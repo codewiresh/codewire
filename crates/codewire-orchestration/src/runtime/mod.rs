@@ -36,8 +36,8 @@ pub use crate::sandbox::snapshots::{ClearingOpts, VolumeMode};
 use crate::sandbox::warm_pool::{ConfiguredShape, shape_label};
 pub use backend::RuntimeBackend;
 pub use observation::{
-    ContainerFact, ControllerFact, EnvFact, MemberFacts, RuntimeFacts, RuntimeObservation,
-    VerifiedChain, VolumeFact,
+    ContainerFact, ControllerFact, EnvFact, MemberFacts, NetworkPolicyFacts, RuntimeFacts,
+    RuntimeObservation, VerifiedChain, VolumeFact,
 };
 pub use rendering::{Isolation, RenderingIdentity, RenderingIntent, WorkspaceShape};
 
@@ -687,6 +687,26 @@ pub trait RuntimeAttestation: Send + Sync {
         namespace: &str,
         name: &str,
     ) -> anyhow::Result<Option<MemberFacts>>;
+
+    /// The NetworkPolicy of this name in `namespace`; `None` when there is
+    /// none (#4000 P6, the egress lockdown's out-of-band check).
+    async fn workspace_network_policy(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> anyhow::Result<Option<NetworkPolicyFacts>>;
+
+    /// The NetworkPolicy this runtime renders for the workspace of
+    /// `environment_id`: what [`Self::workspace_network_policy`] reads back
+    /// while nobody has changed it. `None` when this deployment leaves
+    /// workspace NetworkPolicies to someone else, so there is no rendering
+    /// to compare with.
+    fn rendered_workspace_network_policy(
+        &self,
+        namespace: &str,
+        environment_id: &str,
+        isolation: Isolation,
+    ) -> anyhow::Result<Option<NetworkPolicyFacts>>;
 
     /// The runtime of this name; `None` when there is none.
     async fn attested_runtime(

@@ -245,6 +245,7 @@ fn binding(scope: WorkspaceCredentialScope) -> LiveBinding {
         managed_credential_clients: "github".into(),
         credential_scope: scope,
         environment_generation: ENVIRONMENT_GENERATION,
+        isolation_tier: "standard".into(),
         working_directory: "/workspace/app".into(),
         defaults: None,
     }

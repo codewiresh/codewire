@@ -12,7 +12,7 @@ hmac = { workspace = true }
 rustix = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "net", "sync", "macros"] }
+tokio = { workspace = true, features = ["io-util", "net", "sync", "macros", "time"] }
 uuid = { workspace = true }
 zeroize = { workspace = true }
 

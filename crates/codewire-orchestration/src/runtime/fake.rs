@@ -19,8 +19,8 @@ use super::{
     VolumeMode, VolumeRef, WantedPool, WantedPools,
 };
 use super::{
-    MemberFacts, RuntimeAttestation, RuntimeFacts, RuntimeObservation, RuntimeObservations,
-    VerifiedChain, WorkspaceVolume,
+    Isolation, MemberFacts, NetworkPolicyFacts, RuntimeAttestation, RuntimeFacts,
+    RuntimeObservation, RuntimeObservations, VerifiedChain, WorkspaceVolume,
 };
 use crate::sandbox::ClaimOpts;
 use crate::sandbox::host_keys::HostKeyStore;
@@ -254,6 +254,23 @@ impl RuntimeAttestation for FakeRuntimeDriver {
         _namespace: &str,
         _name: &str,
     ) -> anyhow::Result<Option<MemberFacts>> {
+        anyhow::bail!("not scripted")
+    }
+
+    async fn workspace_network_policy(
+        &self,
+        _namespace: &str,
+        _name: &str,
+    ) -> anyhow::Result<Option<NetworkPolicyFacts>> {
+        anyhow::bail!("not scripted")
+    }
+
+    fn rendered_workspace_network_policy(
+        &self,
+        _namespace: &str,
+        _environment_id: &str,
+        _isolation: Isolation,
+    ) -> anyhow::Result<Option<NetworkPolicyFacts>> {
         anyhow::bail!("not scripted")
     }
 

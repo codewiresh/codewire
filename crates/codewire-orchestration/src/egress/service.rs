@@ -26,11 +26,13 @@ use codewire_egress_node::replacement::StartLimiter;
 
 use super::admission::{self, Reviewed};
 use super::assignment::{AssignedPolicy, environment_policy};
+use super::lockdown;
 use super::reports;
 
 mod wire;
-use crate::runtime::RuntimeAttestation;
+use crate::runtime::{Isolation, RuntimeAttestation};
 use crate::workspace_binding::BindingStore;
+use crate::workspace_binding::store::LiveBinding;
 
 /// How often a watch re-reads a Pod's assignment and sends it if it changed.
 /// Each re-read is one Pod GET and one or two indexed database reads, so a
@@ -135,6 +137,14 @@ pub const WATCH_READ_FAILURES: u32 = 3;
 /// failed read, and a recheck never runs past the caller's token expiry.
 pub const RECHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a watch withholds a bound assignment whose lockdown is not
+/// applied before it ends, failing closed. A claim records the binding as
+/// soon as the Pod is bind-ready and applies the environment's NetworkPolicy
+/// with the access stack afterwards, so a watch can read the binding first;
+/// until the policy is the rendered one the member stays unbound, on
+/// `locked`.
+pub const LOCKDOWN_BIND_GRACE: Duration = Duration::from_secs(30);
+
 fn invalid_report() -> ConnectError {
     ConnectError::invalid_argument("the report is not well formed")
 }
@@ -227,12 +237,109 @@ impl EgressServiceState {
         )
     }
 
-    async fn assignment(&self, guest: &GuestPod) -> Result<Assignment, ConnectError> {
-        let binding = self
-            .bindings
+    /// The out-of-band half of the self-check (#4000 P6): the NetworkPolicy
+    /// the cluster holds for the environment `binding` records is the one
+    /// orchestration renders for it, and selects the guest. `Some` is why it
+    /// is not; an error is a read that could not be made, never a pass.
+    /// Nothing the guest reports is read here.
+    async fn lockdown_refusal(
+        &self,
+        guest: &GuestPod,
+        facts: &crate::runtime::MemberFacts,
+        binding: &LiveBinding,
+    ) -> Result<Option<lockdown::LockdownRefusal>, ConnectError> {
+        let isolation = Isolation::of_tier(&binding.isolation_tier)
+            .map_err(|error| unavailable("read the environment's isolation", error))?;
+        let rendered = self
+            .attestation
+            .rendered_workspace_network_policy(&guest.namespace, &binding.environment_id, isolation)
+            .map_err(|error| unavailable("render the guest's NetworkPolicy", error))?;
+        let live = self
+            .attestation
+            .workspace_network_policy(
+                &guest.namespace,
+                &lockdown::policy_name(&binding.environment_id),
+            )
+            .await
+            .map_err(|error| unavailable("read the guest's NetworkPolicy", error))?;
+        Ok(lockdown::lockdown_applied(
+            facts,
+            &binding.environment_id,
+            rendered.as_ref(),
+            live.as_ref(),
+        )
+        .err())
+    }
+
+    /// The guest fails closed for `refusal`, as it does for a failed probe:
+    /// counted by reason and logged.
+    // TODO(#4000 P2b): record FAILED_CLOSED with `self_check_failed` for the
+    // Pod once enforcement storage lands; until then it is counted and logged.
+    fn failed_closed(&self, guest: &GuestPod, refusal: &lockdown::LockdownRefusal) -> ConnectError {
+        lockdown::count_failed_closed(refusal);
+        tracing::warn!(
+            reason = refusal.reason(),
+            pod = %guest.name,
+            outcome = "self_check_failed",
+            "egress lockdown is not applied; the sandbox fails closed"
+        );
+        denied()
+    }
+
+    /// [`Self::lockdown_refusal`] for Admit: a refusal fails the stream
+    /// closed at once.
+    async fn lockdown_applied(
+        &self,
+        guest: &GuestPod,
+        facts: &crate::runtime::MemberFacts,
+        binding: &LiveBinding,
+    ) -> Result<(), ConnectError> {
+        match self.lockdown_refusal(guest, facts, binding).await? {
+            Some(refusal) => Err(self.failed_closed(guest, &refusal)),
+            None => Ok(()),
+        }
+    }
+
+    /// What a watch of `guest` may send now. A binding to an environment the
+    /// stream has not been sent as bound to (`bound_to`) is a first bound
+    /// assignment: a member admitted unbound and since claimed, or a guest
+    /// whose watch has just opened. Its lockdown is checked before the
+    /// assignment is read, exactly as Admit checks it, and a refusal
+    /// withholds it.
+    async fn watched_assignment(
+        &self,
+        guest: &GuestPod,
+        bound_to: Option<&str>,
+    ) -> Result<Watched, ConnectError> {
+        let binding = self.live_binding(guest).await?;
+        if let Some(binding) = &binding
+            && bound_to != Some(binding.environment_id.as_str())
+        {
+            let facts = self
+                .attestation
+                .attested_pod(&guest.namespace, &guest.name)
+                .await
+                .map_err(|error| unavailable("read the guest Pod", error))?
+                .ok_or_else(denied)?;
+            if let Some(refusal) = self.lockdown_refusal(guest, &facts, binding).await? {
+                return Ok(Watched::Withheld(refusal));
+            }
+        }
+        Ok(Watched::Assignment(self.assignment_of(binding).await?))
+    }
+
+    /// Orchestration's own record of whether `guest` is bound, and to what.
+    async fn live_binding(&self, guest: &GuestPod) -> Result<Option<LiveBinding>, ConnectError> {
+        self.bindings
             .live_binding(&guest.uid, &guest.namespace, &guest.name)
             .await
-            .map_err(|_| unavailable("read the binding", "binding store unavailable"))?;
+            .map_err(|_| unavailable("read the binding", "binding store unavailable"))
+    }
+
+    async fn assignment_of(
+        &self,
+        binding: Option<LiveBinding>,
+    ) -> Result<Assignment, ConnectError> {
         let Some(binding) = binding else {
             return Ok(Assignment::Unbound);
         };
@@ -283,15 +390,30 @@ impl EgressServiceState {
     }
 }
 
+/// What one read of a watched Pod's assignment found.
+enum Watched {
+    Assignment(Assignment),
+    /// The Pod is bound, but its lockdown is not applied: the bound
+    /// assignment is not sent.
+    Withheld(lockdown::LockdownRefusal),
+}
+
 /// One Pod's assignment watch: the first message is the current
 /// assignment, then each change. A Pod that leaves the caller's node, or
 /// ends, gets one error and the stream ends.
+///
+/// A bound assignment is sent only after the lockdown check passes for it
+/// (#4000 P6). While the check refuses, the stream says unbound, so the
+/// member stays on `locked`; a refusal that outlasts
+/// [`LOCKDOWN_BIND_GRACE`] ends the stream, failing closed.
 struct Watch {
     state: Arc<EgressServiceState>,
     caller: Caller,
     guest: GuestPod,
     sent: Option<Assignment>,
     next: Option<Assignment>,
+    /// When the bound assignment now withheld was first refused.
+    withheld_since: Option<tokio::time::Instant>,
     read_failures: u32,
     ended: bool,
 }
@@ -325,8 +447,17 @@ impl Watch {
             }
             self.read_failures = 0;
             // A failed read keeps the last assignment; cw-egress enforces it.
-            match self.state.assignment(&self.guest).await {
-                Ok(assignment) => self.next = Some(assignment),
+            match self
+                .state
+                .watched_assignment(&self.guest, self.bound_to())
+                .await
+            {
+                Ok(watched) => {
+                    if let Err(error) = self.take(watched) {
+                        self.ended = true;
+                        return Some((Err(error), self));
+                    }
+                }
                 Err(error) => tracing::warn!(?error, "egress watch kept the last assignment"),
             }
             // A read that straddled the token's expiry sends nothing.
@@ -340,6 +471,42 @@ impl Watch {
                 ));
             }
         }
+    }
+
+    /// The environment this stream was last sent as bound to, if any.
+    fn bound_to(&self) -> Option<&str> {
+        match &self.sent {
+            Some(Assignment::Bound { environment_id, .. }) => Some(environment_id),
+            Some(Assignment::Unbound) | None => None,
+        }
+    }
+
+    /// Take one read as what to send next. A withheld bound assignment is
+    /// sent as unbound; once it has been withheld for
+    /// [`LOCKDOWN_BIND_GRACE`] the watch ends instead, failing closed.
+    fn take(&mut self, watched: Watched) -> Result<(), ConnectError> {
+        match watched {
+            Watched::Assignment(assignment) => {
+                self.withheld_since = None;
+                self.next = Some(assignment);
+            }
+            Watched::Withheld(refusal) => {
+                let now = tokio::time::Instant::now();
+                let since = *self.withheld_since.get_or_insert_with(|| {
+                    tracing::info!(
+                        reason = refusal.reason(),
+                        pod = %self.guest.name,
+                        "egress watch withholds a bound assignment until the lockdown is applied"
+                    );
+                    now
+                });
+                if now.duration_since(since) >= LOCKDOWN_BIND_GRACE {
+                    return Err(self.state.failed_closed(&self.guest, &refusal));
+                }
+                self.next = Some(Assignment::Unbound);
+            }
+        }
+        Ok(())
     }
 
     /// The caller's token has not expired, the caller is still the same
@@ -428,7 +595,15 @@ impl EgressService for EgressConnectService {
             tracing::info!(?refusal, pod = %guest.name, "egress stream refused");
             denied()
         })?;
-        let assignment = self.state.assignment(&guest).await?;
+        let binding = self.state.live_binding(&guest).await?;
+        // An unbound warm member has no environment policy yet: its lockdown
+        // is the shared template's, and it is assigned nothing of an
+        // environment's. Its watch checks the lockdown before its first
+        // bound assignment.
+        if let Some(binding) = &binding {
+            self.state.lockdown_applied(&guest, &facts, binding).await?;
+        }
+        let assignment = self.state.assignment_of(binding).await?;
         connectrpc::Response::ok(AdmitResponse {
             pod_uid: guest.uid,
             pod_name: guest.name,
@@ -446,16 +621,18 @@ impl EgressService for EgressConnectService {
         let request = request.view();
         let guest = self.state.named_guest(request.pod_name, request.pod_uid);
         self.state.guest_on_node(&guest, &caller.node).await?;
-        let first = self.state.assignment(&guest).await?;
-        let watch = Watch {
+        let first = self.state.watched_assignment(&guest, None).await?;
+        let mut watch = Watch {
             state: Arc::clone(&self.state),
             caller,
             guest,
             sent: None,
-            next: Some(first),
+            next: None,
+            withheld_since: None,
             read_failures: 0,
             ended: false,
         };
+        watch.take(first)?;
         let stream = futures::stream::unfold(watch, Watch::step);
         connectrpc::Response::stream_ok(stream)
     }

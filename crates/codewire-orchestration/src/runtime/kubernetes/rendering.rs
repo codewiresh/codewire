@@ -7,7 +7,8 @@ use crate::sandbox::environment_template_name;
 use crate::sandbox::template::{
     CpuSharingRatio, CredentialRuntimeTemplateConfig, DOCKER_MODE_LOCAL_DIND_DIRECT,
     RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RuntimeProfileSpec, TemplateOpts,
-    WORKSPACE_KEEPALIVE_COMMAND, runtime_profile_spec, validate_managed_runtime_profile,
+    WORKSPACE_KEEPALIVE_COMMAND, render_workspace_daemon_network_policy, runtime_profile_spec,
+    validate_managed_runtime_profile,
 };
 use crate::sandbox::{
     CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME, canonical_workspace_runtime_image,
@@ -178,6 +179,45 @@ impl KubernetesRenderConfig {
         Ok(opts)
     }
 
+    /// The NetworkPolicy an environment's access stack applies, as the egress
+    /// lockdown check expects to read it back (#4000 P6), or `None` when this
+    /// deployment leaves workspace NetworkPolicies to someone else. Of an
+    /// environment's own inputs the policy reads only its ID and isolation,
+    /// so it renders from those; a new per-environment input must be added
+    /// here too, which the test beside this file holds.
+    pub fn workspace_network_policy(
+        &self,
+        namespace: &str,
+        environment_id: &str,
+        isolation: Isolation,
+    ) -> Option<serde_json::Value> {
+        if !self.network_policy_management.is_empty() && self.network_policy_management != "Managed"
+        {
+            return None;
+        }
+        let shape = WorkspaceShape {
+            cpu_millicores: 0,
+            memory_mib: 0,
+            disk_gib: 0,
+        };
+        let opts = self.shape(
+            canonical_workspace_runtime_image(),
+            &self.runtime_spec(isolation),
+            shape,
+        );
+        Some(render_workspace_daemon_network_policy(
+            namespace,
+            &TemplateOpts {
+                environment_id: environment_id.to_owned(),
+                // The policy reads whether a direct UDP port is allocated,
+                // never which, and the access stack allocates one for every
+                // environment where the LoadBalancer is enabled.
+                direct_udp_lb_port: i64::from(opts.direct_udp_lb_enabled),
+                ..opts
+            },
+        ))
+    }
+
     /// The identity-free inputs of one warm-pool shape (Program #2238 C1): the
     /// canonical workspace image on the standard tier, from the shape and this
     /// configuration alone. A confidential runtime, a diagnostic runtime
@@ -312,3 +352,6 @@ impl KubernetesRenderConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

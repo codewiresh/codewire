@@ -258,5 +258,8 @@ async fn write_tun_packet(tun: &AsyncFd<OwnedFd>, packet: &[u8]) -> io::Result<(
     }
 }
 
+pub mod self_check;
+pub use self_check::{InterfaceProbes, PROBE_TIMEOUT, ProbeOutcome, SelfCheckProbes, self_check};
+
 #[cfg(test)]
 mod tests;

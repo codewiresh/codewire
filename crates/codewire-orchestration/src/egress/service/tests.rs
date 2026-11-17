@@ -25,7 +25,9 @@ use tower::{ServiceExt, service_fn};
 
 use super::*;
 use crate::egress::admission::{EGRESS_MODE_BROKER, EGRESS_MODE_LABEL};
-use crate::sandbox::LABEL_TYPE;
+use crate::runtime::kubernetes::rendering::KubernetesRenderConfig;
+use crate::sandbox::{LABEL_ENV_ID, LABEL_TYPE};
+use crate::worker::environment_auth::WorkspaceCredentialScope;
 use crate::workspace_binding::store::{BindingStoreUnavailable, LiveBinding};
 
 const SERVER: &str = "dev";
@@ -124,6 +126,8 @@ struct Cluster {
     /// TokenReviews of guest egress tokens answer with a server error while
     /// set; cw-egress's own review still answers.
     guest_reviews_down: std::sync::atomic::AtomicBool,
+    /// NetworkPolicies by path, for the lockdown check.
+    policies: Mutex<HashMap<String, Value>>,
 }
 
 impl Cluster {
@@ -181,6 +185,7 @@ impl Cluster {
             hang_reads: std::sync::atomic::AtomicBool::new(false),
             guest_reviews: AtomicUsize::new(0),
             guest_reviews_down: std::sync::atomic::AtomicBool::new(false),
+            policies: Mutex::new(HashMap::new()),
         })
     }
 
@@ -240,6 +245,14 @@ impl Cluster {
                         StatusCode::INTERNAL_SERVER_ERROR,
                         json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "code": 500}),
                     )
+                } else if path.contains("/networkpolicies/") {
+                    match cluster.policies.lock().unwrap().get(&path) {
+                        Some(policy) => json_response(StatusCode::OK, policy.clone()),
+                        None => json_response(
+                            StatusCode::NOT_FOUND,
+                            json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "NotFound", "code": 404}),
+                        ),
+                    }
                 } else {
                     match cluster.pods.lock().unwrap().get(&path) {
                         Some(pod) => {
@@ -266,7 +279,7 @@ fn json_response(status: StatusCode, body: Value) -> Response<Body> {
         .unwrap()
 }
 
-/// No Pod is bound: every guest is a warm member on platform allows only.
+/// No Pod is bound: every guest is an unbound warm member, on `locked`.
 struct Unbound;
 
 #[async_trait]
@@ -281,13 +294,21 @@ impl BindingStore for Unbound {
     }
 }
 
-fn app(cluster: &Arc<Cluster>) -> axum::Router {
+/// What the deployment under test renders workspaces with.
+fn rendering() -> KubernetesRenderConfig {
+    KubernetesRenderConfig {
+        server_namespace: SERVER.into(),
+        ..Default::default()
+    }
+}
+
+fn state(cluster: &Arc<Cluster>, bindings: Arc<dyn BindingStore>) -> EgressServiceState {
     let driver =
-        crate::runtime::kubernetes::KubernetesDriver::shared(cluster.client(), Default::default());
+        crate::runtime::kubernetes::KubernetesDriver::shared(cluster.client(), rendering());
     let attestation: Arc<dyn RuntimeAttestation> = driver;
-    codewire_server_core::connect::connect_router(egress_router(Arc::new(EgressServiceState {
+    EgressServiceState {
         attestation,
-        bindings: Arc::new(Unbound),
+        bindings,
         pool: PgPool::connect_lazy("postgres://unused@127.0.0.1:1/unused").unwrap(),
         server_namespace: SERVER.into(),
         sandbox_namespace: SANDBOXES.into(),
@@ -296,16 +317,28 @@ fn app(cluster: &Arc<Cluster>) -> axum::Router {
             port: 443,
         }],
         starts: Default::default(),
-    })))
+    }
+}
+
+fn app(cluster: &Arc<Cluster>) -> axum::Router {
+    app_with(cluster, Arc::new(Unbound))
+}
+
+fn app_with(cluster: &Arc<Cluster>, bindings: Arc<dyn BindingStore>) -> axum::Router {
+    codewire_server_core::connect::connect_router(egress_router(Arc::new(state(cluster, bindings))))
 }
 
 async fn call(cluster: &Arc<Cluster>, method: &str, body: Value) -> (StatusCode, Value) {
+    call_app(app(cluster), method, body).await
+}
+
+async fn call_app(app: axum::Router, method: &str, body: Value) -> (StatusCode, Value) {
     let request = Request::post(format!("/codewire.internal.v1.EgressService/{method}"))
         .header("content-type", "application/json")
         .header(AUTHORIZATION, format!("Bearer {}", token()))
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
-    let response = app(cluster).oneshot(request).await.unwrap();
+    let response = app.oneshot(request).await.unwrap();
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (
@@ -653,6 +686,7 @@ fn watch(cluster: &Arc<Cluster>, expires_in: Duration) -> Watch {
         },
         sent: None,
         next: None,
+        withheld_since: None,
         read_failures: 0,
         ended: false,
     }
@@ -831,4 +865,394 @@ async fn a_guest_review_that_cannot_run_is_unavailable_not_a_refusal() {
     cluster.guest_reviews_down.store(true, Ordering::SeqCst);
     let (status, body) = call(&cluster, "Admit", admit_body()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+}
+
+const BOUND_ENVIRONMENT: &str = "0f8c2f6e-2c1e-4a8e-9c55-3b1f0f7d9a11";
+const ANOTHER_ENVIRONMENT: &str = "9d2a4b7c-51f3-4e0a-8b66-2a7c1e5f3d08";
+
+fn binding() -> LiveBinding {
+    LiveBinding {
+        environment_id: BOUND_ENVIRONMENT.into(),
+        pod_uid: GUEST_UID.into(),
+        namespace: SANDBOXES.into(),
+        pod_name: GUEST.into(),
+        claim_uid: "c0ffee00-0bd2-4f11-8b16-9c239851eb52".into(),
+        sandbox_uid: "5a4db0c5-0bd2-4f11-8b16-9c239851eb52".into(),
+        operation_generation: 3,
+        projection_selection_sha256: None,
+        managed_credential_clients: String::new(),
+        credential_scope: WorkspaceCredentialScope::Pod,
+        environment_generation: 3,
+        isolation_tier: "standard".into(),
+        working_directory: String::new(),
+        defaults: None,
+    }
+}
+
+/// Orchestration's record binds the guest to `BOUND_ENVIRONMENT`, whatever
+/// the Pod's labels say.
+struct Bound;
+
+#[async_trait]
+impl BindingStore for Bound {
+    async fn live_binding(
+        &self,
+        _pod_uid: &str,
+        _namespace: &str,
+        _pod_name: &str,
+    ) -> Result<Option<LiveBinding>, BindingStoreUnavailable> {
+        Ok(Some(binding()))
+    }
+}
+
+fn policy_path(environment: &str) -> String {
+    let name = crate::sandbox::template::workspace_daemon_network_policy_name(environment);
+    format!("/apis/networking.k8s.io/v1/namespaces/{SANDBOXES}/networkpolicies/{name}")
+}
+
+/// The NetworkPolicy the access stack applies for `BOUND_ENVIRONMENT`.
+fn rendered_policy() -> Value {
+    rendering()
+        .workspace_network_policy(
+            SANDBOXES,
+            BOUND_ENVIRONMENT,
+            crate::runtime::Isolation::Standard,
+        )
+        .expect("the default deployment manages workspace NetworkPolicies")
+}
+
+/// A guest labelled for `label`, with `policy` as its bound environment's
+/// NetworkPolicy in the cluster.
+fn bound_guest(label: Option<&str>, policy: Option<Value>) -> Arc<Cluster> {
+    Cluster::healthy().with(|cluster| {
+        cluster.edit_guest(|pod| {
+            let labels = pod.metadata.labels.get_or_insert_with(BTreeMap::new);
+            if let Some(environment) = label {
+                labels.insert(LABEL_ENV_ID.into(), environment.into());
+            }
+        });
+        if let Some(policy) = policy {
+            cluster
+                .policies
+                .get_mut()
+                .unwrap()
+                .insert(policy_path(BOUND_ENVIRONMENT), policy);
+        }
+    })
+}
+
+fn rendered_with(edit: impl FnOnce(&mut Value)) -> Option<Value> {
+    let mut policy = rendered_policy();
+    edit(&mut policy["spec"]);
+    Some(policy)
+}
+
+/// The lockdown decision Admit takes for the bound guest, between the
+/// guest's review and its assignment. Admit itself goes on to read the
+/// environment's policy from the database, which these tests have none of.
+async fn lockdown(cluster: &Arc<Cluster>) -> Result<(), connectrpc::ErrorCode> {
+    let state = state(cluster, Arc::new(Bound));
+    let guest = state.named_guest(GUEST, GUEST_UID);
+    let facts = state
+        .attestation
+        .attested_pod(SANDBOXES, GUEST)
+        .await
+        .unwrap()
+        .unwrap();
+    state
+        .lockdown_applied(&guest, &facts, &binding())
+        .await
+        .map_err(|error| error.code)
+}
+
+async fn admit_bound(cluster: &Arc<Cluster>) -> StatusCode {
+    let (status, _) = call_app(app_with(cluster, Arc::new(Bound)), "Admit", admit_body()).await;
+    status
+}
+
+#[tokio::test]
+async fn a_bound_guest_under_exactly_the_rendered_policy_passes_the_lockdown_check() {
+    let cluster = bound_guest(Some(BOUND_ENVIRONMENT), Some(rendered_policy()));
+    assert_eq!(lockdown(&cluster).await, Ok(()));
+
+    // The API server's defaults and an applied manifest's empty lists are
+    // not differences.
+    let cluster = bound_guest(
+        Some(BOUND_ENVIRONMENT),
+        rendered_with(|spec| {
+            spec["podSelector"]["matchExpressions"] = json!([]);
+            spec["egress"][0]["ports"] = json!([]);
+        }),
+    );
+    assert_eq!(lockdown(&cluster).await, Ok(()));
+}
+
+#[tokio::test]
+async fn a_live_policy_that_is_not_the_rendered_one_is_refused() {
+    let allow_all = rendered_with(|spec| spec["egress"] = json!([{}]));
+    let extra_rule = rendered_with(|spec| {
+        spec["egress"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}]}));
+    });
+    let widened_rule = rendered_with(|spec| {
+        spec["egress"][1]["to"][0]["namespaceSelector"] = json!({});
+    });
+    let widened_selector = rendered_with(|spec| {
+        spec["podSelector"] = json!({"matchLabels": {LABEL_TYPE: "workspace"}});
+    });
+    let ingress_only = rendered_with(|spec| spec["policyTypes"] = json!(["Ingress"]));
+    let extra_ingress = rendered_with(|spec| {
+        spec["ingress"].as_array_mut().unwrap().push(json!({}));
+    });
+    for (what, policy) in [
+        ("no policy", None),
+        ("allow-all egress", allow_all),
+        ("an extra egress rule", extra_rule),
+        ("a widened egress peer", widened_rule),
+        ("a widened Pod selector", widened_selector),
+        ("egress not governed", ingress_only),
+        ("an extra ingress rule", extra_ingress),
+    ] {
+        let cluster = bound_guest(Some(BOUND_ENVIRONMENT), policy);
+        assert_eq!(
+            lockdown(&cluster).await,
+            Err(connectrpc::ErrorCode::PermissionDenied),
+            "{what}"
+        );
+        assert_eq!(admit_bound(&cluster).await, StatusCode::FORBIDDEN, "{what}");
+    }
+}
+
+#[tokio::test]
+async fn a_bound_guest_cannot_leave_the_check_by_its_labels() {
+    // Stripped of its environment label, the Pod looks like a warm member.
+    // The binding still says it is bound, so it is checked and refused.
+    let stripped = bound_guest(None, Some(rendered_policy()));
+    // Labelled for another environment whose policy is in place and exact.
+    let relabelled =
+        bound_guest(Some(ANOTHER_ENVIRONMENT), Some(rendered_policy())).with(|cluster| {
+            let other = rendering()
+                .workspace_network_policy(
+                    SANDBOXES,
+                    ANOTHER_ENVIRONMENT,
+                    crate::runtime::Isolation::Standard,
+                )
+                .unwrap();
+            cluster
+                .policies
+                .get_mut()
+                .unwrap()
+                .insert(policy_path(ANOTHER_ENVIRONMENT), other);
+        });
+    for cluster in [stripped, relabelled] {
+        assert_eq!(
+            lockdown(&cluster).await,
+            Err(connectrpc::ErrorCode::PermissionDenied)
+        );
+        assert_eq!(admit_bound(&cluster).await, StatusCode::FORBIDDEN);
+    }
+}
+
+#[tokio::test]
+async fn an_unbound_member_is_admitted_unbound_on_locked_whatever_label_it_wears() {
+    // No live binding: the label alone binds nothing and assigns no policy,
+    // so cw-egress keeps the member on `locked`.
+    let cluster = bound_guest(Some(BOUND_ENVIRONMENT), None);
+    let (status, body) = call(&cluster, "Admit", admit_body()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["assignment"]["unbound"].is_object(), "{body}");
+}
+
+/// The guest's self-check result can only fail a sandbox closed (#4000 P6).
+/// Admit runs before the guest has sent any result and reads none: a guest
+/// whose lockdown is not applied is refused, and stays refused when the
+/// request also claims its probes passed.
+#[tokio::test]
+async fn admit_refuses_a_guest_whose_lockdown_is_not_applied_whatever_it_reports() {
+    let cluster = bound_guest(Some(BOUND_ENVIRONMENT), None);
+    assert_eq!(admit_bound(&cluster).await, StatusCode::FORBIDDEN);
+
+    let mut claiming = admit_body();
+    claiming["selfCheck"] = json!("PASSED");
+    claiming["selfCheckPassed"] = json!(true);
+    let (status, body) = call_app(app_with(&cluster, Arc::new(Bound)), "Admit", claiming).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert!(body.get("assignment").is_none(), "{body}");
+}
+
+/// A warm member: unbound until `claim` records its binding, as a claim does
+/// after the member's stream was admitted.
+#[derive(Default)]
+struct Claimable(std::sync::atomic::AtomicBool);
+
+impl Claimable {
+    fn claim(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl BindingStore for Claimable {
+    async fn live_binding(
+        &self,
+        _pod_uid: &str,
+        _namespace: &str,
+        _pod_name: &str,
+    ) -> Result<Option<LiveBinding>, BindingStoreUnavailable> {
+        Ok(self.0.load(Ordering::SeqCst).then(binding))
+    }
+}
+
+/// The watch cw-egress opens for the guest once its stream is admitted.
+fn watch_of(state: EgressServiceState) -> Watch {
+    Watch {
+        state: Arc::new(state),
+        caller: Caller {
+            namespace: SERVER.into(),
+            name: CALLER.into(),
+            uid: CALLER_UID.into(),
+            node: NODE.into(),
+            expires_at: tokio::time::Instant::now() + later(),
+        },
+        guest: GuestPod {
+            namespace: SANDBOXES.into(),
+            name: GUEST.into(),
+            uid: GUEST_UID.into(),
+        },
+        sent: None,
+        next: None,
+        withheld_since: None,
+        read_failures: 0,
+        ended: false,
+    }
+}
+
+/// A member admitted unbound and its open watch, which has sent "unbound".
+async fn admitted_unbound(cluster: &Arc<Cluster>) -> (Arc<Claimable>, Watch) {
+    let member = Arc::new(Claimable::default());
+    let (status, body) = call_app(app_with(cluster, member.clone()), "Admit", admit_body()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["assignment"]["unbound"].is_object(), "{body}");
+
+    let state = state(cluster, member.clone());
+    let guest = state.named_guest(GUEST, GUEST_UID);
+    let first = state.watched_assignment(&guest, None).await.unwrap();
+    let mut watch = watch_of(state);
+    watch.take(first).unwrap();
+    let (first, watch) = watch.step().await.unwrap();
+    assert!(
+        matches!(first.unwrap().assignment.binding, Some(Binding::Unbound(_))),
+        "an unbound member's watch starts unbound"
+    );
+    (member, watch)
+}
+
+/// The warm-pool path (#4000 P6): a member is admitted while unbound, with
+/// nothing to check, and is claimed later. Its bound assignment arrives on
+/// the watch, so the lockdown is checked there, before the first one. With
+/// the environment's policy widened the assignment is never sent: the watch
+/// says nothing more, and ends failing closed once the grace has run out.
+#[tokio::test(start_paused = true)]
+async fn a_member_claimed_under_a_widened_policy_never_gets_its_bound_assignment() {
+    let widened = rendered_with(|spec| spec["egress"] = json!([{}]));
+    let cluster = bound_guest(Some(BOUND_ENVIRONMENT), widened);
+    let (member, watch) = admitted_unbound(&cluster).await;
+    let refusal = lockdown::LockdownRefusal::PolicyDiffers;
+    let counted = lockdown::failed_closed(&refusal);
+
+    member.claim();
+    let claimed_at = tokio::time::Instant::now();
+    // The next thing the stream carries is the refusal: no bound assignment,
+    // and no other message, came before it.
+    let (ended, watch) = watch.step().await.unwrap();
+    assert_eq!(
+        ended.unwrap_err().code,
+        connectrpc::ErrorCode::PermissionDenied
+    );
+    assert!(claimed_at.elapsed() >= LOCKDOWN_BIND_GRACE);
+    assert!(claimed_at.elapsed() < LOCKDOWN_BIND_GRACE + 2 * WATCH_INTERVAL);
+    assert!(lockdown::failed_closed(&refusal) > counted);
+    assert!(watch.step().await.is_none(), "the stream ends after it");
+}
+
+/// A claim records the binding before it applies the environment's policy,
+/// so a watch can read the binding first. That is not a failure: the bound
+/// assignment is withheld, and once the policy is the rendered one within
+/// the grace the watch goes on to read the assignment. These tests have no
+/// database for that read, so it keeps what it sent; what matters here is
+/// that the watch does not fail closed.
+#[tokio::test(start_paused = true)]
+async fn a_policy_applied_within_the_grace_does_not_fail_the_member_closed() {
+    let cluster = bound_guest(Some(BOUND_ENVIRONMENT), None);
+    let (member, watch) = admitted_unbound(&cluster).await;
+
+    member.claim();
+    let applied = cluster.clone();
+    let apply = tokio::spawn(async move {
+        tokio::time::sleep(LOCKDOWN_BIND_GRACE / 2).await;
+        applied
+            .policies
+            .lock()
+            .unwrap()
+            .insert(policy_path(BOUND_ENVIRONMENT), rendered_policy());
+    });
+    let (ended, _) = watch.step().await.unwrap();
+    apply.await.unwrap();
+    // It ran on to its caller's token expiry, long past the grace.
+    assert_eq!(
+        ended.unwrap_err().code,
+        connectrpc::ErrorCode::Unauthenticated
+    );
+}
+
+/// The gate itself, where a claimed member's policy is exactly the rendered
+/// one: the watch may send the bound assignment, and reads it. A stream that
+/// was already sent as bound to this environment is not checked again.
+#[tokio::test(start_paused = true)]
+async fn a_member_claimed_under_the_rendered_policy_passes_the_gate() {
+    let member = Arc::new(Claimable::default());
+    member.claim();
+
+    let intact = bound_guest(Some(BOUND_ENVIRONMENT), Some(rendered_policy()));
+    let state_intact = state(&intact, member.clone());
+    let guest = state_intact.named_guest(GUEST, GUEST_UID);
+    // Past the gate, the read of the environment's policy is what fails
+    // here, for want of a database: unavailable, never a refusal.
+    let read = state_intact.watched_assignment(&guest, None).await;
+    assert_eq!(
+        read.err().map(|error| error.code),
+        Some(connectrpc::ErrorCode::Unavailable)
+    );
+
+    let missing = bound_guest(Some(BOUND_ENVIRONMENT), None);
+    let state_missing = state(&missing, member);
+    assert!(matches!(
+        state_missing.watched_assignment(&guest, None).await,
+        Ok(Watched::Withheld(lockdown::LockdownRefusal::PolicyMissing))
+    ));
+    let already_bound = state_missing
+        .watched_assignment(&guest, Some(BOUND_ENVIRONMENT))
+        .await;
+    assert_eq!(
+        already_bound.err().map(|error| error.code),
+        Some(connectrpc::ErrorCode::Unavailable),
+        "a later change under an already bound stream is not checked again yet"
+    );
+}
+
+/// A sandbox failed closed is counted by its reason, which an alert reads
+/// until the status records it. Nothing else in these tests fails a guest
+/// closed for this reason, so the count is exact.
+#[tokio::test]
+async fn a_sandbox_failed_closed_is_counted_by_its_reason() {
+    let state = state(&Cluster::healthy(), Arc::new(Unbound));
+    let guest = state.named_guest(GUEST, GUEST_UID);
+    let refusal = lockdown::LockdownRefusal::NotBrokerMode;
+    let before = lockdown::failed_closed(&refusal);
+    let error = state.failed_closed(&guest, &refusal);
+    assert_eq!(error.code, connectrpc::ErrorCode::PermissionDenied);
+    assert_eq!(lockdown::failed_closed(&refusal), before + 1);
+    assert_eq!(refusal.reason(), "not_broker_mode");
 }

@@ -16,6 +16,7 @@ use crate::workspace_binding::PgBindingStore;
 
 pub mod admission;
 pub mod assignment;
+pub mod lockdown;
 pub mod reports;
 pub mod service;
 pub mod settings;

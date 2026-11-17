@@ -817,6 +817,46 @@ platform. A local VM's egress is bounded by its selected network policy,
 Credential non-disclosure is not egress mediation: a sandbox can still open
 TCP 443 to a provider directly.
 
+Target, not shipped (#4000 P6): the egress self-check. At every start a
+hosted guest probes that a direct dial and a direct DNS query, both sent
+around its tunnel, fail, and reports the result. That result can only fail a
+sandbox closed. A guest's "passed" is necessary, not sufficient: it never
+admits a stream and never by itself makes the status `ENFORCED`, because the
+guest is the party being confined. Admission needs orchestration's own
+lockdown check, which reads nothing from the guest: for a Pod its live
+binding records as bound, the Pod must carry that environment's label, and
+the `NetworkPolicy` the cluster holds for that environment must equal the one
+orchestration renders for it. `ENFORCED` needs the broker's acknowledgement
+of the policy digest. The lockdown check proves that the live policy is
+exactly the rendered one, so nobody removed, replaced or widened it. It does
+not prove that the rendered policy confines egress to the broker: that is the
+broker-mode policy of #4000 P5, and checking its rules is a done-when of P5
+before the hosted-egress flag is turned on.
+The lockdown check runs at admission for a guest that is already bound. A
+member admitted while unbound, as a warm-pool member is, has nothing to check
+then; its lockdown is checked before its first bound assignment is sent. A
+claim records the binding before it applies the environment's policy, so
+while the check refuses, the assignment is withheld and the member stays
+unbound, on `locked`. A refusal that lasts the bind grace, 30 seconds
+(`LOCKDOWN_BIND_GRACE`), ends the member's assignment stream, and the sandbox
+fails closed. Each sandbox failed closed
+this way is counted by reason and logged; writing it into the environment's
+enforcement status (below) is not wired yet. Two limits remain. A policy changed later
+under an already bound sandbox is not checked again, and neither is anything
+checked on a timer; both are tracked follow-ups, and the static floor stays
+the boundary that does not depend on this check. And after a release changes
+what orchestration renders, a running sandbox's next admission is refused
+until its policy has been applied again, so a rollout applies the policies
+again before the new orchestration compares them. A deployment that does not
+let orchestration manage the workspace `NetworkPolicy` has no rendering to
+compare, and every bound guest is refused there. One policy is not compared
+yet. Kubernetes adds the policies that select a Pod together, and a Pod that
+came from a warm pool is also selected by the policy the sandbox controller
+makes from its template. The check compares the environment's policy only, so
+a template made before hosted egress was turned on can stay wider while the
+check passes. Warm templates are made again before the flag goes on, and
+comparing every policy that selects the Pod is #4964.
+
 Target, not shipped (#4000): with hosted egress on, a Sandbox Pod's own
 egress is only to named peers inside the cluster, each by selector and port,
 with no address range and no DNS: the egress process on its node, the

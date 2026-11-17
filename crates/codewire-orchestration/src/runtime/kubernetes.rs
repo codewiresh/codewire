@@ -27,13 +27,13 @@ use kube::api::{Api, DynamicObject, LogParams};
 
 use super::{
     CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
-    Incarnation, KeptSnapshot, MemberEvidence, MemberFacts, MemberReplacement, Pick, Placement,
-    PoolBornClaim, PoolPass, PoolState, RenderingIntent, ResizeState, RuntimeAccess,
-    RuntimeAttestation, RuntimeClaims, RuntimeDriver, RuntimeExec, RuntimeFacts, RuntimeLifecycle,
-    RuntimeMember, RuntimeObservation, RuntimeObservations, RuntimePools, RuntimeProbe,
-    RuntimeResize, RuntimeSnapshots, RuntimeStorage, RuntimeStream, RuntimeTeardown,
-    SuspendedRuntime, VerifiedChain, VolumeGrowth, VolumeIdentity, VolumeMode, VolumeRef,
-    WantedPool, WantedPools, WorkspaceVolume,
+    Incarnation, Isolation, KeptSnapshot, MemberEvidence, MemberFacts, MemberReplacement,
+    NetworkPolicyFacts, Pick, Placement, PoolBornClaim, PoolPass, PoolState, RenderingIntent,
+    ResizeState, RuntimeAccess, RuntimeAttestation, RuntimeClaims, RuntimeDriver, RuntimeExec,
+    RuntimeFacts, RuntimeLifecycle, RuntimeMember, RuntimeObservation, RuntimeObservations,
+    RuntimePools, RuntimeProbe, RuntimeResize, RuntimeSnapshots, RuntimeStorage, RuntimeStream,
+    RuntimeTeardown, SuspendedRuntime, VerifiedChain, VolumeGrowth, VolumeIdentity, VolumeMode,
+    VolumeRef, WantedPool, WantedPools, WorkspaceVolume,
 };
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::HostKeyStore;
@@ -394,6 +394,26 @@ impl RuntimeAttestation for KubernetesDriver {
         name: &str,
     ) -> anyhow::Result<Option<MemberFacts>> {
         attestation::member(&self.client, namespace, name).await
+    }
+
+    async fn workspace_network_policy(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> anyhow::Result<Option<NetworkPolicyFacts>> {
+        attestation::network_policy(&self.client, namespace, name).await
+    }
+
+    fn rendered_workspace_network_policy(
+        &self,
+        namespace: &str,
+        environment_id: &str,
+        isolation: Isolation,
+    ) -> anyhow::Result<Option<NetworkPolicyFacts>> {
+        self.rendering
+            .workspace_network_policy(namespace, environment_id, isolation)
+            .map(attestation::rendered_network_policy)
+            .transpose()
     }
 
     async fn attested_runtime(

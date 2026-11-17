@@ -134,6 +134,16 @@ pub struct MemberFacts {
     pub spec_json: Value,
 }
 
+/// A NetworkPolicy as the egress lockdown check compares it (#4000 P6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkPolicyFacts {
+    /// Its `spec` in the one form two equal policies share: every field under
+    /// its API name, without the nulls and empty lists that mean the same as
+    /// an absent field. An empty object is kept, because as a rule, a peer or
+    /// a selector it means everything.
+    pub spec: Value,
+}
+
 impl MemberFacts {
     /// Whether its reported phase is `Running`: the one place the phase
     /// string is compared.

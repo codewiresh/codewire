@@ -44,6 +44,9 @@ pub struct LiveBinding {
     /// The environment's current operation generation, read in the same
     /// statement. Peer tokens and host keys are bound to it.
     pub environment_generation: i64,
+    /// The environment's isolation tier, read in the same statement: what
+    /// its NetworkPolicy renders from (#4000 P6).
+    pub isolation_tier: String,
     /// The environment's declared working directory, or empty. Read on every
     /// bind, so a restarted Pod gets the current value.
     pub working_directory: String,
@@ -208,6 +211,7 @@ struct LiveBindingRow {
     managed_credential_clients: String,
     credential_scope: String,
     environment_generation: i64,
+    isolation_tier: String,
     working_directory: String,
     environment: Option<serde_json::Value>,
     git_name: Option<String>,
@@ -236,6 +240,7 @@ impl BindingStore for PgBindingStore {
                       w.managed_credential_clients,
                       w.credential_scope,
                       e.environment_operation_generation AS environment_generation,
+                      e.isolation_tier,
                       COALESCE(e.project_spec->>'working_directory', '') AS working_directory,
                       e.project_spec->'environment' AS environment,
                       u.git_name,
@@ -457,6 +462,7 @@ fn live_binding_from_row(
         managed_credential_clients,
         credential_scope,
         environment_generation,
+        isolation_tier,
         working_directory,
         environment,
         git_name,
@@ -480,6 +486,7 @@ fn live_binding_from_row(
         managed_credential_clients,
         credential_scope,
         environment_generation,
+        isolation_tier,
         working_directory,
         defaults: bind_defaults(environment, git_name, git_email, account_name, email),
     })
@@ -653,6 +660,7 @@ mod tests {
                 managed_credential_clients: String::new(),
                 credential_scope: scope.into(),
                 environment_generation: 7,
+                isolation_tier: "standard".into(),
                 working_directory: "/workspace/app".into(),
                 environment: None,
                 git_name: None,

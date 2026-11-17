@@ -7,10 +7,12 @@
 use std::net::IpAddr;
 
 use k8s_openapi::api::core::v1::{Node, Pod, Service};
+use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicySpec};
 use kube::Api;
 use kube::api::{ApiResource, DynamicObject, GroupVersionKind};
+use serde_json::Value;
 
-use super::super::observation::{MemberFacts, RuntimeFacts};
+use super::super::observation::{MemberFacts, NetworkPolicyFacts, RuntimeFacts};
 use super::observation::{member_facts, runtime_facts};
 use crate::runtime_transport::TRANSPORT_ZONE_LABEL;
 use crate::sandbox::{CRD_VERSION, SANDBOX_GROUP};
@@ -26,6 +28,54 @@ pub(super) async fn member(
         .as_ref()
         .map(member_facts)
         .transpose()
+}
+
+pub(super) async fn network_policy(
+    client: &kube::Client,
+    namespace: &str,
+    name: &str,
+) -> anyhow::Result<Option<NetworkPolicyFacts>> {
+    let policies: Api<NetworkPolicy> = Api::namespaced(client.clone(), namespace);
+    policies
+        .get_opt(name)
+        .await?
+        .map(|policy| network_policy_facts(&policy.spec.unwrap_or_default()))
+        .transpose()
+}
+
+/// The policy a rendered manifest applies, in the form one read back has.
+pub(super) fn rendered_network_policy(manifest: Value) -> anyhow::Result<NetworkPolicyFacts> {
+    let policy: NetworkPolicy = serde_json::from_value(manifest)?;
+    network_policy_facts(&policy.spec.unwrap_or_default())
+}
+
+fn network_policy_facts(spec: &NetworkPolicySpec) -> anyhow::Result<NetworkPolicyFacts> {
+    let mut spec = serde_json::to_value(spec)?;
+    drop_absent(&mut spec);
+    Ok(NetworkPolicyFacts { spec })
+}
+
+/// Removes what Kubernetes reads as an absent field: a null and an empty
+/// list. An empty object stays: `{}` as a rule, a peer or a selector means
+/// everything, so dropping it would hide an allow-all.
+///
+/// Nothing here fills in a default the API server adds on write, such as a
+/// port's `protocol` or `policyTypes`. So the rendered policy must spell out
+/// every field the server defaults, or the policy read back differs from the
+/// rendering and every bound guest is refused.
+fn drop_absent(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            fields.retain(|_, field| match field {
+                Value::Null => false,
+                Value::Array(items) => !items.is_empty(),
+                _ => true,
+            });
+            fields.values_mut().for_each(drop_absent);
+        }
+        Value::Array(items) => items.iter_mut().for_each(drop_absent),
+        _ => {}
+    }
 }
 
 pub(super) async fn runtime(
