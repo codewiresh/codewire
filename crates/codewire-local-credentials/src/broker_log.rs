@@ -127,8 +127,15 @@ pub const AGENT_LOGIN_REFUSAL_AGENTS: &[&str] = &["claude", "codex"];
 /// Every reason a broker gives for refusing an agent's login. A broker that
 /// adds a reason adds it here: its own test refuses a reason missing from
 /// this list, and this log ignores one.
-pub const AGENT_LOGIN_REFUSAL_REASONS: &[&str] =
-    &["deadline_passed_before_seal", "scopes_outside_sign_in"];
+pub const AGENT_LOGIN_REFUSAL_REASONS: &[&str] = &[
+    "deadline_passed_before_seal",
+    "scopes_outside_sign_in",
+    // Beside an environment's front door (#3999): it is not paired, or the
+    // agent's login has no placeholder form to deliver.
+    "front_door_not_paired",
+    "no_placeholder_beside_front_door",
+    "no_placeholder_form_beside_front_door",
+];
 /// One line per reason and child at most this often: the guest asks for a
 /// login every two minutes, so a lasting refusal would otherwise repeat.
 pub(crate) const LOGIN_REFUSAL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
@@ -431,6 +438,19 @@ mod tests {
             line("CW_BROKER_LOGIN_REFUSED agent=codex reason=deadline_passed_before_seal\r"),
             Some(("codex", "deadline_passed_before_seal"))
         );
+        // The three reasons a broker gives beside a front door.
+        for (agent, reason) in [
+            ("codex", "front_door_not_paired"),
+            ("codex", "no_placeholder_beside_front_door"),
+            ("claude", "no_placeholder_form_beside_front_door"),
+        ] {
+            assert_eq!(
+                line(&format!(
+                    "CW_BROKER_LOGIN_REFUSED agent={agent} reason={reason}"
+                )),
+                Some((agent, reason))
+            );
+        }
         for other in [
             "CW_BROKER_LOGIN_REFUSED agent=gemini reason=scopes_outside_sign_in",
             "CW_BROKER_LOGIN_REFUSED agent=claude reason=sk-0123456789abcdefghij",
