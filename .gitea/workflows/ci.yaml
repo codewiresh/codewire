@@ -1381,6 +1381,7 @@ jobs:
             --label "codewire.ci.attempt=${GITHUB_RUN_ATTEMPT}" \
             --label "codewire.ci.job=${GITHUB_JOB}" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
+            --tmpfs /var/lib/postgresql/data -e PGDATA=/var/lib/postgresql/data \
             -e POSTGRES_DB=codewire "${INTEGRATION_POSTGRES_IMAGE:?}" \
             -c max_locks_per_transaction=1024 -c synchronous_commit=off
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
@@ -1574,6 +1575,7 @@ jobs:
             --label "codewire.ci.attempt=${GITHUB_RUN_ATTEMPT}" \
             --label "codewire.ci.job=${GITHUB_JOB}" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
+            --tmpfs /var/lib/postgresql/data -e PGDATA=/var/lib/postgresql/data \
             -e POSTGRES_DB=codewire "${INTEGRATION_POSTGRES_IMAGE:?}" \
             -c max_locks_per_transaction=1024 -c synchronous_commit=off
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"
@@ -1770,6 +1772,7 @@ jobs:
             --label "codewire.ci.attempt=${GITHUB_RUN_ATTEMPT}" \
             --label "codewire.ci.job=${GITHUB_JOB}" \
             -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire \
+            --tmpfs /var/lib/postgresql/data -e PGDATA=/var/lib/postgresql/data \
             -e POSTGRES_DB=codewire "${INTEGRATION_POSTGRES_IMAGE:?}" \
             -c max_locks_per_transaction=1024 -c synchronous_commit=off
           echo "POSTGRES_HOST=$postgres_host" >> "$GITHUB_ENV"

@@ -19,6 +19,13 @@
 # crash losing the last commits costs nothing; visibility, ordering and
 # constraints are unchanged, and the cluster cannot be corrupted (fsync stays on).
 INTEGRATION_POSTGRES_SERVER_ARGS=(-c max_locks_per_transaction=1024 -c synchronous_commit=off)
+# The data directory is in memory (#5146 item 2.8). On disk, the database
+# family wrote 18 to 31 GB per run to drives other jobs share; on tmpfs it
+# writes none, and all ten lanes' data peak at about 1.2 GB. fsync stays on, so
+# the cluster still cannot be corrupted; on tmpfs it costs nothing. PGDATA
+# names the mounted folder, so an image whose default data folder differs
+# (PostgreSQL 18's is /var/lib/postgresql/18/docker) still uses it.
+INTEGRATION_POSTGRES_DOCKER_ARGS=(--tmpfs /var/lib/postgresql/data -e PGDATA=/var/lib/postgresql/data)
 # The PostgreSQL image every integration server runs, by digest: the same pin
 # as the Kind PostgreSQL (KIND_POSTGRES_IMAGE in kind/common.sh) and as
 # ci.yaml's "Start integration Postgres" steps (test-integration-postgres.sh
@@ -123,7 +130,7 @@ integration_postgres_configure() {
       --network "$INTEGRATION_DOCKER_NETWORK" \
       --network-alias "$INTEGRATION_POSTGRES_CONTAINER" \
       -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire "${INTEGRATION_FIXTURE_LABELS[@]}" \
-      "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
+      "${INTEGRATION_POSTGRES_DOCKER_ARGS[@]}" "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
     INTEGRATION_POSTGRES_MANAGED=true
     DATABASE_URL="postgres://codewire:codewire@${INTEGRATION_POSTGRES_CONTAINER}:5432/codewire?sslmode=disable"
     DATABASE_URL_RUST="postgres://codewire:codewire@${INTEGRATION_POSTGRES_CONTAINER}:5432/codewire"
@@ -158,7 +165,7 @@ integration_postgres_configure() {
     -e POSTGRES_PASSWORD=codewire \
     -e POSTGRES_DB=codewire \
     "${INTEGRATION_FIXTURE_LABELS[@]}" \
-    -p "$publish" "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
+    -p "$publish" "${INTEGRATION_POSTGRES_DOCKER_ARGS[@]}" "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
   INTEGRATION_POSTGRES_MANAGED=true
 
   port="$(docker port "$INTEGRATION_POSTGRES_CONTAINER" 5432/tcp | sed 's/.*://')"
@@ -220,7 +227,7 @@ integration_postgres_start_lane() {
   if [ "${INTEGRATION_POSTGRES_SOURCE:-}" = managed ]; then
     docker run -d --name "$name" \
       -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire "${INTEGRATION_FIXTURE_LABELS[@]}" \
-      -p 127.0.0.1::5432 "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
+      -p 127.0.0.1::5432 "${INTEGRATION_POSTGRES_DOCKER_ARGS[@]}" "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
     host=127.0.0.1
     port="$(docker port "$name" 5432/tcp | sed 's/.*://')"
     if ! [[ "$port" =~ ^[0-9]+$ ]]; then
@@ -233,13 +240,13 @@ integration_postgres_start_lane() {
       docker run -d --name "$name" --pids-limit 2048 \
         --network "$INTEGRATION_DOCKER_NETWORK" --network-alias "$host" \
         -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire "${INTEGRATION_FIXTURE_LABELS[@]}" \
-        "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null &
+        "${INTEGRATION_POSTGRES_DOCKER_ARGS[@]}" "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null &
       INTEGRATION_POSTGRES_STARTING+=("$!")
     else
       docker run -d --name "$name" --pids-limit 2048 \
         --network "$INTEGRATION_DOCKER_NETWORK" --network-alias "$host" \
         -e POSTGRES_USER=codewire -e POSTGRES_PASSWORD=codewire -e POSTGRES_DB=codewire "${INTEGRATION_FIXTURE_LABELS[@]}" \
-        "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
+        "${INTEGRATION_POSTGRES_DOCKER_ARGS[@]}" "$image" "${INTEGRATION_POSTGRES_SERVER_ARGS[@]}" >/dev/null
     fi
     port=5432
   fi
