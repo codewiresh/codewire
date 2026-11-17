@@ -19,7 +19,7 @@ observed**.
 | `cred-openai-key` | not yet observed | not yet observed | not yet observed |
 | `cred-anthropic-key` | not yet observed | not yet observed | not yet observed |
 | `cred-claude-setup-token` | not yet observed | not yet observed | not yet observed |
-| `cred-claude-sign-in` | observed, #4798 at f5657302c, 2026-11-15 (steps 1–4; the plan and `/usage`, step 5, not yet observed) | failed 2026-11-15: stored, but the login never reached the VM (#4714) | link screen and paste prompt observed, v0.4.18, 2026-11-14; a completed sign-in not yet observed |
+| `cred-claude-sign-in` | observed, #4798 at f5657302c, 2026-11-15 (steps 1–4; the plan and `/usage`, step 5, not yet observed) | login file observed, #4868 at b4541bf05, 2026-11-15 (steps 1–3 and the file; `claude -p`, `/status` and `/usage` not yet observed: the guest had no network, #4948) | link screen and paste prompt observed, v0.4.18, 2026-11-14; a completed sign-in not yet observed |
 | `cred-ssh-key` | not yet observed | not yet observed | not yet observed |
 | `profile-default` | not yet observed | not yet observed | not yet observed |
 
@@ -235,9 +235,19 @@ Issues: #4714 (local), #2559 (cloud).
       before the browser step (at 5781cec6e the same run had completed the
       sign-in and been refused);
     - `/status` and `/usage`: not yet observed.
-  - Mac local VM (M3, cw-dogfood, #4798 + #4868), 2026-11-15: stored, but
-    Claude Code reported "Not logged in"; the login file never arrived.
-    Being diagnosed on #4714.
+  - Mac local VM (M3, cw-dogfood), 2026-11-15:
+    - at 0d133e2e0 (#4868 before its fix, with a diagnostic guest): stored,
+      but Claude Code reported "Not logged in". The store admitted every
+      login lease, yet the guest got "unavailable" for each, because the
+      broker's Seatbelt profile denied the `/usr/bin/id` that #4868's
+      keychain lookup ran; those denials were the only ones for `cw`;
+    - at b4541bf05 (the store opened before Seatbelt), after the authority
+      restarted: the guest wrote the login (`delivered`, `checked: Written`,
+      then `Current`), and `~/.claude/.credentials.json` (0600) held
+      `claudeAiOauth` in a diagnostic VM and in one on the shipped guest; no
+      Seatbelt denials;
+    - `claude -p`, `/status` and `/usage`: not yet observed; the guest had
+      no network (#4948).
 
 ## 7. `cred-ssh-key`: generate or import an SSH key
 

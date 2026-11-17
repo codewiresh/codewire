@@ -24,6 +24,8 @@
 use std::ffi::CString;
 use std::path::Path;
 
+use codewire_protected_store::SelectedProtectedStore;
+
 use anyhow::Context as _;
 
 use super::super::credential_darwin::{
@@ -52,14 +54,14 @@ pub(super) fn confine_relay() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("the relay Seatbelt profile was not applied"))
 }
 
-/// Install the broker's Seatbelt profile. Irreversible for the process.
-pub(super) fn confine(store: &ChildStore, provider_network: bool) -> anyhow::Result<()> {
-    let home = match store {
-        // The broker has no environment, and the login keychain lives below it.
-        ChildStore::Keychain { keychain: None } => Some(crate::config::account::home_directory()?),
-        _ => None,
-    };
-    let profile = profile(store, provider_network, home.as_deref())?;
+/// Install the broker's Seatbelt profile for `opened`, the store opened from
+/// `store`. Irreversible for the process.
+pub(super) fn confine(
+    store: &ChildStore,
+    opened: &SelectedProtectedStore,
+    provider_network: bool,
+) -> anyhow::Result<()> {
+    let profile = profile(store, provider_network, opened.login_keychain_home())?;
     codewire_local_vmm::darwin::sandbox::apply_profile(&profile)
         .map_err(|_| anyhow::anyhow!("the broker Seatbelt profile was not applied"))
 }

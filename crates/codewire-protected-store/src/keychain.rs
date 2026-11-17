@@ -31,6 +31,14 @@ use crate::{
 };
 
 const SECURITY_TOOL: &str = "/usr/bin/security";
+// The account lookup runs only where the login keychain is used; this
+// module is also built for tests on Linux.
+#[cfg(target_os = "macos")]
+const ID_TOOL: &str = "/usr/bin/id";
+#[cfg(target_os = "macos")]
+const ID_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(target_os = "macos")]
+const MAX_ID_RECORD_BYTES: u64 = 4096;
 /// `security -i` truncates a line at 4095 bytes; stay well inside it.
 const MAX_COMMAND_LINE_BYTES: usize = 4000;
 const MAX_KEYCHAIN_PATH_BYTES: usize = 512;
@@ -51,11 +59,25 @@ const EXIT_AUTH_FAILED: i32 = 51; // errSecAuthFailed (-25293)
 const EXIT_USER_CANCELED: i32 = 128; // errSecUserCanceled (-128)
 
 /// Generic-password items under service `sh.codewire.credentials`, account
-/// = exact entry ID. Without an explicit keychain, `security` adds to the
-/// user's default (login) keychain and searches the user's search list.
+/// = exact entry ID, always in one named keychain file: the account's login
+/// keychain, or an explicit file for tests. Neither the session's default
+/// keychain nor its search list is consulted, so a shell with none set (a
+/// remote or agent shell, a scratch `HOME`) stores in the same place as a
+/// Terminal window (#4864).
 #[derive(Clone, PartialEq, Eq)]
 pub struct KeychainProtectedStore {
-    keychain: Option<PathBuf>,
+    keychain: Keychain,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum Keychain {
+    /// `Library/Keychains/login.keychain-db` below this home: the one the
+    /// user database records for this account, never `$HOME`. It is resolved
+    /// when the store is made, so no read runs a tool other than `security`:
+    /// the confined broker may run only that one.
+    Login(PathBuf),
+    /// One explicit keychain file.
+    Explicit(PathBuf),
 }
 
 impl fmt::Debug for KeychainProtectedStore {
@@ -65,9 +87,14 @@ impl fmt::Debug for KeychainProtectedStore {
 }
 
 impl KeychainProtectedStore {
-    /// The user's login keychain, as Claude Code uses it.
-    pub fn login() -> Self {
-        Self { keychain: None }
+    /// The user's login keychain, as Claude Code uses it. Its home comes
+    /// from the user database now, through `id`; make the store before a
+    /// sandbox that allows only `security`.
+    #[cfg(target_os = "macos")]
+    pub fn login() -> Result<Self, ProtectedStoreError> {
+        Ok(Self {
+            keychain: Keychain::Login(account_home_directory()?),
+        })
     }
 
     /// One explicit keychain file, for tests and synthetic acceptance with a
@@ -77,32 +104,59 @@ impl KeychainProtectedStore {
     pub fn with_keychain(path: PathBuf) -> Result<Self, ProtectedStoreError> {
         validate_keychain_path(&path)?;
         Ok(Self {
-            keychain: Some(path),
+            keychain: Keychain::Explicit(path),
         })
     }
 
-    pub fn keychain(&self) -> Option<&Path> {
-        self.keychain.as_deref()
+    /// The account home the login keychain was found below, for a sandbox
+    /// profile that must allow exactly that keychain.
+    #[cfg(target_os = "macos")]
+    pub fn login_home(&self) -> Option<&Path> {
+        match &self.keychain {
+            Keychain::Login(home) => Some(home),
+            Keychain::Explicit(_) => None,
+        }
     }
 
-    fn keychain_argument(&self) -> Result<Option<&str>, ProtectedStoreError> {
-        let Some(path) = &self.keychain else {
-            return Ok(None);
+    pub fn keychain(&self) -> Option<&Path> {
+        match &self.keychain {
+            Keychain::Explicit(path) => Some(path),
+            Keychain::Login(_) => None,
+        }
+    }
+
+    /// The keychain file every `security` command names. It must exist:
+    /// `security` treats a missing file as "item not found", and absence must
+    /// never read as an empty store.
+    fn keychain_argument(&self) -> Result<String, ProtectedStoreError> {
+        let path = match &self.keychain {
+            Keychain::Login(home) => login_keychain_below(home),
+            Keychain::Explicit(path) => {
+                validate_keychain_path(path)?;
+                path.clone()
+            }
         };
-        // `security` treats a missing keychain file as "item not found";
-        // require the file so absence is never mistaken for an empty store.
         let metadata =
-            std::fs::symlink_metadata(path).map_err(|_| ProtectedStoreError::Unavailable)?;
+            std::fs::symlink_metadata(&path).map_err(|_| ProtectedStoreError::KeychainMissing)?;
         if !metadata.file_type().is_file()
-            || std::fs::canonicalize(path).ok().as_deref() != Some(path.as_path())
+            || std::fs::canonicalize(&path).ok().as_deref() != Some(path.as_path())
         {
             return Err(ProtectedStoreError::Unavailable);
         }
-        validate_keychain_path(path).map(Some)
+        let text = path.to_str().ok_or(ProtectedStoreError::Unavailable)?;
+        if text.len() > MAX_KEYCHAIN_PATH_BYTES || !text.bytes().all(plain_path_byte) {
+            return Err(ProtectedStoreError::Unavailable);
+        }
+        Ok(text.to_owned())
     }
 
     fn find(&self, account: &str) -> Result<Option<Zeroizing<String>>, ProtectedStoreError> {
-        let line = command_line(Operation::Find, account, None, self.keychain_argument()?)?;
+        let line = command_line(
+            Operation::Find,
+            account,
+            None,
+            Some(&self.keychain_argument()?),
+        )?;
         let (status, output) = run_security(&line)?;
         match status {
             0 => parse_password_output(output).map(Some),
@@ -116,7 +170,7 @@ impl KeychainProtectedStore {
             Operation::Add,
             account,
             Some(password),
-            self.keychain_argument()?,
+            Some(&self.keychain_argument()?),
         )?;
         match run_security(&line)?.0 {
             0 => Ok(()),
@@ -126,7 +180,12 @@ impl KeychainProtectedStore {
 
     /// Returns whether an item was deleted.
     fn remove(&self, account: &str) -> Result<bool, ProtectedStoreError> {
-        let line = command_line(Operation::Delete, account, None, self.keychain_argument()?)?;
+        let line = command_line(
+            Operation::Delete,
+            account,
+            None,
+            Some(&self.keychain_argument()?),
+        )?;
         match run_security(&line)?.0 {
             0 => Ok(true),
             EXIT_ITEM_NOT_FOUND => Ok(false),
@@ -298,6 +357,79 @@ fn validate_keychain_path(path: &Path) -> Result<&str, ProtectedStoreError> {
         return Err(invalid());
     }
     Ok(text)
+}
+
+fn login_keychain_below(home: &Path) -> PathBuf {
+    home.join("Library/Keychains/login.keychain-db")
+}
+
+/// This account's home directory from the user database, never `$HOME`:
+/// the authority runs with no environment, and a caller's `HOME` may be a
+/// scratch directory whose keychain preferences list nothing. `id -P` prints
+/// the account's own record; it is read once per process.
+#[cfg(target_os = "macos")]
+fn account_home_directory() -> Result<PathBuf, ProtectedStoreError> {
+    static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    if let Some(home) = HOME.get() {
+        return Ok(home.clone());
+    }
+    let home = home_from_account_record(&run_id_record()?)?;
+    Ok(HOME.get_or_init(|| home).clone())
+}
+
+/// `/usr/bin/id -P` with an empty environment, bounded like every tool call.
+#[cfg(target_os = "macos")]
+fn run_id_record() -> Result<Vec<u8>, ProtectedStoreError> {
+    let mut child = Command::new(ID_TOOL)
+        .arg("-P")
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| ProtectedStoreError::Unavailable)?;
+    let deadline = Instant::now() + ID_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
+            _ => {
+                // The process is being abandoned; a failed kill leaves nothing to undo.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ProtectedStoreError::TimedOut);
+            }
+        }
+    };
+    let mut output = Vec::new();
+    child
+        .stdout
+        .take()
+        .ok_or(ProtectedStoreError::Unavailable)?
+        .take(MAX_ID_RECORD_BYTES)
+        .read_to_end(&mut output)
+        .map_err(|_| ProtectedStoreError::Unavailable)?;
+    if !status.success() {
+        return Err(ProtectedStoreError::Unavailable);
+    }
+    Ok(output)
+}
+
+/// The home field of one `master.passwd`-format record,
+/// `name:password:uid:gid:class:change:expire:gecos:home:shell`.
+fn home_from_account_record(record: &[u8]) -> Result<PathBuf, ProtectedStoreError> {
+    let record = std::str::from_utf8(record).map_err(|_| ProtectedStoreError::Unavailable)?;
+    let line = record.strip_suffix('\n').unwrap_or(record);
+    let fields: Vec<&str> = line.split(':').collect();
+    let home = match fields.as_slice() {
+        [_, _, _, _, _, _, _, _, home, _] => PathBuf::from(home),
+        _ => return Err(ProtectedStoreError::Unavailable),
+    };
+    if !home.is_absolute() || line.contains('\n') {
+        return Err(ProtectedStoreError::Unavailable);
+    }
+    Ok(home)
 }
 
 fn plain_path_byte(byte: u8) -> bool {
@@ -609,7 +741,63 @@ mod tests {
         let store =
             KeychainProtectedStore::with_keychain("/private/tmp/x.keychain-db".into()).unwrap();
         assert_eq!(format!("{store:?}"), "KeychainProtectedStore([REDACTED])");
-        assert!(KeychainProtectedStore::login().keychain().is_none());
+        let login = KeychainProtectedStore {
+            keychain: Keychain::Login("/var/empty/codewire-test-home".into()),
+        };
+        assert!(login.keychain().is_none());
+    }
+
+    #[test]
+    fn the_login_keychain_is_named_below_the_account_records_home() {
+        let record = b"synthetic:********:501:20::0:0:Synthetic User:/Users/synthetic:/bin/zsh\n";
+        let home = home_from_account_record(record).unwrap();
+        assert_eq!(home, PathBuf::from("/Users/synthetic"));
+        assert_eq!(
+            login_keychain_below(&home),
+            PathBuf::from("/Users/synthetic/Library/Keychains/login.keychain-db")
+        );
+        for record in [
+            &b""[..],
+            b"synthetic:*:501:20:/Users/synthetic:/bin/zsh\n",
+            b"synthetic:*:501:20::0:0:User:relative/home:/bin/zsh\n",
+            b"a:*:1:1::0:0:U:/Users/a:/bin/zsh\nx:*:2:2::0:0:U:/Users/x:/bin/zsh\n",
+        ] {
+            assert_eq!(
+                home_from_account_record(record),
+                Err(ProtectedStoreError::Unavailable),
+                "{record:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_keychain_is_its_own_definite_error() {
+        let home = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(home.path()).unwrap();
+        let store = KeychainProtectedStore {
+            keychain: Keychain::Login(home.clone()),
+        };
+        // A home without the login keychain (or its keychain preferences).
+        assert_eq!(
+            store.keychain_argument(),
+            Err(ProtectedStoreError::KeychainMissing)
+        );
+        assert!(matches!(
+            store.get(&entry("local/credentials/synthetic/material-v1")),
+            Err(ProtectedStoreError::KeychainMissing)
+        ));
+        let keychains = home.join("Library/Keychains");
+        std::fs::create_dir_all(&keychains).unwrap();
+        std::fs::write(keychains.join("login.keychain-db"), b"synthetic").unwrap();
+        assert_eq!(
+            store.keychain_argument().as_deref(),
+            Ok(keychains.join("login.keychain-db").to_str().unwrap())
+        );
+        let explicit = KeychainProtectedStore::with_keychain(home.join("absent.keychain-db"));
+        assert_eq!(
+            explicit.unwrap().keychain_argument(),
+            Err(ProtectedStoreError::KeychainMissing)
+        );
     }
 
     #[test]

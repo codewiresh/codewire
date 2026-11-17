@@ -85,6 +85,9 @@ pub enum ProtectedStoreError {
     CorruptEntry,
     #[error("operating-system protected storage is unsupported on this platform")]
     UnsupportedPlatform,
+    /// The keychain file the store names does not exist.
+    #[error("the keychain that holds local credentials does not exist")]
+    KeychainMissing,
 }
 
 /// An exact metadata-owned keyring entry. Debug output is redacted because the
@@ -304,7 +307,7 @@ impl ProtectedStore for OsProtectedStore {
         }
         #[cfg(target_os = "macos")]
         {
-            KeychainProtectedStore::login().get(id)
+            KeychainProtectedStore::login()?.get(id)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -324,7 +327,7 @@ impl ProtectedStore for OsProtectedStore {
         }
         #[cfg(target_os = "macos")]
         {
-            KeychainProtectedStore::login().put(id, value)
+            KeychainProtectedStore::login()?.put(id, value)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -340,7 +343,7 @@ impl ProtectedStore for OsProtectedStore {
         }
         #[cfg(target_os = "macos")]
         {
-            KeychainProtectedStore::login().delete(id)
+            KeychainProtectedStore::login()?.delete(id)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -384,7 +387,7 @@ impl SelectedProtectedStore {
             #[cfg(target_os = "macos")]
             ProtectedStoreBackend::Keychain => Ok(Self::Keychain(match keychain {
                 Some(path) => KeychainProtectedStore::with_keychain(path.to_owned())?,
-                None => KeychainProtectedStore::login(),
+                None => KeychainProtectedStore::login()?,
             })),
             #[cfg(target_os = "macos")]
             ProtectedStoreBackend::File => {
@@ -424,6 +427,16 @@ impl SelectedProtectedStore {
             Self::Keychain(_) => ProtectedStoreBackend::Keychain,
             #[cfg(target_os = "macos")]
             Self::File(_) => ProtectedStoreBackend::File,
+        }
+    }
+
+    /// The account home of the login keychain this store reads, if it reads
+    /// one.
+    #[cfg(target_os = "macos")]
+    pub fn login_keychain_home(&self) -> Option<&Path> {
+        match self {
+            Self::Keychain(store) => store.login_home(),
+            Self::File(_) => None,
         }
     }
 }

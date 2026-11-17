@@ -13,8 +13,7 @@ use codewire_access::{
     EnvironmentId, ProviderCatalog, ProviderId, builtin_provider_catalog,
 };
 use codewire_protected_store::{
-    MAX_PROTECTED_VALUE_BYTES, ProtectedStore, ProtectedStoreError, ProtectedStorePersistence,
-    ProtectedValue,
+    MAX_PROTECTED_VALUE_BYTES, ProtectedStore, ProtectedStorePersistence, ProtectedValue,
     ssh_material::{SshMaterialError, generate_ed25519, import_openssh},
 };
 use futures::FutureExt as _;
@@ -84,6 +83,7 @@ mod grants;
 mod placeholders;
 mod profiles;
 mod repository;
+mod store_status;
 mod workload_secrets;
 
 use profiles::{
@@ -2473,16 +2473,8 @@ fn status_for_error(error: LocalCredentialError) -> Status {
         // AccessError is deliberately material-free and carries the stable
         // provider/profile diagnostic needed to repair a rejected selection.
         LocalCredentialError::Access(error) => Status::failed_precondition(error.to_string()),
-        LocalCredentialError::ProtectedStore(ProtectedStoreError::AccessDenied) => {
-            Status::failed_precondition(
-                "local protected storage is locked or inaccessible; unlock it and retry",
-            )
-        }
-        LocalCredentialError::ProtectedStore(ProtectedStoreError::TimedOut) => {
-            Status::unavailable("local protected storage did not respond in time")
-        }
+        LocalCredentialError::ProtectedStore(error) => store_status::status(error),
         LocalCredentialError::DatabaseUnavailable
-        | LocalCredentialError::ProtectedStore(_)
         | LocalCredentialError::ProtectedStoreSwitch(_) => {
             Status::unavailable("local credential authority storage is unavailable")
         }

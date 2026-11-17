@@ -359,10 +359,15 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
     };
     // One Seatbelt profile replaces Landlock and seccomp: provider HTTPS to
     // the addresses resolved above, and reads of exactly the selected store.
+    // The store is opened first: opening the login keychain asks the user
+    // database for the account's home through `id`, and the profile lets the
+    // broker run only `security`. Opening reads no value.
     #[cfg(target_os = "macos")]
     let protected_store = {
-        darwin::confine(&store, !http_providers.is_empty()).context("confine credential broker")?;
-        store.open().context("open broker protected store")?
+        let protected_store = store.open().context("open broker protected store")?;
+        darwin::confine(&store, &protected_store, !http_providers.is_empty())
+            .context("confine credential broker")?;
+        protected_store
     };
     stage.set("lease.connect");
     let mut leases = LocalCredentialBrokerLeaseClient::connect(

@@ -407,7 +407,7 @@ pub(crate) fn remove_bound_socket(
 /// diagnostic stream, so its starter decodes the reason.
 const STORE_SWITCH_EXIT_BASE: i32 = 80;
 const STORE_OPEN_EXIT_BASE: i32 = 90;
-const STORE_ERRORS: [ProtectedStoreError; 9] = [
+const STORE_ERRORS: [ProtectedStoreError; 10] = [
     ProtectedStoreError::InvalidEntryId,
     ProtectedStoreError::EmptyValue,
     ProtectedStoreError::ValueTooLarge,
@@ -417,6 +417,7 @@ const STORE_ERRORS: [ProtectedStoreError; 9] = [
     ProtectedStoreError::AmbiguousEntry,
     ProtectedStoreError::CorruptEntry,
     ProtectedStoreError::UnsupportedPlatform,
+    ProtectedStoreError::KeychainMissing,
 ];
 
 /// The process exit status for an authority that failed to start.
@@ -506,8 +507,8 @@ mod exit_status_tests {
     fn store_start_failures_round_trip_through_the_exit_status() {
         for error in STORE_ERRORS {
             for (failure, codes) in [
-                (LocalCredentialError::ProtectedStoreSwitch(error), 80..=88),
-                (LocalCredentialError::ProtectedStore(error), 90..=98),
+                (LocalCredentialError::ProtectedStoreSwitch(error), 80..=89),
+                (LocalCredentialError::ProtectedStore(error), 90..=99),
             ] {
                 let code = authority_exit_code(&AuthorityRuntimeError::Credential(failure.clone()))
                     .unwrap();
@@ -523,7 +524,7 @@ mod exit_status_tests {
             )),
             None
         );
-        for code in [0, 1, 79, 89, 99] {
+        for code in [0, 1, 79, 100] {
             let status = std::process::ExitStatus::from_raw(code << 8);
             assert_eq!(store_error_from_exit_status(status), None);
         }

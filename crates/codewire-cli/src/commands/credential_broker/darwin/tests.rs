@@ -230,8 +230,10 @@ fn file_store_profile_reads_only_the_entry_directory() {
         let store = ChildStore::File {
             directory: directory.clone(),
         };
-        confine(&store, network).unwrap();
-        let value = store.open().unwrap().get(&entry()).unwrap().unwrap();
+        // As the broker does: the store is opened, then confined.
+        let opened = store.open().unwrap();
+        confine(&store, &opened, network).unwrap();
+        let value = opened.get(&entry()).unwrap().unwrap();
         assert_eq!(value.expose_secret(), VALUE);
         assert_denied(
             std::fs::read(directory.parent().unwrap().join("sibling")),
@@ -304,8 +306,10 @@ fn keychain_profile_reads_the_selected_keychain_through_security() {
         let store = ChildStore::Keychain {
             keychain: Some(keychain),
         };
-        confine(&store, network).unwrap();
-        let value = store.open().unwrap().get(&entry()).unwrap().unwrap();
+        // As the broker does: the store is opened, then confined.
+        let opened = store.open().unwrap();
+        confine(&store, &opened, network).unwrap();
+        let value = opened.get(&entry()).unwrap().unwrap();
         assert_eq!(value.expose_secret(), VALUE);
         assert_common_denials(network);
         return;
