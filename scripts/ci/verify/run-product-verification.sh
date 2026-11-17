@@ -336,10 +336,15 @@ shard_test() {
       fi
       ;;
     archives)
-      [ ! -e "$RUST_SHARD_ARCHIVES/$key.tar.zst" ] || {
+      [ ! -e "$RUST_SHARD_ARCHIVES/$key.tar.zst" ] && [[ " ${SHARD_QUEUED_KEYS[*]-} " != *" $key "* ]] || {
         echo "::error::two test steps share the archive $key" >&2
         return 2
       }
+      if [ "${SHARD_ARCHIVE_QUEUE:-}" = true ]; then
+        SHARD_QUEUED_KEYS+=("$key")
+        SHARD_QUEUED_BUILDS+=("$(printf '%q ' "${build[@]}")")
+        return 0
+      fi
       cargo nextest archive --locked "${build[@]}" \
         --archive-file "$RUST_SHARD_ARCHIVES/$key.tar.zst"
       ;;
@@ -349,6 +354,84 @@ shard_test() {
       ;;
     checks) return 0 ;;
   esac
+}
+
+# The features shard's archives build in batches side by side, each batch in
+# a Cargo target folder of its own (#5146): one after another in one folder,
+# its five steps took 339 s, the build's longest leg once the runtime plane
+# split (credential-broker-platform 118 s, server-core-kubernetes-identity
+# 107, cli-bin-host-interface-refusal 74, credential-service-enrollment 29,
+# client-ffi-swift-bindings 2). A step not named here builds in the leg's own
+# folder. The batches keep their folders warm by name, as compile_batches'
+# do (run-integration-verification.sh), targets/features/batch-NAME
+# (build-once.sh).
+SHARD_ARCHIVE_QUEUE=false
+
+# shard_archive_batch KEY: the batch that builds KEY's archive.
+shard_archive_batch() {
+  case "$1" in
+    server-core-kubernetes-identity) echo server-core ;;
+    cli-bin-host-interface-refusal|credential-service-enrollment|daemon-stock-gh) echo cli-bin ;;
+    *) echo leg ;;
+  esac
+}
+
+# build_shard_archive_batches: every archive shard_test queued, each batch at
+# once in its own folder, the leg's batch in CARGO_TARGET_DIR itself.
+build_shard_archive_batches() {
+  local index batch dir status failed=false logs
+  local -a batches=() pids=()
+  if [ "${#SHARD_QUEUED_KEYS[@]}" -eq 0 ]; then
+    SHARD_ARCHIVE_QUEUE=false
+    return 0
+  fi
+  : "${CARGO_TARGET_DIR:?the features archives need CARGO_TARGET_DIR}"
+  local -A members=()
+  for index in "${!SHARD_QUEUED_KEYS[@]}"; do
+    batch="$(shard_archive_batch "${SHARD_QUEUED_KEYS[$index]}")"
+    [ -n "${members[$batch]+set}" ] || batches+=("$batch")
+    members[$batch]+="$index "
+  done
+  logs="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/shard-archive-batches.XXXXXX")"
+  for batch in "${batches[@]}"; do
+    local -a size_args=()
+    if [ "$batch" = leg ]; then
+      dir="$CARGO_TARGET_DIR"
+      # The leg's folder holds the batches' folders: its size leaves them out.
+      size_args=(--exclude="$CARGO_TARGET_DIR/batch-*")
+    else
+      dir="$CARGO_TARGET_DIR/batch-$batch"
+    fi
+    (
+      started=$SECONDS
+      # The folder by its last name only: a full path in the log reads as a
+      # folder to wipe on a corrupt output (build-once.sh).
+      echo "[build batch] $batch: start (folder ${dir##*/})"
+      export CARGO_TARGET_DIR="$dir"
+      # `|| exit`, not set -e, which a caller's `if` or `||` turns off here.
+      for index in ${members[$batch]}; do
+        eval "cargo nextest archive --locked ${SHARD_QUEUED_BUILDS[$index]}" \
+          '--archive-file "$RUST_SHARD_ARCHIVES/${SHARD_QUEUED_KEYS[$index]}.tar.zst"' || exit $?
+      done
+      # Its folder's size sizes the build disk (build-once.sh bound_targets).
+      echo "[build batch] $batch: finish (elapsed_seconds=$((SECONDS - started)) folder_size=$(
+        du -sh "${size_args[@]}" "$dir" 2>/dev/null | cut -f1))"
+    ) > "$logs/$batch.log" 2>&1 &
+    pids+=("$!")
+  done
+  for index in "${!batches[@]}"; do
+    batch="${batches[$index]}"
+    status=0
+    wait "${pids[$index]}" || status=$?
+    cat "$logs/$batch.log"
+    if [ "$status" -ne 0 ]; then
+      echo "::error::the features $batch build batch failed (status $status)"
+      failed=true
+    fi
+  done
+  rm -rf -- "$logs"
+  SHARD_ARCHIVE_QUEUE=false SHARD_QUEUED_KEYS=() SHARD_QUEUED_BUILDS=()
+  [ "$failed" = false ]
 }
 
 # public_netns_available: this job can make a user and network namespace.
@@ -1324,6 +1407,9 @@ run_rust() {
   rust_shard features || return 0
   check_shard_stage || return $?
   local feature_tests_before="${SHARD_TESTS:-0}"
+  if [ "$RUST_SHARD_STAGE" = archives ]; then
+    SHARD_ARCHIVE_QUEUE=true SHARD_QUEUED_KEYS=() SHARD_QUEUED_BUILDS=()
+  fi
   if shard_stage tests && { selected rust_workspace || selected rust_pkg_codewire_cli || selected rust_pkg_codewire_cli_bin; }; then
     python3 -B scripts/ci/tests/test-cli-host-managed.py || return $?
     python3 -B scripts/ci/tests/test-cli-update-mesh-endpoints.py || return $?
@@ -1396,6 +1482,9 @@ run_rust() {
     # The Swift bindings committed under apps/ios match the crate (#3825).
     shard_test client-ffi-swift-bindings '-E test(swift_bindings_tests::)' \
       -p codewire-client-ffi --features bindgen --lib -- swift_bindings_tests::
+  fi
+  if [ "$RUST_SHARD_STAGE" = archives ]; then
+    build_shard_archive_batches || return $?
   fi
   # The features job is dispatched only when a token in
   # scripts/ci/select/feature-graph-tokens is selected, so there a run that

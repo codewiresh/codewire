@@ -4076,6 +4076,12 @@ cat > "$primitive_probe/bin/cargo" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$PRIMITIVE_CARGO_LOG"
+if [[ "$1" == nextest && -n "${PRIMITIVE_BATCH_LOG:-}" ]]; then
+  # Each archive build's folder, and when it starts and ends.
+  printf 'start %s\n' "${CARGO_TARGET_DIR:-unset}" >> "$PRIMITIVE_BATCH_LOG"
+  sleep 2
+  printf 'end %s\n' "${CARGO_TARGET_DIR:-unset}" >> "$PRIMITIVE_BATCH_LOG"
+fi
 if [[ "${PRIMITIVE_CARGO_FAIL:-}" == all || "${PRIMITIVE_CARGO_FAIL:-}" == "$1" ]]; then
   exit 86
 fi
@@ -4198,7 +4204,7 @@ run_admin_static_negative admin_set_test crates/codewire-admin-proto/src/lib.rs 
 
 primitive_rust_body="$primitive_probe/run-rust.sh"
 awk '
-  /^(rust_shard|run_rust|check_shard_stage|shard_stage|shard_test|run_shard_archive|extract_shard_archive|shard_archive_root)\(\) \{/ { capture = 1 }
+  /^(rust_shard|run_rust|check_shard_stage|shard_stage|shard_test|run_shard_archive|extract_shard_archive|shard_archive_root|shard_archive_batch|build_shard_archive_batches)\(\) \{/ { capture = 1 }
   capture { print }
   capture && /^}$/ { capture = 0 }
 ' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$primitive_rust_body"
@@ -4418,6 +4424,34 @@ defer_check run_feature_graph_selection_case empty_archive features tests rust_p
 defer_check run_feature_graph_selection_case nothing_to_build features archives transport 0 '' yes
 defer_check run_feature_graph_selection_case local_full_run all all transport 0 \
   'no feature-graph package selected; nothing to run' yes
+
+# The features archives build in batches at once, each in its own folder
+# (#5146): the leg's own, batch-server-core and batch-cli-bin; a failed batch
+# fails the stage.
+run_feature_archive_batches_case() {
+  local log="$primitive_probe/features-batches.cargo" batches="$primitive_probe/features-batches.times"
+  local target="$primitive_probe/features-target" key folder
+  : > "$log"; : > "$batches"
+  run_feature_graph_selection_case batches features archives rust_workspace 0 '' no \
+    CARGO_TARGET_DIR="$target" PRIMITIVE_BATCH_LOG="$batches"
+  for key in protected-store-platform credential-broker-platform server-core-kubernetes-identity \
+      credential-service-enrollment client-ffi-swift-bindings; do
+    grep -qF -- "--archive-file $primitive_probe/features-batches.archives/$key.tar.zst" \
+      "$primitive_probe/features-batches.cargo" || { echo "features batches: no archive build for $key" >&2; exit 1; }
+  done
+  for folder in "$target" "$target/batch-server-core" "$target/batch-cli-bin"; do
+    grep -qx "start $folder" "$batches" || { echo "features batches: nothing built in $folder" >&2; cat "$batches" >&2; exit 1; }
+  done
+  [[ "$(grep -c '^start ' "$batches")" == 5 ]] || { echo 'features batches: not five archive builds' >&2; exit 1; }
+  # Every batch starts before any ends: they run at once.
+  [[ "$(sed -n '1,3p' "$batches" | grep -c '^start ')" == 3 ]] ||
+    { echo 'features batches: the batches ran one after another' >&2; cat "$batches" >&2; exit 1; }
+  # Called inside `||`, as a caller may, where set -e no longer stops a batch.
+  run_feature_graph_selection_case batches_fail features archives rust_workspace 1 \
+    '::error::the features' no CARGO_TARGET_DIR="$target" PRIMITIVE_CARGO_FAIL=nextest \
+    PRIMITIVE_HOST_EXPLICIT_STATUS=true PRIMITIVE_HOST_ROUTING_LOG="$primitive_probe/features-batches.routing"
+}
+defer_check run_feature_archive_batches_case
 
 # scripts/ci/select/feature-graph-tokens, which dispatches the features job,
 # names exactly the tokens whose selection gives the shard a test to run: one

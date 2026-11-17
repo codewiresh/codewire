@@ -44,7 +44,8 @@
 #   waiting on each other's folder lock, and the Rust checks' own
 #   (CHECK_FOLDERS); any other folder there is removed. A leg whose builds
 #   run in batches at once (the database and service-plane legs,
-#   run-integration-verification.sh compile_batches) keeps each batch but
+#   run-integration-verification.sh compile_batches, and the features leg,
+#   run-product-verification.sh build_shard_archive_batches) keeps each batch but
 #   its first in a folder of its own inside the leg's, targets/<leg>/batch-*,
 #   which goes and stays with the leg's folder. Each folder's
 #   .build-once-used mark names the last run that used it (GITHUB_RUN_ID),
