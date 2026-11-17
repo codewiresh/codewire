@@ -1157,24 +1157,27 @@ nextest archive --locked -p codewire-credential-broker --no-default-features --f
 nextest archive --locked -p codewire-credential-broker --no-default-features --features platform,ssh-agent --lib --archive-file OUT/codewire-credential-broker--no-default--features-platform-ssh-agent.tar.zst
 nextest archive --locked -p codewire-billing --lib --archive-file OUT/codewire-billing.tar.zst
 nextest archive --locked -p codewire-mesh --lib --archive-file OUT/codewire-mesh.tar.zst
-build --locked --profile ci -p codewire-server-core --bin codewire-db-migrate'
-archive_build_case database database-archives database 5 '|valid:v3|database|complete|' ||
+build --locked -p codewire-server-core --bin codewire-db-migrate'
+# The runner's own batch folder, from before it joined the first batch, goes.
+mkdir -p "$TMP/archive-build-database/build/targets/database/batch-migration-runner/ci"
+archive_build_case database database-archives database 4 '|valid:v3|database|complete|' ||
   { cat "$TMP/archive-build-database/log" >&2; echo 'the database archive build failed' >&2; exit 1; }
 archive_build_check database "$EXPECTED_DATABASE_ARCHIVES" 'database:
   nextest archive --locked -p codewire-server-core --lib --test session_auth --test org_deletion_lifecycle --test oauth_bearer_auth --archive-file OUT/codewire-server-core.tar.zst
   nextest archive --locked -p codewire-mesh --lib --archive-file OUT/codewire-mesh.tar.zst
+  build --locked -p codewire-server-core --bin codewire-db-migrate
 database/batch-credential-service-enrollment:
   nextest archive --locked -p codewire-credential-service --features enrollment --lib --archive-file OUT/codewire-credential-service--features-enrollment.tar.zst
   nextest archive --locked -p codewire-credential-service --lib --archive-file OUT/codewire-credential-service.tar.zst
   nextest archive --locked -p codewire-credential-broker --no-default-features --features platform --lib --archive-file OUT/codewire-credential-broker--no-default--features-platform.tar.zst
   nextest archive --locked -p codewire-credential-broker --no-default-features --features platform,ssh-agent --lib --archive-file OUT/codewire-credential-broker--no-default--features-platform-ssh-agent.tar.zst
-database/batch-migration-runner:
-  build --locked --profile ci -p codewire-server-core --bin codewire-db-migrate
 database/batch-orchestration:
   nextest archive --locked -p codewire-orchestration --lib --test access_profiles --test credentials --test environment_external_cleanup --test environment_sources --archive-file OUT/codewire-orchestration.tar.zst
 database/batch-platform-credentials:
   nextest archive --locked -p codewire-platform-credentials --test storage --test profiles --test refresh --test authority --test owner_sources --archive-file OUT/codewire-platform-credentials.tar.zst
-  nextest archive --locked -p codewire-billing --lib --archive-file OUT/codewire-billing.tar.zst' 5
+  nextest archive --locked -p codewire-billing --lib --archive-file OUT/codewire-billing.tar.zst' 4
+[ ! -e "$TMP/archive-build-database/build/targets/database/batch-migration-runner" ] ||
+  { echo 'the migration runner batch folder from before was kept' >&2; exit 1; }
 [ "$(find "$TMP/archive-build-database/out" -name '*.tar.zst' | wc -l)" -eq 9 ] &&
   [ -x "$TMP/archive-build-database/out/codewire-db-migrate" ] ||
   { echo 'the database archive build did not write every archive and the migration runner' >&2; exit 1; }
@@ -1186,14 +1189,15 @@ for batch in server_core orchestration; do
 done
 # A failing build stops its own batch at once and fails the build, after
 # every other batch has run to its end.
-if archive_build_case database-failed database-archives database 5 '|valid:v3|database|complete|' codewire-server-core; then
+if archive_build_case database-failed database-archives database 4 '|valid:v3|database|complete|' codewire-server-core; then
   echo 'a failed database build batch passed' >&2; exit 1
 fi
 grep -qF '::error::the server_core build batch failed' "$TMP/archive-build-database-failed/log" ||
   { cat "$TMP/archive-build-database-failed/log" >&2; echo 'the failed build batch was not reported' >&2; exit 1; }
-! grep -q 'codewire-mesh' "$TMP/archive-build-database-failed/trace/calls" ||
+! grep -qE 'codewire-mesh|codewire-db-migrate' "$TMP/archive-build-database-failed/trace/calls" ||
   { echo 'a batch went on after its failed build' >&2; exit 1; }
-[ "$(wc -l < "$TMP/archive-build-database-failed/trace/calls")" -eq 9 ] ||
+# server-core's one call, and the other three batches' seven.
+[ "$(wc -l < "$TMP/archive-build-database-failed/trace/calls")" -eq 8 ] ||
   { echo 'the other build batches did not run to their end' >&2; exit 1; }
 
 EXPECTED_SERVICES_CONTROL_ARCHIVES='build --locked -p codewire-server-core --bin codewire-db-migrate

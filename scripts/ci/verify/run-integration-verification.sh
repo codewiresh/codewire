@@ -693,11 +693,20 @@ database_build_mesh() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test -p codewire-mesh --lib --no-run
 }
-# The migration runner the database job runs, in the CI profile (archives
-# only: the lanes build their own with reset_schema's cargo build).
+# The migration runner the database job runs (archives only: the lanes build
+# their own with reset_schema's cargo build). It builds in the archives'
+# profile after server-core's suites, in their folder, so it reuses their
+# units: an optimised build of its own took 188 s of the leg (codewire#5146).
+# The service planes have run a dev-profile runner since #3409.
 database_build_migration_runner() {
-  command cargo build --locked --profile ci -p codewire-server-core --bin codewire-db-migrate
-  install -m 0755 "$CARGO_CI_DIR/codewire-db-migrate" "$ARCHIVE_BUILD_DIR/codewire-db-migrate"
+  local -a profile=()
+  local dir=debug
+  if [ "${ARCHIVE_CARGO_PROFILE:-drop}" = keep ]; then
+    profile=(--profile ci)
+    dir=ci
+  fi
+  command cargo build --locked "${profile[@]}" -p codewire-server-core --bin codewire-db-migrate
+  install -m 0755 "$CARGO_CI_TARGET_DIR/$dir/codewire-db-migrate" "$ARCHIVE_BUILD_DIR/codewire-db-migrate"
 }
 # The batches, about evenly long. One after another in one folder, main run
 # 27000 took 589 s: server-core 105 s, mesh 11; orchestration 135;
@@ -2599,7 +2608,11 @@ case "$MODE" in
     # The build runner's half of compile once: no PostgreSQL, no tests.
     : "${ARCHIVE_BUILD_DIR:?ARCHIVE_BUILD_DIR is required}"
     mkdir -p "$ARCHIVE_BUILD_DIR"
-    compile_batches database_build "${DATABASE_BUILD_BATCHES[@]}" migration_runner
+    # The runner follows server-core's suites in the first batch. Its own
+    # batch folder, from before that, is removed.
+    rm -rf -- "$CARGO_CI_TARGET_DIR/batch-migration-runner"
+    compile_batches database_build "${DATABASE_BUILD_BATCHES[0]} migration_runner" \
+      "${DATABASE_BUILD_BATCHES[@]:1}"
     log "database archives built: $(find "$ARCHIVE_BUILD_DIR" -name '*.tar.zst' | wc -l)"
     exit 0
     ;;
