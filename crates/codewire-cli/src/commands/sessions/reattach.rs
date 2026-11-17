@@ -19,6 +19,23 @@ impl AttachExit {
     }
 }
 
+/// Sends keys to the attachment. A connection that dropped under them is
+/// left to the output side: the attachment's driver reports the same error
+/// there, which ends the attachment as interrupted, so it is reattached and
+/// the input stream resends the keys (#5120). Any other failure ends the
+/// command.
+pub(super) async fn send_keys(
+    input: &codewire_client::EnvironmentSessionAttachmentInput,
+    request: codewire_client::AttachSessionRequest,
+) -> anyhow::Result<()> {
+    match input.send(request).await {
+        Err(error) if !error.is_retryable_transport_interruption() => {
+            Err(super::display_client_error(error))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// A request that sets the session's PTY to (columns, rows).
 pub(super) fn resize_request((columns, rows): (u16, u16)) -> codewire_client::AttachSessionRequest {
     codewire_client::AttachSessionRequest {
@@ -190,6 +207,27 @@ mod tests {
     async fn real_size(sizes: &mut PtySizes, shrunk_at: Instant) -> (Option<(u16, u16)>, Duration) {
         let size = sizes.changed().await;
         (size, shrunk_at.elapsed())
+    }
+
+    #[tokio::test]
+    async fn keys_sent_into_a_dropped_attachment_leave_it_to_reattach() {
+        let (_outputs, output) = tokio::sync::mpsc::channel(1);
+        let attachment = codewire_client::EnvironmentSessionAttachment::from_output(output);
+        let input = attachment.input_handle();
+        drop(attachment);
+        let key = || codewire_client::AttachSessionRequest::default();
+        // The aborted driver closes its end of the input at its next poll.
+        for _ in 0..100 {
+            if input.send(key()).await.is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(input.send(key()).await.is_err(), "the attachment is gone");
+        assert!(
+            send_keys(&input, key()).await.is_ok(),
+            "a dropped connection does not end the command"
+        );
     }
 
     #[tokio::test(start_paused = true)]

@@ -2831,7 +2831,7 @@ async fn attach_platform_environment_session(
                     if !pending.is_empty()
                         && let Some(request) = input_stream.typed(pending, std::time::Instant::now())
                     {
-                        input.send(request).await.map_err(display_client_error)?;
+                        reattach::send_keys(&input, request).await?;
                     }
                     stdin_closed = true;
                     continue;
@@ -2854,7 +2854,7 @@ async fn attach_platform_environment_session(
                 if !forward.is_empty()
                     && let Some(request) = input_stream.typed(forward, std::time::Instant::now())
                 {
-                    input.send(request).await.map_err(display_client_error)?;
+                    reattach::send_keys(&input, request).await?;
                 }
                 if let Some(action) = action {
                     if matches!(action, AttachExit::Detached) && output_open {
