@@ -888,48 +888,17 @@ pub async fn run_network_agent() -> Result<()> {
     }
 }
 
-#[repr(C)]
-struct TunIfreq {
-    name: [libc::c_char; libc::IF_NAMESIZE],
-    flags: libc::c_short,
-    padding: [u8; 22],
-}
-
 fn open_and_configure_tun() -> Result<OwnedFd> {
-    let raw = unsafe {
-        libc::open(
-            c"/dev/net/tun".as_ptr(),
-            libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC,
-        )
+    let descriptor = match crate::tun::open(NETWORK_INTERFACE) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            record_boot_stage(match error {
+                crate::tun::TunError::Open(_) => "workspace-net-tun-open-failed",
+                _ => "workspace-net-tun-attach-failed",
+            })?;
+            return Err(error).context("attach guest TUN interface");
+        }
     };
-    if raw == -1 {
-        record_boot_stage("workspace-net-tun-open-failed")?;
-        return Err(io::Error::last_os_error()).context("open guest TUN device");
-    }
-    let descriptor = unsafe { OwnedFd::from_raw_fd(raw) };
-    let mut request = TunIfreq {
-        name: [0; libc::IF_NAMESIZE],
-        flags: (0x0001 | 0x1000) as libc::c_short,
-        padding: [0; 22],
-    };
-    for (destination, byte) in request.name.iter_mut().zip(NETWORK_INTERFACE.bytes()) {
-        *destination = byte as libc::c_char;
-    }
-    let tunsetiff = if cfg!(any(
-        target_arch = "mips",
-        target_arch = "mips64",
-        target_arch = "powerpc",
-        target_arch = "powerpc64",
-        target_arch = "sparc64"
-    )) {
-        0x8004_54ca_u64
-    } else {
-        0x4004_54ca_u64
-    } as libc::c_ulong;
-    if unsafe { libc::ioctl(descriptor.as_raw_fd(), tunsetiff as _, &mut request) } == -1 {
-        record_boot_stage("workspace-net-tun-attach-failed")?;
-        return Err(io::Error::last_os_error()).context("attach guest TUN interface");
-    }
 
     for (arguments, failure_stage) in [
         (

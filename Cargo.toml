@@ -164,6 +164,12 @@ uuid = { version = "1", features = ["v4", "serde"] }
 dirs = "5"
 filetime = "0.2"
 rustix = { version = "=1.1.6", features = ["fs", "process", "thread"] }
+
+# Netlink, for the hosted Sandbox's egress routing only (#4000): typed route
+# messages over a blocking socket, no async runtime.
+netlink-packet-core = "=0.9.0"
+netlink-packet-route = { version = "=0.34.0", default-features = false }
+netlink-sys = { version = "=0.9.0", default-features = false }
 rusqlite = { version = "=0.42.0", features = ["bundled"] }
 
 # OAuth & Keychain

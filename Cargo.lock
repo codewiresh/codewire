@@ -1563,6 +1563,7 @@ dependencies = [
  "codewire-egress-policy",
  "codewire-local-vmm",
  "codewire-mesh",
+ "codewire-network-session",
  "codewire-proto",
  "codewire-server-core",
  "codewire-tailnet",
@@ -1577,6 +1578,7 @@ dependencies = [
  "rustls",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
  "tonic",
@@ -2268,6 +2270,9 @@ version = "0.1.0"
 dependencies = [
  "codewire-workspace-hack",
  "hmac 0.12.1",
+ "netlink-packet-core",
+ "netlink-packet-route",
+ "netlink-sys",
  "rustix",
  "serde_json",
  "sha2 0.10.9",
@@ -2861,6 +2866,7 @@ dependencies = [
  "uuid",
  "winnow 1.0.3",
  "x509-parser",
+ "zerocopy",
  "zeroize",
 ]
 
@@ -5630,6 +5636,36 @@ name = "ndk-context"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
+
+[[package]]
+name = "netlink-packet-core"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d6e2daf9a8c2e21302714706860a0e6be02e03d17294ecc66b354ea7d4059dd"
+
+[[package]]
+name = "netlink-packet-route"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3c407d8e95c0128ee5729728482a369f3ba9a0d9ba8335c20949a8d8989cf6b"
+dependencies = [
+ "bitflags 2.11.1",
+ "libc",
+ "log",
+ "netlink-packet-core",
+ "zerocopy",
+]
+
+[[package]]
+name = "netlink-sys"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c99d38e00b420df49e940fe0826e667c3dad82ac68eb4c2bbf754c1c14a83a10"
+dependencies = [
+ "bytes",
+ "libc",
+ "log",
+]
 
 [[package]]
 name = "nix"

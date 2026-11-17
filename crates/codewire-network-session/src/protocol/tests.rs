@@ -279,6 +279,7 @@ fn the_self_check_crosses_under_the_session_mac_and_only_as_control() {
         SelfCheck::Passed,
         SelfCheck::Failed(SelfCheckFailure::DirectDial),
         SelfCheck::Failed(SelfCheckFailure::Dns),
+        SelfCheck::Failed(SelfCheckFailure::Routing),
     ] {
         let frame = guest.encode_self_check(result).unwrap();
         assert_eq!(
@@ -303,7 +304,7 @@ fn the_self_check_crosses_under_the_session_mac_and_only_as_control() {
 
 #[test]
 fn a_malformed_self_check_is_a_protocol_error() {
-    for body in [&[][..], &[0, 0], &[1], &[1, 0], &[1, 3], &[2], &[0, 1, 2]] {
+    for body in [&[][..], &[0, 0], &[1], &[1, 0], &[1, 4], &[2], &[0, 1, 2]] {
         assert_eq!(
             SelfCheck::decode(body),
             Err(NetworkError::InvalidControl),

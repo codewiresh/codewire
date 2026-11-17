@@ -24,6 +24,12 @@ codewire-local-vmm = { path = "../codewire-local-vmm" }
 codewire-mesh = { path = "../codewire-mesh" }
 tracing-subscriber = { workspace = true }
 
+# `cw __hosted-egress-tun`, a hosted Sandbox's init container (#4000).
+[target.'cfg(target_os = "linux")'.dependencies]
+codewire-network-session = { workspace = true, features = ["hosted-routing"] }
+codewire-vmm-guest-probe = { workspace = true }
+thiserror = { workspace = true }
+
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
 axum = { workspace = true }
 buffa = { workspace = true }

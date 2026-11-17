@@ -288,13 +288,19 @@ pub enum SelfCheck {
     Failed(SelfCheckFailure),
 }
 
-/// Which bypass probe succeeded.
+/// Why the self-check failed: a bypass probe succeeded, or the guest's
+/// routing isn't as the init container left it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelfCheckFailure {
     /// A direct TCP dial over the Pod's own interface connected.
     DirectDial,
     /// A DNS query straight to the cluster's resolver was answered.
     Dns,
+    /// The Pod table's rules or default, the main default into the TUN, or
+    /// IPv6 being off, read back other than as made (`hosted::routing`). A
+    /// host that predates this reason refuses the frame and drops the stream,
+    /// so cw-egress learns it before any daemon sends it.
+    Routing,
 }
 
 impl SelfCheck {
@@ -305,6 +311,9 @@ impl SelfCheck {
                 vec![CONTROL_SELF_CHECK, SELF_CHECK_FAILED, 1]
             }
             Self::Failed(SelfCheckFailure::Dns) => vec![CONTROL_SELF_CHECK, SELF_CHECK_FAILED, 2],
+            Self::Failed(SelfCheckFailure::Routing) => {
+                vec![CONTROL_SELF_CHECK, SELF_CHECK_FAILED, 3]
+            }
         }
     }
 
@@ -313,6 +322,7 @@ impl SelfCheck {
             [SELF_CHECK_PASSED] => Ok(Self::Passed),
             [SELF_CHECK_FAILED, 1] => Ok(Self::Failed(SelfCheckFailure::DirectDial)),
             [SELF_CHECK_FAILED, 2] => Ok(Self::Failed(SelfCheckFailure::Dns)),
+            [SELF_CHECK_FAILED, 3] => Ok(Self::Failed(SelfCheckFailure::Routing)),
             _ => Err(NetworkError::InvalidControl),
         }
     }

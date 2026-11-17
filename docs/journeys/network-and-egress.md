@@ -1256,6 +1256,9 @@ Issue: #4000.
   - a workload on `locked` calling the platform's own API;
   - a Sandbox whose configuration lacks one of the daemon's in-cluster
     addresses, or has one that is not an IP address and port;
+  - a Sandbox whose egress routing is changed after it starts: one of its
+    rules removed, the default route moved off the egress path, or IPv6
+    turned back on by a privileged container;
   - a new `cw-egress` version rolled out while one Sandbox has nothing
     open, a second is in the middle of a long download, and a third has an
     open terminal or SSH session;
@@ -1272,6 +1275,13 @@ Issue: #4000.
     `FAILED_CLOSED`, and an operator alert fires. A check that gives no
     result in its time, or a Sandbox whose stream drops before the result,
     reads `FAILED_CLOSED` the same way;
+  - each self-check also reads the Sandbox's egress routing back. A missing
+    rule, a default route that does not go into the egress path, or IPv6
+    turned on fails it with the reason `routing`, and the Sandbox reads
+    `FAILED_CLOSED` as for a probe that connected;
+  - IPv6 is off in the Sandbox from its start. Turned back on by a
+    privileged container, its packets are still dropped on the host side,
+    and the next self-check fails with `routing`;
   - on a test cluster with the Sandbox's lockdown left out, the same
     self-check reports that its direct connection got through and the
     Sandbox reads `FAILED_CLOSED`. Without this nothing shows the check

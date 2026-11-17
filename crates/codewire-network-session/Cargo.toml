@@ -16,6 +16,22 @@ tokio = { workspace = true, features = ["io-util", "net", "sync", "macros", "tim
 uuid = { workspace = true }
 zeroize = { workspace = true }
 
+# A hosted guest's routing (`hosted::routing`), for `cw` and its daemon only:
+# off by default, so the guest init, which depends on this crate, never links
+# netlink.
+[target.'cfg(target_os = "linux")'.dependencies]
+netlink-packet-core = { workspace = true, optional = true }
+netlink-packet-route = { workspace = true, optional = true }
+netlink-sys = { workspace = true, optional = true }
+
+[features]
+hosted-routing = [
+    "dep:netlink-packet-core",
+    "dep:netlink-packet-route",
+    "dep:netlink-sys",
+    "rustix/net",
+]
+
 [dev-dependencies]
 codewire-workspace-hack.workspace = true
 serde_json = { workspace = true }

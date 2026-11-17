@@ -9,6 +9,10 @@ use std::net::Ipv4Addr;
 
 pub mod hello;
 pub mod key;
+#[cfg(target_os = "linux")]
+pub mod pod_interface;
+#[cfg(all(target_os = "linux", feature = "hosted-routing"))]
+pub mod routing;
 
 /// The guest's TUN device.
 pub const HOSTED_TUN_NAME: &str = "cwegress0";
@@ -22,5 +26,14 @@ pub const HOSTED_TUN_MTU: usize = 65_000;
 /// The daemon's direct tailnet socket, whose traffic leaves over the Pod's
 /// own interface rather than the TUN.
 pub const TAILNET_DIRECT_SOURCE_PORT: u16 = 31_000;
+/// The Pod's own interface: the only way out that isn't the TUN, for the
+/// daemon's platform dials ([`pod_interface`]) and its direct tailnet socket.
+pub const HOSTED_POD_INTERFACE: &str = "eth0";
+/// The routing table whose default leaves by the Pod's interface.
+pub const HOSTED_POD_ROUTE_TABLE: u32 = 1_000;
+/// The priorities of the three rules into that table, ahead of the main
+/// table's (32766): source port 31000, output interface eth0, and eth0's own
+/// address as source.
+pub const HOSTED_POD_RULE_PRIORITIES: [u32; 3] = [1_000, 1_001, 1_002];
 
 const _: () = assert!(HOSTED_TUN_MTU == crate::SessionLimits::HOSTED_MTU);

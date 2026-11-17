@@ -38,6 +38,8 @@ mod setup_archive;
 #[cfg(target_os = "linux")]
 mod setup_verify;
 #[cfg(target_os = "linux")]
+pub mod tun;
+#[cfg(target_os = "linux")]
 mod workload_cgroup;
 #[cfg(target_os = "linux")]
 mod workspace_plan;

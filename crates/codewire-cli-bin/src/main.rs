@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+mod hosted_egress_tun;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod local_mesh_helper;
 
@@ -134,6 +136,19 @@ fn main() {
     {
         if codewire_cli::run_environment_launcher_from(std::env::args_os()).is_err() {
             eprintln!("environment launch failed");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // A hosted Sandbox's init container, before any configuration, Store or
+    // runtime: its exact command is all it takes (#4000).
+    #[cfg(target_os = "linux")]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "__hosted-egress-tun")
+    {
+        if let Err(error) = hosted_egress_tun::run_from(std::env::args_os()) {
+            eprintln!("hosted egress TUN: {}", hosted_egress_tun::describe(&error));
             std::process::exit(1);
         }
         return;
