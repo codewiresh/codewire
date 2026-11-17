@@ -1,7 +1,7 @@
 ---
 title: Quickstart
 description: Install cw, sign in, add an SSH key and a secret, launch a sandbox, open a server in it through a preview URL, and stop it; then the same in a VM on your own machine.
-updated: 2026-11-14
+updated: 2026-11-16
 weight: 5
 aliases: ["/getting-started", "/getting-started/install", "/getting-started/local-vm", "/getting-started/hosted-sandbox"]
 ---
@@ -56,9 +56,10 @@ cw credentials --cloud generate ssh --name my-key
 ```
 
 ```text
-9f4dbf33-2fcd-4049-97d7-a54f94024771  "my-key"  ssh  active  revision 1
-  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINViKs7x1MGMhO20b4YPkuS1y6m9AX4DlM6BYfSe/Pu7
-  SHA256:nJ2EuAARU4gU4AO3DRH6WE7H9l1tE3Xs4Goldxbnl+8
+NAME    KIND     STATUS  EXPIRES
+my-key  SSH key  active  -
+  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFlm7zP0Hzqt4DFTcAADslvbkSFyOx73BvElqoWANAlI
+  SHA256:OJO/b4gIYTS/SYIwU/bnYnKxmAbfoL81gBaX4BeapPE
 Add the public key above to GitHub: https://github.com/settings/ssh/new
 ```
 
@@ -67,6 +68,10 @@ the set of credentials a sandbox gets:
 
 ```sh
 cw credentials --cloud --profile me set ssh my-key
+```
+
+```text
+✓ my-key is now in profile "me"
 ```
 
 The first `set` creates the profile. Your first profile becomes your default,

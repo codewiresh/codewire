@@ -243,13 +243,19 @@ platform_walk() {
   sign_in
   # The walk's names must be free, so the recording shows a first run.
   cw_as ls 2>&1 | grep -qE '^[[:space:]]*›?[[:space:]]*hello[[:space:]]' && die 'an environment named hello exists'
-  cw_as credentials --cloud list 2>&1 | grep -qF '"my-key"' && die 'a credential named my-key exists'
+  cw_as credentials --cloud list --output json | jq -e 'any(.[]; .name == "my-key")' >/dev/null &&
+    die 'a credential named my-key exists'
   cw_as secrets --cloud --user list 2>&1 | grep -qE '^GREETING[[:space:]]' && die 'a personal secret GREETING exists'
 
   step 'cw credentials --cloud generate ssh --name my-key' \
     cw_as credentials --cloud generate ssh --name my-key
   step 'cw credentials --cloud --profile me set ssh my-key' \
     cw_as credentials --cloud --profile me set ssh my-key
+  # The tables print no IDs, but `cw create` prints the profile's, so both are
+  # read here, unrecorded, to be redacted.
+  local credential profile
+  credential="$(cw_as credentials --cloud list --output json | jq -r '.[] | select(.name == "my-key") | .id')"
+  profile="$(cw_as credentials --cloud profiles list --output json | jq -r '.[] | select(.name == "me") | .id')"
   set_greeting() { echo hello | cw_as secrets --cloud --user set GREETING; }
   step 'echo hello | cw secrets --cloud --user set GREETING' set_greeting
   step 'cw create --name hello --image workspace --user-secrets platform --yes' \
@@ -270,12 +276,10 @@ platform_walk() {
     sed -n 's#.*URL: https://[^.]*\.\([^/[:space:]]*\).*#\1#p' | head -1)"
   [[ -n "$preview_domain" ]] || die 'cw ports printed no preview URL'
   # So are the account's IDs: its organization, its credential and its profile.
-  local uuid='[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}'
-  local organization credential profile
+  local organization
   organization="$(jq -r 'select(.out) | .out' "$TRANSCRIPT" | sed -n 's/.*organization "\([0-9a-f]\{32\}\)".*/\1/p' | head -1)"
-  credential="$(jq -r 'select(.out) | .out' "$TRANSCRIPT" | sed -n "s/^\\($uuid\\) .*\"my-key\".*/\\1/p" | head -1)"
-  profile="$(jq -r 'select(.out) | .out' "$TRANSCRIPT" | sed -n "s/^\\($uuid\\)[[:space:]].*platform:user\\/me.*/\\1/p" | head -1)"
-  [[ -n "$organization" && -n "$credential" && -n "$profile" ]] || die 'the walk printed no organization, credential or profile ID'
+  [[ -n "$organization" ]] || die 'the walk printed no organization ID'
+  [[ -n "$credential" && -n "$profile" ]] || die 'cw credentials listed no ID for my-key or the profile me'
   render --replace "$preview_domain={preview domain}" --replace "$organization={org id}" \
     --replace "$credential={credential id}" --replace "$profile={profile id}" \
     --title 'cw: five minutes on the platform'
