@@ -518,17 +518,21 @@ To serve another origin, such as the GitHub App's registered callback origin for
 real credentials, name both on make's command line
 (`make kind-up CLUSTER=my-task KIND_PUBLIC_ORIGIN=... KIND_BROWSER_API_ORIGIN=...`)
 or set `KIND_PROFILE_PUBLIC_ORIGIN` and `KIND_PROFILE_BROWSER_API_ORIGIN` for a
-script. A profile that saved another origin serves it only when it is named
-again; otherwise every command refuses and names the origin. Put the profile
-back on its own origins with
+script's one command. Never export them from a shell startup file: that would
+give every named profile the same origin, which is the trap this replaced. A
+profile that saved another origin serves it only when it is named again;
+otherwise every command refuses and names the origin. Put the profile back on
+its own origins with
 `python3 scripts/dev/kind/cluster-profile.py reset-origins --cluster my-task`,
-then restart `kind-watch`, which sets the cluster's frontend URL from them.
+then restart `kind-watch`, which sets the cluster's frontend URL from them. The
+reset also works on a deleted profile, before it is brought up again.
 
 `kind-up` holds the source tree while it builds images and refuses a held
 directory that changes, naming it. The dispatcher writes no Python bytecode
 and creates the root `.tmp` before the hold, so a fresh worktree's first
 bring-up passes (#5154); a refusal that still names a directory means another
-step wrote into the tree.
+step wrote into the tree. A wait for the transaction or build publication lock
+that times out names the lock, how long it waited and the process holding it.
 
 `kind-up` requires a clean committed initial base. Repeating it validates a
 live cluster. After `kind-down`, the same unchanged source reuses saved ports

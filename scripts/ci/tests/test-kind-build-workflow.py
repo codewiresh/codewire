@@ -1167,6 +1167,7 @@ class CommonConsumerContractTests(unittest.TestCase):
             for relative in (
                 "scripts/ci/verify/playwright-browser-runtime.sh",
                 "scripts/ci/verify/kind-host-runtime.sh",
+                "scripts/ci/verify/kind/lock-wait.sh",
             ):
                 (fixture / relative).write_text("", encoding="utf-8")
             (fixture / "tests/e2e/kind/credential-broker.sql").write_text(

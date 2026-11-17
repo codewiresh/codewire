@@ -16,6 +16,8 @@ fi
 source "$ROOT/scripts/ci/verify/playwright-browser-runtime.sh"
 # shellcheck source=scripts/ci/verify/kind-host-runtime.sh
 source "$ROOT/scripts/ci/verify/kind-host-runtime.sh"
+# shellcheck source=scripts/ci/verify/kind/lock-wait.sh
+source "$ROOT/scripts/ci/verify/kind/lock-wait.sh"
 CARGO_TARGET_DIR="$(
   "$ROOT/scripts/ci/verify/resolve-cargo-target-dir.sh" "$ROOT"
 )"
@@ -356,10 +358,7 @@ acquire_kind_host_lock() {
   mkdir -p "$(dirname "$KIND_HOST_LOCK_FILE")"
   exec {KIND_HOST_LOCK_FD}>"$KIND_HOST_LOCK_FILE"
   log "waiting for exclusive local Kind transaction lock"
-  if ! flock -w "$KIND_HOST_LOCK_TIMEOUT_SECONDS" "$KIND_HOST_LOCK_FD"; then
-    echo "::error::timed out waiting for the local Kind transaction lock"
-    return 1
-  fi
+  kind_lock_wait "$KIND_HOST_LOCK_FD" "$KIND_HOST_LOCK_FILE" 'local Kind transaction' || return 1
   log "acquired exclusive local Kind transaction lock"
 }
 
@@ -388,7 +387,7 @@ acquire_kind_build_publication_lock() {
     KIND_BUILD_PUBLICATION_LOCK_OPENED_HERE=1
   fi
   export KIND_BUILD_PUBLICATION_LOCK_FD
-  flock -w "$KIND_HOST_LOCK_TIMEOUT_SECONDS" "$KIND_BUILD_PUBLICATION_LOCK_FD" || return $?
+  kind_lock_wait "$KIND_BUILD_PUBLICATION_LOCK_FD" "$lock_file" 'Kind build publication' || return $?
   descriptor_path="/proc/$BASHPID/fd/$KIND_BUILD_PUBLICATION_LOCK_FD"
   [ ! -L "$lock_file" ] \
     && [ "$(stat -Lc '%d:%i:%u:%a:%h' "$descriptor_path")" \

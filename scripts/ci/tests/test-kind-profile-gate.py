@@ -399,6 +399,28 @@ if flock -n "$KIND_BUILD_PUBLICATION_LOCK_FILE" true; then exit 90; fi
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_publication_timeout_names_the_lock_the_wait_and_its_holder(self):
+        # #5154: a timed-out wait once ended kind-up with no word at all.
+        result = self.shell('''
+KIND_HOST_LOCK_TIMEOUT_SECONDS=1
+KIND_BUILD_PUBLICATION_LOCK_FILE="$RUN_DIR/publication.lock"
+install -m 0600 /dev/null "$KIND_BUILD_PUBLICATION_LOCK_FILE"
+# -o: the lock stays with flock itself, not the sleep it starts.
+flock -o "$KIND_BUILD_PUBLICATION_LOCK_FILE" sleep 60 &
+holder=$!
+timeout 30 bash -c 'until ! flock -n "$1" true; do sleep 0.1; done' _ "$KIND_BUILD_PUBLICATION_LOCK_FILE"
+status=0
+acquire_kind_build_publication_lock || status=$?
+pkill -P "$holder" sleep || true
+wait "$holder" || true
+printf '%s\\n' "$holder"
+exit "$status"
+''')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        holder = result.stdout.split()[-1]
+        self.assertRegex(result.stderr, r"::error::timed out after 1 s waiting for the Kind build publication lock "
+                         r"\(.*/publication\.lock\); held by pid " + holder + r" \(flock, running [0-9:]+, in /")
+
     def test_publication_refuses_an_inherited_descriptor_for_another_inode(self):
         result = self.shell('''
 KIND_BUILD_PUBLICATION_LOCK_FILE="$RUN_DIR/publication.lock"
