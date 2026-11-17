@@ -47,6 +47,27 @@ class GitFixture(unittest.TestCase):
             self.fail(f"synthetic Git command {error.cmd!r} exited {error.returncode}\n"
                       f"stdout:\n{error.stdout}\nstderr:\n{error.stderr}")
 
+    def single_branch_copy(self, remote, target):
+        # What `git clone --no-local --single-branch --branch main` gave, built
+        # with local plumbing: main's objects only, so a commit only another
+        # ref reached is absent, origin naming the remote, main checked out.
+        # The clone ran Git's transport, which hung past the 60 s guard on a
+        # starved runner (#4018, main run 59076); a pack piped between two
+        # local processes does not negotiate.
+        self.git(self.work, "init", "-q", "-b", "main", str(target))
+        objects = self.git(remote, "rev-list", "--objects", "main").stdout
+        pack = subprocess.run(["git", "-c", "pack.threads=1", "pack-objects", "--stdout", "-q"],
+                              cwd=remote, input=objects.encode(), capture_output=True,
+                              check=True, timeout=60).stdout
+        subprocess.run(["git", "unpack-objects", "-q"], cwd=target, input=pack,
+                       capture_output=True, check=True, timeout=60)
+        self.git(target, "remote", "add", "-t", "main", "origin", str(remote))
+        self.git(target, "update-ref", "refs/remotes/origin/main", self.head)
+        self.git(target, "update-ref", "refs/heads/main", self.head)
+        self.git(target, "config", "branch.main.remote", "origin")
+        self.git(target, "config", "branch.main.merge", "refs/heads/main")
+        self.git(target, "reset", "-q", "--hard", "main")
+
     def graph(self, *, breaking=False):
         source = self.work / "source"
         source.mkdir()
@@ -76,8 +97,7 @@ class GitFixture(unittest.TestCase):
         self.git(self.work, "--git-dir", str(remote), "update-ref", "refs/heads/main", self.head)
         self.git(self.work, "--git-dir", str(remote), "update-ref", "-d", "refs/heads/rewritten")
         self.target = self.work / "target"
-        self.git(self.work, "clone", "-q", "--no-local", "--single-branch", "--branch", "main",
-                 str(remote), str(self.target))
+        self.single_branch_copy(remote, self.target)
         self.assertNotEqual(self.git(self.target, "cat-file", "-e", self.before + "^{commit}",
                                     check=False).returncode, 0)
         for name, value in (("ROOT", self.target), ("PREIMAGES", self.target / ledger.relative_to(source))):
