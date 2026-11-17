@@ -288,7 +288,11 @@ server it belongs to and says what it can do, instead of asking for a URL.
   cw exec walk -- sh -c 'echo "$CODEWIRE_SANDBOX_SERVER_URL"; cw whoami; echo "exit $?"'
   printf 'cw login\n' | script -qec 'cw shell walk' /dev/null
   cw exec walk -- sh -c 'CODEWIRE_SERVER_URL=https://other.invalid cw whoami'
+  cw exec walk -- sh -lc 'command -v cw; cw --version; /codewire/bin/cw --version; cw ls; echo "exit $?"'
   ```
+
+  Then run an agent in `walk` and ask it to run `cw whoami` and `cw ls`, with
+  a bare `cw` as it would type it.
 
 - **Proof:**
   - The first line is the server you created `walk` on (`https://codewire-dev.sh`
@@ -302,6 +306,12 @@ server it belongs to and says what it can do, instead of asking for a URL.
     there; don't sign in.
   - With `CODEWIRE_SERVER_URL` set, `cw` names `https://other.invalid`, not
     the sandbox's server.
+  - `command -v cw` is `/usr/local/bin/cw`, yet `cw --version` prints the
+    same version as `/codewire/bin/cw --version`: the release's, not the
+    image's (#5202).
+  - `cw ls` says it isn't signed in, as `cw whoami` does. It never mentions a
+    local VM store or a development build, on Dev too.
+  - The agent's bare `cw` gives the same answers.
 - **Gotchas:**
   - A workload started by a custom image's own entrypoint does not see the
     variable; only daemon sessions (`cw exec`, `cw shell`, SSH) do.

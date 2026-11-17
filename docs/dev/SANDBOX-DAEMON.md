@@ -64,6 +64,26 @@ Kind workspaces keep a
 where image volumes do not apply. There is no standalone daemon binary,
 executable-name alias, or public daemon command.
 
+#### Which `cw` a sandbox runs
+
+A plain `cw` on a sandbox's `PATH` is the workspace image's
+`/usr/local/bin/cw`. The image is rebuilt only when its own definition
+changes (`images/base`, `images/workspace`), so that copy lags every
+release. `/codewire/bin/cw` is the current release's, re-pinned on every
+start. So an ordinary invocation of either path runs, in order (#5202):
+
+1. the version a cw runtime update or rollback selected for this sandbox
+   ([CW-RUNTIME-JOURNAL.md](CW-RUNTIME-JOURNAL.md));
+2. otherwise `/codewire/bin/cw`, when it is present;
+3. otherwise the image's own copy, which is only the case outside Codewire,
+   such as the image run on its own.
+
+The launcher in `crates/codewire-cli/src/platform_cw_runtime/launcher.rs`
+makes the choice before any configuration is read. Private roles and an
+explicit version path still run the executable they name. A sandbox has no
+local VMs, so `cw` there never opens or starts a local VM store: commands that
+list environments show only the server's.
+
 Every Start or resume re-pins an existing Sandbox's daemon to orchestration's
 current support image, in the same Sandbox patch that sets it running, so a
 stopped Sandbox restarts on the current daemon. The re-pin rewrites only the
