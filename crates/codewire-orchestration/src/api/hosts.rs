@@ -622,14 +622,18 @@ pub async fn revoke_host(
             "only the host's owner or an organization owner or admin may revoke it",
         ));
     }
+    let mut transaction = pool.begin().await?;
     sqlx::query(
         "UPDATE hosts SET revoked_at = now(), revoked_by = $2, updated_at = now()
           WHERE id = $1 AND revoked_at IS NULL",
     )
     .bind(&host.id)
     .bind(&user.user_id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
+    // A revoked host takes and answers nothing more, so nothing waits for it.
+    super::host_operations::end_for_revoked_host(&mut transaction, &host.id).await?;
+    transaction.commit().await?;
     get_host(pool, user, org_id, host_id).await
 }
 

@@ -828,6 +828,8 @@ async function runTests() {
   assert(createEnvironment.network === "", "create joins no network unless asked");
   assert(createEnvironment.orgId === "org_test" && !("organization" in createEnvironment),
     "the SDK names its organization by org_id only");
+  assert(!("placement" in createEnvironment) && !("requestId" in createEnvironment),
+    "the SDK names no placement and no request ID");
   assert(createEnvironment.sourceSnapshotId === "", "create starts empty unless given a snapshot");
   assert(toProtoCreateEnvironmentRequest("org_test", { project_spec: { schema_version: 1, working_directory: "/workspace" }, source_snapshot_id: "snapshot_1" }).sourceSnapshotId === "snapshot_1",
     "create preserves the source snapshot");
@@ -1555,7 +1557,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 179;
+  const expectedAssertions = 180;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

@@ -98,7 +98,12 @@ async fn record_environment_error(
     Ok(())
 }
 
-fn snapshot(id: &str, state: &str, desired: &str, external_cleanup_complete: bool) -> Snapshot {
+pub(super) fn snapshot(
+    id: &str,
+    state: &str,
+    desired: &str,
+    external_cleanup_complete: bool,
+) -> Snapshot {
     Snapshot {
         id: id.to_string(),
         state: state.to_string(),

@@ -34,6 +34,9 @@ _CREATE_ENVIRONMENT_DESCRIPTOR_FIELDS = {
     29: "omit_application_previews", 30: "network", 31: "source_snapshot_id",
     # The SDK always names its organization by org_id, so this stays unset.
     32: "organization", 33: "network_policy",
+    # The SDK offers no placement on a host, which is a preview (#3609), and
+    # sends no request ID, so these stay unset.
+    34: "placement", 35: "request_id",
 }
 
 _SOURCE_DESCRIPTOR_FIELDS = {

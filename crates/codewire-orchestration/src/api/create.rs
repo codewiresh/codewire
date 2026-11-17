@@ -69,6 +69,12 @@ pub struct CreateEnvironmentBody {
     /// The hosted disk snapshot to start from. The caller must have created it
     /// in this organization; the workspace disk is restored from it.
     pub source_snapshot_id: Option<String>,
+    /// The enrolled host to run on, by name or ID; absent runs on the
+    /// deployment's own runtime (#3609).
+    pub placement_host: Option<String>,
+    /// The client's ID for this create; a retry with it returns the first
+    /// create's environment (#3609, design §6).
+    pub request_id: Option<String>,
     /// The network policy to select (#4000); none is `hosted-default`.
     pub network_policy: Option<String>,
 }
@@ -666,11 +672,99 @@ struct InsertEnvironmentParams<'a> {
     quota: OrgQuota,
 }
 
+impl InsertEnvironmentParams<'_> {
+    fn backend(&self) -> crate::runtime::RuntimeBackend {
+        if self.body.placement_host.is_some() {
+            crate::runtime::RuntimeBackend::Host
+        } else {
+            crate::runtime::RuntimeBackend::Kubernetes
+        }
+    }
+}
+
+/// The environment an earlier create with `request_id` made in `org_id`.
+/// Another member's create with the same ID is refused, not returned.
+pub(super) async fn created_by_request(
+    pool: &PgPool,
+    user: &AuthUser,
+    org_id: &str,
+    request_id: &str,
+) -> AppResult<Option<Environment>> {
+    let sql = format!(
+        "SELECT {ENV_SELECT_COLS} FROM environments e {ENV_SELECT_JOINS} \
+         WHERE e.org_id = $1 AND e.create_request_id = $2"
+    );
+    let Some(row) = sqlx::query(&sql)
+        .bind(org_id)
+        .bind(request_id)
+        .fetch_optional(pool)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let environment = scan_environment(&row)?;
+    if environment.created_by != user.user_id {
+        return Err(request_id_in_use());
+    }
+    Ok(Some(environment))
+}
+
+fn request_id_in_use() -> AppError {
+    coded(
+        StatusCode::CONFLICT,
+        "request_id_in_use",
+        "another create used this request_id; a retry of your own create returns its environment",
+    )
+}
+
+/// The host a create names, admitted for it. It runs under the create's
+/// organization row lock, so creates on one host are counted one after the
+/// other.
+async fn placed_host(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    p: &InsertEnvironmentParams<'_>,
+    source_snapshot: bool,
+) -> AppResult<Option<String>> {
+    let Some(host) = p.body.placement_host.as_deref() else {
+        return Ok(None);
+    };
+    let request = super::host_placement::HostRequest {
+        isolation_tier: p.isolation_tier,
+        image: &p.body.project_spec.image,
+        repositories: p.body.project_spec.repositories.len(),
+        secrets: !p.body.project_spec.secrets.is_empty(),
+        credentials: p.body.project_spec.credentials.is_some(),
+        network: p.body.network.is_some(),
+        network_policy: p.body.network_policy.is_some(),
+        source_snapshot,
+        cpu_millicores: p.cpu_millicores,
+        memory_mib: p.memory_mb,
+        disk_gib: p.disk_gb,
+    };
+    super::host_placement::resolve_host(transaction, p.org_id, p.user, host, &request)
+        .await
+        .map(Some)
+}
+
+/// Why the insert failed. A concurrent retry of this create may have won
+/// it; the next retry returns its environment.
+fn insert_refused(error: sqlx::Error) -> AppError {
+    match &error {
+        sqlx::Error::Database(database)
+            if database.constraint() == Some("environments_org_create_request_id_key") =>
+        {
+            request_id_in_use()
+        }
+        _ => AppError::from(error),
+    }
+}
+
 #[tracing::instrument(level = "debug", skip_all)]
 async fn insert_environment(
     pool: &PgPool,
     p: InsertEnvironmentParams<'_>,
 ) -> AppResult<Environment> {
+    let backend = p.backend();
     let project_spec = serde_json::to_value(&p.body.project_spec).map_err(|error| {
         tracing::error!(%error, "serialize environment project spec");
         coded(
@@ -681,8 +775,8 @@ async fn insert_environment(
     })?;
 
     // Auto-generate name if not provided: "env-{short-id}".
-    let name = match p.name {
-        Some(n) if !n.is_empty() => n,
+    let name = match p.name.as_deref() {
+        Some(n) if !n.is_empty() => n.to_owned(),
         _ => format!("env-{}", generate_short_id()),
     };
 
@@ -694,10 +788,11 @@ async fn insert_environment(
             INSERT INTO environments
                 (org_id, created_by, preset_id, type, name,
                  cpu_millicores, memory_mb, disk_gb, isolation_tier, ttl_seconds,
-                 shutdown_at, project_spec, source_snapshot_id)
+                 shutdown_at, project_spec, source_snapshot_id,
+                 runtime_backend, host_id, create_request_id)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                  CASE WHEN $11::int IS NOT NULL THEN NOW() + make_interval(secs => $11::int) END,
-                 $12, $13)
+                 $12, $13, $14, $15, $16)
              RETURNING *
          )
          SELECT {ENV_SELECT_COLS}
@@ -720,11 +815,13 @@ async fn insert_environment(
             credit_enforcement: p.credit_enforcement,
             quota: p.quota,
             env_type: p.env_type,
+            backend,
             cpu_millicores: p.cpu_millicores,
             memory_mb: p.memory_mb,
         },
     )
     .await?;
+    let host_id = placed_host(&mut transaction, &p, source_snapshot_id.is_some()).await?;
     if let Some(snapshot_id) = source_snapshot_id {
         admit_source_snapshot(
             &mut transaction,
@@ -749,8 +846,12 @@ async fn insert_environment(
         .bind(p.ttl_seconds)
         .bind(project_spec)
         .bind(source_snapshot_id)
+        .bind(backend.as_str())
+        .bind(host_id.as_deref())
+        .bind(p.body.request_id.as_deref())
         .fetch_one(&mut *transaction)
-        .await?;
+        .await
+        .map_err(insert_refused)?;
     let environment_id: String = row.try_get("id")?;
     let mut admitted = p.body.clone();
     super::environment_sources::admit_create_sources_in(
@@ -931,6 +1032,7 @@ struct CapacityRequest<'a> {
     credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
     quota: OrgQuota,
     env_type: &'a str,
+    backend: crate::runtime::RuntimeBackend,
     cpu_millicores: i32,
     memory_mb: i32,
 }
@@ -951,12 +1053,15 @@ async fn reserve_capacity(
     lock_organization_row(transaction, org_id).await?;
     check_quota_in(
         transaction,
-        request.credit_enforcement,
-        request.quota,
         org_id,
-        request.env_type,
-        request.cpu_millicores,
-        request.memory_mb,
+        super::environments::QuotaRequest {
+            credit_enforcement: request.credit_enforcement,
+            quota: request.quota,
+            env_type: request.env_type,
+            backend: request.backend,
+            cpu_millicores: request.cpu_millicores,
+            memory_mb: request.memory_mb,
+        },
     )
     .await
 }
@@ -1135,6 +1240,27 @@ pub(crate) async fn create_environment_core(
     let mut body = input;
 
     require_org_member(pool, user, org_id).await?;
+    // A retry finds the first create's environment before anything else,
+    // so it spends no rate limit and repeats no check.
+    if let Some(request_id) = body.request_id.as_deref() {
+        if !super::host_placement::valid_request_id(request_id) {
+            return Err(coded(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_id",
+                "request_id must be 16 to 64 letters, digits, '-' or '_'",
+            ));
+        }
+        if let Some(environment) = created_by_request(pool, user, org_id, request_id).await? {
+            return Ok(environment);
+        }
+    }
+    if body.placement_host.as_deref().is_some_and(str::is_empty) {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "invalid_placement",
+            "placement.host must name a host",
+        ));
+    }
     require_network_policies(state.network_policy_flags, &body)?;
     validate_network_request(
         body.network.as_deref(),
@@ -1955,6 +2081,7 @@ credentials: {profile: user/work}
             credit_enforcement: Default::default(),
             quota,
             env_type: "sandbox",
+            backend: crate::runtime::RuntimeBackend::Kubernetes,
             cpu_millicores: 0,
             memory_mb: 0,
         };
@@ -3002,6 +3129,7 @@ credentials: {profile: user/work}
                 credit_enforcement: CreditEnforcement::On,
                 quota,
                 env_type: "sandbox",
+                backend: crate::runtime::RuntimeBackend::Kubernetes,
                 cpu_millicores: 1_000,
                 memory_mb: 1_024,
             },
@@ -3272,6 +3400,7 @@ credentials: {profile: user/work}
                 credit_enforcement: Default::default(),
                 quota,
                 env_type: "sandbox",
+                backend: crate::runtime::RuntimeBackend::Kubernetes,
                 cpu_millicores: 1_000,
                 memory_mb: 1_024,
             },

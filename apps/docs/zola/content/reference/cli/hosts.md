@@ -1,7 +1,7 @@
 ---
 title: Hosts
 description: host and hosts, for computers that provide VMs for your organization's environments.
-updated: 2026-11-14
+updated: 2026-11-15
 weight: 11
 aliases: ["/cli/hosts"]
 ---
@@ -13,8 +13,8 @@ silicon.
 
 Enrolling a host grants nothing. Only you may use your host until you offer
 VMs from it (`cw host provide`) and grant it to other members
-(`cw host grant`). Creating environments on a host is coming; for now a host
-enrolls, connects and shows its state.
+(`cw host grant`). `cw create --on host:NAME` creates an environment on a
+host, with an empty workspace for now; opening a session in it is coming.
 
 Hosts are a preview and still being built, and the host commands say so: some
 host features don't work yet. The line goes to standard error, only at a

@@ -21,6 +21,7 @@ pub mod feedback;
 pub mod host_key;
 pub mod host_operation_signals;
 pub mod host_operations;
+pub(crate) mod host_placement;
 pub mod host_session;
 pub mod hosts;
 pub mod log_notifications;

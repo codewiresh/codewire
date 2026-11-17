@@ -8,6 +8,7 @@
 //! behaviour. A capability's methods arrive with the callers that move onto
 //! them, so a signature is never declared before something needs it.
 
+mod backend;
 #[cfg(test)]
 pub(crate) mod fake;
 pub mod kubernetes;
@@ -33,6 +34,7 @@ use crate::sandbox::host_keys::HostKeyStore;
 pub use crate::sandbox::sidecar::PortForwardedStream as RuntimeStream;
 pub use crate::sandbox::snapshots::{ClearingOpts, VolumeMode};
 use crate::sandbox::warm_pool::{ConfiguredShape, shape_label};
+pub use backend::RuntimeBackend;
 pub use observation::{
     ContainerFact, ControllerFact, EnvFact, MemberFacts, RuntimeFacts, RuntimeObservation,
     VerifiedChain, VolumeFact,

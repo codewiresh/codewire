@@ -595,6 +595,7 @@ pub(crate) fn env_create_request_from_init_args(
         count: 1,
         name_prefix: None,
         share_mounts: false,
+        on: None,
     };
     env_create_request_from_args(&env_args)
 }

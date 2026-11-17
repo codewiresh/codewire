@@ -1200,7 +1200,9 @@ export function assertRuntimeConverterCoverage(): void {
   ]));
   assertDescriptorCoverage("create environment request", CreateEnvironmentRequestSchema.fields, new Map([
     // The SDK always names its organization by org_id, so this stays unset.
-    [1, "org_id"], [2, "preset_id"], [3, "name"], [7, "ttl_seconds"], [24, "isolation_tier"], [25, "project_spec"], [26, "expected_profile_revision"], [27, "confirm_personal_credentials"], [28, "confirm_personal_secrets"], [29, "omit_application_previews"], [30, "network"], [31, "source_snapshot_id"], [32, "organization"], [33, "network_policy"],
+    // It offers no placement on a host, which is a preview (#3609), and sends
+    // no request ID, so placement (34) and request_id (35) stay unset too.
+    [1, "org_id"], [2, "preset_id"], [3, "name"], [7, "ttl_seconds"], [24, "isolation_tier"], [25, "project_spec"], [26, "expected_profile_revision"], [27, "confirm_personal_credentials"], [28, "confirm_personal_secrets"], [29, "omit_application_previews"], [30, "network"], [31, "source_snapshot_id"], [32, "organization"], [33, "network_policy"], [34, "placement"], [35, "request_id"],
   ]));
   assertDescriptorCoverage("network policy", NetworkPolicySchema.fields, new Map([
     [1, "id"], [2, "org_id"], [3, "name"], [4, "revision"], [5, "current_revision"], [6, "rules"], [7, "digest"], [8, "created_at"], [9, "created_by"],

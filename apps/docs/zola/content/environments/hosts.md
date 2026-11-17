@@ -1,7 +1,7 @@
 ---
 title: Hosts
 description: Computers you own that provide VMs for your organization's environments. How a host connects to Codewire, who may use it, and how to set one up.
-updated: 2026-11-14
+updated: 2026-11-15
 weight: 8
 ---
 
@@ -12,8 +12,9 @@ online, what it offers, and who may use it.
 
 {% aside(kind="preview") %}
   Hosts are a preview and still being built: some host features don't work
-  yet. Today a host enrolls, connects and shows its state. Creating
-  environments on a host comes next.
+  yet. Today a host enrolls, connects and shows its state, and
+  `cw create --on host:NAME` creates an environment with an empty workspace
+  on it. Opening a session in that environment comes next.
 {% end %}
 
 A host is not a [local VM](@/environments/_index.md#local-vm), which runs

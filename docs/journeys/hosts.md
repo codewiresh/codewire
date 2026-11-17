@@ -11,7 +11,7 @@ in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-13. Slice 1's CLI and agent are observed on Dev: enroll with
+Updated 2026-11-15. Slice 1's CLI and agent are observed on Dev: enroll with
 either key store, the agent's connection directly and through a proxy, the
 user service across logout and reboot, and leave. The Hosts page waits for
 the owner's browser walk. Slice 2 is not yet observed anywhere, and nothing is
@@ -31,6 +31,7 @@ observed on Production.
 | `host-start` | not yet observed | not yet observed |
 | `host-delete` | not yet observed | not yet observed |
 | `host-agent-restart` | not yet observed | not yet observed |
+| `host-revoked-delete` | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -173,15 +174,19 @@ observed on Production.
 
 The first walk is on Dev, on a Linux host, then on a Mac: create, run, stop,
 start and delete an environment with an empty workspace. `--repo`, resize and
-the platform-profile credential relay are later steps (#3609). There is no
-command for any of these yet: placement on a host (`--on host:NAME`) lands
-with slice 2.
+the platform-profile credential relay are later steps (#3609). Placement is
+`cw create --on host:NAME`, and stop, start and delete are the ordinary
+commands. Reaching the environment (`cw run`, `cw attach`, `cw shell`) needs
+the API tunnel, which is not merged yet.
 
 ### `host-create`: an environment created on a host
 
-- **Entry points:** no command yet (#3609).
+- **Entry points:** `cw create --on host:NAME` (NAME is a host's name or ID).
 - **States to exercise:** the host online and providing; offline; not
-  granted; out of capacity, where the host's own refusal is shown verbatim.
+  granted; out of capacity; a request the host can't take (another image,
+  `--repo`, secrets, a credential profile, a network policy); a host that
+  refuses or fails the create, whose own words are shown as one bounded
+  line; a host that never answers, which ends in error after 25 minutes.
 - **Proof:** the environment reaches running on the named host, and the
   host's report shows the same environment and generation. A refused create
   names its reason, and nothing is created on the platform or another host.
@@ -189,7 +194,7 @@ with slice 2.
 
 ### `host-attach`: `cw run` and `cw attach` over the API tunnel
 
-- **Entry points:** no command yet (#3609).
+- **Entry points:** none yet: the API tunnel is not merged (#3609).
 - **States to exercise:** attach, disconnect, reconnect with the result kept.
 - **Proof:** `cw run --agent …` runs in the host's VM; after a disconnect,
   `cw attach` shows the same session and its result.
@@ -197,30 +202,43 @@ with slice 2.
 
 ### `host-stop`: an environment on a host stops
 
-- **Entry points:** no command yet (#3609).
+- **Entry points:** `cw stop ENV`.
 - **Proof:** the environment reads stopped and the host's VM is no longer
   running.
 - **Observed:** not yet observed.
 
 ### `host-start`: a stopped environment on a host starts again
 
-- **Entry points:** no command yet (#3609).
+- **Entry points:** `cw start ENV`.
 - **Proof:** the environment reads running on the same host, with its
   workspace kept.
 - **Observed:** not yet observed.
 
 ### `host-delete`: an environment on a host is deleted
 
-- **Entry points:** no command yet (#3609).
+- **Entry points:** `cw rm ENV`.
 - **Proof:** the environment is gone from the list, and the host reports it
   absent with its disk removed.
 - **Observed:** not yet observed.
 
 ### `host-agent-restart`: a lost reply resolves the original operation
 
-- **Entry points:** no command yet (#3609).
+- **Entry points:** `cw create --on host:NAME` or `cw stop ENV`, with
+  `cw host run` restarted on the host meanwhile.
 - **States to exercise:** the agent restarted, or its connection cut, while a
   create or stop is in flight.
 - **Proof:** after the agent attaches again, the operation completes once
   with its first result, and the host has no second VM.
+- **Observed:** not yet observed.
+
+### `host-revoked-delete`: an environment on a revoked host is deleted
+
+- **Entry points:** `cw host revoke HOST`, then `cw rm ENV`.
+- **States to exercise:** the host revoked while idle; revoked after it took
+  a create or a delete and before it answered.
+- **Proof:** the environment is gone from the list within about 20 seconds, without
+  waiting for the host, and no later retry is needed. The host's VM is the
+  owner's to remove (`cw host leave` on that computer).
+- **Gotchas:** the control plane cannot reach a revoked host, so it does not
+  claim the VM is gone from that computer.
 - **Observed:** not yet observed.

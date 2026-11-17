@@ -383,6 +383,12 @@ pub struct CreateEnvironmentRequest {
     /// The hosted disk snapshot to start from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_snapshot_id: Option<String>,
+    /// The enrolled host to run on, by name or ID (#3609).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement_host: Option<String>,
+    /// This create's request ID, so a retry returns its environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]

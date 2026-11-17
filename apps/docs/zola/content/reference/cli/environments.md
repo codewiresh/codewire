@@ -49,6 +49,7 @@ as positionals or with `--repo`; they replace the file's repositories.
 | `--secrets NAME`, `--user-secrets local\|platform`, `--org-secrets` | Application-secret sources |
 | `--ttl 8h` | Cloud: delete after a lifetime |
 | `--isolation standard\|confidential` | Cloud: isolation tier |
+| `--on host:NAME` | Run on an enrolled host of your organization, by name or ID ([`cw hosts`](@/reference/cli/hosts.md)), instead of the platform. Hosts are a preview |
 | `--network NAME`, `--no-network` | Local: join a Codewire Mesh network, or none |
 | `--no-wait` | Cloud: return at once instead of watching startup |
 | `--write-preset`, `--save-preset NAME` | Cloud: write the resolved preset to `./codewire.yaml`, or save it on the server |
@@ -63,6 +64,16 @@ settings** and **Cancel** choices. Edit one setting at a time, then return to
 review. Escape, Ctrl-C or closed input cancels; `--yes` and JSON output skip
 these walkthroughs. A trusted host (`--local --type host`) takes only
 `--name` and `--path`.
+
+`--on host:NAME` creates the environment on a host rather than the platform.
+You may use a host you own, or one its owner granted to you or to the whole
+organization; the host must be offering VMs, be online, and have room under
+its owner's limits. A create that can't be met is refused with the reason, and
+nothing falls back to the platform or another host. An environment on a host
+draws no compute credit and counts against no CPU or memory limit, only the
+organization's environment count. For now it starts with an empty workspace:
+repositories, a Mesh network, a hosted snapshot and the confidential tier are
+refused. It can't be combined with `--local`, `--snapshot` or `--checkpoint`.
 
 ## cw ls, info, report
 

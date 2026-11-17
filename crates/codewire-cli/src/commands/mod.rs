@@ -63,6 +63,11 @@ mod credential_repository;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use credential_repository::*;
 mod additions;
+mod runtime_arg_parsers;
+use runtime_arg_parsers::{
+    parse_runtime_generation, parse_runtime_request_id, parse_runtime_revision,
+    parse_runtime_sha256,
+};
 mod credential_input;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credentials;
@@ -1189,38 +1194,6 @@ pub(crate) struct EnvRuntimeOperationArgs {
     output: OutputFormat,
 }
 
-fn parse_runtime_sha256(value: &str) -> Result<String, String> {
-    if value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        Ok(value.to_owned())
-    } else {
-        Err("runtime SHA256 must be exactly 64 lowercase hexadecimal characters".into())
-    }
-}
-fn parse_runtime_revision(value: &str) -> Result<u64, String> {
-    value
-        .parse::<u64>()
-        .ok()
-        .filter(|revision| *revision > 0)
-        .ok_or_else(|| "runtime selection revision must be a nonzero integer".into())
-}
-fn parse_runtime_generation(value: &str) -> Result<u64, String> {
-    value
-        .parse::<u64>()
-        .ok()
-        .filter(|number| number.to_string() == value)
-        .ok_or_else(|| "runtime Store generation must be a canonical unsigned integer".into())
-}
-fn parse_runtime_request_id(value: &str) -> Result<uuid::Uuid, String> {
-    uuid::Uuid::parse_str(value)
-        .ok()
-        .filter(|id| !id.is_nil())
-        .ok_or_else(|| "runtime request ID must be a non-nil UUID".into())
-}
-
 #[derive(Clone, Debug, Args)]
 pub(crate) struct EnvCreateArgs {
     #[arg(skip)]
@@ -1402,6 +1375,13 @@ pub(crate) struct EnvCreateArgs {
         help = "Start from a disk snapshot (`cw snapshot`; with --cloud, a hosted one and its disk only) instead of provisioning: its image, workspace and disks, with fresh identity"
     )]
     snapshot: Option<String>,
+    #[arg(
+        long = "on",
+        value_name = "host:NAME",
+        conflicts_with_all = ["snapshot", "checkpoint"],
+        help = "Run the environment on an enrolled host of your organization (`cw hosts`) instead of the platform; hosts are a preview"
+    )]
+    on: Option<String>,
     #[arg(
         long,
         value_name = "CHECKPOINT",

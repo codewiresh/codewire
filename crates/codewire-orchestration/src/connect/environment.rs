@@ -57,6 +57,9 @@ use crate::api::prepare::{PrepareResponse, PrepareStreamEvent, RepoConfig, start
 use crate::api::trust_report::{EnvironmentTrustReport, get_environment_trust_report_core};
 use crate::connect::presets::proto_preset;
 
+mod create_body;
+use create_body::create_body;
+
 /// A watch or a log follow ended as this replica restarts (#4426): nothing is
 /// lost, and the next replica serves the same stream.
 const WATCH_RESTARTED: &str = "Codewire is restarting this server; watch again to continue";
@@ -756,49 +759,6 @@ async fn create_organization(
         ));
     }
     crate::api::organizations::resolve_create_organization(pool, user, selector).await
-}
-
-fn create_body(request: proto::CreateEnvironmentRequest) -> AppResult<CreateEnvironmentBody> {
-    let project_spec = request
-        .project_spec
-        .into_option()
-        .ok_or_else(|| {
-            crate::api::environments::coded(
-                axum::http::StatusCode::BAD_REQUEST,
-                "project_spec_required",
-                "project_spec is required",
-            )
-        })
-        .and_then(|value| {
-            codewire_project_proto::from_proto(value).map_err(|error| {
-                crate::api::environments::coded_owned(
-                    axum::http::StatusCode::BAD_REQUEST,
-                    "invalid_project_spec",
-                    error.to_string(),
-                )
-            })
-        })?;
-    Ok(CreateEnvironmentBody {
-        preset_id: request.preset_id,
-        name: request.name,
-        ttl_seconds: request.ttl_seconds,
-        isolation_tier: match request.isolation_tier.as_known() {
-            Some(proto::IsolationTier::Unspecified) | Some(proto::IsolationTier::Standard) => {
-                String::new()
-            }
-            Some(proto::IsolationTier::Confidential) => "confidential".to_string(),
-            None => format!("unknown-enum-value-{}", request.isolation_tier.to_i32()),
-        },
-        project_spec,
-        expected_profile_revision: request.expected_profile_revision,
-        confirm_personal_credentials: request.confirm_personal_credentials,
-        confirm_personal_secrets: request.confirm_personal_secrets,
-        omit_application_previews: request.omit_application_previews,
-        network: (!request.network.is_empty()).then_some(request.network),
-        source_snapshot_id: (!request.source_snapshot_id.is_empty())
-            .then_some(request.source_snapshot_id),
-        network_policy: (!request.network_policy.is_empty()).then_some(request.network_policy),
-    })
 }
 
 fn source_update_body(

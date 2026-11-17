@@ -258,6 +258,9 @@ func TestCreateEnvironmentPreviewOmissionIsExplicitAndBoolean(t *testing.T) {
 		if request.Organization != nil || request.GetOrgId() != "org_1" {
 			t.Fatalf("the SDK names its organization by org_id only: %v, %q", request.Organization, request.GetOrgId())
 		}
+		if request.Placement != nil || request.GetRequestId() != "" {
+			t.Fatalf("the SDK names no placement and no request ID: %v, %q", request.Placement, request.GetRequestId())
+		}
 	}
 	var body CreateEnvironmentBody
 	if err := json.Unmarshal([]byte(`{"project_spec":{}}`), &body); err != nil || body.OmitApplicationPreviews {

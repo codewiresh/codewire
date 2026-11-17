@@ -149,12 +149,15 @@ async fn refusal(pool: &PgPool, org: &str) -> Result<Option<String>> {
     };
     let outcome = check_quota_in(
         &mut transaction,
-        CreditEnforcement::Off,
-        quota,
         org,
-        "sandbox",
-        1_000,
-        1_024,
+        crate::api::environments::QuotaRequest {
+            credit_enforcement: CreditEnforcement::Off,
+            quota,
+            env_type: "sandbox",
+            backend: crate::runtime::RuntimeBackend::Kubernetes,
+            cpu_millicores: 1_000,
+            memory_mb: 1_024,
+        },
     )
     .await;
     transaction.rollback().await?;

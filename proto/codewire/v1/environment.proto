@@ -253,6 +253,22 @@ message CreateEnvironmentRequest {
   // and the environment is on `hosted-default`. Refused with UNAVAILABLE
   // while the deployment's platform network policies are off.
   string network_policy = 33;
+  // Where the environment runs. Absent: the deployment's own runtime. A
+  // placement that can't be met is refused with its reason; nothing falls
+  // back to another placement.
+  EnvironmentPlacement placement = 34;
+  // The client's ID for this create: 16 to 64 letters, digits, '-' or '_'.
+  // A retry with the same ID in the same organization returns the
+  // environment the first request created, and creates nothing. Empty: no
+  // retry protection.
+  string request_id = 35;
+}
+
+// An environment's placement (#3609). Exactly one field is set.
+message EnvironmentPlacement {
+  // An enrolled host of the organization, by name or ID. Hosts are a
+  // preview.
+  string host = 1;
 }
 
 // Complete selection. Empty means no sources and no provider profile.

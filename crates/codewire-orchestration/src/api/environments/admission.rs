@@ -1,5 +1,6 @@
 //! Admission: whether an organization's quota and compute credit let a create,
-//! start or resize go ahead. Moved out of `environments.rs` unchanged.
+//! start or resize go ahead. A host environment (#3609) needs no credit and
+//! no CPU or memory headroom, but counts as an environment.
 
 use super::*;
 
@@ -8,6 +9,7 @@ pub(super) fn evaluate_quota(
     quota: OrgQuota,
     usage: OrgEnvironmentUsage,
     env_type: &str,
+    backend: crate::runtime::RuntimeBackend,
     cpu: i32,
     mem: i32,
 ) -> Result<(), AppError> {
@@ -35,6 +37,9 @@ pub(super) fn evaluate_quota(
                 usage.active_total, quota.max_concurrent_environments
             ),
         ));
+    }
+    if !backend.platform_compute() {
+        return Ok(());
     }
     if quota.max_cpu_millicores != -1
         && usage.total_cpu + i64::from(cpu) > i64::from(quota.max_cpu_millicores)
@@ -153,19 +158,35 @@ pub(crate) async fn check_not_suspended_in(
 /// balance read refuses the request (#3256).
 pub(crate) async fn check_quota_in(
     transaction: &mut Transaction<'_, Postgres>,
-    credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
-    quota: OrgQuota,
     org_id: &str,
-    env_type: &str,
-    cpu: i32,
-    mem: i32,
+    request: QuotaRequest<'_>,
 ) -> Result<(), AppError> {
     check_not_suspended_in(transaction, org_id).await?;
-    if credit_enforcement.is_on() {
+    // A host's compute is its owner's: it needs no credit (owner,
+    // 2026-11-13, #3609) and no CPU or memory headroom, but still counts as
+    // an environment (design §10 Q1).
+    if request.backend.platform_compute() && request.credit_enforcement.is_on() {
         check_credit_in(transaction, org_id).await?;
     }
     let usage = count_active_environments(&mut **transaction, org_id)
         .await
         .map_err(|error| quota_unavailable(org_id, &error))?;
-    evaluate_quota(quota, usage, env_type, cpu, mem)
+    evaluate_quota(
+        request.quota,
+        usage,
+        request.env_type,
+        request.backend,
+        request.cpu_millicores,
+        request.memory_mb,
+    )
+}
+
+/// One create's or start's demand on its organization's limits.
+pub(crate) struct QuotaRequest<'a> {
+    pub credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
+    pub quota: OrgQuota,
+    pub env_type: &'a str,
+    pub backend: crate::runtime::RuntimeBackend,
+    pub cpu_millicores: i32,
+    pub memory_mb: i32,
 }

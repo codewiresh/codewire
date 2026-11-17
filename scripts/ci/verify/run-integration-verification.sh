@@ -1242,6 +1242,18 @@ database_lane_orchestration_workspaces() {
       'api::host_operations::database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "host placement: who may place, refusals, capacity and request IDs" host-placement \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::host_placement::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "host lifecycle: create, start, stop and destroy through a fake host" host-lifecycle \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::host_lifecycle::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "organization membership credential matrix" organization-membership-credentials \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

@@ -539,3 +539,67 @@ async fn db_live_hosts_are_bounded_per_organization_and_records_per_member() -> 
     .await;
     db.finish(result).await
 }
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_revoking_a_host_ends_the_operations_it_has_not_finished() -> anyhow::Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        organization(&db, "hosts-org").await?;
+        let alice = session("hosts-org-alice");
+        let host = enroll(&db, "hosts-org-alice", "hosts-org", "build-box", 1)
+            .await
+            .unwrap()
+            .host
+            .id;
+        // One operation no session took, one a session took, one answered.
+        for (operation, environment, state) in [
+            ("op-waiting", "env-1", "pending"),
+            ("op-taken", "env-2", "sent"),
+            ("op-answered", "env-3", "done"),
+        ] {
+            sqlx::query(
+                "INSERT INTO host_operations (operation_id, host_id, environment_id, \
+                 expected_generation, kind, payload, state, sent_at, session_generation, \
+                 completed_at) \
+                 VALUES ($1, $2, $3, 0, 'stop', ''::bytea, $4, \
+                         CASE WHEN $4 = 'pending' THEN NULL ELSE now() END, \
+                         CASE WHEN $4 = 'pending' THEN NULL ELSE 1 END, \
+                         CASE WHEN $4 = 'done' THEN now() END)",
+            )
+            .bind(operation)
+            .bind(&host)
+            .bind(environment)
+            .bind(state)
+            .execute(&db.pool)
+            .await?;
+        }
+
+        revoke_host(&db.pool, &alice, "hosts-org", &host)
+            .await
+            .unwrap();
+        let left: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT operation_id, state, failure FROM host_operations \
+              WHERE host_id = $1 ORDER BY operation_id",
+        )
+        .bind(&host)
+        .fetch_all(&db.pool)
+        .await?;
+        // The one never taken is withdrawn; the one taken fails, so nothing
+        // waits for a host that will never answer; the answered one stands.
+        anyhow::ensure!(
+            left == [
+                ("op-answered".into(), "done".into(), None),
+                (
+                    "op-taken".into(),
+                    "failed".into(),
+                    Some(crate::api::host_operations::HOST_REVOKED.into())
+                ),
+            ],
+            "{left:?}"
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

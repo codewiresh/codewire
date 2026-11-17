@@ -818,8 +818,8 @@ where
             r#"SELECT
                 COUNT(*),
                 COUNT(*) FILTER (WHERE type = 'sandbox'),
-                COALESCE(SUM(cpu_millicores), 0),
-                COALESCE(SUM(memory_mb), 0)
+                COALESCE(SUM(cpu_millicores) FILTER (WHERE runtime_backend = 'kubernetes'), 0),
+                COALESCE(SUM(memory_mb) FILTER (WHERE runtime_backend = 'kubernetes'), 0)
              FROM environments
              WHERE org_id = $1
                AND state NOT IN ('destroyed', 'destroying', 'error', 'archived')
@@ -1441,7 +1441,7 @@ pub(crate) async fn extend_environment_ttl_core(
 
 mod admission;
 
-pub(crate) use admission::{check_credit_in, check_not_suspended_in, check_quota_in};
+pub(crate) use admission::{QuotaRequest, check_credit_in, check_not_suspended_in, check_quota_in};
 #[cfg(test)]
 use admission::{evaluate_credit, evaluate_quota};
 
@@ -1514,6 +1514,7 @@ mod tests {
 
     #[test]
     fn quota_evaluation_mirrors_go() {
+        const K8S: crate::runtime::RuntimeBackend = crate::runtime::RuntimeBackend::Kubernetes;
         let usage = |total, sandbox, cpu, mem| OrgEnvironmentUsage {
             active_total: total,
             active_sandbox: sandbox,
@@ -1528,33 +1529,60 @@ mod tests {
         };
 
         // Within limits.
-        assert!(evaluate_quota(quota, usage(3, 2, 8000, 16384), "sandbox", 2000, 4096).is_ok());
+        assert!(
+            evaluate_quota(quota, usage(3, 2, 8000, 16384), "sandbox", K8S, 2000, 4096).is_ok()
+        );
 
         // Sandbox concurrency cap (sandbox type only).
-        let err = evaluate_quota(quota, usage(5, 5, 0, 0), "sandbox", 0, 0).unwrap_err();
+        let err = evaluate_quota(quota, usage(5, 5, 0, 0), "sandbox", K8S, 0, 0).unwrap_err();
         assert!(
             format!("{err}").contains("sandbox environment limit reached (5/5)"),
             "{err}"
         );
-        assert!(evaluate_quota(quota, usage(5, 5, 0, 0), "custom", 0, 0).is_ok());
+        assert!(evaluate_quota(quota, usage(5, 5, 0, 0), "custom", K8S, 0, 0).is_ok());
 
         // Total concurrency cap.
-        let err = evaluate_quota(quota, usage(10, 2, 0, 0), "custom", 0, 0).unwrap_err();
+        let err = evaluate_quota(quota, usage(10, 2, 0, 0), "custom", K8S, 0, 0).unwrap_err();
         assert!(
             format!("{err}").contains("environment limit reached (10/10)"),
             "{err}"
         );
 
         // CPU and memory additive checks.
-        let err = evaluate_quota(quota, usage(1, 1, 31000, 0), "custom", 2000, 0).unwrap_err();
+        let err = evaluate_quota(quota, usage(1, 1, 31000, 0), "custom", K8S, 2000, 0).unwrap_err();
         assert!(
             format!("{err}")
                 .contains("CPU limit would be exceeded (31000+2000 > 32000 millicores)"),
             "{err}"
         );
-        let err = evaluate_quota(quota, usage(1, 1, 0, 65000), "custom", 0, 4096).unwrap_err();
+        let err = evaluate_quota(quota, usage(1, 1, 0, 65000), "custom", K8S, 0, 4096).unwrap_err();
         assert!(
             format!("{err}").contains("memory limit would be exceeded (65000+4096 > 65536 MB)"),
+            "{err}"
+        );
+
+        // A host environment counts as an environment, but its compute is its
+        // owner's: no CPU or memory limit applies to it.
+        let host = crate::runtime::RuntimeBackend::Host;
+        assert!(
+            evaluate_quota(
+                quota,
+                usage(1, 1, 31000, 65000),
+                "sandbox",
+                host,
+                2000,
+                4096
+            )
+            .is_ok()
+        );
+        let err = evaluate_quota(quota, usage(5, 5, 0, 0), "sandbox", host, 0, 0).unwrap_err();
+        assert!(
+            format!("{err}").contains("sandbox environment limit reached (5/5)"),
+            "{err}"
+        );
+        let err = evaluate_quota(quota, usage(10, 2, 0, 0), "sandbox", host, 0, 0).unwrap_err();
+        assert!(
+            format!("{err}").contains("environment limit reached (10/10)"),
             "{err}"
         );
 
@@ -1570,6 +1598,7 @@ mod tests {
                 unlimited,
                 usage(1000, 1000, 1 << 30, 1 << 30),
                 "sandbox",
+                K8S,
                 9999,
                 9999
             )

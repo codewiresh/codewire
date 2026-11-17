@@ -222,14 +222,25 @@ impl Service<PgLifecycleStore> {
             .bind(org_id)
             .fetch_one(&mut *tx)
             .await?;
+        // A host environment's start needs no credit or compute headroom.
+        let backend: String = sqlx::query_scalar(
+            "SELECT runtime_backend FROM environments WHERE id = $1 AND org_id = $2",
+        )
+        .bind(env_id)
+        .bind(org_id)
+        .fetch_one(&mut *tx)
+        .await?;
         crate::api::environments::check_quota_in(
             &mut tx,
-            quota.credit_enforcement,
-            quota.quota,
             org_id,
-            quota.env_type,
-            quota.cpu_millicores,
-            quota.memory_mb,
+            crate::api::environments::QuotaRequest {
+                credit_enforcement: quota.credit_enforcement,
+                quota: quota.quota,
+                env_type: quota.env_type,
+                backend: crate::runtime::RuntimeBackend::parse(&backend)?,
+                cpu_millicores: quota.cpu_millicores,
+                memory_mb: quota.memory_mb,
+            },
         )
         .await?;
         let entry = if isolation_tier == "confidential" {

@@ -327,6 +327,31 @@ pub async fn open_for_environment(
     row.map(HostOperation::try_from).transpose()
 }
 
+/// Why a revoked host's sent operations failed.
+pub const HOST_REVOKED: &str = "the host was revoked";
+
+/// Ends a revoked host's unfinished operations, in the revocation's own
+/// transaction: the host will never take or answer them. One no session took
+/// is withdrawn; one a session took fails, so whoever waits for it stops.
+pub async fn end_for_revoked_host(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    host_id: &str,
+) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM host_operations WHERE host_id = $1 AND state = 'pending'")
+        .bind(host_id)
+        .execute(&mut **transaction)
+        .await?;
+    sqlx::query(
+        "UPDATE host_operations SET state = 'failed', failure = $2, completed_at = now() \
+          WHERE host_id = $1 AND state = 'sent'",
+    )
+    .bind(host_id)
+    .bind(HOST_REVOKED)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 /// Withdraws an operation no session has taken: the host never saw it, so
 /// it is removed as if never asked, and its environment is free for the
 /// next one. False when a session took it, or it ended, first; a sent

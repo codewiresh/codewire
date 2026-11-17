@@ -89,8 +89,8 @@ all three.
 
 A local VM needs no account. A trusted host session has no containment: an
 agent there can read and change anything the user can. A
-[host](#hosts) is a computer enrolled to run VMs for an organization; hosts
-enroll and connect today, and no environment runs on one yet.
+[host](#hosts) is a computer enrolled to run VMs for an organization;
+`cw create --on host:NAME` places an environment on one, as a preview.
 
 ### Sessions and managed agents
 
@@ -551,8 +551,11 @@ admitted hosts.
 A **host** is a computer that a member enrolls to run Codewire VMs for their
 organization, through the same local VM runtime and supervisor as `cw
 --local`. It is not a trusted host: its environments are VMs. Hosts are a
-preview (#3609): today a host enrolls, connects and shows its state, and no
-environment runs on one yet. The user guide is
+preview (#3609): a host enrolls, connects and shows its state, and an
+environment can be created, stopped, started and deleted on one. Reaching
+that environment (`cw run`, `cw shell`, `cw exec`) is not built yet, and the
+lifecycle on a host has not been observed working yet
+([docs/journeys/hosts.md](docs/journeys/hosts.md)). The user guide is
 `apps/docs/zola/content/environments/hosts.md`; the commands are in
 `reference/cli/hosts.md` beside it.
 
@@ -581,6 +584,28 @@ environment runs on one yet. The user guide is
   offline. The agent connects again by itself, through `HTTPS_PROXY` when it is
   set. `OpenHostTunnel` is in the contract and refused until a later slice uses
   it.
+- **Placing an environment.** `cw create --on host:NAME` sends the host
+  (`CreateEnvironmentRequest.placement`) and a request ID, which makes a retry
+  of that create return the first environment. The create is admitted under
+  the organization's row lock: only the host's owner, a member it is granted
+  to, or any member under an organization grant may place on it; the host
+  must be offering VMs, online, running an agent that takes lifecycle
+  operations, and have room within its owner's limits. A host environment
+  starts with an empty workspace on the host's own runtime image: another
+  image, repositories, application secrets, a credential profile, a Mesh
+  network, a network policy, a hosted snapshot and the confidential tier are
+  each refused by name. It counts toward the organization's environment
+  limits and takes no credit and no platform CPU or memory.
+- **Lifecycle on a host.** The environment's row names its backend
+  (`environments.runtime_backend` is `host`), and the one lifecycle workflow
+  runs each step on the host instead of the cluster. A step is one operation
+  in `host_operations`, sent down the host's session and run by the agent
+  through the local VM supervisor. The operation's ID is the supervisor's
+  request ID, so an operation sent again after a lost reply is answered with
+  its first result and never makes a second VM. A step waits at most 25
+  minutes for the host's answer, then the environment is in error saying the
+  host didn't answer. A host's own failure message is shown as one bounded
+  line. Resize is refused for now.
 - **Running the agent.** `cw host service install` keeps it running as a user
   service: systemd `--user` on Linux, a LaunchAgent on macOS. On Linux it
   names `loginctl enable-linger` when linger is off, which keeps the agent
@@ -589,7 +614,10 @@ environment runs on one yet. The user guide is
   organization's hosts with their state, revoked ones included.
 - **Ending.** `cw host revoke` (the owner, or an organization owner or admin)
   is final: the session is told and ended at its next message, the record
-  stays, and its key can never be enrolled again. `cw host leave` removes this
+  stays, and its key can never be enrolled again. Revoking ends the
+  operations the host has not finished, so nothing waits for it, and
+  deleting an environment on a revoked host ends deleted without reaching
+  the host. `cw host leave` removes this
   computer's host: its record unless revoked, its key, its service and the
   local enrollment.
 

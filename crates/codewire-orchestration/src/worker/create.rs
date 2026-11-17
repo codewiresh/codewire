@@ -155,7 +155,7 @@ pub fn next_create_action(
     CreateAction::Done
 }
 
-fn create_command_cancelled(state: &str, desired_state: &str) -> bool {
+pub(super) fn create_command_cancelled(state: &str, desired_state: &str) -> bool {
     desired_state == "destroyed" || matches!(state, "destroying" | "destroyed")
 }
 

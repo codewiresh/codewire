@@ -31,6 +31,7 @@ use temporalio_sdk::{
 use tracing::Instrument as _;
 
 use crate::worker::activity_authority::{ActivityAuthority, AuthorityLost, is_authority_lost};
+use crate::worker::host_lifecycle::Change;
 use crate::worker::lifecycle::ReconcileOutcome;
 use crate::worker::organization_deletion::{
     self, OrganizationDeletionActivityResult, OrganizationDeletionFailureInput,
@@ -39,9 +40,15 @@ use crate::worker::organization_deletion::{
 use crate::worker::setup_lease::SetupActivityIdentity;
 use crate::worker::{JobPayload, WorkerContext, create, lifecycle, resize, setup};
 
+mod activity_run;
 mod commands;
+mod host;
 mod worker;
 
+use activity_run::{
+    claim_authority_metadata, record_heartbeat, required_authority, run_claim_activity,
+    run_cleanup_aware_environment_activity, run_environment_activity, setup_activity_identity,
+};
 use commands::{ensure_workflow_environment, known_environment_action};
 pub use worker::{run_temporal_worker, spawn_temporal_worker};
 
@@ -227,150 +234,6 @@ pub struct EnvironmentActivities {
     pub wctx: Arc<WorkerContext>,
 }
 
-async fn required_authority(
-    wctx: &WorkerContext,
-    cmd: &EnvironmentActivityCommand,
-    desired_state: &str,
-) -> Result<Option<ActivityAuthority>, ActivityError> {
-    match ActivityAuthority::capture_required(
-        &wctx.pool,
-        &cmd.environment_id,
-        desired_state,
-        cmd.operation_generation,
-    )
-    .await
-    {
-        Ok(authority) => Ok(Some(authority)),
-        Err(error) if is_authority_lost(&error) => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
-/// Records an empty heartbeat. The SDK encodes it before handing it to the
-/// worker, which throttles and sends it; encoding `()` cannot fail, and a
-/// heartbeat that cannot be sent is never a reason to fail the activity.
-async fn record_heartbeat(ctx: &ActivityContext) {
-    if let Err(error) = ctx.record_heartbeat(()).await {
-        tracing::warn!(%error, "activity heartbeat could not be encoded");
-    }
-}
-
-async fn run_environment_activity<T, F>(ctx: ActivityContext, future: F) -> Result<T, ActivityError>
-where
-    T: Default,
-    F: std::future::Future<Output = anyhow::Result<T>>,
-{
-    let cancel_ctx = ctx.clone();
-    let heartbeat_ctx = ctx;
-    record_heartbeat(&heartbeat_ctx).await;
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut future = Box::pin(future);
-
-    loop {
-        tokio::select! {
-            _ = cancel_ctx.cancelled() => return Err(ActivityError::cancelled()),
-            _ = heartbeat.tick() => record_heartbeat(&heartbeat_ctx).await,
-            result = &mut future => {
-                return match result {
-                    Ok(value) => Ok(value),
-                    Err(error) if is_authority_lost(&error) => Ok(T::default()),
-                    Err(error) => Err(error.into()),
-                };
-            }
-        }
-    }
-}
-
-async fn run_claim_activity<F>(ctx: ActivityContext, future: F) -> Result<i64, ActivityError>
-where
-    F: std::future::Future<Output = anyhow::Result<i64>>,
-{
-    record_heartbeat(&ctx).await;
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut future = Box::pin(future);
-
-    loop {
-        tokio::select! {
-            _ = ctx.cancelled() => return Err(ActivityError::cancelled()),
-            _ = heartbeat.tick() => record_heartbeat(&ctx).await,
-            result = &mut future => return result.map_err(Into::into),
-        }
-    }
-}
-
-/// Setup cancellation must be acknowledged by the setup handler only after it
-/// has fenced any ambiguously attached workspace process by observing the Pod
-/// absent. Keep heartbeating while that cleanup runs; unlike the ordinary
-/// activity wrapper, do not drop the handler future when cancellation arrives.
-async fn run_cleanup_aware_environment_activity<T, F>(
-    ctx: ActivityContext,
-    future: F,
-) -> Result<T, ActivityError>
-where
-    T: Default,
-    F: std::future::Future<Output = anyhow::Result<T>>,
-{
-    record_heartbeat(&ctx).await;
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // On the heap: an activity's state machine is large, and this one is
-    // otherwise held inside the activity future that the SDK moves.
-    let mut future = Box::pin(future);
-
-    loop {
-        tokio::select! {
-            _ = heartbeat.tick() => record_heartbeat(&ctx).await,
-            result = &mut future => {
-                return match result {
-                    Ok(value) => Ok(value),
-                    Err(error) if setup::is_setup_activity_cancelled(&error) => {
-                        Err(ActivityError::cancelled())
-                    }
-                    Err(error) if setup::is_setup_recovery_failed(&error) => {
-                        Err(error.into())
-                    }
-                    Err(error) if is_authority_lost(&error) => Ok(T::default()),
-                    Err(error) => Err(error.into()),
-                };
-            }
-        }
-    }
-}
-
-fn claim_authority_metadata(ctx: &ActivityContext) -> anyhow::Result<(String, i64)> {
-    let info = ctx.info();
-    let workflow_run_id = info
-        .workflow_run_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|run_id| !run_id.is_empty())
-        .ok_or(AuthorityLost)?
-        .to_string();
-    let scheduled_at_unix_nanos = info
-        .scheduled_time
-        .ok_or(AuthorityLost)?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| AuthorityLost)?
-        .as_nanos()
-        .try_into()
-        .map_err(|_| AuthorityLost)?;
-    Ok((workflow_run_id, scheduled_at_unix_nanos))
-}
-
-fn setup_activity_identity(
-    ctx: &ActivityContext,
-    cmd: &EnvironmentActivityCommand,
-) -> anyhow::Result<SetupActivityIdentity> {
-    let info = ctx.info();
-    SetupActivityIdentity::new(
-        cmd.operation_generation,
-        info.activity_id.clone(),
-        info.attempt,
-    )
-}
-
 #[activities]
 impl EnvironmentActivities {
     #[activity(name = "EnvironmentClaimAuthorityActivity")]
@@ -446,6 +309,12 @@ impl EnvironmentActivities {
             )?;
             let mut setup_completed = false;
             if let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? {
+                if host::ran(&self.wctx, &ctx, &authority, host::Step::Create).await? {
+                    return Ok(ClaimAndCreateResult::Outcome {
+                        operation_generation: generation,
+                        setup_completed: false,
+                    });
+                }
                 let confirmed = run_environment_activity(
                     ctx.clone(),
                     create::handle_environment_create_before_setup(
@@ -497,6 +366,9 @@ impl EnvironmentActivities {
             let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
                 return Ok(());
             };
+            if host::ran(&self.wctx, &ctx, &authority, host::Step::Create).await? {
+                return Ok(());
+            }
             run_environment_activity(
                 ctx,
                 create::handle_environment_create_without_setup_publish(
@@ -529,6 +401,9 @@ impl EnvironmentActivities {
             let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
                 return Ok(());
             };
+            if host::ran(&self.wctx, &ctx, &authority, host::Step::Nothing).await? {
+                return Ok(());
+            }
             run_cleanup_aware_environment_activity(
                 ctx.clone(),
                 setup::handle_environment_setup(
@@ -562,6 +437,16 @@ impl EnvironmentActivities {
             let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
                 return Ok(());
             };
+            if host::ran(
+                &self.wctx,
+                &ctx,
+                &authority,
+                host::Step::Change(Change::Start),
+            )
+            .await?
+            {
+                return Ok(());
+            }
             run_cleanup_aware_environment_activity(
                 ctx.clone(),
                 lifecycle::handle_environment_start(
@@ -594,6 +479,16 @@ impl EnvironmentActivities {
             let Some(authority) = required_authority(&self.wctx, &cmd, "stopped").await? else {
                 return Ok(());
             };
+            if host::ran(
+                &self.wctx,
+                &ctx,
+                &authority,
+                host::Step::Change(Change::Stop),
+            )
+            .await?
+            {
+                return Ok(());
+            }
             run_environment_activity(
                 ctx,
                 lifecycle::handle_environment_stop(
@@ -625,6 +520,9 @@ impl EnvironmentActivities {
             let Some(authority) = required_authority(&self.wctx, &cmd, "started").await? else {
                 return Ok(());
             };
+            if host::ran(&self.wctx, &ctx, &authority, host::Step::Nothing).await? {
+                return Ok(());
+            }
             run_cleanup_aware_environment_activity(
                 ctx.clone(),
                 lifecycle::handle_environment_restart_sources(
@@ -657,6 +555,16 @@ impl EnvironmentActivities {
             let Some(authority) = required_authority(&self.wctx, &cmd, "destroyed").await? else {
                 return Ok(());
             };
+            if host::ran(
+                &self.wctx,
+                &ctx,
+                &authority,
+                host::Step::Change(Change::Destroy),
+            )
+            .await?
+            {
+                return Ok(());
+            }
             run_environment_activity(
                 ctx,
                 lifecycle::handle_environment_destroy(
@@ -688,6 +596,16 @@ impl EnvironmentActivities {
             let Some(authority) = required_authority(&self.wctx, &cmd, "resized").await? else {
                 return Ok(());
             };
+            if host::ran(
+                &self.wctx,
+                &ctx,
+                &authority,
+                host::Step::Unsupported("Resize"),
+            )
+            .await?
+            {
+                return Ok(());
+            }
             run_environment_activity(
                 ctx,
                 resize::run_environment_resize(
@@ -728,6 +646,9 @@ impl EnvironmentActivities {
                 Err(error) => return Err(error.into()),
             };
             let setup_identity = setup_activity_identity(&ctx, &cmd)?;
+            if host::ran(&self.wctx, &ctx, &authority, host::Step::Nothing).await? {
+                return Ok(ReconcileOutcome::Continue);
+            }
             run_cleanup_aware_environment_activity(ctx.clone(), async {
                 lifecycle::handle_environment_reconcile(
                     &self.wctx,

@@ -46,7 +46,7 @@ macro_rules! host_preview {
 /// terminal, so pipes, logs, CI and JSON never see it. It is shown with every
 /// host command rather than once a day, and has no off switch, because the
 /// owner chose to say it wherever host features are used (2026-11-13, #3609).
-fn preview_notice() {
+pub(super) fn preview_notice() {
     let facts = crate::output::TerminalFacts::probe();
     if facts.stderr_tty {
         let caps = crate::output::Capabilities::detect(

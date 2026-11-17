@@ -81,7 +81,7 @@ pub use codewire_proto::codewire::v1::{
     DeleteEnvironmentResponse, DeleteOrganizationRequest, DeleteOrganizationResponse,
     DeletePortRequest, DeletePortResponse, DeletePresetRequest, DeletePresetResponse, DesiredState,
     DownloadFileRequest, DownloadFileResponse, Environment, EnvironmentDaemonDiagnostic,
-    EnvironmentDaemonState, EnvironmentDaemonStatus, EnvironmentLog,
+    EnvironmentDaemonState, EnvironmentDaemonStatus, EnvironmentLog, EnvironmentPlacement,
     EnvironmentResizeDisruptionPolicy, EnvironmentResizeExecutionMode, EnvironmentResizeFailure,
     EnvironmentResizeOperation, EnvironmentResizeOperationState, EnvironmentResizePlan,
     EnvironmentResources, EnvironmentServiceClient as GeneratedEnvironmentServiceClient,
