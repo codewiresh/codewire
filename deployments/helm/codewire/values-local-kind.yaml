@@ -57,6 +57,113 @@ config:
   SKIP_2FA_SETUP: "true"
   DERP_MESH_KEY: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
+# Kind's services read the synthetic local Secret, pull no image, and admit
+# Kind's edge, ingress-nginx.
+sharedSecret: codewire-local-secrets
+
+edge:
+  peers:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: ingress-nginx
+
+# deployments/k8s/overlays/local-kind/coordinator-deployment-patch.yaml
+coordinator:
+  replicas: 1
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  env:
+    - name: COORDINATOR_PORT
+      value: "8090"
+    - name: COORDINATOR_DERP_VERIFY_ADDR
+      value: "0.0.0.0:8097"
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: MY_POD_IP
+      valueFrom:
+        fieldRef:
+          fieldPath: status.podIP
+  initContainers: &waitForPostgres
+    - name: wait-for-postgres
+      image: postgres:17-alpine
+      command:
+        - sh
+        - -c
+        - until pg_isready -h postgres -p 5432 -U codewire -d codewire; do sleep 1; done
+      env:
+        - name: PGPASSWORD
+          value: codewire
+  startupProbe: &startupProbe
+    httpGet:
+      path: /healthz
+      port: http
+    periodSeconds: 2
+    timeoutSeconds: 2
+    failureThreshold: 90
+
+# deployments/k8s/overlays/local-kind/idp-deployment-patch.yaml
+idp:
+  replicas: 1
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  imagePullPolicy: IfNotPresent
+  env:
+    - name: IDP_PORT
+      value: "8091"
+    - name: IDP_SIGNING_KEK_DIR
+      value: /var/run/secrets/codewire/idp-signing-keks
+    - name: IDP_SIGNING_ACTIVE_KEK_ID
+      value: v1
+    - name: IDP_TURNSTILE_BYPASS_EMAIL
+      value: codewire-e2e@example.test
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: MY_POD_IP
+      valueFrom:
+        fieldRef:
+          fieldPath: status.podIP
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  initContainers: *waitForPostgres
+  startupProbe: *startupProbe
+
+# deployments/k8s/overlays/local-kind/billing-deployment-patch.yaml
+billing:
+  replicas: 1
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  imagePullPolicy: IfNotPresent
+  env:
+    - name: BILLING_PORT
+      value: "8081"
+    - name: STRIPE_SECRET_KEY
+      value: sk_test_buildtest_dummy
+    - name: STRIPE_WEBHOOK_SECRET
+      value: whsec_test_secret
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    # Mount the Connect conformance probe (connect-rpc/03 D8)
+    # — local-kind/e2e manifests only, never base or production.
+    - name: CONNECT_TESTING_SURFACE
+      value: "1"
+
 dashboardPublicConfig:
   # The non-promotable Kind credential fixture provides this fixed synthetic
   # App itself.
@@ -66,6 +173,9 @@ dashboardPublicConfig:
 images:
   dashboard:
     repository: codewire-dashboard
+    tag: local
+  services:
+    repository: codewire-services
     tag: local
 
 # Kind's dashboard is a smaller, older shape than production's: its own

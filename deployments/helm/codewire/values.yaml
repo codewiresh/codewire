@@ -111,9 +111,243 @@ dashboardPublicConfig:
   GITHUB_APP_SLUG: ""
   GITHUB_APP_CLIENT_ID: ""
 
+# The shared Secret every service reads with envFrom, beside codewire-config.
+sharedSecret: codewire-secrets
+
+# Pull secrets for the services' Pods.
+imagePullSecrets: []
+
+# The cluster's public edge: the peers the dashboard's and the IdP's network
+# policies admit. Each names the edge by a non-empty selector or an ipBlock.
+edge:
+  peers: []
+
+# The coordinator: tailnet coordination and DERP's client admission lookup.
+coordinator:
+  enabled: true
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  # Empty leaves the cluster's default.
+  imagePullPolicy: ""
+  # The container's own environment, beside codewire-config and the shared
+  # Secret; an environment that differs replaces the whole list.
+  env:
+    - name: COORDINATOR_PORT
+      value: "8090"
+    - name: COORDINATOR_DERP_VERIFY_ADDR
+      value: "0.0.0.0:8097"
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: DB_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: codewire-db-app
+          key: password
+    - name: NATS_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: nats-auth-token
+          key: token
+    # The coordinator's own NATS user, once infra issues it (#3542). It
+    # wins over the shared token above; until the Secret exists the
+    # token is used.
+    - name: NATS_USER
+      valueFrom:
+        secretKeyRef:
+          name: nats-coordinator-login
+          key: user
+          optional: true
+    - name: NATS_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: nats-coordinator-login
+          key: password
+          optional: true
+    - name: MY_POD_IP
+      valueFrom:
+        fieldRef:
+          fieldPath: status.podIP
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  initContainers: []
+  startupProbe: null
+
+# The identity provider.
+idp:
+  enabled: true
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  # Empty leaves the cluster's default.
+  imagePullPolicy: ""
+  # The container's own environment, beside codewire-config and the shared
+  # Secret; an environment that differs replaces the whole list.
+  env:
+    # These explicit values override any broad envFrom input. The SES
+    # client rejects configured endpoint overrides and cannot use IMDS.
+    - name: AWS_EC2_METADATA_DISABLED
+      value: "true"
+    - name: AWS_IGNORE_CONFIGURED_ENDPOINT_URLS
+      value: "true"
+    # The IdP receives only its own SES key pair plus the activation
+    # marker. These fields stay optional while the reviewed Resend
+    # rollback path remains installed; if the marker is present, the
+    # client requires the complete SES projection and never falls back.
+    - name: CODEWIRE_SES_ENABLED
+      valueFrom:
+        secretKeyRef:
+          name: codewire-idp-ses
+          key: CODEWIRE_SES_ENABLED
+          optional: true
+    - name: AWS_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: codewire-idp-ses
+          key: AWS_ACCESS_KEY_ID
+          optional: true
+    - name: AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: codewire-idp-ses
+          key: AWS_SECRET_ACCESS_KEY
+          optional: true
+    # Sign in with GitHub or Google (#4062). Every key is optional:
+    # with none the providers are off, and half a provider's pair
+    # stops the IdP at start. Infra projects the Secret from OpenBao.
+    - name: CODEWIRE_OAUTH_GITHUB_CLIENT_ID
+      valueFrom:
+        secretKeyRef:
+          name: codewire-idp-oauth
+          key: CODEWIRE_OAUTH_GITHUB_CLIENT_ID
+          optional: true
+    - name: CODEWIRE_OAUTH_GITHUB_CLIENT_SECRET
+      valueFrom:
+        secretKeyRef:
+          name: codewire-idp-oauth
+          key: CODEWIRE_OAUTH_GITHUB_CLIENT_SECRET
+          optional: true
+    - name: CODEWIRE_OAUTH_GOOGLE_CLIENT_ID
+      valueFrom:
+        secretKeyRef:
+          name: codewire-idp-oauth
+          key: CODEWIRE_OAUTH_GOOGLE_CLIENT_ID
+          optional: true
+    - name: CODEWIRE_OAUTH_GOOGLE_CLIENT_SECRET
+      valueFrom:
+        secretKeyRef:
+          name: codewire-idp-oauth
+          key: CODEWIRE_OAUTH_GOOGLE_CLIENT_SECRET
+          optional: true
+    - name: IDP_PORT
+      value: "8091"
+    - name: IDP_SIGNING_KEK_DIR
+      value: /var/run/secrets/codewire/idp-signing-keks
+    - name: IDP_SIGNING_ACTIVE_KEK_ID
+      value: v1
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: DB_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: codewire-db-app
+          key: password
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  initContainers: []
+  startupProbe: null
+
+# Billing.
+billing:
+  enabled: true
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  # Empty leaves the cluster's default.
+  imagePullPolicy: ""
+  # The container's own environment, beside codewire-config and the shared
+  # Secret; an environment that differs replaces the whole list.
+  env:
+    # These explicit values override any broad envFrom input. The SES
+    # client rejects configured endpoint overrides and cannot use IMDS.
+    - name: AWS_EC2_METADATA_DISABLED
+      value: "true"
+    - name: AWS_IGNORE_CONFIGURED_ENDPOINT_URLS
+      value: "true"
+    # Billing receives only its own SES key pair plus the activation
+    # marker. These fields stay optional while the reviewed Resend
+    # rollback path remains installed; if the marker is present, the
+    # client requires the complete SES projection and never falls back.
+    - name: CODEWIRE_SES_ENABLED
+      valueFrom:
+        secretKeyRef:
+          name: codewire-billing-ses
+          key: CODEWIRE_SES_ENABLED
+          optional: true
+    - name: AWS_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: codewire-billing-ses
+          key: AWS_ACCESS_KEY_ID
+          optional: true
+    - name: AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: codewire-billing-ses
+          key: AWS_SECRET_ACCESS_KEY
+          optional: true
+    - name: BILLING_PORT
+      value: "8081"
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: DB_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: codewire-db-app
+          key: password
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  initContainers: []
+  startupProbe: null
+
 # Image families. A digest, when set, pins the image and replaces the tag.
 images:
   dashboard:
+    repository: ""
+    tag: ""
+    digest: ""
+  # The shared Rust services image; each service selects its binary.
+  services:
     repository: ""
     tag: ""
     digest: ""
@@ -169,6 +403,5 @@ dashboard:
     port: 80
     portName: http
   networkPolicy:
+    # It admits the public edge (edge.peers) only.
     enabled: true
-    # The peers allowed to reach the dashboard: the cluster's public edge.
-    from: []

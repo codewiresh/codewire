@@ -1,0 +1,123 @@
+{{- with .Values.idp }}
+{{- if .enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codewire-idp
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "codewire.labels" "idp" | nindent 4 }}
+spec:
+  replicas: {{ .replicas }}
+  strategy:
+    {{- toYaml .strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "codewire.selectorLabels" "idp" | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "codewire.selectorLabels" "idp" | nindent 8 }}
+      annotations:
+        # Increment with a successful dedicated SES key rotation. Environment
+        # variables are fixed at container start, so this rolls the workload
+        # onto the verified next credential generation.
+        codewire.sh/ses-credential-generation: "1"
+    spec:
+      {{- include "codewire.servicePod" (dict "root" $ "service" .) | nindent 6 }}
+      # The preStop delay, then 30 s for requests already in flight (#4426).
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: idp
+          # The Rust OIDC provider. Runs from the shared codewire/services
+          # image (one image, many entrypoints); the codewire-idp binary is
+          # selected by `command`.
+          command: ["/codewire-idp"]
+          {{- include "codewire.serviceContainer" (dict "root" $ "service" .) | nindent 10 }}
+          ports:
+            # The API: the edge and the dashboard only (its NetworkPolicy).
+            - containerPort: 8091
+              name: api
+            # Metrics only, scraped by the PodMonitor's port named http from
+            # any source: Prometheus runs on host networking (#4546).
+            - containerPort: 8092
+              name: http
+          volumeMounts:
+            - name: idp-signing-keks
+              mountPath: /var/run/secrets/codewire/idp-signing-keks
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: api
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: api
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          # Keep serving while the gateway drops this Pod's endpoint, so SIGTERM
+          # never closes the listener under a routed request (#4426). A native
+          # sleep needs no binary in the image.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
+      volumes:
+        - name: idp-signing-keks
+          secret:
+            secretName: codewire-idp-signing-keks
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-idp
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "codewire.labels" "idp" | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "codewire.selectorLabels" "idp" | nindent 4 }}
+  ports:
+    - port: 8091
+      targetPort: 8091
+      name: http
+---
+# The IdP's API (8091) admits only the public edge and the dashboard
+# (#3297). Sign-up counts its per-address limit under the last
+# X-Forwarded-For hop, which the edge writes from the client's address and the
+# dashboard forwards from its own request; no other Pod, Sandboxes included,
+# can reach the API to write a hop of its choosing. Every other service reaches
+# the issuer, its discovery document and its keys through the edge.
+#
+# Metrics (8092) admit any source: Prometheus runs on host networking, which
+# Cilium sees as a node and no NetworkPolicy peer can name (#4546), and the
+# port serves nothing but /metrics.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: codewire-idp
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "codewire.selectorLabels" "idp" | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- include "codewire.edgePeers" $ | nindent 8 }}
+        {{- include "codewire.podPeer" (dict "labels" $.Values.dashboard.selectorLabels "from" "dashboard.selectorLabels") | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 8091
+    - ports:
+        - protocol: TCP
+          port: 8092
+{{- end }}
+{{- end }}

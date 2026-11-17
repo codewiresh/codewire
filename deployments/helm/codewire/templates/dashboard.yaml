@@ -110,18 +110,6 @@ spec:
       name: {{ . }}
       {{- end }}
 {{- if .networkPolicy.enabled }}
-{{- /* `required` passes an empty list, which would admit every peer, and an
-entry whose selectors are empty matches every Pod or namespace. Each entry
-must name the edge by a non-empty selector or an ipBlock. */}}
-{{- if not .networkPolicy.from }}
-{{- fail "dashboard.networkPolicy.from must name the public edge" }}
-{{- end }}
-{{- range .networkPolicy.from }}
-{{- $selects := or (dig "namespaceSelector" "matchLabels" nil .) (dig "namespaceSelector" "matchExpressions" nil .) (dig "podSelector" "matchLabels" nil .) (dig "podSelector" "matchExpressions" nil .) (dig "ipBlock" "cidr" nil .) }}
-{{- if not $selects }}
-{{- fail (printf "dashboard.networkPolicy.from entry %s selects every peer; name the public edge" (toJson .)) }}
-{{- end }}
-{{- end }}
 ---
 # The dashboard admits only the public edge (#3297). On sign-up it forwards
 # the client address it received, the last X-Forwarded-For hop the edge
@@ -141,7 +129,7 @@ spec:
     - Ingress
   ingress:
     - from:
-        {{- toYaml .networkPolicy.from | nindent 8 }}
+        {{- include "codewire.edgePeers" $ | nindent 8 }}
       ports:
         - protocol: TCP
           port: 5173

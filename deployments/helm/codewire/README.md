@@ -7,6 +7,7 @@ One Helm chart for the whole Codewire platform (#2908). It is being built one co
 - The release namespace.
 - `codewire-config` and `codewire-dashboard-public-config`, named by a hash of their data as Kustomize's generator names them, so a configuration change rolls the services that read it.
 - The dashboard: its Deployment, Service and NetworkPolicy.
+- The coordinator, the IdP and billing: their Deployments and Services, and the IdP's NetworkPolicy.
 
 ## Values
 
@@ -14,7 +15,9 @@ One Helm chart for the whole Codewire platform (#2908). It is being built one co
 - `values-local-kind.yaml` is the local Kind cluster's values. `values-local-kind-static.yaml` layers the static Kind cluster's differences on top of it. Render both in the namespace `default`.
 - Dev's and Production's values will live in codewire/deploy, where their overlays are.
 
-An environment's values file sets only what differs from the defaults, and uses `null` to remove a default it does not have. Every `config` value is a string, and the render refuses any other type.
+An environment's values file sets only what differs from the defaults, and uses `null` to remove a default it does not have. A service's `env` is a whole list, and an environment that differs replaces it. Every `config` value is a string, and the render refuses any other type.
+
+`edge.peers` names the cluster's public edge once, for every network policy that admits it. The render refuses an empty list, and any entry whose selectors are empty, since either would admit every peer.
 
 ## How it is checked
 

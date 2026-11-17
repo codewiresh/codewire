@@ -11,7 +11,7 @@ once in each render. The only exceptions are listed in ALLOWED, each with its
 reason.
 
 The environments are the two Kind overlays, and Production's source tree
-(base and dashboard composed, as Production's overlay builds on them) with the
+(its directories composed, as Production's overlay builds on them) with the
 values in fixtures/helm-chart-values-source.yaml. Dev and Production
 themselves are checked in codewire/deploy, where their overlays live.
 
@@ -40,13 +40,23 @@ SOURCE_VALUES = ROOT / "scripts/ci/tests/fixtures/helm-chart-values-source.yaml"
 GENERATED = {"codewire-config", "codewire-dashboard-public-config"}
 GENERATED_SUFFIX = re.compile(r"-[a-z0-9]{10}$")
 
+# The Rust services, alike in every environment.
+_SERVICES = {
+    ("Deployment", "codewire-coordinator"),
+    ("Service", "codewire-coordinator"),
+    ("Deployment", "codewire-idp"),
+    ("Service", "codewire-idp"),
+    ("NetworkPolicy", "codewire-idp"),
+    ("Deployment", "codewire-billing"),
+    ("Service", "codewire-billing"),
+}
 _KIND = {
     ("Namespace", "default"),
     ("ConfigMap", "codewire-config"),
     ("ConfigMap", "codewire-dashboard-public-config"),
     ("Deployment", "codewire-dashboard"),
     ("Service", "dashboard"),
-}
+} | _SERVICES
 # What the chart renders so far, by kind and name, per environment.
 MIGRATED: dict[str, set[tuple[str, str]]] = {
     "source": {
@@ -56,7 +66,8 @@ MIGRATED: dict[str, set[tuple[str, str]]] = {
         ("Deployment", "codewire-dashboard"),
         ("Service", "codewire-dashboard"),
         ("NetworkPolicy", "codewire-dashboard"),
-    },
+    }
+    | _SERVICES,
     "local-kind": _KIND,
     "local-kind-static": _KIND,
 }
@@ -74,7 +85,11 @@ ALLOWED: dict[tuple[str, str], str] = {
 # Each environment: its namespace, the Kustomize directories it composes, and
 # the chart's values files for it, in order.
 ENVIRONMENTS: dict[str, tuple[str, list[Path], list[Path]]] = {
-    "source": ("prod", [K8S / "base", K8S / "dashboard"], [SOURCE_VALUES]),
+    "source": (
+        "prod",
+        [K8S / name for name in ("base", "dashboard", "coordinator", "idp", "billing")],
+        [SOURCE_VALUES],
+    ),
     "local-kind": (
         "default",
         [K8S / "overlays/local-kind"],
@@ -235,17 +250,35 @@ class ChartEquivalence(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "codewire-config: PORT must be a string"):
             helm("prod", [SOURCE_VALUES], ("--set", "config.PORT=8080"))
 
-    def test_an_edge_must_be_named_for_the_dashboard_policy(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "dashboard.networkPolicy.from must name the public edge"):
-            helm("default", [CHART / "values-local-kind.yaml"], ("--set", "dashboard.networkPolicy.enabled=true"))
+    def test_the_edge_must_be_named(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "edge.peers must name the public edge"):
+            helm("prod", [SOURCE_VALUES], ("--set", "edge.peers=null"))
 
     def test_an_edge_entry_that_selects_every_peer_is_refused(self) -> None:
         for entry in ({}, {"podSelector": {}}, {"namespaceSelector": {"matchLabels": {}}}):
             with self.subTest(entry=entry), tempfile.TemporaryDirectory() as scratch:
                 values = Path(scratch, "values.yaml")
-                values.write_text(yaml.safe_dump({"dashboard": {"networkPolicy": {"from": [entry]}}}))
+                values.write_text(yaml.safe_dump({"edge": {"peers": [entry]}}))
                 with self.assertRaisesRegex(RuntimeError, "selects every peer; name the public edge"):
                     helm("prod", [SOURCE_VALUES, values])
+
+    def test_a_pod_peer_that_selects_every_pod_is_refused(self) -> None:
+        # Each policy peer the chart builds from labels, by its value's path
+        # and default keys. Helm merges a values file's {} into the defaults,
+        # so a selector is emptied by null, or by nulling each default key.
+        peers = {"dashboard.selectorLabels": ("app.kubernetes.io/component", "app.kubernetes.io/name")}
+        for path, keys in peers.items():
+            for labels in (None, dict.fromkeys(keys)):
+                with self.subTest(path=path, labels=labels), tempfile.TemporaryDirectory() as scratch:
+                    values: dict[str, Any] = {}
+                    *parents, leaf = path.split(".")
+                    node = values
+                    for parent in parents:
+                        node = node.setdefault(parent, {})
+                    node[leaf] = labels
+                    Path(scratch, "values.yaml").write_text(yaml.safe_dump(values))
+                    with self.assertRaisesRegex(RuntimeError, f"{re.escape(path)} is empty: a peer selecting no labels admits every Pod"):
+                        helm("prod", [SOURCE_VALUES, Path(scratch, "values.yaml")])
 
 
 if __name__ == "__main__":

@@ -41,7 +41,9 @@ RENDER_SETS = {
         "images.dashboard.tag=test",
         "dashboard.origins.public=https://codewire.test",
         "dashboard.origins.browserApi=https://codewire.test",
-        "dashboard.networkPolicy.enabled=false",
+        "images.services.repository=registry.test/codewire/services",
+        "images.services.tag=test",
+        "edge.peers[0].ipBlock.cidr=192.0.2.0/24",
     ),
 }
 GUARDED_CORE_KINDS = {"Namespace", "PersistentVolumeClaim"}

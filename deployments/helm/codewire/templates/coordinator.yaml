@@ -1,0 +1,71 @@
+{{- with .Values.coordinator }}
+{{- if .enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codewire-coordinator
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "codewire.labels" "coordinator" | nindent 4 }}
+spec:
+  replicas: {{ .replicas }}
+  strategy:
+    {{- toYaml .strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "codewire.selectorLabels" "coordinator" | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "codewire.selectorLabels" "coordinator" | nindent 8 }}
+    spec:
+      {{- include "codewire.servicePod" (dict "root" $ "service" .) | nindent 6 }}
+      # Coordinate WebSockets are long-lived; give clients time to reconnect
+      # elsewhere before the pod goes away.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: coordinator
+          # Runs from the shared Rust services image; command selects the
+          # coordinator binary.
+          command: ["/codewire-coordinator"]
+          {{- include "codewire.serviceContainer" (dict "root" $ "service" .) | nindent 10 }}
+          ports:
+            - containerPort: 8090
+              name: http
+            # DERP's client admission lookup (#2844). No ingress or route
+            # reaches it; infra's CiliumNetworkPolicy admits only DERP.
+            - containerPort: 8097
+              name: derp-verify
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-coordinator
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "codewire.labels" "coordinator" | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "codewire.selectorLabels" "coordinator" | nindent 4 }}
+  ports:
+    - port: 8090
+      targetPort: 8090
+      name: http
+    - port: 8097
+      targetPort: 8097
+      name: derp-verify
+{{- end }}
+{{- end }}
