@@ -1,0 +1,174 @@
+# The Codewire chart's defaults (#2908). They are production's shape with no
+# site host, image or secret in them: an environment's values file sets those,
+# and says where it differs, with null for a key it does not have.
+#
+# The chart is being built one component at a time while the Kustomize trees
+# under deployments/k8s still deploy everything; each component it renders is
+# checked against them by scripts/ci/tests/test-deploy-helm-chart.py.
+
+# The release namespace as an object, as the Kustomize trees declare it.
+namespace:
+  create: true
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/managed-by: kustomize
+
+# Labels on the shared configuration and the namespace.
+sharedLabels:
+  app.kubernetes.io/name: codewire
+  app.kubernetes.io/part-of: codewire
+
+# codewire-config, which the services read with envFrom. Every value is a
+# string. Its name ends in a hash of its data, as Kustomize's generator names
+# it, so a change rolls every service that reads it.
+config:
+  PORT: "8080"
+  DERP_HOST: ""
+  STUN_HOST: ""
+  STUN_PORT: "3478"
+  PREVIEW_BASE_DOMAIN: ""
+  LIFECYCLE_ORCHESTRATOR: "temporal-primary"
+  ENVIRONMENT_ORCHESTRATOR: "temporal-primary"
+  TEMPORAL_HOST_PORT: "temporal-frontend.temporal-system.svc.cluster.local:7233"
+  TEMPORAL_NAMESPACE: "default"
+  TEMPORAL_TASK_QUEUE: "codewire-lifecycle"
+  TEMPORAL_UI_URL: ""
+  ENVIRONMENT: "production"
+  # SES sender selection is public configuration. The matching AWS sender
+  # credential projection supplies CODEWIRE_SES_ENABLED separately to only the
+  # IDP and billing workloads; without that marker, the temporary shared Resend
+  # rollback credential remains the selected sender.
+  # The From line people see: Codewire's name on the verified address (#4553).
+  CODEWIRE_SES_FROM: ""
+  CODEWIRE_SES_REGION: "eu-west-1"
+  TERRAFORM_DIR: "/terraform"
+  NAMESPACE_PREFIX: "prod-tenant"
+  BAO_ADDR: ""
+  OPENBAO_KUBERNETES_API_AUDIENCE: ""
+  TENANT_SECRET_BAO_AUTH_MOUNT: "kubernetes-codewire"
+  TENANT_SECRET_BAO_ROLE: ""
+  TENANT_SECRET_BAO_AUDIENCE: ""
+  TENANT_SECRET_BAO_TRANSIT_MOUNT: "transit"
+  TENANT_SECRET_BAO_TRANSIT_KEY: "tenant-dek"
+  TENANT_SECRET_BAO_EXPECTED_CLUSTER_ID: ""
+  SANDBOX_RUNTIME_PROFILE: "commodity"
+  CODEWIRE_UDP_RELAY_ADVERTISE_ADDRS: ""
+  CODEWIRE_UDP_RELAY_ALLOCATOR_URL: ""
+  CODEWIRE_UDP_RELAY_BIND_ADDRS: ""
+  CODEWIRE_RUNTIME_TRANSPORT_ZONES_JSON: ""
+  CODEWIRE_DIRECT_UDP_LB_ENABLED: "false"
+  CODEWIRE_DIRECT_UDP_LB_IP: ""
+  CODEWIRE_DIRECT_UDP_LB_PORT_START: "32000"
+  CODEWIRE_DIRECT_UDP_LB_PORT_END: "60999"
+  CODEWIRE_DIRECT_UDP_LB_CLASS: "io.cilium/l2-announcer"
+  CODEWIRE_DIRECT_UDP_LB_SHARING_KEY: "codewire-direct-udp"
+  CODEWIRE_DIRECT_UDP_TRANSPORT_ZONE: ""
+  SANDBOX_DOCKER_MODE: "profile-default"
+  # Shared warm pools (Program #2238 C4): comma-separated exact shapes,
+  # <cpu>m/<memory>Mi/<disk>Gi=<members>. Empty keeps the reconciler and create
+  # routing inert; each overlay that runs pools sets its own shapes.
+  SANDBOX_WARM_POOL_SHAPES: ""
+  # StorageClass for commodity workspace volumes. Required, with no default:
+  # orchestration refuses to start while it is empty, unless the runtime profile
+  # is confidential (docs/CONFIGURATION.md). Each overlay sets its own.
+  SANDBOX_WORKSPACE_STORAGE_CLASS: ""
+  # VolumeSnapshotClass of hosted disk snapshots. Empty refuses them; each overlay
+  # that offers them sets its own.
+  SANDBOX_VOLUME_SNAPSHOT_CLASS: ""
+  SANDBOX_KATA_AGENT_POLICY_ENABLED: "false"
+  SANDBOX_KATA_COCO_INIT_DATA_ENABLED: "false"
+  SANDBOX_KATA_COCO_KBS_URL: ""
+  SANDBOX_KATA_COCO_IMAGE_REGISTRY_AUTH_URI: ""
+  SANDBOX_KATA_COCO_TEST_RESOURCE_URI: ""
+  SANDBOX_KATA_COCO_TEST_RESOURCE_PATH: ""
+  # Each overlay names the repository its workspace image is pulled from;
+  # orchestration refuses to start without one (docs/CONFIGURATION.md).
+  CODEWIRE_WORKSPACE_IMAGE_REPOSITORY: ""
+  BILLING_CONTROLLER_ENABLED: "true"
+  BILLING_CONTROLLER_NAMESPACE: ""
+  BILLING_CONTROLLER_REQUEUE_SECONDS: "60"
+  BILLING_SESSION_LEDGER_CANONICAL: "true"
+  SANDBOX_CONFIDENTIAL_STORAGE_ENABLED: "false"
+  # Organization network policies (#4000). Off until cw-egress enforces them
+  # (docs/CONFIGURATION.md).
+  CODEWIRE_PLATFORM_NETWORK_POLICIES_ENABLED: "false"
+  CONFIDENTIAL_STORAGE_BAO_ADDR: ""
+  CONFIDENTIAL_STORAGE_BAO_AUTH_MOUNT: "kubernetes-codewire"
+  CONFIDENTIAL_STORAGE_BAO_ROLE: ""
+  CONFIDENTIAL_STORAGE_BAO_AUDIENCE: ""
+  CONFIDENTIAL_STORAGE_BAO_KV_MOUNT: ""
+  CONFIDENTIAL_STORAGE_BAO_EXPECTED_CLUSTER_ID: ""
+  CONFIDENTIAL_STORAGE_KBS_URL: ""
+  CONFIDENTIAL_STORAGE_KBS_CA_PATH: ""
+  CONFIDENTIAL_STORAGE_KBS_ADMIN_TOKEN_FILE: "/var/run/secrets/codewire-confidential-storage/kbs-admin-token"
+
+# codewire-dashboard-public-config: the public identifiers only the dashboard
+# reads. It is named by a hash of its data, as codewire-config is.
+dashboardPublicConfig:
+  TURNSTILE_SITE_KEY: ""
+  # Public App identifiers only; the client secret remains solely in
+  # credential-service's dedicated authorization Secret.
+  GITHUB_APP_SLUG: ""
+  GITHUB_APP_CLIENT_ID: ""
+
+# Image families. A digest, when set, pins the image and replaces the tag.
+images:
+  dashboard:
+    repository: ""
+    tag: ""
+    digest: ""
+
+dashboard:
+  enabled: true
+  replicas: 2
+  # The Pods' labels, which the Deployment, Service and NetworkPolicy select.
+  selectorLabels:
+    app.kubernetes.io/component: dashboard
+    app.kubernetes.io/name: codewire
+  # Labels on the Deployment and the Service themselves.
+  labels:
+    app.kubernetes.io/component: dashboard
+    app.kubernetes.io/name: codewire
+  origins:
+    # The site's public origin, and the one browsers call the API on. Required.
+    public: ""
+    browserApi: ""
+    api: http://codewire-orchestration:8084
+    credential: http://codewire-credential-service:8086
+    identity: http://codewire-idp:8091
+    billing: http://codewire-billing:8081
+  portName: http
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+  lifecycle:
+    preStop:
+      sleep:
+        seconds: 10
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  imagePullSecrets: []
+  terminationGracePeriodSeconds: 40
+  service:
+    name: codewire-dashboard
+    type: ClusterIP
+    port: 80
+    portName: http
+  networkPolicy:
+    enabled: true
+    # The peers allowed to reach the dashboard: the cluster's public edge.
+    from: []

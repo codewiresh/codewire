@@ -1,0 +1,105 @@
+# Values for the local Kind cluster (`make kind-*`): the chart's equivalent of
+# deployments/k8s/overlays/local-kind, checked against it by
+# scripts/ci/tests/test-deploy-helm-chart.py. Render it in the namespace
+# `default`. Nothing in it is a real credential.
+
+# The keys deployments/k8s/overlays/local-kind/configmap-patch.yaml sets over
+# the defaults.
+config:
+  PORT: "8080"
+  DATABASE_URL: "postgres://codewire:codewire@postgres:5432/codewire?sslmode=disable"
+  LIFECYCLE_ORCHESTRATOR: "temporal-primary"
+  ENVIRONMENT_ORCHESTRATOR: "temporal-primary"
+  TEMPORAL_HOST_PORT: "temporal-frontend.temporal-system.svc.cluster.local:7233"
+  TEMPORAL_NAMESPACE: "default"
+  TEMPORAL_TASK_QUEUE: "codewire-lifecycle"
+  TEMPORAL_UI_URL: "http://temporal-web.temporal-system.svc.cluster.local:8080"
+  DERP_HOST: "127.0.0.1"
+  DERP_PORT: "8443"
+  STUN_HOST: ""
+  STUN_PORT: "3478"
+  ENVIRONMENT: "local"
+  CODEWIRE_SES_FROM: ""
+  CODEWIRE_SES_REGION: ""
+  FRONTEND_URL: "http://127.0.0.1:8080"
+  PUBLIC_OIDC_ISSUER_URL: "http://127.0.0.1:8080"
+  SANDBOX_RUNTIME_PROFILE: "none"
+  SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME: "true"
+  SANDBOX_DOCKER_MODE: "local-dind-direct"
+  SANDBOX_NETWORK_POLICY_MANAGEMENT: "Unmanaged"
+  # Kind's built-in local-path StorageClass. The setting has no default
+  # (docs/CONFIGURATION.md).
+  SANDBOX_WORKSPACE_STORAGE_CLASS: "standard"
+  # No shared warm pool here (Program #2238 C4): pool templates admit no
+  # ingress before adoption, so they need Managed network policy, and this
+  # overlay's daemon image is a local tag without a registry digest. The
+  # retained harness cluster (tests/e2e/kind, make kind-up) runs pools.
+  SANDBOX_WARM_POOL_SHAPES: ""
+  CODEWIRE_API_URL: "http://codewire-orchestration.default.svc.cluster.local:8084"
+  CODEWIRE_COORDINATOR_URL: "http://codewire-coordinator.default.svc.cluster.local:8090"
+  NAMESPACE_PREFIX: "local-tenant"
+  CODEWIRE_KIND_TENANT_SECRET_TEST_PROVIDER: "true"
+  # Organization network policies (#4000): Kind tests the store and `cw --cloud policy`.
+  # Nothing enforces them until cw-egress does; Production keeps the switch off.
+  CODEWIRE_PLATFORM_NETWORK_POLICIES_ENABLED: "true"
+  # Local clusters pull the workspace image from its public mirror
+  # (docs/CONFIGURATION.md).
+  CODEWIRE_WORKSPACE_IMAGE_REPOSITORY: "ghcr.io/codewiresh/workspace"
+  SANDBOX_NAMESPACE: "dev-sandboxes"
+  BILLING_CONTROLLER_ENABLED: "true"
+  BILLING_CONTROLLER_NAMESPACE: "dev-sandboxes"
+  BILLING_CONTROLLER_REQUEUE_SECONDS: "60"
+  BILLING_SESSION_LEDGER_CANONICAL: "true"
+  SANDBOX_IMAGE_PULL_SECRET: ""
+  SANDBOX_DAEMON_IMAGE: "git.example.com/codewire/daemon:local"
+  SANDBOX_DIND_ENABLED: "true"
+  PREVIEW_BASE_DOMAIN: "codewire-dev.local"
+  SKIP_2FA_SETUP: "true"
+  DERP_MESH_KEY: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+dashboardPublicConfig:
+  # The non-promotable Kind credential fixture provides this fixed synthetic
+  # App itself.
+  GITHUB_APP_SLUG: codewire-synthetic
+  GITHUB_APP_CLIENT_ID: Iv1.kindsynthetic
+
+images:
+  dashboard:
+    repository: codewire-dashboard
+    tag: local
+
+# Kind's dashboard is a smaller, older shape than production's: its own
+# labels, numbered probe ports, no resources, preStop delay or pull secret, a
+# Service named `dashboard` on 5173, and no NetworkPolicy. Each null removes a
+# default it does not have.
+dashboard:
+  replicas: 1
+  selectorLabels:
+    app.kubernetes.io/component: null
+    app.kubernetes.io/name: null
+    app: codewire-dashboard
+  labels: null
+  origins:
+    public: http://127.0.0.1:8080
+    browserApi: http://127.0.0.1:8080
+  portName: null
+  livenessProbe:
+    httpGet:
+      port: 5173
+    initialDelaySeconds: null
+    periodSeconds: null
+  readinessProbe:
+    httpGet:
+      port: 5173
+    initialDelaySeconds: null
+    periodSeconds: null
+  lifecycle: null
+  resources: null
+  terminationGracePeriodSeconds: null
+  service:
+    name: dashboard
+    type: null
+    port: 5173
+    portName: null
+  networkPolicy:
+    enabled: false

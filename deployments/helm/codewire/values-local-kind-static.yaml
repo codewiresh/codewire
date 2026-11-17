@@ -1,0 +1,5 @@
+# Values for the static Kind cluster, layered on values-local-kind.yaml: the
+# chart's equivalent of deployments/k8s/overlays/local-kind-static. It keeps
+# organization network policies off, as the defaults do.
+config:
+  CODEWIRE_PLATFORM_NETWORK_POLICIES_ENABLED: "false"

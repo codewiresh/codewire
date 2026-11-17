@@ -856,6 +856,13 @@ run_paths_case dev_delivery_trigger push refs/heads/main false \
   'deploy policy security security_js' \
   scripts/ci/deploy/rerun-dev-publish.py \
   scripts/ci/tests/test-rerun-dev-publish.py
+# The Codewire chart, its equivalence with the Kustomize trees and that
+# check's fixture run in Deploy (#2908).
+run_paths_case helm_chart_equivalence pull_request refs/pull/2908/head false \
+  'deploy policy security security_js' \
+  deployments/helm/codewire/values.yaml \
+  scripts/ci/tests/test-deploy-helm-chart.py \
+  scripts/ci/tests/fixtures/helm-chart-values-source.yaml
 # The parsed structure of ci.yaml is a Policy CI-script test.
 run_paths_case ci_workflow_structure pull_request refs/pull/3660/head false \
   'policy security security_js' scripts/ci/tests/test-ci-workflow-structure.py

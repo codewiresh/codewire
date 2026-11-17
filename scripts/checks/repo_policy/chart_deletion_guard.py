@@ -25,6 +25,9 @@ HOSTED_VALUES = {
         "deployments/k8s/mesh-dev/values.yaml",
         "deployments/k8s/mesh-production/values.yaml",
     ),
+    # Nothing deploys the Codewire chart yet; Dev's and Production's values
+    # for it will live in codewire/deploy (#2908).
+    "deployments/helm/codewire": (),
 }
 # The defaults leave some required values empty; these fill them for a render.
 RENDER_SETS = {
@@ -32,6 +35,13 @@ RENDER_SETS = {
         "mesh.baseURL=https://mesh.test",
         "image.repository=registry.test/codewire/mesh",
         "image.tag=test",
+    ),
+    "deployments/helm/codewire": (
+        "images.dashboard.repository=registry.test/codewire/dashboard",
+        "images.dashboard.tag=test",
+        "dashboard.origins.public=https://codewire.test",
+        "dashboard.origins.browserApi=https://codewire.test",
+        "dashboard.networkPolicy.enabled=false",
     ),
 }
 GUARDED_CORE_KINDS = {"Namespace", "PersistentVolumeClaim"}

@@ -1,0 +1,27 @@
+# The Codewire chart
+
+One Helm chart for the whole Codewire platform (#2908). It is being built one component at a time. Until it is complete, the Kustomize trees under `deployments/k8s` deploy everything, and nothing deploys this chart.
+
+## What it renders so far
+
+- The release namespace.
+- `codewire-config` and `codewire-dashboard-public-config`, named by a hash of their data as Kustomize's generator names them, so a configuration change rolls the services that read it.
+- The dashboard: its Deployment, Service and NetworkPolicy.
+
+## Values
+
+- `values.yaml` holds the defaults: production's shape, with no site host, image or secret.
+- `values-local-kind.yaml` is the local Kind cluster's values. `values-local-kind-static.yaml` layers the static Kind cluster's differences on top of it. Render both in the namespace `default`.
+- Dev's and Production's values will live in codewire/deploy, where their overlays are.
+
+An environment's values file sets only what differs from the defaults, and uses `null` to remove a default it does not have. Every `config` value is a string, and the render refuses any other type.
+
+## How it is checked
+
+`scripts/ci/tests/test-deploy-helm-chart.py` renders each environment with both Helm and Kustomize, and requires every object the chart has taken over to be the same in both. It runs in CI's Deploy verification. A component joins the chart only together with its entry in that check.
+
+```sh
+helm template codewire deployments/helm/codewire --namespace default \
+  -f deployments/helm/codewire/values-local-kind.yaml
+python3 -B scripts/ci/tests/test-deploy-helm-chart.py
+```

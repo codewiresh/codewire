@@ -2328,6 +2328,13 @@ if [ "$event_selected" = false ]; then
         select_token policy
         recognized=true
         ;;
+      # The chart's equivalence with the Kustomize trees (#2908) runs in
+      # Deploy, with the fixture it renders Production's source tree from.
+      scripts/ci/tests/test-deploy-helm-chart.py|\
+      scripts/ci/tests/fixtures/helm-chart-values-source.yaml)
+        select_token deploy
+        recognized=true
+        ;;
       Dockerfile|docker-bake.hcl|apps/*/Dockerfile*|deployments/docker/*|\
       scripts/ci/images/build-kind-images.sh|\
       scripts/ci/images/run-rust-build.sh|scripts/ci/tests/test-run-rust-build.sh)

@@ -1,0 +1,150 @@
+{{- with .Values.dashboard }}
+{{- if .enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codewire-dashboard
+  namespace: {{ $.Release.Namespace }}
+  {{- with .labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .replicas }}
+  selector:
+    matchLabels:
+      {{- toYaml .selectorLabels | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- toYaml .selectorLabels | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .terminationGracePeriodSeconds }}
+      # The preStop delay, then 30 s for requests already in flight (#4426).
+      terminationGracePeriodSeconds: {{ . }}
+      {{- end }}
+      {{- with .imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dashboard
+          image: {{ include "codewire.image" (dict "family" "dashboard" "images" $.Values.images) }}
+          env:
+            - name: CODEWIRE_PUBLIC_ORIGIN
+              value: {{ required "dashboard.origins.public is required" .origins.public | quote }}
+            - name: CODEWIRE_API_ORIGIN
+              value: {{ .origins.api | quote }}
+            - name: CODEWIRE_CREDENTIAL_ORIGIN
+              value: {{ .origins.credential | quote }}
+            - name: CODEWIRE_IDENTITY_ORIGIN
+              value: {{ .origins.identity | quote }}
+            - name: CODEWIRE_BILLING_ORIGIN
+              value: {{ .origins.billing | quote }}
+            - name: CODEWIRE_BROWSER_API_ORIGIN
+              value: {{ required "dashboard.origins.browserApi is required" .origins.browserApi | quote }}
+            # The public widget key comes from the dedicated generated
+            # ConfigMap. Its optional empty state leaves access requests
+            # fail-closed until the separate rollout supplies both key and secret.
+            {{- range list "TURNSTILE_SITE_KEY" "GITHUB_APP_SLUG" "GITHUB_APP_CLIENT_ID" }}
+            - name: {{ . }}
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "codewire.dashboardPublicConfigName" $ }}
+                  key: {{ . }}
+                  optional: true
+            {{- end }}
+          ports:
+            - containerPort: 5173
+              {{- with .portName }}
+              name: {{ . }}
+              {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          {{- with .resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .lifecycle }}
+          # Keep serving while the gateway drops this Pod's endpoint, so SIGTERM
+          # never closes the listener under a routed request (#4426). A native
+          # sleep needs no binary in the image.
+          lifecycle:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            {{- toYaml .livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .readinessProbe | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .service.name }}
+  namespace: {{ $.Release.Namespace }}
+  {{- with .labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .service.type }}
+  type: {{ . }}
+  {{- end }}
+  selector:
+    {{- toYaml .selectorLabels | nindent 4 }}
+  ports:
+    - port: {{ .service.port }}
+      targetPort: 5173
+      {{- with .service.portName }}
+      name: {{ . }}
+      {{- end }}
+{{- if .networkPolicy.enabled }}
+{{- /* `required` passes an empty list, which would admit every peer, and an
+entry whose selectors are empty matches every Pod or namespace. Each entry
+must name the edge by a non-empty selector or an ipBlock. */}}
+{{- if not .networkPolicy.from }}
+{{- fail "dashboard.networkPolicy.from must name the public edge" }}
+{{- end }}
+{{- range .networkPolicy.from }}
+{{- $selects := or (dig "namespaceSelector" "matchLabels" nil .) (dig "namespaceSelector" "matchExpressions" nil .) (dig "podSelector" "matchLabels" nil .) (dig "podSelector" "matchExpressions" nil .) (dig "ipBlock" "cidr" nil .) }}
+{{- if not $selects }}
+{{- fail (printf "dashboard.networkPolicy.from entry %s selects every peer; name the public edge" (toJson .)) }}
+{{- end }}
+{{- end }}
+---
+# The dashboard admits only the public edge (#3297). On sign-up it forwards
+# the client address it received, the last X-Forwarded-For hop the edge
+# wrote, to the IdP's per-address limit; no other Pod, Sandboxes included,
+# may call it and choose that address. It serves no metrics and no other
+# service calls it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: codewire-dashboard
+  namespace: {{ $.Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml .selectorLabels | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- toYaml .networkPolicy.from | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 5173
+{{- end }}
+{{- end }}
+{{- end }}

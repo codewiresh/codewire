@@ -1,0 +1,8 @@
+apiVersion: v2
+name: codewire
+description: The whole Codewire platform as one chart, replacing the Kustomize trees one component at a time (#2908)
+type: application
+version: 0.1.0
+home: https://codewire.sh
+sources:
+  - https://github.com/codewiresh/codewire

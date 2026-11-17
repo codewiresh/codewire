@@ -1825,6 +1825,8 @@ run_deploy() {
   done
 
   install_helm
+  # The Codewire chart renders what the Kustomize trees render (#2908).
+  python3 -B scripts/ci/tests/test-deploy-helm-chart.py
   scripts/ci/tests/test-deploy-mesh-ingress-protocol.sh
   local default_mesh_render
   default_mesh_render="$(helm template test apps/cli/charts/codewire-mesh \
