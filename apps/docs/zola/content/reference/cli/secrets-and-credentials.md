@@ -1,7 +1,7 @@
 ---
 title: Secrets and credentials
 description: cw secrets for application secrets and cw credentials for provider credentials and profiles.
-updated: 2026-11-15
+updated: 2026-11-17
 weight: 5
 aliases: ["/cli/secrets-and-credentials"]
 ---
@@ -124,9 +124,17 @@ cw credentials --cloud list [--output json]            # alias: ls
 cw credentials --cloud get NAME|id:UUID
 cw credentials --cloud rename NAME NEW_NAME
 cw credentials --cloud rotate NAME [--expires-at UNIX_SECONDS]   # replace an API key or token; sets it Active
-cw credentials --cloud revoke NAME
-cw credentials --cloud delete NAME [--yes]             # on the platform, revoke first
+cw credentials --cloud revoke NAME [-y]               # asks first at a terminal
+cw credentials --cloud delete NAME [-y]               # revokes an active credential first
 ```
+
+`revoke` and `delete` name the credential and ask once; anything but `y`
+keeps it. `-y` (`--yes`) goes ahead without asking. Without a terminal, or with
+`--output json`, there is no one to ask, so they refuse unless `--yes` is
+given: a script that revokes or deletes a credential passes `--yes`. A
+credential a profile selects isn't deleted; `cw` prints the `unset` that frees
+it. Afterwards `cw` says what the provider still holds, and gives the link to
+revoke it there where Codewire can't.
 
 ### Profiles
 
@@ -136,7 +144,7 @@ cw credentials --cloud --profile NAME unset SLOT
 cw credentials --cloud --profile NAME get [--revision N]
 cw credentials --cloud --profile NAME list
 cw credentials --cloud --profile NAME generate ssh --name NAME    # generate and set in one step
-cw credentials --cloud --profile NAME delete [--yes]
+cw credentials --cloud --profile NAME delete [-y]         # asks first at a terminal
 cw credentials --local --profile NAME revisions                   # local storage
 cw credentials --cloud profiles list                               # alias: ls; the default first
 cw credentials --cloud profiles default NAME                       # make NAME your default

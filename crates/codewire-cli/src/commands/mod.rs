@@ -514,7 +514,7 @@ pub(crate) enum CredentialsCommand {
     #[command(about = "Replace a credential's key or token")]
     Rotate(CredentialRotateArgs),
     #[command(about = "Revoke a credential immediately")]
-    Revoke(CredentialSelectorArgs),
+    Revoke(credentials::confirm::CredentialRevokeArgs),
     #[command(about = "Delete a credential, or the explicitly selected profile")]
     Delete(CredentialDeleteArgs),
     #[command(about = "Set one provider identity in --profile; creates the profile on first set")]
@@ -630,7 +630,7 @@ pub(crate) struct CredentialDeleteArgs {
         help = "Credential name, name:<name>, or id:<canonical-uuid>"
     )]
     pub(crate) credential: Option<String>,
-    #[arg(long)]
+    #[arg(short, long, help = "Delete without asking; needed without a terminal")]
     pub(crate) yes: bool,
 }
 

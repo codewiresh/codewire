@@ -92,21 +92,7 @@ async fn handle_with_receipt(
             report_live_github_status(client, std::slice::from_ref(&credential), args.output).await;
             Ok(())
         }
-        CredentialsCommand::Revoke(args) => {
-            let current = resolve(client, &args.credential).await?;
-            let response = client.revoke_credential(rpc::RevokeCredentialRequest {
-                credential_id: current.id,
-                expected_revocation_generation: current.revocation_generation,
-                ..Default::default()
-            }).await.context("revoke exact platform credential revision; inspect metadata before retrying an uncertain result")?;
-            print(
-                &[response
-                    .credential
-                    .into_option()
-                    .context("platform omitted revoked metadata")?],
-                args.output,
-            )
-        }
+        CredentialsCommand::Revoke(args) => revoke_credential(client, args).await,
         CredentialsCommand::Delete(args) => {
             let current = resolve(
                 client,
@@ -115,32 +101,7 @@ async fn handle_with_receipt(
                     .context("delete requires a credential selector")?,
             )
             .await?;
-            if current.status != rpc::CredentialStatus::Revoked {
-                anyhow::bail!("revoke the platform credential before deleting its stored record");
-            }
-            if !args.yes
-                && !prompt_confirm_default_no(&format!(
-                    "Delete platform credential {:?}?",
-                    current.name
-                ))?
-            {
-                eprintln!("Canceled.");
-                return Ok(());
-            }
-            let token = is_subscription_token(&current);
-            client.delete_credential(rpc::DeleteCredentialRequest {
-                credential_id: current.id,
-                expected_revocation_generation: current.revocation_generation,
-                ..Default::default()
-            }).await.context("delete exact revoked platform credential revision; inspect metadata before retrying an uncertain result")?;
-            eprintln!(
-                "{}",
-                super::credentials::output::deleted("cloud", &current.name)
-            );
-            if token {
-                eprintln!("{}", super::credential_input::connect::CLAUDE_TOKEN_DELETED);
-            }
-            Ok(())
+            delete_credential(client, current, args.yes).await
         }
         CredentialsCommand::Add(args) => {
             if args.provider.as_deref() == Some("ssh") {
@@ -822,6 +783,151 @@ async fn print_listing(
     )
 }
 
+/// `cw credentials --cloud delete` (#4717 C6), as the local delete: a
+/// credential a profile selects is refused with the exact `unset` that frees
+/// it; an active one is asked about once, revoked (which asks its provider
+/// too) and deleted; then the provider's answer is said.
+async fn delete_credential(
+    client: &CodewireClient,
+    current: rpc::Credential,
+    yes: bool,
+) -> anyhow::Result<()> {
+    use super::credentials::confirm;
+    use super::credentials::output::{self, ProviderAnswer, refusal};
+    let profiles = super::platform_profiles::list_profiles(client)
+        .await
+        .context("list cloud profiles before deleting a credential")?;
+    let selected = profiles.iter().find_map(|profile| {
+        profile
+            .entries
+            .iter()
+            .find(|entry| entry.credential_id == current.id)
+            .map(|entry| (profile.name.as_str(), entry.capability_slot.as_str()))
+    });
+    if let Some((profile, slot)) = selected {
+        anyhow::bail!(refusal::in_use("cloud", &current.name, profile, slot));
+    }
+    let active = current.status != rpc::CredentialStatus::Revoked;
+    let change = confirm::Change::Delete { active };
+    if !confirm::confirm("cloud", &current.name, change, yes, OutputFormat::Text)? {
+        return Ok(());
+    }
+    let (revision, answer) = if active {
+        // Codewire's own revoke failing stops here: nothing is deleted.
+        let revoked = client.revoke_credential(rpc::RevokeCredentialRequest {
+            credential_id: current.id.clone(),
+            expected_revocation_generation: current.revocation_generation,
+            ..Default::default()
+        }).await.context("revoke exact cloud credential revision; inspect metadata before retrying an uncertain result")?;
+        let revision = revoked
+            .credential
+            .as_option()
+            .context("the cloud omitted revoked metadata")?
+            .revocation_generation;
+        (
+            revision,
+            provider_answer(revoked.provider_revocation.as_option()),
+        )
+    } else {
+        (current.revocation_generation, ProviderAnswer::NotAsked)
+    };
+    let deleted = client
+        .delete_credential(rpc::DeleteCredentialRequest {
+            credential_id: current.id.clone(),
+            expected_revocation_generation: revision,
+            ..Default::default()
+        })
+        .await;
+    if active {
+        deleted.context(refusal::revoked_not_deleted("cloud", &current.name))?;
+    } else {
+        deleted.context("delete exact revoked cloud credential revision; inspect metadata before retrying an uncertain result")?;
+    }
+    output::print_done(&output::deleted("cloud", &current.name));
+    // It is deleted: a kind this cw cannot name only drops the line after.
+    if let Some(line) = output::CredentialView::cloud(&current)
+        .ok()
+        .and_then(|view| output::after_deleted(view.provider(), view.authentication_kind(), answer))
+    {
+        eprintln!("{line}");
+    }
+    Ok(())
+}
+
+/// `cw credentials --cloud revoke` (#4717 C6): asked once, then revoked at
+/// the observed revision, which asks its provider too; then what it did is
+/// said, in the sentences the delete uses.
+async fn revoke_credential(
+    client: &CodewireClient,
+    args: super::credentials::confirm::CredentialRevokeArgs,
+) -> anyhow::Result<()> {
+    use super::credentials::confirm;
+    use super::credentials::output;
+    let current = resolve(client, &args.credential).await?;
+    if !confirm::confirm(
+        "cloud",
+        &current.name,
+        confirm::Change::Revoke,
+        args.yes,
+        args.output,
+    )? {
+        return Ok(());
+    }
+    let response = client.revoke_credential(rpc::RevokeCredentialRequest {
+        credential_id: current.id.clone(),
+        expected_revocation_generation: current.revocation_generation,
+        ..Default::default()
+    }).await.context("revoke exact cloud credential revision; inspect metadata before retrying an uncertain result")?;
+    let answer = provider_answer(response.provider_revocation.as_option());
+    let revoked = response
+        .credential
+        .into_option()
+        .context("the cloud omitted revoked metadata")?;
+    if matches!(args.output, OutputFormat::Json) {
+        return print(&[revoked], args.output);
+    }
+    output::print_done(&output::revoked("cloud", &revoked.name));
+    // It is revoked: a kind this cw cannot name only drops the line after.
+    if let Some(line) = output::CredentialView::cloud(&revoked)
+        .ok()
+        .and_then(|view| output::at_provider(view.provider(), view.authentication_kind(), answer))
+    {
+        eprintln!("{line}");
+    }
+    Ok(())
+}
+
+/// What the platform reported the provider said; unset means not asked.
+fn provider_answer(
+    reported: Option<&rpc::ProviderRevocation>,
+) -> super::credentials::output::ProviderAnswer {
+    use super::credentials::output::{NotConfirmedBecause as Because, ProviderAnswer};
+    let Some(reported) = reported else {
+        return ProviderAnswer::NotAsked;
+    };
+    if reported.outcome == rpc::ProviderRevocationOutcome::Confirmed {
+        return ProviderAnswer::Confirmed;
+    }
+    // NOT_READ: Codewire couldn't use its stored token, so the provider
+    // wasn't asked, and the person reads what it still holds (#4908).
+    if reported.outcome != rpc::ProviderRevocationOutcome::Failed
+        || reported.failure == rpc::ProviderRevocationFailure::NotRead
+    {
+        return ProviderAnswer::NotAsked;
+    }
+    ProviderAnswer::NotConfirmed(
+        if reported.failure == rpc::ProviderRevocationFailure::Refused {
+            Because::Refused(u16::try_from(reported.http_status).unwrap_or(0))
+        } else if reported.failure == rpc::ProviderRevocationFailure::Unreadable {
+            Because::Unreadable
+        } else if reported.failure == rpc::ProviderRevocationFailure::Expired {
+            Because::Expired
+        } else {
+            Because::Unreachable
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1025,37 +1131,39 @@ mod tests {
         .await;
     }
 
+    async fn expect_profiles(server: &MockServer, profiles: Vec<rpc::AccessProfile>) {
+        unary(
+            server,
+            "AccessProfileService",
+            "ListAccessProfiles",
+            rpc::ListAccessProfilesRequest {
+                page_size: 100,
+                ..Default::default()
+            },
+            rpc::ListAccessProfilesResponse {
+                access_profiles: profiles,
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
     #[tokio::test]
-    async fn platform_lifecycle_uses_exact_observed_revision_and_requires_prior_revocation() {
+    async fn platform_delete_revokes_an_active_credential_then_deletes_the_revoked_revision() {
         use rpc::get_credential_request::Selector;
         let server = MockServer::start().await;
         let client = client(&server);
+        // Active (#4717 C6): revoked at the observed revision, which asks the
+        // provider too, then deleted at the revoked revision.
         expect_metadata(
             &server,
             Selector::Name("work".into()),
             rpc::CredentialStatus::Active,
         )
         .await;
-        let error = execute(
-            &client,
-            CredentialsCommand::Delete(CredentialDeleteArgs {
-                credential: Some("name:work".into()),
-                yes: true,
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("revoke the platform credential"));
-        assert_eq!(server.received_requests().await.unwrap().len(), 1);
-        server.verify().await;
-        server.reset().await;
-
-        expect_metadata(
-            &server,
-            Selector::CredentialId(ID.into()),
-            rpc::CredentialStatus::Active,
-        )
-        .await;
+        expect_profiles(&server, Vec::new()).await;
+        let mut revoked = metadata(rpc::CredentialStatus::Revoked);
+        revoked.revocation_generation = REVISION + 1;
         unary(
             &server,
             "CredentialMutationService",
@@ -1066,16 +1174,33 @@ mod tests {
                 ..Default::default()
             },
             rpc::RevokeCredentialResponse {
-                credential: Some(metadata(rpc::CredentialStatus::Revoked)).into(),
+                credential: Some(revoked).into(),
+                provider_revocation: Some(rpc::ProviderRevocation {
+                    outcome: rpc::ProviderRevocationOutcome::Confirmed.into(),
+                    ..Default::default()
+                })
+                .into(),
                 ..Default::default()
             },
         )
         .await;
+        unary(
+            &server,
+            "CredentialMutationService",
+            "DeleteCredential",
+            rpc::DeleteCredentialRequest {
+                credential_id: ID.into(),
+                expected_revocation_generation: REVISION + 1,
+                ..Default::default()
+            },
+            rpc::DeleteCredentialResponse::default(),
+        )
+        .await;
         execute(
             &client,
-            CredentialsCommand::Revoke(CredentialSelectorArgs {
-                credential: format!("id:{ID}"),
-                output: OutputFormat::Json,
+            CredentialsCommand::Delete(CredentialDeleteArgs {
+                credential: Some("name:work".into()),
+                yes: true,
             }),
         )
         .await
@@ -1083,12 +1208,14 @@ mod tests {
         server.verify().await;
         server.reset().await;
 
+        // Already revoked: deleted at its own revision, with no revoke.
         expect_metadata(
             &server,
             Selector::Name("work".into()),
             rpc::CredentialStatus::Revoked,
         )
         .await;
+        expect_profiles(&server, Vec::new()).await;
         unary(
             &server,
             "CredentialMutationService",
@@ -1111,6 +1238,143 @@ mod tests {
         .await
         .unwrap();
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn platform_delete_whose_delete_fails_after_its_revoke_says_to_run_it_again() {
+        use rpc::get_credential_request::Selector;
+        let server = MockServer::start().await;
+        expect_metadata(
+            &server,
+            Selector::Name("work".into()),
+            rpc::CredentialStatus::Active,
+        )
+        .await;
+        expect_profiles(&server, Vec::new()).await;
+        let mut revoked = metadata(rpc::CredentialStatus::Revoked);
+        revoked.revocation_generation = REVISION + 1;
+        unary(
+            &server,
+            "CredentialMutationService",
+            "RevokeCredential",
+            rpc::RevokeCredentialRequest {
+                credential_id: ID.into(),
+                expected_revocation_generation: REVISION,
+                ..Default::default()
+            },
+            rpc::RevokeCredentialResponse {
+                credential: Some(revoked).into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/codewire.v1.CredentialMutationService/DeleteCredential",
+            ))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "code": "failed_precondition", "message": "synthetic refusal"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = execute(
+            &client(&server),
+            CredentialsCommand::Delete(CredentialDeleteArgs {
+                credential: Some("work".into()),
+                yes: true,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cloud credential \"work\" was revoked, but may not have been deleted; run `cw credentials --cloud delete work` again"
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn platform_delete_of_a_selected_credential_names_the_unset_and_changes_nothing() {
+        let server = MockServer::start().await;
+        let client = client(&server);
+        expect_metadata(
+            &server,
+            rpc::get_credential_request::Selector::Name("work".into()),
+            rpc::CredentialStatus::Active,
+        )
+        .await;
+        expect_profiles(
+            &server,
+            vec![rpc::AccessProfile {
+                name: "daily".into(),
+                entries: vec![rpc::AccessProfileEntry {
+                    capability_slot: "codex".into(),
+                    credential_id: ID.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        )
+        .await;
+        let error = execute(
+            &client,
+            CredentialsCommand::Delete(CredentialDeleteArgs {
+                credential: Some("work".into()),
+                yes: true,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("`cw credentials --cloud --profile daily unset codex`"),
+            "{error}"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            2,
+            "no revoke and no delete"
+        );
+    }
+
+    #[test]
+    fn the_platforms_report_reads_as_the_providers_answer() {
+        use super::super::credentials::output::ProviderAnswer;
+        assert!(matches!(provider_answer(None), ProviderAnswer::NotAsked));
+        let report = |outcome: rpc::ProviderRevocationOutcome,
+                      failure: rpc::ProviderRevocationFailure,
+                      http_status: u32| rpc::ProviderRevocation {
+            outcome: outcome.into(),
+            failure: failure.into(),
+            http_status,
+            ..Default::default()
+        };
+        use rpc::{ProviderRevocationFailure as F, ProviderRevocationOutcome as O};
+        assert!(matches!(
+            provider_answer(Some(&report(O::Confirmed, F::Unspecified, 0))),
+            ProviderAnswer::Confirmed
+        ));
+        for (outcome, failure) in [(O::NotAvailable, F::Unspecified), (O::Failed, F::NotRead)] {
+            assert!(matches!(
+                provider_answer(Some(&report(outcome, failure, 0))),
+                ProviderAnswer::NotAsked
+            ));
+        }
+        use super::super::credentials::output::NotConfirmedBecause as Because;
+        for (failure, status, because) in [
+            (F::Unavailable, 0, Because::Unreachable),
+            (F::Refused, 404, Because::Refused(404)),
+            (F::Refused, 70_000, Because::Refused(0)),
+            (F::Unreadable, 0, Because::Unreadable),
+            (F::Expired, 0, Because::Expired),
+        ] {
+            match provider_answer(Some(&report(O::Failed, failure, status))) {
+                ProviderAnswer::NotConfirmed(said) => assert_eq!(said, because),
+                _ => panic!("{failure:?} was not reported as not confirmed"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -1143,15 +1407,92 @@ mod tests {
         assert!(
             execute(
                 &client(&server),
-                CredentialsCommand::Revoke(CredentialSelectorArgs {
-                    credential: "work".into(),
-                    output: OutputFormat::Text,
-                })
+                CredentialsCommand::Revoke(revoke_args("work", true, OutputFormat::Text))
             )
             .await
             .is_err()
         );
         assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        server.verify().await;
+    }
+
+    fn revoke_args(
+        credential: &str,
+        yes: bool,
+        output: OutputFormat,
+    ) -> super::super::credentials::confirm::CredentialRevokeArgs {
+        super::super::credentials::confirm::CredentialRevokeArgs {
+            credential: credential.into(),
+            yes,
+            output,
+        }
+    }
+
+    #[tokio::test]
+    async fn platform_revoke_under_json_without_yes_refuses_and_revokes_nothing() {
+        // #4717 C6, as `cw rm`: `--output json` never asks, so without
+        // `--yes` the revoke fails at once and names it.
+        let server = MockServer::start().await;
+        expect_metadata(
+            &server,
+            rpc::get_credential_request::Selector::Name("work".into()),
+            rpc::CredentialStatus::Active,
+        )
+        .await;
+        let error = execute(
+            &client(&server),
+            CredentialsCommand::Revoke(revoke_args("work", false, OutputFormat::Json)),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("add `--yes` to revoke it"), "{error}");
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.url.path().ends_with("/RevokeCredential")),
+            "nothing is revoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn platform_revoke_with_yes_revokes_the_observed_revision_once() {
+        let server = MockServer::start().await;
+        expect_metadata(
+            &server,
+            rpc::get_credential_request::Selector::Name("work".into()),
+            rpc::CredentialStatus::Active,
+        )
+        .await;
+        let mut revoked = metadata(rpc::CredentialStatus::Revoked);
+        revoked.revocation_generation = REVISION + 1;
+        unary(
+            &server,
+            "CredentialMutationService",
+            "RevokeCredential",
+            rpc::RevokeCredentialRequest {
+                credential_id: ID.into(),
+                expected_revocation_generation: REVISION,
+                ..Default::default()
+            },
+            rpc::RevokeCredentialResponse {
+                credential: Some(revoked).into(),
+                provider_revocation: Some(rpc::ProviderRevocation {
+                    outcome: rpc::ProviderRevocationOutcome::Confirmed.into(),
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        execute(
+            &client(&server),
+            CredentialsCommand::Revoke(revoke_args("work", true, OutputFormat::Text)),
+        )
+        .await
+        .unwrap();
         server.verify().await;
     }
 

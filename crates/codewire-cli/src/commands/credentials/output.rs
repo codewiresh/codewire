@@ -136,6 +136,15 @@ impl CredentialView {
             (status, _) => status,
         }
     }
+
+    pub(in crate::commands) fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// The authentication kind's label, as [`authentication_kind_label`].
+    pub(in crate::commands) fn authentication_kind(&self) -> &'static str {
+        self.authentication_kind
+    }
 }
 
 fn cloud_kind(credential: &rpc::Credential) -> &'static str {
@@ -216,6 +225,134 @@ pub(in crate::commands) fn deleted(placement: &str, name: &str) -> String {
     format!("{placement} credential {name:?} deleted.")
 }
 
+/// The question before `delete`, the same in both placements: an active
+/// credential is revoked first (#4717 C6).
+pub(in crate::commands) fn delete_question(placement: &str, name: &str, active: bool) -> String {
+    if active {
+        format!("Revoke and delete {placement} credential {name:?}?")
+    } else {
+        format!("Delete {placement} credential {name:?}?")
+    }
+}
+
+/// The question before `revoke`, the same in both placements.
+pub(in crate::commands) fn revoke_question(placement: &str, name: &str) -> String {
+    format!("Revoke {placement} credential {name:?}? Codewire stops using it.")
+}
+
+/// The line after a credential is revoked, the same in both placements;
+/// `at_provider` says what its provider still holds.
+pub(in crate::commands) fn revoked(placement: &str, name: &str) -> String {
+    let placement = capitalised(placement);
+    format!("{placement} credential {name:?} revoked in Codewire.")
+}
+
+/// Where a person ends every ChatGPT session (OpenAI help article 9243857).
+/// OpenAI doesn't document that it ends a Codex sign-in, so `cw` names where
+/// it is without claiming that, and without a link (#4908).
+const CHATGPT_SIGN_OUT: &str =
+    "you can sign out of all ChatGPT devices in ChatGPT under Settings → Security";
+
+/// Where a person revokes Codewire's GitHub App authorization.
+const GITHUB_AUTHORIZED_APPS: &str = "https://github.com/settings/apps/authorizations";
+
+/// What a deleted credential's provider said when Codewire asked it to
+/// revoke the credential too (#4717 C6).
+pub(in crate::commands) enum ProviderAnswer {
+    /// The provider confirmed it revoked the token.
+    Confirmed,
+    /// The provider didn't confirm, and why.
+    NotConfirmed(NotConfirmedBecause),
+    /// Codewire did not ask: the provider offers no revocation it can ask
+    /// for, or this placement does not ask yet.
+    NotAsked,
+}
+
+/// Why a provider didn't confirm a revocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::commands) enum NotConfirmedBecause {
+    /// It answered with this HTTP status; 0 when none was reported.
+    Refused(u16),
+    /// It couldn't be reached.
+    Unreachable,
+    /// Codewire couldn't read the stored token to send.
+    Unreadable,
+    /// The stored sign-in had expired.
+    Expired,
+}
+
+/// The reason in words; the status code only in parentheses (#4908).
+fn not_confirmed_because(provider: &str, because: NotConfirmedBecause) -> String {
+    match because {
+        NotConfirmedBecause::Refused(0) => format!("{provider} refused the request"),
+        NotConfirmedBecause::Refused(status) => {
+            format!("{provider} refused the request (HTTP {status})")
+        }
+        NotConfirmedBecause::Unreachable => format!("{provider} couldn't be reached"),
+        NotConfirmedBecause::Unreadable => "its stored token couldn't be read".to_owned(),
+        NotConfirmedBecause::Expired => "the stored sign-in had expired".to_owned(),
+    }
+}
+
+/// The line after `revoked` or `deleted`: what the provider still holds,
+/// the same sentences in both placements. It says a provider revoked a token only when
+/// the provider confirmed it. Until #4896 shows whether a GitHub sign-in ends
+/// with its access token, GitHub is said to keep it whatever it answered.
+pub(in crate::commands) fn at_provider(
+    provider: &str,
+    kind: &str,
+    answer: ProviderAnswer,
+) -> Option<String> {
+    let line = match (provider, kind, answer) {
+        (_, "ssh_key", _) => return None,
+        ("github", _, ProviderAnswer::Confirmed) => format!(
+            "GitHub revoked its access token, but may keep its sign-in until you revoke Codewire at {GITHUB_AUTHORIZED_APPS}."
+        ),
+        ("github", _, _) => format!(
+            "GitHub keeps its sign-in until you revoke Codewire at {GITHUB_AUTHORIZED_APPS}."
+        ),
+        ("openai", "oauth", ProviderAnswer::Confirmed) => {
+            "OpenAI confirmed it revoked the ChatGPT sign-in.".to_owned()
+        }
+        ("openai", "oauth", ProviderAnswer::NotConfirmed(because)) => format!(
+            "OpenAI didn't confirm revoking the ChatGPT sign-in: {}. It may stay valid until it expires; {CHATGPT_SIGN_OUT}.",
+            not_confirmed_because("OpenAI", because)
+        ),
+        ("openai", "oauth", ProviderAnswer::NotAsked) => format!(
+            "The ChatGPT sign-in stays valid at OpenAI until it expires; {CHATGPT_SIGN_OUT}."
+        ),
+        ("openai", "api_key", _) => {
+            "The key still works at OpenAI until you revoke it at https://platform.openai.com/api-keys.".to_owned()
+        }
+        ("anthropic", "api_key", _) => {
+            "The key still works at Anthropic until you revoke it at https://console.anthropic.com/settings/keys.".to_owned()
+        }
+        // A Claude subscription token (`claude setup-token`).
+        ("anthropic", "oauth", _) => {
+            "The token keeps working at Anthropic until it expires, or until you revoke it in your Claude account.".to_owned()
+        }
+        ("anthropic", _, _) => {
+            "The Claude sign-in still works at Anthropic until it expires or you sign out of Claude.".to_owned()
+        }
+        _ => return None,
+    };
+    Some(line)
+}
+
+/// The line after `deleted`. A Claude token's is the connect screens'
+/// sentence (#4985), which says only Codewire's copy is gone; every other
+/// credential's is `at_provider`'s.
+pub(in crate::commands) fn after_deleted(
+    provider: &str,
+    kind: &str,
+    answer: ProviderAnswer,
+) -> Option<String> {
+    if (provider, kind) == ("anthropic", "oauth") {
+        return Some(super::super::credential_input::connect::CLAUDE_TOKEN_DELETED.to_owned());
+    }
+    at_provider(provider, kind, answer)
+}
+
 /// The line after a credential profile is deleted, the same in both
 /// placements.
 pub(in crate::commands) fn profile_deleted(placement: &str, name: &str) -> String {
@@ -286,6 +423,48 @@ pub(in crate::commands) mod refusal {
 
     /// `rotate` on a credential that comes from a provider sign-in.
     pub(in crate::commands) const ROTATE_CONNECTED: &str = "this credential comes from a provider sign-in, so it isn't pasted; reconnect it with `cw credentials connect` and its --name";
+
+    /// `delete` of a credential a profile selects (#4717 C6).
+    pub(in crate::commands) fn in_use(
+        placement: &str,
+        name: &str,
+        profile: &str,
+        slot: &str,
+    ) -> String {
+        format!(
+            "{placement} credential {name:?} is selected by profile {profile:?}; free it with `cw credentials --{placement} --profile {profile} unset {slot}`"
+        )
+    }
+
+    /// `revoke` or `delete` with nobody to ask and no `--yes`, as `cw rm`
+    /// refuses.
+    /// `what` is "credential" or "profile"; `command` is what
+    /// follows the placement flag, ending in the verb.
+    pub(in crate::commands) fn unconfirmed(
+        placement: &str,
+        what: &str,
+        name: &str,
+        command: &str,
+        json: bool,
+    ) -> String {
+        let verb = command.rsplit(' ').next().unwrap_or(command);
+        let why = if json {
+            format!("`cw credentials --{placement} {command} --output json` never asks")
+        } else {
+            format!(
+                "`cw credentials --{placement} {command}` asks first, and there is no terminal to ask at"
+            )
+        };
+        format!("{placement} {what} {name:?} was not {verb}d: {why}; add `--yes` to {verb} it")
+    }
+
+    /// `delete` whose revoke succeeded and whose delete failed or may not
+    /// have reached the store: running `delete` again finishes it either way.
+    pub(in crate::commands) fn revoked_not_deleted(placement: &str, name: &str) -> String {
+        format!(
+            "{placement} credential {name:?} was revoked, but may not have been deleted; run `cw credentials --{placement} delete {name}` again"
+        )
+    }
 
     /// `unset` of a slot the profile doesn't select.
     pub(in crate::commands) fn slot_not_selected(
@@ -609,6 +788,7 @@ pub(in crate::commands) fn print_cloud_profiles(
     print_profile_views(&views, names, output)
 }
 
+/// Local profiles with the default first, as the cloud lists them.
 pub(in crate::commands) fn print_local_profiles(
     records: &[AccessProfileRecord],
     names: &Names,
@@ -933,6 +1113,131 @@ mod tests {
         assert_eq!(
             profile_removed("work", "anthropic"),
             "Profile \"work\" no longer has a credential for anthropic"
+        );
+    }
+}
+
+#[cfg(test)]
+mod delete_tests {
+    use super::*;
+
+    #[test]
+    fn a_deleted_credentials_provider_line_claims_only_what_the_provider_confirmed() {
+        // GitHub keeps its sign-in in every case until #4896 is observed.
+        for answer in [
+            ProviderAnswer::Confirmed,
+            ProviderAnswer::NotConfirmed(NotConfirmedBecause::Refused(404)),
+            ProviderAnswer::NotAsked,
+        ] {
+            let line = at_provider("github", "oauth", answer).unwrap();
+            assert!(line.contains(GITHUB_AUTHORIZED_APPS), "{line}");
+            assert!(line.contains("keep"), "{line}");
+        }
+        assert_eq!(
+            at_provider("openai", "oauth", ProviderAnswer::Confirmed).unwrap(),
+            "OpenAI confirmed it revoked the ChatGPT sign-in."
+        );
+        let line = at_provider(
+            "openai",
+            "oauth",
+            ProviderAnswer::NotConfirmed(NotConfirmedBecause::Refused(400)),
+        )
+        .unwrap();
+        assert_eq!(
+            line,
+            "OpenAI didn't confirm revoking the ChatGPT sign-in: OpenAI refused the request (HTTP 400). It may stay valid until it expires; you can sign out of all ChatGPT devices in ChatGPT under Settings → Security."
+        );
+        // A refusal reported without a status names none.
+        let line = at_provider(
+            "openai",
+            "oauth",
+            ProviderAnswer::NotConfirmed(NotConfirmedBecause::Refused(0)),
+        )
+        .unwrap();
+        assert!(
+            line.contains("OpenAI refused the request. It may") && !line.contains("HTTP"),
+            "{line}"
+        );
+        // Every answer short of a confirmation names where to sign out.
+        assert!(line.contains(CHATGPT_SIGN_OUT), "{line}");
+        assert!(
+            at_provider("openai", "oauth", ProviderAnswer::NotAsked)
+                .unwrap()
+                .contains(CHATGPT_SIGN_OUT)
+        );
+        assert!(
+            at_provider("openai", "oauth", ProviderAnswer::NotAsked)
+                .unwrap()
+                .contains("stays valid")
+        );
+        assert!(
+            at_provider("openai", "api_key", ProviderAnswer::NotAsked)
+                .unwrap()
+                .contains("https://platform.openai.com/api-keys")
+        );
+        assert!(
+            at_provider("anthropic", "api_key", ProviderAnswer::NotAsked)
+                .unwrap()
+                .contains("https://console.anthropic.com/settings/keys")
+        );
+        assert!(
+            at_provider("anthropic", "claude_sign_in", ProviderAnswer::NotAsked)
+                .unwrap()
+                .contains("still works at Anthropic")
+        );
+        assert!(at_provider("github", "ssh_key", ProviderAnswer::NotAsked).is_none());
+    }
+
+    #[test]
+    fn a_claude_token_says_only_codewires_copy_is_gone() {
+        // Revoked: the token itself still works until it expires or is revoked.
+        assert_eq!(
+            at_provider("anthropic", "oauth", ProviderAnswer::NotAsked).unwrap(),
+            "The token keeps working at Anthropic until it expires, or until you revoke it in your Claude account."
+        );
+        // Deleted: the connect screens' sentence, word for word (#4985).
+        assert_eq!(
+            after_deleted("anthropic", "oauth", ProviderAnswer::NotAsked).unwrap(),
+            "That removed Codewire's copy only: the token keeps working at Anthropic until it expires, or until you revoke it in your Claude account."
+        );
+        // Every other credential's line after a delete is at_provider's.
+        for (provider, kind) in [
+            ("anthropic", "api_key"),
+            ("anthropic", "claude_sign_in"),
+            ("openai", "oauth"),
+        ] {
+            assert_eq!(
+                after_deleted(provider, kind, ProviderAnswer::NotAsked),
+                at_provider(provider, kind, ProviderAnswer::NotAsked)
+            );
+        }
+    }
+
+    #[test]
+    fn delete_asks_and_refuses_in_the_placements_words() {
+        assert_eq!(
+            delete_question("local", "work", true),
+            "Revoke and delete local credential \"work\"?"
+        );
+        assert_eq!(
+            delete_question("cloud", "work", false),
+            "Delete cloud credential \"work\"?"
+        );
+        assert_eq!(
+            refusal::in_use("local", "work", "daily", "codex"),
+            "local credential \"work\" is selected by profile \"daily\"; free it with `cw credentials --local --profile daily unset codex`"
+        );
+        assert_eq!(
+            revoke_question("cloud", "work"),
+            "Revoke cloud credential \"work\"? Codewire stops using it."
+        );
+        assert_eq!(
+            revoked("local", "work"),
+            "Local credential \"work\" revoked in Codewire."
+        );
+        assert_eq!(
+            refusal::revoked_not_deleted("local", "work"),
+            "local credential \"work\" was revoked, but may not have been deleted; run `cw credentials --local delete work` again"
         );
     }
 }

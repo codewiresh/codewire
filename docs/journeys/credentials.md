@@ -70,8 +70,19 @@ only what differs.
 4. **Use:** a local VM created with `cw create --local --profile local:P …`,
    or a hosted Sandbox created with `cw create --cloud --profile P …`, then
    the section's check inside the environment.
-5. **Remove:** `cw credentials --local|--cloud delete NAME`. Expect it gone
-   from `list`. The section says what remains at the provider.
+5. **Remove:** `cw credentials --local|--cloud delete NAME`.
+   - A credential a profile selects is refused, with the exact
+     `--profile P unset SLOT` that frees it.
+   - Otherwise `cw` asks once ("Revoke and delete local credential "NAME"?"
+     for an active one). `--yes` goes ahead without asking. With no terminal,
+     or with `--output json`, it refuses and names `--yes`.
+   - An active credential is revoked first, then deleted. If the revoke
+     succeeds and the delete fails or may not have landed, `cw` says it was
+     revoked but may not have been deleted, and to run `delete` again.
+
+   Expect it gone from `list`, and one line saying what remains at the
+   provider; the section says what that is. `revoke NAME` asks the same
+   way.
 
 ## 1. `cred-github`: connect GitHub
 
@@ -101,9 +112,13 @@ only what differs.
 - **Use:** `git clone` of a private repository the connection can read, inside
   the environment, through the broker's GitHub route. Expect the clone to
   succeed, with no GitHub token in the environment or on its disk.
-- **Remove:** in the cloud, delete also revokes the authorization at GitHub.
-  Locally `cw` can't (it needs the GitHub App's secret) and says to revoke it
-  in GitHub's settings.
+- **Remove:**
+  - In the cloud, deleting a connection made through the GitHub App asks
+    GitHub to revoke its access token, and `cw` says whether GitHub confirmed
+    it.
+  - Locally, `cw` can't ask (it needs the GitHub App's secret).
+  - Either way, GitHub keeps your authorization of Codewire until you revoke
+    it at github.com/settings/apps/authorizations, and `cw` names that page.
 
 ## 2. `cred-codex-sign-in`: connect Codex with ChatGPT
 
@@ -121,7 +136,10 @@ only what differs.
 - **Use:** `codex` in the environment. Expect Codex signed in with the
   ChatGPT plan (`/status`), a model answer through the broker, and Codex's
   `auth.json` holding no refresh token.
-- **Remove:** delete also revokes the sign-in at OpenAI in both placements.
+- **Remove:** in the cloud, delete also asks OpenAI to revoke the sign-in,
+  and `cw` says whether OpenAI confirmed it. Locally `cw` doesn't ask yet
+  (#4717, C6 part b2) and says the sign-in stays valid until it expires, and
+  that you can sign out of all ChatGPT devices under Settings → Security.
 
 ## 3. `cred-openai-key`: add an OpenAI API key
 
@@ -176,7 +194,7 @@ Issues: #4945 (the command), #4714 (local).
   (`CLAUDE_CODE_OAUTH_TOKEN` set to Codewire's placeholder, no token on
   disk), the broker forwarding the synthetic token and Anthropic refusing
   it.
-- **Remove:** after `Local credential "NAME" deleted.` (or `Platform
+- **Remove:** after `Local credential "NAME" deleted.` (or `Cloud
   credential …`), `cw` says "That removed Codewire's copy only: the token
   keeps working at Anthropic until it expires, or until you revoke it in your
   Claude account."

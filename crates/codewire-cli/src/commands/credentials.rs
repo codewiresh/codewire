@@ -18,6 +18,8 @@ use codewire_protected_store::MAX_PROTECTED_VALUE_BYTES;
 use codewire_protected_store::ProtectedStorePersistence;
 use codewire_protected_store::ProtectedValue;
 
+pub(in crate::commands) mod confirm;
+mod delete;
 pub(in crate::commands) mod output;
 
 #[cfg(test)]
@@ -25,9 +27,9 @@ use super::CredentialsArgs;
 #[cfg(test)]
 use super::credential_input::CODEX_DEVICE_AUTHORIZATION_GUIDANCE;
 use super::credential_input::connect::{
-    CLAUDE_SUBSCRIPTION_ALIAS, CLAUDE_TOKEN_DELETED, ConnectStore, ConnectTarget, Interrupt,
-    Reconnecting, claude_token_from_alias, claude_token_rotate_refusal, connected_noun,
-    provider_id, provider_label, read_claude_token,
+    CLAUDE_SUBSCRIPTION_ALIAS, ConnectStore, ConnectTarget, Interrupt, Reconnecting,
+    claude_token_from_alias, claude_token_rotate_refusal, connected_noun, provider_id,
+    provider_label, read_claude_token,
 };
 use super::credential_input::{
     CredentialOperation, GITHUB_ALWAYS_INCLUDED, ParsedCredentialSelector, ParsedProfileSelector,
@@ -44,11 +46,10 @@ use super::storage_placement::StoragePlacement;
 #[cfg(test)]
 use super::storage_placement::resolve_storage_placement;
 use super::{
-    CredentialAddArgs, CredentialConnectArgs, CredentialConnectProviderArg, CredentialDeleteArgs,
-    CredentialListArgs, CredentialProfileCommand, CredentialProfileDeleteArgs,
-    CredentialProfileSetArgs, CredentialProfileSlotArgs, CredentialRenameArgs,
-    CredentialRotateArgs, CredentialSelectorArgs, CredentialsCommand, OutputFormat,
-    connect_local_credential_authority, prompt_confirm_default_no, trimmed_required,
+    CredentialAddArgs, CredentialConnectArgs, CredentialConnectProviderArg, CredentialListArgs,
+    CredentialProfileCommand, CredentialProfileDeleteArgs, CredentialProfileSetArgs,
+    CredentialProfileSlotArgs, CredentialRenameArgs, CredentialRotateArgs, CredentialSelectorArgs,
+    CredentialsCommand, OutputFormat, connect_local_credential_authority, trimmed_required,
 };
 use output::{authentication_kind_label, status_label};
 
@@ -101,7 +102,7 @@ async fn handle_local_with_receipt(
         CredentialsCommand::Rename(args) => rename_credential(&mut client, args).await,
         CredentialsCommand::Rotate(args) => rotate_credential(&mut client, args).await,
         CredentialsCommand::Revoke(args) => revoke_credential(&mut client, args).await,
-        CredentialsCommand::Delete(args) => delete_credential(&mut client, args).await,
+        CredentialsCommand::Delete(args) => delete::delete_credential(&mut client, args).await,
         CredentialsCommand::Set(_)
         | CredentialsCommand::Unset(_)
         | CredentialsCommand::Revisions(_)
@@ -841,48 +842,38 @@ async fn rotate_credential(
     print_credentials(&[rotated], OutputFormat::Text)
 }
 
+/// `cw credentials --local revoke` (#4717 C6): asked once, then revoked, then
+/// what its provider still holds is said, as the cloud's revoke says it.
 async fn revoke_credential(
     client: &mut LocalCredentialClient,
-    args: CredentialSelectorArgs,
+    args: confirm::CredentialRevokeArgs,
 ) -> anyhow::Result<()> {
     let record = resolve_credential(client, &args.credential).await?;
+    let name = &record.metadata.display_name;
+    if !confirm::confirm(
+        "local",
+        name,
+        confirm::Change::Revoke,
+        args.yes,
+        args.output,
+    )? {
+        return Ok(());
+    }
     let revoked = client
         .revoke_credential(&record.metadata.id)
         .await
         .context("revoke local credential")?;
-    print_credentials(&[revoked], args.output)
-}
-
-async fn delete_credential(
-    client: &mut LocalCredentialClient,
-    args: CredentialDeleteArgs,
-) -> anyhow::Result<()> {
-    let record = resolve_credential(
-        client,
-        args.credential
-            .as_deref()
-            .context("delete requires a credential selector")?,
-    )
-    .await?;
-    if !args.yes
-        && !prompt_confirm_default_no(&format!(
-            "Delete local credential {:?}?",
-            record.metadata.display_name
-        ))?
-    {
-        eprintln!("Canceled.");
-        return Ok(());
+    if matches!(args.output, OutputFormat::Json) {
+        return print_credentials(&[revoked], args.output);
     }
-    client
-        .delete_credential(&record.metadata.id)
-        .await
-        .context("delete local credential")?;
-    eprintln!(
-        "{}",
-        output::deleted("local", &record.metadata.display_name)
-    );
-    if record.metadata.is_claude_subscription_token() {
-        eprintln!("{CLAUDE_TOKEN_DELETED}");
+    output::print_done(&output::revoked("local", name));
+    // The local placement does not ask a provider yet (#4717 C6, part b2).
+    if let Some(line) = output::at_provider(
+        record.metadata.provider.as_str(),
+        output::authentication_kind_label(record.metadata.authentication_kind),
+        output::ProviderAnswer::NotAsked,
+    ) {
+        eprintln!("{line}");
     }
     Ok(())
 }
@@ -1163,23 +1154,19 @@ async fn delete_profile(
             "--local"
         )
     );
-    if !args.yes
-        && !prompt_confirm_default_no(&format!(
-            "Delete local credential profile {:?}?",
-            record.profile.name.to_string()
-        ))?
-    {
-        eprintln!("Canceled.");
+    let name = record.profile.name.to_string();
+    let question = format!("Delete local profile {name:?}?");
+    let change = confirm::Change::DeleteProfile {
+        question: &question,
+    };
+    if !confirm::confirm("local", &name, change, args.yes, OutputFormat::Text)? {
         return Ok(());
     }
     client
         .delete_profile(&record.profile.id)
         .await
         .context("delete local access profile")?;
-    eprintln!(
-        "{}",
-        output::profile_deleted("local", &record.profile.name.to_string())
-    );
+    output::print_done(&output::profile_deleted("local", &name));
     Ok(())
 }
 

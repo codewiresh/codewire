@@ -133,18 +133,20 @@ async fn handle_profile(
             }
         }
         CredentialProfileCommand::Delete(args) => {
+            use super::credentials::{confirm, output};
             let profile = resolve_profile(client, &args.profile, None).await?;
             anyhow::ensure!(
                 !profile.is_default,
                 default_delete_refusal(&profile.name, "--cloud")
             );
-            if !args.yes
-                && !prompt_confirm_default_no(&format!(
-                    "Delete cloud credential profile {:?} ({}) at revision {}?",
-                    profile.name, profile.id, profile.revision
-                ))?
-            {
-                eprintln!("Canceled.");
+            let question = format!(
+                "Delete cloud profile {:?} ({}) at revision {}?",
+                profile.name, profile.id, profile.revision
+            );
+            let change = confirm::Change::DeleteProfile {
+                question: &question,
+            };
+            if !confirm::confirm("cloud", &profile.name, change, args.yes, OutputFormat::Text)? {
                 return Ok(());
             }
             client
@@ -154,10 +156,7 @@ async fn handle_profile(
                     ..Default::default()
                 })
                 .await?;
-            eprintln!(
-                "{}",
-                super::credentials::output::profile_deleted("cloud", &profile.name)
-            );
+            output::print_done(&output::profile_deleted("cloud", &profile.name));
             Ok(())
         }
         CredentialProfileCommand::Default(args) => {

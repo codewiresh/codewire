@@ -1,7 +1,7 @@
 ---
 title: Credentials
 description: Connect Codex, add OpenAI and Anthropic keys, a Claude subscription token or sign-in, SSH keys and GitHub, then build the credential profile an environment uses.
-updated: 2026-11-15
+updated: 2026-11-17
 weight: 1
 aliases: ["/guides/credentials"]
 ---
@@ -136,10 +136,16 @@ cw credentials --cloud list
 cw credentials --cloud get work-codex
 cw credentials --cloud rename work-openai personal-openai
 cw credentials --cloud revoke work-openai     # stops Codewire's use at the next request
-cw credentials --cloud delete work-openai     # after revoke, on the platform
+cw credentials --cloud delete work-openai     # revokes it first if it's active
 ```
 
-Revocation in Codewire does not log the identity out at the provider.
+Both ask first at a terminal; a script passes `--yes`. Revoking a Codex
+sign-in also asks OpenAI to revoke it, and `cw` says whether OpenAI confirmed.
+For a GitHub connection made through Codewire's GitHub App, Codewire asks
+GitHub to revoke its access token; GitHub keeps your authorization of Codewire
+until you revoke it in your GitHub settings. An API key keeps working at its provider
+until you revoke it in the provider's console. After each revoke or delete,
+`cw` says which of these applies.
 
 ## Local VMs and the Secret Service
 
