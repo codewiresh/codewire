@@ -18,6 +18,7 @@ from repo_policy.live_state import check_live_state
 from repo_policy.material_cache import check_epoch_material_cache_owner
 from repo_policy.database_pools import check_database_pools
 from repo_policy.deployment_http_clients import check_deployment_http_clients
+from repo_policy.forgejo_list_paging import check_forgejo_list_paging
 from repo_policy.mcp_settings import check_mcp_settings
 from repo_policy.mesh import check_mesh_surface_freeze
 from repo_policy.orchestration_security import check_orchestration_authz
@@ -75,6 +76,9 @@ def main(argv: list[str] | None = None) -> int:
     deployment_http_clients_parser = subparsers.add_parser("deployment-http-clients")
     deployment_http_clients_parser.add_argument("--self-test", action="store_true")
     deployment_http_clients_parser.set_defaults(func=check_deployment_http_clients)
+    forgejo_list_paging_parser = subparsers.add_parser("forgejo-list-paging")
+    forgejo_list_paging_parser.add_argument("--self-test", action="store_true")
+    forgejo_list_paging_parser.set_defaults(func=check_forgejo_list_paging)
     mcp_parser = subparsers.add_parser("mcp-settings")
     mcp_parser.add_argument("--self-test", action="store_true")
     mcp_parser.set_defaults(func=check_mcp_settings)

@@ -88,7 +88,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 case "$url" in
-  https://forgejo.invalid/api/v1/repos/codewire/codewire/pulls\?state=open\&limit=50)
+  https://forgejo.invalid/api/v1/repos/codewire/codewire/pulls\?state=open\&page=1\&limit=50)
     printf '%s\n' "${FAKE_OPEN_PULLS:-[]}" >"$output" ;;
   https://forgejo.invalid/api/v1/repos/codewire/codewire/pulls)
     cp "$data" "${FAKE_CREATED_BODY:?}"

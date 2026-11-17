@@ -106,7 +106,7 @@ platforms="$(pin index-platforms <"$index")" || die 'the published image is not 
 # own runtime asset; on a busy main every head was replaced before its CI
 # finished and the pin never landed (#3295).
 curl --config "$work/api.curl" "${CURL_BOUNDS[@]}" --output "$work/open.json" \
-  "${api}/pulls?state=open&limit=50"
+  "${api}/pulls?state=open&page=1&limit=50"
 proposal_open=false
 if jq -e --arg branch "$BRANCH" 'any(.[]; .head.ref == $branch)' "$work/open.json" >/dev/null; then
   proposal_open=true
