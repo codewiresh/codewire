@@ -46,7 +46,7 @@ pub use front_door_session::{
 mod http_ingress;
 pub use http_ingress::{
     ClassifiedHttpRequest, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX,
-    classify_http_request,
+    classify_http_request, classify_intercepted_request, intercepted_host_route,
 };
 mod login;
 pub use login::{LOGIN_REQUEST_LIFETIME, LoginFailure};
@@ -793,9 +793,19 @@ impl CredentialBridge {
         intercepted_host: Option<&str>,
         request: Request<Body>,
     ) -> Result<(v1::CredentialBridgeRequest, Option<Body>), BodyRefusal> {
-        let classified = classify_http_request(request.method(), request.uri(), request.headers())?;
-        let streams = request_body::streamable(classified.route, request.method())
-            && self.streams_request_body().await;
+        let classified = match intercepted_host {
+            Some(host) => classify_intercepted_request(
+                host,
+                request.method(),
+                request.uri(),
+                request.headers(),
+            ),
+            None => classify_http_request(request.method(), request.uri(), request.headers()),
+        }?;
+        let streams = match intercepted_host.and_then(intercepted_host_route) {
+            Some(_) => request_body::carries_body(request.method()),
+            None => request_body::streamable(classified.route, request.method()),
+        } && self.streams_request_body().await;
         let mut frame = v1::CredentialBridgeRequest {
             capability_slot: classified.capability_slot.to_owned(),
             route: classified.route.to_owned(),

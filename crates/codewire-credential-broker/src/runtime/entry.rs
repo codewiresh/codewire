@@ -33,8 +33,7 @@ where
     }
 
     /// [`Self::execute_front_door`] for a request whose body streams: only a
-    /// GitHub Git POST, which the swap rule refuses until the GitHub route
-    /// has one.
+    /// request to one of GitHub's two hosts.
     pub(crate) async fn execute_front_door_streamed(
         &self,
         request: v1::CredentialBridgeRequest,
@@ -64,8 +63,8 @@ where
             ));
         }
         let result = match body {
-            _ if request.intercepted_host.is_some() => {
-                self.execute_intercepted(request, body.is_some()).await
+            body if request.intercepted_host.is_some() => {
+                self.execute_intercepted(request, body).await
             }
             None => self.execute_validated(request).await,
             Some(body) => self.execute_github(request, Some(body)).await,
@@ -94,17 +93,22 @@ where
         self
     }
 
-    /// A front-door request, under the swap rule. Only the Anthropic route
-    /// and Codex at `chatgpt.com` have it yet; any other front-door request
-    /// is refused before a lease, never served by always injecting. Claude's
-    /// token host is answered or forwarded by its own rule (`claude_token.rs`).
+    /// A front-door request, under the swap rule. The Anthropic route, Codex
+    /// at `chatgpt.com` and GitHub's two hosts have it; any other front-door
+    /// request is refused before a lease, never served by always injecting.
+    /// Claude's token host is answered or forwarded by its own rule
+    /// (`claude_token.rs`), and GitHub's hosts by theirs
+    /// (`github_front_door.rs`). Only a GitHub request may stream its body.
     async fn execute_intercepted(
         &self,
         request: ValidatedGuestRequest,
-        streamed_body: bool,
+        body: Option<BrokerRequestBodyStream>,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         match (request.slot.as_str(), request.intercepted_host) {
-            _ if streamed_body => Err(BrokerRequestError::InvalidRequest),
+            ("github", Some(host @ (RouteHost::GitHub | RouteHost::GitHubApi))) => {
+                self.execute_github_intercepted(host, request, body).await
+            }
+            _ if body.is_some() => Err(BrokerRequestError::InvalidRequest),
             ("anthropic", _) if request.route.as_str() == CLAUDE_TOKEN_ROUTE => {
                 self.execute_claude_token(request).await
             }

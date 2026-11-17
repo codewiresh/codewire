@@ -6,6 +6,8 @@
 //! serves, then calls [`CredentialBridge::respond`] exactly as that ingress
 //! does. The bridge, its classifier and the broker's per-destination checks
 //! decide everything after the rewrite; nothing here widens what they admit.
+//! GitHub's two hosts have no prefix: the bridge selects their routes from
+//! the bound host itself, and their paths go on as received.
 //!
 //! Paths are matched as received, never decoded or normalised. A path that
 //! could mean something else once a server decodes or resolves it is
@@ -29,10 +31,12 @@ use std::task::{Context, Poll};
 use axum::body::Body;
 use bytes::Bytes;
 use codewire_access::{
-    MANAGED_ANTHROPIC_API_PREFIX, MANAGED_ANTHROPIC_OAUTH_PREFIX, ManagedCredentialClients,
+    MANAGED_ANTHROPIC_API_PREFIX, MANAGED_ANTHROPIC_OAUTH_PREFIX, ManagedCredentialClient,
+    ManagedCredentialClients,
 };
 use codewire_credential_bridge::{
     CredentialBridge, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX, UpgradeAnswer,
+    intercepted_host_route,
 };
 use codewire_egress_front_door::{Backend, BoxError, Incoming, ResponseBody, UpgradeOutcome};
 use codewire_egress_policy::check::CheckDestination;
@@ -63,6 +67,10 @@ const CHATGPT_HOST: &str = "chatgpt.com";
 /// is not a managed refresh untouched. Routed only for an environment whose
 /// Anthropic slot holds a Claude sign-in ([`RouteTable::for_clients`]).
 pub(crate) const CLAUDE_TOKEN_HOST: &str = "platform.claude.com";
+/// GitHub over Git and the GitHub API. The bridge selects each route from
+/// the bound host, so every path maps as received. Routed only for an
+/// environment with a GitHub connection ([`RouteTable::for_clients`]).
+pub(crate) const GITHUB_HOSTS: [&str; 2] = ["github.com", "api.github.com"];
 
 /// The managed path prefixes the bridge's classifier recognises. Each
 /// selects one route; a rewritten path is that prefix and the rest of the
@@ -87,7 +95,9 @@ pub struct HostRoute {
     /// `/` for every path, or a path of whole segments without a trailing
     /// slash, matched only at a segment boundary.
     pub strip_prefix: String,
-    /// One of the managed prefixes the credential bridge recognises.
+    /// One of the managed prefixes the credential bridge recognises, or
+    /// empty for a host whose route the bridge selects from the host itself
+    /// ([`Self::by_host`]).
     pub add_prefix: String,
 }
 
@@ -103,6 +113,17 @@ impl HostRoute {
             add_prefix: add_prefix.into(),
         }
     }
+
+    /// Every path of `host`, as received: for a host whose route the
+    /// credential bridge selects from the intercepted host, with no managed
+    /// prefix a loopback client could name.
+    pub fn by_host(host: impl Into<String>) -> Self {
+        Self::new(host, "/", "")
+    }
+
+    fn selected_by_host(&self) -> bool {
+        self.add_prefix.is_empty()
+    }
 }
 
 /// Why a route table was refused. Carries no input, so it may be logged.
@@ -116,6 +137,8 @@ pub enum RouteTableError {
     Prefix,
     #[error("a route must add a prefix the credential bridge recognises")]
     UnknownRoute,
+    #[error("a host that selects its own route covers every path and adds no prefix")]
+    HostRoute,
     #[error("two routes share a host and a stripped prefix")]
     Duplicate,
 }
@@ -141,10 +164,18 @@ impl RouteTable {
             if !canonical_host(&route.host) {
                 return Err(RouteTableError::Host);
             }
-            if !plain_prefix(&route.strip_prefix) || !plain_prefix(&route.add_prefix) {
+            // A host that selects its own route covers every path and adds
+            // no prefix: a prefix there would send its requests to a route
+            // the bridge then picks by host anyway, under another path.
+            let by_host = intercepted_host_route(&route.host).is_some();
+            if by_host && (!route.selected_by_host() || route.strip_prefix != "/") {
+                return Err(RouteTableError::HostRoute);
+            }
+            if !plain_prefix(&route.strip_prefix) || (!by_host && !plain_prefix(&route.add_prefix))
+            {
                 return Err(RouteTableError::Prefix);
             }
-            if !route_prefixes().contains(&route.add_prefix.as_str()) {
+            if !by_host && !route_prefixes().contains(&route.add_prefix.as_str()) {
                 return Err(RouteTableError::UnknownRoute);
             }
             if table.iter().any(|existing| {
@@ -164,25 +195,34 @@ impl RouteTable {
     /// every path, the OpenAI API under `/v1`, and Codex on a ChatGPT
     /// sign-in on every path, whole, which the broker narrows to Codex's own.
     pub fn defaults() -> Self {
-        Self::with_claude_token_host(false)
+        Self::with_optional_hosts(false, false)
     }
 
     /// The routes for an environment whose stock clients are `clients`: the
-    /// defaults, and Claude's token host only when the Anthropic slot holds
-    /// a Claude sign-in. With an API key, a subscription token or
-    /// no Anthropic client, Claude's token host is never bound, so the
-    /// environment reaches it exactly as it would without a front door. A
-    /// boot binds these hosts and no others once the boot chain calls this
-    /// (#4809); until then the token host is never bound (#3999).
+    /// defaults, Claude's token host only when the Anthropic slot holds a
+    /// Claude sign-in, and GitHub's two hosts only with a GitHub connection.
+    /// With an API key, a subscription token or no Anthropic client, Claude's
+    /// token host is never bound, and without a GitHub connection neither
+    /// GitHub host is, so the environment reaches them exactly as it would
+    /// without a front door. A boot binds these hosts and no others once the
+    /// boot chain calls this (#4809); until then neither the token host nor
+    /// a GitHub host is ever bound (#3999).
     pub fn for_clients(clients: ManagedCredentialClients) -> Self {
-        Self::with_claude_token_host(clients.anthropic_sign_in())
+        Self::with_optional_hosts(
+            clients.anthropic_sign_in(),
+            clients.contains(ManagedCredentialClient::GitHub),
+        )
     }
 
     /// The defaults, with Claude's token host on every path when
-    /// `claude_token_host`.
-    pub(crate) fn with_claude_token_host(claude_token_host: bool) -> Self {
+    /// `claude_token_host` and GitHub's two hosts when `github`.
+    pub(crate) fn with_optional_hosts(claude_token_host: bool, github: bool) -> Self {
         let claude_token = claude_token_host
             .then(|| HostRoute::new(CLAUDE_TOKEN_HOST, "/", MANAGED_ANTHROPIC_OAUTH_PREFIX));
+        let github = github
+            .then(|| GITHUB_HOSTS.map(HostRoute::by_host))
+            .into_iter()
+            .flatten();
         Self::new(
             [HostRoute::new(
                 ANTHROPIC_API_HOST,
@@ -194,7 +234,8 @@ impl RouteTable {
             .chain([
                 HostRoute::new(OPENAI_API_HOST, OPENAI_API_PATH, MANAGED_OPENAI_API_PREFIX),
                 HostRoute::new(CHATGPT_HOST, "/", CODEX_PREFIX),
-            ]),
+            ])
+            .chain(github),
         )
         .expect("the built-in routes are valid")
     }
@@ -372,10 +413,11 @@ fn below<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
         .filter(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
-/// Every header but Host, in the order received. The rewritten path alone
-/// selects the route: a loopback client's Host names the ingress, which the
-/// broker drops, but this one names the provider, and `api.github.com` would
-/// select another family. `HeaderMap::remove` would reorder the rest.
+/// Every header but Host, in the order received. The rewritten path, or for
+/// GitHub the bound host the front door names, alone selects the route: a
+/// loopback client's Host names the ingress, which the broker drops, but
+/// this one is whatever the environment wrote, and `api.github.com` in it
+/// would select another family. `HeaderMap::remove` would reorder the rest.
 fn without_host(headers: HeaderMap) -> HeaderMap {
     let mut kept = HeaderMap::with_capacity(headers.len());
     let mut current: Option<HeaderName> = None;

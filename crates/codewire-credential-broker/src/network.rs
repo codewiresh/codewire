@@ -243,6 +243,32 @@ impl BrokerUpstreamTransport for ProviderHttpsTransport {
         upstream_response(response)
     }
 
+    async fn forward_github(
+        &self,
+        mut request: BrokerUpstreamRequest,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        let body_stream = request.take_body_stream();
+        let (method, target, headers, body) = request.into_parts();
+        validate_github_forward_target(&target, &method, &self.selected)?;
+        let provider_host = provider_host(&target);
+        let request = self
+            .client
+            .request(method.clone(), target.as_str())
+            .headers(headers);
+        // A forwarded body may be a push or an upload of any size, so a
+        // streamed one is bounded by its idle time at the bridge, not here.
+        let request = match body_stream {
+            Some(stream) => request.body(reqwest::Body::wrap_stream(stream)),
+            None => request.body(body).timeout(REQUEST_TIMEOUT),
+        };
+        let response = request
+            .send()
+            .await
+            .map_err(|error| request_failed(provider_host, false, error))?;
+        validate_github_forward_target(response.url(), &method, &self.selected)?;
+        upstream_response(response)
+    }
+
     async fn upgrade(
         &self,
         mut request: BrokerUpstreamRequest,
@@ -605,6 +631,31 @@ fn validate_target(
     Ok(())
 }
 
+/// The destination check for a request forwarded to GitHub untouched: one of
+/// GitHub's two route hosts, on a session that selected GitHub, by HTTPS on
+/// 443 with a plain method. Any path: the request carries nothing of the
+/// broker's, so it is what the environment's own egress would send. Never
+/// used for a request that carries leased material, which [`validate_target`]
+/// holds to the route's exact grammar.
+fn validate_github_forward_target(
+    target: &url::Url,
+    method: &Method,
+    selected: &BTreeSet<HttpProvider>,
+) -> Result<(), BrokerUpstreamError> {
+    if !matches!(target.host_str(), Some(GITHUB_API_HOST | GITHUB_GIT_HOST))
+        || !selected.contains(&HttpProvider::GitHubOAuth)
+        || !transparent_method(method)
+        || target.scheme() != "https"
+        || target.port_or_known_default() != Some(OPENAI_PORT)
+        || target.fragment().is_some()
+        || !target.username().is_empty()
+        || target.password().is_some()
+    {
+        return Err(BrokerUpstreamError::DestinationDenied);
+    }
+    Ok(())
+}
+
 /// A `chatgpt.com` path a Codex request may reach: under Codex's base, or
 /// one of the front door's wider paths.
 pub(crate) fn chatgpt_path(path: &str) -> bool {
@@ -807,6 +858,67 @@ mod tests {
             map_reqwest_error(refused),
             BrokerUpstreamError::DestinationDenied
         );
+    }
+
+    /// A request forwarded to GitHub untouched may name any path of the two
+    /// route hosts, and nothing else; the check for a request that carries
+    /// leased material still holds it to the route's grammar (#3999).
+    #[test]
+    fn a_forward_to_github_reaches_only_its_two_hosts_and_the_exact_check_stays() {
+        let github = BTreeSet::from([HttpProvider::GitHubOAuth]);
+        let url = |text: &str| url::Url::parse(text).unwrap();
+        for target in [
+            "https://api.github.com/rate_limit",
+            "https://api.github.com/search/code?q=a%20b",
+            "https://github.com/owner/repo.git/info/lfs/objects/batch",
+            "https://github.com/owner/repo/releases/download/v1/a.tar.gz",
+        ] {
+            for method in [Method::GET, Method::POST, Method::DELETE] {
+                assert_eq!(
+                    validate_github_forward_target(&url(target), &method, &github),
+                    Ok(()),
+                    "{method} {target}"
+                );
+            }
+            // The same destination with leased material is still refused.
+            assert_eq!(
+                validate_target(&url(target), &Method::GET, &github),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{target}"
+            );
+        }
+        for (target, method, selected) in [
+            ("https://api.github.com/user", Method::CONNECT, &github),
+            ("https://api.github.com/user", Method::OPTIONS, &github),
+            ("http://api.github.com/user", Method::GET, &github),
+            ("https://api.github.com:8443/user", Method::GET, &github),
+            ("https://user@api.github.com/user", Method::GET, &github),
+            ("https://api.github.com/user#fragment", Method::GET, &github),
+            ("https://uploads.github.com/x", Method::GET, &github),
+            ("https://codeload.github.com/x", Method::GET, &github),
+            ("https://github.com.example.com/x", Method::GET, &github),
+            (
+                "https://api.anthropic.com/v1/messages",
+                Method::GET,
+                &github,
+            ),
+            (
+                "https://api.github.com/user",
+                Method::GET,
+                &BTreeSet::from([HttpProvider::AnthropicApiKey]),
+            ),
+            (
+                "https://api.github.com/user",
+                Method::GET,
+                &BTreeSet::from([HttpProvider::GitHubAppAuthorization]),
+            ),
+        ] {
+            assert_eq!(
+                validate_github_forward_target(&url(target), &method, selected),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{method} {target}"
+            );
+        }
     }
 
     #[test]

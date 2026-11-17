@@ -830,3 +830,144 @@ async fn newly_routed_requests_keep_existing_body_and_header_limits() {
     }
     assert!(bridge.inner.lock().await.active.is_none());
 }
+
+/// A front door's GitHub host selects its route whatever the path, and no
+/// header of the environment's can: the closed families are the broker's to
+/// apply, to the requests it would give a credential (#3999).
+#[test]
+fn an_intercepted_github_host_selects_its_route_on_any_path() {
+    for (host, route) in [
+        ("github.com", "github-https"),
+        ("api.github.com", "github-api"),
+    ] {
+        assert_eq!(intercepted_host_route(host), Some(("github", route)));
+        for (method, uri, path, query) in [
+            ("GET", "/", "/", None),
+            ("GET", "/rate_limit", "/rate_limit", None),
+            (
+                "POST",
+                "/owner/repo.git/info/lfs/objects/batch",
+                "/owner/repo.git/info/lfs/objects/batch",
+                None,
+            ),
+            (
+                "GET",
+                "/search/code?q=a%20b+c&x=%7E",
+                "/search/code",
+                Some("q=a%20b+c&x=%7E"),
+            ),
+            (
+                "DELETE",
+                "/repos/o/r/git/refs/heads/a%2Fb",
+                "/repos/o/r/git/refs/heads/a%2Fb",
+                None,
+            ),
+        ] {
+            // Whatever Host says, another family's name included.
+            for claimed in [
+                None,
+                Some("api.github.com"),
+                Some("github.com"),
+                Some("example.com"),
+            ] {
+                let request = request(method, uri, claimed);
+                let classified = classify_intercepted_request(
+                    host,
+                    request.method(),
+                    request.uri(),
+                    request.headers(),
+                )
+                .unwrap();
+                assert_eq!(
+                    (
+                        classified.capability_slot,
+                        classified.route,
+                        classified.path,
+                        classified.query
+                    ),
+                    ("github", route, path, query),
+                    "{host} {method} {uri}"
+                );
+            }
+        }
+        for (method, uri) in [
+            ("OPTIONS", "/user"),
+            ("CONNECT", "/user"),
+            ("TRACE", "/user"),
+            ("GET", "/owner//repo"),
+            ("GET", "/owner/../repo"),
+            ("GET", "/owner/./repo"),
+        ] {
+            let request = request(method, uri, None);
+            assert_eq!(
+                classify_intercepted_request(
+                    host,
+                    request.method(),
+                    request.uri(),
+                    request.headers()
+                ),
+                Err(StatusCode::FORBIDDEN),
+                "{host} {method} {uri}"
+            );
+        }
+        let long = format!("/{}", "a".repeat(MAX_PATH_BYTES));
+        let request = request("GET", &long, None);
+        assert!(
+            classify_intercepted_request(host, request.method(), request.uri(), request.headers())
+                .is_err()
+        );
+        let mut upgrade = request_with_upgrade();
+        *upgrade.uri_mut() = "/user".parse().unwrap();
+        assert_eq!(
+            classify_intercepted_request(host, upgrade.method(), upgrade.uri(), upgrade.headers()),
+            Err(StatusCode::FORBIDDEN),
+            "{host}: an upgrade is refused"
+        );
+    }
+}
+
+fn request_with_upgrade() -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri("/")
+        .header("connection", "Upgrade")
+        .header("upgrade", "websocket")
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Any other intercepted host classifies exactly as a loopback request
+/// does, and a loopback request for GitHub keeps its closed families.
+#[test]
+fn only_githubs_hosts_select_a_route_by_themselves() {
+    for host in [
+        "api.anthropic.com",
+        "api.openai.com",
+        "chatgpt.com",
+        "uploads.github.com",
+    ] {
+        assert_eq!(intercepted_host_route(host), None, "{host}");
+        for uri in [
+            "/_codewire/anthropic/v1/messages",
+            "/rate_limit",
+            "/v1/models",
+        ] {
+            let request = request("GET", uri, None);
+            assert_eq!(
+                classify_intercepted_request(
+                    host,
+                    request.method(),
+                    request.uri(),
+                    request.headers()
+                ),
+                classify_http_request(request.method(), request.uri(), request.headers()),
+                "{host}{uri}"
+            );
+        }
+    }
+    let loopback = request("GET", "/rate_limit", Some("api.github.com"));
+    assert_eq!(
+        classify_http_request(loopback.method(), loopback.uri(), loopback.headers()),
+        Err(StatusCode::FORBIDDEN)
+    );
+}

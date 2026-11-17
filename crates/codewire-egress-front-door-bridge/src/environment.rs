@@ -26,7 +26,7 @@ use uuid::Uuid;
 use codewire_egress_policy::handoff::InterceptedStreamHeader;
 
 use crate::handoff::{HandoffSocket, Received};
-use crate::{CLAUDE_TOKEN_HOST, CredentialRouteBackend, RouteTable};
+use crate::{CLAUDE_TOKEN_HOST, CredentialRouteBackend, GITHUB_HOSTS, RouteTable};
 
 /// The only port a binding may name: the front door serves TLS.
 pub const INTERCEPT_PORT: u16 = 443;
@@ -93,11 +93,16 @@ impl EnvironmentFrontDoor {
             .collect();
         names.dedup();
         let ca = EnvironmentCa::generate(names)?;
-        // Claude's token host is bound only for a Claude sign-in, once the
-        // boot chain builds its intercepts from `RouteTable::for_clients`
-        // (#4809); its route follows that binding.
-        let routes =
-            RouteTable::with_claude_token_host(intercepts.binds(CLAUDE_TOKEN_HOST, INTERCEPT_PORT));
+        // Claude's token host is bound only for a Claude sign-in and
+        // GitHub's hosts only with a GitHub connection, once the boot chain
+        // builds its intercepts from `RouteTable::for_clients` (#4809); each
+        // route follows its binding. GitHub's two are bound together.
+        let routes = RouteTable::with_optional_hosts(
+            intercepts.binds(CLAUDE_TOKEN_HOST, INTERCEPT_PORT),
+            GITHUB_HOSTS
+                .iter()
+                .all(|host| intercepts.binds(host, INTERCEPT_PORT)),
+        );
         let backend = CredentialRouteBackend::new(routes, bridge.clone());
         let door = FrontDoor::new(ca, backend, FrontDoorConfig::default());
         Ok(Self {

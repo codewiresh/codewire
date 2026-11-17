@@ -1204,6 +1204,34 @@ is exactly as described above. What exists today:
 - **The agent's login.** Claude Code's login writer accepts this
   environment's placeholder as the access token; the broker delivering it is
   the next step, and until then the direct delivery exception below applies.
+- **GitHub's two hosts.** The front door, the bridge and the broker can
+  serve `github.com` and `api.github.com` whole, so that Git and `gh` use
+  GitHub's own names. No boot binds them yet: that needs the boot chain to
+  bind hosts by the environment's clients (#4809), the projection to hand
+  Git and `gh` the placeholder, and their trust in the boot's CA. The
+  broker's rule for a request to either host, in order:
+  1. The environment's network policy must allow GitHub's hosts by rule, or
+     nothing is sent, with or without a credential (#4926). Today that is
+     the answer the broker is started with; the egress broker's signed
+     decision for the connection replaces it.
+  2. A placeholder beside another credential is refused
+     (`credential_conflict`).
+  3. A request with no placeholder-shaped value is forwarded as it was sent,
+     on any path, with no lease: an anonymous clone and the user's own token
+     work as theirs. Its destination check is its own (the two hosts, HTTPS,
+     443, the six plain methods); a request that carries leased material
+     keeps the route's exact check.
+  4. A placeholder-shaped value on a request outside the route's grammar
+     (Git fetch and push, and the API operations the route grants) is
+     refused without a lease (`placeholder_outside_route`), whoever's
+     placeholder it looks like. Git LFS is one such request.
+  5. On the grammar, this environment's placeholder is served exactly as the
+     loopback route serves it, and any other value is forwarded untouched.
+
+  The path and query reach GitHub byte for byte. A forwarded body streams
+  whatever its size; a Git request given the credential streams as on the
+  loopback route; an API request given the credential keeps the 4 MiB bound
+  and is answered 413 above it.
 
 ### Per-environment placeholders (#3999)
 
@@ -1289,7 +1317,8 @@ with #4971.
 | `websocket_not_served` | 403 | a WebSocket the route doesn't carry yet (#3999 changes 9 and 10) | "Codewire: WebSockets to HOST aren't carried yet." |
 | `route_not_served` | 403 | an intercepted host whose credential route the front door doesn't serve yet (today every slot but Anthropic) | "Codewire: requests to HOST can't use this environment's credentials yet." |
 | `request_not_forwarded` | 400, 403 or 421, as today | a request the front door or bridge won't forward as it is: CONNECT, a malformed target, a host that isn't this connection's (421), a bad upgrade, an unsafe path, a method outside GET, HEAD, POST, PUT, PATCH and DELETE, an oversized query or a header it can't carry | "Codewire: this request to HOST isn't one Codewire forwards." |
-| `body_too_large` | 413 | a body over 4 MiB on a host that doesn't stream | "Codewire: this request's body is over the 4 MiB Codewire forwards to HOST." |
+| `placeholder_outside_route` | 403 | a request to `github.com` or `api.github.com` carries a placeholder-shaped value and is not one the GitHub route serves with the managed credential: anything but Git fetch and push and the API operations the route grants (Git LFS, for one). Until #5057 renders it, the API host answers JSON with `message` and `code`, which `gh` shows, and the Git host plain text, as `network_policy_refuses_github` does | "Codewire's GitHub connection serves Git fetch and push and a fixed set of GitHub API operations. This request is not one of them, so it was not sent. Git LFS is not served." Fix: use your own GitHub token for this request |
+| `body_too_large` | 413 | a body over 4 MiB on a host that doesn't stream, or a GitHub API request over 4 MiB that carries the placeholder | "Codewire: this request's body is over the 4 MiB Codewire forwards to HOST." |
 | `busy` | 503 | the bridge's limits on requests or WebSockets in flight | "Codewire: too many requests are in flight; try again." |
 | `upstream_failed` | 502 | PROVIDER couldn't be reached, or answered in a way Codewire won't pass on | "Codewire: PROVIDER couldn't be reached; try again." |
 | `name_not_allowed` | 403 | a request on an intercepted host without a Codewire value, which the network policy refuses (design 3a) | "Codewire: this environment's network policy doesn't allow this request to HOST." The owner's `cw policy log` (#5058) shows it; until that exists, no fix line |

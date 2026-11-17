@@ -46,6 +46,17 @@ pub(super) fn streamable(route: &str, method: &Method) -> bool {
     route == STREAMED_ROUTE && method == Method::POST
 }
 
+/// Whether a request for a host that selects its own route behind a front
+/// door (GitHub's two) would stream its body: every method that sends one.
+/// Such a request may be forwarded as it was sent, so no size is refused
+/// here; the broker bounds the ones it gives a credential.
+pub(super) fn carries_body(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    )
+}
+
 /// The frames a streamed request may still send: the host's unspent credit.
 #[derive(Clone)]
 pub(super) struct RequestCredit(Arc<Semaphore>);

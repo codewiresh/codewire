@@ -218,7 +218,7 @@ fn header_names(request: &v1::CredentialBridgeRequest) -> Vec<&str> {
 async fn each_default_route_reaches_the_bridge_as_its_loopback_form_does() {
     let mut host = Host::start().await;
     // The defaults and Claude's token host, as a Claude sign-in binds them.
-    let backend = host.backend(RouteTable::with_claude_token_host(true));
+    let backend = host.backend(RouteTable::with_optional_hosts(true, false));
     // (bound host, method, path and query, the loopback form, slot, route,
     // provider path, query)
     let cases = [
@@ -392,7 +392,7 @@ fn the_defaults_bind_three_hosts() {
 /// or no Anthropic client, whose agents reach it as without a front door.
 #[test]
 fn claudes_token_host_is_routed_only_for_a_claude_sign_in() {
-    let none = ManagedCredentialClients::from_profile_slots(["openai", "github"]).unwrap();
+    let none = ManagedCredentialClients::from_profile_slots(["openai", "ssh"]).unwrap();
     let api_key = ManagedCredentialClients::from_profile_slots(["anthropic"]).unwrap();
     let subscription = api_key.with_anthropic_subscription_token().unwrap();
     let sign_in = api_key.with_anthropic_sign_in().unwrap();
@@ -424,6 +424,125 @@ fn claudes_token_host_is_routed_only_for_a_claude_sign_in() {
                 && route.add_prefix == MANAGED_ANTHROPIC_OAUTH_PREFIX)
     );
     EnvironmentCa::generate(routes.hosts()).expect("the CA binds every sign-in host");
+}
+
+/// GitHub's two hosts are routed, and so bound, only with a GitHub
+/// connection, and always together. Each covers every path with no prefix:
+/// the bridge selects the route from the bound host.
+#[test]
+fn githubs_hosts_are_routed_only_with_a_github_connection() {
+    let without = ManagedCredentialClients::from_profile_slots(["anthropic", "openai"]).unwrap();
+    let routes = RouteTable::for_clients(without);
+    assert!(!routes.hosts().iter().any(|host| host.contains("github")));
+
+    let with = ManagedCredentialClients::from_profile_slots(["github"]).unwrap();
+    let routes = RouteTable::for_clients(with);
+    assert_eq!(
+        routes.hosts(),
+        [
+            "api.anthropic.com",
+            "api.openai.com",
+            "chatgpt.com",
+            "github.com",
+            "api.github.com"
+        ]
+    );
+    assert_eq!(
+        routes.routes()[3..],
+        [
+            HostRoute::by_host("github.com"),
+            HostRoute::by_host("api.github.com")
+        ]
+    );
+    EnvironmentCa::generate(routes.hosts()).expect("the CA binds GitHub's hosts");
+    for (host, uri) in [
+        (
+            "github.com",
+            "/owner/repo.git/info/refs?service=git-upload-pack",
+        ),
+        ("github.com", "/owner/repo/releases/download/v1/a%20b.tgz"),
+        ("api.github.com", "/"),
+        ("api.github.com", "/search/code?q=a%20b+c&x=%7E&empty="),
+    ] {
+        assert_eq!(
+            rewrite(&routes, host, uri),
+            Ok(uri.to_owned()),
+            "{host}{uri}"
+        );
+    }
+    // The refusal of ambiguous paths holds for them too.
+    for uri in [
+        "/owner/../other",
+        "/owner//repo",
+        "/owner/%2e%2e/x",
+        "/a%2Fb",
+    ] {
+        assert_eq!(
+            rewrite(&routes, "github.com", uri),
+            Err(StatusCode::BAD_REQUEST),
+            "{uri}"
+        );
+    }
+}
+
+/// A GitHub request reaches the bridge on the route its bound host selects,
+/// its path and query as received, whatever its Host header says, and a
+/// body-carrying method streams where the session's host takes streams.
+#[tokio::test]
+async fn a_github_request_reaches_the_bridge_on_the_route_its_host_selects() {
+    let mut host = Host::start().await;
+    let backend = host.backend(RouteTable::with_optional_hosts(false, true));
+    for (bound, uri, route, path, query) in [
+        (
+            "github.com",
+            "/owner/repo.git/info/refs?service=git-upload-pack",
+            "github-https",
+            "/owner/repo.git/info/refs",
+            "service=git-upload-pack",
+        ),
+        (
+            "github.com",
+            "/owner/repo.git/info/lfs/objects/batch",
+            "github-https",
+            "/owner/repo.git/info/lfs/objects/batch",
+            "",
+        ),
+        (
+            "api.github.com",
+            "/rate_limit",
+            "github-api",
+            "/rate_limit",
+            "",
+        ),
+        (
+            "api.github.com",
+            "/search/code?q=a%20b+c",
+            "github-api",
+            "/search/code",
+            "q=a%20b+c",
+        ),
+    ] {
+        for claimed in [bound, "api.github.com", "github.com", "api.anthropic.com"] {
+            let request = Request::get(uri)
+                .header(HOST, claimed)
+                .header("authorization", "token placeholder")
+                .body(Full::default())
+                .unwrap();
+            let (seen, _) = through_backend(&mut host, &backend, bound, request).await;
+            assert_eq!(
+                (
+                    seen.capability_slot.as_str(),
+                    seen.route.as_str(),
+                    seen.path.as_str(),
+                    seen.query.as_str(),
+                    seen.intercepted_host.as_str()
+                ),
+                ("github", route, path, query, bound),
+                "{bound}{uri} claiming {claimed}"
+            );
+            assert_eq!(header_names(&seen), ["authorization"]);
+        }
+    }
 }
 
 /// Mapping `chatgpt.com` whole (#3999) changes no other host's rewrite: the
@@ -613,7 +732,7 @@ async fn a_request_no_route_covers_is_404_and_never_reaches_the_bridge() {
 #[tokio::test]
 async fn every_path_of_claudes_token_host_reaches_the_bridge_for_a_sign_in() {
     let mut host = Host::start().await;
-    let backend = host.backend(RouteTable::with_claude_token_host(true));
+    let backend = host.backend(RouteTable::with_optional_hosts(true, false));
     for (method, uri, path, query) in [
         (Method::GET, "/v1/oauth/token", "/v1/oauth/token", ""),
         (Method::DELETE, "/v1/oauth/token", "/v1/oauth/token", ""),
@@ -734,13 +853,13 @@ async fn the_query_is_kept_byte_for_byte() {
 async fn host_never_selects_the_route() {
     let mut host = Host::start().await;
     let backend = host.backend(
-        RouteTable::new([HostRoute::new("api.github.com", "/", GITHUB_GIT_PREFIX)]).unwrap(),
+        RouteTable::new([HostRoute::new("git.example.com", "/", GITHUB_GIT_PREFIX)]).unwrap(),
     );
     let request = Request::get("/owner/repo.git/info/refs?service=git-upload-pack")
         .header(HOST, "api.github.com")
         .body(Full::default())
         .unwrap();
-    let (seen, _) = through_backend(&mut host, &backend, "api.github.com", request).await;
+    let (seen, _) = through_backend(&mut host, &backend, "git.example.com", request).await;
     assert_eq!(
         (seen.capability_slot.as_str(), seen.route.as_str()),
         ("github", "github-https")
@@ -957,6 +1076,20 @@ fn route_tables_are_validated() {
         let shown = format!("{routes:?}");
         assert_eq!(RouteTable::new(routes), Err(error), "{shown}");
     }
+
+    // A host that selects its own route covers every path and adds no
+    // prefix; no other host may go without one.
+    for routes in [
+        vec![route("github.com", "/", GITHUB_GIT_PREFIX)],
+        vec![route("api.github.com", "/", CODEX_PREFIX)],
+        vec![route("github.com", "/owner", "")],
+    ] {
+        assert_eq!(RouteTable::new(routes), Err(RouteTableError::HostRoute));
+    }
+    assert_eq!(
+        RouteTable::new([HostRoute::by_host("api.example.com")]),
+        Err(RouteTableError::Prefix)
+    );
 
     let most: Vec<HostRoute> = (0..32)
         .map(|index| route(&format!("h{index}.example.com"), "/", CODEX_PREFIX))

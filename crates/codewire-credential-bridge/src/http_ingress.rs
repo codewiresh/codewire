@@ -17,6 +17,7 @@ pub use codewire_access::{
 };
 
 const GITHUB_API_HOST: &str = "api.github.com";
+const GITHUB_GIT_HOST: &str = "github.com";
 const MAX_PATH_BYTES: usize = 2048;
 const MAX_QUERY_BYTES: usize = 4096;
 
@@ -48,20 +49,7 @@ pub fn classify_http_request<'a>(
     if uri.scheme().is_some() || uri.authority().is_some() {
         return Err(denied);
     }
-    // Reject upgrade attempts before hop-by-hop header filtering can erase
-    // them. None of these routes supports WebSocket, h2c or another upgrade.
-    if headers.contains_key("upgrade")
-        || headers
-            .keys()
-            .any(|name| name.as_str().starts_with("sec-websocket-"))
-        || headers.get_all("connection").iter().any(|value| {
-            value.to_str().map_or(true, |value| {
-                value
-                    .split(',')
-                    .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
-            })
-        })
-    {
+    if asks_for_upgrade(headers) {
         return Err(denied);
     }
     let host = validate_host(headers)?;
@@ -136,6 +124,82 @@ pub fn classify_http_request<'a>(
     {
         return Err(denied);
     }
+    Ok(ClassifiedHttpRequest {
+        capability_slot,
+        route,
+        path,
+        query,
+    })
+}
+
+/// Upgrade attempts are refused before hop-by-hop header filtering can erase
+/// them. None of these routes supports WebSocket, h2c or another upgrade
+/// through this classifier.
+fn asks_for_upgrade(headers: &HeaderMap) -> bool {
+    headers.contains_key("upgrade")
+        || headers
+            .keys()
+            .any(|name| name.as_str().starts_with("sec-websocket-"))
+        || headers.get_all("connection").iter().any(|value| {
+            value.to_str().map_or(true, |value| {
+                value
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+            })
+        })
+}
+
+/// The slot and route a TLS front door's intercepted host selects by itself.
+/// Only GitHub's two hosts do; every other bound host reaches its route
+/// through a managed path prefix.
+pub fn intercepted_host_route(host: &str) -> Option<(&'static str, &'static str)> {
+    match host {
+        GITHUB_GIT_HOST => Some(("github", "github-https")),
+        GITHUB_API_HOST => Some(("github", "github-api")),
+        _ => None,
+    }
+}
+
+/// [`classify_http_request`] for a request a TLS front door intercepted for
+/// `host`, which the front door's hand-off names and no header of the
+/// environment's can.
+///
+/// A GitHub host selects its route whatever the path. A request that carries
+/// none of this environment's placeholders is forwarded as it was sent, so
+/// the closed families cannot be applied here, where the credential is not
+/// read; the broker applies them to every request it would give a credential.
+/// The path and query stay as received, bounded and never decoded. Any other
+/// host classifies by its managed prefix, exactly as a loopback request does.
+pub fn classify_intercepted_request<'a>(
+    host: &str,
+    method: &Method,
+    uri: &'a Uri,
+    headers: &HeaderMap,
+) -> Result<ClassifiedHttpRequest<'a>, StatusCode> {
+    let Some((capability_slot, route)) = intercepted_host_route(host) else {
+        return classify_http_request(method, uri, headers);
+    };
+    let denied = StatusCode::FORBIDDEN;
+    let path = uri.path();
+    let query = uri.query();
+    if uri.scheme().is_some()
+        || uri.authority().is_some()
+        || asks_for_upgrade(headers)
+        || !matches!(
+            *method,
+            Method::GET
+                | Method::HEAD
+                | Method::POST
+                | Method::PUT
+                | Method::PATCH
+                | Method::DELETE
+        )
+        || !provider_path_is_safe(path)
+        || query.is_some_and(|query| query.len() > MAX_QUERY_BYTES)
+    {
+        return Err(denied);
+    }
+    validate_host(headers)?;
     Ok(ClassifiedHttpRequest {
         capability_slot,
         route,

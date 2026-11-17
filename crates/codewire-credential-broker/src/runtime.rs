@@ -68,6 +68,7 @@ mod anthropic_route;
 mod claude_token;
 mod entry;
 mod forced_refresh;
+mod github_front_door;
 mod request_binding;
 use request_binding::validate_request_binding;
 #[cfg(test)]
@@ -1606,7 +1607,7 @@ where
     async fn execute_github(
         &self,
         request: ValidatedGuestRequest,
-        mut body_stream: Option<BrokerRequestBodyStream>,
+        body_stream: Option<BrokerRequestBodyStream>,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         let request_id = request.request_id;
         let slot = request.slot;
@@ -1638,6 +1639,31 @@ where
             .await
             .map_err(map_lease_error)?;
         validate_http_lease_coordinates(&lease, &slot, &operation, &route)?;
+        self.serve_github(
+            request_id,
+            slot,
+            route,
+            operation,
+            lease,
+            validated,
+            body_stream,
+        )
+        .await
+    }
+
+    /// A validated GitHub request on its lease: the credential injected, the
+    /// expiry and 401 refreshes, and the reply redacted.
+    #[allow(clippy::too_many_arguments)]
+    async fn serve_github(
+        &self,
+        request_id: Uuid,
+        slot: CapabilitySlot,
+        route: BrokerRouteId,
+        operation: BrokerOperationId,
+        lease: P::Lease,
+        validated: crate::github::ValidatedGitHubRequest,
+        mut body_stream: Option<BrokerRequestBodyStream>,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         let admitted_grant = lease.grant().clone();
         let generation = refresh_generation(&lease);
         let credential = self
@@ -2426,7 +2452,9 @@ struct ValidatedGuestRequest {
 
 impl ValidatedGuestRequest {
     /// `body_stream` says whether the bridge handed over a streamed body; the
-    /// request must agree, and only a GitHub Git request streams.
+    /// request must agree. Only a GitHub request streams: a Git one on either
+    /// entry, and behind a front door any GitHub request, which may be
+    /// forwarded as it was sent.
     fn parse(
         entry: BridgeEntry,
         request: v1::CredentialBridgeRequest,
@@ -2435,7 +2463,7 @@ impl ValidatedGuestRequest {
         if request.streamed_body != body_stream
             || (request.streamed_body
                 && (request.capability_slot != "github"
-                    || request.route != "github-https"
+                    || (request.route != "github-https" && entry != BridgeEntry::FrontDoor)
                     || !request.body.is_empty()))
         {
             return Err(BrokerRequestError::InvalidRequest);

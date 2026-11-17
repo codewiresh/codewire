@@ -32,6 +32,20 @@ pub trait BrokerUpstreamTransport: Send + Sync {
         drop(request);
         Err(BrokerUpstreamError::DestinationDenied)
     }
+
+    /// Send a front-door request to one of GitHub's two hosts as the
+    /// environment sent it, with nothing of the broker's in it (#3999). The
+    /// destination check is its own: the host the front door intercepted,
+    /// HTTPS on 443 and a plain method, on any path. [`Self::execute`] keeps
+    /// the exact check for every request that carries leased material. A
+    /// transport that does not forward refuses the destination.
+    async fn forward_github(
+        &self,
+        request: BrokerUpstreamRequest,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        drop(request);
+        Err(BrokerUpstreamError::DestinationDenied)
+    }
 }
 
 /// A runtime with application sources only has no provider DNS/socket setup.
@@ -53,6 +67,16 @@ impl<T: BrokerUpstreamTransport> BrokerUpstreamTransport for Option<T> {
     ) -> Result<BrokerUpstreamUpgrade, BrokerUpstreamError> {
         match self {
             Some(transport) => transport.upgrade(request).await,
+            None => Err(BrokerUpstreamError::DestinationDenied),
+        }
+    }
+
+    async fn forward_github(
+        &self,
+        request: BrokerUpstreamRequest,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        match self {
+            Some(transport) => transport.forward_github(request).await,
             None => Err(BrokerUpstreamError::DestinationDenied),
         }
     }

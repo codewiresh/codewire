@@ -181,6 +181,9 @@ struct Recorded {
     refreshes: Option<Arc<AtomicUsize>>,
     /// What the next leases do, in order; then every lease is ordinary.
     plan: Arc<Mutex<std::collections::VecDeque<LeasePlan>>>,
+    /// How many of `outbound` went by the transport's forward path, which
+    /// holds no request to its route's grammar.
+    forwarded: Arc<AtomicUsize>,
 }
 
 /// One planned lease.
@@ -212,9 +215,14 @@ impl Recorded {
                 echo_credential: self.echo_credential,
                 sockets: Arc::clone(&self.sockets),
                 unauthorized_upgrades: Arc::clone(&self.unauthorized_upgrades),
+                forwarded: Arc::clone(&self.forwarded),
             },
         )
         .unwrap()
+    }
+
+    fn forwarded(&self) -> usize {
+        self.forwarded.load(Ordering::Relaxed)
     }
 
     fn leases(&self) -> usize {
@@ -332,15 +340,23 @@ struct Upstream {
     echo_credential: bool,
     sockets: Arc<Mutex<Vec<tokio::io::DuplexStream>>>,
     unauthorized_upgrades: Arc<AtomicUsize>,
+    forwarded: Arc<AtomicUsize>,
 }
 
 #[async_trait]
 impl BrokerUpstreamTransport for Upstream {
     async fn execute(
         &self,
-        request: BrokerUpstreamRequest,
+        mut request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
-        let (method, target, headers, body) = request.into_parts();
+        let streamed = request.take_body_stream();
+        let (method, target, headers, mut body) = request.into_parts();
+        // A streamed body is recorded whole, as the provider would read it.
+        if let Some(mut stream) = streamed {
+            while let Some(chunk) = stream.next().await {
+                body.extend_from_slice(&chunk.map_err(|_| BrokerUpstreamError::Protocol)?);
+            }
+        }
         let echoed = headers
             .get("x-api-key")
             .or_else(|| headers.get("authorization"))
@@ -382,6 +398,16 @@ impl BrokerUpstreamTransport for Upstream {
             reply_headers,
             Box::pin(futures::stream::iter([Ok(reply_body)])),
         ))
+    }
+
+    /// Records and answers like [`Self::execute`], and counts the request as
+    /// forwarded.
+    async fn forward_github(
+        &self,
+        request: BrokerUpstreamRequest,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        self.forwarded.fetch_add(1, Ordering::Relaxed);
+        self.execute(request).await
     }
 
     /// Records the handshake like a request and switches it, keeping the
@@ -453,18 +479,19 @@ async fn collect(response: BrokerHttpResponse) -> (StatusCode, HeaderMap, Vec<u8
 }
 
 /// A front-door request naming one of its route's hosts is validated with
-/// that host. Only the Anthropic route and Codex at `chatgpt.com` have the
-/// swap rule yet: a front-door request on any other route is refused before a
-/// lease, never served by always injecting; one with the rule and no
-/// credential is forwarded as the environment sent it, without a lease.
+/// that host. The Anthropic route, Codex at `chatgpt.com` and GitHub's two
+/// hosts have the swap rule: a front-door request on any other route is
+/// refused before a lease, never served by always injecting; one with the
+/// rule and no credential is forwarded as the environment sent it, without a
+/// lease.
 #[tokio::test]
 async fn a_front_door_request_is_served_only_on_a_route_with_the_swap_rule() {
     for case in cases() {
         for host in case.hosts {
             let recorded = Recorded::default();
             let broker = recorded.broker();
-            let swapped =
-                case.slot == "anthropic" || (case.slot == "codex" && *host == "chatgpt.com");
+            let swapped = matches!(case.slot, "anthropic" | "github")
+                || (case.slot == "codex" && *host == "chatgpt.com");
             let mut request = case.request(host);
             if case.slot == "codex" && *host == "chatgpt.com" {
                 // A front-door path on chatgpt.com is the whole path.
@@ -475,6 +502,7 @@ async fn a_front_door_request_is_served_only_on_a_route_with_the_swap_rule() {
                 let (status, _, body) = collect(front_door.unwrap()).await;
                 assert_eq!((status, body.as_slice()), (StatusCode::OK, &b"{}"[..]));
                 assert_eq!(recorded.leases(), 0);
+                assert_eq!(recorded.forwarded(), usize::from(case.slot == "github"));
                 let outbound = recorded.outbound();
                 assert_eq!(outbound.len(), 1);
                 assert!(
@@ -1798,4 +1826,5 @@ async fn a_swapped_codex_reply_redacts_the_token_and_keeps_the_account() {
     );
 }
 
+mod github;
 mod upgrade;
