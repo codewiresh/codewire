@@ -1687,6 +1687,7 @@ mod tests {
                 host: None,
                 launch_projection: None,
                 session_working_dir: None,
+                sandbox_server_url: None,
             };
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
             let task = tokio::spawn(async move {
@@ -1739,6 +1740,7 @@ mod tests {
             host: None,
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let mut daemon = codewire_daemon::service::DaemonServiceImpl::new(config);
         if let Some(app_ports) = app_ports {

@@ -344,6 +344,7 @@ fn session_config(
         }),
         managed_credential_clients: selected,
         session_working_dir: None,
+        sandbox_server_url: None,
     }
 }
 

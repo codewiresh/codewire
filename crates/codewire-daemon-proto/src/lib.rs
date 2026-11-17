@@ -147,6 +147,36 @@ pub const HOSTED_DAEMON_ACCESS_READY_FILE: &str = "/codewire/run/daemon/access-r
 /// (its SSH proxy and setup health check) may reach it.
 pub const WORKSPACE_SSH_PORT: u16 = 2222;
 
+/// A session's Codewire server inside a hosted sandbox (#5100): the
+/// deployment's public origin from its binding. It names no identity and
+/// authenticates nothing; `cw` uses it only after every server configured
+/// another way, and only through [`sandbox_server_origin`].
+pub const SANDBOX_SERVER_URL_ENV: &str = "CODEWIRE_SANDBOX_SERVER_URL";
+
+/// `value` without a trailing `/` when it is an absolute `https` origin: a
+/// lowercase host name, optionally with a port, and no userinfo, path, query
+/// or fragment. Anything else is refused, never corrected, since anything in
+/// the sandbox can set the variable.
+pub fn sandbox_server_origin(value: &str) -> Option<&str> {
+    let origin = value.strip_suffix('/').unwrap_or(value);
+    let authority = origin.strip_prefix("https://")?;
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    let host_ok = !host.is_empty()
+        && host.len() <= 253
+        && host.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+        })
+        && !host.starts_with(['.', '-']);
+    let port_ok = port.is_none_or(|port| {
+        port.bytes().all(|byte| byte.is_ascii_digit())
+            && port.parse::<u16>().is_ok_and(|port| port > 0)
+    });
+    (host_ok && port_ok).then_some(origin)
+}
+
 /// The health diagnostic in which a bound daemon reports the saved project
 /// defaults and Git author it wrote for its binding (#3684). Healthy, its
 /// message names the binding's generation; setup skips its own write only then.
@@ -483,6 +513,41 @@ pub mod broker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sandbox_server_is_an_https_origin_and_nothing_else() {
+        for (value, origin) in [
+            ("https://codewire.sh", "https://codewire.sh"),
+            ("https://codewire.sh/", "https://codewire.sh"),
+            (
+                "https://codewire-dev.sh:8443",
+                "https://codewire-dev.sh:8443",
+            ),
+        ] {
+            assert_eq!(sandbox_server_origin(value), Some(origin), "{value}");
+        }
+        for value in [
+            "",
+            "codewire.sh",
+            "http://codewire.sh",
+            "https://",
+            "https://user@codewire.sh",
+            "https://user:secret@codewire.sh",
+            "https://codewire.sh/api",
+            "https://codewire.sh//",
+            "https://codewire.sh?next=1",
+            "https://codewire.sh#top",
+            "https://Codewire.sh",
+            "https://codewire.sh:0",
+            "https://codewire.sh:+443",
+            "https://codewire.sh:65536",
+            "https://.codewire.sh",
+            " https://codewire.sh",
+            "https://codewire.sh\n",
+        ] {
+            assert_eq!(sandbox_server_origin(value), None, "{value:?}");
+        }
+    }
 
     #[test]
     fn mesh_connect_requests_name_one_valid_node_and_port() {

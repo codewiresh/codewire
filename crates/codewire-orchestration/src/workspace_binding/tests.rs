@@ -781,6 +781,7 @@ async fn a_forks_daemon_refuses_the_credential_its_source_was_bound_with() {
                 projection_selection_sha256: "",
                 managed_credential_clients: "",
                 working_directory: "",
+                server_url: "",
             })
             .is_err()
     );
@@ -793,6 +794,7 @@ async fn a_forks_daemon_refuses_the_credential_its_source_was_bound_with() {
             projection_selection_sha256: &fork.projection_selection_sha256,
             managed_credential_clients: &fork.managed_credential_clients,
             working_directory: &fork.working_directory,
+            server_url: "",
         })
         .unwrap();
 
@@ -1367,6 +1369,30 @@ async fn a_bound_pod_gets_a_generation_bound_peer_token_and_its_public_endpoints
     assert!(!debug.contains(&access.peer_token));
     assert!(!debug.contains(ALLOCATOR_URL));
     assert!(fixture.allocator.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_bound_pod_is_told_its_server_only_when_it_is_an_https_origin() {
+    for (frontend_url, sent) in [
+        ("https://codewire.example/", "https://codewire.example"),
+        ("http://127.0.0.1:8080", ""),
+        ("https://user@codewire.example", ""),
+        ("https://codewire.example/app", ""),
+    ] {
+        let fixture = fixture_with(
+            FakeCluster::placed(),
+            FakeStore::bound(WorkspaceCredentialScope::Pod),
+            |state| state.with_server_url(frontend_url),
+        );
+        let response = fixture.bind(0).await.unwrap();
+        assert_eq!(response.server_url, sent, "{frontend_url}");
+    }
+    // Unconfigured, nothing is sent.
+    let fixture = fixture(
+        FakeCluster::placed(),
+        FakeStore::bound(WorkspaceCredentialScope::Pod),
+    );
+    assert_eq!(fixture.bind(0).await.unwrap().server_url, "");
 }
 
 #[tokio::test]

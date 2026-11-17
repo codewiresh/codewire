@@ -117,6 +117,8 @@ pub struct WorkspaceBindingState {
     sandbox_namespace: String,
     session_secret: String,
     access: AccessSettings,
+    /// The origin `cw` inside the sandbox uses as its server, or empty.
+    server_url: String,
     relay: Arc<dyn RelayAllocator>,
     max_wait: Duration,
     requery_interval: Duration,
@@ -153,6 +155,7 @@ impl WorkspaceBindingState {
             sandbox_namespace: sandbox_namespace.to_owned(),
             session_secret: session_secret.to_owned(),
             access: AccessSettings::default(),
+            server_url: String::new(),
             relay: Arc::new(HttpRelayAllocator::new()),
             max_wait: MAX_BIND_WAIT,
             requery_interval: BINDING_REQUERY_INTERVAL,
@@ -164,6 +167,19 @@ impl WorkspaceBindingState {
     pub fn with_access(mut self, access: AccessSettings, relay: Arc<dyn RelayAllocator>) -> Self {
         self.access = access;
         self.relay = relay;
+        self
+    }
+
+    /// Tells each bound daemon the deployment's public origin, `FRONTEND_URL`,
+    /// so `cw` inside knows its server (#5100). Only an absolute https origin
+    /// is sent; any other value, such as a host loopback, sends nothing.
+    pub fn with_server_url(mut self, frontend_url: &str) -> Self {
+        match codewire_daemon_proto::sandbox_server_origin(frontend_url) {
+            Some(origin) => self.server_url = origin.to_owned(),
+            None => tracing::info!(
+                "FRONTEND_URL is not an https origin; sandboxes are not told their server"
+            ),
+        }
         self
     }
 
@@ -352,7 +368,9 @@ impl WorkspaceBindingState {
 
         // §4.7: respond only while the reviewed token is still valid.
         still_valid(&caller.identity)?;
-        respond(&self.session_secret, &caller.identity, binding, access)
+        let mut response = respond(&self.session_secret, &caller.identity, binding, access)?;
+        response.server_url.clone_from(&self.server_url);
+        Ok(response)
     }
 
     /// A fresh access grant for an already-bound Pod.

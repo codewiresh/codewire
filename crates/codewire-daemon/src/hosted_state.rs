@@ -122,6 +122,7 @@ mod tests {
                 projection_selection_sha256: digest,
                 managed_credential_clients: clients,
                 working_directory: "",
+                server_url: "",
             })
             .unwrap()
     }

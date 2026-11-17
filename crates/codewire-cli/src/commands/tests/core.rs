@@ -1628,8 +1628,42 @@ fn resolve_login_server_url_in_a_fresh_config_is_the_hosted_default() {
 
     // `cw login` before `cw setup` (#3888).
     assert_eq!(
-        resolve_login_server_url(&globals, &paths, &env),
-        "https://codewire.sh"
+        resolve_login_server(&globals, &paths, &env),
+        ("https://codewire.sh".to_owned(), false)
+    );
+}
+
+#[test]
+fn login_inside_a_sandbox_offers_its_server_and_says_so() {
+    let home = tempfile::tempdir().unwrap();
+    let env = config::MapEnv::new([(
+        codewire_daemon_proto::SANDBOX_SERVER_URL_ENV,
+        "https://sandbox.codewire.test",
+    )]);
+    let paths = ResolvePaths::from_home_and_env(home.path().to_path_buf(), &env).unwrap();
+    let globals = Globals {
+        server: None,
+        member: None,
+        placement: None,
+        org: None,
+    };
+    assert_eq!(
+        resolve_login_server(&globals, &paths, &env),
+        ("https://sandbox.codewire.test".to_owned(), true)
+    );
+    // A server the person saved is never replaced by the sandbox's.
+    config::save_platform_config(
+        &paths.platform_config_dir,
+        &config::PlatformConfig {
+            server_url: "https://saved.codewire.test".to_owned(),
+            default_org: String::new(),
+            deployment_ca: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        resolve_login_server(&globals, &paths, &env),
+        ("https://saved.codewire.test".to_owned(), false)
     );
 }
 
@@ -1646,8 +1680,8 @@ fn resolve_login_server_url_prefers_global_server() {
     };
 
     assert_eq!(
-        resolve_login_server_url(&globals, &paths, &env),
-        "https://flag.codewire.sh"
+        resolve_login_server(&globals, &paths, &env),
+        ("https://flag.codewire.sh".to_owned(), false)
     );
 }
 

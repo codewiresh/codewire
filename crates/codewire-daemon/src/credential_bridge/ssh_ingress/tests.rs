@@ -57,6 +57,7 @@ fn daemon_config(root: &Path) -> Config {
             native: None,
         }),
         session_working_dir: None,
+        sandbox_server_url: None,
     }
 }
 

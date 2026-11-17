@@ -123,6 +123,7 @@ fn projection_daemon_child() {
                 }),
             }),
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         println!("\nCW_PROJECTION_ENDPOINT={endpoint}");
         std::io::stdout().flush().unwrap();

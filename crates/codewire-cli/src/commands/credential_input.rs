@@ -1009,7 +1009,10 @@ mod tests {
         }
         assert_eq!(placements.last(), Some(&StoragePlacement::Platform));
         assert!(signed_out(&anyhow::Error::new(
-            crate::config::ConfigError::NoPlatformToken { cause: None }
+            crate::config::ConfigError::NoPlatformToken {
+                cause: None,
+                sandbox: None
+            }
         )));
         assert!(!signed_out(&anyhow::anyhow!("connection refused")));
     }

@@ -67,6 +67,9 @@ pub struct Config {
     /// starts. Local and host daemons leave this None and keep their own
     /// defaults.
     pub session_working_dir: Option<PathBuf>,
+    /// Hosted only: the server origin from the binding, which every session
+    /// gets as [`codewire_daemon_proto::SANDBOX_SERVER_URL_ENV`] (#5100).
+    pub sandbox_server_url: Option<String>,
 }
 
 /// One of the environment's own live mounts below `workspace_root`, and the
@@ -306,6 +309,7 @@ impl HostedPlacement {
         Config {
             listen_addr: self.listen_addr,
             session_working_dir: Some(self.workspace_root.clone()),
+            sandbox_server_url: None,
             workspace_root: self.workspace_root,
             home_root: self.home_root,
             mount_roots: Vec::new(),
@@ -498,6 +502,7 @@ pub struct BindResponseFields<'a> {
     pub projection_selection_sha256: &'a str,
     pub managed_credential_clients: &'a str,
     pub working_directory: &'a str,
+    pub server_url: &'a str,
 }
 
 /// A bind response the daemon accepted. Its credential never appears in
@@ -510,6 +515,7 @@ pub struct WorkspaceBinding {
     projection_selection_sha256: Option<[u8; 32]>,
     managed_credential_clients: ManagedCredentialClients,
     working_directory: Option<PathBuf>,
+    server_url: Option<String>,
 }
 
 impl fmt::Debug for WorkspaceBinding {
@@ -528,6 +534,7 @@ impl fmt::Debug for WorkspaceBinding {
                 &self.managed_credential_clients.encode(),
             )
             .field("working_directory", &self.working_directory)
+            .field("server_url", &self.server_url)
             .finish()
     }
 }
@@ -642,6 +649,7 @@ impl WorkspaceBindingConfig {
             projection_selection_sha256,
             managed_credential_clients,
             working_directory: declared_working_directory(response.working_directory),
+            server_url: sandbox_server_url(response.server_url),
         })
     }
 
@@ -654,6 +662,7 @@ impl WorkspaceBindingConfig {
         if let Some(directory) = &binding.working_directory {
             config.session_working_dir = Some(directory.clone());
         }
+        config.sandbox_server_url.clone_from(&binding.server_url);
         if let Some(selection_sha256) = binding.projection_selection_sha256 {
             config.apply_hosted_projection(
                 binding.environment_id,
@@ -664,6 +673,20 @@ impl WorkspaceBindingConfig {
         }
         config
     }
+}
+
+/// The binding's server origin, accepted only as an absolute https origin.
+/// Anything else is logged and dropped rather than refusing the bind or being
+/// corrected: sessions then get no server, and the daemon still serves.
+fn sandbox_server_url(value: &str) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    let origin = codewire_daemon_proto::sandbox_server_origin(value);
+    if origin.is_none() {
+        tracing::warn!("the binding's server is not an https origin; sessions get none");
+    }
+    origin.map(str::to_owned)
 }
 
 /// The environment's declared working directory, accepted only as a clean
@@ -823,6 +846,7 @@ mod tests {
             launch_projection: None,
             // Hosted placement starts unlisted sessions in the workspace root.
             session_working_dir: Some(DEFAULT_WORKSPACE_ROOT.into()),
+            sandbox_server_url: None,
         }
     }
 
@@ -1130,6 +1154,7 @@ mod tests {
             projection_selection_sha256: "",
             managed_credential_clients: "v1:none",
             working_directory: "",
+            server_url: "",
         }
     }
 
@@ -1467,6 +1492,33 @@ mod tests {
     }
 
     #[test]
+    fn a_bound_server_is_an_https_origin_or_nothing_and_never_refuses_the_bind() {
+        let config = binding_config();
+        let server = |value: &str| {
+            let binding = config
+                .validate(&BindResponseFields {
+                    server_url: value,
+                    ..response()
+                })
+                .unwrap_or_else(|_| panic!("{value:?} refused the bind"));
+            config.clone().into_config(&binding).sandbox_server_url
+        };
+        assert_eq!(
+            server("https://codewire.example/"),
+            Some("https://codewire.example".into())
+        );
+        for value in [
+            "",
+            "http://codewire.example",
+            "https://user@codewire.example",
+            "https://codewire.example/app",
+            "https://codewire.example?next=1",
+        ] {
+            assert_eq!(server(value), None, "{value:?}");
+        }
+    }
+
+    #[test]
     fn a_bound_working_directory_becomes_the_session_default() {
         let config = binding_config();
         let declared = config
@@ -1690,6 +1742,7 @@ mod tests {
             host: None,
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         };
 
         let debug = format!("{config:?}");

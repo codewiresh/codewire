@@ -4,6 +4,7 @@ use std::io;
 use std::path::PathBuf;
 
 use codewire_access::ManagedCredentialClientPlacement;
+use codewire_daemon_proto::SANDBOX_SERVER_URL_ENV;
 
 use crate::config::{
     Config, CredentialBridgeTransport, DAEMON_AUTH_TOKEN_ENV, MANAGED_CREDENTIAL_CLIENTS_ENV,
@@ -138,6 +139,16 @@ fn build_managed_process_env_from(
             .split_once('=')
             .is_none_or(|(name, _)| !managed_names.contains(name))
     });
+    // The binding's server replaces any image or persisted value; a
+    // session's own env still wins.
+    if let Some(origin) = &config.sandbox_server_url {
+        persisted.retain(|entry| {
+            entry
+                .split_once('=')
+                .is_none_or(|(name, _)| name != SANDBOX_SERVER_URL_ENV)
+        });
+        persisted.push(format!("{SANDBOX_SERVER_URL_ENV}={origin}"));
+    }
     let mut entries =
         build_process_env_from(config, persisted, extra, term, inherited, fallback_shell);
     bypass_proxy_for_loopback(config.managed_credential_clients, &mut entries);
@@ -399,6 +410,7 @@ mod tests {
             host: None,
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         }
     }
 
@@ -1424,5 +1436,47 @@ mod tests {
                 Some((key.into(), value.into()))
             })
             .collect()
+    }
+
+    #[test]
+    fn a_session_gets_the_bindings_server_over_the_image_and_project_values() {
+        let servers = |config: &Config, persisted: &[&str], extra: &[&str]| {
+            let image = [(
+                SANDBOX_SERVER_URL_ENV.to_owned(),
+                "https://image.invalid".to_owned(),
+            )];
+            let persisted = persisted
+                .iter()
+                .map(|value| format!("{SANDBOX_SERVER_URL_ENV}={value}"))
+                .collect();
+            let extra: Vec<String> = extra
+                .iter()
+                .map(|value| format!("{SANDBOX_SERVER_URL_ENV}={value}"))
+                .collect();
+            build_managed_process_env_from(config, persisted, &extra, "", image, "/bin/sh")
+                .unwrap()
+                .entries
+                .into_iter()
+                .filter_map(|entry| {
+                    entry
+                        .strip_prefix(&format!("{SANDBOX_SERVER_URL_ENV}="))
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut config = test_config(PathBuf::from("/home/codewire"));
+        config.sandbox_server_url = Some("https://codewire.example".into());
+        assert_eq!(
+            servers(&config, &["https://project.invalid"], &[]),
+            ["https://codewire.example"]
+        );
+        // The session's own request still wins, as for every variable.
+        assert_eq!(
+            servers(&config, &[], &["https://session.invalid"]),
+            ["https://session.invalid"]
+        );
+        // Without a server from the binding, the daemon adds none.
+        config.sandbox_server_url = None;
+        assert_eq!(servers(&config, &[], &[]), ["https://image.invalid"]);
     }
 }

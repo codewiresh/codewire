@@ -419,6 +419,7 @@ mod tests {
                 state_root: root.clone(),
             }),
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let socket = root.join("daemon.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -547,6 +548,7 @@ mod tests {
                 state_root: root.clone(),
             }),
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let socket = root.join("daemon.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();

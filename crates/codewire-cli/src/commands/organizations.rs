@@ -150,7 +150,7 @@ pub(crate) async fn handle_org_command(
         // Signed out, listing has nothing to fail at: it says so and how to
         // sign in (#4592).
         Err(error)
-            if super::inventory::cloud_not_configured(&error) == super::NOT_SIGNED_IN
+            if super::inventory::signed_out(&error)
                 && let Some(OrgCommand::List(args)) = &command =>
         {
             match args.output {
@@ -158,7 +158,13 @@ pub(crate) async fn handle_org_command(
                 OutputFormat::Text => {
                     let caps =
                         crate::output::Capabilities::from_process(crate::output::OutputMode::Text);
-                    print!("{}", super::format_not_signed_in(caps.stdout_style()));
+                    match super::inventory::cloud_not_configured(&error).as_str() {
+                        super::NOT_SIGNED_IN => {
+                            print!("{}", super::format_not_signed_in(caps.stdout_style()));
+                        }
+                        // Inside a sandbox: what works there, not `cw login`.
+                        sandbox => println!("{}.", super::sentence(sandbox)),
+                    }
                 }
             }
             return Ok(());

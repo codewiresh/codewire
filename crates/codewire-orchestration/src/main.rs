@@ -847,7 +847,8 @@ async fn main() -> anyhow::Result<()> {
                 mesh_url: api_state.sandbox_cfg.mesh_public_url.clone(),
             },
             Arc::new(relay_allocator(|name| std::env::var(name).ok())?),
-        ),
+        )
+        .with_server_url(&api_state.frontend_url),
     );
     // There is no plaintext form: inside a cluster it serves TLS with the
     // internal identity, and outside one no workspace exists to call it, so

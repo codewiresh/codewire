@@ -334,6 +334,14 @@ pub fn resolve_platform(
     {
         server_url = non_empty(normalize_server_url(&config.server_url));
     }
+    // Last, the server of the sandbox this runs in: it never pairs with a
+    // sign-in saved for another server.
+    let sandbox_server = server_url
+        .is_none()
+        .then(|| sandbox_server_url(env))
+        .flatten();
+    let server_from_override = server_from_override || sandbox_server.is_some();
+    let server_url = server_url.or_else(|| sandbox_server.clone());
     let server_url = match server_url {
         Some(server_url) => server_url,
         None => {
@@ -372,6 +380,7 @@ pub fn resolve_platform(
             }
             return Err(ConfigError::NoPlatformToken {
                 cause: config_result.err().map(Box::new),
+                sandbox: sandbox_server,
             });
         }
     };
@@ -404,7 +413,8 @@ pub fn resolve_platform(
 }
 
 /// The selected platform server without requiring a sign-in: `--server`,
-/// then `CODEWIRE_SERVER_URL`, then the saved login's server.
+/// then `CODEWIRE_SERVER_URL`, then the saved login's server, then the
+/// sandbox's.
 pub fn resolve_platform_server_url(
     explicit: Option<String>,
     paths: &ResolvePaths,
@@ -417,6 +427,39 @@ pub fn resolve_platform_server_url(
                 .ok()
                 .and_then(|config| non_empty(normalize_server_url(&config.server_url)))
         })
+        .or_else(|| sandbox_server_url(env))
+}
+
+/// The server of the Codewire sandbox this process runs in, which its daemon
+/// names in `CODEWIRE_SANDBOX_SERVER_URL` (#5100). Anything in the sandbox
+/// can set that variable, so only an absolute https origin is used, and it
+/// never authenticates anything or enters the saved config by itself.
+pub fn sandbox_server_url(env: &impl Env) -> Option<String> {
+    env.var(codewire_daemon_proto::SANDBOX_SERVER_URL_ENV)
+        .as_deref()
+        .and_then(codewire_daemon_proto::sandbox_server_origin)
+        .map(str::to_owned)
+}
+
+/// Signed out inside a sandbox: what `cw` can and can't do there, with the
+/// cost of signing in first (#5100).
+fn sandbox_signed_out(server: &str) -> String {
+    format!(
+        "this Codewire sandbox on {server} holds no sign-in, so `cw` here can't reach your \
+         account; `cw network connect` works here. `cw login` here would store a key in this \
+         sandbox, which anything running in it could use. Prefer running `cw` from your own \
+         computer"
+    )
+}
+
+fn no_platform_token(cause: Option<&ConfigError>, sandbox: Option<&str>) -> String {
+    match sandbox {
+        Some(server) => format!("not signed in: {}", sandbox_signed_out(server)),
+        None => format!(
+            "not signed in (run `cw login`, or set CODEWIRE_API_KEY){}",
+            config_note(cause)
+        ),
+    }
 }
 
 pub fn load_platform_config(config_dir: &Path) -> Result<PlatformConfig, ConfigError> {
@@ -1431,8 +1474,13 @@ pub enum ConfigError {
     #[error("no server configured (set --server, CODEWIRE_SERVER_URL, run 'cw setup', or run 'cw login'){}", config_note(cause.as_deref()))]
     NoPlatformServer { cause: Option<Box<ConfigError>> },
     // The wording every command shares for a signed-out user (#4626, #4643).
-    #[error("not signed in (run `cw login`, or set CODEWIRE_API_KEY){}", config_note(cause.as_deref()))]
-    NoPlatformToken { cause: Option<Box<ConfigError>> },
+    // Inside a sandbox, `sandbox` is its server and the wording says what
+    // works there instead.
+    #[error("{}", no_platform_token(cause.as_deref(), sandbox.as_deref()))]
+    NoPlatformToken {
+        cause: Option<Box<ConfigError>>,
+        sandbox: Option<String>,
+    },
     #[error(
         "not logged in for {requested} (saved config is for {saved}; set CODEWIRE_API_KEY or log in to that server)"
     )]
@@ -1789,6 +1837,107 @@ mod tests {
         assert!(!format!("{resolved:?}").contains("cw_env_only"));
     }
 
+    const SANDBOX_SERVER: &str = codewire_daemon_proto::SANDBOX_SERVER_URL_ENV;
+
+    #[test]
+    fn a_sandboxs_server_comes_after_every_configured_one() {
+        let home = tempfile::tempdir().unwrap();
+        let sandbox = MapEnv::new([(SANDBOX_SERVER, "https://sandbox.codewire.test/")]);
+        let paths = paths(home.path(), &sandbox);
+        assert_eq!(
+            resolve_platform_server_url(None, &paths, &sandbox).as_deref(),
+            Some("https://sandbox.codewire.test")
+        );
+        // The saved config, the variable and the flag each come first.
+        write_platform_config(&paths.platform_config_dir, "https://saved.codewire.test");
+        assert_eq!(
+            resolve_platform_server_url(None, &paths, &sandbox).as_deref(),
+            Some("https://saved.codewire.test")
+        );
+        let env = MapEnv::new([
+            (SANDBOX_SERVER, "https://sandbox.codewire.test"),
+            (CODEWIRE_SERVER_URL_ENV, "https://env.codewire.test"),
+        ]);
+        assert_eq!(
+            resolve_platform_server_url(None, &paths, &env).as_deref(),
+            Some("https://env.codewire.test")
+        );
+        assert_eq!(
+            resolve_platform_server_url(Some("https://flag.codewire.test".into()), &paths, &env)
+                .as_deref(),
+            Some("https://flag.codewire.test")
+        );
+    }
+
+    #[test]
+    fn a_sandbox_server_that_is_not_an_https_origin_is_not_used() {
+        let home = tempfile::tempdir().unwrap();
+        for value in [
+            "http://sandbox.codewire.test",
+            "https://user@sandbox.codewire.test",
+            "https://sandbox.codewire.test/login",
+        ] {
+            let env = MapEnv::new([(SANDBOX_SERVER, value)]);
+            let paths = paths(home.path(), &env);
+            assert_eq!(
+                resolve_platform_server_url(None, &paths, &env),
+                None,
+                "{value}"
+            );
+            let error =
+                resolve_platform(PlatformResolveOptions::default(), &paths, &env).unwrap_err();
+            assert!(
+                matches!(error, ConfigError::NoPlatformServer { .. }),
+                "{value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sandboxs_server_never_pairs_with_a_saved_sign_in() {
+        let home = tempfile::tempdir().unwrap();
+        let env = MapEnv::new([(SANDBOX_SERVER, "https://sandbox.codewire.test")]);
+        let paths = paths(home.path(), &env);
+        // A saved config whose server normalizes to nothing, beside a saved
+        // sign-in: the sandbox's server is used, never with that sign-in.
+        write_platform_config(&paths.platform_config_dir, "/");
+        fs::write(oauth_credentials_path(&paths.platform_config_dir), "{}").unwrap();
+        let error = resolve_platform(PlatformResolveOptions::default(), &paths, &env).unwrap_err();
+        assert!(
+            matches!(error, ConfigError::PlatformServerMismatch { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn signed_out_in_a_sandbox_says_what_works_there_and_what_signing_in_costs() {
+        let home = tempfile::tempdir().unwrap();
+        let env = MapEnv::new([(SANDBOX_SERVER, "https://sandbox.codewire.test")]);
+        let paths = paths(home.path(), &env);
+        let error = resolve_platform(PlatformResolveOptions::default(), &paths, &env).unwrap_err();
+        let ConfigError::NoPlatformToken { sandbox, .. } = &error else {
+            panic!("{error}");
+        };
+        assert_eq!(sandbox.as_deref(), Some("https://sandbox.codewire.test"));
+        let message = error.to_string();
+        for expected in [
+            "not signed in: this Codewire sandbox on https://sandbox.codewire.test",
+            "`cw network connect` works here",
+            "`cw login` here would store a key in this sandbox, which anything running in it could use",
+            "Prefer running `cw` from your own computer",
+        ] {
+            assert!(message.contains(expected), "{message}");
+        }
+        assert!(!message.contains("no server configured"), "{message}");
+        // An API key the person set is theirs to use.
+        let keyed = MapEnv::new([
+            (SANDBOX_SERVER, "https://sandbox.codewire.test"),
+            (CODEWIRE_API_KEY_ENV, "cw_sandbox_key"),
+        ]);
+        let resolved = resolve_platform(PlatformResolveOptions::default(), &paths, &keyed).unwrap();
+        assert_eq!(resolved.server_url, "https://sandbox.codewire.test");
+    }
+
     #[tokio::test]
     async fn platform_uses_saved_oauth_credentials_after_process_restart() {
         let home = tempfile::tempdir().unwrap();
@@ -1894,7 +2043,11 @@ mod tests {
     #[test]
     fn signed_out_is_one_wording_with_the_command_that_signs_in() {
         assert_eq!(
-            ConfigError::NoPlatformToken { cause: None }.to_string(),
+            ConfigError::NoPlatformToken {
+                cause: None,
+                sandbox: None
+            }
+            .to_string(),
             "not signed in (run `cw login`, or set CODEWIRE_API_KEY)"
         );
     }

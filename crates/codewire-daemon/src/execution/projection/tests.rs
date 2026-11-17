@@ -35,6 +35,7 @@ fn config(directory: &Path) -> Config {
             native: None,
         }),
         session_working_dir: None,
+        sandbox_server_url: None,
     }
 }
 

@@ -1306,6 +1306,7 @@ mod tests {
             host: None,
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let (rotation, requests) = crate::auth_rotation::rotation_channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -1871,6 +1872,7 @@ mod tests {
             host: None,
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         (
             temp,
@@ -1903,6 +1905,7 @@ mod tests {
             host: None,
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let health = |outcome| {
             let service = DaemonServiceImpl::with_runtime_state(
@@ -1953,6 +1956,7 @@ mod tests {
             host: None,
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let store = temp.path().join(".codewire/daemon/sessions");
         std::fs::create_dir_all(store.parent().unwrap()).unwrap();
@@ -2023,6 +2027,7 @@ mod tests {
             host: None,
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         // A daemon that serves no tailnet refuses the push.
         let unbound = DaemonServiceImpl::new(config.clone());
@@ -2850,6 +2855,7 @@ mod tests {
                 state_root: temp.path().join("state"),
             }),
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let (app_ports, current_ports) =
             tokio::sync::watch::channel(crate::app_ports::AppPorts::from([8080]));
@@ -3028,6 +3034,7 @@ mod tests {
             }),
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         tokio::spawn(async move {

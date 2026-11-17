@@ -392,6 +392,7 @@ mod tests {
             launch_projection: None,
             managed_credential_clients: Default::default(),
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let (connector, local) = local_transport();
         let network = tokio_stream::empty::<io::Result<tokio::net::TcpStream>>();

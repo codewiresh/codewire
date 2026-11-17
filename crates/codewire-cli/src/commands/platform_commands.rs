@@ -307,13 +307,19 @@ pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> 
     }
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
-    let server_url = resolve_login_server_url(globals, &paths, &env);
+    let (server_url, sandbox) = resolve_login_server(globals, &paths, &env);
+    if sandbox {
+        eprintln!("Server: {server_url} (this sandbox's server)");
+        eprintln!("{SANDBOX_SIGN_IN_WARNING}");
+    }
     let login_client = OAuthClient::discover(&server_url)
         .await
         .context("discover OAuth device flow")?;
 
     eprintln!("Welcome to Codewire.");
-    eprintln!("Server: {server_url}");
+    if !sandbox {
+        eprintln!("Server: {server_url}");
+    }
 
     let (credentials, user) = login_with_device(&login_client).await?;
     eprintln!("Logged in as {}.", oauth_user_display_name(&user));
@@ -462,28 +468,37 @@ pub(crate) async fn setup_select_org(
 }
 
 /// The server `cw login` and `cw setup` sign in to: `--server`, then
-/// `CODEWIRE_SERVER_URL`, then the saved config, then hosted Codewire, so a
-/// new user can run `cw login` first (#3888).
-pub(crate) fn resolve_login_server_url(
+/// `CODEWIRE_SERVER_URL`, then the saved config, then the server of the
+/// sandbox this runs in, then hosted Codewire, so a new user can run
+/// `cw login` first (#3888). And whether it is the sandbox's, which the
+/// sign-in names before it waits, since anything in the sandbox can set it
+/// (#5100).
+pub(crate) fn resolve_login_server(
     globals: &Globals,
     paths: &ResolvePaths,
     env: &impl config::Env,
-) -> String {
+) -> (String, bool) {
     if let Some(server_url) = normalize_login_server_url(globals.server.as_deref()) {
-        return server_url;
+        return (server_url, false);
     }
     if let Some(server_url) =
         normalize_login_server_url(env.var(config::CODEWIRE_SERVER_URL_ENV).as_deref())
     {
-        return server_url;
+        return (server_url, false);
     }
     if let Ok(config) = config::load_platform_config(&paths.platform_config_dir)
         && let Some(server_url) = normalize_login_server_url(Some(&config.server_url))
     {
-        return server_url;
+        return (server_url, false);
     }
-    "https://codewire.sh".to_string()
+    if let Some(server_url) = config::sandbox_server_url(env) {
+        return (server_url, true);
+    }
+    ("https://codewire.sh".to_string(), false)
 }
+
+/// What a sign-in inside a sandbox says before it waits (#5100).
+pub(crate) const SANDBOX_SIGN_IN_WARNING: &str = "Signing in here stores a key in this sandbox, which anything running in it could use. Prefer running `cw` from your own computer.";
 
 pub(crate) fn normalize_login_server_url(value: Option<&str>) -> Option<String> {
     let value = value?.trim().trim_end_matches('/').to_string();
@@ -3212,7 +3227,10 @@ mod tests {
             message,
             "no environment named \"gh\": no local VM has that name (`cw --local ls` shows yours), and no Codewire server is set up for cloud environments (`cw login`)"
         );
-        let logged_out = anyhow::Error::from(config::ConfigError::NoPlatformToken { cause: None });
+        let logged_out = anyhow::Error::from(config::ConfigError::NoPlatformToken {
+            cause: None,
+            sandbox: None,
+        });
         assert!(
             format!("{:#}", unknown_environment_without_cloud("gh", logged_out))
                 .ends_with("and you are not logged in for cloud environments (`cw login`)")

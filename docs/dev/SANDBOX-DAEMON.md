@@ -91,6 +91,11 @@ namespace, filesystem view, UID/GID, and environment:
   `/home/codewire/.codewire/environment.json`, which it writes from the saved
   project on every bind; it is not a file to edit by hand, and an edit lasts
   only until the next bind
+- give each session `CODEWIRE_SANDBOX_SERVER_URL`, the server origin from the
+  bind response, so `cw` inside knows its server (#5100). The daemon exports
+  it only when it is an absolute `https` origin with no userinfo, path, query
+  or fragment, logs and drops any other value, and never puts it in the Pod
+  template
 - default workspace paths to `/workspace` and `/home/codewire`
 
 The daemon RPC listener is `0.0.0.0:7777` inside the workspace Pod. Kubernetes
@@ -283,6 +288,8 @@ For both exec and PTY sessions:
 - empty working directory defaults to the workspace user home
 - command process env starts from the workspace container env
 - persisted env from `/home/codewire/.codewire/environment.json` is merged in
+- `CODEWIRE_SANDBOX_SERVER_URL` from the current binding replaces any
+  container or persisted value
 - session-provided env wins over persisted env
 - PTY sessions set `TERM` from the request
 - `HOME`, `USER`, and `SHELL` are filled with sane defaults when missing

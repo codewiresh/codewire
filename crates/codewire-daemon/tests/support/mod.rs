@@ -169,6 +169,7 @@ impl DaemonHarness {
                     host: None,
                     launch_projection: None,
                     session_working_dir: None,
+                    sandbox_server_url: None,
                 };
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
                 let server = tokio::spawn(async move {
@@ -209,6 +210,7 @@ impl DaemonHarness {
                     host: None,
                     launch_projection: None,
                     session_working_dir: None,
+                    sandbox_server_url: None,
                 };
                 let (shutdown_tx, shutdown_rx) = oneshot::channel();
                 let server = tokio::spawn(async move {

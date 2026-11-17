@@ -149,7 +149,10 @@ fn only_a_missing_platform_configuration_proves_an_ineligible_backend() {
     assert!(platform_is_proven_unconfigured(&missing));
     for error in [
         config::ConfigError::NoPlatformServer { cause: None },
-        config::ConfigError::NoPlatformToken { cause: None },
+        config::ConfigError::NoPlatformToken {
+            cause: None,
+            sandbox: None,
+        },
         config::ConfigError::NoPlatformServer {
             cause: Some(Box::new(config::ConfigError::ReadConfig {
                 path: PathBuf::from("/synthetic/unreadable/config.json"),

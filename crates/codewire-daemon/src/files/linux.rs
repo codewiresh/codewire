@@ -878,6 +878,7 @@ mod tests {
             host: None,
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         (temp, config, workspace)
     }

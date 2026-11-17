@@ -4,7 +4,8 @@ This journey proves what a user does with a cloud sandbox, as `SPEC.md`
 describes it in "4. Hosted sandboxes" and "7. Access paths": creating one,
 what a create that fails leaves behind, running commands and shells in it,
 stopping and starting it, what its page shows while it starts, copying files
-with `cw cp` ("File transfer" in section 7), and what a user sees while a release replaces the orchestration
+with `cw cp` ("File transfer" in section 7), what `cw` inside a sandbox
+knows (section 8), and what a user sees while a release replaces the orchestration
 service ("Rollouts drain" in section 10). Large `cw run` output is not written
 yet; its owner adds it. The format is in [README.md](README.md).
 
@@ -18,6 +19,7 @@ Updated 2026-11-17.
 | `sandbox-create-fails` | cw-cleanup | observed 2026-11-17 (#4483) | not yet observed; v0.4.21 lacks #4483's reasons |
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
+| `sandbox-cw-knows-its-server` | cw-identity | not yet observed | not yet observed |
 | `sandbox-attach-stays` | cw-direct-udp | not yet observed | not yet observed |
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
@@ -264,6 +266,47 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished),
     `shell-says-42` and `cw` exited 3. The dashboard terminal and `ssh` were
     not walked. Evidence: the pull
     request that added this section.
+
+## `sandbox-cw-knows-its-server`: `cw` inside a sandbox knows its server
+
+`SPEC.md` section 8, "What a workload inside a sandbox can and cannot do"
+(#5100). A sandbox holds no Codewire sign-in. `cw` inside it knows which
+server it belongs to and says what it can do, instead of asking for a URL.
+
+- **Entry points:** `cw` in a shell inside a cloud sandbox. A local VM gets
+  the same later (#5103, not yet built).
+- **States to exercise:**
+  - a command that needs a sign-in, run with no sign-in;
+  - `cw network connect`, which works without one;
+  - `cw login` offering the sandbox's server;
+  - a saved server or `CODEWIRE_SERVER_URL` taking precedence over the
+    sandbox's.
+- **Driving it:** in `walk`:
+
+  ```sh
+  cw exec walk -- sh -c 'echo "$CODEWIRE_SANDBOX_SERVER_URL"; cw whoami; echo "exit $?"'
+  printf 'cw login\n' | script -qec 'cw shell walk' /dev/null
+  cw exec walk -- sh -c 'CODEWIRE_SERVER_URL=https://other.invalid cw whoami'
+  ```
+
+- **Proof:**
+  - The first line is the server you created `walk` on (`https://codewire-dev.sh`
+    on Dev).
+  - `cw whoami` exits nonzero and says this is a Codewire sandbox on that
+    server with no sign-in. It names `cw network connect` as what works here,
+    and says that `cw login` here would store a key that anything in the
+    sandbox could use. Nowhere does it say "no server configured" or ask for
+    a URL.
+  - `cw login` names that server as this sandbox's before it waits. Stop it
+    there; don't sign in.
+  - With `CODEWIRE_SERVER_URL` set, `cw` names `https://other.invalid`, not
+    the sandbox's server.
+- **Gotchas:**
+  - A workload started by a custom image's own entrypoint does not see the
+    variable; only daemon sessions (`cw exec`, `cw shell`, SSH) do.
+  - On Kind there is no `https` server origin, so the variable is absent and
+    `cw` says "no server configured" there, as on any machine without one.
+- **Observed:** not yet.
 
 ## `sandbox-attach-stays`: an attached session stays connected
 

@@ -25,6 +25,7 @@ pub(crate) fn config(root: &Path) -> crate::Config {
             state_root: root.join("state"),
         }),
         session_working_dir: None,
+        sandbox_server_url: None,
     }
 }
 

@@ -30,6 +30,7 @@ pub(crate) async fn in_process_daemon(temp: &Path) -> DaemonSessionClient {
         launch_projection: None,
         managed_credential_clients: Default::default(),
         session_working_dir: None,
+        sandbox_server_url: None,
     };
     let (connector, local) = local_transport();
     let network = tokio_stream::empty::<std::io::Result<TcpStream>>();

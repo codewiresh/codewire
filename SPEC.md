@@ -789,6 +789,18 @@ credential that the broker holds; obtain a refresh token, API key, GitHub or
 SSH private material or organization-owned credential; reach the node's
 container runtime.
 
+`cw` inside a cloud sandbox knows its server and holds no sign-in (#5100).
+The bind response carries the deployment's public origin (`FRONTEND_URL`,
+only when it is an absolute `https` origin), and the daemon gives each
+session it as `CODEWIRE_SANDBOX_SERVER_URL`; it names no identity and
+authenticates nothing. `cw` uses it only after `--server`,
+`CODEWIRE_SERVER_URL` and the saved config, never writes it to the saved
+config itself, and ignores any value that is not an `https` origin. A
+command that needs a sign-in says this is a sandbox on that server, that
+`cw network connect` works here, and that `cw login` here would store a key
+that anything in the sandbox could use. Not yet observed working
+(`sandbox-cw-knows-its-server`); a local VM gets the same later (#5103).
+
 Hosted network policy today
 (`crates/codewire-orchestration/src/sandbox/template/network.rs`):
 orchestration renders one `NetworkPolicy` per environment. Ingress admits the

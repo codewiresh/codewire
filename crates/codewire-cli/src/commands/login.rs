@@ -17,7 +17,7 @@ pub(crate) struct LoginArgs {
 pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> anyhow::Result<()> {
     let env = OsEnv;
     let paths = ResolvePaths::from_env(&env)?;
-    let server_url = resolve_login_server_url(globals, &paths, &env);
+    let (server_url, sandbox) = resolve_login_server(globals, &paths, &env);
     let configured_org = saved_login_default_org(&paths, &server_url);
     let ca = args
         .ca_file
@@ -38,7 +38,12 @@ pub(crate) async fn handle_login_command(globals: &Globals, args: LoginArgs) -> 
         .context("build the HTTP client")?;
     // Say where before waiting, and wait a bounded time (#4598).
     let host = server_host(&server_url);
-    eprintln!("Connecting to {host}…");
+    if sandbox {
+        eprintln!("Connecting to {host} (this sandbox's server)…");
+        eprintln!("{SANDBOX_SIGN_IN_WARNING}");
+    } else {
+        eprintln!("Connecting to {host}…");
+    }
     let client = match tokio::time::timeout(
         LOGIN_REACH_TIMEOUT,
         OAuthClient::discover_with_http(&server_url, http),

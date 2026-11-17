@@ -77,6 +77,11 @@ message BindWorkspaceResponse {
   // which the daemon writes on every bind (#3684). Absent from a server that
   // doesn't send them; setup then writes them as before.
   WorkspaceDefaults defaults = 9;
+  // The deployment's public origin, which `cw` inside the sandbox uses as its
+  // server after every configured one (#5100): an absolute https origin, or
+  // empty when the deployment has none. Not an identity or a credential. The
+  // daemon validates it again before giving it to sessions.
+  string server_url = 10;
 }
 
 // WorkspaceDefaults is the configuration the bound daemon writes into the

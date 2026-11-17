@@ -550,6 +550,7 @@ mod tests {
             managed_credential_clients:
                 codewire_access::ManagedCredentialClients::from_profile_slots(["codex"]).unwrap(),
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let mut origin = Origin {
             version: 1,
@@ -643,6 +644,7 @@ mod tests {
                 codewire_access::ManagedCredentialClients::from_profile_slots(["anthropic"])
                     .unwrap(),
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let origin = Origin {
             version: 1,

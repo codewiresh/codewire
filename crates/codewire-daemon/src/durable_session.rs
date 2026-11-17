@@ -5231,6 +5231,7 @@ mod tests {
             host: None,
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let engine = SessionEngine::new(&config, CredentialBridge::new(None));
         engine.ensure_initialized().await.unwrap();
@@ -5256,6 +5257,7 @@ mod tests {
             host: None,
             launch_projection: None,
             session_working_dir: declared.map(|relative| temp.path().join(relative)),
+            sandbox_server_url: None,
         };
         let engine = SessionEngine::new(&config, CredentialBridge::new(None));
         engine.ensure_initialized().await.unwrap();
@@ -5311,6 +5313,7 @@ mod tests {
             host: None,
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let engine = SessionEngine::new(&config, CredentialBridge::new(None));
         engine.ensure_initialized().await.unwrap();
@@ -5894,6 +5897,7 @@ mod tests {
                 }),
             }),
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let bridge = CredentialBridge::new(config.credential_bridge.clone());
         let engine = SessionEngine::new(&config, bridge);
@@ -6048,6 +6052,7 @@ mod tests {
             host: None,
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         SessionEngine::new(&config, CredentialBridge::new(None))
     }

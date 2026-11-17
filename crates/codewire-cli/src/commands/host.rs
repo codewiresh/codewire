@@ -870,6 +870,7 @@ fn host_daemon_config(
             state_root: environment.root(),
         }),
         session_working_dir: None,
+        sandbox_server_url: None,
     })
 }
 

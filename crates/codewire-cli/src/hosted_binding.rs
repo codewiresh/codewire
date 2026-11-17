@@ -219,6 +219,7 @@ impl BindingClient {
             projection_selection_sha256: &response.projection_selection_sha256,
             managed_credential_clients: &response.managed_credential_clients,
             working_directory: &response.working_directory,
+            server_url: &response.server_url,
         };
         let accepted = config.validate(&fields);
         // The response owns copies of the credential and peer token; wipe

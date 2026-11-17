@@ -818,6 +818,7 @@ mod tests {
                 }),
                 managed_credential_clients: Default::default(),
                 session_working_dir: None,
+                sandbox_server_url: None,
             };
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
             let server = tokio::spawn(async move {

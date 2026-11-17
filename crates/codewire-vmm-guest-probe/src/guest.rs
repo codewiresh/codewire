@@ -587,6 +587,7 @@ pub async fn run_daemon() -> Result<()> {
             ingress_gid: plan.identity.gid,
         }),
         session_working_dir: None,
+        sandbox_server_url: None,
     };
 
     // While Codex is selected the guest daemon also keeps Codex's own ChatGPT

@@ -306,7 +306,7 @@ pub(crate) async fn environment_inventory(
                 let reason = cloud_not_configured(&error);
                 // Signed out is an expected state even when the cloud is
                 // asked for by name; any other setup error is a failure there.
-                let signed_out = reason == super::NOT_SIGNED_IN;
+                let signed_out = signed_out(&error);
                 inventory.report(
                     Location::Cloud,
                     if placement == Some(EnvironmentPlacement::Platform) && !signed_out {
@@ -356,9 +356,26 @@ async fn local_vms() -> anyhow::Result<Option<Vec<codewire_local_vmm::control::v
     native_environments().await.map(Some)
 }
 
+/// Whether `error` is the signed-out state, which a read reports and exits 0.
+pub(crate) fn signed_out(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<config::ConfigError>(),
+        Some(
+            config::ConfigError::NoPlatformServer { .. }
+                | config::ConfigError::NoPlatformToken { .. }
+        )
+    )
+}
+
 /// Why the cloud is not set up, with its repair.
 pub(crate) fn cloud_not_configured(error: &anyhow::Error) -> String {
     match error.downcast_ref::<config::ConfigError>() {
+        // Inside a sandbox, `cw login` is not the plain next step (#5100).
+        Some(
+            sandbox @ config::ConfigError::NoPlatformToken {
+                sandbox: Some(_), ..
+            },
+        ) => sandbox.to_string(),
         // Before `cw login` there is no server set up, after `cw logout` no
         // token: to the user both are the same state (#4589).
         Some(

@@ -61,6 +61,7 @@ impl Fixture {
             host: None,
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let engine = SessionEngine::new(&config, CredentialBridge::new(None));
         let record = engine.launch(v1::LaunchSessionRequest {
@@ -327,6 +328,7 @@ async fn platform_managed_driver_is_prepared_through_the_launch_projection_like_
             }),
         }),
         session_working_dir: None,
+        sandbox_server_url: None,
     };
     let origin = Origin {
         version: 1,
@@ -614,6 +616,7 @@ fn retained_config(root: &Path) -> Config {
         host: None,
         launch_projection: None,
         session_working_dir: None,
+        sandbox_server_url: None,
     }
 }
 

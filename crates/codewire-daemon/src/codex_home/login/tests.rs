@@ -853,6 +853,7 @@ fn a_daemon_with_a_bridge_and_codex_selected_runs_the_writer_for_its_own_placeme
         managed_credential_clients: clients(slots),
         launch_projection: None,
         session_working_dir: None,
+        sandbox_server_url: None,
     };
     let hosted = CodexHome::at("/nonexistent/.codex");
     let native = CodexHome::native(

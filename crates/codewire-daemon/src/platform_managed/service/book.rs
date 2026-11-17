@@ -738,6 +738,7 @@ mod tests {
             host: None,
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         let service = Service {
             inner: Arc::new(Inner {
@@ -900,6 +901,7 @@ mod tests {
             host: None,
             launch_projection: None,
             session_working_dir: None,
+            sandbox_server_url: None,
         };
         // Only the in-memory admission predicate, not availability, Info,
         // original channel or actual provider launch, is under test here.

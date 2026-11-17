@@ -898,6 +898,7 @@ fn only_a_hosted_daemon_with_the_sign_in_form_runs_the_writer() {
         managed_credential_clients: clients,
         launch_projection: None,
         session_working_dir: None,
+        sandbox_server_url: None,
     };
     let anthropic = ManagedCredentialClients::from_profile_slots(["anthropic"]).unwrap();
     let sign_in = anthropic.with_anthropic_sign_in().unwrap();
