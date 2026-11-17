@@ -9,7 +9,7 @@ surface proves nothing about another. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-15. Every step not listed as observed is **not yet
+Updated 2026-11-17. Every step not listed as observed is **not yet
 observed**.
 
 | ID | Linux local VM | Mac local VM | Hosted Sandbox (Dev) |
@@ -22,6 +22,7 @@ observed**.
 | `cred-claude-sign-in` | observed, #4798 at f5657302c, 2026-11-15 (steps 1–4; the plan and `/usage`, step 5, not yet observed) | login file observed, #4868 at b4541bf05, 2026-11-15 (steps 1–3 and the file; `claude -p`, `/status` and `/usage` not yet observed: the guest had no network, #4948) | link screen and paste prompt observed, v0.4.18, 2026-11-14; a completed sign-in not yet observed |
 | `cred-ssh-key` | not yet observed | not yet observed | not yet observed |
 | `profile-default` | not yet observed | not yet observed | not yet observed |
+| `cred-delivery-diagnosis` | not yet observed | not yet observed | local VMs only |
 
 ## Before the walk
 
@@ -316,4 +317,76 @@ Issues: #4714 (local), #2559 (cloud).
     the VMs and run the command again.
   - A cloud profile cannot be deleted while it is the default either. The
     walk's last profile stays until another is made the default.
+- **Observed:** not yet observed.
+
+## 10. `cred-delivery-diagnosis`: see why a credential didn't reach a local VM
+
+Issue: #4882. The rules are in `docs/dev/SECRETS-AND-CREDENTIALS.md`,
+"Diagnosing delivery in a local VM". Local VMs only: a hosted Sandbox's daemon
+lines are in its Pod log.
+
+- **Entry points:** `cw --local daemon logs ENV`.
+- **States to exercise:**
+  - a running VM whose profile holds a Claude sign-in: the writer's outcome
+    and the admitted lease are both shown;
+  - a running VM whose profile holds a synthetic Claude token: no login is
+    written, and the lease for the model request is shown;
+  - a running VM with no profile: the guest daemon part has lines, and the
+    leases part says none are recorded;
+  - a stopped VM: the guest daemon part says the VM is not running, and the
+    leases recorded while it ran are still listed;
+  - a VM still running on the guest it was started with before the `cw`
+    update that brought this command: the guest daemon part says the guest is
+    older and that a restart brings the lines. Drive it as
+    [local-vm-upgrade.md](local-vm-upgrade.md) does: start the VM on v0.4.22
+    or earlier, update `cw` without `--vms`, then run the command;
+  - no credential authority running: the leases part says so, and the command
+    starts none. No command stops an authority while a VM runs, so a test
+    holds this state and the walk skips it.
+- **Driving it:** with the throwaway `HOME` and store of
+  [Before the walk](#before-the-walk), a synthetic token named
+  `diag-token`, and environments named `diag-*`. The token is made in a
+  shell variable and piped in, so it is never typed, echoed or recorded:
+
+  ```sh
+  DIAG_TOKEN="sk-ant-oat01-$(head -c 96 /dev/urandom | base64 | tr -dc A-Za-z0-9 | head -c 95)"
+  printf '%s' "$DIAG_TOKEN" | cw credentials --local connect claude-token --name diag-token
+  cw credentials --local --profile diag-profile set anthropic diag-token
+  cw --local create diag-env --profile local:diag-profile
+  cw --local exec --in diag-env -- claude -p hi
+  cw --local daemon logs diag-env
+  cw --local create diag-bare --no-profile
+  cw --local daemon logs diag-bare
+  cw --local stop diag-env
+  cw --local daemon logs diag-env
+  ```
+
+  In a fresh store `diag-profile` becomes the default profile
+  (`profile-default`), so `diag-bare` needs its `--no-profile`. The sign-in
+  state uses the profile from `cred-claude-sign-in` in place of
+  `diag-profile`. Afterwards remove `diag-env`, `diag-bare`, `diag-profile`
+  and `diag-token`, and unset `DIAG_TOKEN`.
+- **Proof:**
+  - The output has three heading lines, in this order: operations, guest
+    daemon, credential leases. Every guest daemon line starts with `guest: `.
+  - With the sign-in, the guest daemon part holds a line with
+    `claude_login=Written` (or `Current` on a later check), and the leases
+    part a line with the `claude-login` operation and route and the decision
+    `admitted`.
+  - With the synthetic token, the leases part holds a line for the model
+    request with the decision `admitted`, at the environment's current
+    generation, after Anthropic refused the token.
+  - `diag-bare` lists no lease, and none of `diag-env`'s.
+  - The whole output holds no part of the synthetic token, no credential
+    name and no credential id: `grep -c -F -e diag-token -e
+    "${DIAG_TOKEN:13:12}"` over it prints 0. Record the count, never the
+    token.
+  - The stopped VM's output says the VM is not running where the guest
+    daemon lines were, and still lists `diag-env`'s leases.
+- **Gotchas:**
+  - Guest daemon lines live in the VM's memory: a stop or restart clears
+    them, so read them before stopping a VM that failed.
+  - Lease decisions live in the authority's memory: after it restarts the
+    part is empty until the VM asks again.
+  - A VM started before the update keeps its older guest until it restarts.
 - **Observed:** not yet observed.

@@ -1428,6 +1428,49 @@ against its fixed template, check that no label appears, and place a canary
 in the request, including one in a Host subname under a suffix binding, that
 must never come back.
 
+### Diagnosing delivery in a local VM (in progress, #4882)
+
+`cw --local daemon logs ENV` is the one place to see why a credential did not
+reach a local VM. It is gaining two parts beside the supervisor's operation
+lines; until they ship it prints the operation lines only. Each part has a
+heading line, and a part that cannot be read says why in one line instead.
+
+- **Guest daemon.** The guest daemon keeps its most recent log lines in
+  memory, at most 32 KiB with the oldest dropped first, and nowhere else: not
+  on a guest disk and not on a console. They are the lines a hosted daemon
+  writes to its Pod log, so a login writer appears as a closed state such as
+  `claude_login=Written` or `claude_login=Denied`, never a token, a file's
+  content or a path. The host reads them over the daemon connection the
+  supervisor already holds, authorized as every daemon call is; nothing
+  inside the VM gets a new way to read them. The guest is not trusted with
+  the owner's terminal:
+  - the supervisor accepts at most 32 KiB, within a deadline; a larger or a
+    late answer shows the part as unavailable, and the other parts still
+    print;
+  - every line is prefixed `guest: `, so none can pass for `cw`'s own output;
+  - bytes that are not UTF-8 are replaced, and so is every control character
+    except the line break: the C0 controls (carriage return included), DEL,
+    the C1 controls (U+0080 to U+009F), and the bidirectional overrides and
+    isolates.
+
+  A stopped VM has no lines, and a restarted one starts empty.
+- **Credential leases.** The authority's recent decisions for this
+  environment, oldest first. A line holds the time, the environment
+  generation, the slot, the operation, the route, the decision (`admitted`,
+  `denied` or `unavailable`) and whether a credential was selected, and
+  nothing else: no credential's id, name or value. A denial reads `denied`
+  only: the reason names of
+  [Refusals an agent or a person can read](#refusals-an-agent-or-a-person-can-read-5057)
+  are not in the authority's record yet (#5211 adds them to the broker). The
+  list is the
+  authority's bounded in-memory record, so it is empty after the authority
+  starts (#1922 owns durable audit). The supervisor reads it through its
+  material-free client, and only from an authority that is already running;
+  the command never starts one.
+
+A hosted Sandbox's daemon lines are in its Pod log, which `cw daemon logs ENV`
+already prints.
+
 ### Hosted front-door session (not yet served)
 
 `EgressService.FrontDoorSession` is specified, but not served yet: it answers
