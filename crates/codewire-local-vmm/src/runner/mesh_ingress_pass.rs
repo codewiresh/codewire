@@ -64,7 +64,6 @@ impl MeshIngressPass {
         }
         let sequence = self.sequence;
         self.sequence = sequence.checked_add(1).ok_or(RunnerError::IngressControl)?;
-        let limit = tokio::time::Instant::now() + self.ack_timeout;
         transfer_mesh_ingress_connection(
             control,
             key,
@@ -74,6 +73,9 @@ impl MeshIngressPass {
             &accepted,
         )
         .await?;
+        // The worker's time to answer runs from when it has been sent the
+        // connection: a send held up by a full channel does not use it up.
+        let limit = tokio::time::Instant::now() + self.ack_timeout;
         self.in_flight = Some(InFlight {
             sequence,
             accepted,
@@ -314,6 +316,35 @@ pub(super) mod tests {
                 assert!(matches!(closed, Err(RunnerError::IngressControl)));
             }
         }
+    }
+
+    /// The worker's time to answer starts when it has been sent the
+    /// connection, not when the runner began to send: a send that waited a
+    /// second for room in the channel still leaves the whole limit.
+    #[tokio::test(start_paused = true)]
+    async fn the_limit_runs_from_the_end_of_the_send() {
+        let (mut runner, mut worker) = control();
+        let mut filled = 0;
+        while let Ok(written) = runner.try_write(&[0_u8; 4096]) {
+            filled += written;
+        }
+        let (accepted, _transport) = connection();
+        let mut pass = pass();
+        let began = tokio::time::Instant::now();
+        let held_up = Duration::from_secs(1);
+        {
+            let send = pass.send(&mut runner, &KEY, accepted);
+            tokio::pin!(send);
+            assert!(
+                tokio::time::timeout(held_up, &mut send).await.is_err(),
+                "the send did not wait for room in the channel"
+            );
+            worker.read_exact(&mut vec![0_u8; filled]).await.unwrap();
+            send.await.unwrap();
+        }
+        let _held = received(&mut worker).await;
+        pass.limit().await;
+        assert_eq!(began.elapsed(), held_up + MESH_INGRESS_ACK_TIMEOUT);
     }
 
     /// An acknowledgement between two unacknowledged connections starts the
