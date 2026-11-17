@@ -1984,13 +1984,8 @@ dependencies = [
 name = "codewire-egress-node"
 version = "0.1.0"
 dependencies = [
- "codewire-vmm-guest-probe",
+ "codewire-network-session",
  "codewire-workspace-hack",
- "hmac 0.12.1",
- "sha2 0.10.9",
- "thiserror 2.0.21",
- "uuid",
- "zeroize",
 ]
 
 [[package]]

@@ -11,6 +11,8 @@
 
 #![forbid(unsafe_code)]
 
-pub mod hello;
-pub mod key;
 pub mod replacement;
+
+/// The stream's hello and key are the session protocol's, shared with the
+/// guest that dials cw-egress.
+pub use codewire_network_session::hosted::{hello, key};

@@ -7,6 +7,9 @@
 
 use std::net::Ipv4Addr;
 
+pub mod hello;
+pub mod key;
+
 /// The guest's TUN device.
 pub const HOSTED_TUN_NAME: &str = "cwegress0";
 /// The guest's address on the TUN, a /30 with the netstack.

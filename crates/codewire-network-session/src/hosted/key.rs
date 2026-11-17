@@ -5,13 +5,13 @@
 //! not an input: a re-placed environment runs in a new Pod with a new UID,
 //! and an unbound warm member has none.
 
-use codewire_vmm_guest_probe::{NETWORK_KEY_LEN, NetworkError, NetworkKey};
 use hmac::{Hmac, Mac as _};
 use sha2::Sha256;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::hello::NONCE_LEN;
+use super::hello::NONCE_LEN;
+use crate::{NETWORK_KEY_LEN, NetworkError, NetworkKey};
 
 const KEY_DOMAIN: &[u8] = b"codewire.egress-stream/v1\0";
 
