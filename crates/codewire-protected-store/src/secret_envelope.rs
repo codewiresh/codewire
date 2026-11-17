@@ -108,6 +108,8 @@ pub enum TenantSecretScope {
     Organization,
     User,
     Canary,
+    /// One hosted Pod's interception CA key (#5030), and nothing else.
+    Platform,
 }
 
 impl TenantSecretScope {
@@ -116,6 +118,7 @@ impl TenantSecretScope {
             Self::Organization => "org",
             Self::User => "user",
             Self::Canary => "canary",
+            Self::Platform => "platform",
         }
     }
 }
@@ -145,6 +148,26 @@ impl DekContext {
             scope: TenantSecretScope::Canary,
             scope_id: "tenant-secret".to_owned(),
         }
+    }
+
+    /// The context of one hosted Pod's interception CA key (#5030): the
+    /// `platform` scope, for that Pod UID alone, so each Pod's key is wrapped
+    /// under its own derived KEK. Like the canary, it is not derivable from a
+    /// product secret path, and nothing else uses the `platform` scope.
+    pub fn interception_ca(pod_uid: &str) -> Result<Self, SecretEnvelopeError> {
+        if !valid_scope_id(pod_uid) {
+            return Err(SecretEnvelopeError {
+                class: "invalid-scope",
+                scope: Some(TenantSecretScope::Platform),
+                provider: None,
+                key_version: None,
+                format: None,
+            });
+        }
+        Ok(Self {
+            scope: TenantSecretScope::Platform,
+            scope_id: pod_uid.to_owned(),
+        })
     }
 
     pub fn from_secret_path(path: &str) -> Result<Self, SecretEnvelopeError> {
@@ -1015,8 +1038,36 @@ mod tests {
             "/projects/org_1/project_1/extra",
             "/other/org_1",
             "/users/not allowed",
+            // The interception CA's own path is never a product secret path.
+            "/platform-interception-cas/v1/7c9e6679-7425-40de-944b-e07fc1f90ae7",
+            "/platform/7c9e6679-7425-40de-944b-e07fc1f90ae7",
         ] {
             assert!(DekContext::from_secret_path(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    /// The `platform` scope has one constructor, for one Pod's CA key; a
+    /// value that could name a path or another scope is refused (#5030).
+    #[test]
+    fn the_platform_scope_is_only_one_pods_interception_ca() {
+        let pod = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+        let context = DekContext::interception_ca(pod).unwrap();
+        assert_eq!(context.scope, TenantSecretScope::Platform);
+        assert_eq!(context.scope_id, pod);
+        assert_ne!(
+            context.transit_context(),
+            DekContext::interception_ca("0f8fad5b-d9cb-469f-a165-70867728950e")
+                .unwrap()
+                .transit_context()
+        );
+        for invalid in [
+            "",
+            "a/b",
+            "../org-secrets/org_1",
+            "pod uid",
+            &"a".repeat(256),
+        ] {
+            assert!(DekContext::interception_ca(invalid).is_err(), "{invalid}");
         }
     }
 

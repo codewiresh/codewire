@@ -7,23 +7,42 @@ license.workspace = true
 authors.workspace = true
 description = "Owner-fenced platform credential metadata and encrypted material storage"
 
+[features]
+# The hosted interception CA store and its leaf signer (#5030), which only
+# the credential service enables.
+interception-ca = ["dep:codewire-egress-policy", "dep:rand", "dep:rcgen", "dep:time", "dep:x509-parser"]
+# An in-memory CA that signs real leaves, for the signer's callers' tests.
+interception-ca-test-support = ["interception-ca"]
+
 [dependencies]
 codewire-access = { workspace = true }
+codewire-egress-policy = { workspace = true, optional = true }
 codewire-protected-store = { workspace = true, features = ["platform", "ssh-material"] }
+rand = { workspace = true, optional = true }
+# The front door's rcgen: ring, PEM and zeroize, so the CA key's encodings
+# can be wiped.
+rcgen = { version = "0.13", features = ["zeroize"], optional = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
+time = { workspace = true, optional = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
+# Reads a stored CA certificate's key, to check it pairs with the opened key.
+x509-parser = { workspace = true, optional = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+# The storage suite covers the interception CA store too, whichever lane
+# builds it alone.
+codewire-platform-credentials = { path = ".", features = ["interception-ca"] }
 codewire-protected-store = { workspace = true, features = ["platform-test-support"] }
 codewire-server-core = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 url = { workspace = true }
+x509-parser = { workspace = true }
 codewire-workspace-hack.workspace = true
 
 [lints]

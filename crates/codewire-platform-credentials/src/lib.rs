@@ -60,6 +60,10 @@ pub use refresh::{
     OAuthKeepAliveCandidate, OAuthKeepAliveForm, OAuthRefreshAttemptInfo, OAuthRefreshState,
     PreparedOAuthRefresh, PreparedOAuthRefreshResult, RevocationFence, StartedOAuthRefresh,
 };
+#[cfg(feature = "interception-ca")]
+pub use store::{
+    CA_VALIDITY, InterceptedPod, InterceptionCa, LeafRefusal, MAX_LEAF_HOSTS, MAX_LEAF_LIFETIME,
+};
 pub use store::{
     CredentialMetadataReader, OwnedCredentials, PlatformCredentialStore,
     PreparedCredentialCreation, PreparedCredentialReplacement, active_github_connection,

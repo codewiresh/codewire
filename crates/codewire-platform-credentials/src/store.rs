@@ -19,6 +19,13 @@ use crate::{
     CredentialRecord, CredentialRegistration, CredentialVersion, PlatformCredentialError as Error,
 };
 
+#[cfg(feature = "interception-ca")]
+mod interception_ca;
+#[cfg(feature = "interception-ca")]
+pub use interception_ca::{
+    CA_VALIDITY, InterceptedPod, InterceptionCa, LeafRefusal, MAX_LEAF_HOSTS, MAX_LEAF_LIFETIME,
+};
+
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_METADATA_PAGE: u32 = 1000;
 const METADATA_COLUMNS: &str = "c.id, c.user_id, c.organization_id, c.provider, \

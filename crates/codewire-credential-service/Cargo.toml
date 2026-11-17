@@ -36,7 +36,7 @@ codewire-access = { workspace = true }
 # service explicitly selects platform without changing any existing consumer.
 codewire-credential-broker = { path = "../codewire-credential-broker", default-features = false, features = ["platform", "ssh-agent"] }
 codewire-daemon-proto = { workspace = true }
-codewire-platform-credentials = { workspace = true }
+codewire-platform-credentials = { workspace = true, features = ["interception-ca"] }
 codewire-project = { workspace = true }
 codewire-protected-store = { workspace = true, features = ["platform", "ssh-material"] }
 codewire-proto = { workspace = true, optional = true }

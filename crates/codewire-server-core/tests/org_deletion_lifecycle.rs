@@ -1940,6 +1940,9 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "environment_sessions:cascade",
             "platform_environment_access_bindings:cascade",
             "platform_environment_network_policies:cascade",
+            // An attached interception CA goes with its environment (0032,
+            // #5030); an unbound one names none.
+            "platform_interception_cas:cascade",
             "preview_auth_challenges:cascade",
             "preview_browser_grants:cascade",
             "sandbox_egress_enforcement:cascade",

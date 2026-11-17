@@ -335,11 +335,16 @@ async fn workspace_binding_fresh_schema_constrains_rows_pointer_trigger_and_inde
         )
         .fetch_all(&pool)
         .await?;
+        // The binding's own guards, and #5030's two triggers that attach and
+        // delete the Pod's interception CA row; those change nothing in the
+        // binding.
         anyhow::ensure!(
-            matches!(triggers.as_slice(), [delete, update]
-                if delete.contains("codewire_workspace_binding_cascade_only BEFORE DELETE")
+            matches!(triggers.as_slice(), [attach, release, delete, update]
+                if attach.contains("codewire_interception_ca_attach AFTER INSERT ON public.sandbox_workspace_bindings FOR EACH ROW EXECUTE FUNCTION codewire_interception_ca_attach()")
+                    && release.contains("codewire_interception_ca_release AFTER UPDATE OF released_at ON public.sandbox_workspace_bindings FOR EACH ROW WHEN (((old.released_at IS NULL) AND (new.released_at IS NOT NULL))) EXECUTE FUNCTION codewire_interception_ca_release()")
+                    && delete.contains("codewire_workspace_binding_cascade_only BEFORE DELETE")
                     && update.contains("codewire_workspace_binding_immutable BEFORE UPDATE")
-                    && triggers.iter().all(|trigger| trigger.contains("FOR EACH ROW")
+                    && [delete, update].iter().all(|trigger| trigger.contains("FOR EACH ROW")
                         && trigger.contains("EXECUTE FUNCTION codewire_workspace_binding_immutable()"))),
             "{triggers:?}"
         );

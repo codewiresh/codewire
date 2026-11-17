@@ -2,6 +2,8 @@
 //! Run explicitly with --ignored; an absent TEST_DATABASE_URL is a failure.
 //! These tests prove storage CAS, not external OAuth refresh serialization.
 
+#[path = "storage/interception_ca.rs"]
+mod interception_ca;
 #[path = "storage/lifecycle.rs"]
 mod lifecycle;
 #[path = "storage/ssh.rs"]

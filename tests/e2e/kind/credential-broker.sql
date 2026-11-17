@@ -38,6 +38,11 @@ GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_owner(text,text) TO code
 GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_environment(text,text,text) TO codewire_credential_broker;
 GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_profile(text,text,text) TO codewire_credential_broker;
 GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_credential(text,text,text) TO codewire_credential_broker;
+-- Hosted interception CAs (#5030): it inserts and reads a Pod's row, and
+-- deletes one only through the sweep's function; the bind and the release
+-- attach and delete rows as the migration owner.
+GRANT SELECT,INSERT ON public.platform_interception_cas TO codewire_credential_broker;
+GRANT EXECUTE ON FUNCTION public.forget_interception_ca(text) TO codewire_credential_broker;
 GRANT EXECUTE ON FUNCTION public.codewire_platform_projection_metadata(text) TO codewire_credential_broker;
 GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_projection_authority(text,text,text,text)
     TO codewire_credential_broker;

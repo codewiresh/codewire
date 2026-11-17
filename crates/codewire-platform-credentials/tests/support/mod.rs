@@ -233,6 +233,8 @@ impl TestDatabase {
             "EXECUTE ON FUNCTION public.codewire_platform_lock_environment(text,text,text)",
             "EXECUTE ON FUNCTION public.codewire_platform_lock_profile(text,text,text)",
             "EXECUTE ON FUNCTION public.codewire_platform_lock_credential(text,text,text)",
+            "SELECT,INSERT ON public.platform_interception_cas",
+            "EXECUTE ON FUNCTION public.forget_interception_ca(text)",
         ] {
             sqlx::query(&format!("GRANT {grant} TO {role_ident}"))
                 .execute(&self.pool)
