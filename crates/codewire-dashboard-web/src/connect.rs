@@ -96,11 +96,19 @@ pub(crate) async fn create_organization(
     Ok(())
 }
 
+/// An invitation's public page view by either kind of token (#3840). The
+/// browser's `X-Forwarded-For` goes along so the platform's per-address limit
+/// counts the visitor, not the dashboard.
 pub(crate) async fn invitation(
     state: &AppState,
     token: String,
+    forwarded_for: Option<HeaderValue>,
 ) -> Result<InvitationView, WebError> {
-    let client = OrganizationServiceClient::new(transport(state, None), client_config(state));
+    let transport = crate::transport::ForwardingTransport {
+        inner: transport(state, None),
+        forwarded_for,
+    };
+    let client = OrganizationServiceClient::new(transport, client_config(state));
     let response = client
         .get_invitation_by_token(GetInvitationByTokenRequest {
             token,
@@ -121,6 +129,10 @@ pub(crate) async fn invitation(
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "A team administrator".to_owned()),
         role: role_name(invitation.role.to_i32()),
+        expires_at: invitation
+            .expires_at
+            .into_option()
+            .map_or(0, |expires_at| expires_at.seconds),
     })
 }
 

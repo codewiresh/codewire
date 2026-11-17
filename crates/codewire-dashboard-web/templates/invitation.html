@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8">
     <script src="/assets/codewire/theme-v1.js"></script>
+    <script src="/assets/codewire/accept-invite-v1.js" defer></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Join {{ view.invitation.organization_name }} · Codewire</title>
     <link rel="stylesheet" href="/assets/codewire/design-v1.css">
@@ -17,22 +18,24 @@
           <p class="cw-auth-copy">{{ view.invitation.inviter_name }} invited you to join as {{ view.invitation.role }}.</p>
         </header>
         <dl class="cw-invite-details"><div><dt>Team</dt><dd>{{ view.invitation.organization_name }}</dd></div><div><dt>Invited email</dt><dd>{{ view.invitation.email }}</dd></div><div><dt>Role</dt><dd>{{ view.invitation.role }}</dd></div></dl>
-        {% if verify_email %}<div class="cw-alert cw-alert--warning" role="alert">{{ view.error }} <form class="cw-auth-resend" method="post" action="/settings/_actions/send-verification"><input type="hidden" name="_csrf" value="{{ view.csrf_token }}"><button class="cw-link-button cw-auth-resend-link" type="submit">Send a verification email</button></form></div>
-        {% else if !view.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ view.error }}</div>{% endif %}
-        {% if !view.authenticated %}
-        <p class="cw-auth-copy">Sign in or create an account with the invited email address. The invitation will remain attached to the continuation.</p>
-        <div class="cw-auth-actions"><a class="cw-button cw-button--pill cw-button--large" href="{{ view.login_url }}">Sign in</a><a class="cw-button cw-button--outline cw-button--pill cw-button--large" href="{{ view.signup_url }}">Create account</a></div>
-        {% else if !view.email_matches %}
-        <div class="cw-alert cw-alert--warning" role="alert"><strong>Email mismatch.</strong> Sign in as {{ view.invitation.email }} to accept this invitation.</div>
-        <a class="cw-button cw-button--outline cw-button--pill cw-button--large cw-auth-submit" href="/login">Use another account</a>
-        {% else %}
+        {% if !view.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ view.error }}</div>{% endif %}
+        {% match view.state %}
+        {% when InvitationState::SignedOut %}
+        <p class="cw-auth-copy">Sign in, or create an account, with the address this invitation was sent to ({{ view.invitation.email }}). You come back here to accept.</p>
+        <div class="cw-auth-actions"><a class="cw-button cw-button--pill cw-button--large" href="{{ view.login_url }}">Sign in</a><form method="post" action="/signup/invited"><input type="hidden" name="_csrf" value="{{ view.csrf_token }}"><input type="hidden" name="invitation_token" value="{{ view.signup_token }}"><input type="hidden" name="email_hint" value="{{ view.invitation.email }}"><button class="cw-button cw-button--outline cw-button--pill cw-button--large" type="submit">Create account</button></form></div>
+        {% when InvitationState::OtherAccount %}
+        <div class="cw-alert cw-alert--warning" role="alert">This invitation is for {{ view.invitation.email }}. You're signed in as {{ view.signed_in_as }}.</div>
+        <form class="cw-form" method="post" action="/accept-invite/_actions/switch"><input type="hidden" name="_csrf" value="{{ view.csrf_token }}"><button class="cw-button cw-button--outline cw-button--pill cw-button--large cw-auth-submit" type="submit">Switch account</button></form>
+        {% when InvitationState::Unverified %}
+        <div class="cw-alert cw-alert--warning" role="alert">Verify your email address, then accept the invitation again. <form class="cw-auth-resend" method="post" action="/settings/_actions/send-verification"><input type="hidden" name="_csrf" value="{{ view.csrf_token }}"><button class="cw-link-button cw-auth-resend-link" type="submit">Send a verification email</button></form></div>
+        {% when InvitationState::Ready %}
         <form class="cw-form" method="post" action="/accept-invite/_actions/accept">
           <input type="hidden" name="_csrf" value="{{ view.csrf_token }}">
-          <input type="hidden" name="token" value="{{ view.token }}">
           <button class="cw-button cw-button--pill cw-button--large cw-auth-submit" type="submit">Accept invitation</button>
         </form>
         <p class="cw-auth-secondary"><a href="/dashboard/">Cancel and return to dashboard</a></p>
-        {% endif %}
+        {% endmatch %}
+        <form hidden data-invitation-open method="post" action="/accept-invite/_actions/open"><input type="hidden" name="_csrf" value="{{ view.csrf_token }}"><input type="hidden" name="t" value=""></form>
       </section>
     </main>
   </body>

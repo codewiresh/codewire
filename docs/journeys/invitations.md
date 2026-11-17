@@ -108,8 +108,8 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
   - an invitation refused by `invite-limits` or `invite-unverified` sends no
     email;
   - the email's button opens the invitation at `/accept-invite#t=<token>`
-    (#3840, decided 2026-11-13). No command yet: the page and its token are
-    not built (#3840, #4121);
+    (#3840, decided 2026-11-13). The page is built for the copied link
+    (`invite-accept`); the email's own token is not built yet (#4624);
   - the email uses the plain shared layout with a text part, from "Codewire
     <hello@codewire.sh>" (#4553). Not on main yet.
 - **Driving it:** invite an address a person reads, and read the email
@@ -140,8 +140,8 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
 ## `invite-accept`: the invitee accepts
 
 - **Entry points:** `cw org invitations` and `cw org accept`, as the email
-  says; the one-time link from `invite-send` (`/accept-invite`) in the
-  dashboard.
+  says; the one-time link from `invite-send`, `/accept-invite#t=<token>`,
+  in the dashboard.
 - **States to exercise:**
   - the invitee already has an account, and has none yet (signs up with the
     invited address, verifies it, then accepts);
@@ -152,18 +152,27 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
     refused;
   - `cw org accept` naming an organization with no pending invitation lists
     the ones the invitee has;
-  - from the email's button, `/accept-invite#t=<token>` (#3840, decided
-    2026-11-13; no command yet, not built):
+  - the one-time link, `/accept-invite#t=<token>` (#3840, decided
+    2026-11-13):
     - signed in as the invited, verified address: one click accepts;
+    - signed in as the invited address, not verified yet: offered the
+      verification email;
     - signed out: asked to sign in or sign up, then returned to the
       invitation to accept;
     - signed in as a different account: refused with a clear message, and
       offered to switch account;
+    - a used, revoked, expired or unknown link: "not found", the same for
+      each;
+    - an old `?token=` link: the out-of-date page;
     - the link never signs anyone in by itself;
-  - a new invitee who signs up from the invitation's link is admitted with no
-    invite code and no access review, on hosted and self-hosted servers
-    (#4121), and still verifies its email before it can sign in (#4481). No
-    command yet: not built.
+  - the same page from the email's button, by the email's own token: not
+    built yet (#4624);
+  - a new invitee who signs up from the link: on an invite-only server it is
+    admitted with no invite code, reason, challenge or access review, at the
+    invited address only. The page shows the address masked as a hint, and
+    the invitee types it (#4121, #3840). It still verifies its email before
+    it can sign in, unless the server has no mail (#4481). On a hosted
+    server, admission by invitation is not built yet (#4624);
 - **Driving it:** as the invitee:
 
   ```sh
@@ -195,7 +204,8 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
   exited 0 for the invitee with the sentence above (#4530). The unverified
   and different-email states are not yet observed on Dev. The dashboard's
   invitation page is covered on Kind by
-  `apps/dashboard/e2e/ssr-dashboard.governance.ssr.ts`.
+  `apps/dashboard/e2e/ssr-dashboard.governance.ssr.ts`. The one-time link's
+  page and sign-up from it are not yet observed on Dev (#3840).
 
 ## `invite-remove`: an owner or admin removes the member
 

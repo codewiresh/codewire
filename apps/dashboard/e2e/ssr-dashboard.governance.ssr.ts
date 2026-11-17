@@ -166,16 +166,17 @@ test.describe.serial("server-rendered organization governance", () => {
       await page.getByLabel("Email").fill(outsiderEmail);
       await page.getByRole("button", { name: "Send Invite" }).click();
 
-      const invitationUrl = await oneTimeInvitationUrl(page);
-      const token = new URL(invitationUrl).searchParams.get("token");
+      // The token travels in the fragment, never a query (#3840).
+      const invitationUrl = new URL(await oneTimeInvitationUrl(page));
+      expect(invitationUrl.search).toBe("");
+      const token = new URLSearchParams(invitationUrl.hash.slice(1)).get("t");
       expect(token).toBeTruthy();
       await page.context().clearCookies();
-      await page.goto(`/accept-invite?token=${token}`);
+      await page.goto(`/accept-invite#t=${token}`);
       await expect(page.getByRole("heading", { name: "Join SSR Governance" })).toBeVisible();
+      expect(page.url()).not.toContain(token!);
       await page.getByRole("link", { name: "Sign in", exact: true }).click();
-      expect(new URL(page.url()).searchParams.get("return_to")).toBe(
-        `/accept-invite?token=${token}`,
-      );
+      expect(new URL(page.url()).searchParams.get("return_to")).toBe("/accept-invite");
 
       await fillField(page, "#email", outsiderEmail);
       await fillField(page, "#password", TEST_PASSWORD);
@@ -190,7 +191,7 @@ test.describe.serial("server-rendered organization governance", () => {
         .toBeVisible();
       await expect(page.getByTestId("recovery-code")).toHaveCount(10);
       await page.getByRole("link", { name: /continue to codewire/i }).click();
-      await expect(page).toHaveURL(new RegExp(`/accept-invite\\?token=${token}`));
+      await expect(page).toHaveURL(/\/accept-invite(\?resume)?$/);
 
       await page.getByRole("button", { name: "Accept invitation" }).click();
       await expect(page.getByRole("heading", { name: "Welcome to the team" })).toBeVisible();

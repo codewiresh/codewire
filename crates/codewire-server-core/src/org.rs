@@ -68,3 +68,38 @@ pub async fn user_assignments(
 pub fn can_admin(role: &str, assignments: &[String]) -> bool {
     role == "owner" || role == "admin" || assignments.iter().any(|a| a == "super_admin")
 }
+
+/// An email address shown to someone who may not own it (#3840): the first
+/// character of the local part, then "•••", then the domain, as in
+/// "j•••@example.com". Comparing two masks can only say two addresses
+/// differ, never that they match.
+pub fn masked_email(email: &str) -> String {
+    let (local, domain) = email.rsplit_once('@').unwrap_or(("", email));
+    let first: String = local.chars().take(1).collect();
+    format!("{first}\u{2022}\u{2022}\u{2022}@{domain}")
+}
+
+#[cfg(test)]
+mod masked_email_tests {
+    use super::masked_email;
+
+    #[test]
+    fn an_address_keeps_only_its_first_character_and_domain() {
+        assert_eq!(
+            masked_email("jane.doe@example.com"),
+            "j\u{2022}\u{2022}\u{2022}@example.com"
+        );
+        assert_eq!(
+            masked_email("j@example.com"),
+            "j\u{2022}\u{2022}\u{2022}@example.com"
+        );
+        assert_eq!(
+            masked_email("Élise@exemple.fr"),
+            "É\u{2022}\u{2022}\u{2022}@exemple.fr"
+        );
+        assert_eq!(
+            masked_email("not-an-address"),
+            "\u{2022}\u{2022}\u{2022}@not-an-address"
+        );
+    }
+}

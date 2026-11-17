@@ -8,6 +8,12 @@ use connectrpc::{ConnectError, ErrorCode};
 use serde::Deserialize;
 use std::fmt;
 
+mod invitation;
+
+pub(crate) use invitation::{
+    InvitationOpenSubmission, InvitationPageView, InvitationState, InvitationView,
+};
+
 #[derive(Default, Deserialize)]
 pub(crate) struct AuthQuery {
     #[serde(default, rename = "authRequestID")]
@@ -79,6 +85,12 @@ pub(crate) struct AuthFormSubmission {
     pub(crate) auth_request_id: String,
     #[serde(default)]
     pub(crate) return_to: String,
+    /// Sign-up from an invitation (#3840): its hand-off token, only ever in
+    /// a POST body, and the invited address, masked.
+    #[serde(default)]
+    pub(crate) invitation_token: String,
+    #[serde(default)]
+    pub(crate) email_hint: String,
 }
 
 impl fmt::Debug for AuthFormSubmission {
@@ -96,6 +108,8 @@ impl fmt::Debug for AuthFormSubmission {
             .field("code", &redacted(&self.code))
             .field("auth_request_id", &redacted(&self.auth_request_id))
             .field("return_to", &redacted(&self.return_to))
+            .field("invitation_token", &redacted(&self.invitation_token))
+            .field("email_hint", &redacted(&self.email_hint))
             .finish()
     }
 }
@@ -138,6 +152,13 @@ pub(crate) struct AuthFormView {
     /// email) the confirmation would connect.
     pub(crate) identity_provider: &'static str,
     pub(crate) identity_account: String,
+    /// Sign-up from an invitation (#3840): the token for a hidden field and
+    /// the invited address, masked, for a hint. The person types the address.
+    pub(crate) invitation_token: String,
+    pub(crate) invitation_email: String,
+    /// On an invite-only server the IdP admits the invitation's sign-up with
+    /// no Turnstile, reason or invite code (#4121).
+    pub(crate) invited: bool,
 }
 
 pub(crate) struct AccountAccessView {
@@ -204,6 +225,7 @@ impl fmt::Debug for AuthFormView {
             .field("csrf_token", &redacted(&self.csrf_token))
             .field("auth_request_id", &redacted(&self.auth_request_id))
             .field("return_to", &redacted(&self.return_to))
+            .field("invitation_token", &redacted(&self.invitation_token))
             .finish_non_exhaustive()
     }
 }
@@ -263,41 +285,6 @@ impl fmt::Debug for DevicePageView {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct InvitationView {
-    pub(crate) organization_name: String,
-    pub(crate) email: String,
-    pub(crate) inviter_name: String,
-    pub(crate) role: &'static str,
-}
-
-pub(crate) struct InvitationPageView {
-    pub(crate) invitation: InvitationView,
-    pub(crate) token: String,
-    pub(crate) csrf_token: String,
-    pub(crate) authenticated: bool,
-    pub(crate) email_matches: bool,
-    pub(crate) login_url: String,
-    pub(crate) signup_url: String,
-    pub(crate) error: String,
-}
-
-impl fmt::Debug for InvitationPageView {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("InvitationPageView")
-            .field("invitation", &self.invitation)
-            .field("token", &redacted(&self.token))
-            .field("csrf_token", &redacted(&self.csrf_token))
-            .field("authenticated", &self.authenticated)
-            .field("email_matches", &self.email_matches)
-            .field("login_url", &redacted(&self.login_url))
-            .field("signup_url", &redacted(&self.signup_url))
-            .field("error", &self.error)
-            .finish()
-    }
-}
-
 #[derive(Deserialize)]
 pub(crate) struct CsrfSubmission {
     #[serde(rename = "_csrf")]
@@ -349,23 +336,6 @@ impl fmt::Debug for DeviceSubmission {
             .debug_struct("DeviceSubmission")
             .field("csrf", &redacted(&self.csrf))
             .field("user_code", &"[REDACTED]")
-            .finish()
-    }
-}
-
-#[derive(Deserialize)]
-pub(crate) struct InvitationSubmission {
-    #[serde(rename = "_csrf")]
-    pub(crate) csrf: String,
-    pub(crate) token: String,
-}
-
-impl fmt::Debug for InvitationSubmission {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("InvitationSubmission")
-            .field("csrf", &redacted(&self.csrf))
-            .field("token", &redacted(&self.token))
             .finish()
     }
 }
@@ -2703,6 +2673,8 @@ mod secret_debug_tests {
             code: MARKER.into(),
             auth_request_id: MARKER.into(),
             return_to: MARKER.into(),
+            invitation_token: MARKER.into(),
+            email_hint: MARKER.into(),
         };
 
         assert_value_blind(&format!("{query:?}"));
@@ -2779,25 +2751,25 @@ mod secret_debug_tests {
     }
 
     #[test]
-    fn invitation_debug_redacts_token_and_token_bearing_urls() {
+    fn invitation_debug_redacts_the_token() {
         let page = InvitationPageView {
             invitation: InvitationView {
                 organization_name: "Synthetic Organization".into(),
-                email: "invitee@example.test".into(),
+                email: "i\u{2022}\u{2022}\u{2022}@example.test".into(),
                 inviter_name: "Synthetic Owner".into(),
                 role: "Member",
+                expires_at: 0,
             },
-            token: MARKER.into(),
+            state: InvitationState::SignedOut,
+            signed_in_as: String::new(),
             csrf_token: MARKER.into(),
-            authenticated: true,
-            email_matches: true,
-            login_url: format!("/login?return_to=/accept-invite%3Ftoken%3D{MARKER}"),
-            signup_url: format!("/signup?return_to=/accept-invite%3Ftoken%3D{MARKER}"),
+            signup_token: MARKER.into(),
+            login_url: "/login?return_to=%2Faccept-invite".into(),
             error: String::new(),
         };
-        let submission = InvitationSubmission {
+        let submission = InvitationOpenSubmission {
             csrf: MARKER.into(),
-            token: MARKER.into(),
+            t: MARKER.into(),
         };
 
         assert_value_blind(&format!("{page:?}"));

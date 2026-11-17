@@ -8,6 +8,7 @@ use crate::admin_connect::{
 use crate::billing_banner::BillingBannerView;
 use crate::billing_connect::BillingPageView;
 use crate::view::EnvironmentCreateFormView;
+use crate::view::InvitationState;
 use crate::view::{
     AccountAccessView, AccountDeletionPageView, AdminAccountDeletionView, ApiKeysPageView,
     AuthFormView, CredentialSettingsView, DashboardView, DevicePageView, EnvironmentsPageView,
@@ -179,9 +180,14 @@ pub(crate) struct DeviceTemplate<'a> {
 #[template(path = "invitation.html")]
 pub(crate) struct InvitationTemplate<'a> {
     pub(crate) view: &'a InvitationPageView,
-    /// Accepting was refused because the invited address is not verified:
-    /// the page offers a new verification email.
-    pub(crate) verify_email: bool,
+}
+
+/// The invitation page before it knows which invitation (#3840): its script
+/// posts the link's fragment token, or says there is nothing to open.
+#[derive(Template)]
+#[template(path = "invitation-opening.html")]
+pub(crate) struct InvitationOpeningTemplate<'a> {
+    pub(crate) csrf_token: &'a str,
 }
 
 #[derive(Template)]

@@ -304,6 +304,89 @@ async fn db_a_vouched_address_accepts_only_by_its_own_token_within_a_day() {
     fixture.cleanup().await;
 }
 
+/// The page's view of an invitation (#3840): by the copied link's hand-off
+/// token, a pending invitation shows only its organization's
+/// name, the inviter, the role, the expiry and the invited address masked.
+/// Accepted, revoked, expired and unknown tokens all get one identical
+/// not-found answer, and lookups are limited per client address.
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_an_invitation_by_token_shows_only_its_page_and_nothing_of_a_closed_one() {
+    let fixture = LeaseFixture::seed("synthetic-invitation-view").await;
+    let t = Invitations::new(&fixture);
+    let email = t.email("viewed");
+    let (_, handoff) = t.invite("pending", &email, "pending", "7 days").await;
+    let address: std::net::IpAddr = "192.0.2.41".parse().unwrap();
+
+    let shown = invitation_by_token(t.pool(), &handoff, Some(address))
+        .await
+        .unwrap();
+    assert_eq!(shown.email, codewire_server_core::org::masked_email(&email));
+    assert_eq!(shown.role, "admin");
+    assert!(shown.id.is_empty() && shown.org_id.is_empty() && shown.invited_by.is_empty());
+    assert!(shown.org_slug.is_empty() && shown.assignments.is_empty());
+
+    let (_, accepted) = t
+        .invite("accepted", &t.email("accepted"), "accepted", "7 days")
+        .await;
+    let (_, revoked) = t
+        .invite("revoked", &t.email("revoked"), "revoked", "7 days")
+        .await;
+    let (_, expired) = t
+        .invite("expired", &t.email("expired"), "pending", "-1 day")
+        .await;
+    let mut answers = Vec::new();
+    for token in [
+        accepted,
+        revoked,
+        expired,
+        "synthetic-unknown-token".to_owned(),
+    ] {
+        let refused = invitation_by_token(t.pool(), &token, Some(address))
+            .await
+            .unwrap_err();
+        answers.push(format!("{refused:?}"));
+    }
+    assert!(
+        answers.iter().all(|answer| answer == &answers[0]),
+        "{answers:?}"
+    );
+    assert!(answers[0].contains("NotFound"), "{answers:?}");
+
+    // The limit counts per address: one address runs out, another doesn't.
+    let flooding: std::net::IpAddr = "192.0.2.42".parse().unwrap();
+    for _ in 0..rate_limit::INVITATION_LOOKUP.default_max {
+        let _ = invitation_by_token(t.pool(), "synthetic-unknown-token", Some(flooding)).await;
+    }
+    let limited = invitation_by_token(t.pool(), &handoff, Some(flooding))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            limited,
+            AppError::Coded {
+                code: "rate_limited",
+                ..
+            }
+        ),
+        "{limited:?}"
+    );
+    invitation_by_token(t.pool(), &handoff, Some(address))
+        .await
+        .unwrap();
+
+    sqlx::query("DELETE FROM rate_limit WHERE key = ANY($1)")
+        .bind(vec![
+            rate_limit::INVITATION_LOOKUP.key(&address.to_string()),
+            rate_limit::INVITATION_LOOKUP.key(&flooding.to_string()),
+        ])
+        .execute(t.pool())
+        .await
+        .unwrap();
+    t.cleanup().await;
+    fixture.cleanup().await;
+}
+
 /// A stranger learns nothing of someone else's invitation, by token or by id:
 /// a lapsed one is not found and stays pending, since only its invitee's
 /// attempt marks it expired, and a revoked one is not found rather than

@@ -878,11 +878,7 @@ fn api_keys_path(slug: &str) -> String {
 }
 
 fn invitation_url(public_origin: &str, token: &str) -> String {
-    format!(
-        "{}{}",
-        public_origin.trim_end_matches('/'),
-        super::invitations::invite_continuation(token)
-    )
+    super::invitations::invitation_link(public_origin, token)
 }
 
 fn members_message(value: &str) -> &'static str {
@@ -1003,7 +999,7 @@ mod tests {
                 "https://codewire.test/",
                 "synthetic/invitation capability?marker"
             ),
-            "https://codewire.test/accept-invite?token=synthetic%2Finvitation+capability%3Fmarker"
+            "https://codewire.test/accept-invite#t=synthetic%2Finvitation+capability%3Fmarker"
         );
     }
 
@@ -1021,7 +1017,7 @@ mod tests {
             members_url: "/synthetic/members/".into(),
             billing_url: "/synthetic/billing/".into(),
         };
-        let marker = "https://codewire.test/accept-invite?token=synthetic-marker";
+        let marker = "https://codewire.test/accept-invite#t=synthetic-marker";
         let render = |has_one_time_invitation| {
             let page = MembersPageView {
                 members: Vec::new(),

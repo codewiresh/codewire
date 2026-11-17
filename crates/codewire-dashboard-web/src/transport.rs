@@ -44,6 +44,34 @@ impl ClientTransport for BrowserTransport {
     }
 }
 
+/// A [`BrowserTransport`] that also passes on the page request's
+/// `X-Forwarded-For`, for limits the platform counts per client address
+/// (#3840). The platform reads only the hop our edge appended last, so a
+/// browser's own entries change nothing.
+#[derive(Clone)]
+pub(crate) struct ForwardingTransport {
+    pub(crate) inner: BrowserTransport,
+    pub(crate) forwarded_for: Option<HeaderValue>,
+}
+
+impl ClientTransport for ForwardingTransport {
+    type ResponseBody = reqwest::Body;
+    type Error = ConnectError;
+
+    fn send(
+        &self,
+        mut request: Request<connectrpc::client::ClientBody>,
+    ) -> BoxFuture<'static, Result<Response<Self::ResponseBody>, Self::Error>> {
+        if let Some(forwarded_for) = &self.forwarded_for {
+            request.headers_mut().insert(
+                header::HeaderName::from_static("x-forwarded-for"),
+                forwarded_for.clone(),
+            );
+        }
+        self.inner.send(request)
+    }
+}
+
 pub(crate) fn browser_headers(
     mut headers: HeaderMap,
     cookie: Option<HeaderValue>,

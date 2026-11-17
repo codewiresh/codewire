@@ -13,8 +13,7 @@ use crate::{
     auth::authenticated_identity,
     error::WebError,
     raw_auth::{
-        IdentityErrorCode, SignupMode, forward_session_cookies, oauth_providers, post_json,
-        user_message,
+        IdentityErrorCode, forward_session_cookies, oauth_providers, post_json, user_message,
     },
     response::{error_page, redirect, render_page, render_template, safe_auth_continuation},
     security::{
@@ -36,7 +35,9 @@ use crate::{
 
 mod sign_up;
 
-pub(super) use sign_up::{signup, signup_action, signup_complete, signup_complete_action};
+pub(super) use sign_up::{
+    signup, signup_action, signup_complete, signup_complete_action, signup_invited,
+};
 
 const SECRET_TTL_SECONDS: u32 = 10 * 60;
 const LOGIN_ACTION: &str = "/login/_actions/sign-in";
@@ -80,17 +81,6 @@ const TURNSTILE_CSP: &str = "default-src 'self'; base-uri 'none'; connect-src 's
 struct CredentialsRequest<'a> {
     email: &'a str,
     password: &'a str,
-}
-
-#[derive(Serialize)]
-struct SignUpRequest<'a> {
-    email: &'a str,
-    password: &'a str,
-    name: &'a str,
-    invite_code: &'a str,
-    reason: &'a str,
-    #[serde(rename = "turnstile_token")]
-    turnstile_token: &'a str,
 }
 
 #[derive(Serialize)]
@@ -365,7 +355,11 @@ async fn auth_entry_response(
     status: StatusCode,
     mut view: AuthFormView,
 ) -> Response {
-    view.oauth_providers = provider_links(state, &view).await;
+    // Provider sign-up can't carry an invitation, so an invited sign-up,
+    // which only the invitation admits, offers none (#4121).
+    if !view.invited {
+        view.oauth_providers = provider_links(state, &view).await;
+    }
     auth_form_response(state, headers, status, view)
 }
 
@@ -1168,19 +1162,27 @@ pub(super) async fn sign_out_action(
     headers: HeaderMap,
     Form(form): Form<crate::view::CsrfSubmission>,
 ) -> Response {
-    if !valid_form_request(&state, &headers, &form.csrf) {
+    sign_out_then(&state, &headers, &form.csrf, "/login".to_owned()).await
+}
+
+/// Signs this browser out, then goes to `next`, a path on this site.
+pub(super) async fn sign_out_then(
+    state: &AppState,
+    headers: &HeaderMap,
+    csrf: &str,
+    next: String,
+) -> Response {
+    if !valid_form_request(state, headers, csrf) {
         return error_page(WebError::CsrfRejected);
     }
-    let cookie = canonical_cookie(&headers).ok();
+    let cookie = canonical_cookie(headers).ok();
     let identity =
-        post_json::<_, SuccessResponse>(&state, "/api/auth/sign-out", cookie, &EmptyRequest {})
+        post_json::<_, SuccessResponse>(state, "/api/auth/sign-out", cookie, &EmptyRequest {})
             .await;
     match identity {
-        Ok(identity) => forward_session_cookies(
-            redirect("/login".to_owned(), &headers),
-            &identity,
-            &state.public_origin,
-        ),
+        Ok(identity) => {
+            forward_session_cookies(redirect(next, headers), &identity, &state.public_origin)
+        }
         Err(()) => error_page(WebError::IdentityUnavailable),
     }
 }
@@ -1202,7 +1204,7 @@ fn auth_form_response(
 ) -> Response {
     let csrf = page_csrf_token(headers);
     view.csrf_token = csrf.clone();
-    if view.action == SIGNUP_ACTION || view.action == SIGNUP_COMPLETE_ACTION {
+    if (view.action == SIGNUP_ACTION || view.action == SIGNUP_COMPLETE_ACTION) && !view.invited {
         view.turnstile_site_key = state.turnstile_site_key.clone();
     }
     let mut response = with_csrf_cookie(
@@ -1287,6 +1289,9 @@ fn base_view(query: AuthQuery) -> AuthFormView {
         oauth_providers: Vec::new(),
         identity_provider: "",
         identity_account: String::new(),
+        invitation_token: String::new(),
+        invitation_email: String::new(),
+        invited: false,
     }
 }
 
@@ -1323,35 +1328,6 @@ fn continues_to_preview_handoff(view: &AuthFormView) -> bool {
                         .bytes()
                         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
             })
-}
-
-fn signup_view(query: AuthQuery, error: String, mode: SignupMode) -> AuthFormView {
-    let mut view = base_view(query);
-    view.title = "Request Codewire access";
-    view.description = "Tell us what you want to build with Codewire.";
-    view.action = SIGNUP_ACTION;
-    view.submit_label = "Request access";
-    view.error = error;
-    view.show_email = true;
-    view.show_password = true;
-    view.new_password = true;
-    view.show_confirm_password = true;
-    view.show_name = true;
-    view.show_reason = mode.reason;
-    // Preserve the current UI input and raw IdP field without inventing or
-    // enforcing invite policy in this presentation adapter (#1352).
-    view.show_invite_code = true;
-    // Open sign-up admits everyone (#4121): no access request, no invite code.
-    if mode.open {
-        view.title = "Create your Codewire account";
-        view.description = "Sign up with your email address to start using Codewire.";
-        view.submit_label = "Create account";
-        view.show_invite_code = false;
-        view.open_signup = true;
-    }
-    view.secondary_label = "Already have an account? Sign in";
-    view.secondary_url = auth_path_from_view("/login", &view);
-    view
 }
 
 fn forgot_password_view(error: String) -> AuthFormView {
@@ -1495,6 +1471,8 @@ fn auth_path_from_view(path: &str, view: &AuthFormView) -> String {
         code: String::new(),
         auth_request_id: view.auth_request_id.clone(),
         return_to: view.return_to.clone(),
+        invitation_token: String::new(),
+        email_hint: String::new(),
     };
     auth_path(path, &form)
 }
@@ -1509,7 +1487,9 @@ mod oauth_sign_in_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::sign_up::{SignUpRequest, signup_view};
     use super::*;
+    use crate::raw_auth::SignupMode;
     use crate::security::new_csrf_token;
     use askama::Template as _;
 
@@ -1554,6 +1534,7 @@ mod tests {
             invite_code: "",
             reason: "Build isolated coding environments",
             turnstile_token: "challenge-marker",
+            invitation_token: "",
         })
         .expect("serialize signup request");
 
@@ -1575,6 +1556,8 @@ mod tests {
             code: "123456".into(),
             auth_request_id: "request-id".into(),
             return_to: "/dashboard".into(),
+            invitation_token: String::new(),
+            email_hint: String::new(),
         };
         let url = auth_path("/two-factor", &form);
         assert!(url.contains("request-id"));
@@ -1863,6 +1846,8 @@ mod tests {
             code: String::new(),
             auth_request_id: String::new(),
             return_to: preview_continuation(),
+            invitation_token: String::new(),
+            email_hint: String::new(),
         };
         let view = login_view(form_query(&form), "Email and password are required.".into());
         assert!(view.preview_sign_in);
@@ -1944,6 +1929,8 @@ mod tests {
             code: String::new(),
             auth_request_id: String::new(),
             return_to: String::new(),
+            invitation_token: String::new(),
+            email_hint: String::new(),
         };
         assert!(!validate_new_password(&form).is_empty());
         form.password = "CorrectHorse9#xy".into();

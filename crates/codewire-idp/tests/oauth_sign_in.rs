@@ -2707,3 +2707,26 @@ async fn the_admin_account_list_names_linked_identities() {
     assert!(identities[0].get("userId").is_none());
     cleanup(&h.pool, &[email, admin_email], &[github_id.subject()]).await;
 }
+
+/// Signing in with a provider from an invitation (#3840) sends the provider
+/// only a random state and our fixed callback: the return path stays in our
+/// own records, so nothing of the invitation page reaches GitHub or Google.
+#[tokio::test]
+async fn a_provider_never_sees_where_sign_in_returns_to() {
+    let Some(h) = Harness::new(invite_policy()).await else {
+        return;
+    };
+    for provider in ["github", "google"] {
+        let started = h.start(provider, "?return_to=%2Faccept-invite").await;
+        for (name, value) in &started.params {
+            assert!(
+                !value.contains("accept-invite") && !name.contains("return"),
+                "{provider} authorize URL carries {name}={value}"
+            );
+        }
+        assert!(
+            started.params["redirect_uri"]
+                .ends_with(&format!("/api/auth/oauth/{provider}/callback"))
+        );
+    }
+}

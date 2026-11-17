@@ -40,6 +40,8 @@ struct Scenario {
     list_unavailable: bool,
     /// AcceptInvitation's answer: `None` accepts, otherwise the Connect code.
     accept_error: Option<&'static str>,
+    /// The address an invitation link names.
+    invited: &'static str,
 }
 
 const VERIFIED: Scenario = Scenario {
@@ -48,6 +50,7 @@ const VERIFIED: Scenario = Scenario {
     invitations: 2,
     list_unavailable: false,
     accept_error: None,
+    invited: EMAIL,
 };
 
 struct TestServer {
@@ -145,8 +148,16 @@ async fn upstream(scenario: Scenario) -> (TestServer, Calls) {
         let calls = captured.clone();
         async move {
             let path = request.uri().path().to_owned();
+            let signed_in = request
+                .headers()
+                .get(header::COOKIE)
+                .and_then(|cookie| cookie.to_str().ok())
+                .is_some_and(|cookie| cookie.contains("codewire.session_token="));
             let body = to_bytes(request.into_body(), 32 * 1024).await.unwrap();
             calls.lock().unwrap().push((path.clone(), body.to_vec()));
+            if path == "/api/auth/get-session" && !signed_in {
+                return Json(serde_json::Value::Null).into_response();
+            }
             if path == "/api/auth/get-session" {
                 return Json(serde_json::json!({"user": {
                     "id": "synthetic-account",
@@ -191,8 +202,11 @@ async fn upstream(scenario: Scenario) -> (TestServer, Calls) {
                 });
             }
             if path.ends_with("/GetInvitationByToken") {
+                // The platform answers with the invited address masked (#3840).
+                let mut shown = invitation(0);
+                shown.email = codewire_server_core::org::masked_email(scenario.invited);
                 return proto(GetInvitationByTokenResponse {
-                    invitation: Some(invitation(0)).into(),
+                    invitation: Some(shown).into(),
                     ..Default::default()
                 });
             }
@@ -533,33 +547,235 @@ async fn accepting_checks_origin_csrf_form_and_two_factor_before_the_platform() 
     assert!(accept_calls(&calls_without_two_factor).is_empty());
 }
 
+/// The headers every invitation page answers with (#3840).
+fn assert_invitation_headers(page: &Page) {
+    assert_eq!(page.headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(page.headers[header::REFERRER_POLICY], "no-referrer");
+    assert!(!page.body.contains("token="), "a token in a URL");
+}
+
+/// The open POST and the page as an invitation link's holder.
+fn with_invitation(mut headers: HeaderMap) -> HeaderMap {
+    let cookie = headers
+        .get(header::COOKIE)
+        .map(|cookie| cookie.to_str().unwrap().to_owned());
+    let cookie = match cookie {
+        Some(cookie) => format!("{cookie}; codewire.invitation={TOKEN}"),
+        None => format!("codewire.invitation={TOKEN}"),
+    };
+    headers.insert(header::COOKIE, cookie.parse().unwrap());
+    headers
+}
+
+fn signed_out(csrf: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::ORIGIN, ORIGIN.parse().unwrap());
+    headers.insert(
+        header::COOKIE,
+        format!("codewire_ssr_csrf={csrf}").parse().unwrap(),
+    );
+    headers
+}
+
+/// The script posts the fragment's token once: an exact same-origin request
+/// sets the path-scoped invitation cookie and sends the browser to the plain
+/// page; any other origin is refused.
 #[tokio::test]
-async fn the_emailed_link_asks_an_unverified_invitee_to_verify_first() {
-    let (_services, dashboard, calls) = start(Scenario {
-        accept_error: Some("failed_precondition"),
+async fn opening_a_link_keeps_its_token_in_a_scoped_cookie_and_nowhere_else() {
+    let (_services, dashboard, _) = start(VERIFIED).await;
+    let csrf = crate::security::new_csrf_token();
+    let opened = post(
+        &dashboard,
+        "/accept-invite/_actions/open",
+        signed_out(&csrf),
+        &[("_csrf", &csrf), ("t", TOKEN)],
+    )
+    .await;
+    assert_eq!(opened.status, StatusCode::SEE_OTHER);
+    assert_eq!(opened.headers[header::LOCATION], "/accept-invite");
+    let cookie = opened.headers[header::SET_COOKIE].to_str().unwrap();
+    assert!(
+        cookie.starts_with(&format!(
+            "codewire.invitation={TOKEN}; Path=/accept-invite; HttpOnly; SameSite=Strict; Max-Age="
+        )),
+        "{cookie}"
+    );
+    assert_invitation_headers(&opened);
+
+    let mut elsewhere = signed_out(&csrf);
+    elsewhere.insert(header::ORIGIN, "https://elsewhere.test".parse().unwrap());
+    let refused = post(
+        &dashboard,
+        "/accept-invite/_actions/open",
+        elsewhere,
+        &[("_csrf", &csrf), ("t", TOKEN)],
+    )
+    .await;
+    assert_ne!(refused.status, StatusCode::SEE_OTHER);
+    assert!(
+        !refused.headers.contains_key(header::SET_COOKIE)
+            || !refused.headers[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .contains("codewire.invitation=")
+    );
+}
+
+/// A link from before the fragment carries its token in the query: it is
+/// never resolved, and the visitor is sent to ask for a new one.
+#[tokio::test]
+async fn an_old_query_link_is_never_resolved() {
+    let (_services, dashboard, calls) = start(VERIFIED).await;
+    let page = get(
+        &dashboard,
+        &format!("/accept-invite?token={TOKEN}"),
+        HeaderMap::new(),
+    )
+    .await;
+    assert_eq!(page.status, StatusCode::SEE_OTHER);
+    assert_eq!(page.headers[header::LOCATION], "/accept-invite/out-of-date");
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(path, _)| !path.ends_with("/GetInvitationByToken"))
+    );
+    let gone = get(&dashboard, "/accept-invite/out-of-date", HeaderMap::new()).await;
+    assert_eq!(gone.status, StatusCode::GONE);
+    assert!(gone.body.contains("This link is out of date"));
+    assert_invitation_headers(&gone);
+}
+
+/// With no invitation cookie the page is the script's: it opens the link's
+/// fragment, and without JavaScript it says to enable it.
+#[tokio::test]
+async fn the_page_without_an_invitation_runs_only_the_opening_script() {
+    let (_services, dashboard, _) = start(VERIFIED).await;
+    let page = get(&dashboard, "/accept-invite", HeaderMap::new()).await;
+    assert_eq!(page.status, StatusCode::OK);
+    // Asset URLs are versioned when served, so match the path.
+    assert!(page.body.contains("/assets/codewire/accept-invite-v1.js"));
+    assert!(page.body.contains("data-invitation-opening"));
+    assert!(
+        page.body
+            .contains("Enable JavaScript to open this invitation.")
+    );
+    assert!(
+        page.body
+            .contains(r#"action="/accept-invite/_actions/open""#)
+    );
+    assert_invitation_headers(&page);
+}
+
+/// Each visitor sees one branch: signed out, another account, or the invited
+/// account ready to accept; the token reaches the page only as the signed-out
+/// Sign up form's hidden field.
+#[tokio::test]
+async fn the_page_shows_each_visitor_their_branch() {
+    let (_services, dashboard, _) = start(VERIFIED).await;
+    let csrf = crate::security::new_csrf_token();
+
+    let page = get(
+        &dashboard,
+        "/accept-invite",
+        with_invitation(signed_out(&csrf)),
+    )
+    .await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("Join Team Alpha"));
+    assert!(page.body.contains("s\u{2022}\u{2022}\u{2022}@example.test"));
+    assert!(!page.body.contains(EMAIL), "the invited address is masked");
+    assert!(
+        page.body
+            .contains(r#"href="/login?return_to=%2Faccept-invite""#)
+    );
+    assert!(page.body.contains(r#"action="/signup/invited""#));
+    assert!(
+        page.body
+            .contains(&format!(r#"name="invitation_token" value="{TOKEN}""#))
+    );
+    assert_invitation_headers(&page);
+
+    let page = get(
+        &dashboard,
+        "/accept-invite",
+        with_invitation(authority(&csrf)),
+    )
+    .await;
+    assert!(page.body.contains("Accept invitation</button>"));
+    assert!(
+        !page.body.contains(TOKEN),
+        "a signed-in page carries no token"
+    );
+    assert_invitation_headers(&page);
+
+    let (_services, dashboard, _) = start(Scenario {
+        invited: "someone.else@elsewhere.test",
         ..VERIFIED
     })
     .await;
+    let page = get(
+        &dashboard,
+        "/accept-invite",
+        with_invitation(authority(&csrf)),
+    )
+    .await;
+    assert!(page.body.contains("This invitation is for s\u{2022}\u{2022}\u{2022}@elsewhere.test. You're signed in as synthetic.invitee@example.test."));
+    assert!(
+        page.body
+            .contains(r#"action="/accept-invite/_actions/switch""#)
+    );
+    assert!(!page.body.contains("Accept invitation</button>"));
+}
+
+/// Accepting reads the token from the cookie, never a form field, clears the
+/// cookie once accepted, and an unverified invitee is asked to verify first.
+#[tokio::test]
+async fn accepting_uses_the_cookie_and_an_unverified_invitee_verifies_first() {
+    let (_services, dashboard, calls) = start(VERIFIED).await;
     let csrf = crate::security::new_csrf_token();
     let page = post(
         &dashboard,
         "/accept-invite/_actions/accept",
-        authority(&csrf),
-        &[("_csrf", &csrf), ("token", TOKEN)],
+        with_invitation(authority(&csrf)),
+        &[("_csrf", &csrf)],
     )
     .await;
-    assert_eq!(page.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("Welcome to the team"));
+    let cleared = page.headers[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        page.headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .any(|cookie| cookie
+                .to_str()
+                .unwrap()
+                .starts_with("codewire.invitation=; Path=/accept-invite;")),
+        "{cleared}"
+    );
+    assert_eq!(accept_calls(&calls)[0].token, TOKEN);
+    assert_invitation_headers(&page);
+
+    let (_services, dashboard, _) = start(Scenario {
+        accept_error: Some("failed_precondition"),
+        ..VERIFIED
+    })
+    .await;
+    let page = post(
+        &dashboard,
+        "/accept-invite/_actions/accept",
+        with_invitation(authority(&csrf)),
+        &[("_csrf", &csrf)],
+    )
+    .await;
     assert!(page.body.contains("<div class=\"cw-alert cw-alert--warning\" role=\"alert\">Verify your email address, then accept the invitation again. <form class=\"cw-auth-resend\" method=\"post\" action=\"/settings/_actions/send-verification\">"));
     assert!(page.body.contains("Send a verification email</button>"));
-    assert!(
-        page.body.contains("Accept invitation</button>"),
-        "the invitee can accept again"
-    );
-    assert!(!page.body.contains("cw-alert--error"));
     assert!(!page.body.contains("upstream-private-canary"));
-    let accepted = accept_calls(&calls);
-    assert_eq!(accepted.len(), 1);
-    assert_eq!(accepted[0].token, TOKEN);
 
     // Other refusals keep the generic message without the verification offer.
     let (_services, dashboard, _) = start(Scenario {
@@ -570,11 +786,10 @@ async fn the_emailed_link_asks_an_unverified_invitee_to_verify_first() {
     let page = post(
         &dashboard,
         "/accept-invite/_actions/accept",
-        authority(&csrf),
-        &[("_csrf", &csrf), ("token", TOKEN)],
+        with_invitation(authority(&csrf)),
+        &[("_csrf", &csrf)],
     )
     .await;
-    assert_eq!(page.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(
         page.body
             .contains("The invitation could not be accepted. Try again.")

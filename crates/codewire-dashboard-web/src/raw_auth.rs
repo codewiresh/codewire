@@ -142,12 +142,15 @@ pub(crate) async fn oauth_providers(state: &AppState) -> Vec<&'static str> {
 pub(crate) struct SignupMode {
     pub(crate) open: bool,
     pub(crate) reason: bool,
+    /// Only an invitation admits a sign-up (#4121).
+    pub(crate) invite_only: bool,
 }
 
 impl SignupMode {
     pub(crate) const REVIEW: Self = Self {
         open: false,
         reason: true,
+        invite_only: false,
     };
 }
 
@@ -191,6 +194,7 @@ pub(crate) async fn signup_mode(state: &AppState) -> SignupMode {
             SignupMode {
                 open: body.mode == "open",
                 reason: body.reason,
+                invite_only: body.mode == "invite-only",
             },
         ),
         None => (OAUTH_PROVIDERS_FAILURE_TTL, SignupMode::REVIEW),

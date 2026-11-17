@@ -35,6 +35,9 @@
           <p class="cw-auth-switch">Don't have an account? <a href="{{ view.secondary_url }}">Sign up.</a></p>
           {% else if is_signup %}
           <p class="cw-auth-switch">Already have an account? <a href="{{ view.secondary_url }}">Sign in.</a></p>
+          {% if !view.invitation_email.is_empty() %}
+          <p class="cw-auth-copy">Your invitation is for <strong>{{ view.invitation_email }}</strong>. Sign up with that address.</p>
+          {% endif %}
           {% endif %}
           {% if is_signup_complete %}
           <p class="cw-auth-copy">You're signing up with {{ view.identity_provider }} as <strong>{{ view.identity_account }}</strong>.</p>
@@ -61,6 +64,10 @@
           {% endif %}
           {% if !view.return_to.is_empty() %}
           <input type="hidden" name="return_to" value="{{ view.return_to }}">
+          {% endif %}
+          {% if !view.invitation_token.is_empty() %}
+          <input type="hidden" name="invitation_token" value="{{ view.invitation_token }}">
+          <input type="hidden" name="email_hint" value="{{ view.invitation_email }}">
           {% endif %}
           {% if steps %}
           <fieldset class="cw-signup-step" data-signup-step="1">

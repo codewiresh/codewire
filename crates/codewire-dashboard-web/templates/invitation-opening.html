@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <script src="/assets/codewire/theme-v1.js"></script>
+    <script src="/assets/codewire/accept-invite-v1.js" defer></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Your invitation · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/auth-v2.css">
+  </head>
+  <body class="cw-body cw-auth-body" data-route="accept-invite">
+    <main class="cw-auth-shell">
+      <a class="cw-auth-brand" href="/" aria-label="Codewire home"><img src="/assets/codewire/brand-icon-v1.svg" width="48" height="48" alt="Codewire"></a>
+      <section class="cw-auth-panel" aria-labelledby="invite-title">
+        <header class="cw-auth-header">
+          <h1 id="invite-title" class="cw-page-title">Your invitation</h1>
+          <p class="cw-auth-copy" data-invitation-opening>Opening your invitation…</p>
+          <p class="cw-auth-copy" data-invitation-missing hidden>There is no invitation to open here. Use the link in your invitation email.</p>
+        </header>
+        <noscript><div class="cw-alert cw-alert--warning" role="alert">Enable JavaScript to open this invitation.</div></noscript>
+        <form hidden data-invitation-open method="post" action="/accept-invite/_actions/open"><input type="hidden" name="_csrf" value="{{ csrf_token }}"><input type="hidden" name="t" value=""></form>
+      </section>
+    </main>
+  </body>
+</html>

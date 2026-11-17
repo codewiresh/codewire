@@ -1,5 +1,5 @@
-//! The sign-up pages and their actions: `/signup` and, for a provider
-//! sign-up, `/signup/complete`. Moved out of `authentication.rs` unchanged.
+//! The sign-up pages and their actions: `/signup`, `/signup/invited` for an
+//! invitation's visitor, and, for a provider sign-up, `/signup/complete`.
 
 use codewire_server_core::client_address::forwarded_client_hop;
 
@@ -7,6 +7,7 @@ use super::*;
 use crate::raw_auth::{
     IdentityErrorCode, IdentityResponse, SignupMode, post_json_for_client, signup_mode,
 };
+use crate::routes::invitations::{INVITATION_PATH, MAX_TOKEN_BYTES};
 
 pub(in crate::routes) async fn signup(
     State(state): State<AppState>,
@@ -23,6 +24,27 @@ pub(in crate::routes) async fn signup(
     .await
 }
 
+/// `POST /signup/invited`: the invitation page's Create account (#3840). The
+/// page posts the invitation's hand-off token and the invited address,
+/// masked, so the token stays out of every URL.
+pub(in crate::routes) async fn signup_invited(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<AuthFormSubmission>,
+) -> Response {
+    if !valid_form_request(&state, &headers, &form.csrf) {
+        return error_page(WebError::CsrfRejected);
+    }
+    let mode = signup_mode(&state).await;
+    auth_entry_response(
+        &state,
+        &headers,
+        StatusCode::OK,
+        signup_form_view(&form, String::new(), mode),
+    )
+    .await
+}
+
 pub(in crate::routes) async fn signup_action(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -31,15 +53,15 @@ pub(in crate::routes) async fn signup_action(
     if !valid_form_request(&state, &headers, &form.csrf) {
         return error_page(WebError::CsrfRejected);
     }
-    let query = form_query(&form);
     let mode = signup_mode(&state).await;
+    let reason_required = mode.reason && !invited(&form, mode);
     let error = validate_new_password(&form);
     if !error.is_empty()
         || form.email.trim().is_empty()
         || form.name.trim().is_empty()
-        || (mode.reason && form.reason.trim().is_empty())
+        || (reason_required && form.reason.trim().is_empty())
     {
-        let error = match (error.is_empty(), mode.reason) {
+        let error = match (error.is_empty(), reason_required) {
             (true, true) => "Name, email, and what you want to build are required.".to_owned(),
             (true, false) => "Name and email are required.".to_owned(),
             (false, _) => error,
@@ -48,7 +70,7 @@ pub(in crate::routes) async fn signup_action(
             &state,
             &headers,
             StatusCode::UNPROCESSABLE_ENTITY,
-            signup_view(query, error, mode),
+            signup_form_view(&form, error, mode),
         )
         .await;
     }
@@ -64,6 +86,7 @@ pub(in crate::routes) async fn signup_action(
             invite_code: form.invite_code.trim(),
             reason: form.reason.trim(),
             turnstile_token: form.turnstile_response.trim(),
+            invitation_token: invitation_token(&form.invitation_token),
         },
     )
     .await
@@ -74,8 +97,8 @@ pub(in crate::routes) async fn signup_action(
                 &state,
                 &headers,
                 StatusCode::BAD_GATEWAY,
-                signup_view(
-                    query,
+                signup_form_view(
+                    &form,
                     "The identity service is temporarily unavailable.".to_owned(),
                     mode,
                 ),
@@ -88,7 +111,7 @@ pub(in crate::routes) async fn signup_action(
             &state,
             &headers,
             identity.status,
-            signup_view(query, refusal_message(&identity, "sign-up"), mode),
+            signup_form_view(&form, refusal_message(&identity, "sign-up"), mode),
         )
         .await;
     }
@@ -352,6 +375,99 @@ fn signup_complete_view(
     // The IdP keeps the return target with the pending sign-up.
     view.return_to = String::new();
     view
+}
+
+#[derive(Serialize)]
+pub(super) struct SignUpRequest<'a> {
+    pub(super) email: &'a str,
+    pub(super) password: &'a str,
+    pub(super) name: &'a str,
+    pub(super) invite_code: &'a str,
+    pub(super) reason: &'a str,
+    #[serde(rename = "turnstile_token")]
+    pub(super) turnstile_token: &'a str,
+    pub(super) invitation_token: &'a str,
+}
+
+pub(super) fn signup_view(query: AuthQuery, error: String, mode: SignupMode) -> AuthFormView {
+    let mut view = base_view(query);
+    view.title = "Request Codewire access";
+    view.description = "Tell us what you want to build with Codewire.";
+    view.action = SIGNUP_ACTION;
+    view.submit_label = "Request access";
+    view.error = error;
+    view.show_email = true;
+    view.show_password = true;
+    view.new_password = true;
+    view.show_confirm_password = true;
+    view.show_name = true;
+    view.show_reason = mode.reason;
+    // Preserve the current UI input and raw IdP field without inventing or
+    // enforcing invite policy in this presentation adapter (#1352).
+    view.show_invite_code = true;
+    // Open sign-up admits everyone (#4121): no access request, no invite code.
+    if mode.open {
+        view.title = "Create your Codewire account";
+        view.description = "Sign up with your email address to start using Codewire.";
+        view.submit_label = "Create account";
+        view.show_invite_code = false;
+        view.open_signup = true;
+    }
+    view.secondary_label = "Already have an account? Sign in";
+    view.secondary_url = auth_path_from_view("/login", &view);
+    view
+}
+
+/// The sign-up page again for a submitted form, keeping its invitation.
+fn signup_form_view(form: &AuthFormSubmission, error: String, mode: SignupMode) -> AuthFormView {
+    let mut view = signup_view(form_query(form), error, mode);
+    let token = invitation_token(&form.invitation_token);
+    if token.is_empty() {
+        return view;
+    }
+    view.invitation_token = token.to_owned();
+    view.invitation_email = email_hint(&form.email_hint);
+    // Signing in from this page returns to the invitation.
+    view.return_to = INVITATION_PATH.to_owned();
+    view.secondary_url = auth_path_from_view("/login", &view);
+    if invited(form, mode) {
+        view.invited = true;
+        view.title = "Create your Codewire account";
+        view.submit_label = "Create account";
+        view.show_reason = false;
+        view.show_invite_code = false;
+        view.open_signup = true;
+    }
+    view
+}
+
+/// An invitation's sign-up on an invite-only server, which the IdP admits
+/// without Turnstile, a reason or an invite code when the token names a live
+/// invitation for the address typed (#4121). Elsewhere the token changes
+/// nothing, so the page asks what it always asks.
+fn invited(form: &AuthFormSubmission, mode: SignupMode) -> bool {
+    mode.invite_only && !invitation_token(&form.invitation_token).is_empty()
+}
+
+/// The posted invitation token, or empty when it can't be one.
+fn invitation_token(token: &str) -> &str {
+    let token = token.trim();
+    if token.len() <= MAX_TOKEN_BYTES && token.bytes().all(|byte| byte.is_ascii_graphic()) {
+        token
+    } else {
+        ""
+    }
+}
+
+/// The invited address as the platform masked it, or empty when what was
+/// posted isn't an address: the page only ever shows it as a hint.
+fn email_hint(hint: &str) -> String {
+    let hint = hint.trim();
+    if hint.len() <= 254 && hint.contains('@') && !hint.chars().any(char::is_control) {
+        hint.to_owned()
+    } else {
+        String::new()
+    }
 }
 
 #[cfg(test)]

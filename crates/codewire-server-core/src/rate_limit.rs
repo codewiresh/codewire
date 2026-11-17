@@ -141,6 +141,17 @@ pub const MAIL_VERIFICATION: Limit = Limit {
     per_user: false,
 };
 
+/// Public invitation-link lookups per client address (#3840): a token is
+/// unguessable, but a public read is still limited like the other public
+/// auth routes.
+pub const INVITATION_LOOKUP: Limit = Limit {
+    name: "invitation_lookup",
+    key_prefix: "invitation_lookup",
+    window_secs: 60,
+    default_max: 30,
+    per_user: false,
+};
+
 /// Every named limit, in the order an admin sees them.
 pub const LIMITS: &[Limit] = &[
     SANDBOX_CREATE,
@@ -152,6 +163,7 @@ pub const LIMITS: &[Limit] = &[
     SIGNUP_ADDRESS,
     MAIL_PASSWORD_RESET,
     MAIL_VERIFICATION,
+    INVITATION_LOOKUP,
 ];
 
 /// What [`consume`] decided.

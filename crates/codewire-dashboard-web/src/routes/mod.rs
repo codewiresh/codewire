@@ -67,6 +67,7 @@ pub(crate) fn router() -> Router<AppState> {
             post(authentication::login_action),
         )
         .route("/signup", get(authentication::signup))
+        .route("/signup/invited", post(authentication::signup_invited))
         .route(
             "/signup/_actions/sign-up",
             post(authentication::signup_action),
@@ -112,7 +113,19 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/device", get(device::device))
         .route("/device/_actions/approve", post(device::approve))
         .route("/accept-invite", get(invitations::invitation_page))
-        .route("/accept-invite/_actions/accept", post(invitations::accept))
+        .route("/accept-invite/out-of-date", get(invitations::out_of_date))
+        .route(
+            "/accept-invite/_actions/open",
+            post(invitations::open).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/accept-invite/_actions/accept",
+            post(invitations::accept).layer(DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/accept-invite/_actions/switch",
+            post(invitations::switch_account).layer(DefaultBodyLimit::max(2048)),
+        )
         .route("/dashboard", get(slash_redirect))
         .route(DASHBOARD_PATH, get(dashboard::dashboard))
         .route(

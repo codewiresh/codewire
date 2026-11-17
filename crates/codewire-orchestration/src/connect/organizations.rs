@@ -356,7 +356,8 @@ impl OrganizationService for OrganizationConnectService {
         // Deliberately do not extract AuthUser: this exact method is the sole
         // public-method exemption on the authenticated codewire.v1 mount.
         let request = request.to_owned_message();
-        let invitation = get_invitation_by_token_core(self.state.clone(), request.token)
+        let address = codewire_server_core::client_address::forwarded_client_ip(ctx.headers());
+        let invitation = get_invitation_by_token_core(self.state.clone(), request.token, address)
             .await
             .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(GetInvitationByTokenResponse {

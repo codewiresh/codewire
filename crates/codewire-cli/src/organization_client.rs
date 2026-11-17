@@ -490,8 +490,12 @@ fn invitation_url(public_origin: &str, token: &str) -> anyhow::Result<String> {
     let mut url = url::Url::parse(public_origin).context("parse public invitation origin")?;
     url.set_path("/accept-invite");
     url.set_query(None);
-    url.set_fragment(None);
-    url.query_pairs_mut().append_pair("token", token);
+    // The token goes in the fragment, which no request line, edge log or
+    // Referer carries (#3840).
+    let fragment = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("t", token)
+        .finish();
+    url.set_fragment(Some(&fragment));
     Ok(url.into())
 }
 
@@ -567,7 +571,7 @@ mod tests {
         let url = invitation_url("https://codewire.test/api/", token).unwrap();
         assert_eq!(
             url,
-            "https://codewire.test/accept-invite?token=synthetic%2Finvitation+capability%3Fmarker"
+            "https://codewire.test/accept-invite#t=synthetic%2Finvitation+capability%3Fmarker"
         );
 
         let created = CreatedInvitation {
