@@ -615,18 +615,23 @@ pub async fn delete_policy(
     let selecting: Vec<String> = sqlx::query_scalar(
         "SELECT COALESCE(e.name, e.id) FROM platform_environment_network_policies b \
            JOIN environments e ON e.id = b.environment_id \
-          WHERE b.policy_id = $1 ORDER BY 1 LIMIT 11",
+          WHERE b.policy_id = $1 ORDER BY 1 LIMIT $2",
     )
     .bind(&id)
+    .bind(NAMED_ENVIRONMENTS as i64 + 1)
     .fetch_all(&mut *tx)
     .await?;
     if !selecting.is_empty() {
-        let more = if selecting.len() > 10 {
+        let more = if selecting.len() > NAMED_ENVIRONMENTS {
             " and more"
         } else {
             ""
         };
-        let shown = selecting.iter().take(10).cloned().collect::<Vec<_>>();
+        let shown = selecting
+            .iter()
+            .take(NAMED_ENVIRONMENTS)
+            .cloned()
+            .collect::<Vec<_>>();
         return Err(AppError::Precondition(
             format!(
                 "{name} is selected by {}{more}; select another policy for them first",
@@ -642,6 +647,89 @@ pub async fn delete_policy(
         .await?;
     tx.commit().await?;
     Ok(view)
+}
+
+/// What some of an organization's hosted environments select.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UsageSelection {
+    /// A stored policy, by id.
+    Policy(String),
+    Builtin(BuiltinPolicy),
+    /// No selection.
+    HostedDefault,
+}
+
+/// How many environments select one thing, and the first names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyUsage {
+    pub selection: UsageSelection,
+    pub environments: u32,
+    /// At most [`NAMED_ENVIRONMENTS`], in name order; an unnamed one by id.
+    pub names: Vec<String>,
+}
+
+/// How many environments a refused delete and a policy's usage name.
+pub const NAMED_ENVIRONMENTS: usize = 10;
+
+/// What the organization's hosted environments select, in one grouped read.
+/// It counts the same selection rows [`delete_policy`] refuses for, so a
+/// count never says nobody selects a policy whose delete is refused; an
+/// environment with no row and not destroyed is on `hosted-default`.
+pub async fn policy_usage(
+    pool: &PgPool,
+    user: &AuthUser,
+    org_id: &str,
+) -> AppResult<Vec<PolicyUsage>> {
+    member_role(pool, user, org_id).await?;
+    let rows = sqlx::query(
+        "WITH chosen AS ( \
+           SELECT b.policy_id, b.builtin, COALESCE(e.name, e.id) AS label \
+             FROM platform_environment_network_policies b \
+             JOIN environments e ON e.id = b.environment_id \
+            WHERE e.org_id = $1 \
+           UNION ALL \
+           SELECT NULL, $2, COALESCE(e.name, e.id) \
+             FROM environments e \
+            WHERE e.org_id = $1 AND e.type = 'sandbox' AND e.state <> 'destroyed' \
+              AND NOT EXISTS (SELECT 1 FROM platform_environment_network_policies b \
+                               WHERE b.environment_id = e.id) \
+         ), ranked AS ( \
+           SELECT policy_id, builtin, label, \
+                  row_number() OVER (PARTITION BY policy_id, builtin ORDER BY label) AS n \
+             FROM chosen \
+         ) \
+         SELECT policy_id, builtin, count(*) AS environments, \
+                array_agg(label ORDER BY label) FILTER (WHERE n <= $3) AS names \
+           FROM ranked GROUP BY policy_id, builtin ORDER BY policy_id, builtin",
+    )
+    .bind(org_id)
+    .bind(HOSTED_DEFAULT_NAME)
+    .bind(NAMED_ENVIRONMENTS as i64)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            let policy_id: Option<String> = row.try_get("policy_id")?;
+            let builtin: Option<String> = row.try_get("builtin")?;
+            let selection = match (policy_id, builtin) {
+                (Some(id), None) => UsageSelection::Policy(id),
+                (None, Some(name)) if name == HOSTED_DEFAULT_NAME => UsageSelection::HostedDefault,
+                (None, Some(name)) => UsageSelection::Builtin(
+                    BuiltinPolicy::from_name(&name).ok_or_else(corrupt_selection)?,
+                ),
+                _ => return Err(corrupt_selection()),
+            };
+            let environments: i64 = row.try_get("environments")?;
+            Ok(PolicyUsage {
+                selection,
+                environments: u32::try_from(environments).map_err(|_| corrupt_selection())?,
+                names: row
+                    .try_get::<Option<Vec<String>>, _>("names")?
+                    .unwrap_or_default(),
+            })
+        })
+        .collect::<Result<_, sqlx::Error>>()
+        .map_err(Into::into)
 }
 
 // ── Environment selections ───────────────────────────────────────────────

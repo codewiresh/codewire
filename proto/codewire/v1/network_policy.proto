@@ -112,6 +112,24 @@ message ListNetworkPoliciesRequest {
 
 message ListNetworkPoliciesResponse {
   repeated NetworkPolicy policies = 1;
+  // Which of the organization's hosted environments select what: one entry
+  // for each stored policy, built-in and `hosted-default` that any selects.
+  // It counts exactly the selections DeleteNetworkPolicy refuses for, so a
+  // destroying environment is counted until its destroy ends.
+  repeated NetworkPolicyUsage usage = 2;
+}
+message NetworkPolicyUsage {
+  oneof selection {
+    // A stored policy of the organization, by `NetworkPolicy.id`.
+    string policy_id = 1;
+    // `open`, `locked`, or `hosted-default` for an environment that selects
+    // nothing.
+    string builtin = 2;
+  }
+  uint32 environments = 3;
+  // At most ten environment names, in name order; an unnamed environment by
+  // its id.
+  repeated string names = 4;
 }
 
 message GetNetworkPolicyRequest {

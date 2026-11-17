@@ -649,3 +649,109 @@ async fn db_a_selection_that_does_not_decode_never_fails_the_environment_read() 
     .await;
     db.finish(result).await
 }
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_usage_counts_the_selections_a_delete_refuses_for() -> anyhow::Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        organization(&db, "np-use").await?;
+        organization(&db, "np-use-other").await?;
+        let owner = session("np-use-owner");
+        let alice = session("np-use-alice");
+        let web = create_policy(&db.pool, &owner, "np-use", "web", None, &[])
+            .await
+            .unwrap();
+        create_policy(&db.pool, &owner, "np-use", "unused", None, &[])
+            .await
+            .unwrap();
+        for id in [
+            "np-use-b",
+            "np-use-a",
+            "np-use-going",
+            "np-use-locked",
+            "np-use-plain",
+            "np-use-gone",
+        ] {
+            environment(&db, id, "np-use", "np-use-alice").await?;
+        }
+        environment(
+            &db,
+            "np-use-elsewhere",
+            "np-use-other",
+            "np-use-other-owner",
+        )
+        .await?;
+        for id in ["np-use-b", "np-use-a", "np-use-going"] {
+            select_for_environment(&db.pool, &alice, "np-use", id, "web")
+                .await
+                .unwrap();
+        }
+        select_for_environment(&db.pool, &alice, "np-use", "np-use-locked", "locked")
+            .await
+            .unwrap();
+        // Destroying keeps its selection until the destroy ends; destroyed
+        // has none, as lifecycle's destroy removes it in the same statement.
+        sqlx::query("UPDATE environments SET state = 'destroying' WHERE id = 'np-use-going'")
+            .execute(&db.pool)
+            .await?;
+        sqlx::query("UPDATE environments SET state = 'destroyed' WHERE id = 'np-use-gone'")
+            .execute(&db.pool)
+            .await?;
+
+        // A member reads the same usage an owner does.
+        let usage = policy_usage(&db.pool, &alice, "np-use").await.unwrap();
+        let find =
+            |selection: UsageSelection| usage.iter().find(|u| u.selection == selection).cloned();
+        anyhow::ensure!(
+            find(UsageSelection::Policy(web.id.clone()))
+                == Some(PolicyUsage {
+                    selection: UsageSelection::Policy(web.id.clone()),
+                    environments: 3,
+                    names: vec!["np-use-a".into(), "np-use-b".into(), "np-use-going".into()],
+                }),
+            "{usage:?}"
+        );
+        anyhow::ensure!(
+            find(UsageSelection::Builtin(BuiltinPolicy::Locked)).map(|u| (u.environments, u.names))
+                == Some((1, vec!["np-use-locked".to_owned()]))
+        );
+        anyhow::ensure!(
+            find(UsageSelection::HostedDefault).map(|u| (u.environments, u.names))
+                == Some((1, vec!["np-use-plain".to_owned()])),
+            "a destroyed environment is not on hosted-default: {usage:?}"
+        );
+        anyhow::ensure!(
+            usage.len() == 3,
+            "nothing for an unselected policy or another organization: {usage:?}"
+        );
+
+        // The destroying environment a count names is the one delete names.
+        let refused = delete_policy(&db.pool, &owner, "np-use", Selector::Name("web")).await;
+        anyhow::ensure!(code(refused.unwrap_err()).contains("np-use-a, np-use-b, np-use-going"));
+
+        // Ten names at most, and the count is still all of them.
+        for n in 0..11 {
+            let id = format!("np-use-many-{n:02}");
+            environment(&db, &id, "np-use", "np-use-alice").await?;
+            select_for_environment(&db.pool, &alice, "np-use", &id, "open")
+                .await
+                .unwrap();
+        }
+        let open = policy_usage(&db.pool, &alice, "np-use")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.selection == UsageSelection::Builtin(BuiltinPolicy::Open))
+            .unwrap();
+        anyhow::ensure!(open.environments == 11 && open.names.len() == 10);
+        anyhow::ensure!(open.names.first().map(String::as_str) == Some("np-use-many-00"));
+
+        // Not a member: the organization does not exist.
+        let refused = policy_usage(&db.pool, &session("np-use-other-owner"), "np-use").await;
+        anyhow::ensure!(code(refused.unwrap_err()) == "org_not_found");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

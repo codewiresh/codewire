@@ -5,13 +5,14 @@ use std::sync::Arc;
 
 use buffa_types::Timestamp;
 use chrono::{DateTime, Utc};
-use codewire_proto::codewire::v1::__buffa::oneof::network_policy_selector;
+use codewire_egress_policy::HOSTED_DEFAULT_NAME;
+use codewire_proto::codewire::v1::__buffa::oneof::{network_policy_selector, network_policy_usage};
 use codewire_proto::codewire::v1::{
     CreateNetworkPolicyRequest, CreateNetworkPolicyResponse, DeleteNetworkPolicyRequest,
     DeleteNetworkPolicyResponse, EnvironmentNetworkPolicy, GetNetworkPolicyRequest,
     GetNetworkPolicyResponse, ListNetworkPoliciesRequest, ListNetworkPoliciesResponse,
     NetworkPolicy, NetworkPolicyEnforcement, NetworkPolicyRule, NetworkPolicySelector,
-    NetworkPolicyService, UpdateEnvironmentNetworkPolicyRequest,
+    NetworkPolicyService, NetworkPolicyUsage, UpdateEnvironmentNetworkPolicyRequest,
     UpdateEnvironmentNetworkPolicyResponse, UpdateNetworkPolicyRequest,
     UpdateNetworkPolicyResponse,
 };
@@ -21,8 +22,9 @@ use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 use sqlx::PgPool;
 
 use crate::api::network_policies::{
-    EnvironmentPolicyView, NetworkPolicyFlags, PolicyView, RuleInput, Selector, create_policy,
-    delete_policy, get_policy, list_policies, select_for_environment, update_policy,
+    EnvironmentPolicyView, NetworkPolicyFlags, PolicyUsage, PolicyView, RuleInput, Selector,
+    UsageSelection, create_policy, delete_policy, get_policy, list_policies, policy_usage,
+    select_for_environment, update_policy,
 };
 
 pub fn router(pool: PgPool, flags: NetworkPolicyFlags) -> connectrpc::Router {
@@ -75,12 +77,16 @@ impl NetworkPolicyService for NetworkPolicyConnectService {
         let request = request.to_owned_message();
         let result = async {
             self.flags.require()?;
-            list_policies(&self.pool, &user, &request.org_id).await
+            let policies = list_policies(&self.pool, &user, &request.org_id).await?;
+            let usage = policy_usage(&self.pool, &user, &request.org_id).await?;
+            Ok::<_, AppError>((policies, usage))
         }
         .await
         .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let (policies, usage) = result;
         connectrpc::Response::ok(ListNetworkPoliciesResponse {
-            policies: result.into_iter().map(proto_policy).collect(),
+            policies: policies.into_iter().map(proto_policy).collect(),
+            usage: usage.into_iter().map(proto_usage).collect(),
             ..Default::default()
         })
     }
@@ -243,6 +249,23 @@ fn proto_policy(view: PolicyView) -> NetworkPolicy {
         digest: view.digest,
         created_at: Some(proto_timestamp(view.created_at)).into(),
         created_by: view.created_by.unwrap_or_default(),
+        ..Default::default()
+    }
+}
+
+fn proto_usage(usage: PolicyUsage) -> NetworkPolicyUsage {
+    NetworkPolicyUsage {
+        selection: Some(match usage.selection {
+            UsageSelection::Policy(id) => network_policy_usage::Selection::PolicyId(id),
+            UsageSelection::Builtin(builtin) => {
+                network_policy_usage::Selection::Builtin(builtin.name().to_owned())
+            }
+            UsageSelection::HostedDefault => {
+                network_policy_usage::Selection::Builtin(HOSTED_DEFAULT_NAME.to_owned())
+            }
+        }),
+        environments: usage.environments,
+        names: usage.names,
         ..Default::default()
     }
 }

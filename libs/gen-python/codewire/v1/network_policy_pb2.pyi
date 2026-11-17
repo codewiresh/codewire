@@ -85,10 +85,24 @@ class ListNetworkPoliciesRequest(_message.Message):
     def __init__(self, org_id: _Optional[str] = ...) -> None: ...
 
 class ListNetworkPoliciesResponse(_message.Message):
-    __slots__ = ("policies",)
+    __slots__ = ("policies", "usage")
     POLICIES_FIELD_NUMBER: _ClassVar[int]
+    USAGE_FIELD_NUMBER: _ClassVar[int]
     policies: _containers.RepeatedCompositeFieldContainer[NetworkPolicy]
-    def __init__(self, policies: _Optional[_Iterable[_Union[NetworkPolicy, _Mapping]]] = ...) -> None: ...
+    usage: _containers.RepeatedCompositeFieldContainer[NetworkPolicyUsage]
+    def __init__(self, policies: _Optional[_Iterable[_Union[NetworkPolicy, _Mapping]]] = ..., usage: _Optional[_Iterable[_Union[NetworkPolicyUsage, _Mapping]]] = ...) -> None: ...
+
+class NetworkPolicyUsage(_message.Message):
+    __slots__ = ("policy_id", "builtin", "environments", "names")
+    POLICY_ID_FIELD_NUMBER: _ClassVar[int]
+    BUILTIN_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENTS_FIELD_NUMBER: _ClassVar[int]
+    NAMES_FIELD_NUMBER: _ClassVar[int]
+    policy_id: str
+    builtin: str
+    environments: int
+    names: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, policy_id: _Optional[str] = ..., builtin: _Optional[str] = ..., environments: _Optional[int] = ..., names: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class GetNetworkPolicyRequest(_message.Message):
     __slots__ = ("org_id", "policy", "revision")

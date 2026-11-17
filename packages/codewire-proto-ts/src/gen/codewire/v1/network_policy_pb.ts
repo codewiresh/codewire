@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/network_policy.proto.
  */
 export const file_codewire_v1_network_policy: GenFile = /*@__PURE__*/
-  fileDesc("CiBjb2Rld2lyZS92MS9uZXR3b3JrX3BvbGljeS5wcm90bxILY29kZXdpcmUudjEiQQoVTmV0d29ya1BvbGljeVNlbGVjdG9yEg4KBG5hbWUYASABKAlIABIMCgJpZBgCIAEoCUgAQgoKCHNlbGVjdG9yIjIKEU5ldHdvcmtQb2xpY3lSdWxlEg4KBnRhcmdldBgBIAEoCRINCgVwb3J0cxgCIAMoDSLoAQoNTmV0d29ya1BvbGljeRIKCgJpZBgBIAEoCRIOCgZvcmdfaWQYAiABKAkSDAoEbmFtZRgDIAEoCRIQCghyZXZpc2lvbhgEIAEoDRIYChBjdXJyZW50X3JldmlzaW9uGAUgASgNEi0KBXJ1bGVzGAYgAygLMh4uY29kZXdpcmUudjEuTmV0d29ya1BvbGljeVJ1bGUSDgoGZGlnZXN0GAcgASgJEi4KCmNyZWF0ZWRfYXQYCCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhIKCmNyZWF0ZWRfYnkYCSABKAkimwEKGkNyZWF0ZU5ldHdvcmtQb2xpY3lSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIMCgRuYW1lGAIgASgJEjAKBGZyb20YAyABKAsyIi5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5U2VsZWN0b3ISLQoFYWxsb3cYBCADKAsyHi5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5UnVsZSJJChtDcmVhdGVOZXR3b3JrUG9saWN5UmVzcG9uc2USKgoGcG9saWN5GAEgASgLMhouY29kZXdpcmUudjEuTmV0d29ya1BvbGljeSIsChpMaXN0TmV0d29ya1BvbGljaWVzUmVxdWVzdBIOCgZvcmdfaWQYASABKAkiSwobTGlzdE5ldHdvcmtQb2xpY2llc1Jlc3BvbnNlEiwKCHBvbGljaWVzGAEgAygLMhouY29kZXdpcmUudjEuTmV0d29ya1BvbGljeSJvChdHZXROZXR3b3JrUG9saWN5UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSMgoGcG9saWN5GAIgASgLMiIuY29kZXdpcmUudjEuTmV0d29ya1BvbGljeVNlbGVjdG9yEhAKCHJldmlzaW9uGAMgASgNIkYKGEdldE5ldHdvcmtQb2xpY3lSZXNwb25zZRIqCgZwb2xpY3kYASABKAsyGi5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5IroBChpVcGRhdGVOZXR3b3JrUG9saWN5UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSMgoGcG9saWN5GAIgASgLMiIuY29kZXdpcmUudjEuTmV0d29ya1BvbGljeVNlbGVjdG9yEi0KBWFsbG93GAMgAygLMh4uY29kZXdpcmUudjEuTmV0d29ya1BvbGljeVJ1bGUSDgoGcmVtb3ZlGAQgAygJEhkKEWV4cGVjdGVkX3JldmlzaW9uGAUgASgNIkkKG1VwZGF0ZU5ldHdvcmtQb2xpY3lSZXNwb25zZRIqCgZwb2xpY3kYASABKAsyGi5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5ImAKGkRlbGV0ZU5ldHdvcmtQb2xpY3lSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIyCgZwb2xpY3kYAiABKAsyIi5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5U2VsZWN0b3IiSQobRGVsZXRlTmV0d29ya1BvbGljeVJlc3BvbnNlEioKBnBvbGljeRgBIAEoCzIaLmNvZGV3aXJlLnYxLk5ldHdvcmtQb2xpY3kiZwolVXBkYXRlRW52aXJvbm1lbnROZXR3b3JrUG9saWN5UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSFgoOZW52aXJvbm1lbnRfaWQYAiABKAkSFgoObmV0d29ya19wb2xpY3kYAyABKAkiZwomVXBkYXRlRW52aXJvbm1lbnROZXR3b3JrUG9saWN5UmVzcG9uc2USPQoObmV0d29ya19wb2xpY3kYASABKAsyJS5jb2Rld2lyZS52MS5FbnZpcm9ubWVudE5ldHdvcmtQb2xpY3ki/gEKGEVudmlyb25tZW50TmV0d29ya1BvbGljeRIRCglyZWZlcmVuY2UYASABKAkSDAoEbmFtZRgCIAEoCRIQCghyZXZpc2lvbhgDIAEoDRIOCgZkaWdlc3QYBCABKAkSOgoLZW5mb3JjZW1lbnQYBSABKA4yJS5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5RW5mb3JjZW1lbnQSGQoRZW5mb3JjZWRfcmV2aXNpb24YBiABKA0SFwoPZW5mb3JjZWRfZGlnZXN0GAcgASgJEi8KC2VuZm9yY2VkX2F0GAggASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCr0AQoYTmV0d29ya1BvbGljeUVuZm9yY2VtZW50EioKJk5FVFdPUktfUE9MSUNZX0VORk9SQ0VNRU5UX1VOU1BFQ0lGSUVEEAASKwonTkVUV09SS19QT0xJQ1lfRU5GT1JDRU1FTlRfTk9UX0VORk9SQ0VEEAESJwojTkVUV09SS19QT0xJQ1lfRU5GT1JDRU1FTlRfRU5GT1JDRUQQAhIoCiRORVRXT1JLX1BPTElDWV9FTkZPUkNFTUVOVF9FTkZPUkNJTkcQAxIsCihORVRXT1JLX1BPTElDWV9FTkZPUkNFTUVOVF9GQUlMRURfQ0xPU0VEEAQytQUKFE5ldHdvcmtQb2xpY3lTZXJ2aWNlEmgKE0NyZWF0ZU5ldHdvcmtQb2xpY3kSJy5jb2Rld2lyZS52MS5DcmVhdGVOZXR3b3JrUG9saWN5UmVxdWVzdBooLmNvZGV3aXJlLnYxLkNyZWF0ZU5ldHdvcmtQb2xpY3lSZXNwb25zZRJtChNMaXN0TmV0d29ya1BvbGljaWVzEicuY29kZXdpcmUudjEuTGlzdE5ldHdvcmtQb2xpY2llc1JlcXVlc3QaKC5jb2Rld2lyZS52MS5MaXN0TmV0d29ya1BvbGljaWVzUmVzcG9uc2UiA5ACARJkChBHZXROZXR3b3JrUG9saWN5EiQuY29kZXdpcmUudjEuR2V0TmV0d29ya1BvbGljeVJlcXVlc3QaJS5jb2Rld2lyZS52MS5HZXROZXR3b3JrUG9saWN5UmVzcG9uc2UiA5ACARJoChNVcGRhdGVOZXR3b3JrUG9saWN5EicuY29kZXdpcmUudjEuVXBkYXRlTmV0d29ya1BvbGljeVJlcXVlc3QaKC5jb2Rld2lyZS52MS5VcGRhdGVOZXR3b3JrUG9saWN5UmVzcG9uc2USaAoTRGVsZXRlTmV0d29ya1BvbGljeRInLmNvZGV3aXJlLnYxLkRlbGV0ZU5ldHdvcmtQb2xpY3lSZXF1ZXN0GiguY29kZXdpcmUudjEuRGVsZXRlTmV0d29ya1BvbGljeVJlc3BvbnNlEokBCh5VcGRhdGVFbnZpcm9ubWVudE5ldHdvcmtQb2xpY3kSMi5jb2Rld2lyZS52MS5VcGRhdGVFbnZpcm9ubWVudE5ldHdvcmtQb2xpY3lSZXF1ZXN0GjMuY29kZXdpcmUudjEuVXBkYXRlRW52aXJvbm1lbnROZXR3b3JrUG9saWN5UmVzcG9uc2VCtQEKD2NvbS5jb2Rld2lyZS52MUISTmV0d29ya1BvbGljeVByb3RvUAFaQWdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS92MTtjb2Rld2lyZXYxogIDQ1hYqgILQ29kZXdpcmUuVjHKAgtDb2Rld2lyZVxWMeICF0NvZGV3aXJlXFYxXEdQQk1ldGFkYXRh6gIMQ29kZXdpcmU6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp]);
+  fileDesc("CiBjb2Rld2lyZS92MS9uZXR3b3JrX3BvbGljeS5wcm90bxILY29kZXdpcmUudjEiQQoVTmV0d29ya1BvbGljeVNlbGVjdG9yEg4KBG5hbWUYASABKAlIABIMCgJpZBgCIAEoCUgAQgoKCHNlbGVjdG9yIjIKEU5ldHdvcmtQb2xpY3lSdWxlEg4KBnRhcmdldBgBIAEoCRINCgVwb3J0cxgCIAMoDSLoAQoNTmV0d29ya1BvbGljeRIKCgJpZBgBIAEoCRIOCgZvcmdfaWQYAiABKAkSDAoEbmFtZRgDIAEoCRIQCghyZXZpc2lvbhgEIAEoDRIYChBjdXJyZW50X3JldmlzaW9uGAUgASgNEi0KBXJ1bGVzGAYgAygLMh4uY29kZXdpcmUudjEuTmV0d29ya1BvbGljeVJ1bGUSDgoGZGlnZXN0GAcgASgJEi4KCmNyZWF0ZWRfYXQYCCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhIKCmNyZWF0ZWRfYnkYCSABKAkimwEKGkNyZWF0ZU5ldHdvcmtQb2xpY3lSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIMCgRuYW1lGAIgASgJEjAKBGZyb20YAyABKAsyIi5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5U2VsZWN0b3ISLQoFYWxsb3cYBCADKAsyHi5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5UnVsZSJJChtDcmVhdGVOZXR3b3JrUG9saWN5UmVzcG9uc2USKgoGcG9saWN5GAEgASgLMhouY29kZXdpcmUudjEuTmV0d29ya1BvbGljeSIsChpMaXN0TmV0d29ya1BvbGljaWVzUmVxdWVzdBIOCgZvcmdfaWQYASABKAkiewobTGlzdE5ldHdvcmtQb2xpY2llc1Jlc3BvbnNlEiwKCHBvbGljaWVzGAEgAygLMhouY29kZXdpcmUudjEuTmV0d29ya1BvbGljeRIuCgV1c2FnZRgCIAMoCzIfLmNvZGV3aXJlLnYxLk5ldHdvcmtQb2xpY3lVc2FnZSJuChJOZXR3b3JrUG9saWN5VXNhZ2USEwoJcG9saWN5X2lkGAEgASgJSAASEQoHYnVpbHRpbhgCIAEoCUgAEhQKDGVudmlyb25tZW50cxgDIAEoDRINCgVuYW1lcxgEIAMoCUILCglzZWxlY3Rpb24ibwoXR2V0TmV0d29ya1BvbGljeVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEjIKBnBvbGljeRgCIAEoCzIiLmNvZGV3aXJlLnYxLk5ldHdvcmtQb2xpY3lTZWxlY3RvchIQCghyZXZpc2lvbhgDIAEoDSJGChhHZXROZXR3b3JrUG9saWN5UmVzcG9uc2USKgoGcG9saWN5GAEgASgLMhouY29kZXdpcmUudjEuTmV0d29ya1BvbGljeSK6AQoaVXBkYXRlTmV0d29ya1BvbGljeVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEjIKBnBvbGljeRgCIAEoCzIiLmNvZGV3aXJlLnYxLk5ldHdvcmtQb2xpY3lTZWxlY3RvchItCgVhbGxvdxgDIAMoCzIeLmNvZGV3aXJlLnYxLk5ldHdvcmtQb2xpY3lSdWxlEg4KBnJlbW92ZRgEIAMoCRIZChFleHBlY3RlZF9yZXZpc2lvbhgFIAEoDSJJChtVcGRhdGVOZXR3b3JrUG9saWN5UmVzcG9uc2USKgoGcG9saWN5GAEgASgLMhouY29kZXdpcmUudjEuTmV0d29ya1BvbGljeSJgChpEZWxldGVOZXR3b3JrUG9saWN5UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSMgoGcG9saWN5GAIgASgLMiIuY29kZXdpcmUudjEuTmV0d29ya1BvbGljeVNlbGVjdG9yIkkKG0RlbGV0ZU5ldHdvcmtQb2xpY3lSZXNwb25zZRIqCgZwb2xpY3kYASABKAsyGi5jb2Rld2lyZS52MS5OZXR3b3JrUG9saWN5ImcKJVVwZGF0ZUVudmlyb25tZW50TmV0d29ya1BvbGljeVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhYKDmVudmlyb25tZW50X2lkGAIgASgJEhYKDm5ldHdvcmtfcG9saWN5GAMgASgJImcKJlVwZGF0ZUVudmlyb25tZW50TmV0d29ya1BvbGljeVJlc3BvbnNlEj0KDm5ldHdvcmtfcG9saWN5GAEgASgLMiUuY29kZXdpcmUudjEuRW52aXJvbm1lbnROZXR3b3JrUG9saWN5Iv4BChhFbnZpcm9ubWVudE5ldHdvcmtQb2xpY3kSEQoJcmVmZXJlbmNlGAEgASgJEgwKBG5hbWUYAiABKAkSEAoIcmV2aXNpb24YAyABKA0SDgoGZGlnZXN0GAQgASgJEjoKC2VuZm9yY2VtZW50GAUgASgOMiUuY29kZXdpcmUudjEuTmV0d29ya1BvbGljeUVuZm9yY2VtZW50EhkKEWVuZm9yY2VkX3JldmlzaW9uGAYgASgNEhcKD2VuZm9yY2VkX2RpZ2VzdBgHIAEoCRIvCgtlbmZvcmNlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAq9AEKGE5ldHdvcmtQb2xpY3lFbmZvcmNlbWVudBIqCiZORVRXT1JLX1BPTElDWV9FTkZPUkNFTUVOVF9VTlNQRUNJRklFRBAAEisKJ05FVFdPUktfUE9MSUNZX0VORk9SQ0VNRU5UX05PVF9FTkZPUkNFRBABEicKI05FVFdPUktfUE9MSUNZX0VORk9SQ0VNRU5UX0VORk9SQ0VEEAISKAokTkVUV09SS19QT0xJQ1lfRU5GT1JDRU1FTlRfRU5GT1JDSU5HEAMSLAooTkVUV09SS19QT0xJQ1lfRU5GT1JDRU1FTlRfRkFJTEVEX0NMT1NFRBAEMrUFChROZXR3b3JrUG9saWN5U2VydmljZRJoChNDcmVhdGVOZXR3b3JrUG9saWN5EicuY29kZXdpcmUudjEuQ3JlYXRlTmV0d29ya1BvbGljeVJlcXVlc3QaKC5jb2Rld2lyZS52MS5DcmVhdGVOZXR3b3JrUG9saWN5UmVzcG9uc2USbQoTTGlzdE5ldHdvcmtQb2xpY2llcxInLmNvZGV3aXJlLnYxLkxpc3ROZXR3b3JrUG9saWNpZXNSZXF1ZXN0GiguY29kZXdpcmUudjEuTGlzdE5ldHdvcmtQb2xpY2llc1Jlc3BvbnNlIgOQAgESZAoQR2V0TmV0d29ya1BvbGljeRIkLmNvZGV3aXJlLnYxLkdldE5ldHdvcmtQb2xpY3lSZXF1ZXN0GiUuY29kZXdpcmUudjEuR2V0TmV0d29ya1BvbGljeVJlc3BvbnNlIgOQAgESaAoTVXBkYXRlTmV0d29ya1BvbGljeRInLmNvZGV3aXJlLnYxLlVwZGF0ZU5ldHdvcmtQb2xpY3lSZXF1ZXN0GiguY29kZXdpcmUudjEuVXBkYXRlTmV0d29ya1BvbGljeVJlc3BvbnNlEmgKE0RlbGV0ZU5ldHdvcmtQb2xpY3kSJy5jb2Rld2lyZS52MS5EZWxldGVOZXR3b3JrUG9saWN5UmVxdWVzdBooLmNvZGV3aXJlLnYxLkRlbGV0ZU5ldHdvcmtQb2xpY3lSZXNwb25zZRKJAQoeVXBkYXRlRW52aXJvbm1lbnROZXR3b3JrUG9saWN5EjIuY29kZXdpcmUudjEuVXBkYXRlRW52aXJvbm1lbnROZXR3b3JrUG9saWN5UmVxdWVzdBozLmNvZGV3aXJlLnYxLlVwZGF0ZUVudmlyb25tZW50TmV0d29ya1BvbGljeVJlc3BvbnNlQrUBCg9jb20uY29kZXdpcmUudjFCEk5ldHdvcmtQb2xpY3lQcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message codewire.v1.NetworkPolicySelector
@@ -213,6 +213,16 @@ export type ListNetworkPoliciesResponse = Message<"codewire.v1.ListNetworkPolici
    * @generated from field: repeated codewire.v1.NetworkPolicy policies = 1;
    */
   policies: NetworkPolicy[];
+
+  /**
+   * Which of the organization's hosted environments select what: one entry
+   * for each stored policy, built-in and `hosted-default` that any selects.
+   * It counts exactly the selections DeleteNetworkPolicy refuses for, so a
+   * destroying environment is counted until its destroy ends.
+   *
+   * @generated from field: repeated codewire.v1.NetworkPolicyUsage usage = 2;
+   */
+  usage: NetworkPolicyUsage[];
 };
 
 /**
@@ -221,6 +231,53 @@ export type ListNetworkPoliciesResponse = Message<"codewire.v1.ListNetworkPolici
  */
 export const ListNetworkPoliciesResponseSchema: GenMessage<ListNetworkPoliciesResponse> = /*@__PURE__*/
   messageDesc(file_codewire_v1_network_policy, 6);
+
+/**
+ * @generated from message codewire.v1.NetworkPolicyUsage
+ */
+export type NetworkPolicyUsage = Message<"codewire.v1.NetworkPolicyUsage"> & {
+  /**
+   * @generated from oneof codewire.v1.NetworkPolicyUsage.selection
+   */
+  selection: {
+    /**
+     * A stored policy of the organization, by `NetworkPolicy.id`.
+     *
+     * @generated from field: string policy_id = 1;
+     */
+    value: string;
+    case: "policyId";
+  } | {
+    /**
+     * `open`, `locked`, or `hosted-default` for an environment that selects
+     * nothing.
+     *
+     * @generated from field: string builtin = 2;
+     */
+    value: string;
+    case: "builtin";
+  } | { case: undefined; value?: undefined };
+
+  /**
+   * @generated from field: uint32 environments = 3;
+   */
+  environments: number;
+
+  /**
+   * At most ten environment names, in name order; an unnamed environment by
+   * its id.
+   *
+   * @generated from field: repeated string names = 4;
+   */
+  names: string[];
+};
+
+/**
+ * Describes the message codewire.v1.NetworkPolicyUsage.
+ * Use `create(NetworkPolicyUsageSchema)` to create a new message.
+ */
+export const NetworkPolicyUsageSchema: GenMessage<NetworkPolicyUsage> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_network_policy, 7);
 
 /**
  * @generated from message codewire.v1.GetNetworkPolicyRequest
@@ -249,7 +306,7 @@ export type GetNetworkPolicyRequest = Message<"codewire.v1.GetNetworkPolicyReque
  * Use `create(GetNetworkPolicyRequestSchema)` to create a new message.
  */
 export const GetNetworkPolicyRequestSchema: GenMessage<GetNetworkPolicyRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_network_policy, 7);
+  messageDesc(file_codewire_v1_network_policy, 8);
 
 /**
  * @generated from message codewire.v1.GetNetworkPolicyResponse
@@ -266,7 +323,7 @@ export type GetNetworkPolicyResponse = Message<"codewire.v1.GetNetworkPolicyResp
  * Use `create(GetNetworkPolicyResponseSchema)` to create a new message.
  */
 export const GetNetworkPolicyResponseSchema: GenMessage<GetNetworkPolicyResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_network_policy, 8);
+  messageDesc(file_codewire_v1_network_policy, 9);
 
 /**
  * @generated from message codewire.v1.UpdateNetworkPolicyRequest
@@ -308,7 +365,7 @@ export type UpdateNetworkPolicyRequest = Message<"codewire.v1.UpdateNetworkPolic
  * Use `create(UpdateNetworkPolicyRequestSchema)` to create a new message.
  */
 export const UpdateNetworkPolicyRequestSchema: GenMessage<UpdateNetworkPolicyRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_network_policy, 9);
+  messageDesc(file_codewire_v1_network_policy, 10);
 
 /**
  * @generated from message codewire.v1.UpdateNetworkPolicyResponse
@@ -325,7 +382,7 @@ export type UpdateNetworkPolicyResponse = Message<"codewire.v1.UpdateNetworkPoli
  * Use `create(UpdateNetworkPolicyResponseSchema)` to create a new message.
  */
 export const UpdateNetworkPolicyResponseSchema: GenMessage<UpdateNetworkPolicyResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_network_policy, 10);
+  messageDesc(file_codewire_v1_network_policy, 11);
 
 /**
  * @generated from message codewire.v1.DeleteNetworkPolicyRequest
@@ -347,7 +404,7 @@ export type DeleteNetworkPolicyRequest = Message<"codewire.v1.DeleteNetworkPolic
  * Use `create(DeleteNetworkPolicyRequestSchema)` to create a new message.
  */
 export const DeleteNetworkPolicyRequestSchema: GenMessage<DeleteNetworkPolicyRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_network_policy, 11);
+  messageDesc(file_codewire_v1_network_policy, 12);
 
 /**
  * @generated from message codewire.v1.DeleteNetworkPolicyResponse
@@ -366,7 +423,7 @@ export type DeleteNetworkPolicyResponse = Message<"codewire.v1.DeleteNetworkPoli
  * Use `create(DeleteNetworkPolicyResponseSchema)` to create a new message.
  */
 export const DeleteNetworkPolicyResponseSchema: GenMessage<DeleteNetworkPolicyResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_network_policy, 12);
+  messageDesc(file_codewire_v1_network_policy, 13);
 
 /**
  * @generated from message codewire.v1.UpdateEnvironmentNetworkPolicyRequest
@@ -396,7 +453,7 @@ export type UpdateEnvironmentNetworkPolicyRequest = Message<"codewire.v1.UpdateE
  * Use `create(UpdateEnvironmentNetworkPolicyRequestSchema)` to create a new message.
  */
 export const UpdateEnvironmentNetworkPolicyRequestSchema: GenMessage<UpdateEnvironmentNetworkPolicyRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_network_policy, 13);
+  messageDesc(file_codewire_v1_network_policy, 14);
 
 /**
  * @generated from message codewire.v1.UpdateEnvironmentNetworkPolicyResponse
@@ -413,7 +470,7 @@ export type UpdateEnvironmentNetworkPolicyResponse = Message<"codewire.v1.Update
  * Use `create(UpdateEnvironmentNetworkPolicyResponseSchema)` to create a new message.
  */
 export const UpdateEnvironmentNetworkPolicyResponseSchema: GenMessage<UpdateEnvironmentNetworkPolicyResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_network_policy, 14);
+  messageDesc(file_codewire_v1_network_policy, 15);
 
 /**
  * An environment's network policy: what it selects, and what its runtime
@@ -478,7 +535,7 @@ export type EnvironmentNetworkPolicy = Message<"codewire.v1.EnvironmentNetworkPo
  * Use `create(EnvironmentNetworkPolicySchema)` to create a new message.
  */
 export const EnvironmentNetworkPolicySchema: GenMessage<EnvironmentNetworkPolicy> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_network_policy, 15);
+  messageDesc(file_codewire_v1_network_policy, 16);
 
 /**
  * How far an environment's runtime enforces its selection.
