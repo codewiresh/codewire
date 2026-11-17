@@ -1244,16 +1244,11 @@ kind_credential_bound_revision '%s'
         self.assertTrue(waits)
         for wait in waits:
             self.assertIn("|| true", wait.group(1))
-        # The guard is what keeps the trap going, under errexit as the stage runs.
-        script = (
-            'stage() ( set -eE; p=""; trap \'[ -z "$p" ] || { kill "$p" 2>/dev/null; '
-            'wait "$p" 2>/dev/null%s; }; echo cleaned\' EXIT; sleep 30 & p=$!; false )\n'
-            'stage || true\n')
-        for guard, expected in (("", ""), (" || true", "cleaned\n")):
-            with self.subTest(guard=guard):
-                result = subprocess.run(["bash", "-c", script % guard], capture_output=True,
-                                        text=True, timeout=30)
-                self.assertEqual(result.stdout, expected)
+        # Whether an unguarded wait ends an EXIT trap under errexit differs by
+        # bash release: 5.3 runs the rest of the trap, and the CI image's bash
+        # ran a guarded trap's cleanup twice, so a demonstration of it failed
+        # every main run from 520c65f67 on (58899). The guard on every wait is
+        # what the stage relies on, and it is what this test holds.
 
     def test_provider_audit_still_rejects_a_restarted_fixture(self):
         self.assertNotEqual(self.provider_counts(self.provider_events(), restarts=1).returncode, 0)
