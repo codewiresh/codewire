@@ -9,11 +9,11 @@ format is in [README.md](README.md). Issue: #4980.
 
 ## Where it stands
 
-Updated 2026-11-16.
+Updated 2026-11-17.
 
 | ID | Linux | macOS |
 | --- | --- | --- |
-| `local-vm-runtime-upgrade` | observed working from v0.4.21 with #5088: the moved start with its line, the moved restart, the guest cw, the checkpoint listing, restore and fork refusals, the disk-snapshot fork and removal | observed working from v0.4.18 with #5088, including a failed move retried and the start's line |
+| `local-vm-runtime-upgrade` | observed working from v0.4.21 with #5088: the moved start with its line, the moved restart, the guest cw, the checkpoint listing, restore and fork refusals, the disk-snapshot fork and removal | observed working from v0.4.18 to a development build of the v0.4.22 candidate (df5ceafd0): the moved starts with their line, the moved restart, the guest cw, the disk-snapshot fork and removal; with #5088, a failed move retried |
 
 ## 1. `local-vm-runtime-upgrade`: an upgrade across a guest ABI change
 
@@ -164,3 +164,18 @@ installed runtime (orchestrator, 2026-11-15, recorded on #4980).
     under `TERM=dumb` the start printed "+ Moved up-line to this cw's VM
     runtime (guest seed 9 to 10, net none to 2)", the form without
     checkpoints, and the marker read back. Observed working (#4980).
+  - macOS 27.2.1, released v0.4.18 (guest ABI `seed=9;cw_catalog=1`, as
+    v0.4.21's) to a development build of the v0.4.22 candidate df5ceafd0
+    (`seed=11;cw_catalog=1;net=2`), 2026-11-17, by cw-mac. Under v0.4.18,
+    up-stop was stopped with a marker and up-run left running. While v0.4.18's
+    supervisor ran up-run, `setup --replace` was refused naming `cw upgrade
+    --vms`; after `cw --local stop up-run` it installed the runtime.
+    `cw --local start up-stop` printed "+ Moved up-stop to this cw's VM
+    runtime (guest seed 9 to 11, net none to 2)" and booted in 58 s; the
+    marker read back and the VM's `cw --version` was the installed build's.
+    up-run moved the same way in 57 s, and its restart then moved nothing
+    (7 s). supervisor.log recorded `cw_runtime_move` for both, and both
+    bindings read the installed catalog active and v0.4.18's as rollback.
+    The disk snapshot of the moved, stopped up-stop and its fork are in
+    [snapshots-and-forks.md](snapshots-and-forks.md); `rm` of all worked.
+    Observed working (#4980).

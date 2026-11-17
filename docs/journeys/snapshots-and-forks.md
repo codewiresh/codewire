@@ -14,7 +14,7 @@ format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-13. Cloud capture, management and a three-way fork are
+Updated 2026-11-17. Cloud capture, management and a three-way fork are
 observed on Dev and on Production, as the smoke identities. The launch walk by
 a new account, the fork while the snapshot's node is down and the dashboard
 are not observed.
@@ -25,8 +25,8 @@ are not observed.
 | `snap-manage` | `cw --cloud snapshot ls`, `inspect` and `rm` | observed 2026-11-13 with `v0.4.17` (#4370) | observed 2026-11-13 with `v0.4.18`, as the smoke identity (#4370) |
 | `snap-fork` | `cw --cloud create --snapshot`, one fork and `--count N` | `--count 3` observed 2026-11-13 with `v0.4.17` (#4370); one fork on its own not yet observed | `--count 3` observed 2026-11-13 with `v0.4.18`, as the smoke identity (#4370) |
 | `snap-fork-node-down` | a fork while the snapshot's node is unavailable | not yet observed (#4371) | not yet observed |
-| `snap-local` | `cw snapshot create`, `ls`, `inspect` and `rm` on a local VM (Linux or a Mac) | does not apply; a local VM observed on a pre-merge build (#3525) | does not apply |
-| `snap-local-fork` | `cw create --local --snapshot`, one fork and `--count N` | does not apply; a local VM observed on a pre-merge build (#3525) | does not apply |
+| `snap-local` | `cw snapshot create`, `ls`, `inspect` and `rm` on a local VM (Linux or a Mac) | does not apply; a local VM observed on a pre-merge build (#3525) and on a Mac with the v0.4.22 candidate | does not apply |
+| `snap-local-fork` | `cw create --local --snapshot`, one fork and `--count N` | does not apply; a local VM observed on a pre-merge build (#3525); one fork on a Mac with the v0.4.22 candidate | does not apply |
 | `snap-dashboard` | the organization's Snapshots page | hidden for launch (#4582) | hidden for launch (#4582) |
 
 ## Before any of these
@@ -320,6 +320,15 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     was removed; `cw snapshot rm` of each left no snapshots. The pull request
     records no run date; it merged on 2026-10-26.
   - A local VM with a released `cw`: not yet observed.
+  - A local VM on macOS 27.2.1, a development build of the v0.4.22
+    candidate df5ceafd0 and its runtime, 2026-11-17, by cw-mac: up-stop,
+    moved from v0.4.18 ([local-vm-upgrade.md](local-vm-upgrade.md)) and
+    stopped. `cw --local snapshot create up-stop --name v0422-snap` printed
+    `mode=reflink consistency=clean disks=3 apparent=60.0 GiB in 1.07 s`; a
+    running source was refused with "stop it first (`cw stop up-run`), or
+    snapshot it later with a VM checkpoint"; `inspect` read `Consistency:
+    clean`, each disk's allocated bytes and the removed sign-ins; `rm` printed
+    "environments made from it are unaffected" and `ls` then "No snapshots."
 
 ## `snap-local-fork`: local VMs from a snapshot (Linux or a Mac)
 
@@ -353,6 +362,10 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     --memory 2GB`. The pull request records no run date; it merged on
     2026-10-26.
   - A local VM with a released `cw`: not yet observed.
+  - A local VM on macOS 27.2.1, the same build, 2026-11-17, by cw-mac:
+    `cw create --local --snapshot v0422-snap --name snap-fork` in 8.5 s; the
+    fork had the source's marker and its own machine ID, and still ran the
+    marker's read after `snapshot rm`. `--count N` not observed on a Mac.
 
 ## `snap-dashboard`: the Snapshots page
 

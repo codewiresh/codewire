@@ -8,11 +8,11 @@ walk observed on macOS 27 and on macOS 26. The format is in
 
 ## Where it stands
 
-Updated 2026-11-16.
+Updated 2026-11-17.
 
 | ID | macOS 27 | macOS 26 |
 | --- | --- | --- |
-| `mac-vm-lifecycle` | observed on a development build of the #4478 fix; failure observed on v0.4.16 | observed on a development build of the #4478 fix |
+| `mac-vm-lifecycle` | observed on a development build of the v0.4.22 candidate (df5ceafd0); failure observed on v0.4.16 | observed on a development build of the #4478 fix |
 | `mac-vm-refused-start` | refused create observed on a development build | not yet observed |
 | `mac-vm-cached-image` | observed on a development build of #5036 (e42e2f457) | not yet observed |
 | `mac-vm-mesh-ingress` | not yet observed | not yet observed |
@@ -101,6 +101,20 @@ Issues: #4478 (VMs did not start on macOS 27), #4370 (launch step 11).
   - macOS 26.6.2, the same `cw` and runtime directory, 2026-11-13: steps 3 to
     8 observed, after `cw setup --local --from DIR`. The create took 195 s,
     about 2 minutes of it the image pull; the stop took 1 s and the start 4 s.
+  - macOS 27.2.1, a development build of the v0.4.22 candidate df5ceafd0,
+    2026-11-17, by cw-mac, in a scratch `HOME`: steps 3 to 8 observed after
+    `cw setup --local --from DIR`. The runtime was packed on the Mac from
+    df5ceafd0's guest root and sealed `cw`, built with the release's own
+    scripts, and v0.4.21's released arm64 kernel, byte-identical to the one
+    df5ceafd0's recipe builds (its only changed input is #5098's timeout
+    hook); the VZ helper was built from df5ceafd0 and signed ad hoc. The
+    create took 117 s. The shell opened in `/workspace` and printed
+    `aarch64`; the stop took 1.7 s and `ls` read `stopped`; the start took
+    6.3 s, `ls` read `running`, and the command after it printed
+    `after-restart` with an uptime of 0 minutes. The same walk moved two
+    v0.4.18 VMs onto this runtime and forked a disk snapshot
+    ([local-vm-upgrade.md](local-vm-upgrade.md),
+    [snapshots-and-forks.md](snapshots-and-forks.md)).
 
 ## 2. `mac-vm-refused-start`: a VM macOS refuses to start says so
 
