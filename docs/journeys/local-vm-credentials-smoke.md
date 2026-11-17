@@ -70,8 +70,11 @@ authority running is the owner's failure on v0.4.21, in step 4.
     firewall must let the binary under test reach it;
   - `cw credentials --local generate ssh` stores the key in the operating
     system's keyring even with a private HOME, so the smoke runs against an
-    isolated keyring of its own, never the host's, and checks afterwards that
-    the host's keyring holds none of its values;
+    isolated keyring of its own, and runs every `cw` in a private mount
+    namespace where the host's runtime directory and the home's keyrings, SSH
+    keys and Codewire state are empty, so the host keyring is unreachable. It
+    never calls the host's Secret Service: a loop of D-Bus reads to it crashed
+    it on 2026-11-17 (#5256);
   - on v0.4.21 a first VM start could spend two to three minutes in its
     network step; on v0.4.22 it took 0.3 s (hand runs on #5220).
 - **Observed:** not yet observed.
