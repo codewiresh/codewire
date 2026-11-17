@@ -456,6 +456,14 @@ and crosses Temporal inside the signal and activity inputs. No other service
 exports traces, whatever its environment says; billing, idp, coordinator and
 the other services only log.
 
+Whether or not tracing is on, the dashboard answers every signed-in `GET` page
+with `Server-Timing: total;dur=MS`, the milliseconds this server took from the
+request to its response (#5206). A page that marks its own phases keeps them
+beside it: the credentials page adds `shell`, `reads` and `github`. A request
+with no session cookie gets no header, so a sign-in form never shows how long a
+lookup took. The browser's network panel shows it under Timing, so the
+server's share of a slow page reads apart from the network's.
+
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | No | The OTLP/gRPC endpoint (a collector or Tempo's OTLP receiver) that orchestration and the dashboard send spans to. Unset or empty means no exporter is installed and tracing costs nothing beyond the compiled-in code. Orchestration logs one line at startup saying whether export is on, naming the endpoint's scheme, host and port only. | `http://tempo.observability.svc:4317` |

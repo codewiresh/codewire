@@ -66,6 +66,9 @@ pub fn app(config: Config) -> Router {
                 ))
                 .layer(axum::middleware::map_response(
                     security::keep_cookie_responses_private,
+                ))
+                .layer(axum::middleware::from_fn(
+                    server_timing::total_for_signed_in_pages,
                 )),
         )
         .merge(assets::router())
