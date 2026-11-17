@@ -39,7 +39,8 @@ RENDER_SETS = {
     "deployments/helm/codewire": (
         "images.dashboard.repository=registry.test/codewire/dashboard",
         "images.dashboard.tag=test",
-        "dashboard.origins.public=https://codewire.test",
+        "publicOrigin=https://codewire.test",
+        "sandboxNamespace=sandboxes",
         "dashboard.origins.browserApi=https://codewire.test",
         "images.services.repository=registry.test/codewire/services",
         "images.services.tag=test",

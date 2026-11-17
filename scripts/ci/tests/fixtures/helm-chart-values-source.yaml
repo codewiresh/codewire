@@ -1,9 +1,9 @@
 # The values that render what deployments/k8s/base, dashboard, coordinator,
-# idp and billing declare together, the source tree Production's overlay builds
-# on. They hold the site hosts, images, pull secrets and edge the chart's
-# defaults leave out. Only scripts/ci/tests/test-deploy-helm-chart.py reads
-# this file; it goes when Production's own values are checked against
-# Production's overlay (#2908).
+# idp, billing and credential-service declare together, the source tree
+# Production's overlay builds on. They hold the site hosts, images, pull
+# secrets and edge the chart's defaults leave out. Only
+# scripts/ci/tests/test-deploy-helm-chart.py reads this file; it goes when
+# Production's own values are checked against Production's overlay (#2908).
 config:
   DERP_HOST: derp.codewire.sh
   STUN_HOST: stun.codewire.sh
@@ -30,9 +30,11 @@ edge:
         matchLabels:
           app.kubernetes.io/name: rke2-ingress-nginx
 
+publicOrigin: https://codewire.sh
+sandboxNamespace: prod-sandboxes
+
 dashboard:
   origins:
-    public: https://codewire.sh
     browserApi: https://codewire.sh
   imagePullSecrets:
     - name: harbor-registry

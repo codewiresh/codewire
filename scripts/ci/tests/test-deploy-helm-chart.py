@@ -49,6 +49,18 @@ _SERVICES = {
     ("NetworkPolicy", "codewire-idp"),
     ("Deployment", "codewire-billing"),
     ("Service", "codewire-billing"),
+    ("Deployment", "codewire-credential-service"),
+    ("ServiceAccount", "codewire-credential-service"),
+    ("Service", "codewire-credential-service"),
+    ("ClusterRole", "codewire-credential-service-tokenreview"),
+    ("ClusterRoleBinding", "codewire-credential-service-tokenreview"),
+    ("Role", "codewire-credential-service-tokenrequest"),
+    ("RoleBinding", "codewire-credential-service-tokenrequest"),
+    ("Role", "codewire-credential-service-runtime"),
+    ("RoleBinding", "codewire-credential-service-runtime"),
+    ("Certificate", "codewire-credential-broker"),
+    ("NetworkPolicy", "codewire-credential-service"),
+    ("PodDisruptionBudget", "codewire-credential-service"),
 }
 _KIND = {
     ("Namespace", "default"),
@@ -72,14 +84,47 @@ MIGRATED: dict[str, set[tuple[str, str]]] = {
     "local-kind-static": _KIND,
 }
 
-# Differences the chart makes on purpose, by kind and the path the comparison
-# reports, each with its reason. Nothing else may differ.
-ALLOWED: dict[tuple[str, str], str] = {
-    ("Namespace", "metadata.annotations.helm.sh/resource-policy"): (
+# Differences the chart makes on purpose, each with its reason: by environment
+# (None for every one), kind, name (None for any) and the path the comparison
+# reports, which covers the paths below it. Nothing else may differ.
+ALLOWED: dict[tuple[str | None, str, str | None, str], str] = {
+    (None, "Namespace", None, "metadata.annotations.helm.sh/resource-policy"): (
         "a Helm uninstall or upgrade keeps the namespace and everything in it, "
         "as the clusters' deletion guard requires (#3542); Kustomize has no "
         "uninstall, and nothing but Helm reads the annotation"
     ),
+    **{
+        (environment, "NetworkPolicy", "codewire-credential-service", "spec.ingress[0].from[1].podSelector.matchLabels"): (
+            "Kind's overlay retargets this policy's edge but not its dashboard "
+            "peer, which keeps production's labels that Kind's dashboard does "
+            "not carry; the chart names the dashboard each environment runs"
+        )
+        for environment in ("local-kind", "local-kind-static")
+    },
+}
+
+
+def allowed(environment: str | None, kind: str, name: str, path: str) -> bool:
+    return any(
+        (scope in (None, environment))
+        and kind == allowed_kind
+        and (allowed_name in (None, name))
+        and (path == prefix or path.startswith(prefix + "."))
+        for scope, allowed_kind, allowed_name, prefix in ALLOWED
+    )
+
+
+# Deployments whose environment may list the same variables in another order,
+# per environment, with the reason. Their variables are compared by name, and
+# only while none refers to another with $(...), the one way order matters.
+ENV_ORDER_ALLOWED: dict[str, dict[str, str]] = {
+    environment: {
+        "codewire-credential-service": (
+            "Kind's strategic-merge patch of CREDENTIAL_PUBLIC_ORIGIN moves it "
+            "to the front of the list; the chart keeps the source's order"
+        ),
+    }
+    for environment in ("local-kind", "local-kind-static")
 }
 
 # Each environment: its namespace, the Kustomize directories it composes, and
@@ -87,7 +132,10 @@ ALLOWED: dict[tuple[str, str], str] = {
 ENVIRONMENTS: dict[str, tuple[str, list[Path], list[Path]]] = {
     "source": (
         "prod",
-        [K8S / name for name in ("base", "dashboard", "coordinator", "idp", "billing")],
+        [
+            K8S / name
+            for name in ("base", "dashboard", "coordinator", "idp", "billing", "credential-service")
+        ],
         [SOURCE_VALUES],
     ),
     "local-kind": (
@@ -161,13 +209,32 @@ def differences(left: Any, right: Any, path: str = "") -> Iterator[tuple[str, st
         yield path, f"chart {left!r}, Kustomize {right!r}"
 
 
+def order_cannot_matter(deployment: dict[str, Any]) -> bool:
+    """Whether every container's variables mean the same in any order: no name
+    is listed twice, and no value refers to another with $(...)."""
+    for container in deployment["spec"]["template"]["spec"]["containers"]:
+        env = container.get("env", [])
+        names = [variable["name"] for variable in env]
+        if len(set(names)) != len(names) or any("$(" in str(variable.get("value", "")) for variable in env):
+            return False
+    return True
+
+
+def sort_env(deployment: dict[str, Any]) -> None:
+    for container in deployment["spec"]["template"]["spec"]["containers"]:
+        container.get("env", []).sort(key=lambda variable: variable["name"])
+
+
 def compare(
     migrated: set[tuple[str, str]],
     chart: list[dict[str, Any]],
     kustomized: list[dict[str, Any]],
+    environment: str | None = None,
 ) -> list[str]:
-    """Every way the two renders differ on the migrated objects; empty if none."""
+    """Every way the two renders differ on the migrated objects in an
+    environment; empty if none."""
     problems = []
+    env_order = ENV_ORDER_ALLOWED.get(environment or "", {})
     by_key: dict[str, dict[tuple[str, str], list[dict[str, Any]]]] = {
         "chart": {},
         "Kustomize": {},
@@ -183,8 +250,17 @@ def compare(
             if len(documents) != 1:
                 problems.append(f"{wanted}: {side} renders it {len(documents)} times")
         if all(len(documents) == 1 for documents in found.values()):
+            # Compared by name only where the order cannot matter on either
+            # side; otherwise the order is compared as it is.
+            if (
+                wanted[0] == "Deployment"
+                and wanted[1] in env_order
+                and all(order_cannot_matter(found[side][0]) for side in found)
+            ):
+                for side in found:
+                    sort_env(found[side][0])
             for path, what in differences(found["chart"][0], found["Kustomize"][0]):
-                if (wanted[0], path) not in ALLOWED:
+                if not allowed(environment, wanted[0], wanted[1], path):
                     problems.append(f"{wanted}: {path}: {what}")
     return problems
 
@@ -195,6 +271,7 @@ def check(environment: str, extra: tuple[str, ...] = ()) -> list[str]:
         MIGRATED[environment],
         objects(helm(namespace, values, extra)),
         objects(kustomize(directories)),
+        environment,
     )
 
 
@@ -224,13 +301,13 @@ class ChartEquivalence(unittest.TestCase):
 
     def test_an_object_only_one_side_renders_is_reported(self) -> None:
         chart = objects(helm("prod", [SOURCE_VALUES], ("--set", "dashboard.networkPolicy.enabled=false")))
-        problems = compare(MIGRATED["source"], chart, objects(kustomize(ENVIRONMENTS["source"][1])))
+        problems = compare(MIGRATED["source"], chart, objects(kustomize(ENVIRONMENTS["source"][1])), "source")
         self.assertEqual(problems, ["('NetworkPolicy', 'codewire-dashboard'): chart renders it 0 times"])
 
     def test_an_unmigrated_object_the_chart_renders_is_reported(self) -> None:
         migrated = MIGRATED["local-kind"] - {("Service", "dashboard")}
         _, directories, values = ENVIRONMENTS["local-kind"]
-        problems = compare(migrated, objects(helm("default", values)), objects(kustomize(directories)))
+        problems = compare(migrated, objects(helm("default", values)), objects(kustomize(directories)), "local-kind")
         self.assertEqual(problems, ["('Service', 'dashboard'): the chart renders it, but it is not migrated"])
 
     def test_an_allowed_difference_covers_its_own_path_only(self) -> None:
@@ -242,9 +319,47 @@ class ChartEquivalence(unittest.TestCase):
                 self.assertEqual(document["metadata"]["annotations"]["helm.sh/resource-policy"], "keep")
                 document["metadata"]["annotations"]["example.test/extra"] = "x"
         self.assertEqual(
-            compare(MIGRATED["local-kind"], chart, kustomized),
+            compare(MIGRATED["local-kind"], chart, kustomized, "local-kind"),
             ["('Namespace', 'default'): metadata.annotations.example.test/extra: only the chart has it"],
         )
+
+    def test_every_policy_peer_goes_through_a_guarded_helper(self) -> None:
+        # A peer written into a template would skip the refusal tests above.
+        # Only a policy's own podSelector, directly under spec, is written
+        # there; every peer comes from codewire.podPeer or codewire.edgePeers.
+        selector = re.compile(r"\s*-?\s*(podSelector|namespaceSelector|ipBlock):")
+        for template in sorted((CHART / "templates").glob("*.yaml")):
+            for number, line in enumerate(template.read_text().splitlines(), 1):
+                if selector.match(line) and line.rstrip() != "  podSelector:":
+                    self.fail(f"{template.name}:{number} writes a policy peer: use codewire.podPeer or codewire.edgePeers")
+
+    def test_env_order_is_allowed_only_where_order_cannot_matter(self) -> None:
+        def deployment(*env: dict[str, str]) -> dict[str, Any]:
+            return {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {"name": "codewire-credential-service"},
+                "spec": {"template": {"spec": {"containers": [{"name": "c", "env": list(env)}]}}},
+            }
+
+        key = {("Deployment", "codewire-credential-service")}
+        a, b = {"name": "A", "value": "1"}, {"name": "B", "value": "2"}
+        self.assertEqual(compare(key, [deployment(a, b)], [deployment(b, a)], "local-kind"), [])
+        # Outside the environments that allow it, order counts.
+        self.assertNotEqual(compare(key, [deployment(a, b)], [deployment(b, a)], "source"), [])
+        # A $(...) reference or a twice-listed name falls back to the order.
+        ref = {"name": "B", "value": "$(A)/x"}
+        self.assertEqual(
+            compare(key, [deployment(a, ref)], [deployment(ref, a)], "local-kind"),
+            [
+                "('Deployment', 'codewire-credential-service'): spec.template.spec.containers[0].env[0].name: chart 'A', Kustomize 'B'",
+                "('Deployment', 'codewire-credential-service'): spec.template.spec.containers[0].env[0].value: chart '1', Kustomize '$(A)/x'",
+                "('Deployment', 'codewire-credential-service'): spec.template.spec.containers[0].env[1].name: chart 'B', Kustomize 'A'",
+                "('Deployment', 'codewire-credential-service'): spec.template.spec.containers[0].env[1].value: chart '$(A)/x', Kustomize '1'",
+            ],
+        )
+        twice = {"name": "A", "value": "3"}
+        self.assertNotEqual(compare(key, [deployment(a, b, twice)], [deployment(b, twice, a)], "local-kind"), [])
 
     def test_a_non_string_configuration_value_is_refused(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "codewire-config: PORT must be a string"):

@@ -8,6 +8,7 @@ One Helm chart for the whole Codewire platform (#2908). It is being built one co
 - `codewire-config` and `codewire-dashboard-public-config`, named by a hash of their data as Kustomize's generator names them, so a configuration change rolls the services that read it.
 - The dashboard: its Deployment, Service and NetworkPolicy.
 - The coordinator, the IdP and billing: their Deployments and Services, and the IdP's NetworkPolicy.
+- The credential service: its Deployment, ServiceAccount, Service, RBAC (its Role and RoleBinding for reading Sandboxes in `sandboxNamespace`), broker Certificate, NetworkPolicy and PodDisruptionBudget.
 
 ## Values
 
@@ -17,7 +18,9 @@ One Helm chart for the whole Codewire platform (#2908). It is being built one co
 
 An environment's values file sets only what differs from the defaults, and uses `null` to remove a default it does not have. A service's `env` is a whole list, and an environment that differs replaces it. Every `config` value is a string, and the render refuses any other type.
 
-`edge.peers` names the cluster's public edge once, for every network policy that admits it. The render refuses an empty list, and any entry whose selectors are empty, since either would admit every peer.
+`publicOrigin` is the site's origin, which the dashboard and the credential service use, and `sandboxNamespace` is where Sandboxes run. Both are required.
+
+`edge.peers` names the cluster's public edge once, for every network policy that admits it. The render refuses an empty list, and any entry whose selectors are empty, since either would admit every peer. Every other policy peer is built by `codewire.podPeer`, which refuses an empty selector, and the check fails on a peer written into a template directly.
 
 ## How it is checked
 

@@ -37,7 +37,7 @@ spec:
           image: {{ include "codewire.image" (dict "family" "dashboard" "images" $.Values.images) }}
           env:
             - name: CODEWIRE_PUBLIC_ORIGIN
-              value: {{ required "dashboard.origins.public is required" .origins.public | quote }}
+              value: {{ required "publicOrigin is required" $.Values.publicOrigin | quote }}
             - name: CODEWIRE_API_ORIGIN
               value: {{ .origins.api | quote }}
             - name: CODEWIRE_CREDENTIAL_ORIGIN

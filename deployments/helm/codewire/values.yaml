@@ -111,6 +111,14 @@ dashboardPublicConfig:
   GITHUB_APP_SLUG: ""
   GITHUB_APP_CLIENT_ID: ""
 
+# The site's public origin, which browsers load and the dashboard and the
+# credential service name. Required.
+publicOrigin: ""
+
+# The namespace Sandboxes run in, where the services hold the Roles that let
+# them read their Sandboxes. Required.
+sandboxNamespace: ""
+
 # The shared Secret every service reads with envFrom, beside codewire-config.
 sharedSecret: codewire-secrets
 
@@ -340,6 +348,15 @@ billing:
   initContainers: []
   startupProbe: null
 
+# The credential service and broker. It reads neither codewire-config nor the
+# shared Secret: everything it is given is its own.
+credentialService:
+  enabled: true
+  replicas: 2
+  # Kind only, until #5169: its own pull secrets, where Kind's differ from
+  # imagePullSecrets'. Null uses those.
+  imagePullSecrets: null
+
 # Image families. A digest, when set, pins the image and replaces the tag.
 images:
   dashboard:
@@ -364,8 +381,7 @@ dashboard:
     app.kubernetes.io/component: dashboard
     app.kubernetes.io/name: codewire
   origins:
-    # The site's public origin, and the one browsers call the API on. Required.
-    public: ""
+    # The origin browsers call the API on. Required.
     browserApi: ""
     api: http://codewire-orchestration:8084
     credential: http://codewire-credential-service:8086

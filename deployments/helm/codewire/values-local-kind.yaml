@@ -59,6 +59,8 @@ config:
 
 # Kind's services read the synthetic local Secret, pull no image, and admit
 # Kind's edge, ingress-nginx.
+publicOrigin: http://127.0.0.1:8080
+sandboxNamespace: dev-sandboxes
 sharedSecret: codewire-local-secrets
 
 edge:
@@ -164,6 +166,16 @@ billing:
     - name: CONNECT_TESTING_SURFACE
       value: "1"
 
+# deployments/k8s/overlays/local-kind/credential-service-origin-patch.yaml:
+# one node, so a single broker keeps local logs and debugging simple.
+credentialService:
+  replicas: 1
+  # Kind's overlay leaves the source's pull secret here, unlike the other
+  # services'; nothing is pulled on Kind, so it is never used. Removed at
+  # Kind's cut-over to the chart (#5169).
+  imagePullSecrets:
+    - name: harbor-registry
+
 dashboardPublicConfig:
   # The non-promotable Kind credential fixture provides this fixed synthetic
   # App itself.
@@ -190,7 +202,6 @@ dashboard:
     app: codewire-dashboard
   labels: null
   origins:
-    public: http://127.0.0.1:8080
     browserApi: http://127.0.0.1:8080
   portName: null
   livenessProbe:
