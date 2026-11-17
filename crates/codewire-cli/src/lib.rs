@@ -1106,7 +1106,7 @@ where
     if selection_changes && result.is_ok() {
         refresh_rex_selection();
     }
-    credit_refusal::report(result, json)
+    update::notice::report(&command, &matches, result, json)
 }
 
 /// Whether the invoked command, at any depth, asked for `--output json`.

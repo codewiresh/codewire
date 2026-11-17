@@ -88,6 +88,31 @@ pub(crate) async fn fetch(selection: Selection, host: Platform) -> anyhow::Resul
     .await
 }
 
+/// The release host, as messages name it.
+pub(crate) const RELEASE_HOST: &str = http::HOST;
+
+/// The stable channel's release tag, read and verified as an upgrade reads
+/// it, for telling the user a newer release exists. Nothing is fetched or
+/// installed.
+pub(crate) async fn stable_release(deadline: Duration) -> anyhow::Result<String> {
+    let http = http::FixedHttp::new()?;
+    let read = async {
+        let verifier = ReleaseKey::import(TRUST_KEY, TRUST_FINGERPRINT)?;
+        let bytes = http
+            .read("cw/v1/channels/stable.json", MAX_JSON_BYTES, None)
+            .await?;
+        let channel = ChannelEnvelope::decode(&bytes)?;
+        verifier.verify(
+            &channel.pointer.signing_bytes()?,
+            channel.signature.as_bytes(),
+        )?;
+        anyhow::Ok(channel.pointer.release_tag)
+    };
+    tokio::time::timeout(deadline, read)
+        .await
+        .map_err(|_| anyhow::anyhow!("{} didn't answer in time", http::HOST))?
+}
+
 async fn controlled<T>(
     operation: impl Future<Output = anyhow::Result<T>>,
     scratch: Arc<scratch::Scratch>,

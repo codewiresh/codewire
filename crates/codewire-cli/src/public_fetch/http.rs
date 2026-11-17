@@ -12,6 +12,8 @@ use reqwest::{Client, Response, StatusCode, Url, header};
 use sha2::{Digest as _, Sha256};
 
 const ORIGIN: &str = "https://releases.codewire.sh/";
+/// The release host, as messages name it.
+pub(super) const HOST: &str = "releases.codewire.sh";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// Runtime blobs carry their own size-scaled deadline; this only bounds a
 /// request the caller has not.
@@ -80,11 +82,17 @@ impl FixedHttp {
             .header(header::ACCEPT_ENCODING, "identity")
             .send()
             .await
-            .context("request public release object")?;
+            .map_err(|error| unreachable(self.origin.host_str().unwrap_or(HOST), &error))?;
+        let host = url.host_str().unwrap_or(HOST);
         anyhow::ensure!(
-            response.status() == StatusCode::OK && response.url() == &url,
-            "public release request did not return an unredirected HTTP200"
+            response.url() == &url && !response.status().is_redirection(),
+            "{host} redirected {key}; a release object is read only from its own address"
         );
+        match response.status() {
+            StatusCode::OK => {}
+            StatusCode::NOT_FOUND => anyhow::bail!("{host} has no {key} (HTTP 404)"),
+            status => anyhow::bail!("{host} answered HTTP {} for {key}", status.as_u16()),
+        }
         anyhow::ensure!(
             response
                 .headers()
@@ -212,4 +220,20 @@ fn admitted_key(key: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// A request that never got an answer from `host`, as one line that says
+/// what to check, with the innermost cause (#4479).
+fn unreachable(host: &str, error: &reqwest::Error) -> anyhow::Error {
+    let mut cause: &dyn std::error::Error = error;
+    while let Some(source) = cause.source() {
+        cause = source;
+    }
+    let what = if error.is_timeout() {
+        "it didn't answer in time".to_owned()
+    } else {
+        cause.to_string()
+    };
+    // The client uses no proxy (`no_proxy` above), so a proxy is not named.
+    anyhow::anyhow!("couldn't reach {host} ({what}); check your connection or firewall")
 }

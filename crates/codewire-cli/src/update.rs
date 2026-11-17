@@ -26,6 +26,8 @@ use serde::Serialize;
 use crate::build_record::{BUILD_RECORD, embedded, executable_identity};
 use crate::public_fetch;
 
+pub(crate) mod notice;
+
 /// Identity file beside `cw` in a pinned local release directory; the same
 /// schema-2 document the cw image carries as `cw-runtime.json`.
 const LOCAL_RELEASE_IDENTITY: &str = "cw-runtime.json";
@@ -59,10 +61,15 @@ pub(crate) struct UpgradeArgs {
 
 #[derive(Debug, Subcommand)]
 enum UpgradeCommand {
-    /// Show the managed installation, its selection and retained versions.
-    Status(StoreArgs),
+    /// Show the managed installation, its selection and retained versions,
+    /// and whether a newer stable release exists.
+    Status(StatusArgs),
     /// Select the previous, or a named retained, version for new invocations.
     Rollback(RollbackArgs),
+    /// The detached newer-release check a command at a terminal starts once
+    /// a day ([`notice`]).
+    #[command(name = "_check", hide = true)]
+    Check,
 }
 
 #[derive(Debug, Args)]
@@ -73,6 +80,15 @@ struct StoreArgs {
     store: Option<PathBuf>,
     #[arg(long, help = "Print JSON")]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct StatusArgs {
+    /// Also show each retained version's build identity.
+    #[arg(short, long)]
+    verbose: bool,
+    #[command(flatten)]
+    store: StoreArgs,
 }
 
 #[derive(Debug, Args)]
@@ -232,7 +248,8 @@ struct SelectionReport<'a> {
 pub(crate) async fn run(args: UpgradeArgs) -> anyhow::Result<()> {
     use std::io::IsTerminal as _;
     let rollback = match args.command {
-        Some(UpgradeCommand::Status(store)) => return status(store),
+        Some(UpgradeCommand::Status(status_args)) => return status(status_args).await,
+        Some(UpgradeCommand::Check) => return notice::run_check().await,
         Some(UpgradeCommand::Rollback(rollback)) => rollback,
         None => {
             let interactive = !args.selection.store.json
@@ -875,21 +892,118 @@ fn consistent(record: &VersionRecord, identity: &CwPayloadIdentity) -> anyhow::R
     Ok(())
 }
 
-fn status(args: StoreArgs) -> anyhow::Result<()> {
-    let store = open_store(args.store.as_deref())?;
+async fn status(args: StatusArgs) -> anyhow::Result<()> {
+    let store = open_store(args.store.store.as_deref())?;
     let status = store.status()?;
-    if args.json {
+    if args.store.json {
         println!("{}", serde_json::to_string_pretty(&status)?);
-    } else {
-        let caps = crate::output::Capabilities::from_process(crate::output::OutputMode::Text);
-        print!("{}", render_status(&status, caps.stdout_style()));
+        return Ok(());
     }
+    let builds = args.verbose.then(|| {
+        status
+            .versions
+            .iter()
+            .map(|version| {
+                (
+                    version.sha256.clone(),
+                    version_build(&store, &version.sha256),
+                )
+            })
+            .collect()
+    });
+    let style =
+        crate::output::Capabilities::from_process(crate::output::OutputMode::Text).stdout_style();
+    print!("{}", render_status(&status, builds.as_ref(), style));
+    let latest = if notice::check_off(|name| std::env::var_os(name)) {
+        None
+    } else {
+        // Named before the wait, which can last until the deadline.
+        if io::IsTerminal::is_terminal(&io::stderr()) {
+            eprintln!(
+                "Asking {} for the newest stable release…",
+                public_fetch::RELEASE_HOST
+            );
+        }
+        Some(public_fetch::stable_release(STATUS_CHECK_DEADLINE).await)
+    };
+    print!(
+        "{}",
+        render_latest(current_version(&status).as_deref(), latest)
+    );
     Ok(())
 }
 
-/// The heading is bold at a terminal (#4578); the field lines stay plain for
+/// A retained version's build line, as `cw upgrade -v` shows it: its
+/// verified build identity, or why it can't be shown.
+fn version_build(store: &Store, sha256: &str) -> String {
+    match store.verify(sha256) {
+        Ok(VersionRecord {
+            payload: Some(build),
+            ..
+        }) => format!(
+            "{}, source {} (tree {}), {}",
+            build.target, build.source_revision, build.source_tree_sha256, build.rustc
+        ),
+        Ok(_) => "not recorded".to_owned(),
+        Err(error) => format!("unverified: {error:#}"),
+    }
+}
+
+/// How long `cw upgrade status` waits to learn the newest stable release.
+const STATUS_CHECK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The selected version's release name, when the store records it.
+fn current_version(status: &Status) -> Option<String> {
+    let current = status.current.as_ref()?;
+    status
+        .versions
+        .iter()
+        .find(|version| &version.sha256 == current)
+        .and_then(|version| version.package_version.as_deref())
+        .map(release_name)
+}
+
+/// Whether `latest` is a newer release than `current` (#4479).
+fn newer_release(current: &str, latest: &str) -> bool {
+    codewire_cw_release::release::compare_versions(latest, current)
+        == Some(std::cmp::Ordering::Greater)
+}
+
+/// The status's last line: the newest stable release, or why it is unknown.
+/// `None` when the check is turned off.
+fn render_latest(current: Option<&str>, latest: Option<anyhow::Result<String>>) -> String {
+    use std::cmp::Ordering;
+    let line = match latest {
+        None => "not checked (CW_NO_UPDATE_CHECK or CI is set)".to_owned(),
+        Some(Err(error)) => format!("unknown: {error:#}"),
+        Some(Ok(latest)) => match current.map(|current| {
+            (
+                current,
+                codewire_cw_release::release::compare_versions(&latest, current),
+            )
+        }) {
+            Some((_, Some(Ordering::Greater))) => {
+                format!("a newer release, {latest}, is available: run `cw upgrade`")
+            }
+            Some((_, Some(Ordering::Equal))) => format!("{latest}, the selected version"),
+            Some((current, Some(Ordering::Less))) => {
+                format!("{latest}; the selected {current} is newer")
+            }
+            // No selection, or versions that can't be compared.
+            Some((_, None)) | None => latest,
+        },
+    };
+    format!("  latest:     {line}\n")
+}
+
+/// With `builds`, each retained version is followed by its build line. The
+/// heading is bold at a terminal (#4578); the field lines stay plain for
 /// whoever reads them.
-fn render_status(status: &Status, style: crate::output::Style) -> String {
+fn render_status(
+    status: &Status,
+    builds: Option<&std::collections::BTreeMap<String, String>>,
+    style: crate::output::Style,
+) -> String {
     let mut text = String::new();
     let _ = writeln!(
         text,
@@ -951,6 +1065,9 @@ fn render_status(status: &Status, style: crate::output::Style) -> String {
             version.sha256,
             version.package_version.as_deref().unwrap_or("-")
         );
+        if let Some(build) = builds.and_then(|builds| builds.get(&version.sha256)) {
+            text.push_str(&format!("      build: {build}\n"));
+        }
     }
     text
 }
@@ -1320,7 +1437,10 @@ mod tests {
         assert!(matches!(
             parse(&["cw", "upgrade", "status", "--json"]),
             Ok(Command::Upgrade(UpgradeArgs {
-                command: Some(UpgradeCommand::Status(StoreArgs { json: true, .. })),
+                command: Some(UpgradeCommand::Status(StatusArgs {
+                    store: StoreArgs { json: true, .. },
+                    ..
+                })),
                 ..
             }))
         ));
@@ -1914,6 +2034,58 @@ mod tests {
     }
 
     #[test]
+    fn status_says_whether_a_newer_release_exists_or_why_it_cant_tell() {
+        let line = |current, latest: &str| render_latest(current, Some(Ok(latest.into())));
+        assert_eq!(
+            line(Some("v0.4.16"), "v0.4.17"),
+            "  latest:     a newer release, v0.4.17, is available: run `cw upgrade`\n"
+        );
+        assert_eq!(
+            line(Some("v0.4.17"), "v0.4.17"),
+            "  latest:     v0.4.17, the selected version\n"
+        );
+        assert_eq!(
+            line(Some("v0.4.18"), "v0.4.17"),
+            "  latest:     v0.4.17; the selected v0.4.18 is newer\n",
+            "a newer selection is never told to upgrade, nor called the latest"
+        );
+        assert_eq!(
+            line(Some("unrecorded"), "v0.4.17"),
+            "  latest:     v0.4.17\n",
+            "versions that can't be compared say neither"
+        );
+        assert_eq!(line(None, "v0.4.17"), "  latest:     v0.4.17\n");
+        assert_eq!(
+            render_latest(
+                Some("v0.4.17"),
+                Some(Err(anyhow::anyhow!("couldn't reach releases.codewire.sh")))
+            ),
+            "  latest:     unknown: couldn't reach releases.codewire.sh\n"
+        );
+        assert_eq!(
+            render_latest(Some("v0.4.17"), None),
+            "  latest:     not checked (CW_NO_UPDATE_CHECK or CI is set)\n"
+        );
+    }
+
+    #[test]
+    fn upgrade_status_takes_verbose_as_upgrade_does() {
+        for line in [
+            ["cw", "upgrade", "status", "-v"],
+            ["cw", "upgrade", "status", "--verbose"],
+        ] {
+            let Ok(Command::Upgrade(UpgradeArgs {
+                command: Some(UpgradeCommand::Status(status)),
+                ..
+            })) = parse(&line)
+            else {
+                panic!("{line:?} is not upgrade status");
+            };
+            assert!(status.verbose, "{line:?}");
+        }
+    }
+
+    #[test]
     fn status_text_marks_the_current_version_and_an_inconsistent_entry() {
         let sha256 = "b".repeat(64);
         let status = Status {
@@ -1936,19 +2108,29 @@ mod tests {
                 recorded: true,
             }],
         };
-        let text = render_status(
-            &status,
-            crate::output::Style::new(false, crate::output::Charset::Unicode),
-        );
+        let plain = crate::output::Style::new(false, crate::output::Charset::Unicode);
+        let text = render_status(&status, None, plain);
         assert!(text.starts_with("Managed cw installation\n"));
         let styled = render_status(
             &status,
+            None,
             crate::output::Style::new(true, crate::output::Charset::Unicode),
         );
         assert!(styled.starts_with("\x1b[1mManaged cw installation\x1b[0m\n"));
         assert!(text.contains(&format!("current:    v0.3.0 ({sha256})")));
         assert!(text.contains("warning:    the entry is a link to /usr/bin/true"));
         assert!(text.contains(&format!("* {sha256} v0.3.0 (self-install)")));
+        assert!(!text.contains("build:"));
+
+        // `-v`: each version's build line under it, verified or not.
+        let builds = [(sha256.clone(), "unverified: digest mismatch".to_owned())].into();
+        let verbose = render_status(&status, Some(&builds), plain);
+        assert!(
+            verbose.contains(&format!(
+                "* {sha256} v0.3.0 (self-install)\n      build: unverified: digest mismatch\n"
+            )),
+            "{verbose}"
+        );
     }
 
     #[test]

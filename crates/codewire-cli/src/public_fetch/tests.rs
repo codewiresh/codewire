@@ -1029,6 +1029,71 @@ async fn executable_unknown_length_is_bounded_by_signed_size_and_exact_eof() {
 }
 
 #[tokio::test]
+async fn a_release_host_answer_or_silence_is_said_with_the_host_and_what_to_check() {
+    // #4479: a missing object, another status and an unreachable host each
+    // read as one line that names the host, not an HTTP-library chain.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/cw/v1/releases/v9.9.9/release.json"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    let http =
+        http::FixedHttp::synthetic(&format!("{}/", server.uri()), Duration::from_secs(5)).unwrap();
+    let missing = http
+        .read("cw/v1/releases/v1.2.3/release.json", 32, None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        missing.ends_with("has no cw/v1/releases/v1.2.3/release.json (HTTP 404)"),
+        "{missing}"
+    );
+    let refused = http
+        .read("cw/v1/releases/v9.9.9/release.json", 32, None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.ends_with("answered HTTP 503 for cw/v1/releases/v9.9.9/release.json"),
+        "{refused}"
+    );
+    Mock::given(method("GET"))
+        .and(path("/cw/v1/channels/stable.json"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("location", "https://example.invalid/"),
+        )
+        .mount(&server)
+        .await;
+    let redirected = http
+        .read("cw/v1/channels/stable.json", 32, None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        redirected.ends_with(
+            "redirected cw/v1/channels/stable.json; a release object is read only from its own address"
+        ),
+        "{redirected}"
+    );
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = closed.local_addr().unwrap();
+    drop(closed);
+    let unreachable =
+        http::FixedHttp::synthetic(&format!("http://{address}/"), Duration::from_secs(5))
+            .unwrap()
+            .read("cw/v1/channels/stable.json", 32, None)
+            .await
+            .unwrap_err()
+            .to_string();
+    assert!(
+        unreachable.starts_with("couldn't reach 127.0.0.1 (")
+            && unreachable.ends_with("); check your connection or firewall"),
+        "{unreachable}"
+    );
+}
+
+#[tokio::test]
 async fn closed_route_refusal_happens_before_any_connection() {
     let server = MockServer::start().await;
     let http =

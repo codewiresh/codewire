@@ -26,6 +26,7 @@ use uuid::Uuid;
 use super::*;
 use crate::commands::progress::terminal_text;
 
+mod create_hint;
 mod dev_store;
 mod error_view;
 pub(crate) mod host_create;
@@ -668,6 +669,7 @@ pub(crate) async fn create_native_environment(
         ),
         network: lifecycle::network_ref(mesh.as_ref()),
     };
+    let image = create_hint::CreateImage::of(&spec.image);
     let (project_spec_json, project_spec_sha256) =
         canonical_native_project_intent(spec, vcpus, memory_mib, disk_bytes)?;
     ensure_pinned_runtime().await?;
@@ -734,9 +736,7 @@ pub(crate) async fn create_native_environment(
         }
         Err(status) => {
             let (stage, error) =
-                lifecycle::wait_failure(&progress, "creation", &request.name, status);
-            // The supervisor's reason already says whether the failed
-            // environment was kept.
+                create_hint::wait_failure(&progress, &request.name, status, &image);
             return Err(
                 lifecycle::lifecycle_failure("create", &request.name, stage, error, false).await,
             );

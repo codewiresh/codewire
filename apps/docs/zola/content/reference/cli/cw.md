@@ -1,7 +1,7 @@
 ---
 title: cw itself
 description: version, install, upgrade, doctor, feedback, config and completion.
-updated: 2026-11-14
+updated: 2026-11-15
 weight: 8
 aliases: ["/cli/cw"]
 ---
@@ -34,7 +34,7 @@ does the same. A `cw` built without source provenance (a plain
 cw upgrade                       # at a terminal: choose what to upgrade
 cw upgrade [--cli] [--vms] [--channel stable | --version vX.Y.Z | --from DIR --sha256 HEX]
            [--expect-generation N] [--store DIR] [--verbose] [--json]
-cw upgrade status [--json]
+cw upgrade status [--verbose] [--json]
 cw upgrade rollback [--to VERSION] [--expect-generation N] [--vms] [--verbose]
 ```
 
@@ -59,6 +59,28 @@ Running cw processes keep v0.4.1 until they exit. To go back: cw upgrade rollbac
 
 `--verbose` adds the selected version's SHA-256, entry, store, selection
 generation and build identity; `--json` reports every field.
+
+`cw upgrade status` ends with the newest stable release, read from the signed
+channel, and says when it is newer than the selected `cw`. With
+`CW_NO_UPDATE_CHECK=1` or in CI it doesn't ask. `--verbose` adds a `build:`
+line under each retained version: its verified build identity, or why it
+can't be shown.
+
+When you run other commands yourself, at a terminal, `cw` says once a day, on
+stderr, when a newer release exists: "a newer release, vX.Y.Z, is available:
+run `cw upgrade` (turn this notice off with CW_NO_UPDATE_CHECK=1)". It comes
+after the command's own output, and only when the command succeeded. The check
+never holds a command up. At most once a day, a command starts a detached `cw`
+that asks the release server and records the answer, and a later command gives
+the notice. It never runs:
+
+- with `--output json`;
+- unless both stdout and stderr are a terminal;
+- for `cw upgrade`, `cw install`, `cw completion`, or a helper that ssh runs
+  (`cw shell --stdio`, `cw ssh known-hosts`);
+- in CI (`CI` set), or in a development build.
+
+To turn it off, set `CW_NO_UPDATE_CHECK=1`.
 
 | Flag | Meaning |
 | --- | --- |
