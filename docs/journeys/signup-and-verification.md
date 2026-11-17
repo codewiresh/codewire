@@ -11,7 +11,7 @@ Production. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-16.
+Updated 2026-11-17.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -19,7 +19,7 @@ Updated 2026-11-16.
 | `signup-email-review` | not yet observed | not yet observed |
 | `signup-unverified-stranger` | observed 2026-11-16 at b183980df, stand-in (#4481) | not yet observed |
 | `signup-resend` | not yet observed | not yet observed |
-| `signup-provider` | not yet observed by a walk; reported working by the owner 2026-11-14 (#4062), release not recorded | not yet observed by a walk; reported working by the owner 2026-11-14 (#4062), release not recorded |
+| `signup-provider` | buttons, start, cancel and state refusals observed 2026-11-17 at `5c6631406` (#4062); a real provider sign-in reported working by the owner 2026-11-14, not walked | buttons, start, cancel and state refusals observed 2026-11-17 at v0.4.22 (#4062); a real provider sign-in reported working by the owner 2026-11-14, not walked |
 | `signup-gates` | not yet observed | not yet observed |
 | `account-password-reset` | not yet observed | not yet observed |
 | `account-admin-delete` | not yet observed | not yet observed |
@@ -219,7 +219,23 @@ Issue: #4062. Launch step 1 (`launch-signup`) walks this on Production.
 - **Proof:** `cw whoami` names the same account after the second sign-in.
 - **Gotchas:** only a real GitHub or Google account proves this step.
 - **Observed:**
-  - Not yet observed by a walk on any surface.
+  - Dev, 2026-11-17, at `5c6631406`, and Production, 2026-11-17, at
+    v0.4.22 (`df5ceafd0`), both after #4996 (#4062). These states were
+    observed, with HTTP requests only and no provider sign-in:
+    - the sign-in and sign-up pages, and the page `cw login` opens, show
+      both buttons;
+    - each start redirects to its provider and writes no `oauth_states`
+      row;
+    - the provider's cancel answer (`error=access_denied`) sent to the
+      callback returns to the login page with "Sign-in was cancelled." and
+      creates no account;
+    - a missing, tampered, mismatched or other provider's state cookie is
+      refused as expired before any provider call.
+
+    The states that need a real provider account aren't observed yet: a
+    first sign-up through a provider, a second sign-in, a completed
+    `cw login` through one, the email-match link, linking and unlinking in
+    Settings, and a replayed state after a completed exchange.
   - The owner reported on 2026-11-13 that signing in with GitHub and with
     Google works ("GitHub and Google both work for me", #4062), and on
     2026-11-14 that this was on Dev and on Production ("it works on both").
