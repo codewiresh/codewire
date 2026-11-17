@@ -1954,7 +1954,17 @@ mod tests {
             AuthClientError::Response { ref message }
                 if message == "desktop OAuth login cancelled"
         ));
-        std::net::TcpListener::bind(address).expect("cancelled listener releases its port");
+        // tiny_http's drop only wakes its accept thread, which closes the
+        // listening socket after drop returns, so the port comes free a
+        // moment after cancellation rather than at once. The bound only
+        // guards a hang; the loop ends as soon as the port is free.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while std::net::TcpListener::bind(address).is_err() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled listener releases its port");
     }
 
     #[tokio::test]
