@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import os
 from pathlib import Path
+import re
 import stat
 import tempfile
 import time
@@ -428,6 +429,28 @@ class Inventory(unittest.TestCase):
             self.assertEqual(set(os.listdir(directory)), before)
             with self.assertRaises(source.Refused):
                 admitted.revalidate()
+
+    def test_a_refusal_names_the_path_that_changed(self):
+        # #5154: a bring-up that adds a protected entry to a held directory
+        # fails late; the refusal says which directory, file or tree it was.
+        for directory, where in ((self.checkout / "src", "src"), (self.checkout, ".")):
+            with self.subTest(where=where):
+                added = directory / "__pycache__"
+                with self.admit() as admitted:
+                    added.mkdir()
+                    with self.assertRaisesRegex(source.Refused,
+                                                "^held image-source directory name/identity changed: "
+                                                + re.escape(where) + "$"):
+                        admitted.revalidate()
+                added.rmdir()
+        with self.admit() as admitted:
+            write(self.checkout / "src/main.rs", b"changed\n")
+            with self.assertRaisesRegex(source.Refused, "^held image-source file changed: src/main.rs$"):
+                admitted.revalidate()
+        write(self.policy, IGNORE.replace("**/.tmp\n", ""))
+        (self.checkout / "src/.tmp").mkdir()
+        with self.assertRaisesRegex(source.Refused, "protected credential/cache tree: src/.tmp$"):
+            self.admit()
 
     def test_transient_in_place_restore_and_directory_replacement_refuse(self):
         path = self.checkout / "src/main.rs"

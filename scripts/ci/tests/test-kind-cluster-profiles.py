@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import socket
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -286,7 +287,7 @@ class ProfileTests(unittest.TestCase):
                 self.profiles.ensure("alpha", public=value)
         value = self.profiles.ensure("alpha", public="https://review.example.com:4174",
                                      browser="https://review.example.com:8090")
-        self.assertEqual(self.profiles.ensure("alpha"), value)
+        self.assertEqual(self.profiles.ensure("alpha", public="https://review.example.com:4174"), value)
         with self.assertRaises(profile.ProfileError):
             self.profiles.ensure("alpha", public="http://localhost")
         with self.assertRaises(profile.ProfileError):
@@ -507,6 +508,54 @@ class ProfileTests(unittest.TestCase):
             with self.assertRaises(profile.ProfileError):
                 self.profiles.ensure("alpha")
         self.assertEqual((self.path() / "profile.json").read_bytes(), before)
+
+    def test_inherited_review_origins_are_ignored_and_another_saved_origin_must_be_named(self):
+        # #5154: a shell's exported review origins became every new named
+        # profile's, and each profile's own watcher then failed CSRF.
+        review = {"KIND_PUBLIC_ORIGIN": "https://review.example.com:4174",
+                  "KIND_BROWSER_API_ORIGIN": "https://review.example.com:8090"}
+        with patch.dict(os.environ, review):
+            value = self.profiles.ensure("alpha")
+            own = profile.own_origins(value["ports"])
+            self.assertEqual(value["origins"], own)
+            fields = self.profiles.env("alpha")
+            self.assertEqual((fields["KIND_PUBLIC_ORIGIN"], fields["KIND_BROWSER_API_ORIGIN"]),
+                             (own["public"], own["browser_api"]))
+        value["origins"] = {"public": review["KIND_PUBLIC_ORIGIN"], "browser_api": review["KIND_BROWSER_API_ORIGIN"]}
+        self.profiles.save(value)
+        before = (self.path() / "profile.json").read_bytes()
+        for command in (self.profiles.ensure, self.profiles.env):
+            with self.subTest(command=command.__name__), self.assertRaisesRegex(
+                    profile.ProfileError, r"^profile alpha saves the origin https://review\.example\.com:4174, "
+                    r"not its own loopback origin; .* reset-origins --cluster alpha`$"):
+                command("alpha")
+        self.assertEqual((self.path() / "profile.json").read_bytes(), before)
+        fields = self.profiles.env("alpha", public=review["KIND_PUBLIC_ORIGIN"])
+        self.assertEqual(fields["KIND_PUBLIC_ORIGIN"], review["KIND_PUBLIC_ORIGIN"])
+        with self.assertRaises(profile.ProfileError):
+            self.profiles.env("alpha", public="https://other.example.com:4174")
+        self.assertEqual(self.profiles.reset_origins("alpha")["origins"], own)
+        self.assertEqual(self.profiles.env("alpha")["KIND_PUBLIC_ORIGIN"], own["public"])
+
+    def test_make_names_a_profile_origin_only_from_its_command_line(self):
+        # #5154: the shell's exported origins never reach a named profile;
+        # origins given on make's command line do, as KIND_PROFILE_*.
+        tree = Path(self.scratch.name) / "make"
+        tree.mkdir()
+        (tree / "Makefile").write_text((ROOT / "Makefile").read_text())
+        (tree / ".env").write_text("AGENT_SANDBOX_SHA=synthetic\nBUF=synthetic-buf\nGO_BIN=/synthetic/bin\n")
+        show = "show-origins: ; @printf '%s|%s' \"$$KIND_PROFILE_PUBLIC_ORIGIN\" \"$$KIND_PROFILE_BROWSER_API_ORIGIN\""
+        shell = {key: value for key, value in os.environ.items() if not key.startswith("KIND_")} | {
+            "KIND_PUBLIC_ORIGIN": "http://review.example:4174", "KIND_BROWSER_API_ORIGIN": "http://review.example:8090"}
+
+        def origins(*arguments):
+            return subprocess.run(["make", "--no-print-directory", "--eval", show, "show-origins", *arguments],
+                                  cwd=tree, env=shell, text=True, capture_output=True, timeout=60, check=True).stdout
+
+        self.assertEqual(origins("CLUSTER=alpha"), "|")
+        self.assertEqual(origins("CLUSTER=alpha", "KIND_PUBLIC_ORIGIN=http://named.example:4174",
+                                 "KIND_BROWSER_API_ORIGIN=http://named.example:8090"),
+                         "http://named.example:4174|http://named.example:8090")
 
     def test_preexisting_unowned_node_is_never_adopted(self):
         node = profile.Node("a" * 64, "alpha-control-plane", "alpha", "control-plane", "fixture")

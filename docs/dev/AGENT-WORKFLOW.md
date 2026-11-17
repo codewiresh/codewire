@@ -510,9 +510,25 @@ Each profile saves seven loopback ports, browser origins, a private kubeconfig,
 the actual Docker daemon and node identities, and the committed source and
 sealed image/smoke inventory. `kind-list` shows the endpoints. Commands load
 those settings from `CLUSTER`; conflicting inherited selectors or endpoints
-fail before use. Do not export the legacy review settings when selecting a
-named profile. The default named browser URL is its saved loopback watcher
-origin; no extra host routing is required.
+fail before use. A named profile's browser origins are its own loopback watcher
+and ingress; no extra host routing is required. An inherited
+`KIND_PUBLIC_ORIGIN` or `KIND_BROWSER_API_ORIGIN`, such as the legacy review
+settings a shell exports, is ignored and replaced by the saved origins (#5154).
+To serve another origin, such as the GitHub App's registered callback origin for
+real credentials, name both on make's command line
+(`make kind-up CLUSTER=my-task KIND_PUBLIC_ORIGIN=... KIND_BROWSER_API_ORIGIN=...`)
+or set `KIND_PROFILE_PUBLIC_ORIGIN` and `KIND_PROFILE_BROWSER_API_ORIGIN` for a
+script. A profile that saved another origin serves it only when it is named
+again; otherwise every command refuses and names the origin. Put the profile
+back on its own origins with
+`python3 scripts/dev/kind/cluster-profile.py reset-origins --cluster my-task`,
+then restart `kind-watch`, which sets the cluster's frontend URL from them.
+
+`kind-up` holds the source tree while it builds images and refuses a held
+directory that changes, naming it. The dispatcher writes no Python bytecode
+and creates the root `.tmp` before the hold, so a fresh worktree's first
+bring-up passes (#5154); a refusal that still names a directory means another
+step wrote into the tree.
 
 `kind-up` requires a clean committed initial base. Repeating it validates a
 live cluster. After `kind-down`, the same unchanged source reuses saved ports

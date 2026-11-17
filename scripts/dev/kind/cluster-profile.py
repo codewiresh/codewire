@@ -55,7 +55,7 @@ ENV_CONFLICT_KEYS = {"KIND_CLUSTER_NAME", "KUBE_CONTEXT", "KUBECONFIG", "KIND_CO
                      "KIND_INGRESS_URL", "KIND_INGRESS_TLS_URL", "KIND_ORCHESTRATION_URL",
                      "KIND_COORDINATOR_DIRECT_URL", "KIND_TEMPORAL_ADDRESS", "KIND_DATABASE_URL",
                      "KIND_ORCHESTRATION_HTTP_URL", "KIND_TEMPORAL_FRONTEND_URL",
-                     "KIND_WATCH_ADDR", "KIND_PUBLIC_ORIGIN", "KIND_BROWSER_API_ORIGIN"}
+                     "KIND_WATCH_ADDR"}
 
 
 class ProfileError(RuntimeError):
@@ -138,6 +138,11 @@ def origin(value: str) -> str:
         valid = False
     require(valid, "profile origin must be an HTTP(S) origin without credentials or a path")
     return value.rstrip("/")
+
+
+def own_origins(ports: dict) -> dict:
+    """The origins a profile serves unless a command names others explicitly."""
+    return {"public": f"http://127.0.0.1:{ports['watch']}", "browser_api": f"http://127.0.0.1:{ports['http']}"}
 
 
 def unique_object(pairs: list[tuple[str, object]]) -> dict:
@@ -673,6 +678,7 @@ class Profiles:
                         "saved profile public origin cannot be overridden")
                 require(browser is None or value["origins"]["browser_api"] == browser,
                         "saved profile browser API origin cannot be overridden")
+                self.check_origins(value, public)
                 self.check_environment(value)
                 # Deleted profiles keep their leases. Validate the complete
                 # registry too, so a corrupted or manually overlapping saved
@@ -701,8 +707,8 @@ class Profiles:
                 value = {"schema": SCHEMA, "cluster_name": cluster, "docker_id": self.daemon,
                          "ownership_nonce": secrets.token_hex(16), "created_at": time.time_ns(),
                          "lifecycle": "allocated", "ports": ports,
-                         "origins": {"public": public or f"http://127.0.0.1:{ports['watch']}",
-                                     "browser_api": browser or f"http://127.0.0.1:{ports['http']}"},
+                         "origins": {"public": public or own_origins(ports)["public"],
+                                     "browser_api": browser or own_origins(ports)["browser_api"]},
                          "node": None, "artifacts": None}
                 self.validate(value, cluster, self.daemon)
                 self.check_environment(value)
@@ -762,14 +768,42 @@ class Profiles:
                     "sealed artifact descriptor differs from its admission")
         return manifest, raw
 
-    def env(self, cluster: str) -> dict[str, str]:
+    def env(self, cluster: str, public: str | None = None, browser: str | None = None) -> dict[str, str]:
+        public = origin(public) if public is not None else None
+        browser = origin(browser) if browser is not None else None
         with self.registry():
             value = self.load(cluster)
             self.inherited_lock(self.path(cluster) / "operation.lock", "KIND_PROFILE_LOCK_FD")
             require(value["lifecycle"] != "deleted", "selected profile was explicitly deleted")
+            require((public is None or value["origins"]["public"] == public)
+                    and (browser is None or value["origins"]["browser_api"] == browser),
+                    "saved profile origins cannot be overridden")
+            self.check_origins(value, public)
             if value["artifacts"] is not None:
                 self.artifact_manifest(value)
             return self.environment(value)
+
+    def check_origins(self, value: dict, public: str | None) -> None:
+        # A shell that exported review origins once gave them to every new
+        # profile, and each watcher then failed its own CSRF check (#5154). A
+        # saved origin other than the profile's own serves only when this
+        # command names it explicitly.
+        saved = value["origins"]
+        if saved == own_origins(value["ports"]):
+            return
+        cluster = value["cluster_name"]
+        require(public == saved["public"],
+                f"profile {cluster} saves the origin {saved['public']}, not its own loopback origin; "
+                f"name it explicitly (KIND_PROFILE_PUBLIC_ORIGIN={saved['public']} "
+                f"KIND_PROFILE_BROWSER_API_ORIGIN={saved['browser_api']}) or reset it with "
+                f"`python3 scripts/dev/kind/cluster-profile.py reset-origins --cluster {cluster}`")
+
+    def reset_origins(self, cluster: str) -> dict:
+        with self.operation(cluster), self.registry():
+            value = self.load(cluster)
+            value["origins"] = own_origins(value["ports"])
+            self.save(value)
+            return value
 
     def check_environment(self, value: dict) -> None:
         fields = self.environment(value)
@@ -964,12 +998,12 @@ def main() -> int:
     listing = commands.add_parser("list")
     listing.add_argument("--format", choices=("table", "json"), default="table")
     for command in ("ensure", "env", "render-config", "record-node", "verify-node",
-                    "record-artifacts", "verify-artifacts", "mark-deleted", "purge"):
+                    "record-artifacts", "verify-artifacts", "mark-deleted", "purge", "reset-origins"):
         sub = commands.add_parser(command)
         sub.add_argument("--cluster", required=True)
         if command in ("record-node", "record-artifacts", "mark-deleted", "purge"):
             sub.add_argument("--nonce", required=True)
-        if command == "ensure":
+        if command in ("ensure", "env"):
             sub.add_argument("--public-origin")
             sub.add_argument("--browser-api-origin")
         if command == "env":
@@ -1007,7 +1041,7 @@ def main() -> int:
             case "ensure":
                 result = profiles.ensure(cluster, arguments.public_origin, arguments.browser_api_origin)
             case "env":
-                result = profiles.env(cluster)
+                result = profiles.env(cluster, arguments.public_origin, arguments.browser_api_origin)
                 if arguments.format == "nul":
                     for key, value in result.items():
                         sys.stdout.buffer.write(key.encode() + b"\0" + value.encode() + b"\0")
@@ -1026,11 +1060,13 @@ def main() -> int:
                 result = profiles.mark_deleted(cluster, arguments.nonce)
             case "purge":
                 result = profiles.purge(cluster, arguments.nonce)
+            case "reset-origins":
+                result = profiles.reset_origins(cluster)
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         return 0
     except ProfileError as error:
         # ProfileError messages are fixed checked-in reasons. The sole dynamic
-        # fields are validated endpoint names and numeric loopback ports.
+        # fields are validated endpoint names, origins and numeric loopback ports.
         print(f"cluster-profile: {error}", file=sys.stderr)
         return 2
     except (OSError, ValueError, KeyError, TypeError):

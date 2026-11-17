@@ -8,7 +8,7 @@ kind_profile_error() {
 
 kind_profile_load() {
   local root="$1" key value status count index
-  local -a fields=()
+  local -a fields=() origin_args=()
   local -A seen=() values=()
   KIND_PROFILE=0
   [ -n "${CLUSTER:-}" ] || return 0
@@ -16,12 +16,17 @@ kind_profile_load() {
     kind_profile_error 'CLUSTER and KIND_CLUSTER_NAME select different clusters'
     return 1
   fi
+  # A profile's origins are its own unless named explicitly (#5154): the
+  # inherited KIND_PUBLIC_ORIGIN a shell exports for review is replaced below.
+  [ -z "${KIND_PROFILE_PUBLIC_ORIGIN:-}" ] || origin_args+=(--public-origin "$KIND_PROFILE_PUBLIC_ORIGIN")
+  [ -z "${KIND_PROFILE_BROWSER_API_ORIGIN:-}" ] ||
+    origin_args+=(--browser-api-origin "$KIND_PROFILE_BROWSER_API_ORIGIN")
   # Keep the helper's exit status in the same pipe: process substitution alone
   # would turn a failed validation into a successful empty read.
   mapfile -d '' -t fields < <(
     status=0
     python3 "$root/scripts/dev/kind/cluster-profile.py" env \
-      --cluster "$CLUSTER" --format nul || status=$?
+      --cluster "$CLUSTER" --format nul "${origin_args[@]}" || status=$?
     printf '_kind_profile_exit_status\0%s\0' "$status"
   ) || return $?
   count="${#fields[@]}"
@@ -78,7 +83,7 @@ kind_profile_load() {
       KIND_INGRESS_URL|KIND_INGRESS_TLS_URL|KIND_ORCHESTRATION_URL|\
       KIND_COORDINATOR_DIRECT_URL|KIND_TEMPORAL_ADDRESS|KIND_DATABASE_URL|\
       KIND_ORCHESTRATION_HTTP_URL|KIND_TEMPORAL_FRONTEND_URL|\
-      KIND_WATCH_ADDR|KIND_PUBLIC_ORIGIN|KIND_BROWSER_API_ORIGIN)
+      KIND_WATCH_ADDR)
         if [ -n "${!key:-}" ] && [ "${!key}" != "$value" ]; then
           kind_profile_error "$key conflicts with saved cluster profile $CLUSTER"
           return 1

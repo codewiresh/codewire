@@ -7,6 +7,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# An image context holds the source tree while a build runs and refuses a
+# held directory that changes (#5154). In a fresh worktree two things would:
+# Python's __pycache__ beside the scripts it imports, and the root .tmp that
+# later steps create. Neither is written once the hold has begun.
+export PYTHONDONTWRITEBYTECODE=1
+mkdir -p "$ROOT/.tmp"
 if [ "${KIND_CLUSTER_NAME+x}" = x ] || [ -n "${CLUSTER:-}" ]; then
   KIND_CLUSTER_NAME_EXPLICIT=1
 else
@@ -21,9 +27,12 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]] && [ -n "${CLUSTER:-}" ] \
     echo '::error::named Kind profiles currently require the synthetic CI product image contract' >&2
     exit 2
   fi
+  # A named profile never takes the KIND_PUBLIC_ORIGIN a shell exports for
+  # review (#5154); another origin is named with KIND_PROFILE_PUBLIC_ORIGIN.
   profile_args=(--cluster "$CLUSTER")
-  [ -z "${KIND_PUBLIC_ORIGIN:-}" ] || profile_args+=(--public-origin "$KIND_PUBLIC_ORIGIN")
-  [ -z "${KIND_BROWSER_API_ORIGIN:-}" ] || profile_args+=(--browser-api-origin "$KIND_BROWSER_API_ORIGIN")
+  [ -z "${KIND_PROFILE_PUBLIC_ORIGIN:-}" ] || profile_args+=(--public-origin "$KIND_PROFILE_PUBLIC_ORIGIN")
+  [ -z "${KIND_PROFILE_BROWSER_API_ORIGIN:-}" ] ||
+    profile_args+=(--browser-api-origin "$KIND_PROFILE_BROWSER_API_ORIGIN")
   python3 "$ROOT/scripts/dev/kind/cluster-profile.py" ensure "${profile_args[@]}" >/dev/null
 fi
 

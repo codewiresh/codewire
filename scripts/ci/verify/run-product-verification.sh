@@ -1669,6 +1669,7 @@ run_kind_tools() {
   CODEWIRE_TEST_SHARD=5/6 python3 -B scripts/ci/tests/test-kind-dev-profile.py
   scripts/ci/tests/test-kind-e2e-cleanup.sh
   scripts/ci/tests/test-kind-e2e-suites.sh
+  scripts/ci/tests/test-kind-e2e-fresh-tree.sh
   run_kind_cw_runtime_probe_fixture
   python3 -B scripts/ci/tests/test-kind-cluster-profiles.py
   python3 -B scripts/ci/tests/test-kind-profile-artifacts.py

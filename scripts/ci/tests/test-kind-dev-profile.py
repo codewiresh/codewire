@@ -506,8 +506,7 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
 
     def test_endpoint_context_and_kubeconfig_conflicts(self) -> None:
         for key, value in (("KIND_INGRESS_URL", "http://127.0.0.1:8090"), ("KIND_POSTGRES_HOST_PORT", "25432"),
-                           ("KIND_PUBLIC_ORIGIN", "http://other:4174"), ("KUBE_CONTEXT", "kind-other"),
-                           ("KUBECONFIG", "/synthetic/other-config")):
+                           ("KUBE_CONTEXT", "kind-other"), ("KUBECONFIG", "/synthetic/other-config")):
             with self.subTest(key=key):
                 result = self.run_script("dev-loop.sh", "watch", **{key: value})
                 self.assertNotEqual(result.returncode, 0)
@@ -523,9 +522,10 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assert_no_runtime_calls()
 
     def test_profile_values_are_literal(self) -> None:
-        result = self.run_adapter('kind_profile_load "$FIXTURE_TREE"; printf "%s\\n" "$KIND_PUBLIC_ORIGIN"',
-                                  FAKE_FIELD_MODE="literal")
-        self.assertEqual(result.returncode, 0, result.stderr)
+        # An inherited review origin is replaced, not a conflict; a named one reaches the helper (#5154).
+        result = self.run_adapter('kind_profile_load "$FIXTURE_TREE"; printf "%s\\n" "$KIND_PUBLIC_ORIGIN"', FAKE_FIELD_MODE="literal",
+                                  KIND_PUBLIC_ORIGIN="http://other:4174", KIND_PROFILE_PUBLIC_ORIGIN="http://named:4174")
+        self.assertEqual((result.returncode, self.calls("profile")[-1]["args"][-2:]), (0, ["--public-origin", "http://named:4174"]))
         self.assertIn("$(touch", result.stdout)
         self.assertFalse((self.state / "executed").exists())
 

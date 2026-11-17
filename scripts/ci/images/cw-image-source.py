@@ -331,8 +331,10 @@ class ImageSource:
         try:
             current = os.fstat(fd)
             directory_policy(current)
-            require(stamp(before) == stamp(current), "image-source directory changed during open")
-            record = {"fd": fd, "parent_fd": parent_fd, "leaf": leaf,
+            require(stamp(before) == stamp(current), f"image-source directory changed during open: {name or '.'}")
+            # The path names the directory in a refusal; a held tree that
+            # changes is otherwise found only by holding it again by hand.
+            record = {"fd": fd, "parent_fd": parent_fd, "leaf": leaf, "path": name or ".",
                       "metadata": stamp(current), "names": None}
             self.directories[name] = record
             self.nodes[name] = "directory"
@@ -377,7 +379,7 @@ class ImageSource:
             raise
 
     def _selected_file(self, name, maximum):
-        require(not forbidden(name), "image-source selection exposes a protected tree")
+        require(not forbidden(name), f"image-source selection exposes a protected tree: {name}")
         parent, leaf = self._parent(name)
         held = self._file(name, parent, leaf, maximum)
         self.selections.add(name)
@@ -420,13 +422,15 @@ class ImageSource:
 
     def _names(self, record, count=False):
         self.active()
-        require(stamp(os.fstat(record["fd"])) == record["metadata"], "image-source directory changed")
+        where = record["path"]
+        require(stamp(os.fstat(record["fd"])) == record["metadata"], f"image-source directory changed: {where}")
         names = []
         # dup() shares directory offsets. A fresh anchored '.' open provides
         # an independent enumeration, including on repeated revalidation.
         scan_fd = os.open(".", DIR_FLAGS, dir_fd=record["fd"])
         try:
-            require(stamp(os.fstat(scan_fd)) == record["metadata"], "image-source enumeration changed directory")
+            require(stamp(os.fstat(scan_fd)) == record["metadata"],
+                    f"image-source enumeration changed directory: {where}")
             with os.scandir(scan_fd) as entries:
                 for entry in entries:
                     self.active()
@@ -437,24 +441,26 @@ class ImageSource:
                     if count:
                         self.total_entries += 1
                         require(self.total_entries <= MAX_ENTRIES, "image-source total entry bound exceeded")
-            require(stamp(os.fstat(scan_fd)) == record["metadata"], "image-source directory changed during enumeration")
+            require(stamp(os.fstat(scan_fd)) == record["metadata"],
+                    f"image-source directory changed during enumeration: {where}")
         finally:
             os.close(scan_fd)
-        require(stamp(os.fstat(record["fd"])) == record["metadata"], "image-source directory changed during enumeration")
+        require(stamp(os.fstat(record["fd"])) == record["metadata"],
+                f"image-source directory changed during enumeration: {where}")
         return tuple(sorted(names))
 
     def _walk(self, name):
         self.active()
         record = self.directories[name]
         names = self._names(record, count=True)
-        require(record["names"] in (None, names), "image-source directory inventory changed")
+        require(record["names"] in (None, names), f"image-source directory inventory changed: {record['path']}")
         record["names"] = names
         for leaf in names:
             path = relative(name + "/" + leaf if name else leaf)
             included = any(policy.includes(path) for policy in self.policies)
             traversed = included or any(policy.traverses(path) for policy in self.policies)
             if forbidden(path):
-                require(not traversed, "effective image context exposes a protected credential/cache tree")
+                require(not traversed, f"effective image context exposes a protected credential/cache tree: {path}")
                 continue  # Never stat/open an excluded protected entry.
             if not traversed and path not in self.selections and path not in self.directories:
                 continue
@@ -546,12 +552,12 @@ class ImageSource:
         for record in self.directories.values():
             require(stamp(os.stat(record["leaf"], dir_fd=record["parent_fd"], follow_symlinks=False))
                     == record["metadata"] == stamp(os.fstat(record["fd"])),
-                    "held image-source directory name/identity changed")
+                    f"held image-source directory name/identity changed: {record['path']}")
             names = self._names(record)
             if record["names"] is None:
                 record["names"] = names
             else:
-                require(names == record["names"], "held image-source directory inventory changed")
+                require(names == record["names"], f"held image-source directory inventory changed: {record['path']}")
         for parent, leaf in self.absent_policies:
             try:
                 os.stat(leaf, dir_fd=parent["fd"], follow_symlinks=False)
@@ -559,20 +565,20 @@ class ImageSource:
                 pass
             else:
                 raise Refused("previously absent Dockerfile ignore policy appeared")
-        for record in self.files.values():
+        for name, record in self.files.items():
             require(stamp(os.stat(record["leaf"], dir_fd=record["parent"]["fd"], follow_symlinks=False))
-                    == record["metadata"] == stamp(os.fstat(record["fd"])), "held image-source file changed")
-            require(self._hash(record) == record["sha256"], "held image-source file hash changed")
-        for record in self.links.values():
+                    == record["metadata"] == stamp(os.fstat(record["fd"])), f"held image-source file changed: {name}")
+            require(self._hash(record) == record["sha256"], f"held image-source file hash changed: {name}")
+        for name, record in self.links.items():
             require(stamp(os.stat(record["leaf"], dir_fd=record["parent"]["fd"], follow_symlinks=False))
                     == record["metadata"] and os.readlink(record["leaf"], dir_fd=record["parent"]["fd"])
-                    == record["target"], "held image-source symlink changed")
+                    == record["target"], f"held image-source symlink changed: {name}")
         # Hashing can span enough time for namespace changes; close the phase
         # with the held directory and ancestry identities again.
         for record in self.directories.values():
             require(stamp(os.fstat(record["fd"])) == record["metadata"]
                     == stamp(os.stat(record["leaf"], dir_fd=record["parent_fd"], follow_symlinks=False)),
-                    "image-source directory changed during revalidation")
+                    f"image-source directory changed during revalidation: {record['path']}")
         self.ancestry.revalidate()
 
     def _make_summary(self):

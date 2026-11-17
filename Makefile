@@ -213,6 +213,16 @@ KIND_ORIGIN_ENV = KIND_PUBLIC_ORIGIN="$(KIND_PUBLIC_ORIGIN)" KIND_BROWSER_API_OR
 else
 export CLUSTER
 KIND_ORIGIN_ENV =
+# A named profile serves its own loopback origins, whatever the shell exports
+# (#5154). Another origin, such as the GitHub App's registered one for real
+# credentials, is named on make's command line:
+# `make kind-up CLUSTER=x KIND_PUBLIC_ORIGIN=... KIND_BROWSER_API_ORIGIN=...`.
+ifeq ($(origin KIND_PUBLIC_ORIGIN),command line)
+export KIND_PROFILE_PUBLIC_ORIGIN := $(KIND_PUBLIC_ORIGIN)
+endif
+ifeq ($(origin KIND_BROWSER_API_ORIGIN),command line)
+export KIND_PROFILE_BROWSER_API_ORIGIN := $(KIND_BROWSER_API_ORIGIN)
+endif
 endif
 
 # Create and deploy a new retained cluster without running the test suites.
