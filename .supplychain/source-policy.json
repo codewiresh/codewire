@@ -23,6 +23,14 @@
     },
     {
       "kind": "osv",
+      "advisory_id": "RUSTSEC-2026-0543",
+      "package": "chrono",
+      "reason": "Informational unmaintained notice, not a vulnerability. chrono is a direct dependency of 12 workspace crates; moving to jiff or time is tracked in codewire#5199.",
+      "owner": "noel",
+      "expires": "2027-02-08"
+    },
+    {
+      "kind": "osv",
       "advisory_id": "RUSTSEC-2026-0374",
       "package": "basic-toml",
       "reason": "Informational unmaintained notice, not a vulnerability. Replace basic-toml with the maintained toml crate when Askama offers a compatible upgrade.",
