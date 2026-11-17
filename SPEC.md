@@ -269,6 +269,7 @@ fan-out where a service needs it.
 | Mode | Crate | Role |
 | --- | --- | --- |
 | CLI | `crates/codewire-cli`, `crates/codewire-cli-bin`, `crates/codewire-client` | Every user command, the OAuth client, the tailnet SSH client and the local VM supervisor. |
+| Rust SDK | `crates/codewire` | The `codewire.v1` client: configuration, the Connect transport, bearer tokens, typed errors and every public service wrapper. `codewire-client` builds on it and re-exports it (#3511). |
 | Hosted daemon | `crates/codewire-daemon`, `crates/codewire-workspace-access`, `crates/codewire-daemon-bridge` | `cw __hosted-daemon`: sessions, files, the SSH server, the tailnet peer and the credential bridge inside a hosted sandbox. |
 | Guest daemon | the same crates | The daemon inside a local VM, from the runtime pack the release pins. |
 | Release identity | `crates/codewire-cw-release` | The immutable version store behind the managed installation and `cw upgrade` ([docs/dev/CLI-MANAGED-INSTALL.md](docs/dev/CLI-MANAGED-INSTALL.md)). |

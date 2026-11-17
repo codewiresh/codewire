@@ -178,7 +178,7 @@ impl crate::CodewireClient {
     ) -> Result<CoordinatorPeerSession, Error> {
         let token = self.bearer_token().await?;
         CoordinatorPeerSession::connect_public_edge_grpc_with_setup_timeout(
-            self.config.server_url().as_str(),
+            self.config().server_url().as_str(),
             token.expose_secret(),
             identity,
             setup_timeout,
@@ -206,7 +206,7 @@ impl crate::CodewireClient {
     ) -> Result<CoordinatorPeerSession, Error> {
         let token = self.bearer_token().await?;
         CoordinatorPeerSession::connect_with_setup_timeout(
-            self.config.server_url().as_str(),
+            self.config().server_url().as_str(),
             token.expose_secret(),
             identity,
             setup_timeout,
@@ -235,7 +235,7 @@ impl crate::CodewireClient {
     ) -> Result<MeshCoordinatorPeerSession, Error> {
         let token = self.bearer_token().await?;
         MeshCoordinatorPeerSession::connect_with_setup_timeout(
-            self.config.mesh_url().as_str(),
+            self.config().mesh_url().as_str(),
             token.expose_secret(),
             identity,
             setup_timeout,

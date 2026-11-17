@@ -61,8 +61,8 @@ impl CodewireClient {
     ) -> Result<AdmittedCredentialDelegation, ClientError> {
         let deadline = Instant::now() + SETUP_TIMEOUT;
         let client = CredentialDelegationServiceClient::new(
-            ReqwestConnectTransport(self.http.clone()),
-            self.config.environment_session_connect_config()?,
+            ReqwestConnectTransport(self.http().clone()),
+            self.config().environment_session_connect_config()?,
         );
         let (stream, accepts_keepalive) =
             setup(client, self.auth_options(), open, deadline).await?;

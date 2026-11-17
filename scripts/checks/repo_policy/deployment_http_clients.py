@@ -1,13 +1,13 @@
 """Every HTTP client of a Codewire deployment starts from ClientConfig.
 
 `cw login --ca-file` pins a self-hosted deployment's own CA for its host
-(#4121). codewire_client::ClientConfig::http_client_builder is the one place
-that applies the pin, so a reqwest client built any other way in codewire-cli
-or codewire-client would reach a pinned deployment without it. The reviewed
+(#4121). codewire::ClientConfig::http_client_builder is the one place that
+applies the pin, so a reqwest client built any other way in codewire,
+codewire-cli or codewire-client would reach a pinned deployment without it. The reviewed
 clients below reach something other than a deployment's origin, or are the
 default for a caller that passes none, and each says which.
 
-Disabling certificate checks is refused everywhere in both crates. The one
+Disabling certificate checks is refused everywhere in the three crates. The one
 custom verifier is the pinned-host verifier, which only chooses between two
 full WebPKI verifiers; it is installed through rustls's `dangerous()` builder,
 the only way rustls takes one, and only in VERIFIER_OWNER.
@@ -16,9 +16,9 @@ the only way rustls takes one, and only in VERIFIER_OWNER.
 from .database_pools import TEST_FILE, production_source
 from .shared import *
 
-CRATE_SOURCES = ("crates/codewire-cli/src/", "crates/codewire-client/src/")
-BUILDER_OWNER = "crates/codewire-client/src/config.rs"
-VERIFIER_OWNER = "crates/codewire-client/src/config/deployment_ca.rs"
+CRATE_SOURCES = ("crates/codewire/src/", "crates/codewire-cli/src/", "crates/codewire-client/src/")
+BUILDER_OWNER = "crates/codewire/src/config.rs"
+VERIFIER_OWNER = "crates/codewire/src/config/deployment_ca.rs"
 REVIEWED_CLIENTS = {
     "crates/codewire-client/src/auth.rs":
         "the OAuth constructors' default for a caller with no pinned CA; the CLI passes its own",
@@ -38,7 +38,7 @@ CUSTOM_VERIFIER = re.compile(r"\.\s*dangerous\s*\(\s*\)")
 
 
 def violations_from(sources: dict[str, str]) -> list[str]:
-    """SOURCES maps repository paths in the two crates to their Rust text."""
+    """SOURCES maps repository paths in the three crates to their Rust text."""
     failures: list[str] = []
     seen: set[str] = set()
     for path, source in sorted(sources.items()):

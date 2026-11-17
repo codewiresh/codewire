@@ -52,6 +52,7 @@ members = [
     "crates/codewire-workspace-access",
     "crates/codewire-workspace-hack",
     "crates/codewire-workspace-image",
+    "crates/codewire",
 ]
 exclude = [
     "crates/codewire-desktop",
@@ -68,6 +69,7 @@ authors = ["Sonica"]
 [workspace.dependencies]
 # Internal crates
 codewire-access = { path = "crates/codewire-access" }
+codewire = { path = "crates/codewire" }
 codewire-client = { path = "crates/codewire-client" }
 codewire-client-ffi = { path = "crates/codewire-client-ffi" }
 codewire-types = { path = "crates/codewire-types" }

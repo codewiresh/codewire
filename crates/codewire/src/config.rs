@@ -145,7 +145,8 @@ impl ClientConfig {
         self.unary_timeout
     }
 
-    pub(crate) fn connect_config(&self) -> Result<connectrpc::client::ClientConfig, ClientError> {
+    #[doc(hidden)]
+    pub fn connect_config(&self) -> Result<connectrpc::client::ClientConfig, ClientError> {
         Ok(self
             .base_connect_config(self.server_url())?
             .with_default_timeout(self.unary_timeout))
@@ -186,7 +187,8 @@ impl ClientConfig {
     /// generated service has no default whole-call deadline because durable
     /// attachments are intentionally long-lived. Facade unary calls apply the
     /// configured unary timeout explicitly.
-    pub(crate) fn environment_session_connect_config(
+    #[doc(hidden)]
+    pub fn environment_session_connect_config(
         &self,
     ) -> Result<connectrpc::client::ClientConfig, ClientError> {
         Ok(self

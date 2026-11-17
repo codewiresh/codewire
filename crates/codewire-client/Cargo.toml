@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license = "AGPL-3.0-only"
-description = "Shared ergonomic Rust client over Codewire's generated Connect-RPC stubs."
+description = "The CLI's and native apps' layer over the Codewire Rust SDK: sign-in, billing, setup following, credential delegation, tailnet and hosted shell."
 
 [features]
 kind-e2e = []
@@ -27,6 +27,7 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 buffa = { workspace = true }
 buffa-types = { workspace = true }
+codewire = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
 codewire-tailnet = { workspace = true }
 chrono = { workspace = true }
@@ -52,7 +53,6 @@ tracing = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 webpki-roots = "=1.0.10"
-x509-parser = { workspace = true }
 
 tokio = { workspace = true }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
@@ -71,8 +71,6 @@ keyring = { workspace = true, optional = true, features = ["linux-native-sync-pe
 codewire-cw-release = { workspace = true }
 # The rejoin tests serve a fake coordinator in-process.
 connectrpc = { workspace = true, features = ["server"] }
-# The deployment CA tests sign their own certificates.
-rcgen = "0.13"
 rustix = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

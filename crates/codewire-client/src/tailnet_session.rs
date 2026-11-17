@@ -26,8 +26,7 @@ use crate::session_wire::{FrameDecoder, SESSION_SUBSYSTEM, encode_frame};
 use crate::tailnet::dial_tailnet_ssh;
 use crate::{
     AttachSessionOpen, AttachSessionRequest, AttachSessionResponse, ClientError, CodewireClient,
-    EnvironmentSessionAttachment, EnvironmentSessionAttachmentInput, GetEnvironmentHostKeyRequest,
-    attach_session_request,
+    EnvironmentSessionAttachment, GetEnvironmentHostKeyRequest, attach_session_request,
 };
 
 /// The user the daemon's SSH server expects; the tailnet authenticated the
@@ -529,15 +528,12 @@ async fn attach_over(
         output_tx,
         terminal_error_tx,
     ));
-    Ok(EnvironmentSessionAttachment {
-        input: EnvironmentSessionAttachmentInput {
-            input: input_tx,
-            terminal_error: terminal_error_rx,
-        },
-        output: output_rx,
-        first: None,
+    Ok(EnvironmentSessionAttachment::from_parts(
+        input_tx,
+        terminal_error_rx,
+        output_rx,
         driver,
-    })
+    ))
 }
 
 /// Why the connection is not on direct UDP, from what the environment

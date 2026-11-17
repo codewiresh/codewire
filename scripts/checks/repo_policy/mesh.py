@@ -154,6 +154,7 @@ MESH_FINAL_POLICY_KEYS = {
 MESH_FINAL_CLIENT_SOURCE_ROOTS = (
     "apps/desktop/",
     "apps/ios/",
+    "crates/codewire/",
     "crates/codewire-cli/src/",
     "crates/codewire-client/",
     "crates/codewire-dashboard-web/",

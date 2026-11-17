@@ -45,6 +45,7 @@ on:
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
+      - 'crates/codewire/**'
       - 'crates/codewire-access/**'
       - 'crates/codewire-cli/**'
       - 'crates/codewire-cli-bin/**'

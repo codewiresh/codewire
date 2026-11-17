@@ -38,6 +38,7 @@ exact-versions = true
 # toward the unified features.
 [final-excludes]
 workspace-members = [
+    "codewire",
     "codewire-client",
     "codewire-derp",
     "codewire-netstack",

@@ -24,6 +24,7 @@ PERMANENT_RAW_OIDC_DEFAULTS = "crates/codewire-oidc/src/discovery.rs"
 PERMANENT_RAW_CLIENT_ROOTS = (
     "apps/dashboard/src/",
     "apps/ios/Sources/",
+    "crates/codewire/src/",
     "crates/codewire-cli/src/",
     "crates/codewire-client/src/",
     "crates/codewire-desktop/src/",

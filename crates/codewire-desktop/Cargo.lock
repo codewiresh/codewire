@@ -1242,6 +1242,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "buffa",
+ "buffa-types",
+ "bytes",
+ "codewire-proto",
+ "connectrpc",
+ "futures-util",
+ "http",
+ "http-body-util",
+ "reqwest",
+ "rustls",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "url",
+ "uuid",
+ "webpki-roots 1.0.10",
+ "x509-parser",
+]
+
+[[package]]
 name = "codewire-client"
 version = "0.1.0"
 dependencies = [
@@ -1252,6 +1279,7 @@ dependencies = [
  "buffa-types",
  "bytes",
  "chrono",
+ "codewire",
  "codewire-proto",
  "codewire-tailnet",
  "connectrpc",
@@ -1279,7 +1307,6 @@ dependencies = [
  "uuid",
  "webpki-roots 1.0.10",
  "wiremock",
- "x509-parser",
 ]
 
 [[package]]

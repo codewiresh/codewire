@@ -136,7 +136,8 @@ impl MemberTailnet {
             Uuid::new_v4(),
             StaticSecret::random_from_rng(OsRng),
             options,
-            client.config.mesh_url().scheme() == "http" && is_loopback(client.config.mesh_url()),
+            client.config().mesh_url().scheme() == "http"
+                && is_loopback(client.config().mesh_url()),
         )
         .await
     }

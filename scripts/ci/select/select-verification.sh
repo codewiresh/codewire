@@ -1211,6 +1211,7 @@ if [ "$event_selected" = false ]; then
         # Environment requests are consumed directly by the platform clients,
         # dashboard, orchestration adapter, and local VMM public API.
         select_token rust
+        select_token rust_pkg_codewire
         select_token rust_pkg_codewire_cli
         select_token rust_pkg_codewire_client
         select_token rust_pkg_codewire_dashboard_web
@@ -1225,6 +1226,7 @@ if [ "$event_selected" = false ]; then
         # Preset requests are consumed directly by the platform clients,
         # dashboard, and orchestration adapter.
         select_token rust
+        select_token rust_pkg_codewire
         select_token rust_pkg_codewire_cli
         select_token rust_pkg_codewire_client
         select_token rust_pkg_codewire_dashboard_web
@@ -1237,6 +1239,7 @@ if [ "$event_selected" = false ]; then
         # The shared setup and project messages also have handwritten Rust and
         # dashboard consumers outside the generated-proto crate.
         select_token rust
+        select_token rust_pkg_codewire
         select_token rust_pkg_codewire_cli
         select_token rust_pkg_codewire_client
         select_token rust_pkg_codewire_dashboard_web

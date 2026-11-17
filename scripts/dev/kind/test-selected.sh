@@ -88,8 +88,9 @@ map_token() {
     rust_pkg_codewire_email) want "$token" dashboard-browser ;;
     rust_pkg_codewire_orchestration)
       want "$token" edge-contract workspace-services final-fencing runtime-acceptance credentials ;;
-    # The client's examples are the session, run and coordinator ingress smokes.
-    rust_pkg_codewire_client) want "$token" edge-contract workspace-services integrated ;;
+    # The client's examples are the session, run and coordinator ingress smokes;
+    # the SDK crate carries every RPC they make.
+    rust_pkg_codewire | rust_pkg_codewire_client) want "$token" edge-contract workspace-services integrated ;;
     # Project documents drive environment setup and create-time detection.
     rust_pkg_codewire_project | rust_pkg_codewire_project_proto)
       want "$token" edge-contract workspace-services ;;

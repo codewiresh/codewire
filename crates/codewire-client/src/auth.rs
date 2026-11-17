@@ -16,92 +16,12 @@ use std::time::Instant;
 use async_trait::async_trait;
 use base64::Engine as _;
 use connectrpc::ErrorCode;
-use http::HeaderValue;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
 use url::Url;
 
-use crate::{ClientConfig, ClientError};
-
-/// A validated bearer credential.
-///
-/// Debug output is always redacted. Callers that must authenticate a
-/// non-Connect transport, such as the permanent terminal WebSocket, can use
-/// [`expose_secret`](Self::expose_secret) deliberately.
-#[derive(Clone, PartialEq, Eq)]
-pub struct BearerToken(String);
-
-impl BearerToken {
-    pub fn new(token: impl Into<String>) -> Result<Self, ClientError> {
-        let token = token.into();
-        if token.is_empty() || token.bytes().any(|byte| byte.is_ascii_whitespace()) {
-            return Err(ClientError::new(
-                ErrorCode::InvalidArgument,
-                "bearer token must not be empty or contain whitespace",
-            ));
-        }
-        HeaderValue::try_from(format!("Bearer {token}")).map_err(|_| {
-            ClientError::new(
-                ErrorCode::InvalidArgument,
-                "bearer token contains invalid header characters",
-            )
-        })?;
-        Ok(Self(token))
-    }
-
-    pub fn expose_secret(&self) -> &str {
-        &self.0
-    }
-
-    pub(crate) fn authorization_header(&self) -> String {
-        format!("Bearer {}", self.0)
-    }
-}
-
-impl fmt::Debug for BearerToken {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("BearerToken([REDACTED])")
-    }
-}
-
-/// Supplies the current bearer credential for each RPC.
-///
-/// The provider is asynchronous so the later OAuth convergence can refresh
-/// and atomically persist a token pair behind this same seam. API keys and
-/// OAuth access tokens both use this interface; the server remains the
-/// authority for their distinct semantics.
-#[async_trait]
-pub trait TokenProvider: Send + Sync {
-    async fn token(&self) -> Result<BearerToken, ClientError>;
-}
-
-/// A non-refreshing provider for an already-resolved token or `cw_` API key.
-#[derive(Clone, Debug)]
-pub struct StaticTokenProvider {
-    token: BearerToken,
-}
-
-impl StaticTokenProvider {
-    pub fn new(token: impl Into<String>) -> Result<Self, ClientError> {
-        Ok(Self {
-            token: BearerToken::new(token)?,
-        })
-    }
-
-    /// Move an already validated credential into a static provider without
-    /// manufacturing another plaintext copy.
-    pub fn from_token(token: BearerToken) -> Self {
-        Self { token }
-    }
-}
-
-#[async_trait]
-impl TokenProvider for StaticTokenProvider {
-    async fn token(&self) -> Result<BearerToken, ClientError> {
-        Ok(self.token.clone())
-    }
-}
+use crate::{BearerToken, ClientConfig, ClientError, TokenProvider};
 
 /// The standard OAuth client registration used by the public Codewire CLI.
 pub const CODEWIRE_CLI_OAUTH_CLIENT_ID: &str = "codewire-cli";
@@ -369,8 +289,8 @@ impl OAuthCredentials {
                 "OAuth client id must not be empty",
             ));
         }
-        let access_token = BearerToken::new(access_token)?.0;
-        let refresh_token = BearerToken::new(refresh_token)?.0;
+        let access_token = BearerToken::new(access_token)?.into_secret();
+        let refresh_token = BearerToken::new(refresh_token)?.into_secret();
         Ok(Self {
             issuer,
             client_id,
@@ -393,7 +313,7 @@ impl OAuthCredentials {
                 "OAuth token response did not use Bearer authentication",
             ));
         }
-        let access_token = BearerToken::new(response.access_token)?.0;
+        let access_token = BearerToken::new(response.access_token)?.into_secret();
         let refresh_token = response
             .refresh_token
             .or_else(|| previous_refresh_token.map(ToOwned::to_owned))
@@ -1650,19 +1570,8 @@ fn sync_credential_dir(_path: &Path) -> Result<(), ClientError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::StaticTokenProvider;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
-
-    #[test]
-    fn bearer_tokens_are_validated_without_echoing_the_value() {
-        assert!(BearerToken::new("").is_err());
-        assert!(BearerToken::new("token with whitespace").is_err());
-        assert!(BearerToken::new("token\r\ninjected: true").is_err());
-
-        let token = BearerToken::new("secret-value").expect("valid token");
-        assert_eq!(format!("{token:?}"), "BearerToken([REDACTED])");
-        assert!(!format!("{token:?}").contains("secret-value"));
-        assert_eq!(token.expose_secret(), "secret-value");
-    }
 
     #[test]
     fn device_authorization_debug_preserves_user_instructions_but_redacts_capabilities() {
