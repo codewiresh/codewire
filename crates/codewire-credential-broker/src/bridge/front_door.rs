@@ -135,7 +135,12 @@ where
         .try_send(front_door)
         .map_err(|_| BrokerBridgeError::Unavailable)?;
     drop(joins);
-    run_admitted_credential_bridge_with_front_doors(broker, loopback, joining).await
+    run_admitted_credential_bridge_with_front_doors(
+        broker.paired_with_front_door(),
+        loopback,
+        joining,
+    )
+    .await
 }
 
 /// [`run_admitted_credential_bridges`] for front-door sessions that join a

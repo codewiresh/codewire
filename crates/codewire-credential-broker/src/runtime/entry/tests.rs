@@ -173,6 +173,10 @@ struct Recorded {
     deny: bool,
     /// The codex slot holds a ChatGPT sign-in instead of an API key.
     codex_sign_in: bool,
+    /// The environment whose Codex login the authority delivers, if any.
+    codex_login_environment: Option<Uuid>,
+    /// Counts the leases asked for a sealed agent login.
+    login_leases: Arc<AtomicUsize>,
     /// The provider's ends of the sockets its WebSocket handshakes opened.
     sockets: Arc<Mutex<Vec<tokio::io::DuplexStream>>>,
     /// Handshakes the provider answers 401 before it switches one.
@@ -211,6 +215,8 @@ impl Recorded {
                 codex_sign_in: self.codex_sign_in,
                 refreshes: self.refreshes.clone(),
                 plan: Arc::clone(&self.plan),
+                codex_login_environment: self.codex_login_environment,
+                login_leases: Arc::clone(&self.login_leases),
             },
             Upstream {
                 outbound: Arc::clone(&self.outbound),
@@ -243,6 +249,8 @@ struct Authority {
     codex_sign_in: bool,
     refreshes: Option<Arc<AtomicUsize>>,
     plan: Arc<Mutex<std::collections::VecDeque<LeasePlan>>>,
+    codex_login_environment: Option<Uuid>,
+    login_leases: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -300,6 +308,35 @@ impl BrokerLeaseProvider for Authority {
             LeasePlan::Ordinary | LeasePlan::Denied => {}
         }
         Ok(lease)
+    }
+
+    /// The codex slot's sign-in for `codex_login_environment`, when set.
+    async fn lease_codex_login(&self, _id: Uuid) -> Result<Lease, BrokerLeaseError> {
+        self.login_leases.fetch_add(1, Ordering::Relaxed);
+        let Some(environment_id) = self.codex_login_environment.filter(|_| self.codex_sign_in)
+        else {
+            return Err(BrokerLeaseError::Denied);
+        };
+        let permission = codewire_access::codex_login_permission();
+        let mut lease = Lease::new(
+            "openai",
+            CredentialAuthKind::OAuth,
+            "codex",
+            permission.operation.as_str(),
+            permission.route.as_str(),
+        );
+        lease.grant.environment_id =
+            codewire_access::EnvironmentId::parse(environment_id.to_string()).unwrap();
+        lease.material = codex_sign_in();
+        lease.placeholder = self
+            .placeholder
+            .map(|value| codewire_access::CredentialPlaceholder::parse(value).unwrap());
+        Ok(lease)
+    }
+
+    async fn lease_claude_login(&self, _id: Uuid) -> Result<Lease, BrokerLeaseError> {
+        self.login_leases.fetch_add(1, Ordering::Relaxed);
+        Err(BrokerLeaseError::Denied)
     }
 
     async fn begin_credential_refresh(
@@ -1192,7 +1229,10 @@ struct TwoSessions {
 
 impl TwoSessions {
     async fn start(recorded: &Recorded) -> Self {
-        let environment_id = Uuid::new_v4();
+        Self::start_in(recorded, Uuid::new_v4()).await
+    }
+
+    async fn start_in(recorded: &Recorded, environment_id: Uuid) -> Self {
         let (front_door_end, broker_end) = tokio::net::UnixStream::pair().unwrap();
         let guest = CredentialBridge::new(environment_id, GENERATION).unwrap();
         let serving = guest.clone();
@@ -1859,6 +1899,151 @@ async fn a_swapped_codex_reply_redacts_the_token_and_keeps_the_account() {
         "{}",
         String::from_utf8_lossy(&body)
     );
+}
+
+/// One Codex login through a loopback session, opened as the guest daemon
+/// opens it.
+async fn codex_login_through(
+    input: &mpsc::Sender<v1::CredentialBridgeGuestMessage>,
+    output: &mut mpsc::Receiver<Payload>,
+    environment_id: Uuid,
+) -> codewire_workload_secrets::OpenedCodexLogin {
+    let recipient = codewire_workload_secrets::ProjectionRecipient::new();
+    let request = v1::CodexLoginRequest {
+        request_id: Uuid::new_v4().to_string(),
+        recipient_public_key: recipient.public_key().to_vec(),
+        deadline_unix_ms: crate::runtime::current_unix_time_ms().unwrap()
+            + codewire_workload_secrets::MAX_CODEX_LOGIN_LIFETIME_MS,
+    };
+    input
+        .send(v1::CredentialBridgeGuestMessage {
+            payload: Some(v1::credential_bridge_guest_message::Payload::CodexLogin(
+                request.clone(),
+            )),
+        })
+        .await
+        .unwrap();
+    let Payload::CodexLogin(v1::CodexLoginResponse {
+        result: Some(v1::codex_login_response::Result::SealedLogin(sealed)),
+        ..
+    }) = output.recv().await.unwrap()
+    else {
+        panic!("expected a sealed Codex login");
+    };
+    let context = codewire_workload_secrets::CodexLoginContext {
+        environment_id: *environment_id.as_bytes(),
+        environment_generation: GENERATION,
+        request_id: *Uuid::parse_str(&request.request_id).unwrap().as_bytes(),
+        deadline_unix_ms: request.deadline_unix_ms,
+    };
+    recipient
+        .open_codex_login(
+            &sealed,
+            &context,
+            crate::runtime::current_unix_time_ms().unwrap(),
+        )
+        .unwrap()
+}
+
+/// The pairing is `run_admitted_credential_bridges`' own (#3999): served
+/// there beside a front door, a broker seals the loopback session's Codex
+/// login with this environment's placeholder and a placeholder ID token; the
+/// same broker served alone seals the sign-in's own tokens, the listed direct
+/// delivery exception.
+#[tokio::test]
+async fn only_a_broker_beside_a_front_door_seals_a_placeholder_codex_login() {
+    let environment_id = Uuid::new_v4();
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        codex_sign_in: true,
+        codex_login_environment: Some(environment_id),
+        ..Recorded::default()
+    };
+    let mut sessions = TwoSessions::start_in(&recorded, environment_id).await;
+    let paired = codex_login_through(
+        &sessions.loopback_input,
+        &mut sessions.loopback_output,
+        environment_id,
+    )
+    .await;
+    assert_eq!(paired.login.access_token(), OURS);
+    assert!(paired.login.id_token().ends_with(".codewire-placeholder"));
+    assert_eq!(paired.login.account_id(), SIGN_IN_ACCOUNT);
+
+    let (alone, input, mut output) = loopback_session(environment_id).await;
+    let broker = recorded.broker();
+    let runner = tokio::spawn(async move { run_admitted_credential_bridge(broker, alone).await });
+    let direct = codex_login_through(&input, &mut output, environment_id).await;
+    assert_ne!(direct.login.access_token(), OURS);
+    assert!(direct.login.access_token().starts_with("ey"));
+    assert!(direct.login.id_token().ends_with(".synthetic-signature"));
+    drop(input);
+    assert_eq!(runner.await.unwrap(), Err(BrokerBridgeError::Unavailable));
+}
+
+/// A broker that cannot pair with the front door its environment was started
+/// with seals no agent login at all: both are refused before any lease, so
+/// it never hands the environment the sign-in's tokens instead (#3999).
+#[tokio::test]
+async fn a_broker_whose_front_door_is_gone_refuses_every_agent_login() {
+    let environment_id = Uuid::new_v4();
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        codex_sign_in: true,
+        codex_login_environment: Some(environment_id),
+        ..Recorded::default()
+    };
+    let broker = recorded.broker().with_agent_logins_refused();
+    let recipient = codewire_workload_secrets::ProjectionRecipient::new();
+    let deadline_unix_ms = crate::runtime::current_unix_time_ms().unwrap()
+        + codewire_workload_secrets::MAX_CODEX_LOGIN_LIFETIME_MS;
+    assert!(matches!(
+        broker
+            .codex_login(v1::CodexLoginRequest {
+                request_id: Uuid::new_v4().to_string(),
+                recipient_public_key: recipient.public_key().to_vec(),
+                deadline_unix_ms,
+            })
+            .await,
+        Err(BrokerRequestError::Denied)
+    ));
+    assert!(matches!(
+        broker
+            .claude_login(v1::ClaudeLoginRequest {
+                request_id: Uuid::new_v4().to_string(),
+                recipient_public_key: recipient.public_key().to_vec(),
+                deadline_unix_ms,
+            })
+            .await,
+        Err(BrokerRequestError::Denied)
+    ));
+    assert_eq!(recorded.login_leases.load(Ordering::Relaxed), 0);
+    assert_eq!(recorded.leases(), 0);
+}
+
+/// Beside the front door the Claude login has no placeholder form until #3999
+/// change 12c, so the paired broker refuses it before any lease rather than
+/// seal the owner's real Claude sign-in.
+#[tokio::test]
+async fn a_broker_beside_a_front_door_refuses_the_claude_login_before_any_lease() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        ..Recorded::default()
+    };
+    let broker = recorded.broker().paired_with_front_door();
+    let recipient = codewire_workload_secrets::ProjectionRecipient::new();
+    assert!(matches!(
+        broker
+            .claude_login(v1::ClaudeLoginRequest {
+                request_id: Uuid::new_v4().to_string(),
+                recipient_public_key: recipient.public_key().to_vec(),
+                deadline_unix_ms: crate::runtime::current_unix_time_ms().unwrap()
+                    + codewire_workload_secrets::MAX_CODEX_LOGIN_LIFETIME_MS,
+            })
+            .await,
+        Err(BrokerRequestError::Denied)
+    ));
+    assert_eq!(recorded.login_leases.load(Ordering::Relaxed), 0);
 }
 
 mod github;

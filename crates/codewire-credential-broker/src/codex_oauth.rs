@@ -21,6 +21,18 @@ pub(crate) const ACCESS_TOKEN_REFRESH_WINDOW_SECONDS: u64 = 5 * 60;
 /// token's lifetime (see [`CodexOAuthCredential::should_refresh_within`]).
 pub(crate) const CODEX_LOGIN_MINIMUM_VALIDITY_SECONDS: u64 = 30 * 60;
 const FALLBACK_REFRESH_INTERVAL_SECONDS: u64 = 8 * 24 * 60 * 60;
+/// A placeholder login's ID token expires 2099-01-01, so Codex never refreshes
+/// it on its own (#3999).
+const PLACEHOLDER_ID_TOKEN_EXPIRY_UNIX: u64 = 4_070_908_800;
+/// The header and signature of a placeholder ID token: unsigned, which Codex
+/// accepts, since it decodes the claims and never checks a signature.
+const PLACEHOLDER_JWT_HEADER: &[u8] = br#"{"alg":"none","typ":"JWT"}"#;
+const PLACEHOLDER_JWT_SIGNATURE: &str = "codewire-placeholder";
+const AUTH_CLAIM: &str = "https://api.openai.com/auth";
+const PROFILE_CLAIM: &str = "https://api.openai.com/profile";
+/// The `auth` claim's members a placeholder ID token copies, when they are
+/// strings. The account id and FedRAMP flag come from the credential itself.
+const PLACEHOLDER_AUTH_STRINGS: [&str; 2] = ["chatgpt_plan_type", "chatgpt_user_id"];
 
 /// Stable import failures that never retain provider material or parser input.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -208,6 +220,65 @@ impl CodexOAuthCredential {
         self.refreshed_at_unix = refreshed_at_unix;
         self.validate()?;
         Ok(self)
+    }
+
+    /// The ID token a placeholder login carries in place of the real one
+    /// (#3999, decided by cw-network on 2026-11-15): an unsigned JWT of an
+    /// allow-list of the real token's non-secret claims and a 2099 expiry.
+    /// Copied are `email`, the profile's `email`, and the `auth` claim's plan
+    /// type and user id when they are strings, plus this credential's account
+    /// id and FedRAMP flag. Every other claim is withheld.
+    pub(crate) fn placeholder_id_token(
+        &self,
+    ) -> Result<Zeroizing<String>, CodexOAuthMaterialError> {
+        use serde_json::{Map, Value};
+
+        let real = decode_jwt_payload::<Map<String, Value>>(&self.id_token)?;
+        let string = |claims: &Map<String, Value>, name: &str| {
+            claims
+                .get(name)
+                .and_then(Value::as_str)
+                .map(|value| Value::String(value.to_owned()))
+        };
+        let mut claims = Map::new();
+        if let Some(email) = string(&real, "email") {
+            claims.insert("email".into(), email);
+        }
+        if let Some(email) = real
+            .get(PROFILE_CLAIM)
+            .and_then(Value::as_object)
+            .and_then(|profile| string(profile, "email"))
+        {
+            claims.insert(
+                PROFILE_CLAIM.into(),
+                Value::Object(Map::from_iter([("email".to_owned(), email)])),
+            );
+        }
+        let mut auth = Map::new();
+        if let Some(real_auth) = real.get(AUTH_CLAIM).and_then(Value::as_object) {
+            for name in PLACEHOLDER_AUTH_STRINGS {
+                if let Some(value) = string(real_auth, name) {
+                    auth.insert(name.into(), value);
+                }
+            }
+        }
+        auth.insert(
+            "chatgpt_account_id".into(),
+            Value::String(self.account_id.clone()),
+        );
+        auth.insert(
+            "chatgpt_account_is_fedramp".into(),
+            Value::Bool(self.fedramp),
+        );
+        claims.insert(AUTH_CLAIM.into(), Value::Object(auth));
+        claims.insert("exp".into(), Value::from(PLACEHOLDER_ID_TOKEN_EXPIRY_UNIX));
+        let payload = serde_json::to_vec(&claims).map_err(|_| CodexOAuthMaterialError::Invalid)?;
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        Ok(Zeroizing::new(format!(
+            "{}.{}.{PLACEHOLDER_JWT_SIGNATURE}",
+            encode(PLACEHOLDER_JWT_HEADER),
+            encode(&payload)
+        )))
     }
 
     pub(crate) fn to_bundle(&self) -> Result<CanonicalCodexOAuthBundle, CodexOAuthMaterialError> {
@@ -447,6 +518,125 @@ mod tests {
 
     fn import_at(access_token: &str, imported_at: u64) -> CodexOAuthImport {
         import_tokens_at(issued(work_claims(), access_token), imported_at).unwrap()
+    }
+
+    fn decoded(token: &str) -> serde_json::Value {
+        let mut parts = token.split('.');
+        let (header, payload, signature) = (
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+        );
+        assert!(parts.next().is_none());
+        let decode = |part: &str| {
+            serde_json::from_slice::<serde_json::Value>(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(part)
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(decode(header), json!({"alg": "none", "typ": "JWT"}));
+        assert_eq!(signature, PLACEHOLDER_JWT_SIGNATURE);
+        decode(payload)
+    }
+
+    /// A real-shaped ID token's claims beyond the allow-list never reach the
+    /// placeholder: issuer, audience, subject, session ids, organizations,
+    /// subscription dates and unknown members of the auth claim.
+    #[test]
+    fn a_placeholder_id_token_carries_only_the_allow_listed_claims() {
+        let real = json!({
+            "iss": "https://auth.openai.com",
+            "aud": ["app_synthetic"],
+            "sub": "auth0|synthetic-subject",
+            "sid": "synthetic-session",
+            "jti": "synthetic-jti",
+            "iat": 1_800_000_000_u64,
+            "exp": 1_800_003_600_u64,
+            "auth_time": 1_800_000_000_u64,
+            "email": "developer@example.test",
+            "email_verified": true,
+            "https://api.openai.com/profile": {
+                "email": "developer@example.test",
+                "email_verified": true,
+                "phone_number": "+10000000000"
+            },
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "account-work",
+                "chatgpt_account_is_fedramp": false,
+                "chatgpt_plan_type": "pro",
+                "chatgpt_user_id": "user-synthetic",
+                "chatgpt_subscription_active_until": "2099-01-01T00:00:00+00:00",
+                "organizations": [{"id": "org-synthetic", "role": "owner"}],
+                "user_id": "user-synthetic"
+            }
+        });
+        let credential = CodexOAuthCredential::parse(
+            import_tokens_at(issued(real, "header.access.signature"), 1_800_000_000)
+                .unwrap()
+                .into_parts()
+                .0
+                .as_bytes(),
+        )
+        .unwrap();
+        let placeholder = credential.placeholder_id_token().unwrap();
+        assert_eq!(
+            decoded(&placeholder),
+            json!({
+                "email": "developer@example.test",
+                "https://api.openai.com/profile": {"email": "developer@example.test"},
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "account-work",
+                    "chatgpt_account_is_fedramp": false,
+                    "chatgpt_plan_type": "pro",
+                    "chatgpt_user_id": "user-synthetic"
+                },
+                "exp": PLACEHOLDER_ID_TOKEN_EXPIRY_UNIX
+            })
+        );
+        // It is an ID token this module, and so Codex, reads as the same
+        // account.
+        let claims = id_token_claims(&placeholder).unwrap();
+        assert_eq!(claims.account_id.as_deref(), Some("account-work"));
+        assert_eq!(
+            claims.account_hint.as_deref(),
+            Some("developer@example.test")
+        );
+        assert!(!credential.id_token().contains(PLACEHOLDER_JWT_SIGNATURE));
+    }
+
+    /// An `auth` member of an unexpected type is dropped rather than copied
+    /// or failing the login; the account id and FedRAMP flag are the
+    /// credential's own. (A non-string email or profile is refused at import.)
+    #[test]
+    fn a_placeholder_id_token_drops_auth_members_of_another_type() {
+        let real = json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "account-work",
+                "chatgpt_account_is_fedramp": true,
+                "chatgpt_plan_type": {"nested": "plus"},
+                "chatgpt_user_id": null
+            }
+        });
+        let credential = CodexOAuthCredential::parse(
+            import_tokens_at(issued(real, "header.access.signature"), 1_800_000_000)
+                .unwrap()
+                .into_parts()
+                .0
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            decoded(&credential.placeholder_id_token().unwrap()),
+            json!({
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "account-work",
+                    "chatgpt_account_is_fedramp": true
+                },
+                "exp": PLACEHOLDER_ID_TOKEN_EXPIRY_UNIX
+            })
+        );
     }
 
     #[test]

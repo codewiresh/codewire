@@ -12,8 +12,8 @@ use codewire_access::{
 };
 use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_workload_secrets::{
-    ClaudeLogin, CodexLogin, CodexLoginBinding, CodexLoginContext, MAX_CODEX_LOGIN_LIFETIME_MS,
-    seal_claude_login, seal_codex_login, validate_projection_recipient,
+    ClaudeLogin, CodexLoginBinding, CodexLoginContext, MAX_CODEX_LOGIN_LIFETIME_MS,
+    seal_claude_login, validate_projection_recipient,
 };
 #[cfg(feature = "local-broker-synthetic-smoke")]
 use futures::stream;
@@ -66,6 +66,7 @@ const SYNTHETIC_CODEX_ACCOUNT_ID: &str = "account-native-broker";
 
 mod anthropic_route;
 mod claude_token;
+mod codex_login;
 mod entry;
 mod forced_refresh;
 mod github_front_door;
@@ -1066,6 +1067,22 @@ pub struct OpenAiBroker<P, U> {
     placeholders: swap::PlaceholderCache,
     github_forced_attempts: forced_refresh::ForcedAttempts,
     network_policy_allows_github: bool,
+    login_delivery: LoginDelivery,
+}
+
+/// What this broker's sealed agent logins carry (#3999).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LoginDelivery {
+    /// The sign-in's own tokens: the listed direct delivery exception, for an
+    /// environment with no front door.
+    Real,
+    /// Serving beside the environment's front door: placeholders, never the
+    /// sign-in's tokens. Codex's login has its placeholder form; Claude's is
+    /// refused until #3999 change 12c gives it one.
+    Placeholder,
+    /// The environment was started with a front door this broker cannot
+    /// pair with, such as after a restart within the generation: no login.
+    Refused,
 }
 
 struct PreparedOAuthRequest {
@@ -1320,7 +1337,26 @@ where
             placeholders: swap::PlaceholderCache::default(),
             github_forced_attempts: forced_refresh::ForcedAttempts::default(),
             network_policy_allows_github: true,
+            login_delivery: LoginDelivery::Real,
         })
+    }
+
+    /// This broker serves beside the environment's front door. Only
+    /// [`crate::run_admitted_credential_bridges`] calls it, before either
+    /// session serves, so no request can turn it on or off.
+    pub(crate) fn paired_with_front_door(mut self) -> Self {
+        self.login_delivery = LoginDelivery::Placeholder;
+        self
+    }
+
+    /// This broker serves an environment started with a front door it cannot
+    /// pair with, such as one restarted within the generation after its
+    /// front door's socket is gone: it seals no agent login at all, never the
+    /// sign-in's tokens in place of placeholders (#3999). The local broker's
+    /// restart path calls it, from #3999 change 12c.
+    pub fn with_agent_logins_refused(mut self) -> Self {
+        self.login_delivery = LoginDelivery::Refused;
+        self
     }
 
     /// Install the App owner only through private process composition: the
@@ -1358,77 +1394,6 @@ where
             .map_err(map_lease_error)
     }
 
-    /// Seal the environment creator's own personal Codex ChatGPT login to the
-    /// recipient key of a hosted Sandbox's workspace daemon or a local VM's
-    /// guest daemon: a listed direct delivery exception
-    /// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions").
-    /// Codex enables `/usage`, analytics and account routing only with its own
-    /// login, which a proxy cannot supply.
-    ///
-    /// The placement's `lease_codex_login` decides delivery. The access token
-    /// is refreshed first, through the same serialized path proxied requests
-    /// use, unless it stays valid for thirty minutes (capped at half its
-    /// lifetime). The sealed plaintext carries the access token, ID token,
-    /// account ID and refresh time, and is bound to this environment and
-    /// generation, the request, the recipient, its deadline and the exact
-    /// credential version. The refresh token never leaves the broker.
-    pub(crate) async fn codex_login(
-        &self,
-        request: v1::CodexLoginRequest,
-    ) -> Result<Vec<u8>, BrokerRequestError> {
-        let login = LoginRequest::parse(
-            &request.request_id,
-            &request.recipient_public_key,
-            request.deadline_unix_ms,
-            timing::codex_login_refused,
-        )?;
-        let purpose = OAuthPurpose::CodexLogin;
-        let lease = self.lease_oauth(login.request_id, &purpose).await?;
-        let admitted_grant = lease.grant().clone();
-        let generation = refresh_generation(&lease);
-        let credential = self.codex_oauth_credential(lease, &purpose)?;
-        let (credential, generation) = if credential
-            .should_refresh_within(current_unix_time()?, CODEX_LOGIN_MINIMUM_VALIDITY_SECONDS)
-        {
-            drop(credential);
-            self.fresh_oauth_credential(
-                login.request_id,
-                &purpose,
-                |lease| self.codex_oauth_credential(lease, &purpose),
-                None,
-                &admitted_grant,
-                CODEX_LOGIN_MINIMUM_VALIDITY_SECONDS,
-            )
-            .await?
-        } else {
-            (credential, generation)
-        };
-
-        let codex = CodexLogin::new(
-            Zeroizing::new(credential.access_token().to_owned()),
-            Zeroizing::new(credential.id_token().to_owned()),
-            credential.account_id().to_owned(),
-            credential.refreshed_at_unix(),
-        )
-        .map_err(|_| BrokerRequestError::Denied)?;
-        drop(credential);
-        let (binding, context) = login.bind(&admitted_grant, &generation)?;
-        seal_codex_login(
-            &codex,
-            &binding,
-            &context,
-            login.recipient,
-            current_unix_time_ms()?,
-        )
-        .map_err(|error| match error {
-            codewire_workload_secrets::CodexLoginError::InvalidContext => {
-                timing::codex_login_refused("deadline_passed_before_seal");
-                BrokerRequestError::AuthorityUnavailable
-            }
-            _ => BrokerRequestError::Denied,
-        })
-    }
-
     /// Seal the environment creator's own personal Claude sign-in to the
     /// recipient key of a hosted Sandbox's workspace daemon or a local VM's
     /// guest daemon, which writes it as `claudeAiOauth` in Claude
@@ -1454,6 +1419,20 @@ where
             request.deadline_unix_ms,
             timing::claude_login_refused,
         )?;
+        // Beside the front door the environment must get placeholders, never
+        // the sign-in's tokens, and the placeholder Claude login is #3999
+        // change 12c's; until it lands there is no Claude login there at all.
+        match self.login_delivery {
+            LoginDelivery::Real => {}
+            LoginDelivery::Placeholder => {
+                timing::claude_login_refused("no_placeholder_form_beside_front_door");
+                return Err(BrokerRequestError::Denied);
+            }
+            LoginDelivery::Refused => {
+                timing::claude_login_refused("front_door_not_paired");
+                return Err(BrokerRequestError::Denied);
+            }
+        }
         let purpose = OAuthPurpose::ClaudeLogin;
         let lease = self.lease_oauth(login.request_id, &purpose).await?;
         let admitted_grant = lease.grant().clone();

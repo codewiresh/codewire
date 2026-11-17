@@ -264,3 +264,94 @@ async fn denied_or_malformed_requests_neither_lease_nor_refresh() {
     );
     assert_eq!(lease_count.load(Ordering::Relaxed), 0);
 }
+
+/// The JSON claims of a three-part JWT, unverified.
+fn jwt_payload(token: &str) -> serde_json::Value {
+    use base64::Engine as _;
+    let payload = token.split('.').nth(1).unwrap();
+    serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+/// Beside the environment's front door the sealed login carries this
+/// environment's placeholder and an ID token of allow-listed claims, never
+/// the sign-in's tokens (#3999). The guest writes it as Codex's login, and
+/// the front door swaps the placeholder outside the environment.
+#[tokio::test]
+async fn beside_the_front_door_a_login_carries_placeholders_only() {
+    let now = current_unix_time().unwrap();
+    let token = jwt(json!({ "iat": now, "exp": now + 7_200 }));
+    let (broker, state) = oauth_broker_with_initial_token(
+        token.clone(),
+        BTreeSet::new(),
+        StatusCode::OK,
+        Vec::new(),
+        token.clone(),
+        Duration::ZERO,
+    );
+    let binding = state
+        .authority
+        .get_environment_access_binding(&state.environment_id)
+        .unwrap();
+    // Deriving it without a lease loads the authority's placeholder key, as
+    // the supervisor does before an environment with a front door starts.
+    let placeholder = state
+        .authority
+        .environment_credential_placeholder(
+            &state.environment_id,
+            11,
+            &CapabilitySlot::codex(),
+            &state.credential_id,
+            Some(&binding.binding),
+        )
+        .unwrap();
+    let broker = broker.paired_with_front_door();
+    let recipient = ProjectionRecipient::new();
+    let request = login_request(&recipient);
+    let sealed = broker.codex_login(request.clone()).await.unwrap();
+    let opened = open(&state, recipient, &request, &sealed);
+    assert_eq!(opened.login.access_token(), placeholder.as_str());
+    assert_eq!(opened.login.account_id(), "account-work");
+    assert_eq!(
+        jwt_payload(opened.login.id_token()),
+        json!({
+            "email": "developer@example.test",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "account-work",
+                "chatgpt_account_is_fedramp": false
+            },
+            "exp": 4_070_908_800_u64
+        })
+    );
+    for secret in [token.as_str(), "synthetic-old-refresh-token"] {
+        assert!(!opened.login.access_token().contains(secret));
+        assert!(!opened.login.id_token().contains(secret));
+    }
+    assert_eq!(state.refresh_count.load(Ordering::Relaxed), 0);
+}
+
+/// Beside the front door, a lease that carries no placeholder delivers no
+/// login at all: never the sign-in's tokens in its place.
+#[tokio::test]
+async fn beside_the_front_door_a_lease_without_a_placeholder_delivers_nothing() {
+    let now = current_unix_time().unwrap();
+    let token = jwt(json!({ "iat": now, "exp": now + 7_200 }));
+    let (broker, _state) = oauth_broker_with_initial_token(
+        token.clone(),
+        BTreeSet::new(),
+        StatusCode::OK,
+        Vec::new(),
+        token,
+        Duration::ZERO,
+    );
+    let broker = broker.paired_with_front_door();
+    let request = login_request(&ProjectionRecipient::new());
+    assert!(matches!(
+        broker.codex_login(request).await,
+        Err(BrokerRequestError::Denied)
+    ));
+}
