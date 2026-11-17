@@ -1,0 +1,277 @@
+{{- if .Values.orchestration.enabled }}
+# Runtime-node image cache (Program #2238 A2b). Orchestration reconciles one
+# DaemonSet, cw-image-cache, in the shared sandbox namespace. On every
+# katacontainers.io/kata-runtime node it mounts each image orchestration renders
+# (workspace default, daemon support image, DinD) for the current and
+# previous release as a read-only OCI image volume, so the kubelet pulls them
+# and its image garbage collector keeps them in use. A sandbox start after a
+# release then does not wait for a pull.
+#
+# The Pod's one container runs BusyBox sleep from the pinned DinD image's own
+# root filesystem. Nothing from a cached image runs, and nothing runs from a
+# volume: on Talos an emptyDir is kubelet_state_t, which SELinux does not allow
+# as a container entrypoint.
+#
+# The Pod runs under the node's default runtime (runc), not Kata, in a user
+# namespace (hostUsers: false), as the dedicated cw-image-cache identity, which
+# has no token and no RBAC, never codewire-sandbox.
+#
+# The sandbox namespace is used because its Kyverno policy
+# (codewire-shared-sandbox-runtime-security) re-applies Pod Security baseline
+# to every Pod there and restricts runc only for Pods carrying the Sandbox
+# label, which these Pods do not carry. The harbor-registry pull Secret is
+# already delivered to it.
+#
+# SANDBOX_IMAGE_CACHE=disabled stops orchestration reconciling; it has no
+# delete grant, so an operator then deletes daemonset/cw-image-cache.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cw-image-cache
+  namespace: {{ required "sandboxNamespace is required" $.Values.sandboxNamespace }}
+  labels:
+    app.kubernetes.io/component: image-cache
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+automountServiceAccountToken: false
+---
+# Deny all traffic to and from the idle cache Pods. They serve nothing and
+# fetch nothing; the kubelet pulls images outside the Pod network.
+# Cilium unions allow policies: where a CiliumClusterwideNetworkPolicy allows
+# traffic for the whole namespace (dev-sandboxes: DNS and public 80/443), this
+# policy cannot remove it. Closing that needs an infra-owned
+# CiliumNetworkPolicy with ingressDeny/egressDeny for this Pod label.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cw-image-cache
+  namespace: {{ required "sandboxNamespace is required" $.Values.sandboxNamespace }}
+  labels:
+    app.kubernetes.io/component: image-cache
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cw-image-cache
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Create a DaemonSet (admission binds the name), and read or change only
+# cw-image-cache. No list, watch or delete.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: codewire-orchestration-image-cache
+  namespace: {{ required "sandboxNamespace is required" $.Values.sandboxNamespace }}
+  labels:
+    app.kubernetes.io/component: orchestration
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["create"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    resourceNames: ["cw-image-cache"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: codewire-orchestration-image-cache
+  namespace: {{ required "sandboxNamespace is required" $.Values.sandboxNamespace }}
+  labels:
+    app.kubernetes.io/component: orchestration
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: codewire-orchestration-image-cache
+subjects:
+  - kind: ServiceAccount
+    name: codewire-orchestration
+    namespace: {{ $.Release.Namespace }}
+---
+# Every DaemonSet write by the orchestration identity must be the exact idle
+# image cache: its name and labels; a runc Pod in a user namespace on Kata
+# runtime nodes, with the dedicated tokenless identity; no host namespaces or
+# privilege; one container running only BusyBox sleep from the pinned DinD
+# image; no init containers; and at most six image volumes, each a
+# digest-pinned image from a registry CODEWIRE_APPROVED_IMAGE_REGISTRIES
+# approves, mounted read-only. The policy reads that value from the
+# codewire-image-registries ConfigMap (image-registries.yaml), the one
+# orchestration reads it from, so both approve the same registries.
+# The Rust renderer (crates/codewire-orchestration/src/sandbox/image_cache.rs)
+# has a test that this file pins its commands, images, selector and resources.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: codewire-orchestration-image-cache
+  labels:
+    app.kubernetes.io/component: orchestration
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["daemonsets"]
+  matchConditions:
+    - name: orchestration-service-account
+      expression: request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')
+  variables:
+    # The approved registry prefixes, each ending in '/'. A malformed entry,
+    # which orchestration refuses at startup, approves nothing here.
+    - name: registries
+      expression: >-
+        has(params.data) && 'CODEWIRE_APPROVED_IMAGE_REGISTRIES' in params.data ?
+        params.data['CODEWIRE_APPROVED_IMAGE_REGISTRIES'].split(',').filter(r, r.matches('^[a-z0-9]+([.-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*/$')) : []
+    - name: pod
+      expression: object.spec.template.spec
+    - name: containers
+      expression: object.spec.template.spec.containers
+    - name: volumes
+      expression: "has(object.spec.template.spec.volumes) ? object.spec.template.spec.volumes : []"
+    - name: labels
+      expression: >-
+        {'app.kubernetes.io/name': 'cw-image-cache', 'app.kubernetes.io/component': 'image-cache', 'app.kubernetes.io/part-of': 'codewire', 'app.kubernetes.io/managed-by': 'codewire'}
+  validations:
+    - expression: request.name == 'cw-image-cache'
+      message: codewire-orchestration may only manage the DaemonSet named cw-image-cache
+    - expression: >-
+        has(object.metadata.labels) && object.metadata.labels == variables.labels &&
+        has(object.spec.template.metadata.labels) && object.spec.template.metadata.labels == variables.labels &&
+        has(object.spec.selector.matchLabels) &&
+        object.spec.selector.matchLabels == {'app.kubernetes.io/name': 'cw-image-cache'} &&
+        !has(object.spec.selector.matchExpressions) &&
+        !has(object.spec.template.metadata.annotations)
+      message: the image cache must keep its exact labels and selector and carry no Pod annotations
+    - expression: >-
+        has(variables.pod.serviceAccountName) &&
+        variables.pod.serviceAccountName == 'cw-image-cache' &&
+        (!has(variables.pod.serviceAccount) || variables.pod.serviceAccount == 'cw-image-cache')
+      message: the image cache must run as its dedicated cw-image-cache ServiceAccount, never codewire-sandbox or any other identity
+    - expression: >-
+        has(variables.pod.automountServiceAccountToken) &&
+        variables.pod.automountServiceAccountToken == false
+      message: the image cache must not mount a ServiceAccount token
+    - expression: "!has(variables.pod.runtimeClassName)"
+      message: the image cache must run under the node's default runtime, with no runtimeClassName
+    - expression: >-
+        (!has(variables.pod.hostNetwork) || !variables.pod.hostNetwork) &&
+        (!has(variables.pod.hostPID) || !variables.pod.hostPID) &&
+        (!has(variables.pod.hostIPC) || !variables.pod.hostIPC) &&
+        has(variables.pod.hostUsers) && variables.pod.hostUsers == false
+      message: the image cache must not share host namespaces and must run in a user namespace
+    - expression: >-
+        size(variables.volumes) <= 6 &&
+        variables.volumes.all(v, v.name.matches('^image-[0-9]$') &&
+        has(v.image) && has(v.image.reference) &&
+        variables.registries.exists(r, v.image.reference.startsWith(r) &&
+        v.image.reference.substring(size(r)).matches('^[a-z0-9]+([._/-][a-z0-9]+)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$')) &&
+        has(v.image.pullPolicy) && v.image.pullPolicy == 'IfNotPresent') &&
+        !has(variables.pod.resourceClaims)
+      message: the image cache may mount only up to six image volumes of digest-pinned images from the registries CODEWIRE_APPROVED_IMAGE_REGISTRIES approves, with no other volume sources
+    - expression: >-
+        (!has(object.spec.template.spec.initContainers) || size(object.spec.template.spec.initContainers) == 0) &&
+        size(variables.containers) == 1 &&
+        variables.containers.all(c, c.name == 'idle' &&
+        c.image == 'docker.io/library/docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977' &&
+        has(c.command) &&
+        c.command == ['/bin/busybox', 'sleep', '2147483647'] &&
+        !has(c.args))
+      message: the image cache runs only one idle container, BusyBox sleep from the pinned DinD image, and no init containers
+    - expression: >-
+        variables.containers.all(c,
+        (has(c.volumeMounts) ? size(c.volumeMounts) : 0) == size(variables.volumes) &&
+        (!has(c.volumeMounts) || c.volumeMounts.all(m,
+        has(m.readOnly) && m.readOnly &&
+        m.mountPath == '/cw-image-cache/' + m.name &&
+        !has(m.subPath) && !has(m.subPathExpr) &&
+        (!has(m.mountPropagation) || m.mountPropagation == 'None') &&
+        variables.volumes.exists(v, v.name == m.name)))) &&
+        variables.volumes.all(v, variables.containers.exists(c,
+        has(c.volumeMounts) && c.volumeMounts.exists(m, m.name == v.name)))
+      message: every image cache volume must be mounted read-only, once, at its own path in the idle container
+    - expression: >-
+        variables.containers.all(c,
+        has(c.securityContext) &&
+        (!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+        has(c.securityContext.allowPrivilegeEscalation) && !c.securityContext.allowPrivilegeEscalation &&
+        has(c.securityContext.readOnlyRootFilesystem) && c.securityContext.readOnlyRootFilesystem &&
+        has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) &&
+        c.securityContext.capabilities.drop == ['ALL'] &&
+        !has(c.securityContext.capabilities.add) &&
+        (!has(c.securityContext.runAsUser) || c.securityContext.runAsUser > 0) &&
+        (!has(c.securityContext.runAsNonRoot) || c.securityContext.runAsNonRoot) &&
+        !has(c.securityContext.seLinuxOptions) &&
+        !has(c.securityContext.windowsOptions) &&
+        !has(c.securityContext.appArmorProfile) &&
+        (!has(c.securityContext.procMount) || c.securityContext.procMount == 'Default') &&
+        (!has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault'))
+      message: image cache containers must be unprivileged, drop all capabilities, forbid privilege escalation and use a read-only root filesystem
+    - expression: >-
+        variables.containers.all(c, has(c.resources) &&
+        c.resources == {'requests': {'cpu': '1m', 'memory': '4Mi'}, 'limits': {'cpu': '10m', 'memory': '16Mi'}})
+      message: image cache containers must keep their fixed resources
+    - expression: >-
+        has(variables.pod.securityContext) &&
+        has(variables.pod.securityContext.runAsNonRoot) && variables.pod.securityContext.runAsNonRoot &&
+        has(variables.pod.securityContext.runAsUser) && variables.pod.securityContext.runAsUser > 0 &&
+        has(variables.pod.securityContext.seccompProfile) &&
+        variables.pod.securityContext.seccompProfile.type == 'RuntimeDefault' &&
+        !has(variables.pod.securityContext.seLinuxOptions) &&
+        !has(variables.pod.securityContext.windowsOptions) &&
+        !has(variables.pod.securityContext.appArmorProfile) &&
+        !has(variables.pod.securityContext.sysctls)
+      message: the image cache Pod must run as a non-root user under the RuntimeDefault seccomp profile
+    - expression: >-
+        variables.containers.all(c,
+        !has(c.env) && !has(c.envFrom) && !has(c.ports) && !has(c.volumeDevices) &&
+        !has(c.lifecycle) && !has(c.livenessProbe) && !has(c.readinessProbe) && !has(c.startupProbe))
+      message: image cache containers take no environment, ports, devices, hooks or probes
+    - expression: >-
+        has(variables.pod.nodeSelector) &&
+        variables.pod.nodeSelector == {'katacontainers.io/kata-runtime': 'true', 'node.codewire.sh/runtime-candidate': 'true'} &&
+        (!has(variables.pod.tolerations) || variables.pod.tolerations.all(t,
+        has(t.key) && t.key == 'node.codewire.sh/runtime-candidate' &&
+        has(t.effect) && t.effect == 'NoSchedule')) &&
+        !has(variables.pod.priorityClassName)
+      message: the image cache must select exactly the Kata runtime nodes and tolerate only the runtime-candidate NoSchedule taint, without a priority class
+    - expression: >-
+        !has(variables.pod.imagePullSecrets) ||
+        variables.pod.imagePullSecrets.all(s, has(s.name) && s.name == 'harbor-registry')
+      message: the image cache may use only the harbor-registry pull Secret
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: codewire-orchestration-image-cache
+  labels:
+    app.kubernetes.io/component: orchestration
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  policyName: codewire-orchestration-image-cache
+  validationActions: [Deny]
+  # The ConfigMap orchestration reads CODEWIRE_APPROVED_IMAGE_REGISTRIES
+  # from. Kustomize writes the orchestration namespace
+  # (kustomizeconfig.yaml); a missing ConfigMap denies.
+  paramRef:
+    name: codewire-image-registries
+    namespace: {{ $.Release.Namespace }}
+    parameterNotFoundAction: Deny
+  # No mutable namespace selector: orchestration can update namespace labels.
+  # The exact namespace Role bounds the grant; admission follows the identity.
+{{- end }}

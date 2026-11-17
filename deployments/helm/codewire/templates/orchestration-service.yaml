@@ -1,0 +1,70 @@
+{{- if .Values.orchestration.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-orchestration
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: orchestration
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+  ports:
+    - port: 8084
+      targetPort: 8084
+      name: http
+    - port: 8088
+      targetPort: internal-tls
+      name: internal-tls
+---
+# The native-gRPC Ingress uses service-upstream so this Service's distinct
+# ClusterIP, rather than the shared orchestration pod endpoints, keys its
+# ingress-nginx upstream pool. A cached HTTP/1 connection from the ordinary
+# HTTP/Connect Service therefore cannot enter grpc_pass. Both Services still
+# select the same pods, so auth, handlers, and state stay shared.
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-orchestration-grpc
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: orchestration
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+  ports:
+    - port: 8084
+      targetPort: http
+      name: grpc
+---
+# Identity-free workspace Pods reach WorkspaceBindingService here. This
+# Service exposes only the dedicated listener, no Ingress references it, and
+# the main Service above does not carry the port. The workspace template's
+# single egress rule to this port lands with the B2 cutover.
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-orchestration-workspace-binding
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: orchestration
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: orchestration
+  ports:
+    - port: 8087
+      targetPort: workspace-bind
+      name: workspace-bind
+{{- end }}

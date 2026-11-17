@@ -8,6 +8,7 @@ One Helm chart for the whole Codewire platform (#2908). It is being built one co
 - `codewire-config` and `codewire-dashboard-public-config`, named by a hash of their data as Kustomize's generator names them, so a configuration change rolls the services that read it.
 - The dashboard: its Deployment, Service and NetworkPolicy.
 - The coordinator, the IdP and billing: their Deployments and Services, and the IdP's NetworkPolicy.
+- Orchestration: its Deployment, ServiceAccount, Services, RBAC (cluster-wide read-only, its own namespace, and the sandbox namespace), admission policies and bindings, the image-registries and hosted-egress ConfigMaps (hosted egress off by default), its Certificates, and its workspace-binding NetworkPolicy.
 - The credential service: its Deployment, ServiceAccount, Service, RBAC (its Role and RoleBinding for reading Sandboxes in `sandboxNamespace`), broker Certificate, NetworkPolicy and PodDisruptionBudget.
 
 ## Values

@@ -1,0 +1,176 @@
+{{- with .Values.orchestration }}
+{{- if .enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codewire-orchestration
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "codewire.labels" "orchestration" | nindent 4 }}
+spec:
+  # Single replica: the Temporal worker scales horizontally and the
+  # loops elect their own leader, so one is sufficient and keeps
+  # reasoning simple. Scale out if worker throughput demands it.
+  replicas: {{ .replicas }}
+  strategy:
+    {{- toYaml .strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: orchestration
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codewire
+        app.kubernetes.io/component: orchestration
+    spec:
+      {{- include "codewire.servicePod" (dict "root" $ "service" .) | nindent 6 }}
+      serviceAccountName: codewire-orchestration
+      # After the preStop delay, open transfers finish while this replica
+      # drains; at SIGTERM it hands over leadership and its Temporal tasks
+      # at once, so only open HTTP streams keep it (#4426).
+      terminationGracePeriodSeconds: 300
+      # Group-reads the 0440 internal TLS leaf; the image runs as 65532.
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: orchestration
+          # Runs from the shared codewire/services image (one image, many
+          # entrypoints); the codewire-orchestration binary is selected by
+          # `command`.
+          command: ["/codewire-orchestration"]
+          {{- include "codewire.serviceContainer" (dict "root" $ "service" .) | nindent 10 }}
+          ports:
+            - containerPort: 8084
+              name: http
+            # The internal Connect app (Mesh authorization), TLS-only. Mesh
+            # verifies it with the public roots in
+            # codewire-orchestration-internal-roots.
+            - containerPort: 8088
+              name: internal-tls
+            # Serves only WorkspaceBindingService to identity-free workspace
+            # Pods, under its own connection and request limits.
+            - containerPort: 8087
+              name: workspace-bind
+            # The sandbox identity issuer's public discovery documents and key
+            # sets, served only while CODEWIRE_IDENTITY_ENABLED is set.
+            - containerPort: 8089
+              name: identity
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          # Orchestration runs one replica, so a probe failure empties the API
+          # Service. Ready stays a database round trip, but tolerates a brief
+          # stall: Dev saw sporadic >1 s /readyz stalls with the process idle and
+          # the database healthy, and one burst made the whole API return 503.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          # Keep serving while the gateway drops this Pod's endpoint, so SIGTERM
+          # never closes the listener under a routed request (#4426). A native
+          # sleep needs no binary in the image.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
+          volumeMounts:
+            - name: internal-tls
+              mountPath: /run/codewire-orchestration-internal-tls
+              readOnly: true
+            - name: udp-relay-allocator-client-tls
+              mountPath: /run/codewire-udp-relay-allocator-client-tls
+              readOnly: true
+            - name: udp-relay-allocator-roots
+              mountPath: /run/codewire-udp-relay-allocator-roots
+              readOnly: true
+            # Platform-only Trustee administration credential. This volume is
+            # never projected into tenant Secrets or sandbox Pods.
+            - name: confidential-storage-kbs-admin
+              mountPath: /var/run/secrets/codewire-confidential-storage
+              readOnly: true
+            - name: confidential-storage-kbs-ca
+              mountPath: /etc/codewire/confidential-storage-kbs
+              readOnly: true
+            # The credential relay (design §4) presents this projected token
+            # to the broker, which accepts it only as this ServiceAccount in
+            # this namespace, and verifies the broker with its public roots.
+            - name: credential-relay-identity
+              mountPath: /var/run/secrets/codewire/credential-relay
+              readOnly: true
+            - name: credential-broker-roots
+              mountPath: /run/codewire-credentials/broker-roots
+              readOnly: true
+      volumes:
+        # cert-manager-owned leaf for the internal TLS listener. Readable by
+        # the image's 65532 group only, through the pod fsGroup.
+        - name: internal-tls
+          secret:
+            secretName: codewire-orchestration-internal-tls
+            defaultMode: 0440
+        # cert-manager-owned client leaf for the UDP relay allocator, and the
+        # public roots that verify the relay. Both are optional so that
+        # orchestration starts without them: until they exist an https
+        # allocator URL fails closed and the kubelet adds them when they do.
+        - name: udp-relay-allocator-client-tls
+          secret:
+            secretName: codewire-orchestration-udp-relay-allocator-client-tls
+            defaultMode: 0440
+            optional: true
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        - name: udp-relay-allocator-roots
+          configMap:
+            name: codewire-udp-relay-allocator-roots
+            optional: true
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: confidential-storage-kbs-admin
+          secret:
+            secretName: codewire-confidential-storage-kbs-admin
+            optional: true
+            items:
+              - key: CONFIDENTIAL_STORAGE_KBS_ADMIN_TOKEN
+                path: kbs-admin-token
+        - name: confidential-storage-kbs-ca
+          configMap:
+            name: codewire-trustee-kbs-ca
+            optional: true
+        # Group-readable through the pod fsGroup, like the internal TLS leaf.
+        - name: credential-relay-identity
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  audience: codewire.internal.credential-relay.v1
+                  expirationSeconds: 600
+                  path: token
+        # Public trust only, provisioned by infrastructure in this namespace.
+        # Until it exists the relay admits no epoch and retries; kubelet adds
+        # it to the running Pod when it appears.
+        - name: credential-broker-roots
+          configMap:
+            name: codewire-credential-broker-roots
+            optional: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: codewire-orchestration
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "codewire.labels" "orchestration" | nindent 4 }}
+{{- end }}
+{{- end }}

@@ -8,11 +8,7 @@ be a string, as an env file gives it.
 Arguments: a dict with "name" and "data".
 */}}
 {{- define "codewire.generatedName" -}}
-{{- range $key, $value := .data }}
-{{- if not (kindIs "string" $value) }}
-{{- fail (printf "%s: %s must be a string; quote it" $.name $key) }}
-{{- end }}
-{{- end }}
+{{- include "codewire.requireStrings" . }}
 {{- $hash := dict "data" .data "kind" "ConfigMap" "name" "" | toJson | sha256sum | trunc 10 }}
 {{- printf "%s-%s" .name ($hash | replace "0" "g" | replace "1" "h" | replace "3" "k" | replace "a" "m" | replace "e" "t") }}
 {{- end }}
@@ -78,8 +74,9 @@ app.kubernetes.io/part-of: codewire
 
 {{/*
 The fields every Rust service's container shares: the services image, its
-pull policy, codewire-config and the shared Secret, its own environment,
-resources, and a startup probe when one is set.
+pull policy, codewire-config and the shared Secret and any further sources it
+lists (extraEnvFrom), its own environment, resources, and a startup probe
+when one is set.
 Arguments: a dict with "root" (the root context) and "service" (its values).
 */}}
 {{- define "codewire.serviceContainer" -}}
@@ -92,6 +89,9 @@ envFrom:
       name: {{ include "codewire.configName" .root }}
   - secretRef:
       name: {{ .root.Values.sharedSecret }}
+  {{- with .service.extraEnvFrom }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
 env:
   {{- toYaml .service.env | nindent 2 }}
 resources:
@@ -119,14 +119,60 @@ initContainers:
 A network policy peer that selects Pods by their labels. Every peer the chart
 builds from labels goes through here: an empty or null selector matches every
 Pod in the namespace, so it is refused, whether or not the selected component
-is rendered. Arguments: a dict with "labels" and "from", the value they come
-from, for the refusal.
+is rendered. With "namespace", the peer is those Pods in that namespace only,
+by its immutable kubernetes.io/metadata.name, and an empty namespace is
+refused too. Arguments: a dict with "labels", optionally "namespace", and
+"from", the value they come from, for the refusal.
 */}}
 {{- define "codewire.podPeer" -}}
 {{- if not .labels }}
 {{- fail (printf "%s is empty: a peer selecting no labels admits every Pod" .from) }}
 {{- end }}
+{{- if and (hasKey . "namespace") (not .namespace) }}
+{{- fail (printf "%s is empty: the peer must name its namespace, or it selects the policy's own" .from) }}
+{{- end }}
 - podSelector:
     matchLabels:
       {{- toYaml .labels | nindent 6 }}
+  {{- with .namespace }}
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ . }}
+  {{- end }}
+{{- end }}
+
+{{/*
+A list of strings as a CEL list literal, for an admission policy's variable:
+['a', 'b']. Arguments: the list.
+*/}}
+{{- define "codewire.celStrings" -}}
+[{{ range $i, $s := . }}{{ if $i }}, {{ end }}'{{ $s }}'{{ end }}]
+{{- end }}
+
+{{/*
+Refuses any value of a ConfigMap's data that is not a string, as an env file
+gives every value. Renders nothing. Arguments: a dict with "name", for the
+refusal, and "data".
+*/}}
+{{- define "codewire.requireStrings" -}}
+{{- range $key, $value := .data }}
+{{- if not (kindIs "string" $value) }}
+{{- fail (printf "%s: %s must be a string; quote it" $.name $key) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+RuntimeClass names as an admission policy's CEL list. Each is written into the
+policy's expression, so each must be a DNS subdomain, as a RuntimeClass name
+is, or '' for a Pod without runtimeClassName. Arguments: a dict with "names"
+and "from", the value they come from, for the refusal.
+*/}}
+{{- define "codewire.runtimeClassesCel" -}}
+{{- range .names }}
+{{- if not (or (eq . "") (and (le (len .) 253) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" .))) }}
+{{- fail (printf "%s: %q is not a RuntimeClass name" $.from .) }}
+{{- end }}
+{{- end }}
+{{- include "codewire.celStrings" .names }}
 {{- end }}

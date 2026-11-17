@@ -20,8 +20,10 @@ Needs `helm` and `kustomize` on PATH, at the versions CI pins.
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -61,6 +63,42 @@ _SERVICES = {
     ("Certificate", "codewire-credential-broker"),
     ("NetworkPolicy", "codewire-credential-service"),
     ("PodDisruptionBudget", "codewire-credential-service"),
+    # Orchestration, with its RBAC, admission policies and ConfigMaps.
+    ("ClusterRole", "codewire-orchestration"),
+    ("ClusterRoleBinding", "codewire-orchestration"),
+    ("ConfigMap", "codewire-hosted-egress"),
+    ("ConfigMap", "codewire-image-registries"),
+    ("Deployment", "codewire-orchestration"),
+    ("NetworkPolicy", "codewire-orchestration-workspace-binding"),
+    ("NetworkPolicy", "cw-image-cache"),
+    ("Role", "codewire-orchestration-image-cache"),
+    ("Role", "codewire-orchestration-internal-roots"),
+    ("Role", "codewire-orchestration-release-revision"),
+    ("Role", "codewire-orchestration-sandboxes"),
+    ("Role", "codewire-orchestration-tokenrequest"),
+    ("RoleBinding", "codewire-orchestration-image-cache"),
+    ("RoleBinding", "codewire-orchestration-internal-roots"),
+    ("RoleBinding", "codewire-orchestration-release-revision"),
+    ("RoleBinding", "codewire-orchestration-sandboxes"),
+    ("RoleBinding", "codewire-orchestration-tokenrequest"),
+    ("Service", "codewire-orchestration"),
+    ("Service", "codewire-orchestration-grpc"),
+    ("Service", "codewire-orchestration-workspace-binding"),
+    ("ServiceAccount", "codewire-orchestration"),
+    ("ServiceAccount", "cw-image-cache"),
+    ("ValidatingAdmissionPolicy", "codewire-orchestration-image-cache"),
+    ("ValidatingAdmissionPolicy", "codewire-orchestration-warm-pool"),
+    ("ValidatingAdmissionPolicy", "codewire-orchestration-warm-pool-member"),
+    ("ValidatingAdmissionPolicy", "codewire-orchestration-warm-pool-template"),
+    ("ValidatingAdmissionPolicyBinding", "codewire-orchestration-image-cache"),
+    ("ValidatingAdmissionPolicyBinding", "codewire-orchestration-warm-pool"),
+    ("ValidatingAdmissionPolicyBinding", "codewire-orchestration-warm-pool-member"),
+    ("ValidatingAdmissionPolicyBinding", "codewire-orchestration-warm-pool-template"),
+}
+# Orchestration's cert-manager Certificates, which Kind does not render.
+_CERTIFICATES = {
+    ("Certificate", "codewire-orchestration-internal"),
+    ("Certificate", "codewire-orchestration-udp-relay-allocator-client"),
 }
 _KIND = {
     ("Namespace", "default"),
@@ -79,7 +117,8 @@ MIGRATED: dict[str, set[tuple[str, str]]] = {
         ("Service", "codewire-dashboard"),
         ("NetworkPolicy", "codewire-dashboard"),
     }
-    | _SERVICES,
+    | _SERVICES
+    | _CERTIFICATES,
     "local-kind": _KIND,
     "local-kind-static": _KIND,
 }
@@ -134,7 +173,9 @@ ENVIRONMENTS: dict[str, tuple[str, list[Path], list[Path]]] = {
         "prod",
         [
             K8S / name
-            for name in ("base", "dashboard", "coordinator", "idp", "billing", "credential-service")
+            for name in (
+                "base", "dashboard", "coordinator", "idp", "billing", "credential-service", "orchestration",
+            )
         ],
         [SOURCE_VALUES],
     ),
@@ -176,6 +217,23 @@ def helm(namespace: str, values: list[Path], extra: tuple[str, ...] = ()) -> str
     for path in values:
         command += ["-f", str(path)]
     return run([*command, *extra])
+
+
+def probe(template: str) -> str:
+    """Render one template against the chart's helpers alone, so a helper's
+    own refusal is tested without the rest of the chart refusing first."""
+    with tempfile.TemporaryDirectory() as scratch:
+        root = Path(scratch)
+        (root / "templates").mkdir()
+        (root / "Chart.yaml").write_text("apiVersion: v2\nname: probe\nversion: 0.1.0\n")
+        shutil.copy(CHART / "templates/_helpers.tpl", root / "templates/_helpers.tpl")
+        # Helm parses what a template renders as an object, so the output is
+        # a ConfigMap's value.
+        (root / "templates/probe.yaml").write_text(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: probe\ndata:\n"
+            "  out: |\n    {{- " + template.removeprefix("{{ ").removesuffix(" }}") + " | nindent 4 }}\n"
+        )
+        return objects(run(["helm", "template", "probe", scratch]))[0]["data"]["out"]
 
 
 def objects(rendered: str) -> list[dict[str, Any]]:
@@ -322,6 +380,28 @@ class ChartEquivalence(unittest.TestCase):
             compare(MIGRATED["local-kind"], chart, kustomized, "local-kind"),
             ["('Namespace', 'default'): metadata.annotations.example.test/extra: only the chart has it"],
         )
+
+    def test_a_peer_in_no_named_namespace_is_refused(self) -> None:
+        # Without a namespace, a peer selects the policy's own namespace, not
+        # the sandbox namespace the workspace-binding policy means.
+        peer = '{{ include "codewire.podPeer" (dict "labels" (dict "a" "b") "namespace" %s "from" "probe.namespace") }}'
+        self.assertIn("kubernetes.io/metadata.name: sandboxes", probe(peer % '"sandboxes"'))
+        for empty in ('""', "nil"):
+            with self.subTest(namespace=empty):
+                with self.assertRaisesRegex(RuntimeError, "probe.namespace is empty: the peer must name its namespace"):
+                    probe(peer % empty)
+
+    def test_a_runtime_class_that_is_not_a_name_never_reaches_cel(self) -> None:
+        names = '{{ include "codewire.runtimeClassesCel" (dict "names" (list %s) "from" "probe.names") }}'
+        self.assertEqual(probe(names % '"commodity" "runc" ""').strip(), "['commodity', 'runc', '']")
+        for bad in ("\"x', 'y\"", '"Runc"', '"a b"', '"a\\\\b"', '"-a"', '"a.-b"'):
+            with self.subTest(name=bad):
+                with self.assertRaisesRegex(RuntimeError, "probe.names: .* is not a RuntimeClass name"):
+                    probe(names % bad)
+
+    def test_a_non_string_hosted_egress_value_is_refused(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "codewire-hosted-egress: CODEWIRE_HOSTED_EGRESS_ENABLED must be a string"):
+            helm("prod", [SOURCE_VALUES], ("--set", "hostedEgress.CODEWIRE_HOSTED_EGRESS_ENABLED=false"))
 
     def test_every_policy_peer_goes_through_a_guarded_helper(self) -> None:
         # A peer written into a template would skip the refusal tests above.

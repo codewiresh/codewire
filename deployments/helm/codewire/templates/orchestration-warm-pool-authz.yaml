@@ -1,0 +1,734 @@
+{{- if .Values.orchestration.enabled }}
+# Shared warm pools (Program #2238 C2). The orchestration leader reconciles one
+# SandboxTemplate and one SandboxWarmPool per configured exact shape, named
+# cw-pool-<cpu>m-<mem>mi-<disk>gi-<h8>. A pool's unclaimed members belong to no
+# environment until a claim adopts one and the claim-time binding records it,
+# so the shared template must be identity-free (design invariant 1, §13).
+#
+# These policies bound what the orchestration identity may write, whatever its
+# renderer does:
+# - only a cw-pool- SandboxWarmPool may hold members; every other pool it
+#   writes is a zero-replica environment shadow;
+# - a cw-pool- pool keeps its exact name, labels and revision, names its own
+#   template, holds at most 16 members and replaces stale members (Recreate);
+# - a cw-pool- template is an allowlist: digest-pinned images; the
+#   identity-free workspace and DinD variables only, the Pod UID the only
+#   reference; image, emptyDir, the public roots ConfigMaps (orchestration's
+#   internal roots; Kind adds its coordinator's extra roots), each mounted
+#   only as its ca.crt, and the two workspace-audience projected tokens the
+#   only volumes; the commodity
+#   runtime (Kind overlays add their diagnostic runtimes); no host namespace,
+#   host alias or node pin; its revision in the workspace container's
+#   immutable environment; no environment identity label; ingress that is
+#   none (during the rollout, see the rule) or exactly orchestration's own identity (its namespace AND its Pod labels, in
+#   one peer) on TCP 7777 and 2222, nothing more, so a bind needs no policy
+#   change before orchestration reaches the member (codewire#3626; nothing in
+#   an unbound member listens on either port); and egress that is exactly the
+#   renderer's allowlist: the world outside every private range, plus named
+#   in-cluster peers on their exact ports (codewire#3318). The Kind e2e
+#   overlay also admits its one side-loaded daemon image, which has no
+#   registry digest, and names its own ingress controller;
+# - orchestration never creates or changes an unclaimed member Sandbox; only
+#   the agent-sandbox controller writes those.
+#
+# The Rust renderer (crates/codewire-orchestration/src/sandbox/warm_pool.rs)
+# and its goldens produce exactly these shapes;
+# scripts/checks/repo_policy/orchestration_security.py pins this file.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: codewire-orchestration-warm-pool
+  labels:
+    app.kubernetes.io/component: orchestration
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ["extensions.agents.x-k8s.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["sandboxwarmpools"]
+  matchConditions:
+    - name: orchestration-service-account
+      expression: request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')
+  variables:
+    - name: pool
+      expression: request.name.startsWith('cw-pool-')
+  validations:
+    - expression: >-
+        variables.pool ||
+        (has(object.spec.replicas) && object.spec.replicas == 0)
+      message: only a cw-pool- SandboxWarmPool may hold members; every other orchestration pool is a zero-replica environment shadow
+    - expression: >-
+        !variables.pool ||
+        (request.name.matches('^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$') &&
+        has(object.metadata.labels) &&
+        'app.kubernetes.io/managed-by' in object.metadata.labels &&
+        object.metadata.labels['app.kubernetes.io/managed-by'] == 'codewire' &&
+        'codewire.sh/type' in object.metadata.labels &&
+        object.metadata.labels['codewire.sh/type'] == 'workspace-pool' &&
+        !['codewire.sh/environment-id', 'codewire.sh/org-id', 'codewire.sh/environment-operation-generation', 'codewire.sh/isolation-tier'].exists(k, k in object.metadata.labels) &&
+        has(object.metadata.annotations) &&
+        'codewire.sh/pool-revision' in object.metadata.annotations &&
+        object.metadata.annotations['codewire.sh/pool-revision'].matches('^[0-9a-f]{64}$'))
+      message: a warm pool keeps its exact cw-pool- shape name, its pool labels and its revision, and carries no environment label
+    - expression: >-
+        !variables.pool ||
+        (has(object.spec.sandboxTemplateRef) &&
+        object.spec.sandboxTemplateRef.name == request.name &&
+        has(object.spec.updateStrategy) && has(object.spec.updateStrategy.type) &&
+        object.spec.updateStrategy.type == 'Recreate' &&
+        has(object.spec.replicas) &&
+        object.spec.replicas >= 0 && object.spec.replicas <= 16)
+      message: a warm pool names its own template, replaces stale members (Recreate) and holds at most 16 members
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: codewire-orchestration-warm-pool
+  labels:
+    app.kubernetes.io/component: orchestration
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  policyName: codewire-orchestration-warm-pool
+  validationActions: [Deny]
+  # No mutable namespace selector: orchestration can update namespace labels.
+  # The identity match bounds the policy; it follows the writer everywhere.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: codewire-orchestration-warm-pool-template
+  labels:
+    app.kubernetes.io/component: orchestration
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+  # Removing this policy would admit any pool template, so a source change
+  # that drops it never prunes it.
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  failurePolicy: Fail
+  # The hosted-egress switch and its broker peers (codewire-hosted-egress,
+  # hosted-egress.yaml), which orchestration's environment also reads.
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ["extensions.agents.x-k8s.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["sandboxtemplates"]
+  matchConditions:
+    - name: orchestration-service-account
+      expression: request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')
+    - name: warm-pool-template
+      expression: request.name.startsWith('cw-pool-')
+  variables:
+    # Kind overlays replace this first variable with their diagnostic
+    # runtimes; keep it first. '' is a Pod without runtimeClassName. Each
+    # commodity memory tier is its own class (runtime-profiles base).
+    - name: runtimeClasses
+      expression: {{ include "codewire.runtimeClassesCel" (dict "names" $.Values.orchestration.warmPoolRuntimeClasses "from" "orchestration.warmPoolRuntimeClasses") | quote }}
+    # The Kind e2e overlay replaces this second variable with its side-loaded
+    # daemon image, which has no registry digest; keep it second. Every
+    # deployed cluster admits only digest-pinned images.
+    - name: localImages
+      expression: "[]"
+    # The public roots ConfigMaps a workspace mounts, each only as its ca.crt.
+    # The Kind e2e overlay replaces this third variable to add its
+    # coordinator's extra roots; keep it third.
+    - name: rootsConfigMaps
+      expression: "['codewire-orchestration-internal-roots']"
+    # The ingress controller a workspace reaches on 80/443, as
+    # namespace|label=value. The Kind e2e overlay replaces this fourth
+    # variable with its in-cluster ingress-nginx; keep it fourth.
+    - name: ingressPeer
+      expression: "'kube-system|app.kubernetes.io/name=rke2-ingress-nginx'"
+    # The orchestration Service Account's own namespace: the server namespace
+    # the renderer names for orchestration, DERP and the UDP relay.
+    - name: serverNamespace
+      expression: request.userInfo.username.split(':')[2]
+    # Every in-cluster peer the identity-free egress may name, as
+    # namespace|label=value|PROTOCOL/port (crates/codewire-orchestration/src/
+    # sandbox/template/network.rs). A rule may name a subset, never more.
+    # Warm pools are never confidential, so the Trustee KBS is never a peer
+    # (codewire#3332).
+    - name: egressPeers
+      expression: >-
+        ['kube-system||UDP/53', 'kube-system||TCP/53',
+        variables.ingressPeer + '|TCP/443', variables.ingressPeer + '|TCP/80',
+        variables.serverNamespace + '|app.kubernetes.io/component=orchestration|TCP/8087',
+        variables.serverNamespace + '|app.kubernetes.io/component=derp|UDP/3478',
+        variables.serverNamespace + '|app.kubernetes.io/component=udp-relay|UDP/41641']
+    # The world rule's mandatory exceptions: every private, loopback,
+    # link-local and carrier-grade NAT range. A rule may except more.
+    - name: nonWorldIPv4
+      expression: "['10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16']"
+    - name: nonWorldIPv6
+      expression: "['fc00::/7']"
+    - name: pod
+      expression: object.spec.podTemplate.spec
+    - name: containers
+      expression: >-
+        object.spec.podTemplate.spec.containers +
+        (has(object.spec.podTemplate.spec.initContainers) ? object.spec.podTemplate.spec.initContainers : [])
+    - name: volumes
+      expression: "has(object.spec.podTemplate.spec.volumes) ? object.spec.podTemplate.spec.volumes : []"
+    - name: identity
+      expression: >-
+        ['codewire.sh/environment-id', 'codewire.sh/org-id', 'codewire.sh/environment-operation-generation', 'codewire.sh/isolation-tier']
+    - name: environment
+      expression: >-
+        ['CODEWIRE_WORKSPACE_SHIM_ADDR', 'HOME', 'USER', 'CODEWIRE_WORKSPACE_BINDING_URL', 'CODEWIRE_POD_UID',
+        'CODEWIRE_WORKSPACE_POOL_REVISION', 'DOCKER_HOST', 'DOCKER_TLS_CERTDIR', 'CODEWIRE_DOCKER_DATA_IMAGE',
+        'CODEWIRE_DOCKER_DATA_ROOT', 'CODEWIRE_DOCKER_DATA_SIZE', 'CODEWIRE_DOCKER_MOUNT_MODE']
+    - name: audiences
+      expression: "['codewire.internal.workspace-binding.v1', 'codewire.internal.credential-workspace.v1']"
+    # codewire#3718: the exact script mount-workspace runs, which
+    # crates/codewire-orchestration/src/sandbox/template/workspace.rs renders
+    # (MOUNT_WORKSPACE_SCRIPT; the renderer's tests hold the two equal).
+    - name: mountWorkspaceScript
+      expression: |-
+        r'''set -u
+        # The three paths are overridable only for the script's own test; nothing
+        # renders them, and the pool policy admits no other variable.
+        dev="${CODEWIRE_MOUNT_WORKSPACE_DEVICE:-/dev/cwws}"
+        ws="${CODEWIRE_MOUNT_WORKSPACE_ROOT:-/mnt/ws}"
+        tmp="${CODEWIRE_MOUNT_WORKSPACE_TMP:-/mnt/tmp}"
+        volume="${1:-}"
+        began="$(date +%s%N)"
+        refuse() {
+          echo "codewire mount-workspace: $*" >&2
+          exit 1
+        }
+        subfolder=0
+        case "$volume" in
+          new|existing) ;;
+          new-subfolder|existing-subfolder) subfolder=1; volume="${volume%-subfolder}" ;;
+          *) refuse "the volume state must be new or existing, optionally with -subfolder, not '$volume'" ;;
+        esac
+        dd if="$dev" of=/dev/null bs=4096 count=1 2>/dev/null || refuse "the workspace device $dev cannot be read"
+        probe=0
+        blkid -p "$dev" >/dev/null 2>&1 || probe=$?
+        fstype=
+        [ "$probe" != 0 ] || fstype="$(blkid -p -s TYPE -o value "$dev" 2>/dev/null || true)"
+        ext4=0
+        if [ "$fstype" = ext4 ] || dumpe2fs -h "$dev" >/dev/null 2>&1; then ext4=1; fi
+        fresh=0
+        if [ "$ext4" = 0 ] && [ "$volume" = new ]; then
+          case "$probe" in
+            0|2|8) ;;
+            *) refuse "probing the workspace device failed (blkid exit $probe)" ;;
+          esac
+          [ "$probe" = 2 ] || wipefs -a -q "$dev" || refuse "clearing the new workspace volume's chance signature failed"
+          mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 "$dev" || refuse "formatting the new workspace volume failed"
+          fresh=1
+        elif [ "$ext4" = 0 ]; then
+          case "$probe" in
+            0) refuse "the workspace volume holds '${fstype:-an unknown signature}', not ext4" ;;
+            2) refuse "the existing workspace volume has no filesystem; it is not formatted" ;;
+            *) refuse "probing the workspace device failed (blkid exit $probe)" ;;
+          esac
+        fi
+        checked="$(date +%s%N)"
+        check=0
+        e2fsck -f -p "$dev" >/dev/null 2>&1 || check=$?
+        [ "$check" -le 1 ] || refuse "checking the workspace filesystem failed (e2fsck exit $check)"
+        check_ms=$((($(date +%s%N) - checked) / 1000000))
+        mount -t ext4 -o noatime "$dev" "$ws" || refuse "mounting the workspace filesystem failed"
+        resize2fs "$dev" >/dev/null 2>&1 || echo "codewire mount-workspace: the workspace filesystem did not grow; it keeps its previous size" >&2
+        [ "$fresh" = 0 ] || chown 1000:1000 "$ws" || refuse "the fresh workspace root could not be given to the workspace user"
+        [ ! -L "$ws/.codewire" ] || refuse "the workspace's .codewire is a symbolic link"
+        if [ ! -d "$ws/.codewire" ]; then
+          mkdir "$ws/.codewire" && chown 1000:1000 "$ws/.codewire" && chmod 0755 "$ws/.codewire" ||
+            refuse "the workspace's .codewire could not be created"
+        fi
+        rm -rf "$ws/.codewire/tmp" && mkdir "$ws/.codewire/tmp" && chmod 1777 "$ws/.codewire/tmp" ||
+          refuse "the workspace temporary directory could not be emptied"
+        mount --bind "$ws/.codewire/tmp" "$tmp" || refuse "binding the workspace temporary directory failed"
+        if [ "$subfolder" = 1 ]; then
+          # /workspace is the filesystem's workspace/ folder (#4026). No workspace
+          # process runs yet, so a folder checked here is the one bound.
+          dir="${CODEWIRE_MOUNT_WORKSPACE_DIR:-/mnt/wsdir}"
+          [ ! -L "$ws/workspace" ] || refuse "the workspace's workspace folder is a symbolic link"
+          if [ ! -d "$ws/workspace" ]; then
+            [ ! -e "$ws/workspace" ] || refuse "the workspace's workspace folder is not a directory"
+            mkdir "$ws/workspace" && chown 1000:1000 "$ws/workspace" && chmod 0755 "$ws/workspace" ||
+              refuse "the workspace's workspace folder could not be created"
+          fi
+          mount --bind "$ws/workspace" "$dir" || refuse "binding the workspace folder failed"
+        fi
+        if [ -n "${CODEWIRE_DOCKER_DATA_SIZE:-}" ]; then
+          (
+            CODEWIRE_DOCKER_DATA_IMAGE="$ws/.codewire/docker-data.ext4"
+        data_image="${CODEWIRE_DOCKER_DATA_IMAGE:-/workspace/.codewire/docker-data.ext4}"
+        data_size="${CODEWIRE_DOCKER_DATA_SIZE:-8G}"
+        mount_mode="${CODEWIRE_DOCKER_MOUNT_MODE:-loop}"
+        if [ "$mount_mode" = "loop" ]; then
+          codewire_dir="$(dirname "$data_image")"
+          mkdir -p "$codewire_dir"
+          chown 1000:1000 "$codewire_dir"
+          # Owner-writable only: the workspace daemon refuses a group- or
+          # world-writable ancestor of its platform session store.
+          chmod 0755 "$codewire_dir"
+          if [ ! -s "$data_image" ]; then
+            # A fresh sparse image reads as zeros, so mke2fs skips zeroing its
+            # inode tables and journal: a few MiB of writes at any size.
+            if ! { truncate -s "$data_size" "$data_image" &&
+              mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 "$data_image"; }; then
+              rm -f "$data_image"
+              echo "the Docker data image $data_image was not created; Docker does not start" >&2
+            fi
+          fi
+          if [ -s "$data_image" ]; then
+            # A grown workspace disk renders a larger data size: extend the image to
+            # it, never shrinking it, and grow its filesystem offline to fill the
+            # image. Growth keeps every byte, and a failed grow still starts Docker
+            # at its previous size (#3554).
+            data_gib="${data_size%G}"
+            case "$data_gib" in ''|*[!0-9]*) data_gib=0 ;; esac
+            if [ "$(stat -c %s "$data_image")" -lt "$((data_gib * 1073741824))" ]; then
+              truncate -s "$data_size" "$data_image" || true
+            fi
+            data_fs_bytes="$(dumpe2fs -h "$data_image" 2>/dev/null | awk -F: '$1 == "Block count" { count = $2 } $1 == "Block size" { size = $2 } END { printf "%.0f", count * size }')"
+            if [ "$(stat -c %s "$data_image")" -gt "${data_fs_bytes:-0}" ]; then
+              # resize2fs grows an unmounted filesystem only after a forced check;
+              # e2fsck exits 1 when it corrected something.
+              fsck_status=0
+              e2fsck -fy "$data_image" >/dev/null || fsck_status=$?
+              if [ "$fsck_status" -gt 1 ] || ! resize2fs "$data_image"; then
+                echo "the Docker data filesystem did not grow to $data_size; Docker keeps its previous size" >&2
+              fi
+            fi
+          fi
+        fi
+          ) || echo "codewire mount-workspace: preparing the Docker data image failed; Docker reports it" >&2
+        fi
+        echo "codewire mount-workspace: mounted the $volume workspace volume (formatted=$fresh e2fsck_ms=$check_ms total_ms=$((($(date +%s%N) - began) / 1000000)))"
+        '''
+    # Hosted egress (codewire#4000; private-docs designs/hosted-egress.md,
+    # "Warm-pool template admission"). The deployment decides, never the
+    # template: the switch is the codewire-hosted-egress ConfigMap that
+    # orchestration's environment also reads, and orchestration cannot write
+    # it. On, only broker-mode templates are admitted; off, none is. No state
+    # admits both, so a template that drops the label never falls back to
+    # the world egress below.
+    - name: hostedEgress
+      expression: >-
+        has(params.data) && 'CODEWIRE_HOSTED_EGRESS_ENABLED' in params.data &&
+        params.data['CODEWIRE_HOSTED_EGRESS_ENABLED'] == 'true'
+    - name: egressLabelled
+      expression: >-
+        has(object.spec.podTemplate.metadata) && has(object.spec.podTemplate.metadata.labels) &&
+        'codewire.sh/egress' in object.spec.podTemplate.metadata.labels
+    - name: broker
+      expression: >-
+        variables.egressLabelled &&
+        object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'
+    - name: brokerEnvironment
+      expression: "['CODEWIRE_EGRESS_STREAM_ADDR', 'CODEWIRE_WORKSPACE_BINDING_ADDR']"
+    - name: brokerAudiences
+      expression: "['codewire.internal.egress.v1']"
+    # Of those, the ones every broker-mode workspace must set: without the
+    # stream address the daemon serves without its self-check (cw-security).
+    - name: brokerRequiredEnvironment
+      expression: "['CODEWIRE_EGRESS_STREAM_ADDR', 'CODEWIRE_WORKSPACE_BINDING_ADDR']"
+    # The VM RuntimeClasses the privileged TUN init may run under: it is root
+    # only inside a guest. Unlike runtimeClasses, no overlay patches this.
+    - name: vmRuntimeClasses
+      expression: "['commodity', 'commodity-32g']"
+    # The daemon image's repository, from the deployment, as a list of at
+    # most one. A value that is not a registry path, the empty base value
+    # included, leaves it empty, which admits no TUN image.
+    - name: daemonRepositories
+      expression: >-
+        has(params.data) && 'CODEWIRE_HOSTED_EGRESS_DAEMON_REPOSITORY' in params.data &&
+        params.data['CODEWIRE_HOSTED_EGRESS_DAEMON_REPOSITORY'].matches('^[a-z0-9]+([.-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$') ?
+        [string(params.data['CODEWIRE_HOSTED_EGRESS_DAEMON_REPOSITORY'])] : []
+    # A broker peer, as one list of strings: its namespace, its ports
+    # (PROTOCOL/port, comma-separated), then each Pod label as key=value.
+    # Neither a label key nor a label value can hold '=', and the first two
+    # entries never do, so a selector with as many labels as the peer, each
+    # key=value among the peer's, has exactly the peer's labels.
+    #
+    # The public gateway's proxies, from the deployment: their namespace,
+    # the gateway controller's two owner labels and the listener port. A
+    # missing field leaves no gateway peer.
+    - name: gatewayPeers
+      expression: >-
+        has(params.data) &&
+        ['CODEWIRE_HOSTED_EGRESS_GATEWAY_NAMESPACE', 'CODEWIRE_HOSTED_EGRESS_GATEWAY_NAME',
+        'CODEWIRE_HOSTED_EGRESS_GATEWAY_OWNER_NAMESPACE', 'CODEWIRE_HOSTED_EGRESS_GATEWAY_PORT'].all(k,
+        k in params.data && size(params.data[k]) > 0) ?
+        [[string(params.data['CODEWIRE_HOSTED_EGRESS_GATEWAY_NAMESPACE']),
+        'TCP/' + string(params.data['CODEWIRE_HOSTED_EGRESS_GATEWAY_PORT']),
+        'gateway.envoyproxy.io/owning-gateway-name=' + string(params.data['CODEWIRE_HOSTED_EGRESS_GATEWAY_NAME']),
+        'gateway.envoyproxy.io/owning-gateway-namespace=' + string(params.data['CODEWIRE_HOSTED_EGRESS_GATEWAY_OWNER_NAMESPACE'])]] : []
+    # Every peer a broker-mode template may name
+    # (crates/codewire-orchestration/src/sandbox/template/network.rs,
+    # broker_egress_rules). Pools are never confidential, so the KBS is
+    # never one.
+    - name: brokerEgressPeers
+      expression: >-
+        [[variables.serverNamespace, 'TCP/8089', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=egress'],
+        [variables.serverNamespace, 'TCP/8087', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=orchestration'],
+        [variables.serverNamespace, 'TCP/8443', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=derp'],
+        [variables.serverNamespace, 'UDP/41641', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=udp-relay']] +
+        variables.gatewayPeers
+  validations:
+    - expression: >-
+        request.name.matches('^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$') &&
+        has(object.metadata.labels) &&
+        'app.kubernetes.io/managed-by' in object.metadata.labels &&
+        object.metadata.labels['app.kubernetes.io/managed-by'] == 'codewire' &&
+        'codewire.sh/type' in object.metadata.labels &&
+        object.metadata.labels['codewire.sh/type'] == 'workspace-pool' &&
+        !variables.identity.exists(k, k in object.metadata.labels) &&
+        has(object.metadata.annotations) &&
+        'codewire.sh/pool-revision' in object.metadata.annotations &&
+        object.metadata.annotations['codewire.sh/pool-revision'].matches('^[0-9a-f]{64}$')
+      message: a warm-pool template keeps its exact cw-pool- shape name, its pool labels and its revision, and carries no environment label
+    - expression: >-
+        !has(object.spec.podTemplate.metadata) ||
+        !has(object.spec.podTemplate.metadata.labels) ||
+        !variables.identity.exists(k, k in object.spec.podTemplate.metadata.labels)
+      message: warm-pool members carry no environment, organization, generation or tier label until a claim adopts them
+    - expression: >-
+        variables.containers.all(c, c.image.matches('^[^@ ]+@sha256:[0-9a-f]{64}$') ||
+        c.image in variables.localImages) &&
+        variables.volumes.all(v, !has(v.image) ||
+        (has(v.image.reference) && (v.image.reference.matches('^[^@ ]+@sha256:[0-9a-f]{64}$') ||
+        v.image.reference in variables.localImages))) &&
+        !has(variables.pod.ephemeralContainers)
+      message: a warm-pool template runs and mounts only digest-pinned images (Kind adds its side-loaded daemon image)
+    - expression: >-
+        variables.containers.all(c, !has(c.envFrom) &&
+        (!has(c.env) || c.env.all(e, e.name in variables.environment &&
+        dyn(e).all(k, k in ['name', 'value', 'valueFrom']) &&
+        (!has(e.valueFrom) || (e.name == 'CODEWIRE_POD_UID' &&
+        dyn(e.valueFrom).all(k, k == 'fieldRef') &&
+        dyn(e.valueFrom.fieldRef).all(k, k in ['fieldPath', 'apiVersion']) &&
+        e.valueFrom.fieldRef.fieldPath == 'metadata.uid' &&
+        (!has(e.valueFrom.fieldRef.apiVersion) || e.valueFrom.fieldRef.apiVersion == 'v1'))) ||
+        variables.hostedEgress && c.name == 'workspace' && e.name in variables.brokerEnvironment &&
+        dyn(e).all(k, k in ['name', 'value']) && has(e.value))))
+      message: a warm-pool template sets only the identity-free workspace and DinD variables (and, with hosted egress on, the workspace's two broker addresses), takes no environment source and reads only its own Pod UID
+    - expression: >-
+        variables.pod.containers.exists_one(c, c.name == 'workspace') &&
+        variables.pod.containers.all(c, c.name != 'workspace' ||
+        (has(c.env) && c.env.exists(e, e.name == 'CODEWIRE_WORKSPACE_BINDING_URL') &&
+        c.env.exists_one(e, e.name == 'CODEWIRE_WORKSPACE_POOL_REVISION') &&
+        c.env.exists(e, e.name == 'CODEWIRE_WORKSPACE_POOL_REVISION' && has(e.value) &&
+        e.value == object.metadata.annotations['codewire.sh/pool-revision'])))
+      message: a warm-pool workspace binds through the workspace binding listener and carries its pool revision in its immutable Pod spec
+    - expression: >-
+        variables.volumes.all(v, dyn(v).all(k, k in ['name', 'image', 'emptyDir', 'configMap', 'projected']) &&
+        (!has(v.configMap) || (has(v.configMap.name) && v.configMap.name in variables.rootsConfigMaps &&
+        dyn(v.configMap).all(k, k in ['name', 'items', 'defaultMode']) &&
+        has(v.configMap.items) && size(v.configMap.items) == 1 &&
+        dyn(v.configMap.items[0]).all(k, k in ['key', 'path']) &&
+        v.configMap.items[0].key == 'ca.crt' && v.configMap.items[0].path == 'ca.crt')) &&
+        (!has(v.projected) || (has(v.projected.sources) && v.projected.sources.all(s,
+        dyn(s).all(k, k == 'serviceAccountToken') &&
+        has(s.serviceAccountToken.audience) && s.serviceAccountToken.audience in variables.audiences ||
+        variables.hostedEgress && dyn(s).all(k, k == 'serviceAccountToken') &&
+        has(s.serviceAccountToken.audience) && s.serviceAccountToken.audience in variables.brokerAudiences))))
+      message: a warm-pool template mounts only images, emptyDirs, the public roots ConfigMaps (only their ca.crt) and workspace-audience projected tokens (and, with hosted egress on, the egress token)
+    - expression: >-
+        has(variables.pod.serviceAccountName) &&
+        variables.pod.serviceAccountName == 'codewire-sandbox' &&
+        has(variables.pod.automountServiceAccountToken) &&
+        variables.pod.automountServiceAccountToken == false
+      message: warm-pool members run as codewire-sandbox without a Kubernetes API token
+    - expression: >-
+        (has(variables.pod.runtimeClassName) ? variables.pod.runtimeClassName : '') in variables.runtimeClasses
+      message: warm-pool members run under the commodity runtime; only Kind overlays add a diagnostic runtime
+    - expression: >-
+        (!has(variables.pod.hostNetwork) || !variables.pod.hostNetwork) &&
+        (!has(variables.pod.hostPID) || !variables.pod.hostPID) &&
+        (!has(variables.pod.hostIPC) || !variables.pod.hostIPC) &&
+        !has(variables.pod.hostAliases) && !has(variables.pod.nodeName)
+      message: warm-pool members share no host namespace, carry no host alias and are never pinned to a node
+    - expression: >-
+        (!has(variables.pod.runtimeClassName) || variables.pod.runtimeClassName != 'confidential') &&
+        (!has(object.spec.podTemplate.metadata) ||
+        !has(object.spec.podTemplate.metadata.annotations) ||
+        !('io.katacontainers.config.hypervisor.kernel_params' in object.spec.podTemplate.metadata.annotations)) &&
+        (!has(object.spec.volumeClaimTemplates) ||
+        object.spec.volumeClaimTemplates.all(t, !has(t.spec) ||
+        (!has(t.spec.accessModes) || !('ReadWriteOncePod' in t.spec.accessModes))))
+      message: confidential workspaces are never pooled
+    # codewire#3718: a commodity workspace is a Block volume the guest formats
+    # and mounts. Only the one-shot mount-workspace init container ever holds
+    # its device: a Kata container with a volumeDevice cannot restart.
+    - expression: >-
+        variables.pod.containers.all(c, !has(c.volumeDevices)) &&
+        (!has(variables.pod.initContainers) ||
+        variables.pod.initContainers.all(c, !has(c.volumeDevices) ||
+        (c.name == 'mount-workspace' && size(c.volumeDevices) == 1 &&
+        c.volumeDevices[0].name == 'workspace')))
+      message: only the mount-workspace init container holds the workspace device
+    # The one privileged init container runs only its rendered script, with
+    # the volume state as its one argument, from the support image the
+    # workspace daemon comes from (codewire#3718).
+    - expression: >-
+        !has(variables.pod.initContainers) ||
+        variables.pod.initContainers.all(c, c.name != 'mount-workspace' ||
+        (has(c.command) && size(c.command) == 5 && c.command[0] == 'sh' && c.command[1] == '-c' &&
+        c.command[2] == variables.mountWorkspaceScript && c.command[3] == 'mount-workspace' &&
+        c.command[4] in ['new-subfolder', 'existing-subfolder'] && !has(c.args) &&
+        variables.volumes.exists(v, v.name == 'codewire-bin' && has(v.image) &&
+        has(v.image.reference) && v.image.reference == c.image)))
+      message: mount-workspace runs exactly its rendered script, from the workspace daemon's support image
+    # codewire#3626: the template's one ingress rule admits orchestration's
+    # identity, and nothing wider, on the daemon and SSH ports. One peer
+    # carries both selectors (two peers would be an OR: the whole server
+    # namespace, or any Pod with those labels), each exactly its labels.
+    # Previews and the tailnet's world UDP stay in the per-environment
+    # policies, which open only after the bind.
+    # The controller must manage the policy (Unmanaged would admit all
+    # ingress), and then exactly two ingress shapes are admitted: that one
+    # rule, or ingress absent or an empty list. The no-ingress arm is for the
+    # rollout and old templates: an orchestration replica of the previous
+    # release still writes its ingress-free template until it is replaced. It
+    # admits strictly less. Remove it in #3640 once every pool template
+    # carries the rule.
+    - expression: >-
+        (!has(object.spec.networkPolicyManagement) || object.spec.networkPolicyManagement == 'Managed') &&
+        has(object.spec.networkPolicy) &&
+        (!has(object.spec.networkPolicy.ingress) || size(object.spec.networkPolicy.ingress) == 0 ||
+        (size(object.spec.networkPolicy.ingress) == 1 &&
+        object.spec.networkPolicy.ingress.all(r, dyn(r).all(k, k in ['from', 'ports']) &&
+        has(r.from) && size(r.from) == 1 &&
+        r.from.all(f, dyn(f).all(k, k in ['namespaceSelector', 'podSelector']) &&
+        has(f.namespaceSelector) && dyn(f.namespaceSelector).all(k, k == 'matchLabels') &&
+        has(f.namespaceSelector.matchLabels) && size(f.namespaceSelector.matchLabels) == 1 &&
+        'kubernetes.io/metadata.name' in f.namespaceSelector.matchLabels &&
+        f.namespaceSelector.matchLabels['kubernetes.io/metadata.name'] == variables.serverNamespace &&
+        has(f.podSelector) && dyn(f.podSelector).all(k, k == 'matchLabels') &&
+        has(f.podSelector.matchLabels) && size(f.podSelector.matchLabels) == 2 &&
+        'app.kubernetes.io/name' in f.podSelector.matchLabels &&
+        f.podSelector.matchLabels['app.kubernetes.io/name'] == 'codewire' &&
+        'app.kubernetes.io/component' in f.podSelector.matchLabels &&
+        f.podSelector.matchLabels['app.kubernetes.io/component'] == 'orchestration') &&
+        has(r.ports) && size(r.ports) == 2 &&
+        r.ports.all(q, dyn(q).all(k, k in ['port', 'protocol']) && has(q.port) && has(q.protocol) &&
+        q.protocol == 'TCP' && type(q.port) == int) &&
+        r.ports.exists(q, q.port == 7777) && r.ports.exists(q, q.port == 2222))))
+      message: unclaimed warm-pool members admit no ingress, or only orchestration's identity, in one peer, on TCP 7777 and 2222
+    # codewire#3318: the egress is Codewire's allowlist. Each rule is either
+    # the world rule (0.0.0.0/0 and ::/0, all ports, excepting at least every
+    # non-world range) or names only allowlisted namespace, Pod and port
+    # peers. Anything else (a bare 0.0.0.0/0, a private range, another
+    # Service, a wider port) is refused.
+    - expression: >-
+        variables.hostedEgress ||
+        has(object.spec.networkPolicy) &&
+        dyn(object.spec.networkPolicy).all(k, k in ['ingress', 'egress']) &&
+        has(object.spec.networkPolicy.egress) &&
+        object.spec.networkPolicy.egress.all(r, dyn(r).all(k, k in ['to', 'ports']) &&
+        has(r.to) && size(r.to) > 0 &&
+        ((!has(r.ports) && r.to.all(t, dyn(t).all(k, k == 'ipBlock') && has(t.ipBlock.except) &&
+        ((t.ipBlock.cidr == '0.0.0.0/0' && variables.nonWorldIPv4.all(c, c in t.ipBlock.except)) ||
+        (t.ipBlock.cidr == '::/0' && variables.nonWorldIPv6.all(c, c in t.ipBlock.except))))) ||
+        (has(r.ports) && size(r.ports) > 0 && r.to.all(t,
+        dyn(t).all(k, k in ['namespaceSelector', 'podSelector']) &&
+        has(t.namespaceSelector) && dyn(t.namespaceSelector).all(k, k == 'matchLabels') &&
+        has(t.namespaceSelector.matchLabels) && size(t.namespaceSelector.matchLabels) == 1 &&
+        'kubernetes.io/metadata.name' in t.namespaceSelector.matchLabels &&
+        (!has(t.podSelector) || (dyn(t.podSelector).all(k, k == 'matchLabels') &&
+        has(t.podSelector.matchLabels) && size(t.podSelector.matchLabels) == 1)) &&
+        r.ports.all(p, dyn(p).all(k, k in ['port', 'protocol']) && has(p.port) && has(p.protocol) &&
+        (t.namespaceSelector.matchLabels['kubernetes.io/metadata.name'] + '|' +
+        (has(t.podSelector) ? t.podSelector.matchLabels.map(k, k + '=' + t.podSelector.matchLabels[k])[0] : '') +
+        '|' + p.protocol + '/' + string(p.port)) in variables.egressPeers)))))
+      message: warm-pool egress is Codewire's allowlist only, the world outside every private range plus the named in-cluster peers and ports
+    # Hosted egress (codewire#4000): the switch, not the template, picks the
+    # arm. On, every template is broker-mode; off, none carries the egress
+    # label.
+    - expression: >-
+        variables.hostedEgress ? variables.broker : !variables.egressLabelled
+      message: with hosted egress on, every warm-pool template is broker-mode (codewire.sh/egress=broker); with it off, none carries the egress label
+    # A broker-mode workspace always has its stream and binding addresses,
+    # so its daemon gates serving on the self-check.
+    - expression: >-
+        !variables.hostedEgress ||
+        variables.pod.containers.exists(c, c.name == 'workspace' && has(c.env) &&
+        variables.brokerRequiredEnvironment.all(n, c.env.exists(e, e.name == n && has(e.value) && size(e.value) > 0)))
+      message: with hosted egress on, the workspace container sets the egress stream and workspace binding addresses
+    # The broker arm's resolver: the netstack (the TUN's gateway, NETSTACK_RESOLVER
+    # in hosted_egress.rs) is the Pod's only nameserver, with no search list
+    # or options. The fence and the lockdown also refuse cluster DNS, so this
+    # keeps a broker Pod from even trying it.
+    - expression: >-
+        !variables.hostedEgress ||
+        has(variables.pod.dnsPolicy) && variables.pod.dnsPolicy == 'None' &&
+        has(variables.pod.dnsConfig) && dyn(variables.pod.dnsConfig).all(k, k in ['nameservers', 'searches']) &&
+        has(variables.pod.dnsConfig.nameservers) && variables.pod.dnsConfig.nameservers == ['192.0.2.1'] &&
+        (!has(variables.pod.dnsConfig.searches) || size(variables.pod.dnsConfig.searches) == 0)
+      message: with hosted egress on, the netstack resolver 192.0.2.1 is a warm-pool template's only nameserver, with no search list or options
+    # The broker arm's egress: no address range and no world rule. Each peer
+    # is exactly one broker peer (one namespace and the whole Pod label map,
+    # so neither an extra label nor a missing Pod selector passes) on only
+    # that peer's ports. Which container mounts the egress token is checked
+    # at first bind (pool_member_isolated), not here.
+    - expression: >-
+        !variables.hostedEgress ||
+        has(object.spec.networkPolicy) &&
+        dyn(object.spec.networkPolicy).all(k, k in ['ingress', 'egress']) &&
+        has(object.spec.networkPolicy.egress) &&
+        object.spec.networkPolicy.egress.all(r, dyn(r).all(k, k in ['to', 'ports']) &&
+        has(r.to) && size(r.to) > 0 && has(r.ports) && size(r.ports) > 0 &&
+        r.to.all(t, dyn(t).all(k, k in ['namespaceSelector', 'podSelector']) &&
+        has(t.namespaceSelector) && dyn(t.namespaceSelector).all(k, k == 'matchLabels') &&
+        has(t.namespaceSelector.matchLabels) && size(t.namespaceSelector.matchLabels) == 1 &&
+        'kubernetes.io/metadata.name' in t.namespaceSelector.matchLabels &&
+        has(t.podSelector) && dyn(t.podSelector).all(k, k == 'matchLabels') &&
+        has(t.podSelector.matchLabels) &&
+        variables.brokerEgressPeers.exists(b,
+        b[0] == t.namespaceSelector.matchLabels['kubernetes.io/metadata.name'] &&
+        size(t.podSelector.matchLabels) == size(b) - 2 &&
+        t.podSelector.matchLabels.all(k, (k + '=' + t.podSelector.matchLabels[k]) in b) &&
+        r.ports.all(p, dyn(p).all(k, k in ['port', 'protocol']) && has(p.port) && has(p.protocol) &&
+        type(p.port) == int && (p.protocol + '/' + string(p.port)) in b[1].split(',')))))
+      message: with hosted egress on, warm-pool egress names only the broker peers, each by its namespace and exact Pod labels on its own ports, with no address range
+    # The broker arm's privilege (cw-network and cw-security, 2026-11-16).
+    # The Pod runs as the workspace user and group, with no extra groups or
+    # sysctls, so a container that sets no securityContext is never root.
+    # Root only for the pinned TUN init; mount-workspace, an init container
+    # that runs and exits before it; and dind, from the official DinD image.
+    # Neither root init container is a sidecar. No container adds a
+    # capability to the runtime's default set, and none sets
+    # allowPrivilegeEscalation: true. What this does not stop: a container
+    # that leaves escalation at its default can still reach in-guest root
+    # through a setuid binary such as sudo, which workspaces keep. That
+    # widens nothing (cw-security, 2026-11-16): the in-guest routing is how
+    # traffic reaches the broker, not the boundary; the lockdown outside the
+    # guest is, and the daemon's self-check verifies the routing each time.
+    - expression: >-
+        !variables.hostedEgress ||
+        has(variables.pod.securityContext) &&
+        has(variables.pod.securityContext.runAsUser) && variables.pod.securityContext.runAsUser == 1000 &&
+        has(variables.pod.securityContext.runAsGroup) && variables.pod.securityContext.runAsGroup == 1000 &&
+        (!has(variables.pod.securityContext.supplementalGroups) || size(variables.pod.securityContext.supplementalGroups) == 0) &&
+        (!has(variables.pod.securityContext.sysctls) || size(variables.pod.securityContext.sysctls) == 0) &&
+        variables.containers.all(c, !has(c.securityContext) ||
+        (!has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) ||
+        size(c.securityContext.capabilities.add) == 0) &&
+        (!has(c.securityContext.allowPrivilegeEscalation) || !c.securityContext.allowPrivilegeEscalation)) &&
+        (!has(variables.pod.initContainers) ||
+        variables.pod.initContainers.all(c, !has(c.securityContext) ||
+        !(has(c.securityContext.privileged) && c.securityContext.privileged ||
+        has(c.securityContext.runAsUser) && c.securityContext.runAsUser == 0 ||
+        has(c.securityContext.runAsGroup) && c.securityContext.runAsGroup == 0) ||
+        c.name == 'hosted-egress-tun' && !has(c.restartPolicy) ||
+        c.name == 'mount-workspace' && !has(c.restartPolicy) &&
+        variables.pod.initContainers.map(i, i.name).indexOf('mount-workspace') <
+        variables.pod.initContainers.map(i, i.name).indexOf('hosted-egress-tun'))) &&
+        variables.pod.containers.all(c, !has(c.securityContext) ||
+        !(has(c.securityContext.privileged) && c.securityContext.privileged ||
+        has(c.securityContext.runAsUser) && c.securityContext.runAsUser == 0 ||
+        has(c.securityContext.runAsGroup) && c.securityContext.runAsGroup == 0) ||
+        c.name == 'dind' && c.image.matches('^docker[.]io/library/docker:[0-9][0-9.]*-dind@sha256:[0-9a-f]{64}$'))
+      message: with hosted egress on, the Pod runs as 1000:1000 with no extra groups or sysctls; only hosted-egress-tun and mount-workspace (init containers, not sidecars, mount-workspace before the TUN init) and dind (the official DinD image) run as root; and no container adds a capability or sets allowPrivilegeEscalation true
+    # The privileged TUN init (codewire#4955): never a regular container; an
+    # init container only with the switch on, under a VM runtime class, with
+    # exactly its command and nothing added, from the daemon image the
+    # deployment names, the same image the codewire-bin volume mounts. Every
+    # broker-mode template has it.
+    - expression: >-
+        variables.pod.containers.all(c, c.name != 'hosted-egress-tun') &&
+        (!has(variables.pod.initContainers) ||
+        variables.pod.initContainers.all(c, c.name != 'hosted-egress-tun' ||
+        (variables.hostedEgress &&
+        has(variables.pod.runtimeClassName) && variables.pod.runtimeClassName in variables.vmRuntimeClasses &&
+        has(c.command) && c.command == ['/usr/local/bin/cw', '__hosted-egress-tun', '--owner-uid', '1000'] &&
+        !has(c.args) && !has(c.env) && !has(c.envFrom) && !has(c.volumeMounts) && !has(c.volumeDevices) &&
+        c.image.matches('^[^@ ]+@sha256:[0-9a-f]{64}$') &&
+        c.image.split('@')[0] in variables.daemonRepositories &&
+        variables.volumes.exists(v, v.name == 'codewire-bin' && has(v.image) &&
+        has(v.image.reference) && v.image.reference == c.image)))) &&
+        (!variables.hostedEgress || has(variables.pod.initContainers) &&
+        variables.pod.initContainers.exists(c, c.name == 'hosted-egress-tun'))
+      message: hosted-egress-tun runs only as an init container with hosted egress on, under a VM runtime class, exactly its command with nothing added, from the deployment's daemon image; every broker-mode template has it
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: codewire-orchestration-warm-pool-template
+  labels:
+    app.kubernetes.io/component: orchestration
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  policyName: codewire-orchestration-warm-pool-template
+  validationActions: [Deny]
+  # The hosted-egress switch, from the namespace orchestration runs in.
+  # Kustomize writes that namespace (kustomizeconfig.yaml); a missing
+  # ConfigMap denies every pool template.
+  paramRef:
+    name: codewire-hosted-egress
+    namespace: {{ $.Release.Namespace }}
+    parameterNotFoundAction: Deny
+  # No mutable namespace selector: orchestration can update namespace labels.
+  # The identity match bounds the policy; it follows the writer everywhere.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: codewire-orchestration-warm-pool-member
+  labels:
+    app.kubernetes.io/component: orchestration
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ["agents.x-k8s.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["sandboxes"]
+  matchConditions:
+    - name: orchestration-service-account
+      expression: request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')
+  # The reconciler deletes stale members by UID and resourceVersion; DELETE is
+  # not matched. Bootstrap and resize patch only Sandboxes a claim adopted,
+  # which carry neither the pool label nor a pool owner.
+  validations:
+    - expression: >-
+        !(has(object.metadata.labels) && 'agents.x-k8s.io/warm-pool-sandbox' in object.metadata.labels) &&
+        !(has(object.metadata.ownerReferences) &&
+        object.metadata.ownerReferences.exists(o, o.kind == 'SandboxWarmPool'))
+      message: orchestration never creates or changes an unclaimed warm-pool member; only the controller writes it
+    - expression: >-
+        request.operation != 'UPDATE' ||
+        (!(has(oldObject.metadata.labels) && 'agents.x-k8s.io/warm-pool-sandbox' in oldObject.metadata.labels) &&
+        !(has(oldObject.metadata.ownerReferences) &&
+        oldObject.metadata.ownerReferences.exists(o, o.kind == 'SandboxWarmPool')))
+      message: orchestration never strips an unclaimed warm-pool member's pool label or owner
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: codewire-orchestration-warm-pool-member
+  labels:
+    app.kubernetes.io/component: orchestration
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  policyName: codewire-orchestration-warm-pool-member
+  validationActions: [Deny]
+  # No mutable namespace selector: orchestration can update namespace labels.
+  # The identity match bounds the policy; it follows the writer everywhere.
+{{- end }}

@@ -1,0 +1,27 @@
+{{- if .Values.orchestration.enabled }}
+# The hosted-egress switch (codewire#4000) and what the warm-pool template
+# admission policy needs for its broker arm. Orchestration reads
+# CODEWIRE_HOSTED_EGRESS_ENABLED into its environment and the policy reads the
+# whole ConfigMap as its parameter, so the two always agree; orchestration
+# cannot write it. The name carries no hash suffix, so the policy binding can
+# name it.
+#
+# Base ships hosted egress off: only today's templates are admitted. An overlay
+# that turns it on also sets the daemon image's repository (no tag, no digest)
+# and the public gateway's proxies; an empty or malformed value admits no
+# broker template. docs/CONFIGURATION.md documents each key.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: codewire-hosted-egress
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+  # Removing it denies every pool template, so a source change never prunes it.
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+data:
+  {{- include "codewire.requireStrings" (dict "name" "codewire-hosted-egress" "data" $.Values.hostedEgress) }}
+  {{- toYaml $.Values.hostedEgress | nindent 2 }}
+{{- end }}
