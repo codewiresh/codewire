@@ -6,10 +6,13 @@ use codewire_client::hosted_shell::{InputNotice, InputStream, restart};
 pub(crate) mod agents;
 mod entry;
 mod exec;
+mod navigation;
 mod reattach;
 pub(crate) mod setup;
+
 pub(crate) use entry::{handle_environment_run_command, handle_environment_shell_command};
 pub(crate) use exec::handle_exec_command;
+pub(crate) use navigation::AttachNavigationDecoder;
 
 #[cfg(target_os = "linux")]
 pub(crate) async fn run_host_agent_control(
@@ -2256,68 +2259,6 @@ impl AttachmentReconnectBudget {
             );
         }
         Ok(ATTACH_RECONNECT_BASE_DELAY * u32::from(self.consecutive_interruptions))
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct AttachNavigationDecoder {
-    pending_prefix: bool,
-    /// Every key goes to the session, Ctrl-B included: a plain `cw shell`.
-    plain: bool,
-}
-
-impl AttachNavigationDecoder {
-    pub(crate) fn new(plain: bool) -> Self {
-        Self {
-            plain,
-            ..Self::default()
-        }
-    }
-
-    pub(crate) fn feed(&mut self, input: &[u8]) -> (Option<AttachExit>, Vec<u8>) {
-        if self.plain {
-            return (None, input.to_vec());
-        }
-        let mut forward = Vec::with_capacity(input.len());
-        for byte in input {
-            if self.pending_prefix {
-                self.pending_prefix = false;
-                let action = match byte {
-                    b'h' => Some(AttachExit::PreviousSession),
-                    b'l' => Some(AttachExit::NextSession),
-                    b'k' => Some(AttachExit::PreviousEnvironment),
-                    b'j' => Some(AttachExit::NextEnvironment),
-                    b'w' => Some(AttachExit::OpenWorkspaces),
-                    b'r' => Some(AttachExit::Restart),
-                    b'd' => Some(AttachExit::Detached),
-                    b'b' => {
-                        forward.push(0x02);
-                        None
-                    }
-                    _ => {
-                        forward.extend_from_slice(&[0x02, *byte]);
-                        None
-                    }
-                };
-                if action.is_some() {
-                    return (action, forward);
-                }
-            } else if *byte == 0x02 {
-                self.pending_prefix = true;
-            } else {
-                forward.push(*byte);
-            }
-        }
-        (None, forward)
-    }
-
-    pub(crate) fn finish(&mut self) -> Vec<u8> {
-        if self.pending_prefix {
-            self.pending_prefix = false;
-            vec![0x02]
-        } else {
-            Vec::new()
-        }
     }
 }
 

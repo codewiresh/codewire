@@ -1,7 +1,7 @@
 ---
 title: Access
 description: run, exec, ls, attach, logs, send, wait, stop and restart, and the attach key bindings.
-updated: 2026-11-16
+updated: 2026-11-17
 weight: 3
 aliases: ["/cli/sessions"]
 ---
@@ -172,6 +172,9 @@ refused: use `cw msg`, `cw steer` and `cw logs`.
 | `Ctrl+B w` | Show the environment list |
 | `Ctrl+B r` | Restart the session once it has exited |
 | `Ctrl+B b` | Send a literal Ctrl+B |
+
+These keys work too when the program in the session turns on the kitty
+keyboard protocol, as Codex, Neovim and Helix do.
 
 ## cw logs
 
