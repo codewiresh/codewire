@@ -28,16 +28,43 @@
 
   /* ---------- copy: the install command, and the prompt for an agent ---------- */
   const toast = $('#toast'), say = (t) => { toast.textContent = t; toast.classList.add('on'); clearTimeout(say.t); say.t = setTimeout(() => toast.classList.remove('on'), 1400); };
-  $$('.cw-site-copy').forEach((b) => b.addEventListener('click', async () => {
-    const code = b.previousElementSibling;
-    try { await navigator.clipboard.writeText(code.textContent); }
-    catch (e) { const r = document.createRange(); r.selectNodeContents(code); const s = getSelection(); s.removeAllRanges(); s.addRange(r); say('Selected, press copy'); return; }
-    b.classList.add('done'); b.setAttribute('aria-label', 'Copied');
-    clearTimeout(b.t); b.t = setTimeout(() => { b.classList.remove('done'); b.setAttribute('aria-label', 'Copy install command'); }, 1600);
-  }));
-  $$('[data-copy-text]').forEach((b) => b.addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(b.dataset.copyText); say('Prompt copied'); }
-    catch (e) { say('Copy failed'); }
+  async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); return; } catch (_) {}
+    const focus = document.activeElement;
+    const field = document.createElement('textarea');
+    field.value = text;
+    field.readOnly = true;
+    field.hidden = false;
+    field.className = 'cw-copy-fallback';
+    document.body.append(field);
+    field.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); }
+    finally { field.remove(); focus?.focus({ preventScroll: true }); }
+    if (!copied) throw new Error('Copy failed');
+  }
+  $$('.cw-site-copy, [data-copy-text]').forEach((button) => button.addEventListener('click', async () => {
+    const isPrompt = button.hasAttribute('data-copy-text');
+    const text = isPrompt ? button.dataset.copyText : button.previousElementSibling.textContent;
+    const idle = button.dataset.copyIdle || (isPrompt ? button.textContent : button.getAttribute('aria-label'));
+    button.dataset.copyIdle = idle;
+    clearTimeout(button.t);
+    try {
+      await copyText(text.trim());
+      button.classList.add('done');
+      button.setAttribute('aria-label', 'Copied');
+      if (isPrompt) button.textContent = 'Copied';
+    } catch (_) {
+      button.classList.remove('done');
+      button.setAttribute('aria-label', 'Copy failed. Try again');
+      if (isPrompt) button.textContent = 'Try copying again';
+      say('Could not copy. Please try again.');
+    }
+    button.t = setTimeout(() => {
+      button.classList.remove('done');
+      button.setAttribute('aria-label', idle);
+      if (isPrompt) button.textContent = idle;
+    }, 1600);
   }));
 
   /* ---------- the calculator: price a sandbox per second, hour, day, week or month ---------- */

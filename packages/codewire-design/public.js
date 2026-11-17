@@ -740,12 +740,43 @@ void main() {
       addEventListener('scroll', go, { passive: true });
     }
   }
-  $$('.cw-site-copy').forEach((b) => b.addEventListener('click', async () => {
-    const code = b.previousElementSibling, txt = code.textContent;
-    let ok = true;
-    try { await navigator.clipboard.writeText(txt); }
-    catch (e) { ok = false; const r = document.createRange(); r.selectNodeContents(code); const s = getSelection(); s.removeAllRanges(); s.addRange(r); say('Selected, press copy'); }
-    if (ok) { b.classList.add('done'); b.setAttribute('aria-label', 'Copied'); clearTimeout(b.t); b.t = setTimeout(() => { b.classList.remove('done'); b.setAttribute('aria-label', 'Copy install command'); }, 1600); }
+  async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); return; } catch (_) {}
+    const focus = document.activeElement;
+    const field = document.createElement('textarea');
+    field.value = text;
+    field.readOnly = true;
+    field.hidden = false;
+    field.className = 'cw-copy-fallback';
+    document.body.append(field);
+    field.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); }
+    finally { field.remove(); focus?.focus({ preventScroll: true }); }
+    if (!copied) throw new Error('Copy failed');
+  }
+  $$('.cw-site-copy').forEach((button) => button.addEventListener('click', async () => {
+    const payload = button.dataset.copyTarget ? document.getElementById(button.dataset.copyTarget) : button.previousElementSibling;
+    const label = button.querySelector('[data-copy-label]');
+    const idle = button.dataset.copyIdle || button.getAttribute('aria-label');
+    button.dataset.copyIdle = idle;
+    clearTimeout(button.t);
+    try {
+      await copyText(payload.textContent.trim());
+      button.classList.add('done');
+      button.setAttribute('aria-label', 'Copied');
+      if (label) label.textContent = 'Copied';
+    } catch (_) {
+      button.classList.remove('done');
+      button.setAttribute('aria-label', 'Copy failed. Try again');
+      if (label) label.textContent = 'Try copying again';
+      say('Could not copy. Please try again.');
+    }
+    button.t = setTimeout(() => {
+      button.classList.remove('done');
+      button.setAttribute('aria-label', idle);
+      if (label) label.textContent = idle;
+    }, 1600);
   }));
 
   /* ---------- fig 3.1: a geodesic sphere of crimped strands; sessions clip onto nodes, you sit at the centre ---------- */

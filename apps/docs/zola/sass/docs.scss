@@ -1032,8 +1032,8 @@ html {
 }
 
 .docs-code-copy svg {
-  width: 1rem;
-  height: 1rem;
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
 }
 
 .docs-code-copy svg + svg,
@@ -1045,6 +1045,50 @@ html {
   display: block;
   color: var(--accent-text);
 }
+
+.docs-prompt {
+  display: flow-root;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+
+.docs-prompt > p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.docs-prompt-copy {
+  float: right;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 2.25rem;
+  margin: 0 0 var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inverse);
+  color: var(--fg-inverse);
+  font: inherit;
+  font-size: var(--text-small);
+  cursor: pointer;
+}
+
+.docs-prompt-copy svg {
+  width: var(--icon-size);
+  height: var(--icon-size);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.docs-prompt-copy svg + svg,
+.docs-prompt-copy[data-copied] svg:first-child { display: none; }
+.docs-prompt-copy[data-copied] svg + svg { display: block; }
+.docs-copy-fallback { position: fixed; inset: 0 auto auto 0; opacity: 0; }
 
 .docs-prose hr {
   height: 1px;

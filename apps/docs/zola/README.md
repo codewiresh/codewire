@@ -52,6 +52,11 @@ shortcodes become plain Markdown; a shortcode the exporter does not know fails
 the build. The Rust server also serves the two text files at `/llms.txt` and
 `/llms-full.txt`.
 
+An `agent_prompt` block holds plain setup-prompt text and a copy button in its
+upper right. The Markdown export retains the text without the button. Keep
+the human commands below the prompt; prompts refer to the same canonical
+walkthrough, rather than maintaining a separate set of instructions.
+
 A diagram is a `figure` shortcode: `source` names an SVG in `figures/`, `alt`
 is its text alternative, and the body is the caption. The SVG is inlined into
 the page and carries only the `fig-` classes from `sass/docs.scss`, with no

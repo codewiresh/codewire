@@ -2,7 +2,22 @@
   "use strict";
 
   const svgNamespace = "http://www.w3.org/2000/svg";
-  const canCopy = Boolean(navigator.clipboard && window.isSecureContext);
+  const canCopy = Boolean(navigator.clipboard || document.queryCommandSupported?.("copy"));
+
+  const copyText = async (text) => {
+    try { await navigator.clipboard.writeText(text); return; } catch (_error) {}
+    const focused = document.activeElement;
+    const field = document.createElement("textarea");
+    field.value = text;
+    field.readOnly = true;
+    field.className = "docs-copy-fallback";
+    document.body.append(field);
+    field.select();
+    let copied = false;
+    try { copied = document.execCommand("copy"); }
+    finally { field.remove(); focused?.focus({ preventScroll: true }); }
+    if (!copied) throw new Error("Copy failed");
+  };
 
   const icon = (paths) => {
     const svg = document.createElementNS(svgNamespace, "svg");
@@ -54,9 +69,23 @@
       button.setAttribute("aria-label", "Copy to clipboard");
       button.append(copyIcon(), checkIcon());
       button.addEventListener("click", () => {
-        navigator.clipboard.writeText(code.textContent.replace(/\n$/, "")).then(() => flash(button, null, "Copy to clipboard"));
+        copyText(code.textContent.replace(/\n$/, ""))
+          .then(() => flash(button, null, "Copy to clipboard"))
+          .catch(() => button.setAttribute("aria-label", "Copy failed. Try again"));
       });
       frame.append(button);
+    });
+
+    document.querySelectorAll("[data-docs-copy-prompt]").forEach((button) => {
+      const label = button.querySelector("[data-docs-copy-label]");
+      const text = button.parentElement.querySelector("[data-docs-prompt-text]");
+      button.prepend(copyIcon(), checkIcon());
+      button.hidden = false;
+      button.addEventListener("click", () => {
+        copyText(text.textContent.trim())
+          .then(() => flash(button, label, "Copy prompt"))
+          .catch(() => { label.textContent = "Try copying again"; });
+      });
     });
 
     document.querySelectorAll("[data-docs-copy-markdown]").forEach((button) => {
@@ -65,7 +94,7 @@
       button.addEventListener("click", () => {
         fetch(button.dataset.docsCopyMarkdown, { credentials: "same-origin" })
           .then((response) => (response.ok ? response.text() : Promise.reject(new Error(String(response.status)))))
-          .then((markdown) => navigator.clipboard.writeText(markdown))
+          .then(copyText)
           .then(() => flash(button, label, "Copy as Markdown"))
           .catch(() => { if (label) label.textContent = "Copy failed"; });
       });

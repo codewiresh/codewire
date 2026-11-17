@@ -46,6 +46,17 @@ for color, spacing, radius, content width, and overlay shadow. Prefer semantic
 HTML and native controls; a class supplies presentation, not application state.
 State exposed to CSS uses `aria-*` or `data-*` attributes.
 
+Text action buttons use the pill radius in both the dashboard and the public
+site. The public site's segmented controls use a pill track with a small inset
+and fully rounded selection buttons. The selected segment is identified by
+`aria-pressed`, with the inverse foreground and background colors; rounding
+does not change selection or keyboard behavior. Standalone icon controls retain
+their existing presentation. The public-site scale owns its radius and segment
+inset tokens in `routes/public.css`.
+
+The review and verification steps are in
+[`docs/journeys/public-controls.md`](../../docs/journeys/public-controls.md).
+
 `python3 scripts/checks/repo_checks.py design-tokens` enforces these
 conventions in Policy, locally and in CI. Literal font sizes, line heights,
 colors, radii, shadows, and spacing live only in the `:root` token block of
