@@ -163,7 +163,11 @@ impl CredentialKind {
 /// preserving the evidence future service-specific checks need.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialContext {
-    SessionCookie,
+    SessionCookie {
+        /// The `sessions` row that admitted the request. Not a secret: it
+        /// names the session, as the session list does.
+        session_id: String,
+    },
     ApiKey {
         key_id: String,
         /// Reserved API-key labels. They are intentionally not interpreted as
@@ -182,7 +186,7 @@ impl CredentialContext {
     /// Stable telemetry kind derived from the resolved credential.
     pub fn kind(&self) -> CredentialKind {
         match self {
-            CredentialContext::SessionCookie => CredentialKind::SessionCookie,
+            CredentialContext::SessionCookie { .. } => CredentialKind::SessionCookie,
             CredentialContext::ApiKey { .. } => CredentialKind::ApiKey,
             CredentialContext::OidcAccessToken { .. } => CredentialKind::OidcAccessToken,
         }
@@ -248,7 +252,7 @@ pub async fn require_session_auth(
     let token = session_cookie(req.headers())
         .map(str::to_owned)
         .ok_or(AppError::Unauthorized)?;
-    let user = authenticate_session_cookie(&state.pool, &token).await?;
+    let (user, _session_id) = authenticate_session_cookie(&state.pool, &token).await?;
     req.extensions_mut().insert(user);
     Ok(next.run(req).await)
 }
@@ -392,11 +396,11 @@ pub(crate) async fn resolve_authentication(
 ) -> Result<Authentication, AppError> {
     // Credential precedence is session cookie first, then Authorization.
     if let Some(token) = session_token
-        && let Ok(user) = authenticate_session_cookie(&state.pool, token).await
+        && let Ok((user, session_id)) = authenticate_session_cookie(&state.pool, token).await
     {
         return Ok(Authentication {
             user,
-            credential: CredentialContext::SessionCookie,
+            credential: CredentialContext::SessionCookie { session_id },
             oauth_bearer_authority: None,
         });
     }
@@ -470,7 +474,7 @@ pub(crate) async fn resolve_credential_mutation_authentication(
         .map_err(|_| AppError::ServiceUnavailable("session credential lookup unavailable".into()))?;
         let (session_id, user_id, is_admin, expires_at) = row.ok_or(AppError::Unauthorized)?;
         let authority = session_mutation_authority::SessionCredentialMutationAuthority::new(
-            session_id,
+            session_id.clone(),
             digest,
             user_id.clone(),
             expires_at,
@@ -486,7 +490,7 @@ pub(crate) async fn resolve_credential_mutation_authentication(
                     is_admin,
                     via_api_key: false,
                 },
-                credential: CredentialContext::SessionCookie,
+                credential: CredentialContext::SessionCookie { session_id },
                 oauth_bearer_authority: None,
             },
             CredentialMutationAuthority::from_session(authority),
@@ -671,12 +675,15 @@ pub fn session_cookie(headers: &HeaderMap) -> Option<&str> {
     None
 }
 
-async fn authenticate_session_cookie(pool: &PgPool, token: &str) -> Result<AuthUser, AppError> {
+async fn authenticate_session_cookie(
+    pool: &PgPool,
+    token: &str,
+) -> Result<(AuthUser, String), AppError> {
     // Sliding expiry: mirrors `auth.GetSessionByToken` exactly for an enabled
     // account. Disabled users do not refresh their session expiry and cannot
     // reach a product or identity operation through an existing cookie.
     let token_hash = hash_session_token(token);
-    let user: (String, bool) = sqlx::query_as(
+    let session: SessionAuthRow = sqlx::query_as(
         r#"
         UPDATE sessions AS session
            SET expires_at = GREATEST(session.expires_at, NOW() + $2::interval),
@@ -686,7 +693,7 @@ async fn authenticate_session_cookie(pool: &PgPool, token: &str) -> Result<AuthU
            AND session.expires_at > NOW()
            AND session.user_id = user_account.id
            AND user_account.enabled
-         RETURNING session.user_id, user_account.is_admin
+         RETURNING session.id, session.user_id, user_account.is_admin
         "#,
     )
     .bind(&token_hash)
@@ -695,14 +702,23 @@ async fn authenticate_session_cookie(pool: &PgPool, token: &str) -> Result<AuthU
     .await
     .map_err(AppError::from)?
     .ok_or(AppError::Unauthorized)?;
-    let (user_id, is_admin) = user;
 
-    Ok(AuthUser {
-        user_id,
-        org_id: None,
-        is_admin,
-        via_api_key: false,
-    })
+    Ok((
+        AuthUser {
+            user_id: session.user_id,
+            org_id: None,
+            is_admin: session.is_admin,
+            via_api_key: false,
+        },
+        session.id,
+    ))
+}
+
+#[derive(sqlx::FromRow)]
+struct SessionAuthRow {
+    id: String,
+    user_id: String,
+    is_admin: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -932,7 +948,9 @@ mod tests {
     #[test]
     fn account_credentials_require_global_admin_authorization() {
         for credential in [
-            CredentialContext::SessionCookie,
+            CredentialContext::SessionCookie {
+                session_id: "session".into(),
+            },
             CredentialContext::OidcAccessToken {
                 client_id: "native-client".into(),
                 scopes: vec![PRODUCT_API_SCOPE.into()],

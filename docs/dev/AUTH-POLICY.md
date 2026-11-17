@@ -558,9 +558,14 @@ browser approval bridge for the standard device grant; it is not a product
 REST API. Product capability is proto-first and served through the shared
 Connect authentication layer.
 
-Terminal tickets are short-lived derivatives of an already authenticated user
-credential for a WebSocket handshake. Stripe webhook signatures are a
-third-party protocol mechanism, not an additional Codewire credential flavor.
+Terminal tickets are 30-second, single-use derivatives of a signed-in browser
+session, for the terminal's WebSocket handshake, which a browser cannot send a
+header with. A ticket names the session that minted it, and its redemption
+requires that session still live and its user still enabled, so a sign-out or
+a disable before redemption refuses it (#3586). Only a session gets a ticket:
+an API key or OAuth client sends its own credential with the handshake. Stripe
+webhook signatures are a third-party protocol mechanism, not an additional
+Codewire credential flavor.
 
 Missing or invalid credentials map to REST `401` / Connect
 `unauthenticated`. An authenticated principal without required scope, role,

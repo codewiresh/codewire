@@ -10,7 +10,7 @@ use codewire_proto::codewire::console::v1::{
     GetEnvironmentCreateOptionsResponse, IssueTerminalTicketRequest, IssueTerminalTicketResponse,
 };
 use codewire_server_core::AppResult;
-use codewire_server_core::connect::{auth_user, rpc_app_error};
+use codewire_server_core::connect::{auth_context, auth_user, rpc_app_error};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 
 use crate::api::ApiState;
@@ -59,7 +59,8 @@ impl EnvironmentSetupService for EnvironmentSetupConnectService {
         _request: ServiceRequest<'_, IssueTerminalTicketRequest>,
     ) -> ServiceResult<IssueTerminalTicketResponse> {
         let user = auth_user(&ctx)?.clone();
-        let ticket = issue_terminal_ticket_core(&self.state, &user)
+        let credential = auth_context(&ctx)?;
+        let ticket = issue_terminal_ticket_core(&self.state.session_secret, &user, credential)
             .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(IssueTerminalTicketResponse {
             ticket,

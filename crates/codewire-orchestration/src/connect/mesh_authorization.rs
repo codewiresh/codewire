@@ -91,7 +91,7 @@ fn credential_kind(
     credential: &codewire_server_core::auth::CredentialContext,
 ) -> MeshAuthorizationCredentialKind {
     match credential {
-        codewire_server_core::auth::CredentialContext::SessionCookie => {
+        codewire_server_core::auth::CredentialContext::SessionCookie { .. } => {
             MeshAuthorizationCredentialKind::SessionCookie
         }
         codewire_server_core::auth::CredentialContext::ApiKey { .. } => {

@@ -1299,6 +1299,12 @@ database_lane_orchestration_workspaces() {
       'worker::credential_relay::database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "terminal ticket session matrix" terminal-ticket-session \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::terminal::ticket_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "preset projection matrix" preset-projection \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

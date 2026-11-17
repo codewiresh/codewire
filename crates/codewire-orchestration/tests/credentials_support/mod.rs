@@ -83,7 +83,7 @@ impl Harness {
                 "SELECT (id,disabled) ON public.oidc_clients".into(),
                 // Ordinary account auth retains its existing session sliding
                 // expiry and API-key usage paths; these are not metadata writes.
-                "SELECT (token_hash,user_id,expires_at) ON public.sessions".into(),
+                "SELECT (id,token_hash,user_id,expires_at) ON public.sessions".into(),
                 "UPDATE (expires_at,updated_at) ON public.sessions".into(),
                 "SELECT (id,user_id,org_id,key_prefix,key_hash,expires_at,disabled_at,scopes,last_used_at) ON public.api_keys".into(),
                 // A key acts only for a current member of its organization (#3254).

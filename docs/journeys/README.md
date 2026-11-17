@@ -29,6 +29,7 @@ runs the same commands and holds the result to the same standard.
 | [ios-app.md](ios-app.md) | The iOS app (#3825): create an environment from the app, follow its setup steps and open its shell. Written first; not yet observed |
 | [cli-completion.md](cli-completion.md) | Tab completion of names in `cw` (#5108): environments, sessions, credentials, profiles, policies, mesh networks, presets, snapshots, checkpoints and organizations in zsh, bash and fish, bounded and never prompting. Written first; every step is not yet observed |
 | [mesh.md](mesh.md) | Mesh Networks (#3350, #5115, #5118, #5119): Sandboxes on one Mesh Network reach each other's published ports and nothing else does, and the dashboard shows the same Mesh Networks, nodes and join state as `cw`. Written first; every step is not yet observed |
+| [account-access.md](account-access.md) | What an account can still reach after a sign-out, a disable or a revoked credential (#3586): first, a terminal ticket from a session that has ended |
 | [deletion.md](deletion.md) | Deleting an account or an organization (#4823): the account-deletion page and `cw org delete` say it is permanent, before it happens |
 
 ## What a journey file holds

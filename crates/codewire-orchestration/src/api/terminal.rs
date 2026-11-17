@@ -15,7 +15,7 @@ use codewire_daemon_bridge::client::{
     DaemonRunSender, DaemonRunSession, DaemonRunStart,
 };
 use codewire_server_core::AppError;
-use codewire_server_core::auth::{AuthUser, SESSION_COOKIE_NAME, authenticate};
+use codewire_server_core::auth::{AuthUser, CredentialContext, SESSION_COOKIE_NAME, authenticate};
 use codewire_server_core::org_deletion::{
     acquire_environment_runtime_mutation_lease, mark_organization_mutation_resolution_required,
     release_organization_mutation_lease,
@@ -45,6 +45,8 @@ const TERMINAL_LEASE_TIMEOUT: Duration = Duration::from_secs(5);
 type HmacSha256 = Hmac<Sha256>;
 
 mod durable;
+#[cfg(test)]
+mod ticket_database_tests;
 
 /// Single-use enforcement for terminal tickets (#2505 L3).
 ///
@@ -86,10 +88,22 @@ impl TerminalTicketReplayCache {
 #[derive(Debug, Serialize, Deserialize)]
 struct TerminalTicketClaims {
     user_id: String,
-    #[serde(default)]
-    global_admin_user_credential: bool,
+    /// The browser session that minted the ticket. Redemption requires it
+    /// still live and its user still enabled (AUTH-POLICY "Product
+    /// protocols", #3586).
+    session_id: String,
     exp: i64,
     nonce: String,
+}
+
+/// Why a ticket opened nothing.
+#[derive(Debug, PartialEq, Eq)]
+enum TicketRefused {
+    /// Forged, expired, replayed, or its session or user no longer live: one
+    /// answer, so a caller can't tell which.
+    Invalid,
+    /// The session couldn't be read.
+    Unavailable,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,16 +112,19 @@ pub struct TerminalQuery {
     ticket: String,
 }
 
+/// A ticket for the terminal's WebSocket handshake, which a browser can't
+/// send a header with. Only a browser session gets one; an API key or OAuth
+/// client sends its own credential with the handshake.
 pub(crate) fn issue_terminal_ticket_core(
-    state: &ApiState,
+    session_secret: &str,
     user: &AuthUser,
+    credential: &CredentialContext,
 ) -> Result<String, AppError> {
-    issue_ticket(
-        &state.session_secret,
-        &user.user_id,
-        user.is_admin && !user.via_api_key,
-    )
-    .map_err(|_| AppError::InternalMsg("failed to issue ticket".into()))
+    let CredentialContext::SessionCookie { session_id } = credential else {
+        return Err(AppError::Forbidden);
+    };
+    issue_ticket(session_secret, &user.user_id, session_id)
+        .map_err(|_| AppError::InternalMsg("failed to issue ticket".into()))
 }
 
 /// Raw terminal WebSocket route. Authenticates manually because the Go
@@ -203,33 +220,22 @@ pub(crate) async fn authenticate_socket_request(
     ticket: &str,
 ) -> Result<AuthUser, Response> {
     if !ticket.is_empty() {
-        let Some(claims) = redeem_ticket(&state.session_secret, ticket) else {
-            return Err(terminal_error(
+        return admit_ticket(
+            &state.pool,
+            &state.session_secret,
+            &state.terminal_ticket_replays,
+            ticket,
+        )
+        .await
+        .map_err(|refused| match refused {
+            TicketRefused::Invalid => terminal_error(
                 StatusCode::UNAUTHORIZED,
                 r#"{"error":"invalid or expired ticket"}"#,
-            ));
-        };
-        // Single-use (#2505 L3): the nonce is unique per issue and the cache
-        // entry dies with the ticket's own `exp`, so a ticket replayed from
-        // history/proxy logs cannot open a second session. The 401 matches
-        // the invalid-ticket branch so a replay is indistinguishable from a
-        // forgery to the caller.
-        let mut nonce_digest = [0u8; 32];
-        nonce_digest.copy_from_slice(&Sha256::digest(claims.nonce.as_bytes()));
-        if !state
-            .terminal_ticket_replays
-            .record(nonce_digest, claims.exp)
-        {
-            return Err(terminal_error(
-                StatusCode::UNAUTHORIZED,
-                r#"{"error":"invalid or expired ticket"}"#,
-            ));
-        }
-        return Ok(AuthUser {
-            user_id: claims.user_id,
-            org_id: None,
-            is_admin: claims.global_admin_user_credential,
-            via_api_key: false,
+            ),
+            TicketRefused::Unavailable => terminal_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"error":"terminal sign-in unavailable"}"#,
+            ),
         });
     }
 
@@ -667,16 +673,53 @@ fn terminal_error(status: StatusCode, body: &str) -> Response {
     plain_error(status, body)
 }
 
-fn issue_ticket(
+/// The user a ticket admits: a genuine, unexpired, first-use ticket whose
+/// session is still live and whose user is still enabled. The single use is
+/// spent before the session is read, so a refused ticket can't be retried.
+async fn admit_ticket(
+    pool: &sqlx::PgPool,
     secret: &str,
-    user_id: &str,
-    global_admin_user_credential: bool,
-) -> anyhow::Result<String> {
+    replays: &TerminalTicketReplayCache,
+    ticket: &str,
+) -> Result<AuthUser, TicketRefused> {
+    let claims = redeem_ticket(secret, ticket).ok_or(TicketRefused::Invalid)?;
+    // Single-use (#2505 L3): the nonce is unique per issue and the cache
+    // entry dies with the ticket's own `exp`, so a ticket replayed from
+    // history/proxy logs cannot open a second session.
+    let mut nonce_digest = [0u8; 32];
+    nonce_digest.copy_from_slice(&Sha256::digest(claims.nonce.as_bytes()));
+    if !replays.record(nonce_digest, claims.exp) {
+        return Err(TicketRefused::Invalid);
+    }
+    let is_admin: Option<bool> = sqlx::query_scalar(
+        "SELECT user_account.is_admin FROM sessions AS session \
+         JOIN users AS user_account ON user_account.id = session.user_id \
+         WHERE session.id = $1 AND session.user_id = $2 \
+           AND session.expires_at > NOW() AND user_account.enabled",
+    )
+    .bind(&claims.session_id)
+    .bind(&claims.user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        tracing::warn!(%error, "terminal ticket session lookup failed");
+        TicketRefused::Unavailable
+    })?;
+    let is_admin = is_admin.ok_or(TicketRefused::Invalid)?;
+    Ok(AuthUser {
+        user_id: claims.user_id,
+        org_id: None,
+        is_admin,
+        via_api_key: false,
+    })
+}
+
+fn issue_ticket(secret: &str, user_id: &str, session_id: &str) -> anyhow::Result<String> {
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce)?;
     let claims = TerminalTicketClaims {
         user_id: user_id.to_string(),
-        global_admin_user_credential,
+        session_id: session_id.to_string(),
         exp: chrono::Utc::now().timestamp() + TERMINAL_TICKET_TTL_SECS,
         nonce: hex_lower(&nonce),
     };
@@ -803,11 +846,54 @@ mod tests {
 
     #[test]
     fn issue_and_redeem_ticket_round_trips() {
-        let ticket =
-            issue_ticket("0123456789abcdef0123456789abcdef", "test-user-123", true).unwrap();
+        let ticket = issue_ticket(
+            "0123456789abcdef0123456789abcdef",
+            "test-user-123",
+            "session-1",
+        )
+        .unwrap();
         let claims = redeem_ticket("0123456789abcdef0123456789abcdef", &ticket).unwrap();
         assert_eq!(claims.user_id, "test-user-123");
-        assert!(claims.global_admin_user_credential);
+        assert_eq!(claims.session_id, "session-1");
+    }
+
+    /// Only a browser session gets a ticket; an API key or an OAuth token
+    /// sends its own credential with the handshake (#3586).
+    #[test]
+    fn only_a_browser_session_gets_a_ticket() {
+        let user = AuthUser {
+            user_id: "user".into(),
+            org_id: None,
+            is_admin: false,
+            via_api_key: false,
+        };
+        for credential in [
+            CredentialContext::ApiKey {
+                key_id: "key".into(),
+                scopes: Vec::new(),
+            },
+            CredentialContext::OidcAccessToken {
+                client_id: "client".into(),
+                scopes: Vec::new(),
+            },
+        ] {
+            assert!(matches!(
+                issue_terminal_ticket_core("0123456789abcdef0123456789abcdef", &user, &credential),
+                Err(AppError::Forbidden)
+            ));
+        }
+        let session = CredentialContext::SessionCookie {
+            session_id: "session".into(),
+        };
+        let ticket =
+            issue_terminal_ticket_core("0123456789abcdef0123456789abcdef", &user, &session)
+                .unwrap();
+        assert_eq!(
+            redeem_ticket("0123456789abcdef0123456789abcdef", &ticket)
+                .unwrap()
+                .session_id,
+            "session"
+        );
     }
 
     /// #2505 L3 regression: a redeemed ticket cannot be replayed while its
@@ -847,7 +933,7 @@ mod tests {
         let secret = "0123456789abcdef0123456789abcdef";
         let payload = serde_json::to_vec(&TerminalTicketClaims {
             user_id: "user".to_string(),
-            global_admin_user_credential: false,
+            session_id: "session".to_string(),
             exp: chrono::Utc::now().timestamp() - 1,
             nonce: "expired".to_string(),
         })
@@ -861,7 +947,7 @@ mod tests {
     #[test]
     fn tampered_ticket_is_rejected() {
         let secret = "0123456789abcdef0123456789abcdef";
-        let ticket = issue_ticket(secret, "user", false).unwrap();
+        let ticket = issue_ticket(secret, "user", "session").unwrap();
         let (payload_part, sig_part) = ticket.split_once('.').unwrap();
         let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
         let mut payload = engine.decode(payload_part).unwrap();
