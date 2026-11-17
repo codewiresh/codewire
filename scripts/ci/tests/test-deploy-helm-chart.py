@@ -29,7 +29,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import yaml
 
@@ -140,6 +140,7 @@ _KIND = {
     ("ConfigMap", "codewire-dashboard-public-config"),
     ("Deployment", "codewire-dashboard"),
     ("Service", "dashboard"),
+    ("RuntimeClass", "runc"),
 } | _SERVICES | _DERP | _INGRESSES | _LOCAL_INGRESSES
 # What the chart renders so far, by kind and name, per environment.
 MIGRATED: dict[str, set[tuple[str, str]]] = {
@@ -150,6 +151,7 @@ MIGRATED: dict[str, set[tuple[str, str]]] = {
         ("Deployment", "codewire-dashboard"),
         ("Service", "codewire-dashboard"),
         ("NetworkPolicy", "codewire-dashboard"),
+        ("RuntimeClass", "runc"),
     }
     | _SERVICES
     | _CERTIFICATES
@@ -404,25 +406,56 @@ def check_mesh(environment: str) -> list[str]:
     return compare({key(document) for document in reference}, chart, reference, environment, "the Mesh chart")
 
 
-# The agent-sandbox controller and its CRDs, which Kustomize renders from their
-# own trees and the chart renders from files/agent-sandbox; every object those
-# trees render must be the chart's.
-SANDBOX_ENVIRONMENTS: dict[str, tuple[Path, list[Path]]] = {
-    "agent-sandbox": (K8S / "agent-sandbox/base", [SOURCE_VALUES]),
-    "agent-sandbox-kind": (K8S / "agent-sandbox/overlays/local-kind", [CHART / "values-local-kind.yaml"]),
-}
 SANDBOX_FILES = CHART / "files/agent-sandbox"
-# Components that Kustomize applies from trees of their own, compared in their
-# own environments, so not in the main ones.
-SEPARATE = ("--set", "agentSandbox.enabled=false")
+SMOKE = K8S / "runtime-profiles/confidential-smoke"
 
 
-def check_sandbox(environment: str) -> list[str]:
-    directory, values = SANDBOX_ENVIRONMENTS[environment]
-    reference = objects(kustomize([directory]))
+def variant(directory: Path, kustomization: str) -> str:
+    """Kustomize's render of a directory with another of its kustomization
+    files in place of kustomization.yaml, as a reviewed PR swaps them."""
+    with tempfile.TemporaryDirectory() as scratch:
+        copy = Path(scratch, directory.name)
+        shutil.copytree(directory, copy)
+        shutil.copy(directory / kustomization, copy / "kustomization.yaml")
+        return run(["kustomize", "build", str(copy)])
+
+
+# Components Kustomize applies from trees of their own, each compared in an
+# environment of its own: the tree's render, the chart's values and settings,
+# and the one template that renders the component. Every object the tree
+# renders must be the chart's.
+COMPONENTS: dict[str, tuple[Callable[[], str], list[Path], tuple[str, ...], str]] = {
+    "agent-sandbox": (
+        lambda: kustomize([K8S / "agent-sandbox/base"]), [SOURCE_VALUES], (), "agent-sandbox.yaml",
+    ),
+    "agent-sandbox-kind": (
+        lambda: kustomize([K8S / "agent-sandbox/overlays/local-kind"]),
+        [CHART / "values-local-kind.yaml"], (), "agent-sandbox.yaml",
+    ),
+    "runtime-profiles": (
+        lambda: kustomize([K8S / "runtime-profiles/base"]), [SOURCE_VALUES], (), "runtime-profiles.yaml",
+    ),
+    "confidential-smoke-baseline": (
+        lambda: variant(SMOKE, "kustomization.baseline.yaml"), [SOURCE_VALUES],
+        ("--set", "confidentialSmoke.enabled=true", "--set", "confidentialSmoke.phase=inactive"),
+        "confidential-smoke.yaml",
+    ),
+    "confidential-smoke-snp": (
+        lambda: variant(SMOKE, "kustomization.confidential-snp.yaml"), [SOURCE_VALUES],
+        ("--set", "confidentialSmoke.enabled=true", "--set", "confidentialSmoke.phase=confidential-snp"),
+        "confidential-smoke.yaml",
+    ),
+}
+# The main environments leave out the components Kustomize applies separately.
+SEPARATE = ("--set", "agentSandbox.enabled=false", "--set", "runtimeProfiles.enabled=false")
+
+
+def check_component(environment: str) -> list[str]:
+    render, values, settings, template = COMPONENTS[environment]
+    reference = objects(render())
     if not reference:
         return [f"{environment}: Kustomize renders nothing, so nothing was compared"]
-    chart = objects(helm("default", values, ("--show-only", "templates/agent-sandbox.yaml")))
+    chart = objects(helm("default", values, settings + ("--show-only", f"templates/{template}")))
     return compare({key(document) for document in reference}, chart, reference, environment)
 
 
@@ -442,10 +475,10 @@ class ChartEquivalence(unittest.TestCase):
             with self.subTest(environment=environment):
                 self.assertEqual(check(environment), [])
 
-    def test_agent_sandbox_renders_as_kustomize_does(self) -> None:
-        for environment in SANDBOX_ENVIRONMENTS:
+    def test_each_component_renders_as_its_own_tree_does(self) -> None:
+        for environment in COMPONENTS:
             with self.subTest(environment=environment):
-                self.assertEqual(check_sandbox(environment), [])
+                self.assertEqual(check_component(environment), [])
 
     def test_the_vendored_agent_sandbox_files_are_the_pinned_ones(self) -> None:
         # Until slice 8 removes deployments/k8s/agent-sandbox, whose files
@@ -571,6 +604,17 @@ class ChartEquivalence(unittest.TestCase):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(RuntimeError, f"ingress.local.{name} is required"):
                     helm("default", [CHART / "values-local-kind.yaml"], ("--set", f"ingress.local.{name}="))
+
+    def test_the_smoke_phase_is_one_it_knows(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, 'confidentialSmoke.phase is "snp": it is inactive or confidential-snp'):
+            helm("prod", [SOURCE_VALUES], ("--set", "confidentialSmoke.enabled=true", "--set", "confidentialSmoke.phase=snp"))
+
+    def test_the_confidential_smoke_runs_only_its_pinned_probe(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "images.confidentialProbe.digest is required in the confidential-snp phase"):
+            helm("prod", [SOURCE_VALUES], (
+                "--set", "confidentialSmoke.enabled=true", "--set", "confidentialSmoke.phase=confidential-snp",
+                "--set", "images.confidentialProbe.digest=", "--set", "images.confidentialProbe.tag=latest",
+            ))
 
     def test_a_non_string_hosted_egress_value_is_refused(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "codewire-hosted-egress: CODEWIRE_HOSTED_EGRESS_ENABLED must be a string"):

@@ -645,6 +645,27 @@ agentSandbox:
   # A controller image of the environment's own; empty runs the pinned release.
   image: ""
 
+# The runc RuntimeClass, the node default that diagnostic and Kind Sandboxes
+# run under. Not kept, as the VM profiles' are not.
+runcRuntimeClass: true
+
+# The VM runtime profiles' RuntimeClasses, each with its own switch. Unlike the
+# CRDs, they carry no resource-policy keep: a RuntimeClass holds no data,
+# running Pods keep running without it, and applying the chart restores it.
+runtimeProfiles:
+  enabled: true
+  commodity: true
+  commodity32g: true
+  confidential: true
+
+# The confidential runtime smoke: its control ConfigMap, in the probe
+# namespace, and in the confidential-snp phase the smoke Jobs, which need AMD
+# SEV-SNP runtime nodes. phase is inactive or confidential-snp.
+confidentialSmoke:
+  enabled: false
+  phase: inactive
+  namespace: codewire-runtime-probes
+
 # Image families. A digest, when set, pins the image and replaces the tag.
 images:
   dashboard:
@@ -655,6 +676,11 @@ images:
     repository: ""
     tag: ""
     digest: ""
+  # The confidential runtime probe the smoke Jobs run.
+  confidentialProbe:
+    repository: ghcr.io/codewiresh/confidential-probe
+    tag: ""
+    digest: sha256:8a4a55dbbcaaef4f34c5b35a20b667d99328db77e3e14bedd5718703d7530517
   # The shared Rust services image; each service selects its binary.
   services:
     repository: ""

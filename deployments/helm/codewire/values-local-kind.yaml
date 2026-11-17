@@ -294,6 +294,10 @@ ingress:
 agentSandbox:
   image: agent-sandbox-controller:local
 
+# No VM runtimes on Kind: its Sandboxes run under runc or the node default.
+runtimeProfiles:
+  enabled: false
+
 dashboardPublicConfig:
   # The non-promotable Kind credential fixture provides this fixed synthetic
   # App itself.
