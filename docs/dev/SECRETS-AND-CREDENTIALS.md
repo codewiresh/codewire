@@ -189,7 +189,7 @@ cw credentials --cloud generate ssh --name work-ssh
 cw credentials --cloud add ssh --name imported-ssh --key-file ./id_ed25519
 cw credentials --cloud add openai --name work-openai
 cw credentials --cloud add anthropic --name work-anthropic
-cw credentials --cloud add claude-subscription --name work-claude
+cw credentials --cloud connect claude-token --name work-claude
 cw credentials --cloud connect claude --name claude-login
 cw credentials --cloud rename work-openai personal-openai
 cw credentials --cloud rotate personal-openai
@@ -290,10 +290,22 @@ to a Sandbox.
 
 ### Claude subscription token
 
-A Claude subscription token lets Claude Code in a Sandbox use its owner's
-Claude Pro, Max, Team or Enterprise plan instead of an Anthropic API key. It is
-the Anthropic provider's OAuth authentication kind. A profile's one Anthropic
-slot holds either an API key or a subscription token.
+A Claude subscription token lets Claude Code in a Sandbox or a local VM use
+its owner's Claude Pro, Max, Team or Enterprise plan instead of an Anthropic
+API key. It is the Anthropic provider's OAuth authentication kind. A profile's
+one Anthropic slot holds an API key, a subscription token or a Claude sign-in.
+
+Both subscription forms are connected with `connect` (owner, 2026-11-15,
+#4945): `connect claude` signs in with the browser, and `connect claude-token`
+takes the token `claude setup-token` prints. Help, the guided picker and the
+dashboard call them **Claude (sign-in)** and **Claude (token)**, both the
+user's Claude subscription, and lists show the same names. The sign-in shows
+the plan and usage; the token lasts a year, suits automation and makes model
+requests only. A token is replaced by connecting it again under its name,
+which asks first, as every `connect` does; `rotate` is for API keys only and
+says so. `add claude-subscription` is a hidden alias of `connect claude-token`
+for one release: it prints one `→` line with the exact new command, then does
+the same. `add` is for API keys and SSH keys.
 
 Enrollment is by paste; Codewire never runs Claude Code's OAuth client. Run
 `claude setup-token` on your own machine or in any Sandbox terminal. It opens
@@ -304,17 +316,23 @@ printed earlier stops working before the one-year expiry Codewire records.
 
 ```sh
 claude setup-token
-cw credentials --cloud add claude-subscription --name work-claude
+cw credentials --cloud connect claude-token --name work-claude
 cw credentials --cloud --profile=work set anthropic work-claude
 ```
 
 The dashboard equivalent is **Settings → Credentials → Add credential →
-Claude subscription token**. The CLI reads the token from a no-echo prompt or
-stdin, never argv. Codewire checks only its shape (16 to 1024 printable
+Claude (token)**. The CLI reads the token from a no-echo prompt or stdin,
+never argv; with no terminal, a token piped to stdin is used and nothing is
+asked. Codewire checks only its shape (16 to 1024 printable
 characters, no whitespace) and makes no provider call when it is added. The
 token is opaque, so Codewire records a hard expiry one year after it is added;
 the dashboard shows **Expires soon** in its last 30 days and **Expired** after
-it. Subscription tokens are platform credentials only; `--local` refuses them.
+it. `--local` stores the same token, with the same checks and expiry, in the
+local credential store, and a local VM's Claude Code uses it in the same token
+form as a Sandbox: `CLAUDE_CODE_OAUTH_TOKEN` holds Codewire's placeholder and
+the host's broker adds the token to each request, so it never enters the VM. Deleting
+a token removes Codewire's copy only: it keeps working at Anthropic until it
+expires or is revoked in the owner's Claude account, and `delete` says so.
 
 The token stays in Codewire and is never delivered to a Sandbox. It needs no
 [direct delivery exception](#direct-delivery-exceptions): it "can only make
@@ -391,8 +409,8 @@ early or was revoked at claude.ai), its 401 reaches Claude Code unchanged, as
 it does for an API key; the token stays Active, since a process in the
 Sandbox shapes the request and must not be able to disable it. In either
 case, run `claude setup-token` again and replace the token with
-`cw credentials --cloud rotate work-claude` or **Replace token** in the
-dashboard. Replacement keeps the identity and profile bindings, sets it Active
+`cw credentials --cloud connect claude-token --name work-claude` or **Replace
+token** in the dashboard. Replacement keeps the identity and profile bindings, sets it Active
 and restarts the one-year expiry. Like rotating an API key, it applies to the
 next request, also in a running Sandbox: every lease rereads the token's
 record, and a request already reading the replaced token never releases it
@@ -423,7 +441,7 @@ authorize page (`https://claude.com/cai/oauth/authorize`) alone on its line
 (at a terminal also copied to the clipboard with OSC 52 and opened in the
 browser, fully detached so the browser's own messages never reach the prompt)
 and reads the code Claude shows after you sign in from a no-echo prompt
-("Paste code here if prompted >") or stdin, never argv. Codex and GitHub
+("Paste the code Claude shows after you sign in >") or stdin, never argv. Codex and GitHub
 connects show the same screen with their device code. Once connected, the
 screen names the account that signed in (the credential's account hint). Sign in with the account whose
 plan you want to use. The prompt accepts Claude's `code#state` with

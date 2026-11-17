@@ -244,7 +244,7 @@ fn show_challenge(sign_in: SignInScreen<'_>, challenge: &DeviceChallenge) {
         crate::output::Capabilities::from_process(crate::output::OutputMode::Text).stderr_style();
     eprint!(
         "{}",
-        super::login_screen::device_code_lines(sign_in, challenge.user_code(), style)
+        super::login_screen::device_code_lines(challenge.user_code(), style)
     );
 }
 

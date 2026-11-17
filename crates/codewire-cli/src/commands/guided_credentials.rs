@@ -32,12 +32,6 @@ pub(super) async fn complete(
     placement: StoragePlacement,
     storage_missing: bool,
 ) -> anyhow::Result<()> {
-    if placement == StoragePlacement::Local {
-        anyhow::ensure!(
-            !matches!(&args.command, CredentialsCommand::Add(a) if a.provider.as_deref() == Some("claude-subscription")),
-            "Claude subscription tokens are stored only in your Codewire account; use --cloud"
-        );
-    }
     let was_missing = missing(args);
     if was_missing {
         guided::require_available(
@@ -49,14 +43,11 @@ pub(super) async fn complete(
         CredentialsCommand::Add(a) => {
             a.guided = was_missing || storage_missing;
             if a.provider.is_none() {
-                let mut providers = vec![
+                let providers = [
                     ("openai", "OpenAI API key"),
                     ("anthropic", "Anthropic API key"),
                     ("ssh", "SSH private key"),
                 ];
-                if placement == StoragePlacement::Platform {
-                    providers.push(("claude-subscription", "Claude subscription token"));
-                }
                 let choices = providers
                     .iter()
                     .map(|(_, label)| Choice::new(*label, ""))
@@ -92,17 +83,22 @@ pub(super) async fn complete(
                     (
                         CredentialConnectProviderArg::Codex,
                         "Codex",
-                        "Device sign-in",
+                        "sign in with your ChatGPT account",
                     ),
                     (
                         CredentialConnectProviderArg::Github,
                         "GitHub",
-                        "Device sign-in",
+                        "sign in with your GitHub account",
                     ),
                     (
                         CredentialConnectProviderArg::Claude,
-                        "Claude",
-                        "Browser sign-in",
+                        "Claude (sign-in)",
+                        "your subscription; shows your plan and usage",
+                    ),
+                    (
+                        CredentialConnectProviderArg::ClaudeToken,
+                        "Claude (token)",
+                        "your subscription; lasts a year, for automation, model requests only",
                     ),
                 ];
                 let choices = providers
@@ -110,7 +106,7 @@ pub(super) async fn complete(
                     .map(|(_, label, detail)| Choice::new(*label, *detail))
                     .collect::<Vec<_>>();
                 a.provider =
-                    Some(providers[guided::choose("Connect which provider?", &choices)?].0);
+                    Some(providers[guided::choose("What do you want to connect?", &choices)?].0);
             }
             fill_name(&mut a.name)?;
         }
@@ -364,19 +360,22 @@ async fn enroll_for_profile(
             }
         }
         "anthropic" => {
-            // The Claude sign-in in both placements; the subscription token
-            // is still a cloud credential only (#4714).
-            let mut options = vec![(Some(CredentialConnectProviderArg::Claude), "anthropic")];
-            let mut labels = vec![Choice::new("Claude sign-in", "Browser sign-in")];
-            if placement == StoragePlacement::Platform {
-                options.push((None, "claude-subscription"));
-                labels.push(Choice::new(
-                    "Claude subscription token",
-                    "Paste a token from claude setup-token",
-                ));
-            }
-            options.push((None, "anthropic"));
-            labels.push(Choice::new("Anthropic API key", "Paste an API key"));
+            let options = [
+                (Some(CredentialConnectProviderArg::Claude), "anthropic"),
+                (Some(CredentialConnectProviderArg::ClaudeToken), "anthropic"),
+                (None, "anthropic"),
+            ];
+            let labels = [
+                Choice::new(
+                    "Claude (sign-in)",
+                    "your subscription; shows your plan and usage",
+                ),
+                Choice::new(
+                    "Claude (token)",
+                    "your subscription; lasts a year, for automation, model requests only",
+                ),
+                Choice::new("Anthropic API key", "Paste an API key"),
+            ];
             match options[guided::choose("Connect Anthropic access", &labels)?] {
                 (Some(provider), _) => CredentialsCommand::Connect(CredentialConnectArgs {
                     provider: Some(provider),
@@ -428,7 +427,9 @@ pub(super) fn assignment_slot(command: &CredentialsCommand) -> Option<String> {
         },
         CredentialsCommand::Connect(a) if a.guided => match a.provider? {
             CredentialConnectProviderArg::Codex => "codex",
-            CredentialConnectProviderArg::Claude => "anthropic",
+            CredentialConnectProviderArg::Claude | CredentialConnectProviderArg::ClaudeToken => {
+                "anthropic"
+            }
             CredentialConnectProviderArg::Github => return None,
         },
         CredentialsCommand::Generate(a) if a.guided => "ssh",

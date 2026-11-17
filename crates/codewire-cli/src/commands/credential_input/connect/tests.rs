@@ -475,3 +475,56 @@ async fn a_ctrl_c_while_nothing_waits_for_it_is_still_seen() {
         .await
         .expect("a remembered press ends the next wait at once");
 }
+
+/// A token's reconnect says its year restarts; every other says the expiry
+/// is kept (#4945).
+#[test]
+fn a_token_reconnect_says_its_year_restarts() {
+    let record = Reconnecting {
+        name: "claude".into(),
+        id: "fdd5612f-12ca-4a21-9557-dc4875f9c1f6".into(),
+        revision: 2,
+        status: "active",
+    };
+    let mut asked = String::new();
+    confirm_reconnect_with(
+        "local",
+        CredentialConnectProviderArg::ClaudeToken,
+        &record,
+        false,
+        true,
+        |message| {
+            asked = message.to_owned();
+            Ok(true)
+        },
+    )
+    .unwrap();
+    assert!(
+        asked.starts_with("Reconnect local Claude (token) credential \"claude\""),
+        "{asked}"
+    );
+    assert!(
+        asked.ends_with("it will become active and its one-year expiry will restart."),
+        "{asked}"
+    );
+}
+
+/// The alias's line and `rotate`'s refusal both give the exact command that
+/// connects or replaces the token, placement and name included.
+#[test]
+fn the_token_commands_name_their_placement_and_name() {
+    let plain = crate::output::Style::new(false, crate::output::Charset::Unicode);
+    assert_eq!(
+        claude_token_command_line("cloud", "work", plain),
+        "→ cw credentials --cloud connect claude-token --name work"
+    );
+    let refusal = claude_token_rotate_refusal("local", "work");
+    let step = refusal
+        .downcast_ref::<crate::error_report::NextStep>()
+        .map(ToString::to_string);
+    assert_eq!(
+        step.as_deref(),
+        Some("cw credentials --local connect claude-token --name work")
+    );
+    assert!(format!("{refusal:#}").contains("not with rotate"));
+}

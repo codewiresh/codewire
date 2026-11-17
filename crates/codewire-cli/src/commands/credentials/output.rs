@@ -274,7 +274,7 @@ pub(in crate::commands) mod refusal {
     /// `add` takes this provider's key from neither placement.
     pub(in crate::commands) fn add_unsupported(provider: &str) -> String {
         format!(
-            "{provider} has no key to add; `add` takes an openai or anthropic API key, or an SSH key with `add ssh --key-file PATH`. Use `add claude-subscription` for a Claude subscription token, and `connect` for Codex, GitHub or a Claude sign-in"
+            "{provider} has no key to add; `add` takes an openai or anthropic API key, or an SSH key with `add ssh --key-file PATH`. Use `connect` for Codex, GitHub, a Claude sign-in or a Claude token (`connect claude-token`)"
         )
     }
 

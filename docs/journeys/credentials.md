@@ -56,12 +56,11 @@ Each setup below runs the same five steps on each surface. The section lists
 only what differs.
 
 1. **Enrol:** `cw credentials --local|--cloud …` as the section says. Expect
-   the same prompts and screens in both placements. A sign-in screen is
-   titled for its provider (` Connect Codex`) and says
-   `Saving as "NAME" on this computer` locally or `in your Codewire account`
-   in the cloud. A device code (Codex, GitHub) is alone on its line, bold at
-   a terminal, and the success screen reads ` Codex connected`, then
-   `Signed in as ACCOUNT`.
+   the same prompts and screens in both placements, as the owner approved
+   them (2026-11-15, private-docs `designs/2026-11-15-credentials-screens.html`):
+   a title line `Connect PROVIDER as NAME, on this computer` (or `in your
+   Codewire account`), the step, then one result line
+   `✓ PROVIDER connected as ACCOUNT`. Each section shows its screen.
 2. **List:** `cw credentials --local|--cloud list` and `list --output json`.
    Expect the credential with its provider, kind, status `active` and, where
    the provider gives one, an account hint.
@@ -76,7 +75,21 @@ only what differs.
 ## 1. `cred-github`: connect GitHub
 
 - **Enrol:** `connect github --name NAME`. A device code, approved by a person
-  at github.com/login/device. A second connection under another name is
+  at github.com/login/device. Expect, with the code alone on its line (bold
+  at a terminal):
+
+  ```text
+  Connect GitHub as NAME, on this computer
+
+    Open this link to sign in:
+    https://github.com/login/device
+
+    Enter this code:
+    K7QF-2M9X
+  ```
+
+  then `✓ GitHub connected as LOGIN`. The copy key and the waiting line
+  under the code come with #4885. A second connection under another name is
   refused, saying "GitHub is already connected as NAME" and how to
   reconnect it.
 - **Ctrl-C:** pressed after approving the device code and before the save,
@@ -95,7 +108,9 @@ only what differs.
 
 - **Enrol:** `connect codex --name NAME`. "Enable device code authorization
   for Codex" in ChatGPT's Security settings first, then a device code,
-  approved by a person.
+  approved by a person. Expect the GitHub screen with
+  `Connect Codex as NAME, …`, the link `https://auth.openai.com/codex/device`
+  and its code, then `✓ Codex connected as ACCOUNT`.
 - **Ctrl-C:** pressed after approving the device code and before the save,
   it saves nothing and says so ("canceled; no credential was changed").
   Not yet observed.
@@ -123,34 +138,71 @@ only what differs.
   refusing it, with no key in the environment.
 - **Remove:** as for OpenAI, the console.
 
-## 5. `cred-claude-setup-token`: add a Claude setup token
+## 5. `cred-claude-setup-token`: connect a Claude setup token
 
-- **Enrol:** `add claude-subscription --name NAME`, with a synthetic
-  `sk-ant-oat01-…` token at the hidden prompt. Expect "expires" one year
-  from now in `list`.
+Issues: #4945 (the command), #4714 (local).
+
+- **Enrol:** `connect claude-token --name ci`. Expect:
+
+  ```text
+  Connect Claude (token) as ci, on this computer
+
+    Run `claude setup-token`, then paste what it prints.
+    Token > (hidden)
+    Got it (108 characters).
+
+  ✓ Claude (token) connected as ci · expires 15 Nov 2027
+  ```
+
+  with a synthetic `sk-ant-oat01-…` token at the prompt, or piped to stdin
+  with no terminal (no prompt then). The date is one year from now, and
+  `list` shows it with the kind `Claude (token)`. Locally, the store is
+  checked before the prompt, as for every connect.
+- **Replace:** `connect claude-token --name NAME` again asks once (or takes
+  `--yes`), naming the token it replaces, and restarts the year. `rotate
+  NAME` refuses and prints that `connect` as its `→` line.
+- **Alias:** `add claude-subscription --name NAME` prints
+  `→ cw credentials --local connect claude-token --name NAME` (or `--cloud`),
+  then does the same.
+- **Help:** `cw credentials connect --help` and the guided picker
+  ("What do you want to connect?") list `Claude (sign-in)  your subscription;
+  shows your plan and usage` and `Claude (token)  your subscription; lasts a
+  year, for automation, model requests only`, after Codex and GitHub.
 - **Profile:** `set anthropic NAME`.
 - **Use:** `claude -p "hi"`. Expect Claude Code in its token form
   (`CLAUDE_CODE_OAUTH_TOKEN` set to Codewire's placeholder, no token on
   disk), the broker forwarding the synthetic token and Anthropic refusing
   it.
-- **Also:** `rotate NAME` replaces the token and restarts the year.
-- **Remove:** `cw` says the token keeps working at Anthropic until it
-  expires.
+- **Remove:** after `Local credential "NAME" deleted.` (or `Platform
+  credential …`), `cw` says "That removed Codewire's copy only: the token
+  keeps working at Anthropic until it expires, or until you revoke it in your
+  Claude account."
 
 ## 6. `cred-claude-sign-in`: connect Claude by signing in
 
 Issues: #4714 (local), #2559 (cloud).
 
 - **Enrol:** `connect claude --name NAME`. Both placements show the same
-  screen: ` Connect Claude`, the `Saving as` line, "Browser didn't open? Use
-  the url below to sign in", a
-  `https://claude.com/cai/oauth/authorize?` link, then `Paste code here if
-  prompted >`. A person signs in with a Pro, Max, Team or Enterprise plan and
-  pastes the `code#state` Claude shows. Locally, the store is checked before
-  the link appears: an older store with a local VM running stops `cw` first,
-  saying what to do. A missing or locked keychain is checked there too once
-  the store probe lands (#4717, track A3); until then it is refused after
-  the sign-in, and nothing is saved.
+  screen:
+
+  ```text
+  Connect Claude (sign-in) as NAME, on this computer
+
+    Open this link to sign in:
+    https://claude.com/cai/oauth/authorize?code=true&client_id=…&state=…
+
+    Paste the code Claude shows after you sign in > (hidden)
+    Got it (87 characters).
+
+  ✓ Claude (sign-in) connected as ACCOUNT
+  ```
+
+  A person signs in with a Pro, Max, Team or Enterprise plan and pastes the
+  `code#state` Claude shows. The copy key under the link comes with #4885.
+  Locally, the store is checked before the link appears: an older store with
+  a local VM running stops `cw` first, saying what to do. A missing or locked
+  keychain is checked there too once the store probe lands (#4717, track
+  A3); until then it is refused after the sign-in, and nothing is saved.
 - **List:** KIND `Claude (sign-in)` in both placements, and
   `"authentication_kind": "claude_sign_in"` in both placements' JSON, with
   the Claude account's email as its `account_hint`.

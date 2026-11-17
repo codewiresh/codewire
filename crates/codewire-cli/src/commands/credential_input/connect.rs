@@ -8,12 +8,115 @@
 use std::io::IsTerminal as _;
 
 use anyhow::Context as _;
+use clap::{Args, ValueEnum};
 use codewire_credential_broker::provider_oauth::{ProviderRevocation, RevocationFailure};
 
 use super::CredentialExecution;
-use crate::commands::{
-    CredentialConnectArgs, CredentialConnectProviderArg, prompt_confirm_default_no,
-};
+use crate::commands::prompt_confirm_default_no;
+
+/// `cw credentials connect`'s arguments.
+#[derive(Debug, Args)]
+pub(crate) struct CredentialConnectArgs {
+    #[arg(value_enum, value_name = "PROVIDER")]
+    pub(crate) provider: Option<CredentialConnectProviderArg>,
+    #[arg(long, value_name = "NAME")]
+    pub(crate) name: Option<String>,
+    #[arg(
+        short,
+        long,
+        help = "Confirm reconnecting an existing named credential"
+    )]
+    pub(crate) yes: bool,
+    #[arg(skip)]
+    pub(crate) guided: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum CredentialConnectProviderArg {
+    #[value(help = super::CODEX_DEVICE_AUTHORIZATION_GUIDANCE)]
+    Codex,
+    Github,
+    #[value(help = super::CLAUDE_SIGN_IN_HELP)]
+    Claude,
+    #[value(help = super::CLAUDE_TOKEN_HELP)]
+    ClaudeToken,
+}
+
+/// `add claude-subscription`, the setup token's name before #4945.
+pub(in crate::commands) const CLAUDE_SUBSCRIPTION_ALIAS: &str = "claude-subscription";
+
+/// `add claude-subscription` as the `connect claude-token` it now is, for one
+/// release (#4945): one line names the new command, and the add's name
+/// carries over. A token's expiry is always one year, so none is accepted.
+pub(in crate::commands) fn claude_token_from_alias(
+    placement: &str,
+    args: &crate::commands::CredentialAddArgs,
+) -> anyhow::Result<CredentialConnectArgs> {
+    let style =
+        crate::output::Capabilities::from_process(crate::output::OutputMode::Text).stderr_style();
+    eprintln!(
+        "{}",
+        claude_token_command_line(placement, args.name.as_deref().unwrap_or("NAME"), style)
+    );
+    anyhow::ensure!(
+        args.key_file.is_none(),
+        "--key-file is only valid for add ssh"
+    );
+    anyhow::ensure!(
+        args.account_hint.is_none(),
+        "a Claude token doesn't use --account-hint"
+    );
+    anyhow::ensure!(
+        args.expires_at.is_none(),
+        "a Claude token expires one year after it is saved; --expires-at is not accepted"
+    );
+    Ok(CredentialConnectArgs {
+        provider: Some(CredentialConnectProviderArg::ClaudeToken),
+        name: args.name.clone(),
+        yes: false,
+        guided: args.guided,
+    })
+}
+
+/// The one `→` line for the command that connects or replaces a Claude
+/// token, ready to paste.
+fn claude_token_command_line(placement: &str, name: &str, style: crate::output::Style) -> String {
+    format!(
+        "{} cw credentials --{placement} connect claude-token --name {name}",
+        style.status(crate::output::Status::Next)
+    )
+}
+
+/// `rotate` is for API keys: a Claude token is replaced by connecting it again
+/// under its name, which asks first (#4945).
+pub(in crate::commands) fn claude_token_rotate_refusal(
+    placement: &str,
+    name: &str,
+) -> anyhow::Error {
+    crate::error_report::with_next_step(
+        anyhow::anyhow!("a Claude token is replaced by connecting it again, not with rotate"),
+        format!("cw credentials --{placement} connect claude-token --name {name}"),
+    )
+}
+
+/// What `delete` adds for a Claude token, in both placements: only Codewire's
+/// copy is gone; the token itself works until it expires or is revoked.
+pub(in crate::commands) const CLAUDE_TOKEN_DELETED: &str = "That removed Codewire's copy only: the token keeps working at Anthropic until it expires, or until you revoke it in your Claude account.";
+
+/// The setup token's screen and hidden prompt, the same in both placements:
+/// what is saved and where, how to get the token, then the token itself from
+/// a no-echo prompt or a piped stdin, never argv.
+pub(in crate::commands) fn read_claude_token(
+    screen: crate::commands::login_screen::SignInScreen<'_>,
+) -> anyhow::Result<codewire_protected_store::ProtectedValue> {
+    let indent = crate::commands::login_screen::INDENT;
+    eprintln!(
+        "{}{indent}{}",
+        screen.heading(),
+        super::CLAUDE_TOKEN_GUIDANCE
+    );
+    super::prompt_hidden(super::CLAUDE_TOKEN_PROMPT, indent)
+}
 
 /// What a connect says when it stops before anything was saved.
 pub(in crate::commands) const CANCELED: &str = "canceled; no credential was changed";
@@ -23,7 +126,19 @@ pub(in crate::commands) fn provider_id(provider: CredentialConnectProviderArg) -
     match provider {
         CredentialConnectProviderArg::Codex => "openai",
         CredentialConnectProviderArg::Github => "github",
-        CredentialConnectProviderArg::Claude => "anthropic",
+        CredentialConnectProviderArg::Claude | CredentialConnectProviderArg::ClaudeToken => {
+            "anthropic"
+        }
+    }
+}
+
+/// What a connect saves, in a sentence: "your {noun} wasn't saved".
+pub(in crate::commands) fn connected_noun(provider: CredentialConnectProviderArg) -> &'static str {
+    match provider {
+        CredentialConnectProviderArg::Codex => "Codex sign-in",
+        CredentialConnectProviderArg::Github => "GitHub sign-in",
+        CredentialConnectProviderArg::Claude => "Claude sign-in",
+        CredentialConnectProviderArg::ClaudeToken => "Claude token",
     }
 }
 
@@ -68,6 +183,10 @@ pub(in crate::commands) fn discarded_sign_in(
         (CredentialConnectProviderArg::Claude, _) => {
             "The Claude sign-in you approved expires on its own; you can remove it sooner in your Claude account settings.".to_owned()
         }
+        // Anthropic publishes no way to revoke a setup token.
+        (CredentialConnectProviderArg::ClaudeToken, _) => {
+            "The Claude token you pasted stays valid until it expires; Codewire can't revoke it.".to_owned()
+        }
     };
     Some(line)
 }
@@ -77,7 +196,8 @@ pub(in crate::commands) fn provider_label(provider: CredentialConnectProviderArg
     match provider {
         CredentialConnectProviderArg::Codex => "Codex",
         CredentialConnectProviderArg::Github => "GitHub",
-        CredentialConnectProviderArg::Claude => "Claude",
+        CredentialConnectProviderArg::Claude => "Claude (sign-in)",
+        CredentialConnectProviderArg::ClaudeToken => "Claude (token)",
     }
 }
 
@@ -258,8 +378,15 @@ fn confirm_reconnect_with(
 ) -> anyhow::Result<bool> {
     let label = provider_label(provider);
     let message = format!(
-        "Reconnect {placement} {label} credential {:?} ({}, revision {}, status {})? Its identity and profile bindings will be kept; it will become active and its hard expiry will be preserved.",
-        existing.name, existing.id, existing.revision, existing.status,
+        "Reconnect {placement} {label} credential {:?} ({}, revision {}, status {})? Its identity and profile bindings will be kept; it will become active and {}.",
+        existing.name,
+        existing.id,
+        existing.revision,
+        existing.status,
+        match provider {
+            CredentialConnectProviderArg::ClaudeToken => "its one-year expiry will restart",
+            _ => "its hard expiry will be preserved",
+        },
     );
     if yes {
         eprintln!("{message}");

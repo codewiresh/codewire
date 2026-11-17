@@ -25,7 +25,9 @@ use super::CredentialsArgs;
 #[cfg(test)]
 use super::credential_input::CODEX_DEVICE_AUTHORIZATION_GUIDANCE;
 use super::credential_input::connect::{
-    ConnectStore, ConnectTarget, Interrupt, Reconnecting, provider_id, provider_label,
+    CLAUDE_SUBSCRIPTION_ALIAS, CLAUDE_TOKEN_DELETED, ConnectStore, ConnectTarget, Interrupt,
+    Reconnecting, claude_token_from_alias, claude_token_rotate_refusal, connected_noun,
+    provider_id, provider_label, read_claude_token,
 };
 use super::credential_input::{
     CredentialOperation, GITHUB_ALWAYS_INCLUDED, ParsedCredentialSelector, ParsedProfileSelector,
@@ -115,26 +117,27 @@ async fn handle_local_with_receipt(
 fn authority_feature_needed(
     operation: &CredentialOperation,
 ) -> Option<(codewire_local_credentials::AuthorityFeature, &'static str)> {
-    if matches!(
-        operation,
-        CredentialOperation::Profile(CredentialProfileCommand::Default(_))
-    ) {
-        return Some((
-            codewire_local_credentials::AuthorityFeature::DefaultProfile,
+    use codewire_local_credentials::AuthorityFeature;
+    match operation {
+        CredentialOperation::Profile(CredentialProfileCommand::Default(_)) => Some((
+            AuthorityFeature::DefaultProfile,
             "a default credential profile",
-        ));
-    }
-    matches!(
-        operation,
+        )),
         CredentialOperation::Credential(CredentialsCommand::Connect(CredentialConnectArgs {
             provider: Some(CredentialConnectProviderArg::Claude),
             ..
-        }))
-    )
-    .then_some((
-        codewire_local_credentials::AuthorityFeature::ClaudeSignIn,
-        "a Claude sign-in",
-    ))
+        })) => Some((AuthorityFeature::ClaudeSignIn, "a Claude sign-in")),
+        CredentialOperation::Credential(CredentialsCommand::Connect(CredentialConnectArgs {
+            provider: Some(CredentialConnectProviderArg::ClaudeToken),
+            ..
+        })) => Some((AuthorityFeature::ClaudeToken, "a Claude token")),
+        CredentialOperation::Credential(CredentialsCommand::Add(add))
+            if add.provider.as_deref() == Some(CLAUDE_SUBSCRIPTION_ALIAS) =>
+        {
+            Some((AuthorityFeature::ClaudeToken, "a Claude token"))
+        }
+        _ => None,
+    }
 }
 
 /// What `profiles default` says once the local default is set: the cloud's
@@ -194,15 +197,15 @@ impl ConnectStore for LocalConnectStore<'_> {
             .list_credentials()
             .await
             .context("check local credential name before provider login")?;
-        Ok(select_oauth_connection_target(records, name, provider_id(provider))?.existing)
+        Ok(select_oauth_connection_target(records, name, provider)?.existing)
     }
 
     async fn connections(
         &mut self,
         provider: CredentialConnectProviderArg,
     ) -> anyhow::Result<Vec<CredentialRecord>> {
+        let kind = connected_kind(provider);
         let provider = ProviderId::parse(provider_id(provider))?;
-        let kind = connected_kind(&provider);
         let records = self
             .client
             .list_credentials()
@@ -241,6 +244,11 @@ impl ConnectStore for LocalConnectStore<'_> {
         let sign_in =
             super::login_screen::SignInScreen::local(provider_label(target.provider), &target.name);
         match target.provider {
+            CredentialConnectProviderArg::ClaudeToken => Ok(LocalApproval {
+                material: read_claude_token(sign_in)?,
+                account_hint: None,
+                reach: Vec::new(),
+            }),
             CredentialConnectProviderArg::Claude => {
                 let (bundle, account_hint) =
                     super::provider_login::claude_sign_in(sign_in, interrupt)
@@ -332,7 +340,7 @@ impl ConnectStore for LocalConnectStore<'_> {
         let label = provider_label(target.provider);
         let connecting = target.provider;
         let provider = ProviderId::parse(provider_id(target.provider))?;
-        let authentication_kind = connected_kind(&provider);
+        let authentication_kind = connected_kind(target.provider);
         // A copy to revoke if the store definitely refuses the save.
         let revocable = matches!(connecting, CredentialConnectProviderArg::Codex)
             .then(|| ProtectedValue::from_slice(approval.material.expose_secret()).ok())
@@ -357,19 +365,35 @@ impl ConnectStore for LocalConnectStore<'_> {
                 if definitely_not_saved(&status) {
                     say_discarded(connecting, revoke_unsaved(connecting, revocable).await);
                 }
-                return Err(local_connect_publish_error(label, &status));
+                return Err(local_connect_publish_error(
+                    connected_noun(target.provider),
+                    &status,
+                ));
             }
         };
         remember_local(&record, execution);
-        let name = &record.metadata.display_name;
+        let metadata = &record.metadata;
+        let (who, expires) = match target.provider {
+            CredentialConnectProviderArg::ClaudeToken => {
+                (metadata.display_name.as_str(), metadata.expires_at_unix)
+            }
+            _ => (
+                super::login_screen::signed_in_account(
+                    metadata.account_hint.as_deref(),
+                    &metadata.display_name,
+                ),
+                None,
+            ),
+        };
+        let style = crate::output::Capabilities::from_process(crate::output::OutputMode::Text)
+            .stderr_style();
         eprint!(
             "\n{}",
-            super::login_screen::success_screen(
-                super::login_screen::SignInScreen::local(label, name),
-                super::login_screen::signed_in_account(
-                    record.metadata.account_hint.as_deref(),
-                    name
-                ),
+            super::login_screen::connected_line(
+                super::login_screen::SignInScreen::local(label, &metadata.display_name),
+                who,
+                expires,
+                style,
             )
         );
         if matches!(target.provider, CredentialConnectProviderArg::Github) {
@@ -519,13 +543,14 @@ struct OAuthConnectionTarget {
     existing: Option<CredentialRecord>,
 }
 
-/// The kind a provider's `connect` stores: a Claude sign-in for Anthropic,
-/// an OAuth login for every other provider.
-fn connected_kind(provider: &ProviderId) -> CredentialAuthKind {
-    if provider.as_str() == "anthropic" {
-        CredentialAuthKind::ClaudeSignIn
-    } else {
-        CredentialAuthKind::OAuth
+/// The kind a `connect` stores: a Claude sign-in for `claude`, an OAuth
+/// login for every other provider, the setup token included.
+fn connected_kind(provider: CredentialConnectProviderArg) -> CredentialAuthKind {
+    match provider {
+        CredentialConnectProviderArg::Claude => CredentialAuthKind::ClaudeSignIn,
+        CredentialConnectProviderArg::Codex
+        | CredentialConnectProviderArg::Github
+        | CredentialConnectProviderArg::ClaudeToken => CredentialAuthKind::OAuth,
     }
 }
 
@@ -533,21 +558,21 @@ fn connected_kind(provider: &ProviderId) -> CredentialAuthKind {
 /// refusal is definite and saved nothing; only a failure after the request may
 /// have reached the store leaves the outcome unknown. The store's RPC code and
 /// framing never reach the person.
-fn local_connect_publish_error(provider: &str, status: &tonic::Status) -> anyhow::Error {
+fn local_connect_publish_error(what: &str, status: &tonic::Status) -> anyhow::Error {
     use tonic::Code;
     let next = "cw credentials --local list";
     let error = match status.code() {
         _ if !definitely_not_saved(status) => anyhow::anyhow!(
-            "the local credential store didn't confirm saving your {provider} sign-in, so it may or may not be saved; check the list before connecting again"
+            "the local credential store didn't confirm saving your {what}, so it may or may not be saved; check the list before connecting again"
         ),
         Code::AlreadyExists => anyhow::anyhow!(
-            "a local credential with that name already exists, so your {provider} sign-in wasn't saved; choose another --name"
+            "a local credential with that name already exists, so your {what} wasn't saved; choose another --name"
         ),
         Code::NotFound => anyhow::anyhow!(
-            "the local credential to reconnect is gone, so your {provider} sign-in wasn't saved; connect it again under a new name"
+            "the local credential to reconnect is gone, so your {what} wasn't saved; connect it again under a new name"
         ),
         _ => anyhow::anyhow!(
-            "the local credential store refused your {provider} sign-in, so nothing was saved: {}",
+            "the local credential store refused your {what}, so nothing was saved: {}",
             status.message()
         ),
     };
@@ -595,10 +620,10 @@ fn say_discarded(
 fn select_oauth_connection_target(
     records: Vec<CredentialRecord>,
     display_name: &str,
-    provider: &str,
+    connect: CredentialConnectProviderArg,
 ) -> anyhow::Result<OAuthConnectionTarget> {
-    let provider = ProviderId::parse(provider)?;
-    let authentication_kind = connected_kind(&provider);
+    let provider = ProviderId::parse(provider_id(connect))?;
+    let authentication_kind = connected_kind(connect);
     let mut matches = records.into_iter().filter(|record| {
         record
             .metadata
@@ -665,6 +690,10 @@ async fn add_credential(
     args: CredentialAddArgs,
     execution: &mut super::credential_input::CredentialExecution,
 ) -> anyhow::Result<()> {
+    if args.provider.as_deref() == Some(CLAUDE_SUBSCRIPTION_ALIAS) {
+        return connect_credential(client, claude_token_from_alias("local", &args)?, execution)
+            .await;
+    }
     if args.provider.as_deref() == Some("ssh") {
         let name = validate_ssh_import(&args)?;
         anyhow::ensure!(
@@ -776,6 +805,12 @@ async fn rotate_credential(
     if record.metadata.authentication_kind == CredentialAuthKind::SshKey {
         anyhow::bail!(output::refusal::ROTATE_SSH);
     }
+    if record.metadata.is_claude_subscription_token() {
+        return Err(claude_token_rotate_refusal(
+            "local",
+            &record.metadata.display_name,
+        ));
+    }
     if !manually_supplied_credential_kind(record.metadata.authentication_kind) {
         anyhow::bail!(output::refusal::ROTATE_CONNECTED);
     }
@@ -846,6 +881,9 @@ async fn delete_credential(
         "{}",
         output::deleted("local", &record.metadata.display_name)
     );
+    if record.metadata.is_claude_subscription_token() {
+        eprintln!("{CLAUDE_TOKEN_DELETED}");
+    }
     Ok(())
 }
 
@@ -1229,9 +1267,9 @@ fn optional_profile_by_name<'a>(
 fn api_key_enrollment_kind(provider: &str) -> anyhow::Result<CredentialAuthKind> {
     match provider {
         "openai" | "anthropic" => Ok(CredentialAuthKind::ApiKey),
-        "claude-subscription" => anyhow::bail!(
-            "Claude subscription tokens are stored only on the Codewire platform; add one with --cloud"
-        ),
+        "claude-subscription" => {
+            anyhow::bail!("use connect claude-token --name NAME for a Claude token")
+        }
         _ => anyhow::bail!(output::refusal::add_unsupported(provider)),
     }
 }
@@ -1403,10 +1441,17 @@ mod tests {
         let mut record = credential();
         record.metadata.authentication_kind = CredentialAuthKind::OAuth;
         record.metadata.revocation_generation = 7;
-        let target =
-            select_oauth_connection_target(vec![record.clone()], "WORK-OPENAI", "openai").unwrap();
+        let target = select_oauth_connection_target(
+            vec![record.clone()],
+            "WORK-OPENAI",
+            CredentialConnectProviderArg::Codex,
+        )
+        .unwrap();
         assert_eq!(target.existing.unwrap(), record);
-        for provider in ["github", "anthropic"] {
+        for provider in [
+            CredentialConnectProviderArg::Github,
+            CredentialConnectProviderArg::Claude,
+        ] {
             assert!(
                 select_oauth_connection_target(vec![record.clone()], "work-openai", provider,)
                     .is_err()
@@ -1415,37 +1460,64 @@ mod tests {
         let mut wrong_kind = record.clone();
         wrong_kind.metadata.authentication_kind = CredentialAuthKind::ApiKey;
         assert!(
-            select_oauth_connection_target(vec![wrong_kind], "work-openai", "openai",).is_err()
+            select_oauth_connection_target(
+                vec![wrong_kind],
+                "work-openai",
+                CredentialConnectProviderArg::Codex,
+            )
+            .is_err()
         );
         let mut duplicate = record.clone();
         duplicate.metadata.id =
             CredentialId::parse("22222222-2222-4222-8222-222222222222").unwrap();
-        let error =
-            select_oauth_connection_target(vec![record, duplicate], "work-openai", "openai")
-                .err()
-                .unwrap();
+        let error = select_oauth_connection_target(
+            vec![record, duplicate],
+            "work-openai",
+            CredentialConnectProviderArg::Codex,
+        )
+        .err()
+        .unwrap();
         assert!(error.to_string().contains("ambiguous"));
-        let target =
-            select_oauth_connection_target(vec![credential()], "new-name", "github").unwrap();
+        let target = select_oauth_connection_target(
+            vec![credential()],
+            "new-name",
+            CredentialConnectProviderArg::Github,
+        )
+        .unwrap();
         assert!(target.existing.is_none());
     }
 
     #[test]
     fn connecting_claude_targets_a_claude_sign_in_and_reconnects_only_one() {
-        let target = select_oauth_connection_target(Vec::new(), "claude", "anthropic").unwrap();
+        let target = select_oauth_connection_target(
+            Vec::new(),
+            "claude",
+            CredentialConnectProviderArg::Claude,
+        )
+        .unwrap();
         assert_eq!(target.authentication_kind, CredentialAuthKind::ClaudeSignIn);
         assert!(target.existing.is_none());
         let mut sign_in = credential();
         sign_in.metadata.provider = ProviderId::parse("anthropic").unwrap();
         sign_in.metadata.authentication_kind = CredentialAuthKind::ClaudeSignIn;
-        let target =
-            select_oauth_connection_target(vec![sign_in.clone()], "WORK-OPENAI", "anthropic")
-                .unwrap();
+        let target = select_oauth_connection_target(
+            vec![sign_in.clone()],
+            "WORK-OPENAI",
+            CredentialConnectProviderArg::Claude,
+        )
+        .unwrap();
         assert_eq!(target.existing, Some(sign_in.clone()));
         // An Anthropic API key under that name is never replaced by a sign-in.
         let mut api_key = sign_in;
         api_key.metadata.authentication_kind = CredentialAuthKind::ApiKey;
-        assert!(select_oauth_connection_target(vec![api_key], "work-openai", "anthropic").is_err());
+        assert!(
+            select_oauth_connection_target(
+                vec![api_key],
+                "work-openai",
+                CredentialConnectProviderArg::Claude
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1475,7 +1547,7 @@ mod tests {
     #[test]
     fn a_local_connect_refusal_says_nothing_was_saved_without_rpc_text() {
         let refused = local_connect_publish_error(
-            "Claude",
+            "Claude sign-in",
             &tonic::Status::failed_precondition("the store cannot hold this credential"),
         );
         let text = format!("{refused:#}");
@@ -1493,7 +1565,7 @@ mod tests {
         );
         // A locked keychain is the authority's own, definite refusal.
         let locked = local_connect_publish_error(
-            "Claude",
+            "Claude sign-in",
             &tonic::Status::failed_precondition(
                 "local protected storage is locked or inaccessible; unlock it and retry",
             ),
@@ -1520,7 +1592,10 @@ mod tests {
             tonic::Status::deadline_exceeded("deadline"),
             tonic::Status::cancelled("cancelled"),
         ] {
-            let text = format!("{:#}", local_connect_publish_error("Codex", &status));
+            let text = format!(
+                "{:#}",
+                local_connect_publish_error("Codex sign-in", &status)
+            );
             assert!(text.contains("may or may not be saved"), "{text}");
             assert!(
                 !text.contains("code:") && !text.contains("nothing was saved"),
@@ -1528,7 +1603,7 @@ mod tests {
             );
         }
         let uncertain =
-            local_connect_publish_error("Codex", &tonic::Status::deadline_exceeded("x"));
+            local_connect_publish_error("Codex sign-in", &tonic::Status::deadline_exceeded("x"));
         for error in [refused, locked, uncertain] {
             assert_eq!(
                 error
@@ -1633,10 +1708,13 @@ mod tests {
         );
         let mut client = connect_ready_authority(&config, &server).await;
         for (provider, slot) in [
-            ("openai", CapabilitySlot::codex()),
-            ("github", CapabilitySlot::github()),
+            (CredentialConnectProviderArg::Codex, CapabilitySlot::codex()),
+            (
+                CredentialConnectProviderArg::Github,
+                CapabilitySlot::github(),
+            ),
         ] {
-            let name = format!("work-{provider}");
+            let name = format!("work-{}", provider_id(provider));
             let target = select_oauth_connection_target(Vec::new(), &name, provider).unwrap();
             let created = publish_oauth_connection(
                 &mut client,
@@ -1748,7 +1826,12 @@ mod tests {
             ),
         );
         let mut client = connect_ready_authority(&config, &server).await;
-        let target = select_oauth_connection_target(Vec::new(), "work", "github").unwrap();
+        let target = select_oauth_connection_target(
+            Vec::new(),
+            "work",
+            CredentialConnectProviderArg::Github,
+        )
+        .unwrap();
         let connected = publish_oauth_connection(
             &mut client,
             target,
@@ -2074,37 +2157,76 @@ mod tests {
     }
 
     #[test]
-    fn claude_subscription_tokens_parse_as_an_add_provider_and_are_platform_only() {
-        let parsed = Cli::try_parse_from([
-            "cw",
-            "credentials",
-            "--cloud",
-            "add",
-            "claude-subscription",
-            "--name=claude",
-        ])
-        .unwrap();
-        assert!(parsed.cloud && !parsed.local);
-        assert!(
-            matches!(parsed.command, Command::Credentials(CredentialsArgs {
-            command: CredentialsCommand::Add(CredentialAddArgs { provider, name, .. }), ..
-        }) if provider.as_deref() == Some("claude-subscription") && name.as_deref() == Some("claude"))
-        );
-        // The token is never an argument.
-        assert!(
-            Cli::try_parse_from([
+    fn a_claude_token_is_connected_in_both_placements_and_never_an_argument() {
+        for placement in ["--local", "--cloud"] {
+            let parsed = Cli::try_parse_from([
                 "cw",
                 "credentials",
-                "--cloud",
-                "add",
-                "claude-subscription",
+                placement,
+                "connect",
+                "claude-token",
                 "--name=claude",
-                "--token=sk-ant-oat01-must-not-be-argv",
             ])
-            .is_err()
+            .unwrap();
+            assert!(
+                matches!(parsed.command, Command::Credentials(CredentialsArgs {
+                command: CredentialsCommand::Connect(CredentialConnectArgs {
+                    provider: Some(CredentialConnectProviderArg::ClaudeToken), name, ..
+                }), ..
+            }) if name.as_deref() == Some("claude"))
+            );
+            assert!(
+                Cli::try_parse_from([
+                    "cw",
+                    "credentials",
+                    placement,
+                    "connect",
+                    "claude-token",
+                    "--name=claude",
+                    "--token=sk-ant-oat01-must-not-be-argv",
+                ])
+                .is_err()
+            );
+        }
+        let token =
+            CredentialOperation::Credential(CredentialsCommand::Connect(CredentialConnectArgs {
+                provider: Some(CredentialConnectProviderArg::ClaudeToken),
+                name: Some("claude".into()),
+                yes: false,
+                guided: false,
+            }));
+        let (feature, _) = authority_feature_needed(&token).expect("a token needs its feature");
+        assert_eq!(
+            feature,
+            codewire_local_credentials::AuthorityFeature::ClaudeToken
         );
-        let error = api_key_enrollment_kind("claude-subscription").unwrap_err();
-        assert!(error.to_string().contains("--cloud"));
+    }
+
+    /// `add claude-subscription` is `connect claude-token` for one release
+    /// (#4945): the name carries over, and what a token can't take is refused.
+    #[test]
+    fn the_old_add_claude_subscription_becomes_connect_claude_token() {
+        let add = |expires_at| CredentialAddArgs {
+            provider: Some("claude-subscription".into()),
+            name: Some("claude".into()),
+            account_hint: None,
+            expires_at,
+            key_file: None,
+            guided: false,
+        };
+        let connect = claude_token_from_alias("local", &add(None)).unwrap();
+        assert!(matches!(
+            connect.provider,
+            Some(CredentialConnectProviderArg::ClaudeToken)
+        ));
+        assert_eq!(connect.name.as_deref(), Some("claude"));
+        assert!(!connect.yes);
+        assert!(claude_token_from_alias("local", &add(Some(4_102_444_800))).is_err());
+        let gated = CredentialOperation::Credential(CredentialsCommand::Add(add(None)));
+        assert_eq!(
+            authority_feature_needed(&gated).map(|(feature, _)| feature),
+            Some(codewire_local_credentials::AuthorityFeature::ClaudeToken)
+        );
     }
 
     #[test]

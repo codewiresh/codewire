@@ -460,7 +460,15 @@ fn reject_unknown_selector_prefix(selector: &str, kind: &str) -> anyhow::Result<
 }
 
 /// What `connect claude` says before it prints Claude's sign-in link.
-pub(super) const CLAUDE_SIGN_IN_GUIDANCE: &str = "Sign in to Claude in your browser with the account whose Claude Pro, Max, Team or Enterprise plan you want to use, then paste the code Claude shows.";
+/// `connect`'s help for the two Claude subscription forms (owner,
+/// 2026-11-15, #4945): what each is and the one difference that matters.
+pub(super) const CLAUDE_SIGN_IN_HELP: &str =
+    "Claude (sign-in): your subscription; shows your plan and usage";
+pub(super) const CLAUDE_TOKEN_HELP: &str =
+    "Claude (token): your subscription; lasts a year, for automation, model requests only";
+/// The token screen's first line: no link to follow, only a paste.
+pub(super) const CLAUDE_TOKEN_GUIDANCE: &str =
+    "Run `claude setup-token`, then paste what it prints.";
 
 /// A pasted value that is not Claude's `code#state`; one retry follows at a
 /// terminal.
@@ -469,12 +477,8 @@ pub(super) const CLAUDE_CODE_SHAPE_HINT: &str = "That doesn't look like Claude's
 /// The longest code or state part accepted from a paste.
 const MAX_CLAUDE_CODE_PART_BYTES: usize = 4096;
 
-/// The one paste-based enrollment step for a Claude subscription token. The
-/// owner runs Claude Code's own command; Codewire never drives its OAuth.
-pub(super) const CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE: &str = "Run `claude setup-token` (requires a Claude Pro, Max, Team or Enterprise plan), then copy the freshly printed token, paste it here and press Enter (what you paste stays hidden). Codewire records an expiry one year from now; the token stays in Codewire and is never delivered to a Sandbox.";
-
 /// The hidden prompt for a Claude subscription token.
-pub(super) const CLAUDE_SUBSCRIPTION_TOKEN_PROMPT: &str = "Paste the token from claude setup-token";
+pub(super) const CLAUDE_TOKEN_PROMPT: &str = "  Token > ";
 
 /// Every profile includes the account's one GitHub connection, so GitHub is
 /// never set or unset on a profile.
@@ -970,10 +974,7 @@ mod tests {
             paste_prompt("acme", AccessToken),
             "Paste the acme access token"
         );
-        assert_eq!(
-            CLAUDE_SUBSCRIPTION_TOKEN_PROMPT,
-            "Paste the token from claude setup-token"
-        );
+        assert_eq!(CLAUDE_TOKEN_PROMPT, "  Token > ");
         for provider in ["anthropic", "openai", "github", "acme"] {
             for kind in [ApiKey, AccessToken] {
                 let prompt = paste_prompt(provider, kind).to_lowercase();
@@ -1248,7 +1249,7 @@ mod tests {
         assert_eq!(code.expose_secret(), b"abc#xyz");
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            format!("   {CLAUDE_CODE_SHAPE_HINT}\n")
+            format!("  {CLAUDE_CODE_SHAPE_HINT}\n")
         );
 
         let mut pastes = vec![value("first-paste"), value("second-paste")].into_iter();
@@ -1260,7 +1261,7 @@ mod tests {
         assert!(!error.to_string().contains("second-paste"));
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            format!("   {CLAUDE_CODE_SHAPE_HINT}\n")
+            format!("  {CLAUDE_CODE_SHAPE_HINT}\n")
         );
 
         let mut reads = 0;

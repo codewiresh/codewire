@@ -17,6 +17,7 @@ mod admission;
 mod broker_channel;
 mod broker_log;
 mod broker_process;
+mod claude_token;
 mod client;
 mod control;
 mod default_profile;
@@ -770,14 +771,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
                 .ok_or_else(|| AccessError::ProviderUnavailable {
                     provider: input.provider.clone(),
                 })?;
-        // A Claude sign-in is admitted as in the cloud (#4714). A Claude
-        // subscription token (Anthropic OAuth) is still a platform credential
-        // only: a local VM does not yet project its token form.
-        // TODO(native-claude-subscription-form): admit it with that form.
-        if !provider.supports_authentication_kind(input.authentication_kind)
-            || (input.provider.as_str() == "anthropic"
-                && input.authentication_kind == CredentialAuthKind::OAuth)
-        {
+        if !provider.supports_authentication_kind(input.authentication_kind) {
             return Err(AccessError::UnsupportedAuthenticationKind {
                 provider: input.provider,
                 kind: input.authentication_kind,
@@ -785,6 +779,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             .into());
         }
 
+        let input = claude_token::admit(input, &material)?;
         let id = CredentialId::parse(Uuid::new_v4().to_string())?;
         let metadata = CredentialMetadata {
             id: id.clone(),
@@ -1007,10 +1002,10 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         }
         let mut replacement_metadata = current.public.metadata.clone();
         replacement_metadata.account_hint = account_hint;
-        replacement_metadata.expires_at_unix = expires_at_unix;
+        claude_token::set_expiry(&mut replacement_metadata, &material, expires_at_unix)?;
         replacement_metadata.status = CredentialStatus::Active;
         replacement_metadata.validate()?;
-        let expires_at = optional_u64_to_i64(expires_at_unix)?;
+        let expires_at = optional_u64_to_i64(replacement_metadata.expires_at_unix)?;
         reconcile_ready_journal(&connection, &self.protected_store, &current)?;
         current = load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
         if current.public.metadata.revocation_generation != expected_revocation_generation {

@@ -530,36 +530,13 @@ pub(crate) enum CredentialsCommand {
     },
 }
 
-#[derive(Debug, Args)]
-pub(crate) struct CredentialConnectArgs {
-    #[arg(value_enum, value_name = "PROVIDER")]
-    pub(crate) provider: Option<CredentialConnectProviderArg>,
-    #[arg(long, value_name = "NAME")]
-    pub(crate) name: Option<String>,
-    #[arg(
-        short,
-        long,
-        help = "Confirm reconnecting an existing named credential"
-    )]
-    pub(crate) yes: bool,
-    #[arg(skip)]
-    pub(crate) guided: bool,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub(crate) enum CredentialConnectProviderArg {
-    #[value(help = credential_input::CODEX_DEVICE_AUTHORIZATION_GUIDANCE)]
-    Codex,
-    Github,
-    #[value(help = credential_input::CLAUDE_SIGN_IN_GUIDANCE)]
-    Claude,
-}
+pub(crate) use credential_input::connect::{CredentialConnectArgs, CredentialConnectProviderArg};
 
 #[derive(Debug, Args)]
 pub(crate) struct CredentialAddArgs {
     #[arg(
         value_name = "PROVIDER",
-        help = "openai or anthropic (API key read from stdin), claude-subscription (token from `claude setup-token`, read from stdin; platform only), or ssh"
+        help = "openai or anthropic (API key read from stdin), or ssh; a Claude token is `connect claude-token`"
     )]
     pub(crate) provider: Option<String>,
     #[arg(long, value_name = "NAME")]
@@ -641,7 +618,7 @@ pub(crate) struct CredentialRotateArgs {
     #[arg(
         long,
         value_name = "UNIX_SECONDS",
-        help = "New hard expiry; omission clears it. Explicit API-key rotation sets status Active, including if revoked. Not accepted for a Claude subscription token, whose replacement restarts its one-year expiry"
+        help = "New hard expiry; omission clears it. Explicit API-key rotation sets status Active, including if revoked"
     )]
     pub(crate) expires_at: Option<u64>,
 }

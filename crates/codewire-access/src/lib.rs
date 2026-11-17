@@ -33,9 +33,10 @@ pub use managed_refresh::{
     is_managed_claude_refresh_token, managed_claude_refresh_token,
 };
 pub use model::{
-    AccessProfile, CapabilityPolicy, CredentialAuthKind, CredentialMetadata, CredentialStatus,
-    EnvironmentAccessBinding, GrantPermission, HttpProvider, Owner, Placement, ProviderCatalog,
-    ProviderDefinition, SshPublicKeyMetadata,
+    AccessProfile, CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS, CapabilityPolicy,
+    CredentialAuthKind, CredentialMetadata, CredentialStatus, EnvironmentAccessBinding,
+    GrantPermission, HttpProvider, Owner, Placement, ProviderCatalog, ProviderDefinition,
+    SshPublicKeyMetadata, is_claude_subscription_token_shape,
 };
 pub use placeholder::{
     CREDENTIAL_PLACEHOLDER_LENGTH, CREDENTIAL_PLACEHOLDER_TAG, CredentialPlaceholder,

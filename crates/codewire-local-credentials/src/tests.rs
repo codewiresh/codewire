@@ -1608,42 +1608,50 @@ fn unsupported_authentication_kind_is_rejected_before_protected_store_access() {
     );
 }
 
-/// The shared catalog admits Anthropic OAuth for the platform's Claude
-/// subscription token; the local authority still refuses it before any
-/// protected-store access. A Claude sign-in is stored locally as in the cloud
-/// (#4714).
+/// A Claude subscription token (Anthropic OAuth) is stored locally as in the
+/// cloud (#4945): a malformed one is refused before any protected-store access,
+/// and a stored one expires one year after it is saved, whatever was asked;
+/// replacing it restarts the year. A Claude sign-in is stored as well (#4714).
 #[test]
-fn the_local_authority_stores_a_claude_sign_in_but_not_yet_a_subscription_token() {
+fn the_local_authority_stores_a_claude_sign_in_and_a_subscription_token() {
     let temp = TempDir::new().expect("temporary directory");
     let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
     let catalog = codewire_access::builtin_provider_catalog();
-    assert!(
-        catalog
-            .get(&provider("anthropic"))
-            .expect("Anthropic provider")
-            .supports_authentication_kind(CredentialAuthKind::OAuth)
-    );
     let authority = LocalCredentialAuthority::open(&authority_root(&temp), store.clone(), catalog)
         .expect("open authority");
-    let mut input = new_credential("claude-subscription");
-    input.provider = provider("anthropic");
-    input.account_hint = None;
-    assert_eq!(
-        authority.add_credential(input, material(b"sk-ant-oat01-synthetic-local-token")),
+    let token = || {
+        let mut input = new_credential("claude-token");
+        input.provider = provider("anthropic");
+        input.account_hint = None;
+        input.expires_at_unix = Some(1);
+        input
+    };
+    assert!(matches!(
+        authority.add_credential(token(), material(b"sk-ant-oat01 not a token")),
         Err(LocalCredentialError::Access(
-            AccessError::UnsupportedAuthenticationKind {
-                provider: provider("anthropic"),
-                kind: CredentialAuthKind::OAuth,
-            }
+            AccessError::InvalidField { .. }
         ))
-    );
+    ));
     assert_eq!(store.entry_count(), 0);
-    assert!(
-        authority
-            .list_credentials()
-            .expect("list credentials")
-            .is_empty()
-    );
+    let year = codewire_access::CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS;
+    let before = crate::unix_seconds().unwrap();
+    let stored = authority
+        .add_credential(token(), material(b"sk-ant-oat01-synthetic-local-token"))
+        .expect("local Claude subscription token");
+    assert!(stored.metadata.is_claude_subscription_token());
+    let expires = stored.metadata.expires_at_unix.expect("a token's expiry");
+    assert!((before + year..=crate::unix_seconds().unwrap() + year).contains(&expires));
+    assert_eq!(store.entry_count(), 1);
+    let rotated = authority
+        .rotate_credential_material(
+            &stored.metadata.id,
+            stored.metadata.revocation_generation,
+            material(b"sk-ant-oat01-synthetic-replacement"),
+            stored.metadata.expires_at_unix.map(|at| at - 10),
+            None,
+        )
+        .expect("replace the token");
+    assert!(rotated.metadata.expires_at_unix.expect("expiry") >= expires);
     let mut sign_in = new_credential("claude-sign-in");
     sign_in.provider = provider("anthropic");
     sign_in.authentication_kind = CredentialAuthKind::ClaudeSignIn;
@@ -1656,7 +1664,8 @@ fn the_local_authority_stores_a_claude_sign_in_but_not_yet_a_subscription_token(
         CredentialAuthKind::ClaudeSignIn
     );
     assert!(stored.metadata.is_refreshable_login());
-    assert_eq!(store.entry_count(), 1);
+    // The replaced token's old value is gone; the new one and the sign-in stay.
+    assert_eq!(store.entry_count(), 2);
     // An Anthropic API key remains a local credential.
     let mut api_key = new_credential("anthropic-api-key");
     api_key.provider = provider("anthropic");
@@ -3800,6 +3809,7 @@ fn the_credential_kinds_the_local_authority_stores_are_pinned_to_its_protocol() 
     let expected: BTreeSet<(&str, String)> = [
         ("openai", "OAuth"),
         ("openai", "ApiKey"),
+        ("anthropic", "OAuth"),
         ("anthropic", "ApiKey"),
         ("anthropic", "ClaudeSignIn"),
         ("github", "OAuth"),
@@ -3811,7 +3821,7 @@ fn the_credential_kinds_the_local_authority_stores_are_pinned_to_its_protocol() 
         admitted, expected,
         "bump the authority protocol with this set"
     );
-    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 20);
+    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 21);
 }
 
 /// The store keeps one default profile as the cloud does (#4717): the first

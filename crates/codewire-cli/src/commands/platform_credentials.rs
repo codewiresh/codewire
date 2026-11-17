@@ -3,12 +3,12 @@
 use codewire_client::{self as rpc, CodewireClient};
 
 use super::credential_input::connect::{
-    ConnectStore, ConnectTarget, Interrupt, Reconnecting, provider_id, provider_label,
+    ConnectStore, ConnectTarget, Interrupt, Reconnecting, claude_token_from_alias,
+    claude_token_rotate_refusal, provider_id, provider_label, read_claude_token,
 };
 use super::credential_input::{
-    CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE, CLAUDE_SUBSCRIPTION_TOKEN_PROMPT,
     CODEX_DEVICE_AUTHORIZATION_GUIDANCE, ParsedCredentialSelector, SSH_PUBLIC_KEY_GITHUB_HINT,
-    parse_credential_selector, prompt_credential_material, prompt_named_material, read_ssh_import,
+    parse_credential_selector, prompt_credential_material, read_ssh_import,
     validate_ssh_generation, validate_ssh_import,
 };
 use super::login_screen;
@@ -127,6 +127,7 @@ async fn handle_with_receipt(
                 eprintln!("Canceled.");
                 return Ok(());
             }
+            let token = is_subscription_token(&current);
             client.delete_credential(rpc::DeleteCredentialRequest {
                 credential_id: current.id,
                 expected_revocation_generation: current.revocation_generation,
@@ -136,6 +137,9 @@ async fn handle_with_receipt(
                 "{}",
                 super::credentials::output::deleted("cloud", &current.name)
             );
+            if token {
+                eprintln!("{}", super::credential_input::connect::CLAUDE_TOKEN_DELETED);
+            }
             Ok(())
         }
         CredentialsCommand::Add(args) => {
@@ -165,33 +169,12 @@ async fn handle_with_receipt(
                 );
             }
             if args.provider.as_deref() == Some(CLAUDE_SUBSCRIPTION) {
-                let name = validate_subscription_token_arguments(&args)?;
-                // Confirm owner-scoped access and name availability before
-                // asking for the token.
-                anyhow::ensure!(
-                    find_named(client, &name).await?.is_none(),
-                    super::credentials::output::refusal::name_in_use("cloud", &name)
-                );
-                eprintln!("{CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE}");
-                let token = prompt_named_material(CLAUDE_SUBSCRIPTION_TOKEN_PROMPT)?;
-                let response = client
-                    .add_claude_subscription_token_credential(
-                        rpc::AddClaudeSubscriptionTokenCredentialRequest {
-                            name,
-                            token: token.expose_secret().to_vec(),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .context("add platform Claude subscription token; inspect by name before retrying an uncertain acknowledgement")?;
-                return print(
-                    &[response
-                        .credential
-                        .into_option()
-                        .inspect(|record| remember_platform(record, execution))
-                        .context("platform omitted credential metadata")?],
-                    OutputFormat::Text,
-                );
+                return super::credential_input::connect::connect(
+                    &mut CloudConnectStore { client },
+                    claude_token_from_alias("cloud", &args)?,
+                    execution,
+                )
+                .await;
             }
             validate_key_arguments(&args)?;
             let material = prompt_credential_material(
@@ -234,7 +217,7 @@ async fn handle_with_receipt(
         CredentialsCommand::Rotate(args) => {
             let current = resolve(client, &args.credential).await?;
             if is_subscription_token(&current) {
-                return replace_subscription_token(client, current, args.expires_at).await;
+                return Err(claude_token_rotate_refusal("cloud", &current.name));
             }
             let expected = rotation_metadata(&current, args.expires_at)?;
             eprintln!("{}", rotation_notice(&current, args.expires_at));
@@ -268,76 +251,6 @@ async fn handle_with_receipt(
 fn is_subscription_token(credential: &rpc::Credential) -> bool {
     credential.provider == "anthropic"
         && credential.authentication_kind == rpc::CredentialAuthenticationKind::Oauth
-}
-
-fn validate_subscription_token_arguments(args: &CredentialAddArgs) -> anyhow::Result<String> {
-    anyhow::ensure!(
-        args.key_file.is_none(),
-        "--key-file is only valid for add ssh"
-    );
-    anyhow::ensure!(
-        args.account_hint.is_none(),
-        super::credentials::output::refusal::ACCOUNT_HINT
-    );
-    anyhow::ensure!(
-        args.expires_at.is_none(),
-        "a Claude subscription token's expiry is recorded as one year after it is added; --expires-at is not accepted"
-    );
-    Ok(trimmed_required(
-        args.name
-            .as_deref()
-            .context("credential name is required")?,
-        "credential name",
-    )?
-    .to_owned())
-}
-
-/// Replace an exact existing Claude subscription token with a newly pasted
-/// one. Its identity and profile bindings are kept, it is reactivated, and
-/// its one-year expiry restarts.
-async fn replace_subscription_token(
-    client: &CodewireClient,
-    current: rpc::Credential,
-    expiry: Option<u64>,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        expiry.is_none(),
-        "a Claude subscription token's replacement restarts its one-year expiry; --expires-at is not accepted"
-    );
-    anyhow::ensure!(
-        current.revocation_generation > 0 && current.revocation_generation < i64::MAX as u64,
-        "platform returned an invalid credential revision"
-    );
-    eprintln!(
-        "Replacing the token of Claude subscription credential {:?} ({}, revision {}) sets its status to Active (including if revoked) and restarts its one-year expiry. {CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE}",
-        current.name, current.id, current.revocation_generation
-    );
-    let token = prompt_named_material(CLAUDE_SUBSCRIPTION_TOKEN_PROMPT)?;
-    let response = client
-        .add_claude_subscription_token_credential(rpc::AddClaudeSubscriptionTokenCredentialRequest {
-            name: current.name.clone(),
-            token: token.expose_secret().to_vec(),
-            credential_id: Some(current.id.clone()),
-            expected_revocation_generation: Some(current.revocation_generation),
-            ..Default::default()
-        })
-        .await
-        .context("replace exact platform Claude subscription token; inspect metadata before retrying an uncertain result")?;
-    drop(token);
-    let replaced = response
-        .credential
-        .into_option()
-        .context("platform omitted replaced metadata")?;
-    anyhow::ensure!(
-        replaced.id == current.id
-            && replaced.name == current.name
-            && is_subscription_token(&replaced)
-            && replaced.status == rpc::CredentialStatus::Active
-            && replaced.revocation_generation == current.revocation_generation + 1
-            && replaced.expires_at_unix.is_some(),
-        "platform returned unexpected credential metadata; inspect the identity before retrying the uncertain result"
-    );
-    print(&[replaced], OutputFormat::Text)
 }
 
 fn rotation_metadata(
@@ -426,6 +339,7 @@ enum CloudApproval {
         sign_in: String,
         pasted: codewire_protected_store::ProtectedValue,
     },
+    ClaudeToken(codewire_protected_store::ProtectedValue),
     Codex,
     Github,
 }
@@ -436,9 +350,9 @@ fn cloud_connected_kind(
 ) -> rpc::CredentialAuthenticationKind {
     match provider {
         CredentialConnectProviderArg::Claude => rpc::CredentialAuthenticationKind::ClaudeSignIn,
-        CredentialConnectProviderArg::Codex | CredentialConnectProviderArg::Github => {
-            rpc::CredentialAuthenticationKind::Oauth
-        }
+        CredentialConnectProviderArg::Codex
+        | CredentialConnectProviderArg::Github
+        | CredentialConnectProviderArg::ClaudeToken => rpc::CredentialAuthenticationKind::Oauth,
     }
 }
 
@@ -512,6 +426,12 @@ impl ConnectStore for CloudConnectStore<'_> {
                 interrupt.listen();
                 CloudApproval::Claude { sign_in, pasted }
             }
+            CredentialConnectProviderArg::ClaudeToken => {
+                CloudApproval::ClaudeToken(read_claude_token(login_screen::SignInScreen::cloud(
+                    provider_label(target.provider),
+                    &target.name,
+                ))?)
+            }
             CredentialConnectProviderArg::Codex => CloudApproval::Codex,
             CredentialConnectProviderArg::Github => CloudApproval::Github,
         })
@@ -564,6 +484,26 @@ impl ConnectStore for CloudConnectStore<'_> {
                         })
                     })
                     .map(|credential| (credential, Vec::new())),
+                CloudApproval::ClaudeToken(token) => client
+                    .add_claude_subscription_token_credential(
+                        rpc::AddClaudeSubscriptionTokenCredentialRequest {
+                            name: request.name,
+                            token: token.expose_secret().to_vec(),
+                            credential_id: request.credential_id,
+                            expected_revocation_generation: request.expected_revocation_generation,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .and_then(|response| {
+                        response.credential.into_option().ok_or_else(|| {
+                            rpc::ClientError::new(
+                                rpc::ErrorCode::Internal,
+                                "platform omitted Claude token metadata",
+                            )
+                        })
+                    })
+                    .map(|credential| (credential, Vec::new())),
                 CloudApproval::Codex => {
                     eprintln!("{}", CODEX_DEVICE_AUTHORIZATION_GUIDANCE);
                     client
@@ -612,18 +552,25 @@ impl ConnectStore for CloudConnectStore<'_> {
                 anyhow::bail!("enrollment cancelled; inspect the credential by name before retrying because storage acknowledgement may be unknown");
             }
         };
-        eprint!(
-            "\n{}",
-            login_screen::success_screen(
-                screen,
+        let (who, expires) = match target.provider {
+            CredentialConnectProviderArg::ClaudeToken => {
+                (credential.name.as_str(), credential.expires_at_unix)
+            }
+            _ => (
                 login_screen::signed_in_account(
                     credential.account_hint.as_deref(),
-                    &credential.name
-                )
-            )
+                    &credential.name,
+                ),
+                None,
+            ),
+        };
+        let style = crate::output::Capabilities::from_process(crate::output::OutputMode::Text)
+            .stderr_style();
+        eprint!(
+            "\n{}",
+            login_screen::connected_line(screen, who, expires, style)
         );
         remember_platform(&credential, execution);
-        print(&[credential], OutputFormat::Text)?;
         super::credentials::report_github_pending(github_pending(&pending));
         Ok(())
     }
@@ -657,7 +604,7 @@ fn display_challenge(screen: login_screen::SignInScreen<'_>, url: &str, code: &s
     login_screen::open_sign_in_link(screen, url);
     let style =
         crate::output::Capabilities::from_process(crate::output::OutputMode::Text).stderr_style();
-    eprint!("{}", login_screen::device_code_lines(screen, code, style));
+    eprint!("{}", login_screen::device_code_lines(code, style));
     true
 }
 
@@ -956,52 +903,24 @@ mod tests {
     }
 
     #[test]
-    fn subscription_token_add_rejects_argv_expiry_hint_and_key_file_before_input() {
-        let args = |expires_at: Option<u64>, account_hint: Option<&str>, key_file: bool| {
-            CredentialAddArgs {
-                provider: Some(CLAUDE_SUBSCRIPTION.into()),
-                name: Some(" claude ".into()),
-                account_hint: account_hint.map(str::to_owned),
-                expires_at,
-                key_file: key_file.then(|| "/dev/null".into()),
-
-                guided: false,
-            }
+    fn an_api_key_add_never_accepts_the_claude_token_word() {
+        let args = CredentialAddArgs {
+            provider: Some(CLAUDE_SUBSCRIPTION.into()),
+            name: Some("claude".into()),
+            account_hint: None,
+            expires_at: None,
+            key_file: None,
+            guided: false,
         };
-        assert_eq!(
-            validate_subscription_token_arguments(&args(None, None, false)).unwrap(),
-            "claude"
-        );
-        for invalid in [
-            args(Some(4_000_000_000), None, false),
-            args(None, Some("person@example.test"), false),
-            args(None, None, true),
-        ] {
-            assert!(validate_subscription_token_arguments(&invalid).is_err());
-        }
-        let mut blank = args(None, None, false);
-        blank.name = Some("  ".into());
-        assert!(validate_subscription_token_arguments(&blank).is_err());
-        // An API-key add never accepts the subscription provider word.
-        assert!(validate_key_arguments(&args(None, None, false)).is_err());
-        assert!(CLAUDE_SUBSCRIPTION_TOKEN_GUIDANCE.contains("claude setup-token"));
+        assert!(validate_key_arguments(&args).is_err());
     }
 
-    #[tokio::test]
-    async fn subscription_token_rotation_is_a_replacement_that_refuses_an_explicit_expiry() {
-        let server = MockServer::start().await;
-        let client = client(&server);
+    #[test]
+    fn a_claude_token_is_not_an_api_key_rotation() {
         let mut current = metadata(rpc::CredentialStatus::RefreshFailed);
         current.provider = "anthropic".into();
         current.authentication_kind = rpc::CredentialAuthenticationKind::Oauth.into();
         assert!(is_subscription_token(&current));
-        // Refused before any prompt or request.
-        let error = replace_subscription_token(&client, current.clone(), Some(4_000_000_000))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("--expires-at"));
-        assert!(server.received_requests().await.unwrap().is_empty());
-        // API-key rotation still refuses the subscription form.
         assert!(rotation_metadata(&current, None).is_err());
         let mut api_key = current.clone();
         api_key.authentication_kind = rpc::CredentialAuthenticationKind::ApiKey.into();

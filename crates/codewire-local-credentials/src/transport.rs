@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 20;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 21;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -51,6 +51,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         20,
         "EnsureEnvironmentBroker carries the network policy's answer for GitHub, and the broker refuses the managed GitHub credential when it is no (#4926)",
     ),
+    (
+        21,
+        "admits a Claude subscription token, with its shape checked and a one-year expiry (#4945)",
+    ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 
@@ -76,15 +80,19 @@ pub enum AuthorityFeature {
     /// when the answer is no. An older authority ignores the field and
     /// serves GitHub whatever the policy says.
     NetworkPolicyGithub,
+    /// A Claude subscription token, stored with a one-year expiry. An older
+    /// authority refuses to store one.
+    ClaudeToken,
 }
 
 impl AuthorityFeature {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::PlatformGithub,
         Self::ClaudeSignIn,
         Self::DefaultProfile,
         Self::CredentialPlaceholders,
         Self::NetworkPolicyGithub,
+        Self::ClaudeToken,
     ];
 
     /// The protocol that introduced it.
@@ -95,6 +103,7 @@ impl AuthorityFeature {
             Self::DefaultProfile => 18,
             Self::CredentialPlaceholders => 19,
             Self::NetworkPolicyGithub => 20,
+            Self::ClaudeToken => 21,
         }
     }
 

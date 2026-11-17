@@ -1,21 +1,23 @@
-//! The screens `credentials connect` shows while a person signs in
-//! to a provider in their browser, laid out like Claude Code's own login:
-//! the sign-in link on its own line (copied to the clipboard with OSC 52 at a
-//! terminal), then a hidden paste prompt or a device code, then the account
-//! that signed in. Nothing here prints a token or a pasted code.
+//! The screens `credentials connect` shows, the same in both placements, as
+//! the owner approved them (private-docs
+//! `designs/2026-11-15-credentials-screens.html`): one title line naming the
+//! provider, the credential's name and its store, then the link to sign in
+//! (copied to the clipboard with OSC 52 at a terminal), a device code alone on
+//! its line or a hidden paste prompt, then one result line. Nothing here
+//! prints a token or a pasted code.
 
 use std::io::{IsTerminal as _, Write as _};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
-use crate::output::{Role, Style};
+use crate::output::{Role, Status, Style};
 
 /// The indent of every line under the screen's title.
-pub(super) const INDENT: &str = "   ";
+pub(super) const INDENT: &str = "  ";
 
 /// The hidden prompt for the code Claude shows after sign-in.
-pub(super) const PASTE_CODE_PROMPT: &str = "   Paste code here if prompted > ";
+pub(super) const PASTE_CODE_PROMPT: &str = "  Paste the code Claude shows after you sign in > ";
 
 /// What a sign-in screen is for: the provider, the name the credential is
 /// saved under, and where it is saved.
@@ -45,62 +47,58 @@ impl<'a> SignInScreen<'a> {
         }
     }
 
-    fn heading(self) -> String {
+    /// The title line: what is connected, under which name, and where.
+    pub(super) fn heading(self) -> String {
         let place = if self.in_account {
             "in your Codewire account"
         } else {
             "on this computer"
         };
-        format!(
-            " Connect {}\n\n{INDENT}Saving as {:?} {place}\n\n",
-            self.provider, self.name
-        )
+        format!("Connect {} as {}, {place}\n\n", self.provider, self.name)
     }
 }
 
-/// The link screen: what is being connected, then where to sign in when no
-/// browser opens. `copied` says whether the link was also sent to the
-/// clipboard with OSC 52.
-pub(super) fn link_screen(sign_in: SignInScreen<'_>, url: &str, copied: bool) -> String {
-    let mut screen = sign_in.heading();
-    screen.push_str(INDENT);
-    screen.push_str("Browser didn't open? Use the url below to sign in\n");
-    if copied {
-        screen.push_str(INDENT);
-        screen.push_str("(Sent via OSC 52 \u{b7} select the URL manually if paste fails)\n");
-    }
-    screen.push('\n');
-    screen.push_str(url);
-    screen.push_str("\n\n");
-    screen.push_str(INDENT);
-    screen.push_str("Hold Shift while selecting to use your terminal's native copy\n");
-    screen
-}
-
-/// The device-code lines under the link screen of a device flow (Codex,
-/// GitHub): no paste, the person enters this code on the provider's page.
-/// The code is alone on its line, so selecting the line copies only the
-/// code, and bold where `style` has colour.
-pub(super) fn device_code_lines(sign_in: SignInScreen<'_>, code: &str, style: Style) -> String {
+/// The link screen: the title, then where to sign in, true whether or not a
+/// browser opened.
+pub(super) fn link_screen(sign_in: SignInScreen<'_>, url: &str) -> String {
     format!(
-        "\n{INDENT}Enter this code on that page:\n\n{INDENT}{}\n\n{INDENT}Continue only if you started this {} sign-in.\n",
-        style.paint(Role::Strong, code),
-        sign_in.provider,
+        "{}{INDENT}Open this link to sign in:\n{INDENT}{url}\n",
+        sign_in.heading()
     )
 }
 
-/// The screen once the provider accepted the sign-in. `account` is the
-/// credential's account hint (an email or login), or its name when the
-/// provider gave none.
-pub(super) fn success_screen(sign_in: SignInScreen<'_>, account: &str) -> String {
+/// The device-code lines under the link screen of a device flow (Codex,
+/// GitHub): the code alone on its line, so a double-click takes exactly the
+/// code, and bold where `style` has colour.
+pub(super) fn device_code_lines(code: &str, style: Style) -> String {
     format!(
-        " {} connected\n\n{INDENT}Signed in as {account}\n",
+        "\n{INDENT}Enter this code:\n{INDENT}{}\n",
+        style.paint(Role::Strong, code)
+    )
+}
+
+/// The one result line once a credential is saved: who signed in (or, for a
+/// token, its name), and a token's expiry date.
+pub(super) fn connected_line(
+    sign_in: SignInScreen<'_>,
+    who: &str,
+    expires_at_unix: Option<u64>,
+    style: Style,
+) -> String {
+    let expires = expires_at_unix
+        .and_then(|at| i64::try_from(at).ok())
+        .and_then(|at| chrono::DateTime::<chrono::Utc>::from_timestamp(at, 0))
+        .map(|at| format!(" · expires {}", at.format("%-d %b %Y")))
+        .unwrap_or_default();
+    format!(
+        "{} {} connected as {who}{expires}\n",
+        style.status(Status::Done),
         sign_in.provider
     )
 }
 
-/// The account a success screen names: the credential's account hint (an
-/// email or login), or its name when the provider gave none.
+/// The account a result line names: the credential's account hint (an email
+/// or login), or its name when the provider gave none.
 pub(super) fn signed_in_account<'a>(account_hint: Option<&'a str>, name: &'a str) -> &'a str {
     account_hint
         .map(str::trim)
@@ -140,11 +138,14 @@ pub(super) fn claude_sign_in_code(
 /// stdout is a terminal (the sequence goes to stdout only then, so a piped
 /// stdout never receives it).
 pub(super) fn show_link(sign_in: SignInScreen<'_>, url: &str) {
-    let copied = std::io::stdout().is_terminal() && {
+    if std::io::stdout().is_terminal() {
         let mut stdout = std::io::stdout();
-        stdout.write_all(osc52_copy(url).as_bytes()).is_ok() && stdout.flush().is_ok()
-    };
-    eprint!("{}", link_screen(sign_in, url, copied));
+        // A terminal that ignores OSC 52 still shows the link to select.
+        let _ = stdout
+            .write_all(osc52_copy(url).as_bytes())
+            .and_then(|()| stdout.flush());
+    }
+    eprint!("{}", link_screen(sign_in, url));
 }
 
 #[cfg(test)]
@@ -154,42 +155,65 @@ mod tests {
     use crate::output::Charset;
 
     const URL: &str = "https://claude.com/cai/oauth/authorize?code=true&state=s";
+    const PLAIN: Style = Style::new(false, Charset::Unicode);
 
     #[test]
-    fn the_link_screen_names_what_is_connected_and_where_it_is_saved() {
+    fn the_title_names_the_provider_the_name_and_the_store() {
         assert_eq!(
-            link_screen(SignInScreen::local("Claude", "work"), URL, true),
+            link_screen(
+                SignInScreen::local("Claude (sign-in)", "n@example.com"),
+                URL
+            ),
             format!(
-                " Connect Claude\n\n   Saving as \"work\" on this computer\n\n   Browser didn't open? Use the url below to sign in\n   (Sent via OSC 52 \u{b7} select the URL manually if paste fails)\n\n{URL}\n\n   Hold Shift while selecting to use your terminal's native copy\n"
+                "Connect Claude (sign-in) as n@example.com, on this computer\n\n  Open this link to sign in:\n  {URL}\n"
             )
         );
         assert!(
-            link_screen(SignInScreen::cloud("Codex", "work"), URL, false).starts_with(
-                " Connect Codex\n\n   Saving as \"work\" in your Codewire account\n\n"
-            )
+            SignInScreen::cloud("Claude (token)", "ci")
+                .heading()
+                .starts_with("Connect Claude (token) as ci, in your Codewire account\n")
         );
-        let uncopied = link_screen(SignInScreen::local("Claude", "work"), URL, false);
-        assert!(!uncopied.contains("OSC 52"));
-        // The link is alone on its line, so it can be selected whole and
-        // found by scripts.
-        assert!(uncopied.lines().any(|line| line == URL));
+        // The link is alone on its line, so it can be selected whole.
+        assert!(
+            link_screen(SignInScreen::local("Codex", "work"), URL)
+                .lines()
+                .any(|line| line.trim() == URL)
+        );
     }
 
     #[test]
     fn the_device_code_is_alone_on_its_line_and_bold_only_with_colour() {
-        let sign_in = SignInScreen::local("Codex", "work");
-        let plain = device_code_lines(sign_in, "ABCD-1234", Style::new(false, Charset::Unicode));
-        assert_eq!(
-            plain,
-            "\n   Enter this code on that page:\n\n   ABCD-1234\n\n   Continue only if you started this Codex sign-in.\n"
-        );
-        assert!(plain.lines().any(|line| line.trim() == "ABCD-1234"));
+        let plain = device_code_lines("K7QF-2M9XD", PLAIN);
+        assert_eq!(plain, "\n  Enter this code:\n  K7QF-2M9XD\n");
         assert!(!plain.contains('\x1b'));
-        let coloured = device_code_lines(sign_in, "ABCD-1234", Style::new(true, Charset::Unicode));
+        let coloured = device_code_lines("K7QF-2M9XD", Style::new(true, Charset::Unicode));
         assert!(
             coloured
                 .lines()
-                .any(|line| line == "   \x1b[1mABCD-1234\x1b[0m")
+                .any(|line| line == "  \x1b[1mK7QF-2M9XD\x1b[0m")
+        );
+    }
+
+    #[test]
+    fn the_result_line_names_who_connected_and_a_tokens_expiry() {
+        assert_eq!(
+            connected_line(
+                SignInScreen::local("Claude (sign-in)", "n@example.com"),
+                "n@example.com",
+                None,
+                PLAIN
+            ),
+            "✓ Claude (sign-in) connected as n@example.com\n"
+        );
+        // 2027-11-15 00:00 UTC.
+        assert_eq!(
+            connected_line(
+                SignInScreen::local("Claude (token)", "ci"),
+                "ci",
+                Some(1_826_236_800),
+                PLAIN
+            ),
+            "✓ Claude (token) connected as ci · expires 15 Nov 2027\n"
         );
     }
 
@@ -204,14 +228,6 @@ mod tests {
     }
 
     #[test]
-    fn the_success_screen_names_the_provider_and_the_account() {
-        assert_eq!(
-            success_screen(SignInScreen::cloud("GitHub", "work"), "person@example.test"),
-            " GitHub connected\n\n   Signed in as person@example.test\n"
-        );
-    }
-
-    #[test]
     fn osc52_carries_the_link_base64_encoded() {
         let sequence = osc52_copy(URL);
         let encoded = sequence
@@ -222,7 +238,10 @@ mod tests {
     }
 
     #[test]
-    fn the_paste_prompt_matches_the_claude_code_layout() {
-        assert_eq!(PASTE_CODE_PROMPT, "   Paste code here if prompted > ");
+    fn the_paste_prompt_says_where_the_code_comes_from() {
+        assert_eq!(
+            PASTE_CODE_PROMPT,
+            "  Paste the code Claude shows after you sign in > "
+        );
     }
 }

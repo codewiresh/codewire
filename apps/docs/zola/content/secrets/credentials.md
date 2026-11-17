@@ -39,24 +39,28 @@ printf '%s' "$ANTHROPIC_API_KEY" | cw credentials --cloud add anthropic --name w
 cw credentials --cloud rotate work-openai        # replace the key; clears a hard expiry unless --expires-at
 ```
 
-## Claude subscription token or sign-in
+## Claude subscription: sign-in or token
 
 A Claude Pro, Max, Team or Enterprise plan can serve Claude Code instead of an
-API key. Both forms are platform credentials (`--cloud`).
+API key, in two forms, both connected with `connect` and both your Claude
+subscription: **Claude (sign-in)** shows your plan and usage; **Claude
+(token)** lasts a year, for automation, and makes model requests only. Both
+work with `--local` and `--cloud`.
 
-**Subscription token**: run `claude setup-token` on your own machine, then add
-the printed token at once:
+**Token**: run `claude setup-token` on your own machine, then connect the
+printed token at once (from a hidden prompt, or piped to stdin):
 
 ```sh
 claude setup-token
-cw credentials --cloud add claude-subscription --name work-claude
+cw credentials connect claude-token --name work-claude
 ```
 
 Codewire records a one-year expiry and shows **Expires soon** in the last 30
 days. Managed and interactive turns work; Claude Code shows "Claude API"
-instead of your plan name and `/usage` is unavailable. Replace it with
-`cw credentials --cloud rotate work-claude` or **Replace token** in the
-dashboard.
+instead of your plan name and `/usage` is unavailable. Replace it by
+connecting it again, `cw credentials connect claude-token --name work-claude`,
+or with **Replace token** in the dashboard. `cw credentials add
+claude-subscription` still works for one release and prints the new command.
 
 **Sign-in**: `cw credentials connect claude --name claude-login` opens
 Claude's authorization page and asks you to paste the code Claude shows, the
@@ -65,7 +69,7 @@ sign-in carries your plan, so `/usage` and plan features work in the sandbox;
 the access token is delivered to the sandbox as Claude Code's own login file.
 See the [security model](@/reference/security.md).
 
-The dashboard offers the API key and the subscription token under
+The dashboard offers the API key and the token under
 **Settings → Credentials → Add credential**.
 
 ## SSH keys

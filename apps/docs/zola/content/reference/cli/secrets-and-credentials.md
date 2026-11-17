@@ -93,8 +93,8 @@ cw credentials --local|--cloud [--profile NAME] SUBCOMMAND
 ### Add and connect
 
 ```sh
-cw credentials --cloud connect codex|github|claude --name NAME [-y]
-cw credentials --cloud add openai|anthropic|claude-subscription --name NAME [--expires-at UNIX_SECONDS]
+cw credentials --cloud connect codex|github|claude|claude-token --name NAME [-y]
+cw credentials --cloud add openai|anthropic --name NAME [--expires-at UNIX_SECONDS]
 cw credentials --cloud add ssh --name NAME --key-file PATH
 cw credentials --cloud generate ssh --name NAME [--expires-at UNIX_SECONDS]
 ```
@@ -103,9 +103,9 @@ cw credentials --cloud generate ssh --name NAME [--expires-at UNIX_SECONDS]
 | --- | --- |
 | `codex` | ChatGPT device-code sign-in; enable device code authorization in ChatGPT's Security settings first |
 | `github` | Device-code sign-in to the Codewire GitHub App; prints the installation link |
-| `claude` | Browser sign-in to Claude, paste the code shown |
+| `claude` | Claude (sign-in): your Claude subscription; browser sign-in, paste the code shown |
+| `claude-token` | Claude (token): your Claude subscription; the token from `claude setup-token`, from a hidden prompt or stdin; one-year expiry recorded |
 | `openai`, `anthropic` | API key from stdin |
-| `claude-subscription` | token from `claude setup-token`, from stdin; platform only; one-year expiry recorded |
 | `ssh` | an Ed25519 key `cw` generates (public key printed), or an imported OpenSSH key file |
 
 Guided `add`, `connect`, and `generate` ask for missing provider, name, and

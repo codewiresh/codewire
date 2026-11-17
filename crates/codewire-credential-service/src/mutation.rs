@@ -42,13 +42,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
 
 const MAX_OPERATIONS: usize = 8;
-/// `claude setup-token` prints a token valid for one year and does not say
-/// when it was issued, so a pasted token's hard expiry is one year after it
-/// is added. An earlier provider expiry is detected when the provider refuses it.
-pub(crate) const CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS: u64 = 365 * 24 * 60 * 60;
-/// Token shape only: no provider call is made at enrollment.
-const MIN_CLAUDE_SUBSCRIPTION_TOKEN_BYTES: usize = 16;
-const MAX_CLAUDE_SUBSCRIPTION_TOKEN_BYTES: usize = 1024;
+pub(crate) use codewire_access::CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS;
 const ENROLLMENT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MUTATION_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -628,13 +622,8 @@ fn validate_api_key(
     }
 }
 
-/// A pasted `claude setup-token` value: bounded, printable ASCII without
-/// whitespace. Its format is the provider's and is not otherwise interpreted.
 fn validate_claude_subscription_token(material: &[u8]) -> Result<(), Error> {
-    if (MIN_CLAUDE_SUBSCRIPTION_TOKEN_BYTES..=MAX_CLAUDE_SUBSCRIPTION_TOKEN_BYTES)
-        .contains(&material.len())
-        && material.iter().all(u8::is_ascii_graphic)
-    {
+    if codewire_access::is_claude_subscription_token_shape(material) {
         Ok(())
     } else {
         Err(Error::InvalidInput)

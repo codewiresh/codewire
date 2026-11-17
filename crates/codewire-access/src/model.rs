@@ -149,6 +149,19 @@ pub struct CredentialMetadata {
     pub revocation_generation: u64,
 }
 
+/// `claude setup-token` prints a token valid for one year and does not say
+/// when it was issued, so every store records a pasted token's hard expiry one
+/// year after it is added. An earlier provider expiry shows when the provider
+/// refuses it.
+pub const CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS: u64 = 365 * 24 * 60 * 60;
+
+/// A pasted `claude setup-token` value as every store accepts it: 16 to 1024
+/// bytes of printable ASCII without whitespace. Only its shape is checked; no
+/// provider call is made when it is added.
+pub fn is_claude_subscription_token_shape(material: &[u8]) -> bool {
+    (16..=1024).contains(&material.len()) && material.iter().all(u8::is_ascii_graphic)
+}
+
 impl CredentialMetadata {
     pub fn validate(&self) -> Result<(), AccessError> {
         validate_label(&self.display_name, "credential display name")?;
