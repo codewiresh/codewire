@@ -290,6 +290,10 @@ ingress:
     previewHost: "*.codewire-dev.local"
     tlsSecret: codewire-kind-ingress-tls
 
+# deployments/k8s/agent-sandbox/overlays/local-kind: Kind's own controller build.
+agentSandbox:
+  image: agent-sandbox-controller:local
+
 dashboardPublicConfig:
   # The non-promotable Kind credential fixture provides this fixed synthetic
   # App itself.

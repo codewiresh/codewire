@@ -1,0 +1,49 @@
+{{- /*
+The agent-sandbox controller and its CRDs, from the pinned release vendored
+byte-identical in files/agent-sandbox (the source of truth until slice 8 of
+#2908 removes deployments/k8s/agent-sandbox). Each document is parsed and
+written back with only these changes: its Namespace and every CRD are kept by
+a Helm uninstall or upgrade, as the clusters' deletion guard requires (#3542),
+and Flux never prunes the Namespace (infra#1671); an environment may run its
+own controller image (agentSandbox.image).
+*/}}
+{{- with .Values.agentSandbox }}
+{{- if .enabled }}
+{{- $files := list "controller.yaml" "config.yaml" "rbac.generated.yaml" "extensions.yaml" "extensions-rbac.generated.yaml" }}
+{{- if .crds }}
+{{- range $crd := list "agents.x-k8s.io_sandboxes.yaml" "extensions.agents.x-k8s.io_sandboxclaims.yaml" "extensions.agents.x-k8s.io_sandboxtemplates.yaml" "extensions.agents.x-k8s.io_sandboxwarmpools.yaml" }}
+{{- $files = append $files (printf "crds/%s" $crd) }}
+{{- end }}
+{{- end }}
+{{- range $file := $files }}
+{{- $text := $.Files.Get (printf "files/agent-sandbox/%s" $file) }}
+{{- if not $text }}
+{{- fail (printf "files/agent-sandbox/%s is missing" $file) }}
+{{- end }}
+{{- range $document := regexSplit "(?m)^---\\s*$" $text -1 }}
+{{- $object := fromYaml $document }}
+{{- if hasKey $object "Error" }}
+{{- fail (printf "files/agent-sandbox/%s: %s" $file $object.Error) }}
+{{- end }}
+{{- if $object }}
+{{- $kept := dict "helm.sh/resource-policy" "keep" }}
+{{- if eq $object.kind "Namespace" }}
+{{- $_ := set $object.metadata "annotations" (merge (dict "kustomize.toolkit.fluxcd.io/prune" "disabled") $kept ($object.metadata.annotations | default dict)) }}
+{{- end }}
+{{- if eq $object.kind "CustomResourceDefinition" }}
+{{- $_ := set $object.metadata "annotations" (merge (deepCopy $kept) ($object.metadata.annotations | default dict)) }}
+{{- end }}
+{{- if and $.Values.agentSandbox.image (eq $object.kind "Deployment") }}
+{{- range $container := $object.spec.template.spec.containers }}
+{{- if eq $container.name "agent-sandbox-controller" }}
+{{- $_ := set $container "image" $.Values.agentSandbox.image }}
+{{- end }}
+{{- end }}
+{{- end }}
+---
+{{ toYaml $object }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

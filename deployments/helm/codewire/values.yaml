@@ -636,6 +636,15 @@ ingress:
     tlsHost: localhost
     tlsSecret: ""
 
+# The agent-sandbox controller and its CRDs (files/agent-sandbox, the pinned
+# release). Every CRD and the controller's Namespace is kept by a Helm
+# uninstall or upgrade.
+agentSandbox:
+  enabled: true
+  crds: true
+  # A controller image of the environment's own; empty runs the pinned release.
+  image: ""
+
 # Image families. A digest, when set, pins the image and replaces the tag.
 images:
   dashboard:

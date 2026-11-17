@@ -1,0 +1,91 @@
+---
+kind: Namespace
+apiVersion: v1
+metadata:
+  name: agent-sandbox-system
+
+---
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+  labels:
+    app: agent-sandbox-controller
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agent-sandbox-controller
+subjects:
+- kind: ServiceAccount
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+roleRef:
+  kind: ClusterRole
+  name: agent-sandbox-controller
+  apiGroup: rbac.authorization.k8s.io
+
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+  labels:
+    app: agent-sandbox-controller
+spec:
+  selector:
+    app: agent-sandbox-controller
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: metrics
+    protocol: TCP
+
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: agent-sandbox-controller
+  namespace: agent-sandbox-system
+  labels:
+    app: agent-sandbox-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-sandbox-controller
+  template:
+    metadata:
+      labels:
+        app: agent-sandbox-controller
+    spec:
+      serviceAccountName: agent-sandbox-controller
+      containers:
+      - name: agent-sandbox-controller
+        image: ghcr.io/noeljackson/agent-sandbox-controller@sha256:b00759b0efbf2c654078d30573d3830841d8cbe7896655704bc8268948d72177
+        args:
+        - --leader-elect=true
+        - --extensions
+        - --sandbox-concurrent-workers=2
+        - --sandbox-claim-concurrent-workers=4
+        - --sandbox-warm-pool-concurrent-workers=2
+        - --sandbox-template-concurrent-workers=2
+        ports:
+        - name: metrics
+          containerPort: 8080
+          protocol: TCP
+        - name: healthz
+          containerPort: 8081
+          protocol: TCP
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/sandbox-config
+          readOnly: true
+      volumes:
+      - name: config-volume
+        configMap:
+          name: agent-sandbox-config
+          optional: true

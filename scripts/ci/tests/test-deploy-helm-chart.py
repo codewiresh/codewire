@@ -170,6 +170,11 @@ ALLOWED: dict[tuple[str | None, str, str | None, str], str] = {
         "as the clusters' deletion guard requires (#3542); Kustomize has no "
         "uninstall, and nothing but Helm reads the annotation"
     ),
+    (None, "CustomResourceDefinition", None, "metadata.annotations.helm.sh/resource-policy"): (
+        "a Helm uninstall or upgrade never deletes a CRD, which would delete "
+        "every object of its kind; the clusters' deletion guard requires it "
+        "(#3542), and nothing but Helm reads the annotation"
+    ),
     **{
         (environment, "NetworkPolicy", "codewire-credential-service", "spec.ingress[0].from[1].podSelector.matchLabels"): (
             "Kind's overlay retargets this policy's edge but not its dashboard "
@@ -399,11 +404,33 @@ def check_mesh(environment: str) -> list[str]:
     return compare({key(document) for document in reference}, chart, reference, environment, "the Mesh chart")
 
 
+# The agent-sandbox controller and its CRDs, which Kustomize renders from their
+# own trees and the chart renders from files/agent-sandbox; every object those
+# trees render must be the chart's.
+SANDBOX_ENVIRONMENTS: dict[str, tuple[Path, list[Path]]] = {
+    "agent-sandbox": (K8S / "agent-sandbox/base", [SOURCE_VALUES]),
+    "agent-sandbox-kind": (K8S / "agent-sandbox/overlays/local-kind", [CHART / "values-local-kind.yaml"]),
+}
+SANDBOX_FILES = CHART / "files/agent-sandbox"
+# Components that Kustomize applies from trees of their own, compared in their
+# own environments, so not in the main ones.
+SEPARATE = ("--set", "agentSandbox.enabled=false")
+
+
+def check_sandbox(environment: str) -> list[str]:
+    directory, values = SANDBOX_ENVIRONMENTS[environment]
+    reference = objects(kustomize([directory]))
+    if not reference:
+        return [f"{environment}: Kustomize renders nothing, so nothing was compared"]
+    chart = objects(helm("default", values, ("--show-only", "templates/agent-sandbox.yaml")))
+    return compare({key(document) for document in reference}, chart, reference, environment)
+
+
 def check(environment: str, extra: tuple[str, ...] = ()) -> list[str]:
     namespace, directories, values = ENVIRONMENTS[environment]
     return compare(
         MIGRATED[environment],
-        objects(helm(namespace, values, extra)),
+        objects(helm(namespace, values, SEPARATE + extra)),
         objects(kustomize(directories)),
         environment,
     )
@@ -414,6 +441,39 @@ class ChartEquivalence(unittest.TestCase):
         for environment in ENVIRONMENTS:
             with self.subTest(environment=environment):
                 self.assertEqual(check(environment), [])
+
+    def test_agent_sandbox_renders_as_kustomize_does(self) -> None:
+        for environment in SANDBOX_ENVIRONMENTS:
+            with self.subTest(environment=environment):
+                self.assertEqual(check_sandbox(environment), [])
+
+    def test_the_vendored_agent_sandbox_files_are_the_pinned_ones(self) -> None:
+        # Until slice 8 removes deployments/k8s/agent-sandbox, whose files
+        # scripts/ci/tests/test-agent-sandbox-pin.sh pins, the chart's copy must
+        # be byte-identical to them.
+        source = K8S / "agent-sandbox/base"
+        vendored = sorted(p.relative_to(source) for p in source.rglob("*.yaml") if p.name != "kustomization.yaml")
+        self.assertEqual(sorted(p.relative_to(SANDBOX_FILES) for p in SANDBOX_FILES.rglob("*")
+                                if p.is_file()), vendored)
+        for path in vendored:
+            with self.subTest(path=str(path)):
+                self.assertEqual((SANDBOX_FILES / path).read_bytes(), (source / path).read_bytes())
+
+    def test_every_object_a_release_must_never_delete_is_kept(self) -> None:
+        # A Helm uninstall or upgrade deletes what it stops rendering; the
+        # clusters' deletion guard refuses that for these kinds (#3542).
+        guarded = {"Namespace", "PersistentVolumeClaim", "CustomResourceDefinition"}
+        renders = {
+            name: objects(helm(namespace, values))
+            for name, (namespace, _, values) in ENVIRONMENTS.items()
+        }
+        for name, documents in renders.items():
+            for document in documents:
+                if document["kind"] in guarded:
+                    with self.subTest(environment=name, object=(document["kind"], document["metadata"]["name"])):
+                        self.assertEqual(
+                            (document["metadata"].get("annotations") or {}).get("helm.sh/resource-policy"), "keep"
+                        )
 
     def test_mesh_renders_as_its_own_chart_does(self) -> None:
         for environment in MESH_ENVIRONMENTS:
@@ -465,19 +525,19 @@ class ChartEquivalence(unittest.TestCase):
         )
 
     def test_an_object_only_one_side_renders_is_reported(self) -> None:
-        chart = objects(helm("prod", [SOURCE_VALUES], ("--set", "dashboard.networkPolicy.enabled=false")))
+        chart = objects(helm("prod", [SOURCE_VALUES], SEPARATE + ("--set", "dashboard.networkPolicy.enabled=false")))
         problems = compare(MIGRATED["source"], chart, objects(kustomize(ENVIRONMENTS["source"][1])), "source")
         self.assertEqual(problems, ["('NetworkPolicy', 'codewire-dashboard'): chart renders it 0 times"])
 
     def test_an_unmigrated_object_the_chart_renders_is_reported(self) -> None:
         migrated = MIGRATED["local-kind"] - {("Service", "dashboard")}
         _, directories, values = ENVIRONMENTS["local-kind"]
-        problems = compare(migrated, objects(helm("default", values)), objects(kustomize(directories)), "local-kind")
+        problems = compare(migrated, objects(helm("default", values, SEPARATE)), objects(kustomize(directories)), "local-kind")
         self.assertEqual(problems, ["('Service', 'dashboard'): the chart renders it, but it is not migrated"])
 
     def test_an_allowed_difference_covers_its_own_path_only(self) -> None:
         namespace, directories, values = ENVIRONMENTS["local-kind"]
-        chart = objects(helm(namespace, values))
+        chart = objects(helm(namespace, values, SEPARATE))
         kustomized = objects(kustomize(directories))
         for document in chart:
             if document["kind"] == "Namespace":
