@@ -109,6 +109,26 @@ _UDP_RELAY = {
     ("Certificate", "codewire-udp-relay-allocator"),
     ("NetworkPolicy", "codewire-udp-relay"),
 }
+# The public edge's Ingresses that every environment renders, those only the
+# source tree renders, and Kind's own hostless ones.
+_INGRESSES = {
+    ("Ingress", name)
+    for name in (
+        "codewire-connect", "codewire-coordinator-connect", "codewire-environment-session-grpc",
+        "codewire-mesh-coordinator-grpc", "codewire-preview",
+    )
+}
+_SOURCE_INGRESSES = {
+    ("Ingress", name) for name in ("codewire-dashboard", "codewire-derp", "codewire-idp", "codewire-billing")
+}
+_LOCAL_INGRESSES = {
+    ("Ingress", name)
+    for name in (
+        "codewire-local", "codewire-coordinator-connect-local", "codewire-mesh-coordinator-grpc-local",
+        "codewire-environment-session-grpc-local", "codewire-idp-local", "codewire-billing-local",
+        "codewire-connect-local",
+    )
+}
 # Orchestration's cert-manager Certificates, which Kind does not render.
 _CERTIFICATES = {
     ("Certificate", "codewire-orchestration-internal"),
@@ -120,7 +140,7 @@ _KIND = {
     ("ConfigMap", "codewire-dashboard-public-config"),
     ("Deployment", "codewire-dashboard"),
     ("Service", "dashboard"),
-} | _SERVICES | _DERP
+} | _SERVICES | _DERP | _INGRESSES | _LOCAL_INGRESSES
 # What the chart renders so far, by kind and name, per environment.
 MIGRATED: dict[str, set[tuple[str, str]]] = {
     "source": {
@@ -134,7 +154,9 @@ MIGRATED: dict[str, set[tuple[str, str]]] = {
     | _SERVICES
     | _CERTIFICATES
     | _DERP
-    | _UDP_RELAY,
+    | _UDP_RELAY
+    | _INGRESSES
+    | _SOURCE_INGRESSES,
     "local-kind": _KIND,
     "local-kind-static": _KIND,
 }
@@ -483,6 +505,12 @@ class ChartEquivalence(unittest.TestCase):
             with self.subTest(name=bad):
                 with self.assertRaisesRegex(RuntimeError, "probe.names: .* is not a RuntimeClass name"):
                     probe(names % bad)
+
+    def test_the_local_edge_needs_its_hosts_and_secret(self) -> None:
+        for name in ("previewHost", "tlsHost", "tlsSecret"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(RuntimeError, f"ingress.local.{name} is required"):
+                    helm("default", [CHART / "values-local-kind.yaml"], ("--set", f"ingress.local.{name}="))
 
     def test_a_non_string_hosted_egress_value_is_refused(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "codewire-hosted-egress: CODEWIRE_HOSTED_EGRESS_ENABLED must be a string"):

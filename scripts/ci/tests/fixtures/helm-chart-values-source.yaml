@@ -36,6 +36,16 @@ edge:
 publicOrigin: https://codewire.sh
 sandboxNamespace: prod-sandboxes
 
+ingress:
+  host: codewire.sh
+  tlsSecret: codewire-tls
+  derp:
+    host: derp.codewire.sh
+    tlsSecret: codewire-derp-tls
+  preview:
+    host: "*.cwpreview.sh"
+    tlsSecret: cwpreview-tls
+
 dashboard:
   origins:
     browserApi: https://codewire.sh

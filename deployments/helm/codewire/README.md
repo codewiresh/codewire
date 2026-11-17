@@ -10,6 +10,7 @@ One Helm chart for the whole Codewire platform (#2908). It is being built one co
 - The coordinator, the IdP and billing: their Deployments and Services, and the IdP's NetworkPolicy.
 - DERP: its Deployment, Services and PodDisruptionBudget.
 - The UDP relay: its Deployment, Service, Certificate and NetworkPolicy (`udpRelay.enabled`; Kind runs none).
+- The public edge's Ingresses, each behind its own switch (`ingress.routes`), with the site's, DERP's and the previews' hosts and TLS Secrets as values; and a single-node cluster's hostless edge on 127.0.0.1 (`ingress.local`), as local Kind uses.
 - Mesh (`mesh.enabled`, off by default): the Mesh chart's own templates, kept verbatim in `templates/_mesh.tpl` and rendered with `mesh.values` as that chart's values and `mesh.release` as its release name, so the objects match today's `codewire-mesh` release. Its `helm test` hook is not rendered. Until the cut-over, Dev and Production still deploy `apps/cli/charts/codewire-mesh`, and a change there must be made in `_mesh.tpl` too.
 - Orchestration: its Deployment, ServiceAccount, Services, RBAC (cluster-wide read-only, its own namespace, and the sandbox namespace), admission policies and bindings, the image-registries and hosted-egress ConfigMaps (hosted egress off by default), its Certificates, and its workspace-binding NetworkPolicy.
 - The credential service: its Deployment, ServiceAccount, Service, RBAC (its Role and RoleBinding for reading Sandboxes in `sandboxNamespace`), broker Certificate, NetworkPolicy and PodDisruptionBudget.

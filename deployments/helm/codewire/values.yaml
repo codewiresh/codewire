@@ -604,6 +604,38 @@ mesh:
     monitoring:
       enabled: false
 
+# The public edge's Ingresses, each with its own switch (ingress.routes).
+ingress:
+  # The site's host and its TLS Secret, for every route but DERP's and the
+  # previews'. Required while one of those routes is on.
+  host: ""
+  tlsSecret: ""
+  # DERP's host and TLS Secret, served by its own ingress class.
+  derp:
+    host: ""
+    tlsSecret: ""
+  # The preview wildcard host, such as "*.example.dev", and its TLS Secret.
+  preview:
+    host: ""
+    tlsSecret: ""
+  routes:
+    dashboard: true
+    derp: true
+    preview: true
+    coordinatorConnect: true
+    meshCoordinatorGrpc: true
+    environmentSessionGrpc: true
+    idp: true
+    billing: true
+    connect: true
+  # A single-node cluster's hostless edge on 127.0.0.1, as local Kind uses:
+  # its preview wildcard host, and the host and TLS Secret of its gRPC routes.
+  local:
+    enabled: false
+    previewHost: ""
+    tlsHost: localhost
+    tlsSecret: ""
+
 # Image families. A digest, when set, pins the image and replaces the tag.
 images:
   dashboard:

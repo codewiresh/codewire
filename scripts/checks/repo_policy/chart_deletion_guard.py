@@ -46,6 +46,12 @@ RENDER_SETS = {
         "images.services.tag=test",
         "images.derp.repository=registry.test/codewire/derp",
         "images.derp.tag=test",
+        "ingress.host=codewire.test",
+        "ingress.tlsSecret=codewire-tls",
+        "ingress.derp.host=derp.codewire.test",
+        "ingress.derp.tlsSecret=derp-tls",
+        "ingress.preview.host=*.preview.test",
+        "ingress.preview.tlsSecret=preview-tls",
         "edge.peers[0].ipBlock.cidr=192.0.2.0/24",
     ),
 }

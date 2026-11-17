@@ -271,6 +271,25 @@ derp:
 udpRelay:
   enabled: false
 
+# deployments/k8s/overlays/local-kind: its own hostless routes (ingress.yaml),
+# and of the base routes only those it does not delete. Those keep the source's
+# hosts and TLS Secrets, which nothing resolves on Kind (#5169).
+ingress:
+  host: codewire.sh
+  tlsSecret: codewire-tls
+  preview:
+    host: "*.cwpreview.sh"
+    tlsSecret: cwpreview-tls
+  routes:
+    dashboard: false
+    derp: false
+    idp: false
+    billing: false
+  local:
+    enabled: true
+    previewHost: "*.codewire-dev.local"
+    tlsSecret: codewire-kind-ingress-tls
+
 dashboardPublicConfig:
   # The non-promotable Kind credential fixture provides this fixed synthetic
   # App itself.
