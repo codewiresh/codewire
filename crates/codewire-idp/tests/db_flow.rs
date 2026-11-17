@@ -275,7 +275,10 @@ async fn native_clients_full_flow_against_postgres() {
         eprintln!("DATABASE_URL unset — skipping idp DB e2e");
         return;
     };
-    let pool = PgPool::connect(&url).await.expect("connect");
+    in_own_database(&url, "cw_idp_native_clients_full", native_clients_full_flow).await;
+}
+
+async fn native_clients_full_flow(pool: PgPool) {
     seed(&pool).await;
     codewire_idp::provisioning::ensure_desktop_client(&pool)
         .await
@@ -718,8 +721,15 @@ async fn oidc_access_token_authenticates_product_api_against_postgres() {
         eprintln!("DATABASE_URL unset — skipping idp bearer-auth e2e");
         return;
     };
-    let pool = PgPool::connect(&url).await.expect("connect");
+    in_own_database(
+        &url,
+        "cw_idp_oidc_access_token",
+        oidc_access_token_authenticates_product_api,
+    )
+    .await;
+}
 
+async fn oidc_access_token_authenticates_product_api(pool: PgPool) {
     let user = "u_bearer_wi1";
     let client = "codewire-bearer-wi1";
     let redirect = "http://localhost:9877/callback";
@@ -1813,7 +1823,15 @@ async fn standard_cli_device_grant_uses_browser_approval_against_postgres() {
         eprintln!("DATABASE_URL unset — skipping standard CLI device-flow e2e");
         return;
     };
-    let pool = PgPool::connect(&url).await.expect("connect");
+    in_own_database(
+        &url,
+        "cw_idp_standard_cli_device",
+        standard_cli_device_grant_uses_browser_approval,
+    )
+    .await;
+}
+
+async fn standard_cli_device_grant_uses_browser_approval(pool: PgPool) {
     let user = format!("u_cli_device_{}", std::process::id());
     let session = format!("sess_cli_device_{}", std::process::id());
     let session_id = format!("s_cli_device_{}", std::process::id());
@@ -2246,7 +2264,15 @@ async fn account_access_completion_paths_serialize_in_both_orders_against_postgr
         eprintln!("DATABASE_URL unset — skipping account-access completion-path e2e");
         return;
     };
-    let pool = PgPool::connect(&url).await.expect("connect");
+    in_own_database_at(
+        &url,
+        "cw_idp_account_access_completion",
+        account_access_completion_paths_serialize_in_both_orders,
+    )
+    .await;
+}
+
+async fn account_access_completion_paths_serialize_in_both_orders(pool: PgPool, url: String) {
     let suffix = std::process::id();
     let client_id = format!("account-access-completion-client-{suffix}");
 
@@ -3000,7 +3026,17 @@ async fn a_stranger_who_signed_up_at_another_address_holds_nothing_that_signs_in
         eprintln!("DATABASE_URL unset — skipping idp stranger sign-up e2e");
         return;
     };
-    let pool = PgPool::connect(&url).await.expect("connect");
+    in_own_database(
+        &url,
+        "cw_idp_stranger_who_signed",
+        a_stranger_who_signed_up_at_another_address_holds_nothing_that_signs_in_in_its_database,
+    )
+    .await;
+}
+
+async fn a_stranger_who_signed_up_at_another_address_holds_nothing_that_signs_in_in_its_database(
+    pool: PgPool,
+) {
     // The address belongs to someone else; the stranger chose the password.
     let email = "owner-not-the-stranger@example.com";
     let password = "Str4nger!Chose1t";
@@ -3150,8 +3186,10 @@ async fn session_auth_flow_against_postgres() {
         eprintln!("DATABASE_URL unset — skipping idp session-auth e2e");
         return;
     };
-    let pool = PgPool::connect(&url).await.expect("connect");
+    in_own_database(&url, "cw_idp_session_auth_flow", session_auth_flow).await;
+}
 
+async fn session_auth_flow(pool: PgPool) {
     let email = "sess-flow@example.com";
     forget_mail_counts(&pool, &[email]).await;
     let pw = "Sup3rStrong!Pass";
@@ -3940,12 +3978,20 @@ async fn invite_only_sign_up_without_mail_vouches_by_invitation_against_postgres
 
 #[tokio::test]
 async fn email_sign_up_without_a_code_waits_in_review_and_is_admitted_when_open_against_postgres() {
-    use codewire_idp::auth_session::SignupMode;
     let Ok(url) = std::env::var("DATABASE_URL") else {
         eprintln!("DATABASE_URL unset — skipping review and open sign-up");
         return;
     };
-    let pool = PgPool::connect(&url).await.expect("connect");
+    in_own_database(
+        &url,
+        "cw_idp_email_sign_up",
+        email_sign_up_without_a_code_waits_in_review_and_is_admitted_when_open,
+    )
+    .await;
+}
+
+async fn email_sign_up_without_a_code_waits_in_review_and_is_admitted_when_open(pool: PgPool) {
+    use codewire_idp::auth_session::SignupMode;
     let email = "open-mode@example.com";
     forget_mail_counts(&pool, &[email]).await;
     let forget = || async {
@@ -4283,8 +4329,15 @@ async fn get_session_accepts_codewire_api_key_against_postgres() {
         eprintln!("DATABASE_URL unset — skipping idp api-key get-session e2e");
         return;
     };
-    let pool = PgPool::connect(&url).await.expect("connect");
+    in_own_database(
+        &url,
+        "cw_idp_get_session_accepts",
+        get_session_accepts_codewire_api_key,
+    )
+    .await;
+}
 
+async fn get_session_accepts_codewire_api_key(pool: PgPool) {
     let user_id = "u_idp_api_key_session";
     let org_id = "org_idp_api_key_session";
     let member_id = "m_idp_api_key_session";
@@ -4445,8 +4498,10 @@ async fn email_password_flow_against_postgres() {
         eprintln!("DATABASE_URL unset — skipping idp email/password e2e");
         return;
     };
-    let pool = PgPool::connect(&url).await.expect("connect");
+    in_own_database_at(&url, "cw_idp_email_password_flow", email_password_flow).await;
+}
 
+async fn email_password_flow(pool: PgPool, url: String) {
     let user = "u_email_password_e2e";
     let email = "email-password-e2e@example.com";
     forget_mail_counts(
@@ -5134,8 +5189,10 @@ async fn two_factor_flow_against_postgres() {
         eprintln!("DATABASE_URL unset — skipping idp 2FA e2e");
         return;
     };
-    let pool = PgPool::connect(&url).await.expect("connect");
+    in_own_database(&url, "cw_idp_two_factor_flow", two_factor_flow).await;
+}
 
+async fn two_factor_flow(pool: PgPool) {
     let user = "u_2fa_e2e";
     let email = "twofactor-e2e@example.com";
     let session = "sess_2fa_e2e_token";
@@ -5460,8 +5517,15 @@ async fn two_factor_attempts_lock_account_against_postgres() {
         eprintln!("DATABASE_URL unset — skipping idp 2FA lockout e2e");
         return;
     };
-    let pool = PgPool::connect(&url).await.expect("connect");
+    in_own_database(
+        &url,
+        "cw_idp_two_factor_attempts",
+        two_factor_attempts_lock_account,
+    )
+    .await;
+}
 
+async fn two_factor_attempts_lock_account(pool: PgPool) {
     let email = "twofactor-lockout-e2e@example.com";
     forget_mail_counts(&pool, &[email]).await;
     let password = "Sup3rStrong!Pass";
@@ -6097,7 +6161,15 @@ async fn admin_resends_verification_only_for_an_unverified_account_against_postg
         eprintln!("DATABASE_URL unset — skipping admin verification resend e2e");
         return;
     };
-    let pool = PgPool::connect(&url).await.expect("connect");
+    in_own_database(
+        &url,
+        "cw_idp_admin_resends_verification",
+        admin_resends_verification_only_for_an_unverified_account,
+    )
+    .await;
+}
+
+async fn admin_resends_verification_only_for_an_unverified_account(pool: PgPool) {
     // (id, email, email_verified, is_admin, enabled)
     let users = [
         (
@@ -6305,10 +6377,23 @@ async fn expired_oidc_rows_are_removed_as_new_ones_are_written() {
 }
 
 /// Runs `test` against a freshly migrated database of its own, then drops
-/// the database, whether the test passes or panics.
+/// the database, whether the test passes or panics. Every test that writes
+/// or reads seeded rows runs this way: tests run in parallel, and on one
+/// shared database a sibling's `seed()` raced their inserts and rewrote the
+/// rows they asserted on (#5161).
 async fn in_own_database<F, T>(url: &str, prefix: &str, test: F)
 where
     F: FnOnce(PgPool) -> T,
+    T: std::future::Future<Output = ()> + Send + 'static,
+{
+    in_own_database_at(url, prefix, |pool, _| test(pool)).await;
+}
+
+/// [`in_own_database`] for a test that also opens connections of its own:
+/// it gets the database's URL too.
+async fn in_own_database_at<F, T>(url: &str, prefix: &str, test: F)
+where
+    F: FnOnce(PgPool, String) -> T,
     T: std::future::Future<Output = ()> + Send + 'static,
 {
     let admin = PgPool::connect(url).await.expect("connect admin");
@@ -6327,7 +6412,7 @@ where
         .await
         .expect("migrate the test database");
     let pool = PgPool::connect(test_url.as_str()).await.expect("connect");
-    let outcome = tokio::spawn(test(pool.clone())).await;
+    let outcome = tokio::spawn(test(pool.clone(), test_url.to_string())).await;
     pool.close().await;
     let _ = sqlx::query(&format!(
         r#"DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)"#
@@ -6919,7 +7004,17 @@ async fn mail_to_one_address_stops_after_three_an_hour_and_the_audit_log_says_so
         eprintln!("DATABASE_URL unset — skipping idp mail limit");
         return;
     };
-    let pool = PgPool::connect(&url).await.expect("connect");
+    in_own_database(
+        &url,
+        "cw_idp_mail_to_one",
+        mail_to_one_address_stops_after_three_an_hour_and_the_audit_log_says_so_in_its_database,
+    )
+    .await;
+}
+
+async fn mail_to_one_address_stops_after_three_an_hour_and_the_audit_log_says_so_in_its_database(
+    pool: PgPool,
+) {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -7103,6 +7198,19 @@ async fn mail_to_one_address_stops_after_three_an_hour_and_the_audit_log_says_so
 /// (docs/dev/AUTH-POLICY.md, "Credential rules"; #5054).
 #[tokio::test]
 async fn api_responses_are_never_stored_by_a_shared_cache() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping idp private API e2e");
+        return;
+    };
+    in_own_database(
+        &url,
+        "cw_idp_api_responses_are",
+        api_responses_are_never_stored_by_a_shared_cache_in_its_database,
+    )
+    .await;
+}
+
+async fn api_responses_are_never_stored_by_a_shared_cache_in_its_database(pool: PgPool) {
     use axum::{body::Body, http::Request, response::Response};
     use tower::ServiceExt;
 
@@ -7135,11 +7243,6 @@ async fn api_responses_are_never_stored_by_a_shared_cache() {
             .to_owned()
     }
 
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("DATABASE_URL unset — skipping idp private API e2e");
-        return;
-    };
-    let pool = PgPool::connect(&url).await.expect("connect");
     seed(&pool).await;
     codewire_idp::provisioning::ensure_desktop_client(&pool)
         .await
