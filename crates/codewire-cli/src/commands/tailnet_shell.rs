@@ -18,8 +18,9 @@ use std::time::{Duration, Instant};
 
 use codewire_client::hosted_shell::{
     self, AttachedTerminal, HostedShellError, InputNotice, SHELL_GRACE, ShellLaunch, ShellNotice,
-    ShellTerminal, TerminalKeys, TerminalOutput, TerminalSizes,
+    ShellTerminal, TerminalKeys, TerminalOutput, TerminalSizes, Via,
 };
+use codewire_client::tailnet_session::TailnetPath;
 use codewire_client::{ClientError, CodewireClient, ErrorCode};
 use tokio::io::AsyncWriteExt as _;
 
@@ -99,6 +100,41 @@ impl ReconnectPacing {
     }
 }
 
+/// The line before a hosted session that says which path it took: printed
+/// at the first attachment, and at a reattachment only when the path
+/// changed. A reattachment's line lands in the screen of whatever the
+/// session runs, such as a full-screen agent (#5090).
+#[derive(Default)]
+pub(crate) struct PathLine {
+    printed: Option<PathTaken>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PathTaken {
+    Tailnet(Option<TailnetPath>),
+    Api,
+}
+
+impl PathLine {
+    pub(crate) fn print(&mut self, via: &Via) {
+        if let Some(line) = self.next(via) {
+            eprintln!("{line}");
+        }
+    }
+
+    /// The line to print for an attachment over `via`, if any.
+    fn next(&mut self, via: &Via) -> Option<String> {
+        let taken = match via {
+            Via::Tailnet(report) => PathTaken::Tailnet(report.as_ref().map(|report| report.path)),
+            Via::Api { .. } => PathTaken::Api,
+        };
+        (self.printed != Some(taken)).then(|| {
+            self.printed = Some(taken);
+            via_line(via)
+        })
+    }
+}
+
 /// Launch the shell and run it to its end, under a failed setup's warning
 /// (#4767). Returns its exit status.
 pub(crate) async fn run(
@@ -128,7 +164,10 @@ pub(crate) async fn run(
         org_id,
         environment_id,
         launch,
-        &mut ProcessTerminal { interactive },
+        &mut ProcessTerminal {
+            interactive,
+            path_line: PathLine::default(),
+        },
     )
     .await
     .map_err(display_hosted_shell_error)
@@ -146,6 +185,7 @@ pub(crate) fn display_hosted_shell_error(error: HostedShellError) -> anyhow::Err
 /// changes, and output to stdout; notices go to stderr.
 struct ProcessTerminal {
     interactive: bool,
+    path_line: PathLine,
 }
 
 impl ShellTerminal for ProcessTerminal {
@@ -168,7 +208,7 @@ impl ShellTerminal for ProcessTerminal {
 
     fn notice(&mut self, notice: ShellNotice) {
         match notice {
-            ShellNotice::Attached(via) => eprintln!("{}", via_line(&via)),
+            ShellNotice::Attached(via) => self.path_line.print(&via),
             ShellNotice::Reconnecting => {
                 eprintln!("[cw] connection lost; reconnecting to the same shell");
             }
@@ -247,6 +287,38 @@ mod tests {
             "failed to read response body: request or response body error",
         );
         assert!(is_network_failure(&display_client_error(cut_off.into())));
+    }
+
+    #[test]
+    fn the_path_line_is_printed_at_the_first_attachment_and_then_only_when_the_path_changes() {
+        use codewire_client::tailnet_session::TailnetPathReport;
+        let tailnet = |path, reason: Option<&str>| {
+            Via::Tailnet(Some(TailnetPathReport {
+                path,
+                reason: reason.map(str::to_owned),
+            }))
+        };
+        let api = |why: &str| Via::Api {
+            tailnet_unavailable: why.into(),
+        };
+        let mut line = PathLine::default();
+        let direct = tailnet(TailnetPath::DirectUdp, None);
+        assert_eq!(line.next(&direct).as_deref(), Some("  via direct UDP"));
+        assert_eq!(line.next(&direct), None, "a reattach on the same path");
+        let derp = tailnet(TailnetPath::Derp, Some("UDP may be blocked"));
+        assert!(
+            line.next(&derp)
+                .is_some_and(|text| text.starts_with("  via DERP"))
+        );
+        assert_eq!(
+            line.next(&tailnet(TailnetPath::Derp, Some("another reason"))),
+            None,
+            "the same path for another reason"
+        );
+        assert!(line.next(&api("timed out")).is_some());
+        assert_eq!(line.next(&api("refused")), None);
+        assert!(line.next(&Via::Tailnet(None)).is_some());
+        assert!(line.next(&direct).is_some());
     }
 
     #[test]

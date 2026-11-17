@@ -512,6 +512,8 @@ fn resize(columns: u16, rows: u16) -> AttachSessionRequest {
 mod input_stream;
 #[path = "hosted_shell/restart.rs"]
 pub mod restart;
+#[path = "hosted_shell/terminal_reports.rs"]
+mod terminal_reports;
 
 #[cfg(test)]
 mod tests {

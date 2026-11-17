@@ -28,7 +28,8 @@ pub const KEPT_INPUT_AGE: Duration = Duration::from_secs(30);
 /// What the client tells the person about its input after a reattach.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputNotice {
-    /// Keys typed during the drop were sent again.
+    /// Keys typed during the drop were sent again; mouse and focus reports
+    /// sent with them are not counted.
     Resent(u64),
     /// Keys typed during the drop were older than the client keeps, or more
     /// than it keeps, and are lost.
@@ -88,10 +89,14 @@ impl InputStream {
     }
 
     /// Keys the person typed. Returns the request to send now, if any.
+    /// While held, mouse and focus reports among them are dropped (#5090).
     pub fn typed(&mut self, keys: Vec<u8>, now: Instant) -> Option<AttachSessionRequest> {
         match self.attachment {
             Attachment::Unanswered => {
-                self.held.push_back((now, keys));
+                let keys = super::terminal_reports::without_reports(&keys);
+                if !keys.is_empty() {
+                    self.held.push_back((now, keys));
+                }
                 let mut held: usize = self.held.iter().map(|(_, keys)| keys.len()).sum();
                 while held > KEPT_INPUT_BYTES {
                     let (_, oldest) = self.held.pop_front().expect("over the bound");
@@ -149,7 +154,7 @@ impl InputStream {
                 if written >= kept_from {
                     self.acknowledge(written);
                     for (offset, _, data) in &self.unacknowledged {
-                        resent += data.len() as u64;
+                        resent += super::terminal_reports::key_count(data);
                         requests.push(offset_input(data.clone(), *offset));
                     }
                 } else {
@@ -389,6 +394,56 @@ mod tests {
         let (requests, notices) = stream.status(None, now);
         assert_eq!(sent_all(&requests), [(b"b".to_vec(), None)]);
         assert_eq!(notices, [InputNotice::Lost(KEPT_INPUT_BYTES as u64)]);
+    }
+
+    #[test]
+    fn mouse_and_focus_reports_typed_during_a_drop_are_dropped_and_never_push_keys_out() {
+        let now = Instant::now();
+        let mut stream = InputStream::new("phone".into());
+        stream.attaching();
+        let motion = b"\x1b[<35;120;40M\x1b[I".as_slice();
+        stream.typed(b"l".to_vec(), now);
+        for _ in 0..KEPT_INPUT_BYTES / motion.len() + 1 {
+            stream.typed(motion.to_vec(), now);
+        }
+        stream.typed(b"s\x1b[O\r".to_vec(), now);
+        let (requests, notices) = stream.status(Some(0), now);
+        assert_eq!(
+            sent_all(&requests),
+            [(b"l".to_vec(), Some(0)), (b"s\r".to_vec(), Some(1))]
+        );
+        assert!(notices.is_empty(), "{notices:?}");
+    }
+
+    #[test]
+    fn a_report_split_across_two_reads_during_a_drop_stays_as_keys() {
+        let now = Instant::now();
+        let mut stream = InputStream::new("phone".into());
+        stream.attaching();
+        stream.typed(b"\x1b[<35;1".to_vec(), now);
+        stream.typed(b";2M".to_vec(), now);
+        let (requests, _) = stream.status(None, now);
+        assert_eq!(
+            sent_all(&requests),
+            [(b"\x1b[<35;1".to_vec(), None), (b";2M".to_vec(), None)]
+        );
+    }
+
+    #[test]
+    fn reports_go_out_while_attached_and_the_resent_count_is_of_keys_only() {
+        let now = Instant::now();
+        let mut stream = numbering(now);
+        let typed = b"\x1b[<35;1;2Mx\x1b[I".to_vec();
+        let request = stream.typed(typed.clone(), now).expect("sent at once");
+        assert_eq!(sent(&request), (typed.clone(), Some(0)), "the mouse works");
+        stream.attaching();
+        let (requests, notices) = stream.status(Some(0), now);
+        assert_eq!(
+            sent_all(&requests),
+            [(typed, Some(0))],
+            "the stream stays whole"
+        );
+        assert_eq!(notices, [InputNotice::Resent(1)]);
     }
 
     #[test]

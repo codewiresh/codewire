@@ -6,6 +6,7 @@ use codewire_client::hosted_shell::{InputNotice, InputStream, restart};
 pub(crate) mod agents;
 mod entry;
 mod exec;
+mod reattach;
 pub(crate) mod setup;
 pub(crate) use entry::{handle_environment_run_command, handle_environment_shell_command};
 pub(crate) use exec::handle_exec_command;
@@ -2329,11 +2330,12 @@ pub(crate) async fn attach_platform_session(
     client: &codewire_client::CodewireClient,
     open: codewire_client::AttachSessionOpen,
     tailnet: &mut Option<codewire_client::tailnet_session::EnvironmentTailnet>,
+    path_line: &mut super::tailnet_shell::PathLine,
 ) -> anyhow::Result<codewire_client::EnvironmentSessionAttachment> {
     let (attachment, via) = codewire_client::hosted_shell::attach(client, open, tailnet)
         .await
         .map_err(super::tailnet_shell::display_hosted_shell_error)?;
-    eprintln!("{}", via_line(&via));
+    path_line.print(&via);
     Ok(attachment)
 }
 
@@ -2464,6 +2466,7 @@ async fn attach_session_until_detached(
     // One tailnet connection to a hosted environment, kept for every
     // reattachment while it lives (#3827).
     let mut tailnet = None;
+    let mut path_line = super::tailnet_shell::PathLine::default();
     let mut retry_after = codewire_client::hosted_shell::TAILNET_RETRY_FIRST;
     // This shell's input stream, kept across its reattachments (#3993).
     let mut input_stream = InputStream::default();
@@ -2526,6 +2529,7 @@ async fn attach_session_until_detached(
                         ..Default::default()
                     },
                     &mut tailnet,
+                    &mut path_line,
                 )
                 .await
                 {
@@ -2576,13 +2580,9 @@ async fn attach_session_until_detached(
                 }
             }
         };
-        if !matches!(
-            exit,
-            AttachExit::StreamEnded { .. }
-                | AttachExit::StreamInterrupted { .. }
-                | AttachExit::TailnetBack { .. }
-        ) {
+        if !exit.resumes_session() {
             screen.release();
+            path_line = super::tailnet_shell::PathLine::default();
         }
         match exit {
             AttachExit::Detached => {
@@ -2744,19 +2744,12 @@ async fn attach_platform_environment_session(
     let mut terminal = false;
     // `interactive` is set only for a PTY session on a terminal. Its PTY
     // follows this terminal's size; a lost resize is cosmetic.
-    let mut window = crate::terminal_attach::WindowSizeWatch::new(interactive);
-    let resize = |(columns, rows): (u16, u16)| codewire_client::AttachSessionRequest {
-        input: Some(codewire_client::attach_session_request::Input::Resize(
-            Box::new(codewire_client::AttachSessionResize {
-                columns: u32::from(columns),
-                rows: u32::from(rows),
-                ..Default::default()
-            }),
-        )),
-        ..Default::default()
-    };
-    if let Some(size) = window.current() {
-        let _ = input.send(resize(size)).await;
+    let mut sizes = reattach::PtySizes::new(
+        crate::terminal_attach::WindowSizeWatch::new(interactive),
+        screen,
+    );
+    if let Some(size) = sizes.first() {
+        let _ = input.send(reattach::resize_request(size)).await;
     }
     // Keys wait for this attachment's first status, which says whether the
     // server keeps input offsets (#3993).
@@ -2773,9 +2766,9 @@ async fn attach_platform_environment_session(
             () = &mut tailnet_back, if output_open => {
                 return Ok(AttachExit::TailnetBack { output_offset });
             }
-            size = window.changed(), if output_open => {
+            size = sizes.changed(), if output_open => {
                 if let Some(size) = size {
-                    let _ = input.send(resize(size)).await;
+                    let _ = input.send(reattach::resize_request(size)).await;
                 }
             }
             event = attachment.next_output(), if output_open => {
@@ -2803,6 +2796,7 @@ async fn attach_platform_environment_session(
                         if raw_output {
                             screen.observe(&output.data);
                         }
+                        sizes.output(output.next_offset);
                         write_session_output(&mut stdout, &output.data, raw_output)?;
                         output_offset = output.next_offset;
                     }
@@ -2820,6 +2814,9 @@ async fn attach_platform_environment_session(
                     }
                     Some(codewire_client::attach_session_response::Event::Status(status)) => {
                         let sent = send_stream_status(&input, input_stream, &status).await;
+                        sizes.answered(
+                            status.session.as_option().map_or(0, |session| session.output_end_offset),
+                        );
                         if !sent {
                             return Ok(AttachExit::StreamInterrupted { output_offset });
                         }

@@ -252,6 +252,12 @@ impl SessionScreen {
         self.tail = window.split_off(window.len() - keep);
     }
 
+    /// Whether the program holds the alternate screen, as its output since
+    /// the last release says.
+    pub(crate) fn alternate(&self) -> bool {
+        self.alternate
+    }
+
     /// The bytes that give the terminal back, or none when nothing was drawn
     /// since the last release.
     fn release_bytes(&mut self) -> Vec<u8> {

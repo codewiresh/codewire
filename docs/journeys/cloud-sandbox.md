@@ -23,6 +23,7 @@ Updated 2026-11-16.
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
 | `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
 | `sandbox-setup-retry` | cw-snapshots | observed in part 2026-11-16 (CLI only) | not yet observed |
+| `sandbox-attach-repaint` | cw-direct-udp | not yet observed | not yet observed |
 | `sandbox-cp-upload` | cw-workspace-mount | observed 2026-11-14 (#4460) | not yet observed |
 | `sandbox-cp-resume` | cw-workspace-mount | observed 2026-11-13 (#4373) | not yet observed; v0.4.17 lacks it |
 | `sandbox-cp-download` | cw-workspace-mount | observed 2026-11-13 (#4394) | not yet observed |
@@ -457,6 +458,57 @@ Issues: #4767, and #5050 for the clone's reason.
     - A clone of a private repository on a forge other than GitHub, with no credential, failed with #5053's sentence naming the host. Retry setup asked "Retry cloning?"; Cancel left the failure; "Delete and retry" showed "Retrying setup" and failed again the same way.
   - Not yet observed: `cw`'s refusal while setup runs; on Dev, the dashboard banner and Retry setup (a dashboard walk runs on Dev only in the protected smoke, which gains this step in #5065).
   - Production: not yet; v0.4.21 lacks Retry setup.
+
+## `sandbox-attach-repaint`: a full-screen program is left clean after a reconnect
+
+Issue: #5090 (text left in an attached agent's screen after a drop).
+
+- **Entry points:** `cw attach SANDBOX --session NAME` and `cw shell
+  --durable`, which reattach after a drop. Plain `cw shell` prints the same
+  path line once, but does not redraw a full-screen program.
+- **States to exercise:**
+  - a first attachment, which neither flickers nor redraws;
+  - a reattach after a drop while a full-screen program with mouse reporting
+    holds the screen;
+  - the mouse moved and keys typed during the drop;
+  - a reattach that takes a different path, which prints its path line again.
+- **Driving it:** a terminal, a running sandbox `walk`, and a way to cut the
+  workstation's network for about 20 s (Wi-Fi off and on, or `nmcli
+  networking off` and `on`). Record the terminal with `script`:
+
+  ```sh
+  cw --cloud run --in walk --name tui --tty --detach -- vim -c 'set mouse=a'
+  script -qc 'cw --cloud attach walk --session tui' attach.log
+  ```
+
+  With vim showing, cut the network. Wait for `[cw] connection lost`, move
+  the mouse over the window, type `ihello` and Escape, then restore the
+  network. Once vim answers again, look at the screen, then type `:q!` and
+  Enter. Afterwards:
+
+  ```sh
+  grep -a '\[cw\]' attach.log
+  grep -ac '  via ' attach.log
+  ```
+
+- **Proof:**
+  - after the reconnect the screen shows only vim's own frame, with `hello`
+    in the buffer: no `[cw]` line and no `via` line is left in it;
+  - `grep -a '\[cw\]'` shows the connection-lost line and no "key(s) typed
+    during the drop were lost" line, since seven keys are well under
+    the bounds, however far the mouse moved; a resent count, if any, is at
+    most the keys typed;
+  - `grep -ac '  via '` prints 1 when the path did not change.
+- **Gotchas:**
+  - The redraw needs the program to hold the alternate screen. A program
+    drawn on the normal screen, such as a shell prompt, is not redrawn.
+  - Keys and mouse reports sent before the client noticed the drop went
+    into the dead connection; they are resent on reattach, and only the
+    keys are counted as resent. If more of them than the client keeps were
+    lost, the lost count is in bytes and can include those reports.
+  - Without `set mouse=a`, vim asks for no mouse reports and the mouse half
+    of the walk proves nothing.
+- **Observed:** not yet observed.
 
 ## `sandbox-cp-upload`: copy a file into a sandbox
 

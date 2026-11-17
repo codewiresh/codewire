@@ -714,6 +714,20 @@ browser presentation of the same durable sessions, reached through
 orchestration's terminal proxy with a short-lived ticket derived from the
 browser session ([docs/dev/BROWSER-TERMINALS.md](docs/dev/BROWSER-TERMINALS.md)).
 
+After a dropped connection, `cw` reattaches to the same session and resumes
+its output where it stopped (#5090). The path line (`via direct UDP`) is
+printed at the first attachment and again only when the path changes. When
+`cw attach` (or `cw shell --durable`) reattaches while the session's program
+holds the alternate screen, as a full-screen editor or agent does, it sets the
+PTY one row shorter and then back to the terminal's size, so the program
+redraws over anything printed during the drop; a first attachment never does.
+Keys typed during the drop are held until the session answers; mouse and
+focus reports the terminal sends meanwhile are dropped, since they describe a
+pointer and focus that have since moved, so they neither count as lost keys
+nor push typed keys out of what is held. Keys sent before the drop was
+noticed are resent, and the notice counts them without the reports among
+them.
+
 ### Ports and previews
 
 A hosted sandbox publishes a port as an HTTPS preview URL
