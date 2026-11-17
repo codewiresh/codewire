@@ -162,11 +162,15 @@ fn spawn_broker_with_sessions(
             Ok(())
         });
     }
+    // Written before the broker exists, while this process still holds the
+    // other end: the socket buffers it. A broker that refuses to start exits
+    // without reading, and a write after its exit would be a broken pipe
+    // that says nothing about the broker.
+    control.write_all(host_addresses).unwrap();
     let child = command.spawn().unwrap();
     drop(inherited);
     drop(child_socket);
     drop(control_child);
-    control.write_all(host_addresses).unwrap();
     (parent, sessions, control, ChildGuard(Some(child)))
 }
 
