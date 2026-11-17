@@ -1086,6 +1086,31 @@ async fn the_front_door_runner_serves_the_frames_a_loopback_session_refuses() {
     assert_eq!(outbound[0].1, "https://api.anthropic.com/v1/messages");
 }
 
+/// The Open a front-door transport writes lists what the front-door executor
+/// serves: `websocket.v1` exactly when it serves upgrades (#4973).
+#[tokio::test]
+async fn the_front_door_open_lists_what_its_executor_serves() {
+    use tokio::io::AsyncReadExt as _;
+
+    let executor = FrontDoorExecutor(Arc::new(Recorded::default().broker()));
+    let (mut front_door_end, broker_end) = tokio::net::UnixStream::pair().unwrap();
+    let _transport = FrontDoorTransport::open(broker_end, Uuid::new_v4(), GENERATION)
+        .await
+        .unwrap();
+    let mut prefix = [0; 4];
+    front_door_end.read_exact(&mut prefix).await.unwrap();
+    let mut frame = vec![0; u32::from_be_bytes(prefix) as usize];
+    front_door_end.read_exact(&mut frame).await.unwrap();
+    let open = v1::CredentialBridgeHostMessage::decode(frame.as_slice()).unwrap();
+    let Some(Payload::Open(open)) = open.payload else {
+        panic!("the first host frame is the Open");
+    };
+    assert_eq!(
+        open.capabilities,
+        codewire_credential_bridge::front_door_capabilities(executor.serves_upgrades())
+    );
+}
+
 /// A front-door session serves HTTP requests only: its executor keeps the
 /// denial for SSH, both projections and both logins, and none takes a lease.
 #[tokio::test]

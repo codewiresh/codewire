@@ -121,6 +121,22 @@ fn admit_open(
     Ok(open.capabilities)
 }
 
+/// What a front-door session's Open lists for an executor that does, or does
+/// not, serve WebSocket upgrades: the front door itself and streamed request
+/// bodies, since intercepted uploads are the large ones, and `websocket.v1`
+/// only when upgrades are served. Listing it otherwise would let a guest send
+/// Upgrade frames that end the session (#4973).
+pub fn front_door_capabilities(serves_upgrades: bool) -> Vec<&'static str> {
+    let mut capabilities = vec![
+        CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR,
+        CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
+    ];
+    if serves_upgrades {
+        capabilities.push(CREDENTIAL_BRIDGE_CAPABILITY_WEBSOCKET);
+    }
+    capabilities
+}
+
 /// The host side of one front-door session, after its Open was written.
 pub struct FrontDoorHostSession {
     reader: FrameReader<tokio::io::ReadHalf<Box<dyn SessionStream>>>,
@@ -139,15 +155,25 @@ impl<T> SessionStream for T where T: AsyncRead + AsyncWrite + Send + Unpin + 'st
 pub struct FrontDoorHostSender(mpsc::Sender<v1::CredentialBridgeHostMessage>);
 
 impl FrontDoorHostSession {
-    /// Write the Open for `identity`, listing
-    /// [`CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR`], streamed request bodies,
-    /// since intercepted uploads are the large ones, and WebSockets, which
-    /// the broker's front-door runner serves (#3999). Ready is not
-    /// read here: the caller admits it as it admits any bridge's first frame.
+    /// Write the Open for `identity`, listing `capabilities`: what the
+    /// executor serving this session serves, from [`front_door_capabilities`]
+    /// (#4973). A list without [`CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR`], or
+    /// over [`CREDENTIAL_BRIDGE_MAX_CAPABILITIES`], or with a malformed name,
+    /// opens nothing. Ready is not read here: the caller admits it as it
+    /// admits any bridge's first frame.
     pub async fn open<S: SessionStream>(
         stream: S,
         identity: BridgeIdentity,
+        capabilities: &[&str],
     ) -> Result<Self, FrontDoorSessionError> {
+        let listed = capabilities.len() <= CREDENTIAL_BRIDGE_MAX_CAPABILITIES
+            && capabilities
+                .iter()
+                .all(|capability| valid_credential_bridge_capability(capability))
+            && capabilities.contains(&CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR);
+        if !listed {
+            return Err(FrontDoorSessionError::InvalidOpen);
+        }
         let stream: Box<dyn SessionStream> = Box::new(stream);
         let (reader, mut writer) = tokio::io::split(stream);
         let open = v1::CredentialBridgeHostMessage {
@@ -156,11 +182,10 @@ impl FrontDoorHostSession {
                     protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
                     environment_id: identity.environment_id.to_string(),
                     environment_generation: identity.environment_generation,
-                    capabilities: vec![
-                        CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR.to_owned(),
-                        CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM.to_owned(),
-                        CREDENTIAL_BRIDGE_CAPABILITY_WEBSOCKET.to_owned(),
-                    ],
+                    capabilities: capabilities
+                        .iter()
+                        .map(|&capability| capability.to_owned())
+                        .collect(),
                 },
             )),
         };

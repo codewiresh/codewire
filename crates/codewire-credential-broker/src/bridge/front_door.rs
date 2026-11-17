@@ -23,6 +23,11 @@ use crate::{
     BrokerUpstreamTransport, OpenAiBroker,
 };
 
+/// Whether [`FrontDoorExecutor`] serves WebSocket upgrades. The Open a
+/// [`FrontDoorTransport`] writes, before any executor exists, lists them from
+/// this same value, so the two cannot disagree (#4973).
+const FRONT_DOOR_SERVES_UPGRADES: bool = true;
+
 /// The host side of a front-door session. Its entry comes from which socket
 /// the caller opened it on, never from anything the front door sends.
 pub struct FrontDoorTransport {
@@ -50,9 +55,13 @@ impl FrontDoorTransport {
             environment_id,
             environment_generation,
         };
-        let session = FrontDoorHostSession::open(stream, identity)
-            .await
-            .map_err(|_| BrokerBridgeError::Unavailable)?;
+        let session = FrontDoorHostSession::open(
+            stream,
+            identity,
+            &codewire_credential_bridge::front_door_capabilities(FRONT_DOOR_SERVES_UPGRADES),
+        )
+        .await
+        .map_err(|_| BrokerBridgeError::Unavailable)?;
         Ok(Self {
             session,
             stop: CancellationToken::new(),
@@ -238,7 +247,7 @@ where
     }
 
     fn serves_upgrades(&self) -> bool {
-        true
+        FRONT_DOOR_SERVES_UPGRADES
     }
 
     async fn execute_upgrade(

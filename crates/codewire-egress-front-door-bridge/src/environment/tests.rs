@@ -72,9 +72,13 @@ impl Running {
             environment_id,
             environment_generation: GENERATION,
         };
-        let mut host = bounded(FrontDoorHostSession::open(credentials, identity))
-            .await
-            .unwrap();
+        let mut host = bounded(FrontDoorHostSession::open(
+            credentials,
+            identity,
+            &codewire_credential_bridge::front_door_capabilities(true),
+        ))
+        .await
+        .unwrap();
         let ready = bounded(host.receive()).await.unwrap().unwrap();
         assert!(matches!(ready.payload, Some(GuestPayload::Ready(_))));
         Self {

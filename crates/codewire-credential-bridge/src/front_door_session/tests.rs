@@ -61,9 +61,13 @@ fn serve(
 async fn a_request_crosses_the_session_naming_its_intercepted_host_and_its_answer_returns() {
     let bridge = bridge();
     let (guest, stream) = serve(&bridge);
-    let mut host = bounded(FrontDoorHostSession::open(stream, bridge.identity()))
-        .await
-        .unwrap();
+    let mut host = bounded(FrontDoorHostSession::open(
+        stream,
+        bridge.identity(),
+        &front_door_capabilities(true),
+    ))
+    .await
+    .unwrap();
     let Some(GuestPayload::Ready(ready)) = bounded(host.receive()).await.unwrap().unwrap().payload
     else {
         panic!("the guest answers Open with Ready");
@@ -112,9 +116,13 @@ async fn a_request_crosses_the_session_naming_its_intercepted_host_and_its_answe
 async fn a_loopback_request_names_no_host() {
     let bridge = bridge();
     let (_guest, stream) = serve(&bridge);
-    let mut host = bounded(FrontDoorHostSession::open(stream, bridge.identity()))
-        .await
-        .unwrap();
+    let mut host = bounded(FrontDoorHostSession::open(
+        stream,
+        bridge.identity(),
+        &front_door_capabilities(true),
+    ))
+    .await
+    .unwrap();
     bounded(host.receive()).await.unwrap().unwrap();
     let asking = bridge.clone();
     drop(tokio::spawn(async move { asking.respond(request()).await }));
@@ -224,9 +232,13 @@ async fn a_receive_cancelled_mid_frame_keeps_what_it_read() {
 async fn a_host_sender_never_writes_a_second_open() {
     let bridge = bridge();
     let (_guest, stream) = serve(&bridge);
-    let host = bounded(FrontDoorHostSession::open(stream, bridge.identity()))
-        .await
-        .unwrap();
+    let host = bounded(FrontDoorHostSession::open(
+        stream,
+        bridge.identity(),
+        &front_door_capabilities(true),
+    ))
+    .await
+    .unwrap();
     assert_eq!(
         host.sender()
             .send(open(
@@ -236,4 +248,56 @@ async fn a_host_sender_never_writes_a_second_open() {
             .await,
         Err(FrontDoorSessionError::InvalidFrame)
     );
+}
+
+// An Open lists websocket.v1 only for an executor that serves upgrades, and a
+// list that is not a front door's opens nothing (#4973).
+#[tokio::test]
+async fn the_open_lists_websocket_only_when_the_executor_serves_upgrades() {
+    for serves in [false, true] {
+        let (guest, host) = tokio::io::duplex(64 * 1024);
+        let listed = front_door_capabilities(serves);
+        let _session = bounded(FrontDoorHostSession::open(
+            host,
+            bridge().identity(),
+            &listed,
+        ))
+        .await
+        .unwrap();
+        let open: v1::CredentialBridgeHostMessage = bounded(FrameReader::new(guest).next())
+            .await
+            .unwrap()
+            .unwrap();
+        let Some(HostPayload::Open(open)) = open.payload else {
+            panic!("the first host frame is the Open");
+        };
+        assert_eq!(open.capabilities, listed);
+        assert!(
+            open.capabilities
+                .contains(&CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR.to_owned())
+        );
+        assert_eq!(
+            open.capabilities
+                .contains(&CREDENTIAL_BRIDGE_CAPABILITY_WEBSOCKET.to_owned()),
+            serves
+        );
+    }
+    let too_many =
+        [CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR; CREDENTIAL_BRIDGE_MAX_CAPABILITIES + 1];
+    for refused in [
+        &[CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM][..],
+        &[CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR, "Not Valid"][..],
+        &too_many[..],
+    ] {
+        let (_guest, host) = tokio::io::duplex(64 * 1024);
+        assert!(matches!(
+            bounded(FrontDoorHostSession::open(
+                host,
+                bridge().identity(),
+                refused
+            ))
+            .await,
+            Err(FrontDoorSessionError::InvalidOpen)
+        ));
+    }
 }
