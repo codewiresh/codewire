@@ -3,7 +3,7 @@ name: Build runner measurement
 
 # Dispatch only: compile-once step 1 (infra#1632). On the pull request build
 # runner (its persistent build disk at /ci-cache) it builds one commit's test
-# archive with line-tables debug info, beside compile-all-targets.sh in a
+# archive with no debug information, beside compile-all-targets.sh in a
 # second build folder, uploads the archive to the archive store and fetches it
 # back as a test job will, and records each time (build-runner.sh). The first
 # job builds cold (its build folder wiped) unless told otherwise; the second

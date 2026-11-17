@@ -772,7 +772,6 @@ run_ci_script_tests() {
   scripts/ci/tests/test-bound-cargo-jobs.sh
   scripts/ci/tests/test-integration-plugins.sh
   scripts/ci/tests/test-build-once.sh
-  scripts/ci/tests/test-build-once-lean-archive.sh
   scripts/ci/tests/test-run-rust-checks.sh
   scripts/ci/tests/test-fetch-test-archive-extract.sh
   python3 -B scripts/ci/tests/test-last-scheduled-run.py

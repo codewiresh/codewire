@@ -76,7 +76,21 @@
 # left Cargo configuration in a parent directory of src. The guest itself
 # wipes the whole folder weekly (infra dispatcher, metal_build_disk_prelude).
 #
-# The archive carries line-tables debug info, as every CI Rust build does.
+# Every build here, the legs' and the Rust checks', writes no debug
+# information (CARGO_PROFILE_DEV_DEBUG=0; 2026-11-16, infra#1534). Nothing in
+# CI read the line tables these builds kept until then (#3093): no job sets
+# RUST_BACKTRACE, and a panic's file and line come from the location compiled
+# into the code. The workspace archive's binaries lost them after the build
+# anyway, since the archive store needs that archive small (infra#2471: at
+# 2.4 GB it outran the store under load): a strip-and-repack step (#4312)
+# took 121-160 s of a 291-342 s archive leg to cut 2.6 GB to 0.9 GB. They
+# are no longer written, so nothing is stripped, the archive is the one
+# cargo-nextest writes, and every target folder holds less (193 MB of the
+# 502 MB cw test binary was debug sections, #4312). Builds outside this
+# folder keep line tables, local-rust-cache.sh's default: the workstation's
+# and the other CI jobs', such as a test job's own build after an archive
+# miss. They share no cache with these builds, which use no compiler cache
+# (in_src).
 # prepare exports the build environment to GITHUB_ENV and GITHUB_PATH, so the
 # later steps of the same job build from src with it.
 set -euo pipefail
@@ -265,7 +279,7 @@ prepare() {
   {
     echo "BUILD_ONCE_SRC=$src"
     echo "CARGO_HOME=$work/cargo-home"
-    echo 'CARGO_PROFILE_DEV_DEBUG=line-tables-only'
+    echo 'CARGO_PROFILE_DEV_DEBUG=0'
     echo 'CARGO_INCREMENTAL=0'
     echo "CARGO_BUILD_JOBS=${BUILD_ONCE_JOBS:-${share:-16}}"
     echo 'CODEWIRE_LOCAL_RUST_CACHE=off'
@@ -524,44 +538,11 @@ LEGS=(
 )
 
 leg_archive() {
-  # The workspace test archive: every package's tests, default features.
+  # The workspace test archive: every package's tests, default features,
+  # published as cargo-nextest writes it (no debug information: the header).
   local out="$1"
   phase 'test archive' env CARGO_TARGET_DIR="$work/targets/archive" \
     cargo nextest archive --locked --workspace --all-targets --archive-file "$out/archive.tar.zst"
-  lean_archive "$out/archive.tar.zst"
-}
-
-lean_archive() {
-  # lean_archive FILE: strip the debug information from the archive's ELF
-  # files and recompress it at zstd -9, after the build, so no fingerprint in
-  # the warm folder changes (infra#2471). A 2.4 GB archive outran the archive
-  # store under load; on the 502 MB cw test binary this is 47 MB against 88 MB.
-  # The tests are the same code; only backtraces lose their line numbers
-  # (panic locations still print). Any failure keeps the archive as built.
-  local file="$1" dir started=$SECONDS before after stripped=0 f
-  before="$(stat -c %s "$file")"
-  dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/lean-archive.XXXXXX")"
-  if ! { zstd -dcq "$file" | tar -x -p --no-same-owner -C "$dir"; }; then
-    echo "::warning::build-once: the test archive did not unpack for slimming; it is kept as built"
-    rm -rf -- "$dir"
-    return 0
-  fi
-  while IFS= read -r -d '' f; do
-    [ "$(head -c 4 "$f" | od -An -tx1 | tr -d ' ')" = 7f454c46 ] || continue
-    objcopy --strip-debug "$f" || { echo "::warning::build-once: objcopy failed on ${f#"$dir"/}; the archive is kept as built"; rm -rf -- "$dir"; return 0; }
-    stripped=$(( stripped + 1 ))
-  done < <(find "$dir" -type f -size +0 -print0)
-  # The same top-level entries nextest wrote, without a ./ prefix.
-  if ! (cd "$dir" && find . -mindepth 1 -maxdepth 1 -printf '%P\0' | sort -z |
-      tar -c --null -T - --owner=0 --group=0 --numeric-owner | zstd -9 -T0 -q -o "$file.lean"); then
-    echo "::warning::build-once: the slimmed test archive did not pack; it is kept as built"
-    rm -rf -- "$dir" "$file.lean"
-    return 0
-  fi
-  mv -- "$file.lean" "$file"
-  rm -rf -- "$dir"
-  after="$(stat -c %s "$file")"
-  echo "build-once: test archive slimmed: $stripped ELF files stripped of debug information, $before -> $after bytes in $(( SECONDS - started )) s"
 }
 
 # The feature-graph and local-vmm shards (run-product-verification.sh's

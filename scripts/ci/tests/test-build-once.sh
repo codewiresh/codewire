@@ -253,6 +253,9 @@ targets_prepare
 # Builds are not incremental (their sessions filled the disk, main run 22822),
 # and prepare removes the sessions earlier builds left.
 grep -q "^    echo 'CARGO_INCREMENTAL=0'$" "$SCRIPT" || fail 'build runner builds are incremental'
+# They write no debug information either (infra#1534): nothing in CI reads
+# it, and the archive store needs the workspace archive small (infra#2471).
+grep -q "^    echo 'CARGO_PROFILE_DEV_DEBUG=0'$" "$SCRIPT" || fail 'build runner builds write debug information'
 mkdir -p "$marker_root/targets/archive/debug/incremental/codewire_proto-x/s-1" "$marker_root/targets/archive/debug/deps"
 archive_epoch
 printf 'x' > "$marker_root/targets/archive/debug/incremental/codewire_proto-x/s-1/dep-graph.bin"
@@ -528,7 +531,7 @@ chmod +x "$legs_src/scripts/ci/verify/run-product-verification.sh"
 cat > "$work/legs-bin/cargo" <<'CARGO'
 #!/usr/bin/env bash
 # The archive leg's cargo: fails as LEGS_CARGO_MODE says while its marker
-# file exists, then writes the archive.
+# file exists, then writes the archive, the zstd tar beside it.
 calls="$LEGS_STATE/calls"; echo x >> "$calls"
 if [ -e "$CARGO_TARGET_DIR/debug/deps/libbroken.rlib" ]; then
   case "$LEGS_CARGO_MODE" in
@@ -546,9 +549,15 @@ else
 fi
 echo "archive-end $(date +%s%N)" >> "$LEGS_STATE/times"
 echo "archive-makeflags ${CARGO_MAKEFLAGS:-none}" >> "$LEGS_STATE/times"
-while [ "$#" -gt 0 ]; do [ "$1" = --archive-file ] && { shift; printf 'archive' > "$1"; }; shift; done
+while [ "$#" -gt 0 ]; do [ "$1" = --archive-file ] && { shift; cp "${0%/*}/archive.tar.zst" "$1"; }; shift; done
 CARGO
 chmod +x "$work/legs-bin/cargo"
+# What it writes: a zstd tar of one test binary that carries a debug section.
+mkdir -p "$work/legs-archive/target/debug/deps"
+cp "$(type -P true)" "$work/legs-archive/target/debug/deps/tests-0123"
+printf 'debug-info-payload' > "$work/legs-archive/payload"
+objcopy --add-section .debug_info="$work/legs-archive/payload" "$work/legs-archive/target/debug/deps/tests-0123"
+tar -c -C "$work/legs-archive" target | zstd -q -o "$work/legs-bin/archive.tar.zst"
 legs_build() {
   rm -rf "$work/legs-out" "$work/legs-state"; mkdir -p "$work/legs-out" "$work/legs-state"
   mkdir -p "$work/legs-root/pr/targets/archive/debug/deps"
@@ -559,6 +568,11 @@ legs_build() {
     "$SCRIPT" build "$work/legs-out" > "$work/legs.log" 2>&1
 }
 LEGS_SELECTION='|rust|' LEGS_BESIDE=features legs_build ok || fail "a cold build failed: $(cat "$work/legs.log")"
+# The archive leg hands on the archive cargo-nextest wrote, byte for byte.
+# The builds write no debug information, so nothing unpacks it, strips its
+# binaries and packs it again: that took 121-160 s of the leg (infra#1534).
+cmp -s "$work/legs-bin/archive.tar.zst" "$work/legs-out/archive.tar.zst" ||
+  fail 'the archive leg changed the archive cargo-nextest wrote'
 # Every leg runs at once, the archive and the feature graphs here, and both
 # take their compilers from the one jobserver.
 at() { sed -n "s/^$1 //p" "$work/legs-state/times"; }

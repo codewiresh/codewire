@@ -11,7 +11,9 @@
 #   rewrites only the files that changed and Cargo's mtime fingerprints keep
 #   every unchanged workspace crate fresh (a new checkout would rebuild them
 #   all), and every build sees the same absolute workspace path.
-# - targets/archive: the test archive build, line-tables debug info.
+# - targets/archive: the test archive build, with no debug information, as
+#   build-once.sh builds in the same folder (infra#1534): another setting
+#   would write a second copy of every unit there.
 # - targets/clippy: compile-all-targets.sh's build folder.
 # - cargo-home: the registry index and downloaded crates.
 # - tools: the downloads of SHA-256-pinned tools, checked on every use.
@@ -172,7 +174,7 @@ protoc --version
 record tools "$(seconds "$started" "$(now)")"
 
 export CARGO_HOME="$work/cargo-home"
-export CARGO_PROFILE_DEV_DEBUG=line-tables-only
+export CARGO_PROFILE_DEV_DEBUG=0
 export CARGO_BUILD_JOBS="$jobs"
 export CODEWIRE_LOCAL_RUST_CACHE=off
 export CARGO_TERM_COLOR=never
