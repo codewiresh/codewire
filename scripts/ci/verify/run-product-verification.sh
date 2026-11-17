@@ -1008,16 +1008,11 @@ run_contracts_proto() {
     buf generate --template buf.gen.google-rpc-ts.yaml
     buf generate --template buf.gen.google-rpc-python.yaml
   )
-  scripts/ci/proto/build-rust-descriptors.sh
   git diff --exit-code \
-    crates/codewire-proto/codewire_descriptor.bin \
-    crates/codewire-admin-proto/codewire_admin_descriptor.bin \
     libs/gen-go libs/gen-python packages/codewire-proto-ts/src/gen
   local generated_untracked
   generated_untracked="$(git ls-files --others --exclude-standard -- \
-    crates/codewire-proto/codewire_descriptor.bin \
-    crates/codewire-admin-proto/codewire_admin_descriptor.bin libs/gen-go libs/gen-python \
-    packages/codewire-proto-ts/src/gen)"
+    libs/gen-go libs/gen-python packages/codewire-proto-ts/src/gen)"
   if [ -n "$generated_untracked" ]; then
     printf '%s\n' "$generated_untracked" >&2
     echo 'generated proto code is untracked; run generation and commit it' >&2
@@ -1036,6 +1031,16 @@ run_contracts_proto() {
     fi
   done
   [ "${#proto_packages[@]}" -eq 0 ] || cargo test --locked "${proto_packages[@]}"
+
+  # The Rust descriptor sets are compiled from proto/ by the proto crates'
+  # build scripts, not by buf (#4950). This holds them to the pinned buf's:
+  # equal as messages, and generating the same Rust.
+  local buf_descriptor_set
+  buf_descriptor_set="$(mktemp "${TMPDIR:-/tmp}/codewire-buf-descriptor-set.XXXXXX")"
+  (cd proto && buf build --as-file-descriptor-set -o "$buf_descriptor_set")
+  CODEWIRE_BUF_DESCRIPTOR_SET="$buf_descriptor_set" \
+    cargo test --locked -p codewire-admin-proto --test descriptor_parity -- --ignored
+  rm -f "$buf_descriptor_set"
 
   PYTHONPATH=libs/gen-python .venv-proto/bin/python - <<'PY'
 import py_compile

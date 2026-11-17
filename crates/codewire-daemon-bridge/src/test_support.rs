@@ -284,20 +284,18 @@ impl Service<http::Request<Body>> for GatedDaemonService {
 }
 
 pub(crate) fn public_service_methods(service_name: &str) -> std::collections::BTreeSet<String> {
-    prost_types::FileDescriptorSet::decode(
-        include_bytes!("../../codewire-proto/codewire_descriptor.bin").as_slice(),
-    )
-    .expect("decode public descriptor")
-    .file
-    .iter()
-    .filter(|file| file.package.as_deref() == Some("codewire.v1"))
-    .flat_map(|file| &file.service)
-    .find(|service| service.name.as_deref() == Some(service_name))
-    .unwrap_or_else(|| panic!("missing public service {service_name}"))
-    .method
-    .iter()
-    .map(|method| method.name.as_deref().expect("method name").to_owned())
-    .collect()
+    prost_types::FileDescriptorSet::decode(codewire_proto::FILE_DESCRIPTOR_SET)
+        .expect("decode public descriptor")
+        .file
+        .iter()
+        .filter(|file| file.package.as_deref() == Some("codewire.v1"))
+        .flat_map(|file| &file.service)
+        .find(|service| service.name.as_deref() == Some(service_name))
+        .unwrap_or_else(|| panic!("missing public service {service_name}"))
+        .method
+        .iter()
+        .map(|method| method.name.as_deref().expect("method name").to_owned())
+        .collect()
 }
 
 pub(crate) struct DaemonHarness {

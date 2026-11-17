@@ -12,10 +12,8 @@ use crate::uds::{bind_owner_only_listener, owner_only_connector, remove_bound_so
 
 #[test]
 fn generated_environment_routes_have_one_explicit_local_semantic() {
-    let descriptor = prost_types::FileDescriptorSet::decode(
-        include_bytes!("../../../../codewire-proto/codewire_descriptor.bin").as_slice(),
-    )
-    .unwrap();
+    let descriptor =
+        prost_types::FileDescriptorSet::decode(codewire_proto::FILE_DESCRIPTOR_SET).unwrap();
     let methods = descriptor
         .file
         .iter()
@@ -44,10 +42,8 @@ fn generated_environment_routes_have_one_explicit_local_semantic() {
 
 #[test]
 fn implemented_public_messages_have_exhaustive_field_semantics() {
-    let descriptor = prost_types::FileDescriptorSet::decode(
-        include_bytes!("../../../../codewire-proto/codewire_descriptor.bin").as_slice(),
-    )
-    .unwrap();
+    let descriptor =
+        prost_types::FileDescriptorSet::decode(codewire_proto::FILE_DESCRIPTOR_SET).unwrap();
     let messages = descriptor
         .file
         .iter()

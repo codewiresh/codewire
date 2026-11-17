@@ -25,6 +25,7 @@ codewire-tailnet = { path = "crates/codewire-tailnet" }
 
 buffa = { version = "=0.9.1", features = ["json"] }
 buffa-types = { version = "=0.9.1", features = ["json"] }
+buffa-descriptor = "=0.9.1"
 # Without the default zstd codec: we never negotiate it, and zstd 0.13
 # carries RUSTSEC-2026-0391..0410 with no fix in connectrpc 0.9.1's range.
 connectrpc = { version = "=0.9.1", default-features = false, features = ["gzip", "json"] }
@@ -34,6 +35,7 @@ http = "1"
 hyper-util = { version = "=0.1.20", features = ["server-auto", "server-graceful", "tokio"] }
 prost = "0.14"
 prost-types = "0.14"
+protox = "=0.10.0"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

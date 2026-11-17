@@ -193,6 +193,13 @@ bytes = "1"
 prost = "0.14"
 prost-types = "0.14"
 prost-build = "0.14"
+# The compiler the proto crates' build scripts turn `proto/` into a
+# descriptor set with. Pinned exactly: a newer one is taken on purpose, and
+# the descriptor parity check judges it (#4950).
+protox = "=0.10.0"
+# Reads descriptor sets with every field the compiler above writes; used by
+# the descriptor parity test only.
+prost-reflect = "0.16"
 tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
@@ -207,6 +214,9 @@ connectrpc = { version = "=0.9.1", default-features = false, features = ["gzip",
 connectrpc-build = "=0.9.0"
 buffa = { version = "=0.9.1", features = ["json"] }
 buffa-types = { version = "=0.9.1", features = ["json"] }
+# The descriptor types of the code generator itself, which know every
+# field option it acts on; used by the redaction test only.
+buffa-descriptor = "=0.9.1"
 
 # ---------------------------------------------------------------------------
 # Server-side stack (used by codewire-server-core and the Phase 2+ services)

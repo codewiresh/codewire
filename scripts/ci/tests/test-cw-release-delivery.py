@@ -536,7 +536,7 @@ class SourceDigestTest(unittest.TestCase):
         inputs = {
             "crates/codewire-mesh/migrations/001_initial_schema.sql": "create table mesh(id int);\n",
             "crates/codewire-server-core/migrations/0001_init.sql": "create table core(id int);\n",
-            "crates/codewire-proto/codewire_descriptor.bin": "descriptor\n",
+            "proto/codewire/v1/common.proto": "syntax = \"proto3\";\n",
             "crates/codewire-credential-broker/src/ssh_agent/askpass.sh": "#!/bin/sh\n",
             "scripts/ci/verify/kind/cw_runtime_probe.py": "print('embedded observer')\n",
         }

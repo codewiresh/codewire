@@ -57,7 +57,7 @@
       "paths": ["Cargo.lock"],
       "expected": {
         "classification": "changed",
-        "selection_tokens": ["ci_plan_tests", "ci_plan_tests_omittable", "ci_script_tests_omittable", "policy", "policy_shell_omittable", "repo_check_self_tests_omittable", "rust", "rust_curated_locks", "rust_workspace", "static_guest_proof", "static_guest_proof_omittable", "transport", "transport_pkg_codewire_local_vmm", "transport_pkg_codewire_vmm_guest_probe"],
+        "selection_tokens": ["ci_plan_tests", "ci_plan_tests_omittable", "ci_script_tests_omittable", "contracts", "contracts_proto", "policy", "policy_shell_omittable", "repo_check_self_tests_omittable", "rust", "rust_curated_locks", "rust_workspace", "static_guest_proof", "static_guest_proof_omittable", "transport", "transport_pkg_codewire_local_vmm", "transport_pkg_codewire_vmm_guest_probe"],
         "required_local_mode": "default"
       }
     },
@@ -98,11 +98,11 @@
       }
     },
     {
-      "id": "generated-proto",
+      "id": "proto-crate-build-script",
       "event": "pull_request",
       "ref": "refs/pull/1714/head",
       "kind_e2e_opt_in": false,
-      "paths": ["crates/codewire-proto/codewire_descriptor.bin"],
+      "paths": ["crates/codewire-proto/build.rs"],
       "expected": {
         "classification": "changed",
         "selection_tokens": ["ci_plan_tests_omittable", "ci_script_tests_omittable", "contracts", "contracts_proto", "policy", "policy_shell_omittable", "repo_check_self_tests_omittable", "rust", "rust_pkg_codewire_proto"],

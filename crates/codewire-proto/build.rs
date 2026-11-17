@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
-    let descriptor_set = manifest_dir.join("codewire_descriptor.bin");
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("out dir"));
+    let descriptor_set = out_dir.join("codewire_descriptor.bin");
 
     // Customer, console, internal, and infrastructure Rust Connect contracts
     // compile here. Global-administrator contracts are intentionally emitted
@@ -50,15 +51,49 @@ fn main() {
         "google/rpc/error_details.proto",
     ];
 
-    // The checked-in descriptor set is generated and drift-checked with the
-    // pinned contract toolchain. Rust and image builds consume that exact
-    // artifact, so they neither depend on an ambient protoc version nor run
-    // contract codegen with an unreviewed compiler.
+    // The descriptor set is compiled here, from `proto/`, by a compiler that
+    // `Cargo.lock` pins, so no build depends on an ambient protoc or buf and
+    // none reads a checked-in binary that every proto change rewrites
+    // (#4950). CI holds its output to the pinned buf's.
+    //
+    // The encoder matters: the typed descriptor form drops options it does
+    // not know, `debug_redact` among them, and the generated `Debug` would
+    // then print the fields it marks.
+    let mut compiler =
+        protox::Compiler::new([manifest_dir.join("../../proto")]).expect("open the proto root");
+    compiler.include_source_info(true).include_imports(true);
+    compiler
+        .open_files(protos)
+        .expect("compile codewire protobuf contracts");
+    // Customer clients must not compile the global-administrator surface,
+    // not even through an import.
+    assert!(
+        compiler
+            .files()
+            .all(|file| !file.name().starts_with("codewire/admin/")),
+        "a customer contract pulls in a global-administrator proto"
+    );
+    std::fs::write(&descriptor_set, compiler.encode_file_descriptor_set())
+        .expect("write the descriptor set");
+    let mut redact_marks = 0;
+    for file in compiler.files() {
+        if let Some(path) = file.path() {
+            println!("cargo:rerun-if-changed={}", path.display());
+            let source = std::fs::read_to_string(path).expect("read a proto file");
+            redact_marks += source.matches("debug_redact = true").count();
+        }
+    }
+    // For the redaction test: a compiler that stops reading the option must
+    // not let it pass by finding no field to check.
+    println!("cargo:rustc-env=CODEWIRE_PROTO_DEBUG_REDACT_MARKS={redact_marks}");
+    println!("cargo:rustc-env=CODEWIRE_PROTO_FILES={}", protos.join(","));
+
     connectrpc_build::Config::new()
         .files(&protos)
         .descriptor_set(descriptor_set)
         .include_file("_connectrpc.rs")
         .gate_client_feature(true)
+        .emit_rerun_directives(false)
         .compile()
-        .expect("compile codewire protobuf contracts");
+        .expect("generate codewire protobuf contracts");
 }

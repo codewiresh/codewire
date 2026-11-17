@@ -3,7 +3,7 @@
 ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 
 FROM codewire-rust-base AS builder
-# protoc: codewire-mesh -> codewire-server-core -> codewire-proto compiles
+# codewire-mesh -> codewire-server-core -> codewire-proto compiles
 # proto/codewire/** + proto/google/rpc/** at build time (connect-rpc 03 WI-2).
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./

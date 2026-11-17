@@ -26,6 +26,7 @@ base64 = { version = "0.22.1" }
 bitflags = { version = "2.11.1", default-features = false, features = ["serde", "std"] }
 blake2 = { version = "0.10.6" }
 buffa = { version = "0.9.1", features = ["json", "text"] }
+buffa-descriptor = { version = "0.9.1" }
 byteorder = { version = "1.5.0" }
 bytes = { version = "1.11.1", features = ["serde"] }
 chacha20 = { version = "0.10.0", default-features = false, features = ["legacy", "rng", "zeroize"] }
@@ -98,12 +99,15 @@ percent-encoding = { version = "2.3.2" }
 pkcs8 = { version = "0.11.0", default-features = false, features = ["encryption", "pem", "std"] }
 portable-atomic = { version = "1.13.1" }
 primeorder = { version = "0.14.0", default-features = false, features = ["basepoint-table", "std"] }
+proc-macro2 = { version = "1.0.106" }
+prost-reflect = { version = "0.16.5", default-features = false, features = ["miette", "text-format"] }
+quote = { version = "1.0.45" }
 rand-274715c4dabd11b0 = { package = "rand", version = "0.9.4" }
 rand-93f6ce9d446188ac = { package = "rand", version = "0.10.1" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8.6" }
 rcgen = { version = "0.13.2", features = ["zeroize"] }
 regex = { version = "1.12.3" }
-regex-automata = { version = "0.4.14", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
+regex-automata = { version = "0.4.14" }
 regex-syntax = { version = "0.8.10" }
 ring = { version = "0.17.14" }
 rsa = { version = "0.10.0-rc.18", features = ["sha2"] }
@@ -125,8 +129,8 @@ sqlx-postgres = { version = "0.8.6", default-features = false, features = ["chro
 ssh-encoding = { version = "0.3.0", default-features = false, features = ["bigint", "bytes", "ctutils", "digest", "pem"] }
 ssh-key = { version = "0.7.0-rc.11", features = ["ed25519", "encryption", "p256", "p384", "p521", "ppk", "rsa", "sha1"] }
 subtle = { version = "2.6.1", features = ["const-generics"] }
+syn-f595c2ba2a3f28df = { package = "syn", version = "2.0.117", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 sync_wrapper = { version = "1.0.2", default-features = false, features = ["futures"] }
-thiserror = { version = "2.0.21" }
 time = { version = "0.3.47", features = ["macros", "serde-well-known"] }
 tokio = { version = "1.54.1", features = ["full", "test-util"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
@@ -156,6 +160,7 @@ base64 = { version = "0.22.1" }
 bitflags = { version = "2.11.1", default-features = false, features = ["serde", "std"] }
 blake2 = { version = "0.10.6" }
 buffa = { version = "0.9.1", features = ["json", "text"] }
+buffa-descriptor = { version = "0.9.1" }
 byteorder = { version = "1.5.0" }
 bytes = { version = "1.11.1", features = ["serde"] }
 cc = { version = "1.2.63", default-features = false, features = ["parallel"] }
@@ -232,13 +237,14 @@ pkcs8 = { version = "0.11.0", default-features = false, features = ["encryption"
 portable-atomic = { version = "1.13.1" }
 primeorder = { version = "0.14.0", default-features = false, features = ["basepoint-table", "std"] }
 proc-macro2 = { version = "1.0.106" }
+prost-reflect = { version = "0.16.5", default-features = false, features = ["miette", "text-format"] }
 quote = { version = "1.0.45" }
 rand-274715c4dabd11b0 = { package = "rand", version = "0.9.4" }
 rand-93f6ce9d446188ac = { package = "rand", version = "0.10.1" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8.6" }
 rcgen = { version = "0.13.2", features = ["zeroize"] }
 regex = { version = "1.12.3" }
-regex-automata = { version = "0.4.14", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
+regex-automata = { version = "0.4.14" }
 regex-syntax = { version = "0.8.10" }
 ring = { version = "0.17.14" }
 rsa = { version = "0.10.0-rc.18", features = ["sha2"] }
@@ -263,7 +269,6 @@ subtle = { version = "2.6.1", features = ["const-generics"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.10", features = ["extra-traits", "full", "visit-mut"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2.0.117", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 sync_wrapper = { version = "1.0.2", default-features = false, features = ["futures"] }
-thiserror = { version = "2.0.21" }
 time = { version = "0.3.47", features = ["macros", "serde-well-known"] }
 time-macros = { version = "0.2.27", default-features = false, features = ["formatting", "parsing", "serde"] }
 tokio = { version = "1.54.1", features = ["full", "test-util"] }
@@ -294,8 +299,6 @@ ipnet = { version = "2.12.0", features = ["serde"] }
 linux-raw-sys = { version = "0.12.1", default-features = false, features = ["auxvec", "elf", "errno", "general", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
 nix = { version = "0.31.3", features = ["ioctl", "mman", "socket", "time", "user"] }
 num = { version = "0.4.3" }
-proc-macro2 = { version = "1.0.106" }
-quote = { version = "1.0.45" }
 rustix = { version = "1.1.6", default-features = false, features = ["param", "system", "termios", "time"] }
 simdutf8 = { version = "0.1.5", default-features = false, features = ["aarch64_neon", "public_imp", "std"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3.0.10", features = ["extra-traits", "fold", "full", "visit-mut"] }

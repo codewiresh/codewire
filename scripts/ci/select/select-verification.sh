@@ -1029,8 +1029,17 @@ if [ "$event_selected" = false ]; then
         kind_relevant=true
         recognized=true
         ;;
-      Cargo.toml|Cargo.lock|rust-toolchain.toml|.config/hakari.toml|clippy.toml)
+      Cargo.toml|rust-toolchain.toml|.config/hakari.toml|clippy.toml)
         select_rust_workspace
+        recognized=true
+        ;;
+      Cargo.lock)
+        select_rust_workspace
+        # The proto crates' build scripts compile their descriptor sets with
+        # a compiler this file pins, and the contracts job holds its output
+        # to the pinned buf's (#4950). A path cannot say which entry moved.
+        select_token contracts
+        select_token contracts_proto
         recognized=true
         ;;
       .config/nextest.toml)
@@ -1108,13 +1117,11 @@ if [ "$event_selected" = false ]; then
         select_token contracts_proto
         ;;
       scripts/checks/contracts/local-runtime-oldest/*|\
-      scripts/ci/proto/build-rust-descriptors.sh|\
       scripts/checks/proto_breaking.py|\
       scripts/checks/contracts/proto-retirements.sha256|\
       scripts/checks/contracts/proto-breaking-preimages.sha256)
-        # The Rust audience-descriptor builder and the exact clean-break
-        # preimage policy alter contract verification rather than runtime
-        # behavior.
+        # The exact clean-break preimage policy alters contract verification
+        # rather than runtime behavior.
         select_token contracts
         select_token contracts_proto
         recognized=true

@@ -223,17 +223,26 @@ error surface. When a client WI flips an area (05 onward):
 
 ## Codegen pipeline
 
-- **Rust (server + client):** pinned contract generation writes two checked-in
-  descriptor sets: customer/control-plane contracts in
-  `crates/codewire-proto/codewire_descriptor.bin`, and global-administrator
-  contracts in `crates/codewire-admin-proto/codewire_admin_descriptor.bin`.
-  Each crate feeds only its descriptor to `connectrpc-build`, so ordinary Rust
-  and image builds do not invoke ambient `protoc`; a customer binary cannot
-  pull billing-admin contracts through `codewire-proto`. Server traits and
-  client stubs remain in their audience-specific crate, with client stubs
-  behind the default-on `client` feature. New proto files must be added to the
-  appropriate crate's `build.rs` list, and `make proto-generate` refreshes
-  both descriptor sets.
+- **Rust (server + client):** each contract crate's build script compiles its
+  own descriptor set from `proto/` into the build directory: customer and
+  control-plane contracts in `crates/codewire-proto`, global-administrator
+  contracts in `crates/codewire-admin-proto`. Nothing generated for Rust is
+  checked in, so two proto changes never collide on a binary (#4950). The
+  compiler is the `protox` crate, pinned exactly in the root `Cargo.toml`;
+  ordinary Rust and image builds invoke no `protoc` or `buf` and need no
+  network. Each crate feeds only its set to `connectrpc-build`, and the
+  customer build refuses an administrator proto, imports included, so a
+  customer binary cannot pull billing-admin contracts through
+  `codewire-proto`. Server traits and client stubs remain in their
+  audience-specific crate, with client stubs behind the default-on `client`
+  feature. A new proto file is added to the appropriate crate's `build.rs`
+  list.
+  - The contracts job builds the same sets with the pinned `buf` and fails if
+    they differ as messages or generate different Rust
+    (`crates/codewire-admin-proto/tests/descriptor_parity.rs`).
+  - Every field marked `debug_redact` is tested for redaction in `Debug`
+    output (`crates/codewire-proto/tests/debug_redaction.rs`). A message that
+    gains a marked field is added to that test's list, or the test fails.
 - **Go:** `protoc-gen-go` + `protoc-gen-connect-go` via
   `proto/buf.gen.codewire.yaml` into the one
   standalone `libs/gen-go/` module. buf managed mode supplies `go_package`
@@ -260,8 +269,8 @@ error surface. When a client WI flips an area (05 onward):
   generator `@bufbuild/protoc-gen-es` is a root `package.json`
   devDependency installed by `bun install`) — no remote buf plugins
   (restricted-network CI).
-  Generated code and the Rust descriptor set are checked in; CI regenerates and diffs
-  (`make proto-drift-check` locally).
+  The generated Go, Python and TypeScript are checked in; CI regenerates and
+  diffs them (`make proto-drift-check` locally).
 - `buf lint` and `buf breaking --against main` gate every proto change.
 
 ## Workflow

@@ -17,9 +17,35 @@
 
 connectrpc::include_generated!();
 
+/// The descriptor set these contracts are generated from, as this build
+/// compiled it from `proto/`. For tests that read the contract itself.
+#[doc(hidden)]
+pub const FILE_DESCRIPTOR_SET: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/codewire_descriptor.bin"));
+
+/// The proto files this crate generates from, comma-separated; the set also
+/// holds what they import.
+#[doc(hidden)]
+pub const PROTO_FILES: &str = env!("CODEWIRE_PROTO_FILES");
+
 #[cfg(test)]
 mod tests {
     use prost::Message as _;
+
+    #[test]
+    fn the_customer_descriptor_set_holds_no_administrator_contract() {
+        let set = prost_types::FileDescriptorSet::decode(crate::FILE_DESCRIPTOR_SET)
+            .expect("decode public descriptor");
+        assert!(!set.file.is_empty());
+        for file in &set.file {
+            assert!(
+                !file.name().starts_with("codewire/admin/")
+                    && !file.package().starts_with("codewire.admin"),
+                "{} is an administrator contract",
+                file.name()
+            );
+        }
+    }
 
     #[test]
     fn shared_ssh_frames_redact_signing_inputs_and_signatures() {
@@ -553,10 +579,8 @@ mod tests {
         assert!(json.get("secretProjects").is_none());
         assert!(json.get("githubStatus").is_none());
 
-        let descriptor = prost_types::FileDescriptorSet::decode(
-            include_bytes!("../codewire_descriptor.bin").as_slice(),
-        )
-        .expect("decode public descriptor");
+        let descriptor = prost_types::FileDescriptorSet::decode(crate::FILE_DESCRIPTOR_SET)
+            .expect("decode public descriptor");
         let response = descriptor
             .file
             .iter()
@@ -599,10 +623,8 @@ mod tests {
 
     #[test]
     fn repository_analysis_contract_is_absent_and_reserved() {
-        let descriptor = prost_types::FileDescriptorSet::decode(
-            include_bytes!("../codewire_descriptor.bin").as_slice(),
-        )
-        .expect("decode public descriptor");
+        let descriptor = prost_types::FileDescriptorSet::decode(crate::FILE_DESCRIPTOR_SET)
+            .expect("decode public descriptor");
         let file = descriptor
             .file
             .iter()

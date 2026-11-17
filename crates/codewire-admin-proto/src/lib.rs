@@ -5,12 +5,38 @@
 
 connectrpc::include_generated!();
 
+/// The descriptor set these contracts are generated from, as this build
+/// compiled it from `proto/`. For tests that read the contract itself.
+#[doc(hidden)]
+pub const FILE_DESCRIPTOR_SET: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/codewire_admin_descriptor.bin"));
+
+/// The proto files this crate generates from, comma-separated; the set also
+/// holds what they import.
+#[doc(hidden)]
+pub const PROTO_FILES: &str = env!("CODEWIRE_PROTO_FILES");
+
 #[cfg(test)]
 mod tests {
     use super::codewire::admin::v1::{
         ADMIN_SERVICE_SERVICE_NAME, BILLING_CATALOG_SERVICE_SERVICE_NAME, GetCatalogResponse,
         GetEnvironmentStartupSummaryRequest, GetStatsResponse, ListAuditLogsRequest, PlanSpec,
     };
+
+    #[test]
+    fn the_administrator_descriptor_set_holds_both_administrator_services() {
+        let pool = prost_reflect::DescriptorPool::decode(crate::FILE_DESCRIPTOR_SET)
+            .expect("decode administrator descriptor");
+        for service in [
+            ADMIN_SERVICE_SERVICE_NAME,
+            BILLING_CATALOG_SERVICE_SERVICE_NAME,
+        ] {
+            assert!(
+                pool.get_service_by_name(service).is_some(),
+                "the administrator descriptor omits {service}"
+            );
+        }
+    }
 
     #[test]
     fn admin_proto_json_surface_and_typed_window_are_pinned() {

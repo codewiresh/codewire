@@ -75,8 +75,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY third_party/sqlx-sqlite-unused ./third_party/sqlx-sqlite-unused
 COPY crates ./crates
 # codewire-proto (a codewire-server-core dependency since connect-rpc 03
-# WI-2) compiles proto/codewire/** + proto/google/rpc/** at build time via
-# protoc — the contract sources must be in the build context.
+# WI-2) compiles proto/codewire/** + proto/google/rpc/** at build time in its
+# build script — the contract sources must be in the build context.
 COPY proto ./proto
 # WI-R4 makes orchestration's authenticated environment proxy consume the
 # private daemon protocol through codewire-daemon-proto. Its build script

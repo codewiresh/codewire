@@ -30,8 +30,10 @@ serde_json = { workspace = true }
 
 [build-dependencies]
 connectrpc-build = { workspace = true }
+protox = { workspace = true }
 
 [dev-dependencies]
+buffa-descriptor = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 

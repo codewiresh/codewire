@@ -964,10 +964,7 @@ mod tests {
     ];
 
     fn descriptor() -> prost_types::FileDescriptorSet {
-        prost_types::FileDescriptorSet::decode(
-            include_bytes!("../../codewire-proto/codewire_descriptor.bin").as_slice(),
-        )
-        .unwrap()
+        prost_types::FileDescriptorSet::decode(codewire_proto::FILE_DESCRIPTOR_SET).unwrap()
     }
 
     type RestartRequestLog = Arc<Mutex<Vec<(String, Option<u64>)>>>;

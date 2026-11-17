@@ -421,7 +421,8 @@ run_graph_case graph_deleted_crate 'policy rust rust_pkg_codewire_graph_gone' ''
 # require the crate's Kind suite row (kind-suite-rows). The Kind tool tests
 # that held the rule before run on a pull request only with its Kind opt-in, so
 # #3800 added a crate without a row and main failed later (#3814).
-run_graph_case graph_new_crate "policy $graph_workspace rust_pkg_codewire_graph_app" '' \
+run_graph_case graph_new_crate \
+  "contracts contracts_proto policy $graph_workspace rust_pkg_codewire_graph_app" '' \
   crates/codewire-graph-app/Cargo.toml crates/codewire-graph-app/src/lib.rs Cargo.toml Cargo.lock
 
 # Non-Rust paths, the root manifest and the lockfile keep their rules and
@@ -432,7 +433,8 @@ printf '#!/usr/bin/env bash\necho "synthetic cargo failure" >&2\nexit 101\n' \
   > "$failing_cargo/cargo"
 chmod +x "$failing_cargo/cargo"
 run_graph_case graph_ignores_docs policy "$failing_cargo" docs/guide.md
-run_graph_case graph_ignores_root_manifest "policy $graph_workspace" "$failing_cargo" \
+run_graph_case graph_ignores_root_manifest \
+  "contracts contracts_proto policy $graph_workspace" "$failing_cargo" \
   Cargo.toml Cargo.lock
 run_graph_case graph_ignores_proto \
   'contracts contracts_proto go_consumer_interop go_support policy' "$failing_cargo" \
@@ -1185,8 +1187,10 @@ run_paths_case retired_desktop_workflow pull_request refs/pull/405/head false \
 run_paths_case artifact_plan_policy pull_request refs/pull/406/head false \
   'policy security security_js' scripts/ci/plan/planner.py scripts/ci/plan/artifact-graph.json
 defer_slow_check python3 "$ROOT/scripts/ci/plan/tests/test_decision_corpus.py"
+# The lockfile also pins the compiler the proto crates' build scripts use,
+# so it selects the contracts job that holds its output to the pinned buf's.
 run_paths_case rust_root pull_request refs/pull/5/head false \
-  'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
+  'contracts contracts_proto policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
   Cargo.lock
 run_paths_case rust_root_manifest pull_request refs/pull/50/head false \
   'policy rust rust_curated_locks rust_workspace transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe' \
@@ -1568,14 +1572,10 @@ run_paths_case preset_proto pull_request refs/pull/1101/head false \
 run_paths_case admin_rust_proto_boundary pull_request refs/pull/1111/head false \
   'contracts contracts_proto policy rust rust_pkg_codewire_admin_proto rust_pkg_codewire_cli_bin security security_js' \
   crates/codewire-admin-proto/Cargo.toml \
-  scripts/ci/proto/build-rust-descriptors.sh \
   scripts/ci/tests/test-admin-proto-boundary.sh
 run_paths_case admin_boundary_guard pull_request refs/pull/11110/head false \
   'policy rust rust_pkg_codewire_cli_bin security security_js' \
   scripts/ci/tests/test-admin-proto-boundary.sh
-run_paths_case rust_descriptor_generator pull_request refs/pull/11113/head false \
-  'contracts contracts_proto policy security security_js' \
-  scripts/ci/proto/build-rust-descriptors.sh
 run_paths_case admin_proto_crate pull_request refs/pull/11111/head false \
   'contracts contracts_proto policy rust rust_pkg_codewire_admin_proto' \
   crates/codewire-admin-proto/build.rs
@@ -2610,11 +2610,12 @@ awk '
   capture { print }
 ' "$ROOT/scripts/ci/verify/run-product-verification.sh" > "$go_support_runner"
 
-rust_descriptor_builder="$ROOT/scripts/ci/proto/build-rust-descriptors.sh"
-grep -qF -- '--path codewire/admin/v1/admin.proto' "$rust_descriptor_builder"
-grep -qF -- '--path codewire/admin/v1/billing_catalog.proto' "$rust_descriptor_builder"
-grep -qF -- '--path codewire/v1/environment.proto' "$rust_descriptor_builder"
-grep -qF 'codewire-admin-proto/codewire_admin_descriptor.bin' "$rust_descriptor_builder"
+# The two proto crates' build scripts compile their own descriptor sets (#4950).
+grep -qF '"codewire/admin/v1/admin.proto"' "$ROOT/crates/codewire-admin-proto/build.rs"
+grep -qF '"codewire/admin/v1/billing_catalog.proto"' "$ROOT/crates/codewire-admin-proto/build.rs"
+grep -qF '"codewire/v1/environment.proto"' "$ROOT/crates/codewire-proto/build.rs"
+grep -qF 'encode_file_descriptor_set()' "$ROOT/crates/codewire-proto/build.rs"
+grep -qF 'encode_file_descriptor_set()' "$ROOT/crates/codewire-admin-proto/build.rs"
 # CI installs buf's pinned release binary; the Makefile's proto-tools and the
 # push check install the same version.
 buf_version="$(sed -nE "s/^readonly BUF_VERSION='([0-9.]+)'$/\\1/p" "$ROOT/scripts/ci/verify/run-product-verification.sh")"
@@ -4137,14 +4138,13 @@ defer_slow_check admin_guard_without_cargo
 # The guard is unchanged, and even its failure cases must never invoke Cargo.
 admin_fixture="$primitive_probe/admin-static"
 mkdir -p "$admin_fixture/scripts/ci/tests" \
-  "$admin_fixture/crates/codewire-proto" "$admin_fixture/crates/codewire-admin-proto"
+  "$admin_fixture/crates/codewire-proto/src" "$admin_fixture/crates/codewire-admin-proto/src"
 cp "$admin_guard" "$admin_fixture/scripts/ci/tests/test-admin-proto-boundary.sh"
 run_admin_static_negative() {
   local name="$1" path="$2" before="$3" after="$4" error="$5" status=0
   local input
   for input in crates/codewire-proto/build.rs crates/codewire-admin-proto/build.rs \
-      crates/codewire-proto/codewire_descriptor.bin \
-      crates/codewire-admin-proto/codewire_admin_descriptor.bin; do
+      crates/codewire-proto/src/lib.rs crates/codewire-admin-proto/src/lib.rs; do
     cp "$ROOT/$input" "$admin_fixture/$input"
   done
   python3 - "$admin_fixture/$path" "$before" "$after" <<'PY'
@@ -4185,15 +4185,16 @@ run_admin_static_negative admin_build_billing crates/codewire-admin-proto/build.
   'admin descriptor omits BillingCatalogService'
 run_admin_static_negative admin_build_descriptor crates/codewire-admin-proto/build.rs \
   'codewire_admin_descriptor.bin' 'removed.bin' \
-  'admin crate lacks a distinct checked-in descriptor input'
-run_admin_static_negative customer_descriptor crates/codewire-proto/codewire_descriptor.bin \
-  '' 'codewire.admin.v1' 'customer descriptor contains global-administrator contracts'
-run_admin_static_negative admin_descriptor_service \
-  crates/codewire-admin-proto/codewire_admin_descriptor.bin \
-  'AdminService' 'RemovedService' 'administrator descriptor omits AdminService'
-run_admin_static_negative admin_descriptor_billing \
-  crates/codewire-admin-proto/codewire_admin_descriptor.bin \
-  'BillingCatalogService' 'RemovedService' 'administrator descriptor omits BillingCatalogService'
+  'admin crate lacks a distinct descriptor set'
+run_admin_static_negative customer_build_guard crates/codewire-proto/build.rs \
+  'starts_with("codewire/admin/")' 'starts_with("codewire/removed/")' \
+  'customer descriptor build no longer refuses an imported administrator proto'
+run_admin_static_negative customer_set_test crates/codewire-proto/src/lib.rs \
+  'the_customer_descriptor_set_holds_no_administrator_contract' 'removed_test' \
+  'customer contract crate no longer tests its built descriptor set'
+run_admin_static_negative admin_set_test crates/codewire-admin-proto/src/lib.rs \
+  'the_administrator_descriptor_set_holds_both_administrator_services' 'removed_test' \
+  'administrator contract crate no longer tests its built descriptor set'
 
 primitive_rust_body="$primitive_probe/run-rust.sh"
 awk '

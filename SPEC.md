@@ -648,13 +648,15 @@ Authoring rules, the error model and the codegen are in
 [docs/dev/PROTO-STYLE.md](docs/dev/PROTO-STYLE.md). Buf generates the Go,
 Python and TypeScript code for every package under `proto/codewire`, not only
 the public one; the SDKs in `libs/sdk-*` are hand-written on top of them. The
-Rust crates are built from checked-in descriptors
-(`scripts/ci/proto/build-rust-descriptors.sh`), and `crates/codewire-daemon-proto`
-compiles its protos at build time, which is why a source build needs `protoc`.
-`make proto-drift-check` regenerates the Go, Python and TypeScript trees and
-the descriptors and fails when they differ from what is committed; CI runs the
-same check. Public and generated contracts ship with their generated clients,
-wrappers and tests in one change.
+two Connect contract crates compile their descriptor sets from `proto/` in
+their build scripts, with a Rust compiler that `Cargo.lock` pins, so they need
+no `protoc` or `buf` and nothing generated for them is checked in (#4950).
+`crates/codewire-daemon-proto` compiles its protos at build time with
+`protoc`, which is why a source build needs it. `make proto-drift-check`
+regenerates the Go, Python and TypeScript trees and fails when they differ
+from what is committed; CI runs the same check, and also holds the Rust
+descriptor sets to the pinned `buf`'s. Public and generated contracts ship
+with their generated clients, wrappers and tests in one change.
 
 `daemon.v1` (`DaemonService`, `HostControlService`, `PlatformManagedService`)
 is the compatibility contract between a `cw` client and the daemon of any

@@ -10,8 +10,11 @@ fail() {
   exit 1
 }
 
-# Policy uses only checked-in source/descriptor inputs. Resolve the real CLI
-# dependency graph only in the separately provisioned Rust capability.
+# Policy uses only checked-in source. The descriptor sets are compiled by the
+# two build scripts (#4950), so what they hold is asserted where they exist:
+# the customer build refuses an administrator proto, imports included, and
+# each crate's tests read its built set. Resolve the real CLI dependency
+# graph only in the separately provisioned Rust capability.
 if [[ "$#" -gt 0 ]]; then
   [[ "$#" -eq 1 && "$1" == --cli-dependencies ]] || {
     printf 'usage: %s [--cli-dependencies]\n' "$0" >&2
@@ -48,16 +51,14 @@ rg -qF 'codewire/admin/v1/admin.proto' "$ADMIN_BUILD" ||
 rg -qF 'codewire/admin/v1/billing_catalog.proto' "$ADMIN_BUILD" ||
   fail 'admin descriptor omits BillingCatalogService'
 rg -qF 'codewire_admin_descriptor.bin' "$ADMIN_BUILD" ||
-  fail 'admin crate lacks a distinct checked-in descriptor input'
-
-if rg -a -qF 'codewire.admin.v1' crates/codewire-proto/codewire_descriptor.bin; then
-  fail 'customer descriptor contains global-administrator contracts'
-fi
-rg -a -qF 'AdminService' \
-  crates/codewire-admin-proto/codewire_admin_descriptor.bin ||
-  fail 'administrator descriptor omits AdminService'
-rg -a -qF 'BillingCatalogService' \
-  crates/codewire-admin-proto/codewire_admin_descriptor.bin ||
-  fail 'administrator descriptor omits BillingCatalogService'
+  fail 'admin crate lacks a distinct descriptor set'
+rg -qF 'starts_with("codewire/admin/")' "$CUSTOMER_BUILD" ||
+  fail 'customer descriptor build no longer refuses an imported administrator proto'
+rg -qF 'the_customer_descriptor_set_holds_no_administrator_contract' \
+  crates/codewire-proto/src/lib.rs ||
+  fail 'customer contract crate no longer tests its built descriptor set'
+rg -qF 'the_administrator_descriptor_set_holds_both_administrator_services' \
+  crates/codewire-admin-proto/src/lib.rs ||
+  fail 'administrator contract crate no longer tests its built descriptor set'
 
 printf '[test-admin-proto-boundary] static customer and administrator contract boundaries passed\n'

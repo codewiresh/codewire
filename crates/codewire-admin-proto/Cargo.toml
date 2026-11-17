@@ -25,9 +25,14 @@ serde_json = { workspace = true }
 
 [build-dependencies]
 connectrpc-build = { workspace = true }
+protox = { workspace = true }
 
 [dev-dependencies]
+codewire-proto = { workspace = true }
 codewire-workspace-hack.workspace = true
+connectrpc-build = { workspace = true }
+prost-reflect = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
