@@ -1311,6 +1311,29 @@ these pieces are in place for the boot seed that will:
   the sign-in form projects no variable. `ANTHROPIC_API_KEY` is never set,
   because the swap rule refuses a placeholder sent beside a second credential
   header. Without interception, the projection is exactly the one above.
+- **What Git and `gh` will get.** Once a boot binds `github.com` and
+  `api.github.com`, the GitHub projection sends nothing to the loopback
+  ingress, so `git remote -v` prints an HTTPS remote as written. Git prints
+  a rewritten form after its rewrite, so a `git://` remote, and an SSH-form
+  remote on a profile without a key, print as `https://github.com/…`; the
+  stored URL stays as written:
+  - no rewrite names the managed route. An HTTPS remote goes to GitHub as it
+    is. On a profile without an SSH key the `git://` and the two SSH forms
+    are rewritten to `https://github.com/`; with a key, the SSH forms keep
+    the key and only `git://` is rewritten;
+  - Git's credential helper for `https://github.com`, and for no other
+    host, answers `x-access-token` and the placeholder; a helper configured
+    earlier for that URL is cleared first;
+  - `GH_TOKEN` is the placeholder, and `gh`'s generated configuration names
+    no socket. If the user sets `GH_HOST`, `gh` sends the placeholder to
+    that host instead. That gives the host nothing: a placeholder is not a
+    credential, and only this environment's own front door and broker
+    exchange it for one.
+
+  Without a placeholder neither the helper nor `GH_TOKEN` is projected, so
+  the fixed `codewire-managed` never reaches the real host. The function
+  exists (`ManagedCredentialClientProjection::intercepted_github`); no boot
+  calls it yet, because nothing delivers a GitHub placeholder to a guest.
 
 ### Refusals an agent or a person can read (#5057)
 

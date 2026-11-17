@@ -964,8 +964,10 @@ Issue: #3999. Hosted Sandboxes follow with #4001.
   `curl` here needs `--cacert` with the bundle `GIT_SSL_CAINFO` names; the walk
   says so where it uses it.
 - **Proof:**
-  - `git remote -v` prints each remote exactly as it was written, in both
-    clones;
+  - `git remote -v` prints the HTTPS remote exactly as it was written. For
+    the SSH-form clone it prints the SSH form on a profile with a key, and
+    `https://github.com/OWNER/PRIVATE.git` on one without; in both,
+    `git config remote.origin.url` is the URL as written;
   - the private clone and the 6 MB push succeed, and the pushed commit is on
     GitHub when read from outside the VM;
   - the SSH-form clone works: over HTTPS with the managed credential on a
@@ -1009,8 +1011,11 @@ Issue: #3999. Hosted Sandboxes follow with #4001.
   - The placeholder works only for Git's fetch and push requests and for the
     API operations the GitHub route grants. Anywhere else on the two hosts it
     is refused, whoever's placeholder it looks like. Git LFS is one such case.
-  - `git remote -v` on a profile without an SSH key still prints the SSH form;
-    only the transport changes.
+  - On a profile without an SSH key, `git remote -v` and
+    `git remote get-url` print an SSH-form or `git://` remote as
+    `https://github.com/…`: Git shows a URL after its `insteadOf` rewrite.
+    The stored URL does not change. A tool that compares the printed remote
+    with one read elsewhere sees a different string for those forms.
   - A VM restored from a checkpoint keeps the bindings of the boot it was
     captured from.
 - **Observed:** not yet observed.

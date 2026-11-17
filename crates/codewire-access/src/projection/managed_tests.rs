@@ -1457,3 +1457,262 @@ fn the_anthropic_credential_kind_fixes_claude_codes_form() {
             .is_err()
     );
 }
+
+fn git_entries(environment: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    let count: usize = environment["GIT_CONFIG_COUNT"].parse().unwrap();
+    let entries: Vec<_> = (0..count)
+        .map(|index| {
+            (
+                environment[&format!("GIT_CONFIG_KEY_{index}")].clone(),
+                environment[&format!("GIT_CONFIG_VALUE_{index}")].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        environment
+            .keys()
+            .filter(|name| name.starts_with("GIT_CONFIG_KEY_"))
+            .count(),
+        count,
+        "no entry beyond the count"
+    );
+    entries
+}
+
+fn intercepted_github(
+    slots: &[&str],
+    placement: ManagedCredentialClientPlacement,
+    placeholder: Option<&CredentialPlaceholder>,
+) -> ManagedCredentialClientProjection {
+    let selected = clients(slots);
+    selected
+        .for_placement(placement)
+        .intercepted_github(selected, placeholder)
+}
+
+/// Intercepted, nothing sends Git or `gh` to the loopback ingress: no
+/// rewrite names the managed route, `gh`'s file names no socket, and the
+/// only credential anywhere is this environment's placeholder, offered to
+/// `https://github.com` alone.
+#[test]
+fn intercepted_github_uses_githubs_own_names_and_only_the_placeholder() {
+    let placeholder = placeholder();
+    for placement in [
+        ManagedCredentialClientPlacement::Native,
+        ManagedCredentialClientPlacement::Platform,
+    ] {
+        for (slots, rewritten) in [
+            (
+                &["github"][..],
+                &[
+                    "git://github.com/",
+                    "git@github.com:",
+                    "ssh://git@github.com/",
+                ][..],
+            ),
+            (&["github", "ssh"], &["git://github.com/"]),
+        ] {
+            let projection = intercepted_github(slots, placement, Some(&placeholder));
+            let entries = git_entries(&projection.environment);
+            let (rewrites, helpers) = entries.split_at(rewritten.len());
+            assert_eq!(
+                rewrites,
+                rewritten
+                    .iter()
+                    .map(|form| (
+                        "url.https://github.com/.insteadOf".to_owned(),
+                        (*form).to_owned()
+                    ))
+                    .collect::<Vec<_>>(),
+                "{slots:?}"
+            );
+            assert_eq!(helpers.len(), 2);
+            assert_eq!(
+                helpers[0],
+                (
+                    "credential.https://github.com.helper".to_owned(),
+                    String::new()
+                ),
+                "earlier helpers are cleared first"
+            );
+            assert_eq!(helpers[1].0, "credential.https://github.com.helper");
+            assert!(helpers[1].1.contains(placeholder.as_str()));
+            assert_eq!(projection.environment["GH_TOKEN"], placeholder.as_str());
+            assert_eq!(projection.gh.unwrap().config_yml(), "version: 1\n");
+            for (name, value) in &projection.environment {
+                assert!(!value.contains("127.0.0.1"), "{name}");
+                assert!(!value.contains("_codewire"), "{name}");
+                assert!(!value.contains("codewire-managed"), "{name}");
+            }
+        }
+    }
+}
+
+/// Without a placeholder neither the helper nor `GH_TOKEN` is projected, so
+/// the fixed managed value never reaches the real host.
+#[test]
+fn intercepted_github_without_a_placeholder_projects_no_credential() {
+    let projection =
+        intercepted_github(&["github"], ManagedCredentialClientPlacement::Native, None);
+    assert!(!projection.environment.contains_key("GH_TOKEN"));
+    let entries = git_entries(&projection.environment);
+    assert_eq!(entries.len(), 3);
+    assert!(entries.iter().all(|(key, _)| key.starts_with("url.")));
+    assert_eq!(projection.gh.unwrap().config_yml(), "version: 1\n");
+}
+
+/// Only the GitHub names change, and a selection without GitHub is
+/// unchanged, an SSH key's own `git://` rewrite included.
+#[test]
+fn github_interception_changes_only_the_github_names() {
+    let placeholder = placeholder();
+    for slots in [
+        &["codex", "openai", "anthropic", "ssh", "github"][..],
+        &["codex", "openai", "anthropic", "ssh"],
+        &["ssh"],
+        &[],
+    ] {
+        let selected = clients(slots);
+        let plain = selected.for_placement(ManagedCredentialClientPlacement::Native);
+        let intercepted = plain
+            .clone()
+            .intercepted_github(selected, Some(&placeholder));
+        if !selected.contains(ManagedCredentialClient::GitHub) {
+            assert_eq!(intercepted, plain, "{slots:?}");
+            continue;
+        }
+        let others = |projection: &ManagedCredentialClientProjection| {
+            projection
+                .environment
+                .iter()
+                .filter(|(name, _)| !name.starts_with("GIT_CONFIG_") && *name != "GH_TOKEN")
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(others(&intercepted), others(&plain));
+        assert_eq!(intercepted.codex, plain.codex);
+        assert_eq!(
+            intercepted.environment["GH_CONFIG_DIR"],
+            plain.environment["GH_CONFIG_DIR"]
+        );
+    }
+}
+
+#[cfg(unix)]
+fn stock_git(environment: &BTreeMap<String, String>) -> std::process::Command {
+    let mut git = std::process::Command::new("git");
+    git.env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", "/nonexistent")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .envs(environment);
+    git
+}
+
+/// Stock Git, given exactly the intercepted environment, keeps an HTTPS
+/// remote as written, sends the other forms to HTTPS unless an SSH key keeps
+/// its own, and never touches another host.
+#[cfg(unix)]
+#[test]
+fn stock_git_resolves_intercepted_github_remotes_to_github_itself() {
+    let placeholder = placeholder();
+    let https = "https://github.com/org/app.git".to_owned();
+    for (slots, expected) in [
+        (
+            &["github"][..],
+            [https.clone(), https.clone(), https.clone(), https.clone()],
+        ),
+        (
+            &["github", "ssh"],
+            [
+                https.clone(),
+                https.clone(),
+                "git@github.com:org/app.git".to_owned(),
+                "ssh://git@github.com/org/app.git".to_owned(),
+            ],
+        ),
+    ] {
+        let environment = intercepted_github(
+            slots,
+            ManagedCredentialClientPlacement::Native,
+            Some(&placeholder),
+        )
+        .environment;
+        let resolve = |url: &str| {
+            let output = stock_git(&environment)
+                .args(["-C", "/", "ls-remote", "--get-url", "--", url])
+                .output()
+                .expect("stock git is installed");
+            assert!(output.status.success(), "{url}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let forms = [
+            "https://github.com/org/app.git",
+            "git://github.com/org/app.git",
+            "git@github.com:org/app.git",
+            "ssh://git@github.com/org/app.git",
+        ];
+        for (form, expected) in forms.iter().zip(&expected) {
+            assert_eq!(&resolve(form), expected, "{slots:?} {form}");
+        }
+        for other in [
+            "https://gitlab.com/org/app.git",
+            "git@gitlab.com:org/app.git",
+            "https://gist.github.com/org/app.git",
+            "https://github.example.com/org/app.git",
+        ] {
+            assert_eq!(resolve(other), other, "{slots:?}");
+        }
+    }
+}
+
+/// Stock Git asks the projected helper for `https://github.com` and gets
+/// GitHub's token user name with the placeholder as the password. For any
+/// other host, `gist.github.com` and `api.github.com` included, the helper
+/// is never asked, so the placeholder is offered to no one else.
+#[cfg(unix)]
+#[test]
+fn stock_git_offers_the_placeholder_to_github_com_alone() {
+    use std::io::Write as _;
+
+    let placeholder = placeholder();
+    let environment = intercepted_github(
+        &["github"],
+        ManagedCredentialClientPlacement::Native,
+        Some(&placeholder),
+    )
+    .environment;
+    let fill = |host: &str| {
+        let mut child = stock_git(&environment)
+            .args(["-C", "/", "credential", "fill"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("stock git is installed");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("protocol=https\nhost={host}\n\n").as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let answer = fill("github.com");
+    assert!(answer.contains("username=x-access-token\n"), "{answer}");
+    assert!(
+        answer.contains(&format!("password={}\n", placeholder.as_str())),
+        "{answer}"
+    );
+    for host in [
+        "gist.github.com",
+        "api.github.com",
+        "github.com.example.com",
+        "gitlab.com",
+    ] {
+        assert!(!fill(host).contains(placeholder.as_str()), "{host}");
+    }
+}

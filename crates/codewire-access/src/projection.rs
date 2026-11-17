@@ -124,6 +124,15 @@ const GITHUB_ALL_FORMS: [&str; 4] = [
     GITHUB_SCP_URL,
     GITHUB_SSH_URL,
 ];
+/// The forms rewritten to HTTPS for an intercepted environment without an
+/// SSH key, so the front door serves them: `git://`, which GitHub retired,
+/// and the two SSH spellings, which nothing in the environment could sign.
+const GITHUB_NON_HTTPS_FORMS: [&str; 3] = [GITHUB_GIT_URL, GITHUB_SCP_URL, GITHUB_SSH_URL];
+/// Git's credential setting for `https://github.com` alone: no other host
+/// is ever offered the placeholder.
+const GITHUB_CREDENTIAL_HELPER_KEY: &str = "credential.https://github.com.helper";
+/// The user name GitHub expects beside an App or OAuth token as a password.
+const GITHUB_TOKEN_USERNAME: &str = "x-access-token";
 /// Destinations a workspace process must reach directly, whatever proxy it is
 /// told to use: every managed HTTP route is the workspace's own loopback
 /// ingress, and a request to it carries prompts and repository content.
@@ -698,6 +707,94 @@ impl ManagedCredentialClientProjection {
         }
         self
     }
+
+    /// [`Self::intercepted`] for the GitHub client, in an environment whose
+    /// front door binds `github.com` and `api.github.com` (#3999). Git and
+    /// `gh` then use GitHub's own names, so nothing routes them to the
+    /// loopback ingress, and `git remote -v` prints an HTTPS remote as
+    /// written (Git prints a rewritten form after its rewrite; the stored
+    /// URL never changes):
+    ///
+    /// - the rewrite to the managed route is dropped. HTTPS remotes go to
+    ///   GitHub as they are. Without an SSH key the other three forms are
+    ///   rewritten to HTTPS, so the same connection serves them; with one,
+    ///   the SSH forms keep the key and only `git://` moves to HTTPS;
+    /// - Git's credential helper for `https://github.com` alone answers with
+    ///   `github`, this environment's placeholder for the selected GitHub
+    ///   credential, which the broker swaps for the credential. An earlier
+    ///   helper for that URL is cleared first, so nothing else is asked;
+    /// - `GH_TOKEN` is the placeholder, and `gh`'s configuration names no
+    ///   socket.
+    ///
+    /// Without a placeholder neither the helper nor `GH_TOKEN` is projected,
+    /// so the fixed managed value never reaches the real host; Git and `gh`
+    /// then act as an anonymous client. A selection without GitHub is
+    /// unchanged.
+    pub fn intercepted_github(
+        mut self,
+        clients: ManagedCredentialClients,
+        github: Option<&CredentialPlaceholder>,
+    ) -> Self {
+        if !clients.contains(ManagedCredentialClient::GitHub) {
+            return self;
+        }
+        self.environment.retain(|name, _| {
+            name != "GIT_CONFIG_COUNT"
+                && !name.starts_with("GIT_CONFIG_KEY_")
+                && !name.starts_with("GIT_CONFIG_VALUE_")
+        });
+        let forms: &[&str] = if clients.contains(ManagedCredentialClient::Ssh) {
+            &GITHUB_GIT_PROTOCOL_FORM
+        } else {
+            &GITHUB_NON_HTTPS_FORMS
+        };
+        let mut entries: Vec<(String, String)> = forms
+            .iter()
+            .map(|form| {
+                (
+                    format!("url.{GITHUB_HTTPS_URL}.insteadOf"),
+                    (*form).to_owned(),
+                )
+            })
+            .collect();
+        match github {
+            Some(placeholder) => {
+                // An empty value clears the helpers configured before it.
+                entries.push((GITHUB_CREDENTIAL_HELPER_KEY.into(), String::new()));
+                entries.push((
+                    GITHUB_CREDENTIAL_HELPER_KEY.into(),
+                    github_credential_helper(placeholder),
+                ));
+                self.environment
+                    .insert("GH_TOKEN".into(), placeholder.as_str().into());
+            }
+            None => {
+                self.environment.remove("GH_TOKEN");
+            }
+        }
+        self.environment
+            .insert("GIT_CONFIG_COUNT".into(), entries.len().to_string());
+        for (index, (key, value)) in entries.into_iter().enumerate() {
+            self.environment
+                .insert(format!("GIT_CONFIG_KEY_{index}"), key);
+            self.environment
+                .insert(format!("GIT_CONFIG_VALUE_{index}"), value);
+        }
+        self.gh = Some(GhConfigProjection::direct());
+        self
+    }
+}
+
+/// A Git credential helper, as a shell snippet Git runs itself, that answers
+/// a `get` with GitHub's token user name and `placeholder` as the password
+/// and does nothing for `store` and `erase`. The placeholder's alphabet
+/// (letters, digits, `_` and `-`) needs no quoting. It is not a credential:
+/// it names, to this environment's broker, the one it stands for.
+fn github_credential_helper(placeholder: &CredentialPlaceholder) -> String {
+    format!(
+        "!f() {{ test \"$1\" = get && printf 'username=%s\\npassword=%s\\n' {GITHUB_TOKEN_USERNAME} {}; }}; f",
+        placeholder.as_str()
+    )
 }
 
 /// Deterministic machine-owned `gh` configuration: where the managed ingress
@@ -714,6 +811,14 @@ impl GhConfigProjection {
     fn for_socket(socket: &str) -> Self {
         Self {
             config_yml: format!("version: 1\nhttp_unix_socket: {socket}\n"),
+        }
+    }
+
+    /// For an intercepted environment: `gh` speaks HTTPS to `api.github.com`
+    /// itself, so the file names no socket.
+    fn direct() -> Self {
+        Self {
+            config_yml: "version: 1\n".to_owned(),
         }
     }
 
