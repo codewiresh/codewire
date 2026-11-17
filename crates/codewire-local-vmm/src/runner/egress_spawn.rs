@@ -4,13 +4,18 @@
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 
+use codewire_confinement::spawn::{INHERITED_SOURCE_FLOOR, duplicate_inherited_descriptor};
 use codewire_egress_policy::intercept::InterceptSet;
 
-use super::{
-    EgressBrokerProcess, INHERITED_SOURCE_FLOOR, RunnerError, duplicate_inherited_descriptor,
+use super::{EgressBrokerProcess, RunnerError};
+use crate::egress_broker::{
+    EGRESS_BROKER_FIRST_SESSION_FD, EGRESS_BROKER_HANDOFF_FD, EGRESS_BROKER_INHERITED_SESSIONS,
 };
-use crate::egress_broker::EGRESS_BROKER_HANDOFF_FD;
 
+const _: () = assert!(
+    EGRESS_BROKER_FIRST_SESSION_FD + EGRESS_BROKER_INHERITED_SESSIONS as RawFd
+        <= INHERITED_SOURCE_FLOOR
+);
 const _: () = assert!(EGRESS_BROKER_HANDOFF_FD < INHERITED_SOURCE_FLOOR);
 
 /// A socket pair for the broker: the runner's end, non-blocking, and the

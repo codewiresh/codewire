@@ -10,6 +10,11 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+use codewire_confinement::spawn::inherit_descriptors;
+#[cfg(target_os = "linux")]
+use codewire_confinement::spawn::prepare_isolated_child;
+use codewire_confinement::spawn::{duplicate_inherited_descriptor, raise_open_file_limit};
 use codewire_daemon::client::SessionClient;
 use codewire_egress_broker::ipc::{BROKER_IPC_KEY_LEN, BROKER_IPC_SESSIONS};
 use codewire_vmm_guest_probe::{
@@ -58,7 +63,7 @@ use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
 #[cfg(target_os = "linux")]
 use crate::linux::confinement::{
     PreparedFilesystemDomain, install_identity_preserving_setgroups_filter,
-    lock_exec_process_privileges, lock_process_privileges, prepare_virtiofsd_filesystem_domain,
+    lock_exec_process_privileges, prepare_virtiofsd_filesystem_domain,
 };
 #[cfg(target_os = "linux")]
 use crate::linux::preflight::{PreflightError, PreflightReport, preflight};
@@ -95,16 +100,14 @@ use crate::state::{
 mod boot_seed;
 #[cfg(target_os = "linux")]
 mod checkpoint;
-mod egress_spawn;
 mod egress_status;
-mod inherited;
 mod intercept;
 
-use inherited::{INHERITED_SOURCE_FLOOR, duplicate_inherited_descriptor, raise_open_file_limit};
 pub use intercept::InterceptRefusal;
 pub(crate) use intercept::boot_intercepts;
 #[cfg(target_os = "linux")]
 mod cw_runtime_disk;
+mod egress_spawn;
 mod host_port_forward;
 mod stage_times;
 mod worker_descriptors;
@@ -4003,58 +4006,6 @@ fn egress_broker_exit_error(status: std::process::ExitStatus) -> RunnerError {
         )
 }
 
-#[cfg(target_os = "linux")]
-fn prepare_isolated_child(
-    expected_parent: libc::pid_t,
-    descriptors: &[(RawFd, RawFd)],
-) -> io::Result<()> {
-    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } == -1
-        || unsafe { libc::getppid() } != expected_parent
-    {
-        return Err(io::Error::last_os_error());
-    }
-    if unsafe {
-        libc::syscall(
-            libc::SYS_close_range,
-            3_u32,
-            u32::MAX,
-            libc::CLOSE_RANGE_CLOEXEC,
-        )
-    } != 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    inherit_descriptors(descriptors)?;
-    lock_process_privileges()
-}
-
-/// Place each (source, target) descriptor at its fixed number for the child.
-/// Sources are duplicated at [`INHERITED_SOURCE_FLOOR`] or above and every
-/// target is below it, so no target overwrites a source.
-fn inherit_descriptors(descriptors: &[(RawFd, RawFd)]) -> io::Result<()> {
-    let duplicate_target = descriptors.iter().enumerate().any(|(index, &(_, target))| {
-        descriptors[index + 1..]
-            .iter()
-            .any(|&(_, other)| other == target)
-    });
-    if duplicate_target
-        || descriptors.iter().any(|&(source, target)| {
-            source < INHERITED_SOURCE_FLOOR || target >= INHERITED_SOURCE_FLOOR
-        })
-    {
-        return Err(io::Error::from_raw_os_error(libc::EINVAL));
-    }
-    for &(source, target) in descriptors {
-        if source != target && unsafe { libc::dup2(source, target) } == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        if unsafe { libc::fcntl(target, libc::F_SETFD, 0) } == -1 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok(())
-}
-
 /// Darwin has no parent-death signal or privilege lock: the child exits with
 /// its parent on its own.
 #[cfg(target_os = "macos")]
@@ -5418,7 +5369,6 @@ impl RunnerError {
 
 #[cfg(test)]
 mod tests {
-    use super::inherited::NETWORK_ROLE_OPEN_FILE_LIMIT;
     use super::*;
     use crate::guest_loopback::tests::in_process_daemon;
     use crate::host_port::tests::{free_loopback_port, once_released};
@@ -5429,57 +5379,6 @@ mod tests {
     /// 2 s failed on slow CI slots that stalled I/O (#3239, #3277).
     const HANG_GUARD: Duration = Duration::from_secs(120);
 
-    /// #2638: a network role starts with at least 1024 open files, or its
-    /// hard limit, even from a process that has the macOS default of 256.
-    #[test]
-    fn network_roles_start_with_their_open_file_limit() {
-        let mut command = std::process::Command::new("/bin/sh");
-        command.args(["-c", "ulimit -Sn; ulimit -Hn"]);
-        // SAFETY: only getrlimit and setrlimit run between fork and exec.
-        unsafe {
-            std::os::unix::process::CommandExt::pre_exec(&mut command, || {
-                let mut limit = libc::rlimit {
-                    rlim_cur: 0,
-                    rlim_max: 0,
-                };
-                if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                limit.rlim_cur = limit.rlim_cur.min(256);
-                if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                raise_open_file_limit()
-            });
-        }
-        let output = command.output().unwrap();
-        assert!(output.status.success(), "{output:?}");
-        let text = String::from_utf8(output.stdout).unwrap();
-        let mut lines = text.lines();
-        let soft: u64 = lines.next().unwrap().parse().unwrap();
-        let hard = lines.next().unwrap();
-        let expected = match hard.parse::<u64>() {
-            Ok(hard) => hard.min(NETWORK_ROLE_OPEN_FILE_LIMIT),
-            Err(_) => NETWORK_ROLE_OPEN_FILE_LIMIT,
-        };
-        assert_eq!(soft, expected, "{text}");
-    }
-
-    #[test]
-    fn inherited_descriptors_must_sit_above_every_target() {
-        // A source below the floor, a target at or above it, or two sources
-        // for one target could be overwritten while descriptors are placed.
-        for descriptors in [
-            &[(9, 4)][..],
-            &[(70, INHERITED_SOURCE_FLOOR)],
-            &[(70, 4), (71, 4)],
-        ] {
-            assert_eq!(
-                inherit_descriptors(descriptors).unwrap_err().raw_os_error(),
-                Some(libc::EINVAL)
-            );
-        }
-    }
     use std::fs;
     use std::io::{Seek, SeekFrom, Write};
     use std::net::SocketAddrV4;
