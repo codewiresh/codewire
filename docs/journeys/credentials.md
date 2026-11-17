@@ -115,6 +115,8 @@ only what differs.
   it saves nothing and says so ("canceled; no credential was changed").
   Not yet observed.
 - **Profile:** `set codex NAME`.
+- **Stopped mid-refresh:** as for a Claude sign-in (section 6), #5177. Not
+  yet observed.
 - **Use:** `codex` in the environment. Expect Codex signed in with the
   ChatGPT plan (`/status`), a model answer through the broker, and Codex's
   `auth.json` holding no refresh token.
@@ -218,6 +220,10 @@ Issues: #4714 (local), #2559 (cloud).
   sign-in says to start again; Ctrl-C after pasting the code and before the
   save saves nothing and says so ("canceled; no credential was changed"),
   not yet observed.
+- **Stopped mid-refresh:** a local store whose authority stopped during the
+  sign-in's refresh (killed, a crash or a power loss) still opens, and
+  `cw credentials --local list` shows the sign-in refreshed, as it was, or
+  **Reconnect needed** (#5177). Not yet observed.
 - **Remove:** `cw` says the sign-in keeps working at Claude until it expires,
   or until you sign out of other sessions in Claude's settings.
 - **Gotchas:** after a `cw` update, the first local `connect claude` may

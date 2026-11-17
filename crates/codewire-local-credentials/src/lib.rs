@@ -3126,7 +3126,7 @@ fn fail_oauth_refresh(
         .execute(
             "UPDATE credentials
          SET status = 'refresh_failed', revocation_generation = ?2, updated_at_unix_ms = ?3
-         WHERE id = ?1 AND authentication_kind = 'oauth' AND status = 'active'
+         WHERE id = ?1 AND authentication_kind IN ('oauth', 'claude_sign_in') AND status = 'active'
            AND material_state = 'ready' AND revocation_generation = ?4
            AND material_generation = ?5 AND protected_entry_id = ?6",
             params![
@@ -3358,7 +3358,7 @@ fn promote_oauth_refresh<S: ProtectedStore>(
             "UPDATE credentials
              SET protected_entry_id = ?2, revocation_generation = ?3,
                  material_generation = ?4, updated_at_unix_ms = ?5
-             WHERE id = ?1 AND authentication_kind = 'oauth' AND status = 'active'
+             WHERE id = ?1 AND authentication_kind IN ('oauth', 'claude_sign_in') AND status = 'active'
                AND material_state = 'ready' AND revocation_generation = ?6
                AND material_generation = ?7 AND protected_entry_id = ?8",
             params![

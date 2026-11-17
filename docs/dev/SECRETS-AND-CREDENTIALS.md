@@ -276,6 +276,16 @@ imported. An expiring App login is refreshed by the environment's local broker
 with the client ID alone, serialized through the local refresh journal like
 Codex; the broker rereads the record for every request.
 
+A local store opens after a crash, a power loss or a stopped authority at any
+point of a refresh, for a Codex sign-in, a GitHub App login and a Claude
+sign-in alike (#5177). A refresh that was reserved but never started is
+dropped, and the credential stays as it was. One that started without a stored
+result is failed, because the provider may already have rotated the refresh
+token: the credential reads **Reconnect needed**, and the old refresh token is
+never sent again. One whose result was stored is published, as its commit
+would have done. A published refresh whose old material was not yet removed
+removes it.
+
 OAuth logins are personal. An organization may hold API keys and SSH keys,
 but never an OAuth credential: no Codex (ChatGPT) login, GitHub OAuth
 connection or GitHub App user connection. GitHub is each account's one

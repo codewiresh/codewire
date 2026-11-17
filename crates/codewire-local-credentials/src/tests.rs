@@ -3958,3 +3958,5 @@ fn move_default_away(authority: &LocalCredentialAuthority<TestProtectedStore>) {
             .is_default
     );
 }
+
+mod refresh_crash;
