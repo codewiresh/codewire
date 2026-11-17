@@ -1,0 +1,27 @@
+# zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this check has no secret, OIDC or write-capable integration and never uses its job token.
+name: GitHub App permissions
+
+# Once a day. Reads the public record of Codewire's GitHub App from GitHub,
+# with no credential, and fails when the App's permissions are not the three
+# the credential broker's GitHub route was reviewed for (#4926):
+# scripts/ci/verify/check-github-app-permissions.py. A day GitHub cannot be
+# read ends in a warning and `app-permissions: unread`, never a failure. No
+# dispatch: the check takes no input and names one fixed URL.
+on:
+  schedule:
+    - cron: '17 6 * * *'
+
+jobs:
+  read:
+    # zizmor: ignore[excessive-permissions] This job has no OIDC or secret and makes one unauthenticated read of a public GitHub record.
+    name: Read the GitHub App's permissions
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    timeout-minutes: 15
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Compare the App's permissions with the expected set
+        run: python3 -I -B scripts/ci/verify/check-github-app-permissions.py

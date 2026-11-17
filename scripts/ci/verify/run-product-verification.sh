@@ -777,6 +777,7 @@ run_ci_script_tests() {
   python3 -B scripts/ci/tests/test-last-scheduled-run.py
   python3 -I -B scripts/ci/tests/test-ci-done-measures.py
   python3 -I -B scripts/ci/tests/test-scan-credential-canaries.py
+  python3 -I -B scripts/ci/tests/test-check-github-app-permissions.py
   python3 -I -B scripts/ci/tests/test-render-terminal-svg.py
   python3 -I -B scripts/ci/tests/test-ci-job-plan.py
   scripts/ci/tests/test-service-ssh-image-verifier.sh

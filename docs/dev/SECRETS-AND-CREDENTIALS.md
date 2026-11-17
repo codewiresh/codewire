@@ -559,6 +559,15 @@ organization, built only from the validated login and numeric ID under the
 fixed `github.com` prefix. An enterprise installation has no such page and is
 only named: its owner accepts in the enterprise's own settings (#2712).
 
+The App itself must hold exactly those three permissions, because the GitHub
+route was reviewed for them and no others: `administration`, for one, would
+let a Sandbox create repositories through the managed credential. The App's
+settings live at GitHub, so a scheduled workflow
+(`.gitea/workflows/github-app-permissions.yaml`) reads the App's public record
+once a day, with no credential, and fails when the set differs, naming each
+difference. A day GitHub cannot be read ends in a warning and the line
+`app-permissions: unread` instead (#4926).
+
 - **Connect and reconnect** (the dashboard callback,
   `cw credentials --cloud connect github` and local
   `cw credentials connect github`) make the comparison with the new token. An

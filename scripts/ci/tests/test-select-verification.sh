@@ -1118,6 +1118,11 @@ run_paths_case credential_canary_scanner pull_request refs/pull/3999/head false 
   'policy security security_js' \
   scripts/ci/verify/scan-credential-canaries.py \
   scripts/ci/tests/test-scan-credential-canaries.py
+run_paths_case github_app_permissions pull_request refs/pull/4926/head false \
+  'policy security security_js' \
+  .gitea/workflows/github-app-permissions.yaml \
+  scripts/ci/verify/check-github-app-permissions.py \
+  scripts/ci/tests/test-check-github-app-permissions.py
 run_paths_case readme_recording_renderer pull_request refs/pull/4942/head false \
   'policy security security_js' \
   scripts/docs/render-terminal-svg.py \

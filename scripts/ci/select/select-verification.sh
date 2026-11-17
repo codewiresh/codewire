@@ -813,6 +813,7 @@ if [ "$event_selected" = false ]; then
       .gitea/workflows/ci.yaml|.gitea/workflows/manual-diagnostics.yaml|\
       .gitea/workflows/ci-start-latency.yaml|\
       .gitea/workflows/ci-done-measures.yaml|\
+      .gitea/workflows/github-app-permissions.yaml|\
       .gitea/workflows/test-archive-measure.yaml|\
       .gitea/workflows/build-runner-measure.yaml|\
       .gitea/workflows/rust-latest-canary.yaml|\
@@ -844,6 +845,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-ci-done-measures.py|\
       scripts/ci/verify/scan-credential-canaries.py|\
       scripts/ci/tests/test-scan-credential-canaries.py|\
+      scripts/ci/verify/check-github-app-permissions.py|\
+      scripts/ci/tests/test-check-github-app-permissions.py|\
       scripts/docs/render-terminal-svg.py|\
       scripts/ci/tests/test-render-terminal-svg.py|\
       scripts/ci/receipts/emit-verification-receipt.py|\
