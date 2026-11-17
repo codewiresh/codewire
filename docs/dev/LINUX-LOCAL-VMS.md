@@ -449,6 +449,58 @@ updater's VM hand-off (v0.3.389 and earlier) hands the state root to it
 while no local VM runs. While one does, it names them: select the newer cw
 again (`cw upgrade rollback`), stop them, then roll back.
 
+### Credentials after an upgrade
+
+The local credential service is a second long-lived process, apart from the
+supervisor, and it outlives an upgrade the same way. Each running VM's
+credential broker belongs to the service that started it, so the previous
+cw's service keeps serving while a local VM may run. It starts every broker
+from its own cw, and a broker serves only a runner that speaks the runner
+protocol it was built with. A service from another cw therefore cannot give
+a VM that this cw starts its credentials.
+
+- **Which service is another cw's.** A credential service reports the
+  runner protocol its brokers accept. This cw treats a running service as
+  another cw's when its own protocol is lower than this cw's, when the runner
+  protocol it reports is not this cw's, or when it reports none, as every cw
+  before #5238 does. The second case is an earlier cw's service after an
+  update, and a later cw's after `cw upgrade rollback`. The two protocols
+  have separate numbers, and one can change without the other; reading the
+  runner protocol from the service is what keeps a service whose brokers no
+  runner of this cw accepts from being taken for this cw's own. A service
+  whose own protocol is higher than this cw's is refused as before.
+- **When it is replaced.** Once none of your VMs may run, the next command
+  that boots or reconfigures a VM replaces that service by itself, without a
+  message, as it switches the supervisor.
+- **While a VM still runs,** a command that would start a VM with a
+  credential profile is refused before it changes anything. `cw update`
+  and a restart leave the VM they would have restarted running. The
+  command names the VMs that still run, and the command that stops one:
+
+  ```text
+  your local VMs dev, web keep your local credentials with the cw you updated from, which can't give a VM started by this cw its credentials; it switches to this cw once they stop (`cw --local stop NAME`)
+  ```
+
+  A VM with no credential profile starts as before.
+- **What the logs say.** When a helper process of a VM ends during a start,
+  the runner's log line for the failed start carries that process's exit
+  status. A start that failed because its credential broker never became
+  ready says so, and does not name whichever other helper ended first. A
+  broker that refuses its runner's protocol records both protocol numbers in
+  the credential service's broker log.
+
+**Not yet built** (#5238). Today a service counts as another cw's only
+by its own protocol number. v0.4.15 and v0.4.21 share that number while
+their runner protocols differ, so with v0.4.21 a service left running by
+v0.4.15 is never replaced, not even with every VM stopped. The first start
+that needs a credential broker then fails in the guest start as
+`environment_sources_guest_start_failed` or `start_guest_start_failed`, with
+`detail=egress_broker_exited` in the runner's log and no reason anywhere,
+and `cw update` leaves the VM stopped. From v0.4.22 the number differs, so
+after `cw --local stop NAME` the next start replaces the service. The
+journey step is `local-vm-upgrade-credentials` in
+`docs/journeys/local-vm-upgrade.md`.
+
 A VM keeps the guest kernel and root it was created with, so neither an upgrade
 nor a rollback moves it to another runtime. A VM created since that kernel
 gained fs-verity (6.18.48-codewire3) has ext4's `verity` feature on its state
@@ -492,6 +544,15 @@ for the workspace image (`ghcr.io/codewiresh/workspace`).
 **`your local VMs ... still run on the cw you updated from`**: see
 [After a cw upgrade](#after-a-cw-upgrade). Restart them on this cw with
 `cw upgrade --vms`, or stop them, then rerun the command.
+
+**`environment_sources_guest_start_failed` or `start_guest_start_failed`
+right after a cw upgrade, on a VM with a credential profile**, with
+`egress_broker_exited` in the runner's log: the credential service still
+running is another cw's, and its broker cannot serve this cw's runner
+(see [Credentials after an upgrade](#credentials-after-an-upgrade)). Stop
+every local VM (`cw --local stop NAME`) and start them again with v0.4.22 or
+later; the first start replaces the service. Until #5238 is built, nothing
+names this cause.
 
 **`Bus error`, or `execute selected workload runtime: I/O error`, from `cw` in a
 VM**, or `session exited with code 135` from the host: part of the guest's `cw`

@@ -43,6 +43,10 @@ restart as an unchecked checklist item beside the newer CLI, and
 `cw upgrade --cli --vms` upgrades and restarts them without asking; without a
 terminal or `--vms`, an upgrade only lists them and changes nothing.
 
+The local credential service outlives an upgrade too, and is replaced by
+the same rule; what a VM with a credential profile meets until then is in
+`docs/dev/LINUX-LOCAL-VMS.md`, "Credentials after an upgrade" (#5238).
+
 Or stop them when it suits you and run the command again. On a Mac a
 supervisor's exit stops its VMs, which is why the switch waits until none runs. `cw setup --local`
 waits the same way, because the previous supervisor would start its next VM

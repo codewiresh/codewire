@@ -14,6 +14,7 @@ Updated 2026-11-17.
 | ID | Linux | macOS |
 | --- | --- | --- |
 | `local-vm-runtime-upgrade` | observed working from v0.4.21 with #5088: the moved start with its line, the moved restart, the guest cw, the checkpoint listing, restore and fork refusals, the disk-snapshot fork and removal | observed working from v0.4.18 to a development build of the v0.4.22 candidate (df5ceafd0): the moved starts with their line, the moved restart, the guest cw, the disk-snapshot fork and removal; with #5088, a failed move retried |
+| `local-vm-upgrade-credentials` | not yet observed (#5238): failure observed from v0.4.15 to v0.4.21, 2026-11-17 | not yet observed |
 
 ## 1. `local-vm-runtime-upgrade`: an upgrade across a guest ABI change
 
@@ -179,3 +180,90 @@ installed runtime (orchestrator, 2026-11-15, recorded on #4980).
     The disk snapshot of the moved, stopped up-stop and its fork are in
     [snapshots-and-forks.md](snapshots-and-forks.md); `rm` of all worked.
     Observed working (#4980).
+
+## 2. `local-vm-upgrade-credentials`: credentials across an upgrade
+
+Issue: #5238. The spec is "Credentials after an upgrade" in
+`docs/dev/LINUX-LOCAL-VMS.md`.
+
+- **Entry points:** `cw upgrade`, or the installer for a named release. Then
+  `cw update --local ENV --profile`, `cw --local start`, `cw create --local
+  --profile` and `cw --local stop`.
+- **States to exercise:**
+  - a credential service left running by the earlier release, with no VM
+    running, then a start that needs a credential profile;
+  - the same service still serving while a VM runs under this `cw`: the
+    state of a `HOME` that passed through v0.4.21, which never replaced it.
+    A create with a profile, and an update of the running VM to a profile;
+  - a VM with no credential profile started while the earlier service still
+    serves;
+  - an upgrade between two releases with the same runner protocol, which
+    replaces nothing and refuses nothing;
+  - a credential service with no earlier release behind it (a fresh `HOME`).
+- **Driving it:**
+  - **No VM running**, the earlier release then the release under test, in a
+    scratch `HOME`:
+    1. With the earlier release: `cw credentials --local list`, which leaves
+       its credential service running.
+    2. With the release under test: `cw setup --local`, then
+       `cw create --local --name up-plain --no-file --no-profile --yes`. No
+       VM ran, so this replaces the service.
+    3. `cw credentials --local generate ssh --name up-key`,
+       `cw credentials --local --profile up set ssh up-key`, then
+       `cw update --local up-plain --profile local:up --yes`: it succeeds,
+       and `cw --local info up-plain` reads `running` with the profile.
+  - **A VM still running**, in a second scratch `HOME`, through v0.4.21:
+    4. With the earlier release (v0.4.15): `cw credentials --local list`.
+       With v0.4.21: `cw setup --local` and
+       `cw create --local --name up-keep --no-file --no-profile --yes`.
+       v0.4.21 leaves v0.4.15's service serving.
+    5. With the release under test, the key and profile of step 3, then
+       `cw update --local up-keep --profile local:up --yes`: refused, naming
+       up-keep to stop, and `cw --local info up-keep` still reads `running`
+       at the generation it had.
+    6. `cw --local stop up-keep`, then `cw --local start up-keep` and the
+       update again: it succeeds.
+  - Afterwards, in each `HOME`: `cw credentials --local delete up-key`, which
+    also removes the key from the operating system's keyring, and
+    `cw --local rm` of its VM.
+- **Proof:**
+  - after step 2 the credential service is the installed release's (its
+    process runs the installed `cw`), and after step 3 the credential
+    service's broker log has `broker_ready` for the VM's new generation;
+  - step 5 changes nothing: the VM keeps running, and the message names the
+    VM to stop. Where the release under test also has a newer supervisor
+    protocol than v0.4.21's, the supervisor's own refusal ("still run on the
+    cw you updated from") comes first and names the same stop; the proof of
+    the credential check is then the code's own test of it, cited here when
+    it lands;
+  - no start fails in the guest start for want of a credential broker. Where
+    one does fail for another reason, the runner's log line carries the exit
+    status of the helper that ended.
+- **Gotchas:**
+  - The earlier side must be a released build: a `cw` built from source has
+    no provenance.
+  - A scratch `HOME` does not isolate the operating system's keyring. Delete
+    the generated key by name.
+  - A first VM start from a scratch `HOME` can spend minutes in its network
+    step where the host firewall has no rule for that `cw`.
+- **Observed:**
+  - Linux, released v0.4.15 to released v0.4.21, 2026-11-17: failure
+    observed, the symptom #5238 fixes. v0.4.15's credential service was left
+    running; under v0.4.21 a VM created with no profile ran. `cw update
+    --local NAME --profile local:NAME --yes` failed with
+    `environment_sources_guest_start_failed` and left the VM stopped; `cw
+    start --local NAME` failed with `start_guest_start_failed`. The runner's
+    log read `detail=guest_workspace_failed` for the first and
+    `detail=egress_broker_exited guest_stage=runc_running daemon_ready=1`
+    for the second. The credential service's broker log read
+    `broker_not_ready … reason=lease_closed_before_ready … error=stage_runner.connect_kind_other`
+    four times. v0.4.21 did not replace the service with every VM stopped.
+    The same commands with v0.4.21 alone, in a fresh `HOME`, succeeded, with
+    `broker_ready` after 0.2 s.
+  - Linux, the same `HOME` continued with released v0.4.22, 2026-11-17:
+    `cw start --local NAME` was refused with "Your local VMs NAME still run
+    on the cw you updated from; this cw starts and changes local VMs once
+    they stop". After `cw --local stop NAME`, `cw --local start NAME`
+    replaced the credential service with v0.4.22's and the VM ran with its
+    profile. Observed working for that pair of releases; the steps as
+    written, and the logs' lines, are not yet observed (#5238).
