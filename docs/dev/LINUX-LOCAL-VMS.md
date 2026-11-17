@@ -418,7 +418,8 @@ memory and device state, so its processes continue after a restore or fork.
 `cw upgrade` stops your local VMs only when you choose their restart. The previous cw's local VM supervisor
 keeps serving them, and this cw uses it for everything that does not boot or
 reconfigure a VM: listing, `cw run`, `cw shell`, sessions and logs, stopping,
-removing and host ports. Starting, creating, restarting or resizing a VM,
+removing and host ports, and taking, listing and removing VM checkpoints.
+Starting, creating, restarting or resizing a VM, restoring a VM checkpoint,
 updating its sources and refreshing its skills need this cw's own supervisor.
 Once none of your VMs runs, the next such command switches over by itself,
 without a message, and installs this cw's runtime. While one still runs, the
@@ -428,6 +429,12 @@ command says so instead:
 your local VMs dev, web still run on the cw you updated from; this cw starts and changes local VMs once they stop (`cw --local stop NAME`)
 cw: restart them with `cw upgrade --vms`
 ```
+
+A restore is refused the same way before it stops the VM it would restore
+(#5243), so a refusal changes nothing. Once this cw's supervisor serves, a
+VM checkpoint taken under a runtime with another guest ABI is listed as
+unrestorable, with the reason; the previous cw, selected again while no VM
+runs, restores it (`docs/journeys/local-vm-upgrade.md`).
 
 At a terminal that command also offers to restart them now. To move them
 yourself, run `cw upgrade --vms`: it restarts the VMs that still run on the

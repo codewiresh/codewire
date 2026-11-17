@@ -2716,7 +2716,7 @@ pub(crate) async fn native_client() -> anyhow::Result<NativeSupervisorClient> {
 /// line while it may (supervisor_upgrade). A command that boots installs
 /// this cw's runtime only after this, so an older supervisor never starts a
 /// VM from it.
-async fn native_boot_client() -> anyhow::Result<NativeSupervisorClient> {
+pub(crate) async fn native_boot_client() -> anyhow::Result<NativeSupervisorClient> {
     match native_boot_client_here().await {
         Err(error) => Err(offer_restart_when_refused(error).await),
         client => client,

@@ -40,6 +40,20 @@ pub(crate) enum CheckpointCommand {
     Rm(CheckpointTargetArgs),
 }
 
+impl CheckpointCommand {
+    /// Whether the command boots a VM. After a cw upgrade such a command
+    /// needs this cw's own supervisor, and is refused while a VM still runs
+    /// on the previous cw's (`docs/dev/LINUX-LOCAL-VMS.md`, "After a cw
+    /// upgrade"). The others reach a VM or a checkpoint where it is, through
+    /// whichever supervisor serves.
+    fn boots_a_vm(&self) -> bool {
+        match self {
+            Self::Restore(_) => true,
+            Self::Create(_) | Self::Ls(_) | Self::Inspect(_) | Self::Rm(_) => false,
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct CheckpointRestoreArgs {
     #[arg(help = "The VM checkpoint, by name or ID")]
@@ -127,7 +141,13 @@ async fn handle_local_checkpoint_command(
             interception::with_switch_step(error, &status)
         }
     };
-    let mut client = native_client().await?;
+    // Taken before the restore looks at, asks about or stops anything, so a
+    // refusal after an upgrade changes nothing (#5243).
+    let mut client = if command.boots_a_vm() {
+        native_boot_client().await?
+    } else {
+        native_client().await?
+    };
     match command {
         CheckpointCommand::Create(args) => {
             // The supervisor names it by the UTC time when none is given.
@@ -629,6 +649,26 @@ mod tests {
         ));
         assert!(Probe::try_parse_from(["checkpoint", "restore"]).is_err());
         assert!(Probe::try_parse_from(["checkpoint", "create"]).is_err());
+    }
+
+    /// After a cw upgrade, only a restore needs this cw's own supervisor:
+    /// it boots a VM. Taking, listing, showing and removing a checkpoint
+    /// reach it where it is, also on the previous cw's supervisor (#5243).
+    #[test]
+    fn only_a_restore_boots_a_vm() {
+        let command = |arguments: &[&str]| Probe::try_parse_from(arguments).unwrap().command;
+        assert!(command(&["checkpoint", "restore", "c1", "--yes"]).boots_a_vm());
+        for served_where_it_is in [
+            &["checkpoint", "create", "app"][..],
+            &["checkpoint", "ls"],
+            &["checkpoint", "inspect", "c1"],
+            &["checkpoint", "rm", "c1"],
+        ] {
+            assert!(
+                !command(served_where_it_is).boots_a_vm(),
+                "{served_where_it_is:?}"
+            );
+        }
     }
 
     fn checkpoint() -> v1::Checkpoint {

@@ -35,6 +35,9 @@ installed runtime (orchestrator, 2026-11-15, recorded on #4980).
     is refused with the VM still running;
   - a VM checkpoint taken before the upgrade: listed, restored, forked
     (`cw create --local --checkpoint`), removed;
+  - a restore of that checkpoint while another environment still runs on
+    the earlier `cw`: refused as a start is, naming the environment to
+    stop, with the checkpoint's own environment left as it was (#5243);
   - a disk snapshot taken before the upgrade, then forked;
   - the earlier `cw` installed again, restoring that checkpoint;
   - an environment and its checkpoints removed after the upgrade without a
@@ -74,6 +77,9 @@ installed runtime (orchestrator, 2026-11-15, recorded on #4980).
     restores. Its boot assets are kept for that; the restore itself is to be
     observed;
   - a restart whose move can't be staged leaves the VM `running`;
+  - while an environment still runs on the earlier `cw`, `cw --local
+    checkpoint restore` is refused with the line a start gets, and nothing
+    is stopped or booted. Not yet observed (#5243);
   - in the moved VM, `cw` is the installed runtime's (`cw run --in up-walk
     --no-tty -- cw --version`): its runtime cache was rebuilt from the
     installed bootstrap. Not yet observed;
