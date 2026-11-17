@@ -12,7 +12,7 @@ Updated 2026-11-17.
 
 | ID | macOS 27 | macOS 26 |
 | --- | --- | --- |
-| `mac-vm-lifecycle` | observed on a development build of the v0.4.22 candidate (df5ceafd0); failure observed on v0.4.16 | observed on a development build of the #4478 fix |
+| `mac-vm-lifecycle` | observed on v0.4.22; failure observed on v0.4.16 | observed on a development build of the #4478 fix |
 | `mac-vm-refused-start` | refused create observed on a development build | not yet observed |
 | `mac-vm-cached-image` | observed on a development build of #5036 (e42e2f457) | not yet observed |
 | `mac-vm-mesh-ingress` | not yet observed | not yet observed |
@@ -115,6 +115,18 @@ Issues: #4478 (VMs did not start on macOS 27), #4370 (launch step 11).
     v0.4.18 VMs onto this runtime and forked a disk snapshot
     ([local-vm-upgrade.md](local-vm-upgrade.md),
     [snapshots-and-forks.md](snapshots-and-forks.md)).
+  - macOS 27.2.1, released v0.4.22, 2026-11-17, by cw-mac, in a scratch
+    `HOME`: the installer put v0.4.21 there and `cw upgrade --cli --version
+    v0.4.22` replaced it, so `cw setup --local` and the upgrade installed the
+    released runtimes. v0.4.22's VZ helper carries the release's Developer
+    ID signature (team PXQZM3GLP5, secure timestamp 2026-11-17) and passes
+    `codesign --verify --strict` against Apple's anchor. Steps 3 to 8
+    observed: the create took 55 s with the image cached; the shell opened
+    in `/workspace` and printed `aarch64`; the stop took 1.7 s and `ls` read
+    `stopped`; the start took 4.0 s and the command after it printed
+    `after-restart` with an uptime of 0 minutes; `rm` worked. A v0.4.21
+    create pulled the image in 221-277 s. Commands and outputs:
+    #4370, comment 112323.
 
 ## 2. `mac-vm-refused-start`: a VM macOS refuses to start says so
 

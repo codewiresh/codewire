@@ -25,8 +25,8 @@ are not observed.
 | `snap-manage` | `cw --cloud snapshot ls`, `inspect` and `rm` | observed 2026-11-13 with `v0.4.17` (#4370) | observed 2026-11-13 with `v0.4.18`, as the smoke identity (#4370) |
 | `snap-fork` | `cw --cloud create --snapshot`, one fork and `--count N` | `--count 3` observed 2026-11-13 with `v0.4.17` (#4370); one fork on its own not yet observed | `--count 3` observed 2026-11-13 with `v0.4.18`, as the smoke identity (#4370) |
 | `snap-fork-node-down` | a fork while the snapshot's node is unavailable | not yet observed (#4371) | not yet observed |
-| `snap-local` | `cw snapshot create`, `ls`, `inspect` and `rm` on a local VM (Linux or a Mac) | does not apply; a local VM observed on a pre-merge build (#3525) and on a Mac with the v0.4.22 candidate | does not apply |
-| `snap-local-fork` | `cw create --local --snapshot`, one fork and `--count N` | does not apply; a local VM observed on a pre-merge build (#3525); one fork on a Mac with the v0.4.22 candidate | does not apply |
+| `snap-local` | `cw snapshot create`, `ls`, `inspect` and `rm` on a local VM (Linux or a Mac) | does not apply; a local VM observed on a pre-merge build (#3525) and on a Mac with the v0.4.22 candidate; `create` and `rm` with v0.4.22 on Linux and on a Mac | does not apply |
+| `snap-local-fork` | `cw create --local --snapshot`, one fork and `--count N` | does not apply; a local VM observed on a pre-merge build (#3525); one fork on a Mac with the v0.4.22 candidate; with v0.4.22, one fork on Linux and `--count 2` on Linux and on a Mac | does not apply |
 | `snap-dashboard` | the organization's Snapshots page | hidden for launch (#4582) | hidden for launch (#4582) |
 
 ## Before any of these
@@ -319,7 +319,12 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     and fix; `cw snapshot ls` listed the snapshots again after their store
     was removed; `cw snapshot rm` of each left no snapshots. The pull request
     records no run date; it merged on 2026-10-26.
-  - A local VM with a released `cw`: not yet observed.
+  - A local VM with released v0.4.22, 2026-11-17, by cw-mac: on Linux, a
+    snapshot of a stopped VM in 0.28 s (`mode=reflink consistency=clean
+    disks=3`), and one taken under v0.4.21 kept after the upgrade; on macOS
+    27.2.1 in 1.01 s. `snapshot rm` worked on both; `ls` and `inspect` were
+    not run with the release. Commands and outputs: #4980, comment 112320,
+    #4370, comment 112323.
   - A local VM on macOS 27.2.1, a development build of the v0.4.22
     candidate df5ceafd0 and its runtime, 2026-11-17, by cw-mac: up-stop,
     moved from v0.4.18 ([local-vm-upgrade.md](local-vm-upgrade.md)) and
@@ -361,7 +366,11 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     and `--share-mounts`; a fork after the source was removed; `--cpu 1
     --memory 2GB`. The pull request records no run date; it merged on
     2026-10-26.
-  - A local VM with a released `cw`: not yet observed.
+  - A local VM with released v0.4.22, 2026-11-17, by cw-mac: on Linux,
+    `--count 2 --name-prefix lin-fork` in 19.1 s, and a fork of the snapshot
+    taken under v0.4.21 onto v0.4.22's runtime with the marker; on macOS
+    27.2.1, `--count 2 --name-prefix mac-fork` in 60.2 s, each with the
+    source's marker. Commands and outputs: #4980, comment 112320, #4370, comment 112323.
   - A local VM on macOS 27.2.1, the same build, 2026-11-17, by cw-mac:
     `cw create --local --snapshot v0422-snap --name snap-fork` in 8.5 s; the
     fork had the source's marker and its own machine ID, and still ran the

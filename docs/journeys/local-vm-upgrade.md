@@ -13,7 +13,7 @@ Updated 2026-11-17.
 
 | ID | Linux | macOS |
 | --- | --- | --- |
-| `local-vm-runtime-upgrade` | observed working from v0.4.21 with #5088: the moved start with its line, the moved restart, the guest cw, the checkpoint listing, restore and fork refusals, the disk-snapshot fork and removal | observed working from v0.4.18 to a development build of the v0.4.22 candidate (df5ceafd0): the moved starts with their line, the moved restart, the guest cw, the disk-snapshot fork and removal; with #5088, a failed move retried |
+| `local-vm-runtime-upgrade` | observed working from v0.4.21 to v0.4.22: the moved start with its line, `cw upgrade --vms`, the guest cw, the checkpoint listing, restore and fork refusals, the disk-snapshot fork and removal; a restore before the move is served by v0.4.21 (#5243) | observed working from v0.4.21 to v0.4.22: the moved start with its line, `cw upgrade --vms`, the moved restart, the guest cw, the disk-snapshot fork and removal; with #5088, a failed move retried |
 | `local-vm-upgrade-credentials` | not yet observed (#5238): failure observed from v0.4.15 to v0.4.21, 2026-11-17 | not yet observed |
 
 ## 1. `local-vm-runtime-upgrade`: an upgrade across a guest ABI change
@@ -180,6 +180,33 @@ installed runtime (orchestrator, 2026-11-15, recorded on #4980).
     The disk snapshot of the moved, stopped up-stop and its fork are in
     [snapshots-and-forks.md](snapshots-and-forks.md); `rm` of all worked.
     Observed working (#4980).
+  - Linux, released v0.4.21 to released v0.4.22 with `cw upgrade --cli
+    --version v0.4.22`, 2026-11-17, by cw-mac, each in a scratch `HOME` the
+    installer filled. With no VM running at the upgrade: `checkpoint ls`
+    listed `before` as `unrestorable`; `cw --local start up-walk` printed "!
+    Moved up-walk to this cw's VM runtime (guest seed 9 to 11, net none to
+    2); its 1 VM checkpoint from before can't be restored (`cw --local
+    checkpoint ls` lists it)" and booted in 114 s with the marker and the
+    VM's `cw v0.4.22`; restore and fork of `before` were refused naming the
+    earlier guest ABI and `cw --local checkpoint rm before`; the disk
+    snapshot taken under v0.4.21 forked onto v0.4.22 with the marker;
+    `checkpoint rm`, `snapshot rm` and `rm` worked. With a VM still running
+    at the upgrade, `upgrade` said so and named `cw upgrade --vms`; start,
+    the checkpoint fork and the snapshot fork were refused naming the
+    running VM, and `cw upgrade --vms` then moved both VMs
+    (`cw_runtime_move` twice) in 438 s, under a host load average of 45-60.
+    `cw --local checkpoint restore before` in that state was accepted and
+    served by v0.4.21's supervisor on its own runtime (#5243). Observed
+    working; commands and outputs on #4980, comment 112320.
+  - macOS 27.2.1, released v0.4.21 to released v0.4.22 the same way,
+    2026-11-17, by cw-mac. `cw --local start up-stop` printed "+ Moved
+    up-stop to this cw's VM runtime (guest seed 9 to 11, net none to 2)" and
+    booted in 63 s with the marker and the VM's `cw v0.4.22`. A VM running at
+    the upgrade was moved by `cw upgrade --vms` in 63 s with its marker, and
+    its restart then moved nothing. v0.4.21 refused a disk snapshot ("Local
+    disk snapshots need a Linux host for now"); v0.4.22's of a moved VM
+    worked ([snapshots-and-forks.md](snapshots-and-forks.md)). Observed
+    working; commands and outputs on #4370, comment 112323.
 
 ## 2. `local-vm-upgrade-credentials`: credentials across an upgrade
 
