@@ -69,6 +69,8 @@ struct ChildRecord {
     closed: Option<Duration>,
     /// How many earlier children's processes still existed when it spawned.
     predecessors_alive: Option<usize>,
+    /// The boot secrets it was started with.
+    boot_secrets: Option<crate::BrokerBootSecrets>,
 }
 
 /// Each spawn stands in for a broker child: a real process the authority
@@ -123,6 +125,7 @@ impl LocalBrokerProcessSpawner for RenewalSpawner {
         &self,
         config: &LocalBrokerProcessConfig,
         authority_peer: std::os::unix::net::UnixStream,
+        boot_secrets: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
         let attempt = {
             let mut attempts = self.attempts.lock().unwrap();
@@ -160,6 +163,7 @@ impl LocalBrokerProcessSpawner for RenewalSpawner {
                 config: Some(config.clone()),
                 spawned: Some(spawned),
                 predecessors_alive: Some(predecessors_alive),
+                boot_secrets: Some(boot_secrets.clone()),
                 ..Default::default()
             });
             children.len() - 1
@@ -276,6 +280,7 @@ impl Lifecycle {
                 local_profile: None,
                 renewal,
                 log: Arc::new(crate::broker_log::BrokerLog::in_root(directory.path())),
+                boot_secrets: boot_secrets(),
             }),
             shutdown_rx,
             state,
@@ -356,6 +361,40 @@ fn process_gone(pid: u32) -> bool {
     )
 }
 
+/// A boot's secrets, as the harness's launch carries them: one byte, so any
+/// copy of them is easy to find.
+const SECRET_BYTE: u8 = 0xc7;
+
+fn boot_secrets() -> crate::BrokerBootSecrets {
+    crate::BrokerBootSecrets::new([(
+        crate::BootSecretPurpose::FrontDoorPairing,
+        vec![SECRET_BYTE; crate::BOOT_SECRET_BYTES],
+    )])
+    .unwrap()
+}
+
+/// Whether any file under `root` holds the secret's bytes.
+fn secret_on_disk(root: &std::path::Path) -> bool {
+    let needle = [SECRET_BYTE; crate::BOOT_SECRET_BYTES];
+    let mut pending = vec![root.to_owned()];
+    while let Some(path) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if std::fs::read(&path)
+                .is_ok_and(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_successor_runs_before_its_predecessor_stops_and_no_request_meets_a_gap() {
     let lifecycle = Lifecycle::start_with(RenewalSpawner::new(BTreeSet::new()), SLOW_SLOT_RENEWAL);
@@ -364,7 +403,15 @@ async fn a_successor_runs_before_its_predecessor_stops_and_no_request_meets_a_ga
     lifecycle
         .until(|spawner| spawner.ready_count() >= 4 && spawner.closed(1))
         .await;
+    // Every child, each renewal's successor included, got the boot's secrets
+    // from memory, and nothing under the authority's root holds them (#3999).
+    assert!(!secret_on_disk(lifecycle.directory.path()));
     let (children, states) = lifecycle.stop().await;
+    assert!(
+        children
+            .iter()
+            .all(|child| child.boot_secrets == Some(boot_secrets()))
+    );
 
     // The lifecycle reported Running once and never Starting again until it
     // was told to stop: callers never saw a broker gap.

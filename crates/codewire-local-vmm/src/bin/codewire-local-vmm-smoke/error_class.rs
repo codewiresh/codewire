@@ -59,6 +59,7 @@ pub(crate) fn runner_error_class(error: &RunnerError) -> &'static str {
         RunnerError::EgressBrokerStartup(failure) => failure.code(),
         RunnerError::EgressBrokerWait => "egress-broker-wait",
         RunnerError::EgressBrokerKillTimeout => "egress-broker-kill-timeout",
+        RunnerError::FrontDoor(failure) => failure.code(),
         RunnerError::MeshTransportSpawn => "mesh-transport-spawn",
         RunnerError::MeshTransportStartTimeout => "mesh-transport-start-timeout",
         RunnerError::MeshTransportBootstrap => "mesh-transport-bootstrap",

@@ -89,10 +89,7 @@ impl EgressBrokerProcess {
     /// Take the front door's end of the hand-off socket. Once taken the
     /// runner holds no copy, so when the front door closes it the broker's
     /// sends fail at once; until then every intercepted dial is handed to it.
-    #[expect(
-        dead_code,
-        reason = "the front-door wiring takes it (#3999, the front-door PR)"
-    )]
+    #[cfg(target_os = "linux")]
     pub(super) fn take_front_door_handoff(&mut self) -> Option<OwnedFd> {
         self.front_door_handoff.take()
     }

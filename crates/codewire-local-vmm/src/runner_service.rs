@@ -4,12 +4,13 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::os::fd::{AsRawFd as _, OwnedFd};
+#[cfg(target_os = "linux")]
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as SyncMutex};
 
 use futures::Stream;
 use rand::{RngCore as _, rngs::OsRng};
@@ -65,7 +66,10 @@ const RUNNER_WATCH_BUFFER: usize = 8;
 // 13: StartVmRequest.cw_runtime_moved_from_generation lets a moved guest
 //     rebuild its runtime cache (#4980); an older runner would boot the move
 //     without it, and the guest would refuse the new bootstrap.
-pub(crate) const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 13;
+// 14: GetBootSecrets gives the supervisor an intercepting boot's secrets, and
+//     brokers pair with the front door on the boot's pairing secret, not the
+//     daemon token (#3999).
+pub(crate) const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 14;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =
@@ -87,6 +91,8 @@ pub struct RunnerEntrypointConfig {
 mod checkpoint;
 mod egress_status;
 mod exit_cause;
+mod generation_access;
+use generation_access::{GenerationAccessCell, GenerationAccessGuard, validate_generation_access};
 mod stage_log;
 mod start_error;
 mod start_request;
@@ -304,204 +310,40 @@ impl RunnerClient {
         validate_generation_access(environment_id, generation, &access)?;
         Ok(access)
     }
-}
 
-fn validate_generation_access(
-    environment_id: Uuid,
-    generation: u64,
-    access: &v1::DaemonAccess,
-) -> Result<(), Status> {
-    if access.hybrid_socket.len() > GENERATION_ACCESS_MAX_BYTES
-        || access.hybrid_socket.contains('\0')
-        || HybridVsockTarget::new(PathBuf::from(&access.hybrid_socket), access.guest_port).is_err()
-        || codewire_vmm_guest_probe::Seed::new(
-            environment_id,
-            generation,
-            access.guest_port,
-            access.generation_capability.clone(),
-        )
-        .is_err()
-    {
-        return Err(Status::failed_precondition(
-            "invalid runner generation transport",
-        ));
-    }
-    Ok(())
-}
-
-/// A second, short-held lock is intentional: startup retains the lifecycle
-/// mutex while install may need this transport. No VM mutation uses this cell.
-/// Its token is ephemeral and never Debug/serialized except the private reply.
-struct GenerationAccessCell {
-    environment_id: Uuid,
-    current: SyncMutex<GenerationAccessState>,
-}
-
-#[derive(Default)]
-struct GenerationAccessState {
-    retiring: bool,
-    access: Option<PublishedGenerationAccess>,
-}
-
-struct PublishedGenerationAccess {
-    generation: u64,
-    socket: String,
-    port: u32,
-    token: Zeroizing<String>,
-    liveness: OwnedFd,
-}
-
-struct GenerationAccessGuard {
-    cell: Arc<GenerationAccessCell>,
-    generation: u64,
-}
-
-impl GenerationAccessCell {
-    fn new(environment_id: Uuid) -> Arc<Self> {
-        Arc::new(Self {
-            environment_id,
-            current: SyncMutex::new(GenerationAccessState::default()),
-        })
-    }
-
-    fn retire(&self) {
-        // Publication, lookup, and this permanent revocation use one lock.
-        // No install/get can race a separate retirement flag and restore a
-        // capability after the lifecycle owner has begun retirement.
-        let mut current = self
-            .current
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        current.retiring = true;
-        current.access = None;
-    }
-
-    fn publish(self: &Arc<Self>, running: &RunningVm) -> Result<GenerationAccessGuard, Status> {
-        if running.vm_id() != self.environment_id {
-            return Err(Status::permission_denied("runner identity mismatch"));
-        }
-        let (socket, port, token) = running.daemon_access_parts();
-        let socket = socket
-            .to_str()
-            .ok_or_else(|| Status::internal("invalid runner transport path"))?;
-        let liveness = running
-            .duplicate_liveness_descriptor()
-            .map_err(|_| Status::internal("observe owned VMM liveness failed"))?;
-        self.install(
-            running.generation(),
-            v1::DaemonAccess {
-                hybrid_socket: socket.to_owned(),
-                guest_port: port,
-                generation_capability: token.to_owned(),
-            },
-            liveness,
-        )
-    }
-
-    fn install(
-        self: &Arc<Self>,
+    /// The boot secrets of `environment_id`'s current `generation`, for an
+    /// intercepting boot (#3999). Each is exactly one known purpose's 32
+    /// bytes, or the answer is refused.
+    pub async fn boot_secrets(
+        &mut self,
+        environment_id: Uuid,
         generation: u64,
-        access: v1::DaemonAccess,
-        liveness: OwnedFd,
-    ) -> Result<GenerationAccessGuard, Status> {
-        validate_generation_access(self.environment_id, generation, &access)?;
-        if !generation_process_alive(&liveness) {
-            return Err(Status::failed_precondition("runner generation is not live"));
+    ) -> Result<Vec<v1::BootSecret>, Status> {
+        let mut client = self
+            .inner
+            .clone()
+            .max_decoding_message_size(GENERATION_ACCESS_MAX_BYTES);
+        let secrets = tokio::time::timeout(
+            GENERATION_ACCESS_TIMEOUT,
+            client.get_boot_secrets(v1::GetBootSecretsRequest {
+                environment_id: environment_id.to_string(),
+                generation,
+            }),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("runner boot secrets timed out"))??
+        .into_inner()
+        .secrets;
+        let valid = !secrets.is_empty()
+            && secrets.iter().all(|secret| {
+                secret.value.len() == crate::runner::BOOT_SECRET_BYTES
+                    && secret.purpose == v1::BootSecretPurpose::FrontDoorPairing as i32
+            });
+        if !valid {
+            return Err(Status::internal("runner returned invalid boot secrets"));
         }
-        let mut current = self
-            .current
-            .lock()
-            .map_err(|_| Status::unavailable("runner generation access unavailable"))?;
-        if current.retiring {
-            return Err(Status::failed_precondition("runner is retiring"));
-        }
-        if current.access.is_some() {
-            return Err(Status::failed_precondition(
-                "runner generation access already owned",
-            ));
-        }
-        current.access = Some(PublishedGenerationAccess {
-            generation,
-            socket: access.hybrid_socket,
-            port: access.guest_port,
-            token: Zeroizing::new(access.generation_capability),
-            liveness,
-        });
-        Ok(GenerationAccessGuard {
-            cell: Arc::clone(self),
-            generation,
-        })
+        Ok(secrets)
     }
-
-    fn get(&self, environment_id: Uuid, generation: u64) -> Result<v1::DaemonAccess, Status> {
-        if environment_id != self.environment_id {
-            return Err(Status::permission_denied("runner identity mismatch"));
-        }
-        if generation == 0 {
-            return Err(Status::invalid_argument(
-                "invalid runner generation identity",
-            ));
-        }
-        let mut current = self
-            .current
-            .lock()
-            .map_err(|_| Status::unavailable("runner generation access unavailable"))?;
-        if current.retiring {
-            return Err(Status::failed_precondition("runner is retiring"));
-        }
-        let access = current
-            .access
-            .as_ref()
-            .ok_or_else(|| Status::failed_precondition("runner generation access unavailable"))?;
-        if access.generation != generation {
-            return Err(Status::failed_precondition(
-                "runner generation does not match",
-            ));
-        }
-        if !generation_process_alive(&access.liveness) {
-            current.access = None;
-            return Err(Status::failed_precondition("runner generation is not live"));
-        }
-        Ok(v1::DaemonAccess {
-            hybrid_socket: access.socket.clone(),
-            guest_port: access.port,
-            generation_capability: access.token.to_string(),
-        })
-    }
-}
-
-impl GenerationAccessGuard {
-    fn revoke(&self) {
-        let mut current = self
-            .cell
-            .current
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if current
-            .access
-            .as_ref()
-            .is_some_and(|access| access.generation == self.generation)
-        {
-            current.access = None;
-        }
-    }
-}
-
-impl Drop for GenerationAccessGuard {
-    fn drop(&mut self) {
-        self.revoke();
-    }
-}
-
-fn generation_process_alive(liveness: &OwnedFd) -> bool {
-    let mut descriptor = libc::pollfd {
-        fd: liveness.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: one owned pidfd pins the process birth. Zero-timeout poll never
-    // waits on lifecycle state; exit, descriptor errors and interruption deny.
-    unsafe { libc::poll(&mut descriptor, 1, 0) == 0 && descriptor.revents == 0 }
 }
 
 fn runner_protocol_info_rpc_error(status: Status) -> RunnerServiceError {
@@ -1785,6 +1627,9 @@ impl EnvironmentRunnerService for RunnerRpc {
             hybrid_socket: socket.to_string_lossy().into_owned(),
             guest_port,
             generation_capability: capability.to_owned(),
+            // Only a credential broker pairs with the front door, through
+            // the generation access.
+            front_door_socket: String::new(),
         }))
     }
 
@@ -1801,13 +1646,17 @@ impl EnvironmentRunnerService for RunnerRpc {
             .map(Response::new)
     }
 
-    /// No boot mints secrets yet (#3999), so every request gets the answer
-    /// for a boot that does not intercept.
     async fn get_boot_secrets(
         &self,
-        _request: Request<v1::GetBootSecretsRequest>,
+        request: Request<v1::GetBootSecretsRequest>,
     ) -> Result<Response<v1::GetBootSecretsResponse>, Status> {
-        Err(Status::failed_precondition("no boot secrets"))
+        let request = request.into_inner();
+        let environment_id = parse_environment_id(&request.environment_id)
+            .map_err(|_| Status::failed_precondition("no boot secrets"))?;
+        // The same owner-only seam as generation access, never self.state.
+        self.generation_access
+            .boot_secrets(environment_id, request.generation)
+            .map(Response::new)
     }
 }
 
@@ -2187,6 +2036,7 @@ impl RunnerServiceError {
 
 #[cfg(test)]
 mod tests {
+    use std::os::fd::OwnedFd;
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::atomic::AtomicUsize;
 
@@ -2211,6 +2061,7 @@ mod tests {
             hybrid_socket: socket.to_str().unwrap().into(),
             guest_port: 7_777,
             generation_capability: PROGRESS_TOKEN.into(),
+            front_door_socket: String::new(),
         };
         (parent, listener, access)
     }
@@ -2472,6 +2323,51 @@ mod tests {
         assert!(cell.get(environment_id, 1).is_err());
         drop(second);
         assert!(cell.get(environment_id, 2).is_err());
+    }
+
+    /// Only the current generation of an intercepting boot has boot secrets,
+    /// and every other request gets the same answer naming nothing (#3999).
+    /// The daemon access never carries them.
+    #[test]
+    fn boot_secrets_answer_only_the_current_intercepting_generation() {
+        let (_parent, _listener, access) = bootstrap_access();
+        let environment_id = Uuid::new_v4();
+        let secret = Zeroizing::new(vec![0x6b; crate::runner::BOOT_SECRET_BYTES]);
+        let pairing = v1::BootSecretPurpose::FrontDoorPairing as i32;
+        let cell = GenerationAccessCell::new(environment_id);
+        let plain = cell
+            .install(1, access.clone(), current_process_liveness())
+            .unwrap();
+        let refused = cell.boot_secrets(environment_id, 1).unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        plain.revoke();
+        drop(plain);
+
+        let _intercepting = cell
+            .install_with_secrets(
+                2,
+                access.clone(),
+                vec![(pairing, secret.clone())],
+                current_process_liveness(),
+            )
+            .unwrap();
+        let answered = cell.boot_secrets(environment_id, 2).unwrap().secrets;
+        assert_eq!(answered.len(), 1);
+        assert_eq!(
+            (answered[0].purpose, &answered[0].value),
+            (pairing, &*secret)
+        );
+        for (environment, generation) in [
+            (Uuid::new_v4(), 2),
+            (environment_id, 1),
+            (environment_id, 3),
+        ] {
+            let other = cell.boot_secrets(environment, generation).unwrap_err();
+            assert_eq!(other.message(), refused.message());
+        }
+        let daemon_access = format!("{:?}", cell.get(environment_id, 2).unwrap());
+        assert!(!daemon_access.contains("107, 107"));
+        assert!(!format!("{answered:?}").contains("107"));
     }
 
     #[test]
@@ -3075,6 +2971,18 @@ mod tests {
             },
             v1::DaemonAccess {
                 generation_capability: "invalid\ntoken".into(),
+                ..access.clone()
+            },
+            v1::DaemonAccess {
+                front_door_socket: "relative/front-door.sock".into(),
+                ..access.clone()
+            },
+            v1::DaemonAccess {
+                front_door_socket: "/invalid\0front-door.sock".into(),
+                ..access.clone()
+            },
+            v1::DaemonAccess {
+                front_door_socket: format!("/{}", "x".repeat(GENERATION_ACCESS_MAX_BYTES)),
                 ..access.clone()
             },
         ] {

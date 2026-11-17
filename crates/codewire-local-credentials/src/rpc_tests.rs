@@ -251,6 +251,7 @@ impl LocalBrokerProcessSpawner for TestBrokerSpawner {
         &self,
         config: &LocalBrokerProcessConfig,
         authority_peer: std::os::unix::net::UnixStream,
+        _boot_secrets: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
         self.launches
             .lock()
@@ -2142,6 +2143,7 @@ impl LocalBrokerProcessSpawner for RunnerGoneBrokerSpawner {
         &self,
         config: &LocalBrokerProcessConfig,
         authority_peer: std::os::unix::net::UnixStream,
+        _boot_secrets: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
         let child = tokio::process::Command::new("/bin/sleep")
             .arg("60")

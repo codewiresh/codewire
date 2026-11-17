@@ -599,6 +599,8 @@ request adds.
     changed;
   - a local VM whose credentials come from the platform rather than the
     local store;
+  - a VM started while a credential authority older than boot secrets is
+    still running;
   - the front door unable to start, and the credential broker never
     connecting to it.
 - **Driving it:** no command yet (#3999). With the switch on and the VM
@@ -640,6 +642,17 @@ request adds.
     `NODE_EXTRA_CA_CERTS`, and its agents use today's routes. It never boots
     trusting an authority that nothing serves. This holds until that route
     carries interception (#3999);
+  - **only the boot's pairing secret pairs a credential broker with the
+    front door** (#3999). The runner mints it for the boot and keeps it in
+    memory; the credential authority hands it to each broker, successors
+    included, on an inherited descriptor. It is never in the seed, a file, an
+    argument, the environment or a log, and the daemon token, which the VM
+    knows, is refused;
+  - a VM started while a credential authority older than boot secrets runs
+    starts without interception, as with the switch off, and the
+    supervisor's log gives the reason
+    (`skipped=authority_predates_boot_secrets`). It never reports
+    interception on when its broker could not pair;
   - **a restore with interception on at both ends is allowed, and the
     restored boot trusts its own new authority** (#4809, #4884). The trust
     files are replaced from the restored boot's seed before the workload
@@ -1104,17 +1117,24 @@ Issues: #3999, #4001.
 - **Entry points:** none for a user. An operator ends the environment's front
   door process, or the credential broker.
 - **States to exercise:** the front door killed while an agent runs; the
-  credential broker killed; either one missing when the environment starts.
+  credential broker killed; the credential broker's routine renewal, every
+  600 seconds; either one missing when the environment starts.
 - **Driving it:** no command yet (#3999, #4001).
 - **Proof:**
-  - after either ends, a request to an intercepted host fails at once, and
-    no connection leaves for that host from the egress broker;
+  - after the front door ends, or while no credential broker is paired with
+    it, a request to an intercepted host fails at once, and no connection
+    leaves for that host from the egress broker;
   - other destinations keep following the network policy;
-  - a credential broker that restarts within a boot does not bring
-    interception back: requests to intercepted hosts keep failing, the
-    runner's log records the front door's exit, and a stop and start
-    restores it. The restarted broker refuses to deliver a login rather
-    than hand the VM the real one;
+  - **a credential broker replaced by its successor keeps interception**
+    (#3999, #4884): the successor pairs again with the same front door, a
+    request in flight on the predecessor is answered, and later requests are
+    served with the same placeholder and the same authority. A broker the
+    authority restarts after a crash pairs the same way. Only the runner's
+    end, or the front door's exit, ends interception for the boot, and the
+    runner's log records the front door's exit; a stop and start restores
+    it;
+  - a credential broker that finds no front door to pair with refuses to
+    deliver a login rather than hand the VM the real one;
   - an environment whose front door cannot start does not start with
     interception half on: it reports the failure, and a stop and start
     restores it.

@@ -28,6 +28,8 @@ tracing-subscriber = { workspace = true }
 axum = { workspace = true }
 buffa = { workspace = true }
 codewire-client = { workspace = true }
+codewire-credential-bridge = { workspace = true }
+codewire-daemon-proto = { workspace = true }
 codewire-derp = { workspace = true }
 codewire-egress-broker = { workspace = true }
 codewire-egress-policy = { workspace = true }
@@ -41,9 +43,14 @@ connectrpc = { workspace = true, features = ["client"] }
 futures = { workspace = true }
 libc = "0.2"
 rand = { workspace = true }
+rustix = { workspace = true, features = ["net"] }
+# The front door's own ring-only Rustls, for a client that trusts only the
+# environment CA.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
 tonic = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }

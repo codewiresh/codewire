@@ -42,6 +42,9 @@ pub struct VmPaths {
     pub api_socket: PathBuf,
     pub vsock_dir: PathBuf,
     pub vsock_socket: PathBuf,
+    /// The private socket the credential broker pairs with the front door
+    /// through (#3999); bound only while a boot waits for that pairing.
+    pub front_door_socket: PathBuf,
     /// Direct-share daemons' sockets, and the pid files virtiofsd writes
     /// beside them.
     pub virtiofs_dir: PathBuf,
@@ -86,9 +89,11 @@ impl VmPaths {
         let checkpoints_dir = vm_dir.join(CHECKPOINTS_DIRECTORY);
         let api_socket = api_dir.join("api.sock");
         let vsock_socket = vsock_dir.join(VSOCK_SOCKET_NAME);
+        let front_door_socket = sockets_dir.join("front-door.sock");
         for socket in [
             &api_socket,
             &vsock_socket,
+            &front_door_socket,
             &virtiofs_dir.join(direct_share_pid_file_name(MAX_DIRECT_SHARES - 1)),
         ] {
             crate::socket_dir::check_length(socket)?;
@@ -96,6 +101,7 @@ impl VmPaths {
         Ok(Self {
             api_socket,
             vsock_socket,
+            front_door_socket,
             virtiofs_dir,
             sockets_dir,
             state_disk: disks_dir.join("state.raw"),

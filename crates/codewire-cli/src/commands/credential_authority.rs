@@ -476,11 +476,14 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
         &self,
         config: &LocalBrokerProcessConfig,
         authority_peer: std::os::unix::net::UnixStream,
+        boot_secrets: &codewire_local_credentials::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
         let authority_fd = authority_peer.as_raw_fd();
         if authority_fd < 3 {
             return Err(LocalBrokerSpawnError::InvalidConfiguration);
         }
+        let boot_secrets = boot_secret_descriptor(boot_secrets)?;
+        let secrets_fd = boot_secrets.as_ref().map(|secrets| secrets.as_raw_fd());
         let parent_pid = unsafe { libc::getpid() };
         let allowed_environment = authority_environment(|name| env::var_os(name));
         let mut command = tokio::process::Command::new(&self.executable);
@@ -513,10 +516,16 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
         if config.network_policy_allows_github {
             command.arg("--network-policy-allows-github");
         }
+        if secrets_fd.is_some() {
+            command
+                .arg("--boot-secrets-fd")
+                .arg(BOOT_SECRETS_FD.to_string());
+        }
         // SAFETY: this post-fork hook uses scalar libc operations only. It
-        // transfers one authority-created socket to fixed FD 3, marks every
-        // other inherited descriptor close-on-exec, removes capabilities,
-        // disables dumps, and binds child death to the exact authority parent.
+        // transfers one authority-created socket to fixed FD 3, and a boot's
+        // secrets, when it has any, to fixed FD 4, marks every other inherited
+        // descriptor close-on-exec, removes capabilities, disables dumps, and
+        // binds child death to the exact authority parent.
         unsafe {
             command.pre_exec(move || {
                 confine_spawned_process()?;
@@ -536,9 +545,17 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
                 } else if libc::dup3(authority_fd, 3, 0) < 0 {
                     return Err(io::Error::last_os_error());
                 }
+                // After FD 3: the secrets' descriptor is above it, so the
+                // move to 3 never overwrites it.
+                if let Some(secrets_fd) = secrets_fd
+                    && libc::dup3(secrets_fd, BOOT_SECRETS_FD, 0) < 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                let first_closed = if secrets_fd.is_some() { 5_u32 } else { 4_u32 };
                 if libc::syscall(
                     libc::SYS_close_range,
-                    4_u32,
+                    first_closed,
                     u32::MAX,
                     libc::CLOSE_RANGE_CLOEXEC,
                 ) != 0
@@ -549,8 +566,38 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
                 Ok(())
             });
         }
-        command.spawn().map_err(|_| LocalBrokerSpawnError::Spawn)
+        let child = command.spawn().map_err(|_| LocalBrokerSpawnError::Spawn);
+        // The authority keeps no open end once the child has its own.
+        drop(boot_secrets);
+        child
     }
+}
+
+/// The descriptor a broker child inherits a boot's secrets at (#3999).
+#[cfg(target_os = "linux")]
+pub(super) const BOOT_SECRETS_FD: i32 = 4;
+
+/// A boot's secrets as the read end of a socket pair whose write end is
+/// already closed, placed above every descriptor the spawn moves, or none
+/// for a boot without secrets. The records never touch a file.
+#[cfg(target_os = "linux")]
+fn boot_secret_descriptor(
+    secrets: &codewire_local_credentials::BrokerBootSecrets,
+) -> Result<Option<std::os::fd::OwnedFd>, LocalBrokerSpawnError> {
+    use std::io::Write as _;
+    if secrets.is_empty() {
+        return Ok(None);
+    }
+    let (mut writer, reader) =
+        std::os::unix::net::UnixStream::pair().map_err(|_| LocalBrokerSpawnError::Spawn)?;
+    writer
+        .write_all(&secrets.records())
+        .map_err(|_| LocalBrokerSpawnError::Spawn)?;
+    drop(writer);
+    let reader = std::os::fd::OwnedFd::from(reader);
+    let raised = rustix::io::fcntl_dupfd_cloexec(&reader, BOOT_SECRETS_FD + 1)
+        .map_err(|_| LocalBrokerSpawnError::Spawn)?;
+    Ok(Some(raised))
 }
 
 #[cfg(target_os = "linux")]

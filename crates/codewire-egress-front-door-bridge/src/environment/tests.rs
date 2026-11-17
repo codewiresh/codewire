@@ -48,6 +48,8 @@ struct Running {
     handoff: HandoffSender,
     host: FrontDoorHostSession,
     door: tokio::task::JoinHandle<Ended>,
+    /// Where a successor broker's session reaches the front door.
+    successors: tokio::sync::mpsc::Sender<tokio::net::UnixStream>,
     next_stream: u64,
 }
 
@@ -67,26 +69,16 @@ impl Running {
         configure(&door_handoff);
         let handoff = HandoffSender::new(handoff).unwrap();
         let (door_credentials, credentials) = tokio::net::UnixStream::pair().unwrap();
-        let door = tokio::spawn(door.serve(door_handoff, door_credentials));
-        let identity = BridgeIdentity {
-            environment_id,
-            environment_generation: GENERATION,
-        };
-        let mut host = bounded(FrontDoorHostSession::open(
-            credentials,
-            identity,
-            &codewire_credential_bridge::front_door_capabilities(true),
-        ))
-        .await
-        .unwrap();
-        let ready = bounded(host.receive()).await.unwrap().unwrap();
-        assert!(matches!(ready.payload, Some(GuestPayload::Ready(_))));
+        let (successors, later) = tokio::sync::mpsc::channel(4);
+        let door = tokio::spawn(door.serve(door_handoff, door_credentials, later));
+        let host = open_host(credentials, environment_id).await;
         Self {
             environment_id,
             ca,
             handoff,
             host,
             door,
+            successors,
             next_stream: 1,
         }
     }
@@ -142,9 +134,9 @@ impl Running {
         .await
     }
 
-    /// One request through a fresh handed-over stream: what reached the
-    /// credential broker, and the response the guest read.
-    async fn request(&mut self) -> (v1::CredentialBridgeRequest, StatusCode, Bytes) {
+    /// Start one request through a fresh handed-over stream. The task ends
+    /// with the status and body the guest read, once a broker answers.
+    async fn start_request(&mut self) -> tokio::task::JoinHandle<(StatusCode, Bytes)> {
         let stream = self.own_stream(BOUND);
         let tls = self.tls(stream, BOUND).await.expect("handshake");
         let (mut sender, connection) =
@@ -152,49 +144,94 @@ impl Running {
                 .await
                 .unwrap();
         tokio::spawn(connection);
-        let response = tokio::spawn(
-            sender.send_request(
-                Request::post("/v1/responses")
-                    .header("host", BOUND)
-                    .header("content-type", "application/json")
-                    .body(Full::new(Bytes::from_static(b"{}")))
-                    .unwrap(),
-            ),
-        );
-        let Some(GuestPayload::Request(seen)) =
-            bounded(self.host.receive()).await.unwrap().unwrap().payload
-        else {
-            panic!("expected a request at the credential broker");
-        };
-        let sender = self.host.sender();
-        for payload in [
-            HostPayload::ResponseStart(v1::CredentialBridgeResponseStart {
-                request_id: seen.request_id.clone(),
-                status_code: 200,
-                headers: Vec::new(),
-            }),
-            HostPayload::ResponseBody(v1::CredentialBridgeResponseBody {
-                request_id: seen.request_id.clone(),
-                data: b"answered".to_vec(),
-            }),
-            HostPayload::ResponseEnd(v1::CredentialBridgeResponseEnd {
-                request_id: seen.request_id.clone(),
-            }),
-        ] {
-            sender
-                .send(v1::CredentialBridgeHostMessage {
-                    payload: Some(payload),
-                })
+        tokio::spawn(async move {
+            let response = sender
+                .send_request(
+                    Request::post("/v1/responses")
+                        .header("host", BOUND)
+                        .header("content-type", "application/json")
+                        .body(Full::new(Bytes::from_static(b"{}")))
+                        .unwrap(),
+                )
                 .await
                 .unwrap();
-        }
-        let response = bounded(response).await.unwrap().unwrap();
-        let status = response.status();
-        let body = bounded(response.into_body().collect())
-            .await
-            .unwrap()
-            .to_bytes();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            (status, body)
+        })
+    }
+
+    /// One request through a fresh handed-over stream: what reached the
+    /// credential broker, and the response the guest read.
+    async fn request(&mut self) -> (v1::CredentialBridgeRequest, StatusCode, Bytes) {
+        let response = self.start_request().await;
+        let seen = received(&mut self.host).await;
+        answer(&self.host, &seen.request_id).await;
+        let (status, body) = bounded(response).await.unwrap();
         (seen, status, body)
+    }
+
+    /// A successor broker pairs: its session reaches the front door, which
+    /// answers its Open.
+    async fn successor(&self) -> FrontDoorHostSession {
+        let (door_credentials, credentials) = tokio::net::UnixStream::pair().unwrap();
+        self.successors.try_send(door_credentials).unwrap();
+        open_host(credentials, self.environment_id).await
+    }
+}
+
+async fn open_host(
+    credentials: tokio::net::UnixStream,
+    environment_id: Uuid,
+) -> FrontDoorHostSession {
+    let identity = BridgeIdentity {
+        environment_id,
+        environment_generation: GENERATION,
+    };
+    let mut host = bounded(FrontDoorHostSession::open(
+        credentials,
+        identity,
+        &codewire_credential_bridge::front_door_capabilities(true),
+    ))
+    .await
+    .unwrap();
+    let ready = bounded(host.receive()).await.unwrap().unwrap();
+    assert!(matches!(ready.payload, Some(GuestPayload::Ready(_))));
+    host
+}
+
+/// The next request the front door sent to `host`.
+async fn received(host: &mut FrontDoorHostSession) -> v1::CredentialBridgeRequest {
+    let Some(GuestPayload::Request(seen)) = bounded(host.receive()).await.unwrap().unwrap().payload
+    else {
+        panic!("expected a request at the credential broker");
+    };
+    seen
+}
+
+/// Answer `request_id` on `host` with 200 and `answered`.
+async fn answer(host: &FrontDoorHostSession, request_id: &str) {
+    let sender = host.sender();
+    for payload in [
+        HostPayload::ResponseStart(v1::CredentialBridgeResponseStart {
+            request_id: request_id.to_owned(),
+            status_code: 200,
+            headers: Vec::new(),
+        }),
+        HostPayload::ResponseBody(v1::CredentialBridgeResponseBody {
+            request_id: request_id.to_owned(),
+            data: b"answered".to_vec(),
+        }),
+        HostPayload::ResponseEnd(v1::CredentialBridgeResponseEnd {
+            request_id: request_id.to_owned(),
+        }),
+    ] {
+        sender
+            .send(v1::CredentialBridgeHostMessage {
+                payload: Some(payload),
+            })
+            .await
+            .unwrap();
     }
 }
 
@@ -256,15 +293,79 @@ async fn the_front_door_stops_when_the_broker_closes_the_handoff_socket() {
     ));
 }
 
-/// Killing the credential side fails closed: the front door stops, and with
-/// it the hand-off socket, so the broker's next hand-off finds no one.
+/// The credential authority replaces a generation's broker every few
+/// minutes (#3999). Its successor's session takes every new request while
+/// the first finishes the one already sent on it, and once the first is gone
+/// requests are still served: the renewal keeps interception, with the same
+/// front door, CA and bindings.
 #[tokio::test]
-async fn the_front_door_stops_when_its_credential_session_ends() {
-    let running = Running::start(&[BOUND]).await;
+async fn a_renewed_broker_keeps_interception_and_the_first_finishes_its_request() {
+    let mut running = Running::start(&[BOUND]).await;
+    let in_flight = running.start_request().await;
+    let first_seen = received(&mut running.host).await;
+
+    let mut successor = running.successor().await;
+    let next = running.start_request().await;
+    let next_seen = received(&mut successor).await;
+    answer(&running.host, &first_seen.request_id).await;
+    assert_eq!(bounded(in_flight).await.unwrap().0, StatusCode::OK);
+    answer(&successor, &next_seen.request_id).await;
+    assert_eq!(bounded(next).await.unwrap().0, StatusCode::OK);
+
+    drop(std::mem::replace(&mut running.host, successor));
+    let after = running.start_request().await;
+    let after_seen = received(&mut running.host).await;
+    answer(&running.host, &after_seen.request_id).await;
+    assert_eq!(
+        bounded(after).await.unwrap(),
+        (StatusCode::OK, Bytes::from("answered"))
+    );
+    assert!(!running.door.is_finished());
+}
+
+/// A session that ends with no successor stops nothing: the front door keeps
+/// the hand-off socket, so no dial falls back to a direct path, and the next
+/// broker to pair serves again.
+#[tokio::test]
+async fn a_broker_gone_without_a_successor_leaves_the_front_door_for_the_next() {
+    let mut running = Running::start(&[BOUND]).await;
     drop(running.host);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!running.door.is_finished());
+    let (door_credentials, credentials) = tokio::net::UnixStream::pair().unwrap();
+    running.successors.try_send(door_credentials).unwrap();
+    running.host = open_host(credentials, running.environment_id).await;
+    let (_, status, body) = running.request().await;
+    assert_eq!((status, body), (StatusCode::OK, Bytes::from("answered")));
+}
+
+/// At most two sessions are live, a predecessor draining and its successor:
+/// a third pairing ends the oldest, so a broker that keeps pairing cannot
+/// pile sessions up in the confined process.
+#[tokio::test]
+async fn a_third_session_ends_the_oldest() {
+    let mut running = Running::start(&[BOUND]).await;
+    let _second = running.successor().await;
+    let mut third = running.successor().await;
+    assert!(matches!(
+        bounded(running.host.receive()).await,
+        Ok(None) | Err(_)
+    ));
+    let response = running.start_request().await;
+    let seen = received(&mut third).await;
+    answer(&third, &seen.request_id).await;
+    assert_eq!(bounded(response).await.unwrap().0, StatusCode::OK);
+}
+
+/// The front door stops once no further session can arrive: the runner that
+/// pairs brokers is gone.
+#[tokio::test]
+async fn the_front_door_stops_when_no_further_session_can_arrive() {
+    let running = Running::start(&[BOUND]).await;
+    drop(running.successors);
     assert!(matches!(
         bounded(running.door).await.unwrap(),
-        Ended::Session(None)
+        Ended::SessionsClosed
     ));
     let mut byte = [0_u8; 1];
     assert_eq!(rustix::io::read(&running.handoff, &mut byte).unwrap(), 0);

@@ -101,10 +101,16 @@ mod boot_seed;
 #[cfg(target_os = "linux")]
 mod checkpoint;
 mod egress_status;
+#[cfg(target_os = "linux")]
+mod front_door;
 mod intercept;
+mod mesh_processes;
+use mesh_processes::{spawn_mesh_enrollment_process, spawn_mesh_transport_process};
 
+pub use intercept::FrontDoorFailure;
 pub use intercept::InterceptRefusal;
 pub(crate) use intercept::boot_intercepts;
+pub(crate) use intercept::{BOOT_SECRET_BYTES, BootSecrets};
 #[cfg(target_os = "linux")]
 mod cw_runtime_disk;
 mod egress_spawn;
@@ -314,6 +320,12 @@ impl CloudHypervisorRunner {
             .map_err(|_| RunnerError::InvalidRequest)?;
 
         let token = Zeroizing::new(boot_seed::generate_auth_token());
+        #[cfg(target_os = "linux")]
+        let (front_door, egress_ca) = match intercept::boot_front_door(&request, &paths).await? {
+            Some((front_door, certificate)) => (Some(front_door), Some(certificate)),
+            None => (None, None),
+        };
+        #[cfg(not(target_os = "linux"))]
         let egress_ca = intercept::boot_egress_ca(&request.intercepts)?;
         let seed = boot_seed::boot_seed(
             &request,
@@ -399,6 +411,8 @@ impl CloudHypervisorRunner {
             #[cfg(target_os = "linux")]
             restore_admit,
             host_port_listeners,
+            #[cfg(target_os = "linux")]
+            front_door,
             lock,
         })
     }
@@ -622,6 +636,8 @@ impl CloudHypervisorRunner {
         let (child, process) = startup.disarm();
 
         Ok(RunningVm {
+            #[cfg(target_os = "linux")]
+            front_door: prepared.front_door,
             stage_times: GuestStageTimes::default(),
             // Evaluated before the request moves.
             host_ports: prepared.request.host_ports.clone(),
@@ -1092,6 +1108,9 @@ pub struct PreparedVm {
     #[cfg(target_os = "linux")]
     restore_admit: Option<Duration>,
     host_port_listeners: Vec<ReservedHostPort>,
+    /// The boot's front door, started before the seed (#3999).
+    #[cfg(target_os = "linux")]
+    front_door: Option<front_door::RunningFrontDoor>,
     lock: VmLock,
 }
 
@@ -1178,6 +1197,10 @@ pub struct RunningVm {
     /// What the guest reported when this boot resumed from a VM checkpoint.
     #[cfg(target_os = "linux")]
     restored: Option<RestoreReport>,
+    /// The environment's front door and its pairing socket (#3999), when
+    /// the boot binds interception.
+    #[cfg(target_os = "linux")]
+    front_door: Option<front_door::RunningFrontDoor>,
     /// When the host first received each guest boot stage (#4242).
     stage_times: GuestStageTimes,
     /// The runner's end of a schema 3 helper's control channel, held for the
@@ -1361,6 +1384,18 @@ impl RunningVm {
             .connect_daemon(token)
             .await
             .map_err(RunnerError::from)
+    }
+
+    /// The socket this generation's credential broker pairs with the front
+    /// door through, when the environment has one.
+    pub(crate) fn front_door_socket(&self) -> Option<&Path> {
+        #[cfg(target_os = "linux")]
+        return self
+            .front_door
+            .as_ref()
+            .map(front_door::RunningFrontDoor::socket);
+        #[cfg(not(target_os = "linux"))]
+        None
     }
 
     pub(crate) fn daemon_access_parts(&self) -> (&Path, u32, &str) {
@@ -1571,6 +1606,14 @@ impl RunningVm {
                                     return Err(error);
                                 }
                             }
+                        }
+                        #[cfg(target_os = "linux")]
+                        if let Err(error) = self.pair_front_door(&mut worker) {
+                            let _ = stop_network_worker_process(&mut worker).await;
+                            if let Some(broker) = worker.broker.as_mut() {
+                                let _ = stop_egress_broker_process(broker).await;
+                            }
+                            return Err(error);
                         }
                     } else if !self.host_port_listeners.is_empty() {
                         return Err(RunnerError::InvalidNetworkWorker);
@@ -3007,248 +3050,6 @@ async fn spawn_mesh_stack_processes(
         process,
         ingress_receiver: Some(ingress_receiver),
     })
-}
-
-async fn spawn_mesh_transport_process(
-    context: &NetworkStackLaunch<'_>,
-    attachment: &MeshAttachment,
-    enrollment: StdUnixStream,
-    deadline: tokio::time::Instant,
-) -> Result<PreparedMeshTransport, RunnerError> {
-    let submission_key = fresh_mesh_ingress_control_key();
-    let bootstrap = encode_mesh_transport_bootstrap(
-        context.vm_id,
-        context.generation,
-        attachment,
-        &submission_key,
-    )
-    .map_err(|_| RunnerError::MeshTransportBootstrap)?;
-    let (control_parent, control_child) =
-        StdUnixStream::pair().map_err(|_| RunnerError::MeshTransportSpawn)?;
-    control_parent
-        .set_nonblocking(true)
-        .map_err(|_| RunnerError::MeshTransportSpawn)?;
-    let mut control = tokio::net::UnixStream::from_std(control_parent)
-        .map_err(|_| RunnerError::MeshTransportSpawn)?;
-    let inherited_control = duplicate_inherited_descriptor(control_child.as_raw_fd())
-        .map_err(|_| RunnerError::MeshTransportSpawn)?;
-    let inherited_enrollment = duplicate_inherited_descriptor(enrollment.as_raw_fd())
-        .map_err(|_| RunnerError::MeshTransportSpawn)?;
-    let expected_parent = unsafe { libc::getpid() };
-    let mut command = tokio::process::Command::new(context.executable);
-    command
-        .arg("__native-mesh-transport")
-        .arg("--environment-id")
-        .arg(context.vm_id.to_string())
-        .arg("--generation")
-        .arg(context.generation.to_string())
-        .env_clear()
-        .current_dir(context.working_directory)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let control_fd = inherited_control.as_raw_fd();
-    let enrollment_fd = inherited_enrollment.as_raw_fd();
-    unsafe {
-        command.pre_exec(move || {
-            prepare_isolated_child_pair(
-                expected_parent,
-                control_fd,
-                MESH_TRANSPORT_BOOTSTRAP_FD,
-                enrollment_fd,
-                MESH_TRANSPORT_ENROLLMENT_FD,
-            )
-        });
-    }
-    let child = command
-        .spawn()
-        .map_err(|_| RunnerError::MeshTransportSpawn)?;
-    drop(inherited_control);
-    drop(inherited_enrollment);
-    drop(control_child);
-    drop(enrollment);
-    let mut startup = MeshProcessStartup::new(child);
-    let Some(pid) = startup.child_mut().id() else {
-        reap_failed_mesh_process_startup(&mut startup).await?;
-        return Err(RunnerError::MeshTransportSpawn);
-    };
-    if let Err(error) = write_mesh_control_frame(&mut control, bootstrap.as_ref(), deadline).await {
-        return match error {
-            MeshStatusReadError::Timeout => {
-                reap_failed_mesh_process_startup(&mut startup).await?;
-                Err(RunnerError::MeshTransportStartTimeout)
-            }
-            MeshStatusReadError::Protocol => Err(mesh_transport_exit_or(
-                &mut startup,
-                RunnerError::MeshTransportBootstrap,
-            )
-            .await?),
-        };
-    }
-    let prepared =
-        match read_mesh_status_frame(&mut control, MESH_TRANSPORT_STATUS_MAX_BYTES, deadline).await
-        {
-            Ok(prepared) => prepared,
-            Err(MeshStatusReadError::Timeout) => {
-                reap_failed_mesh_process_startup(&mut startup).await?;
-                return Err(RunnerError::MeshTransportStartTimeout);
-            }
-            Err(MeshStatusReadError::Protocol) => {
-                return Err(mesh_transport_exit_or(
-                    &mut startup,
-                    RunnerError::MeshTransportBootstrap,
-                )
-                .await?);
-            }
-        };
-    if prepared.as_slice() != MESH_TRANSPORT_PREPARED_MESSAGE {
-        let error = decode_mesh_transport_startup_status(&prepared).map_or(
-            RunnerError::MeshTransportBootstrap,
-            |status| match status {
-                MeshTransportStartupStatus::Confined | MeshTransportStartupStatus::Ready => {
-                    RunnerError::MeshTransportBootstrap
-                }
-                MeshTransportStartupStatus::Failed(failure) => {
-                    RunnerError::MeshTransportStartup(failure)
-                }
-            },
-        );
-        reap_failed_mesh_process_startup(&mut startup).await?;
-        return Err(error);
-    }
-    let process = match LiveProcess::capture_child(pid, context.executable) {
-        Ok(process) => process,
-        Err(error) => {
-            let fallback = RunnerError::Recovery(error);
-            return Err(mesh_transport_exit_or(&mut startup, fallback).await?);
-        }
-    };
-    startup.admit(process);
-    Ok(PreparedMeshTransport {
-        startup,
-        control,
-        submission_key,
-    })
-}
-
-async fn spawn_mesh_enrollment_process(
-    context: &NetworkStackLaunch<'_>,
-    attachment: &MeshAttachment,
-    mesh_data_dir: &Path,
-    platform_config_dir: &Path,
-    transfer: StdUnixStream,
-    deadline: tokio::time::Instant,
-) -> Result<PreparedMeshEnrollment, RunnerError> {
-    let bootstrap = encode_mesh_enrollment_bootstrap(context.vm_id, context.generation, attachment)
-        .map_err(|_| RunnerError::MeshEnrollmentBrokerBootstrap)?;
-    let (control_parent, control_child) =
-        StdUnixStream::pair().map_err(|_| RunnerError::MeshEnrollmentBrokerSpawn)?;
-    control_parent
-        .set_nonblocking(true)
-        .map_err(|_| RunnerError::MeshEnrollmentBrokerSpawn)?;
-    let mut control = tokio::net::UnixStream::from_std(control_parent)
-        .map_err(|_| RunnerError::MeshEnrollmentBrokerSpawn)?;
-    let inherited_control = duplicate_inherited_descriptor(control_child.as_raw_fd())
-        .map_err(|_| RunnerError::MeshEnrollmentBrokerSpawn)?;
-    let inherited_transfer = duplicate_inherited_descriptor(transfer.as_raw_fd())
-        .map_err(|_| RunnerError::MeshEnrollmentBrokerSpawn)?;
-    let expected_parent = unsafe { libc::getpid() };
-    let mut command = tokio::process::Command::new(context.executable);
-    command
-        .arg("__native-mesh-enrollment-broker")
-        .arg("--environment-id")
-        .arg(context.vm_id.to_string())
-        .arg("--generation")
-        .arg(context.generation.to_string())
-        .arg("--mesh-data-dir")
-        .arg(mesh_data_dir)
-        .arg("--platform-config-dir")
-        .arg(platform_config_dir)
-        .env_clear()
-        .current_dir(context.working_directory)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let control_fd = inherited_control.as_raw_fd();
-    let transfer_fd = inherited_transfer.as_raw_fd();
-    unsafe {
-        command.pre_exec(move || {
-            prepare_isolated_child_pair(
-                expected_parent,
-                control_fd,
-                MESH_ENROLLMENT_BOOTSTRAP_FD,
-                transfer_fd,
-                MESH_ENROLLMENT_TRANSFER_FD,
-            )
-        });
-    }
-    let child = command
-        .spawn()
-        .map_err(|_| RunnerError::MeshEnrollmentBrokerSpawn)?;
-    drop(inherited_control);
-    drop(inherited_transfer);
-    drop(control_child);
-    drop(transfer);
-    let mut startup = MeshProcessStartup::new(child);
-    let Some(pid) = startup.child_mut().id() else {
-        reap_failed_mesh_process_startup(&mut startup).await?;
-        return Err(RunnerError::MeshEnrollmentBrokerSpawn);
-    };
-    if let Err(error) = write_mesh_control_frame(&mut control, &bootstrap, deadline).await {
-        return match error {
-            MeshStatusReadError::Timeout => {
-                reap_failed_mesh_process_startup(&mut startup).await?;
-                Err(RunnerError::MeshEnrollmentBrokerStartTimeout)
-            }
-            MeshStatusReadError::Protocol => Err(mesh_enrollment_exit_or(
-                &mut startup,
-                RunnerError::MeshEnrollmentBrokerBootstrap,
-            )
-            .await?),
-        };
-    }
-    let prepared = match read_mesh_status_frame(
-        &mut control,
-        MESH_ENROLLMENT_STATUS_MAX_BYTES,
-        deadline,
-    )
-    .await
-    {
-        Ok(prepared) => prepared,
-        Err(MeshStatusReadError::Timeout) => {
-            reap_failed_mesh_process_startup(&mut startup).await?;
-            return Err(RunnerError::MeshEnrollmentBrokerStartTimeout);
-        }
-        Err(MeshStatusReadError::Protocol) => {
-            return Err(mesh_enrollment_exit_or(
-                &mut startup,
-                RunnerError::MeshEnrollmentBrokerBootstrap,
-            )
-            .await?);
-        }
-    };
-    if prepared.as_slice() != MESH_ENROLLMENT_PREPARED_MESSAGE {
-        let error = decode_mesh_enrollment_startup_status(&prepared).map_or(
-            RunnerError::MeshEnrollmentBrokerBootstrap,
-            |status| match status {
-                MeshEnrollmentStartupStatus::Ready => RunnerError::MeshEnrollmentBrokerBootstrap,
-                MeshEnrollmentStartupStatus::Failed(failure) => {
-                    RunnerError::MeshEnrollmentBrokerStartup(failure)
-                }
-            },
-        );
-        reap_failed_mesh_process_startup(&mut startup).await?;
-        return Err(error);
-    }
-    let process = match LiveProcess::capture_child(pid, context.executable) {
-        Ok(process) => process,
-        Err(error) => {
-            let fallback = RunnerError::Recovery(error);
-            return Err(mesh_enrollment_exit_or(&mut startup, fallback).await?);
-        }
-    };
-    startup.admit(process);
-    Ok(PreparedMeshEnrollment { startup, control })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5192,6 +4993,9 @@ pub enum RunnerError {
     EgressPolicyControl,
     #[error("egress broker process spawn failed")]
     EgressBrokerSpawn,
+    /// The boot's front door failed at a fixed stage (#3999).
+    #[error(transparent)]
+    FrontDoor(#[from] FrontDoorFailure),
     #[error("egress broker did not become ready before the startup deadline")]
     EgressBrokerStartTimeout,
     #[error("egress broker private bootstrap failed")]
@@ -5322,6 +5126,7 @@ impl RunnerError {
             Self::EgressBrokerStartup(_) => "egress_broker_startup",
             Self::EgressBrokerWait => "egress_broker_wait",
             Self::EgressBrokerKillTimeout => "egress_broker_kill_timeout",
+            Self::FrontDoor(failure) => failure.runner_error_code(),
             Self::MeshTransportSpawn => "mesh_transport_spawn",
             Self::MeshTransportStartTimeout => "mesh_transport_start_timeout",
             Self::MeshTransportBootstrap => "mesh_transport_bootstrap",
@@ -5436,7 +5241,7 @@ mod tests {
         disk.sync_all().unwrap();
     }
 
-    fn request(vcpus: u8, memory_mib: u32) -> CreateVmRequest {
+    pub(super) fn request(vcpus: u8, memory_mib: u32) -> CreateVmRequest {
         CreateVmRequest {
             cw_runtime_catalog_generation: None,
             cw_runtime_moved_from_generation: None,

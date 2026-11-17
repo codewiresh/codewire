@@ -2113,6 +2113,7 @@ mod tests {
                 hybrid_socket: "/synthetic/retained/vsock.sock".into(),
                 guest_port: DAEMON_VSOCK_PORT,
                 generation_capability: "f".repeat(64),
+                front_door_socket: String::new(),
             }))
         }
         async fn adopt_runner(

@@ -159,3 +159,5 @@ pub use bridge::{
     run_admitted_credential_bridge_with_front_doors, run_admitted_credential_bridges,
     run_admitted_front_door_bridge, run_credential_bridge,
 };
+/// Written before a front-door session's Open (#3999).
+pub use codewire_credential_bridge::FRONT_DOOR_SESSION_ROLE_TAG;

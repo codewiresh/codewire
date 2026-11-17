@@ -152,6 +152,10 @@ fn main() {
     let egress_broker = std::env::args_os()
         .nth(1)
         .is_some_and(|argument| argument == "__native-egress-broker");
+    // The front door's syscall filter refuses thread creation.
+    let front_door = std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "__native-front-door");
     let mesh_transport = std::env::args_os()
         .nth(1)
         .is_some_and(|argument| argument == "__native-mesh-transport");
@@ -191,8 +195,12 @@ fn main() {
         std::process::exit(1);
     }
 
-    let isolated_process =
-        network_worker || egress_broker || mesh_transport || mesh_enrollment_broker || broker;
+    let isolated_process = network_worker
+        || egress_broker
+        || front_door
+        || mesh_transport
+        || mesh_enrollment_broker
+        || broker;
     let mut runtime = if isolated_process {
         tokio::runtime::Builder::new_current_thread()
     } else {

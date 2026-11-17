@@ -297,58 +297,8 @@ fn apply_seccomp() -> io::Result<()> {
 }
 
 fn seccomp_filters() -> Vec<SocketFilter> {
-    let denied = [
-        libc::SYS_accept,
-        libc::SYS_accept4,
-        libc::SYS_add_key,
-        libc::SYS_bind,
-        libc::SYS_bpf,
-        libc::SYS_delete_module,
-        libc::SYS_execve,
-        libc::SYS_execveat,
-        libc::SYS_finit_module,
-        libc::SYS_fsconfig,
-        libc::SYS_fsmount,
-        libc::SYS_fsopen,
-        libc::SYS_fspick,
-        libc::SYS_init_module,
-        libc::SYS_io_uring_enter,
-        libc::SYS_io_uring_register,
-        libc::SYS_io_uring_setup,
-        libc::SYS_kcmp,
-        libc::SYS_keyctl,
-        libc::SYS_kill,
-        libc::SYS_listen,
-        libc::SYS_mount,
-        libc::SYS_mount_setattr,
-        libc::SYS_move_mount,
-        libc::SYS_open_tree,
-        libc::SYS_open_by_handle_at,
-        libc::SYS_perf_event_open,
-        libc::SYS_pidfd_getfd,
-        libc::SYS_pidfd_open,
-        libc::SYS_pidfd_send_signal,
-        libc::SYS_pivot_root,
-        libc::SYS_process_madvise,
-        libc::SYS_process_mrelease,
-        libc::SYS_process_vm_readv,
-        libc::SYS_process_vm_writev,
-        libc::SYS_prctl,
-        libc::SYS_ptrace,
-        libc::SYS_reboot,
-        libc::SYS_request_key,
-        libc::SYS_rt_sigqueueinfo,
-        libc::SYS_rt_tgsigqueueinfo,
-        libc::SYS_setns,
-        libc::SYS_socketpair,
-        libc::SYS_swapoff,
-        libc::SYS_swapon,
-        libc::SYS_tgkill,
-        libc::SYS_tkill,
-        libc::SYS_umount2,
-        libc::SYS_unshare,
-        libc::SYS_userfaultfd,
-    ];
+    // Shared with the front door, so the two cannot drift (#3999).
+    let denied = codewire_local_vmm::linux::syscall_floor::DENIED_SYSCALL_FLOOR;
     let denied_result = SECCOMP_RET_ERRNO | u32::try_from(libc::EPERM).unwrap_or(1);
     let mut filters = vec![
         statement(BPF_LD_W_ABS, SECCOMP_DATA_ARCH_OFFSET),
@@ -356,7 +306,7 @@ fn seccomp_filters() -> Vec<SocketFilter> {
         statement(BPF_RET_K, SECCOMP_RET_KILL_PROCESS),
         statement(BPF_LD_W_ABS, SECCOMP_DATA_NR_OFFSET),
     ];
-    for syscall in denied {
+    for &syscall in denied {
         filters.push(jump(BPF_JMP_JEQ_K, syscall as u32, 0, 1));
         filters.push(statement(BPF_RET_K, denied_result));
     }

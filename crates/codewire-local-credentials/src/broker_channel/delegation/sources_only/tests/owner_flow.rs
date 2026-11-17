@@ -24,6 +24,7 @@ impl LocalBrokerProcessSpawner for BrokerPeer {
         &self,
         config: &LocalBrokerProcessConfig,
         peer: std::os::unix::net::UnixStream,
+        _boot_secrets: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
         assert!(!config.platform_delegated);
         assert_eq!(
@@ -213,6 +214,7 @@ async fn owner_client_requires_exact_local_profile_and_delivers_both_application
             selection_sha256: context.selection_sha256,
         }),
         network_policy_allows_github: true,
+        boot_secrets: Default::default(),
     };
     let socket = temp.path().join(format!("{environment_id}.sock"));
     let mut client = LocalCredentialControlClient::connect(&config)

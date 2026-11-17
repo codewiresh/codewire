@@ -23,7 +23,7 @@ const TEST: [&str; 2] = ["#[cfg(test)]", "#[cfg(all(test,"];
 
 /// Every function macOS compiles that starts a process or names its command,
 /// by its file under `src/`.
-const SPAWNS: [(&str, &str); 21] = [
+const SPAWNS: [(&str, &str); 22] = [
     ("cw_runtime.rs", "run_tool"),
     ("darwin/disk_tool.rs", "command"),
     ("darwin/mod.rs", "vz_helper_problem"),
@@ -31,9 +31,10 @@ const SPAWNS: [(&str, &str); 21] = [
     ("lib.rs", "sweep_before_exec"),
     ("runner.rs", "disk_tool_command"),
     ("runner.rs", "spawn_egress_broker_process"),
-    ("runner.rs", "spawn_mesh_enrollment_process"),
-    ("runner.rs", "spawn_mesh_transport_process"),
     ("runner.rs", "spawn_network_worker_process"),
+    ("runner/front_door.rs", "spawn"),
+    ("runner/mesh_processes.rs", "spawn_mesh_enrollment_process"),
+    ("runner/mesh_processes.rs", "spawn_mesh_transport_process"),
     ("supervisor.rs", "spawn_runner"),
     ("supervisor.rs", "spawn_supervisor"),
     ("supervisor/snapshots.rs", "command"),

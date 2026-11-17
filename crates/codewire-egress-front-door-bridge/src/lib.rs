@@ -22,6 +22,7 @@
 mod environment;
 pub mod handoff;
 
+pub use codewire_credential_bridge::FRONT_DOOR_SESSION_ROLE_TAG;
 pub use environment::{Ended, EnvironmentFrontDoor, INTERCEPT_PORT, StartError};
 
 use std::pin::Pin;

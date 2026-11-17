@@ -925,6 +925,9 @@ struct TestRunnerProtocolService {
     useful_calls: Arc<AtomicUsize>,
     shutdown_effect: Option<Arc<std::sync::Mutex<Option<std::process::ChildStdin>>>>,
     info_gate: Option<RunnerInfoGate>,
+    /// What `GetBootSecrets` answers; none, as a boot that does not
+    /// intercept.
+    boot_secrets: Option<Vec<v1::BootSecret>>,
     /// The state `get_runner_info` reports, which `stop_vm` sets to
     /// `stopped`, counting each stop in `useful_calls`.
     runner_info: Option<Arc<std::sync::Mutex<v1::RunnerInfo>>>,
@@ -1075,7 +1078,13 @@ impl crate::control::v1::environment_runner_service_server::EnvironmentRunnerSer
         &self,
         _request: Request<v1::GetBootSecretsRequest>,
     ) -> Result<Response<v1::GetBootSecretsResponse>, Status> {
-        self.unexpected_use()
+        match (&self.reply, &self.boot_secrets) {
+            (TestRunnerProtocolReply::Failure(code), _) => Err(Status::new(*code, "refused")),
+            (_, Some(secrets)) => Ok(Response::new(v1::GetBootSecretsResponse {
+                secrets: secrets.clone(),
+            })),
+            (_, None) => Err(Status::failed_precondition("no boot secrets")),
+        }
     }
 
     async fn checkpoint_vm(
@@ -1149,6 +1158,7 @@ fn spawn_test_runner_server(
         useful_calls: Arc::clone(&useful_calls),
         shutdown_effect: None,
         info_gate,
+        boot_secrets: None,
         runner_info,
     };
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1248,6 +1258,81 @@ impl Drop for ShutdownTestChild {
     }
 }
 
+/// The supervisor asks the runner for a boot's secrets on every ensure, so
+/// an authority restarted mid-generation gets the same secrets again from
+/// the runner's memory, and nothing the supervisor or the authority keeps on
+/// disk holds them (#3999). A boot that does not intercept has none, and any
+/// other refusal fails the ensure rather than starting brokers that cannot
+/// pair.
+#[tokio::test]
+async fn each_ensure_gets_the_boot_secrets_again_from_the_runner() {
+    use crate::control::v1::environment_runner_service_server::EnvironmentRunnerServiceServer;
+    use codewire_local_credentials::{BOOT_SECRET_BYTES, BootSecretPurpose, BrokerBootSecrets};
+    let secret = vec![0xd3; BOOT_SECRET_BYTES];
+    let environment = codewire_access::EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
+    let ask = |reply, boot_secrets| {
+        let environment = environment.clone();
+        async move {
+            let parent = tempfile::tempdir().unwrap();
+            fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let socket = parent.path().join("runner.sock");
+            let service = TestRunnerProtocolService {
+                reply,
+                useful_calls: Arc::new(AtomicUsize::new(0)),
+                shutdown_effect: None,
+                info_gate: None,
+                boot_secrets,
+                runner_info: None,
+            };
+            let (incoming, _identity) = bind_owner_only(&socket).unwrap();
+            let server = tokio::spawn(
+                tonic::transport::Server::builder()
+                    .add_service(EnvironmentRunnerServiceServer::new(service))
+                    .serve_with_incoming(incoming),
+            );
+            let mut answers = Vec::new();
+            for _ in 0..2 {
+                answers
+                    .push(super::boot_egress::broker_boot_secrets(&socket, &environment, 4).await);
+            }
+            server.abort();
+            for entry in fs::read_dir(parent.path()).unwrap().flatten() {
+                if entry.path().is_file() {
+                    assert!(
+                        !fs::read(entry.path())
+                            .unwrap()
+                            .windows(BOOT_SECRET_BYTES)
+                            .any(|w| w == [0xd3; BOOT_SECRET_BYTES])
+                    );
+                }
+            }
+            answers
+        }
+    };
+    let current =
+        TestRunnerProtocolReply::Version(crate::runner_service::NATIVE_RUNNER_PROTOCOL_VERSION);
+    let pairing = v1::BootSecret {
+        purpose: v1::BootSecretPurpose::FrontDoorPairing as i32,
+        value: secret.clone(),
+    };
+    let expected = BrokerBootSecrets::new([(BootSecretPurpose::FrontDoorPairing, secret)]).unwrap();
+    for answer in ask(current, Some(vec![pairing])).await {
+        assert_eq!(answer.unwrap(), expected);
+    }
+    for answer in ask(current, None).await {
+        assert!(answer.unwrap().is_empty());
+    }
+    for code in [
+        tonic::Code::Unimplemented,
+        tonic::Code::PermissionDenied,
+        tonic::Code::Internal,
+    ] {
+        for answer in ask(TestRunnerProtocolReply::Failure(code), None).await {
+            assert!(matches!(answer, Err(SupervisorError::RunnerUnavailable)));
+        }
+    }
+}
+
 #[tokio::test]
 async fn unacknowledged_runner_shutdown_still_observes_natural_exit() {
     use crate::control::v1::environment_runner_service_server::EnvironmentRunnerServiceServer;
@@ -1278,6 +1363,7 @@ async fn unacknowledged_runner_shutdown_still_observes_natural_exit() {
         useful_calls: Arc::new(AtomicUsize::new(0)),
         shutdown_effect: Some(Arc::new(std::sync::Mutex::new(child.0.stdin.take()))),
         info_gate: None,
+        boot_secrets: None,
         runner_info: None,
     };
     let (incoming, identity) = bind_owner_only(&socket).unwrap();

@@ -14,19 +14,20 @@ fn main() {
 #[cfg(target_os = "linux")]
 fn main() {
     let isolated_command = std::env::args_os().nth(1);
-    let network_worker = isolated_command.as_ref().is_some_and(|argument| {
-        argument == "__native-network-worker" || argument == "__native-network-worker-fixture"
-    });
-    let egress_broker = isolated_command
+    let role = isolated_command
         .as_ref()
-        .is_some_and(|argument| argument == "__native-egress-broker");
-    let mesh_transport = isolated_command
-        .as_ref()
-        .is_some_and(|argument| argument == "__native-mesh-transport");
-    let mesh_enrollment = isolated_command
-        .as_ref()
-        .is_some_and(|argument| argument == "__native-mesh-enrollment-broker");
-    let isolated_process = network_worker || egress_broker || mesh_transport || mesh_enrollment;
+        .and_then(|argument| argument.to_str());
+    let network_worker = matches!(
+        role,
+        Some("__native-network-worker" | "__native-network-worker-fixture")
+    );
+    let egress_broker = role == Some("__native-egress-broker");
+    let mesh_transport = role == Some("__native-mesh-transport");
+    let mesh_enrollment = role == Some("__native-mesh-enrollment-broker");
+    // The front door's syscall filter refuses thread creation.
+    let front_door = role == Some("__native-front-door");
+    let isolated_process =
+        network_worker || egress_broker || mesh_transport || mesh_enrollment || front_door;
     let mut runtime = if isolated_process {
         tokio::runtime::Builder::new_current_thread()
     } else {
@@ -204,6 +205,7 @@ mod linux {
                 "__native-network-worker"
                     | "__native-network-worker-fixture"
                     | "__native-egress-broker"
+                    | "__native-front-door"
                     | "__native-mesh-transport"
             )
         {
@@ -240,6 +242,12 @@ mod linux {
                     .await
                     .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)
                 }
+                "__native-front-door" => codewire_local_vmm::front_door::run_inherited_front_door(
+                    &environment_id.to_string(),
+                    generation,
+                )
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>),
                 "__native-mesh-transport" => {
                     codewire_local_vmm::mesh_process::run_inherited_mesh_transport_fixture(
                         environment_id,
@@ -1192,6 +1200,7 @@ mod linux {
             | RunnerError::MeshEnrollmentBrokerStartTimeout
             | RunnerError::MeshEnrollmentBrokerBootstrap
             | RunnerError::MeshEnrollmentBrokerStartup(_) => "mesh-enrollment-broker",
+            RunnerError::FrontDoor(_) => "front-door",
             RunnerError::MeshProcessWait | RunnerError::MeshProcessKillTimeout => "mesh-process",
             _ => "runner",
         }
@@ -3738,6 +3747,7 @@ mod linux {
             VmPaths {
                 api_socket: api_dir.join("api.sock"),
                 vsock_socket: vsock_dir.join("vsock.sock"),
+                front_door_socket: sockets_dir.join("front-door.sock"),
                 virtiofs_dir,
                 sockets_dir,
                 state_disk: disks_dir.join("state.raw"),

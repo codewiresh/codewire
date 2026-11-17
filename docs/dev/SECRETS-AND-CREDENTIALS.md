@@ -1244,8 +1244,35 @@ is exactly as described above. What exists today:
   hosts (`api.anthropic.com`, `api.openai.com`, `chatgpt.com`) on 443 in the
   egress broker and carries the front door's CA certificate, never its key,
   to the guest in the seed. The front door makes the CA in its own memory for
-  each boot, name-constrained to those hosts. Until the runner can start the
-  front door, a boot with the switch on is refused and names the file.
+  each boot, name-constrained to those hosts.
+- **The front door.** The runner starts it in `prepare()`, as its own process,
+  confined (no new privileges, a deny-all Landlock domain and a seccomp
+  floor it shares with the credential broker) before it makes the CA. Only
+  the certificate leaves it. The egress broker hands it each connection to a
+  bound host, and it serves those through this boot's credential broker,
+  which pairs with it over a private socket before reporting ready. If it
+  cannot start or pair, the start fails. The credential authority replaces
+  the broker every 600 seconds with an overlapping successor, which pairs
+  again and takes all new work while its predecessor finishes what it
+  already has, so a broker replaced by its successor keeps interception.
+  Only the runner's end, or the front door's exit, ends it for the boot. A
+  boot whose credentials come from the platform, that has no local
+  credential broker, or whose running credential authority predates boot
+  secrets, does not intercept, and the supervisor's log says why. On macOS
+  a boot with the switch on is refused and names the file, until the front
+  door is confined there.
+- **The pairing secret.** A broker pairs by presenting 32 random bytes the
+  runner mints for the boot, held only in its memory, compared in constant
+  time; the daemon token, which the guest knows, is refused. The supervisor
+  asks the runner for it (`GetBootSecrets`, owner-only, the current
+  generation of an intercepting boot only) at each broker ensure and passes
+  it to the credential authority, which holds it in memory for the
+  generation. The authority gives each broker it starts, successors
+  included, its own socket on descriptor 4 carrying the secret; the broker
+  makes it close-on-exec, reads it once before pairing or confinement, and
+  closes it. It is never in the seed, a file, an argument, the environment,
+  a log, or any answer's printed form. An authority restarted within the
+  generation gets it again from the runner.
 - **What the guest trusts.** PID 1 publishes the CA alone as
   `/run/codewire-host/egress-ca.pem` and sets `NODE_EXTRA_CA_CERTS` to it
   (Claude Code), unless the image or project sets that name; then it is kept

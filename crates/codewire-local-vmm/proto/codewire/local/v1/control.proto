@@ -1002,6 +1002,11 @@ message DaemonAccess {
   string hybrid_socket = 1;
   uint32 guest_port = 2;
   string generation_capability = 3;
+  // The private socket through which this generation's credential brokers
+  // pair with the environment's front door (#3999), presenting the boot's
+  // pairing secret (GetBootSecrets). Empty when the environment has no front
+  // door.
+  string front_door_socket = 4;
 }
 
 message CredentialBrokerRuntime {

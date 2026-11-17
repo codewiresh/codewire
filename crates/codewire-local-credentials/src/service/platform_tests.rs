@@ -25,6 +25,7 @@ impl LocalBrokerProcessSpawner for NeverSpawn {
         &self,
         _: &LocalBrokerProcessConfig,
         _: std::os::unix::net::UnixStream,
+        _boot_secrets: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, crate::LocalBrokerSpawnError> {
         panic!("an existing matching generation must not spawn a second owner")
     }
@@ -104,6 +105,7 @@ async fn platform_generation_reuses_only_the_exact_owner_binding() {
         platform: Some(platform),
         local_profile: None,
         network_policy_allows_github: true,
+        boot_secrets: Default::default(),
     };
     assert!(
         manager
@@ -172,6 +174,7 @@ impl LocalBrokerProcessSpawner for RefusedSpawns {
         &self,
         config: &LocalBrokerProcessConfig,
         _: std::os::unix::net::UnixStream,
+        _: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, crate::LocalBrokerSpawnError> {
         self.0
             .lock()
@@ -246,6 +249,7 @@ async fn a_network_policy_change_stops_the_broker_before_it_launches_another() {
         platform: Some(selected.clone()),
         local_profile: None,
         network_policy_allows_github: allows,
+        boot_secrets: Default::default(),
     };
 
     // The same answer keeps the running broker.

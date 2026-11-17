@@ -510,6 +510,7 @@ struct BrokerEnsureRequest {
     platform: Option<crate::PlatformCredentialBinding>,
     local_profile: Option<EnvironmentAccessBinding>,
     network_policy_allows_github: bool,
+    boot_secrets: crate::BrokerBootSecrets,
 }
 
 type PlatformBrokerBinding = (
@@ -796,6 +797,7 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
                 local_profile: request.local_profile.clone(),
                 renewal: BrokerRenewal::PRODUCTION,
                 log: Arc::clone(&self.log),
+                boot_secrets: request.boot_secrets.clone(),
             }),
             shutdown_rx,
             state_tx,
@@ -898,6 +900,8 @@ struct BrokerLaunch<S: ProtectedStore> {
     local_profile: Option<EnvironmentAccessBinding>,
     renewal: BrokerRenewal,
     log: Arc<BrokerLog>,
+    /// Held in memory for the generation, for every broker child (#3999).
+    boot_secrets: crate::BrokerBootSecrets,
 }
 
 type StartingBroker<S> =
@@ -1224,7 +1228,10 @@ async fn start_broker<S: ProtectedStore + 'static>(
     let log = &launch.log;
     let environment = &launch.config.environment_id;
     let generation = launch.config.environment_generation;
-    let Ok(child) = launch.spawner.spawn(&launch.config, broker_stream) else {
+    let Ok(child) = launch
+        .spawner
+        .spawn(&launch.config, broker_stream, &launch.boot_secrets)
+    else {
         log.record(
             "broker_spawn_failed",
             &[("environment", environment), ("generation", &generation)],
@@ -2031,6 +2038,7 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
                 // A supervisor older than protocol 20 does not say; it is
                 // served as it was before the rule existed.
                 network_policy_allows_github: request.network_policy_allows_github.unwrap_or(true),
+                boot_secrets: crate::BrokerBootSecrets::from_proto(request.boot_secrets)?,
             })
             .await?;
         Ok(Response::new(environment_broker_runtime_to_proto(runtime)))

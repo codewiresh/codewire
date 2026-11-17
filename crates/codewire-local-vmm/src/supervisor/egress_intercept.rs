@@ -75,31 +75,88 @@ pub(crate) fn read_switch(root: &Path) -> InterceptSwitch {
 /// is enough, every boot still records what it used.
 static WARNED_UNRECOGNIZED: AtomicBool = AtomicBool::new(false);
 
-/// Read the switch for one boot and log what it starts with.
-pub(crate) fn switch_for_boot(
+/// Read the switch for one boot of `broker`'s environment, log what the boot
+/// starts with, and say whether it intercepts. The front door serves only
+/// through the boot's local credential broker, so a boot with no broker, or
+/// one whose credentials come from the platform, whose relay does not pair
+/// yet, does not intercept: its agent hosts are reached as they would be with
+/// the switch off, and the log says why.
+pub(super) fn for_boot(
     root: &Path,
     log: Option<&DiagnosticLog>,
-    generation: u64,
-) -> InterceptSwitch {
+    broker: &super::CredentialBrokerEnsureRequest,
+    authority_carries_boot_secrets: bool,
+) -> bool {
     let switch = read_switch(root);
     if switch == InterceptSwitch::Unrecognized && !WARNED_UNRECOGNIZED.swap(true, Ordering::Relaxed)
     {
         diagnostic_log::record(log, "egress_intercept_file_unrecognized", &[]);
     }
-    diagnostic_log::record(
-        log,
-        "egress_intercept",
-        &[
-            ("generation", LogField::Count(generation)),
-            ("switch", LogField::Name(switch.name())),
-        ],
+    let skipped = skipped(
+        switch,
+        broker.enabled,
+        broker.platform.is_some(),
+        authority_carries_boot_secrets,
     );
-    switch
+    let generation = ("generation", LogField::Count(broker.environment_generation));
+    let switch_name = ("switch", LogField::Name(switch.name()));
+    match skipped {
+        Some(reason) => diagnostic_log::record(
+            log,
+            "egress_intercept",
+            &[generation, switch_name, ("skipped", LogField::Name(reason))],
+        ),
+        None => diagnostic_log::record(log, "egress_intercept", &[generation, switch_name]),
+    }
+    switch.intercepts() && skipped.is_none()
+}
+
+/// Why a switched-on boot does not intercept, if it doesn't. A boot whose
+/// running authority predates boot secrets would get brokers that can never
+/// pair, so it starts as with the switch off instead (#3999).
+fn skipped(
+    switch: InterceptSwitch,
+    has_broker: bool,
+    platform: bool,
+    authority_carries_boot_secrets: bool,
+) -> Option<&'static str> {
+    if !switch.intercepts() {
+        None
+    } else if !has_broker {
+        Some("no_credential_broker")
+    } else if platform {
+        Some("platform_credentials")
+    } else if !authority_carries_boot_secrets {
+        Some("authority_predates_boot_secrets")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_boot_intercepts_only_through_a_local_credential_broker() {
+        use InterceptSwitch::{Off, On, Unrecognized};
+        assert_eq!(skipped(On, true, false, true), None);
+        assert_eq!(
+            skipped(On, false, false, true),
+            Some("no_credential_broker")
+        );
+        assert_eq!(skipped(On, false, true, true), Some("no_credential_broker"));
+        assert_eq!(skipped(On, true, true, true), Some("platform_credentials"));
+        assert_eq!(
+            skipped(On, true, false, false),
+            Some("authority_predates_boot_secrets")
+        );
+        for switch in [Off, Unrecognized] {
+            for (has_broker, platform) in [(true, false), (false, false), (true, true)] {
+                assert_eq!(skipped(switch, has_broker, platform, false), None);
+            }
+        }
+    }
 
     fn switch_with(content: Option<&[u8]>) -> InterceptSwitch {
         let root = tempfile::tempdir().unwrap();

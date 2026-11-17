@@ -41,6 +41,14 @@ pub(crate) use local_https_command::LocalHttpsCommand;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use native::*;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod native_args;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use native_args::*;
+#[cfg(target_os = "linux")]
+mod native_front_door;
+#[cfg(target_os = "linux")]
+pub(crate) use native_front_door::*;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credential_authority;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod local_images;
@@ -295,84 +303,6 @@ pub(crate) enum EnvironmentPlacement {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Args)]
-pub(crate) struct NativeSupervisorArgs {
-    #[arg(long)]
-    pub(crate) root: PathBuf,
-    #[arg(long)]
-    pub(crate) artifact_root: PathBuf,
-    #[arg(long)]
-    pub(crate) artifact_lock: PathBuf,
-    #[arg(long)]
-    pub(crate) mesh_data_dir: PathBuf,
-    #[arg(long)]
-    pub(crate) platform_config_dir: PathBuf,
-    #[arg(long)]
-    pub(crate) credential_authority_root: PathBuf,
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Debug, Args)]
-pub(crate) struct NativeRunnerArgs {
-    #[arg(long)]
-    pub(crate) environment_id: String,
-    #[arg(long)]
-    pub(crate) socket: PathBuf,
-    #[arg(long)]
-    pub(crate) engine_state_root: PathBuf,
-    #[arg(long)]
-    pub(crate) artifact_generation: String,
-    #[arg(long)]
-    pub(crate) mesh_data_dir: PathBuf,
-    #[arg(long)]
-    pub(crate) platform_config_dir: PathBuf,
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Debug, Args)]
-pub(crate) struct NativeNetworkWorkerArgs {
-    #[arg(long)]
-    pub(crate) environment_id: String,
-    #[arg(long)]
-    pub(crate) generation: u64,
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Debug, Args)]
-pub(crate) struct NativeEgressBrokerArgs {
-    #[arg(long)]
-    pub(crate) environment_id: String,
-    #[arg(long)]
-    pub(crate) generation: u64,
-    /// Hand intercepted dials to the front door over the inherited
-    /// hand-off socket instead of refusing them (#3999).
-    #[arg(long)]
-    pub(crate) intercept_handoff: bool,
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Debug, Args)]
-pub(crate) struct NativeMeshTransportArgs {
-    #[arg(long)]
-    pub(crate) environment_id: String,
-    #[arg(long)]
-    pub(crate) generation: u64,
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Debug, Args)]
-pub(crate) struct NativeMeshEnrollmentBrokerArgs {
-    #[arg(long)]
-    pub(crate) environment_id: String,
-    #[arg(long)]
-    pub(crate) generation: u64,
-    #[arg(long)]
-    pub(crate) mesh_data_dir: PathBuf,
-    #[arg(long)]
-    pub(crate) platform_config_dir: PathBuf,
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Debug, Args)]
 pub(crate) struct LocalCredentialAuthorityArgs {
     #[arg(long)]
     pub(crate) root: PathBuf,
@@ -419,6 +349,10 @@ pub(crate) struct LocalCredentialBrokerArgs {
     pub(crate) http_providers: Vec<String>,
     #[arg(long)]
     pub(crate) platform_delegated: bool,
+    /// The inherited descriptor carrying the boot's secrets (#3999), only
+    /// for a boot that has any.
+    #[arg(long)]
+    pub(crate) boot_secrets_fd: Option<i32>,
     /// The environment's network policy allows GitHub's hosts by rule, so
     /// the managed GitHub credential is served (#4926). Absent, it is not.
     #[arg(long)]

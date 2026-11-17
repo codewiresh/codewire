@@ -4,6 +4,7 @@ pub mod path;
 pub mod preflight;
 pub mod process;
 pub(crate) mod supervisor_peer;
+pub mod syscall_floor;
 
 pub use preflight::{
     HostProblem, PreflightError, PreflightReport, host_prerequisites, host_problem_report,

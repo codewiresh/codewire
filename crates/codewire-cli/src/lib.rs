@@ -25,6 +25,8 @@ mod platform_cw_runtime;
 mod presentation;
 mod public_fetch;
 mod secret_client;
+#[cfg(target_os = "linux")]
+mod snapshot_clear;
 mod tailnet_ssh;
 mod terminal_attach;
 mod update;
@@ -36,6 +38,8 @@ pub use hosted_exec::run_hosted_exec_from;
 pub use platform_cw_runtime::redirect_from as redirect_platform_cw_default_from;
 #[cfg(target_os = "linux")]
 pub use platform_cw_runtime::run_from as run_platform_cw_runtime_from;
+#[cfg(target_os = "linux")]
+pub use snapshot_clear::run_snapshot_clear_from;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -565,6 +569,9 @@ enum Command {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-egress-broker", hide = true)]
     NativeEgressBroker(NativeEgressBrokerArgs),
+    #[cfg(target_os = "linux")]
+    #[command(name = "__native-front-door", hide = true)]
+    NativeFrontDoor(NativeFrontDoorArgs),
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-mesh-transport", hide = true)]
     NativeMeshTransport(NativeMeshTransportArgs),
@@ -1028,6 +1035,8 @@ where
         Command::NativeNetworkWorker(args) => run_native_network_worker(args).await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeEgressBroker(args) => run_native_egress_broker(args).await,
+        #[cfg(target_os = "linux")]
+        Command::NativeFrontDoor(args) => run_native_front_door(args).await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeMeshTransport(args) => run_native_mesh_transport(args).await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1213,100 +1222,6 @@ fn validate_placement_scope(
         );
     anyhow::ensure!(reads, "{flag} does not apply to `cw {name}`");
     Ok(())
-}
-
-/// A snapshot's clearing Sandbox runs this as its only process: `__snapshot-clear
-/// ROOT` for a restore the node mounted at ROOT, or `__snapshot-clear --block
-/// DEVICE [--report PATH]` for a Block restore, which it clears and wipes
-/// without mounting it, writing its report line to PATH too. It runs before any CLI setup, and prints only counts and an error,
-/// never a path or a file's contents. Any failure exits non-zero, so the capture
-/// keeps nothing.
-#[cfg(target_os = "linux")]
-pub fn run_snapshot_clear_from(arguments: impl Iterator<Item = std::ffi::OsString>) -> i32 {
-    use codewire_daemon::snapshot_clearing::{block, clear_workspace_volume};
-    use std::path::Path;
-
-    let arguments = arguments.collect::<Vec<_>>();
-    match arguments.as_slice() {
-        [root] => match clear_workspace_volume(Path::new(root)) {
-            Ok(report) => {
-                println!(
-                    "cleared logins={} trees={}",
-                    report.logins_removed, report.trees_removed
-                );
-                0
-            }
-            Err(error) => {
-                eprintln!("clearing failed: {error}");
-                1
-            }
-        },
-        [flag, device, rest @ ..]
-            if flag == "--block"
-                && matches!(rest, [] | [_, _])
-                && rest.first().is_none_or(|flag| flag == "--report") =>
-        {
-            let report_path = rest.get(1).map(Path::new);
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    eprintln!("clearing failed: {error}");
-                    return 1;
-                }
-            };
-            let started = std::time::Instant::now();
-            match runtime.block_on(block::clear_block_volume(Path::new(device))) {
-                Ok(report) => {
-                    let ms = started.elapsed().as_millis();
-                    let wipe = report.wipe;
-                    let line = format!(
-                        "cleared logins={} trees={} wiped ranges={} bytes={} discard={} discarded={} fallback={} written={} ms={ms}",
-                        report.files.logins_removed,
-                        report.files.trees_removed,
-                        wipe.ranges,
-                        wipe.bytes,
-                        wipe.discard_supported,
-                        wipe.discarded_ranges,
-                        wipe.fallback_ranges,
-                        wipe.written_bytes,
-                    );
-                    println!("{line}");
-                    if !wipe.discard_supported || wipe.fallback_ranges > 0 {
-                        eprintln!(
-                            "warning: discards didn't clear {} of {} ranges (discard supported: {}), so {} bytes were overwritten; clearing took {ms} ms",
-                            if wipe.discard_supported {
-                                wipe.fallback_ranges
-                            } else {
-                                wipe.ranges
-                            },
-                            wipe.ranges,
-                            wipe.discard_supported,
-                            wipe.written_bytes,
-                        );
-                    }
-                    // The report is information for the capture's log; the
-                    // volume is cleared whether or not it can be written.
-                    if let Some(path) = report_path
-                        && let Err(error) = std::fs::write(path, format!("{line}\n"))
-                    {
-                        eprintln!("warning: the clearing report could not be written: {error}");
-                    }
-                    0
-                }
-                Err(error) => {
-                    eprintln!("clearing failed: {error}");
-                    1
-                }
-            }
-        }
-        _ => {
-            eprintln!("usage: cw __snapshot-clear ROOT | --block DEVICE [--report PATH]");
-            2
-        }
-    }
 }
 
 async fn run_hosted_daemon() -> anyhow::Result<()> {

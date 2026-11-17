@@ -27,8 +27,13 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt as _;
 use tonic::Status;
 
-use crate::{BridgeIdentity, CredentialBridge};
+use crate::{BridgeIdentity, CredentialBridge, EpochReplacement};
 
+/// The host's first byte on the session socket, before its Open: the role
+/// tag the front-door process checks before serving anything, so the socket
+/// cannot be mistaken for the egress broker's hand-off (#3999). The front
+/// door's process reads it; [`serve_front_door_session`] starts after it.
+pub const FRONT_DOOR_SESSION_ROLE_TAG: u8 = b'C';
 /// How long the guest waits for the host's Open.
 pub const FRONT_DOOR_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Host messages queued for the writer: backpressure, never unbounded.
@@ -78,8 +83,11 @@ where
             )),
         }
     });
+    // A broker's successor opens its own session before the predecessor
+    // ends: the new session takes all new work, and the old one relays only
+    // the requests already sent on it, as for the daemon's loopback session.
     let connection = prepared
-        .activate_with_capabilities(input, &capabilities)
+        .activate_with_replacement(input, &capabilities, EpochReplacement::Drain)
         .await
         .map_err(|_| FrontDoorSessionError::Refused)?;
     let pump = async {

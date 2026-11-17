@@ -35,6 +35,7 @@ pub(super) fn network_start_error_code(error: &RunnerError) -> &'static str {
         RunnerError::EgressBrokerStartup(failure) => failure.runner_error_code(),
         RunnerError::EgressBrokerWait => "egress_broker_wait",
         RunnerError::EgressBrokerKillTimeout => "egress_broker_kill_timeout",
+        RunnerError::FrontDoor(failure) => failure.runner_error_code(),
         RunnerError::MeshTransportSpawn => "mesh_transport_spawn",
         RunnerError::MeshTransportStartTimeout => "mesh_transport_start_timeout",
         RunnerError::MeshTransportBootstrap => "mesh_transport_bootstrap",

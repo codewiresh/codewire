@@ -15,6 +15,8 @@ pub struct EnvironmentBrokerSelection {
     /// rule (#4926). The default is no: a caller of this client that does
     /// not say is refused the managed GitHub credential.
     pub network_policy_allows_github: bool,
+    /// An intercepting boot's secrets, for each broker it starts (#3999).
+    pub boot_secrets: crate::BrokerBootSecrets,
 }
 
 /// Material-free launch description for one environment generation. Provider
@@ -81,10 +83,13 @@ pub enum LocalBrokerSpawnError {
 /// Authority-owned broker launcher. The stream peer is transferred directly
 /// into the isolated child and must become its only lease-authority channel.
 pub trait LocalBrokerProcessSpawner: Send + Sync + 'static {
+    /// Start one broker child. A boot's `boot_secrets`, when it has any,
+    /// reach the child only on an inherited descriptor (#3999).
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,
         authority_peer: std::os::unix::net::UnixStream,
+        boot_secrets: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError>;
 }
 

@@ -10,11 +10,15 @@ use codewire_credential_broker::ProviderHttpsTransport;
 #[cfg(feature = "local-broker-synthetic-smoke")]
 use codewire_credential_broker::SyntheticOpenAiSmokeTransport;
 use codewire_credential_broker::{
-    BrokerBridgeError, CredentialBridgeRelayOutput, OpenAiBroker, RelayNetworkPolicy,
-    admit_credential_bridge, run_admitted_credential_bridge, run_admitted_credential_bridge_relay,
+    AdmittedCredentialBridge, BrokerBridgeError, CredentialBridgeRelayOutput, FrontDoorTransport,
+    OpenAiBroker, RelayNetworkPolicy, admit_credential_bridge, run_admitted_credential_bridge,
+    run_admitted_credential_bridge_relay, run_admitted_credential_bridges,
 };
 #[cfg(target_os = "linux")]
 use codewire_local_credentials::AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES;
+use codewire_local_credentials::{
+    BootSecretPurpose, BrokerBootSecrets, MAX_BOOT_SECRET_RECORDS_BYTES,
+};
 use codewire_local_credentials::{
     LocalCredentialBrokerLeaseClient, LocalCredentialDelegationClient,
 };
@@ -149,6 +153,12 @@ fn status_kind(code: tonic::Code) -> &'static str {
 
 async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> anyhow::Result<()> {
     verify_broker_process_confinement()?;
+    // Before anything else, so nothing this broker starts inherits them.
+    stage.set("boot_secrets.read");
+    let boot_secrets = match args.boot_secrets_fd {
+        Some(descriptor) => read_boot_secrets(descriptor)?,
+        None => BrokerBootSecrets::default(),
+    };
     stage.set("arguments.parse");
     // Validate the store selection before any channel or provider effect.
     #[cfg(target_os = "macos")]
@@ -303,6 +313,29 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
     let bridge = admit_credential_bridge(bridge, environment_uuid, args.environment_generation)
         .await
         .context("authenticate guest credential bridge")?;
+    // The environment's front door (#3999), when the boot binds interception.
+    // It pairs before confinement, as the daemon connection does. A relay to
+    // the platform broker does not serve it yet; the supervisor does not
+    // intercept such a boot.
+    stage.set("front_door.pair");
+    let front_door = if access.front_door_socket.is_empty() || args.platform_delegated {
+        None
+    } else {
+        // Only the boot's own pairing secret pairs; never the daemon token,
+        // which the guest knows (#3999).
+        let pairing = boot_secrets
+            .get(BootSecretPurpose::FrontDoorPairing)
+            .context("the boot's pairing secret is missing")?;
+        pair_front_door(
+            Path::new(&access.front_door_socket),
+            pairing,
+            environment_uuid,
+            args.environment_generation,
+        )
+        .await
+        .context("pair with the environment's front door")?
+    };
+    drop(boot_secrets);
     // The broker needs only the admitted bridge from this point onward. Do not
     // retain general runner or daemon clients inside the credential-bearing
     // runtime domain.
@@ -403,9 +436,97 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
         None => broker,
     };
     stage.set("bridge.run");
-    run_admitted_credential_bridge(broker, bridge)
+    match front_door {
+        Some(front_door) => run_admitted_credential_bridges(broker, bridge, front_door)
+            .await
+            .context("run guest and front-door credential bridges"),
+        None => run_admitted_credential_bridge(broker, bridge)
+            .await
+            .context("run guest credential bridge"),
+    }
+}
+
+/// A boot's secrets from the descriptor the authority passed (#3999). It is
+/// made close-on-exec before it is read, so no helper this broker starts can
+/// inherit it, read once to its end, and closed.
+fn read_boot_secrets(descriptor: i32) -> anyhow::Result<BrokerBootSecrets> {
+    anyhow::ensure!(descriptor == 4, "invalid broker boot secrets");
+    // SAFETY: FD 4 is created by the authority immediately before exec, only
+    // for a boot with secrets; ownership moves here exactly once.
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    read_boot_secret_descriptor(&descriptor)
+}
+
+/// Seal `descriptor` close-on-exec, then read it to its end. The caller
+/// closes it.
+fn read_boot_secret_descriptor(descriptor: &OwnedFd) -> anyhow::Result<BrokerBootSecrets> {
+    use std::io::Read as _;
+    rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::CLOEXEC)
+        .context("seal broker boot secrets")?;
+    let mut records = zeroize::Zeroizing::new(Vec::new());
+    let limit = u64::try_from(MAX_BOOT_SECRET_RECORDS_BYTES + 1).unwrap_or(u64::MAX);
+    std::os::unix::net::UnixStream::from(
+        descriptor.try_clone().context("read broker boot secrets")?,
+    )
+    .take(limit)
+    .read_to_end(&mut records)
+    .context("read broker boot secrets")?;
+    BrokerBootSecrets::from_records(&records)
+        .map_err(|_| anyhow::anyhow!("invalid broker boot secrets"))
+}
+
+/// Connect to the runner's pairing socket, present the boot's pairing
+/// secret, and open the front-door session the runner then hands the front
+/// door.
+///
+/// The front-door session, or none when the generation's pairing socket is
+/// gone. The runner keeps it for the generation's life, so every broker the
+/// authority starts, each renewal's successor included, pairs and takes the
+/// new work (#3999). Gone means the runner or its front door has ended: this
+/// broker serves its loopback session alone, and intercepted dials stay
+/// refused.
+async fn pair_front_door(
+    socket: &Path,
+    capability: &[u8],
+    environment_id: Uuid,
+    environment_generation: u64,
+) -> anyhow::Result<Option<AdmittedCredentialBridge<FrontDoorTransport>>> {
+    use tokio::io::AsyncWriteExt as _;
+    let connected = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::UnixStream::connect(socket),
+    )
+    .await
+    .context("front door pairing timed out")?;
+    let mut stream = match connected {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let length = u16::try_from(capability.len()).context("pairing secret is too long")?;
+    stream.write_u16(length).await?;
+    stream.write_all(capability).await?;
+    // The runner reads the capability; the front door reads this role tag
+    // before anything else, so a swapped socket is refused at once.
+    stream
+        .write_all(&[codewire_credential_broker::FRONT_DOOR_SESSION_ROLE_TAG])
+        .await?;
+    let session = FrontDoorTransport::open(stream, environment_id, environment_generation).await?;
+    Ok(Some(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            admit_credential_bridge(session, environment_id, environment_generation),
+        )
         .await
-        .context("run guest credential bridge")
+        .context("front door session readiness timed out")??,
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -465,6 +586,58 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+
+    /// The boot's secrets arrive whole on their descriptor, which is made
+    /// close-on-exec before anything reads it; a short or unknown record
+    /// fails the broker before it pairs (#3999).
+    #[test]
+    fn boot_secrets_are_read_whole_from_a_sealed_descriptor() {
+        use std::io::Write as _;
+        let secrets = BrokerBootSecrets::new([(
+            BootSecretPurpose::FrontDoorPairing,
+            vec![0x5a; codewire_local_credentials::BOOT_SECRET_BYTES],
+        )])
+        .unwrap();
+        let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        let reader = OwnedFd::from(reader);
+        // As inherited: not close-on-exec until the broker seals it.
+        rustix::io::fcntl_setfd(&reader, rustix::io::FdFlags::empty()).unwrap();
+        writer.write_all(&secrets.records()).unwrap();
+        drop(writer);
+        assert_eq!(read_boot_secret_descriptor(&reader).unwrap(), secrets);
+        assert!(
+            rustix::io::fcntl_getfd(&reader)
+                .unwrap()
+                .contains(rustix::io::FdFlags::CLOEXEC)
+        );
+
+        let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(&secrets.records()[..10]).unwrap();
+        drop(writer);
+        assert!(read_boot_secret_descriptor(&OwnedFd::from(reader)).is_err());
+        assert!(read_boot_secrets(5).is_err());
+    }
+
+    /// A broker that finds this generation's pairing socket gone, its runner
+    /// or front door ended, serves without the front door.
+    #[tokio::test]
+    async fn a_pairing_socket_already_gone_means_no_front_door_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("front-door.sock");
+        let paired = pair_front_door(&socket, b"capability", Uuid::new_v4(), 1).await;
+        assert!(paired.unwrap().is_none());
+    }
+
+    /// The first broker's pairing is bounded: a front door that never
+    /// answers fails the broker, and so the boot, rather than hanging it.
+    #[tokio::test(start_paused = true)]
+    async fn a_front_door_that_never_answers_fails_the_pairing() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("front-door.sock");
+        let _silent = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let paired = pair_front_door(&socket, b"capability", Uuid::new_v4(), 1).await;
+        assert!(paired.is_err());
+    }
 
     #[test]
     fn broker_environment_allowlist_excludes_provider_and_platform_values() {

@@ -14,6 +14,7 @@
 #![allow(clippy::unwrap_used)]
 
 mod admission;
+mod boot_secrets;
 mod broker_channel;
 mod broker_log;
 mod broker_process;
@@ -38,6 +39,10 @@ use profile_rows::{
     profile_is_default,
 };
 
+pub use boot_secrets::{
+    BOOT_SECRET_BYTES, BootSecretPurpose, BrokerBootSecrets, InvalidBootSecrets,
+    MAX_BOOT_SECRET_RECORDS_BYTES,
+};
 pub use broker_channel::{
     BrokerCredentialRefreshAdmission, BrokerCredentialRefreshReservation, BrokerLeaseAuditDecision,
     BrokerLeaseAuditEvent, BrokerLeaseChannelError, LocalCredentialBrokerLeaseClient,

@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 21;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 22;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -55,6 +55,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         21,
         "admits a Claude subscription token, with its shape checked and a one-year expiry (#4945)",
     ),
+    (
+        22,
+        "EnsureEnvironmentBroker carries a boot's secrets, held in memory and handed to each broker on an inherited descriptor (#3999)",
+    ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 
@@ -83,16 +87,21 @@ pub enum AuthorityFeature {
     /// A Claude subscription token, stored with a one-year expiry. An older
     /// authority refuses to store one.
     ClaudeToken,
+    /// `EnsureEnvironmentBroker.boot_secrets`, carried to each broker on an
+    /// inherited descriptor (#3999). An older authority drops them, and its
+    /// brokers could never pair with the front door.
+    BootSecrets,
 }
 
 impl AuthorityFeature {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::PlatformGithub,
         Self::ClaudeSignIn,
         Self::DefaultProfile,
         Self::CredentialPlaceholders,
         Self::NetworkPolicyGithub,
         Self::ClaudeToken,
+        Self::BootSecrets,
     ];
 
     /// The protocol that introduced it.
@@ -104,6 +113,7 @@ impl AuthorityFeature {
             Self::CredentialPlaceholders => 19,
             Self::NetworkPolicyGithub => 20,
             Self::ClaudeToken => 21,
+            Self::BootSecrets => 22,
         }
     }
 

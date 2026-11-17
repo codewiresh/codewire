@@ -267,7 +267,12 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
         &self,
         config: &LocalBrokerProcessConfig,
         authority_peer: std::os::unix::net::UnixStream,
+        boot_secrets: &codewire_local_credentials::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
+        // A Mac starts no front door yet, so a boot there has no secrets.
+        if !boot_secrets.is_empty() {
+            return Err(LocalBrokerSpawnError::InvalidConfiguration);
+        }
         let authority_fd = authority_peer.as_raw_fd();
         if authority_fd < 3 {
             return Err(LocalBrokerSpawnError::InvalidConfiguration);
@@ -517,7 +522,8 @@ mod tests {
             network_policy_allows_github: false,
         };
         let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();
-        let mut child = LocalBrokerProcessSpawner::spawn(&spawner, &config, peer).unwrap();
+        let mut child =
+            LocalBrokerProcessSpawner::spawn(&spawner, &config, peer, &Default::default()).unwrap();
         assert!(child.wait().await.unwrap().success());
         let lines = observed(&root);
         assert_eq!(lines[0], lines[1], "setsid makes the broker a group leader");
@@ -550,7 +556,9 @@ mod tests {
             ..config
         };
         let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();
-        let mut child = LocalBrokerProcessSpawner::spawn(&spawner, &platform, peer).unwrap();
+        let mut child =
+            LocalBrokerProcessSpawner::spawn(&spawner, &platform, peer, &Default::default())
+                .unwrap();
         assert!(child.wait().await.unwrap().success());
         let lines = observed(&root);
         assert!(lines[8].ends_with(&format!(
