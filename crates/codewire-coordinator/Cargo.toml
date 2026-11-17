@@ -33,6 +33,7 @@ buffa-types = { workspace = true }
 codewire-proto = { workspace = true, features = ["client"] }
 connectrpc = { workspace = true, features = ["axum", "client"] }
 reqwest = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true }
 codewire-workspace-hack.workspace = true
 

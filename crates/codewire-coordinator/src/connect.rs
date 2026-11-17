@@ -18,6 +18,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::node_bindings::{Principal, Refusal};
 use crate::peer::{DbPeerVerifier, PEER_RECHECK_INTERVAL, PeerProof, PeerVerifier, ProofError};
 use crate::session::{
     ClientAccess, ClientRecheck, PeerChecks, SessionContext, SessionInput, SessionOutput,
@@ -74,6 +75,8 @@ fn router_with_authorizer(
 
 struct AuthorizedPeer {
     peer_id: Uuid,
+    /// Who the peer's node key is bound to.
+    principal: Principal,
     sidecar_id: Option<Uuid>,
     kind: PeerKind,
     /// An environment peer's connect-time proof.
@@ -84,6 +87,20 @@ struct AuthorizedPeer {
 
 /// The message a client reads when a re-check refuses its access.
 const ACCESS_REVOKED: &str = "environment access revoked";
+
+/// The error a peer reads when its node key is refused. A lost race and an
+/// unreachable store are worth retrying; a key bound elsewhere is not.
+fn node_key_refused(refusal: Refusal) -> ConnectError {
+    match refusal {
+        Refusal::BoundElsewhere => {
+            ConnectError::permission_denied("node key is bound to another principal or environment")
+        }
+        Refusal::LostRace => {
+            ConnectError::aborted("another session announced this node key at the same time")
+        }
+        Refusal::Unavailable => ConnectError::unavailable("node key binding unavailable"),
+    }
+}
 
 /// A client's identity and target from its hello, re-checked against the
 /// current records with the rule it joined under (#3828). Only access is
@@ -174,6 +191,7 @@ impl ProductionAuthorizer {
             };
             return Ok(AuthorizedPeer {
                 peer_id: environment_id,
+                principal: Principal::Environment(environment_id),
                 sidecar_id: None,
                 kind: PeerKind::Sidecar,
                 proof: Some(proof),
@@ -211,6 +229,7 @@ impl ProductionAuthorizer {
         };
         Ok(AuthorizedPeer {
             peer_id: Uuid::new_v4(),
+            principal: Principal::User(authentication.user.user_id.clone()),
             sidecar_id: Some(environment_id),
             kind: PeerKind::Client,
             proof: None,
@@ -300,6 +319,7 @@ impl CoordinatorService for CoordinateService {
             self.context.clone(),
             SessionPeer {
                 peer_id: peer.peer_id,
+                principal: peer.principal,
                 sidecar_id: peer.sidecar_id,
                 kind: peer.kind,
                 transport: Transport::Connect,
@@ -357,6 +377,7 @@ impl SessionSink for ConnectSink {
     async fn send(&mut self, output: SessionOutput) -> bool {
         let response = match output {
             SessionOutput::AccessRevoked => Err(ConnectError::permission_denied(ACCESS_REVOKED)),
+            SessionOutput::NodeKeyRefused(refusal) => Err(node_key_refused(refusal)),
             output => {
                 let response = session_output_to_proto(output);
                 if let Err(err) = &response {
@@ -394,6 +415,7 @@ fn session_output_to_proto(output: SessionOutput) -> Result<CoordinateResponse, 
         SessionOutput::AccessRevoked => {
             return Err(ConnectError::permission_denied(ACCESS_REVOKED));
         }
+        SessionOutput::NodeKeyRefused(refusal) => return Err(node_key_refused(refusal)),
     };
     Ok(CoordinateResponse {
         msg,
@@ -525,6 +547,7 @@ mod tests {
                 if hello.org_id.is_empty() {
                     Ok(AuthorizedPeer {
                         peer_id: environment_id,
+                        principal: Principal::Environment(environment_id),
                         sidecar_id: None,
                         kind: PeerKind::Sidecar,
                         proof: Some(PeerProof {
@@ -536,6 +559,7 @@ mod tests {
                 } else {
                     Ok(AuthorizedPeer {
                         peer_id: Uuid::new_v4(),
+                        principal: Principal::User("hermetic-user".into()),
                         sidecar_id: Some(environment_id),
                         kind: PeerKind::Client,
                         proof: None,
@@ -1522,6 +1546,14 @@ mod tests {
                 .unwrap();
 
         let environment_id = Uuid::new_v4();
+        // The bucket binds node keys for days, so every run announces fresh ones.
+        let fresh_key = || {
+            let mut raw = [0_u8; 32];
+            raw[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+            raw[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+            NodePublic::from_raw(raw)
+        };
+        let (sidecar_key, client_key) = (fresh_key(), fresh_key());
         let (mut sidecar_state, _) = lazy_state();
         sidecar_state.coordination = Some(sidecar_plane.clone());
         let (sidecar_addr, sidecar_server) = start_hermetic_app_with_state(sidecar_state).await;
@@ -1562,7 +1594,7 @@ mod tests {
         let sidecar_node = codewire_tailnet::node::Node {
             id: environment_id,
             as_of: "2026-07-11T12:00:00Z".parse().unwrap(),
-            key: NodePublic::from_raw([0x31; 32]),
+            key: sidecar_key,
             disco_key: DiscoPublic::from_raw([0x32; 32]),
             preferred_derp: 11,
             derp_latency: None,
@@ -1593,7 +1625,7 @@ mod tests {
         let client_node = codewire_tailnet::node::Node {
             id: proposed_client_id,
             as_of: "2026-07-11T12:00:00Z".parse().unwrap(),
-            key: NodePublic::from_raw([0x41; 32]),
+            key: client_key,
             disco_key: DiscoPublic::from_raw([0x42; 32]),
             preferred_derp: 7,
             derp_latency: None,
@@ -1626,6 +1658,14 @@ mod tests {
             .delete(crate::sidecar_key(environment_id))
             .await
             .ok();
+        for key in [sidecar_key, client_key] {
+            sidecar_plane
+                .node_bindings
+                .0
+                .purge(crate::node_keys::key_hex(&key))
+                .await
+                .ok();
+        }
         sidecar_server.abort();
         client_server.abort();
     }

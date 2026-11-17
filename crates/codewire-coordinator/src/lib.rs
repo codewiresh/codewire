@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 mod connect;
+mod node_bindings;
 mod node_keys;
 mod peer;
 mod session;
@@ -78,6 +79,8 @@ struct CoordinationPlane {
     kv: jetstream::kv::Store,
     /// Node keys of live sessions on every replica (`node_keys`).
     node_keys: jetstream::kv::Store,
+    /// Each node key's principal, environment and session (`node_bindings`).
+    node_bindings: node_bindings::KvBindings,
 }
 
 impl CoordinationPlane {
@@ -108,10 +111,20 @@ impl CoordinationPlane {
             ),
         )
         .await?;
+        let node_bindings = codewire_server_core::nats::kv_bucket(
+            &js,
+            bucket(
+                node_bindings::NODE_BINDING_BUCKET,
+                "Each node key's principal, environment and coordinator session",
+                node_bindings::NODE_BINDING_TTL,
+            ),
+        )
+        .await?;
         Ok(Arc::new(Self {
             client,
             kv,
             node_keys,
+            node_bindings: node_bindings::KvBindings(node_bindings),
         }))
     }
 
@@ -792,6 +805,8 @@ fn log_node(
 #[derive(Default)]
 struct PeerRegistry {
     inner: Mutex<RegistryInner>,
+    /// Node key bindings when there is no NATS plane to hold them.
+    bindings: Arc<node_bindings::MemoryBindings>,
 }
 
 #[derive(Default)]
@@ -904,6 +919,20 @@ impl PeerRegistry {
         if inner.peers.get(&id).is_none_or(|peer| peer.owner != owner) {
             return;
         }
+        Self::remove_peer(&mut inner, id);
+    }
+
+    /// Removes a client whose node key a newer session took over. Dropping
+    /// its entry closes its events, which ends the session.
+    fn retire(&self, id: Uuid) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.peers.contains_key(&id) {
+            Self::remove_peer(&mut inner, id);
+        }
+    }
+
+    /// Removes `id` and tells the peers it was tunnelled with.
+    fn remove_peer(inner: &mut RegistryInner, id: Uuid) {
         inner.peers.remove(&id);
 
         let tunnels: Vec<(Uuid, Uuid)> = inner

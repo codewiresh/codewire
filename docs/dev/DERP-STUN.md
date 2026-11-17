@@ -201,10 +201,10 @@ quiet; it does not wait for a send to fail.
   long it runs. When the session ends, the binding keeps
   `{principal, environment}` and drops `session`; it then ages out seven days
   after that last write. Keys are fresh for each tailnet, so a week outlasts
-  any reconnect. A binding is cleared when it expires, or when its principal
-  signs out or removes the node. Deleting an environment does not search out
-  its bindings: no session can authenticate for it afterwards, and they expire
-  with the TTL. `coordinator-node-keys`, the live-session record DERP admission
+  any reconnect. A binding is cleared only when it expires. The coordinator
+  hears of no sign-out and no removal of a node, and none is needed: the key is
+  random to its tailnet, and a principal that signed out, or an environment
+  that was deleted, can open no session meanwhile. `coordinator-node-keys`, the live-session record DERP admission
   reads, is unchanged.
 - **One writer at a time.** Binding, refreshing, retiring and taking over
   are compare-and-set on the binding's KV revision: create when absent,
