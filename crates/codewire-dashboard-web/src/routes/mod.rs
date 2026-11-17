@@ -17,6 +17,7 @@ mod github_repositories;
 mod hosts;
 mod invitations;
 mod my_invitations;
+pub(crate) mod network_policies;
 mod organization_context;
 mod organization_governance;
 mod organizations;
@@ -369,6 +370,31 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/{slug}/presets/_actions/delete",
             post(secrets_presets::delete_preset),
+        )
+        .route("/{slug}/network-policies", get(slash_redirect))
+        .route(
+            "/{slug}/network-policies/",
+            get(network_policies::list_page),
+        )
+        .route(
+            "/{slug}/network-policies/_actions/create",
+            post(network_policies::create),
+        )
+        .route(
+            "/{slug}/network-policies/{name}/",
+            get(network_policies::policy_page),
+        )
+        .route(
+            "/{slug}/network-policies/{name}/_actions/allow",
+            post(network_policies::allow),
+        )
+        .route(
+            "/{slug}/network-policies/{name}/_actions/remove",
+            post(network_policies::remove),
+        )
+        .route(
+            "/{slug}/network-policies/{name}/_actions/delete",
+            post(network_policies::delete),
         )
         .route("/{slug}/hosts", get(slash_redirect))
         .route("/{slug}/hosts/", get(hosts::page))

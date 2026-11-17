@@ -27,6 +27,8 @@ pub(crate) const RECOVERY_CODES_SCRIPT_PATH: &str = "/assets/codewire/recovery-c
 pub(crate) const SETTINGS_STYLE_PATH: &str = "/assets/codewire/routes/settings-v1.css";
 pub(crate) const ORGANIZATIONS_STYLE_PATH: &str = "/assets/codewire/routes/organizations-v1.css";
 pub(crate) const HOSTS_STYLE_PATH: &str = "/assets/codewire/routes/hosts-v1.css";
+pub(crate) const NETWORK_POLICIES_STYLE_PATH: &str =
+    "/assets/codewire/routes/network-policies-v1.css";
 pub(crate) const SECRET_MANAGEMENT_STYLE_PATH: &str =
     "/assets/codewire/routes/secret-management-v1.css";
 pub(crate) const ENVIRONMENTS_STYLE_PATH: &str = "/assets/codewire/routes/environments-v3.css";
@@ -83,6 +85,8 @@ const SETTINGS_STYLES: &str = include_str!("../../../packages/codewire-design/ro
 const ORGANIZATIONS_STYLES: &str =
     include_str!("../../../packages/codewire-design/routes/organizations.css");
 const HOSTS_STYLES: &str = include_str!("../../../packages/codewire-design/routes/hosts.css");
+const NETWORK_POLICIES_STYLES: &str =
+    include_str!("../../../packages/codewire-design/routes/network-policies.css");
 const SECRET_MANAGEMENT_STYLES: &str =
     include_str!("../../../packages/codewire-design/routes/secret-management.css");
 const ENVIRONMENTS_STYLES: &str =
@@ -174,6 +178,11 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         ORGANIZATIONS_STYLES.as_bytes(),
     ),
     (HOSTS_STYLE_PATH, CSS, HOSTS_STYLES.as_bytes()),
+    (
+        NETWORK_POLICIES_STYLE_PATH,
+        CSS,
+        NETWORK_POLICIES_STYLES.as_bytes(),
+    ),
     (
         SECRET_MANAGEMENT_STYLE_PATH,
         CSS,

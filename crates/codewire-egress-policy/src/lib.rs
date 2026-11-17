@@ -34,6 +34,9 @@ use cidr::IpNetwork;
 use hostname::{NamePattern, canonical_hostname, protected_name};
 
 pub const POLICY_SCHEMA_VERSION: u32 = 1;
+/// The ports an allowed destination gets when it names none: those `open`
+/// allows, so an allowed Git host also works over SSH.
+pub const DEFAULT_ALLOW_PORTS: [u16; 3] = [22, 80, 443];
 pub const DEVELOPER_BASELINE_ID: &str = "codewire-developer-v1";
 pub const DEVELOPER_BASELINE_DIGEST: &str =
     "fab8151c7bffd0d0fe6ca1a9397ae6b60fa1e0ae650a967f9c9445ac3dd4189f";

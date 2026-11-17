@@ -618,20 +618,17 @@ pub async fn delete_policy(
           WHERE b.policy_id = $1 ORDER BY 1 LIMIT $2",
     )
     .bind(&id)
-    .bind(NAMED_ENVIRONMENTS as i64 + 1)
+    .bind(i64::from(NAMED_ENVIRONMENTS) + 1)
     .fetch_all(&mut *tx)
     .await?;
     if !selecting.is_empty() {
-        let more = if selecting.len() > NAMED_ENVIRONMENTS {
+        let named = usize::from(NAMED_ENVIRONMENTS);
+        let more = if selecting.len() > named {
             " and more"
         } else {
             ""
         };
-        let shown = selecting
-            .iter()
-            .take(NAMED_ENVIRONMENTS)
-            .cloned()
-            .collect::<Vec<_>>();
+        let shown = selecting.iter().take(named).cloned().collect::<Vec<_>>();
         return Err(AppError::Precondition(
             format!(
                 "{name} is selected by {}{more}; select another policy for them first",
@@ -669,7 +666,7 @@ pub struct PolicyUsage {
 }
 
 /// How many environments a refused delete and a policy's usage name.
-pub const NAMED_ENVIRONMENTS: usize = 10;
+pub const NAMED_ENVIRONMENTS: u8 = 10;
 
 /// What the organization's hosted environments select, in one grouped read.
 /// It counts the same selection rows [`delete_policy`] refuses for, so a
@@ -704,7 +701,7 @@ pub async fn policy_usage(
     )
     .bind(org_id)
     .bind(HOSTED_DEFAULT_NAME)
-    .bind(NAMED_ENVIRONMENTS as i64)
+    .bind(i64::from(NAMED_ENVIRONMENTS))
     .fetch_all(pool)
     .await?;
     rows.iter()

@@ -339,7 +339,27 @@ policies.
     `cw --local policy` never appears, even under the same name.
   - Until `hosted-enforcement` reports, every Sandbox reads "Not enforced
     yet". That is the expected state, not a failure of the page.
-- **Observed:** not yet observed.
+- **Observed:**
+  - on a local Kind profile (`cw-netui`), 2026-11-17, the dashboard built
+    from #5114's pull request (NP1), as the seeded owner and member:
+    - step 1: the built-ins, "No policies yet", the not-enforced notice and
+      the `cw` line under Create;
+    - step 2: `10.0.0.0/8:443` refused with "the range includes protected
+      addresses", keeping the input; `walk-dash` created at revision 1 and
+      revision 2 after allowing `*.crates.io` with the default ports;
+    - step 3: a save over a newer revision said revision 3 was saved first
+      and kept the typed destination. The other window updating without a
+      reload waits for the live event (#4762);
+    - step 4: `static.crates.io:443` allowed "when the name answers public
+      addresses", and `pypi.org:443` refused "(name not allowed)";
+    - step 5: with 12 synthetic hosted environment rows seeded into the
+      profile's database in place of real Sandboxes, the cell read `12`;
+      hover and keyboard focus at 1280 and a tap at 390 each listed ten names
+      and "and 2 more";
+    - step 6: delete refused, naming the Sandboxes;
+    - step 7: the member saw no Create, Allow, Remove or Delete;
+  - not yet observed: step 8 (the Kind overlay switches the store on), Network
+    access on a Sandbox (#5116) and refusals (#5117); Dev and Production.
 
 ## `policy-protected`: addresses no policy can allow
 

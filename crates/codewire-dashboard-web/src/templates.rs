@@ -351,6 +351,24 @@ pub(crate) struct OrganizationEnvironmentsContentTemplate<'a> {
 }
 
 #[derive(Template)]
+#[template(path = "organization-network-policies.html")]
+pub(crate) struct NetworkPoliciesTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) organization: &'a OrganizationContext,
+    pub(crate) page: &'a crate::routes::network_policies::ListPageView,
+    pub(crate) active_tab: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "organization-network-policy.html")]
+pub(crate) struct NetworkPolicyTemplate<'a> {
+    pub(crate) view: &'a DashboardView,
+    pub(crate) organization: &'a OrganizationContext,
+    pub(crate) page: &'a crate::routes::network_policies::PolicyPageView,
+    pub(crate) active_tab: &'static str,
+}
+
+#[derive(Template)]
 #[template(path = "hosts.html")]
 pub(crate) struct HostsTemplate<'a> {
     pub(crate) view: &'a DashboardView,

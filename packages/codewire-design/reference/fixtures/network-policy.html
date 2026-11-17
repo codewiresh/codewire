@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><script src="../../theme.js"></script><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network policy fixture</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/organizations.css"><link rel="stylesheet" href="../../routes/network-policies.css">
+  <script src="../../dashboard.js" defer></script>
+</head>
+<body class="cw-body" data-dashboard-app>
+  <main class="cw-main"><header class="cw-console-header"><div class="cw-console-breadcrumb"><span>example-org</span><span>/</span><strong>network policies</strong></div><div class="cw-console-account"><a class="cw-button cw-button--outline cw-button--small" href="mailto:support@codewire.sh?subject=%5BSupport%5D">Support</a></div></header><div class="cw-page cw-org-management-page"><div class="cw-org-management-layout"><aside class="cw-context-nav"><header class="cw-context-nav-heading"><h2>Settings</h2></header>
+<nav class="cw-context-nav-links" aria-label="Organization navigation">
+  <h3 id="settings-personal-title" class="cw-section-label">Personal</h3>
+  <ul aria-labelledby="settings-personal-title"><li><a class="cw-nav-link" href="settings-account.html">Account</a></li><li><a class="cw-nav-link" href="settings-credentials.html">Credentials</a></li><li><a class="cw-nav-link" href="settings-secrets.html">Secrets</a></li><li><a class="cw-nav-link" href="settings-api-keys.html">API keys</a></li><li><a class="cw-nav-link" href="settings-invitations.html">Invitations</a></li></ul>
+<h3 id="settings-organization-title" class="cw-section-label">Organization · Example organization</h3>
+<ul aria-labelledby="settings-organization-title"><li><a class="cw-nav-link" href="sandboxes.html">Sandboxes</a></li><li><a class="cw-nav-link" href="/example-org/snapshots/">Snapshots <span class="cw-badge">Soon</span></a></li><li><a class="cw-nav-link" href="/example-org/presets/">Presets</a></li><li><a class="cw-nav-link" href="application-secrets.html">Secrets</a></li><li><a class="cw-nav-link" href="network-policies.html" aria-current="page">Network policies</a></li><li><a class="cw-nav-link" href="/example-org/api-keys/">API keys</a></li><li><a class="cw-nav-link" href="/example-org/members/">Members</a></li><li><a class="cw-nav-link" href="/example-org/billing/">Billing</a></li></ul>
+</nav></aside><div class="cw-context-main cw-network-policies">
+    <a class="cw-back-link" href="network-policies.html"><svg class="cw-icon" aria-hidden="true"><use href="../../assets/icons.svg#icon-chevron-left"/></svg><span>Network policies</span></a>
+    <header class="cw-page-header cw-page-header--stacked"><div class="cw-page-header-row"><div class="cw-page-title-row"><h1 class="cw-page-title cw-mono">docs-and-crates</h1><span class="cw-badge" data-tone="info">rev 3</span></div><button class="cw-button cw-button--outline" type="button" data-dialog-open="delete-network-policy" aria-haspopup="dialog" aria-controls="delete-network-policy">Delete</button></div><p class="cw-page-description">Revision 3 saved 4m ago. Every change is saved at once as a new revision.</p></header>
+    <p class="cw-alert cw-alert--warning" role="status">Hosted Sandboxes don't enforce network policies yet, so a policy here changes nothing a Sandbox can reach.</p>
+    <section class="cw-card" aria-labelledby="network-policy-rules-title">
+      <div class="cw-card-header"><h2 id="network-policy-rules-title" class="cw-card-title">Allowed destinations</h2></div>
+      <ul class="cw-list cw-network-policy-list">
+        <li class="cw-list-row"><p class="cw-network-policy-rule"><strong class="cw-mono">docs.rs</strong> <span>port 443</span></p><form method="post" action="#"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="revision" value="3"><input type="hidden" name="target" value="docs.rs"><button class="cw-button cw-button--ghost cw-button--small" type="submit"><span>Remove</span><span class="cw-sr-only"> docs.rs</span></button></form></li>
+        <li class="cw-list-row"><p class="cw-network-policy-rule"><strong class="cw-mono">*.crates.io</strong> <span>ports 22, 80, 443</span></p><form method="post" action="#"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="revision" value="3"><input type="hidden" name="target" value="*.crates.io"><button class="cw-button cw-button--ghost cw-button--small" type="submit"><span>Remove</span><span class="cw-sr-only"> *.crates.io</span></button></form></li>
+        <li class="cw-list-row"><p class="cw-network-policy-rule"><strong class="cw-mono">crates.io</strong> <span>port 443</span></p><form method="post" action="#"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="revision" value="3"><input type="hidden" name="target" value="crates.io"><button class="cw-button cw-button--ghost cw-button--small" type="submit"><span>Remove</span><span class="cw-sr-only"> crates.io</span></button></form></li>
+      </ul>
+      <form class="cw-field-row cw-network-policy-rule-row cw-network-policy-form" method="post" action="#"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="revision" value="3">
+        <div class="cw-field"><label class="cw-label" for="network-policy-allow-target">Allow a destination</label><input class="cw-input cw-input--mono" id="network-policy-allow-target" name="target" value="10.0.0.0/8" placeholder="docs.rs, *.crates.io or 203.0.113.0/24" autocomplete="off" required aria-invalid="true" aria-describedby="network-policy-allow-error"><p class="cw-field-error" id="network-policy-allow-error">the range includes protected addresses</p></div>
+        <div class="cw-field"><label class="cw-label" for="network-policy-allow-ports">Ports</label><input class="cw-input cw-input--mono" id="network-policy-allow-ports" name="ports" value="443" placeholder="22, 80, 443" inputmode="numeric" autocomplete="off"></div>
+        <button class="cw-button" type="submit">Allow</button>
+      </form>
+    </section>
+    <section class="cw-card" aria-labelledby="network-policy-check-title">
+      <div class="cw-card-header"><h2 id="network-policy-check-title" class="cw-card-title">Check a destination</h2></div>
+      <form class="cw-field-row cw-network-policy-form" method="get" action="#" role="search" aria-label="Check a destination against revision 3">
+        <div class="cw-field"><label class="cw-label" for="network-policy-check">Name or address, and port</label><input class="cw-input cw-input--mono" id="network-policy-check" name="check" value="pypi.org:443" placeholder="static.crates.io:443" autocomplete="off" required></div>
+        <button class="cw-button cw-button--outline" type="submit">Check</button>
+      </form>
+      <p class="cw-network-policy-answer" role="status"><span class="cw-mono">pypi.org:443</span> <span class="cw-status cw-status--pill" data-tone="danger">Refused</span> <span>by docs-and-crates rev 3 (name not allowed)</span></p>
+    </section>
+    <section class="cw-card" aria-labelledby="network-policy-used-title">
+      <div class="cw-card-header"><h2 id="network-policy-used-title" class="cw-card-title">Used by 2 Sandboxes</h2></div>
+      <ul class="cw-list cw-network-policy-list"><li class="cw-list-row">api-server</li><li class="cw-list-row">docs-agent</li></ul>
+    </section>
+    <details class="cw-disclosure"><summary>Revision details</summary><dl class="cw-network-policy-details"><div><dt>Revision</dt><dd>3</dd></div><div><dt>Digest</dt><dd><code>9f2c4e7a1b0d3c5e8f6a2b4c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9b1c3d5e</code></dd></div></dl></details>
+    <dialog class="cw-dialog" data-dialog id="delete-network-policy" aria-labelledby="delete-network-policy-title"><header class="cw-dialog-header"><h2 id="delete-network-policy-title">Delete docs-and-crates?</h2></header><div class="cw-dialog-body"><p>The policy and all its revisions are deleted. A policy that a Sandbox still selects can't be deleted.</p></div><footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close>Cancel</button><form method="post" action="#"><input type="hidden" name="_csrf" value="design-fixture-only"><button class="cw-button cw-danger-button" type="submit">Delete</button></form></footer></dialog>
+
+  </div></div></div></main>
+</body>
+</html>

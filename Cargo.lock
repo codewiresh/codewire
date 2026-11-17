@@ -1906,6 +1906,7 @@ dependencies = [
  "chrono",
  "codewire-access",
  "codewire-admin-proto",
+ "codewire-egress-policy",
  "codewire-oidc",
  "codewire-project",
  "codewire-project-proto",

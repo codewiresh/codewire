@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <script src="/assets/codewire/theme-v1.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true},{"code":"...","swap":true}]}' >
+    <title>Network policies · {{ organization.name }} · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/dashboard-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/organizations-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/network-policies-v1.css">
+    <script src="/assets/codewire/htmx-2.0.10.min.js" integrity="sha384-H5SrcfygHmAuTDZphMHqBJLc3FhssKjG7w/CeCpFReSfwBWDTKpkzPP8c+cLsK+V" defer></script>
+    <script src="/assets/codewire/dashboard-v1.js" defer></script>
+  </head>
+  <body class="cw-body" data-route="organization">
+    {% include "billing-banner-slot.html" %}
+    <div class="cw-app" data-dashboard-app data-mobile-open="false" data-sidebar-collapsed="{{ view.sidebar_collapsed }}">
+      <aside class="cw-sidebar-slot">{% include "sidebar.html" %}</aside>
+      <header class="cw-mobile-bar"><button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-menu"/></svg></button><a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span class="cw-sr-only">Codewire</span></a></header>
+      <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
+      <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
+      <main class="cw-main">{% let crumb_scope = organization.slug.as_str() %}{% let crumb_page = "network policies" %}{% include "console-header.html" %}<div class="cw-page cw-org-management-page">
+        <div class="cw-org-management-layout"><aside class="cw-context-nav">{% include "organization-settings-nav.html" %}</aside><div class="cw-context-main cw-network-policies">
+        <header class="cw-page-header cw-page-header--stacked"><div class="cw-page-header-row"><h1 class="cw-page-title">Network policies</h1>{% if organization.can_admin && page.ready() %}<button class="cw-button" type="button" data-dialog-open="create-network-policy" aria-haspopup="dialog" aria-controls="create-network-policy">Create policy</button>{% endif %}</div><p class="cw-page-description">What your organization's Sandboxes may reach on the Internet. A policy allows names, wildcards or address ranges, each on its TCP ports.</p></header>
+        {% if !page.message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ page.message }}</p>{% endif %}
+        {% if !page.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ page.error }}</p>{% endif %}
+        {% if page.switched_off() %}
+        <section class="cw-card cw-empty" aria-labelledby="network-policies-off-title"><h2 id="network-policies-off-title" class="cw-empty-title">Network policies aren't available here yet</h2><p class="cw-empty-copy">This Codewire deployment hasn't turned on organization network policies. Sandboxes reach any public address on any TCP port.</p></section>
+        {% else if page.unavailable() %}
+        <p class="cw-alert cw-alert--error" role="alert">Network policies couldn't be loaded. This doesn't mean you have none.</p>
+        <p><a class="cw-button cw-button--outline" href="/{{ organization.slug }}/network-policies/">Retry</a></p>
+        {% else %}
+        <p class="cw-alert cw-alert--warning" role="status">{{ page.not_enforced() }}</p>
+        {% if !organization.can_admin %}<p class="cw-alert cw-alert--info" role="status">You can read these policies and choose one for Sandboxes you create. Owners and admins change them.</p>{% endif %}
+        <section class="cw-card" aria-labelledby="network-policies-builtin-title">
+          <div class="cw-card-header"><h2 id="network-policies-builtin-title" class="cw-card-title">Built in</h2></div>
+          <ul class="cw-list cw-network-policy-list">
+            <li class="cw-list-row"><div class="cw-network-policy-copy"><strong class="cw-mono">open</strong><p>Every public destination on TCP 22, 80 and 443</p></div><div class="cw-network-policy-used">Used by {% let usage = page.list.open.clone() %}{% let usage_id = "used-open" %}{% let usage_name = "open" %}{% include "network-policy-usage.html" %}</div></li>
+            <li class="cw-list-row"><div class="cw-network-policy-copy"><strong class="cw-mono">locked</strong><p>Nothing. A Sandbox's terminal, SSH and this dashboard keep working.</p></div><div class="cw-network-policy-used">Used by {% let usage = page.list.locked.clone() %}{% let usage_id = "used-locked" %}{% let usage_name = "locked" %}{% include "network-policy-usage.html" %}</div></li>
+          </ul>
+        </section>
+        {% if page.list.policies.is_empty() %}
+        <section class="cw-card cw-empty" aria-labelledby="network-policies-empty-title"><h2 id="network-policies-empty-title" class="cw-empty-title">No policies yet</h2><p class="cw-empty-copy">By default, Sandboxes with no policy can reach any public address. Create a policy to lock them down further.</p>{% if organization.can_admin %}<button class="cw-button" type="button" data-dialog-open="create-network-policy" aria-haspopup="dialog" aria-controls="create-network-policy">Create policy</button>{% endif %}<p class="cw-empty-hint">Or from a terminal: <code>cw --cloud policy create NAME --allow docs.rs:443</code></p></section>
+        {% else %}
+        <div class="cw-table-shell"><table class="cw-table"><caption class="cw-sr-only">Your network policies</caption>
+          <thead><tr><th scope="col">Name</th><th scope="col">Used by</th><th scope="col">Revision</th><th scope="col">Allows</th></tr></thead>
+          <tbody>
+            {% for policy in page.list.policies %}
+            <tr><th scope="row"><a class="cw-mono" href="/{{ organization.slug }}/network-policies/{{ policy.name }}/">{{ policy.name }}</a></th><td>{% let usage = policy.usage.clone() %}{% let usage_id = format!("used-{}", policy.id) %}{% let usage_name = policy.name.as_str() %}{% include "network-policy-usage.html" %}</td><td>rev {{ policy.revision }}</td><td class="cw-network-policy-allows">{% if policy.rules.is_empty() %}Nothing{% else %}{% for rule in policy.rules %}{% if !loop.first %} · {% endif %}{{ rule.summary() }}{% endfor %}{% endif %}</td></tr>
+            {% endfor %}
+          </tbody></table></div>
+        {% endif %}
+        <p class="cw-network-policy-note">{% if page.list.unselected.sandboxes == 1 %}1 Sandbox selects{% else %}{{ page.list.unselected.sandboxes }} Sandboxes select{% endif %} no policy and reach any public address on any TCP port. Policies on your own computer, for local VMs, stay in <code>cw --local policy</code>; the same name here and there is two policies.</p>
+        {% if organization.can_admin %}
+        <dialog class="cw-dialog" data-dialog id="create-network-policy" aria-labelledby="create-network-policy-title"{% if page.create.open %} data-dialog-auto-open{% endif %}><header class="cw-dialog-header"><h2 id="create-network-policy-title">Create a network policy</h2></header>
+          <form class="cw-dialog-body cw-form" id="create-network-policy-form" method="post" action="/{{ organization.slug }}/network-policies/_actions/create"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}">
+            {% if !page.create.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ page.create.error }}</p>{% endif %}
+            <div class="cw-field"><label class="cw-label" for="network-policy-name">Name</label><input class="cw-input cw-input--mono" id="network-policy-name" name="name" value="{{ page.create.name }}" maxlength="64" pattern="[a-z0-9]([a-z0-9._\-]{0,62}[a-z0-9])?" autocomplete="off" required aria-describedby="network-policy-name-help"><p class="cw-field-help" id="network-policy-name-help">Lowercase letters, digits, dots and dashes.</p></div>
+            <div class="cw-field"><label class="cw-label" for="network-policy-from">Start from</label><select class="cw-select" id="network-policy-from" name="from"><option value=""{% if page.create.from.is_empty() %} selected{% endif %}>locked: nothing, then what you allow</option>{% for policy in page.list.policies %}<option value="{{ policy.name }}"{% if page.create.from == policy.name %} selected{% endif %}>{{ policy.name }} · rev {{ policy.revision }}</option>{% endfor %}</select></div>
+            <div class="cw-field-row cw-network-policy-rule-row"><div class="cw-field"><label class="cw-label" for="network-policy-target">First destination (optional)</label><input class="cw-input cw-input--mono" id="network-policy-target" name="target" value="{{ page.create.target }}" placeholder="docs.rs, *.crates.io or 203.0.113.0/24" autocomplete="off"></div><div class="cw-field"><label class="cw-label" for="network-policy-ports">Ports</label><input class="cw-input cw-input--mono" id="network-policy-ports" name="ports" value="{{ page.create.ports }}" placeholder="22, 80, 443" inputmode="numeric" autocomplete="off"></div></div>
+            <p class="cw-field-help">A wildcard such as <code>*.crates.io</code> doesn't cover <code>crates.io</code> itself. Loopback, private, link-local and metadata addresses can't be allowed.</p>
+          </form>
+          <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close>Cancel</button><button class="cw-button" type="submit" form="create-network-policy-form">Create policy</button></footer>
+        </dialog>
+        {% endif %}
+        {% endif %}
+        </div></div>
+      </div></main>
+    </div>
+  </body>
+</html>

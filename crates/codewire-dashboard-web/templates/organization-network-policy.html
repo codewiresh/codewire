@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <script src="/assets/codewire/theme-v1.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true},{"code":"...","swap":true}]}' >
+    <title>{{ page.policy.name }} · Network policies · {{ organization.name }} · Codewire</title>
+    <link rel="stylesheet" href="/assets/codewire/design-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/dashboard-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/organizations-v1.css">
+    <link rel="stylesheet" href="/assets/codewire/routes/network-policies-v1.css">
+    <script src="/assets/codewire/htmx-2.0.10.min.js" integrity="sha384-H5SrcfygHmAuTDZphMHqBJLc3FhssKjG7w/CeCpFReSfwBWDTKpkzPP8c+cLsK+V" defer></script>
+    <script src="/assets/codewire/dashboard-v1.js" defer></script>
+  </head>
+  <body class="cw-body" data-route="organization">
+    {% include "billing-banner-slot.html" %}
+    <div class="cw-app" data-dashboard-app data-mobile-open="false" data-sidebar-collapsed="{{ view.sidebar_collapsed }}">
+      <aside class="cw-sidebar-slot">{% include "sidebar.html" %}</aside>
+      <header class="cw-mobile-bar"><button class="cw-mobile-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-menu"/></svg></button><a class="cw-brand" href="/dashboard/"><img src="/assets/codewire/console-logo-v1.svg" alt=""><span class="cw-sr-only">Codewire</span></a></header>
+      <button class="cw-mobile-overlay" type="button" data-sidebar-close aria-label="Close sidebar"></button>
+      <aside class="cw-mobile-drawer">{% include "sidebar.html" %}</aside>
+      <main class="cw-main">{% let crumb_scope = organization.slug.as_str() %}{% let crumb_page = "network policies" %}{% include "console-header.html" %}<div class="cw-page cw-org-management-page">
+        <div class="cw-org-management-layout"><aside class="cw-context-nav">{% include "organization-settings-nav.html" %}</aside><div class="cw-context-main cw-network-policies">
+        <a class="cw-back-link" href="/{{ organization.slug }}/network-policies/"><svg class="cw-icon" aria-hidden="true"><use href="/assets/codewire/icons-v2.svg#icon-chevron-left"/></svg><span>Network policies</span></a>
+        <header class="cw-page-header cw-page-header--stacked"><div class="cw-page-header-row"><div class="cw-page-title-row"><h1 class="cw-page-title cw-mono">{{ page.policy.name }}</h1><span class="cw-badge" data-tone="info">rev {{ page.policy.revision }}</span></div>{% if organization.can_admin %}<button class="cw-button cw-button--outline" type="button" data-dialog-open="delete-network-policy" aria-haspopup="dialog" aria-controls="delete-network-policy">Delete</button>{% endif %}</div><p class="cw-page-description">{% if !page.policy.saved.is_empty() %}Revision {{ page.policy.revision }} saved {{ page.policy.saved }}. {% endif %}Every change is saved at once as a new revision.</p></header>
+        {% if !page.message.is_empty() %}<p class="cw-alert cw-alert--success" role="status">{{ page.message }}</p>{% endif %}
+        {% if !page.error.is_empty() %}<p class="cw-alert cw-alert--error" role="alert">{{ page.error }}</p>{% endif %}
+        <p class="cw-alert cw-alert--warning" role="status">{{ page.not_enforced() }}</p>
+        <section class="cw-card" aria-labelledby="network-policy-rules-title">
+          <div class="cw-card-header"><h2 id="network-policy-rules-title" class="cw-card-title">Allowed destinations</h2></div>
+          {% if page.policy.rules.is_empty() %}<p class="cw-network-policy-none">Nothing. Sandboxes on this policy reach nothing on the Internet.</p>{% else %}
+          <ul class="cw-list cw-network-policy-list">
+            {% for rule in page.policy.rules %}
+            <li class="cw-list-row"><p class="cw-network-policy-rule"><strong class="cw-mono">{{ rule.target }}</strong> <span>{{ rule.ports_text() }}</span></p>{% if organization.can_admin %}<form method="post" action="/{{ organization.slug }}/network-policies/{{ page.policy.name }}/_actions/remove"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="revision" value="{{ page.policy.revision }}"><input type="hidden" name="target" value="{{ rule.target }}"><button class="cw-button cw-button--ghost cw-button--small" type="submit"><span>Remove</span><span class="cw-sr-only"> {{ rule.target }}</span></button></form>{% endif %}</li>
+            {% endfor %}
+          </ul>{% endif %}
+          {% if organization.can_admin %}
+          <form class="cw-field-row cw-network-policy-rule-row cw-network-policy-form" method="post" action="/{{ organization.slug }}/network-policies/{{ page.policy.name }}/_actions/allow"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><input type="hidden" name="revision" value="{{ page.policy.revision }}">
+            <div class="cw-field"><label class="cw-label" for="network-policy-allow-target">Allow a destination</label><input class="cw-input cw-input--mono" id="network-policy-allow-target" name="target" value="{{ page.allow.target }}" placeholder="docs.rs, *.crates.io or 203.0.113.0/24" autocomplete="off" required{% if !page.allow.error.is_empty() %} aria-invalid="true" aria-describedby="network-policy-allow-error"{% endif %}>{% if !page.allow.error.is_empty() %}<p class="cw-field-error" id="network-policy-allow-error">{{ page.allow.error }}</p>{% endif %}</div>
+            <div class="cw-field"><label class="cw-label" for="network-policy-allow-ports">Ports</label><input class="cw-input cw-input--mono" id="network-policy-allow-ports" name="ports" value="{{ page.allow.ports }}" placeholder="22, 80, 443" inputmode="numeric" autocomplete="off"></div>
+            <button class="cw-button" type="submit">Allow</button>
+          </form>
+          {% else %}<p class="cw-network-policy-none">Owners and admins change this policy.</p>{% endif %}
+        </section>
+        <section class="cw-card" aria-labelledby="network-policy-check-title">
+          <div class="cw-card-header"><h2 id="network-policy-check-title" class="cw-card-title">Check a destination</h2></div>
+          <form class="cw-field-row cw-network-policy-form" method="get" action="/{{ organization.slug }}/network-policies/{{ page.policy.name }}/" role="search" aria-label="Check a destination against revision {{ page.policy.revision }}">
+            <div class="cw-field"><label class="cw-label" for="network-policy-check">Name or address, and port</label><input class="cw-input cw-input--mono" id="network-policy-check" name="check" value="{{ page.check_input }}" placeholder="static.crates.io:443" autocomplete="off" required{% if !page.check_error.is_empty() %} aria-invalid="true" aria-describedby="network-policy-check-error"{% endif %}>{% if !page.check_error.is_empty() %}<p class="cw-field-error" id="network-policy-check-error">{{ page.check_error }}</p>{% endif %}</div>
+            <button class="cw-button cw-button--outline" type="submit">Check</button>
+          </form>
+          {% if let Some(answer) = page.check %}
+          <p class="cw-network-policy-answer" role="status"><span class="cw-mono">{{ answer.destination }}</span> {% if answer.allowed %}<span class="cw-status cw-status--pill" data-tone="success">Allowed</span>{% else %}<span class="cw-status cw-status--pill" data-tone="danger">Refused</span>{% endif %} <span>by {{ page.policy.name }} rev {{ page.policy.revision }}{% if !answer.detail.is_empty() %}{% if answer.allowed %}, {{ answer.detail }}{% else %} ({{ answer.detail }}){% endif %}{% endif %}</span></p>{% if !answer.within.is_empty() %}<p class="cw-network-policy-within">{{ answer.within }}</p>{% endif %}
+          {% endif %}
+        </section>
+        <section class="cw-card" aria-labelledby="network-policy-used-title">
+          <div class="cw-card-header"><h2 id="network-policy-used-title" class="cw-card-title">{% if page.policy.usage.sandboxes == 1 %}Used by 1 Sandbox{% else %}Used by {{ page.policy.usage.sandboxes }} Sandboxes{% endif %}</h2></div>
+          {% if page.policy.usage.sandboxes == 0 %}<p class="cw-network-policy-none">No Sandbox selects this policy. Choose it with <code>cw --cloud create --policy {{ page.policy.name }}</code> or <code>cw update SANDBOX --policy {{ page.policy.name }}</code>.</p>{% else %}
+          <ul class="cw-list cw-network-policy-list">{% for name in page.policy.usage.names %}<li class="cw-list-row">{{ name }}</li>{% endfor %}</ul>
+          {% if page.policy.usage.more() > 0 %}<p class="cw-network-policy-none">and {{ page.policy.usage.more() }} more</p>{% endif %}{% endif %}
+        </section>
+        <details class="cw-disclosure"><summary>Revision details</summary><dl class="cw-network-policy-details"><div><dt>Revision</dt><dd>{{ page.policy.revision }}</dd></div><div><dt>Digest</dt><dd><code>{{ page.policy.digest }}</code></dd></div></dl></details>
+        {% if organization.can_admin %}
+        <dialog class="cw-dialog" data-dialog id="delete-network-policy" aria-labelledby="delete-network-policy-title"><header class="cw-dialog-header"><h2 id="delete-network-policy-title">Delete {{ page.policy.name }}?</h2></header><div class="cw-dialog-body"><p>The policy and all its revisions are deleted. A policy that a Sandbox still selects can't be deleted.</p></div><footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close>Cancel</button><form method="post" action="/{{ organization.slug }}/network-policies/{{ page.policy.name }}/_actions/delete"><input type="hidden" name="_csrf" value="{{ page.csrf_token }}"><button class="cw-button cw-danger-button" type="submit">Delete</button></form></footer></dialog>
+        {% endif %}
+        </div></div>
+      </div></main>
+    </div>
+  </body>
+</html>

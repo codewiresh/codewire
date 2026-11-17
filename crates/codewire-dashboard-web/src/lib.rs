@@ -26,6 +26,7 @@ mod environment_sources;
 mod error;
 mod hosts_connect;
 mod mailto;
+mod network_policies_connect;
 mod organization_connect;
 mod personal_api_keys_connect;
 mod raw_auth;

@@ -388,6 +388,17 @@ dialog.cw-discard-dialog .cw-dialog-actions { flex-wrap: wrap; }
   line-height: var(--leading-body);
 }
 
+/* A help popover that holds a short list, such as the Sandboxes a policy's
+   "Used by" names: it is as tall and as wide as its content, never scrolls
+   inside, and stays within the popover width (owner, 2026-11-17, #5114).
+   Its list must stay short; ten items is the most it is given. */
+.cw-field-help-popover--list {
+  width: max-content;
+  max-width: min(var(--popover-width), calc(100vw - var(--space-4)));
+  max-height: none;
+  overflow: visible;
+}
+
 /* Combobox: a text field whose choices open as a listbox below it, on the
    same surface as menus. The option under the keyboard is aria-selected. */
 .cw-combobox { position: relative; }

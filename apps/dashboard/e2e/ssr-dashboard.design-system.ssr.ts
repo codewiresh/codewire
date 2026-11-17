@@ -470,6 +470,54 @@ test("an empty state's hint sits one token below its action, and a stacked heade
   expect.soft(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), "no horizontal scroll").toBe(true);
 });
 
+test("a policy's Used by list sits outside any paragraph and leaves no empty one", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system for fixture checks");
+  await page.goto(`${origin}/reference/fixtures/network-policies.html`);
+  const shape = await page.evaluate(() => {
+    const popovers = [...document.querySelectorAll(".cw-network-policies [data-field-help-popover]")];
+    return {
+      popovers: popovers.length,
+      insideParagraph: popovers.filter((popover) => popover.parentElement?.closest("p")).length,
+      emptyParagraphs: [...document.querySelectorAll(".cw-network-policies p")].filter((p) => p.childNodes.length === 0).length,
+    };
+  });
+  expect(shape.popovers).toBeGreaterThan(0);
+  expect(shape.insideParagraph, "a popover inside a paragraph").toBe(0);
+  expect(shape.emptyParagraphs, "an empty paragraph the parser left").toBe(0);
+});
+
+test("a policy's Used by list opens beside its number and shows every name without scrolling", { tag: "@mobile" }, async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system for fixture checks");
+  await page.goto(`${origin}/reference/fixtures/network-policies.html`);
+  const count = page.getByRole("button", { name: "14 Sandboxes use open" });
+  await count.click();
+  const list = page.locator("#used-open");
+  await expect(list).toBeVisible();
+  const shape = await list.evaluate((popover, trigger) => {
+    const box = popover.getBoundingClientRect();
+    const button = (trigger as Element).getBoundingClientRect();
+    return {
+      innerScroll: popover.scrollHeight - popover.clientHeight,
+      overflow: getComputedStyle(popover).overflowY,
+      names: popover.querySelectorAll("li").length,
+      inView: box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight,
+      besideNumber: Math.abs(box.left - button.left) <= 8 || box.left <= button.right,
+      gapToNumber: Math.min(Math.abs(box.top - button.bottom), Math.abs(button.top - box.bottom)),
+      height: box.height,
+      viewport: innerHeight,
+    };
+  }, await count.elementHandle());
+  expect.soft(shape.innerScroll, "no inner scroll").toBeLessThanOrEqual(0);
+  expect.soft(shape.overflow, "nothing to scroll").toBe("visible");
+  expect.soft(shape.names, "every name shown").toBe(10);
+  expect.soft(shape.inView, "inside the window").toBe(true);
+  expect.soft(shape.besideNumber, "starts at the number").toBe(true);
+  expect.soft(shape.gapToNumber, "next to the number, above or below it").toBeLessThanOrEqual(12);
+  expect.soft(shape.height, "not a full-height panel").toBeLessThan(shape.viewport * 0.8);
+});
+
 // What draws every fixture: the browser's GPU process. A host GPU driver in it
 // can block, and then no frame arrives and every click waits out its timeout
 // for a stable element (#3019). playwright.config.ts keeps the browser off the

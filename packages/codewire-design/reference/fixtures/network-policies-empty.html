@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><script src="../../theme.js"></script><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Network policies empty fixture</title>
+  <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
+  <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/organizations.css"><link rel="stylesheet" href="../../routes/network-policies.css">
+  <script src="../../dashboard.js" defer></script>
+</head>
+<body class="cw-body" data-dashboard-app>
+  <main class="cw-main"><header class="cw-console-header"><div class="cw-console-breadcrumb"><span>example-org</span><span>/</span><strong>network policies</strong></div><div class="cw-console-account"><a class="cw-button cw-button--outline cw-button--small" href="mailto:support@codewire.sh?subject=%5BSupport%5D">Support</a></div></header><div class="cw-page cw-org-management-page"><div class="cw-org-management-layout"><aside class="cw-context-nav"><header class="cw-context-nav-heading"><h2>Settings</h2></header>
+<nav class="cw-context-nav-links" aria-label="Organization navigation">
+  <h3 id="settings-personal-title" class="cw-section-label">Personal</h3>
+  <ul aria-labelledby="settings-personal-title"><li><a class="cw-nav-link" href="settings-account.html">Account</a></li><li><a class="cw-nav-link" href="settings-credentials.html">Credentials</a></li><li><a class="cw-nav-link" href="settings-secrets.html">Secrets</a></li><li><a class="cw-nav-link" href="settings-api-keys.html">API keys</a></li><li><a class="cw-nav-link" href="settings-invitations.html">Invitations</a></li></ul>
+<h3 id="settings-organization-title" class="cw-section-label">Organization · Example organization</h3>
+<ul aria-labelledby="settings-organization-title"><li><a class="cw-nav-link" href="sandboxes.html">Sandboxes</a></li><li><a class="cw-nav-link" href="/example-org/snapshots/">Snapshots <span class="cw-badge">Soon</span></a></li><li><a class="cw-nav-link" href="/example-org/presets/">Presets</a></li><li><a class="cw-nav-link" href="application-secrets.html">Secrets</a></li><li><a class="cw-nav-link" href="network-policies.html" aria-current="page">Network policies</a></li><li><a class="cw-nav-link" href="/example-org/api-keys/">API keys</a></li><li><a class="cw-nav-link" href="/example-org/members/">Members</a></li><li><a class="cw-nav-link" href="/example-org/billing/">Billing</a></li></ul>
+</nav></aside><div class="cw-context-main cw-network-policies">
+    <header class="cw-page-header cw-page-header--stacked"><div class="cw-page-header-row"><h1 class="cw-page-title">Network policies</h1><button class="cw-button" type="button" data-dialog-open="create-network-policy" aria-haspopup="dialog" aria-controls="create-network-policy">Create policy</button></div><p class="cw-page-description">What your organization's Sandboxes may reach on the Internet. A policy allows names, wildcards or address ranges, each on its TCP ports.</p></header>
+    <p class="cw-alert cw-alert--warning" role="status">Hosted Sandboxes don't enforce network policies yet, so a policy here changes nothing a Sandbox can reach.</p>
+    <section class="cw-card" aria-labelledby="network-policies-builtin-title">
+      <div class="cw-card-header"><h2 id="network-policies-builtin-title" class="cw-card-title">Built in</h2></div>
+      <ul class="cw-list cw-network-policy-list">
+        <li class="cw-list-row"><div class="cw-network-policy-copy"><strong class="cw-mono">open</strong><p>Every public destination on TCP 22, 80 and 443</p></div><div class="cw-network-policy-used">Used by <span class="cw-network-policy-count">0</span></div></li>
+        <li class="cw-list-row"><div class="cw-network-policy-copy"><strong class="cw-mono">locked</strong><p>Nothing. A Sandbox's terminal, SSH and this dashboard keep working.</p></div><div class="cw-network-policy-used">Used by <span class="cw-network-policy-count">0</span></div></li>
+      </ul>
+    </section>
+    <section class="cw-card cw-empty" aria-labelledby="network-policies-empty-title"><h2 id="network-policies-empty-title" class="cw-empty-title">No policies yet</h2><p class="cw-empty-copy">By default, Sandboxes with no policy can reach any public address. Create a policy to lock them down further.</p><button class="cw-button" type="button" data-dialog-open="create-network-policy" aria-haspopup="dialog" aria-controls="create-network-policy">Create policy</button><p class="cw-empty-hint">Or from a terminal: <code>cw --cloud policy create NAME --allow docs.rs:443</code></p></section>
+    <p class="cw-network-policy-note">3 Sandboxes select no policy and reach any public address on any TCP port. Policies on your own computer, for local VMs, stay in <code>cw --local policy</code>; the same name here and there is two policies.</p>
+    <dialog class="cw-dialog" data-dialog id="create-network-policy" aria-labelledby="create-network-policy-title"><header class="cw-dialog-header"><h2 id="create-network-policy-title">Create a network policy</h2></header>
+      <form class="cw-dialog-body cw-form" id="create-network-policy-form" method="post" action="#"><input type="hidden" name="_csrf" value="design-fixture-only">
+        <div class="cw-field"><label class="cw-label" for="network-policy-name">Name</label><input class="cw-input cw-input--mono" id="network-policy-name" name="name" value="" maxlength="64" pattern="[a-z0-9]([a-z0-9._\-]{0,62}[a-z0-9])?" autocomplete="off" required aria-describedby="network-policy-name-help"><p class="cw-field-help" id="network-policy-name-help">Lowercase letters, digits, dots and dashes.</p></div>
+        <div class="cw-field"><label class="cw-label" for="network-policy-from">Start from</label><select class="cw-select" id="network-policy-from" name="from"><option value="" selected>locked: nothing, then what you allow</option></select></div>
+        <div class="cw-field-row cw-network-policy-rule-row"><div class="cw-field"><label class="cw-label" for="network-policy-target">First destination (optional)</label><input class="cw-input cw-input--mono" id="network-policy-target" name="target" value="" placeholder="docs.rs, *.crates.io or 203.0.113.0/24" autocomplete="off"></div><div class="cw-field"><label class="cw-label" for="network-policy-ports">Ports</label><input class="cw-input cw-input--mono" id="network-policy-ports" name="ports" value="" placeholder="22, 80, 443" inputmode="numeric" autocomplete="off"></div></div>
+        <p class="cw-field-help">A wildcard such as <code>*.crates.io</code> doesn't cover <code>crates.io</code> itself. Loopback, private, link-local and metadata addresses can't be allowed.</p>
+      </form>
+      <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close>Cancel</button><button class="cw-button" type="submit" form="create-network-policy-form">Create policy</button></footer>
+    </dialog>
+
+  </div></div></div></main>
+</body>
+</html>
