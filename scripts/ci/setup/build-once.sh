@@ -90,7 +90,7 @@
 # folder keep line tables, local-rust-cache.sh's default: the workstation's
 # and the other CI jobs', such as a test job's own build after an archive
 # miss. They share no cache with these builds, which use no compiler cache
-# (in_src).
+# (in_src) unless their runner turns on the build disk's own (sccache_on).
 # prepare exports the build environment to GITHUB_ENV and GITHUB_PATH, so the
 # later steps of the same job build from src with it.
 set -euo pipefail
@@ -106,6 +106,23 @@ readonly work
 if [ "${work##*/}" = main ]; then other_work="$cache_root/pr"; else other_work="$cache_root/main"; fi
 readonly other_work
 readonly src="$work/src"
+# A compiler cache on the build disk, shared by every leg, when the runner
+# sets CODEWIRE_BUILD_ONCE_SCCACHE=local: a canary on one pull request build
+# VM (#5146), whose traces are compared with the other's. It has the target
+# folders' trust: only the next build on the same runner reads what this one
+# wrote, as with their warm targets, and nothing reaches a remote or protected
+# cache (infra docs/ci/runners.md, section 7). Unset or off, nothing is
+# cached and prepare removes the folder.
+readonly sccache_dir="$work/sccache"
+readonly sccache_bin="${BUILD_ONCE_SCCACHE_BIN:-/usr/local/bin/sccache}"
+case "${CODEWIRE_BUILD_ONCE_SCCACHE:-off}" in
+  off|local) ;;
+  *)
+    echo "build-once: CODEWIRE_BUILD_ONCE_SCCACHE is off or local, not ${CODEWIRE_BUILD_ONCE_SCCACHE}" >&2
+    exit 2
+    ;;
+esac
+sccache_on() { [ "${CODEWIRE_BUILD_ONCE_SCCACHE:-off}" = local ]; }
 # The Rust checks' target folders (checks), one per check, since they run at
 # once and Cargo locks a target folder for a whole build: clippy for
 # compile-all-targets, clippy_features for the feature-graph checks, darwin
@@ -194,6 +211,7 @@ prepare() {
   for entry in "$work"/*; do
     case "${entry##*/}" in
       src|targets|cargo-home|tools|layout|job-running) ;;
+      sccache) sccache_on || rm -rf -- "$entry" ;;
       *) rm -rf -- "$entry" ;;
     esac
   done
@@ -275,6 +293,10 @@ prepare() {
   tar -xzf "$(tool "$nextest_url" "$nextest_sha")" -C "$bin" cargo-nextest
   "$bin/protoc/bin/protoc" --version
   "$bin/cargo-nextest" nextest --version | head -n 1
+  if sccache_on; then
+    [ -x "$sccache_bin" ] || die "the compiler cache is on, but $sccache_bin is not in the job image"
+    "$sccache_bin" --version
+  fi
 
   {
     echo "BUILD_ONCE_SRC=$src"
@@ -285,6 +307,10 @@ prepare() {
     echo 'CODEWIRE_LOCAL_RUST_CACHE=off'
     echo 'CARGO_TERM_COLOR=never'
     echo "BUILD_ONCE_COLD=$cold"
+    if sccache_on; then
+      echo "SCCACHE_DIR=$sccache_dir"
+      echo "SCCACHE_CACHE_SIZE=${BUILD_ONCE_SCCACHE_SIZE:-40G}"
+    fi
   } >> "$GITHUB_ENV"
   {
     echo "$bin/protoc/bin"
@@ -301,6 +327,7 @@ remove_interrupted_writes() {
   [ -f "$mark" ] || return 0
   [ ! -d "$work/targets" ] || roots+=("$work/targets")
   [ ! -d "$work/cargo-home" ] || roots+=("$work/cargo-home")
+  [ ! -d "$sccache_dir" ] || roots+=("$sccache_dir")
   count=0
   if [ "${#roots[@]}" -gt 0 ]; then
     count="$(find "${roots[@]}" -type f -newer "$mark" | wc -l)"
@@ -507,7 +534,13 @@ bound_targets() {
 in_src() {
   [ -n "${BUILD_ONCE_SRC:-}" ] && [ -d "$BUILD_ONCE_SRC/.git" ] || die 'run prepare first'
   cd "$BUILD_ONCE_SRC"
-  unset RUSTC_WRAPPER
+  # BUILD_ONCE_NO_CACHE: a leg whose server did not start, or a rebuild after
+  # a corrupt output, compiles without the cache.
+  if sccache_on && [ "${BUILD_ONCE_NO_CACHE:-}" != 1 ]; then
+    export RUSTC_WRAPPER="$sccache_bin"
+  else
+    unset RUSTC_WRAPPER
+  fi
   # If the guest still runs out of memory, the kernel kills a compiler, so
   # Cargo fails the job at once, never the job container's own process: a
   # killed job container left its runner reporting the job running for hours
@@ -700,7 +733,13 @@ rebuild_corrupt_leg() {
     echo "build-once: the $name leg read a corrupt output in $folder; it is wiped and the leg runs once more" | tee -a "$log"
     rm -rf -- "$folder"
   done
-  "$ROOT/scripts/ci/setup/build-once.sh" leg "$name" "$out" >> "$log" 2>&1
+  # The cache may hold the corrupt output too: it is emptied, and the rebuild
+  # does not read it.
+  if sccache_on; then
+    echo "build-once: the compiler cache is emptied, and the $name leg rebuilds without it" | tee -a "$log"
+    rm -rf -- "$sccache_dir"
+  fi
+  BUILD_ONCE_NO_CACHE=1 "$ROOT/scripts/ci/setup/build-once.sh" leg "$name" "$out" >> "$log" 2>&1
 }
 
 run_one_leg() {
@@ -711,14 +750,82 @@ run_one_leg() {
   # cancelled before the legs all end still shows each finished leg's time.
   local name="$1" out="$2" logs="$3" started=$SECONDS status=0
   mark_used "$work/targets/$name"
+  if sccache_on; then
+    sccache_local_only
+    # Each leg has its own server on the one cache folder, so its hit rate is
+    # its own.
+    export SCCACHE_SERVER_UDS="${RUNNER_TEMP:-/tmp}/build-once-sccache-$name.sock"
+    if ! "$sccache_bin" --start-server >/dev/null 2>&1 || ! sccache_is_local; then
+      echo "::warning::build-once: the $name leg's compiler cache is not this build folder's local one; it compiles without it"
+      "$sccache_bin" --stop-server >/dev/null 2>&1 || true
+      export BUILD_ONCE_NO_CACHE=1
+    fi
+  fi
   echo "[build-once] leg $name: start"
   "$ROOT/scripts/ci/setup/build-once.sh" leg "$name" "$out" > "$logs/$name.log" 2>&1 ||
     rebuild_corrupt_leg "$name" "$out" "$logs/$name.log" || status=1
   echo "[build-once] leg $name: finish (status=$status elapsed_seconds=$((SECONDS - started)))"
+  if sccache_on && [ "${BUILD_ONCE_NO_CACHE:-}" != 1 ]; then
+    sccache_leg_stats "$name"
+  fi
   if [ "$status" -ne 0 ]; then
     echo "$name" >> "$logs/failed"
     return 1
   fi
+}
+
+sccache_local_only() {
+  # Local must stay local (cw-security, #5231): sccache uses a remote backend
+  # whenever its environment or configuration file names one (a bucket, an
+  # endpoint, Redis, GCS, Azure, GHA or WebDAV settings, AWS credentials), so
+  # a leg drops every other SCCACHE_ and AWS_ variable and reads no
+  # configuration file.
+  local name
+  for name in $(compgen -e); do
+    case "$name" in
+      SCCACHE_DIR|SCCACHE_CACHE_SIZE) ;;
+      SCCACHE_*|AWS_*) unset "$name" ;;
+    esac
+  done
+  export SCCACHE_CONF=/dev/null
+}
+
+sccache_is_local() {
+  # Whether the leg's running server caches in this build folder, on the
+  # local disk, as it reports itself.
+  "$sccache_bin" --show-stats --stats-format json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    location = json.load(sys.stdin).get("cache_location", "")
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if location == f"Local disk: \"{sys.argv[1]}\"" else 1)
+' "$sccache_dir"
+}
+
+sccache_leg_stats() {
+  # sccache_leg_stats NAME: one line with the leg's cache hits and misses,
+  # from its own server, which then stops.
+  local name="$1" stats
+  stats="$("$sccache_bin" --show-stats --stats-format json 2>/dev/null)" || stats=''
+  "$sccache_bin" --stop-server >/dev/null 2>&1 || true
+  python3 -c '
+import json, sys
+name = sys.argv[1]
+try:
+    report = json.loads(sys.stdin.read())
+    stats = report["stats"]
+except (ValueError, KeyError, TypeError):
+    print(f"[build-once] leg {name}: sccache stats unavailable")
+    sys.exit(0)
+hits = sum(stats.get("cache_hits", {}).get("counts", {}).values())
+misses = sum(stats.get("cache_misses", {}).get("counts", {}).values())
+rate = f"{100 * hits / (hits + misses):.1f}" if hits + misses else "n/a"
+uncacheable = stats.get("non_cacheable_compilations", 0)
+size = report.get("cache_size", 0)
+print(f"[build-once] leg {name}: sccache hits={hits} misses={misses} hit_rate={rate} "
+      f"not_cacheable={uncacheable} cache_bytes={size}")
+' "$name" <<<"$stats"
 }
 
 run_checks_beside_legs() {
@@ -830,6 +937,8 @@ checks() {
   # does (rebuild_corrupt_leg).
   local log folder folders=() status=0
   in_src
+  # The canary caches the legs' compiles only (#5146).
+  unset RUSTC_WRAPPER
   for folder in "${CHECK_FOLDERS[@]}"; do
     mark_used "$work/targets/$folder"
   done

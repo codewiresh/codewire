@@ -11,9 +11,11 @@ readonly SCRIPT="$ROOT/scripts/ci/setup/build-once.sh"
 # The leg table reads the run's selection, publish its store, and prepare its
 # event (main or pr build folder), and the Rust checks their CPU share
 # (CARGO_BUILD_JOBS, set in every CI job), and the use marks their run
-# (GITHUB_RUN_ID); a CI job running this test may have its own in the
-# environment, so each case states its own.
+# (GITHUB_RUN_ID), and the compiler cache its runner's switch
+# (CODEWIRE_BUILD_ONCE_SCCACHE); a CI job running this test may have its own
+# in the environment, so each case states its own.
 unset VERIFICATION_SELECTION ARCHIVE_STORE_URL GITHUB_EVENT_NAME GITHUB_REF BUILD_ONCE_LOCAL_VMM CARGO_BUILD_JOBS GITHUB_RUN_ID
+unset CODEWIRE_BUILD_ONCE_SCCACHE
 
 fail() {
   echo "test-build-once: $*" >&2
@@ -272,6 +274,30 @@ for folder in $CHECK_FOLDERS; do
 done
 [ ! -e "$marker_root/targets/stray" ] || fail 'prepare kept an unknown target folder'
 grep -q 'removing the unused target folder stray' "$work/prepare.log" || fail 'the stray folder removal gave no reason'
+# The compiler cache canary (#5146): its folder stays only while the runner
+# turns it on, and an unknown setting is refused before anything is touched.
+mkdir -p "$marker_root/sccache"
+printf 'entry' > "$marker_root/sccache/entry"
+CODEWIRE_BUILD_ONCE_SCCACHE=local targets_prepare
+[ -f "$marker_root/sccache/entry" ] || fail 'prepare removed the compiler cache while it was on'
+targets_prepare
+[ ! -e "$marker_root/sccache" ] || fail 'prepare kept the compiler cache while it was off'
+mkdir -p "$marker_root/sccache"
+if CODEWIRE_BUILD_ONCE_SCCACHE=remote BUILD_ONCE_ROOT="$work/marker-root" BUILD_ONCE_TEST_STOP_AFTER_TARGETS=1 \
+    GITHUB_ENV="$work/env/env" GITHUB_PATH="$work/env/path" RUNNER_TEMP="$work/env" \
+    "$SCRIPT" prepare "$work/lock-checkout" build > "$work/prepare.log" 2>&1; then
+  fail 'prepare accepted an unknown compiler cache setting'
+fi
+grep -q 'CODEWIRE_BUILD_ONCE_SCCACHE is off or local, not remote' "$work/prepare.log" ||
+  fail "the unknown cache setting's refusal does not name it: $(cat "$work/prepare.log")"
+[ -d "$marker_root/sccache" ] || fail 'a refused cache setting touched the build folder'
+rm -rf "$marker_root/sccache"
+# With it on, the legs compile through the cache, a rebuild after a corrupt
+# output does not (it may hold the corrupt output), and the Rust checks never.
+grep -q '^    export RUSTC_WRAPPER="$sccache_bin"$' "$SCRIPT" || fail 'the legs do not use the compiler cache when it is on'
+grep -q '^  BUILD_ONCE_NO_CACHE=1 "$ROOT/scripts/ci/setup/build-once.sh" leg ' "$SCRIPT" ||
+  fail 'a rebuild after a corrupt output reads the compiler cache'
+sed -n '/^checks() {/,/^}/p' "$SCRIPT" | grep -q '^  unset RUSTC_WRAPPER$' || fail 'the Rust checks use the compiler cache'
 
 # A leg's epoch: an archive folder from before it (no epoch file, or an older
 # number) is wiped once, with the reason, and started again at the epoch;
@@ -533,6 +559,7 @@ cat > "$work/legs-bin/cargo" <<'CARGO'
 # The archive leg's cargo: fails as LEGS_CARGO_MODE says while its marker
 # file exists, then writes the archive, the zstd tar beside it.
 calls="$LEGS_STATE/calls"; echo x >> "$calls"
+echo "wrapper=${RUSTC_WRAPPER:-none} bucket=${SCCACHE_BUCKET:-none} redis=${SCCACHE_REDIS:-none} aws=${AWS_ACCESS_KEY_ID:-none}" >> "$LEGS_STATE/cargo-env"
 if [ -e "$CARGO_TARGET_DIR/debug/deps/libbroken.rlib" ]; then
   case "$LEGS_CARGO_MODE" in
     corrupt) echo "rust-lld: error: $CARGO_TARGET_DIR/debug/deps/libbroken.rlib: Archive::children failed: truncated or malformed archive"; exit 101 ;;
@@ -746,4 +773,43 @@ if ARCHIVE_STORE_URL="file://$work/store" "$SCRIPT" publish "$work/out" >/dev/nu
   fail 'publish accepted an invalid leg output name'
 fi
 
-echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the per-kind build folder, the archive fetch and its build fallback, interrupted folders and lockfile changes kept warm, the disk bound (idle folders first, live ones kept, the folders a job uses never removed), the corrupt-output rebuild and publish hold; bad input refused'
+# The compiler cache canary (#5146) stays local (cw-security, #5231): a stray
+# remote setting in the job's environment reaches neither a leg's server nor
+# its compilers, each leg logs its hit rate, and a server that reports any
+# other cache leaves its leg uncached.
+cat > "$work/legs-bin/fake-sccache" <<'SCCACHE'
+#!/usr/bin/env bash
+case "$1" in
+  --start-server) env > "$LEGS_STATE/sccache-server-env" ;;
+  --show-stats)
+    python3 -c '
+import json, os
+location = os.environ.get("FAKE_SCCACHE_LOCATION") or "Local disk: \"" + os.environ["SCCACHE_DIR"] + "\""
+print(json.dumps({"cache_location": location, "cache_size": 7,
+                  "stats": {"cache_hits": {"counts": {"Rust": 3}}, "cache_misses": {"counts": {"Rust": 1}}}}))
+'
+    ;;
+esac
+SCCACHE
+chmod +x "$work/legs-bin/fake-sccache"
+cache_legs_build() {
+  CODEWIRE_BUILD_ONCE_SCCACHE=local BUILD_ONCE_SCCACHE_BIN="$work/legs-bin/fake-sccache" \
+    SCCACHE_DIR="$work/legs-root/pr/sccache" SCCACHE_BUCKET=stray-bucket SCCACHE_REDIS=redis://stray \
+    AWS_ACCESS_KEY_ID=stray-id LEGS_SELECTION='|valid:v3|complete|' legs_build ok
+}
+cache_legs_build || fail "a build with the compiler cache failed: $(cat "$work/legs.log")"
+for stray in SCCACHE_BUCKET SCCACHE_REDIS AWS_ACCESS_KEY_ID; do
+  ! grep -q "^$stray=" "$work/legs-state/sccache-server-env" || fail "the leg's cache server saw $stray"
+done
+grep -qx 'SCCACHE_CONF=/dev/null' "$work/legs-state/sccache-server-env" || fail 'the cache server could read a configuration file'
+grep -qx "wrapper=$work/legs-bin/fake-sccache bucket=none redis=none aws=none" "$work/legs-state/cargo-env" ||
+  fail "the leg's compilers did not use only the local cache: $(cat "$work/legs-state/cargo-env")"
+grep -q '^\[build-once\] leg archive: sccache hits=3 misses=1 hit_rate=75.0 ' "$work/legs.log" ||
+  fail "the leg logged no hit rate: $(cat "$work/legs.log")"
+FAKE_SCCACHE_LOCATION='S3, name: stray-bucket' cache_legs_build || fail "a build with a remote cache server failed: $(cat "$work/legs.log")"
+grep -q "the archive leg's compiler cache is not this build folder's local one; it compiles without it" "$work/legs.log" ||
+  fail 'a remote cache server was not refused'
+grep -qx 'wrapper=none bucket=none redis=none aws=none' "$work/legs-state/cargo-env" ||
+  fail "a leg compiled through a remote cache: $(cat "$work/legs-state/cargo-env")"
+
+echo 'test-build-once: shallow checkouts sync into the persistent clone; the leg table, the per-kind build folder, the archive fetch and its build fallback, interrupted folders and lockfile changes kept warm, the disk bound (idle folders first, live ones kept, the folders a job uses never removed), the corrupt-output rebuild and publish hold, and the local compiler cache stays local; bad input refused'
