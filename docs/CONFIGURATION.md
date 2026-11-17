@@ -394,7 +394,7 @@ malformed one stops orchestration at startup. Nothing mints tokens yet.
 | `CODEWIRE_IDENTITY_ISSUER_BASE` | When enabled | The `https` URL every issuer starts with: a DNS host name, an optional port and path, no credentials, query, fragment or trailing slash, and never an IP address. Issuers and key URLs are built from it alone, never from a request's headers. The listener serves `/orgs/…` paths, so a base with a path needs the TLS front to strip it. | `https://identity.example.com` |
 | `CODEWIRE_IDENTITY_SIGNER` | When enabled | Where the signing key lives. Only `openbao-transit` exists; there is no default. | `openbao-transit` |
 | `ORCHESTRATION_IDENTITY_PORT` | No | The identity listener's TCP port. Unset or empty means `8089`. | `8089` |
-| `SANDBOX_IDENTITY_BAO_ADDR` | When enabled | The OpenBao origin: `https`, or `http` only to `127.0.0.1` or a `.svc.cluster.local` host. | `https://openbao.example.com` |
+| `SANDBOX_IDENTITY_BAO_ADDR` | When enabled | The OpenBao origin, `https` only; an in-cluster `http` address is refused (#4853). | `https://openbao.example.com` |
 | `SANDBOX_IDENTITY_BAO_EXPECTED_CLUSTER_ID` | When enabled | The OpenBao cluster ID every call checks first, so a misrouted address is refused before login. | `b7c2…` |
 | `SANDBOX_IDENTITY_BAO_AUTH_MOUNT` | When enabled | The Kubernetes auth mount the Pod logs in through. | `kubernetes` |
 | `SANDBOX_IDENTITY_BAO_ROLE` | When enabled | The role: the signer role for orchestration, the rotator role for the rotation job. | `sandbox-identity-signer` |
