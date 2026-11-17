@@ -41,6 +41,7 @@ uuid = { workspace = true }
 zeroize = { workspace = true }
 
 [build-dependencies]
+codewire-prost-debug-redact = { workspace = true }
 tonic-prost-build = { workspace = true }
 
 [dev-dependencies]

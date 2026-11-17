@@ -12,17 +12,35 @@ fn main() {
     println!("cargo:rerun-if-changed={}", daemon_proto.display());
     println!("cargo:rerun-if-changed={}", broker_proto.display());
 
+    let descriptor_set =
+        PathBuf::from(std::env::var("OUT_DIR").expect("out dir")).join("daemon_descriptor.bin");
     let compiled = tonic_prost_build::configure()
-        .skip_debug([
-            ".codewire.bridge.v1.CredentialSshSignRequest",
-            ".codewire.bridge.v1.CredentialSshSignature",
-        ])
+        .file_descriptor_set_path(&descriptor_set)
+        .skip_debug(SKIP_DEBUG)
         .compile_protos(
             &[bridge_proto, daemon_proto, broker_proto],
             &[daemon_proto_root, shared_proto_root],
         );
     require_compiled(compiled, "compile daemon protobuf types");
+    codewire_prost_debug_redact::require_covered(
+        &descriptor_set,
+        &[
+            "codewire/bridge/v1/bridge.proto",
+            "daemon/v1/daemon.proto",
+            "broker/v1/broker.proto",
+        ],
+        SKIP_DEBUG,
+    );
 }
+
+/// Messages whose `Debug` is written by hand, because they hold a field
+/// marked `debug_redact` (src/ssh.rs, src/login_debug.rs).
+const SKIP_DEBUG: &[&str] = &[
+    ".codewire.bridge.v1.ClaudeLoginResponse",
+    ".codewire.bridge.v1.CodexLoginResponse",
+    ".codewire.bridge.v1.CredentialSshSignRequest",
+    ".codewire.bridge.v1.CredentialSshSignature",
+];
 
 /// Reports a missing `protoc` in one line; any other failure keeps its detail.
 fn require_compiled(result: std::io::Result<()>, what: &str) {

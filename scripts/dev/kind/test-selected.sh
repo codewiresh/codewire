@@ -107,7 +107,9 @@ map_token() {
       if [[ "$changed_crates" == *' codewire-server-core '* ]]; then
         full "$token" 'every service compiles it; only the full gate rebuilds them all'
       fi ;;
-    rust_pkg_codewire_proto | rust_pkg_codewire_daemon_proto | rust_pkg_codewire_workload_secrets)
+    # The redaction check is a build dependency of daemon-proto.
+    rust_pkg_codewire_proto | rust_pkg_codewire_daemon_proto | rust_pkg_codewire_workload_secrets | \
+      rust_pkg_codewire_prost_debug_redact)
       full "$token" 'every service compiles it; only the full gate rebuilds them all' ;;
     rust_workspace) full "$token" 'the workspace manifest or lockfile rebuilds every service' ;;
     rust_pkg_codewire_workspace_hack)

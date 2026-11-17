@@ -407,6 +407,8 @@ pub mod ssh;
 /// Canonical names-only framing for fixed-role native projection composition.
 pub mod projection;
 
+mod login_debug;
+
 /// Validated credential for the private environment-daemon RPC boundary.
 ///
 /// The token is deliberately not optional: every daemon transport, including

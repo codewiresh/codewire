@@ -16,6 +16,7 @@ tonic = { workspace = true }
 tonic-prost = { workspace = true }
 
 [build-dependencies]
+codewire-prost-debug-redact = { workspace = true }
 tonic-prost-build = { workspace = true }
 
 [dev-dependencies]

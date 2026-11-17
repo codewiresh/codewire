@@ -98,7 +98,6 @@ percent-encoding = { version = "2.3.2" }
 pkcs8 = { version = "0.11.0", default-features = false, features = ["encryption", "pem", "std"] }
 portable-atomic = { version = "1.13.1" }
 primeorder = { version = "0.14.0", default-features = false, features = ["basepoint-table", "std"] }
-prost = { version = "0.14.4" }
 rand-274715c4dabd11b0 = { package = "rand", version = "0.9.4" }
 rand-93f6ce9d446188ac = { package = "rand", version = "0.10.1" }
 rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8.6" }
@@ -233,7 +232,6 @@ pkcs8 = { version = "0.11.0", default-features = false, features = ["encryption"
 portable-atomic = { version = "1.13.1" }
 primeorder = { version = "0.14.0", default-features = false, features = ["basepoint-table", "std"] }
 proc-macro2 = { version = "1.0.106" }
-prost = { version = "0.14.4" }
 quote = { version = "1.0.45" }
 rand-274715c4dabd11b0 = { package = "rand", version = "0.9.4" }
 rand-93f6ce9d446188ac = { package = "rand", version = "0.10.1" }

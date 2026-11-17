@@ -1846,6 +1846,7 @@ dependencies = [
 name = "codewire-daemon-proto"
 version = "0.1.0"
 dependencies = [
+ "codewire-prost-debug-redact",
  "codewire-workload-secrets",
  "codewire-workspace-hack",
  "prost",
@@ -2072,6 +2073,7 @@ dependencies = [
  "codewire-credential-bridge",
  "codewire-daemon-proto",
  "codewire-project",
+ "codewire-prost-debug-redact",
  "codewire-protected-store",
  "codewire-workload-secrets",
  "codewire-workspace-hack",
@@ -2127,6 +2129,7 @@ dependencies = [
  "codewire-network-session",
  "codewire-project",
  "codewire-project-proto",
+ "codewire-prost-debug-redact",
  "codewire-protected-store",
  "codewire-proto",
  "codewire-tailnet",
@@ -2378,6 +2381,14 @@ dependencies = [
  "codewire-proto",
  "codewire-workspace-hack",
  "serde_json",
+]
+
+[[package]]
+name = "codewire-prost-debug-redact"
+version = "0.1.0"
+dependencies = [
+ "codewire-workspace-hack",
+ "prost",
 ]
 
 [[package]]
@@ -2749,7 +2760,6 @@ dependencies = [
  "portable-atomic",
  "primeorder",
  "proc-macro2",
- "prost",
  "quote",
  "rand 0.10.1",
  "rand 0.8.6",

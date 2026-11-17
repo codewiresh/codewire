@@ -293,6 +293,7 @@ fan-out where a service needs it.
 | Egress front door bridge | `crates/codewire-egress-front-door-bridge` | A front door back end that maps a bound host and path to an existing transparent credential route and hands the request to the credential bridge unchanged. Its route hosts are the names a local VM boot with the `egress-intercept` switch on binds for interception; nothing hands it a request yet (#3999). |
 | Egress node | `crates/codewire-egress-node` | cw-egress, the per-node egress supervisor for hosted sandboxes (#4000): the per-Pod replacement limit, and the guest's stream hello and the stream's network key from the network session's `hosted` module; nothing runs it yet. |
 | Disk scrub | `crates/codewire-ext4-scrub` | Clears every block of an ext4 disk its guest cannot read through the filesystem; a local snapshot's capture runs it on the copy of `state.raw`. |
+| Prost redaction check | `crates/codewire-prost-debug-redact` | Build-time only: fails the build of a crate that generates protobuf types with prost (`codewire-daemon-proto`, `codewire-local-credentials`, `codewire-local-vmm`) when a message with a field marked `debug_redact` is missing from its `skip_debug` list, because prost's derived `Debug` ignores the option (#5034). |
 
 ### Images
 

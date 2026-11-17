@@ -7,14 +7,25 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", control_proto.display());
 
+    let descriptor_set = PathBuf::from(std::env::var("OUT_DIR").expect("out dir"))
+        .join("local_runtime_descriptor.bin");
     require_compiled(
         tonic_prost_build::configure()
-            // prost ignores `debug_redact`; src/control.rs redacts these.
-            .skip_debug([".codewire.local.v1.BootSecret"])
+            .file_descriptor_set_path(&descriptor_set)
+            .skip_debug(SKIP_DEBUG)
             .compile_protos(&[control_proto], &[proto_root]),
         "compile private local runtime protobuf types",
     );
+    codewire_prost_debug_redact::require_covered(
+        &descriptor_set,
+        &["codewire/local/v1/control.proto"],
+        SKIP_DEBUG,
+    );
 }
+
+/// Messages prost derives no `Debug` for, because they hold a field marked
+/// `debug_redact`; src/control.rs redacts them.
+const SKIP_DEBUG: &[&str] = &[".codewire.local.v1.BootSecret"];
 
 /// Reports a missing `protoc` in one line; any other failure keeps its detail.
 fn require_compiled(result: std::io::Result<()>, what: &str) {

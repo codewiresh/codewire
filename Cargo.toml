@@ -41,6 +41,7 @@ members = [
     "crates/codewire-oidc",
     "crates/codewire-orchestration",
     "crates/codewire-proto",
+    "crates/codewire-prost-debug-redact",
     "crates/codewire-server-core",
     "crates/codewire-tailnet",
     "crates/codewire-tls",
@@ -103,6 +104,7 @@ codewire-vmm-guest-probe = { path = "crates/codewire-vmm-guest-probe" }
 codewire-project = { path = "crates/codewire-project" }
 codewire-project-proto = { path = "crates/codewire-project-proto" }
 codewire-protected-store = { path = "crates/codewire-protected-store" }
+codewire-prost-debug-redact = { path = "crates/codewire-prost-debug-redact" }
 codewire-credential-broker = { path = "crates/codewire-credential-broker" }
 codewire-credential-bridge = { path = "crates/codewire-credential-bridge" }
 codewire-credential-service = { path = "crates/codewire-credential-service" }

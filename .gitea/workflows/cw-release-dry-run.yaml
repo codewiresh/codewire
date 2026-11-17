@@ -70,6 +70,7 @@ on:
       - 'crates/codewire-platform-credentials/**'
       - 'crates/codewire-project/**'
       - 'crates/codewire-project-proto/**'
+      - 'crates/codewire-prost-debug-redact/**'
       - 'crates/codewire-protected-store/**'
       - 'crates/codewire-proto/**'
       - 'crates/codewire-server-core/**'

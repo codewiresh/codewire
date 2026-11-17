@@ -96,6 +96,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "crates/codewire-platform-credentials/Cargo.toml": "workspace",
         "crates/codewire-project-proto/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-project/Cargo.toml": "AGPL-3.0-only",
+        "crates/codewire-prost-debug-redact/Cargo.toml": "workspace",
         "crates/codewire-protected-store/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-proto/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-server-core/Cargo.toml": "AGPL-3.0-only",

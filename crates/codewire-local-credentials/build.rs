@@ -11,19 +11,15 @@ fn main() {
     println!("cargo:rerun-if-changed={}", authority_proto.display());
     println!("cargo:rerun-if-changed={}", bridge_proto.display());
 
+    let descriptor_set = PathBuf::from(std::env::var("OUT_DIR").expect("out dir"))
+        .join("local_credentials_descriptor.bin");
     let compiled = tonic_prost_build::configure()
         .extern_path(
             ".codewire.bridge.v1",
             "::codewire_daemon_proto::codewire::bridge::v1",
         )
-        .skip_debug([
-            ".codewire.local.credentials.v1.AddCredentialRequest",
-            ".codewire.local.credentials.v1.AddSshCredentialRequest",
-            ".codewire.local.credentials.v1.RotateCredentialMaterialRequest",
-            ".codewire.local.credentials.v1.SetUserWorkloadSecretRequest",
-            ".codewire.local.credentials.v1.SetProjectWorkloadSecretRequest",
-            ".codewire.local.credentials.v1.BrokerBootSecret",
-        ])
+        .file_descriptor_set_path(&descriptor_set)
+        .skip_debug(SKIP_DEBUG)
         .compile_protos(
             &[authority_proto],
             &[proto_root, daemon_proto_root, shared_proto_root],
@@ -32,7 +28,24 @@ fn main() {
         compiled,
         "compile private local credential-authority protobuf types",
     );
+    codewire_prost_debug_redact::require_covered(
+        &descriptor_set,
+        &["codewire/local/credentials/v1/authority.proto"],
+        SKIP_DEBUG,
+    );
 }
+
+/// Messages prost derives no `Debug` for, because they carry credential or
+/// secret material: each has a redacting one written by hand (src/control.rs)
+/// or none. Every message with a field marked `debug_redact` must be here.
+const SKIP_DEBUG: &[&str] = &[
+    ".codewire.local.credentials.v1.AddCredentialRequest",
+    ".codewire.local.credentials.v1.AddSshCredentialRequest",
+    ".codewire.local.credentials.v1.RotateCredentialMaterialRequest",
+    ".codewire.local.credentials.v1.SetUserWorkloadSecretRequest",
+    ".codewire.local.credentials.v1.SetProjectWorkloadSecretRequest",
+    ".codewire.local.credentials.v1.BrokerBootSecret",
+];
 
 /// Reports a missing `protoc` in one line; any other failure keeps its detail.
 fn require_compiled(result: std::io::Result<()>, what: &str) {
