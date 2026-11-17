@@ -270,23 +270,25 @@ def key(document: dict[str, Any]) -> tuple[str, str]:
     return (document["kind"], name)
 
 
-def differences(left: Any, right: Any, path: str = "") -> Iterator[tuple[str, str]]:
-    """Each path where the chart's object (left) and Kustomize's differ, with
-    what differs there."""
+def differences(
+    left: Any, right: Any, path: str = "", reference: str = "Kustomize"
+) -> Iterator[tuple[str, str]]:
+    """Each path where the chart's object (left) and the reference's differ,
+    with what differs there."""
     if isinstance(left, dict) and isinstance(right, dict):
         for name in sorted(set(left) | set(right), key=str):
             child = f"{path}.{name}" if path else str(name)
             if name not in right:
                 yield child, "only the chart has it"
             elif name not in left:
-                yield child, "only Kustomize has it"
+                yield child, f"only {reference} has it"
             else:
-                yield from differences(left[name], right[name], child)
+                yield from differences(left[name], right[name], child, reference)
     elif isinstance(left, list) and isinstance(right, list) and len(left) == len(right):
         for index, (a, b) in enumerate(zip(left, right)):
-            yield from differences(a, b, f"{path}[{index}]")
+            yield from differences(a, b, f"{path}[{index}]", reference)
     elif left != right:
-        yield path, f"chart {left!r}, Kustomize {right!r}"
+        yield path, f"chart {left!r}, {reference} {right!r}"
 
 
 def order_cannot_matter(deployment: dict[str, Any]) -> bool:
@@ -316,6 +318,7 @@ def compare(
     chart: list[dict[str, Any]],
     kustomized: list[dict[str, Any]],
     environment: str | None = None,
+    reference: str = "Kustomize",
 ) -> list[str]:
     """Every way the two renders differ on the migrated objects in an
     environment; empty if none."""
@@ -323,9 +326,9 @@ def compare(
     env_order = ENV_ORDER_ALLOWED.get(environment or "", {})
     by_key: dict[str, dict[tuple[str, str], list[dict[str, Any]]]] = {
         "chart": {},
-        "Kustomize": {},
+        reference: {},
     }
-    for side, documents in (("chart", chart), ("Kustomize", kustomized)):
+    for side, documents in (("chart", chart), (reference, kustomized)):
         for document in documents:
             by_key[side].setdefault(key(document), []).append(document)
     for extra in sorted(set(by_key["chart"]) - migrated):
@@ -345,10 +348,33 @@ def compare(
             ):
                 for side in found:
                     sort_env(found[side][0])
-            for path, what in differences(found["chart"][0], found["Kustomize"][0]):
+            for path, what in differences(found["chart"][0], found[reference][0], reference=reference):
                 if not allowed(environment, wanted[0], wanted[1], path):
                     problems.append(f"{wanted}: {path}: {what}")
     return problems
+
+
+# Mesh's environments: the values file Dev's or Production's Mesh release
+# renders apps/cli/charts/codewire-mesh with. The chart renders Mesh with the
+# same values under mesh.values, and must render every object that chart does,
+# without its helm test hook.
+MESH_CHART = ROOT / "apps/cli/charts/codewire-mesh"
+MESH_ENVIRONMENTS = {
+    "mesh-dev": K8S / "mesh-dev/values.yaml",
+    "mesh-production": K8S / "mesh-production/values.yaml",
+}
+
+
+def check_mesh(environment: str) -> list[str]:
+    values = MESH_ENVIRONMENTS[environment]
+    reference = objects(run(["helm", "template", "codewire-mesh", str(MESH_CHART), "--no-hooks", "-f", str(values)]))
+    if not reference:
+        return [f"{environment}: the Mesh chart renders nothing, so nothing was compared"]
+    with tempfile.TemporaryDirectory() as scratch:
+        mesh = Path(scratch, "mesh.yaml")
+        mesh.write_text(yaml.safe_dump({"mesh": {"enabled": True, "values": yaml.safe_load(values.read_text())}}))
+        chart = objects(helm("prod", [SOURCE_VALUES, mesh], ("--show-only", "templates/mesh.yaml")))
+    return compare({key(document) for document in reference}, chart, reference, environment, "the Mesh chart")
 
 
 def check(environment: str, extra: tuple[str, ...] = ()) -> list[str]:
@@ -366,6 +392,37 @@ class ChartEquivalence(unittest.TestCase):
         for environment in ENVIRONMENTS:
             with self.subTest(environment=environment):
                 self.assertEqual(check(environment), [])
+
+    def test_mesh_renders_as_its_own_chart_does(self) -> None:
+        for environment in MESH_ENVIRONMENTS:
+            with self.subTest(environment=environment):
+                self.assertEqual(check_mesh(environment), [])
+
+    def test_mesh_templates_and_defaults_are_the_mesh_charts_own(self) -> None:
+        # Renders under Dev's and Production's values cannot see a branch
+        # neither takes, or a default both override, so the folded text and
+        # defaults must be the Mesh chart's own until it is deleted (slice 8).
+        folded = (CHART / "templates/_mesh.tpl").read_text()
+        driver = (CHART / "templates/mesh.yaml").read_text()
+        self.assertIn((MESH_CHART / "templates/_helpers.tpl").read_text().rstrip() + "\n", folded)
+        templates = sorted((MESH_CHART / "templates").glob("*.yaml"))
+        self.assertTrue(templates)
+        for template in templates:
+            with self.subTest(template=template.name):
+                body = template.read_text().rstrip()
+                self.assertIn(f'{{{{- define "codewire.mesh.{template.stem}" -}}}}\n{body}\n{{{{- end }}}}', folded)
+                self.assertIn(f'"{template.stem}"', driver)
+        self.assertEqual(
+            set(re.findall(r'define "codewire\.mesh\.([^"]+)"', folded)),
+            {template.stem for template in templates},
+        )
+        chart = yaml.safe_load((MESH_CHART / "Chart.yaml").read_text())
+        for field in ("Name", "Version", "AppVersion"):
+            self.assertIn(f'"{field}" "{chart[field[0].lower() + field[1:]]}"', driver)
+        self.assertEqual(
+            yaml.safe_load((CHART / "values.yaml").read_text())["mesh"]["values"],
+            yaml.safe_load((MESH_CHART / "values.yaml").read_text()),
+        )
 
     def test_a_changed_field_is_reported_by_its_path(self) -> None:
         problems = check("local-kind", ("--set", "dashboard.replicas=3"))
@@ -436,7 +493,9 @@ class ChartEquivalence(unittest.TestCase):
         # Only a policy's own podSelector, directly under spec, is written
         # there; every peer comes from codewire.podPeer or codewire.edgePeers.
         selector = re.compile(r"\s*-?\s*(podSelector|namespaceSelector|ipBlock):")
-        for template in sorted((CHART / "templates").glob("*.yaml")):
+        # The Mesh chart's templates are kept in _mesh.tpl; _helpers.tpl holds the
+        # guarded helpers themselves.
+        for template in sorted([*(CHART / "templates").glob("*.yaml"), CHART / "templates/_mesh.tpl"]):
             for number, line in enumerate(template.read_text().splitlines(), 1):
                 if selector.match(line) and line.rstrip() != "  podSelector:":
                     self.fail(f"{template.name}:{number} writes a policy peer: use codewire.podPeer or codewire.edgePeers")

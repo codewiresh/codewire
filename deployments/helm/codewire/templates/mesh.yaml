@@ -1,0 +1,17 @@
+{{- /*
+Mesh, rendered by the Mesh chart's own templates (_mesh.tpl) in the context its
+release gives them: mesh.values as its values, and mesh.release as its release
+name, which its selectors carry (app.kubernetes.io/instance), so the objects
+stay those of today's release. The chart's helm test hook is not rendered.
+*/}}
+{{- if .Values.mesh.enabled }}
+{{- $mesh := dict "Values" .Values.mesh.values "Release" (dict "Name" .Values.mesh.release "Service" "Helm") "Chart" (dict "Name" "codewire-mesh" "Version" "0.1.0" "AppVersion" "0.1.0") }}
+{{- range list "serviceaccount" "service-http" "retained-data-pvc" "deployment" "pdb" "ingress" "coordinator-ingress" }}
+{{- /* A template its values turn off renders nothing, and gets no document. */}}
+{{- $document := include (printf "codewire.mesh.%s" .) $mesh }}
+{{- if trim $document }}
+---
+{{ $document }}
+{{- end }}
+{{- end }}
+{{- end }}
