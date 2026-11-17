@@ -317,7 +317,10 @@ server it belongs to and says what it can do, instead of asking for a URL.
     mouse reports every minute;
   - the client's coordinator session reconnecting during it (it does so
     every few minutes, #5120);
-  - a real cut, such as a Wi-Fi change, which may reconnect once.
+  - a real cut, such as a Wi-Fi change, which may reconnect once;
+  - after a reconnect, the coordinator ending the client's older session
+    within about 45 seconds (or at once, when the new session takes the key
+    over), so the daemon is told to remove it.
 - **Driving it:** without a person, give `cw attach` a terminal and a trickle
   of input, with `CW_DEBUG_TAILNET=1` so the attachment logs its path:
 
@@ -334,7 +337,10 @@ server it belongs to and says what it can do, instead of asking for a URL.
   - the daemon logs no `rust tailnet refused peer addresses` line for the
     client;
   - the coordinator log shows the client's session reconnecting at least
-    once in the window.
+    once in the window;
+  - after each reconnect, the coordinator log shows the older session
+    ended, and the daemon's log shows its `PeerRemove`, within about
+    45 seconds.
 - **Gotchas:**
   - The client's coordinator session reconnects on its own schedule. Check
     the coordinator log for a second `coordinator peer connected` from the

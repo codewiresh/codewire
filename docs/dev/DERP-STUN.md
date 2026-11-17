@@ -181,6 +181,60 @@ either way; admission stops strangers using the relay as free bandwidth.
 `cargo run -p codewire-derp --example derp_probe -- derp.example.com:443`
 connects with a fresh, unregistered key and reports `admitted` or `refused`.
 
+## Coordinator sessions and node keys
+
+A peer's coordinator session names its node by the session, so a peer whose
+stream breaks and reconnects announces the same node key again under a new
+session (#5120). A stream can break without either end seeing it: the CLI's
+stream crosses the CDN edge, which answers its HTTP/2 PINGs, and a stalled
+edge connection leaves the coordinator holding the old stream for minutes. The
+coordinator therefore owns each node key and ends sessions that have gone
+quiet; it does not wait for a send to fail.
+
+- **Binding.** The NATS KV bucket `coordinator-node-bindings` (with no NATS,
+  the coordinator's local registry) maps each node key to
+  `{principal, environment, session}`. The principal is the signed-in user for
+  a CLI client, and the environment itself for its daemon. The first session to
+  announce a key binds it. The bucket's TTL is seven days, and NATS counts it
+  from an entry's last write, so a live session rewrites its binding every
+  hour, a compare-and-set that keeps a long-lived daemon's key bound however
+  long it runs. When the session ends, the binding keeps
+  `{principal, environment}` and drops `session`; it then ages out seven days
+  after that last write. Keys are fresh for each tailnet, so a week outlasts
+  any reconnect. A binding is cleared when it expires, or when its principal
+  signs out or removes the node. Deleting an environment does not search out
+  its bindings: no session can authenticate for it afterwards, and they expire
+  with the TTL. `coordinator-node-keys`, the live-session record DERP admission
+  reads, is unchanged.
+- **One writer at a time.** Binding, refreshing, retiring and taking over
+  are compare-and-set on the binding's KV revision: create when absent,
+  update with the revision just read otherwise. Of two sessions racing for one
+  key, exactly one wins. The loser is refused; it does not retry and
+  overwrite. A session changes its binding only while the binding names it:
+  when it ends, it drops `session` only if the binding it reads still names
+  this session, so a late end after a takeover leaves the successor's binding
+  alone. A refresh that finds another session named ends this one, as a
+  takeover would.
+- **Refused.** An announcement of a bound key from another principal, or
+  from the same principal in another environment, is refused, while the key's
+  session is live and for the binding's seven days after. The announcing
+  session gets the refusal, and its node reaches no peer.
+- **Retired.** An announcement of a bound key from the same principal and
+  environment, under a new session, takes the binding over. The older session
+  is retired: its peers get a `PeerRemove` for it, and the replica that holds
+  it, this one or the other, ends it on the environment's existing NATS
+  subject. A reconnect therefore leaves one session and one peer, whichever
+  replica each stream reached.
+- **Quiet sessions end.** A session that has sent a `CoordinatePing` ends
+  when 45 s pass with nothing received from it (the coordinator's
+  `SESSION_SILENCE_LIMIT`). That is three of the peer's 15 s pings,
+  mirroring the peer's own `COORDINATOR_SILENCE_LIMIT`.
+  Its binding stays as above, and its peers get a `PeerRemove`. A session
+  that has never pinged, from a CLI older than v0.4.1, keeps the earlier
+  behaviour: it ends when a send to it fails, or when its proof lapses.
+- **Proof of possession** of the node key is not required. Binding to the
+  principal and environment is the boundary (#5131).
+
 ## Network Paths
 
 **DERP path:** `derp.codewire-dev.sh:443` or `derp.codewire.sh:443`
