@@ -133,23 +133,24 @@ class Isolation(unittest.TestCase):
         self.assertEqual(self.isolated(f"smoke_scope_exec {UNIT} echo ran").returncode, 3)
 
 
-FAKE_BWRAP = r"""#!/bin/sh
-# Records its arguments, masks nothing, applies --chdir as bwrap does, and
-# runs what follows --.
-: >"$LOG"
-for arg in "$@"; do printf '%s\n' "$arg" >>"$LOG"; done
-while [ "$1" != -- ]; do
-  if [ "$1" = --chdir ]; then cd "$2" || exit 1; fi
-  shift
-done
-shift
-exec "$@"
-"""
+# Fakes for the privileged namespace: each records its arguments in LOG (a
+# path written into it, since the namespace shells start with no environment)
+# and hands on what follows its options, so the real setup and self-check
+# run, with no mount made and no privilege taken.
+# Records only the options before --, then runs what follows.
+OPTIONS = ('options=""\nwhile [ "$1" != -- ]; do options="$options $1"; shift; done\nshift\n'
+           'echo "TOOL$options" >>"LOG"\nexec "$@"\n')
+FAKE_TOOLS = {
+    "sudo": 'echo "sudo $1" >>"LOG"\n[ "$1" = -n ] && shift\nexec "$@"\n',
+    "unshare": OPTIONS.replace("TOOL", "unshare"),
+    "mount": 'echo "mount $*" >>"LOG"\n',
+    "setpriv": OPTIONS.replace("TOOL", "setpriv"),
+}
 
 
 class Namespace(unittest.TestCase):
-    """smoke_cw runs every command through the namespace and its self-check;
-    a fake bwrap that masks nothing shows the self-check refusing (#5250)."""
+    """smoke_cw runs every command through the mount namespace and its
+    self-check; fakes that mask nothing show the self-check refusing."""
 
     def setUp(self):
         self.root = scratch_directory(self, "smoke-namespace-")
@@ -167,35 +168,54 @@ class Namespace(unittest.TestCase):
         listener = socket.socket(socket.AF_UNIX)
         listener.bind(str(self.runtime / "bus"))
         self.addCleanup(listener.close)
-        self.bwrap = self.root / "bwrap"
-        self.bwrap.write_text(FAKE_BWRAP)
-        self.bwrap.chmod(0o755)
-        self.log = self.root / "bwrap-args"
+        # The capabilities the self-check reads: a fake setpriv drops none, and
+        # CI may run these tests as root.
+        self.proc = self.root / "proc"
+        (self.proc / "self").mkdir(parents=True)
+        self.status(0)
+        self.log = self.root / "calls"
+        for name, body in FAKE_TOOLS.items():
+            tool = self.root / name
+            tool.write_text("#!/bin/sh\n" + body.replace('"LOG"', f'"{self.log}"'))
+            tool.chmod(0o755)
+
+    def status(self, capabilities):
+        (self.proc / "self" / "status").write_text(
+            f"Uid:\t{os.getuid()}\nCapEff:\t{capabilities:016x}\n")
+
+    def variables(self, address=None):
+        return (f'SMOKE_SUDO="{self.root}/sudo"\nSMOKE_UNSHARE="{self.root}/unshare"\n'
+                f'SMOKE_PROC_ROOT="{self.proc}"\n'
+                f'SMOKE_MOUNT="{self.root}/mount"\nSMOKE_SETPRIV="{self.root}/setpriv"\n'
+                f'SMOKE_HOST_RUNTIME="{self.host_runtime}"\nSMOKE_HOST_HOME="{self.host_home}"\n'
+                f'SMOKE_HOME="{self.home}"\nSMOKE_WORKSPACE="{self.workspace}"\n'
+                f'SMOKE_RUNTIME="{self.runtime}"\n'
+                f'SMOKE_DBUS_ADDRESS="{address or f"unix:path={self.runtime}/bus"}"\n')
 
     def cw(self, command, env=None, address=None):
-        assignments = (f'SMOKE_BWRAP="{self.bwrap}"\nSMOKE_HOST_RUNTIME="{self.host_runtime}"\n'
-                       f'SMOKE_HOST_HOME="{self.host_home}"\nSMOKE_HOME="{self.home}"\n'
-                       f'SMOKE_WORKSPACE="{self.workspace}"\nSMOKE_RUNTIME="{self.runtime}"\n'
-                       f'SMOKE_DBUS_ADDRESS="{address or f"unix:path={self.runtime}/bus"}"\n')
-        return bash(assignments + "smoke_cw " + command,
+        self.log.unlink(missing_ok=True)
+        return bash(self.variables(address) + "smoke_cw " + command,
                     env={**os.environ, "LOG": str(self.log), **(env or {})})
 
-    def test_the_namespace_masks_the_host_runtime_and_every_existing_home_store(self):
+    def test_root_only_masks_binds_and_drops_to_the_user_with_no_capabilities(self):
         result = self.cw("/usr/bin/true")
         self.assertEqual(result.returncode, 0, result.stderr)
-        arguments = self.log.read_text().splitlines()
-        def follows(flag, *values):
-            return any(arguments[i:i + 1 + len(values)] == [flag, *values]
-                       for i in range(len(arguments)))
-        self.assertTrue(follows("--tmpfs", str(self.host_runtime)))
-        self.assertTrue(follows("--bind", str(self.runtime), str(self.runtime)))
-        self.assertTrue(follows("--tmpfs", str(self.host_home / ".ssh")))
-        self.assertTrue(follows("--tmpfs", str(self.host_home / ".codewire")))
-        self.assertFalse(follows("--tmpfs", str(self.host_home / ".config/codewire")),
-                         "only directories that exist are masked")
-        self.assertTrue(follows("--chdir", str(self.workspace)))
-        self.assertLess(arguments.index("--tmpfs"), arguments.index("--bind"),
-                        "the runtime is bound back in after the host's is masked")
+        calls = self.log.read_text().splitlines()
+        uid, gid = os.getuid(), os.getgid()
+        self.assertEqual(calls[:2], ["sudo -n", "unshare --mount --propagation private"])
+        self.assertEqual(calls[2:-1], [
+            f"mount --bind {self.runtime} /mnt",
+            f"mount -t tmpfs -o mode=0700,uid={uid},gid={gid} tmpfs {self.host_runtime}",
+            f"mount --move /mnt {self.runtime}",
+            f"mount -t tmpfs -o mode=0700,uid={uid},gid={gid} tmpfs {self.host_home}/.ssh",
+            f"mount -t tmpfs -o mode=0700,uid={uid},gid={gid} tmpfs {self.host_home}/.codewire",
+        ], "only directories that exist are masked, after the runtime is moved back in")
+        self.assertEqual(calls[-1],
+            f"setpriv --reuid={uid} --regid={gid} --init-groups --inh-caps=-all --bounding-set=-all")
+
+    def test_the_namespace_shells_read_no_startup_file(self):
+        source = LIBRARY.read_text()
+        self.assertEqual(source.count("/usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/bash --norc --noprofile -c"), 2)
 
     def test_cw_sees_only_the_smokes_environment_from_its_workspace(self):
         leaked = {"SSH_AUTH_SOCK": "/tmp/agent", "GITHUB_TOKEN": "ghp_synthetic",
@@ -226,6 +246,21 @@ class Namespace(unittest.TestCase):
         result = self.cw("/usr/bin/echo ran", address=f"unix:path={self.host_runtime}/bus")
         self.assertEqual((result.returncode, result.stdout), (125, ""))
         self.assertIn("not the smoke's own", result.stderr)
+
+    def test_the_self_check_refuses_remaining_capabilities(self):
+        self.status(1 << 21)
+        result = self.cw("/usr/bin/echo ran")
+        self.assertEqual((result.returncode, result.stdout), (125, ""))
+        self.assertIn("capabilities remain", result.stderr)
+
+    def test_the_self_check_refuses_another_user(self):
+        script = (self.variables() + 'bash --norc --noprofile -c "$SMOKE_SELF_CHECK" check '
+                  f'{os.getuid() + 1} {os.getgid()} "{self.proc}/self/status" '
+                  '"$SMOKE_HOST_RUNTIME" "$SMOKE_RUNTIME" '
+                  '"$SMOKE_DBUS_ADDRESS" "$SMOKE_HOST_HOME" --environment PATH=/usr/bin:/bin -- /usr/bin/echo ran')
+        result = bash(script)
+        self.assertEqual((result.returncode, result.stdout), (125, ""))
+        self.assertIn("not the invoking user", result.stderr)
 
     def test_the_library_never_calls_the_host_secret_service(self):
         source = LIBRARY.read_text()

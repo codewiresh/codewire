@@ -7,10 +7,11 @@
 #   it runs reads or writes the host's keyring, login or agent;
 # - cw run with `env -i` and only the variables named here, so the caller's
 #   SSH_AUTH_SOCK, GITHUB_TOKEN, ANTHROPIC_* or OPENAI_* never reach it, inside
-#   a private mount namespace (bwrap) where the host's runtime directory, and
-#   the passwd home's keyrings, SSH keys and Codewire state, are empty, and a
+#   a private mount namespace where the host's runtime directory, and the
+#   passwd home's keyrings, SSH keys and Codewire state, are empty, and a
 #   stat-only self-check inside it refuses to run cw if the host's bus is
-#   still reachable;
+#   still reachable or cw would not run as the invoking user with no
+#   capabilities;
 # - one systemd user scope around the whole smoke. cw detaches its credential
 #   service and local VM supervisor (parent 1); they stay in the scope's
 #   cgroup, so stopping the scope ends them, and the scope's own process list
@@ -18,6 +19,17 @@
 # - no call to the host's Secret Service, ever. A loop of short-lived D-Bus
 #   reads to it crashed a host gnome-keyring-daemon (#5250, #5256); the
 #   namespace makes the host keyring unreachable instead.
+#
+# Passwordless sudo, for the mount namespace only. An unprivileged (user)
+# namespace shows root-owned files as owned by nobody, and cw rightly refuses
+# to run then: its local VM host check needs e2fsprogs owned by root, and its
+# credential authority will not start. So `sudo -n unshare --mount
+# --propagation private` makes the namespace, root mounts the masks and binds
+# the smoke's runtime directory back in, and nothing else: setpriv returns to
+# the invoking user with no capabilities before the self-check, and no file
+# outside the namespace is written as root (#5250). Agreed for
+# the owner's workstation only; a CI machine that would run this as sudo
+# needs its own review first.
 #
 # The sourcing script defines die MESSAGE (print and exit nonzero), calls
 # smoke_run_in_scope first, and runs smoke_isolation_end from an EXIT trap
@@ -41,7 +53,10 @@ SMOKE_CGROUP_ROOT=/sys/fs/cgroup
 SMOKE_BUSCTL=/usr/bin/busctl
 SMOKE_SYSTEMD_RUN=/usr/bin/systemd-run
 SMOKE_SYSTEMCTL=/usr/bin/systemctl
-SMOKE_BWRAP=/usr/bin/bwrap
+SMOKE_SUDO=/usr/bin/sudo
+SMOKE_UNSHARE=/usr/bin/unshare
+SMOKE_MOUNT=/usr/bin/mount
+SMOKE_SETPRIV=/usr/bin/setpriv
 SMOKE_HOST_RUNTIME="/run/user/$(id -u)"
 # The account's home from passwd, not $HOME: anything that resolves the home
 # through getpwuid finds these paths masked too.
@@ -172,26 +187,39 @@ smoke_refuse_host_leaks() {
   done
 }
 
-# The bwrap arguments of the smoke's mount namespace: the host as it is,
-# except an empty tmpfs over the host's runtime directory, with only the
-# smoke's own runtime directory bound back in, and over each of the passwd
-# home's masked directories that exists.
-smoke_namespace_arguments() {
-  local relative
-  printf '%s\0' --dev-bind / / --tmpfs "$SMOKE_HOST_RUNTIME" --bind "$SMOKE_RUNTIME" "$SMOKE_RUNTIME"
-  for relative in "${SMOKE_HOST_MASKS[@]}"; do
-    [[ -d "$SMOKE_HOST_HOME/$relative" ]] && printf '%s\0' --tmpfs "$SMOKE_HOST_HOME/$relative"
-  done
-  printf '%s\0' --chdir "$SMOKE_WORKSPACE"
-}
+# Run by root in the new mount namespace, and nothing more: an empty tmpfs
+# over the host's runtime directory with only the smoke's own runtime
+# directory moved back in, an empty tmpfs over each of the passwd home's
+# masked directories that exists, the workspace as the working directory,
+# then setpriv to the invoking user with no capabilities.
+# shellcheck disable=SC2016
+SMOKE_NAMESPACE_SETUP='
+set -eu
+mount="$1" setpriv="$2" uid="$3" gid="$4" host_runtime="$5" runtime="$6" home="$7" workspace="$8"
+shift 8
+masks=()
+while [[ "$1" != --run ]]; do masks+=("$1"); shift; done
+shift
+"$mount" --bind "$runtime" /mnt
+"$mount" -t tmpfs -o "mode=0700,uid=$uid,gid=$gid" tmpfs "$host_runtime"
+mkdir -p "$runtime"
+"$mount" --move /mnt "$runtime"
+for relative in "${masks[@]}"; do
+  if [[ -d "$home/$relative" ]]; then
+    "$mount" -t tmpfs -o "mode=0700,uid=$uid,gid=$gid" tmpfs "$home/$relative"
+  fi
+done
+cd "$workspace"
+exec "$setpriv" --reuid="$uid" --regid="$gid" --init-groups --inh-caps=-all --bounding-set=-all -- "$@"
+'
 
 # Run inside the namespace before cw, with stat alone: the host's bus socket
 # is absent, each masked directory is empty, and the bus cw is given is the
 # smoke's own. Then the command runs with only the smoke's environment.
 # shellcheck disable=SC2016
 SMOKE_SELF_CHECK='
-host_runtime="$1" runtime="$2" address="$3" home="$4"
-shift 4
+uid="$1" gid="$2" status="$3" host_runtime="$4" runtime="$5" address="$6" home="$7"
+shift 7
 masks=()
 while [[ "$1" != --environment ]]; do masks+=("$1"); shift; done
 shift
@@ -199,6 +227,8 @@ environment=()
 while [[ "$1" != -- ]]; do environment+=("$1"); shift; done
 shift
 fail() { echo "smoke self-check: $*" >&2; exit 125; }
+[[ "$(id -u)" == "$uid" && "$(id -g)" == "$gid" ]] || fail "not the invoking user"
+[[ "$(sed -n "s/^CapEff:[[:space:]]*//p" "$status")" =~ ^0+$ ]] || fail "capabilities remain"
 [[ ! -e "$host_runtime/bus" && ! -L "$host_runtime/bus" ]] || fail "the host bus is reachable"
 for relative in "${masks[@]}"; do
   [[ ! -d "$home/$relative" || -z "$(ls -A -- "$home/$relative")" ]] || fail "$relative is not masked"
@@ -212,11 +242,17 @@ exec env -i "${environment[@]}" "$@"
 # a create with no configuration file shares its directory live, and cw
 # refuses to share one that holds Codewire state or a keyring, as HOME does.
 smoke_cw() {
-  local -a environment namespace
+  local -a environment
   mapfile -d '' -t environment < <(smoke_environment)
-  mapfile -d '' -t namespace < <(smoke_namespace_arguments)
-  "$SMOKE_BWRAP" "${namespace[@]}" -- /usr/bin/bash -c "$SMOKE_SELF_CHECK" smoke-self-check \
-    "$SMOKE_HOST_RUNTIME" "$SMOKE_RUNTIME" "$SMOKE_DBUS_ADDRESS" "$SMOKE_HOST_HOME" \
+  # Both shells start with no environment and read no startup file: root
+  # must not run root's, nor the user's, and sudo hands over root's HOME.
+  "$SMOKE_SUDO" -n "$SMOKE_UNSHARE" --mount --propagation private -- \
+    /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/bash --norc --noprofile -c "$SMOKE_NAMESPACE_SETUP" smoke-namespace \
+    "$SMOKE_MOUNT" "$SMOKE_SETPRIV" "$(id -u)" "$(id -g)" "$SMOKE_HOST_RUNTIME" "$SMOKE_RUNTIME" \
+    "$SMOKE_HOST_HOME" "$SMOKE_WORKSPACE" "${SMOKE_HOST_MASKS[@]}" --run \
+    /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/bash --norc --noprofile -c "$SMOKE_SELF_CHECK" smoke-self-check \
+    "$(id -u)" "$(id -g)" "$SMOKE_PROC_ROOT/self/status" "$SMOKE_HOST_RUNTIME" "$SMOKE_RUNTIME" \
+    "$SMOKE_DBUS_ADDRESS" "$SMOKE_HOST_HOME" \
     "${SMOKE_HOST_MASKS[@]}" --environment "${environment[@]}" -- "$@"
 }
 
