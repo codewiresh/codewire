@@ -21,6 +21,10 @@ impl crate::PlatformCredentialConnector for NeverConnect {
 struct NeverSpawn;
 
 impl LocalBrokerProcessSpawner for NeverSpawn {
+    fn runner_protocol(&self) -> u32 {
+        crate::broker_process::TEST_RUNNER_PROTOCOL
+    }
+
     fn spawn(
         &self,
         _: &LocalBrokerProcessConfig,
@@ -170,6 +174,10 @@ async fn platform_generation_reuses_only_the_exact_owner_binding() {
 struct RefusedSpawns(Arc<std::sync::Mutex<Vec<bool>>>);
 
 impl LocalBrokerProcessSpawner for RefusedSpawns {
+    fn runner_protocol(&self) -> u32 {
+        crate::broker_process::TEST_RUNNER_PROTOCOL
+    }
+
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,

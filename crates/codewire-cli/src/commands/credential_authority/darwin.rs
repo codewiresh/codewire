@@ -263,6 +263,12 @@ fn bind_child_to_authority(command: &mut tokio::process::Command, authority_fd: 
 }
 
 impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
+    fn runner_protocol(&self) -> u32 {
+        // The broker this starts is this cw's `__local-credential-broker`,
+        // whose `RunnerClient` admits exactly this runner protocol.
+        codewire_local_vmm::runner_service::NATIVE_RUNNER_PROTOCOL_VERSION
+    }
+
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,

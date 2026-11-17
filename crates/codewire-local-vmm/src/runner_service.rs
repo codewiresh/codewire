@@ -69,7 +69,10 @@ const RUNNER_WATCH_BUFFER: usize = 8;
 // 14: GetBootSecrets gives the supervisor an intercepting boot's secrets, and
 //     brokers pair with the front door on the boot's pairing secret, not the
 //     daemon token (#3999).
-pub(crate) const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 14;
+/// The protocol a runner speaks, and the only one [`RunnerClient`] admits.
+/// A local credential authority reports it for the brokers it starts, which
+/// connect as that client (#5238).
+pub const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 14;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =

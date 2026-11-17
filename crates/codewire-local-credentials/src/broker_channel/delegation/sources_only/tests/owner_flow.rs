@@ -20,6 +20,10 @@ struct BrokerPeer {
 }
 
 impl LocalBrokerProcessSpawner for BrokerPeer {
+    fn runner_protocol(&self) -> u32 {
+        crate::broker_process::TEST_RUNNER_PROTOCOL
+    }
+
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,

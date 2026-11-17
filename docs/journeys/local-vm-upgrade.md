@@ -275,8 +275,10 @@ Issue: #5238. The spec is "Credentials after an upgrade" in
 - **Gotchas:**
   - The earlier side must be a released build: a `cw` built from source has
     no provenance.
-  - A scratch `HOME` does not isolate the operating system's keyring. Delete
-    the generated key by name.
+  - A scratch `HOME` does not isolate the operating system's keyring
+    (#5255): walk with credentials only in a private D-Bus session and
+    keyring of the walk's own, as the local VM credentials smoke does
+    (#5220), never against your own.
   - A first VM start from a scratch `HOME` can spend minutes in its network
     step where the host firewall has no rule for that `cw`.
 - **Observed:**

@@ -247,6 +247,10 @@ struct TestBrokerSpawner {
 }
 
 impl LocalBrokerProcessSpawner for TestBrokerSpawner {
+    fn runner_protocol(&self) -> u32 {
+        crate::broker_process::TEST_RUNNER_PROTOCOL
+    }
+
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,
@@ -963,6 +967,8 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
             protocol_version: AUTHORITY_PROTOCOL_VERSION,
             protected_store_persistence: ProtectedStorePersistence::ProcessLifetime,
             protected_store: None,
+            // This server has no broker spawner, so it starts no brokers.
+            broker_runner_protocol: None,
         }
     );
 
@@ -1706,6 +1712,7 @@ impl tonic::server::UnaryService<v1::GetAuthorityInfoRequest> for CompatibilityA
                     protected_store_persistence: v1::ProtectedStorePersistence::ProcessLifetime
                         as i32,
                     protected_store_backend: String::new(),
+                    broker_runner_protocol: 0,
                 }))
             }
         })
@@ -2139,6 +2146,10 @@ struct RunnerGoneBrokerSpawner {
 }
 
 impl LocalBrokerProcessSpawner for RunnerGoneBrokerSpawner {
+    fn runner_protocol(&self) -> u32 {
+        crate::broker_process::TEST_RUNNER_PROTOCOL
+    }
+
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,
@@ -2511,4 +2522,34 @@ async fn move_default_away(client: &mut LocalCredentialClient) {
             .unwrap()
             .is_default
     );
+}
+
+/// An authority tells its clients the runner protocol its brokers accept,
+/// which is its spawner's to say (#5238): a client whose runner speaks
+/// another protocol, or one that gets no answer, takes the authority for
+/// another cw's.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_authority_reports_the_runner_protocol_its_brokers_accept() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let spawner = Arc::new(RunnerGoneBrokerSpawner {
+        store: store.clone(),
+        child_pids: Arc::default(),
+        tasks: Arc::default(),
+    });
+    let (shutdown, server) = start_server_with_spawner(
+        config.clone(),
+        store,
+        spawner as Arc<dyn LocalBrokerProcessSpawner>,
+    )
+    .await;
+    let client = connect_when_ready(&config).await;
+    let reported = crate::broker_process::TEST_RUNNER_PROTOCOL;
+    assert_eq!(client.info().broker_runner_protocol, Some(reported));
+    assert!(!client.is_another_cws(reported));
+    assert!(client.is_another_cws(reported + 1));
+    drop(client);
+    shutdown.send(()).unwrap();
+    server.await.unwrap().unwrap();
 }

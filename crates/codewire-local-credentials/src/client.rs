@@ -64,6 +64,16 @@ pub struct AuthorityInfo {
     /// `None` from an authority that predates the recorded store; it used
     /// the platform default backend.
     pub protected_store: Option<AuthorityProtectedStore>,
+    /// The runner protocol its brokers accept. `None` from an authority that
+    /// predates the report (#5238), or one that starts no brokers.
+    pub broker_runner_protocol: Option<u32>,
+}
+
+impl AuthorityInfo {
+    fn is_another_cws(&self, runner_protocol: u32) -> bool {
+        self.protocol_version < AUTHORITY_PROTOCOL_VERSION
+            || self.broker_runner_protocol != Some(runner_protocol)
+    }
 }
 
 /// An authority process the starting client still owns until admission.
@@ -353,6 +363,8 @@ impl LocalCredentialClient {
             )
             .map_err(|_| AuthorityRuntimeError::ProtocolMismatch)?,
             protected_store: store_from_proto(&response.protected_store_backend)?,
+            broker_runner_protocol: (response.broker_runner_protocol != 0)
+                .then_some(response.broker_runner_protocol),
         };
         Ok(Self { inner, info })
     }
@@ -361,10 +373,14 @@ impl LocalCredentialClient {
         self.info.clone()
     }
 
-    /// An authority older than this cw still serves after an update; one a
-    /// boot command may replace once no local VM uses it.
-    pub fn is_older(&self) -> bool {
-        self.info.protocol_version < AUTHORITY_PROTOCOL_VERSION
+    /// Whether this authority is another cw's, for a cw whose runner speaks
+    /// `runner_protocol`: one that still serves after an update or a
+    /// rollback, and that a boot command may replace once no local VM uses
+    /// it. Its own protocol is lower, or its brokers accept another runner
+    /// protocol, or it does not say which they accept
+    /// (`docs/dev/LINUX-LOCAL-VMS.md`, "Credentials after an upgrade").
+    pub fn is_another_cws(&self, runner_protocol: u32) -> bool {
+        self.info.is_another_cws(runner_protocol)
     }
 
     pub async fn shutdown(mut self) -> Result<(), Status> {
@@ -1554,6 +1570,26 @@ mod tests {
 
     use super::workload_secrets::valid_workload_secret_key;
     use super::*;
+
+    /// Whose authority it is, for a cw whose runner speaks protocol 13.
+    /// The second row is v0.4.15's authority met by v0.4.21 (#5238): the
+    /// same authority number, and brokers no runner of this cw is served
+    /// by.
+    #[test]
+    fn an_authority_whose_brokers_accept_another_runner_is_another_cws() {
+        let info = |protocol_version, broker_runner_protocol| AuthorityInfo {
+            protocol_version,
+            protected_store_persistence: ProtectedStorePersistence::OperatingSystem,
+            protected_store: None,
+            broker_runner_protocol,
+        };
+        let current = AUTHORITY_PROTOCOL_VERSION;
+        assert!(!info(current, Some(13)).is_another_cws(13));
+        assert!(info(current, None).is_another_cws(13));
+        assert!(info(current, Some(12)).is_another_cws(13));
+        assert!(info(current, Some(14)).is_another_cws(13));
+        assert!(info(current - 1, Some(13)).is_another_cws(13));
+    }
 
     #[test]
     fn workload_secret_response_keys_use_the_canonical_workload_grammar() {

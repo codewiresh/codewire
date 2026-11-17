@@ -83,6 +83,11 @@ pub enum LocalBrokerSpawnError {
 /// Authority-owned broker launcher. The stream peer is transferred directly
 /// into the isolated child and must become its only lease-authority channel.
 pub trait LocalBrokerProcessSpawner: Send + Sync + 'static {
+    /// The runner protocol the brokers this spawner starts accept. The
+    /// authority reports it, so a cw whose runner speaks another protocol
+    /// knows these brokers cannot serve its VMs (#5238).
+    fn runner_protocol(&self) -> u32;
+
     /// Start one broker child. A boot's `boot_secrets`, when it has any,
     /// reach the child only on an inherited descriptor (#3999).
     fn spawn(
@@ -92,6 +97,10 @@ pub trait LocalBrokerProcessSpawner: Send + Sync + 'static {
         boot_secrets: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError>;
 }
+
+/// What this crate's test spawners report as their brokers' runner protocol.
+#[cfg(test)]
+pub(crate) const TEST_RUNNER_PROTOCOL: u32 = 7;
 
 #[cfg(test)]
 mod tests {

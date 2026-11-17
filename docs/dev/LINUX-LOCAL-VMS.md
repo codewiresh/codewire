@@ -496,17 +496,21 @@ a VM that this cw starts its credentials.
   broker that refuses its runner's protocol records both protocol numbers in
   the credential service's broker log.
 
-**Not yet built** (#5238). Today a service counts as another cw's only
-by its own protocol number. v0.4.15 and v0.4.21 share that number while
-their runner protocols differ, so with v0.4.21 a service left running by
-v0.4.15 is never replaced, not even with every VM stopped. The first start
-that needs a credential broker then fails in the guest start as
-`environment_sources_guest_start_failed` or `start_guest_start_failed`, with
-`detail=egress_broker_exited` in the runner's log and no reason anywhere,
-and `cw update` leaves the VM stopped. From v0.4.22 the number differs, so
-after `cw --local stop NAME` the next start replaces the service. The
-journey step is `local-vm-upgrade-credentials` in
-`docs/journeys/local-vm-upgrade.md`.
+**Built in part** (#5238). The first two points are built: a service
+reports the runner protocol its brokers accept, and one that reports
+another, or none, is replaced once no VM may run. Before that, a service
+counted as another cw's only by its own protocol number, which v0.4.15 and
+v0.4.21 share while their runner protocols differ: with v0.4.21 a service
+left running by v0.4.15 is never replaced, not even with every VM stopped,
+and from v0.4.22 only because that number happened to move.
+
+**Not yet built:** the refusal while a VM still runs, and what the logs say.
+Until then, in that state the first start that needs a credential broker
+fails in the guest start as `environment_sources_guest_start_failed` or
+`start_guest_start_failed`, with `detail=egress_broker_exited` in the
+runner's log and no reason anywhere, and `cw update` leaves the VM stopped;
+stop the local VMs and start them again. The journey step is
+`local-vm-upgrade-credentials` in `docs/journeys/local-vm-upgrade.md`.
 
 A VM keeps the guest kernel and root it was created with, so neither an upgrade
 nor a rollback moves it to another runtime. A VM created since that kernel

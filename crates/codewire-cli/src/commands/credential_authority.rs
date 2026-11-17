@@ -230,11 +230,13 @@ pub(crate) async fn connect_local_credential_authority_serving(
     Ok(client)
 }
 
-/// Replace a running authority older than this cw, so the VM a boot command
-/// starts gets this cw's (#2850's platform GitHub question needs protocol
-/// 16). Only once `no_vm_may_run`: each running VM's broker belongs to the
-/// authority that started it, so while one may run, the older one keeps
-/// serving. No authority, or a current one, changes nothing.
+/// Replace a running authority that is another cw's, so the VM a boot command
+/// starts gets this cw's: an older one (#2850's platform GitHub question
+/// needs protocol 16), or one whose brokers accept another runner protocol
+/// than this cw's runner speaks (#5238). Only once `no_vm_may_run`: each
+/// running VM's broker belongs to the authority that started it, so while
+/// one may run, that authority keeps serving. No authority, or this cw's,
+/// changes nothing.
 pub(crate) async fn replace_older_local_credential_authority(
     no_vm_may_run: impl std::future::Future<Output = anyhow::Result<bool>>,
 ) -> anyhow::Result<()> {
@@ -248,7 +250,9 @@ pub(crate) async fn replace_older_local_credential_authority(
     else {
         return Ok(());
     };
-    if !client.is_older() || !no_vm_may_run.await? {
+    let another_cws =
+        client.is_another_cws(codewire_local_vmm::runner_service::NATIVE_RUNNER_PROTOCOL_VERSION);
+    if !another_cws || !no_vm_may_run.await? {
         return Ok(());
     }
     let store = configured_authority_store(&env)?;
@@ -472,6 +476,12 @@ struct CwLocalCredentialProcessSpawner {
 
 #[cfg(target_os = "linux")]
 impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
+    fn runner_protocol(&self) -> u32 {
+        // The broker this starts is this cw's `__local-credential-broker`,
+        // whose `RunnerClient` admits exactly this runner protocol.
+        codewire_local_vmm::runner_service::NATIVE_RUNNER_PROTOCOL_VERSION
+    }
+
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,

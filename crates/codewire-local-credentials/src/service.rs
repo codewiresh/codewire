@@ -555,6 +555,14 @@ struct BrokerProcessManager<S: ProtectedStore> {
 }
 
 impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
+    /// The runner protocol this authority's brokers accept; zero for an
+    /// authority that starts none.
+    fn runner_protocol(&self) -> u32 {
+        self.spawner
+            .as_ref()
+            .map_or(0, |spawner| spawner.runner_protocol())
+    }
+
     fn new(
         authority: Arc<LocalCredentialAuthority<S>>,
         spawner: Option<Arc<dyn LocalBrokerProcessSpawner>>,
@@ -1430,6 +1438,7 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
                 .protected_store_identity()
                 .map(AuthorityProtectedStore::to_record)
                 .unwrap_or_default(),
+            broker_runner_protocol: self.brokers.runner_protocol(),
         }))
     }
 
