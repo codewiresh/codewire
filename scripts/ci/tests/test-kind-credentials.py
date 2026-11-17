@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -99,7 +100,8 @@ class WorkspaceProbe(unittest.TestCase):
             "last_refresh": "2026-10-03T00:00:00Z"})
 
     def test_codewires_delivered_login_replaces_its_proxy_config(self):
-        # Once the daemon delivers Codex's own login it removes config.toml.
+        # Once the daemon delivers Codex's own login, config.toml keeps only
+        # its sandbox setting (#5001); a daemon before that removed it.
         (self.home / "auth.json").write_text(self.codewire_login(), encoding="ascii")
         for config in (True, False):
             with self.subTest(config=config):
@@ -166,7 +168,8 @@ class WorkspaceProbe(unittest.TestCase):
                 self.managed(first_line)
                 with self.assertRaisesRegex(ValueError, "^projection$"):
                     PROBE.probe("selected")
-        # A delivered login removes Codewire's config.toml; absence is fine.
+        # A daemon before #5001 removed Codewire's config.toml on delivery;
+        # absence is still fine.
         (self.home / "config.toml").unlink()
         PROBE.probe("selected")
         outside = self.home / "outside.toml"
@@ -220,9 +223,11 @@ class HarnessGuards(unittest.TestCase):
             {"event": "projected_token_rotated", "changed": True, "rotated_ms": 471000,
              "fresh_admission": True, "elapsed_ms": 478000},
             {"event": "rotation_turn_completed", "legacy_auth_commands": 0},
-            {"event": "broker_retry_completed", "legacy_auth_commands": 0, "elapsed_ms": 12},
-            {"event": "broker_retry_exhausted", "legacy_auth_commands": 0, "elapsed_ms": 13},
-            {"event": "complete", "turns": 4, "completed": 3, "failed": 1,
+            {"event": "broker_retry_completed", "legacy_auth_commands": 0, "sign_in_age_s": 612,
+             "elapsed_ms": 12},
+            {"event": "broker_retry_bounded", "status": 401, "legacy_auth_commands": 0,
+             "elapsed_ms": 13},
+            {"event": "complete", "turns": 3, "completed": 3, "failed": 0,
              "same_process": True, "token_changed": True},
         ]
 
@@ -495,8 +500,11 @@ watch_kind_credential_fresh_admission '%s' workspace-pod relay-pod /tmp/codewire
                                (1, {"fresh_admission": False}),
                                (1, {"fresh_admission": False, "elapsed_ms": 600000}),
                                (2, {"legacy_auth_commands": 2}),
+                               # A sign-in too young for the first forced refresh.
+                               (3, {"sign_in_age_s": 599}), (3, {"sign_in_age_s": None}),
                                (4, {"event": "native_reread_completed"}),
-                               (4, {"elapsed_ms": 30000}), (5, {"failed": 0, "completed": 4}),
+                               (4, {"event": "broker_retry_exhausted"}), (4, {"status": 400}),
+                               (4, {"elapsed_ms": 30000}), (5, {"failed": 1, "turns": 4}),
                                (5, {"same_process": False})):
             session = self.session_events()
             session[index].update(changes)
@@ -523,9 +531,7 @@ watch_kind_credential_fresh_admission '%s' workspace-pod relay-pod /tmp/codewire
         response("broker_retry_once", 1, 401)
         refresh()
         response("broker_retry_once", 2, 200)
-        response("broker_retry_exhausted", 1, 401)
-        refresh()
-        response("broker_retry_exhausted", 2, 400)
+        response("broker_retry_bounded", 1, 401)
         for attempt in range(3, baseline + 1):
             response("baseline", attempt, 200)
         return events
@@ -1203,25 +1209,51 @@ kind_credential_bound_revision '%s'
                 if not expected:
                     self.assertEqual(result.stdout, "3\n")
 
-    def test_provider_audit_rejects_old_third_request_missing_refresh_and_extra_replay(self):
+    def test_provider_audit_rejects_old_scenarios_missing_refresh_and_a_bounded_resend(self):
         correct = self.provider_events()
+        bounded = correct.index(next(event for event in correct
+                                     if event.get("scenario") == "broker_retry_bounded"))
         mutations = []
         old = [dict(event) for event in correct]
-        for event in old:
-            if event.get("scenario") == "broker_retry_exhausted":
-                event["scenario"] = "native_reread"
-        old.append({"event": "provider_response", "scenario": "native_reread", "attempt": 3,
-                    "status": 200, "response_calls": 7, "refresh_calls": 2})
+        old[bounded]["scenario"] = "native_reread"
         mutations.append(old)
         mutations.append([event for event in correct if event["event"] != "provider_refresh"])
-        mutations.append(correct + [dict(correct[-1], attempt=3, response_calls=7, status=200)])
-        mutations.append(correct + [dict(correct[-1], attempt=3, response_calls=7, status=401)])
-        mutations.append(correct + [dict(correct[-1], attempt=3, response_calls=7, status=400)])
+        # The transcript before #4974: the young sign-in's 401 forced a second
+        # refresh and a resend.
+        resend = dict(correct[bounded], attempt=2, response_calls=6, refresh_calls=2)
+        second = {"event": "provider_refresh", "response_calls": 5, "refresh_calls": 2}
+        for status in (200, 400, 401):
+            mutations.append(correct[:bounded + 1] + [second, dict(resend, status=status)])
+            mutations.append(correct[:bounded + 1]
+                             + [dict(resend, status=status, refresh_calls=1)])
         mutations.append(correct[:3] + [dict(correct[3], refresh_calls=2)] + correct[4:])
         mutations.append(correct[:3] + [correct[4], correct[3]] + correct[5:])
         for events in mutations:
             with self.subTest(events=events):
                 self.assertNotEqual(self.provider_counts(events).returncode, 0)
+
+    def test_a_stage_exit_trap_reaches_its_cleanup_after_a_killed_watch(self):
+        # A killed background process's wait returns 143. Unguarded inside an
+        # EXIT trap it ended the trap before the stage cleanup that follows,
+        # leaving the stage's environment, profile and credential live (#5191).
+        traps = [trap for trap in re.findall(r"trap '([^']*)' EXIT", HELPERS.read_text())
+                 if "cleanup_kind_credential_stage" in trap]
+        self.assertEqual(len(traps), 3)
+        waits = [match for trap in traps
+                 for match in re.finditer(r'wait "\$\w+" 2>/dev/null([^;}]*)', trap)]
+        self.assertTrue(waits)
+        for wait in waits:
+            self.assertIn("|| true", wait.group(1))
+        # The guard is what keeps the trap going, under errexit as the stage runs.
+        script = (
+            'stage() ( set -eE; p=""; trap \'[ -z "$p" ] || { kill "$p" 2>/dev/null; '
+            'wait "$p" 2>/dev/null%s; }; echo cleaned\' EXIT; sleep 30 & p=$!; false )\n'
+            'stage || true\n')
+        for guard, expected in (("", ""), (" || true", "cleaned\n")):
+            with self.subTest(guard=guard):
+                result = subprocess.run(["bash", "-c", script % guard], capture_output=True,
+                                        text=True, timeout=30)
+                self.assertEqual(result.stdout, expected)
 
     def test_provider_audit_still_rejects_a_restarted_fixture(self):
         self.assertNotEqual(self.provider_counts(self.provider_events(), restarts=1).returncode, 0)

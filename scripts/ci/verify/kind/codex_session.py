@@ -7,8 +7,8 @@ print raw RPC, stderr, trace, token bytes or fingerprints: stdout is the
 closed acceptance event stream.
 
 This session covers the proxy route. Once the daemon delivers Codex's own
-ChatGPT login it removes Codewire's config.toml (codex_login.py covers that
-route), so the session forces the same proxy provider with CODEX_OVERRIDES
+ChatGPT login, Codewire's config.toml holds no provider (codex_login.py covers
+that route), so the session forces the same proxy provider with CODEX_OVERRIDES
 and points Codex's ChatGPT backend at a closed loopback port. There are no
 token or auth overrides.
 
@@ -20,6 +20,7 @@ fatal; there is no untraced fallback.
 """
 
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -39,10 +40,12 @@ CODEX = "/opt/codewire/agents/npm/bin/codex"
 # A ChatGPT login in auth.json would otherwise send Codex's account, settings
 # and analytics calls to chatgpt.com through blocked egress; a closed loopback
 # port fails them at once. The provider itself sends no OpenAI auth.
+# The daemon's loopback ingress, where that provider sends Codex's requests.
+PROXY_PORT = 38081
 CODEX_OVERRIDES = (
     "-c", 'model_provider="codewire_openai"',
     "-c", 'model_providers.codewire_openai.name="Codewire OpenAI"',
-    "-c", 'model_providers.codewire_openai.base_url="http://127.0.0.1:38081/v1"',
+    "-c", f'model_providers.codewire_openai.base_url="http://127.0.0.1:{PROXY_PORT}/v1"',
     "-c", 'model_providers.codewire_openai.wire_api="responses"',
     "-c", "model_providers.codewire_openai.requires_openai_auth=false",
     "-c", "model_providers.codewire_openai.supports_websockets=false",
@@ -71,9 +74,20 @@ HOSTED_EPOCH_MAX_LIFETIME = 600.0
 # The host creates this file once the relay has admitted a successor epoch for
 # this environment that authenticated with the replaced workspace token. With
 # the replaced token it ends the idle before the epoch bound
-# (codex_session.py <marker>).
+# (codex_session.py <marker> <sign-in saved at, unix seconds>).
 ADMISSION_MARKER = re.compile(r"/tmp/codewire-kind-fresh-admission-[0-9]{1,12}")
 SCENARIO_TIMEOUT = 30.0
+# A 401 forces a refresh only of a sign-in last refreshed ten minutes ago or
+# more (#4974, the broker's FORCED_REFRESH_MIN_AGE). The host passes the time
+# the sign-in was saved, at or after its stored refresh time; a few seconds
+# past the bound keep the first retry scenario's refresh certain.
+FORCED_REFRESH_MIN_AGE = 600
+SIGN_IN_AGE = FORCED_REFRESH_MIN_AGE + 5
+BOUNDED_BODY = json.dumps({"model": "codewire-synthetic", "input": "CW_KIND_BROKER_RETRY_BOUNDED"},
+                          separators=(",", ":"))
+# The fixture's fixed 401 text, so the 401 is the provider's, not a refusal.
+UNAUTHORIZED_TEXT = b"Synthetic Kind authentication rejection"
+SAVED_AT = re.compile(r"[1-9][0-9]{0,11}")
 SHUTDOWN_GRACE = 5.0
 
 
@@ -406,7 +420,7 @@ class Server:
             raise Failure("unexpected_model_provider")
         return thread_id
 
-    def turn(self, thread_id, prompt, deadline=None, *, expected_failure=False):
+    def turn(self, thread_id, prompt, deadline=None):
         self.phase = "turn_start"
         deadline = deadline if deadline is not None else time.monotonic() + RPC_TIMEOUT
         result = self.request("turn/start", {
@@ -419,20 +433,10 @@ class Server:
         self.phase = "turn_completion"
         self.until(lambda: key in self.completed, deadline)
         completed = self.completed[key]
-        if expected_failure:
-            # The host verifies the exact 401 -> refresh -> 400 transcript;
-            # double-401 forwarding is separate broker unit proof. Require a
-            # real failed terminal here, not an RPC
-            # timeout, interrupted turn, or successful third request.
-            if (completed.get("status") != "failed"
-                    or not isinstance(completed.get("error"), dict)
-                    or not completed["error"] or key in self.markers):
-                raise Failure("unexpected_exhaustion_terminal")
-        else:
-            if completed.get("status") != "completed" or completed.get("error") is not None:
-                raise Failure("turn_failed")
-            if key not in self.markers:
-                raise Failure("missing_synthetic_output")
+        if completed.get("status") != "completed" or completed.get("error") is not None:
+            raise Failure("turn_failed")
+        if key not in self.markers:
+            raise Failure("missing_synthetic_output")
         self.phase = "idle"
 
     def close(self):
@@ -478,7 +482,44 @@ def observe_rotation(server, initial, baseline_completed, admitted=lambda: False
         server.pump(0.25)
 
 
-def run(server, trace, admitted=lambda: False):
+def wait_for_sign_in_age(server, saved_at_unix):
+    """Pump the idle stock process until the sign-in saved at saved_at_unix is
+    SIGN_IN_AGE seconds old, and return its age in whole seconds. The idle for
+    the token rotation usually covers it, so this rarely waits."""
+    if saved_at_unix is None or saved_at_unix > time.time() + 5:
+        raise Failure("sign_in_saved_at")
+    while (age := time.time() - saved_at_unix) < SIGN_IN_AGE:
+        server.pump(min(1.0, SIGN_IN_AGE - age))
+    return int(age)
+
+
+def bounded_unauthorized(deadline):
+    """The second retry scenario, sent to the daemon's loopback route rather
+    than as a Codex turn. The sign-in the first scenario refreshed seconds
+    before draws a 401, which the broker must return as the provider sent it,
+    with no second refresh (#4974); the host checks the fixture's transcript.
+    Stock Codex, given a 401 its login cannot fix, waits on its own token
+    refresh, which this session leaves nowhere to go. Returns the status; the
+    body is only compared, never printed."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise Failure("retry_scenario_deadline")
+    connection = http.client.HTTPConnection("127.0.0.1", PROXY_PORT, timeout=remaining)
+    try:
+        connection.request("POST", "/v1/responses", BOUNDED_BODY,
+                           {"Host": "localhost", "Content-Type": "application/json"})
+        response = connection.getresponse()
+        body = response.read(MAX_LINE + 1)
+    except (OSError, http.client.HTTPException):
+        raise Failure("bounded_request_failed") from None
+    finally:
+        connection.close()
+    if response.status != 401 or UNAUTHORIZED_TEXT not in body:
+        raise Failure("bounded_401_not_returned")
+    return response.status
+
+
+def run(server, trace, admitted=lambda: False, saved_at_unix=None):
     server.initialize()
     thread_id = server.thread()
     server.turn(thread_id, "CW_KIND_BASELINE")
@@ -492,9 +533,10 @@ def run(server, trace, admitted=lambda: False):
     emit("projected_token_rotated", changed=True, rotated_ms=int(rotated * 1000),
          fresh_admission=fresh_admission,
          elapsed_ms=int((time.monotonic() - baseline_completed) * 1000))
+    sign_in_age = wait_for_sign_in_age(server, saved_at_unix)
     # The same stock process continues through the new hosted epoch. The
-    # remaining original deadlines bound the entire retry/exhaustion journey,
-    # not a removed Codex auth-command cache. No harness request is replayed.
+    # remaining original deadlines bound the entire retry journey, not a
+    # removed Codex auth-command cache. No harness request is replayed.
     deadline = time.monotonic() + SCENARIO_TIMEOUT
     server.turn(thread_id, "CW_KIND_ROTATION", deadline)
     validate_process_trace(trace)
@@ -502,20 +544,24 @@ def run(server, trace, admitted=lambda: False):
         raise Failure("rotation_turn_deadline")
     emit("rotation_turn_completed", legacy_auth_commands=0)
 
-    for prompt, event, expected_failure in (
-        ("CW_KIND_BROKER_RETRY_ONCE", "broker_retry_completed", False),
-        ("CW_KIND_BROKER_RETRY_EXHAUSTED", "broker_retry_exhausted", True),
-    ):
-        started = time.monotonic()
-        # Fresh threads avoid interpreting an earlier test marker retained in
-        # conversation history as the current synthetic provider scenario.
-        thread_id = server.thread(deadline)
-        server.turn(thread_id, prompt, deadline, expected_failure=expected_failure)
-        validate_process_trace(trace)
-        elapsed = time.monotonic() - started
-        if not time.monotonic() < deadline:
-            raise Failure("retry_scenario_deadline")
-        emit(event, legacy_auth_commands=0, elapsed_ms=int(elapsed * 1000))
+    started = time.monotonic()
+    # A fresh thread avoids interpreting an earlier test marker retained in
+    # conversation history as the current synthetic provider scenario.
+    thread_id = server.thread(deadline)
+    server.turn(thread_id, "CW_KIND_BROKER_RETRY_ONCE", deadline)
+    validate_process_trace(trace)
+    if not time.monotonic() < deadline:
+        raise Failure("retry_scenario_deadline")
+    emit("broker_retry_completed", legacy_auth_commands=0, sign_in_age_s=sign_in_age,
+         elapsed_ms=int((time.monotonic() - started) * 1000))
+
+    started = time.monotonic()
+    status = bounded_unauthorized(deadline)
+    validate_process_trace(trace)
+    if not time.monotonic() < deadline:
+        raise Failure("retry_scenario_deadline")
+    emit("broker_retry_bounded", status=status, legacy_auth_commands=0,
+         elapsed_ms=int((time.monotonic() - started) * 1000))
 
 
 def managed_config(path):
@@ -535,11 +581,12 @@ def managed_config(path):
 def validate_projection():
     # Selected Codex uses the daemon-owned loopback route. The daemon's own
     # ~/.codex/config.toml configures it until a delivered ChatGPT login
-    # removes that file; never a user's file or a symlink. An
-    # environment-token Pod also renders the selection and CODEX_HOME; an
-    # identity-free Pod renders neither, and this kubectl-exec'd driver then
-    # relies on Codex's default home. The gateway's public roots are not a
-    # Codex environment override, even when that mount exists.
+    # leaves only its sandbox setting there; never a user's file or a
+    # symlink. An environment-token Pod also renders the selection and
+    # CODEX_HOME; an identity-free Pod renders neither, and this
+    # kubectl-exec'd driver then relies on Codex's default home. The
+    # gateway's public roots are not a Codex environment override, even when
+    # that mount exists.
     rendered = (os.environ.get("CODEX_HOME"),
                 os.environ.get("CODEWIRE_MANAGED_CREDENTIAL_CLIENTS"))
     config = Path(CODEX_HOME) / "config.toml"
@@ -559,13 +606,15 @@ def main(argv=()):
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     try:
-        if len(argv) > 1 or (argv and not ADMISSION_MARKER.fullmatch(argv[0])):
+        if (len(argv) != 2 or not ADMISSION_MARKER.fullmatch(argv[0])
+                or not SAVED_AT.fullmatch(argv[1])):
             raise Failure("arguments")
-        marker = Path(argv[0]) if argv else None
-        if marker is not None and os.path.lexists(marker):
+        marker = Path(argv[0])
+        saved_at = int(argv[1])
+        if os.path.lexists(marker):
             raise Failure("admission_marker_present")
         def admitted():
-            return marker is not None and marker.is_file()
+            return marker.is_file()
         validate_projection()
         if Path(CODEX_HOME).resolve() != Path(CODEX_HOME):
             raise Failure("unexpected_home_path")
@@ -578,7 +627,7 @@ def main(argv=()):
             ], "/workspace")
             stage = "session"
             try:
-                run(server, trace, admitted)
+                run(server, trace, admitted, saved_at)
             except BaseException:
                 # Repeated interruption must not abandon an owned child while
                 # the first cancellation is being drained. Keep the original
@@ -609,7 +658,7 @@ def main(argv=()):
     except Exception:
         emit("failed", stage=stage, reason="driver_failure", **diagnostics)
     if success:
-        emit("complete", turns=4, completed=3, failed=1, same_process=True, token_changed=True)
+        emit("complete", turns=3, completed=3, failed=0, same_process=True, token_changed=True)
     return 0 if success else 1
 
 

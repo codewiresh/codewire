@@ -14,15 +14,19 @@ Modes, in the order the credential suite runs them:
                        the placeholder refresh token and never the broker's.
                        Stock Codex reads the account as ChatGPT, reads usage
                        (wham/usage) and completes a turn against the synthetic
-                       backend with the delivered bearer.
+                       backend with the delivered bearer. Codewire's
+                       config.toml switches to its signed-in form, the
+                       sandbox setting without a provider (#5001).
   rotation GENERATION  The file holds a later synthetic token generation at
                        the daemon's next check after the broker refreshed.
   own-login            A user's own login written in place of Codewire's stays
-                       untouched for a full check period; Codewire's file is
-                       then put back.
+                       untouched for a full check period, with the
+                       signed-in config.toml; Codewire's file is then put
+                       back.
   logout               Stock `codex logout` revokes only the placeholder and
                        deletes the file; the daemon records the logout and
-                       writes nothing for a full check period.
+                       writes nothing for a full check period, keeping the
+                       signed-in config.toml.
   redelivered          After Stop/Start (a new container) the login is back.
   revoked              After revocation Codewire's auth.json is gone and its
                        proxy config.toml is back.
@@ -74,8 +78,8 @@ CHECK_PERIOD = 120.0
 FULL_CHECK = CHECK_PERIOD + 15.0
 NEXT_CHECK = CHECK_PERIOD + 30.0
 DELIVERY_TIMEOUT = 180.0
-# The check that writes auth.json removes Codewire's config.toml right after.
-CONFIG_REMOVAL_TIMEOUT = 10.0
+# The check that writes auth.json switches Codewire's config.toml right after.
+CONFIG_SWITCH_TIMEOUT = 10.0
 RPC_TIMEOUT = 60.0
 SHUTDOWN_GRACE = 5.0
 POLL = 1.0
@@ -203,17 +207,22 @@ def delivered_generation(now=None):
     return generation
 
 
-def managed_config():
-    """Whether config.toml is Codewire's: regular, not a symlink, first line
-    exactly the managed header."""
+def config_form():
+    """Which of Codewire's config.toml forms the file holds (#5001): "proxy",
+    with Codewire's model provider, while no login is delivered; "signed_in",
+    the sandbox setting alone, while one is. None when it is absent or not
+    Codewire's: not regular, a symlink, or without the managed header."""
     try:
         if not stat.S_ISREG(os.lstat(CONFIG).st_mode):
-            return False
+            return None
         descriptor = os.open(CONFIG, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
-        return False
+        return None
     with os.fdopen(descriptor, "rb") as source:
-        return source.read(64 * 1024 + 1).split(b"\n", 1)[0] == MANAGED_HEADER
+        lines = source.read(64 * 1024 + 1).split(b"\n")
+    if lines[0] != MANAGED_HEADER:
+        return None
+    return "proxy" if any(line.startswith(b"model_provider") for line in lines) else "signed_in"
 
 
 def logout_markers():
@@ -585,13 +594,9 @@ def chatgpt_session(backend):
     return routes
 
 
-def config_absent():
-    return not os.path.lexists(CONFIG)
-
-
 def deliver():
     generation = wait_for(delivered_generation, DELIVERY_TIMEOUT, "login_not_delivered")
-    wait_for(config_absent, CONFIG_REMOVAL_TIMEOUT, "proxy_config_kept")
+    wait_for(lambda: config_form() == "signed_in", CONFIG_SWITCH_TIMEOUT, "proxy_config_kept")
     bearer = json.loads(read_private(AUTH)[1])["tokens"]["access_token"]
     backend = Backend(bearer)
     try:
@@ -647,7 +652,7 @@ def own_login():
         found = read_private(AUTH)
         if found is None or found[1] != users or found[0] != 0o600:
             raise Failure("own_login_touched")
-        if not config_absent():
+        if config_form() != "signed_in":
             raise Failure("proxy_config_over_own_login")
     finally:
         # Put Codewire's file back only over this synthetic user login.
@@ -698,7 +703,7 @@ def logout():
     time.sleep(FULL_CHECK)
     if read_private(AUTH) is not None:
         raise Failure("logout_undone")
-    if not config_absent():
+    if config_form() != "signed_in":
         raise Failure("proxy_config_after_logout")
     emit("logout_stays_logged_out", revoked="placeholder",
          recorded_ms=int(recorded * 1000), waited_ms=int(FULL_CHECK * 1000))
@@ -713,7 +718,7 @@ def redelivered():
 
 def revoked():
     started = time.monotonic()
-    wait_for(lambda: read_private(AUTH) is None and managed_config(), NEXT_CHECK,
+    wait_for(lambda: read_private(AUTH) is None and config_form() == "proxy", NEXT_CHECK,
              "revoked_login_kept")
     emit("revoked_login_removed", proxy_config="restored",
          waited_ms=int((time.monotonic() - started) * 1000))

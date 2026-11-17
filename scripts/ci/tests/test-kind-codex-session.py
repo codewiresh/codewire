@@ -48,9 +48,8 @@ for line in sys.stdin:
             completed_id = "foreign-turn"
         else:
             completed_id = turn_id
-        if mode != "authentication-failed":
-            send({"method":"item/completed","params":{"threadId":thread_id,"turnId":completed_id,"item":{"type":"agentMessage","text":"CWCODEX149 kind"}}})
-        failed = mode in ("failed", "authentication-failed")
+        send({"method":"item/completed","params":{"threadId":thread_id,"turnId":completed_id,"item":{"type":"agentMessage","text":"CWCODEX149 kind"}}})
+        failed = mode == "failed"
         turn = {"id":completed_id,"status":"failed" if failed else "completed","error":{"message":"synthetic-private-canary"} if failed else None}
         # Notifications deliberately precede the request response.
         send({"method":"turn/completed","params":{"threadId":thread_id,"turn":turn}})
@@ -100,8 +99,9 @@ class ProjectionTests(unittest.TestCase):
                         driver.validate_projection()
 
     def test_codewires_config_or_none_but_never_a_users_file(self):
-        # A delivered ChatGPT login removes Codewire's config.toml; the session
-        # forces the same proxy provider itself, so an absent file is fine.
+        # A delivered ChatGPT login leaves Codewire's config.toml without a
+        # provider, and a daemon before #5001 removed it; the session forces
+        # the same proxy provider itself, so either, or no file, is fine.
         with codex_home(None), patch.dict(os.environ, {}, clear=True):
             driver.validate_projection()
         header = driver.MANAGED_HEADER.decode()
@@ -230,21 +230,6 @@ class ProtocolTests(unittest.TestCase):
                 server.turn(server.thread(), "synthetic")
             self.assertNotIn("canary", str(result.exception))
 
-    def test_expected_exhaustion_requires_failed_terminal_without_success_marker(self):
-        with self.server("authentication-failed") as server:
-            server.initialize()
-            server.turn(server.thread(), "CW_KIND_BROKER_RETRY_EXHAUSTED", expected_failure=True)
-            self.assertEqual(server.phase, "idle")
-            self.assertEqual(len(server.completed), 1)
-            self.assertEqual(server.markers, set())
-
-    def test_exhaustion_cannot_accept_success_or_failed_turn_with_success_output(self):
-        for mode in ("success", "failed"):
-            with self.subTest(mode=mode), self.server(mode) as server:
-                server.initialize()
-                with self.assertRaisesRegex(driver.Failure, "^unexpected_exhaustion_terminal$"):
-                    server.turn(server.thread(), "CW_KIND_BROKER_RETRY_EXHAUSTED", expected_failure=True)
-
     def test_unexpected_server_request_is_denied(self):
         with self.server("server-request") as server:
             server.initialize()
@@ -318,7 +303,8 @@ class DiagnosticTests(unittest.TestCase):
                                                "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"}, clear=True), \
                         patch.object(driver, "Server", server_factory), signal_guard, \
                         contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-                    status = driver.main()
+                    status = driver.main([f"/tmp/codewire-kind-fresh-admission-{os.getpid()}",
+                                          str(int(time.time()) - 700)])
             finally:
                 if real_cancellation:
                     for sig, handler in original_handlers.items():
@@ -664,12 +650,80 @@ class AcceptanceTests(unittest.TestCase):
         self.assertEqual(rotated["event"], "projected_token_rotated")
         self.assertEqual((rotated["rotated_ms"], rotated["fresh_admission"]), (470000, True))
 
-    def test_the_admission_marker_argument_is_closed(self):
-        for argv in (["/tmp/other"], ["/tmp/codewire-kind-fresh-admission-1", "extra"],
-                     ["/tmp/codewire-kind-fresh-admission-x"]):
+    def test_the_admission_marker_and_saved_at_arguments_are_closed(self):
+        marker = "/tmp/codewire-kind-fresh-admission-1"
+        for argv in ([], ["/tmp/other", "1794900000"], [marker, "extra"], [marker],
+                     ["/tmp/codewire-kind-fresh-admission-x", "1794900000"], [marker, "0"],
+                     [marker, "-1"], [marker, "1794900000", "extra"]):
             with self.subTest(argv=argv), contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(driver.main(argv), 1)
             self.assertIn('"reason":"arguments"', output.getvalue())
+
+    def test_the_forced_refresh_bound_matches_the_broker(self):
+        broker = SOURCE.parents[4] / "crates/codewire-credential-broker/src/runtime/forced_refresh.rs"
+        self.assertIn("const FORCED_REFRESH_MIN_AGE: Duration = Duration::from_secs(10 * 60);",
+                      broker.read_text())
+        self.assertEqual(driver.FORCED_REFRESH_MIN_AGE, 600)
+        self.assertGreater(driver.SIGN_IN_AGE, driver.FORCED_REFRESH_MIN_AGE)
+
+    def test_the_session_waits_until_the_sign_in_is_old_enough(self):
+        clock = [1_794_900_000.0]
+        class Idle:
+            pumped = 0.0
+            def pump(self, duration):
+                self.pumped += duration
+                clock[0] += duration
+        with patch.object(driver.time, "time", lambda: clock[0]):
+            idle = Idle()
+            saved_at = int(clock[0]) - 100
+            self.assertEqual(driver.wait_for_sign_in_age(idle, saved_at), driver.SIGN_IN_AGE)
+            self.assertAlmostEqual(idle.pumped, driver.SIGN_IN_AGE - 100)
+            idle = Idle()
+            self.assertEqual(driver.wait_for_sign_in_age(idle, int(clock[0]) - 700), 700)
+            self.assertEqual(idle.pumped, 0.0)
+            for saved_at in (None, int(clock[0]) + 60):
+                with self.subTest(saved_at=saved_at), \
+                        self.assertRaisesRegex(driver.Failure, "^sign_in_saved_at$"):
+                    driver.wait_for_sign_in_age(Idle(), saved_at)
+
+    @contextlib.contextmanager
+    def loopback(self, status, body):
+        import http.server
+        import threading
+        requests = []
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers["Content-Length"])
+                requests.append((self.path, json.loads(self.rfile.read(length))))
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *_):
+                pass
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch.object(driver, "PROXY_PORT", server.server_address[1]):
+                yield requests
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_the_bounded_scenario_needs_the_providers_own_401(self):
+        rejection = b'{"error":{"message":"Synthetic Kind authentication rejection"}}'
+        with self.loopback(401, rejection) as requests:
+            self.assertEqual(driver.bounded_unauthorized(time.monotonic() + 5), 401)
+        self.assertEqual(requests, [("/v1/responses", {
+            "model": "codewire-synthetic", "input": "CW_KIND_BROKER_RETRY_BOUNDED"})])
+        for status, body in ((200, rejection), (401, b'{"error":"denied"}'), (403, rejection)):
+            with self.subTest(status=status, body=body), self.loopback(status, body), \
+                    self.assertRaisesRegex(driver.Failure, "^bounded_401_not_returned$"):
+                driver.bounded_unauthorized(time.monotonic() + 5)
+        with self.loopback(401, rejection), \
+                self.assertRaisesRegex(driver.Failure, "^retry_scenario_deadline$"):
+            driver.bounded_unauthorized(time.monotonic() - 1)
 
     def test_epoch_bound_matches_production_relay(self):
         relay = SOURCE.parents[4] / "crates/codewire-orchestration/src/worker/credential_relay/epoch.rs"
@@ -691,10 +745,8 @@ class AcceptanceTests(unittest.TestCase):
     def workflow(self, legacy_calls=0, codex_calls=1, durations=(0.0, 0.0, 0.0)):
         calls = []
         clock = [0.0]
-        elapsed_by_prompt = dict(zip(
-            ("CW_KIND_ROTATION", "CW_KIND_BROKER_RETRY_ONCE", "CW_KIND_BROKER_RETRY_EXHAUSTED"),
-            durations,
-        ))
+        rotation, retry_once, bounded = durations
+        elapsed_by_prompt = {"CW_KIND_ROTATION": rotation, "CW_KIND_BROKER_RETRY_ONCE": retry_once}
         class Workflow:
             def __init__(self):
                 self.threads = 0
@@ -707,12 +759,16 @@ class AcceptanceTests(unittest.TestCase):
                 if self.threads > 1:
                     self.deadlines.append(deadline)
                 return str(self.threads)
-            def turn(self, thread, prompt, deadline=None, *, expected_failure=False):
-                self.inputs.append((thread, prompt, expected_failure))
+            def turn(self, thread, prompt, deadline=None):
+                self.inputs.append((thread, prompt))
                 if prompt != "CW_KIND_BASELINE":
                     self.deadlines.append(deadline)
                 calls.extend([clock[0]] * legacy_calls)
                 clock[0] += elapsed_by_prompt.get(prompt, 0.0)
+        def bounded_unauthorized(deadline):
+            workflow.deadlines.append(deadline)
+            clock[0] += bounded
+            return 401
         workflow = Workflow()
         output = io.StringIO()
         with patch.object(driver, "auth_calls", lambda _: list(calls)), \
@@ -720,20 +776,23 @@ class AcceptanceTests(unittest.TestCase):
                 patch.object(driver.time, "monotonic", lambda: clock[0]), \
                 patch.object(driver, "token_fingerprint", lambda: b"synthetic"), \
                 patch.object(driver, "observe_rotation", lambda *_: (470.0, True)), \
+                patch.object(driver, "bounded_unauthorized", bounded_unauthorized), \
                 contextlib.redirect_stdout(output):
-            driver.run(workflow, None)
+            driver.run(workflow, None, saved_at_unix=int(time.time()) - 700)
         return workflow, [json.loads(line) for line in output.getvalue().splitlines()]
 
-    def test_no_legacy_auth_and_fresh_thread_markers_with_failed_exhaustion(self):
+    def test_no_legacy_auth_fresh_thread_markers_and_a_bounded_401(self):
         workflow, events = self.workflow(durations=(3.0, 4.0, 5.0))
-        self.assertEqual([thread for thread, _, _ in workflow.inputs], ["1", "1", "2", "3"])
-        self.assertEqual([failure for _, _, failure in workflow.inputs], [False, False, False, True])
+        self.assertEqual(workflow.inputs, [("1", "CW_KIND_BASELINE"), ("1", "CW_KIND_ROTATION"),
+                                           ("2", "CW_KIND_BROKER_RETRY_ONCE")])
         self.assertEqual([event["event"] for event in events], [
             "baseline_completed", "projected_token_rotated", "rotation_turn_completed",
-            "broker_retry_completed", "broker_retry_exhausted",
+            "broker_retry_completed", "broker_retry_bounded",
         ])
         self.assertEqual([event["legacy_auth_commands"] for event in events[-3:]], [0, 0, 0])
-        self.assertEqual(workflow.deadlines, [driver.SCENARIO_TIMEOUT] * 5)
+        self.assertGreaterEqual(events[3]["sign_in_age_s"], 700)
+        self.assertEqual((events[4]["status"], events[4]["elapsed_ms"]), (401, 5000))
+        self.assertEqual(workflow.deadlines, [driver.SCENARIO_TIMEOUT] * 4)
 
     def test_any_legacy_auth_command_or_second_codex_process_is_rejected(self):
         with self.assertRaisesRegex(driver.Failure, "legacy_auth_command_executed"):

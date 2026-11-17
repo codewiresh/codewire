@@ -33,7 +33,7 @@ const TOKEN_SIGNATURE: &str = "synthetic-kind-signature";
 const MAX_GENERATION: u64 = 10_000;
 const MAX_BODY: usize = 4 * 1024 * 1024;
 const RETRY_MARKER: &[u8] = b"CW_KIND_BROKER_RETRY_ONCE";
-const EXHAUSTED_MARKER: &[u8] = b"CW_KIND_BROKER_RETRY_EXHAUSTED";
+const BOUNDED_MARKER: &[u8] = b"CW_KIND_BROKER_RETRY_BOUNDED";
 const LEGACY_REREAD_MARKER: &[u8] = b"CW_KIND_NATIVE_REREAD";
 
 // Fixed, non-secret identities for the checked-in Kind fixture.  They are
@@ -119,7 +119,7 @@ const SSE: &[u8] = concat!(
 enum Scenario {
     Baseline,
     BrokerRetryOnce,
-    BrokerRetryExhausted,
+    BrokerRetryBounded,
 }
 
 impl Scenario {
@@ -127,7 +127,7 @@ impl Scenario {
         match self {
             Self::Baseline => 0,
             Self::BrokerRetryOnce => 1,
-            Self::BrokerRetryExhausted => 2,
+            Self::BrokerRetryBounded => 2,
         }
     }
 
@@ -135,7 +135,7 @@ impl Scenario {
         match self {
             Self::Baseline => "baseline",
             Self::BrokerRetryOnce => "broker_retry_once",
-            Self::BrokerRetryExhausted => "broker_retry_exhausted",
+            Self::BrokerRetryBounded => "broker_retry_bounded",
         }
     }
 
@@ -143,14 +143,12 @@ impl Scenario {
         match self {
             Self::Baseline => StatusCode::OK,
             Self::BrokerRetryOnce if attempt == 1 => StatusCode::UNAUTHORIZED,
-            Self::BrokerRetryExhausted if attempt == 1 => StatusCode::UNAUTHORIZED,
-            // Exercise a failed broker replay without also selecting stock
-            // Codex's outer retry policy for 401/5xx. The broker unit test
-            // retries_an_oauth_unauthorized_response_only_once separately
-            // proves 401 -> refresh -> 401 with exactly two upstream calls.
-            // Unexpected extra calls remain counted and fail the exact audit.
-            Self::BrokerRetryExhausted => StatusCode::BAD_REQUEST,
-            _ => StatusCode::OK,
+            Self::BrokerRetryOnce => StatusCode::OK,
+            // Sent to the sign-in BrokerRetryOnce refreshed seconds before, so
+            // the broker returns this 401 as it is and forces no second
+            // refresh (#4974). A second call would be that refresh's resend;
+            // it stays counted and fails the exact audit.
+            Self::BrokerRetryBounded => StatusCode::UNAUTHORIZED,
         }
     }
 
@@ -174,13 +172,13 @@ impl Scenario {
         {
             return Err(BrokerUpstreamError::Protocol);
         }
-        let exhausted = input
-            .windows(EXHAUSTED_MARKER.len())
-            .any(|window| window == EXHAUSTED_MARKER);
-        match (retry, exhausted) {
+        let bounded = input
+            .windows(BOUNDED_MARKER.len())
+            .any(|window| window == BOUNDED_MARKER);
+        match (retry, bounded) {
             (false, false) => Ok(Self::Baseline),
             (true, false) => Ok(Self::BrokerRetryOnce),
-            (false, true) => Ok(Self::BrokerRetryExhausted),
+            (false, true) => Ok(Self::BrokerRetryBounded),
             (true, true) => Err(BrokerUpstreamError::Protocol),
         }
     }
@@ -623,7 +621,7 @@ impl SyntheticProvider {
         if let Ok(counters) = self.0.lock() {
             tracing::info!(target: TARGET, event = "provider_totals", response_calls = counters.responses,
                 refresh_calls = counters.refreshes, baseline_calls = counters.attempts[0],
-                broker_retry_once_calls = counters.attempts[1], broker_retry_exhausted_calls = counters.attempts[2],
+                broker_retry_once_calls = counters.attempts[1], broker_retry_bounded_calls = counters.attempts[2],
                 github_advertisement_calls = counters.github_advertisements,
                 github_upload_pack_calls = counters.github_upload_packs,
                 github_app_refresh_calls = counters.github_app_refreshes,
@@ -1961,21 +1959,21 @@ mod tests {
                 assert_eq!(counters.last_refresh, None);
             }
             // API traffic must not consume or reset the retained OAuth schedule.
-            let exhausted = super::body("CW_KIND_BROKER_RETRY_EXHAUSTED");
-            provider.responses(super::headers(1), &exhausted).unwrap();
+            let bounded = super::body("CW_KIND_BROKER_RETRY_BOUNDED");
+            provider.responses(super::headers(1), &bounded).unwrap();
             let refresh = serde_json::to_vec(&json!({
                 "grant_type":"refresh_token",
                 "refresh_token":refresh_token(1),
             }))
             .unwrap();
             provider.refresh(HeaderMap::new(), &refresh).unwrap();
-            provider.responses(super::headers(2), &exhausted).unwrap();
-            provider.responses(super::headers(2), &exhausted).unwrap();
+            provider.responses(super::headers(2), &bounded).unwrap();
+            provider.responses(super::headers(2), &bounded).unwrap();
             assert_eq!(attempts(&provider), (1, 4));
             let counters = provider.0.lock().unwrap();
             assert_eq!(counters.responses, 3);
             assert_eq!(counters.refreshes, 1);
-            assert_eq!(counters.attempts[Scenario::BrokerRetryExhausted.index()], 3);
+            assert_eq!(counters.attempts[Scenario::BrokerRetryBounded.index()], 3);
         }
 
         fn main_anthropic_request(path: &str) -> CredentialBridgeRequest {
@@ -2671,14 +2669,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_scenarios_reject_the_removed_marker_and_close_exhaustion() {
+    fn provider_scenarios_reject_the_removed_marker_and_always_refuse_the_bounded_one() {
         assert!(Scenario::from_body(&body("CW_KIND_NATIVE_REREAD")).is_err());
-        let exhausted = Scenario::from_body(&body("CW_KIND_BROKER_RETRY_EXHAUSTED")).unwrap();
-        assert!(matches!(exhausted, Scenario::BrokerRetryExhausted));
-        assert_eq!(exhausted.status(1), StatusCode::UNAUTHORIZED);
-        assert_eq!(exhausted.status(2), StatusCode::BAD_REQUEST);
-        assert_eq!(exhausted.status(3), StatusCode::BAD_REQUEST);
-        assert_eq!(exhausted.status(u64::MAX), StatusCode::BAD_REQUEST);
+        let bounded = Scenario::from_body(&body("CW_KIND_BROKER_RETRY_BOUNDED")).unwrap();
+        assert!(matches!(bounded, Scenario::BrokerRetryBounded));
+        for attempt in [1, 2, u64::MAX] {
+            assert_eq!(bounded.status(attempt), StatusCode::UNAUTHORIZED);
+        }
     }
 
     fn anthropic_headers(kind: AnthropicKind) -> HeaderMap {
@@ -3128,22 +3125,22 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_schedule_counts_an_unexpected_third_request_as_failure() {
+    fn bounded_schedule_counts_every_unexpected_request() {
         let provider = SyntheticProvider::new();
-        let exhausted = body("CW_KIND_BROKER_RETRY_EXHAUSTED");
-        provider.responses(headers(1), &exhausted).unwrap();
+        let bounded = body("CW_KIND_BROKER_RETRY_BOUNDED");
+        provider.responses(headers(1), &bounded).unwrap();
         let refresh = serde_json::to_vec(&json!({
             "grant_type":"refresh_token",
             "refresh_token":refresh_token(1),
         }))
         .unwrap();
         provider.refresh(HeaderMap::new(), &refresh).unwrap();
-        provider.responses(headers(2), &exhausted).unwrap();
-        provider.responses(headers(2), &exhausted).unwrap();
+        provider.responses(headers(2), &bounded).unwrap();
+        provider.responses(headers(2), &bounded).unwrap();
 
         let counters = provider.0.lock().unwrap();
         assert_eq!(counters.responses, 3);
         assert_eq!(counters.refreshes, 1);
-        assert_eq!(counters.attempts[Scenario::BrokerRetryExhausted.index()], 3);
+        assert_eq!(counters.attempts[Scenario::BrokerRetryBounded.index()], 3);
     }
 }

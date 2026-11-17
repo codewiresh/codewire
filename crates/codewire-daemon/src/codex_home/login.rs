@@ -11,8 +11,9 @@
 //! `~/.codex` when hosted, Codewire's own native home in a local VM, on the
 //! workload user's behalf) with [`CODEX_MANAGED_REFRESH_TOKEN`] in place of
 //! the refresh token, which never leaves Codewire. A delivered login means Codex
-//! uses its built-in provider, so Codewire's proxy `config.toml` is removed;
-//! a denied one restores it.
+//! uses its built-in provider, so Codewire's `config.toml` keeps only its
+//! sandbox setting, without the proxy provider; a denied one restores the
+//! proxy form.
 //!
 //! The file is Codewire's only while it is a regular file (never a symlink) of
 //! the daemon's uid that parses, has `auth_mode` `"chatgpt"` and holds exactly

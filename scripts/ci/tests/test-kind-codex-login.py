@@ -58,7 +58,10 @@ def login(generation=0, *, refresh=driver.PLACEHOLDER, plan=driver.PLAN, exp=Non
     return json.dumps(document, indent=2).encode()
 
 
-MANAGED_CONFIG = driver.MANAGED_HEADER + b'\nmodel_provider = "codewire_openai"\n'
+# Codewire's two config.toml forms: with its provider while no login is
+# delivered, the sandbox setting alone while one is (#5001).
+PROXY_CONFIG = driver.MANAGED_HEADER + b'\nmodel_provider = "codewire_openai"\n'
+SIGNED_IN_CONFIG = driver.MANAGED_HEADER + b'\nsandbox_mode = "danger-full-access"\n'
 
 # A synthetic Codex: JSON-RPC over stdio for `app-server`, revoke-then-delete
 # for `logout`. It reads auth.json and sends the calls Codex 0.160 sends with
@@ -194,7 +197,7 @@ class Workspace:
             patch.object(driver, "NEXT_CHECK", 1.0),
             patch.object(driver, "DELIVERY_TIMEOUT", 1.0),
             patch.object(driver, "time", self.clock),
-            patch.object(driver, "CONFIG_REMOVAL_TIMEOUT", 0.3),
+            patch.object(driver, "CONFIG_SWITCH_TIMEOUT", 0.3),
             patch.dict(os.environ, {"CODEX_HOME": str(self.home),
                                     "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS": "v1:codex"},
                        clear=False),
@@ -220,6 +223,7 @@ class Workspace:
         temporary.write_bytes(login() if contents is None else contents)
         temporary.chmod(mode)
         temporary.rename(self.auth)
+        self.config.write_bytes(SIGNED_IN_CONFIG)
 
     def mark_logout(self):
         self.state.mkdir(parents=True, exist_ok=True)
@@ -433,8 +437,16 @@ class Modes(unittest.TestCase):
                 self.assertEqual(events, [{"event": "failed", "mode": "deliver", "reason": reason}])
         self.workspace.output.truncate(0)
         self.workspace.output.seek(0)
-        self.workspace.config.write_bytes(MANAGED_CONFIG)
-        self.assertEqual(self.run_mode("deliver")[1][-1]["reason"], "proxy_config_kept")
+        # The proxy form kept, or no file at all as before #5001.
+        for config in (PROXY_CONFIG, None):
+            with self.subTest(config=config):
+                self.workspace.output.truncate(0)
+                self.workspace.output.seek(0)
+                if config is None:
+                    self.workspace.config.unlink()
+                else:
+                    self.workspace.config.write_bytes(config)
+                self.assertEqual(self.run_mode("deliver")[1][-1]["reason"], "proxy_config_kept")
 
     def test_deliver_waits_for_the_daemon_and_fails_without_a_login(self):
         self.workspace.daemon_check(lambda: self.workspace.deliver(login(2)))
@@ -470,6 +482,12 @@ class Modes(unittest.TestCase):
         status, events = self.run_mode("own-login")
         self.assertEqual((status, events[-1]["reason"]), (1, "own_login_touched"))
 
+    def test_own_login_fails_when_the_proxy_config_comes_back(self):
+        self.workspace.deliver(login(1))
+        self.workspace.config.write_bytes(PROXY_CONFIG)
+        status, events = self.run_mode("own-login")
+        self.assertEqual((status, events[-1]["reason"]), (1, "proxy_config_over_own_login"))
+
     def test_logout_revokes_only_the_placeholder_and_stays_logged_out(self):
         self.workspace.deliver(login(1))
         self.workspace.daemon_check(self.workspace.record_logout)
@@ -498,6 +516,14 @@ class Modes(unittest.TestCase):
                     self.workspace.daemon_check(lambda: self.workspace.deliver(login(1)))
                 self.assertEqual(self.run_mode("logout")[1][-1]["reason"], reason)
 
+    def test_logout_fails_when_the_proxy_config_comes_back(self):
+        self.workspace.deliver(login(1))
+        def daemon_records_and_restores_the_proxy():
+            self.workspace.record_logout()
+            self.workspace.config.write_bytes(PROXY_CONFIG)
+        self.workspace.daemon_check(daemon_records_and_restores_the_proxy)
+        self.assertEqual(self.run_mode("logout")[1][-1]["reason"], "proxy_config_after_logout")
+
     def test_redelivery_requires_a_fresh_container(self):
         self.workspace.deliver(login(2))
         self.assertEqual(self.run_mode("redelivered")[0], 0)
@@ -511,7 +537,7 @@ class Modes(unittest.TestCase):
         self.workspace.deliver(login(2))
         def daemon_withdraws():
             self.workspace.auth.unlink()
-            self.workspace.config.write_bytes(MANAGED_CONFIG)
+            self.workspace.config.write_bytes(PROXY_CONFIG)
         self.workspace.daemon_check(daemon_withdraws)
         self.assertEqual(self.run_mode("revoked")[0], 0)
         self.workspace.deliver(login(2))

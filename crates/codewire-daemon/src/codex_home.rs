@@ -12,9 +12,9 @@
 //! user's: it is never written, replaced or removed.
 //!
 //! Once listening, the daemon also keeps Codex's own ChatGPT login in
-//! `auth.json` while the broker delivers one ([`login`]); a delivered login
-//! removes Codewire's `config.toml`, so Codex uses its built-in provider.
-//! Nothing else in the home is touched.
+//! `auth.json` while the broker delivers one ([`login`]); while a login is
+//! delivered, Codewire's `config.toml` keeps only its sandbox setting, so
+//! Codex uses its built-in provider. Nothing else in the home is touched.
 //!
 //! In a local VM, Codex's home is Codewire's own directory
 //! ([`CODEX_NATIVE_HOME`] in the workspace), which the guest prepares at boot

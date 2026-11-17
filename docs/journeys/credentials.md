@@ -137,6 +137,13 @@ only what differs.
 - **Use:** `codex` in the environment. Expect Codex signed in with the
   ChatGPT plan (`/status`), a model answer through the broker, and Codex's
   `auth.json` holding no refresh token.
+- **A 401 the broker returns:** where the broker serves Codex (the proxy
+  route, with no delivered login, or interception), a provider 401 to a
+  sign-in refreshed in the last ten minutes reaches Codex as the provider
+  sent it, with no forced refresh (#4974, walked on Kind). What Codex then
+  shows a person is not yet observed. In the Kind suite's session, which
+  forces the proxy provider beside a delivered login, Codex waited on its own
+  token refresh until the session timed out.
 - **Remove:** in the cloud, delete also asks OpenAI to revoke the sign-in,
   and `cw` says whether OpenAI confirmed it. Locally `cw` doesn't ask yet
   (#4717, C6 part b2) and says the sign-in stays valid until it expires, and

@@ -882,9 +882,10 @@ assert_kind_credential_provider_counts() {
   counts="$(kind_credential_fixture_events)"
   jq -e --argjson baseline "$baseline" '
     # Keep response and refresh events interleaved. Final totals alone can
-    # hide a refresh before rejection, replay, or the retired third request.
-    # The failed replay is a nonretryable 400 for the stock client. Double-401
-    # forwarding and the broker-only retry bound have separate runtime proof.
+    # hide a refresh before rejection, a replay, or a second refresh. The
+    # sign-in is ten minutes old at broker_retry_once, so its 401 forces one
+    # refresh and one resend; broker_retry_bounded comes seconds after that
+    # refresh, so its 401 is returned with neither (#4974).
     [.[] | select(.event == "provider_response" or .event == "provider_refresh") |
       [.event, .scenario, .attempt, .status, .response_calls, .refresh_calls]] as $observed |
     # After the retry scenarios of the session, every baseline response is
@@ -896,11 +897,9 @@ assert_kind_credential_provider_counts() {
       ["provider_response", "broker_retry_once", 1, 401, 3, 0],
       ["provider_refresh", null, null, null, 3, 1],
       ["provider_response", "broker_retry_once", 2, 200, 4, 1],
-      ["provider_response", "broker_retry_exhausted", 1, 401, 5, 1],
-      ["provider_refresh", null, null, null, 5, 2],
-      ["provider_response", "broker_retry_exhausted", 2, 400, 6, 2]
+      ["provider_response", "broker_retry_bounded", 1, 401, 5, 1]
     ] + [range(3; $baseline + 1) as $attempt
-      | ["provider_response", "baseline", $attempt, 200, $attempt + 4, 2]]))
+      | ["provider_response", "baseline", $attempt, 200, $attempt + 3, 1]]))
   ' <<<"$counts" >/dev/null || {
     echo '::error::synthetic provider retry/refresh counts differ from the exact hosted scenarios' >&2
     return 1
@@ -1081,7 +1080,7 @@ save_kind_credential_rotation_evidence() (
       }
       elif .event == "provider_response" then {
         event, scenario:(.scenario | if . == "baseline" or . == "broker_retry_once" or
-          . == "broker_retry_exhausted" then . else null end),
+          . == "broker_retry_bounded" then . else null end),
         attempt:(.attempt | count), status:(.status | count | if . >= 100 and . <= 599 then . else null end),
         response_calls:(.response_calls | count), refresh_calls:(.refresh_calls | count)
       }
@@ -1117,14 +1116,15 @@ assert_kind_credential_rotation() {
   # admission mark, or else the >600s epoch bound. Never print token digests.
   jq -es '
     map(.event) == ["baseline_completed", "projected_token_rotated", "rotation_turn_completed",
-      "broker_retry_completed", "broker_retry_exhausted", "complete"] and
+      "broker_retry_completed", "broker_retry_bounded", "complete"] and
     .[0].codex_processes == 1 and
     ([.[0,2,3,4].legacy_auth_commands] == [0,0,0,0]) and
+    (.[3].sign_in_age_s | type == "number" and . >= 600) and .[4].status == 401 and
     .[1].changed == true and .[1].elapsed_ms < 720000 and
     (.[1].rotated_ms | type == "number" and . >= 0) and .[1].rotated_ms <= .[1].elapsed_ms and
     (.[1].fresh_admission == true or .[1].elapsed_ms > 600000) and
     all(.[3,4]; .elapsed_ms >= 0 and .elapsed_ms < 30000) and
-    .[5] == {event:"complete", turns:4, completed:3, failed:1, same_process:true, token_changed:true}
+    .[5] == {event:"complete", turns:3, completed:3, failed:0, same_process:true, token_changed:true}
   ' "$session" >/dev/null || {
     echo "::error::stock Codex hosted rotation/session evidence is incomplete; fixture record: $evidence" >&2
     return 1
@@ -1326,7 +1326,7 @@ kind_credential_native_smoke() (
   fi
   log "running public platform enrollment/profile/native Codex acceptance with synthetic credentials"
   local KIND_CREDENTIAL_CLI_HOME credential_name profile_name environment pod pod_uid generation relay relay_pod relay_uid token_lead
-  local workspace_image marker
+  local workspace_image marker codex_saved_at
   local login_events login_generation update restart_generation renewal_stop renewal_pid=""
   local member_role_changed="" bound_revision journey_from served
   local stage_environment="" stage_profiles="" stage_credentials="" admission admission_pid=""
@@ -1340,8 +1340,11 @@ kind_credential_native_smoke() (
   KIND_CREDENTIAL_CLI_HOME="$(mktemp -d /dev/shm/codewire-kind-credentials.XXXXXX)"
   # A failed step must not leave the renewal probe running, here or in the
   # Pod, and a failure while the creator is an admin restores the seeded
-  # member role, so a retained cluster can run this suite again.
-  trap '[ -z "$authority_window_from" ] || assert_kind_credential_no_renewal_since "$environment" "$relay_pod" "$authority_window_from" || true; [ -z "$KIND_CREDENTIAL_ROTATION_STAGES_PID" ] || finish_kind_credential_rotation_stages || true; [ -z "$admission_pid" ] || { kill "$admission_pid" 2>/dev/null; wait "$admission_pid" 2>/dev/null; }; [ -z "$renewal_pid" ] || abandon_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid"; [ -z "$member_role_changed" ] || set_kind_credential_member_role "$environment" member >/dev/null 2>&1 || true; cleanup_kind_credential_stage "$stage_environment" "$stage_profiles" "$stage_credentials"; rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
+  # member role, so a retained cluster can run this suite again. Every step
+  # before the stage cleanup tolerates failure: the killed admission watch's
+  # wait returns 143, which otherwise ended the trap and left the stage's
+  # environment, profile and credential live (#5191).
+  trap '[ -z "$authority_window_from" ] || assert_kind_credential_no_renewal_since "$environment" "$relay_pod" "$authority_window_from" || true; [ -z "$KIND_CREDENTIAL_ROTATION_STAGES_PID" ] || finish_kind_credential_rotation_stages || true; [ -z "$admission_pid" ] || { kill "$admission_pid" 2>/dev/null; wait "$admission_pid" 2>/dev/null || true; }; [ -z "$renewal_pid" ] || abandon_kind_credential_bridge_renewal "$pod" "$renewal_stop" "$renewal_pid"; [ -z "$member_role_changed" ] || set_kind_credential_member_role "$environment" member >/dev/null 2>&1 || true; cleanup_kind_credential_stage "$stage_environment" "$stage_profiles" "$stage_credentials"; rm -rf -- "$KIND_CREDENTIAL_CLI_HOME"' EXIT
   [ "$(stat -f -c %T "$KIND_CREDENTIAL_CLI_HOME")" = tmpfs ] || return 1
   credential_name="kind-codex-${RANDOM}-${RANDOM}"
   profile_name="kind-profile-${RANDOM}-${RANDOM}"
@@ -1358,6 +1361,9 @@ kind_credential_native_smoke() (
     END { exit !(count == 1 && id == "org_contract_1") }'
   stage_credentials="$credential_name"
   kind_credential_cli credentials --cloud connect codex --name "$credential_name"
+  # The sign-in's stored refresh time is at or before this second; the session
+  # waits until it is old enough for one forced refresh (#4974).
+  codex_saved_at="$(date +%s)"
   kind_credential_cli credentials --cloud get "$credential_name" --output json | jq -e \
     --arg name "$credential_name" 'length == 1 and .[0].name == $name
       and .[0].provider == "openai" and .[0].status == "active"' >/dev/null
@@ -1424,7 +1430,8 @@ kind_credential_native_smoke() (
   # The session's rotation idle is most of this stage; the other stages run
   # through it, and this stage waits for them before reading the fixture.
   start_kind_credential_rotation_stages "$@"
-  kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- python3 -B -u - "$admission" \
+  kubectl -n "$SANDBOX_NS" exec -i "$pod" -c workspace -- \
+    python3 -B -u - "$admission" "$codex_saved_at" \
     < "$ROOT/scripts/ci/verify/kind/codex_session.py" | tee "$RUN_DIR/credential-native-session.jsonl"
   kill "$admission_pid" 2>/dev/null || true
   wait "$admission_pid" 2>/dev/null || true
