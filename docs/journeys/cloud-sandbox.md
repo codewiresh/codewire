@@ -30,6 +30,7 @@ Updated 2026-11-17.
 | `sandbox-cp-resume` | cw-workspace-mount | observed 2026-11-13 (#4373) | not yet observed; v0.4.17 lacks it |
 | `sandbox-cp-download` | cw-workspace-mount | observed 2026-11-13 (#4394) | not yet observed |
 | `sandbox-rollout` | cw-rollout | observed 2026-11-13 (#4426) | not yet observed |
+| `sandbox-amp` | cw-integrations | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -825,3 +826,44 @@ an error the client can retry.
   - `AttachHost` at SIGTERM: not yet observed. It needs a host agent on Dev
     (#4426).
   - Production: not yet observed.
+
+## `sandbox-amp`: Amp from the image, and its update into the home
+
+Issue: #5049.
+
+- **Entry points:** `cw run --in SANDBOX -- amp …`, and `amp` in a sandbox's
+  terminal.
+- **States to exercise:**
+  - a fresh sandbox, where `amp` is the image's;
+  - `amp update`, after which the home's copy is the one that runs;
+  - a sandbox stopped and started after the update, where the home's copy
+    remains;
+  - `amp update --porcelain`, which the image's wrapper refuses.
+- **Driving it:**
+
+  ```sh
+  cw create --name amp-walk -y
+  cw run --in amp-walk --no-tty -- sh -lc 'command -v amp; amp --version'
+  cw run --in amp-walk --no-tty -- amp update
+  cw run --in amp-walk --no-tty -- sh -lc 'command -v amp; amp --version'
+  cw stop amp-walk && cw start amp-walk
+  cw run --in amp-walk --no-tty -- sh -lc 'command -v amp; amp --version'
+  cw run --in amp-walk --no-tty -- amp update --porcelain
+  ```
+
+  Then open the sandbox's terminal and start `amp`. It asks to sign in with
+  its own flow, since Codewire brokers no Amp key. Remove the sandbox
+  afterwards with `cw rm --yes amp-walk`.
+- **Proof:**
+  - **Fresh:** `command -v amp` is `/opt/codewire/agents/upgrade/amp`, and
+    the version is the one pinned in `images/workspace/agents/package.json`.
+  - **After `amp update`:** `command -v amp` is
+    `/home/codewire/.npm-global/bin/amp`, `amp --version` runs and prints the
+    newer or the same version, and it is still there after the stop and start.
+  - **The refused option:** `--porcelain` exits 2 and names the one option
+    the wrapper takes.
+- **Gotchas:** a home install without the wrapper (`npm install --global
+  @sourcegraph/amp`) skips `@ampcode/cli`'s postinstall and leaves a stub
+  that prints "Amp native binary not installed".
+- **Observed:** not yet observed.
+

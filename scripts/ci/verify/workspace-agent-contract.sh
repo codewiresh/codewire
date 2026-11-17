@@ -91,13 +91,14 @@ for component in / /usr /usr/local "$bin_root"; do
   esac
 done
 
-for agent in codex claude gemini kimi pi aider; do
+for agent in codex claude gemini kimi pi amp aider; do
   executable="$(command -v "$agent")"
   test -n "$executable"
   resolved="$(readlink -f "$executable")"
   if [ "$mode" = mounted-home-agents ]; then
     case "$agent:$executable:$resolved" in
       aider:/opt/codewire/agents/upgrade/aider:/opt/codewire/agents/upgrade/aider) ;;
+      amp:/opt/codewire/agents/upgrade/amp:/opt/codewire/agents/upgrade/amp) ;;
       codex:/opt/codewire/agents/npm/bin/codex:/opt/codewire/agents/npm/lib/node_modules/*) ;;
       claude:/opt/codewire/agents/upgrade/claude:/opt/codewire/agents/upgrade/claude) ;;
       gemini:/opt/codewire/agents/npm/bin/gemini:/opt/codewire/agents/npm/lib/node_modules/*) ;;
@@ -135,7 +136,7 @@ if [ -n "$invalid_agent" ]; then
   printf 'workspace image verification: shipped agents are writable\n' >&2
   exit 1
 fi
-# pi, Kimi Code and aider would update in place or refuse; their upgrade
+# pi, Kimi Code, Amp and aider would update in place or refuse; their upgrade
 # commands install into the persistent home instead. Recording stubs prove the
 # routing without contacting a registry.
 upgrade_stubs="$(mktemp -d)"
@@ -148,6 +149,8 @@ for route in \
   'pi update=npm install --global @earendil-works/pi-coding-agent@latest' \
   'kimi upgrade=npm install --global @moonshot-ai/kimi-code@latest' \
   'kimi update --yes=npm install --global @moonshot-ai/kimi-code@latest' \
+  'amp update=npm install --global --allow-scripts=@ampcode/cli @sourcegraph/amp@latest' \
+  'amp up --target-version 0.0.1=npm install --global --allow-scripts=@ampcode/cli @sourcegraph/amp@0.0.1' \
   'aider --upgrade=pipx install --force aider-chat'; do
   command_line="${route%%=*}"
   # shellcheck disable=SC2086 # Each route is a fixed, space-separated command line.

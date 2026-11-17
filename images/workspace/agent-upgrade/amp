@@ -1,0 +1,22 @@
+#!/bin/sh
+# The image's Amp lives outside the persistent home, where its own updater
+# cannot write. Updating installs it into the home's npm prefix, which PATH
+# prefers from then on. Its native binary is placed by @ampcode/cli's
+# postinstall, which a user install skips unless that one package's script
+# is allowed; without it the home copy would be a stub that cannot start.
+# Everything else is Amp itself.
+set -eu
+case "${1:-}" in
+  update | up)
+    version=latest
+    shift
+    while [ "$#" -gt 0 ]; do
+      case $1 in
+        --target-version) version=${2:?--target-version needs a version}; shift 2 ;;
+        --target-version=*) version=${1#*=}; shift ;;
+        *) printf 'amp update: here it takes only --target-version VERSION, not %s\n' "$1" >&2; exit 2 ;;
+      esac
+    done
+    exec npm install --global --allow-scripts=@ampcode/cli "@sourcegraph/amp@$version" ;;
+esac
+exec /opt/codewire/agents/npm/lib/node_modules/@ampcode/cli/bin/amp "$@"

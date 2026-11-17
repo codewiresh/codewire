@@ -329,8 +329,8 @@ RUN PIPX_HOME=/opt/codewire/agents/pipx PIPX_BIN_DIR=/opt/codewire/agents/bin pi
 # precedence. No startup installer or image-home copy is needed.
 # npm ci installs the reviewed lockfile, every transitive version included, in
 # the layout of a global install. Its allowScripts policy runs only the
-# postinstall of Claude's official package, which places its native binary,
-# and fails on any other unreviewed lifecycle script. The user's global npm
+# postinstalls of Claude's and Amp's official packages, which place their
+# native binaries, and fails on any other unreviewed lifecycle script. The user's global npm
 # configuration does not apply to this project install. Only the agents'
 # own commands are linked.
 RUN --mount=type=bind,source=images/workspace/agents,target=/tmp/codewire-agents,readonly \
@@ -340,7 +340,7 @@ RUN --mount=type=bind,source=images/workspace/agents,target=/tmp/codewire-agents
     env -u NPM_CONFIG_PREFIX \
       npm ci --strict-allow-scripts --no-audit --no-fund && \
     npm cache clean --force && \
-    for agent in claude codex gemini kimi pi; do \
+    for agent in amp claude codex gemini kimi pi; do \
       ln -s "../lib/node_modules/.bin/$agent" "/opt/codewire/agents/npm/bin/$agent"; \
     done && \
     chmod -R go-w /opt/codewire/agents
@@ -361,8 +361,8 @@ RUN printf '\n%s\nset +h\n' \
       >>/etc/bash.bashrc
 # The shipped agents are image content outside the persistent home. Keep them
 # read-only, so no self-updater writes a copy that the next restart discards.
-# Codex and Gemini update into the home's npm prefix themselves; pi, Kimi Code
-# and aider reach the home through their upgrade wrappers, and Claude Code's
+# Codex and Gemini update into the home's npm prefix themselves; pi, Kimi Code,
+# Amp and aider reach the home through their upgrade wrappers, and Claude Code's
 # wrapper installs its native, self-updating build in the home on first use.
 COPY --from=workspace-agents --chown=0:0 /opt/codewire/agents/ /opt/codewire/agents/
 COPY --chmod=0755 images/workspace/agent-upgrade/ /opt/codewire/agents/upgrade/

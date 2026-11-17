@@ -423,7 +423,8 @@ grep -qF 'snapshot.debian.org/archive/debian/20261015T000000Z/' \
   "$ROOT/images/workspace/debian.sources" ||
   fail 'workspace builder apt inputs are not bound to the reviewed Debian snapshot'
 # The shipped agents come from one exact lockfile: every package from the
-# registry with its integrity, and only Claude's reviewed installer allowed.
+# registry with its integrity, and only the reviewed installers allowed:
+# Claude's, and the Amp postinstall that links its native binary.
 python3 - "$WORKSPACE_AGENTS/package.json" "$WORKSPACE_AGENTS/package-lock.json" <<'PY' ||
 import json
 import re
@@ -437,6 +438,7 @@ agents = {
     "@google/gemini-cli": "0.62.0",
     "@moonshot-ai/kimi-code": "2.1.1",
     "@openai/codex": "0.160.0",
+    "@sourcegraph/amp": "0.0.1794830433-g119204",
 }
 assert package["dependencies"] == agents
 assert lock["lockfileVersion"] == 3
@@ -449,14 +451,17 @@ for path, entry in lock["packages"].items():
 for name, version in agents.items():
     assert lock["packages"]["node_modules/" + name]["version"] == version, name
 allowed = [spec for spec, allow in package["allowScripts"].items() if allow is not False]
-assert allowed == ["@anthropic-ai/claude-code@2.1.308"], allowed
+assert allowed == [
+    "@ampcode/cli@0.0.1794830433-g119204",
+    "@anthropic-ai/claude-code@2.1.308",
+], allowed
 PY
   fail 'workspace agents are not one exact, registry-pinned lockfile'
 grep -qF 'npm ci --strict-allow-scripts --no-audit --no-fund' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace does not install the agent lockfile under its strict script policy'
 grep -qF 'env -u NPM_CONFIG_PREFIX' "$WORKSPACE_DOCKERFILE" ||
   fail 'workspace agent install inherits the user-facing global npm configuration'
-if grep -Eq 'npm install .*(@openai/codex|@anthropic-ai/claude-code|@google/gemini-cli|@moonshot-ai/kimi-code|@earendil-works/pi-coding-agent)' \
+if grep -Eq 'npm install .*(@openai/codex|@anthropic-ai/claude-code|@google/gemini-cli|@moonshot-ai/kimi-code|@earendil-works/pi-coding-agent|@sourcegraph/amp)' \
     "$WORKSPACE_DOCKERFILE"; then
   fail 'workspace installs an agent outside its lockfile'
 fi

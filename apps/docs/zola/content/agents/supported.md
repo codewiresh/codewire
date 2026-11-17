@@ -1,7 +1,7 @@
 ---
 title: Supported agents
 description: The coding agents Codewire runs as managed conversations, how each one signs in, what each supports, and how to run any other agent.
-updated: 2026-11-14
+updated: 2026-11-16
 weight: 1
 ---
 
@@ -37,9 +37,9 @@ as you, and also runs `--agent noel --model PROVIDER/ID`.
 
 ## Other agents
 
-Gemini CLI (`gemini`) and Aider (`aider`) are installed in the workspace image
-too, and any other agent can be installed in an environment. They run as
-terminal sessions:
+Gemini CLI (`gemini`), Amp (`amp`) and Aider (`aider`) are installed in the
+workspace image too, and any other agent can be installed in an environment.
+They run as terminal sessions:
 
 ```sh
 cw run --in ENV --name gemini --tty --detach -- gemini

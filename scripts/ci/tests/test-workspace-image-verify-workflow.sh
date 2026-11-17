@@ -163,7 +163,7 @@ grep -qF 'pids.current pids.max' "$AGENT_CONTRACT" ||
 # shellcheck disable=SC2016 # Match the literal in-container shell contract.
 grep -qF '"$cgroup_root/pids.events"' "$AGENT_CONTRACT" ||
   fail 'workspace failure evidence omits pids.events'
-for agent in codex claude gemini kimi pi aider; do
+for agent in codex claude gemini kimi pi amp aider; do
   grep -qF "$agent" "$AGENT_CONTRACT" || fail "verification omits $agent"
 done
 for tool in cw docker dockerd docker-compose gh git go gopls hcloud kubectl atmos node npm bun pnpm yarn \
