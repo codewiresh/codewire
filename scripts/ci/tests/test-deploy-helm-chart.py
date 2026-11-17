@@ -95,6 +95,20 @@ _SERVICES = {
     ("ValidatingAdmissionPolicyBinding", "codewire-orchestration-warm-pool-member"),
     ("ValidatingAdmissionPolicyBinding", "codewire-orchestration-warm-pool-template"),
 }
+# DERP, in every environment.
+_DERP = {
+    ("Deployment", "codewire-derp"),
+    ("Service", "codewire-derp"),
+    ("Service", "codewire-derp-mesh"),
+    ("PodDisruptionBudget", "codewire-derp"),
+}
+# The UDP relay, which Kind does not run.
+_UDP_RELAY = {
+    ("Deployment", "codewire-udp-relay"),
+    ("Service", "codewire-udp-relay"),
+    ("Certificate", "codewire-udp-relay-allocator"),
+    ("NetworkPolicy", "codewire-udp-relay"),
+}
 # Orchestration's cert-manager Certificates, which Kind does not render.
 _CERTIFICATES = {
     ("Certificate", "codewire-orchestration-internal"),
@@ -106,7 +120,7 @@ _KIND = {
     ("ConfigMap", "codewire-dashboard-public-config"),
     ("Deployment", "codewire-dashboard"),
     ("Service", "dashboard"),
-} | _SERVICES
+} | _SERVICES | _DERP
 # What the chart renders so far, by kind and name, per environment.
 MIGRATED: dict[str, set[tuple[str, str]]] = {
     "source": {
@@ -118,7 +132,9 @@ MIGRATED: dict[str, set[tuple[str, str]]] = {
         ("NetworkPolicy", "codewire-dashboard"),
     }
     | _SERVICES
-    | _CERTIFICATES,
+    | _CERTIFICATES
+    | _DERP
+    | _UDP_RELAY,
     "local-kind": _KIND,
     "local-kind-static": _KIND,
 }
@@ -155,12 +171,17 @@ def allowed(environment: str | None, kind: str, name: str, path: str) -> bool:
 
 # Deployments whose environment may list the same variables in another order,
 # per environment, with the reason. Their variables are compared by name, and
-# only while none refers to another with $(...), the one way order matters.
+# only while order_cannot_matter holds on both sides.
 ENV_ORDER_ALLOWED: dict[str, dict[str, str]] = {
     environment: {
         "codewire-credential-service": (
             "Kind's strategic-merge patch of CREDENTIAL_PUBLIC_ORIGIN moves it "
             "to the front of the list; the chart keeps the source's order"
+        ),
+        "codewire-derp": (
+            "Kind's strategic-merge patch of DERP_MESH_HOSTNAME, TLS_PORT and "
+            "TLS_HOSTS moves them to the front of the list; the chart keeps "
+            "the source's order"
         ),
     }
     for environment in ("local-kind", "local-kind-static")
@@ -175,6 +196,7 @@ ENVIRONMENTS: dict[str, tuple[str, list[Path], list[Path]]] = {
             K8S / name
             for name in (
                 "base", "dashboard", "coordinator", "idp", "billing", "credential-service", "orchestration",
+                "derp", "udp-relay",
             )
         ],
         [SOURCE_VALUES],
@@ -268,13 +290,19 @@ def differences(left: Any, right: Any, path: str = "") -> Iterator[tuple[str, st
 
 
 def order_cannot_matter(deployment: dict[str, Any]) -> bool:
-    """Whether every container's variables mean the same in any order: no name
-    is listed twice, and no value refers to another with $(...)."""
+    """Whether every container's variables mean the same in any order.
+    Kubernetes expands $(NAME) only from a variable listed earlier, so the
+    order is free when no name is listed twice and every reference names a
+    variable listed before it (or one never listed, which stays as written)."""
     for container in deployment["spec"]["template"]["spec"]["containers"]:
         env = container.get("env", [])
         names = [variable["name"] for variable in env]
-        if len(set(names)) != len(names) or any("$(" in str(variable.get("value", "")) for variable in env):
+        if len(set(names)) != len(names):
             return False
+        for index, variable in enumerate(env):
+            for name in re.findall(r"\$\(([^)]*)\)", str(variable.get("value", ""))):
+                if name in names and name not in names[:index]:
+                    return False
     return True
 
 
@@ -438,6 +466,10 @@ class ChartEquivalence(unittest.TestCase):
                 "('Deployment', 'codewire-credential-service'): spec.template.spec.containers[0].env[1].value: chart '$(A)/x', Kustomize '1'",
             ],
         )
+        # A reference to a variable listed before it in both orders expands
+        # alike, so it still compares by name.
+        c = {"name": "C", "value": "3"}
+        self.assertEqual(compare(key, [deployment(a, ref, c)], [deployment(c, a, ref)], "local-kind"), [])
         twice = {"name": "A", "value": "3"}
         self.assertNotEqual(compare(key, [deployment(a, b, twice)], [deployment(b, twice, a)], "local-kind"), [])
 

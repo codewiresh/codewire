@@ -44,6 +44,8 @@ RENDER_SETS = {
         "dashboard.origins.browserApi=https://codewire.test",
         "images.services.repository=registry.test/codewire/services",
         "images.services.tag=test",
+        "images.derp.repository=registry.test/codewire/derp",
+        "images.derp.tag=test",
         "edge.peers[0].ipBlock.cidr=192.0.2.0/24",
     ),
 }

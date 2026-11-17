@@ -249,6 +249,28 @@ orchestration:
   internalCertificate: false
   udpRelayAllocatorClientCertificate: false
 
+# deployments/k8s/overlays/local-kind/derp-deployment-patch.yaml and
+# derp-service-patch.yaml: one relay, reached on fixed node ports.
+derp:
+  replicas: 1
+  imagePullPolicy: IfNotPresent
+  tlsHosts: 127.0.0.1,localhost
+  # Kind's patch sets imagePullSecrets: [], but in a strategic-merge patch an
+  # empty list removes nothing, so the source's pull secret stays; nothing is
+  # pulled on Kind. Removed at Kind's cut-over to the chart (#5169).
+  imagePullSecrets:
+    - name: harbor-registry
+  service:
+    type: NodePort
+    nodePorts:
+      http: 30444
+      https: 30443
+      stun: 30445
+
+# No UDP relay on Kind.
+udpRelay:
+  enabled: false
+
 dashboardPublicConfig:
   # The non-promotable Kind credential fixture provides this fixed synthetic
   # App itself.
@@ -261,6 +283,9 @@ images:
     tag: local
   services:
     repository: codewire-services
+    tag: local
+  derp:
+    repository: codewire-derp
     tag: local
 
 # Kind's dashboard is a smaller, older shape than production's: its own

@@ -1,0 +1,219 @@
+{{- if .Values.udpRelay.enabled }}
+# Server identity of the relay allocator's TLS listener (8097), which
+# orchestration verifies by the relay's Service name (#4011). The name is the
+# short one a caller in this namespace uses, so it is the same in every
+# namespace and no overlay has to rewrite it. The
+# namespace-local Issuer and its dedicated CA are provisioned by the
+# infrastructure owner, who also publishes the CA's public certificate here as
+# `codewire-udp-relay-allocator-roots`. That CA signs only this leaf and
+# orchestration's client leaf: never use it, or any other CA, for both.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: codewire-udp-relay-allocator
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  secretName: codewire-udp-relay-allocator-tls
+  issuerRef:
+    name: codewire-udp-relay-allocator
+    kind: Issuer
+    group: cert-manager.io
+  dnsNames:
+    - codewire-udp-relay
+  duration: 24h
+  renewBefore: 8h
+  isCA: false
+  revisionHistoryLimit: 1
+  usages:
+    - digital signature
+    - server auth
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+    rotationPolicy: Always
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codewire-udp-relay
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: udp-relay
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  # Relay allocations and VNI bindings are in-memory. Keep one replica until
+  # relay sharding or shared state is implemented.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: udp-relay
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codewire
+        app.kubernetes.io/component: udp-relay
+    spec:
+      imagePullSecrets: {{ toYaml $.Values.imagePullSecrets | nindent 8 }}
+      terminationGracePeriodSeconds: 15
+      # The TLS leaf is readable by the image's 65532 group only.
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: udp-relay
+          image: {{ include "codewire.image" (dict "family" "services" "images" $.Values.images) }}
+          command: ["/codewire-udp-relay"]
+          ports:
+            - containerPort: 41641
+              protocol: UDP
+              name: udp
+            # The allocator, over TLS, for orchestration's client certificate
+            # only (#4011). There is no plain allocator port.
+            - containerPort: 8097
+              name: allocator-tls
+            # Probes and metrics. The PodMonitor scrapes the port named http.
+            - containerPort: 8096
+              name: http
+          # This Pod parses UDP from the internet and needs no secret to do it,
+          # so it takes none of codewire-secrets (#3926). Its only Secret is
+          # its own TLS identity for the allocator.
+          envFrom:
+            - configMapRef:
+                name: {{ include "codewire.configName" $ }}
+          env:
+            - name: CODEWIRE_UDP_RELAY_ALLOCATOR_TLS_CERT
+              value: /run/codewire-udp-relay-allocator-tls/tls.crt
+            - name: CODEWIRE_UDP_RELAY_ALLOCATOR_TLS_KEY
+              value: /run/codewire-udp-relay-allocator-tls/tls.key
+            - name: CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_ROOTS
+              value: /run/codewire-udp-relay-allocator-roots/ca.crt
+            # The name on orchestration's client certificate. It names a
+            # caller, not a host, so it is the same in every namespace.
+            - name: CODEWIRE_UDP_RELAY_ALLOCATOR_CLIENT_NAME
+              value: orchestration.udp-relay-allocator.codewire.internal
+          volumeMounts:
+            - name: allocator-tls
+              mountPath: /run/codewire-udp-relay-allocator-tls
+              readOnly: true
+            - name: allocator-roots
+              mountPath: /run/codewire-udp-relay-allocator-roots
+              readOnly: true
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+      volumes:
+        - name: allocator-tls
+          secret:
+            secretName: codewire-udp-relay-allocator-tls
+            defaultMode: 0440
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        - name: allocator-roots
+          configMap:
+            name: codewire-udp-relay-allocator-roots
+            items:
+              - key: ca.crt
+                path: ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-udp-relay
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: udp-relay
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: udp-relay
+  ports:
+    - port: 41641
+      targetPort: 41641
+      protocol: UDP
+      name: udp
+    - port: 8097
+      targetPort: 8097
+      name: allocator-tls
+---
+# Ingress to the UDP relay (#3926). Relay data on UDP 41641 is public: the
+# relay's LoadBalancer sends the internet here, and each side proves its disco
+# key before anything is forwarded. Only orchestration calls the allocator, on
+# TCP 8097 over TLS, where the relay allocates only for orchestration's client
+# certificate (#4011). TCP 8096 is read-only: probes and metrics.
+#
+# 8096 lists no source because Prometheus runs on host networking on both
+# clusters. Cilium sees it as a node, which no Pod selector matches, and a
+# NetworkPolicy has no way to name a node. Sandboxes stay denied every TCP port
+# here by the platform's deny policy.
+#
+# A NetworkPolicy isolates its Pod on every port, so 41641 is listed. Traffic from
+# the Pod's own node is never blocked on Cilium, so a host-network process there
+# can reach the allocator; the client certificate closes that, which is why the
+# allocator has no plain port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: codewire-udp-relay
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: udp-relay
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: UDP
+          port: 41641
+    - from:
+        {{- include "codewire.podPeer" (dict "labels" (include "codewire.selectorLabels" "orchestration" | fromYaml) "from" "orchestration's selector labels") | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 8097
+    - ports:
+        - protocol: TCP
+          port: 8096
+{{- end }}

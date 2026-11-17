@@ -481,9 +481,32 @@ hostedEgress:
   CODEWIRE_HOSTED_EGRESS_GATEWAY_OWNER_NAMESPACE: ""
   CODEWIRE_HOSTED_EGRESS_GATEWAY_PORT: ""
 
+# DERP, the relay sandbox and client tailnets fall back to.
+derp:
+  enabled: true
+  replicas: 3
+  imagePullPolicy: ""
+  # Kind only, until #5169: its own pull secrets, where Kind's differ from
+  # imagePullSecrets'. Null uses those.
+  imagePullSecrets: null
+  # The names DERP's certificate covers.
+  tlsHosts: codewire-derp.prod.svc.cluster.local,codewire-derp.dev.svc.cluster.local,codewire-derp.default.svc.cluster.local,127.0.0.1,localhost
+  service:
+    type: ClusterIP
+    # Node ports by port name (http, https, stun), for a NodePort Service.
+    nodePorts: {}
+
+# The UDP relay, which allocates direct UDP paths only over mutual TLS (#4011).
+udpRelay:
+  enabled: true
+
 # Image families. A digest, when set, pins the image and replaces the tag.
 images:
   dashboard:
+    repository: ""
+    tag: ""
+    digest: ""
+  derp:
     repository: ""
     tag: ""
     digest: ""
