@@ -76,6 +76,15 @@ settings; a cloud create never reads that file. Repeated `--file` merges the
 named files in order: mappings merge by key, a later value or list replaces the
 earlier one, and `null` removes a key.
 
+A create form enters the same environment field by field: the dashboard's
+Create Sandbox form and the iOS app's Create sheet. Their fields, limits and
+refusal words are one set, in `codewire_project::create_input`, and
+`codewire_project_proto::create_request` turns an accepted form into the
+`CreateEnvironment` request, its project included; neither form keeps rules of
+its own. `cw create` reads flags and `codewire.yaml` instead, with its own
+lifetime syntax (`--ttl 1h30m`); every create meets the same project
+validation and the server's checks.
+
 ### Placements
 
 A **placement** is where an environment runs. The same `cw` commands work in
@@ -268,7 +277,7 @@ fan-out where a service needs it.
 
 | Component | Crate | Role |
 | --- | --- | --- |
-| iOS app core | `crates/codewire-client-ffi` | The iOS app's Rust core behind UniFFI bindings for Swift (#3825): the shell, `codewire-client`'s hosted shell, the loop `cw shell` runs; and a create, with the organization's presets, `CreateEnvironment` and the setup wait `cw create` uses (`codewire_client::environment_setup::await_setup`), each row a step. Journey: [docs/journeys/ios-app.md](docs/journeys/ios-app.md). |
+| iOS app core | `crates/codewire-client-ffi` | The iOS app's Rust core behind UniFFI bindings for Swift (#3825): the shell, `codewire-client`'s hosted shell, the loop `cw shell` runs; and a create from the dashboard's create form rules (`codewire_project::create_input`), then `CreateEnvironment` and the setup wait `cw create` uses (`codewire_client::environment_setup::await_setup`), each row a step. Journey: [docs/journeys/ios-app.md](docs/journeys/ios-app.md). |
 
 ### Local VM runtime
 

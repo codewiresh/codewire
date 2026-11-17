@@ -1692,26 +1692,7 @@ fn current_resource_choices(
     resource_choices(catalog, &value, || format!("{value} {unit} (current)"))
 }
 
-/// Empty asks Create for the configuration's default lifetime. `0`,
-/// `infinity` and `∞` are accepted with the same meaning for older input and
-/// saved drafts.
-pub(crate) fn ttl_uses_default(value: &str) -> bool {
-    let value = value.trim();
-    value.is_empty() || value == "0" || value.eq_ignore_ascii_case("infinity") || value == "∞"
-}
-
-/// A lifetime in the largest exact unit the Delete after field accepts, such
-/// as `1h` for 3600 seconds or `90m` for 5400.
-pub(crate) fn lifetime_field_value(seconds: i32) -> String {
-    if seconds > 0 {
-        for (unit, size) in [("d", 86_400), ("h", 3_600), ("m", 60)] {
-            if seconds % size == 0 {
-                return format!("{}{unit}", seconds / size);
-            }
-        }
-    }
-    format!("{seconds}s")
-}
+use codewire_project::create_input::{lifetime_field_value, ttl_uses_default};
 
 #[derive(Clone, Debug)]
 pub(crate) struct EnvironmentCreateFormView {

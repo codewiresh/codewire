@@ -7,6 +7,10 @@ use std::collections::BTreeMap;
 use codewire_project as project;
 use codewire_proto::codewire::v1 as proto;
 
+mod create;
+
+pub use create::create_request;
+
 pub fn from_proto(
     value: proto::ProjectSpec,
 ) -> Result<project::ProjectSpec, project::ProjectError> {

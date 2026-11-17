@@ -12,12 +12,15 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse as _, Response},
 };
-use codewire_project::{
-    AgentsSpec, ApplicationPort, PROJECT_SCHEMA_VERSION, ProjectSpec, RepositorySpec, ResourceSpec,
+use codewire_project::ProjectSpec;
+use codewire_project::create_input::{
+    CreateError, CreateField, CreateInput, CreateReason, MAX_APP_PORTS, MAX_FIELD,
+    MAX_REPOSITORIES, PortInput, PresetDefaults, RepositoryInput, allowlisted_access,
+    allowlisted_agents, ttl_uses_default, valid_port_label, valid_repository_url,
 };
 use codewire_proto::codewire::v1::{
     CreateEnvironmentRequest, CreatePortRequest, DeletePortRequest,
-    EnvironmentResizeDisruptionPolicy, IsolationTier, PortAccess, ResizeEnvironmentRequest,
+    EnvironmentResizeDisruptionPolicy, PortAccess, ResizeEnvironmentRequest,
 };
 use connectrpc::{ConnectError, ErrorCode};
 use serde::Deserialize;
@@ -47,14 +50,10 @@ use crate::{
     view::{
         EnvironmentAppPortFormRow, EnvironmentCreateFormView, EnvironmentPortPanelView,
         EnvironmentRepositoryFormRow, EnvironmentsPageView, OrganizationContext,
-        SandboxListContext, bad_request_fields, connect_error_reason, lifetime_field_value,
-        ttl_uses_default,
+        SandboxListContext, bad_request_fields, connect_error_reason,
     },
 };
 
-const MAX_REPOSITORIES: usize = crate::view::MAX_CREATE_REPOSITORIES;
-const MAX_APP_PORTS: usize = 16;
-const MAX_FIELD: usize = 16_384;
 const PROTECTED_SECRET_ACCESS_UNAVAILABLE: &str =
     crate::environment_source_forms::INVALID_SELECTION;
 const PROJECT_SPEC_INVALID: &str = "The Sandbox service returned an invalid project configuration.";
@@ -164,20 +163,7 @@ pub(super) struct ResizeApplySubmission {
 // derived diagnostics, retained form models, or errors.
 struct EnvironmentSubmission {
     csrf: String,
-    name: String,
-    preset_id: String,
-    image: String,
-    install_command: String,
-    startup_script: String,
-    cpu: String,
-    memory: String,
-    disk: String,
-    ttl: String,
-    isolation_tier: String,
-    repositories: Vec<(String, String, String)>,
-    agents: Vec<String>,
-    app_ports: Vec<(String, String, String)>,
-    application_previews_explicit: bool,
+    input: CreateInput,
     agent_secret_supplied: bool,
     sources: Result<crate::environment_source_forms::SourceSubmission, ()>,
 }
@@ -185,8 +171,8 @@ struct EnvironmentSubmission {
 impl EnvironmentSubmission {
     fn parse(bytes: &[u8]) -> Result<Self, ()> {
         let mut values = HashMap::<String, String>::new();
-        let mut repositories = BTreeMap::<usize, (String, String, String)>::new();
-        let mut app_ports = BTreeMap::<usize, (String, String, String)>::new();
+        let mut repositories = BTreeMap::<usize, RepositoryInput>::new();
+        let mut app_ports = BTreeMap::<usize, PortInput>::new();
         let mut agents = Vec::new();
         let mut agent_secret_supplied = false;
 
@@ -205,32 +191,32 @@ impl EnvironmentSubmission {
                 if index >= MAX_REPOSITORIES {
                     return Err(());
                 }
-                repositories.entry(index).or_default().0 = value;
+                repositories.entry(index).or_default().url = value;
             } else if let Some(index) = indexed_key(&key, "repo_branch_") {
                 if index >= MAX_REPOSITORIES {
                     return Err(());
                 }
-                repositories.entry(index).or_default().1 = value;
+                repositories.entry(index).or_default().branch = value;
             } else if let Some(index) = indexed_key(&key, "repo_mount_") {
                 if index >= MAX_REPOSITORIES {
                     return Err(());
                 }
-                repositories.entry(index).or_default().2 = value;
+                repositories.entry(index).or_default().mount_path = value;
             } else if let Some(index) = indexed_key(&key, "app_port_") {
                 if index >= MAX_APP_PORTS {
                     return Err(());
                 }
-                app_ports.entry(index).or_default().0 = value;
+                app_ports.entry(index).or_default().port = value;
             } else if let Some(index) = indexed_key(&key, "app_label_") {
                 if index >= MAX_APP_PORTS {
                     return Err(());
                 }
-                app_ports.entry(index).or_default().1 = value;
+                app_ports.entry(index).or_default().label = value;
             } else if let Some(index) = indexed_key(&key, "app_access_") {
                 if index >= MAX_APP_PORTS {
                     return Err(());
                 }
-                app_ports.entry(index).or_default().2 = value;
+                app_ports.entry(index).or_default().access = value;
             } else if matches!(key.as_str(), "secret_project" | "credential_profile") {
                 // Parsed exactly once by the metadata-only source adapter below.
             } else if key.starts_with("agent_secret_") {
@@ -244,21 +230,23 @@ impl EnvironmentSubmission {
 
         Ok(Self {
             csrf: take(&mut values, "_csrf"),
-            name: take(&mut values, "name"),
-            preset_id: take(&mut values, "preset_id"),
-            image: take(&mut values, "image"),
-            install_command: take(&mut values, "install_command"),
-            startup_script: take(&mut values, "startup_script"),
-            cpu: take(&mut values, "cpu"),
-            memory: take(&mut values, "memory"),
-            disk: take(&mut values, "disk"),
-            ttl: take(&mut values, "ttl"),
-            isolation_tier: take(&mut values, "isolation_tier"),
-            repositories: repositories.into_values().collect(),
-            agents,
-            app_ports: app_ports.into_values().collect(),
-            application_previews_explicit: take(&mut values, "application_previews_explicit")
-                == "true",
+            input: CreateInput {
+                name: take(&mut values, "name"),
+                preset_id: take(&mut values, "preset_id"),
+                image: take(&mut values, "image"),
+                install_command: take(&mut values, "install_command"),
+                startup_script: take(&mut values, "startup_script"),
+                cpu: take(&mut values, "cpu"),
+                memory: take(&mut values, "memory"),
+                disk: take(&mut values, "disk"),
+                ttl: take(&mut values, "ttl"),
+                isolation_tier: take(&mut values, "isolation_tier"),
+                repositories: repositories.into_values().collect(),
+                agents,
+                app_ports: app_ports.into_values().collect(),
+                application_previews_explicit: take(&mut values, "application_previews_explicit")
+                    == "true",
+            },
             agent_secret_supplied,
             sources: crate::environment_source_forms::SourceSubmission::parse(bytes),
         })
@@ -269,6 +257,7 @@ impl EnvironmentSubmission {
         if let Ok(submission) = &self.sources {
             submission.hydrate(&mut sources);
         }
+        let input = &self.input;
         EnvironmentCreateFormView {
             csrf_token: token,
             draft_actor: String::new(),
@@ -279,27 +268,27 @@ impl EnvironmentSubmission {
             draft_restored: false,
             options_loading: false,
             expanded: true,
-            name: self.name.trim().to_owned(),
-            preset_id: self.preset_id.trim().to_owned(),
-            image: self.image.trim().to_owned(),
-            repositories: repository_rows(&self.repositories),
-            install_command: self.install_command.clone(),
-            startup_script: self.startup_script.clone(),
-            cpu: self.cpu.trim().to_owned(),
-            memory: self.memory.trim().to_owned(),
-            disk: self.disk.trim().to_owned(),
+            name: input.name.trim().to_owned(),
+            preset_id: input.preset_id.trim().to_owned(),
+            image: input.image.trim().to_owned(),
+            repositories: repository_rows(&input.repositories),
+            install_command: input.install_command.clone(),
+            startup_script: input.startup_script.clone(),
+            cpu: input.cpu.trim().to_owned(),
+            memory: input.memory.trim().to_owned(),
+            disk: input.disk.trim().to_owned(),
             // Legacy `0`, `infinity` and `∞` mean the default; never echo them.
-            ttl: if ttl_uses_default(&self.ttl) {
+            ttl: if ttl_uses_default(&input.ttl) {
                 String::new()
             } else {
-                self.ttl.trim().to_owned()
+                input.ttl.trim().to_owned()
             },
-            isolation_tier: self.isolation_tier.trim().to_owned(),
+            isolation_tier: input.isolation_tier.trim().to_owned(),
             confidential_available: false,
             show_confidential_controls: false,
             preview_base_domain: String::new(),
-            selected_agents: self.agents.clone(),
-            app_ports: app_port_rows(&self.app_ports),
+            selected_agents: input.agents.clone(),
+            app_ports: app_port_rows(&input.app_ports),
             presets: Vec::new(),
             agents: Vec::new(),
             sources,
@@ -319,49 +308,29 @@ impl EnvironmentSubmission {
         let Some(preset) = options
             .presets
             .iter()
-            .find(|preset| preset.id == self.preset_id.trim())
+            .find(|preset| preset.id == self.input.preset_id.trim())
         else {
             return;
         };
-        if self.image.trim().is_empty() {
-            self.image = preset.image.clone();
-        }
-        if self.cpu.trim().is_empty()
-            && let Some(cpu) = preset.default_cpu_millicores
-        {
-            self.cpu = cpu.to_string();
-        }
-        if self.memory.trim().is_empty()
-            && let Some(memory) = preset.default_memory_mib
-        {
-            self.memory = memory.to_string();
-        }
-        if self.disk.trim().is_empty()
-            && let Some(disk) = preset.default_disk_gib
-        {
-            self.disk = disk.to_string();
-        }
-        if ttl_uses_default(&self.ttl)
-            && let Some(ttl) = preset.default_ttl_seconds
-        {
-            self.ttl = lifetime_field_value(ttl);
-        }
-        if self.install_command.is_empty() {
-            self.install_command = preset.default_install_command.clone();
-        }
-        if self.startup_script.is_empty() {
-            self.startup_script = preset.default_startup_script.clone();
-        }
-        if self.agents.is_empty() {
-            self.agents = preset.default_agents.clone();
-        }
-        if self.app_ports.is_empty() && !self.application_previews_explicit {
-            self.app_ports = preset
+        self.input.apply_preset_defaults(&PresetDefaults {
+            image: preset.image.clone(),
+            cpu_millicores: preset.default_cpu_millicores,
+            memory_mib: preset.default_memory_mib,
+            disk_gib: preset.default_disk_gib,
+            ttl_seconds: preset.default_ttl_seconds,
+            install_command: preset.default_install_command.clone(),
+            startup_script: preset.default_startup_script.clone(),
+            agents: preset.default_agents.clone(),
+            app_ports: preset
                 .default_app_ports
                 .iter()
-                .map(|port| (port.port.clone(), port.label.clone(), port.access.clone()))
-                .collect();
-        }
+                .map(|port| PortInput {
+                    port: port.port.clone(),
+                    label: port.label.clone(),
+                    access: port.access.clone(),
+                })
+                .collect(),
+        });
     }
 
     fn validate_and_draft(
@@ -369,167 +338,36 @@ impl EnvironmentSubmission {
         org_id: &str,
         form: &mut EnvironmentCreateFormView,
     ) -> Option<CreateEnvironmentRequest> {
-        let mut repositories: Vec<RepositorySpec> = self
-            .repositories
-            .iter()
-            .filter_map(|(url, branch, mount_path)| {
-                let url = url.trim();
-                (!url.is_empty()).then(|| RepositorySpec {
-                    source: url.to_owned(),
-                    revision: String::new(),
-                    branch: branch.trim().to_owned(),
-                    destination: workspace_mount_path(mount_path),
-                    known_hosts: Vec::new(),
-                })
-            })
-            .collect();
-
-        if repositories
-            .iter()
-            .any(|repository| !valid_repository_url(&repository.source))
-        {
-            form.repo_error =
-                "Repository URLs must be clean HTTP(S) URLs without embedded credentials."
-                    .to_owned();
-        }
-        if repositories.is_empty()
-            && self.image.trim().is_empty()
-            && self.preset_id.trim().is_empty()
-        {
-            form.image_error = "Enter a workspace image or choose a repository.".to_owned();
-        }
-        match codewire_project::validate_repository_destinations(
-            repositories
-                .iter()
-                .map(|repository| (repository.source.as_str(), repository.destination.as_str())),
-        ) {
-            Ok(destinations) => {
-                for (repository, destination) in repositories.iter_mut().zip(destinations) {
-                    repository.destination = destination;
+        let mut project_invalid = false;
+        let draft = match self.input.draft(form.confidential_available) {
+            Ok(draft) => Some(draft),
+            Err(errors) => {
+                for error in errors {
+                    if error.reason == CreateReason::ProjectInvalid {
+                        project_invalid = true;
+                    } else {
+                        place_create_error(form, error);
+                    }
                 }
-            }
-            Err(_) => {
-                form.repo_error =
-                    "Repository destinations must be distinct paths inside /workspace.".to_owned();
-            }
-        }
-
-        if self.name.len() > 128 || self.name.bytes().any(|byte| byte.is_ascii_control()) {
-            form.name_error = "Name must be 128 characters or fewer.".to_owned();
-        }
-        let cpu = parse_bounded_i32(&self.cpu, 100, 128_000, "CPU", &mut form.cpu_error);
-        let memory = parse_bounded_i32(
-            &self.memory,
-            128,
-            1_048_576,
-            "Memory",
-            &mut form.memory_error,
-        );
-        let disk = parse_bounded_i32(&self.disk, 1, 16_384, "Disk", &mut form.disk_error);
-        let ttl = parse_ttl(&self.ttl, &mut form.ttl_error);
-        let agents = allowlisted_agents(&self.agents);
-        if agents.len() != self.agents.len() {
-            form.form_error = "One of the selected agents is not supported.".to_owned();
-        }
-        let isolation_tier = match self.isolation_tier.trim() {
-            "" | "standard" => IsolationTier::Standard,
-            "confidential" if form.confidential_available => IsolationTier::Confidential,
-            "confidential" => {
-                form.form_error =
-                    "Confidential Sandboxes are not available for this organization.".to_owned();
-                IsolationTier::Unspecified
-            }
-            _ => {
-                form.form_error = "Choose a valid isolation tier.".to_owned();
-                IsolationTier::Unspecified
+                None
             }
         };
-
-        let mut ports = Vec::new();
-        let mut seen_ports = std::collections::HashSet::new();
-        let mut seen_labels = std::collections::HashSet::new();
-        for (index, (port, label, access)) in self.app_ports.iter().enumerate() {
-            if port.trim().is_empty() && label.trim().is_empty() {
-                continue;
-            }
-            let row = &mut form.app_ports[index];
-            let port_number = port.trim().parse::<u16>().ok().filter(|port| *port != 0);
-            match port_number {
-                None => row.port_error = "Enter an internal port from 1 to 65535.".into(),
-                Some(2222) => {
-                    row.port_error = "Port 2222 is reserved for the Sandbox runtime.".into()
-                }
-                Some(port) if !seen_ports.insert(port) => {
-                    row.port_error = "This internal port is already used in another row.".into()
-                }
-                Some(_) => {}
-            }
-            if !valid_port_label(label.trim()) {
-                row.label_error = "Use 2–22 lowercase letters, digits or hyphens; start and end with a letter or digit.".into();
-            } else if !seen_labels.insert(label.trim()) {
-                row.label_error = "This preview label is already used in another row.".into();
-            }
-            if !matches!(access.as_str(), "" | "creator" | "org_members" | "public") {
-                row.access_error = "Choose who can open this HTTPS preview.".into();
-            }
-            if !row.port_error.is_empty()
-                || !row.label_error.is_empty()
-                || !row.access_error.is_empty()
-            {
-                continue;
-            };
-            ports.push(ApplicationPort {
-                port: port_number.expect("validated internal port"),
-                label: label.trim().to_owned(),
-                access: allowlisted_access(access).to_owned(),
-            });
-        }
-
         if self.agent_secret_supplied || self.sources.is_err() {
             form.form_error = PROTECTED_SECRET_ACCESS_UNAVAILABLE.to_owned();
         }
-
         if form.has_errors() {
             return None;
         }
-        let working_directory = match repositories.as_slice() {
-            [repository] => repository.destination.clone(),
-            _ => "/workspace".to_owned(),
-        };
-        let omit_application_previews = self.application_previews_explicit && ports.is_empty();
-        let project_spec = ProjectSpec {
-            schema_version: PROJECT_SCHEMA_VERSION,
-            image: self.image.trim().to_owned(),
-            repositories,
-            working_directory,
-            install_command: self.install_command.clone(),
-            startup_script: self.startup_script.clone(),
-            agents: AgentsSpec {
-                install: None,
-                tools: agents,
-            },
-            application_ports: ports,
-            resources: ResourceSpec {
-                cpu_millicores: cpu.map(|value| value as u32),
-                memory_mib: memory.map(|value| value as u64),
-                disk_gib: disk.map(|value| value as u64),
-            },
-            ..ProjectSpec::default()
-        };
-        if project_spec.validate().is_err() {
-            form.form_error = "The Sandbox project configuration is invalid.".to_owned();
-            return None;
+        // Reported only when nothing else is wrong, as the project is built
+        // only from fields that passed.
+        if project_invalid {
+            form.form_error = CreateError {
+                field: CreateField::Form,
+                reason: CreateReason::ProjectInvalid,
+            }
+            .to_string();
         }
-        let mut request = CreateEnvironmentRequest {
-            org_id: org_id.to_owned(),
-            preset_id: nonempty(self.preset_id.trim()),
-            name: nonempty(self.name.trim()),
-            ttl_seconds: ttl,
-            isolation_tier: isolation_tier.into(),
-            omit_application_previews,
-            project_spec: Some(codewire_project_proto::to_proto(project_spec)).into(),
-            ..Default::default()
-        };
+        let mut request = codewire_project_proto::create_request(org_id, draft?);
         if self
             .sources
             .as_ref()
@@ -542,6 +380,25 @@ impl EnvironmentSubmission {
         }
         Some(request)
     }
+}
+
+/// Puts a refusal on the form field it belongs to.
+fn place_create_error(form: &mut EnvironmentCreateFormView, error: CreateError) {
+    let message = error.to_string();
+    let slot = match error.field {
+        CreateField::Repositories => &mut form.repo_error,
+        CreateField::Image => &mut form.image_error,
+        CreateField::Name => &mut form.name_error,
+        CreateField::Cpu => &mut form.cpu_error,
+        CreateField::Memory => &mut form.memory_error,
+        CreateField::Disk => &mut form.disk_error,
+        CreateField::Ttl => &mut form.ttl_error,
+        CreateField::Form => &mut form.form_error,
+        CreateField::PortNumber(row) => &mut form.app_ports[row].port_error,
+        CreateField::PortLabel(row) => &mut form.app_ports[row].label_error,
+        CreateField::PortAccess(row) => &mut form.app_ports[row].access_error,
+    };
+    *slot = message;
 }
 
 fn validated_dashboard_project_spec(
@@ -2229,144 +2086,36 @@ fn take(values: &mut HashMap<String, String>, key: &str) -> String {
     values.remove(key).unwrap_or_default()
 }
 
-fn repository_rows(values: &[(String, String, String)]) -> Vec<EnvironmentRepositoryFormRow> {
+fn repository_rows(values: &[RepositoryInput]) -> Vec<EnvironmentRepositoryFormRow> {
     let values = if values.is_empty() {
-        vec![(String::new(), String::new(), String::new())]
+        vec![RepositoryInput::default()]
     } else {
         values.to_vec()
     };
     values
         .into_iter()
         .enumerate()
-        .map(
-            |(index, (url, branch, mount_path))| EnvironmentRepositoryFormRow {
-                index: index + 100,
-                url,
-                branch,
-                mount_path,
-            },
-        )
+        .map(|(index, row)| EnvironmentRepositoryFormRow {
+            index: index + 100,
+            url: row.url,
+            branch: row.branch,
+            mount_path: row.mount_path,
+        })
         .collect()
 }
 
-fn app_port_rows(values: &[(String, String, String)]) -> Vec<EnvironmentAppPortFormRow> {
+fn app_port_rows(values: &[PortInput]) -> Vec<EnvironmentAppPortFormRow> {
     values
         .iter()
         .enumerate()
-        .map(|(index, (port, label, access))| EnvironmentAppPortFormRow {
+        .map(|(index, row)| EnvironmentAppPortFormRow {
             index,
-            port: port.clone(),
-            label: label.clone(),
-            access: allowlisted_access(access).to_owned(),
+            port: row.port.clone(),
+            label: row.label.clone(),
+            access: allowlisted_access(&row.access).to_owned(),
             ..Default::default()
         })
         .collect()
-}
-
-fn nonempty(value: &str) -> Option<String> {
-    (!value.is_empty()).then(|| value.to_owned())
-}
-
-fn valid_repository_url(value: &str) -> bool {
-    Url::parse(value).is_ok_and(|url| {
-        matches!(url.scheme(), "http" | "https")
-            && url.host_str().is_some()
-            && url.username().is_empty()
-            && url.password().is_none()
-            && url.fragment().is_none()
-    })
-}
-
-fn workspace_mount_path(value: &str) -> String {
-    let value = value.trim();
-    if value.is_empty() || value == "/workspace" || value == "/workspace/" {
-        return String::new();
-    }
-    let suffix = value
-        .strip_prefix("/workspace/")
-        .unwrap_or(value)
-        .trim_start_matches('/');
-    format!("/workspace/{suffix}")
-}
-
-fn parse_bounded_i32(
-    value: &str,
-    minimum: i32,
-    maximum: i32,
-    label: &str,
-    error: &mut String,
-) -> Option<i32> {
-    if value.trim().is_empty() {
-        return None;
-    }
-    match value.trim().parse::<i32>() {
-        Ok(value) if (minimum..=maximum).contains(&value) => Some(value),
-        _ => {
-            *error = format!("{label} must be between {minimum} and {maximum}.");
-            None
-        }
-    }
-}
-
-fn parse_ttl(value: &str, error: &mut String) -> Option<i32> {
-    let value = value.trim();
-    if ttl_uses_default(value) {
-        return None;
-    }
-    let (digits, multiplier) = match value.as_bytes().last() {
-        Some(b's') => (&value[..value.len() - 1], 1_i64),
-        Some(b'm') => (&value[..value.len() - 1], 60),
-        Some(b'h') => (&value[..value.len() - 1], 3_600),
-        Some(b'd') => (&value[..value.len() - 1], 86_400),
-        _ => (value, 60),
-    };
-    match digits
-        .parse::<i64>()
-        .ok()
-        .and_then(|number| number.checked_mul(multiplier))
-    {
-        Some(seconds) if (60..=31_536_000).contains(&seconds) => Some(seconds as i32),
-        _ => {
-            *error = "Enter a duration from 60 seconds to 365 days, such as 8h or 7d, or leave it empty."
-                .to_owned();
-            None
-        }
-    }
-}
-
-fn allowlisted_agents(values: &[String]) -> Vec<String> {
-    values
-        .iter()
-        .filter(|value| {
-            matches!(
-                value.as_str(),
-                "claude-code" | "codex" | "gemini-cli" | "kimi-code" | "pi" | "aider"
-            )
-        })
-        .cloned()
-        .collect()
-}
-
-fn valid_port_label(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    (2..=22).contains(&bytes.len())
-        && bytes
-            .first()
-            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && bytes
-            .last()
-            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
-}
-
-fn allowlisted_access(value: &str) -> &'static str {
-    match value {
-        "public" => "public",
-        "org_members" => "org_members",
-        _ => "creator",
-    }
 }
 
 fn port_access(value: &str) -> PortAccess {
@@ -4092,16 +3841,6 @@ mod tests {
     }
 
     #[test]
-    fn repository_urls_reject_credentials_and_unsafe_schemes() {
-        assert!(valid_repository_url("https://github.com/codewire/codewire"));
-        assert!(valid_repository_url(
-            "https://github.com/noeljackson/stocks"
-        ));
-        assert!(!valid_repository_url("https://token@example.test/private"));
-        assert!(!valid_repository_url("file:///etc/passwd"));
-    }
-
-    #[test]
     fn lifecycle_failures_name_quota_rate_limits_and_unconfirmed_outcomes() {
         // As the server renders them: the wire's reason is upper-case.
         let wire = |status, code| {
@@ -4556,30 +4295,30 @@ mod tests {
 
         submission.apply_selected_preset_defaults(&options);
 
-        assert_eq!(submission.cpu, "750");
-        assert_eq!(submission.memory, "1024");
-        assert_eq!(submission.disk, "5");
-        assert_eq!(submission.ttl, "1h");
-        assert_eq!(submission.image, "example.test/workspace@sha256:abc");
-        assert_eq!(submission.install_command, "install-dependencies");
-        assert_eq!(submission.startup_script, "start-services");
-        assert_eq!(submission.agents, vec!["codex"]);
+        assert_eq!(submission.input.cpu, "750");
+        assert_eq!(submission.input.memory, "1024");
+        assert_eq!(submission.input.disk, "5");
+        assert_eq!(submission.input.ttl, "1h");
+        assert_eq!(submission.input.image, "example.test/workspace@sha256:abc");
+        assert_eq!(submission.input.install_command, "install-dependencies");
+        assert_eq!(submission.input.startup_script, "start-services");
+        assert_eq!(submission.input.agents, vec!["codex"]);
         let sources = submission.sources.as_ref().ok().unwrap();
         assert!(sources.selection.credentials.is_unset());
         assert_eq!(
             sources.selection.secrets.as_option().unwrap(),
             &codewire_proto::codewire::v1::ProjectSecretBindings::default()
         );
-        assert_eq!(submission.app_ports[0].0, "3000");
-        assert!(!submission.application_previews_explicit);
+        assert_eq!(submission.input.app_ports[0].port, "3000");
+        assert!(!submission.input.application_previews_explicit);
 
         let mut explicit = EnvironmentSubmission::parse(
             b"preset_id=preset-id&cpu=750&application_previews_explicit=true",
         )
         .unwrap();
         explicit.apply_selected_preset_defaults(&options);
-        assert!(explicit.app_ports.is_empty());
-        assert_eq!(explicit.memory, "1024");
+        assert!(explicit.input.app_ports.is_empty());
+        assert_eq!(explicit.input.memory, "1024");
         let mut explicit_form = explicit.form_view("token".into());
         let explicit_draft = explicit
             .validate_and_draft("org-test", &mut explicit_form)
@@ -4611,42 +4350,12 @@ mod tests {
             b"image=ghcr.io%2Fcodewiresh%2Fworkspace%40sha256%3Aeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee&repo_url_0=https%3A%2F%2Fexample.test%2Frepo&preset_id=preset-id",
         )
         .expect("combined submission");
-        assert_eq!(submission.repositories.len(), 1);
+        assert_eq!(submission.input.repositories.len(), 1);
         assert_eq!(
-            submission.image,
+            submission.input.image,
             "ghcr.io/codewiresh/workspace@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         );
-        assert_eq!(submission.preset_id, "preset-id");
-    }
-
-    #[test]
-    fn ttl_without_a_suffix_matches_the_react_minutes_default() {
-        let mut error = String::new();
-        assert_eq!(parse_ttl("30", &mut error), Some(1_800));
-        assert!(error.is_empty());
-        assert_eq!(parse_ttl("infinity", &mut error), None);
-        assert_eq!(parse_ttl("∞", &mut error), None);
-        assert_eq!(parse_ttl("0", &mut error), None);
-        assert!(error.is_empty());
-    }
-
-    #[test]
-    fn preset_lifetimes_use_the_largest_exact_unit_and_parse_back() {
-        for (seconds, expected) in [
-            (60, "1m"),
-            (90, "90s"),
-            (3_600, "1h"),
-            (5_400, "90m"),
-            (86_400, "1d"),
-            (90_000, "25h"),
-            (604_800, "7d"),
-            (31_536_000, "365d"),
-        ] {
-            assert_eq!(lifetime_field_value(seconds), expected);
-            let mut error = String::new();
-            assert_eq!(parse_ttl(expected, &mut error), Some(seconds));
-            assert!(error.is_empty());
-        }
+        assert_eq!(submission.input.preset_id, "preset-id");
     }
 
     #[test]
@@ -4698,20 +4407,6 @@ mod tests {
         assert_eq!(submission.form_view("csrf".into()).ttl, "");
         let submission = EnvironmentSubmission::parse(b"ttl=8h").unwrap();
         assert_eq!(submission.form_view("csrf".into()).ttl, "8h");
-    }
-
-    #[test]
-    fn repository_mount_inputs_are_scoped_under_workspace() {
-        assert_eq!(workspace_mount_path("codewire"), "/workspace/codewire");
-        assert_eq!(
-            workspace_mount_path("services/api"),
-            "/workspace/services/api"
-        );
-        assert_eq!(
-            workspace_mount_path("/workspace/legacy"),
-            "/workspace/legacy"
-        );
-        assert_eq!(workspace_mount_path(""), "");
     }
 
     #[test]
@@ -5019,14 +4714,6 @@ mod tests {
             "Sandbox creation started."
         );
         assert_eq!(page_message("<script>"), "");
-    }
-
-    #[test]
-    fn ttl_and_port_validation_match_form_contract() {
-        let mut error = String::new();
-        assert_eq!(parse_ttl("8h", &mut error), Some(28_800));
-        assert!(valid_port_label("web-ui"));
-        assert!(!valid_port_label("Web UI"));
     }
 }
 
