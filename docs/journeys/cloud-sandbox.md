@@ -10,12 +10,12 @@ yet; its owner adds it. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-16.
+Updated 2026-11-17.
 
 | ID | Owner | Dev | Production |
 | --- | --- | --- | --- |
 | `sandbox-create` | cw-cleanup | observed 2026-11-14 | not yet observed |
-| `sandbox-create-fails` | cw-cleanup | observed 2026-11-14 (#4482) | not yet observed; v0.4.17 lacks it |
+| `sandbox-create-fails` | cw-cleanup | observed 2026-11-17 (#4483) | not yet observed; v0.4.21 lacks #4483's reasons |
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-attach-stays` | cw-direct-udp | not yet observed | not yet observed |
@@ -87,7 +87,8 @@ Updated 2026-11-16.
 
 ## `sandbox-create-fails`: a create the platform ends says why
 
-Issues: #4431 (the create never ended), #4482 (the failed create vanished).
+Issues: #4431 (the create never ended), #4482 (the failed create vanished),
+#4483 (the reason is a sentence, with no runtime text).
 
 - **Entry points:** `cw create`, then `cw ls`, `cw info` and `cw rm`. The
   dashboard does not show a failed create yet (#4484).
@@ -142,6 +143,19 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished).
   - The runtime's own text is only in the server's log, which a user cannot
     read. An operator finds it there by the environment's ID.
 - **Observed:**
+  - Dev, 2026-11-17 (cw-cleanup): Dev ran source 4fd096025, which includes
+    #4828. `cw` built from main at 29eca2c2a plus #5152's projection change,
+    which does not touch this path, as the Dev smoke identity. A waiting
+    create with the image above exited 1 after 75 s; its failed step
+    was "Starting the sandbox", with the reason "The image `IMAGE` could not
+    be pulled: its registry could not be reached. Check the registry's
+    address." The same create with `--no-wait` was listed as `failed` 77 s
+    after the create. A container whose command could not start was `failed`
+    38 s after its create, with "The container `workspace` could not start
+    (StartError, exit code 128). Try again." No reason held runtime text.
+    `cw ls` offered no "Sessions:" hint, `cw info` had no `Recoverable` line,
+    no Pod or claim was left for any of the three, and `cw rm` and `cw start`
+    answered as under Proof. Evidence: #4483, the comment of 2026-11-17.
   - Dev, 2026-11-14 (cw-cleanup): Dev ran source b98e0702d, which includes
     #4497; the server answered the new list request, which only that source
     does. `cw` built from #4497's head 3e61900ac, as the Dev smoke identity.
