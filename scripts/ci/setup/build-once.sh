@@ -907,18 +907,38 @@ sccache_is_selected() {
   # nowhere else, as the server reports itself.
   local bucket=''
   [ -z "${SCCACHE_BUCKET:-}" ] || bucket="$SCCACHE_BUCKET"
-  "$sccache_bin" --show-stats --stats-format json 2>/dev/null | python3 -c '
-import json, re, sys
-directory, bucket = sys.argv[1], sys.argv[2]
+  if [ -z "$bucket" ]; then
+    "$sccache_bin" --show-stats --stats-format json 2>/dev/null | python3 -c '
+import json, sys
 try:
     location = json.load(sys.stdin).get("cache_location", "")
 except ValueError:
     sys.exit(1)
-local = f"Local disk: \"{directory}\""
-if not bucket:
-    sys.exit(0 if location == local else 1)
-others = re.search(r"redis|memcached|gcs|azure|gha|webdav|oss|cos\b", location, re.I)
-sys.exit(0 if local in location and bucket in location and not others else 1)
+sys.exit(0 if location == f"Local disk: \"{sys.argv[1]}\"" else 1)
+' "$sccache_dir"
+    return
+  fi
+  # A multi-level server's JSON names no level: sccache 0.17 reports only
+  # "Multi-level (2 levels)", which refused every leg's cache on every build
+  # VM (runs 59311, 59332). Its text report lists each level under "Cache
+  # location"; exactly two must be there, this folder's disk and the job's
+  # bucket under the protected prefix.
+  "$sccache_bin" --show-stats 2>/dev/null | python3 -c '
+import re, sys
+directory, bucket = sys.argv[1], sys.argv[2]
+lines = sys.stdin.read().splitlines()
+start = next((i for i, line in enumerate(lines) if line.startswith("Cache location")), None)
+if start is None or lines[start].split(None, 2)[2:] != ["Multi-level (2 levels)"]:
+    sys.exit(1)
+levels = []
+for line in lines[start + 1:]:
+    match = re.match(r"^\s+L(\d+) \((\w+)\)\s{2,}(\S.*)$", line)
+    if not match:
+        break
+    levels.append(match.groups())
+expected = [("0", "disk", f"Local disk: \"{directory}\""),
+            ("1", "s3", f"s3, name: {bucket}, prefix: /protected/codewire/v1/")]
+sys.exit(0 if levels == expected else 1)
 ' "$sccache_dir" "$bucket"
 }
 

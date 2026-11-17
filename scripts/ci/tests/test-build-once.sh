@@ -876,12 +876,25 @@ cat > "$work/legs-bin/fake-sccache" <<'SCCACHE'
 case "$1" in
   --start-server) env > "$LEGS_STATE/sccache-server-env" ;;
   --show-stats)
+    # sccache 0.17's own formats: a multi-level server's JSON names no level;
+    # its text report lists them under "Cache location".
     python3 -c '
-import json, os
+import json, os, sys
+levels = os.environ.get("FAKE_SCCACHE_LEVELS")
 location = os.environ.get("FAKE_SCCACHE_LOCATION") or "Local disk: \"" + os.environ["SCCACHE_DIR"] + "\""
-print(json.dumps({"cache_location": location, "cache_size": 7,
-                  "stats": {"cache_hits": {"counts": {"Rust": 3}}, "cache_misses": {"counts": {"Rust": 1}}}}))
-'
+if levels:
+    location = "Multi-level (%d levels)" % len(levels.split("|"))
+if sys.argv[1:] == ["--stats-format", "json"]:
+    print(json.dumps({"cache_location": location, "cache_size": 7,
+                      "stats": {"cache_hits": {"counts": {"Rust": 3}}, "cache_misses": {"counts": {"Rust": 1}}}}))
+else:
+    print("Cache hits                            3")
+    print("Cache location                  " + location)
+    for index, level in enumerate((levels or "").split("|") if levels else []):
+        kind, where = level.split("=", 1)
+        print("  L%d (%s)                     %s" % (index, kind, where))
+    print("Version (client)                0.17.0")
+' "${@:2}"
     ;;
 esac
 SCCACHE
@@ -921,8 +934,11 @@ shared_legs_build() {
     SCCACHE_REDIS=redis://stray AWS_ACCESS_KEY_ID=stray-id GITHUB_EVENT_NAME=pull_request \
     GITHUB_REF=refs/pull/1/head LEGS_CREDENTIAL=1 LEGS_SELECTION='|valid:v3|complete|' legs_build ok
 }
-FAKE_SCCACHE_LOCATION="Multi-level: Local disk: \"$work/legs-root/build/sccache\", S3, name: protected-bucket" \
+shared_levels="disk=Local disk: \"$work/legs-root/build/sccache\"|s3=s3, name: protected-bucket, prefix: /protected/codewire/v1/"
+FAKE_SCCACHE_LEVELS="$shared_levels" \
   shared_legs_build || fail "a build with the shared cache failed: $(cat "$work/legs.log")"
+! grep -q "compiler cache is not this build folder's" "$work/legs.log" ||
+  fail "a leg refused the shared cache it selected: $(cat "$work/legs.log")"
 server_env="$work/legs-state/sccache-server-env"
 for kept in SCCACHE_BUCKET=protected-bucket SCCACHE_S3_RW_MODE=READ_ONLY SCCACHE_MULTILEVEL_CHAIN=disk,s3 \
     "SCCACHE_DIR=$work/legs-root/build/sccache" \
@@ -933,8 +949,17 @@ done
 for stray in SCCACHE_REDIS AWS_ACCESS_KEY_ID; do
   ! grep -q "^$stray=" "$server_env" || fail "the leg's shared cache server saw $stray"
 done
-grep -q '^\[build-once\] leg archive: sccache hits=3 misses=1 hit_rate=75.0 .* location=Multi-level: ' "$work/legs.log" ||
+grep -q '^\[build-once\] leg archive: sccache hits=3 misses=1 hit_rate=75.0 .* location=Multi-level (2 levels)' "$work/legs.log" ||
   fail "the leg did not log its cache's location: $(cat "$work/legs.log")"
+# A server whose levels are not exactly this folder's disk and the job's
+# bucket leaves its leg uncached.
+for levels in "disk=Local disk: \"/elsewhere\"|s3=s3, name: protected-bucket, prefix: /protected/codewire/v1/" \
+    "disk=Local disk: \"$work/legs-root/build/sccache\"|s3=s3, name: other-bucket, prefix: /protected/codewire/v1/" \
+    "$shared_levels|redis=Redis"; do
+  FAKE_SCCACHE_LEVELS="$levels" shared_legs_build || fail "a build with a wrong level failed: $(cat "$work/legs.log")"
+  grep -q "the archive leg's compiler cache is not this build folder's, or the shared one the job selected; it compiles without it" "$work/legs.log" ||
+    fail "a server with levels $levels was not refused"
+done
 SHARED_BUCKET=other-bucket shared_legs_build || fail "a build with another bucket failed: $(cat "$work/legs.log")"
 grep -q "the job's shared compiler cache does not name its own bucket, prefix and trust" "$work/legs.log" ||
   fail 'a shared cache with another bucket was not refused'
