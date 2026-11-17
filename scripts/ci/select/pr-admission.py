@@ -8,19 +8,24 @@ metal hosts' drives saturated. A run now waits before its first real job
 until fewer than ADMITTED_LIMIT pull request runs are admitted, and runs are
 admitted in the order they started, across every pull request.
 
-ci.yaml's first job, "PR admission", runs this; Verification selection needs
-it and every other job needs selection, so a waiting run holds no build or
-test slot. It runs on the untrusted light runner, whose 240-minute job cap is
-the gate's (infra#2471); a waiting gate is one idle poll. A newer push to the
-same pull request still cancels the run, gate and all.
+The first step of ci.yaml's first job, Verification selection, runs this,
+before the code under test is checked out; every other job needs selection,
+so a waiting run holds no build or test slot. Until codewire#5146 the gate was
+a job of its own, "PR admission", and an admitted run then waited for a
+second light runner slot to start selecting. It runs on the untrusted light
+runner, whose 240-minute job cap is the gate's and selection's (infra#2471); a
+waiting gate is one idle poll. A newer push to the same pull request still
+cancels the run, gate and all.
 
-A run is admitted when its "PR admission" job succeeded and the run has not
-ended; a run from before the gate counts as admitted while it runs, and so
-does a run whose jobs cannot be read, so one odd run never opens the gate for
-every other. A run whose gate has not ended is waiting. A blocked run, one
-awaiting approval, holds no slot until it is approved. This run is admitted
-when the admitted runs and the waiting runs that started before it are fewer
-than ADMITTED_LIMIT.
+A run is admitted when its gate succeeded and the run has not ended. Its gate
+is its "PR admission" job, or the GATE_STEP step of its selection job: the
+job is running both while that step waits and after it admits, so the step
+is read, once the job runs, until it has admitted. A run from before the gate
+counts as admitted while it runs, and so does a run whose jobs cannot be
+read, so one odd run never opens the gate for every other. A run whose gate
+has not ended is waiting. A blocked run, one awaiting approval, holds no slot
+until it is approved. This run is admitted when the admitted runs and the
+waiting runs that started before it are fewer than ADMITTED_LIMIT.
 
 The gate may delay a run but never stops one, and never fails its job:
 - a push, a schedule or a dispatch is admitted at once, as is a closed pull
@@ -38,9 +43,9 @@ The gate may delay a run but never stops one, and never fails its job:
 - the run list unreadable for UNREADABLE_LIMIT polls in a row, or a wait past
   WAIT_SECONDS, admits it with a warning. The deadline is checked before every
   request, each at most 30 s, so a slow Forgejo never runs the gate past its
-  job's 235 minutes.
+  job's 235 minutes, and selection keeps its 25 after it.
 It writes admission=admitted, overflow, unreadable, deadline or not-a-pull-request
-to GITHUB_OUTPUT.
+to GITHUB_OUTPUT, and logs how many Forgejo reads its polls made.
 """
 
 from __future__ import annotations
@@ -56,6 +61,8 @@ from typing import Callable
 HERE = Path(__file__).resolve().parent
 WORKFLOW = "ci.yaml"
 GATE_JOB = "PR admission"
+SELECTION_JOB = "Verification selection"
+GATE_STEP = "Wait for this run's admission"
 # Not "blocked": a run awaiting approval holds no slot until it is approved.
 UNFINISHED_RUN_STATES = ("waiting", "running", "unknown")
 ADMITTED_LIMIT = 6
@@ -68,8 +75,9 @@ ADMITTED_LIMIT = 6
 # build runners, holding no slot.
 WAITING_LIMIT = 2
 POLL_SECONDS = 45
-# Inside the gate job's 235 minutes and the light runner's 240-minute cap.
-WAIT_SECONDS = 230 * 60
+# Selection's 25 minutes follow the wait inside its job's 235, and the light
+# runner's 240-minute cap.
+WAIT_SECONDS = 205 * 60
 UNREADABLE_LIMIT = 5
 
 ADMITTED = "admitted"
@@ -113,22 +121,70 @@ def unfinished_pull_request_runs(api) -> list[dict]:
     ]
 
 
-def gate_state(jobs: list[dict], run_id: int) -> str | None:
-    """The run's gate job state, or None for a run from before the gate."""
-    if not any(job.get("name") == GATE_JOB for job in jobs):
+def gate_state(api, jobs: list[dict], run_id: int, admitted: set[int],
+               before_request: Callable[[], None] = lambda: None) -> str | None:
+    """The run's gate state, or None for a run from before the gate.
+
+    A gate that has admitted its run never waits again, so ADMITTED keeps
+    those runs and their steps are not read twice; a queued selection job's
+    gate has not started, so it is not read at all."""
+    if any(job.get("name") == GATE_JOB for job in jobs):
+        return verdicts.state_of(verdicts.named_job(jobs, GATE_JOB, run_id))
+    if not any(job.get("name") == SELECTION_JOB for job in jobs):
         return None
-    return verdicts.state_of(verdicts.named_job(jobs, GATE_JOB, run_id))
+    if run_id in admitted:
+        return "success"
+    selection = verdicts.named_job(jobs, SELECTION_JOB, run_id)
+    state = verdicts.state_of(selection)
+    if state != "running":
+        # Queued, its gate has not started; ended, its gate ended first.
+        return state
+    before_request()
+    # A job record lists its steps without a total_count.
+    record = api.get_json(f"/actions/jobs/{selection['id']}")
+    steps = record.get("steps") if isinstance(record, dict) else None
+    if not isinstance(steps, list) or len(steps) > verdicts.API_LIMIT:
+        raise Unproven("forgejo-api-malformed")
+    steps = [step for step in steps if isinstance(step, dict)]
+    if not steps:
+        # Just started: the gate is the first step that runs.
+        return "running"
+    gates = [step for step in steps if step.get("name") == GATE_STEP]
+    if not gates:
+        return None
+    if len(gates) != 1:
+        raise Unproven("jobs-ambiguous")
+    step = verdicts.state_of(gates[0])
+    if step in ("success", "skipped"):
+        admitted.add(run_id)
+        return "success"
+    # The job holds its slot while the steps before the gate run.
+    return "running" if step == "not-started" else step
+
+
+class CountedReads:
+    """The Forgejo API, counting the reads the gate makes."""
+
+    def __init__(self, api) -> None:
+        self.api = api
+        self.reads = 0
+
+    def get_json(self, path: str):
+        self.reads += 1
+        return self.api.get_json(path)
 
 
 def decide(api, own_run_id: int, *, limit: int = ADMITTED_LIMIT,
            waiting_limit: int | None = None, deadline: float | None = None,
-           clock: Callable[[], float] = time.monotonic) -> tuple[str, str]:
+           clock: Callable[[], float] = time.monotonic,
+           admitted_runs: set[int] | None = None) -> tuple[str, str]:
     """ADMITTED, OVERFLOW or WAIT for this run, with the reason.
 
     Only the run list itself unreadable raises Unproven; past the deadline,
     before any request, it raises DeadlineReached."""
     # Read at call time, so the module's limit is the one that applies.
     waiting_limit = WAITING_LIMIT if waiting_limit is None else waiting_limit
+    admitted_runs = set() if admitted_runs is None else admitted_runs
     def in_time() -> None:
         if deadline is not None and clock() >= deadline:
             raise DeadlineReached
@@ -140,7 +196,7 @@ def decide(api, own_run_id: int, *, limit: int = ADMITTED_LIMIT,
             continue
         in_time()
         try:
-            gate = gate_state(verdicts.jobs_of(api, run_id), run_id)
+            gate = gate_state(api, verdicts.jobs_of(api, run_id), run_id, admitted_runs, in_time)
         except Unproven:
             # Two gates, a run deleted mid-poll, too many jobs: it holds a slot.
             unreadable += 1
@@ -184,12 +240,26 @@ def wait_for_admission(
     log: Callable[[str], None] = print,
 ) -> str:
     """Poll until this run is admitted; every way out admits it."""
+    api = CountedReads(api)
+    try:
+        return poll_for_admission(api, own_run_id, poll_seconds=poll_seconds, wait_seconds=wait_seconds,
+                                  sleep=sleep, clock=clock, log=log)
+    finally:
+        # The added reads are measured against the saving (codewire#5146).
+        log(f"PR admission: {api.reads} Forgejo reads")
+
+
+def poll_for_admission(api, own_run_id: int, *, poll_seconds: float, wait_seconds: float,
+                       sleep: Callable[[float], None], clock: Callable[[], float],
+                       log: Callable[[str], None]) -> str:
     deadline = clock() + wait_seconds
     unreadable = 0
     last_reason = None
+    admitted_runs: set[int] = set()
     while True:
         try:
-            verdict, reason = decide(api, own_run_id, deadline=deadline, clock=clock)
+            verdict, reason = decide(api, own_run_id, deadline=deadline, clock=clock,
+                                     admitted_runs=admitted_runs)
             unreadable = 0
         except DeadlineReached:
             verdict, reason = WAIT, "the deadline passed during a poll"

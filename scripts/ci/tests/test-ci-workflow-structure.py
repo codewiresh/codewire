@@ -70,10 +70,12 @@ import ci_runner_fixtures as runners  # noqa: E402
 WORKFLOWS = ROOT / ".gitea/workflows"
 CI = WORKFLOWS / "ci.yaml"
 SELECTION = "verification-selection"
-# At most six pull request runs at once (infra#2471): the one job before
-# selection, which selection needs, so a waiting run holds no other job.
-ADMISSION = "pr-admission"
-ADMISSION_GATE = ".trusted-ci-policy/scripts/ci/select/pr-admission.py"
+# At most six pull request runs at once (infra#2471): selection's first step,
+# before the code under test is checked out (codewire#5146), so a waiting run
+# holds no other job and an admitted one waits for no second slot.
+ADMISSION_STEP = "Wait for this run's admission"
+ADMISSION_POLICY = ".trusted-ci-admission"
+ADMISSION_GATE = f"{ADMISSION_POLICY}/scripts/ci/select/pr-admission.py"
 REQUIRED = "required-verification"
 TRUSTED_POLICY = ".trusted-ci-policy/"
 # The trusted base's copies these steps run (select, receipt, dispatch).
@@ -102,8 +104,9 @@ JOB_LIMIT = {runners.UNTRUSTED_LIGHT: 25, runners.LIGHT: 25, runners.TRUSTED_LIG
 # A dispatched release waits its turn on the unprivileged runner (#2892) for
 # the release in flight, so it always delivers (owner, 2026-11-12; #4476).
 LONG_WAITS = {("cli-release.yaml", "pending"): 190, ("deploy-prod.yaml", "pending"): 190,
-              # The pull request admission gate, inside the runner's 240 (infra#2471).
-              ("ci.yaml", ADMISSION): 235}
+              # The pull request admission gate's 205 and selection's 25, inside
+              # the runner's 240 (infra#2471, codewire#5146).
+              ("ci.yaml", SELECTION): 235}
 EXPECTED = re.compile(r"needs\.verification-selection\.outputs\.([a-z_]+_expected) == 'true'")
 NEEDS_REF = re.compile(r"needs\.([A-Za-z0-9_-]+)\.")
 NEEDS_OUTPUT = re.compile(r"needs\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)")
@@ -153,22 +156,11 @@ def graph_errors(jobs, ci=True):
             for ref in STEPS_REF.findall(str(value)):
                 if ref not in seen:
                     errors.append(f"{name} output {output} reads a step it does not have: {ref}")
-        if ci and name not in (SELECTION, ADMISSION) and SELECTION not in needs:
+        if ci and name != SELECTION and SELECTION not in needs:
             errors.append(f"{name} does not need {SELECTION}, so it could run for a closed pull request")
     if not ci:
         return errors
-    gate = jobs.get(ADMISSION, {})
-    if needs_of(jobs.get(SELECTION, {})) != [ADMISSION]:
-        errors.append(f"{SELECTION} does not wait for {ADMISSION}, so pull request runs start without a cap")
-    if needs_of(gate) or gate.get("if"):
-        errors.append(f"{ADMISSION} needs a job or has a condition, so a run could skip its gate")
-    if not any(ADMISSION_GATE in str(step.get("run", "")) for step in gate.get("steps") or []):
-        errors.append(f"{ADMISSION} does not run the pull request base's gate")
-    # A push has no pull request base to read; its gate admits at once.
-    for step in gate.get("steps") or []:
-        if (step.get("with") or {}).get("path") == TRUSTED_POLICY.rstrip("/") and (
-                step.get("if") != "${{ github.event_name == 'pull_request' }}"):
-            errors.append(f"{ADMISSION} checks out the base outside a pull request: {step.get('if')!r}")
+    errors += admission_errors(jobs.get(SELECTION, {}))
     required = set(needs_of(jobs.get(REQUIRED, {})))
     required_text = dump(jobs.get(REQUIRED, {}))
     for name, expectation in sorted(groups(jobs).items()):
@@ -179,6 +171,33 @@ def graph_errors(jobs, ci=True):
             errors.append(f"{REQUIRED} does not judge the result of {name}")
         if f"needs.verification-selection.outputs.{expectation}" not in required_text:
             errors.append(f"{REQUIRED} does not read whether {name} was expected ({expectation})")
+    return errors
+
+
+def admission_errors(selection):
+    """The gate is selection's first work: the base's copy, run before any code under test."""
+    errors = []
+    steps = selection.get("steps") or []
+    if needs_of(selection):
+        errors.append(f"{SELECTION} needs a job, so a pull request run waits for a slot before its gate")
+    if selection.get("if") != "${{ github.event.action != 'closed' }}":
+        errors.append(f"{SELECTION} has a condition that could skip its gate: {selection.get('if')!r}")
+    checkout, wait = (steps + [{}, {}])[:2]
+    options = checkout.get("with") or {}
+    # A push has no pull request base to read; its gate admits at once.
+    if ("actions-checkout@" not in str(checkout.get("uses", "")) or options != {
+            "ref": "${{ github.event.pull_request.base.sha }}", "path": ADMISSION_POLICY, "fetch-depth": 1,
+            "persist-credentials": False, "sparse-checkout": "scripts/ci"}
+            or checkout.get("if") != "${{ github.event_name == 'pull_request' }}"):
+        errors.append(f"{SELECTION}'s first step is not the pull request base's gate checkout: {checkout!r}")
+    run = str(wait.get("run", ""))
+    if (wait.get("name") != ADMISSION_STEP or ADMISSION_GATE not in run or wait.get("if")
+            or wait.get("continue-on-error") or f"rm -rf -- {ADMISSION_POLICY}" not in run):
+        errors.append(f"{SELECTION}'s second step is not the gate, run from the base and removed after: {wait!r}")
+    # Nothing else may hold the gate's name or read its copy.
+    for index, step in enumerate(steps[2:], start=2):
+        if step.get("name") == ADMISSION_STEP or ADMISSION_POLICY in dump(step):
+            errors.append(f"{SELECTION} step {index} is a second gate or reads the gate's copy")
     return errors
 
 
@@ -203,8 +222,7 @@ def dispatch_errors(jobs):
         for script in scripts:
             if TRUSTED_POLICY + script not in str(steps.get(step_id, {}).get("run", "")):
                 errors.append(f"selection step {step_id} does not run the trusted base's {script}")
-    # The admission gate reads the same trusted base, under the same rules.
-    for step in (selection.get("steps") or []) + (jobs.get(ADMISSION, {}).get("steps") or []):
+    for step in selection.get("steps") or []:
         options = step.get("with") or {}
         if options.get("path") == TRUSTED_POLICY.rstrip("/"):
             if options.get("persist-credentials") is not False:
@@ -556,17 +574,28 @@ UNTRUSTED_MEDIUM = "${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM || 'unset-CODEW
 # Each mutation is a failure an earlier text pin caught, or one it missed.
 MUTATIONS = {
     "selection starts without the admission gate": lambda t: in_job(
-        t, SELECTION, "    needs: [pr-admission]\n", ""),
+        t, SELECTION, "      - name: Wait for this run's admission\n", "      - name: Wait\n"),
+    "the admission gate runs after the code under test is checked out": lambda t: move_step(
+        t, SELECTION, "Wait for this run's admission", "Check out the commit this run verifies"),
+    "selection waits for a slot before its gate": lambda t: in_job(
+        t, SELECTION, "    timeout-minutes: 235\n", "    timeout-minutes: 235\n    needs: [required-verification]\n"),
     "the admission gate runs the pull request's own copy": lambda t: in_job(
-        t, ADMISSION, "gate=.trusted-ci-policy/scripts/ci/select/pr-admission.py", "gate=scripts/ci/select/pr-admission.py"),
+        t, SELECTION, "gate=.trusted-ci-admission/scripts/ci/select/pr-admission.py",
+        "gate=scripts/ci/select/pr-admission.py"),
     "the admission gate can be skipped": lambda t: in_job(
-        t, ADMISSION, "    timeout-minutes: 235\n", "    timeout-minutes: 235\n    if: ${{ github.event_name == 'push' }}\n"),
+        t, SELECTION, "      - name: Wait for this run's admission\n",
+        "      - name: Wait for this run's admission\n        if: ${{ github.event_name == 'push' }}\n"),
+    "the admission gate's failure is ignored": lambda t: in_job(
+        t, SELECTION, "      - name: Wait for this run's admission\n",
+        "      - name: Wait for this run's admission\n        continue-on-error: true\n"),
+    "the admission gate's copy stays beside the code under test": lambda t: in_job(
+        t, SELECTION, "          rm -rf -- .trusted-ci-admission\n", ""),
     "the admission gate reads the pull request head": lambda t: in_job(
-        t, ADMISSION, "ref: ${{ github.event.pull_request.base.sha }}", "ref: ${{ github.event.pull_request.head.sha }}"),
+        t, SELECTION, "ref: ${{ github.event.pull_request.base.sha }}", "ref: ${{ github.event.pull_request.head.sha }}"),
     "the admission gate's checkout keeps credentials": lambda t: in_job(
-        t, ADMISSION, "          persist-credentials: false\n", ""),
+        t, SELECTION, "          persist-credentials: false\n", ""),
     "the admission gate checks out the base on a push": lambda t: in_job(
-        t, ADMISSION, "        if: ${{ github.event_name == 'pull_request' }}\n", ""),
+        t, SELECTION, "        if: ${{ github.event_name == 'pull_request' }}\n", ""),
     # The archive consumers read the compile job's outputs and result.
     "database drops rust-compile from needs": lambda t: in_job(
         t, "database", "needs: [verification-selection, rust-compile]", "needs: [verification-selection]"),
@@ -656,7 +685,9 @@ WORKFLOW_MUTATIONS = {
     "the Dev delivery turn outlasts its light runner's limit": ("deploy-dev.yaml", lambda t: in_job(
         t, "dev-delivery-turn", "timeout-minutes: 25", "timeout-minutes: 90")),
     "a light job leans on the runner's cap": ("ci.yaml", lambda t: in_job(
-        t, "verification-selection", "    timeout-minutes: 25\n", "")),
+        t, "required-verification", "    timeout-minutes: 25\n", "")),
+    "selection outlasts its gate's long limit": ("ci.yaml", lambda t: in_job(
+        t, "verification-selection", "    timeout-minutes: 235\n", "    timeout-minutes: 240\n")),
     "a release wait outlasts its long limit": ("deploy-prod.yaml", lambda t: in_job(
         t, "pending", "timeout-minutes: 190", "timeout-minutes: 240")),
     "the Dev publisher runs on the untrusted runner": ("deploy-dev.yaml", lambda t: in_job(

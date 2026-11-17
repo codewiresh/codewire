@@ -36,6 +36,52 @@ UNFINISHED = ("/actions/runs?workflow_id=ci.yaml&status=waiting&status=running&s
 # A gate job's state: "admitted" succeeded, "waiting" is still polling, "queued"
 # waits for a light slot, "old" is a run from before the gate.
 GATE = {"admitted": "success", "waiting": "running", "queued": "waiting", "cancelled": "cancelled"}
+# Since codewire#5146 the gate is the selection job's first step: the job, then
+# the gate step, for each state; "old" is a selection job without the step.
+IN_SELECTION = {"admitted": ("running", "success"), "waiting": ("running", "running"),
+                "queued": ("waiting", None), "cancelled": ("cancelled", None), "old": ("running", None)}
+# Job 394125's steps (run 56647's Verification selection, before the gate
+# moved into it), as /actions/jobs/394125 gave them while the job ran on
+# 2026-11-16: a step that has not started is "waiting", with no times.
+RUNNING_SELECTION_STEPS = [
+    {"number": 0, "name": "Set up job", "status": "success",
+     "started": "2026-11-16T20:27:41Z", "stopped": "2026-11-16T20:28:15Z"},
+    {"number": 1, "name": "noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "status": "success",
+     "started": "2026-11-16T20:28:15Z", "stopped": "2026-11-16T20:28:38Z"},
+    {"number": 2, "name": "Choose the commit this run verifies", "status": "success",
+     "started": "2026-11-16T20:28:38Z", "stopped": "2026-11-16T20:28:39Z"},
+    {"number": 9, "name": "Select capabilities and artifact facts", "status": "success",
+     "started": "2026-11-16T20:28:52Z", "stopped": "2026-11-16T20:29:25Z"},
+    {"number": 12, "name": "Choose the Kind workspace image source", "status": "running",
+     "started": "2026-11-16T20:29:33Z", "stopped": None},
+    {"number": 13, "name": "Emit trusted capability dispatch decisions", "status": "waiting",
+     "started": None, "stopped": None},
+    {"number": 14, "name": "Complete job", "status": "waiting", "started": None, "stopped": None},
+]
+
+
+def selection_steps(gate: str | None) -> list[dict]:
+    """A running selection job's steps in the recorded form, its gate step GATE."""
+    if gate is None:
+        return RUNNING_SELECTION_STEPS
+    done = gate == "success"
+    return [
+        {"number": 0, "name": "Set up job", "status": "success",
+         "started": "2026-11-16T20:27:41Z", "stopped": "2026-11-16T20:28:15Z"},
+        {"number": 1, "name": "noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "status": "success",
+         "started": "2026-11-16T20:28:15Z", "stopped": "2026-11-16T20:28:16Z"},
+        {"number": 2, "name": gate_module_step(), "status": gate,
+         "started": None if gate == "waiting" else "2026-11-16T20:28:16Z",
+         "stopped": "2026-11-16T20:40:00Z" if done else None},
+        {"number": 3, "name": "noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+         "status": "running" if done else "waiting", "started": "2026-11-16T20:40:00Z" if done else None,
+         "stopped": None},
+        {"number": 4, "name": "Complete job", "status": "waiting", "started": None, "stopped": None},
+    ]
+
+
+def gate_module_step() -> str:
+    return gate.GATE_STEP
 
 
 class FakeForgejo:
@@ -43,15 +89,20 @@ class FakeForgejo:
 
     repository = fx.REPOSITORY
 
-    def __init__(self, polls, *, blocked=(), unreadable=(), on_request=None):
+    def __init__(self, polls, *, blocked=(), unreadable=(), on_request=None, shape="job", job_shaped=()):
         # Each poll: {run_id: gate} (gate a GATE key or "old") or an exception.
         # blocked: runs whose status is blocked (awaiting approval); unreadable:
         # runs whose jobs cannot be read; on_request: called on every request.
+        # shape: "job", the gate a job of its own, or "step", the selection
+        # job's first step; job_shaped: runs that keep the gate job either way.
         self.polls = polls
         self.poll = 0
         self.blocked = set(blocked)
         self.unreadable = set(unreadable)
         self.on_request = on_request
+        self.shape = shape
+        self.job_shaped = set(job_shaped)
+        self.step_reads: list[int] = []
 
     def state(self):
         state = self.polls[min(self.poll, len(self.polls) - 1)]
@@ -68,10 +119,22 @@ class FakeForgejo:
                            status="blocked" if run_id in self.blocked else "running")
                     for run_id in sorted(self.state(), reverse=True)]
             return {"total_count": len(runs), "workflow_runs": runs}
+        if path.startswith("/actions/jobs/"):
+            run_id = int(path.rsplit("/", 1)[1]) // 10
+            self.step_reads.append(run_id)
+            job, step = IN_SELECTION[self.state()[run_id]]
+            # Only a running selection job's steps are ever read.
+            assert job == "running", (run_id, job)
+            return {"id": run_id * 10 + 1, "run_id": run_id, "name": "Verification selection", "status": job,
+                    "steps": selection_steps(step)}
         run_id = int(path.split("/")[3])
         if run_id in self.unreadable:
             raise gate.Unproven("jobs-ambiguous")
         state = self.state()[run_id]
+        if self.shape == "step" and run_id not in self.job_shaped:
+            jobs = [{"id": run_id * 10 + 1, "run_id": run_id, "name": "Verification selection",
+                     "status": IN_SELECTION[state][0]}]
+            return {"total_count": len(jobs), "jobs": jobs}
         jobs = [{"id": run_id * 10 + 1, "run_id": run_id, "name": "Verification selection", "status": "blocked"}]
         if state != "old":
             jobs.append({"id": run_id * 10, "run_id": run_id, "name": "PR admission", "status": GATE[state]})
@@ -79,11 +142,16 @@ class FakeForgejo:
 
 
 class PrAdmission(unittest.TestCase):
+    """Every case reads runs whose gate is the "PR admission" job."""
+
+    SHAPE = "job"
+
     def decide(self, state: dict, own: int, *, blocked=(), unreadable=(), **options):
-        return gate.decide(FakeForgejo([state], blocked=blocked, unreadable=unreadable), own, **options)
+        return gate.decide(FakeForgejo([state], blocked=blocked, unreadable=unreadable, shape=self.SHAPE),
+                           own, **options)
 
     def wait(self, polls: list, own: int, *, unreadable=(), **options):
-        api = FakeForgejo(polls, unreadable=unreadable)
+        api = FakeForgejo(polls, unreadable=unreadable, shape=self.SHAPE)
         lines: list[str] = []
         clock = iter(range(0, 100_000, 20))
 
@@ -106,6 +174,7 @@ class PrAdmission(unittest.TestCase):
         self.assertEqual(result, gate.ADMITTED)
         self.assertIn("6 pull request runs admitted and 0 waiting ahead; 6 at once; waiting", log)
         self.assertIn("this run starts now", log)
+        self.assertRegex(log, r"PR admission: \d+ Forgejo reads$")
 
     def test_runs_are_admitted_oldest_first_across_pull_requests(self) -> None:
         # Four admitted, 8 and 9 waiting before 10: 8 and 9 fill the last two
@@ -216,7 +285,7 @@ class PrAdmission(unittest.TestCase):
             now[0] += 60
 
         full = {run_id: "admitted" for run_id in range(1, 7)} | {10: "waiting"}
-        api = FakeForgejo([full], on_request=slow)
+        api = FakeForgejo([full], on_request=slow, shape=self.SHAPE)
         lines: list[str] = []
         result = gate.wait_for_admission(api, 10, wait_seconds=150, sleep=lambda s: now.__setitem__(0, now[0] + s),
                                          clock=lambda: now[0], log=lines.append)
@@ -235,7 +304,8 @@ class PrAdmission(unittest.TestCase):
         self.assertIn(f"after {gate.UNREADABLE_LIMIT} tries; this run starts now", log)
 
     def test_a_wait_past_its_bound_starts_inside_the_runner_cap(self) -> None:
-        self.assertLess(gate.WAIT_SECONDS, 235 * 60)
+        # Selection's own 25 minutes follow the wait inside its job's 235.
+        self.assertLessEqual(gate.WAIT_SECONDS + 25 * 60, 235 * 60)
         full = {run_id: "admitted" for run_id in range(1, 7)} | {10: "waiting"}
         result, log = self.wait([full], 10, wait_seconds=300)
         self.assertEqual(result, gate.DEADLINE)
@@ -250,6 +320,60 @@ class PrAdmission(unittest.TestCase):
                     self.assertEqual(gate.main(), 0)
                 with open(output.name, encoding="utf-8") as written:
                     self.assertEqual(written.read(), "admission=not-a-pull-request\n")
+
+
+class PrAdmissionInSelection(PrAdmission):
+    """The same cases, with the gate the selection job's first step (codewire#5146)."""
+
+    SHAPE = "step"
+
+    def test_the_gate_step_is_read_only_while_it_can_still_wait(self) -> None:
+        # A queued job's gate has not started and an ended one's has ended:
+        # neither is read. An admitted gate never waits again, so a later poll
+        # does not read it.
+        state = ({1: "admitted", 2: "admitted", 3: "queued", 4: "cancelled", 5: "waiting", 6: "old"}
+                 | {10: "waiting"})
+        api = FakeForgejo([state], shape="step")
+        admitted: set[int] = set()
+        gate.decide(api, 10, admitted_runs=admitted)
+        self.assertEqual(sorted(api.step_reads), [1, 2, 5, 6])
+        self.assertEqual(admitted, {1, 2})
+        api.step_reads.clear()
+        gate.decide(api, 10, admitted_runs=admitted)
+        self.assertEqual(sorted(api.step_reads), [5, 6])
+
+    def test_runs_of_both_shapes_share_one_line(self) -> None:
+        # While pull requests move to the new workflow, runs whose gate is a
+        # job and runs whose gate is a step are counted together.
+        state = {1: "admitted", 2: "admitted", 3: "admitted", 4: "admitted", 5: "admitted", 8: "waiting",
+                 9: "waiting", 10: "waiting"}
+        for job_shaped in ({1, 2, 3}, {4, 5, 8}, {9}):
+            with self.subTest(job_shaped=job_shaped):
+                api = FakeForgejo([state], shape="step", job_shaped=job_shaped)
+                self.assertEqual(gate.decide(api, 8)[0], gate.ADMITTED)
+                self.assertEqual(gate.decide(api, 9)[0], gate.WAIT)
+
+    def test_the_recorded_running_job_reads_as_from_before_the_gate(self) -> None:
+        # Job 394125's record, without a gate step: it counts as admitted.
+        api = FakeForgejo([{1: "old", 10: "waiting"}], shape="step")
+        jobs = api.get_json("/actions/runs/1/jobs?page=1&limit=100")["jobs"]
+        self.assertIsNone(gate.gate_state(api, jobs, 1, set()))
+        # A gate step that has not started yet ("waiting", no times) holds the
+        # job's slot as a waiting gate does.
+        steps = selection_steps("waiting")
+        self.assertEqual((steps[2]["name"], steps[2]["started"]), (gate.GATE_STEP, None))
+        holding = FakeForgejo([{1: "waiting"}], shape="step")
+        holding.get_json = lambda path: ({"jobs": [{"id": 11, "run_id": 1, "name": gate.SELECTION_JOB,
+                                                    "status": "running"}]}
+                                         if "/runs/" in path else {"steps": steps})
+        self.assertEqual(gate.gate_state(holding, holding.get_json("/actions/runs/1/jobs")["jobs"], 1, set()),
+                         "running")
+        # A job that has just started lists no steps yet: its gate is next.
+        holding.get_json = lambda path: ({"jobs": [{"id": 11, "run_id": 1, "name": gate.SELECTION_JOB,
+                                                    "status": "running"}]}
+                                         if "/runs/" in path else {"steps": []})
+        self.assertEqual(gate.gate_state(holding, holding.get_json("/actions/runs/1/jobs")["jobs"], 1, set()),
+                         "running")
 
 
 if __name__ == "__main__":

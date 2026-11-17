@@ -102,7 +102,16 @@ class WorkflowContractTests(unittest.TestCase):
         selection = self.jobs["verification-selection"]
         source = "${{ needs.verification-selection.outputs.source_sha }}"
         self.assertEqual(selection["outputs"]["source_sha"], "${{ steps.source.outputs.source_sha }}")
-        first, choose, switch = selection["steps"][:3]
+        # The pull request admission gate is selection's first two steps
+        # (infra#2471, codewire#5146): its one checkout is the pull request
+        # base's policy, never the code under test, and it ends before the
+        # code under test is checked out.
+        gate_checkout, gate = selection["steps"][:2]
+        self.assertEqual(gate["name"], "Wait for this run's admission")
+        self.assertEqual((gate_checkout["with"]["ref"], gate_checkout["with"]["path"],
+                          gate_checkout["with"]["persist-credentials"]),
+                         ("${{ github.event.pull_request.base.sha }}", ".trusted-ci-admission", False))
+        first, choose, switch = selection["steps"][2:5]
         self.assertIn("actions-checkout@", first["uses"])
         self.assertEqual(first["with"], {"fetch-depth": 0})
         self.assertEqual(choose["id"], "source")
@@ -111,16 +120,8 @@ class WorkflowContractTests(unittest.TestCase):
             "scripts/ci/select/dispatch-source.sh .gitea/workflows/ci.yaml"))
         self.assertEqual(switch["env"], {"VERIFICATION_SOURCE_SHA": "${{ steps.source.outputs.source_sha }}"})
         self.assertEqual(switch["run"], 'git checkout -q --detach "$VERIFICATION_SOURCE_SHA"')
-        # The pull request admission gate runs before selection chooses a
-        # commit (infra#2471): its one checkout is the pull request base's
-        # policy, never the code under test.
-        gate_checkouts = [step for step in self.jobs["pr-admission"]["steps"]
-                          if "actions-checkout@" in step.get("uses", "")]
-        self.assertEqual([(step["with"]["ref"], step["with"]["path"], step["with"]["persist-credentials"])
-                          for step in gate_checkouts],
-                         [("${{ github.event.pull_request.base.sha }}", ".trusted-ci-policy", False)])
         for name, job in self.jobs.items():
-            if name in ("verification-selection", "pr-admission"):
+            if name == "verification-selection":
                 continue
             checkouts = [step for step in job["steps"] if "actions-checkout@" in step.get("uses", "")]
             with self.subTest(job=name):
