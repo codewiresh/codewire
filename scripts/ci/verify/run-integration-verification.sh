@@ -1747,7 +1747,7 @@ run_idp_flow() {
     echo "::error::idp db_flow skipped"
     return 1
   fi
-  assert_passed_count "idp db_flow" "$logfile" 23
+  assert_passed_count "idp db_flow" "$logfile" 24
 }
 
 run_idp_session_inventory() {

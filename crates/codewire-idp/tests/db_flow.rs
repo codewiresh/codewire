@@ -2987,6 +2987,158 @@ async fn device_post(
     (status, json)
 }
 
+/// A stranger who signs up at someone else's address, and never has the
+/// emailed link opened, holds nothing that signs in (#4481; the owner's
+/// decision of 2026-11-13). The sign-up starts no session; the right password
+/// answers only `email_unverified`; and the resend token that answer carries
+/// neither verifies the address nor authenticates. It only mails the
+/// address's owner another link. An invite code enables the account, so this
+/// is the strongest case: review mode leaves the account disabled as well.
+#[tokio::test]
+async fn a_stranger_who_signed_up_at_another_address_holds_nothing_that_signs_in() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping idp stranger sign-up e2e");
+        return;
+    };
+    let pool = PgPool::connect(&url).await.expect("connect");
+    // The address belongs to someone else; the stranger chose the password.
+    let email = "owner-not-the-stranger@example.com";
+    let password = "Str4nger!Chose1t";
+    let invite_code = "synthetic-stranger-invite";
+    forget_mail_counts(&pool, &[email]).await;
+    let cleanup = |p: PgPool| async move {
+        for sql in [
+            "DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE email=$1)",
+            "DELETE FROM accounts WHERE account_id=$1",
+            "DELETE FROM verifications WHERE identifier=$1 OR identifier IN (SELECT id FROM users WHERE email=$1)",
+            "DELETE FROM users WHERE email=$1",
+        ] {
+            sqlx::query(sql).bind(email).execute(&p).await.ok();
+        }
+    };
+    cleanup(pool.clone()).await;
+    let invite_hash = format!("{:x}", Sha256::digest(invite_code.as_bytes()));
+    let (mail, outbox) = codewire_email::EmailClient::recording();
+    let app = codewire_idp::auth_session::router_with_email(
+        pool.clone(),
+        false,
+        codewire_idp::auth_session::SignupInvitePolicy::from_sha256_hashes(Some(&invite_hash))
+            .unwrap(),
+        "https://app.codewire.test".to_owned(),
+        mail,
+    );
+    let (resend_mail, resent) = codewire_email::EmailClient::recording();
+    let links = codewire_idp::email_password::router(
+        pool.clone(),
+        "https://app.codewire.test".to_string(),
+        resend_mail,
+        AuthState { pool: pool.clone() },
+    );
+    let state = || async {
+        sqlx::query_as::<_, (bool, bool, i64)>(
+            "SELECT u.enabled, COALESCE(u.email_verified, false), \
+             (SELECT count(*) FROM sessions s WHERE s.user_id = u.id) \
+             FROM users u WHERE u.email = $1",
+        )
+        .bind(email)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+
+    // The sign-up enables the account and signs no one in.
+    let (st, body, cookie) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-up",
+        None,
+        &format!(
+            r#"{{"email":"{email}","password":"{password}","name":"Stranger","invite_code":"{invite_code}"}}"#
+        ),
+    )
+    .await;
+    assert_eq!(st, 202, "sign-up: {body}");
+    assert!(body.get("session").is_none() && cookie.is_none(), "{body}");
+    assert_eq!(state().await, (true, false, 0));
+
+    // The right password learns only that the address needs verifying.
+    let (st, body, cookie) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-in",
+        None,
+        &format!(r#"{{"email":"{email}","password":"{password}"}}"#),
+    )
+    .await;
+    assert_eq!(st, 403, "sign-in: {body}");
+    assert_eq!(body["code"], "email_unverified");
+    assert!(body.get("session").is_none() && cookie.is_none(), "{body}");
+    let resend_token = body["resendToken"].as_str().unwrap().to_owned();
+
+    // The resend token is no verification link and no session.
+    let (st, body, _) = sess_req(
+        &links,
+        "GET",
+        &format!("/api/auth/verify-email?token={resend_token}"),
+        None,
+        "",
+    )
+    .await;
+    assert_ne!(st, 200, "a resend token verified the address: {body}");
+    let (st, body, cookie) = sess_req(
+        &app,
+        "GET",
+        "/api/auth/get-session",
+        Some(&resend_token),
+        "",
+    )
+    .await;
+    assert!(
+        body.is_null() && cookie.is_none(),
+        "a resend token authenticated ({st}): {body}"
+    );
+
+    // All it does is mail the address's owner another link, once the
+    // sign-up's link is older than the five minutes that count as a resend.
+    sqlx::query(
+        "UPDATE verifications SET created_at = created_at - interval '10 minutes' \
+         WHERE identifier = $1 AND purpose = 'email_verification'",
+    )
+    .bind(email)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (st, body, _) = sess_req(
+        &links,
+        "POST",
+        "/api/auth/resend-verification",
+        None,
+        &format!(r#"{{"token":"{resend_token}"}}"#),
+    )
+    .await;
+    assert_eq!((st, &body), (202, &serde_json::json!({ "sent": true })));
+    let sent: Vec<_> = outbox.sent().into_iter().chain(resent.sent()).collect();
+    assert_eq!(sent.len(), 2, "the sign-up's link and the resent one");
+    assert!(sent.iter().all(|message| message.to == email));
+
+    // Nothing the stranger did verified the address or signed anyone in.
+    assert_eq!(state().await, (true, false, 0));
+    let (st, body, cookie) = sess_req(
+        &app,
+        "POST",
+        "/api/auth/sign-in",
+        None,
+        &format!(r#"{{"email":"{email}","password":"{password}"}}"#),
+    )
+    .await;
+    assert_eq!(
+        (st, &body["code"]),
+        (403, &serde_json::json!("email_unverified"))
+    );
+    assert!(cookie.is_none());
+    cleanup(pool).await;
+}
+
 /// End-to-end session-core credential flow against Postgres: sign-up →
 /// get-session(cookie) → conflict → sign-in → bad-password(401) → lockout
 /// after 5 fails(429) → sign-out → get-session(null). Mirrors

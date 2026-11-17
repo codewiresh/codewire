@@ -11,13 +11,13 @@ Production. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-14.
+Updated 2026-11-16.
 
 | ID | Dev | Production |
 | --- | --- | --- |
 | `signup-email-invite` | not yet observed | not yet observed |
 | `signup-email-review` | not yet observed | not yet observed |
-| `signup-unverified-stranger` | failure observed 2026-11-13 before #4489 (#4481) | not yet observed |
+| `signup-unverified-stranger` | observed 2026-11-16 at b183980df, stand-in (#4481) | not yet observed |
 | `signup-resend` | not yet observed | not yet observed |
 | `signup-provider` | not yet observed by a walk; reported working by the owner 2026-11-14 (#4062), release not recorded | not yet observed by a walk; reported working by the owner 2026-11-14 (#4062), release not recorded |
 | `signup-gates` | not yet observed | not yet observed |
@@ -153,6 +153,27 @@ Issue: #4481.
     directly because Turnstile blocks scripted sign-up, and the owner's link
     was a token only the check knew; verification and sign-in used Dev's
     public API (#4481).
+  - Dev, 2026-11-16, at b183980df (with #4489 and #4507): working, by a
+    stand-in walk (cw-selfhost, the orchestrator's choice on #4481).
+    - **Stood in:** the browser sign-up, by two seeded accounts: one enabled,
+      as an invite code leaves it, and one in review. The owner's
+      verification link and reset email were stood in by tokens the check
+      created itself, never emailed ones. Everything else used Dev's public
+      API.
+    - **Step 2:** `403` `email_unverified` with no session cookie, invited and
+      in review.
+    - **Step 4:** after the stand-in link, the stranger's password signed in,
+      the accepted residual.
+    - **Step 5:** the owner's reset, then the owner's sign-in.
+    - **Step 6:** the stranger's old password answered `401` "Invalid email
+      or password". The stranger's session was read from the database: the
+      reset had deleted its row, and no row matched its cookie. The HTTP
+      check couldn't be used, because Dev's edge cache answered
+      `/api/auth/get-session` whatever the cookie (reported 2026-11-16).
+    - **Step 3, the email's wording, wasn't observed.** #4489's test pins it.
+      The stranger holding nothing that signs in is pinned by
+      `a_stranger_who_signed_up_at_another_address_holds_nothing_that_signs_in`.
+    - Both accounts were removed by id.
 
 ## `signup-resend`: a new verification link
 
