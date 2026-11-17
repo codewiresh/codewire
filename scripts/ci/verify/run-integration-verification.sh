@@ -280,11 +280,12 @@ extract_archives() {
   local dir="$1" archive key binary link target metadata status failed=false
   local -A linked=() named=() extracting=()
   # Test binaries carry the build folder's source paths (CARGO_MANIFEST_DIR):
-  # a real copy of this checkout there, not a link, since tests check their
-  # paths' ancestry and compare canonical paths.
+  # a real copy there of the tree they were built from (a pull request's
+  # merged source, BUILD_SOURCE_DIR; otherwise this checkout), not a link,
+  # since tests check their paths' ancestry and compare canonical paths.
   rm -rf -- "$DATABASE_ARCHIVE_BUILD_ROOT"
   mkdir -p "$RUN_DIR/archives" "$DATABASE_ARCHIVE_BUILD_ROOT"
-  cp -a "$ROOT/." "$DATABASE_ARCHIVE_BUILD_ROOT/src" || return
+  cp -a "${BUILD_SOURCE_DIR:-$ROOT}/." "$DATABASE_ARCHIVE_BUILD_ROOT/src" || return
   for archive in "$dir"/*.tar.zst; do
     key="$(basename "$archive" .tar.zst)"
     # nextest extracts only into an existing, empty folder.
@@ -1483,7 +1484,7 @@ list_database_suites() {
     SUITE_LIST_ONLY=true run_database_lane "$lane"
   done
   python3 -B "$ROOT/scripts/ci/verify/database-test-coverage.py" \
-    --root "${DATABASE_TEST_SOURCE_ROOT:-$ROOT}" --listings "$SUITE_LISTINGS"
+    --root "${DATABASE_TEST_SOURCE_ROOT:-${BUILD_SOURCE_DIR:-$ROOT}}" --listings "$SUITE_LISTINGS"
 }
 
 run_database() {
@@ -1928,7 +1929,7 @@ run_coordinator() {
   assert_passed_count "coordinator client re-check" "$logfile" 1
 
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
-    -f "$ROOT/tests/fixtures/coordinator/seed.sql"
+    -f "${BUILD_SOURCE_DIR:-$ROOT}/tests/fixtures/coordinator/seed.sql"
   start_proc coordinator "$COORDINATOR_PORT" env \
     DATABASE_URL="$DATABASE_URL_RUST" SESSION_SECRET="$SESSION_SECRET" \
     COORDINATOR_PORT="$COORDINATOR_PORT" \
@@ -1957,7 +1958,7 @@ ensure_billing_fixture() {
 
   log "loading billing contract fixture"
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
-    -f "$ROOT/tests/fixtures/billing/seed.sql"
+    -f "${BUILD_SOURCE_DIR:-$ROOT}/tests/fixtures/billing/seed.sql"
   BILLING_FIXTURE_LOADED=true
 }
 
@@ -2373,9 +2374,9 @@ start_orchestration_process() {
 
 start_orchestration() {
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
-    -f "$ROOT/tests/fixtures/orchestration/seed.sql"
+    -f "${BUILD_SOURCE_DIR:-$ROOT}/tests/fixtures/orchestration/seed.sql"
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
-    -f "$ROOT/tests/fixtures/orchestration/runtime-ready.sql"
+    -f "${BUILD_SOURCE_DIR:-$ROOT}/tests/fixtures/orchestration/runtime-ready.sql"
   start_temporal
   start_orchestration_kube_stub
   start_orchestration_daemon_fixture

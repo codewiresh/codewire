@@ -1039,6 +1039,10 @@ run_paths_case bound_cargo_jobs_fixture pull_request refs/pull/3102/head false \
 run_paths_case build_once_fixtures pull_request refs/pull/3494/head false \
   'policy security security_js' \
   scripts/ci/tests/test-build-once.sh scripts/ci/tests/test-run-rust-checks.sh
+# A test job's merged source and its fixture select Policy, which runs them (#5146).
+run_paths_case merged_source_placement pull_request refs/pull/5228/head false \
+  'policy security security_js' \
+  scripts/ci/setup/place-build-source.sh scripts/ci/tests/test-place-build-source.sh
 # Compile once's build half selects the Rust families it builds for, and the
 # guest CPU share also the database and service families whose lanes and
 # test threads it sizes (infra#1632).
@@ -5133,6 +5137,7 @@ SUPPORT = {
     "Fetch and verify the test archive", "Install pinned cargo-nextest",
     "Fetch and verify the feature-graph test archives", "Fetch and verify the local-vmm test archives",
     "Unpack the feature-graph test archives", "Unpack the local-vmm test archives",
+    "Put the merged source in place",
     "Fetch and verify the database archives", "Unpack the database archives",
     "Fetch and verify the service control-plane archives", "Unpack the service control-plane archives",
     "Fetch and verify the service runtime-plane archives", "Unpack the service runtime-plane archives",

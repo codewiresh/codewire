@@ -308,6 +308,10 @@ def control_errors(text, jobs):
         errors.append("product CI declares GitHub-only permissions that Forgejo ignores")
     if re.search(r"/actions/runs/[^ ]*/cancel", text):
         errors.append("a job cancels its own run")
+    # `c && X || Y` gives Y whenever X is falsy, so `c && 0 || 1` is always 1:
+    # #5228's merge build got a one-commit checkout that way and refused it.
+    for falsy in FALSY_AND_OR.findall(text):
+        errors.append(f"an expression `&& {falsy} ||` can never give {falsy}; put the falsy value after `||`")
     for name, job in jobs.items():
         for index, step in enumerate(job.get("steps") or []):
             if FAMILY_RUNNER.search(str(step.get("run", ""))) and "VERIFICATION_SELECTION" not in (step.get("env") or {}):
@@ -329,6 +333,8 @@ RUNNER_EXPRESSION = re.compile(
 # Runners only protected work reaches: the trusted pool and the protected Mac.
 TRUSTED_ONLY = {runners.TRUSTED_LIGHT, runners.MACOS}
 PINNED_ACTION = re.compile(r"[^@\s]+@[0-9a-f]{40}")
+# A falsy value between `&&` and `||` in an expression, which `||` always skips.
+FALSY_AND_OR = re.compile(r"&& (0|''|\"\"|false|null) \|\|")
 ROLE_KEY = re.compile(r"OPENBAO_([A-Z]*_?)ROLE")
 SAFE_TRIGGERS = {"push", "workflow_dispatch", "schedule"}
 
@@ -573,6 +579,8 @@ TRUSTED_RUNNER = runners.MEDIUM
 UNTRUSTED_MEDIUM = "${{ vars.CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM || 'unset-CODEWIRE_CI_RUNNER_UNTRUSTED_MEDIUM' }}"
 # Each mutation is a failure an earlier text pin caught, or one it missed.
 MUTATIONS = {
+    "a pull request's merge build gets a one-commit checkout": lambda t: in_job(
+        t, "rust-compile", "merge_onto == '' && 1 || 0 }}", "merge_onto != '' && 0 || 1 }}"),
     "selection starts without the admission gate": lambda t: in_job(
         t, SELECTION, "      - name: Wait for this run's admission\n", "      - name: Wait\n"),
     "the admission gate runs after the code under test is checked out": lambda t: move_step(

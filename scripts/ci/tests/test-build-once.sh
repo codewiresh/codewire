@@ -42,7 +42,7 @@ sync_clone() {
   local checkout="$1" src="$work/root/build/src"
   local git_src=(git -c core.hooksPath=/dev/null -C "$src")
   [ -d "$src/.git" ] || git init -q "$src"
-  eval "$(sed -nE 's/^  "\$\{git_src\[@\]\}" (fetch .*)$/"${git_src[@]}" \1/p' "$SCRIPT")"
+  eval "$(sed -nE 's/^ +"\$\{git_src\[@\]\}" (fetch .*)$/"${git_src[@]}" \1/p' "$SCRIPT")"
   "${git_src[@]}" checkout -q --force --detach FETCH_HEAD
   "${git_src[@]}" rev-parse HEAD
 }
@@ -50,6 +50,66 @@ mkdir -p "$work/root/build"
 [ "$(sync_clone "$work/checkout1")" = "$first" ] || fail 'the first fetch into an empty clone did not land on the commit'
 [ "$(sync_clone "$work/checkout2")" = "$second" ] || fail 'a later fetch did not land on the newer commit'
 grep -Fq -- '--update-shallow "$checkout" HEAD' "$SCRIPT" || fail 'the fetch must update the shallow boundary'
+
+# A pull request builds its head merged onto its base tip (#5146): the clone
+# fetches both from the job's full checkout (no credential), merges with
+# merge-identity.sh's identity, and must give the tree selection checked; the
+# same inputs give the same commit.
+mrepo="$work/merge-origin"
+git init -q -b main "$mrepo"
+git -C "$mrepo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+base_c="$(git -C "$mrepo" rev-parse HEAD)"
+git -C "$mrepo" checkout -q -b feature
+echo pr > "$mrepo/pr.txt"; git -C "$mrepo" add pr.txt
+git -C "$mrepo" -c user.name=t -c user.email=t@t commit -q -m pr
+pr_head="$(git -C "$mrepo" rev-parse HEAD)"
+git -C "$mrepo" checkout -q main
+echo main > "$mrepo/main.txt"; git -C "$mrepo" add main.txt
+git -C "$mrepo" -c user.name=t -c user.email=t@t commit -q -m main
+main_tip="$(git -C "$mrepo" rev-parse HEAD)"
+merged_tree="$(git -C "$mrepo" merge-tree --write-tree "$main_tip" "$pr_head" | head -n 1)"
+mcheckout="$work/merge-checkout"
+git clone -q "file://$mrepo" "$mcheckout"
+git -C "$mcheckout" checkout -q --detach "$pr_head"
+eval "$(awk '/^merge_onto_base\(\) \{/,/^\}/' "$SCRIPT")"
+# As the script's die: merge_onto_base runs in a subshell here, so this ends it.
+die() { echo "die: $*" >&2; exit 1; }
+merge_clone() {
+  local src="$1" checkout="${3:-$mcheckout}"
+  local git_src=(git -c core.hooksPath=/dev/null -c advice.detachedHead=false -C "$src")
+  git init -q "$src"
+  if ( BUILD_ONCE_MERGE_ONTO="$main_tip" BUILD_ONCE_MERGED_TREE="$2" BUILD_ONCE_BASE_REF=main \
+      ROOT="$ROOT" merge_onto_base "$pr_head" "$checkout" ) >/dev/null; then
+    git -C "$src" rev-parse HEAD
+  else
+    return 1
+  fi
+}
+one="$(merge_clone "$work/merge-a" "$merged_tree")" || fail 'a clean merge onto the base tip failed'
+two="$(merge_clone "$work/merge-b" "$merged_tree")" || fail 'the second clean merge failed'
+[ "$one" = "$two" ] || fail 'the same head and tip gave two different merge commits'
+[ "$(git -C "$work/merge-a" rev-parse "$one^{tree}")" = "$merged_tree" ] || fail 'the merge built another tree'
+[ "$(git -C "$work/merge-a" rev-parse "$one^1")" = "$main_tip" ] || fail 'the merge is not onto the base tip'
+! merge_clone "$work/merge-c" "$base_c$base_c" >/dev/null 2>&1 || fail 'a malformed tree was accepted'
+! merge_clone "$work/merge-d" "$(git -C "$mrepo" rev-parse "$base_c^{tree}")" >/dev/null 2>&1 ||
+  fail 'a merge giving another tree than selection checked was accepted'
+git clone -q --depth 1 "file://$mrepo" "$work/merge-shallow"
+! merge_clone "$work/merge-e" "$merged_tree" "$work/merge-shallow" >/dev/null 2>&1 ||
+  fail 'a shallow checkout was accepted for a merge build'
+# Selection's half: a clean head gives the tree; a conflicting one stops.
+sel="$work/merge-sel"
+git clone -q "file://$mrepo" "$sel"
+git -C "$sel" checkout -q --detach "$pr_head"
+: > "$work/merge-out"
+( cd "$sel" && GITHUB_OUTPUT="$work/merge-out" "$ROOT/scripts/ci/select/merge-onto-base.sh" main ) >/dev/null ||
+  fail 'selection refused a clean merge'
+grep -qx "merged_tree=$merged_tree" "$work/merge-out" || fail 'selection gave another tree'
+grep -qx "merge_onto=$main_tip" "$work/merge-out" || fail 'selection named another tip'
+echo conflict > "$sel/main.txt"; git -C "$sel" add main.txt
+git -C "$sel" -c user.name=t -c user.email=t@t commit -q -m clash
+if ( cd "$sel" && GITHUB_OUTPUT="$work/merge-out" "$ROOT/scripts/ci/select/merge-onto-base.sh" main ) >/dev/null 2>&1; then
+  fail 'selection accepted a head that conflicts with its base'
+fi
 
 for args in '' 'archive' 'publish x' 'publish x Bad-Name' 'leg nothing x' 'nothing'; do
   # shellcheck disable=SC2086 # Word splitting builds each case's arguments.

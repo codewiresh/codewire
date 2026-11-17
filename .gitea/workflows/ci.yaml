@@ -143,6 +143,9 @@ jobs:
       superseded_by: ${{ steps.superseded.outputs.superseded_by }}
       kind_workspace_source: ${{ steps.kind-workspace.outputs.kind_workspace_source }}
       source_sha: ${{ steps.source.outputs.source_sha }}
+      # A pull request's head merged onto its base tip (#5146).
+      merge_onto: ${{ steps.merge.outputs.merge_onto }}
+      merged_tree: ${{ steps.merge.outputs.merged_tree }}
     steps:
       # At most six pull request runs at once, oldest first (owner, 2026-11-13:
       # "We'd like less faster runs is better than a bunch of slow runs";
@@ -204,6 +207,17 @@ jobs:
         env:
           VERIFICATION_SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
         run: git checkout -q --detach "$VERIFICATION_SOURCE_SHA"
+
+      # A pull request builds and tests its head merged onto its base
+      # branch's current tip, so the build runner's warm folder follows the
+      # base branch and a build compiles little more than the change itself
+      # (#5146). A head that does not merge cleanly stops here.
+      - name: Merge this pull request onto its base branch
+        id: merge
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: scripts/ci/select/merge-onto-base.sh "$BASE_REF"
 
       - name: Verify CI runner image contract
         run: |
@@ -779,6 +793,8 @@ jobs:
       services_runtime_sha256: ${{ steps.publish.outputs.services_runtime_sha256 }}
       features_sha256: ${{ steps.publish.outputs.features_sha256 }}
       local_vmm_sha256: ${{ steps.publish.outputs.local_vmm_sha256 }}
+      # The merged source a pull request's build compiled (#5146).
+      source_sha256: ${{ steps.publish.outputs.source_sha256 }}
     env:
       # The build runner's warm build folder (build-once.sh prepare).
       BUILD_ONCE_TREE: /ci-cache/build
@@ -793,15 +809,26 @@ jobs:
       # they started 51-177 s after the build, and the checks were shorter than
       # the legs in every measured main run (2026-10-28).
       BUILD_ONCE_CHECKS: 'true'
+      # A pull request builds its head merged onto its base tip (#5146).
+      BUILD_ONCE_MERGE_ONTO: ${{ needs.verification-selection.outputs.merge_onto }}
+      BUILD_ONCE_MERGED_TREE: ${{ needs.verification-selection.outputs.merged_tree }}
+      BUILD_ONCE_BASE_REF: ${{ github.event.pull_request.base.ref }}
     steps:
       - name: Reuse exact PR-head content verification
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt == 'accepted' }}
         run: echo 'Rust compilation inherited from the exact tested PR-head tree'
 
+      # A pull request's merge build takes the whole history, its base branch
+      # with it, so build-once.sh merges from this checkout with no credential
+      # of its own (#5146); any other build keeps the one commit.
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' }}
         with:
           ref: ${{ needs.verification-selection.outputs.source_sha }}
+          fetch-depth: ${{ needs.verification-selection.outputs.merge_onto == '' && 1 || 0 }}
+          # Nothing in this job uses the remote after the checkout, so the
+          # checkout's token does not stay where the PR's code can read it.
+          persist-credentials: false
 
       # Nothing new starts once a check of this run has failed (infra#1632).
       - name: Stop if a check of this run has already failed
@@ -962,6 +989,18 @@ jobs:
           COMPILE_RESULT: ${{ needs.rust-compile.result }}
         run: scripts/ci/setup/fetch-test-archive.sh --or-build --extract "$ARCHIVE_SHA256" "$RUNNER_TEMP/tests"
 
+      # The merged source this pull request's archives were built from, at the
+      # build path instead of the head's checkout, so the tests read and run
+      # what was compiled (place-build-source.sh, #5146).
+      - name: Put the merged source in place
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) && needs.verification-selection.outputs.merge_onto != '' && steps.test-archive.outputs.ready == 'true' }}
+        env:
+          SOURCE_SHA256: ${{ needs.rust-compile.outputs.source_sha256 }}
+          MERGE_ONTO: ${{ needs.verification-selection.outputs.merge_onto }}
+          MERGED_TREE: ${{ needs.verification-selection.outputs.merged_tree }}
+          HEAD_SHA: ${{ needs.verification-selection.outputs.source_sha }}
+        run: scripts/ci/setup/place-build-source.sh "$SOURCE_SHA256" "$RUNNER_TEMP/merged-source"
+
       - name: Select best-effort shared Rust cache
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|')) && steps.test-archive.outputs.ready != 'true' }}
         env:
@@ -1069,6 +1108,18 @@ jobs:
           COMPILE_ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.archive_sha256 }}
           COMPILE_RESULT: ${{ needs.rust-compile.result }}
         run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/features.tar"
+
+      # The merged source this pull request's archives were built from, at the
+      # build path instead of the head's checkout, so the tests read and run
+      # what was compiled (place-build-source.sh, #5146).
+      - name: Put the merged source in place
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.rust_features_expected == 'true' && needs.verification-selection.outputs.merge_onto != '' && steps.feature-archives.outputs.ready == 'true' }}
+        env:
+          SOURCE_SHA256: ${{ needs.rust-compile.outputs.source_sha256 }}
+          MERGE_ONTO: ${{ needs.verification-selection.outputs.merge_onto }}
+          MERGED_TREE: ${{ needs.verification-selection.outputs.merged_tree }}
+          HEAD_SHA: ${{ needs.verification-selection.outputs.source_sha }}
+        run: scripts/ci/setup/place-build-source.sh "$SOURCE_SHA256" "$RUNNER_TEMP/merged-source"
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && needs.verification-selection.outputs.rust_features_expected == 'true' }}
@@ -1187,6 +1238,18 @@ jobs:
           COMPILE_ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.archive_sha256 }}
           COMPILE_RESULT: ${{ needs.rust-compile.result }}
         run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/local-vmm.tar"
+
+      # The merged source this pull request's archives were built from, at the
+      # build path instead of the head's checkout, so the tests read and run
+      # what was compiled (place-build-source.sh, #5146).
+      - name: Put the merged source in place
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|transport|') || needs.verification-selection.outputs.desktop_package_selected == 'true') && needs.verification-selection.outputs.merge_onto != '' && steps.local-vmm-archives.outputs.ready == 'true' }}
+        env:
+          SOURCE_SHA256: ${{ needs.rust-compile.outputs.source_sha256 }}
+          MERGE_ONTO: ${{ needs.verification-selection.outputs.merge_onto }}
+          MERGED_TREE: ${{ needs.verification-selection.outputs.merged_tree }}
+          HEAD_SHA: ${{ needs.verification-selection.outputs.source_sha }}
+        run: scripts/ci/setup/place-build-source.sh "$SOURCE_SHA256" "$RUNNER_TEMP/merged-source"
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && (contains(needs.verification-selection.outputs.selection, '|rust|') || contains(needs.verification-selection.outputs.selection, '|rust_curated_locks|') || contains(needs.verification-selection.outputs.selection, '|transport|') || needs.verification-selection.outputs.desktop_package_selected == 'true') }}
@@ -1352,6 +1415,18 @@ jobs:
           COMPILE_ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.archive_sha256 }}
           COMPILE_RESULT: ${{ needs.rust-compile.result }}
         run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/database.tar"
+
+      # The merged source this pull request's archives were built from, at the
+      # build path instead of the head's checkout, so the tests read and run
+      # what was compiled (place-build-source.sh, #5146).
+      - name: Put the merged source in place
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') && needs.verification-selection.outputs.merge_onto != '' && steps.database-archives.outputs.ready == 'true' }}
+        env:
+          SOURCE_SHA256: ${{ needs.rust-compile.outputs.source_sha256 }}
+          MERGE_ONTO: ${{ needs.verification-selection.outputs.merge_onto }}
+          MERGED_TREE: ${{ needs.verification-selection.outputs.merged_tree }}
+          HEAD_SHA: ${{ needs.verification-selection.outputs.source_sha }}
+        run: scripts/ci/setup/place-build-source.sh "$SOURCE_SHA256" "$RUNNER_TEMP/merged-source"
 
       - name: Select best-effort shared Rust cache
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && contains(needs.verification-selection.outputs.selection, '|database|') && steps.database-archives.outputs.ready != 'true' }}
@@ -1542,6 +1617,18 @@ jobs:
           COMPILE_ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.archive_sha256 }}
           COMPILE_RESULT: ${{ needs.rust-compile.result }}
         run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/services.tar"
+
+      # The merged source this pull request's archives were built from, at the
+      # build path instead of the head's checkout, so the tests read and run
+      # what was compiled (place-build-source.sh, #5146).
+      - name: Put the merged source in place
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && needs.verification-selection.outputs.merge_onto != '' && steps.services-archives.outputs.ready == 'true' }}
+        env:
+          SOURCE_SHA256: ${{ needs.rust-compile.outputs.source_sha256 }}
+          MERGE_ONTO: ${{ needs.verification-selection.outputs.merge_onto }}
+          MERGED_TREE: ${{ needs.verification-selection.outputs.merged_tree }}
+          HEAD_SHA: ${{ needs.verification-selection.outputs.source_sha }}
+        run: scripts/ci/setup/place-build-source.sh "$SOURCE_SHA256" "$RUNNER_TEMP/merged-source"
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}
@@ -1738,6 +1825,18 @@ jobs:
           COMPILE_ARCHIVE_SHA256: ${{ needs.rust-compile.outputs.archive_sha256 }}
           COMPILE_RESULT: ${{ needs.rust-compile.result }}
         run: scripts/ci/setup/fetch-test-archive.sh --or-build "$ARCHIVE_SHA256" "$RUNNER_TEMP/services.tar"
+
+      # The merged source this pull request's archives were built from, at the
+      # build path instead of the head's checkout, so the tests read and run
+      # what was compiled (place-build-source.sh, #5146).
+      - name: Put the merged source in place
+        if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' && needs.verification-selection.outputs.merge_onto != '' && steps.services-archives.outputs.ready == 'true' }}
+        env:
+          SOURCE_SHA256: ${{ needs.rust-compile.outputs.source_sha256 }}
+          MERGE_ONTO: ${{ needs.verification-selection.outputs.merge_onto }}
+          MERGED_TREE: ${{ needs.verification-selection.outputs.merged_tree }}
+          HEAD_SHA: ${{ needs.verification-selection.outputs.source_sha }}
+        run: scripts/ci/setup/place-build-source.sh "$SOURCE_SHA256" "$RUNNER_TEMP/merged-source"
 
       - name: Verify sealed Rust toolchain
         if: ${{ needs.verification-selection.outputs.tested_tree_receipt != 'accepted' && steps.service-scope.outputs.selected == 'true' }}

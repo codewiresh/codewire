@@ -187,7 +187,9 @@ run_rust_archive_tests() {
     filter="${filter:+$filter | }$part"
   done
   # The test binaries carry the build folder's paths. The source is a real
-  # copy of this checkout there, not a link: many tests check that their
+  # copy there of the tree the archive was built from (a pull request's
+  # merged source, BUILD_SOURCE_DIR, place-build-source.sh; otherwise this
+  # checkout), not a link: many tests check that their
   # paths' ancestry is real and owner-private, and compare canonical paths.
   # The target folder is extracted on the job's disk (a metal guest's
   # /ci-cache is its full warm cache), and the build path's target folder is
@@ -196,7 +198,7 @@ run_rust_archive_tests() {
   local extract entry
   rm -rf -- "$root"
   mkdir -p "$root/targets/archive/tmp"
-  cp -a "$ROOT/." "$root/src"
+  cp -a "${BUILD_SOURCE_DIR:-$ROOT}/." "$root/src"
   if [ -d "$RUST_TEST_ARCHIVE" ]; then
     # fetch-test-archive.sh --extract unpacked it as it downloaded, and
     # reported it ready only once its bytes hashed to the digest.
@@ -506,7 +508,7 @@ extract_shard_archive() {
   if [ "$SHARD_ARCHIVE_SOURCE_READY" != true ]; then
     rm -rf -- "$root"
     mkdir -p "$root"
-    cp -a "$ROOT/." "$root/src" || return 1
+    cp -a "${BUILD_SOURCE_DIR:-$ROOT}/." "$root/src" || return 1
     SHARD_ARCHIVE_EXTRACT="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/rust-shard-archives.XXXXXX")"
     SHARD_ARCHIVE_SOURCE_READY=true
     trap shard_archive_cleanup EXIT
@@ -856,6 +858,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-build-once.sh
   scripts/ci/tests/test-run-rust-checks.sh
   scripts/ci/tests/test-fetch-test-archive-extract.sh
+  scripts/ci/tests/test-place-build-source.sh
   python3 -B scripts/ci/tests/test-last-scheduled-run.py
   python3 -I -B scripts/ci/tests/test-ci-done-measures.py
   python3 -I -B scripts/ci/tests/test-scan-credential-canaries.py

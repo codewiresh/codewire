@@ -186,6 +186,39 @@ tool() {
   printf '%s\n' "$file"
 }
 
+merge_onto_base() {
+  # merge_onto_base HEAD CHECKOUT: the persistent clone at HEAD merged onto
+  # BUILD_ONCE_MERGE_ONTO, the base tip selection checked (merge-onto-base.sh,
+  # #5146), so the warm folder follows the base branch and a build compiles
+  # little more than the pull request's own change. A merge build's checkout
+  # has the whole history (ci.yaml), so the clone fetches the head and the
+  # base branch from it, with no credential of its own; after its first merge
+  # build the clone has the base branch's history and later fetches are small.
+  # The commit is made with merge-identity.sh's fixed identity, so the same
+  # inputs give the same commit, and it must give the tree selection checked.
+  local head="$1" checkout="$2" tip="${BUILD_ONCE_MERGE_ONTO}" tree="${BUILD_ONCE_MERGED_TREE:-}"
+  local base="${BUILD_ONCE_BASE_REF:-}"
+  [[ "$tip" =~ ^[0-9a-f]{40}$ && "$tree" =~ ^[0-9a-f]{40}$ && "$base" =~ ^[A-Za-z0-9._/-]+$ ]] ||
+    die 'BUILD_ONCE_MERGE_ONTO, BUILD_ONCE_MERGED_TREE and BUILD_ONCE_BASE_REF must all be set and valid'
+  [ ! -f "$checkout/.git/shallow" ] || die 'a merge build needs a checkout with its whole history'
+  local -a fetch=("${git_src[@]}" fetch -q --no-tags)
+  [ ! -f "$src/.git/shallow" ] || fetch+=(--unshallow)
+  "${fetch[@]}" "$checkout" "+HEAD:refs/ci/pull-head" "+refs/remotes/origin/$base:refs/ci/base" ||
+    die 'the persistent clone could not fetch the head and its base branch from the checkout'
+  [ "$("${git_src[@]}" rev-parse refs/ci/pull-head)" = "$head" ] || die 'the fetch did not bring the head'
+  "${git_src[@]}" merge-base --is-ancestor "$tip" refs/ci/base || die "${tip:0:12} is not on $base"
+  # shellcheck source=scripts/ci/setup/merge-identity.sh
+  source "$ROOT/scripts/ci/setup/merge-identity.sh"
+  ci_merge_commit_env "$head" "$tip"
+  "${git_src[@]}" checkout -q --force --detach "$tip"
+  # Signing would make the commit differ wherever it is made.
+  "${git_src[@]}" -c commit.gpgSign=false merge -q --no-ff --no-edit -m "$CI_MERGE_MESSAGE" "$head" ||
+    die "the head does not merge onto ${tip:0:12} here, though selection found it clean"
+  [ "$("${git_src[@]}" rev-parse 'HEAD^{tree}')" = "$tree" ] ||
+    die 'the merge gives another tree than selection checked'
+  echo "build-once: building the head ${head:0:12} merged onto $base ${tip:0:12} ($("${git_src[@]}" rev-parse --short=12 HEAD))"
+}
+
 prepare() {
   local checkout commit entry bin nextest_version nextest_url nextest_sha share job="$2"
   case "$job" in build|checks) ;; *) die "prepare is for the build or the checks job, not: $job" ;; esac
@@ -249,10 +282,15 @@ prepare() {
     rm -rf -- "$src"
     git init -q "$src"
   fi
-  # The checkout is shallow; its root may move the clone's shallow boundary.
-  "${git_src[@]}" fetch -q --no-tags --update-shallow "$checkout" HEAD
-  [ "$("${git_src[@]}" rev-parse FETCH_HEAD)" = "$commit" ] || die 'the fetch did not bring the commit'
-  "${git_src[@]}" checkout -q --force --detach "$commit"
+  if [ -n "${BUILD_ONCE_MERGE_ONTO:-}" ]; then
+    merge_onto_base "$commit" "$checkout"
+    commit="$("${git_src[@]}" rev-parse HEAD)"
+  else
+    # The checkout is shallow; its root may move the clone's shallow boundary.
+    "${git_src[@]}" fetch -q --no-tags --update-shallow "$checkout" HEAD
+    [ "$("${git_src[@]}" rev-parse FETCH_HEAD)" = "$commit" ] || die 'the fetch did not bring the commit'
+    "${git_src[@]}" checkout -q --force --detach "$commit"
+  fi
   "${git_src[@]}" clean -q -ffdx
   [ "$("${git_src[@]}" rev-parse HEAD)" = "$commit" ] || die 'the persistent clone is not at the commit'
 
@@ -966,6 +1004,13 @@ jobserver_tokens() {
 build() {
   local out="$1" logs tokens status=0 name
   mkdir -p "$out"
+  # A merge build's source, as the test jobs extract it to run the archives
+  # against exactly what was compiled (#5146); published as source_sha256.
+  if [ -n "${BUILD_ONCE_MERGE_ONTO:-}" ]; then
+    # shellcheck source=scripts/ci/setup/merge-identity.sh
+    source "$ROOT/scripts/ci/setup/merge-identity.sh"
+    ci_source_archive "$src" "$out/source.tar.zst"
+  fi
   logs="$(mktemp -d "${RUNNER_TEMP:-/tmp}/build-once-logs.XXXXXX")"
   tokens="$(jobserver_tokens)"
   [[ "$tokens" =~ ^[1-9][0-9]*$ ]] || die "invalid jobserver size: $tokens"
