@@ -54,6 +54,7 @@ pub mod local_https;
 pub mod mesh_enrollment;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod mesh_ingress;
+mod mesh_ingress_ack;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod mesh_process;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

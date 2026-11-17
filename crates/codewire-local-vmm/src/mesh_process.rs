@@ -45,6 +45,7 @@ use crate::linux::confinement::{
     lock_process_privileges, require_single_threaded_process,
 };
 use crate::mesh_ingress::{MAX_MESH_INGRESS_PORTS, MESH_INGRESS_CONTROL_KEY_LEN, MeshAttachment};
+use crate::mesh_ingress_ack::AcknowledgementReader;
 use crate::mesh_transport::{MeshIngressBridge, MeshIngressSubmitter, MeshTransportError};
 
 pub const MESH_TRANSPORT_BOOTSTRAP_FD: RawFd = 4;
@@ -633,24 +634,16 @@ pub async fn run_inherited_mesh_transport(
     control
         .set_write_timeout(None)
         .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
-    let liveness = control
-        .try_clone()
-        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
     let status = control
         .try_clone()
         .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
     control
         .set_nonblocking(true)
         .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
-    liveness
-        .set_nonblocking(true)
-        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
     status
         .set_nonblocking(true)
         .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
     let control = tokio::net::UnixStream::from_std(control)
-        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
-    let liveness = tokio::net::UnixStream::from_std(liveness)
         .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
     let mut status = tokio::net::UnixStream::from_std(status)
         .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
@@ -671,7 +664,7 @@ pub async fn run_inherited_mesh_transport(
         .await
         .map_err(|_| MeshTransportProcessError::StatusIo)?;
     drop(status);
-    runtime.run(liveness).await
+    runtime.run().await
 }
 
 /// Checked-in qualified-host seam for proving the production runner and guest
@@ -744,34 +737,20 @@ pub async fn run_inherited_mesh_transport_fixture(
     control
         .set_write_timeout(None)
         .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
-    let liveness = control
-        .try_clone()
-        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
-    let startup_liveness = control
-        .try_clone()
-        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
     control
-        .set_nonblocking(true)
-        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
-    liveness
-        .set_nonblocking(true)
-        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
-    startup_liveness
         .set_nonblocking(true)
         .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
     let mut control = tokio::net::UnixStream::from_std(control)
         .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
-    let liveness = tokio::net::UnixStream::from_std(liveness)
-        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
-    let startup_liveness = tokio::net::UnixStream::from_std(startup_liveness)
-        .map_err(|_| MeshTransportProcessError::BootstrapIo)?;
     write_status_frame(&mut control, MESH_TRANSPORT_READY_MESSAGE).await?;
-    let mut submitter = MeshIngressSubmitter::new(
+    let (mut submitter, runner) = MeshIngressSubmitter::new(
         control,
         environment_id,
         generation,
         bootstrap.submission_key,
     )?;
+    let parent = monitor_parent(runner);
+    tokio::pin!(parent);
     let round_trip = async {
         loop {
             if mesh_fixture_round_trip(
@@ -789,10 +768,10 @@ pub async fn run_inherited_mesh_transport_fixture(
         }
     };
     tokio::select! {
-        parent = monitor_parent(startup_liveness) => return parent,
+        parent = &mut parent => return parent,
         result = round_trip => result?,
     }
-    monitor_parent(liveness).await
+    parent.await
 }
 
 async fn mesh_fixture_round_trip(
@@ -848,15 +827,17 @@ struct MeshRuntime {
     conn: Arc<Conn>,
     bridge: MeshIngressBridge,
     direct_udp: direct_udp::Handle,
+    runner: AcknowledgementReader,
 }
 
 impl MeshRuntime {
-    async fn run(self, liveness: tokio::net::UnixStream) -> Result<(), MeshTransportProcessError> {
+    async fn run(self) -> Result<(), MeshTransportProcessError> {
         let Self {
             mut coordinator,
             conn,
             bridge,
             direct_udp,
+            runner,
         } = self;
         let _direct_udp = direct_udp;
         let (node_tx, node_rx) = mpsc::unbounded_channel();
@@ -887,7 +868,7 @@ impl MeshRuntime {
             let _ = bridge.run(shutdown_rx).await;
             RuntimeTaskExit::Bridge
         });
-        tasks.spawn(async move { RuntimeTaskExit::Parent(monitor_parent(liveness).await.is_ok()) });
+        tasks.spawn(async move { RuntimeTaskExit::Parent(monitor_parent(runner).await.is_ok()) });
 
         let result = tokio::select! {
             Some(()) = derp_map_rx.recv() => {
@@ -964,7 +945,7 @@ async fn build_runtime(
         Conn::new(options, transport).map_err(|_| MeshTransportProcessError::TransportSetup)?,
     );
     conn.set_preferred_derp(prepared.transport.preferred_derp);
-    let submitter = MeshIngressSubmitter::new(
+    let (submitter, runner) = MeshIngressSubmitter::new(
         control,
         environment_id,
         generation,
@@ -981,17 +962,18 @@ async fn build_runtime(
         conn,
         bridge,
         direct_udp,
+        runner,
     })
 }
 
-async fn monitor_parent(
-    mut liveness: tokio::net::UnixStream,
-) -> Result<(), MeshTransportProcessError> {
-    let mut byte = [0_u8; 1];
-    match liveness.read(&mut byte).await {
-        Ok(0) => Ok(()),
-        Ok(_) | Err(_) => Err(MeshTransportProcessError::Protocol),
-    }
+/// Ends without an error when the runner closes the control channel. Until
+/// then the runner says only that it holds a connection submitted to it,
+/// which this one reader carries to the submitter (#5084).
+async fn monitor_parent(runner: AcknowledgementReader) -> Result<(), MeshTransportProcessError> {
+    runner
+        .read()
+        .await
+        .map_err(|_| MeshTransportProcessError::Protocol)
 }
 
 fn prepare_mesh_bootstrap(

@@ -25,6 +25,10 @@ use crate::mesh_ingress::{
     MeshIngressControlFrame, MeshIngressControlReceiver, MeshIngressError, MeshIngressPublisher,
     validate_canonical_mesh_ingress_ports,
 };
+use crate::mesh_ingress_ack::{
+    AcknowledgementReader, Acknowledgements, MESH_INGRESS_ACK_TIMEOUT, Passed, acknowledgements,
+    mesh_ingress_ack,
+};
 use crate::network_worker::{receive_mesh_ingress_descriptor, send_mesh_ingress_descriptor};
 
 const MESH_ACCEPT_QUEUE_CAPACITY: usize = 64;
@@ -34,45 +38,60 @@ const MESH_SUBMISSION_TIMEOUT: Duration = Duration::from_secs(2);
 /// Generation-bound client used by the isolated Mesh process to submit only
 /// connected AF_UNIX stream capabilities to the environment runner.
 pub struct MeshIngressSubmitter {
-    control: tokio::net::UnixStream,
+    control: tokio::net::unix::OwnedWriteHalf,
     environment_id: Uuid,
     generation: u64,
     key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
     next_sequence: u64,
+    acknowledgements: Acknowledgements,
 }
 
 impl MeshIngressSubmitter {
+    /// The submitter for `control`, and the one reader of what the runner
+    /// says on it. The caller runs that reader for as long as it submits: it
+    /// carries the runner's acknowledgements to [`Self::submit`], and ends
+    /// when the runner closes the channel.
     pub fn new(
         control: tokio::net::UnixStream,
         environment_id: Uuid,
         generation: u64,
         key: Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]>,
-    ) -> Result<Self, MeshTransportError> {
+    ) -> Result<(Self, AcknowledgementReader), MeshTransportError> {
         if environment_id.is_nil() || generation == 0 || key.iter().all(|byte| *byte == 0) {
             return Err(MeshTransportError::InvalidSubmission);
         }
-        Ok(Self {
+        let (runner, control) = control.into_split();
+        let (acknowledgements, runner) = acknowledgements(runner);
+        let submitter = Self {
             control,
             environment_id,
             generation,
             key,
             next_sequence: 1,
-        })
+            acknowledgements,
+        };
+        Ok((submitter, runner))
     }
 
+    /// Submits `stream` and waits for the runner to say it holds it; the
+    /// caller keeps its own copy until this returns (#5084). False when the
+    /// runner said nothing in time: the caller closes that connection, so
+    /// its client sees it end. The third in a row is an error.
     pub(crate) async fn submit(
         &mut self,
         guest_port: u16,
         stream: &StdUnixStream,
-    ) -> Result<(), MeshTransportError> {
+    ) -> Result<bool, MeshTransportError> {
         let binding = MeshIngressBinding::new(guest_port)?;
+        let sequence = self.next_sequence;
         let frame = MeshIngressControlFrame::encode(
             self.environment_id,
             self.generation,
-            self.next_sequence,
+            sequence,
             binding,
             &self.key,
         )?;
+        self.acknowledgements.passing(sequence);
         let deadline = tokio::time::Instant::now() + MESH_SUBMISSION_TIMEOUT;
         tokio::time::timeout_at(deadline, async {
             self.control.write_all(&frame).await?;
@@ -87,7 +106,8 @@ impl MeshIngressSubmitter {
                     .writable()
                     .await
                     .map_err(|_| MeshTransportError::SubmissionControl)?;
-                match send_mesh_ingress_descriptor(self.control.as_raw_fd(), stream.as_raw_fd()) {
+                let control = self.control.as_ref().as_raw_fd();
+                match send_mesh_ingress_descriptor(control, stream.as_raw_fd()) {
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                     Ok(()) => return Ok(()),
                     Err(_) => return Err(MeshTransportError::SubmissionControl),
@@ -96,11 +116,14 @@ impl MeshIngressSubmitter {
         })
         .await
         .map_err(|_| MeshTransportError::SubmissionControl)??;
-        self.next_sequence = self
-            .next_sequence
+        self.next_sequence = sequence
             .checked_add(1)
             .ok_or(MeshTransportError::InvalidSubmission)?;
-        Ok(())
+        let limit = tokio::time::Instant::now() + MESH_INGRESS_ACK_TIMEOUT;
+        match self.acknowledgements.of(sequence, limit).await {
+            Ok(passed) => Ok(passed == Passed::Acknowledged),
+            Err(_) => Err(MeshTransportError::SubmissionControl),
+        }
     }
 }
 
@@ -123,10 +146,7 @@ impl MeshIngressTarget {
                     Err(error) => Err(MeshTransportError::Admission(error)),
                 }
             }
-            Self::Isolated(submitter) => {
-                submitter.submit(guest_port, stream).await?;
-                Ok(true)
-            }
+            Self::Isolated(submitter) => submitter.submit(guest_port, stream).await,
         }
     }
 }
@@ -216,6 +236,11 @@ impl MeshIngressBridge {
                     let (publisher_stream, bridge_stream) = StdUnixStream::pair()?;
                     bridge_stream.set_nonblocking(true)?;
                     let bridge_stream = tokio::net::UnixStream::from_std(bridge_stream)?;
+                    // Waiting here for the runner's acknowledgement holds this
+                    // loop on purpose: it is what keeps the transport to one
+                    // connection in flight (#5084). The loop serves nothing
+                    // else for a client; shutdown and reaping wait at most
+                    // that limit.
                     if !self
                         .target
                         .publish(accepted.guest_port, &publisher_stream)
@@ -311,6 +336,12 @@ pub async fn receive_mesh_ingress_submissions(
             .decode(&frame, &key)
             .map_err(|_| MeshTransportError::InvalidSubmission)?;
         let descriptor = receive_mesh_ingress_descriptor(&control)
+            .await
+            .map_err(|_| MeshTransportError::SubmissionControl)?;
+        // The runner holds the connection now. The transport keeps its own
+        // copy until this line (#5084).
+        control
+            .write_all(&mesh_ingress_ack(frame.sequence))
             .await
             .map_err(|_| MeshTransportError::SubmissionControl)?;
         let stream = StdUnixStream::from(descriptor);
@@ -440,13 +471,14 @@ mod tests {
         runner.set_nonblocking(true).unwrap();
         let environment_id = Uuid::new_v4();
         let key = [0x6d; MESH_INGRESS_CONTROL_KEY_LEN];
-        let submitter = MeshIngressSubmitter::new(
+        let (submitter, runner_frames) = MeshIngressSubmitter::new(
             tokio::net::UnixStream::from_std(submission).unwrap(),
             environment_id,
             7,
             Zeroizing::new(key),
         )
         .unwrap();
+        let _reading = tokio::spawn(runner_frames.read());
         let submission_receiver = tokio::spawn(receive_mesh_ingress_submissions(
             tokio::net::UnixStream::from_std(runner).unwrap(),
             publisher,
@@ -536,15 +568,21 @@ mod tests {
             ports,
             Zeroizing::new([0x41; MESH_INGRESS_CONTROL_KEY_LEN]),
         ));
-        let mut submitter = MeshIngressSubmitter::new(
+        let (mut submitter, runner_frames) = MeshIngressSubmitter::new(
             tokio::net::UnixStream::from_std(submission).unwrap(),
             environment_id,
             9,
             Zeroizing::new([0x42; MESH_INGRESS_CONTROL_KEY_LEN]),
         )
         .unwrap();
+        let _reading = tokio::spawn(runner_frames.read());
         let (stream, _peer) = StdUnixStream::pair().unwrap();
-        submitter.submit(3_000, &stream).await.unwrap();
+        // The runner refuses the frame and closes the channel, so no
+        // acknowledgement comes.
+        assert!(matches!(
+            submitter.submit(3_000, &stream).await,
+            Err(MeshTransportError::SubmissionControl)
+        ));
 
         assert!(matches!(
             receiver.await.unwrap(),
@@ -588,6 +626,78 @@ mod tests {
             assert_eq!(result.is_ok(), expected_ok);
             if !expected_ok {
                 assert!(matches!(result, Err(MeshTransportError::SubmissionControl)));
+            }
+        }
+    }
+
+    /// A submitter with the reader of its runner's frames running, and the
+    /// runner's end of the channel.
+    fn submission() -> (MeshIngressSubmitter, tokio::net::UnixStream) {
+        let (submission, runner) = tokio::net::UnixStream::pair().unwrap();
+        let (submitter, runner_frames) = MeshIngressSubmitter::new(
+            submission,
+            Uuid::from_u128(7),
+            9,
+            Zeroizing::new([0x42; MESH_INGRESS_CONTROL_KEY_LEN]),
+        )
+        .unwrap();
+        tokio::spawn(runner_frames.read());
+        (submitter, runner)
+    }
+
+    /// The runner's side of one submission: the control frame, then the
+    /// connection.
+    async fn submitted(runner: &mut tokio::net::UnixStream) -> std::os::fd::OwnedFd {
+        let mut frame = [0_u8; MESH_INGRESS_CONTROL_FRAME_LEN];
+        runner.read_exact(&mut frame).await.unwrap();
+        receive_mesh_ingress_descriptor(runner).await.unwrap()
+    }
+
+    /// The transport's caller keeps the stream it submits until `submit`
+    /// returns, and `submit` does not return before the runner says it holds
+    /// the connection (#5084). On a paused clock, so a stalled host cannot
+    /// run the submission to its limit.
+    #[tokio::test(start_paused = true)]
+    async fn a_submission_is_not_done_until_the_runner_acknowledges_it() {
+        let (mut submitter, mut runner) = submission();
+        let (stream, _peer) = StdUnixStream::pair().unwrap();
+        let submit = submitter.submit(3_000, &stream);
+        tokio::pin!(submit);
+        let _held = tokio::select! {
+            _ = &mut submit => panic!("the submission ended before the runner took it"),
+            held = submitted(&mut runner) => held,
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut submit)
+                .await
+                .is_err(),
+            "the submission waits for the runner's acknowledgement"
+        );
+        runner.write_all(&mesh_ingress_ack(1)).await.unwrap();
+        assert!(submit.await.unwrap());
+    }
+
+    /// A runner that takes a connection and says nothing: the submission
+    /// reports it unacknowledged at the limit, so its caller closes that
+    /// connection, and the third in a row ends the transport's channel.
+    #[tokio::test(start_paused = true)]
+    async fn a_submission_the_runner_does_not_acknowledge_is_reported_and_the_third_is_an_error() {
+        let (mut submitter, mut runner) = submission();
+        let mut kept = Vec::new();
+        for submission_number in 1..=3 {
+            let (stream, _peer) = StdUnixStream::pair().unwrap();
+            let asked = tokio::time::Instant::now();
+            let (acknowledged, held) =
+                tokio::join!(submitter.submit(3_000, &stream), submitted(&mut runner));
+            kept.push(held);
+            assert_eq!(asked.elapsed(), MESH_INGRESS_ACK_TIMEOUT);
+            if submission_number < 3 {
+                assert!(!acknowledged.unwrap());
+            } else {
+                assert!(matches!(
+                    acknowledged,
+                    Err(MeshTransportError::SubmissionControl)
+                ));
             }
         }
     }

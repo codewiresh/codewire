@@ -1855,6 +1855,17 @@ mod tests {
         runner.flush().await.unwrap();
         let (mut mesh_peer, bridge) = StdUnixStream::pair().unwrap();
         send_mesh_ingress_descriptor(runner.as_raw_fd(), bridge.as_raw_fd()).unwrap();
+        // The worker says it holds the connection, which is what lets the
+        // runner let go of its copy (#5084).
+        // Generous, so a loaded host fails only a missing acknowledgement.
+        const WAIT: Duration = Duration::from_secs(30);
+        let held = crate::mesh_ingress_ack::mesh_ingress_ack(1);
+        let mut said = [0_u8; crate::mesh_ingress_ack::MESH_INGRESS_ACK_LEN];
+        tokio::time::timeout(WAIT, runner.read_exact(&mut said))
+            .await
+            .expect("the worker did not acknowledge the connection")
+            .unwrap();
+        assert_eq!(said, held);
 
         let mut incoming = tokio::time::timeout(Duration::from_secs(2), inbound_rx.recv())
             .await

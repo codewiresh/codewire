@@ -1,7 +1,11 @@
 //! The worker's side of its control socket once it is ready: the runner's
-//! Mesh ingress frames in, and the egress broker's late answers out (#4965).
+//! Mesh ingress frames in, and out the acknowledgement of each (#5084) and
+//! the egress broker's late answers (#4965). Everything out is one frame of
+//! [`LATE_STATUS_FRAME_LEN`] bytes, written whole by this one task, which
+//! the runner tells apart by its magic.
 
 use super::*;
+use crate::mesh_ingress_ack::mesh_ingress_ack;
 
 /// How often the worker looks at the broker's late answers. A frame goes out
 /// only when the count rose or requests are answered again, so at most one a
@@ -140,6 +144,9 @@ pub(super) async fn run_ingress_control(
             .decode(&frame, &mesh_key)
             .map_err(|_| NetworkWorkerError::Protocol)?;
         let descriptor = receive_mesh_ingress_descriptor(&control).await?;
+        // The worker holds the connection now. The runner keeps its own copy
+        // until this frame (#5084).
+        write_control_bytes(&control, &mesh_ingress_ack(frame.sequence)).await?;
         let guest_port = frame.binding.guest_port;
         let stream =
             transferred_stream(descriptor).map_err(|_| NetworkWorkerError::InheritedDescriptor)?;

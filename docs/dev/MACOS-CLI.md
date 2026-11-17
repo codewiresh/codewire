@@ -334,13 +334,18 @@ acknowledges it, for a bounded time:
   connection at a time and waits up to two seconds for that
   acknowledgement, so it never holds more than one. A connection not
   acknowledged in time is not let go silently, which would be the same loss
-  again: its sender closes it, so the client sees it end at once, and
-  records `mesh_ingress_unacknowledged`. Three in a row end that sender's
-  channel, as a receiver that has stopped answering, and the environment
-  turns `error`. A late acknowledgement of a connection already closed is
-  ignored; anything else the receiver says on that channel ends it. Not yet
-  built (#5084): today each sender lets go as soon as the connection is
-  sent, so on a loaded Mac a Mesh connection to a local VM can arrive dead.
+  again: its sender closes it, so the client sees it end at once. The
+  runner records each one it closes as `mesh_ingress_unacknowledged` in its
+  log; the Mesh transport has no log, so one it closes shows only as that
+  connection ending. Three in a row end that sender's channel, as a
+  receiver that has stopped answering, and the environment turns `error`
+  (`ingress_forwarder_exit` or `mesh_transport_exit`). While the runner
+  waits, it goes on serving the VM's published host ports. A late
+  acknowledgement of a connection already closed is ignored. The network
+  worker's acknowledgements share its channel to the runner with its reports
+  of the egress broker's late answers (#4965), each one fixed-size frame
+  told apart by its first eight bytes; anything else a receiver says on
+  either channel ends it (#5084).
 
 `cw mesh up` runs the standalone Mesh service on a Mac from the same code as on
 Linux (#3797): the installed `cw` serves the Mesh (`cw __local-mesh`), which

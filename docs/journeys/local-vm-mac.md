@@ -197,13 +197,14 @@ Issue: #5084.
   acknowledges it, and the Mesh transport's when the runner does, so a
   connection the VM's server closes still ends at once for its client. A
   connection not acknowledged within two seconds is closed by whichever of
-  the two was holding it: its client sees it end, never hang, and
-  `mesh_ingress_unacknowledged` is recorded. After three in a row the
-  environment turns `error`, as when the forwarder or the transport is lost
-  for any other reason.
+  the two was holding it: its client sees it end, never hang, and when it
+  was the runner, its log has `mesh_ingress_unacknowledged`. After three in
+  a row the environment turns `error`, as when the forwarder or the
+  transport is lost for any other reason.
 - **Gotchas:** Mesh attachment on a Mac local VM is implemented but not yet
   observed with a real Mesh sign-in (`docs/dev/MACOS-CLI.md`), so this step
   waits on that walk too. Linux local VMs keep a socket in flight and do
   not show the loss; the rule is the same on both.
 - **Observed:** not yet observed. The loss itself is measured outside the
-  product (`docs/dev/MACOS-CLI.md`); the fix is not built.
+  product (`docs/dev/MACOS-CLI.md`). The hold is built and unit-tested on
+  Linux (#5084); its walk on a Mac is not done.
