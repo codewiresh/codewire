@@ -1640,7 +1640,9 @@ probe_connect_surface() {
   }
 }
 
-build_selected_services() {
+# build_selected_service_binaries: the selected services' own binaries, after
+# refusing a selection with no service in it.
+build_selected_service_binaries() {
   local packages=() binary
   selected service_idp && packages+=( -p codewire-idp )
   selected service_coordinator && packages+=( -p codewire-coordinator )
@@ -1657,13 +1659,31 @@ build_selected_services() {
     cargo_ci build --locked --profile ci "${packages[@]}"
     # Before any test build of these packages rebuilds their binaries with
     # the tests' features.
-    selected service_idp && keep_binaries codewire-idp
-    selected service_coordinator && keep_binaries codewire-coordinator
-    selected service_billing && keep_binaries codewire-billing
+    # `if`, not `&&`: an unselected last service must not fail the step.
+    if selected service_idp; then keep_binaries codewire-idp; fi
+    if selected service_coordinator; then keep_binaries codewire-coordinator; fi
+    if selected service_billing; then keep_binaries codewire-billing; fi
   fi
+}
+
+# build_selected_services: every binary the selected services start, one
+# build after another in one folder.
+build_selected_services() {
+  build_selected_service_binaries
+  build_orchestration_cli
+  build_orchestration_service
+}
+
+# The cw binary the orchestration tests drive.
+build_orchestration_cli() {
   if selected service_orchestration; then
     cargo_ci build --locked --profile ci -p codewire-cli-bin --bin cw
     keep_binaries cw
+  fi
+}
+
+build_orchestration_service() {
+  if selected service_orchestration; then
     # One build for the wire contract and the service: an integration test
     # also builds every binary of its package, with the test's features, into
     # the profile directory. A separate `cargo build` of the binaries resolves
@@ -1683,15 +1703,17 @@ build_selected_services() {
 # Building a service plane's archives (compile once, infra#1632): every test
 # the run_* functions below run, one build per package and feature set, as
 # they run it, in batches (compile_batches). The first batch builds the
-# binaries the plane starts, the migration runner first, and with them the
-# orchestration wire contract (build_selected_services); each other batch
-# one package's tests. A test missing here fails its run, which finds no
-# archive, or no test, for it.
+# binaries the plane starts, the migration runner first; the cw binary and
+# the orchestration wire contract, which builds the orchestration service,
+# are batches of their own; each other batch one package's tests. A test
+# missing here fails its run, which finds no archive, or no test, for it.
 service_build_binaries() {
   cargo_ci build --locked --profile ci -p codewire-server-core --bin codewire-db-migrate
   keep_binaries codewire-db-migrate
-  build_selected_services
+  build_selected_service_binaries
 }
+service_build_cw() { build_orchestration_cli; }
+service_build_orchestration() { build_orchestration_service; }
 service_build_idp() {
   if selected service_idp; then
     cargo_ci test --locked --profile ci -p codewire-idp --test db_flow \
@@ -1731,11 +1753,16 @@ service_build_mesh() {
 # 62, connect_auth 2), and the runtime plane 194 s in main run 27000 (the
 # orchestration wire contract 92 s, the orchestration library 85; the
 # library's database tests now run in the database lanes, which build it
-# anyway). A step whose service is not selected builds nothing.
+# anyway). A step whose service is not selected builds nothing. The runtime
+# plane's one batch was the build's longest leg, 396 s in isolated main run
+# 58164: the migration runner 79 s, then 181 s, then the wire contract
+# 132 s, one after another (#5146). cw and the wire contract now build
+# beside the binaries, each in its own warm folder, so the leg takes about
+# its longest batch.
 service_build_batches() {
   case "$1" in
     control) printf '%s\n' 'binaries connectcore' idp coordinator billing ;;
-    runtime) printf '%s\n' 'binaries coordinator mesh' ;;
+    runtime) printf '%s\n' 'binaries coordinator mesh' cw orchestration ;;
     *) echo "::error::unknown service plane: $1" >&2; return 2 ;;
   esac
 }
