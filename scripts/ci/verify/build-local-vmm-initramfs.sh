@@ -189,6 +189,22 @@ build_one() {
   )
 }
 
+# build_both TARGET: the two independent builds of TARGET at once, in their
+# own fresh target folders (#5146: one after another they were 201 s of a
+# warm main build's 202 s of Rust checks). Each waits to the end, so neither
+# outlives a failure, and the byte comparison below still proves them equal.
+build_both() {
+  local build_target="$1" pid_a pid_b status_a=0 status_b=0
+  build_one "$target_a" "$build_target" &
+  pid_a=$!
+  build_one "$target_b" "$build_target" &
+  pid_b=$!
+  wait "$pid_a" || status_a=$?
+  wait "$pid_b" || status_b=$?
+  [[ "$status_a" == 0 && "$status_b" == 0 ]] ||
+    die "an independent static build of $build_target failed (statuses $status_a and $status_b)"
+}
+
 verify_static_elf() {
   local label="$1" binary="$2" expected_target="$3"
   local machine
@@ -280,8 +296,7 @@ verify_reproducible() {
   archive_a="$VERIFY_WORK/initramfs-a.cpio"
   archive_b="$VERIFY_WORK/initramfs-b.cpio"
 
-  build_one "$target_a" "$TARGET"
-  build_one "$target_b" "$TARGET"
+  build_both "$TARGET"
   binary_a="$target_a/$TARGET/release/$BINARY"
   binary_b="$target_b/$TARGET/release/$BINARY"
   [[ -x "$binary_a" && -x "$binary_b" ]] || die "static guest build did not produce both binaries"
@@ -298,8 +313,7 @@ verify_reproducible() {
     # the deterministic newc writer from the same source for the host target in
     # each independent tree, compare those packers, and use each only to package
     # the corresponding already-verified target payload.
-    build_one "$target_a" "$DEFAULT_TARGET"
-    build_one "$target_b" "$DEFAULT_TARGET"
+    build_both "$DEFAULT_TARGET"
     packer_a="$target_a/$DEFAULT_TARGET/release/$BINARY"
     packer_b="$target_b/$DEFAULT_TARGET/release/$BINARY"
     [[ -x "$packer_a" && -x "$packer_b" ]] || die "static archive build did not produce both host packers"
