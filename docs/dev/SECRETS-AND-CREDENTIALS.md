@@ -1663,12 +1663,17 @@ heading line, and a part that cannot be read says why in one line instead.
 A hosted Sandbox's daemon lines are in its Pod log, which `cw daemon logs ENV`
 already prints.
 
-### Hosted front-door session (not yet served)
+### Front-door session through a relay (not yet served)
 
-`EgressService.FrontDoorSession` is specified, but not served yet: it answers
-`UNIMPLEMENTED` until the credential relay attaches it (#4001). It is the
-hosted TLS front door's way into the credential broker, beside a Sandbox's
-loopback ingress, and these rules hold from the start:
+A front door reaches the broker that holds an environment's credentials
+through a relay in two placements: a hosted Sandbox, and a local VM on a
+platform profile. Both use one mechanism: a second stream that joins a relay
+epoch already admitted, by that epoch's handle, never a second way in.
+
+**Hosted (#4001).** `EgressService.FrontDoorSession` is specified, but not
+served yet: it answers `UNIMPLEMENTED` until the credential relay attaches it
+(#4001). It is the hosted TLS front door's way into the credential broker,
+beside a Sandbox's loopback ingress, and these rules hold from the start:
 
 - **Who opens it:** only `cw-egress`, with its own projected token (audience
   `codewire.internal.egress-node.v1`, its ServiceAccount and namespace), for
@@ -1684,6 +1689,79 @@ loopback ingress, and these rules hold from the start:
 - **It ends with its credential relay epoch,** so the epoch's reuse limits
   above bound it. `cw-egress` opens a new session for the next epoch. A Pod
   has at most one per epoch.
+
+**A local VM on a platform profile (not yet served, #4909).** Such a VM has
+no local credential engine: its confined local relay forwards the guest's
+bridge to the platform's broker over the owner-local delegation channel, one
+delegation epoch at a time. Today the supervisor starts it without
+interception, and its log says `skipped=platform_credentials` ("Agent host
+interception" above). Once this carrier is served, the same front-door
+session crosses the delegation instead, and these rules hold:
+
+- **Who opens it:** only the boot's own front door, paired with the local
+  relay exactly as with a local broker: the boot's pairing secret, then the
+  `C` role tag. The relay opens the upstream stream inside a delegation it
+  already holds, by that epoch's handle. The guest's loopback session can
+  never open a front-door session or name an intercepted host (#4221).
+- **The environment** comes from the delegation's admitted selection, never
+  from a frame.
+- **The platform's broker serves it** as `BridgeEntry::FrontDoor` on the
+  same broker as the loopback session: one lease set, one refresh, the swap
+  rule (#4722). The relay adds no engine, lease, decision or material of its
+  own.
+- **The relay holds the local session for the boot's life.** The front door
+  can never dial (its seccomp floor denies `socket` and `connect`), so ending
+  its session would end interception for the boot. The relay reopens the
+  upstream after an idle end and moves new requests to the successor
+  delegation at rotation. Each upstream stream still ends with its epoch, so
+  the 60-second authority and 2-minute material limits hold, and no cache
+  outlives an epoch.
+- **Logins follow the session.** The relay reports a placeholder login only
+  once a front-door session is attached. Before that, an intercepted boot's
+  logins are refused, never real.
+- **Without a front door the boot fails closed:** a request to an
+  intercepted host is refused by the egress broker and counted, never dialled
+  directly.
+- **With the switch off** (`egress-intercept`), the VM behaves exactly as
+  today: base-URL routes through the relay.
+
+**The relay's router (both carriers, agreed with cw-security on #4909 and
+#4001, 2026-11-15 and 2026-11-16).** A local relay, and the hosted relay once
+it routes, carry one front-door session across upstream changes as follows:
+
+- **It reads one field.** Each guest frame's request id, only after the
+  frame's length is bounded. It never decodes a payload, and nothing from a
+  payload reaches a log or a metric.
+- **Opening:** a guest `Request` or `Upgrade` with an id that isn't live opens
+  it on the current upstream. A live id, or one finished within the last 60
+  seconds, can't be opened again: the reuse gets the bridge's error response
+  for that id (a request's `ResponseFailure`, a socket's reset `StreamClose`)
+  and is counted.
+- **Frames the front-door entry never serves** (`EnvironmentProjection`,
+  `Ssh`, `CodexLogin`, `ClaudeLogin`) are refused by the router with the
+  error response for their id, so no SSH or login flow crosses this carrier.
+- **Following:** a request's later frames (body, end, cancel, stream data,
+  credit, close) go to the upstream its id opened on.
+- **What it can't route gets the bridge's own error response for that id,**
+  counted by reason, and the session stays open: an id never opened, an id
+  whose upstream has ended, and a frame that needs a capability outside the
+  pin. A frame for an id finished within the last 60 seconds is dropped and
+  counted, since it races that id's answer. That memory is capped by count
+  as well as time, and an id it forgot is treated as never opened.
+- **Responses stay with their upstream.** A response for an id its upstream
+  doesn't own is dropped, and that upstream is ended: its open ids get the
+  error response, and the session continues on the others.
+- **Draining** an old upstream is bounded by its epoch's expiry. Requests
+  still open then get the error response.
+- **Capabilities are pinned** from the first upstream's admission
+  (`front-door.v1`, `request-body-stream`, and `websocket.v1` only where
+  served), advertised exactly in the session's one Open, which the relay
+  writes itself. A successor that lists fewer is not used: new requests stay
+  on the current upstream until it expires, then get the error response
+  until a pinned-equal upstream is admitted.
+- **Only an unreadable frame ends the session:** a bad length, a length over
+  the bridge's frame limit, an envelope that can't be parsed, or a second
+  `Ready`, which has no id to answer. Every other refusal is per id.
 
 ### Hosted interception CA (not yet served)
 

@@ -24,7 +24,7 @@ met by a base-URL route.
 
 ## Where the walk stands
 
-Updated 2026-11-16. A hosted Sandbox is recorded on Dev and on Production
+Updated 2026-11-18. A hosted Sandbox is recorded on Dev and on Production
 separately.
 
 | ID | Issue | Linux local VM | macOS local VM | Dev | Production |
@@ -41,6 +41,7 @@ separately.
 | `refusal-readable` | #5057, #5058 | no command yet | no command yet | n/a | n/a |
 | `learn-mode` | #4015 | after launch | after launch | after launch | after launch |
 | `agent-vm-interception` | #3999 (#4809, #4884, #4812, #4887) | no command yet | no command yet | n/a | n/a |
+| `agent-vm-platform-profile` | #4909 | no command yet | no command yet | n/a | n/a |
 | `agent-claude` | #3999, #4001 | no command yet | no command yet | no command yet | no command yet |
 | `agent-codex` | #3999, #4001 | no command yet | no command yet | no command yet | no command yet |
 | `agent-codex-websocket` | #3999 | no command yet | no command yet | n/a | n/a |
@@ -660,8 +661,9 @@ request adds.
     supervisor's log gives the reason (`skipped=platform_credentials`). Its
     seed carries no authority and no placeholders, so the guest sets no
     `NODE_EXTRA_CA_CERTS`, and its agents use today's routes. It never boots
-    trusting an authority that nothing serves. This holds until that route
-    carries interception (#3999);
+    trusting an authority that nothing serves. This holds until the
+    delegation carries the front-door session (#4909,
+    `agent-vm-platform-profile`);
   - **only the boot's pairing secret pairs a credential broker with the
     front door** (#3999). The runner mints it for the boot and keeps it in
     memory; the credential authority hands it to each broker, successors
@@ -703,6 +705,56 @@ request adds.
     denies everything (no file, no new socket, no process), where Linux
     uses Landlock and seccomp (#4916). The walk is the same on both; a Mac
     boot with the switch on is not yet observed.
+- **Observed:** not yet observed.
+
+## `agent-vm-platform-profile`: a local VM on a platform profile is intercepted through the delegation
+
+Issue: #4909. The front door's session crosses the owner-local delegation
+channel to the platform's broker, by the same mechanism as the hosted relay
+(#4001). The rules are in `docs/dev/SECRETS-AND-CREDENTIALS.md`, "Front-door
+session through a relay".
+
+- **Entry points:** the per-host switch for local VMs, then `cw create
+  --local` or `cw start` for a VM whose credential profile is a platform
+  profile. Nothing inside the VM turns interception on.
+- **States to exercise:**
+  - a Claude sign-in and a Codex login, both from the platform profile;
+  - a token forced to expire mid-session;
+  - the platform credential revoked, then selected again;
+  - a front door from another boot or VM asking for this VM's tokens;
+  - a delegation epoch rotating while an agent session runs, with a request
+    in flight;
+  - the front door killed while an agent runs;
+  - the switch off.
+- **Driving it:** no command yet (#4909). On a Linux host with a built
+  `cw`, against Dev, with the switch on: start the VM, then run a Claude Code
+  prompt, `/usage` and the plan, and a Codex task.
+- **Proof:**
+  - the VM starts with interception on: its recorded state says so, and the
+    supervisor's log has no `skipped=platform_credentials`;
+  - a Claude Code prompt works, and `/usage` and the plan show; a Codex task
+    works, including its account routing;
+  - **no real token is found** in the VM's login files (they hold
+    placeholders), on its disk, in the local relay's and front door's logs,
+    or in the host's credential directories;
+  - after a forced expiry, the platform refreshes the token, and the agent's
+    own refresh gets placeholders back;
+  - after a revocation the agent fails; after the credential is selected
+    again it recovers;
+  - a front door from another boot or VM is refused this VM's tokens, and
+    the refusal is shown;
+  - **across a delegation rotation** a request in flight on the old epoch
+    completes there, a request started after the successor's admission is
+    served by the successor, and the front door's session never ends; a
+    WebSocket resets at most once;
+  - **with the front door gone,** a request to an intercepted host is
+    refused by the egress broker and counted, and nothing is dialled
+    directly;
+  - with the switch off, the VM behaves exactly as today: base-URL routes
+    through the relay.
+- **Gotchas:** the relay's per-id refusals (an unknown or finished id, a
+  capability outside the pin) are unit-tested; the walk sees them only as an
+  agent's request failing without the session ending.
 - **Observed:** not yet observed.
 
 ## `agent-claude`: Claude Code with stock settings and no token inside
