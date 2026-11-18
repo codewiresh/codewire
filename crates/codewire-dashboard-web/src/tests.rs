@@ -847,6 +847,9 @@ fn unsafe_organization(has_explicit_quota: bool) -> AdminOrganizationView {
             .collect(),
         credit_balance: "-€0.003385".into(),
         credit_negative: true,
+        credit_balance_nano_eur: -3_385_000,
+        auto_top_up_enabled: true,
+        auto_top_up_cents: 2000,
         credit_entries: vec![crate::admin_connect::AdminCreditRow {
             kind: "Adjustment".into(),
             amount: "€25.00".into(),
@@ -945,6 +948,7 @@ fn admin_organization_template_shows_billing_quota_usage_and_escapes_upstream_da
             organization: &organization,
             csrf_token: "csrf-safe",
             credit_key: "credit-key-1",
+            credit_confirmation: None,
             message: "",
             error: "",
         }
@@ -1020,6 +1024,7 @@ fn admin_organization_dedicated_cpu_toggle_follows_the_setting() {
             organization: &organization,
             csrf_token: "csrf-safe",
             credit_key: "credit-key-1",
+            credit_confirmation: None,
             message: "",
             error: "",
         }
@@ -1056,6 +1061,7 @@ fn admin_organization_confidential_toggle_follows_the_opt_in() {
             organization: &organization,
             csrf_token: "csrf-safe",
             credit_key: "credit-key-1",
+            credit_confirmation: None,
             message: "",
             error: "",
         }
@@ -1093,4 +1099,56 @@ fn admin_organization_confidential_toggle_follows_the_opt_in() {
     assert!(unknown.contains(
         r#"<p>Confidential environments <span class="cw-muted">cannot be read right now</span></p>"#
     ));
+}
+
+/// An adjustment below zero asks first (#4754): the page shows what it sets
+/// off and a Confirm that sends the same adjustment with the balance it
+/// showed, and no second Adjust form.
+#[test]
+fn admin_organization_asks_before_a_negative_balance() {
+    let view = admin_view();
+    let organization = unsafe_organization(false);
+    let confirmation = crate::admin_connect::CreditConfirmationView {
+        amount: "-6".into(),
+        reason: "billing test".into(),
+        idempotency_key: "credit-key-1".into(),
+        confirmed_balance_nano_eur: -1_140_000_000,
+        question: crate::admin_connect::negative_balance_question(-1_140_000_000, true, 2000),
+    };
+    let body = AdminOrganizationTemplate {
+        view: &view,
+        organization: &organization,
+        csrf_token: "csrf-safe",
+        credit_key: "credit-key-1",
+        credit_confirmation: Some(&confirmation),
+        message: "",
+        error: "",
+    }
+    .render()
+    .expect("render admin organization page");
+    assert!(body.contains(r#"<p class="cw-alert cw-alert--warning" role="alert">This leaves the balance at -€1.14. Automatic top-up is on at €20.00, so a saved card is charged within seconds; without one, new Sandboxes and starts are refused.</p>"#), "{body}");
+    for field in [
+        r#"<input type="hidden" name="amount" value="-6">"#,
+        r#"<input type="hidden" name="reason" value="billing test">"#,
+        r#"<input type="hidden" name="idempotency_key" value="credit-key-1">"#,
+        r#"<input type="hidden" name="confirmed_balance" value="-1140000000">"#,
+    ] {
+        assert!(body.contains(field), "{field}");
+    }
+    assert!(body.contains(r#"<button class="cw-button" type="submit">Confirm</button>"#));
+    assert!(body.contains(&format!(
+        r#"href="/admin/organizations/{}/">Go back</a>"#,
+        organization.id
+    )));
+    assert!(!body.contains(">Adjust credit</button>"));
+}
+
+#[test]
+fn a_negative_balance_question_says_what_top_up_sets_off() {
+    use crate::admin_connect::negative_balance_question;
+    assert_eq!(
+        negative_balance_question(-1_140_000_000, false, 2000),
+        "This leaves the balance at -€1.14. New Sandboxes and starts are refused, and running Sandboxes stop after 24 hours; their storage is kept."
+    );
+    assert!(negative_balance_question(-1, true, 5000).contains("Automatic top-up is on at €50.00"));
 }

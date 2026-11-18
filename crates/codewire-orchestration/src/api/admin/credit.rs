@@ -24,11 +24,14 @@ pub struct AdminCreditEntry {
     pub actor_user_id: String,
 }
 
-/// An organization's card, balance and newest ledger entries.
+/// An organization's card, balance, automatic top-up and newest ledger
+/// entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminOrganizationCredit {
     pub rate_card: String,
     pub balance_nano_eur: i64,
+    pub auto_top_up_enabled: bool,
+    pub auto_top_up_cents: i32,
     pub recent: Vec<AdminCreditEntry>,
 }
 
@@ -110,12 +113,14 @@ pub(crate) async fn organization_credit(
     pool: &sqlx::PgPool,
     organization_id: &str,
 ) -> AppResult<AdminOrganizationCredit> {
-    let rate_card: String = sqlx::query_scalar("SELECT rate_card FROM organizations WHERE id = $1")
-        .bind(organization_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(failure("read rate card"))?
-        .ok_or_else(|| AppError::NotFound("organization not found".into()))?;
+    let (rate_card, auto_top_up_enabled, auto_top_up_cents): (String, bool, i32) = sqlx::query_as(
+        "SELECT rate_card, auto_top_up_enabled, auto_top_up_cents FROM organizations WHERE id = $1",
+    )
+    .bind(organization_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(failure("read rate card"))?
+    .ok_or_else(|| AppError::NotFound("organization not found".into()))?;
     let recent = sqlx::query_as::<
         _,
         (
@@ -149,6 +154,8 @@ pub(crate) async fn organization_credit(
     Ok(AdminOrganizationCredit {
         rate_card,
         balance_nano_eur: balance(pool, organization_id).await?,
+        auto_top_up_enabled,
+        auto_top_up_cents,
         recent,
     })
 }
@@ -201,6 +208,22 @@ pub(crate) async fn set_organization_rate_card_core(
     })
 }
 
+/// The refusal of an adjustment that would leave `balance_nano_eur`, below
+/// zero, before the administrator confirmed that balance.
+fn negative_balance_unconfirmed(balance_nano_eur: i64) -> AppError {
+    let cents = balance_nano_eur.unsigned_abs() / 10_000_000;
+    AppError::Coded {
+        status: axum::http::StatusCode::CONFLICT,
+        code: "negative_balance_unconfirmed",
+        detail: format!(
+            "this leaves the balance at -EUR {}.{:02} ({balance_nano_eur} nano-euros); confirm that balance to apply it",
+            cents / 100,
+            cents % 100
+        )
+        .into(),
+    }
+}
+
 /// Validates an administrator's adjustment: a non-zero amount of at most
 /// EUR 100,000 either way, a reason, and an idempotency key of 1 to 128
 /// letters, digits, '-' or '_'. Returns the trimmed reason.
@@ -236,6 +259,12 @@ pub(crate) fn validate_adjustment<'a>(
 /// Adds or removes compute credit as an `adjustment` ledger entry naming the
 /// administrator and the reason, and audits it, in one transaction. A
 /// repeated idempotency key for the organization applies nothing again.
+///
+/// An adjustment that would leave the balance below zero is applied only
+/// when `confirmed_balance_nano_eur` is that balance, read under the
+/// organization's lock: otherwise it writes nothing and is refused with
+/// `negative_balance_unconfirmed`, naming the balance, so the administrator
+/// is asked and a balance that moved meanwhile asks again (#4754).
 pub(crate) async fn adjust_organization_credit_core(
     pool: &sqlx::PgPool,
     actor_user_id: &str,
@@ -243,6 +272,7 @@ pub(crate) async fn adjust_organization_credit_core(
     amount_nano_eur: i64,
     reason: &str,
     idempotency_key: &str,
+    confirmed_balance_nano_eur: Option<i64>,
 ) -> AppResult<AdminCreditAdjustment> {
     let reason = validate_adjustment(amount_nano_eur, reason, idempotency_key)?;
     let mut transaction = pool
@@ -251,6 +281,24 @@ pub(crate) async fn adjust_organization_credit_core(
         .map_err(failure("start credit adjustment"))?;
     lock_organization(&mut transaction, organization_id).await?;
     let ledger_key = format!("admin:{idempotency_key}");
+    // A retry of an applied adjustment returns it below without asking again.
+    let retried: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM billing_credit_ledger \
+         WHERE organization_id = $1 AND idempotency_key = $2)",
+    )
+    .bind(organization_id)
+    .bind(&ledger_key)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(failure("read credit adjustment"))?;
+    if !retried {
+        let result = balance(&mut *transaction, organization_id)
+            .await?
+            .saturating_add(amount_nano_eur);
+        if result < 0 && confirmed_balance_nano_eur != Some(result) {
+            return Err(negative_balance_unconfirmed(result));
+        }
+    }
     let applied = sqlx::query_scalar::<_, i64>(
         r#"INSERT INTO billing_credit_ledger
                (organization_id, entry_kind, amount_nano_eur, idempotency_key,

@@ -297,6 +297,11 @@ pub(crate) struct AdminOrganizationView {
     /// Signed, in euros.
     pub(crate) credit_balance: String,
     pub(crate) credit_negative: bool,
+    /// The balance and automatic top-up an adjustment below zero is
+    /// measured against (#4754).
+    pub(crate) credit_balance_nano_eur: i64,
+    pub(crate) auto_top_up_enabled: bool,
+    pub(crate) auto_top_up_cents: i32,
     pub(crate) credit_entries: Vec<AdminCreditRow>,
     pub(crate) has_explicit_quota: bool,
     pub(crate) effective_quota: QuotaView,
@@ -906,6 +911,9 @@ pub(crate) async fn organization(
             .collect(),
         credit_balance: euro_text(billing.credit_balance_nano_eur),
         credit_negative: billing.credit_balance_nano_eur < 0,
+        credit_balance_nano_eur: billing.credit_balance_nano_eur,
+        auto_top_up_enabled: billing.auto_top_up_enabled,
+        auto_top_up_cents: billing.auto_top_up_cents,
         credit_entries: billing
             .recent_credit
             .into_iter()
@@ -998,6 +1006,7 @@ pub(crate) async fn adjust_organization_credit(
     amount_nano_eur: i64,
     reason: &str,
     idempotency_key: &str,
+    confirmed_balance_nano_eur: Option<i64>,
 ) -> Result<(), ConnectError> {
     admin_client(state, cookie)
         .adjust_organization_credit(AdjustOrganizationCreditRequest {
@@ -1005,6 +1014,7 @@ pub(crate) async fn adjust_organization_credit(
             amount_nano_eur,
             reason: reason.to_owned(),
             idempotency_key: idempotency_key.to_owned(),
+            confirmed_balance_nano_eur,
             ..Default::default()
         })
         .await?;
@@ -1105,6 +1115,40 @@ pub(crate) fn euro_text(nano_eur: i64) -> String {
     let fraction = fraction[..6].trim_end_matches('0');
     let fraction = format!("{fraction:0<2}");
     format!("{sign}€{whole}.{fraction}")
+}
+
+/// An adjustment the server refused until the administrator confirms the
+/// balance it leaves, below zero: what the page asks, and what Confirm sends
+/// again (#4754).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CreditConfirmationView {
+    /// As entered, in euros.
+    pub(crate) amount: String,
+    pub(crate) reason: String,
+    pub(crate) idempotency_key: String,
+    pub(crate) confirmed_balance_nano_eur: i64,
+    pub(crate) question: String,
+}
+
+/// What confirming an adjustment that leaves `balance_nano_eur`, below zero,
+/// sets off: a top-up charge, or refused work (#4754, journey
+/// `billing-admin-adjust`).
+pub(crate) fn negative_balance_question(
+    balance_nano_eur: i64,
+    auto_top_up_enabled: bool,
+    auto_top_up_cents: i32,
+) -> String {
+    let balance = euro_text(balance_nano_eur);
+    if auto_top_up_enabled {
+        format!(
+            "This leaves the balance at {balance}. Automatic top-up is on at {}, so a saved card is charged within seconds; without one, new Sandboxes and starts are refused.",
+            euro_text(i64::from(auto_top_up_cents) * (NANO_EUR_PER_EURO / 100))
+        )
+    } else {
+        format!(
+            "This leaves the balance at {balance}. New Sandboxes and starts are refused, and running Sandboxes stop after 24 hours; their storage is kept."
+        )
+    }
 }
 
 /// An administrator's euro amount ("25", "-10.5", "+0.01") in nano-euros:

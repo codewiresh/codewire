@@ -419,6 +419,7 @@ impl AdminService for AdminConnectService {
             request.amount_nano_eur,
             request.reason,
             request.idempotency_key,
+            request.confirmed_balance_nano_eur,
         )
         .await
         .map_err(|error| rpc_app_error(&error, &ctx))?;
@@ -653,6 +654,8 @@ fn proto_organization_overview(
                 .collect(),
             rate_card: value.credit.rate_card,
             credit_balance_nano_eur: value.credit.balance_nano_eur,
+            auto_top_up_enabled: value.credit.auto_top_up_enabled,
+            auto_top_up_cents: value.credit.auto_top_up_cents,
             recent_credit: value
                 .credit
                 .recent

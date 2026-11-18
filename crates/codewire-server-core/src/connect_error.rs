@@ -230,7 +230,10 @@ fn connect_code_for(status: StatusCode, reason: Option<&str>) -> ConnectCode {
             | "last_owner"
             // A setup retry that would delete repository directories until
             // the caller confirms it (#4767).
-            | "reclone_unconfirmed",
+            | "reclone_unconfirmed"
+            // An administrator adjustment that would leave a negative balance
+            // until the administrator confirms that balance (#4754).
+            | "negative_balance_unconfirmed",
         ) => {
             return ConnectCode::FailedPrecondition;
         }
@@ -574,6 +577,25 @@ mod tests {
             panic!("expected ErrorInfo detail, got {:?}", rendered.details);
         };
         assert_eq!(info.reason, "RECLONE_UNCONFIRMED");
+    }
+
+    /// An adjustment below zero waits for its balance to be confirmed
+    /// (#4754): the admin page asks, and a client can tell why.
+    #[test]
+    fn a_negative_balance_refusal_is_a_failed_precondition_named_for_its_confirmation() {
+        let rendered = ConnectError::from_app_error(
+            &coded(
+                StatusCode::CONFLICT,
+                "negative_balance_unconfirmed",
+                "this adjustment leaves the balance at -EUR 1.14; confirm that balance to apply it",
+            ),
+            None,
+        );
+        assert_eq!(rendered.code, ConnectCode::FailedPrecondition);
+        let Some(ConnectErrorDetail::ErrorInfo(info)) = rendered.details.first() else {
+            panic!("expected ErrorInfo detail, got {:?}", rendered.details);
+        };
+        assert_eq!(info.reason, "NEGATIVE_BALANCE_UNCONFIRMED");
     }
 
     /// D3 conversion cases: root, nested, array index, plus edges.

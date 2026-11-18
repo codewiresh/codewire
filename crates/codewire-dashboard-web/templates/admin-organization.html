@@ -80,6 +80,16 @@
               <p class="cw-muted">Saving a different card writes an audit entry.</p>
               <div class="cw-form-action"><button class="cw-button" type="submit">Save rate card</button></div>
             </form>
+            {% if let Some(confirm) = credit_confirmation %}<form class="cw-catalog-form" method="post" action="/admin/organizations/_actions/credit/adjust" aria-label="Confirm the credit adjustment" data-credit-confirmation>
+              <p class="cw-alert cw-alert--warning" role="alert">{{ confirm.question }}</p>
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="organization_id" value="{{ organization.id }}">
+              <input type="hidden" name="idempotency_key" value="{{ confirm.idempotency_key }}">
+              <input type="hidden" name="amount" value="{{ confirm.amount }}">
+              <input type="hidden" name="reason" value="{{ confirm.reason }}">
+              <input type="hidden" name="confirmed_balance" value="{{ confirm.confirmed_balance_nano_eur }}">
+              <div class="cw-form-action"><a class="cw-button cw-button--outline" href="/admin/organizations/{{ organization.id }}/">Go back</a><button class="cw-button" type="submit">Confirm</button></div>
+            </form>{% else %}
             <form class="cw-catalog-form" method="post" action="/admin/organizations/_actions/credit/adjust" aria-label="Grant or remove credit">
               <input type="hidden" name="_csrf" value="{{ csrf_token }}">
               <input type="hidden" name="organization_id" value="{{ organization.id }}">
@@ -88,7 +98,7 @@
               <label class="cw-field"><span>Reason</span><input class="cw-input" type="text" name="reason" maxlength="500" required></label>
               <p class="cw-muted">A positive amount grants credit and a negative one removes it. Each adjustment is recorded with your name and reason, and audited.</p>
               <div class="cw-form-action"><button class="cw-button" type="submit">Adjust credit</button></div>
-            </form>
+            </form>{% endif %}
             {% if organization.credit_entries.is_empty() %}<p class="cw-muted">No credit entries yet.</p>{% else %}
             <div class="cw-table-wrap"><table class="cw-table"><caption class="cw-sr-only">Recent credit entries, newest first</caption><thead><tr><th scope="col">Entry</th><th scope="col">Amount</th><th scope="col">When</th><th scope="col">Reason</th></tr></thead><tbody>
               {% for entry in organization.credit_entries %}<tr><th scope="row">{{ entry.kind }}</th><td>{{ entry.amount }}</td><td>{{ entry.when }}</td><td>{{ entry.note }}</td></tr>{% endfor %}

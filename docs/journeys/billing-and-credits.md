@@ -271,10 +271,11 @@ Issue: #4754.
   - a removal that would leave the balance below €0, with automatic top-up on
     and a card: nothing changes yet. The page asks, naming the result and its
     effect. Proposed wording, for the owner's look with #4754's low-balance
-    copy: "This leaves the balance at −€1.14. Automatic top-up is on, so
-    Visa •••• 4242 is charged €20 within seconds.";
+    copy: "This leaves the balance at -€1.14. Automatic top-up is on at
+    €20.00, so a saved card is charged within seconds; without one, new
+    Sandboxes and starts are refused." (Naming the card is #5094.)
   - the same with top-up off, or with no card: "This leaves the balance at
-    −€1.14. New Sandboxes and starts are refused, and running Sandboxes
+    -€1.14. New Sandboxes and starts are refused, and running Sandboxes
     stop after 24 hours; their storage is kept.";
   - confirming applies it, once; going back changes nothing;
   - the balance moving between the question and the answer: the answer

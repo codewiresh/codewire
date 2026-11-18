@@ -6,6 +6,7 @@
 //! and later lanes add their route constants here only when integrating.
 
 mod admin;
+mod admin_credit;
 mod authentication;
 mod billing;
 #[cfg(test)]
@@ -188,7 +189,7 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route(
             "/admin/organizations/_actions/credit/adjust",
-            post(admin::adjust_organization_credit),
+            post(admin_credit::adjust_organization_credit),
         )
         .route(
             "/admin/organizations/_actions/defaults/set",

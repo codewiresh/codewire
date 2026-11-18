@@ -150,7 +150,9 @@ type AdminServiceClient interface {
 	SetOrganizationDedicatedCpu(context.Context, *connect.Request[v1.SetOrganizationDedicatedCpuRequest]) (*connect.Response[v1.SetOrganizationDedicatedCpuResponse], error)
 	// AdjustOrganizationCredit adds or removes compute credit with a reason,
 	// as a ledger entry naming the administrator, and writes an audit entry.
-	// A repeated idempotency key for the organization changes nothing.
+	// A repeated idempotency key for the organization changes nothing. One
+	// that would leave the balance below zero is applied only when the request
+	// confirms that balance.
 	AdjustOrganizationCredit(context.Context, *connect.Request[v1.AdjustOrganizationCreditRequest]) (*connect.Response[v1.AdjustOrganizationCreditResponse], error)
 	// SuspendAccount is the one-step response to abuse (#3297). The account can
 	// no longer sign in, and its sessions, OIDC tokens and API keys are revoked.
@@ -488,7 +490,9 @@ type AdminServiceHandler interface {
 	SetOrganizationDedicatedCpu(context.Context, *connect.Request[v1.SetOrganizationDedicatedCpuRequest]) (*connect.Response[v1.SetOrganizationDedicatedCpuResponse], error)
 	// AdjustOrganizationCredit adds or removes compute credit with a reason,
 	// as a ledger entry naming the administrator, and writes an audit entry.
-	// A repeated idempotency key for the organization changes nothing.
+	// A repeated idempotency key for the organization changes nothing. One
+	// that would leave the balance below zero is applied only when the request
+	// confirms that balance.
 	AdjustOrganizationCredit(context.Context, *connect.Request[v1.AdjustOrganizationCreditRequest]) (*connect.Response[v1.AdjustOrganizationCreditResponse], error)
 	// SuspendAccount is the one-step response to abuse (#3297). The account can
 	// no longer sign in, and its sessions, OIDC tokens and API keys are revoked.

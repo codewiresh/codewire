@@ -118,7 +118,9 @@ service AdminService {
 
   // AdjustOrganizationCredit adds or removes compute credit with a reason,
   // as a ledger entry naming the administrator, and writes an audit entry.
-  // A repeated idempotency key for the organization changes nothing.
+  // A repeated idempotency key for the organization changes nothing. One
+  // that would leave the balance below zero is applied only when the request
+  // confirms that balance.
   rpc AdjustOrganizationCredit(AdjustOrganizationCreditRequest)
       returns (AdjustOrganizationCreditResponse);
 
@@ -389,6 +391,10 @@ message OrganizationBilling {
   int64 credit_balance_nano_eur = 7;
   // The newest credit ledger entries, newest first, at most 20.
   repeated CreditLedgerEntry recent_credit = 8;
+  // Automatic top-up, for what an adjustment below zero sets off (#4754).
+  bool auto_top_up_enabled = 9;
+  // EUR 5 to EUR 1,000, in cents.
+  int32 auto_top_up_cents = 10;
 }
 
 message CreditLedgerEntry {
@@ -531,6 +537,12 @@ message AdjustOrganizationCreditRequest {
   // 1 to 128 letters, digits, '-' or '_'; a retry with the same key
   // applies nothing again.
   string idempotency_key = 4;
+  // The balance this adjustment leaves, in nano-euros, as the administrator
+  // was shown it and accepted. Required when that balance is below zero: an
+  // adjustment that would leave a negative balance writes nothing and is
+  // refused with FailedPrecondition (negative_balance_unconfirmed) unless
+  // this equals the balance it would leave now (#4754).
+  optional int64 confirmed_balance_nano_eur = 5;
 }
 
 message AdjustOrganizationCreditResponse {

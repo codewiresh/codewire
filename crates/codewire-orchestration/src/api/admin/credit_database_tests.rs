@@ -102,21 +102,42 @@ async fn db_credit_adjustments_move_the_balance_once_and_are_audited() -> Result
         db.organization(ORGANIZATION).await?;
         let pool = &db.pool;
 
-        let granted =
-            adjust_organization_credit_core(pool, ADMIN, ORGANIZATION, 25 * EURO, "goodwill", "k1")
-                .await
-                .map_err(app_error)?;
+        let granted = adjust_organization_credit_core(
+            pool,
+            ADMIN,
+            ORGANIZATION,
+            25 * EURO,
+            "goodwill",
+            "k1",
+            None,
+        )
+        .await
+        .map_err(app_error)?;
         ensure!(granted.applied && granted.balance_nano_eur == 25 * EURO);
         // A resubmitted form applies nothing again.
-        let repeated =
-            adjust_organization_credit_core(pool, ADMIN, ORGANIZATION, 25 * EURO, "goodwill", "k1")
-                .await
-                .map_err(app_error)?;
+        let repeated = adjust_organization_credit_core(
+            pool,
+            ADMIN,
+            ORGANIZATION,
+            25 * EURO,
+            "goodwill",
+            "k1",
+            None,
+        )
+        .await
+        .map_err(app_error)?;
         ensure!(!repeated.applied && repeated.balance_nano_eur == 25 * EURO);
-        let removed =
-            adjust_organization_credit_core(pool, ADMIN, ORGANIZATION, -10 * EURO, " fix ", "k2")
-                .await
-                .map_err(app_error)?;
+        let removed = adjust_organization_credit_core(
+            pool,
+            ADMIN,
+            ORGANIZATION,
+            -10 * EURO,
+            " fix ",
+            "k2",
+            None,
+        )
+        .await
+        .map_err(app_error)?;
         ensure!(removed.applied && removed.balance_nano_eur == 15 * EURO);
 
         let credit = organization_credit(pool, ORGANIZATION)
@@ -155,15 +176,23 @@ async fn db_credit_adjustments_move_the_balance_once_and_are_audited() -> Result
             (ORGANIZATION, 1, "", "k3"),
             (ORGANIZATION, 1, "r", "bad key"),
         ] {
-            let outcome =
-                adjust_organization_credit_core(pool, ADMIN, organization, amount, reason, key)
-                    .await;
+            let outcome = adjust_organization_credit_core(
+                pool,
+                ADMIN,
+                organization,
+                amount,
+                reason,
+                key,
+                None,
+            )
+            .await;
             ensure!(
                 matches!(outcome, Err(AppError::Validation { .. })),
                 "{outcome:?}"
             );
         }
-        let missing = adjust_organization_credit_core(pool, ADMIN, "missing", 1, "r", "k3").await;
+        let missing =
+            adjust_organization_credit_core(pool, ADMIN, "missing", 1, "r", "k3", None).await;
         ensure!(matches!(missing, Err(AppError::NotFound(_))), "{missing:?}");
         ensure!(
             organization_credit(pool, ORGANIZATION)
@@ -177,6 +206,98 @@ async fn db_credit_adjustments_move_the_balance_once_and_are_audited() -> Result
                 .await?
                 .len()
                 == 2
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// An adjustment that would leave a negative balance asks first (#4754): it
+/// writes nothing until the administrator confirms the exact balance it
+/// leaves, a balance that moved asks again, and a retry never asks.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_an_adjustment_below_zero_applies_only_once_its_balance_is_confirmed() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        db.user(ADMIN).await?;
+        db.organization(ORGANIZATION).await?;
+        let pool = &db.pool;
+        let adjust = |amount, key, confirmed| {
+            adjust_organization_credit_core(
+                pool,
+                ADMIN,
+                ORGANIZATION,
+                amount,
+                "test",
+                key,
+                confirmed,
+            )
+        };
+        let balance = || async {
+            organization_credit(pool, ORGANIZATION)
+                .await
+                .map(|credit| credit.balance_nano_eur)
+        };
+        adjust(5 * EURO, "grant", None).await.map_err(app_error)?;
+
+        // EUR 5 - EUR 6 leaves -EUR 1: refused unasked, and nothing written.
+        let unasked = adjust(-6 * EURO, "remove", None).await;
+        match &unasked {
+            Err(AppError::Coded { code, detail, .. }) => {
+                ensure!(*code == "negative_balance_unconfirmed", "{unasked:?}");
+                ensure!(detail.contains("-EUR 1.00"), "{detail}");
+            }
+            other => anyhow::bail!("not refused: {other:?}"),
+        }
+        ensure!(balance().await.map_err(app_error)? == 5 * EURO);
+        // Confirming a different balance, as when it moved meanwhile, asks again.
+        let stale = adjust(-6 * EURO, "remove", Some(-2 * EURO)).await;
+        ensure!(
+            matches!(
+                &stale,
+                Err(AppError::Coded {
+                    code: "negative_balance_unconfirmed",
+                    ..
+                })
+            ),
+            "{stale:?}"
+        );
+        ensure!(balance().await.map_err(app_error)? == 5 * EURO);
+        ensure!(
+            audit_entries(pool, "admin.organization.credit_adjustment")
+                .await?
+                .len()
+                == 1
+        );
+
+        // The balance it leaves, confirmed: applied once, and audited.
+        let confirmed = adjust(-6 * EURO, "remove", Some(-EURO))
+            .await
+            .map_err(app_error)?;
+        ensure!(confirmed.applied && confirmed.balance_nano_eur == -EURO);
+        // Its retry returns it without asking, and applies nothing again.
+        let retried = adjust(-6 * EURO, "remove", None).await.map_err(app_error)?;
+        ensure!(!retried.applied && retried.balance_nano_eur == -EURO);
+        ensure!(
+            audit_entries(pool, "admin.organization.credit_adjustment")
+                .await?
+                .len()
+                == 2
+        );
+
+        // From below zero, a grant that still leaves it negative asks too.
+        let grant = adjust(EURO / 2, "partial", None).await;
+        ensure!(
+            matches!(
+                &grant,
+                Err(AppError::Coded {
+                    code: "negative_balance_unconfirmed",
+                    ..
+                })
+            ),
+            "{grant:?}"
         );
         Ok(())
     }

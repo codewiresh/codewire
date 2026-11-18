@@ -352,7 +352,7 @@ class OrganizationSubscription(_message.Message):
     def __init__(self, kind: _Optional[str] = ..., plan: _Optional[str] = ..., status: _Optional[str] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
 
 class OrganizationBilling(_message.Message):
-    __slots__ = ("billing_plan", "billing_status", "billing_exempt", "effective_plan", "subscriptions", "rate_card", "credit_balance_nano_eur", "recent_credit")
+    __slots__ = ("billing_plan", "billing_status", "billing_exempt", "effective_plan", "subscriptions", "rate_card", "credit_balance_nano_eur", "recent_credit", "auto_top_up_enabled", "auto_top_up_cents")
     BILLING_PLAN_FIELD_NUMBER: _ClassVar[int]
     BILLING_STATUS_FIELD_NUMBER: _ClassVar[int]
     BILLING_EXEMPT_FIELD_NUMBER: _ClassVar[int]
@@ -361,6 +361,8 @@ class OrganizationBilling(_message.Message):
     RATE_CARD_FIELD_NUMBER: _ClassVar[int]
     CREDIT_BALANCE_NANO_EUR_FIELD_NUMBER: _ClassVar[int]
     RECENT_CREDIT_FIELD_NUMBER: _ClassVar[int]
+    AUTO_TOP_UP_ENABLED_FIELD_NUMBER: _ClassVar[int]
+    AUTO_TOP_UP_CENTS_FIELD_NUMBER: _ClassVar[int]
     billing_plan: str
     billing_status: str
     billing_exempt: bool
@@ -369,7 +371,9 @@ class OrganizationBilling(_message.Message):
     rate_card: str
     credit_balance_nano_eur: int
     recent_credit: _containers.RepeatedCompositeFieldContainer[CreditLedgerEntry]
-    def __init__(self, billing_plan: _Optional[str] = ..., billing_status: _Optional[str] = ..., billing_exempt: _Optional[bool] = ..., effective_plan: _Optional[str] = ..., subscriptions: _Optional[_Iterable[_Union[OrganizationSubscription, _Mapping]]] = ..., rate_card: _Optional[str] = ..., credit_balance_nano_eur: _Optional[int] = ..., recent_credit: _Optional[_Iterable[_Union[CreditLedgerEntry, _Mapping]]] = ...) -> None: ...
+    auto_top_up_enabled: bool
+    auto_top_up_cents: int
+    def __init__(self, billing_plan: _Optional[str] = ..., billing_status: _Optional[str] = ..., billing_exempt: _Optional[bool] = ..., effective_plan: _Optional[str] = ..., subscriptions: _Optional[_Iterable[_Union[OrganizationSubscription, _Mapping]]] = ..., rate_card: _Optional[str] = ..., credit_balance_nano_eur: _Optional[int] = ..., recent_credit: _Optional[_Iterable[_Union[CreditLedgerEntry, _Mapping]]] = ..., auto_top_up_enabled: _Optional[bool] = ..., auto_top_up_cents: _Optional[int] = ...) -> None: ...
 
 class CreditLedgerEntry(_message.Message):
     __slots__ = ("kind", "amount_nano_eur", "created_at", "reason", "actor_user_id")
@@ -558,16 +562,18 @@ class SetOrganizationDedicatedCpuResponse(_message.Message):
     def __init__(self, organization_id: _Optional[str] = ..., dedicated_cpu: _Optional[bool] = ..., previous_dedicated_cpu: _Optional[bool] = ...) -> None: ...
 
 class AdjustOrganizationCreditRequest(_message.Message):
-    __slots__ = ("organization_id", "amount_nano_eur", "reason", "idempotency_key")
+    __slots__ = ("organization_id", "amount_nano_eur", "reason", "idempotency_key", "confirmed_balance_nano_eur")
     ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
     AMOUNT_NANO_EUR_FIELD_NUMBER: _ClassVar[int]
     REASON_FIELD_NUMBER: _ClassVar[int]
     IDEMPOTENCY_KEY_FIELD_NUMBER: _ClassVar[int]
+    CONFIRMED_BALANCE_NANO_EUR_FIELD_NUMBER: _ClassVar[int]
     organization_id: str
     amount_nano_eur: int
     reason: str
     idempotency_key: str
-    def __init__(self, organization_id: _Optional[str] = ..., amount_nano_eur: _Optional[int] = ..., reason: _Optional[str] = ..., idempotency_key: _Optional[str] = ...) -> None: ...
+    confirmed_balance_nano_eur: int
+    def __init__(self, organization_id: _Optional[str] = ..., amount_nano_eur: _Optional[int] = ..., reason: _Optional[str] = ..., idempotency_key: _Optional[str] = ..., confirmed_balance_nano_eur: _Optional[int] = ...) -> None: ...
 
 class AdjustOrganizationCreditResponse(_message.Message):
     __slots__ = ("organization_id", "balance_nano_eur", "applied")

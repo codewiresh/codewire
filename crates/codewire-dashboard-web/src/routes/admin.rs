@@ -44,7 +44,7 @@ const ORGANIZATIONS_PATH: &str = "/admin/organizations/";
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct AdminQuery {
     #[serde(default)]
-    org: String,
+    pub(super) org: String,
     #[serde(default)]
     message: String,
     #[serde(default)]
@@ -174,17 +174,6 @@ pub(super) struct DedicatedCpuSubmission {
     csrf: String,
     organization_id: String,
     dedicated_cpu: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct CreditSubmission {
-    #[serde(rename = "_csrf")]
-    csrf: String,
-    organization_id: String,
-    /// Euros, signed, at most two decimals.
-    amount: String,
-    reason: String,
-    idempotency_key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -505,6 +494,7 @@ pub(super) async fn organization(
             organization: &organization,
             csrf_token: &token,
             credit_key: &credit_key,
+            credit_confirmation: None,
             message: quota_message(&query.message),
             error: quota_error(&query.error),
         }),
@@ -608,45 +598,6 @@ pub(super) async fn set_organization_dedicated_cpu(
         "dedicated-cpu-cleared"
     };
     quota_response(result, &path, message, &headers)
-}
-
-pub(super) async fn adjust_organization_credit(
-    State(state): State<AppState>,
-    Query(query): Query<AdminQuery>,
-    headers: HeaderMap,
-    Form(submission): Form<CreditSubmission>,
-) -> Response {
-    if !valid_organization_id(&submission.organization_id) {
-        return error_page(WebError::NotFound);
-    }
-    let path = organization_path(&submission.organization_id);
-    let cookie =
-        match admin_action_page_context_for(&state, &headers, &submission.csrf, &query.org, &path)
-            .await
-        {
-            Ok((_, cookie)) => cookie,
-            Err(response) => return response,
-        };
-    let reason = submission.reason.trim();
-    let Some(amount_nano_eur) = admin_connect::euro_amount_nano(&submission.amount) else {
-        return admin_redirect_to(&path, "", "invalid-credit", &headers);
-    };
-    if reason.is_empty()
-        || reason.chars().count() > 500
-        || !valid_organization_id(&submission.idempotency_key)
-    {
-        return admin_redirect_to(&path, "", "invalid-credit", &headers);
-    }
-    let result = admin_connect::adjust_organization_credit(
-        &state,
-        cookie,
-        &submission.organization_id,
-        amount_nano_eur,
-        reason,
-        &submission.idempotency_key,
-    )
-    .await;
-    quota_response(result, &path, "credit-adjusted", &headers)
 }
 
 pub(super) async fn clear_organization_quota(
@@ -1100,7 +1051,7 @@ async fn admin_action_page_context(
 }
 
 #[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
-async fn admin_action_page_context_for(
+pub(super) async fn admin_action_page_context_for(
     state: &AppState,
     headers: &HeaderMap,
     csrf: &str,
@@ -1283,7 +1234,12 @@ fn account_redirect(message: &str, error: &str, headers: &HeaderMap) -> Response
     admin_redirect_to(ACCOUNTS_PATH, message, error, headers)
 }
 
-fn admin_redirect_to(path: &str, message: &str, error: &str, headers: &HeaderMap) -> Response {
+pub(super) fn admin_redirect_to(
+    path: &str,
+    message: &str,
+    error: &str,
+    headers: &HeaderMap,
+) -> Response {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     if !message.is_empty() {
         query.append_pair("message", message);
@@ -1303,7 +1259,7 @@ fn admin_redirect_to(path: &str, message: &str, error: &str, headers: &HeaderMap
 
 /// Organization ids reach a URL path, so only the characters ids are made of
 /// are accepted.
-fn valid_organization_id(value: &str) -> bool {
+pub(super) fn valid_organization_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value
@@ -1311,7 +1267,7 @@ fn valid_organization_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
-fn organization_path(organization_id: &str) -> String {
+pub(super) fn organization_path(organization_id: &str) -> String {
     format!("{ORGANIZATIONS_PATH}{organization_id}/")
 }
 
@@ -1327,7 +1283,7 @@ fn valid_quota(quota: QuotaMutation) -> bool {
     .all(|value| value == -1 || value > 0)
 }
 
-fn quota_response(
+pub(super) fn quota_response(
     result: Result<(), ConnectError>,
     path: &str,
     message: &str,

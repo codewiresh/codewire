@@ -86,6 +86,8 @@ pub(crate) struct AdminOrganizationTemplate<'a> {
     /// A fresh key for the credit form, so a resubmitted form applies its
     /// adjustment once (#3381).
     pub(crate) credit_key: &'a str,
+    /// An adjustment below zero awaiting the administrator's answer (#4754).
+    pub(crate) credit_confirmation: Option<&'a crate::admin_connect::CreditConfirmationView>,
     pub(crate) message: &'a str,
     pub(crate) error: &'a str,
 }
