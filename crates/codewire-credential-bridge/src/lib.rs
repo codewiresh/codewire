@@ -830,6 +830,7 @@ impl CredentialBridge {
             // Only a front-door session names the host it intercepted.
             intercepted_host: intercepted_host.unwrap_or_default().to_owned(),
             streamed_body: false,
+            intercept_decision: Vec::new(),
         };
         if streams {
             return Ok((frame, Some(request.into_body())));

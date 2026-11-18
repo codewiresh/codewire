@@ -210,6 +210,7 @@ fn request(
         body: body.to_vec(),
         intercepted_host: String::new(),
         streamed_body: false,
+        intercept_decision: Vec::new(),
     }
 }
 

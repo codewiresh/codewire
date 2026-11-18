@@ -39,6 +39,7 @@ fn github(
         .into(),
         intercepted_host: host.into(),
         streamed_body: false,
+        intercept_decision: Vec::new(),
     }
 }
 

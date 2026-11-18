@@ -182,6 +182,7 @@ impl Harness {
             body,
             intercepted_host: String::new(),
             streamed_body: streamed,
+            intercept_decision: Vec::new(),
         }))
         .await;
         request_id

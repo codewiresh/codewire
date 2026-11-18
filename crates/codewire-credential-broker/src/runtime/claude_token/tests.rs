@@ -251,6 +251,7 @@ fn token_request(body: &[u8]) -> v1::CredentialBridgeRequest {
         route: CLAUDE_TOKEN_ROUTE.into(),
         intercepted_host: "platform.claude.com".into(),
         streamed_body: false,
+        intercept_decision: Vec::new(),
     }
 }
 

@@ -1436,6 +1436,7 @@ pub(crate) mod tests {
                     body: Vec::new(),
                     intercepted_host: String::new(),
                     streamed_body: false,
+                    intercept_decision: Vec::new(),
                 },
             )),
         }
@@ -1905,6 +1906,7 @@ pub(crate) mod tests {
                 route: "openai-api".into(),
                 intercepted_host: "chatgpt.com".into(),
                 initial_credit_bytes: 65_536,
+                intercept_decision: Vec::new(),
             }),
             Payload::StreamData(v1::CredentialBridgeStreamData {
                 request_id: request_id.clone(),

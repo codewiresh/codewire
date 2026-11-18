@@ -459,6 +459,7 @@ fn upgrade_frame(
         route: classified.route.to_owned(),
         intercepted_host: host.to_owned(),
         initial_credit_bytes: CREDENTIAL_BRIDGE_STREAM_WINDOW_BYTES,
+        intercept_decision: Vec::new(),
     })
 }
 

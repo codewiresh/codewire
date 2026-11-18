@@ -214,7 +214,7 @@ class CredentialBridgeReady(_message.Message):
     def __init__(self, protocol_version: _Optional[int] = ..., environment_id: _Optional[str] = ..., environment_generation: _Optional[int] = ...) -> None: ...
 
 class CredentialBridgeRequest(_message.Message):
-    __slots__ = ("request_id", "method", "path", "query", "headers", "body", "capability_slot", "route", "intercepted_host", "streamed_body")
+    __slots__ = ("request_id", "method", "path", "query", "headers", "body", "capability_slot", "route", "intercepted_host", "streamed_body", "intercept_decision")
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     METHOD_FIELD_NUMBER: _ClassVar[int]
     PATH_FIELD_NUMBER: _ClassVar[int]
@@ -225,6 +225,7 @@ class CredentialBridgeRequest(_message.Message):
     ROUTE_FIELD_NUMBER: _ClassVar[int]
     INTERCEPTED_HOST_FIELD_NUMBER: _ClassVar[int]
     STREAMED_BODY_FIELD_NUMBER: _ClassVar[int]
+    INTERCEPT_DECISION_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     method: str
     path: str
@@ -235,7 +236,8 @@ class CredentialBridgeRequest(_message.Message):
     route: str
     intercepted_host: str
     streamed_body: bool
-    def __init__(self, request_id: _Optional[str] = ..., method: _Optional[str] = ..., path: _Optional[str] = ..., query: _Optional[str] = ..., headers: _Optional[_Iterable[_Union[CredentialHttpHeader, _Mapping]]] = ..., body: _Optional[bytes] = ..., capability_slot: _Optional[str] = ..., route: _Optional[str] = ..., intercepted_host: _Optional[str] = ..., streamed_body: _Optional[bool] = ...) -> None: ...
+    intercept_decision: bytes
+    def __init__(self, request_id: _Optional[str] = ..., method: _Optional[str] = ..., path: _Optional[str] = ..., query: _Optional[str] = ..., headers: _Optional[_Iterable[_Union[CredentialHttpHeader, _Mapping]]] = ..., body: _Optional[bytes] = ..., capability_slot: _Optional[str] = ..., route: _Optional[str] = ..., intercepted_host: _Optional[str] = ..., streamed_body: _Optional[bool] = ..., intercept_decision: _Optional[bytes] = ...) -> None: ...
 
 class CredentialBridgeRequestBody(_message.Message):
     __slots__ = ("request_id", "data")
@@ -260,7 +262,7 @@ class CredentialBridgeRequestCredit(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., frames: _Optional[int] = ...) -> None: ...
 
 class CredentialBridgeUpgrade(_message.Message):
-    __slots__ = ("request_id", "method", "path", "query", "headers", "capability_slot", "route", "intercepted_host", "initial_credit_bytes")
+    __slots__ = ("request_id", "method", "path", "query", "headers", "capability_slot", "route", "intercepted_host", "initial_credit_bytes", "intercept_decision")
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     METHOD_FIELD_NUMBER: _ClassVar[int]
     PATH_FIELD_NUMBER: _ClassVar[int]
@@ -270,6 +272,7 @@ class CredentialBridgeUpgrade(_message.Message):
     ROUTE_FIELD_NUMBER: _ClassVar[int]
     INTERCEPTED_HOST_FIELD_NUMBER: _ClassVar[int]
     INITIAL_CREDIT_BYTES_FIELD_NUMBER: _ClassVar[int]
+    INTERCEPT_DECISION_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     method: str
     path: str
@@ -279,7 +282,8 @@ class CredentialBridgeUpgrade(_message.Message):
     route: str
     intercepted_host: str
     initial_credit_bytes: int
-    def __init__(self, request_id: _Optional[str] = ..., method: _Optional[str] = ..., path: _Optional[str] = ..., query: _Optional[str] = ..., headers: _Optional[_Iterable[_Union[CredentialHttpHeader, _Mapping]]] = ..., capability_slot: _Optional[str] = ..., route: _Optional[str] = ..., intercepted_host: _Optional[str] = ..., initial_credit_bytes: _Optional[int] = ...) -> None: ...
+    intercept_decision: bytes
+    def __init__(self, request_id: _Optional[str] = ..., method: _Optional[str] = ..., path: _Optional[str] = ..., query: _Optional[str] = ..., headers: _Optional[_Iterable[_Union[CredentialHttpHeader, _Mapping]]] = ..., capability_slot: _Optional[str] = ..., route: _Optional[str] = ..., intercepted_host: _Optional[str] = ..., initial_credit_bytes: _Optional[int] = ..., intercept_decision: _Optional[bytes] = ...) -> None: ...
 
 class CredentialBridgeCancel(_message.Message):
     __slots__ = ("request_id",)

@@ -189,6 +189,14 @@ message CredentialBridgeRequest {
   // for a GitHub Git POST on an epoch whose Open lists "request-body-stream";
   // every other request carries its whole body here, at most 4 MiB.
   bool streamed_body = 10;
+  // The egress broker's signed record of whether a rule of the network
+  // policy allows the host this request's connection was intercepted for
+  // (#3999): 76 bytes, copied unread from the hand-off header of the stream
+  // the request arrived on. The front door cannot make or change one; only
+  // the credential broker, which holds the key, reads it. Empty on every
+  // session but a front-door one, and on a front-door session whose egress
+  // broker signs none. Nothing sets it yet.
+  bytes intercept_decision = 12;
 }
 
 // One chunk of a streamed request body, 1 byte to 64 KiB. The guest sends one
@@ -227,6 +235,9 @@ message CredentialBridgeUpgrade {
   string route = 7;
   string intercepted_host = 8;
   uint32 initial_credit_bytes = 9;
+  // As CredentialBridgeRequest.intercept_decision, for the stream this
+  // upgrade arrived on. Nothing sets it yet.
+  bytes intercept_decision = 11;
 }
 
 message CredentialBridgeCancel {

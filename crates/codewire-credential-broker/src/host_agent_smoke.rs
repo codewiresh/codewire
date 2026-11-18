@@ -550,6 +550,7 @@ async fn handle(
         .into(),
         intercepted_host: String::new(),
         streamed_body: false,
+        intercept_decision: Vec::new(),
     };
     let response = match timeout(PREPARE_DEADLINE, state.broker.execute(request)).await {
         Ok(Ok(response)) => response,

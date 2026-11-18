@@ -136,6 +136,7 @@ where
                 route: upgrade.route,
                 intercepted_host: upgrade.intercepted_host,
                 streamed_body: false,
+                intercept_decision: upgrade.intercept_decision,
             },
             false,
         )?;

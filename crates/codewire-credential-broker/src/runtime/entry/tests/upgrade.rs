@@ -33,6 +33,7 @@ fn handshake(path: &str, credential: Option<String>) -> v1::CredentialBridgeUpgr
         route: request.route,
         intercepted_host: request.intercepted_host,
         initial_credit_bytes: codewire_daemon_proto::CREDENTIAL_BRIDGE_STREAM_WINDOW_BYTES,
+        intercept_decision: Vec::new(),
     }
 }
 

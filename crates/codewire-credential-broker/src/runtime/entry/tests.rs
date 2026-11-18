@@ -134,6 +134,7 @@ impl Case {
             route: self.route.into(),
             intercepted_host: intercepted_host.into(),
             streamed_body: false,
+            intercept_decision: Vec::new(),
         }
     }
 }

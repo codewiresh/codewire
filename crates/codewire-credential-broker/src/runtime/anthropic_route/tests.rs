@@ -370,6 +370,7 @@ async fn try_send(
             body: BODY.to_vec(),
             intercepted_host: String::new(),
             streamed_body: false,
+            intercept_decision: Vec::new(),
         })
         .await?;
     let (status, _, mut body) = response.into_parts();

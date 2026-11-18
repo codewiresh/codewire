@@ -484,6 +484,7 @@ async fn shared_frame_validation_and_server_message_ceiling_remain_active() {
                     body: vec![],
                     intercepted_host: String::new(),
                     streamed_body: false,
+                    intercept_decision: Vec::new(),
                 },
             )),
         })
@@ -508,6 +509,7 @@ async fn shared_frame_validation_and_server_message_ceiling_remain_active() {
                     body: vec![b'x'; CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES + 1],
                     intercepted_host: String::new(),
                     streamed_body: false,
+                    intercept_decision: Vec::new(),
                 },
             )),
         })
@@ -850,6 +852,7 @@ fn leased_request() -> v1::CredentialBridgeGuestMessage {
                 body: vec![],
                 intercepted_host: String::new(),
                 streamed_body: false,
+                intercept_decision: Vec::new(),
             },
         )),
     }

@@ -749,6 +749,7 @@ mod tests {
                 route: "openai-api".to_owned(),
                 intercepted_host: "chatgpt.com".to_owned(),
                 initial_credit_bytes: 65_536,
+                intercept_decision: Vec::new(),
             }),
             Payload::StreamData(bridge_v1::CredentialBridgeStreamData {
                 request_id: "r".to_owned(),
@@ -957,6 +958,7 @@ mod tests {
             route: "openai-api".to_owned(),
             intercepted_host: String::new(),
             streamed_body: false,
+            intercept_decision: Vec::new(),
         };
         let previous_request = previous::Request {
             request_id: request.request_id.clone(),

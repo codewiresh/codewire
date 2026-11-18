@@ -697,6 +697,7 @@ async fn open_refresh(
                     body: br#"{"input":"hello"}"#.to_vec(),
                     intercepted_host: String::new(),
                     streamed_body: false,
+                    intercept_decision: Vec::new(),
                 },
             )),
         })
