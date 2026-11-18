@@ -2343,8 +2343,9 @@ The store is the `local_credential_store` key in the local config,
 local_credential_store = "file"  # macOS: "keychain" (default) or "file"
 ```
 
-Linux accepts only `secret-service`: its brokers and repository executors read
-Secret Service directly.
+Linux accepts only `secret-service` today: its brokers and repository
+executors read Secret Service directly. [Linux file store](#linux-file-store-not-yet-built-5255)
+describes `file` on Linux, not yet built.
 
 - **keychain** — the login Keychain, as Claude Code uses it. Generic-password
   items have service `sh.codewire.credentials` and the exact entry ID as
@@ -2405,6 +2406,47 @@ broker can read the unlocked Secret Service collection. Tests and synthetic acce
 `CODEWIRE_LOCAL_CREDENTIAL_KEYCHAIN` to a throwaway keychain file for the
 keychain backend; it must not be under `Library/Keychains` or reached through
 a symlink, and the recorded store includes that path.
+
+## Linux file store (not yet built, #5255)
+
+A Linux credential root can keep its credentials inside itself, as on macOS,
+so a scratch root does not write to the desktop keyring and deleting the root
+deletes them. cw-security agreed this design on #5255 (2026-11-18).
+
+- **The setting.** `local_credential_store = "file"` is accepted on Linux,
+  beside `secret-service`. The store is the same `file` backend as on macOS:
+  one 0600 file per entry in `protected-v1` (0700) inside the credential
+  root, owned by the user, written by atomic replace and opened without
+  following links. A wrong mode, owner or file type is refused, never
+  repaired. A `file` root needs no session bus or keyring.
+- **Not encrypted by `cw`.** Entries are plaintext; at-rest protection is file
+  permissions and disk encryption. `cw credentials --local list` and
+  `cw doctor` say so for a `file` store (`Store: files in ROOT/protected-v1,
+  not encrypted by cw (protected by file permissions and your disk
+  encryption)`), and `--output json` carries `"store": "file"`.
+- **Only where it is set.** There is no automatic default: every root, from
+  a released or a development build, uses Secret Service unless its
+  `local_credential_store` says `file` (cw-security, 2026-11-18, #5255).
+  Scripts and smokes that make a scratch root set it themselves. No upgrade
+  moves anyone's credentials from the keyring into files.
+- **Changing it.** Setting it switches a root's store by the copy, read-back
+  and compare described above for macOS.
+- **The keyring warning.** A `--local` command that writes a credential from
+  a root that is not the account's own, while that root's store is Secret
+  Service, first prints one line on stderr: `Saving to your desktop keyring
+  (Secret Service), not inside ROOT. Set local_credential_store = "file" to
+  keep this root's credentials with it.` `--output json` prints none.
+- **Children.** The broker and the repository executor read a `file` store
+  through the same store arguments as on macOS (the store and its
+  `protected-v1` directory), and get no bus variables. A Secret Service root's
+  children keep their arguments and environment.
+- **The broker's Landlock domain** gains, for a `file` store only, one rule
+  allowing reading files and listing directories beneath that
+  `protected-v1` directory, and nothing else: no write, and no other path.
+  Seccomp is unchanged. As on macOS, the broker only reads the store; the
+  authority writes it.
+- **Admission.** A `cw` that admits an already running authority uses the
+  configured store, so a `file` root is never reopened on Secret Service.
 
 ## Dashboard
 

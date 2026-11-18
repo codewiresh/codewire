@@ -25,6 +25,7 @@ observed**.
 | `profile-default` | not yet observed | not yet observed | not yet observed |
 | `cred-delivery-diagnosis` | not yet observed | not yet observed | local VMs only |
 | `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, and the early replacements on that build plus their change, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | not yet observed | local VMs only |
+| `cred-file-store` | not yet built (#5255) | the macOS file store; not part of this check | local stores only |
 
 ## Before the walk
 
@@ -609,3 +610,49 @@ hosted Sandbox's broker is the platform's.
     both (`resolution_for_a_start_leaves_a_failed_host_unresolved_and_serves_the_rest`,
     `a_forced_refresh_is_not_begun_toward_a_provider_with_no_address`,
     `a_github_app_refresh_is_not_begun_toward_an_endpoint_with_no_address`).
+
+## 12. `cred-file-store`: a Linux root that keeps its credentials inside itself
+
+Not yet built (#5255). The spec is
+[Linux file store](../dev/SECRETS-AND-CREDENTIALS.md#linux-file-store-not-yet-built-5255).
+
+- **Entry points:** `local_credential_store = "file"` in the root's
+  `config.toml`, `cw credentials --local list`, and `cw doctor`.
+- **States to exercise:**
+  - a new root with `file` set: credentials go to `ROOT/protected-v1` and
+    nowhere else;
+  - a second root with nothing set, from a released or a development
+    build: Secret Service, and the one-line keyring warning before each
+    write;
+  - an existing Secret Service root after the update, setting unset: it
+    stays on Secret Service;
+  - a `protected-v1` file or directory with the wrong mode or owner:
+    refused, not repaired;
+  - a local VM started from a `file` root: its broker serves a lease from
+    the file store.
+- **Driving it:** Linux only, with a throwaway `HOME`, synthetic credentials
+  named `parity-file-*`, and no session bus for the `file` states (unset
+  `DBUS_SESSION_BUS_ADDRESS`). The Secret Service states run only in the
+  private keyring of [Before the walk](#before-the-walk).
+
+  ```sh
+  printf 'local_credential_store = "file"\n' >> "$HOME/.codewire/config.toml"
+  printf '%s' "$SYNTHETIC_KEY" | cw credentials --local add anthropic --name parity-file-key
+  cw credentials --local list
+  ls -l "$HOME/.codewire/credentials-v1/protected-v1"
+  cw doctor
+  ```
+- **Proof:**
+  - `list` and `doctor` say `Store: files in ROOT/protected-v1, not
+    encrypted by cw (protected by file permissions and your disk
+    encryption)`, and `list --output json` carries `"store": "file"`.
+  - `protected-v1` is 0700 and each entry 0600, all owned by the user.
+  - With no session bus, the add succeeds and nothing asks for a keyring.
+  - The upgraded Secret Service root lists the same store before and after
+    the update.
+  - A `chmod 0644` entry makes the next read fail with the store's refusal,
+    and the mode stays 0644.
+  - Removing the throwaway `HOME` leaves no Codewire entry in the private
+    keyring.
+- **Gotchas:** entries are plaintext: never walk it with a real credential.
+- **Observed:** not yet observed.
