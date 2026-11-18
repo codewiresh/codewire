@@ -24,7 +24,7 @@ observed**.
 | `smoke-credential-codex` | not yet observed | no command yet (#5220) |
 | `smoke-attach-restart` | observed, v0.4.22, 2026-11-18 (by hand) | `scripts/ci/verify/smoke-local-credentials.sh` |
 | `smoke-upgrade` | not yet observed | no command yet (#5220) |
-| `smoke-proxy-down` | not yet observed | no command yet (#5220) |
+| `smoke-proxy-down` | observed, `main` at 1250f23ed, 2026-11-18 (by hand) | `scripts/ci/verify/smoke-local-credentials.sh` |
 | `smoke-provider-unresolved` | observed, `main` at 4cae0f601, 2026-11-18 (by hand) | `scripts/ci/verify/smoke-local-credentials.sh` |
 
 ## Before the walk
@@ -186,16 +186,40 @@ same (#5238).
 
 ## 5. `smoke-proxy-down`: the proxy down fails closed
 
-- **States to exercise:** the egress broker or the credential broker killed
-  while the VM runs.
-- **Driving it:** kill the process, make a credentialed request from the
-  guest, then `cw stop` and `cw start`.
-- **Proof:** the request fails within seconds with a readable refusal, and
-  stop and start restore it. Nothing leaves the guest another way: the
-  synthetic providers record no call while the process is down, and a direct
-  connection from the guest to a provider's address, around the proxy, is
-  refused.
-- **Observed:** not yet observed.
+- **States to exercise:** the credential broker killed while the VM runs,
+  then the egress broker.
+- **Driving it:** a loop in the guest, about four times a second, makes an
+  HTTPS request to Codewire's release channel by name, an HTTP request
+  straight to that host's IPv4 address, and asks the agent for its keys
+  (`ssh-add -l`), logging each start time and result to the workspace. The
+  host measures the guest clock's offset through `cw exec` (to within half a
+  second), kills the one helper of that kind the `cw` under test runs for
+  the VM, then reads the log in the host's clock. After the egress broker's
+  kill, `cw stop` and `cw start`.
+- **Proof:**
+  - **The credential broker mends by itself,** as
+    [SECRETS-AND-CREDENTIALS.md](../dev/SECRETS-AND-CREDENTIALS.md) says:
+    the credential service starts another, the agent answers again, and no
+    agent request fails more than five seconds after the kill. No restart is
+    needed.
+  - **The egress broker fails closed:** no request the guest starts a
+    second or more after the kill gets an answer, whether through the proxy
+    or straight to an address, and the VM turns `error`. `cw stop` and
+    `cw start` restore HTTPS from the guest.
+  - **A readable refusal: not met (#5359).** The guest's requests just time
+    out, `cw exec` answers `Failed_precondition: local environment is not
+    in the required state`, and `cw ls` names no cause. The smoke logs what
+    `cw exec` says and checks it once #5359 lands.
+  - **No provider call while it is down:** with synthetic providers, Part B
+    (#5220).
+- **Observed:** `main` at 1250f23ed, 2026-11-18, by hand on a Linux host,
+  with a static `cw` built from it and a runtime built from main the same
+  day: `smoke-local-credentials.sh --cw <it> --runtime-from <runtime>
+  --scratch <dir>` printed `ok smoke-proxy-down` after the other steps, and
+  nothing was left on the host. Exploring it with v0.4.22 the same day, one
+  agent request failed in the 0.2 s after the credential broker's kill, and
+  every request failed from the first one after the egress broker's. Not
+  yet run in CI (#5220).
 
 ## 6. `smoke-provider-unresolved`: a provider's name doesn't resolve when the VM starts
 

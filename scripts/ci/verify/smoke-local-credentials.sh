@@ -27,6 +27,8 @@ Runs the journey steps that need only the cw under test:
   smoke-provider-unresolved
   smoke-profile-after-create
   smoke-attach-restart
+  smoke-proxy-down
+smoke-proxy-down needs HTTPS from the guest to releases.codewire.sh.
 --cw-sha256 checks a downloaded release before it runs. --runtime-from
 installs the local VM runtime from a release directory (for a cw built from
 source, which pins none); without it, the first create downloads the runtime
@@ -278,6 +280,190 @@ step_provider_unresolved() {
   printf 'ok %s\n' "$step"
 }
 
+# What the guest probes: Codewire's own release channel, as the native smoke's
+# network qualification does.
+readonly PROBE_URL='https://releases.codewire.sh/cw/v1/channels/stable.json'
+
+# The scope's processes that are the cw under test running ROLE, and for an
+# environment's helper, ENVIRONMENT_ID's: one PID a line.
+role_pids() {
+  local role="$1" environment_id="${2:-}" pid
+  local -a argv
+  while read -r pid; do
+    argv=()
+    mapfile -d '' -t argv 2>/dev/null <"$SMOKE_PROC_ROOT/$pid/cmdline" || continue
+    [[ ${#argv[@]} -ge 2 && "${argv[1]}" == "$role" ]] || continue
+    [[ "$(readlink -f -- "${argv[0]}")" == "$(readlink -f -- "$CW")" ]] || continue
+    [[ -z "$environment_id" || ( "${argv[2]:-}" == --environment-id && "${argv[3]:-}" == "$environment_id" ) ]] ||
+      continue
+    printf '%s\n' "$pid"
+  done < <(smoke_scope_pids)
+}
+
+# SIGKILL the one process role_pids finds for ROLE (and ENVIRONMENT_ID), and
+# print `PID EPOCH`, the host's time just before the signal. The signal goes
+# through a pidfd opened after the PID was matched, and only once that same
+# process is seen still in the smoke's scope with the argv it was matched by,
+# so a reused PID fails the step instead of being killed.
+kill_role() {
+  local step="$1" role="$2" environment_id="${3:-}" pid argv at
+  pid="$(role_pids "$role" "$environment_id")"
+  [[ -n "$pid" && "$pid" != *$'\n'* ]] ||
+    step_fail "$step" "expected exactly one $role, found: ${pid:-none}"
+  argv="$(od -An -tx1 -v <"$SMOKE_PROC_ROOT/$pid/cmdline" | tr -d ' \n')" ||
+    step_fail "$step" "$role $pid ended before it could be killed"
+  at="$(python3 -I -c '
+import os, signal, sys, time
+proc, pid, argv = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+fd = os.pidfd_open(pid)
+with open(f"{proc}/self/cgroup") as mine, open(f"{proc}/{pid}/cgroup") as its:
+    same_scope = mine.read() == its.read()
+with open(f"{proc}/{pid}/cmdline", "rb") as source:
+    same_argv = source.read().hex() == argv
+if not (same_scope and same_argv):
+    sys.exit("not the process that was matched")
+at = time.time()
+signal.pidfd_send_signal(fd, signal.SIGKILL)
+print(f"{at:.6f}")
+' "$SMOKE_PROC_ROOT" "$pid" "$argv")" || step_fail "$step" "$role $pid could not be killed as matched"
+  printf '$ kill -KILL %s (%s) at %s\n' "$pid" "$role" "$at" >>"$LOG"
+  printf '%s %s\n' "$pid" "$at"
+}
+
+# The guest's probe lines, `START NAMED DIRECT AGENT`: the guest's wall-clock
+# start, the HTTP code of the request by name through the proxy and of the
+# request straight to an address (000 for no answer), and `ssh-add -l`'s
+# status, read from FILE in the shared workspace. OFFSET is the guest clock's
+# lead on the host's (guest_offset), so START - OFFSET is host time, as
+# KILLED is. Checks pass or fail on them:
+# - agent_mended FILE KILLED OFFSET: some probe after KILLED reached the
+#   agent, and none more than five seconds after it failed;
+# - egress_closed FILE KILLED OFFSET: at least five probes started from a
+#   second after KILLED, and neither request of any of them got an answer.
+agent_mended() {
+  awk -v killed="$2" -v offset="$3" '
+    $1 - offset > killed && $4 == 0 { served = 1 }
+    $1 - offset > killed + 5 && $4 != 0 { late = 1 }
+    END { exit !(served && !late) }' "$1"
+}
+egress_closed() {
+  awk -v killed="$2" -v offset="$3" '
+    $1 - offset >= killed + 1 { after++; if ($2 != "000" || $3 != "000") answered = 1 }
+    END { exit !(after >= 5 && !answered) }' "$1"
+}
+
+# How far the guest's clock leads the host's: `OFFSET HALF_WIDTH` from
+# SAMPLES lines of `HOST_BEFORE GUEST HOST_AFTER`, by the narrowest sample,
+# since the guest read its clock somewhere between the host's two readings.
+narrowest_offset() {
+  awk '
+    { width = ($3 - $1) / 2
+      if (NR == 1 || width < best) { best = width; offset = $2 - ($1 + $3) / 2 } }
+    END { if (NR == 0) exit 1; printf "%.6f %.6f\n", offset, best }'
+}
+
+# The guest clock's offset for VM, measured five times through `cw exec`;
+# fails STEP unless the narrowest measurement is within half a second.
+guest_offset() {
+  local step="$1" vm="$2" before guest after
+  for _ in 1 2 3 4 5; do
+    before="$(date +%s.%N)"
+    guest="$(smoke_cw "$CW" exec --in "$vm" -- date +%s.%N 2>>"$LOG")" ||
+      step_fail "$step" "cw exec date failed in $vm"
+    after="$(date +%s.%N)"
+    printf '%s %s %s\n' "$before" "$guest" "$after"
+  done | narrowest_offset | {
+    read -r offset width
+    printf '$ guest clock offset %s, within %s s\n' "$offset" "$width" >>"$LOG"
+    awk -v width="$width" 'BEGIN { exit !(width <= 0.5) }' ||
+      step_fail "$step" "the guest's clock offset is known only to within $width s"
+    printf '%s\n' "$offset"
+  }
+}
+
+# Wait up to SECONDS for FILE to hold COUNT lines that pass AWK_CONDITION.
+wait_for_probes() {
+  local file="$1" condition="$2" count="$3" seconds="$4" waited
+  for ((waited = 0; waited < seconds; waited++)); do
+    [[ "$(awk "$condition" "$file" 2>/dev/null | wc -l)" -ge "$count" ]] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# With a VM running, its credential broker is killed and then its egress
+# broker. A credential broker is replaced by the credential service, and the
+# agent answers again within seconds with no restart
+# (docs/dev/SECRETS-AND-CREDENTIALS.md, "It mends by itself"). An egress
+# broker is not: from a second after the kill nothing the guest sends gets an
+# answer, the VM turns `error`, and `cw stop` and `cw start` restore it.
+step_proxy_down() {
+  local step=smoke-proxy-down name=smoke-p key=smoke-n-key vm probes stop id killed pid replaced
+  local address offset
+  # The earlier steps' VMs are stopped, so this VM's helpers are the only ones.
+  for vm in "${VMS[@]}"; do
+    step_cw "$step" stop --local "$vm"
+  done
+  VMS+=("$name")
+  probes="$SMOKE_WORKSPACE/proxy-down.probes"
+  stop="$SMOKE_WORKSPACE/proxy-down.stop"
+  step_cw "$step" credentials --local --profile "$name" set ssh "$key"
+  step_cw "$step" create --local --name "$name" --no-file --profile "local:$name" --yes
+  id="$(smoke_cw "$CW" ls --local --output json 2>>"$LOG" | python3 -c '
+import json, sys
+print(next(entry["id"] for entry in json.load(sys.stdin) if entry.get("name") == sys.argv[1]))
+' "$name")" || step_fail "$step" "cw ls names no $name"
+  # The same host straight by its address, with no name to look up: any HTTP
+  # answer on port 80 is a connection that got out.
+  address="$(getent ahostsv4 "$(sed -E 's|^https://([^/]+)/.*|\1|' <<<"$PROBE_URL")" | awk 'NR == 1 { print $1 }')"
+  [[ -n "$address" ]] || step_fail "$step" "the host cannot resolve $PROBE_URL's name"
+  # Four probes a second at most, for at most five minutes, until the stop file.
+  # shellcheck disable=SC2016 # the guest's shell expands these
+  step_cw "$step" run --in "$name" --name probes --detach -- sh -c '
+    count=0
+    while [ ! -e "$2" ] && [ "$count" -lt 1200 ]; do
+      started="$(date +%s.%N)"
+      named="$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 2 --max-time 3 "$3" 2>/dev/null)"
+      direct="$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 2 --max-time 3 "http://$4/" 2>/dev/null)"
+      ssh-add -l >/dev/null 2>&1
+      printf "%s %s %s %s\n" "$started" "${named:-000}" "${direct:-000}" "$?" >>"$1"
+      count=$((count + 1))
+      sleep 0.25
+    done' probes "/workspace/workspace/${probes##*/}" "/workspace/workspace/${stop##*/}" "$PROBE_URL" "$address"
+  # shellcheck disable=SC2016 # an awk condition
+  wait_for_probes "$probes" '$2 == "200" && $3 != "000" && $4 == 0' 3 60 ||
+    step_fail "$step" "the guest's probes never reached $PROBE_URL, $address and the agent before any kill"
+  offset="$(guest_offset "$step" "$name")" || exit 1
+
+  read -r pid killed < <(kill_role "$step" __local-credential-broker)
+  sleep 10
+  replaced="$(role_pids __local-credential-broker)"
+  [[ -n "$replaced" && "$replaced" != "$pid" ]] ||
+    step_fail "$step" 'no other credential broker serves after the kill'
+  agent_mended "$probes" "$killed" "$offset" ||
+    step_fail "$step" "the guest's agent did not answer again within five seconds of the credential broker's kill"
+
+  read -r pid killed < <(kill_role "$step" __native-egress-broker "$id")
+  wait_for_probes "$probes" "\$1 - $offset >= $killed + 1" 5 60 ||
+    step_fail "$step" 'the guest made no probes after the egress broker was killed'
+  egress_closed "$probes" "$killed" "$offset" ||
+    step_fail "$step" 'a guest request got an answer a second or more after the egress broker was killed'
+  [[ "$(vm_state "$name")" == error ]] ||
+    step_fail "$step" 'the VM did not turn error when its egress broker was killed'
+  # What a person sees now; not yet a check (the refusal names no cause).
+  printf '$ cw exec --in %s -- true\n' "$name" >>"$LOG"
+  smoke_cw "$CW" exec --in "$name" -- true >>"$LOG" 2>&1 || true
+  : >"$stop"
+  cat -- "$probes" >>"$LOG"
+
+  step_cw "$step" stop --local "$name"
+  step_cw "$step" start --local "$name"
+  step_cw "$step" exec --in "$name" -- curl -sS -o /dev/null -w 'egress %{http_code}\n' --max-time 10 "$PROBE_URL"
+  tail -n 1 "$LOG" | grep -qx 'egress 200' ||
+    step_fail "$step" "stop and start did not restore the guest's HTTPS"
+  printf 'ok %s\n' "$step"
+}
+
 main() {
   local -a arguments=("$@")
   while [[ $# -gt 0 ]]; do
@@ -308,6 +494,7 @@ main() {
   step_provider_unresolved
   step_profile_after_create
   step_attach_restart
+  step_proxy_down
 }
 
 # Sourced by its tests, run otherwise.

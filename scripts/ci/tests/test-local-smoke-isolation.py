@@ -458,5 +458,99 @@ class Attach(unittest.TestCase):
         self.assertNotIn("signed-5", result.stdout)
 
 
+class ProxyDown(unittest.TestCase):
+    """smoke-proxy-down kills exactly this VM's helper of the cw under test, and
+    judges the guest's probe lines as the journey says."""
+
+    def setUp(self):
+        self.root = scratch_directory(self, "smoke-proxy-down-")
+
+    def runner(self, body):
+        script = f'source "{Runner.RUNNER}"\n' + body
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30,
+                              env={**os.environ, "CODEWIRE_SMOKE_SCOPE": UNIT})
+
+    def test_role_pids_finds_only_the_cw_under_tests_helper_for_this_environment(self):
+        cw, other = self.root / "cw", self.root / "cw-other"
+        for binary in (cw, other):
+            binary.write_bytes(b"")
+        egress = "__native-egress-broker"
+        roots = Isolation.fake_scope(self, {
+            41: ([str(cw), egress, "--environment-id", "env-a"], cw),
+            42: ([str(cw), egress, "--environment-id", "env-b"], cw),
+            43: ([str(other), egress, "--environment-id", "env-a"], other),
+            44: ([str(cw), "__local-credential-broker", "--authority-fd", "3"], cw),
+        })
+        for query, found in ((f"{egress} env-a", "41\n"), ("__local-credential-broker", "44\n"),
+                             (f"{egress} env-c", "")):
+            with self.subTest(query=query):
+                result = self.runner(roots + f'CW="{cw}"\nrole_pids {query}')
+                self.assertEqual(result.stdout, found, result.stderr)
+
+    def kill_target(self, cgroup_of_target):
+        """A real process standing in for a helper, seen through a fake /proc
+        whose scope holds it; CGROUP_OF_TARGET is what its own cgroup file says."""
+        cw = self.root / "cw"
+        cw.write_bytes(b"")
+        target = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(lambda: (target.kill(), target.wait()))
+        roots = Isolation.fake_scope(self, {target.pid: (
+            [str(cw), "__native-egress-broker", "--environment-id", "env-a"], cw)})
+        (self.root / "proc" / str(target.pid) / "cgroup").write_text(cgroup_of_target)
+        log = self.root / "log"
+        script = (roots + f'CW="{cw}"\nLOG="{log}"\n'
+                  'kill_role smoke-proxy-down __native-egress-broker env-a')
+        return target, self.runner(script)
+
+    def test_kill_role_kills_the_matched_process_through_its_pidfd(self):
+        scope = f"0::/user.slice/user-1000.slice/user@1000.service/app.slice/{UNIT}.scope\n"
+        target, result = self.kill_target(scope)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.startswith(f"{target.pid} "), result.stdout)
+        self.assertEqual(target.wait(timeout=10), -9)
+
+    def test_kill_role_refuses_a_process_no_longer_in_the_scope(self):
+        target, result = self.kill_target("0::/user.slice/elsewhere.scope\n")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("could not be killed as matched", result.stderr)
+        self.assertIsNone(target.poll())
+
+    def judge(self, check, lines, killed="100.0", offset="0"):
+        probes = self.root / "probes"
+        probes.write_text("".join(f"{line}\n" for line in lines))
+        return self.runner(f'{check} "{probes}" {killed} {offset}').returncode
+
+    def test_the_agent_mends_when_it_answers_after_the_kill_and_never_fails_late(self):
+        before, gap, back = "99.5 200 301 0", "100.1 200 301 2", "100.4 200 301 0"
+        self.assertEqual(self.judge("agent_mended", [before, gap, back, "104.9 200 301 0"]), 0)
+        self.assertNotEqual(self.judge("agent_mended", [before, gap, back, "105.2 200 301 2"]), 0)
+        self.assertNotEqual(self.judge("agent_mended", [before, gap, "103.0 200 301 2"]), 0)
+
+    def test_egress_is_closed_only_when_five_later_probes_got_no_answer_either_way(self):
+        within_a_second = "100.5 200 301 0"
+        closed = [f"{100 + second}.2 000 000 0" for second in range(1, 6)]
+        self.assertEqual(self.judge("egress_closed", [within_a_second, *closed]), 0)
+        self.assertNotEqual(self.judge("egress_closed", [*closed, "106.2 200 000 0"]), 0)
+        self.assertNotEqual(self.judge("egress_closed", [*closed, "106.2 000 301 0"]), 0)
+        self.assertNotEqual(self.judge("egress_closed", [within_a_second, *closed[:4]]), 0)
+
+    def test_guest_times_are_shifted_into_the_hosts_clock(self):
+        # The guest leads by 3 s: guest 103.4 is host 100.4, inside the first
+        # second after the kill, so its answer does not count against egress.
+        early = "103.4 200 301 0"
+        closed = [f"{103 + second}.2 000 000 0" for second in range(1, 6)]
+        self.assertEqual(self.judge("egress_closed", [early, *closed], offset="3"), 0)
+        self.assertNotEqual(self.judge("egress_closed", [early, *closed], offset="0"), 0)
+        # Guest 106.0 is host 103.0, under five seconds after the kill.
+        late_by_guest = ["103.2 200 301 0", "106.0 200 301 2", "106.5 200 301 0"]
+        self.assertEqual(self.judge("agent_mended", late_by_guest, offset="3"), 0)
+        self.assertNotEqual(self.judge("agent_mended", late_by_guest, offset="0"), 0)
+
+    def test_the_offset_comes_from_the_narrowest_measurement(self):
+        samples = "10.0 13.9 12.0\n20.0 23.3 20.4\n30.0 33.5 31.0\n"
+        result = subprocess.run(["bash", "-c", f'source "{Runner.RUNNER}"\nnarrowest_offset'],
+                                input=samples, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.stdout, "3.100000 0.200000\n", result.stderr)
+
 if __name__ == "__main__":
     unittest.main()
