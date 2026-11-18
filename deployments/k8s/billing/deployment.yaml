@@ -52,9 +52,9 @@ spec:
             - name: AWS_IGNORE_CONFIGURED_ENDPOINT_URLS
               value: "true"
             # Billing receives only its own SES key pair plus the activation
-            # marker. These fields stay optional while the reviewed Resend
-            # rollback path remains installed; if the marker is present, the
-            # client requires the complete SES projection and never falls back.
+            # marker. These fields are optional: without the marker, email
+            # delivery is disabled; with it, the client requires the complete
+            # SES projection.
             - name: CODEWIRE_SES_ENABLED
               valueFrom:
                 secretKeyRef:

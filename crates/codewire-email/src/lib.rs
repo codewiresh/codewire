@@ -1,10 +1,8 @@
 //! Transactional Codewire email delivery.
 //!
-//! During the SES migration, an explicit workload-specific marker selects SES
-//! and requires its complete, narrow AWS credential projection. Without that
-//! marker, the client uses the existing Codewire Resend credential as a
-//! rollback provider. An active SES sender never falls back to Resend after a
-//! configuration or delivery error.
+//! An explicit workload-specific marker selects SES and requires its
+//! complete, narrow AWS credential projection. Without that marker, delivery
+//! is disabled: SES is the only provider (#2053).
 
 use std::fmt;
 use std::sync::Arc;
@@ -17,7 +15,7 @@ use aws_sigv4::http_request::{
 };
 use aws_sigv4::sign::v4;
 use aws_smithy_runtime_api::client::identity::Identity;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue};
+use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 
 mod layout;
 
@@ -42,17 +40,10 @@ pub const ACCESS_KEY_ID_ENV: &str = "AWS_ACCESS_KEY_ID";
 /// Standard AWS credential field projected from the dedicated SES Secret.
 pub const SECRET_ACCESS_KEY_ENV: &str = "AWS_SECRET_ACCESS_KEY";
 
-/// Legacy Resend credential retained only until SES delivery and the access
-/// signup flow are proved in an environment. Remove it immediately afterward
-/// through a separately qualified environment transaction.
-pub const RESEND_API_KEY_ENV: &str = "RESEND_API_KEY";
-
-/// Environment variable holding the From header for the legacy Resend sender:
-/// one mailbox, optionally with a display name (`Codewire <hello@example.com>`).
-/// Its domain must be verified in the Resend account. It has no default: when
-/// [`RESEND_API_KEY_ENV`] enables Resend, an unset or empty value refuses
-/// startup (docs/CONFIGURATION.md).
-pub const RESEND_FROM_ENV: &str = "CODEWIRE_RESEND_FROM";
+/// The retired Resend credential. Set without the SES marker, it stops
+/// startup rather than leave a server that used Resend with email silently
+/// off (#2053).
+const RETIRED_RESEND_API_KEY_ENV: &str = "RESEND_API_KEY";
 
 const SESSION_TOKEN_ENV: &str = "AWS_SESSION_TOKEN";
 const DISABLE_IMDS_ENV: &str = "AWS_EC2_METADATA_DISABLED";
@@ -71,7 +62,6 @@ const ECS_CREDENTIALS_RELATIVE_URI_ENV: &str = "AWS_CONTAINER_CREDENTIALS_RELATI
 const ECS_CREDENTIALS_FULL_URI_ENV: &str = "AWS_CONTAINER_CREDENTIALS_FULL_URI";
 const ECS_AUTHORIZATION_TOKEN_ENV: &str = "AWS_CONTAINER_AUTHORIZATION_TOKEN";
 const ECS_AUTHORIZATION_TOKEN_FILE_ENV: &str = "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE";
-const RESEND_EMAIL_ENDPOINT: &str = "https://api.resend.com/emails";
 
 // SendEmail has no client idempotency key. One bounded HTTP attempt avoids
 // turning an uncertain transport outcome into an automatic duplicate.
@@ -87,7 +77,6 @@ pub struct EmailClient {
 
 enum Delivery {
     Disabled,
-    Resend(ResendDelivery),
     Ses(SesDelivery),
     #[cfg(feature = "test-support")]
     Recording(Outbox),
@@ -120,18 +109,9 @@ impl Outbox {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EmailProvider {
     Disabled,
-    Resend,
     Ses,
     #[cfg(feature = "test-support")]
     Recording,
-}
-
-/// The legacy credential stays within the dedicated delivery client. It is
-/// deliberately neither `Clone` nor `Debug`.
-struct ResendDelivery {
-    api_key: String,
-    from: String,
-    client: reqwest::Client,
 }
 
 /// The material required to sign a request stays within the narrowly scoped
@@ -153,9 +133,9 @@ impl fmt::Debug for EmailClient {
 }
 
 impl EmailClient {
-    /// Builds a client from the migration configuration. An explicit SES
-    /// marker chooses SES exclusively; otherwise the legacy Resend credential
-    /// remains available as the bounded rollback provider.
+    /// Builds a client from the environment: SES when its marker is set,
+    /// otherwise a disabled client, unless the retired Resend credential is
+    /// still set.
     pub async fn from_env() -> Result<Self> {
         if let Some(config) = EmailConfig::from_env()? {
             let credentials = EmailCredentials::from_env()?;
@@ -181,18 +161,8 @@ impl EmailClient {
                 })),
             });
         }
-
-        let Some(credentials) = ResendCredentials::from_env()? else {
-            return Ok(Self::disabled());
-        };
-        let from = read_optional_env(RESEND_FROM_ENV)?;
-        Ok(Self {
-            delivery: Arc::new(Delivery::Resend(ResendDelivery {
-                api_key: credentials.api_key,
-                from: resend_sender(from.as_deref())?,
-                client: resend_http_client()?,
-            })),
-        })
+        refuse_retired_resend(read_optional_env(RETIRED_RESEND_API_KEY_ENV)?.as_deref())?;
+        Ok(Self::disabled())
     }
 
     /// Returns a client that cannot send mail. This is intentionally explicit
@@ -219,7 +189,6 @@ impl EmailClient {
     pub fn provider(&self) -> EmailProvider {
         match self.delivery.as_ref() {
             Delivery::Disabled => EmailProvider::Disabled,
-            Delivery::Resend(..) => EmailProvider::Resend,
             Delivery::Ses(..) => EmailProvider::Ses,
             #[cfg(feature = "test-support")]
             Delivery::Recording(..) => EmailProvider::Recording,
@@ -241,25 +210,6 @@ impl EmailClient {
     async fn send_parts(&self, to: &str, subject: &str, html: &str, text: &str) -> Result<()> {
         match self.delivery.as_ref() {
             Delivery::Disabled => bail!("transactional email delivery is not configured"),
-            Delivery::Resend(delivery) => {
-                validate_mailbox(to, "recipient")?;
-                validate_subject(subject)?;
-                let request = resend_email_request(
-                    &delivery.client,
-                    &delivery.api_key,
-                    &delivery.from,
-                    to,
-                    subject,
-                    html,
-                    text,
-                )?;
-                let response = delivery
-                    .client
-                    .execute(request)
-                    .await
-                    .context("send Resend email")?;
-                ensure_resend_success(response.status())
-            }
             Delivery::Ses(delivery) => {
                 validate_mailbox(to, "recipient")?;
                 validate_subject(subject)?;
@@ -334,35 +284,6 @@ impl EmailCredentials {
     }
 }
 
-/// Legacy Resend credentials are accepted only while SES is inactive. This
-/// keeps the rollback path explicit and prevents malformed credentials from
-/// being silently treated as an unavailable sender.
-struct ResendCredentials {
-    api_key: String,
-}
-
-impl ResendCredentials {
-    fn from_env() -> Result<Option<Self>> {
-        let api_key = read_optional_env(RESEND_API_KEY_ENV)?;
-        Self::parse(api_key.as_deref())
-    }
-
-    fn parse(api_key: Option<&str>) -> Result<Option<Self>> {
-        let Some(api_key) = api_key.filter(|value| !value.is_empty()) else {
-            return Ok(None);
-        };
-        if api_key
-            .chars()
-            .any(|character| character.is_control() || character.is_whitespace())
-        {
-            bail!("{RESEND_API_KEY_ENV} must not contain whitespace or control characters");
-        }
-        Ok(Some(Self {
-            api_key: api_key.to_owned(),
-        }))
-    }
-}
-
 impl EmailConfig {
     fn from_env() -> Result<Option<Self>> {
         let enabled = read_optional_env(ENABLED_ENV)?;
@@ -402,6 +323,18 @@ impl EmailConfig {
             region: region.to_owned(),
         }))
     }
+}
+
+/// Names the variable, never its value.
+fn refuse_retired_resend(api_key: Option<&str>) -> Result<()> {
+    if api_key.is_some_and(|value| !value.is_empty()) {
+        bail!(
+            "{RETIRED_RESEND_API_KEY_ENV} is set, but Resend is no longer supported: \
+             configure SES with {ENABLED_ENV}, {FROM_ENV} and {REGION_ENV}, or unset \
+             {RETIRED_RESEND_API_KEY_ENV} to run without email (see docs/CONFIGURATION.md)"
+        );
+    }
+    Ok(())
 }
 
 fn read_optional_env(name: &str) -> Result<Option<String>> {
@@ -528,19 +461,6 @@ fn ses_http_client() -> Result<reqwest::Client> {
         .context("construct SES HTTP client")
 }
 
-fn resend_http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .connect_timeout(EMAIL_CONNECT_TIMEOUT)
-        .read_timeout(EMAIL_READ_TIMEOUT)
-        .timeout(EMAIL_OPERATION_TIMEOUT)
-        .https_only(true)
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .build()
-        .context("construct Resend HTTP client")
-}
-
 fn ses_email_payload(
     from: &str,
     to: &str,
@@ -573,44 +493,6 @@ fn ses_email_payload(
         },
     }))
     .context("serialize SES email")
-}
-
-fn resend_email_payload(
-    from: &str,
-    to: &str,
-    subject: &str,
-    html: &str,
-    text: &str,
-) -> Result<Vec<u8>> {
-    serde_json::to_vec(&serde_json::json!({
-        "from": from,
-        "to": [to],
-        "subject": subject,
-        "html": html,
-        "text": text,
-    }))
-    .context("serialize Resend email")
-}
-
-fn resend_email_request(
-    client: &reqwest::Client,
-    api_key: &str,
-    from: &str,
-    to: &str,
-    subject: &str,
-    html: &str,
-    text: &str,
-) -> Result<reqwest::Request> {
-    let mut authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
-        .context("encode Resend authorization header")?;
-    authorization.set_sensitive(true);
-    client
-        .post(RESEND_EMAIL_ENDPOINT)
-        .header(CONTENT_TYPE, "application/json")
-        .header(AUTHORIZATION, authorization)
-        .body(resend_email_payload(from, to, subject, html, text)?)
-        .build()
-        .context("build Resend email request")
 }
 
 fn signed_ses_request(
@@ -750,31 +632,6 @@ fn ses_error_class(code: &str) -> &'static str {
     }
 }
 
-fn ensure_resend_success(status: reqwest::StatusCode) -> Result<()> {
-    if status.is_success() {
-        Ok(())
-    } else {
-        bail!("Resend email request failed with HTTP {}", status.as_u16())
-    }
-}
-
-/// Returns the configured Resend From header. It is one plain mailbox, or a
-/// display name followed by one mailbox in angle brackets. There is no
-/// built-in sender: unset or empty is a configuration error.
-fn resend_sender(value: Option<&str>) -> Result<String> {
-    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        bail!(
-            "{RESEND_FROM_ENV} is required when {RESEND_API_KEY_ENV} is set; \
-             set it to a sender whose domain is verified in the Resend account \
-             (see docs/CONFIGURATION.md)"
-        );
-    };
-    if !valid_sender(value) {
-        bail!("{RESEND_FROM_ENV} must be one email address, optionally as `Name <address>`");
-    }
-    Ok(value.to_owned())
-}
-
 /// One sender mailbox, bare or as `Name <address>`, such as
 /// `Codewire <hello@codewire.sh>` (#4553). The name is plain text: no
 /// quotes, brackets, separators or address of its own.
@@ -830,16 +687,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inactive_ses_marker_leaves_the_legacy_provider_available() {
+    fn inactive_ses_marker_disables_delivery() {
         assert_eq!(
             EmailConfig::parse(None, Some("hello@example.invalid"), Some("eu-west-1")).unwrap(),
             None
         );
-        assert!(
-            ResendCredentials::parse(Some("re_legacy_credential"))
-                .unwrap()
-                .is_some()
+        assert_eq!(
+            EmailConfig::parse(
+                Some("false"),
+                Some("hello@example.invalid"),
+                Some("eu-west-1")
+            )
+            .unwrap(),
+            None
         );
+    }
+
+    #[test]
+    fn a_retired_resend_key_without_ses_refuses_startup_and_names_no_value() {
+        assert!(refuse_retired_resend(None).is_ok());
+        assert!(refuse_retired_resend(Some("")).is_ok());
+        let error = refuse_retired_resend(Some("re_retired_credential"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(RETIRED_RESEND_API_KEY_ENV), "{error}");
+        assert!(error.contains(ENABLED_ENV), "{error}");
+        assert!(error.contains("docs/CONFIGURATION.md"), "{error}");
+        assert!(!error.contains("re_retired_credential"), "{error}");
     }
 
     #[test]
@@ -884,6 +758,10 @@ mod tests {
             "\"Codewire\" <hello@example.invalid>",
             "Codewire <hello@example.invalid>, Other <other@example.invalid>",
             "Codewire <hello@example.invalid>\r\nBcc: other@example.invalid",
+            "Codewire <hello@example.invalid",
+            "Codewire <two words@example.invalid>",
+            "Code\"wire <hello@example.invalid>",
+            "hello@localhost",
         ] {
             assert!(
                 EmailConfig::parse(Some("true"), Some(invalid), Some("eu-west-1")).is_err(),
@@ -916,22 +794,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_delivery_requires_a_well_formed_resend_credential() {
-        assert!(ResendCredentials::parse(None).unwrap().is_none());
-        assert!(ResendCredentials::parse(Some("")).unwrap().is_none());
-        assert!(
-            ResendCredentials::parse(Some("re_good_credential"))
-                .unwrap()
-                .is_some()
-        );
-        assert!(ResendCredentials::parse(Some("re credential")).is_err());
-        assert!(ResendCredentials::parse(Some("re_credential\n")).is_err());
-    }
-
-    #[test]
     fn transactional_delivery_uses_one_bounded_http_attempt() {
         assert!(ses_http_client().is_ok());
-        assert!(resend_http_client().is_ok());
         assert_eq!(EMAIL_CONNECT_TIMEOUT, Duration::from_secs(2));
         assert_eq!(EMAIL_READ_TIMEOUT, Duration::from_secs(4));
         assert_eq!(EMAIL_OPERATION_TIMEOUT, Duration::from_secs(8));
@@ -996,82 +860,6 @@ mod tests {
             value["Content"]["Simple"]["Body"]["Text"],
             serde_json::json!({"Data": "review", "Charset": "UTF-8"})
         );
-    }
-
-    #[test]
-    fn legacy_resend_request_preserves_the_reviewed_sender_and_secret_boundary() {
-        let client = resend_http_client().unwrap();
-        let request = resend_email_request(
-            &client,
-            "re_test_credential",
-            "Codewire <hello@example.invalid>",
-            "owner@example.com",
-            "Review your Codewire request",
-            "<p>review</p>",
-            "review",
-        )
-        .unwrap();
-
-        assert_eq!(request.url().as_str(), RESEND_EMAIL_ENDPOINT);
-        assert_eq!(request.headers()[CONTENT_TYPE], "application/json");
-        let authorization = request.headers().get(AUTHORIZATION).unwrap();
-        assert!(authorization.is_sensitive());
-        assert_eq!(authorization, "Bearer re_test_credential");
-        let body = request.body().unwrap().as_bytes().unwrap();
-        let value: serde_json::Value = serde_json::from_slice(body).unwrap();
-        assert_eq!(value["from"], "Codewire <hello@example.invalid>");
-        assert_eq!(value["to"], serde_json::json!(["owner@example.com"]));
-        assert_eq!(value["subject"], "Review your Codewire request");
-        assert_eq!(value["html"], "<p>review</p>");
-        assert_eq!(value["text"], "review");
-    }
-
-    #[test]
-    fn legacy_resend_sender_is_required_and_accepts_one_configured_mailbox() {
-        for missing in [None, Some(""), Some(" ")] {
-            let error = resend_sender(missing).unwrap_err().to_string();
-            assert!(error.contains(RESEND_FROM_ENV), "{missing:?}: {error}");
-            assert!(
-                error.contains("docs/CONFIGURATION.md"),
-                "{missing:?}: {error}"
-            );
-        }
-        assert_eq!(
-            resend_sender(Some("Example <mail@example.com>")).unwrap(),
-            "Example <mail@example.com>"
-        );
-        assert_eq!(
-            resend_sender(Some("mail@example.com")).unwrap(),
-            "mail@example.com"
-        );
-        for invalid in [
-            "Example",
-            "<mail@example.com>",
-            "Example <mail@example.com",
-            "Example <mail@example.com>, Other <other@example.com>",
-            "Example <mail@example.com>\r\nBcc: other@example.com",
-            "Example <two words@example.com>",
-            "Exa\"mple <mail@example.com>",
-            "mail@localhost",
-        ] {
-            let error = resend_sender(Some(invalid)).unwrap_err().to_string();
-            assert!(error.contains(RESEND_FROM_ENV), "{invalid}: {error}");
-        }
-
-        let client = resend_http_client().unwrap();
-        let request = resend_email_request(
-            &client,
-            "re_test_credential",
-            "Example <mail@example.com>",
-            "owner@example.com",
-            "Review your Codewire request",
-            "<p>review</p>",
-            "review",
-        )
-        .unwrap();
-        let body = request.body().unwrap().as_bytes().unwrap();
-        let value: serde_json::Value = serde_json::from_slice(body).unwrap();
-        assert_eq!(value["from"], "Example <mail@example.com>");
     }
 
     #[test]
@@ -1188,16 +976,6 @@ mod tests {
             synthetic_ses_response(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n".to_vec())
                 .await;
         assert!(ensure_ses_success(response).await.is_ok());
-    }
-
-    #[test]
-    fn legacy_resend_response_status_must_indicate_delivery_success() {
-        assert!(ensure_resend_success(reqwest::StatusCode::ACCEPTED).is_ok());
-        let error = ensure_resend_success(reqwest::StatusCode::TOO_MANY_REQUESTS).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "Resend email request failed with HTTP 429"
-        );
     }
 
     #[test]

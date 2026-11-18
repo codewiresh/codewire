@@ -387,7 +387,7 @@ the purge". The page names no money (owner, 2026-11-15, #3013).
 
 Issue: #2053. The receipt is walked as `billing-receipt` in
 [billing-and-credits.md](billing-and-credits.md); this step is that walk on
-Production, which #2053 needs before Resend is retired.
+Production.
 
 - **Entry points:** **Add credit** on the Billing page, or an automatic
   top-up; the receipt goes to the organization's first owner, whoever paid.

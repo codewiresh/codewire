@@ -159,12 +159,9 @@ Additional slice-specific requirements:
   `CODEWIRE_SES_REGION` are set. The activated workload also needs its own
   `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` projection; it does not use
   an AWS profile, metadata service, or configured endpoint override. An unset
-  or `false` marker selects the legacy Resend rollback sender when
-  `RESEND_API_KEY` is present; it sends from `CODEWIRE_RESEND_FROM`, which has
-  no default and whose domain the Resend account must have verified
-  ([configuration reference](../CONFIGURATION.md)). Leave both delivery credentials unset for local development.
-- SES and the Resend rollback sender each make one bounded
-  eight-second HTTP attempt. `SendEmail` has no idempotency token, so a timeout
+  or `false` marker disables delivery
+  ([configuration reference](../CONFIGURATION.md)). Leave it unset for local development.
+- SES makes one bounded eight-second HTTP attempt. `SendEmail` has no idempotency token, so a timeout
   can still leave delivery uncertain; verification, access, and receipt email
   flows are at-least-once from the recipient's perspective when a caller
   retries.
