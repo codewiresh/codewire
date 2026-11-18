@@ -20,8 +20,9 @@
 //!   `google.rpc.BadRequest` field violation — 01's renderer end to end
 //!   through a real mount (D8),
 //! - the D7 per-RPC log event carries the correct credential kind per row,
-//! - credentialed Connect GET responses carry `Cache-Control: private`
-//!   (D6b cache posture).
+//! - every response the layer handles carries `Cache-Control: no-store`:
+//!   authenticated, public and anonymous methods, GETs, and the layer's own
+//!   401, 403 and 504 rejections (AUTH-POLICY "Credential rules", #5054).
 //!
 //! Skipped unless `DATABASE_URL` is set (same convention as the idp
 //! `db_flow` suite); the migration-integration gate runs it against a
@@ -380,6 +381,17 @@ async fn start_probe_app(pool: PgPool, synthetic_user_ids: &[String]) -> SocketA
     addr
 }
 
+/// The layer's cache rule: nothing it answers may be stored (#5054).
+fn assert_no_store(resp: &reqwest::Response, row: &str) {
+    assert_eq!(
+        resp.headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store, private"),
+        "{row} must be Cache-Control: no-store, private"
+    );
+}
+
 fn ping_url(addr: SocketAddr, method: &str) -> String {
     format!("http://{addr}/{SERVICE}/{method}")
 }
@@ -569,6 +581,7 @@ async fn connect_auth_matrix() {
     // Row 1 — allowlisted public method bypasses authentication.
     let resp = post_ping(&client, &ping_url(addr, "PublicPing"), "{}", None, None).await;
     assert_eq!(resp.status(), 200, "PublicPing must not require auth");
+    assert_no_store(&resp, "a public method");
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["message"], "public pong");
     assert_log_line(&["method=PublicPing", "code=ok", "credential=none"]);
@@ -758,6 +771,7 @@ async fn connect_auth_matrix() {
     )
     .await;
     assert_eq!(resp.status(), 401);
+    assert_no_store(&resp, "the layer's 401");
     let request_id = resp
         .headers()
         .get("x-request-id")
@@ -847,6 +861,7 @@ async fn connect_auth_matrix() {
     )
     .await;
     assert_eq!(resp.status(), 403);
+    assert_no_store(&resp, "the layer's 403");
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["code"], "permission_denied");
     assert_eq!(body["message"], "forbidden");
@@ -886,8 +901,8 @@ async fn connect_auth_matrix() {
     ]);
     assert_ne!(user_fingerprint, admin_fingerprint);
 
-    // Row 11 — credentialed Connect GET carries Cache-Control: private
-    // (D6b cache posture).
+    // Row 11 — credentialed Connect GET is no-store, not just private, so a
+    // browser on a shared machine keeps no per-user answer either.
     let get_url = format!(
         "{}?connect=v1&encoding=json&message=%7B%22message%22%3A%22via-get%22%7D",
         ping_url(addr, "Ping")
@@ -902,28 +917,19 @@ async fn connect_auth_matrix() {
         .await
         .expect("request");
     assert_eq!(resp.status(), 200);
-    assert_eq!(
-        resp.headers()
-            .get("cache-control")
-            .and_then(|v| v.to_str().ok()),
-        Some("private"),
-        "credentialed Connect GET must be Cache-Control: private"
-    );
+    assert_no_store(&resp, "a credentialed Connect GET");
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["message"], "via-get");
 
-    // Row 12 — an uncredentialed allowlisted GET gets no cache directive
-    // from the layer (nothing credentialed to protect).
+    // Row 12 — an uncredentialed public GET is no-store too: no method is on a
+    // cacheable allowlist.
     let get_url = format!(
         "{}?connect=v1&encoding=json&message=%7B%7D",
         ping_url(addr, "PublicPing")
     );
     let resp = client.get(&get_url).send().await.expect("request");
     assert_eq!(resp.status(), 200);
-    assert!(
-        resp.headers().get("cache-control").is_none(),
-        "public bypass adds no cache-control header"
-    );
+    assert_no_store(&resp, "a public Connect GET");
 }
 
 #[tokio::test]
@@ -964,6 +970,7 @@ async fn stalled_auth_lookup_is_bounded_before_unknown_method_dispatch() {
     .await;
     let elapsed = started.elapsed();
     assert_eq!(resp.status(), 504);
+    assert_no_store(&resp, "the layer's 504");
     assert!(
         elapsed < std::time::Duration::from_secs(12),
         "stalled auth was not bounded at 10 seconds: {elapsed:?}"
@@ -1041,6 +1048,7 @@ async fn anonymous_methods_use_a_presented_credential_and_refuse_an_invalid_one(
     // No credential: the request reaches the handler.
     let resp = post_ping(&client, &ping_url(addr, "PublicPing"), "{}", None, None).await;
     assert_eq!(resp.status(), 200, "no credential continues anonymously");
+    assert_no_store(&resp, "an anonymous method");
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["message"], "public pong");
 

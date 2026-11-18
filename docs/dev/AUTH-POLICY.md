@@ -47,6 +47,23 @@ workspace daemon uses to fetch its binding.
   `GET /api/v1/organizations/{org}/environments/{env}/ssh-proxy/check`, the
   terminal and SSH-proxy upgrades, and the preview authorization page
   (#5054).
+- The shared Connect auth layer (`ConnectAuthLayer`,
+  `crates/codewire-server-core/src/connect.rs`) answers every request it
+  handles with `Cache-Control: no-store, private`, whatever the method or
+  outcome: authenticated calls, public and anonymous-allowed methods, and
+  its own 401, 403 and 504 rejections. A handler's `no-store` directive is
+  kept; any other directive it sets, such as `public` or `max-age`, is
+  replaced, and the edge-only directives that CDNs obey over
+  `Cache-Control` (`Cloudflare-CDN-Cache-Control`, `CDN-Cache-Control`,
+  `Surrogate-Control`) are removed. A cache decides by the response, not by intent, so storing is
+  never the default (cw-security ruling, 2026-11-18, #5054). The public and
+  anonymous-allowed methods today are `GetInvitationByToken` (keyed by a
+  secret token; it returns the invitee's address), `SubmitFeedback`
+  (varies by caller when one signs in) and `GetSignupCredit` (the same for
+  every caller). None is cached. A method whose answer is the same for every
+  caller may be cached only through an explicit per-method allowlist in the
+  layer, added in a reviewed change that names its directive and tests that
+  the response does not depend on credentials.
 - An OAuth credential without exact `codewire.api` may use the identity
   endpoints its scopes permit, but product calls fail with REST `403` /
   Connect `permission_denied`.

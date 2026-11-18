@@ -36,8 +36,10 @@ route walker in `crates/codewire-dashboard-web/src/routes/cache_policy_tests.rs`
 
     ```sh
     curl -sS -o /dev/null -D - -H @"$COOKIE_FILE" "$ORIGIN$ROUTE" | grep -i -E '^(cache-control|cf-cache-status):'
-    rm -- "$COOKIE_FILE"
     ```
+
+    After the last signed-in request, delete the file by its path:
+    `rm -- "$COOKIE_FILE"`.
 
   - Signed in to Mesh and the SSH proxy check, which take a bearer, not the
     cookie: run under `scripts/runtime/dev/with-dev-smoke-auth.sh`, which
@@ -58,6 +60,8 @@ route walker in `crates/codewire-dashboard-web/src/routes/cache_policy_tests.rs`
   - a redirect: `/dashboard/` signed out, which sends the caller to sign in;
   - the 404: `/no-such-page`;
   - the anonymous homepage: `/`;
+  - a Connect method behind the shared auth layer (#5317), with the cookie:
+    `/codewire.v1.OrganizationService/ListOrganizations?encoding=json&message=%7B%7D`;
   - Mesh's list as a Connect GET (#5123), with the bearer:
     `/codewire.v1.MeshNetworkService/ListMeshNetworks?encoding=json&message=%7B%22orgId%22%3A%22$ORG%22%7D`;
   - the SSH proxy check (#5123), with the bearer:

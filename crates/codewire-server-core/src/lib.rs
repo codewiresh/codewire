@@ -35,6 +35,7 @@ pub mod bounded_http1;
 pub mod client_address;
 pub mod config;
 pub mod connect;
+mod connect_cache_policy;
 pub mod connect_error;
 pub mod connect_testing;
 pub mod credit_enforcement;

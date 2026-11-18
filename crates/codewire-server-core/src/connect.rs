@@ -42,8 +42,9 @@
 //!   `admin`, plus an explicit per-method public allowlist. Rejections are
 //!   rendered through 01's Connect error renderer (D4): canonical code +
 //!   `google.rpc.ErrorInfo` detail carrying today's `code`/`hint` and the
-//!   request id — never the REST JSON envelope. Handlers read the
-//!   authenticated caller back via [`auth_user`].
+//!   request id — never the REST JSON envelope. Every response the layer
+//!   handles, rejections included, is `Cache-Control: no-store`. Handlers
+//!   read the authenticated caller back via [`auth_user`].
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -1098,7 +1099,11 @@ fn normalize_method_path(path: String) -> String {
     }
 }
 
-async fn enforce_connect_auth(
+async fn enforce_connect_auth(layer: Arc<ConnectAuthLayer>, req: Request, next: Next) -> Response {
+    crate::connect_cache_policy::forbid_storage(authorize_and_dispatch(layer, req, next).await)
+}
+
+async fn authorize_and_dispatch(
     layer: Arc<ConnectAuthLayer>,
     mut req: Request,
     next: Next,
@@ -1121,7 +1126,6 @@ async fn enforce_connect_auth(
         .map(str::to_owned);
     let request_headers = req.headers().clone();
     let auth_timeout = connect_auth_resolution_timeout(req.headers());
-    let is_get = req.method() == Method::GET;
     let resolved = match bounded_authentication(
         async {
             match layer.credential_policy {
@@ -1203,15 +1207,6 @@ async fn enforce_connect_auth(
     let mut resp = next.run(req).await;
     resp.extensions_mut().insert(credential);
     resp.extensions_mut().insert(principal_evidence);
-
-    // D6b cache posture: a credentialed Connect GET response must never be
-    // cacheable by a shared cache. Handlers that need a stricter directive
-    // (e.g. `no-store` on credential-bearing payloads) set their own header,
-    // which wins here.
-    if is_get && !resp.headers().contains_key(header::CACHE_CONTROL) {
-        resp.headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("private"));
-    }
     resp
 }
 
