@@ -26,7 +26,9 @@ die() { log "ERROR: $*"; exit 1; }
 select_host_timeout() {
   TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
   [[ -n "$TIMEOUT_BIN" ]] || die 'missing timeout or gtimeout; install coreutils for bounded fixture commands'
-  "$TIMEOUT_BIN" 1 sh -c ':' >/dev/null 2>&1 || die 'host timeout tool is unusable'
+  # Proves the tool runs and takes a duration. The bound is generous: a loaded
+  # runner can take more than a second to start a child.
+  "$TIMEOUT_BIN" 60 true >/dev/null 2>&1 || die 'host timeout tool is unusable'
 }
 usage() {
   cat <<'HELP'
