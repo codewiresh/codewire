@@ -415,7 +415,14 @@ async fn owner_local_admit_rejects_malformed_grants_before_credential_lookup() {
             "bad trailing grant" => vec![valid.clone(), invalid],
             _ => vec![invalid],
         };
-        fixture.assert_admit_error(BrokerLeaseError::Denied).await;
+        // With no grant for the requested slot the lease names it unselected;
+        // every other malformed grant is a bare denial. Neither reaches a
+        // credential lookup.
+        let expected = match attack {
+            "slot" | "empty" => BrokerLeaseError::NotSelected,
+            _ => BrokerLeaseError::Denied,
+        };
+        fixture.assert_admit_error(expected).await;
         expected_calls += 1;
         assert_eq!(
             fixture.authority.description_calls.load(Ordering::SeqCst),

@@ -457,7 +457,9 @@ fn passing_if_expired(error: BrokerRequestError, admitted: &DerivedGrant) -> Bro
 fn managed_failure(error: BrokerRequestError) -> Result<BrokerHttpResponse, BrokerRequestError> {
     let invalid_grant = matches!(
         error,
-        BrokerRequestError::ReconnectRequired | BrokerRequestError::Denied
+        BrokerRequestError::ReconnectRequired(_)
+            | BrokerRequestError::Denied
+            | BrokerRequestError::NotSelected
     );
     if invalid_grant {
         // At info: this answer makes Claude Code drop its login, which the
@@ -467,7 +469,9 @@ fn managed_failure(error: BrokerRequestError) -> Result<BrokerHttpResponse, Brok
         tracing::debug!(outcome = "claude_token_managed_refused", error = %error);
     }
     match error {
-        BrokerRequestError::ReconnectRequired | BrokerRequestError::Denied => Ok(oauth_error(
+        BrokerRequestError::ReconnectRequired(_)
+        | BrokerRequestError::Denied
+        | BrokerRequestError::NotSelected => Ok(oauth_error(
             StatusCode::BAD_REQUEST,
             "invalid_grant",
             Some(RENEW_SIGN_IN),
@@ -487,10 +491,12 @@ fn managed_failure(error: BrokerRequestError) -> Result<BrokerHttpResponse, Brok
 fn forward_failure(error: BrokerRequestError) -> Result<BrokerHttpResponse, BrokerRequestError> {
     tracing::debug!(outcome = "claude_token_forward_failed", error = %error);
     match error {
-        BrokerRequestError::Denied | BrokerRequestError::InvalidRequest => {
+        BrokerRequestError::Denied
+        | BrokerRequestError::InvalidRequest
+        | BrokerRequestError::NotSelected => {
             Ok(oauth_error(StatusCode::FORBIDDEN, "invalid_request", None))
         }
-        BrokerRequestError::ReconnectRequired
+        BrokerRequestError::ReconnectRequired(_)
         | BrokerRequestError::UpstreamFailed
         | BrokerRequestError::ResponseTooLarge => Ok(temporarily_unavailable()),
         BrokerRequestError::AuthorityUnavailable => Err(error),

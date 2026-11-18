@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use codewire_access::Refusal;
 use codewire_daemon::client::{
     CredentialBridgeConnection, CredentialBridgeResponseSender, SessionClientError,
 };
@@ -970,7 +971,8 @@ async fn send_login_response<S: CredentialBridgeResponseSink>(
         | Err(
             BrokerRequestError::InvalidRequest
             | BrokerRequestError::Denied
-            | BrokerRequestError::ReconnectRequired,
+            | BrokerRequestError::ReconnectRequired(_)
+            | BrokerRequestError::NotSelected,
         ) => Err(v1::CredentialBridgeFailureReason::Denied as i32),
         Err(
             BrokerRequestError::AuthorityUnavailable
@@ -1254,12 +1256,13 @@ async fn send_failure<S: CredentialBridgeResponseSink>(
     request_id: String,
     error: BrokerRequestError,
 ) -> Result<(), ()> {
+    // The reason stays the closed one every guest decodes; a guest that
+    // knows `refusal` answers from it instead.
     let reason = match error {
-        // HTTP routes answer ReconnectRequired themselves; any other operation
-        // keeps the existing closed Denied reason that every daemon decodes.
         BrokerRequestError::InvalidRequest
         | BrokerRequestError::Denied
-        | BrokerRequestError::ReconnectRequired => v1::CredentialBridgeFailureReason::Denied,
+        | BrokerRequestError::ReconnectRequired(_)
+        | BrokerRequestError::NotSelected => v1::CredentialBridgeFailureReason::Denied,
         BrokerRequestError::AuthorityUnavailable => v1::CredentialBridgeFailureReason::Unavailable,
         BrokerRequestError::UpstreamFailed => v1::CredentialBridgeFailureReason::UpstreamFailed,
         BrokerRequestError::ResponseTooLarge => v1::CredentialBridgeFailureReason::ResponseTooLarge,
@@ -1270,12 +1273,36 @@ async fn send_failure<S: CredentialBridgeResponseSink>(
                 v1::CredentialBridgeResponseFailure {
                     request_id,
                     reason: reason as i32,
-                    refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
+                    refusal: wire_refusal(error.refusal()) as i32,
                 },
             ),
         )
         .await
         .map_err(|_| ())
+}
+
+/// A refusal as the bridge protocol carries it. `denied` is left unspecified:
+/// the frame's reason already says it, as every guest reads it.
+pub(crate) fn wire_refusal(refusal: Refusal) -> v1::CredentialBridgeRefusal {
+    use v1::CredentialBridgeRefusal as Wire;
+    match refusal {
+        Refusal::CredentialRevoked => Wire::CredentialRevoked,
+        Refusal::CredentialExpired => Wire::CredentialExpired,
+        Refusal::CredentialNeedsReconnect => Wire::CredentialNeedsReconnect,
+        Refusal::NoCredentialSelected => Wire::NoCredentialSelected,
+        Refusal::CredentialUnavailable => Wire::CredentialUnavailable,
+        Refusal::CredentialConflict => Wire::CredentialConflict,
+        Refusal::PathNotServed => Wire::PathNotServed,
+        Refusal::WebsocketNotServed => Wire::WebsocketNotServed,
+        Refusal::RouteNotServed => Wire::RouteNotServed,
+        Refusal::RequestNotForwarded(_) => Wire::RequestNotForwarded,
+        Refusal::BodyTooLarge => Wire::BodyTooLarge,
+        Refusal::Busy => Wire::Busy,
+        Refusal::UpstreamFailed(_) => Wire::UpstreamFailed,
+        Refusal::NameNotAllowed => Wire::NameNotAllowed,
+        Refusal::Unavailable => Wire::Unavailable,
+        Refusal::Denied => Wire::Unspecified,
+    }
 }
 
 #[cfg(test)]
@@ -1338,6 +1365,80 @@ pub(crate) mod tests {
                 .send(payload)
                 .await
                 .map_err(|_| BrokerBridgeError::Unavailable)
+        }
+    }
+
+    /// A failure frame keeps the closed reason every guest decodes and adds
+    /// the refusal a newer guest answers with; a bare denial names no cause.
+    #[tokio::test]
+    async fn a_failure_frame_carries_its_refusal_beside_a_reason_every_guest_reads() {
+        use codewire_access::WithheldReason;
+        use v1::CredentialBridgeFailureReason as Reason;
+        use v1::CredentialBridgeRefusal as Wire;
+        for (error, reason, refusal) in [
+            (
+                BrokerRequestError::ReconnectRequired(WithheldReason::Revoked),
+                Reason::Denied,
+                Wire::CredentialRevoked,
+            ),
+            (
+                BrokerRequestError::ReconnectRequired(WithheldReason::Expired),
+                Reason::Denied,
+                Wire::CredentialExpired,
+            ),
+            (
+                BrokerRequestError::ReconnectRequired(WithheldReason::NeedsReconnect),
+                Reason::Denied,
+                Wire::CredentialNeedsReconnect,
+            ),
+            (
+                BrokerRequestError::NotSelected,
+                Reason::Denied,
+                Wire::NoCredentialSelected,
+            ),
+            (
+                BrokerRequestError::Denied,
+                Reason::Denied,
+                Wire::Unspecified,
+            ),
+            (
+                BrokerRequestError::InvalidRequest,
+                Reason::Denied,
+                Wire::Unspecified,
+            ),
+            (
+                BrokerRequestError::AuthorityUnavailable,
+                Reason::Unavailable,
+                Wire::CredentialUnavailable,
+            ),
+            (
+                BrokerRequestError::UpstreamFailed,
+                Reason::UpstreamFailed,
+                Wire::UpstreamFailed,
+            ),
+            (
+                BrokerRequestError::ResponseTooLarge,
+                Reason::ResponseTooLarge,
+                Wire::UpstreamFailed,
+            ),
+        ] {
+            let (output, mut received) = mpsc::channel(1);
+            send_failure(&FakeSender { output }, "request".into(), error)
+                .await
+                .unwrap();
+            assert_eq!(
+                received.recv().await,
+                Some(
+                    v1::credential_bridge_host_message::Payload::ResponseFailure(
+                        v1::CredentialBridgeResponseFailure {
+                            request_id: "request".into(),
+                            reason: reason as i32,
+                            refusal: refusal as i32,
+                        }
+                    )
+                ),
+                "{error:?}"
+            );
         }
     }
 

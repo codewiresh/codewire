@@ -4,6 +4,7 @@
 use super::*;
 
 use async_trait::async_trait;
+use codewire_access::WithheldReason;
 use codewire_credential_broker::{
     BrokerCredentialLease, BrokerLeaseError, BrokerLeaseProvider,
     platform::PlatformBrokerLeaseProvider,
@@ -783,12 +784,17 @@ async fn credential_needing_reconnect_withholds_only_its_capability_and_launches
                 .map_err(|error| anyhow::anyhow!("{state}: healthy capability withheld: {error}"))?;
             ensure!(anthropic.with_material(|material| material == b"synthetic-anthropic-key-never-projected"));
             ensure!(kek.unwrap_calls.load(Ordering::SeqCst) == unwraps + 1);
-            // The withheld capability names its Reconnect and reads no material.
-            // (Its HTTP route turns this into the fixed 403 explanation; see the
-            // broker's runtime HTTP tests.)
+            // The withheld capability names its Reconnect, with why, and reads
+            // no material. (Its HTTP route turns this into the refusal body; see
+            // the broker's runtime HTTP tests.)
+            let reason = match state {
+                "revoked" => WithheldReason::Revoked,
+                "expired" | "past-deadline" => WithheldReason::Expired,
+                _ => WithheldReason::NeedsReconnect,
+            };
             ensure!(
-                matches!(codex_lease(authority.clone()).await?, Err(BrokerLeaseError::ReconnectRequired)),
-                "{state}: withheld capability did not report Reconnect"
+                matches!(codex_lease(authority.clone()).await?, Err(BrokerLeaseError::ReconnectRequired(withheld)) if withheld == reason),
+                "{state}: withheld capability did not report Reconnect as {reason:?}"
             );
             ensure!(kek.unwrap_calls.load(Ordering::SeqCst) == unwraps + 1, "{state}: withheld capability read material");
         }

@@ -14,7 +14,7 @@ use anyhow::{Context, Result, ensure};
 use codewire_access::{
     AccessProfile, AccessProfileName, CapabilitySlot, CredentialAuthKind as Kind, CredentialId,
     EnvironmentAccessBinding, EnvironmentId, GrantContext, GrantPlacement, Owner, OwnerId,
-    builtin_provider_catalog,
+    Withheld, WithheldReason, builtin_provider_catalog,
 };
 use codewire_platform_credentials::{
     CredentialMetadataReader, CredentialRecord, OAuthRefreshState, PlatformAccessProfileStore,
@@ -269,7 +269,13 @@ async fn restricted_broker_enrolls_refreshes_and_uses_exact_bound_grants() -> Re
         ensure!(admitted.grants.is_empty());
         ensure!(
             admitted.reconnect_required
-                == BTreeMap::from([(CapabilitySlot::codex(), initial.metadata.id.clone())])
+                == BTreeMap::from([(
+                    CapabilitySlot::codex(),
+                    Withheld {
+                        credential: initial.metadata.id.clone(),
+                        reason: WithheldReason::Revoked,
+                    }
+                )])
         );
         ensure!(
             broker

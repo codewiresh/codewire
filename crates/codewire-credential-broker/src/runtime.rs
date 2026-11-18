@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use codewire_access::{
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, DerivedGrant,
-    GrantPermission, PROVIDER_REFRESH_TIMEOUT_SECONDS, claude_login_permission,
-    codex_login_permission,
+    GrantPermission, PROVIDER_REFRESH_TIMEOUT_SECONDS, Refusal, UpstreamFailure, WithheldReason,
+    claude_login_permission, codex_login_permission,
 };
 use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_workload_secrets::{
@@ -283,7 +283,10 @@ pub enum BrokerLeaseError {
     /// The selected capability's credential needs Reconnect (its refresh
     /// failed, or it was revoked or expired). Only this capability is withheld.
     #[error("credential broker lease needs the selected credential reconnected")]
-    ReconnectRequired,
+    ReconnectRequired(WithheldReason),
+    /// The bound profile fills no credential for the requested slot.
+    #[error("credential broker lease names a slot the profile does not fill")]
+    NotSelected,
 }
 
 /// Stable refresh failures that never retain provider or protected-store
@@ -1049,7 +1052,31 @@ pub enum BrokerRequestError {
     /// The selected capability's credential needs Reconnect. HTTP routes answer
     /// with a fixed explanation; other operations are simply denied.
     #[error("credential broker request needs the selected credential reconnected")]
-    ReconnectRequired,
+    ReconnectRequired(WithheldReason),
+    /// The bound profile fills no credential for the requested slot.
+    #[error("credential broker request names a slot the profile does not fill")]
+    NotSelected,
+}
+
+impl BrokerRequestError {
+    /// The refusal an agent reads for this failure
+    /// (`docs/dev/SECRETS-AND-CREDENTIALS.md`, "Refusals an agent or a person
+    /// can read"). Any other denial stays a bare `denied`, naming no cause.
+    pub fn refusal(&self) -> Refusal {
+        match self {
+            Self::InvalidRequest | Self::Denied => Refusal::Denied,
+            Self::AuthorityUnavailable => Refusal::CredentialUnavailable,
+            Self::UpstreamFailed | Self::ResponseTooLarge => {
+                Refusal::UpstreamFailed(UpstreamFailure::Failed)
+            }
+            Self::ReconnectRequired(WithheldReason::Revoked) => Refusal::CredentialRevoked,
+            Self::ReconnectRequired(WithheldReason::Expired) => Refusal::CredentialExpired,
+            Self::ReconnectRequired(WithheldReason::NeedsReconnect) => {
+                Refusal::CredentialNeedsReconnect
+            }
+            Self::NotSelected => Refusal::NoCredentialSelected,
+        }
+    }
 }
 
 /// Provider broker shared by local and platform placements. Placement-specific
@@ -2524,7 +2551,10 @@ impl Stream for BrokerRedactedBody {
 fn map_lease_error(error: BrokerLeaseError) -> BrokerRequestError {
     match error {
         BrokerLeaseError::InvalidRequest | BrokerLeaseError::Denied => BrokerRequestError::Denied,
-        BrokerLeaseError::ReconnectRequired => BrokerRequestError::ReconnectRequired,
+        BrokerLeaseError::ReconnectRequired(reason) => {
+            BrokerRequestError::ReconnectRequired(reason)
+        }
+        BrokerLeaseError::NotSelected => BrokerRequestError::NotSelected,
         BrokerLeaseError::Unavailable | BrokerLeaseError::InvalidResponse => {
             BrokerRequestError::AuthorityUnavailable
         }

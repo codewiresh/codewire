@@ -29,7 +29,7 @@ use codewire_access::{
     CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CapabilitySlot, CredentialAuthKind,
     CredentialId, CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding,
     GrantContext, GrantPermission, GrantPlacement, Owner, PROVIDER_REFRESH_TIMEOUT_SECONDS,
-    Placement, claude_login_permission, codex_login_permission,
+    Placement, WithheldReason, claude_login_permission, codex_login_permission,
 };
 use codewire_platform_credentials::{
     CredentialRecord, CredentialVersion, EpochMaterialCache, OAuthRefreshState,
@@ -603,6 +603,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                     Ok(AvailableGrants {
                         grants,
                         reconnect_required: Default::default(),
+                        ungranted_github: codewire_access::UngrantedGitHub::None,
                     })
                 }
                 RuntimeIdentity::OwnerLocal { profile: None, .. } => Err(BrokerLeaseError::Denied),
@@ -1517,10 +1518,19 @@ fn select_grant(
         .iter()
         .find(|grant| &grant.capability_slot == slot)
     else {
-        return Err(if available.reconnect_required.contains_key(slot) {
-            BrokerLeaseError::ReconnectRequired
-        } else {
-            BrokerLeaseError::Denied
+        // Grant evaluation rejects the whole selection for anything but
+        // lifecycle, so a slot with neither a grant nor a withheld credential
+        // is one the profile doesn't fill.
+        return Err(match available.reconnect_required.get(slot) {
+            Some(withheld) => BrokerLeaseError::ReconnectRequired(withheld.reason),
+            None if *slot == CapabilitySlot::github() => match available.ungranted_github {
+                codewire_access::UngrantedGitHub::NotConnected => {
+                    BrokerLeaseError::ReconnectRequired(WithheldReason::NeedsReconnect)
+                }
+                codewire_access::UngrantedGitHub::NotAuthorized => BrokerLeaseError::Denied,
+                codewire_access::UngrantedGitHub::None => BrokerLeaseError::NotSelected,
+            },
+            None => BrokerLeaseError::NotSelected,
         });
     };
     if !grant.permissions.contains(permission) {
@@ -1653,9 +1663,9 @@ fn refresh_lease_error(error: BrokerLeaseError) -> BrokerRefreshError {
     match error {
         BrokerLeaseError::InvalidRequest => BrokerRefreshError::InvalidRequest,
         // A credential needing Reconnect is never refreshed again automatically.
-        BrokerLeaseError::Denied | BrokerLeaseError::ReconnectRequired => {
-            BrokerRefreshError::Denied
-        }
+        BrokerLeaseError::Denied
+        | BrokerLeaseError::ReconnectRequired(_)
+        | BrokerLeaseError::NotSelected => BrokerRefreshError::Denied,
         BrokerLeaseError::Unavailable => BrokerRefreshError::Unavailable,
         BrokerLeaseError::InvalidResponse => BrokerRefreshError::InvalidResponse,
     }

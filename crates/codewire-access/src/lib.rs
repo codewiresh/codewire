@@ -20,8 +20,9 @@ pub use catalog::{
     builtin_provider_catalog, claude_login_permission, codex_login_permission,
 };
 pub use grant::{
-    AvailableGrants, DerivedGrant, GrantContext, GrantPlacement, GrantProfile,
-    derive_account_github_grant, derive_available_grants, derive_grants, validate_profile_entries,
+    AvailableGrants, DerivedGrant, GrantContext, GrantPlacement, GrantProfile, UngrantedGitHub,
+    Withheld, WithheldReason, derive_account_github_grant, derive_available_grants, derive_grants,
+    ungranted_github, validate_profile_entries,
 };
 pub use id::{
     AccessProfileId, AccessProfileName, AccessProfileReference, AccessProfileScope,

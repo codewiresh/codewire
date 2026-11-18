@@ -310,7 +310,7 @@ async fn another_environments_placeholder_is_forwarded_untouched() {
 async fn a_placeholder_beside_another_credential_is_refused() {
     let recorded = ours();
     let broker = recorded.broker();
-    let (status, _, body) = collect(
+    let (status, headers, body) = collect(
         broker
             .execute_front_door(github(
                 "api.github.com",
@@ -328,7 +328,11 @@ async fn a_placeholder_beside_another_credential_is_refused() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(contains(&body, "credential_conflict"));
+    assert_eq!(headers["codewire-refusal"], "credential_conflict");
+    assert_eq!(
+        String::from_utf8(body).unwrap(),
+        "Codewire: this request carries the Codewire placeholder and another credential; send only one.\n"
+    );
     assert_eq!(recorded.leases(), 0);
     assert!(recorded.outbound().is_empty());
 }

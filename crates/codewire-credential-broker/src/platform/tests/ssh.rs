@@ -459,7 +459,7 @@ async fn completed_signature_is_drained_then_revalidated_before_release() -> Res
         ensure!(
             matches!(
                 tokio::time::timeout(TIMEOUT, operation).await??,
-                Err(BrokerLeaseError::ReconnectRequired)
+                Err(BrokerLeaseError::ReconnectRequired(_))
             ),
             "signature escaped a revoked post-sign binding"
         );

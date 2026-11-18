@@ -740,7 +740,9 @@ async fn a_sign_in_that_cannot_be_used_is_invalid_grant() {
 
     let reconnect = Harness::new(
         SignIn {
-            lease_error: Some(BrokerLeaseError::ReconnectRequired),
+            lease_error: Some(BrokerLeaseError::ReconnectRequired(
+                codewire_access::WithheldReason::NeedsReconnect,
+            )),
             ..SignIn::new(material(FRESH))
         },
         Ok((StatusCode::OK, "{}")),

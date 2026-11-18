@@ -799,7 +799,8 @@ fn lease_status(error: BrokerLeaseError) -> Status {
     match error {
         BrokerLeaseError::Denied
         | BrokerLeaseError::InvalidRequest
-        | BrokerLeaseError::ReconnectRequired => denied(),
+        | BrokerLeaseError::ReconnectRequired(_)
+        | BrokerLeaseError::NotSelected => denied(),
         BrokerLeaseError::Unavailable | BrokerLeaseError::InvalidResponse => unavailable(),
     }
 }

@@ -943,6 +943,59 @@ fn every_personal_profile_includes_github_and_never_pins_it() {
     );
 }
 
+/// A profile that chooses GitHub while the account has no current
+/// connection says so, so the agent is told to reconnect GitHub, not to change
+/// its profile. A current connection clears it.
+#[test]
+fn a_chosen_github_without_a_connection_is_reported_not_connected() {
+    let user = Owner::User(owner_id("user-one"));
+    let github_profile = github_profile(user.clone());
+    let revoked = github_connection("github-one", user.clone(), CredentialStatus::Revoked);
+    let active = github_connection("github-two", user, CredentialStatus::Active);
+    let available = |authorized: Vec<CredentialId>, credentials: BTreeMap<_, _>| {
+        derive_available_grants(
+            &context(authorized),
+            &binding(&github_profile),
+            &github_profile,
+            &credentials,
+            &builtin_provider_catalog(),
+            1_800_000_000,
+        )
+        .unwrap()
+    };
+    for not_connected in [
+        available(vec![], BTreeMap::new()),
+        available(
+            vec![],
+            BTreeMap::from([(revoked.id.clone(), revoked.clone())]),
+        ),
+    ] {
+        assert!(not_connected.grants.is_empty());
+        assert!(not_connected.reconnect_required.is_empty());
+        assert_eq!(
+            not_connected.ungranted_github,
+            UngrantedGitHub::NotConnected
+        );
+    }
+    // A current connection this runtime isn't authorized to use is a denial,
+    // not a reconnect.
+    let unauthorized = available(
+        vec![],
+        BTreeMap::from([(active.id.clone(), active.clone())]),
+    );
+    assert!(unauthorized.grants.is_empty());
+    assert_eq!(
+        unauthorized.ungranted_github,
+        UngrantedGitHub::NotAuthorized
+    );
+    let connected = available(
+        vec![active.id.clone()],
+        BTreeMap::from([(active.id.clone(), active.clone())]),
+    );
+    assert_eq!(connected.grants.len(), 1);
+    assert_eq!(connected.ungranted_github, UngrantedGitHub::None);
+}
+
 #[test]
 fn profiles_grant_only_the_authorized_current_github_connection() {
     let user = Owner::User(owner_id("user-one"));

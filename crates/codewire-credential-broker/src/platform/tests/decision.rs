@@ -218,11 +218,15 @@ async fn a_credential_change_applies_to_the_very_next_lease() -> Result<()> {
                 }
                 "revoke" => {
                     mutate(&f, "revoke").await?;
-                    Err(BrokerLeaseError::ReconnectRequired)
+                    Err(BrokerLeaseError::ReconnectRequired(
+                        codewire_access::WithheldReason::Revoked,
+                    ))
                 }
                 "expiry" => {
                     mutate(&f, "expiry").await?;
-                    Err(BrokerLeaseError::ReconnectRequired)
+                    Err(BrokerLeaseError::ReconnectRequired(
+                        codewire_access::WithheldReason::Expired,
+                    ))
                 }
                 "refresh failed" => {
                     sqlx::query(
@@ -231,7 +235,9 @@ async fn a_credential_change_applies_to_the_very_next_lease() -> Result<()> {
                     .bind(f.record.metadata.id.as_str())
                     .execute(&f.db.pool)
                     .await?;
-                    Err(BrokerLeaseError::ReconnectRequired)
+                    Err(BrokerLeaseError::ReconnectRequired(
+                        codewire_access::WithheldReason::NeedsReconnect,
+                    ))
                 }
                 // The owner's lifecycle removes the environment it created,
                 // then the owner, whose credential rows cascade with it.
@@ -425,18 +431,25 @@ async fn requests_to_an_unselected_slot_make_no_evaluation() -> Result<()> {
             )
         };
         for _ in 0..REQUESTS {
-            // A slot the profile does not select is refused from the decision.
+            // A slot the profile does not select is refused from the decision,
+            // and says so.
             let (leased, timings) = measured(anthropic()).await;
-            ensure!(matches!(leased, Err(BrokerLeaseError::Denied)));
+            ensure!(matches!(leased, Err(BrokerLeaseError::NotSelected)));
             ensure!(
                 steps(&timings) == (0, 0, 0, 0),
                 "anthropic {:?}",
                 steps(&timings)
             );
             ensure!(timings.authority_decision == AuthorityUse::Reused);
-            // An ungranted GitHub slot rereads only the account's connection.
+            // A personal profile's GitHub slot with no connection rereads only
+            // the account's connection, and needs reconnecting.
             let (leased, timings) = measured(github()).await;
-            ensure!(matches!(leased, Err(BrokerLeaseError::Denied)));
+            ensure!(matches!(
+                leased,
+                Err(BrokerLeaseError::ReconnectRequired(
+                    codewire_access::WithheldReason::NeedsReconnect
+                ))
+            ));
             ensure!(
                 steps(&timings) == (0, 0, 1, 0),
                 "github {:?}",
@@ -463,7 +476,10 @@ async fn requests_to_an_unselected_slot_make_no_evaluation() -> Result<()> {
         ensure!(f.authority.calls() == calls + 1);
         for _ in 0..REQUESTS {
             ensure!(matches!(github().await, Err(BrokerLeaseError::Denied)));
-            ensure!(matches!(anthropic().await, Err(BrokerLeaseError::Denied)));
+            ensure!(matches!(
+                anthropic().await,
+                Err(BrokerLeaseError::NotSelected)
+            ));
         }
         ensure!(f.authority.calls() == calls + 1, "a refused slot evaluated");
         // The selected slot is still served.
@@ -490,13 +506,16 @@ async fn a_withheld_slot_is_refused_without_evaluation_until_its_reconnect() -> 
         let calls = f.authority.calls();
         ensure!(matches!(
             lease(&adapter).await,
-            Err(BrokerLeaseError::ReconnectRequired)
+            Err(BrokerLeaseError::ReconnectRequired(_))
         ));
         ensure!(f.authority.calls() == calls + 1);
         // Until Reconnect, each request rereads only that credential's record.
         for _ in 0..REQUESTS {
             let (leased, timings) = measured(lease(&adapter)).await;
-            ensure!(matches!(leased, Err(BrokerLeaseError::ReconnectRequired)));
+            ensure!(matches!(
+                leased,
+                Err(BrokerLeaseError::ReconnectRequired(_))
+            ));
             ensure!(
                 steps(&timings) == (0, 0, 1, 0),
                 "withheld {:?}",

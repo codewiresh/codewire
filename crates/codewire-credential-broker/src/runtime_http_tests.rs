@@ -40,7 +40,9 @@ impl BrokerLeaseProvider for Authority {
             return Err(BrokerLeaseError::Denied);
         }
         if self.reconnect_required {
-            return Err(BrokerLeaseError::ReconnectRequired);
+            return Err(BrokerLeaseError::ReconnectRequired(
+                codewire_access::WithheldReason::NeedsReconnect,
+            ));
         }
         let (provider, kind) = match self.slot {
             "codex" | "openai" => ("openai", CredentialAuthKind::ApiKey),
@@ -410,36 +412,27 @@ async fn a_capability_needing_reconnect_answers_with_a_fixed_explanation_and_no_
         assert!(broker.upstream.calls.lock().unwrap().is_empty());
         let (status, headers, mut body) = response.into_parts();
         assert_eq!(status, StatusCode::FORBIDDEN, "{slot}");
-        assert_eq!(headers["content-type"], "application/json");
+        assert_eq!(headers["content-type"], "text/plain; charset=utf-8");
         assert_eq!(headers["cache-control"], "no-store");
+        assert_eq!(headers["codewire-refusal"], "credential_needs_reconnect");
         let mut bytes = Vec::new();
         while let Some(chunk) = body.next().await {
             bytes.extend(chunk.unwrap());
         }
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let message = match slot {
-            "codex" | "openai" => {
-                assert_eq!(json["error"]["code"], "credential_reconnect_required");
-                json["error"]["message"].as_str()
-            }
-            "anthropic" => {
-                assert_eq!(json["type"], "error");
-                assert_eq!(json["error"]["type"], "permission_error");
-                json["error"]["message"].as_str()
-            }
-            _ => json["message"].as_str(),
-        }
-        .unwrap();
-        assert!(
-            message.contains("Codewire Settings → Credentials"),
-            "{message}"
+        let provider = match slot {
+            "codex" | "openai" => "OpenAI",
+            "anthropic" => "Anthropic",
+            "github" => "GitHub",
+            other => panic!("unexpected slot {other}"),
+        };
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            format!(
+                "Codewire: the {provider} credential this environment uses needs reconnecting.\n\
+                 Fix: in a local VM, run `cw credentials --local list` on the computer that runs it; in a hosted Sandbox, run `cw credentials --cloud list` wherever you're signed in to Codewire; then connect it again.\n"
+            ),
+            "{slot}"
         );
-        if slot == "codex" {
-            assert_eq!(
-                message,
-                "Codex needs Reconnect in Codewire Settings → Credentials."
-            );
-        }
     }
 }
 

@@ -358,7 +358,9 @@ async fn codex_login_admits_only_the_creators_own_active_personal_oauth_login() 
             ensure!(
                 matches!(
                     outcome,
-                    Err(BrokerLeaseError::Denied | BrokerLeaseError::ReconnectRequired)
+                    Err(BrokerLeaseError::Denied
+                        | BrokerLeaseError::NotSelected
+                        | BrokerLeaseError::ReconnectRequired(_))
                 ),
                 "{case} must not deliver a login"
             );

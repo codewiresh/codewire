@@ -23,6 +23,7 @@ use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use codewire_access::{
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, CredentialPlaceholder,
+    Refusal,
 };
 use futures::{Stream, StreamExt as _, stream};
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
@@ -45,9 +46,6 @@ use crate::transparent::without_framing;
 /// without a lease while the remembered one is this fresh; a rebind takes
 /// effect within the same 60 seconds (#3999).
 const PLACEHOLDER_FRESH_FOR: Duration = Duration::from_secs(60);
-
-/// Stable machine-readable code of the mixed-credential refusal.
-pub(crate) const CREDENTIAL_CONFLICT_CODE: &str = "credential_conflict";
 
 impl<P, U> OpenAiBroker<P, U>
 where
@@ -279,21 +277,15 @@ impl PlaceholderCache {
 /// The answer to a placeholder sent beside another credential: the client
 /// must send one or the other. 400 is final, so it is shown at once.
 pub(super) fn credential_conflict_response() -> BrokerHttpResponse {
-    let body = serde_json::json!({
-        "type": "error",
-        "error": {
-            "type": "invalid_request_error",
-            "code": CREDENTIAL_CONFLICT_CODE,
-            "message": "This request carries the Codewire placeholder and another credential. Send only one.",
-        },
-    });
     let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    let body = Bytes::from(body.to_string());
+    let refusal = Refusal::CredentialConflict;
+    for (name, value) in refusal.headers() {
+        headers.insert(
+            HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        );
+    }
+    let body = Bytes::from(refusal.body(None, None));
     BrokerHttpResponse::new(
         StatusCode::BAD_REQUEST,
         headers,

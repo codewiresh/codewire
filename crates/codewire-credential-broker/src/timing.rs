@@ -269,7 +269,8 @@ fn error_label(error: BrokerRequestError) -> &'static str {
         BrokerRequestError::AuthorityUnavailable => "authority_unavailable",
         BrokerRequestError::UpstreamFailed => "upstream_failed",
         BrokerRequestError::ResponseTooLarge => "response_too_large",
-        BrokerRequestError::ReconnectRequired => "reconnect_required",
+        BrokerRequestError::ReconnectRequired(_) => "reconnect_required",
+        BrokerRequestError::NotSelected => "not_selected",
     }
 }
 
@@ -591,6 +592,7 @@ pub(crate) mod tests {
         "upstream_failed",
         "response_too_large",
         "reconnect_required",
+        "not_selected",
         "admitted",
         "unauthenticated",
         "unavailable",

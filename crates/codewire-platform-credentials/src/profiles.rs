@@ -782,11 +782,9 @@ impl PlatformAccessProfileStore {
                 .map_err(access_error)?
             }
             // Selecting a GitHub repository needs no profile: without a
-            // binding, the creator's one GitHub connection is the only grant.
-            None => AvailableGrants {
-                grants: self.admit_account_github(&mut tx, context).await?,
-                reconnect_required: BTreeMap::new(),
-            },
+            // binding, the creator's one GitHub connection is the only grant,
+            // and without a current connection there is no profile to fix.
+            None => self.admit_account_github(&mut tx, context).await?,
         };
         tx.commit().await.map_err(database_error)?;
         Ok(grants)
@@ -796,17 +794,30 @@ impl PlatformAccessProfileStore {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         context: &GrantContext,
-    ) -> Result<Vec<DerivedGrant>, Error> {
+    ) -> Result<AvailableGrants, Error> {
         let mut credentials = BTreeMap::new();
         if let Some((id, metadata)) = lock_github_connection(tx, &context.user_id).await? {
             credentials.insert(id, metadata);
         }
-        Ok(
+        let grants: Vec<DerivedGrant> =
             derive_account_github_grant(context, &credentials, &self.catalog, unix_now()?)
                 .map_err(access_error)?
                 .into_iter()
-                .collect(),
-        )
+                .collect();
+        // Decided from the locked row, as a bound profile's choice is.
+        let ungranted_github = if grants.is_empty() {
+            codewire_access::ungranted_github(
+                &codewire_access::Owner::User(context.user_id.clone()),
+                &credentials,
+            )
+        } else {
+            codewire_access::UngrantedGitHub::None
+        };
+        Ok(AvailableGrants {
+            grants,
+            reconnect_required: BTreeMap::new(),
+            ungranted_github,
+        })
     }
 
     /// Admit an explicit platform credential selection for owner-authenticated

@@ -296,14 +296,29 @@ async fn journey(protocol: Protocol) -> Result<()> {
         put(&format!("/users/{ALICE}"), "DATABASE_URL", b"synthetic-application-value", &h.db.pool).await?;
         let mut stream = connect(&client, &url, protocol, open.clone()).await?;
         // This legal bridge frame exceeds the default 4MiB Connect ceiling.
-        // It must reach grant admission and return a closed provider denial,
+        // It must reach grant admission and be refused there as a slot the
+        // empty profile doesn't select, with the readable refusal (#5057),
         // not fail in the dispatcher. No empty-profile material may be read.
         stream.send(frame(public_bridge::credential_bridge_guest_message::Payload::Request(Box::new(public_bridge::CredentialBridgeRequest {
             request_id: Uuid::new_v4().to_string(), method: "POST".into(), path: "/v1/responses".into(),
             body: vec![b' '; CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES], capability_slot: "codex".into(), route: "openai-api".into(), ..Default::default()
         })))).await?;
+        let refusal = codewire_access::Refusal::NoCredentialSelected;
         ensure!(matches!(response(&mut stream).await?.output, Some(proto::delegate_credentials_response::Output::Frame(frame))
-            if matches!(frame.payload, Some(public_bridge::credential_bridge_host_message::Payload::ResponseFailure(_)))));
+            if matches!(&frame.payload, Some(public_bridge::credential_bridge_host_message::Payload::ResponseStart(start))
+                if start.status_code == u32::from(refusal.status())
+                    && start.headers.iter().any(|header| header.name == codewire_access::REFUSAL_HEADER
+                        && header.value == refusal.reason().as_bytes()))),
+            "an unselected slot was not refused as no_credential_selected");
+        // Its body and end follow before the stream serves anything else.
+        loop {
+            let Some(proto::delegate_credentials_response::Output::Frame(frame)) = response(&mut stream).await?.output else { anyhow::bail!("missing refusal frame") };
+            match frame.payload {
+                Some(public_bridge::credential_bridge_host_message::Payload::ResponseBody(_)) => {}
+                Some(public_bridge::credential_bridge_host_message::Payload::ResponseEnd(_)) => break,
+                _ => anyhow::bail!("unexpected frame inside the refusal"),
+            }
+        }
 
         let (request, recipient, context) = projection_request(&selection, unix_millis()? + 15_000);
         let projection = public_bridge::EnvironmentProjectionRequest {

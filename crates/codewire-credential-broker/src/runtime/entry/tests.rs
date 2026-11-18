@@ -836,10 +836,9 @@ async fn a_placeholder_beside_another_credential_is_refused() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
-        body["error"]["code"],
-        super::super::swap::CREDENTIAL_CONFLICT_CODE
+        String::from_utf8(body).unwrap(),
+        "Codewire: this request carries the Codewire placeholder and another credential; send only one.\n"
     );
     assert_eq!(recorded.leases(), 0);
     assert!(recorded.outbound().is_empty());
@@ -1871,10 +1870,10 @@ async fn a_key_never_goes_to_chatgpt_com_and_a_mixed_credential_is_refused() {
     let (status, _, body) =
         collect(recorded.broker().execute_front_door(mixed).await.unwrap()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(contains(
-        &body,
-        crate::runtime::swap::CREDENTIAL_CONFLICT_CODE
-    ));
+    assert_eq!(
+        String::from_utf8(body).unwrap(),
+        "Codewire: this request carries the Codewire placeholder and another credential; send only one.\n"
+    );
     assert_eq!(recorded.leases(), 0);
     assert!(recorded.outbound().is_empty());
 }

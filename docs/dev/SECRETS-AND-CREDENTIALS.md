@@ -1444,14 +1444,16 @@ one list of those refusals: what the agent receives, the `Codewire-Refusal`
 reason, and what the guest's refusal list (#4015) and the owner's
 `cw policy log` (#5058) show. A new refusal is added here first.
 
-**Not yet built** (#5057 builds it): the guest's bridge, the TLS front door
-and the local VM's credential forwarder answer with this rendering, and the
-bridge protocol carries the reason (`CredentialBridgeRefusal`). The brokers
-don't send one yet, so a broker's refusal still reaches the agent as `denied`
-(403), `credential_unavailable` or `upstream_failed`; `credential_conflict`
-and the hosted Sandbox's reconnect answer keep the broker's own bodies until
-they move to this rendering; and an unserved `chatgpt.com` path (#4898) is
-refused as the broker's denial (403), not yet as `path_not_served` (404).
+**Not yet built** (#5057 builds it): the guest's bridge, the TLS front door,
+the local VM's credential forwarder and the broker answer with this
+rendering, and the bridge protocol carries the reason
+(`CredentialBridgeRefusal`). The broker sends `credential_revoked`,
+`credential_expired`, `credential_needs_reconnect` and
+`no_credential_selected` from the credential's lifecycle and the bound
+profile; any other denial stays `denied` (403) and names no cause. The local
+CLI's own refusals (#4717) and an unserved `chatgpt.com` path (#4898), still
+refused as the broker's denial (403) and not yet as `path_not_served` (404),
+come next.
 
 **Two kinds.** Only a request the TLS front door has taken (an intercepted
 host, its connection handed off) can be answered in HTTP. Everything refused

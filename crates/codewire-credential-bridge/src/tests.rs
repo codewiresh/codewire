@@ -536,6 +536,109 @@ async fn a_hosts_refusal_reaches_the_agent_readable_and_echoes_nothing() {
     }
 }
 
+/// Git's managed route keeps the statuses it answered before refusals had
+/// reasons, never a 401 that Git would answer by asking for a password, and
+/// a body Git can print whole.
+#[tokio::test]
+async fn gits_route_keeps_its_statuses_and_a_short_body() {
+    for (reason, refusal, status) in [
+        (
+            v1::CredentialBridgeFailureReason::Denied,
+            v1::CredentialBridgeRefusal::Unspecified,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            v1::CredentialBridgeFailureReason::Denied,
+            v1::CredentialBridgeRefusal::CredentialRevoked,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            v1::CredentialBridgeFailureReason::Denied,
+            v1::CredentialBridgeRefusal::NoCredentialSelected,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            v1::CredentialBridgeFailureReason::Unavailable,
+            v1::CredentialBridgeRefusal::CredentialUnavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            v1::CredentialBridgeFailureReason::UpstreamFailed,
+            v1::CredentialBridgeRefusal::UpstreamFailed,
+            StatusCode::BAD_GATEWAY,
+        ),
+    ] {
+        let mut harness = Harness::new().await;
+        let bridge = harness.bridge.clone();
+        let task = tokio::spawn(async move {
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri("/_codewire/github/owner/repo.git/info/refs?service=git-upload-pack")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap();
+            bridge.respond(request).await
+        });
+        let Some(GuestPayload::Request(request)) = harness.next().await.payload else {
+            panic!("expected a request");
+        };
+        harness
+            .send(HostPayload::ResponseFailure(
+                v1::CredentialBridgeResponseFailure {
+                    request_id: request.request_id,
+                    reason: reason as i32,
+                    refusal: refusal as i32,
+                },
+            ))
+            .await;
+        let response = bounded(task).await.unwrap();
+        assert_eq!(response.status(), status, "{refusal:?}");
+        assert!(response.headers().contains_key("codewire-refusal"));
+        let text = to_bytes(response.into_body(), 4096).await.unwrap();
+        let text = std::str::from_utf8(&text).unwrap();
+        assert!(text.starts_with("Codewire: "), "{text}");
+        assert!(text.lines().count() <= 2 && text.len() <= 400, "{text}");
+        harness.stop().await;
+    }
+}
+
+/// A response that has started can't turn into a refusal: a failure frame
+/// after its start ends the stream with an error and adds no refusal text.
+#[tokio::test]
+async fn a_failure_after_the_response_started_adds_no_refusal_body() {
+    let mut harness = Harness::new().await;
+    let (task, request) = harness.submit().await;
+    harness.send(start(&request.request_id)).await;
+    harness.send(body(&request.request_id, b"partial")).await;
+    let response = bounded(task).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key("codewire-refusal"));
+    harness
+        .send(HostPayload::ResponseFailure(
+            v1::CredentialBridgeResponseFailure {
+                request_id: request.request_id.clone(),
+                reason: v1::CredentialBridgeFailureReason::Denied as i32,
+                refusal: v1::CredentialBridgeRefusal::CredentialNeedsReconnect as i32,
+            },
+        ))
+        .await;
+    let mut stream = response.into_body().into_data_stream();
+    let mut received = Vec::new();
+    let mut failed = false;
+    while let Some(chunk) = bounded(stream.next()).await {
+        match chunk {
+            Ok(chunk) => received.extend_from_slice(&chunk),
+            Err(_) => {
+                failed = true;
+                break;
+            }
+        }
+    }
+    assert!(failed, "the stream ends with an error, not a clean end");
+    assert_eq!(received, b"partial");
+    harness.stop().await;
+}
+
 #[tokio::test]
 async fn response_stream_requires_an_explicit_end_for_clean_eof() {
     let mut harness = Harness::new().await;

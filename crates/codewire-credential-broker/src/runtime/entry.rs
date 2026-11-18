@@ -75,9 +75,10 @@ where
             Some(body) => self.execute_github(request, Some(body)).await,
         };
         match result {
-            Err(BrokerRequestError::ReconnectRequired) => {
-                Ok(crate::reconnect::reconnect_required_response(&slot))
-            }
+            Err(
+                error
+                @ (BrokerRequestError::ReconnectRequired(_) | BrokerRequestError::NotSelected),
+            ) => Ok(crate::reconnect::refusal_response(error.refusal(), &slot)),
             result => result,
         }
     }

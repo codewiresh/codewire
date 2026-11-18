@@ -368,11 +368,22 @@ fn hosted_admission_withholds_only_the_capability_whose_credential_needs_reconne
     expired.status = CredentialStatus::Expired;
     let mut past_deadline = codex.clone();
     past_deadline.expires_at_unix = Some(NOW);
-    for unusable in [refresh_failed, revoked, expired, past_deadline] {
+    for (unusable, reason) in [
+        (refresh_failed, WithheldReason::NeedsReconnect),
+        (revoked, WithheldReason::Revoked),
+        (expired, WithheldReason::Expired),
+        (past_deadline, WithheldReason::Expired),
+    ] {
         let admitted = available(&context, &unusable).unwrap();
         assert_eq!(
             admitted.reconnect_required,
-            BTreeMap::from([(slot("codex"), unusable.id.clone())])
+            BTreeMap::from([(
+                slot("codex"),
+                Withheld {
+                    credential: unusable.id.clone(),
+                    reason,
+                }
+            )])
         );
         // The other capability keeps its exact grant; the withheld one has none.
         assert_eq!(

@@ -174,9 +174,9 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         {
             return false;
         }
-        if let Some(credential) = decision.grants.reconnect_required.get(slot) {
+        if let Some(withheld) = decision.grants.reconnect_required.get(slot) {
             let owner = &decision.session.credential_owner;
-            return match self.read_record(owner, credential).await {
+            return match self.read_record(owner, &withheld.credential).await {
                 Ok(record) => usable(&record.metadata),
                 Err(_) => true,
             };

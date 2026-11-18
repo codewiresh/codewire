@@ -774,7 +774,7 @@ async fn the_material_fence_follows_replacement_and_rejects_revocation_and_expir
                 }
                 // Revocation withholds only this capability until Reconnect.
                 "revoke" => ensure!(
-                    matches!(leased, Err(BrokerLeaseError::ReconnectRequired)),
+                    matches!(leased, Err(BrokerLeaseError::ReconnectRequired(_))),
                     "revoke exposed stale material ({:?})",
                     leased.err()
                 ),
@@ -972,7 +972,7 @@ async fn started_execution_must_still_be_live_after_post_start_admission_waits()
         // The failed refresh withholds this capability until Reconnect.
         ensure!(matches!(
             lease(&f.adapter).await,
-            Err(BrokerLeaseError::ReconnectRequired)
+            Err(BrokerLeaseError::ReconnectRequired(_))
         ));
         Ok(())
     }
@@ -1072,7 +1072,7 @@ async fn lost_start_ack_is_not_a_second_send_permit_and_expired_started_fails_cl
         ensure!(f.state().await? == OAuthRefreshState::Unknown);
         ensure!(matches!(
             lease(&second).await,
-            Err(BrokerLeaseError::ReconnectRequired)
+            Err(BrokerLeaseError::ReconnectRequired(_))
         ));
         pool.close().await;
         Ok(())

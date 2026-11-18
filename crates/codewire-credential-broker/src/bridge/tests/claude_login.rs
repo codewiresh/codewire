@@ -168,7 +168,13 @@ async fn claude_login_answers_are_a_bounded_login_denied_or_unavailable() {
         (Ok(vec![5; maximum + 1]), denied()),
         (Err(BrokerRequestError::Denied), denied()),
         (Err(BrokerRequestError::InvalidRequest), denied()),
-        (Err(BrokerRequestError::ReconnectRequired), denied()),
+        (
+            Err(BrokerRequestError::ReconnectRequired(
+                codewire_access::WithheldReason::Revoked,
+            )),
+            denied(),
+        ),
+        (Err(BrokerRequestError::NotSelected), denied()),
         (Err(BrokerRequestError::AuthorityUnavailable), unavailable()),
         (Err(BrokerRequestError::UpstreamFailed), unavailable()),
         (Err(BrokerRequestError::ResponseTooLarge), unavailable()),

@@ -13,10 +13,11 @@ use anyhow::{Context, Result, ensure};
 use codewire_access::{
     AccessProfile, AccessProfileName, CapabilitySlot, CredentialAuthKind as Kind, CredentialId,
     EnvironmentAccessBinding, EnvironmentId, GrantContext, GrantPlacement, Owner, Placement,
-    ProviderCatalog, builtin_provider_catalog,
+    ProviderCatalog, ProviderId, UngrantedGitHub, Withheld, WithheldReason,
+    builtin_provider_catalog,
 };
 use codewire_platform_credentials::{
-    PlatformAccessProfileStore, PlatformCredentialError as CredentialError,
+    CredentialRegistration, PlatformAccessProfileStore, PlatformCredentialError as CredentialError,
     PlatformProfileError as Error,
 };
 use codewire_server_core::org_deletion::begin_organization_deletion;
@@ -519,15 +520,21 @@ async fn binding_cas_and_each_runtime_admission_recheck_credentials_and_catalog(
         // A credential needing Reconnect withholds only its own capability: the
         // admission names that slot, grants nothing for it, and rebinding the
         // same selection stays possible. No lifecycle state reaches a grant.
-        for (status, expires) in [
-            ("revoked", None), ("refresh_failed", None), ("expired", None), ("active", Some(0_i64)),
+        for (status, expires, reason) in [
+            ("revoked", None, WithheldReason::Revoked),
+            ("refresh_failed", None, WithheldReason::NeedsReconnect),
+            ("expired", None, WithheldReason::Expired),
+            ("active", Some(0_i64), WithheldReason::Expired),
         ] {
             sqlx::query("UPDATE platform_credentials SET status=$2,expires_at_unix=$3 WHERE id=$1")
                 .bind(credential.metadata.id.as_str()).bind(status).bind(expires).execute(&db.pool).await?;
             let admitted = profiles.evaluate_grants(&context).await?;
             ensure!(admitted.grants.is_empty());
             ensure!(admitted.reconnect_required
-                == BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]));
+                == BTreeMap::from([(CapabilitySlot::codex(), Withheld {
+                    credential: credential.metadata.id.clone(),
+                    reason,
+                })]));
             ensure!(profiles.replace_binding(&context, &selected, selected.clone(), None).await? == selected);
         }
         sqlx::query("UPDATE platform_credentials SET status='active',expires_at_unix=NULL,revocation_generation=2 WHERE id=$1")
@@ -1351,6 +1358,45 @@ async fn each_user_has_one_default_that_moves_explicitly_and_is_never_deleted() 
             .fetch_one(&db.pool)
             .await?;
         ensure!(rows == 2);
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// Without a binding the account's GitHub connection is the only grant, and
+/// a missing grant is decided from the locked row as a profile's GitHub
+/// choice is (#5057): no current connection needs reconnecting, and a current
+/// one this runtime isn't authorized to use is a denial.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn account_github_without_a_binding_says_why_it_has_no_grant() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let user = db.user("account-github").await?;
+        let org = db.organization("account-github").await?;
+        let store = db.store(Arc::new(SyntheticKek::default()));
+        let profiles = profiles(&db);
+        let unconnected = environment(&db, &user, &org, "account-github-none", &[]).await?;
+        let available = profiles.evaluate_grants(&unconnected).await?;
+        ensure!(available.grants.is_empty());
+        ensure!(available.ungranted_github == UngrantedGitHub::NotConnected);
+
+        store
+            .create(
+                &user,
+                CredentialRegistration {
+                    provider: ProviderId::parse("github")?,
+                    ..registration("GitHub", Kind::OAuth)
+                },
+                &value(OLD_VALUE),
+            )
+            .await?;
+        let unauthorized =
+            environment(&db, &user, &org, "account-github-unauthorized", &[]).await?;
+        let available = profiles.evaluate_grants(&unauthorized).await?;
+        ensure!(available.grants.is_empty());
+        ensure!(available.ungranted_github == UngrantedGitHub::NotAuthorized);
         Ok(())
     }
     .await;

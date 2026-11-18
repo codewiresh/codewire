@@ -168,13 +168,46 @@ pub fn validate_profile_entries(
 ///
 /// A selected credential whose lifecycle withholds it now (refresh failed,
 /// revoked or expired) withholds only its own capability: the slot is listed
-/// in `reconnect_required`, with the credential that needs Reconnect, and
-/// receives no grant. Every structural, owner, authorization and catalog
+/// in `reconnect_required`, with the credential that needs Reconnect and why,
+/// and receives no grant. Every structural, owner, authorization and catalog
 /// failure still rejects the whole selection.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AvailableGrants {
     pub grants: Vec<DerivedGrant>,
-    pub reconnect_required: BTreeMap<CapabilitySlot, CredentialId>,
+    pub reconnect_required: BTreeMap<CapabilitySlot, Withheld>,
+    /// Why the bound profile's GitHub choice has no grant, when it has one.
+    pub ungranted_github: UngrantedGitHub,
+}
+
+/// A personal profile chooses GitHub without naming a credential. When that
+/// choice has no grant, this says why.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UngrantedGitHub {
+    /// GitHub is granted, withheld, or not chosen.
+    #[default]
+    None,
+    /// The account has no current GitHub connection: the fix is
+    /// reconnecting GitHub, not the profile.
+    NotConnected,
+    /// A current connection exists that this runtime isn't authorized to
+    /// use: a denial, which names no cause.
+    NotAuthorized,
+}
+
+/// A selected credential whose lifecycle withholds its capability.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Withheld {
+    pub credential: CredentialId,
+    pub reason: WithheldReason,
+}
+
+/// Why a selected credential can't be used until its owner reconnects it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WithheldReason {
+    Revoked,
+    Expired,
+    /// Its refresh failed, or the provider refused it.
+    NeedsReconnect,
 }
 
 /// Admit every profile entry, or fail the whole selection. Local and
@@ -220,9 +253,19 @@ pub fn derive_available_grants(
         now_unix,
         Some(&mut reconnect_required),
     )?;
+    let github = CapabilitySlot::github();
+    let ungranted_github = if !profile.includes_github()
+        || reconnect_required.contains_key(&github)
+        || grants.iter().any(|grant| grant.capability_slot == github)
+    {
+        UngrantedGitHub::None
+    } else {
+        ungranted_github(&profile.owner, credentials)
+    };
     Ok(AvailableGrants {
         grants,
         reconnect_required,
+        ungranted_github,
     })
 }
 
@@ -233,7 +276,7 @@ fn derive_profile_grants(
     credentials: &BTreeMap<CredentialId, CredentialMetadata>,
     catalog: &ProviderCatalog,
     now_unix: u64,
-    mut reconnect_required: Option<&mut BTreeMap<CapabilitySlot, CredentialId>>,
+    mut reconnect_required: Option<&mut BTreeMap<CapabilitySlot, Withheld>>,
 ) -> Result<Vec<DerivedGrant>, AccessError> {
     context.validate()?;
     binding.validate()?;
@@ -258,12 +301,24 @@ fn derive_profile_grants(
         reconnect_required.as_deref_mut(),
         error,
     ) {
-        (
-            Some(withheld),
-            AccessError::CredentialInactive { credential }
-            | AccessError::CredentialExpired { credential },
-        ) => {
-            withheld.insert(slot.clone(), credential);
+        (Some(withheld), AccessError::CredentialExpired { credential }) => {
+            withheld.insert(
+                slot.clone(),
+                Withheld {
+                    credential,
+                    reason: WithheldReason::Expired,
+                },
+            );
+            Ok(())
+        }
+        (Some(withheld), AccessError::CredentialInactive { credential }) => {
+            // Inactive is revoked or refresh failed; the status read just now
+            // says which.
+            let reason = match credentials.get(&credential).map(|record| record.status) {
+                Some(CredentialStatus::Revoked) => WithheldReason::Revoked,
+                _ => WithheldReason::NeedsReconnect,
+            };
+            withheld.insert(slot.clone(), Withheld { credential, reason });
             Ok(())
         }
         (_, error) => Err(error),
@@ -438,11 +493,32 @@ fn authorized_github_connection<'a>(
     credentials: &'a BTreeMap<CredentialId, CredentialMetadata>,
 ) -> Option<&'a CredentialMetadata> {
     credentials.values().find(|credential| {
-        credential.provider.as_str() == "github"
-            && credential.authentication_kind == crate::CredentialAuthKind::OAuth
-            && &credential.owner == owner
+        is_github_connection(credential, owner)
             && context.authorized_credentials.contains(&credential.id)
     })
+}
+
+/// Why `owner`'s GitHub choice, which has no grant, has none: a current
+/// connection this runtime may not use, or no current connection at all.
+/// Shared by profile and account GitHub admission, so both read it the same.
+pub fn ungranted_github(
+    owner: &Owner,
+    credentials: &BTreeMap<CredentialId, CredentialMetadata>,
+) -> UngrantedGitHub {
+    if credentials.values().any(|credential| {
+        is_github_connection(credential, owner) && credential.status == CredentialStatus::Active
+    }) {
+        UngrantedGitHub::NotAuthorized
+    } else {
+        UngrantedGitHub::NotConnected
+    }
+}
+
+/// One of `owner`'s GitHub connections, in any state.
+fn is_github_connection(credential: &CredentialMetadata, owner: &Owner) -> bool {
+    credential.provider.as_str() == "github"
+        && credential.authentication_kind == crate::CredentialAuthKind::OAuth
+        && &credential.owner == owner
 }
 
 fn github_grant(

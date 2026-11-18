@@ -312,10 +312,14 @@ async fn cache_hit_rechecks_replacement_revocation_rebinding_stop_generation_exp
         let f = Fixture::create().await?;
         // A revoked or expired credential withholds only its own capability:
         // the second grant evaluation reports Reconnect instead of a grant.
-        let denial = if matches!(mutation, "revoke" | "expiry") {
-            BrokerLeaseError::ReconnectRequired
-        } else {
-            BrokerLeaseError::Denied
+        let denial = match mutation {
+            "revoke" => {
+                BrokerLeaseError::ReconnectRequired(codewire_access::WithheldReason::Revoked)
+            }
+            "expiry" => {
+                BrokerLeaseError::ReconnectRequired(codewire_access::WithheldReason::Expired)
+            }
+            _ => BrokerLeaseError::Denied,
         };
         let mutated = async || {
             match mutation {

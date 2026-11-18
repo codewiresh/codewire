@@ -657,7 +657,7 @@ async fn the_claude_login_delivers_only_the_creators_own_active_sign_in() -> Res
             ensure!(
                 matches!(
                     outcome,
-                    Err(BrokerLeaseError::Denied | BrokerLeaseError::ReconnectRequired)
+                    Err(BrokerLeaseError::Denied | BrokerLeaseError::ReconnectRequired(_))
                 ),
                 "{case} must not deliver a login"
             );

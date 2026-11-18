@@ -65,10 +65,15 @@ fn decision() -> Decision {
         evaluated_at: Instant::now(),
         session,
         grants: AvailableGrants {
+            ungranted_github: codewire_access::UngrantedGitHub::None,
             grants: vec![grant],
             reconnect_required: [(
                 CapabilitySlot::anthropic(),
-                CredentialId::parse("6c1e8d34-29a4-4b6e-9a51-3f0c7e2d9b84").unwrap(),
+                codewire_access::Withheld {
+                    credential: CredentialId::parse("6c1e8d34-29a4-4b6e-9a51-3f0c7e2d9b84")
+                        .unwrap(),
+                    reason: codewire_access::WithheldReason::NeedsReconnect,
+                },
             )]
             .into(),
         },
@@ -129,6 +134,44 @@ fn a_withheld_credential_is_usable_again_only_once_active_and_unexpired() {
     assert!(!usable(&metadata), "past its hard deadline");
 }
 
+/// GitHub chosen by the profile but not connected is withheld with no
+/// credential: its lease reads as needing reconnect, not as unselected.
+#[test]
+fn an_unconnected_github_choice_leases_as_needing_reconnect() {
+    let mut decided = decision();
+    decided.grants.ungranted_github = codewire_access::UngrantedGitHub::NotConnected;
+    assert_eq!(
+        select_grant(
+            &decided.grants,
+            &decided.session,
+            &CapabilitySlot::github(),
+            &permission()
+        )
+        .err(),
+        Some(BrokerLeaseError::ReconnectRequired(
+            codewire_access::WithheldReason::NeedsReconnect
+        ))
+    );
+}
+
+/// A current GitHub connection this runtime isn't authorized to use is a
+/// denial, which names no cause: neither reconnect nor unselected.
+#[test]
+fn an_unauthorized_github_connection_is_denied() {
+    let mut decided = decision();
+    decided.grants.ungranted_github = codewire_access::UngrantedGitHub::NotAuthorized;
+    assert_eq!(
+        select_grant(
+            &decided.grants,
+            &decided.session,
+            &CapabilitySlot::github(),
+            &permission()
+        )
+        .err(),
+        Some(BrokerLeaseError::Denied)
+    );
+}
+
 #[test]
 fn a_lease_admits_only_its_granted_slot_and_the_grants_record_generation() {
     let decided = decision();
@@ -143,11 +186,14 @@ fn a_lease_admits_only_its_granted_slot_and_the_grants_record_generation() {
     );
     assert_eq!(
         select(&CapabilitySlot::anthropic(), &permission()).err(),
-        Some(BrokerLeaseError::ReconnectRequired)
+        Some(BrokerLeaseError::ReconnectRequired(
+            codewire_access::WithheldReason::NeedsReconnect
+        ))
     );
+    // A slot the profile doesn't fill is told apart from a denial.
     assert_eq!(
         select(&CapabilitySlot::github(), &permission()).err(),
-        Some(BrokerLeaseError::Denied)
+        Some(BrokerLeaseError::NotSelected)
     );
     let other = GrantPermission {
         operation: BrokerOperationId::parse("messages").unwrap(),
