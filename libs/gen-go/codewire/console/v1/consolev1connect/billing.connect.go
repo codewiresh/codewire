@@ -69,6 +69,21 @@ const (
 	// BillingServiceAddCreditProcedure is the fully-qualified name of the BillingService's AddCredit
 	// RPC.
 	BillingServiceAddCreditProcedure = "/codewire.console.v1.BillingService/AddCredit"
+	// BillingServiceListPaymentMethodsProcedure is the fully-qualified name of the BillingService's
+	// ListPaymentMethods RPC.
+	BillingServiceListPaymentMethodsProcedure = "/codewire.console.v1.BillingService/ListPaymentMethods"
+	// BillingServiceBeginCardSetupProcedure is the fully-qualified name of the BillingService's
+	// BeginCardSetup RPC.
+	BillingServiceBeginCardSetupProcedure = "/codewire.console.v1.BillingService/BeginCardSetup"
+	// BillingServiceFinishCardSetupProcedure is the fully-qualified name of the BillingService's
+	// FinishCardSetup RPC.
+	BillingServiceFinishCardSetupProcedure = "/codewire.console.v1.BillingService/FinishCardSetup"
+	// BillingServiceSetDefaultPaymentMethodProcedure is the fully-qualified name of the
+	// BillingService's SetDefaultPaymentMethod RPC.
+	BillingServiceSetDefaultPaymentMethodProcedure = "/codewire.console.v1.BillingService/SetDefaultPaymentMethod"
+	// BillingServiceRemovePaymentMethodProcedure is the fully-qualified name of the BillingService's
+	// RemovePaymentMethod RPC.
+	BillingServiceRemovePaymentMethodProcedure = "/codewire.console.v1.BillingService/RemovePaymentMethod"
 )
 
 // BillingServiceClient is a client for the codewire.console.v1.BillingService service.
@@ -106,6 +121,30 @@ type BillingServiceClient interface {
 	// payment. Organization owners and admins only. A retry with the same
 	// request_id and amount never charges twice.
 	AddCredit(context.Context, *connect.Request[v1.AddCreditRequest]) (*connect.Response[v1.AddCreditResponse], error)
+	// ListPaymentMethods lists the organization's saved cards, newest first,
+	// which is the default, and the publishable key Stripe's card form mounts
+	// with. Any member may see them.
+	ListPaymentMethods(context.Context, *connect.Request[v1.ListPaymentMethodsRequest]) (*connect.Response[v1.ListPaymentMethodsResponse], error)
+	// BeginCardSetup starts adding a card in the console once it is saved: a
+	// SetupIntent holding the choices made beside the form, and the secret the
+	// form confirms the card with. Saving the card charges nothing by itself.
+	// Organization owners and admins only.
+	BeginCardSetup(context.Context, *connect.Request[v1.BeginCardSetupRequest]) (*connect.Response[v1.BeginCardSetupResponse], error)
+	// FinishCardSetup finishes adding a card once the form confirmed it: the
+	// card becomes the default, the credit chosen at BeginCardSetup is bought
+	// with it, the top-up setting chosen there is saved, and the organization
+	// is settled at once. With top-up on and still no credit, that charges the
+	// top-up amount. The choices come only from the SetupIntent, never from
+	// this request. A SetupIntent finishes once, within an hour of its start.
+	// Organization owners and admins only.
+	FinishCardSetup(context.Context, *connect.Request[v1.FinishCardSetupRequest]) (*connect.Response[v1.FinishCardSetupResponse], error)
+	// SetDefaultPaymentMethod makes one of the organization's cards the one
+	// top-ups charge. Organization owners and admins only.
+	SetDefaultPaymentMethod(context.Context, *connect.Request[v1.SetDefaultPaymentMethodRequest]) (*connect.Response[v1.SetDefaultPaymentMethodResponse], error)
+	// RemovePaymentMethod removes one of the organization's cards. A removed
+	// default is replaced by the newest card left. Organization owners and
+	// admins only.
+	RemovePaymentMethod(context.Context, *connect.Request[v1.RemovePaymentMethodRequest]) (*connect.Response[v1.RemovePaymentMethodResponse], error)
 }
 
 // NewBillingServiceClient constructs a client for the codewire.console.v1.BillingService service.
@@ -198,23 +237,59 @@ func NewBillingServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(billingServiceMethods.ByName("AddCredit")),
 			connect.WithClientOptions(opts...),
 		),
+		listPaymentMethods: connect.NewClient[v1.ListPaymentMethodsRequest, v1.ListPaymentMethodsResponse](
+			httpClient,
+			baseURL+BillingServiceListPaymentMethodsProcedure,
+			connect.WithSchema(billingServiceMethods.ByName("ListPaymentMethods")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		beginCardSetup: connect.NewClient[v1.BeginCardSetupRequest, v1.BeginCardSetupResponse](
+			httpClient,
+			baseURL+BillingServiceBeginCardSetupProcedure,
+			connect.WithSchema(billingServiceMethods.ByName("BeginCardSetup")),
+			connect.WithClientOptions(opts...),
+		),
+		finishCardSetup: connect.NewClient[v1.FinishCardSetupRequest, v1.FinishCardSetupResponse](
+			httpClient,
+			baseURL+BillingServiceFinishCardSetupProcedure,
+			connect.WithSchema(billingServiceMethods.ByName("FinishCardSetup")),
+			connect.WithClientOptions(opts...),
+		),
+		setDefaultPaymentMethod: connect.NewClient[v1.SetDefaultPaymentMethodRequest, v1.SetDefaultPaymentMethodResponse](
+			httpClient,
+			baseURL+BillingServiceSetDefaultPaymentMethodProcedure,
+			connect.WithSchema(billingServiceMethods.ByName("SetDefaultPaymentMethod")),
+			connect.WithClientOptions(opts...),
+		),
+		removePaymentMethod: connect.NewClient[v1.RemovePaymentMethodRequest, v1.RemovePaymentMethodResponse](
+			httpClient,
+			baseURL+BillingServiceRemovePaymentMethodProcedure,
+			connect.WithSchema(billingServiceMethods.ByName("RemovePaymentMethod")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // billingServiceClient implements BillingServiceClient.
 type billingServiceClient struct {
-	listOrgPlans          *connect.Client[v1.ListOrgPlansRequest, v1.ListOrgPlansResponse]
-	listResourcePlans     *connect.Client[v1.ListResourcePlansRequest, v1.ListResourcePlansResponse]
-	getSignupCredit       *connect.Client[v1.GetSignupCreditRequest, v1.GetSignupCreditResponse]
-	getBillingOverview    *connect.Client[v1.GetBillingOverviewRequest, v1.GetBillingOverviewResponse]
-	listInvoices          *connect.Client[v1.ListInvoicesRequest, v1.ListInvoicesResponse]
-	listBillingEvents     *connect.Client[v1.ListBillingEventsRequest, v1.ListBillingEventsResponse]
-	getEnvironmentUsage   *connect.Client[v1.GetEnvironmentUsageRequest, v1.GetEnvironmentUsageResponse]
-	createCheckoutSession *connect.Client[v1.CreateCheckoutSessionRequest, v1.CreateCheckoutSessionResponse]
-	createPortalSession   *connect.Client[v1.CreatePortalSessionRequest, v1.CreatePortalSessionResponse]
-	createSetupSession    *connect.Client[v1.CreateSetupSessionRequest, v1.CreateSetupSessionResponse]
-	updateAutoTopUp       *connect.Client[v1.UpdateAutoTopUpRequest, v1.UpdateAutoTopUpResponse]
-	addCredit             *connect.Client[v1.AddCreditRequest, v1.AddCreditResponse]
+	listOrgPlans            *connect.Client[v1.ListOrgPlansRequest, v1.ListOrgPlansResponse]
+	listResourcePlans       *connect.Client[v1.ListResourcePlansRequest, v1.ListResourcePlansResponse]
+	getSignupCredit         *connect.Client[v1.GetSignupCreditRequest, v1.GetSignupCreditResponse]
+	getBillingOverview      *connect.Client[v1.GetBillingOverviewRequest, v1.GetBillingOverviewResponse]
+	listInvoices            *connect.Client[v1.ListInvoicesRequest, v1.ListInvoicesResponse]
+	listBillingEvents       *connect.Client[v1.ListBillingEventsRequest, v1.ListBillingEventsResponse]
+	getEnvironmentUsage     *connect.Client[v1.GetEnvironmentUsageRequest, v1.GetEnvironmentUsageResponse]
+	createCheckoutSession   *connect.Client[v1.CreateCheckoutSessionRequest, v1.CreateCheckoutSessionResponse]
+	createPortalSession     *connect.Client[v1.CreatePortalSessionRequest, v1.CreatePortalSessionResponse]
+	createSetupSession      *connect.Client[v1.CreateSetupSessionRequest, v1.CreateSetupSessionResponse]
+	updateAutoTopUp         *connect.Client[v1.UpdateAutoTopUpRequest, v1.UpdateAutoTopUpResponse]
+	addCredit               *connect.Client[v1.AddCreditRequest, v1.AddCreditResponse]
+	listPaymentMethods      *connect.Client[v1.ListPaymentMethodsRequest, v1.ListPaymentMethodsResponse]
+	beginCardSetup          *connect.Client[v1.BeginCardSetupRequest, v1.BeginCardSetupResponse]
+	finishCardSetup         *connect.Client[v1.FinishCardSetupRequest, v1.FinishCardSetupResponse]
+	setDefaultPaymentMethod *connect.Client[v1.SetDefaultPaymentMethodRequest, v1.SetDefaultPaymentMethodResponse]
+	removePaymentMethod     *connect.Client[v1.RemovePaymentMethodRequest, v1.RemovePaymentMethodResponse]
 }
 
 // ListOrgPlans calls codewire.console.v1.BillingService.ListOrgPlans.
@@ -277,6 +352,31 @@ func (c *billingServiceClient) AddCredit(ctx context.Context, req *connect.Reque
 	return c.addCredit.CallUnary(ctx, req)
 }
 
+// ListPaymentMethods calls codewire.console.v1.BillingService.ListPaymentMethods.
+func (c *billingServiceClient) ListPaymentMethods(ctx context.Context, req *connect.Request[v1.ListPaymentMethodsRequest]) (*connect.Response[v1.ListPaymentMethodsResponse], error) {
+	return c.listPaymentMethods.CallUnary(ctx, req)
+}
+
+// BeginCardSetup calls codewire.console.v1.BillingService.BeginCardSetup.
+func (c *billingServiceClient) BeginCardSetup(ctx context.Context, req *connect.Request[v1.BeginCardSetupRequest]) (*connect.Response[v1.BeginCardSetupResponse], error) {
+	return c.beginCardSetup.CallUnary(ctx, req)
+}
+
+// FinishCardSetup calls codewire.console.v1.BillingService.FinishCardSetup.
+func (c *billingServiceClient) FinishCardSetup(ctx context.Context, req *connect.Request[v1.FinishCardSetupRequest]) (*connect.Response[v1.FinishCardSetupResponse], error) {
+	return c.finishCardSetup.CallUnary(ctx, req)
+}
+
+// SetDefaultPaymentMethod calls codewire.console.v1.BillingService.SetDefaultPaymentMethod.
+func (c *billingServiceClient) SetDefaultPaymentMethod(ctx context.Context, req *connect.Request[v1.SetDefaultPaymentMethodRequest]) (*connect.Response[v1.SetDefaultPaymentMethodResponse], error) {
+	return c.setDefaultPaymentMethod.CallUnary(ctx, req)
+}
+
+// RemovePaymentMethod calls codewire.console.v1.BillingService.RemovePaymentMethod.
+func (c *billingServiceClient) RemovePaymentMethod(ctx context.Context, req *connect.Request[v1.RemovePaymentMethodRequest]) (*connect.Response[v1.RemovePaymentMethodResponse], error) {
+	return c.removePaymentMethod.CallUnary(ctx, req)
+}
+
 // BillingServiceHandler is an implementation of the codewire.console.v1.BillingService service.
 type BillingServiceHandler interface {
 	// ListOrgPlans returns the active organization plans keyed by plan key.
@@ -312,6 +412,30 @@ type BillingServiceHandler interface {
 	// payment. Organization owners and admins only. A retry with the same
 	// request_id and amount never charges twice.
 	AddCredit(context.Context, *connect.Request[v1.AddCreditRequest]) (*connect.Response[v1.AddCreditResponse], error)
+	// ListPaymentMethods lists the organization's saved cards, newest first,
+	// which is the default, and the publishable key Stripe's card form mounts
+	// with. Any member may see them.
+	ListPaymentMethods(context.Context, *connect.Request[v1.ListPaymentMethodsRequest]) (*connect.Response[v1.ListPaymentMethodsResponse], error)
+	// BeginCardSetup starts adding a card in the console once it is saved: a
+	// SetupIntent holding the choices made beside the form, and the secret the
+	// form confirms the card with. Saving the card charges nothing by itself.
+	// Organization owners and admins only.
+	BeginCardSetup(context.Context, *connect.Request[v1.BeginCardSetupRequest]) (*connect.Response[v1.BeginCardSetupResponse], error)
+	// FinishCardSetup finishes adding a card once the form confirmed it: the
+	// card becomes the default, the credit chosen at BeginCardSetup is bought
+	// with it, the top-up setting chosen there is saved, and the organization
+	// is settled at once. With top-up on and still no credit, that charges the
+	// top-up amount. The choices come only from the SetupIntent, never from
+	// this request. A SetupIntent finishes once, within an hour of its start.
+	// Organization owners and admins only.
+	FinishCardSetup(context.Context, *connect.Request[v1.FinishCardSetupRequest]) (*connect.Response[v1.FinishCardSetupResponse], error)
+	// SetDefaultPaymentMethod makes one of the organization's cards the one
+	// top-ups charge. Organization owners and admins only.
+	SetDefaultPaymentMethod(context.Context, *connect.Request[v1.SetDefaultPaymentMethodRequest]) (*connect.Response[v1.SetDefaultPaymentMethodResponse], error)
+	// RemovePaymentMethod removes one of the organization's cards. A removed
+	// default is replaced by the newest card left. Organization owners and
+	// admins only.
+	RemovePaymentMethod(context.Context, *connect.Request[v1.RemovePaymentMethodRequest]) (*connect.Response[v1.RemovePaymentMethodResponse], error)
 }
 
 // NewBillingServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -400,6 +524,37 @@ func NewBillingServiceHandler(svc BillingServiceHandler, opts ...connect.Handler
 		connect.WithSchema(billingServiceMethods.ByName("AddCredit")),
 		connect.WithHandlerOptions(opts...),
 	)
+	billingServiceListPaymentMethodsHandler := connect.NewUnaryHandler(
+		BillingServiceListPaymentMethodsProcedure,
+		svc.ListPaymentMethods,
+		connect.WithSchema(billingServiceMethods.ByName("ListPaymentMethods")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	billingServiceBeginCardSetupHandler := connect.NewUnaryHandler(
+		BillingServiceBeginCardSetupProcedure,
+		svc.BeginCardSetup,
+		connect.WithSchema(billingServiceMethods.ByName("BeginCardSetup")),
+		connect.WithHandlerOptions(opts...),
+	)
+	billingServiceFinishCardSetupHandler := connect.NewUnaryHandler(
+		BillingServiceFinishCardSetupProcedure,
+		svc.FinishCardSetup,
+		connect.WithSchema(billingServiceMethods.ByName("FinishCardSetup")),
+		connect.WithHandlerOptions(opts...),
+	)
+	billingServiceSetDefaultPaymentMethodHandler := connect.NewUnaryHandler(
+		BillingServiceSetDefaultPaymentMethodProcedure,
+		svc.SetDefaultPaymentMethod,
+		connect.WithSchema(billingServiceMethods.ByName("SetDefaultPaymentMethod")),
+		connect.WithHandlerOptions(opts...),
+	)
+	billingServiceRemovePaymentMethodHandler := connect.NewUnaryHandler(
+		BillingServiceRemovePaymentMethodProcedure,
+		svc.RemovePaymentMethod,
+		connect.WithSchema(billingServiceMethods.ByName("RemovePaymentMethod")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.console.v1.BillingService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case BillingServiceListOrgPlansProcedure:
@@ -426,6 +581,16 @@ func NewBillingServiceHandler(svc BillingServiceHandler, opts ...connect.Handler
 			billingServiceUpdateAutoTopUpHandler.ServeHTTP(w, r)
 		case BillingServiceAddCreditProcedure:
 			billingServiceAddCreditHandler.ServeHTTP(w, r)
+		case BillingServiceListPaymentMethodsProcedure:
+			billingServiceListPaymentMethodsHandler.ServeHTTP(w, r)
+		case BillingServiceBeginCardSetupProcedure:
+			billingServiceBeginCardSetupHandler.ServeHTTP(w, r)
+		case BillingServiceFinishCardSetupProcedure:
+			billingServiceFinishCardSetupHandler.ServeHTTP(w, r)
+		case BillingServiceSetDefaultPaymentMethodProcedure:
+			billingServiceSetDefaultPaymentMethodHandler.ServeHTTP(w, r)
+		case BillingServiceRemovePaymentMethodProcedure:
+			billingServiceRemovePaymentMethodHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -481,4 +646,24 @@ func (UnimplementedBillingServiceHandler) UpdateAutoTopUp(context.Context, *conn
 
 func (UnimplementedBillingServiceHandler) AddCredit(context.Context, *connect.Request[v1.AddCreditRequest]) (*connect.Response[v1.AddCreditResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.AddCredit is not implemented"))
+}
+
+func (UnimplementedBillingServiceHandler) ListPaymentMethods(context.Context, *connect.Request[v1.ListPaymentMethodsRequest]) (*connect.Response[v1.ListPaymentMethodsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.ListPaymentMethods is not implemented"))
+}
+
+func (UnimplementedBillingServiceHandler) BeginCardSetup(context.Context, *connect.Request[v1.BeginCardSetupRequest]) (*connect.Response[v1.BeginCardSetupResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.BeginCardSetup is not implemented"))
+}
+
+func (UnimplementedBillingServiceHandler) FinishCardSetup(context.Context, *connect.Request[v1.FinishCardSetupRequest]) (*connect.Response[v1.FinishCardSetupResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.FinishCardSetup is not implemented"))
+}
+
+func (UnimplementedBillingServiceHandler) SetDefaultPaymentMethod(context.Context, *connect.Request[v1.SetDefaultPaymentMethodRequest]) (*connect.Response[v1.SetDefaultPaymentMethodResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.SetDefaultPaymentMethod is not implemented"))
+}
+
+func (UnimplementedBillingServiceHandler) RemovePaymentMethod(context.Context, *connect.Request[v1.RemovePaymentMethodRequest]) (*connect.Response[v1.RemovePaymentMethodResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.RemovePaymentMethod is not implemented"))
 }

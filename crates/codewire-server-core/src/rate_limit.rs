@@ -83,6 +83,28 @@ pub const ADMIN_ACCOUNT_DELETE: Limit = Limit {
     per_user: true,
 };
 
+/// Card setups one organization may start in an hour (#4750). Adding a card
+/// takes one or two tries; a SetupIntent per try is what card testing with
+/// stolen cards needs many of. Not in [`LIMITS`]: no setting raises it.
+pub const CARD_SETUP_ORGANIZATION: Limit = Limit {
+    name: "card_setup_organization",
+    key_prefix: "card_setup_org",
+    window_secs: 3_600,
+    default_max: 10,
+    per_user: false,
+};
+
+/// Card setups one user may start in a day, across all their organizations
+/// (#4750), so making more organizations doesn't make more tries. Not in
+/// [`LIMITS`]: no setting raises it.
+pub const CARD_SETUP_USER: Limit = Limit {
+    name: "card_setup_user",
+    key_prefix: "card_setup_user",
+    window_secs: 86_400,
+    default_max: 20,
+    per_user: true,
+};
+
 /// Email and provider sign-ups across the whole site (#3297), counted after
 /// [`SIGNUP_ADDRESS`] and before any account is looked up.
 pub const SIGNUP: Limit = Limit {
@@ -311,18 +333,37 @@ pub async fn take_fixed_for_user(
     limit: &Limit,
     user_id: &str,
 ) -> Result<Decision, sqlx::Error> {
+    take_fixed(connection, limit, user_id).await
+}
+
+/// Counts one request against `subject`, such as an organization id, at the
+/// limit's own count, with no setting or override applied.
+pub async fn take_fixed(
+    connection: &mut PgConnection,
+    limit: &Limit,
+    subject: &str,
+) -> Result<Decision, sqlx::Error> {
     let now = database_now(&mut *connection).await?;
     counted(
         limit,
         consume(
             connection,
-            &limit.key(user_id),
+            &limit.key(subject),
             limit.window_secs,
             limit.default_max,
             now,
         )
         .await,
     )
+}
+
+/// Exposes each limit's refusal series at zero before any refusal. A series
+/// that first appears at 1 has no earlier sample, so an alert's `increase()`
+/// misses a lone first refusal.
+pub fn expose_refusals(limits: &[&Limit]) {
+    for limit in limits {
+        crate::metrics::rate_limit_refusals().with_label_values(&[limit.name]);
+    }
 }
 
 /// Counts a refusal of `limit` in `codewire_rate_limit_refusals_total`, so an
@@ -403,6 +444,22 @@ mod tests {
             decision.refusal("sandbox creates", &SANDBOX_CREATE),
             "at most 10 sandbox creates a minute; try again after 14:05:30 UTC"
         );
+    }
+
+    #[test]
+    fn exposed_limits_report_zero_refusals_before_any() {
+        use prometheus::Encoder;
+
+        expose_refusals(&[&CARD_SETUP_ORGANIZATION, &CARD_SETUP_USER]);
+        let mut rendered = Vec::new();
+        prometheus::TextEncoder::new()
+            .encode(&prometheus::gather(), &mut rendered)
+            .unwrap();
+        let rendered = String::from_utf8(rendered).unwrap();
+        for name in [CARD_SETUP_ORGANIZATION.name, CARD_SETUP_USER.name] {
+            let series = format!("codewire_rate_limit_refusals_total{{limit=\"{name}\"}} 0\n");
+            assert!(rendered.contains(&series), "{series} in {rendered}");
+        }
     }
 
     #[test]

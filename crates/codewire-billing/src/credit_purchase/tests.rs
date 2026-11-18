@@ -94,7 +94,14 @@ fn hosted_url(invoice_id: &str) -> String {
     format!("https://invoice.stripe.com/i/acct_fake/test_{invoice_id}")
 }
 
-fn invoice(id: &str, status: &str, customer: &str, amount: i64, metadata: Value) -> Value {
+/// A Stripe invoice as the client decodes it; the saved cards tests reuse it.
+pub(crate) fn invoice(
+    id: &str,
+    status: &str,
+    customer: &str,
+    amount: i64,
+    metadata: Value,
+) -> Value {
     json!({
         "id": id,
         "object": "invoice",

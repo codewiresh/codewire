@@ -107,15 +107,12 @@ pub async fn add_credit(
     request: AddCreditRequest,
 ) -> AppResult<AddCreditOutcome> {
     require_billing_admin(state, user, organization_id).await?;
-    if !AUTO_TOP_UP_CENTS.contains(&request.amount_cents) {
-        return Err(invalid("/amount_cents", "must be between 500 and 100000"));
-    }
-    if !valid_request_id(&request.request_id) {
-        return Err(invalid(
-            "/request_id",
-            "must be 16 to 64 letters, digits, '-' or '_'",
-        ));
-    }
+    check_purchase(
+        request.amount_cents,
+        &request.request_id,
+        "/amount_cents",
+        "/request_id",
+    )?;
     if request.success_url.is_empty() || request.cancel_url.is_empty() {
         return Err(AppError::BadRequest(
             "success_url and cancel_url are required".into(),
@@ -139,25 +136,72 @@ pub async fn add_credit(
     {
         return checkout(state, organization_id, &top_up_id, &request).await;
     }
+    charge_saved_card(state, organization_id, &top_up_id, request.amount_cents).await
+}
+
+/// Checks the amount and attempt key a purchase names; `amount_path` and
+/// `request_path` name them in the caller's request.
+pub(crate) fn check_purchase(
+    amount_cents: i32,
+    request_id: &str,
+    amount_path: &'static str,
+    request_path: &'static str,
+) -> AppResult<()> {
+    if !AUTO_TOP_UP_CENTS.contains(&amount_cents) {
+        return Err(invalid(amount_path, "must be between 500 and 100000"));
+    }
+    if !valid_request_id(request_id) {
+        return Err(invalid(
+            request_path,
+            "must be 16 to 64 letters, digits, '-' or '_'",
+        ));
+    }
+    Ok(())
+}
+
+/// Buys credit with the card the organization has just saved as its default
+/// (#4750), for a caller already checked as an owner or admin and a purchase
+/// already checked by [`check_purchase`]. A retry resumes the same purchase.
+pub(crate) async fn buy_with_new_card(
+    state: &BillingState,
+    organization_id: &str,
+    amount_cents: i32,
+    request_id: &str,
+) -> AppResult<AddCreditOutcome> {
+    let top_up_id = purchase_top_up_id(organization_id, request_id, amount_cents);
+    if let Some(outcome) = earlier_attempt(state, organization_id, &top_up_id).await? {
+        return Ok(outcome);
+    }
+    charge_saved_card(state, organization_id, &top_up_id, amount_cents).await
+}
+
+/// Records a new purchase and charges it to the saved card, unless a retry
+/// of it or another top-up of the organization is already pending.
+async fn charge_saved_card(
+    state: &BillingState,
+    organization_id: &str,
+    top_up_id: &str,
+    amount_cents: i32,
+) -> AppResult<AddCreditOutcome> {
     let created: Option<String> = sqlx::query_scalar(
         r#"INSERT INTO billing_top_ups (id, organization_id, amount_cents)
            VALUES ($1, $2, $3)
            ON CONFLICT DO NOTHING
            RETURNING id"#,
     )
-    .bind(&top_up_id)
+    .bind(top_up_id)
     .bind(organization_id)
-    .bind(request.amount_cents)
+    .bind(amount_cents)
     .fetch_optional(&state.pool)
     .await?;
     if created.is_none() {
         // Either a retry of this request got here first, or another top-up
         // holds the organization's pending slot.
-        return Ok(earlier_attempt(state, organization_id, &top_up_id)
+        return Ok(earlier_attempt(state, organization_id, top_up_id)
             .await?
             .unwrap_or(AddCreditOutcome::InProgress));
     }
-    charge(state, organization_id, &top_up_id, request.amount_cents).await
+    charge(state, organization_id, top_up_id, amount_cents).await
 }
 
 /// What an earlier attempt of the same purchase came to, resuming one that
@@ -366,4 +410,4 @@ async fn checkout(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

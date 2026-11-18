@@ -1814,6 +1814,8 @@ if [ "$event_selected" = false ]; then
       crates/*/src/*database_tests.rs|\
       crates/*/src/*/database_tests/*|\
       crates/codewire-billing/src/billing_teardown.rs|\
+      crates/codewire-billing/src/cards.rs|\
+      crates/codewire-billing/src/cards/*|\
       crates/codewire-billing/src/credit.rs|\
       crates/codewire-billing/src/credit_changes.rs|\
       crates/codewire-billing/src/credit_changes/*|\

@@ -51,10 +51,12 @@ use stripe_checkout::checkout_session::{
 };
 use stripe_client_core::{RequestBuilder, StripeMethod};
 use stripe_core::customer::{
-    CreateCustomer, DeleteCustomer, RetrieveCustomer, SearchCustomer, UpdateCustomer,
-    UpdateCustomerInvoiceSettings,
+    CreateCustomer, DeleteCustomer, ListPaymentMethodsCustomer, ListPaymentMethodsCustomerType,
+    RetrieveCustomer, SearchCustomer, UpdateCustomer, UpdateCustomerInvoiceSettings,
 };
-use stripe_core::setup_intent::RetrieveSetupIntent;
+use stripe_core::setup_intent::{
+    CreateSetupIntent, CreateSetupIntentUsage, RetrieveSetupIntent, UpdateSetupIntent,
+};
 
 use codewire_server_core::AppError;
 
@@ -165,6 +167,24 @@ fn parameter_key(kind: &str, request: &impl serde::Serialize) -> Result<Idempote
     IdempotencyKey::new(key).map_err(stripe_err)
 }
 
+/// The publishable key, when it is of the secret key's mode: a test key with
+/// a live account, or a live key with a test one, would make the card form
+/// save cards into another account, so it is left out and the form refuses.
+fn publishable_key_for(live: bool, key: Option<String>) -> Option<String> {
+    let prefix = if live { "pk_live_" } else { "pk_test_" };
+    match key {
+        Some(key) if key.starts_with(prefix) => Some(key),
+        Some(key) if !key.is_empty() => {
+            tracing::error!(
+                live,
+                "STRIPE_PUBLISHABLE_KEY is not of the secret key's mode; the card form is off"
+            );
+            None
+        }
+        _ => None,
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct StripeHandle {
     client: Option<Arc<stripe::Client>>,
@@ -172,6 +192,9 @@ pub struct StripeHandle {
     /// `billing.stripeMode`.
     live: bool,
     webhook_secret: String,
+    /// The publishable key the console's embedded card form uses (#4750),
+    /// only when it is of the secret key's mode.
+    publishable_key: Option<String>,
 }
 
 impl StripeHandle {
@@ -181,6 +204,10 @@ impl StripeHandle {
         let webhook_secret = std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default();
         match std::env::var("STRIPE_SECRET_KEY") {
             Ok(key) if !key.is_empty() => Self {
+                publishable_key: publishable_key_for(
+                    key.starts_with("sk_live_"),
+                    std::env::var("STRIPE_PUBLISHABLE_KEY").ok(),
+                ),
                 live: key.starts_with("sk_live_"),
                 client: Some(Arc::new(
                     stripe::ClientBuilder::new(key)
@@ -194,6 +221,7 @@ impl StripeHandle {
                 client: None,
                 live: false,
                 webhook_secret,
+                publishable_key: None,
             },
         }
     }
@@ -214,6 +242,7 @@ impl StripeHandle {
             )),
             live: false,
             webhook_secret: String::new(),
+            publishable_key: Some("pk_test_codewire".to_owned()),
         }
     }
 
@@ -225,6 +254,12 @@ impl StripeHandle {
 
     pub fn webhook_secret(&self) -> &str {
         &self.webhook_secret
+    }
+
+    /// The publishable key for the console's embedded card form, when one of
+    /// this account's mode is configured.
+    pub fn publishable_key(&self) -> Option<&str> {
+        self.publishable_key.as_deref()
     }
 
     /// `test` or `live`, for billing_catalog_prices lookups.
@@ -820,20 +855,6 @@ fn stripe_not_found(error: &stripe::StripeError) -> bool {
 // ── Webhook-handler Stripe calls (Go: webhook.go) ───────────────────
 
 impl StripeHandle {
-    pub async fn retrieve_setup_intent(
-        &self,
-        id: &str,
-    ) -> Result<stripe_shared::SetupIntent, AppError> {
-        let client = self.client()?;
-        RetrieveSetupIntent::new(
-            id.parse::<stripe_shared::SetupIntentId>()
-                .map_err(stripe_err)?,
-        )
-        .send(client)
-        .await
-        .map_err(stripe_err)
-    }
-
     pub async fn retrieve_subscription(
         &self,
         id: &str,
@@ -1034,34 +1055,12 @@ impl StripeHandle {
             .map_err(stripe_err)?;
         Ok(())
     }
-
-    /// Customer update setting invoice_settings.default_payment_method.
-    pub async fn set_default_payment_method(
-        &self,
-        customer_id: &str,
-        payment_method_id: &str,
-        idempotency_key: &str,
-    ) -> Result<(), AppError> {
-        let client = self.client()?;
-        let settings = UpdateCustomerInvoiceSettings {
-            default_payment_method: Some(payment_method_id.to_string()),
-            ..Default::default()
-        };
-        let idempotency_key = IdempotencyKey::new(idempotency_key).map_err(stripe_err)?;
-        UpdateCustomer::new(
-            customer_id
-                .parse::<stripe_shared::CustomerId>()
-                .map_err(stripe_err)?,
-        )
-        .invoice_settings(settings)
-        .customize()
-        .request_strategy(RequestStrategy::Idempotent(idempotency_key))
-        .send(client)
-        .await
-        .map_err(stripe_err)?;
-        Ok(())
-    }
 }
+
+// ── Saved cards (#4750) ─────────────────────────────────────────────────
+
+mod cards;
+pub use cards::SavedCard;
 
 /// How an automatic top-up charge ended (#3381).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1600,7 +1599,12 @@ mod idempotency_key_tests {
     #[test]
     fn every_idempotent_call_is_named_and_keyed_by_its_kind() {
         let file = include_str!("stripe_client.rs");
-        let source = &file[..file.find("mod currency_tests").expect("test module")];
+        // The card calls live in their own file (#4750).
+        let source = [
+            &file[..file.find("mod currency_tests").expect("test module")],
+            include_str!("stripe_client/cards.rs"),
+        ]
+        .concat();
         let mut found = Vec::new();
         for (start, _) in source.match_indices("async fn ") {
             let name: String = source[start + 9..]

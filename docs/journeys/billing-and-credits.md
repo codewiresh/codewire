@@ -51,7 +51,7 @@ the first Production release after codewire/deploy#245.
   method**; the "Add a card or credit" link that `cw create --cloud` prints
   at €0.
 - **States to exercise:** no card yet; a card added at an empty balance; a
-  second card the same day; a card that declines.
+  second card the same day; a card that declines; too many tries (#4874).
 - **Driving it:**
   1. At €0 with no card, choose **Add payment method**. Stripe's page
      offers cards only.
@@ -62,6 +62,14 @@ the first Production release after codewire/deploy#245.
   it charges whole €20 top-ups until the balance is above zero, as one
   charge (owner, 2026-11-11). One paid invoice appears under **Invoices**,
   and the balance moves by the amount paid.
+- **Too many tries** (#4874, against card testing): an organization starts at
+  most 10 card setups an hour, and a user at most 20 a day across all their
+  organizations; every start counts, saved or not. The next try is refused
+  before Stripe is called, so nothing is saved or charged; the dashboard
+  says there were too many tries and to try again later, and the form opens
+  again once the hour (or the day) has passed. Billing counts the refusal in
+  `codewire_rate_limit_refusals_total` and logs the organization and user.
+  Not yet observed on Dev or Production.
 - **Gotchas:** the headless browser could not complete Stripe's declined-card
   flow (Stripe answered "Your internet connection is unstable"); walk the
   declined card in a real browser.

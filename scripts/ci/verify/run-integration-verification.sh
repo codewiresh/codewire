@@ -855,6 +855,11 @@ database_lane_core() {
     cargo test -p codewire-billing --lib 'catalog_admin::tests::db_' \
       -- --nocapture
 
+  counted_suite "saved cards: list, set up, make default and remove against a fake Stripe" saved-cards \
+    DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-billing --lib 'cards::tests::db_' \
+      -- --nocapture
+
   counted_suite "credit purchase matrix" credit-purchase \
     DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-billing --lib 'credit_purchase::tests::db_' \

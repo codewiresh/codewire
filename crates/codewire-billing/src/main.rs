@@ -45,6 +45,11 @@ fn parse_loop_list(value: &str) -> Vec<String> {
 async fn main() -> anyhow::Result<()> {
     let cfg = ServiceConfig::from_env("billing")?;
     codewire_server_core::obs::init(&cfg)?;
+    // The card-testing alert must see the first refusal (#4750).
+    codewire_server_core::rate_limit::expose_refusals(&[
+        &codewire_server_core::rate_limit::CARD_SETUP_ORGANIZATION,
+        &codewire_server_core::rate_limit::CARD_SETUP_USER,
+    ]);
 
     codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
     let pool = codewire_server_core::db::connect(&cfg.database_url).await?;

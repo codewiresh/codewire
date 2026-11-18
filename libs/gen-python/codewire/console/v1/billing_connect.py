@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .billing_pb2 import AddCreditRequest, AddCreditResponse, CreateCheckoutSessionRequest, CreateCheckoutSessionResponse, CreatePortalSessionRequest, CreatePortalSessionResponse, CreateSetupSessionRequest, CreateSetupSessionResponse, GetBillingOverviewRequest, GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetEnvironmentUsageResponse, GetSignupCreditRequest, GetSignupCreditResponse, ListBillingEventsRequest, ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse, ListResourcePlansRequest, ListResourcePlansResponse, UpdateAutoTopUpRequest, UpdateAutoTopUpResponse
+from .billing_pb2 import AddCreditRequest, AddCreditResponse, BeginCardSetupRequest, BeginCardSetupResponse, CreateCheckoutSessionRequest, CreateCheckoutSessionResponse, CreatePortalSessionRequest, CreatePortalSessionResponse, CreateSetupSessionRequest, CreateSetupSessionResponse, FinishCardSetupRequest, FinishCardSetupResponse, GetBillingOverviewRequest, GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetEnvironmentUsageResponse, GetSignupCreditRequest, GetSignupCreditResponse, ListBillingEventsRequest, ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse, ListPaymentMethodsRequest, ListPaymentMethodsResponse, ListResourcePlansRequest, ListResourcePlansResponse, RemovePaymentMethodRequest, RemovePaymentMethodResponse, SetDefaultPaymentMethodRequest, SetDefaultPaymentMethodResponse, UpdateAutoTopUpRequest, UpdateAutoTopUpResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -69,6 +69,21 @@ class BillingService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def add_credit(self, request: AddCreditRequest, ctx: RequestContext[AddCreditRequest, AddCreditResponse]) -> AddCreditResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def list_payment_methods(self, request: ListPaymentMethodsRequest, ctx: RequestContext[ListPaymentMethodsRequest, ListPaymentMethodsResponse]) -> ListPaymentMethodsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def begin_card_setup(self, request: BeginCardSetupRequest, ctx: RequestContext[BeginCardSetupRequest, BeginCardSetupResponse]) -> BeginCardSetupResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def finish_card_setup(self, request: FinishCardSetupRequest, ctx: RequestContext[FinishCardSetupRequest, FinishCardSetupResponse]) -> FinishCardSetupResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def set_default_payment_method(self, request: SetDefaultPaymentMethodRequest, ctx: RequestContext[SetDefaultPaymentMethodRequest, SetDefaultPaymentMethodResponse]) -> SetDefaultPaymentMethodResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def remove_payment_method(self, request: RemovePaymentMethodRequest, ctx: RequestContext[RemovePaymentMethodRequest, RemovePaymentMethodResponse]) -> RemovePaymentMethodResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -204,6 +219,56 @@ class BillingServiceASGIApplication(ConnectASGIApplication[BillingService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.add_credit,
+                ),
+                "/codewire.console.v1.BillingService/ListPaymentMethods": Endpoint.unary(
+                    method=MethodInfo(
+                        name="ListPaymentMethods",
+                        service_name="codewire.console.v1.BillingService",
+                        input=ListPaymentMethodsRequest,
+                        output=ListPaymentMethodsResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.list_payment_methods,
+                ),
+                "/codewire.console.v1.BillingService/BeginCardSetup": Endpoint.unary(
+                    method=MethodInfo(
+                        name="BeginCardSetup",
+                        service_name="codewire.console.v1.BillingService",
+                        input=BeginCardSetupRequest,
+                        output=BeginCardSetupResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.begin_card_setup,
+                ),
+                "/codewire.console.v1.BillingService/FinishCardSetup": Endpoint.unary(
+                    method=MethodInfo(
+                        name="FinishCardSetup",
+                        service_name="codewire.console.v1.BillingService",
+                        input=FinishCardSetupRequest,
+                        output=FinishCardSetupResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.finish_card_setup,
+                ),
+                "/codewire.console.v1.BillingService/SetDefaultPaymentMethod": Endpoint.unary(
+                    method=MethodInfo(
+                        name="SetDefaultPaymentMethod",
+                        service_name="codewire.console.v1.BillingService",
+                        input=SetDefaultPaymentMethodRequest,
+                        output=SetDefaultPaymentMethodResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.set_default_payment_method,
+                ),
+                "/codewire.console.v1.BillingService/RemovePaymentMethod": Endpoint.unary(
+                    method=MethodInfo(
+                        name="RemovePaymentMethod",
+                        service_name="codewire.console.v1.BillingService",
+                        input=RemovePaymentMethodRequest,
+                        output=RemovePaymentMethodResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.remove_payment_method,
                 ),
             },
             interceptors=interceptors,
@@ -497,6 +562,108 @@ class BillingServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def list_payment_methods(
+        self,
+        request: ListPaymentMethodsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListPaymentMethodsResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListPaymentMethods",
+                service_name="codewire.console.v1.BillingService",
+                input=ListPaymentMethodsRequest,
+                output=ListPaymentMethodsResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
+    async def begin_card_setup(
+        self,
+        request: BeginCardSetupRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> BeginCardSetupResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="BeginCardSetup",
+                service_name="codewire.console.v1.BillingService",
+                input=BeginCardSetupRequest,
+                output=BeginCardSetupResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def finish_card_setup(
+        self,
+        request: FinishCardSetupRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> FinishCardSetupResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="FinishCardSetup",
+                service_name="codewire.console.v1.BillingService",
+                input=FinishCardSetupRequest,
+                output=FinishCardSetupResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def set_default_payment_method(
+        self,
+        request: SetDefaultPaymentMethodRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetDefaultPaymentMethodResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetDefaultPaymentMethod",
+                service_name="codewire.console.v1.BillingService",
+                input=SetDefaultPaymentMethodRequest,
+                output=SetDefaultPaymentMethodResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def remove_payment_method(
+        self,
+        request: RemovePaymentMethodRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> RemovePaymentMethodResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="RemovePaymentMethod",
+                service_name="codewire.console.v1.BillingService",
+                input=RemovePaymentMethodRequest,
+                output=RemovePaymentMethodResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class BillingServiceSync(Protocol):
     def list_org_plans(self, request: ListOrgPlansRequest, ctx: RequestContext[ListOrgPlansRequest, ListOrgPlansResponse]) -> ListOrgPlansResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -532,6 +699,21 @@ class BillingServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def add_credit(self, request: AddCreditRequest, ctx: RequestContext[AddCreditRequest, AddCreditResponse]) -> AddCreditResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def list_payment_methods(self, request: ListPaymentMethodsRequest, ctx: RequestContext[ListPaymentMethodsRequest, ListPaymentMethodsResponse]) -> ListPaymentMethodsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def begin_card_setup(self, request: BeginCardSetupRequest, ctx: RequestContext[BeginCardSetupRequest, BeginCardSetupResponse]) -> BeginCardSetupResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def finish_card_setup(self, request: FinishCardSetupRequest, ctx: RequestContext[FinishCardSetupRequest, FinishCardSetupResponse]) -> FinishCardSetupResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def set_default_payment_method(self, request: SetDefaultPaymentMethodRequest, ctx: RequestContext[SetDefaultPaymentMethodRequest, SetDefaultPaymentMethodResponse]) -> SetDefaultPaymentMethodResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def remove_payment_method(self, request: RemovePaymentMethodRequest, ctx: RequestContext[RemovePaymentMethodRequest, RemovePaymentMethodResponse]) -> RemovePaymentMethodResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -665,6 +847,56 @@ class BillingServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.add_credit,
+                ),
+                "/codewire.console.v1.BillingService/ListPaymentMethods": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="ListPaymentMethods",
+                        service_name="codewire.console.v1.BillingService",
+                        input=ListPaymentMethodsRequest,
+                        output=ListPaymentMethodsResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.list_payment_methods,
+                ),
+                "/codewire.console.v1.BillingService/BeginCardSetup": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="BeginCardSetup",
+                        service_name="codewire.console.v1.BillingService",
+                        input=BeginCardSetupRequest,
+                        output=BeginCardSetupResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.begin_card_setup,
+                ),
+                "/codewire.console.v1.BillingService/FinishCardSetup": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="FinishCardSetup",
+                        service_name="codewire.console.v1.BillingService",
+                        input=FinishCardSetupRequest,
+                        output=FinishCardSetupResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.finish_card_setup,
+                ),
+                "/codewire.console.v1.BillingService/SetDefaultPaymentMethod": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="SetDefaultPaymentMethod",
+                        service_name="codewire.console.v1.BillingService",
+                        input=SetDefaultPaymentMethodRequest,
+                        output=SetDefaultPaymentMethodResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.set_default_payment_method,
+                ),
+                "/codewire.console.v1.BillingService/RemovePaymentMethod": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="RemovePaymentMethod",
+                        service_name="codewire.console.v1.BillingService",
+                        input=RemovePaymentMethodRequest,
+                        output=RemovePaymentMethodResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.remove_payment_method,
                 ),
             },
             interceptors=interceptors,
@@ -941,6 +1173,103 @@ class BillingServiceClientSync(ConnectClientSync):
                 service_name="codewire.console.v1.BillingService",
                 input=AddCreditRequest,
                 output=AddCreditResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def list_payment_methods(
+        self,
+        request: ListPaymentMethodsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListPaymentMethodsResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListPaymentMethods",
+                service_name="codewire.console.v1.BillingService",
+                input=ListPaymentMethodsRequest,
+                output=ListPaymentMethodsResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def begin_card_setup(
+        self,
+        request: BeginCardSetupRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> BeginCardSetupResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="BeginCardSetup",
+                service_name="codewire.console.v1.BillingService",
+                input=BeginCardSetupRequest,
+                output=BeginCardSetupResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def finish_card_setup(
+        self,
+        request: FinishCardSetupRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> FinishCardSetupResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="FinishCardSetup",
+                service_name="codewire.console.v1.BillingService",
+                input=FinishCardSetupRequest,
+                output=FinishCardSetupResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def set_default_payment_method(
+        self,
+        request: SetDefaultPaymentMethodRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetDefaultPaymentMethodResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetDefaultPaymentMethod",
+                service_name="codewire.console.v1.BillingService",
+                input=SetDefaultPaymentMethodRequest,
+                output=SetDefaultPaymentMethodResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def remove_payment_method(
+        self,
+        request: RemovePaymentMethodRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> RemovePaymentMethodResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="RemovePaymentMethod",
+                service_name="codewire.console.v1.BillingService",
+                input=RemovePaymentMethodRequest,
+                output=RemovePaymentMethodResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

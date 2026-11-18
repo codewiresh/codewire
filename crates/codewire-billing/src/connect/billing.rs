@@ -8,20 +8,24 @@ use std::sync::Arc;
 use buffa_types::Timestamp;
 use codewire_proto::codewire::console::v1::{
     AddCreditOutcome as ProtoAddCreditOutcome, AddCreditRefusal, AddCreditRequest,
-    AddCreditResponse, BillingEvent as ProtoBillingEvent,
-    BillingLimitUsage as ProtoBillingLimitUsage, BillingLimits as ProtoBillingLimits,
-    BillingService, CreateCheckoutSessionRequest, CreateCheckoutSessionResponse,
-    CreatePortalSessionRequest, CreatePortalSessionResponse, CreateSetupSessionRequest,
-    CreateSetupSessionResponse, CreditRates as ProtoCreditRates,
-    EnvironmentUsageEntry as ProtoEnvironmentUsageEntry,
+    AddCreditResponse, BeginCardSetupRequest, BeginCardSetupResponse,
+    BillingEvent as ProtoBillingEvent, BillingLimitUsage as ProtoBillingLimitUsage,
+    BillingLimits as ProtoBillingLimits, BillingService, CardSetupSettlement,
+    CreateCheckoutSessionRequest, CreateCheckoutSessionResponse, CreatePortalSessionRequest,
+    CreatePortalSessionResponse, CreateSetupSessionRequest, CreateSetupSessionResponse,
+    CreditRates as ProtoCreditRates, EnvironmentUsageEntry as ProtoEnvironmentUsageEntry,
     EnvironmentUsageHour as ProtoEnvironmentUsageHour,
-    EnvironmentUsageMonth as ProtoEnvironmentUsageMonth, GetBillingOverviewRequest,
-    GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetEnvironmentUsageResponse,
-    GetSignupCreditRequest, GetSignupCreditResponse, Invoice as ProtoInvoice,
-    ListBillingEventsRequest, ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse,
-    ListOrgPlansRequest, ListOrgPlansResponse, ListResourcePlansRequest, ListResourcePlansResponse,
-    OrgPlan as ProtoOrgPlan, PaymentCard as ProtoPaymentCard, ResourcePlan as ProtoResourcePlan,
-    UpdateAutoTopUpRequest, UpdateAutoTopUpResponse, UsageSummary as ProtoUsageSummary,
+    EnvironmentUsageMonth as ProtoEnvironmentUsageMonth, FinishCardSetupRequest,
+    FinishCardSetupResponse, GetBillingOverviewRequest, GetBillingOverviewResponse,
+    GetEnvironmentUsageRequest, GetEnvironmentUsageResponse, GetSignupCreditRequest,
+    GetSignupCreditResponse, Invoice as ProtoInvoice, ListBillingEventsRequest,
+    ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest,
+    ListOrgPlansResponse, ListPaymentMethodsRequest, ListPaymentMethodsResponse,
+    ListResourcePlansRequest, ListResourcePlansResponse, OrgPlan as ProtoOrgPlan,
+    PaymentCard as ProtoPaymentCard, RemovePaymentMethodRequest, RemovePaymentMethodResponse,
+    ResourcePlan as ProtoResourcePlan, SavedPaymentMethod as ProtoSavedPaymentMethod,
+    SetDefaultPaymentMethodRequest, SetDefaultPaymentMethodResponse, UpdateAutoTopUpRequest,
+    UpdateAutoTopUpResponse, UsageSummary as ProtoUsageSummary,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult};
@@ -299,6 +303,135 @@ impl BillingService for BillingConnectService {
         .map_err(|error| rpc_app_error(&error, &ctx))?;
         connectrpc::Response::ok(proto_add_credit(outcome, amount_cents))
     }
+
+    async fn list_payment_methods(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, ListPaymentMethodsRequest>,
+    ) -> ServiceResult<ListPaymentMethodsResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let list = crate::cards::list_cards(&self.state, &user, request.view().org_id)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(ListPaymentMethodsResponse {
+            payment_methods: list
+                .cards
+                .into_iter()
+                .map(|saved| ProtoSavedPaymentMethod {
+                    id: saved.id,
+                    card: saved.card.map(proto_card).into(),
+                    ..Default::default()
+                })
+                .collect(),
+            default_id: list.default_id.unwrap_or_default(),
+            publishable_key: list.publishable_key.unwrap_or_default(),
+            ..Default::default()
+        })
+    }
+
+    async fn begin_card_setup(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, BeginCardSetupRequest>,
+    ) -> ServiceResult<BeginCardSetupResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let choices = crate::cards::CardChoices {
+            auto_top_up_enabled: request.auto_top_up_enabled,
+            auto_top_up_cents: request.auto_top_up_cents,
+            credit_cents: (request.credit_cents != 0).then_some(request.credit_cents),
+        };
+        let setup = crate::cards::begin_card_setup(&self.state, &user, request.org_id, choices)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(BeginCardSetupResponse {
+            client_secret: setup.client_secret,
+            ..Default::default()
+        })
+    }
+
+    async fn finish_card_setup(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, FinishCardSetupRequest>,
+    ) -> ServiceResult<FinishCardSetupResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let finished = crate::cards::finish_card_setup(
+            &self.state,
+            &user,
+            request.org_id,
+            request.setup_intent_id,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(FinishCardSetupResponse {
+            settlement: proto_settlement(finished.settlement).into(),
+            credit: finished
+                .credit
+                .map(|credit| proto_add_credit(credit.outcome, credit.amount_cents))
+                .into(),
+            auto_top_up_enabled: finished.auto_top_up_enabled,
+            ..Default::default()
+        })
+    }
+
+    async fn set_default_payment_method(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SetDefaultPaymentMethodRequest>,
+    ) -> ServiceResult<SetDefaultPaymentMethodResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        crate::cards::set_default_card(
+            &self.state,
+            &user,
+            request.org_id,
+            request.payment_method_id,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(SetDefaultPaymentMethodResponse::default())
+    }
+
+    async fn remove_payment_method(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, RemovePaymentMethodRequest>,
+    ) -> ServiceResult<RemovePaymentMethodResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        crate::cards::remove_card(
+            &self.state,
+            &user,
+            request.org_id,
+            request.payment_method_id,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(RemovePaymentMethodResponse::default())
+    }
+}
+
+fn proto_card(card: crate::stripe_client::CardSummary) -> ProtoPaymentCard {
+    ProtoPaymentCard {
+        brand: card.brand,
+        last4: card.last4,
+        exp_month: card.exp_month,
+        exp_year: card.exp_year,
+        ..Default::default()
+    }
+}
+
+fn proto_settlement(settlement: crate::credit::Settlement) -> CardSetupSettlement {
+    use crate::credit::Settlement;
+    match settlement {
+        Settlement::Funded => CardSetupSettlement::Funded,
+        Settlement::ToppedUp => CardSetupSettlement::ToppedUp,
+        Settlement::Pending => CardSetupSettlement::Pending,
+        Settlement::Exhausted => CardSetupSettlement::OutOfCredit,
+        Settlement::NotEnforced => CardSetupSettlement::NotEnforced,
+    }
 }
 
 fn proto_add_credit(outcome: AddCreditOutcome, amount_cents: i32) -> AddCreditResponse {
@@ -417,16 +550,7 @@ fn proto_billing_overview(value: BillingOverviewResponse) -> AppResult<GetBillin
         auto_top_up_cents: value.credit.auto_top_up_cents,
         credit_exhausted_at: optional_timestamp(value.credit.exhausted_at.as_deref())?.into(),
         month_usage_nano_eur: value.credit.month_usage_nano_eur,
-        default_card: value
-            .default_card
-            .map(|card| ProtoPaymentCard {
-                brand: card.brand,
-                last4: card.last4,
-                exp_month: card.exp_month,
-                exp_year: card.exp_year,
-                ..Default::default()
-            })
-            .into(),
+        default_card: value.default_card.map(proto_card).into(),
         ..Default::default()
     })
 }

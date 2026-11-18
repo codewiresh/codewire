@@ -6,6 +6,7 @@
 //! authority.
 
 pub mod billing_teardown;
+pub mod cards;
 pub mod catalog;
 pub mod catalog_admin;
 pub mod checkout_sessions;

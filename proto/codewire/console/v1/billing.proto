@@ -66,6 +66,37 @@ service BillingService {
   // payment. Organization owners and admins only. A retry with the same
   // request_id and amount never charges twice.
   rpc AddCredit(AddCreditRequest) returns (AddCreditResponse);
+
+  // ListPaymentMethods lists the organization's saved cards, newest first,
+  // which is the default, and the publishable key Stripe's card form mounts
+  // with. Any member may see them.
+  rpc ListPaymentMethods(ListPaymentMethodsRequest) returns (ListPaymentMethodsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // BeginCardSetup starts adding a card in the console once it is saved: a
+  // SetupIntent holding the choices made beside the form, and the secret the
+  // form confirms the card with. Saving the card charges nothing by itself.
+  // Organization owners and admins only.
+  rpc BeginCardSetup(BeginCardSetupRequest) returns (BeginCardSetupResponse);
+
+  // FinishCardSetup finishes adding a card once the form confirmed it: the
+  // card becomes the default, the credit chosen at BeginCardSetup is bought
+  // with it, the top-up setting chosen there is saved, and the organization
+  // is settled at once. With top-up on and still no credit, that charges the
+  // top-up amount. The choices come only from the SetupIntent, never from
+  // this request. A SetupIntent finishes once, within an hour of its start.
+  // Organization owners and admins only.
+  rpc FinishCardSetup(FinishCardSetupRequest) returns (FinishCardSetupResponse);
+
+  // SetDefaultPaymentMethod makes one of the organization's cards the one
+  // top-ups charge. Organization owners and admins only.
+  rpc SetDefaultPaymentMethod(SetDefaultPaymentMethodRequest) returns (SetDefaultPaymentMethodResponse);
+
+  // RemovePaymentMethod removes one of the organization's cards. A removed
+  // default is replaced by the newest card left. Organization owners and
+  // admins only.
+  rpc RemovePaymentMethod(RemovePaymentMethodRequest) returns (RemovePaymentMethodResponse);
 }
 
 message ListOrgPlansRequest {}
@@ -243,6 +274,88 @@ enum AddCreditRefusal {
   // Another top-up of this organization is being charged.
   ADD_CREDIT_REFUSAL_IN_PROGRESS = 2;
 }
+
+message ListPaymentMethodsRequest {
+  string org_id = 1;
+}
+
+message ListPaymentMethodsResponse {
+  // Newest first.
+  repeated SavedPaymentMethod payment_methods = 1;
+  // The default's id; empty when there is none.
+  string default_id = 2;
+  // The account's publishable key for Stripe's card form, of the same mode
+  // as its secret key; empty when the card form is not configured.
+  string publishable_key = 3;
+}
+
+message SavedPaymentMethod {
+  // Stripe's PaymentMethod id.
+  string id = 1;
+  // Absent when Stripe's details are out of range.
+  PaymentCard card = 2;
+}
+
+message BeginCardSetupRequest {
+  string org_id = 1;
+  // Written into the SetupIntent, where FinishCardSetup reads them.
+  bool auto_top_up_enabled = 2;
+  // EUR 5 to EUR 1,000, in cents.
+  int32 auto_top_up_cents = 3;
+  // Credit to buy with the new card before settling, as Add credit does with
+  // a saved card: EUR 5 to EUR 1,000 in cents, or 0 for none. Bought first,
+  // so top-up charges only if the organization is still without credit.
+  int32 credit_cents = 4;
+}
+
+message BeginCardSetupResponse {
+  // The SetupIntent's client secret, for Stripe's card form only.
+  string client_secret = 1;
+}
+
+message FinishCardSetupRequest {
+  string org_id = 1;
+  // The SetupIntent the form confirmed.
+  string setup_intent_id = 2;
+}
+
+message FinishCardSetupResponse {
+  CardSetupSettlement settlement = 1;
+  // How buying the chosen credit ended; absent when none was chosen.
+  AddCreditResponse credit = 2;
+  // The automatic top-up setting saved, as chosen at BeginCardSetup.
+  bool auto_top_up_enabled = 3;
+}
+
+// What settling the organization after a new card did.
+enum CardSetupSettlement {
+  CARD_SETUP_SETTLEMENT_UNSPECIFIED = 0;
+  // It has credit, or is not charged for compute: nothing was charged.
+  CARD_SETUP_SETTLEMENT_FUNDED = 1;
+  // It had no credit and top-up is on: the card was charged.
+  CARD_SETUP_SETTLEMENT_TOPPED_UP = 2;
+  // A charge is under way and finishes shortly.
+  CARD_SETUP_SETTLEMENT_PENDING = 3;
+  // It has no credit and nothing was charged: top-up is off, or the card
+  // was refused.
+  CARD_SETUP_SETTLEMENT_OUT_OF_CREDIT = 4;
+  // This deployment does not charge for compute.
+  CARD_SETUP_SETTLEMENT_NOT_ENFORCED = 5;
+}
+
+message SetDefaultPaymentMethodRequest {
+  string org_id = 1;
+  string payment_method_id = 2;
+}
+
+message SetDefaultPaymentMethodResponse {}
+
+message RemovePaymentMethodRequest {
+  string org_id = 1;
+  string payment_method_id = 2;
+}
+
+message RemovePaymentMethodResponse {}
 
 message BillingLimitUsage {
   int32 used = 1;

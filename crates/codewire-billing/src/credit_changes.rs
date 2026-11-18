@@ -110,7 +110,11 @@ async fn subscribe(deps: &MeteringDeps) -> anyhow::Result<PgListener> {
 }
 
 /// The first notice's organization and those of any more that arrive within
-/// [`GATHER`] of it.
+/// [`GATHER`] of it. The gather's timeout cancels a `try_recv` in flight too.
+/// sqlx doesn't document that as lossless, but its socket keeps what it has
+/// read in its own buffer, so a notice cut off there is decoded by the next
+/// call; were one ever lost, the minute's tick still settles that
+/// organization.
 async fn gather(
     listener: &mut PgListener,
     first: PgNotification,

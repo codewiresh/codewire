@@ -23,6 +23,15 @@ class AddCreditRefusal(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     ADD_CREDIT_REFUSAL_UNSPECIFIED: _ClassVar[AddCreditRefusal]
     ADD_CREDIT_REFUSAL_DECLINED: _ClassVar[AddCreditRefusal]
     ADD_CREDIT_REFUSAL_IN_PROGRESS: _ClassVar[AddCreditRefusal]
+
+class CardSetupSettlement(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    CARD_SETUP_SETTLEMENT_UNSPECIFIED: _ClassVar[CardSetupSettlement]
+    CARD_SETUP_SETTLEMENT_FUNDED: _ClassVar[CardSetupSettlement]
+    CARD_SETUP_SETTLEMENT_TOPPED_UP: _ClassVar[CardSetupSettlement]
+    CARD_SETUP_SETTLEMENT_PENDING: _ClassVar[CardSetupSettlement]
+    CARD_SETUP_SETTLEMENT_OUT_OF_CREDIT: _ClassVar[CardSetupSettlement]
+    CARD_SETUP_SETTLEMENT_NOT_ENFORCED: _ClassVar[CardSetupSettlement]
 ADD_CREDIT_OUTCOME_UNSPECIFIED: AddCreditOutcome
 ADD_CREDIT_OUTCOME_PAID: AddCreditOutcome
 ADD_CREDIT_OUTCOME_ACTION_REQUIRED: AddCreditOutcome
@@ -30,6 +39,12 @@ ADD_CREDIT_OUTCOME_REFUSED: AddCreditOutcome
 ADD_CREDIT_REFUSAL_UNSPECIFIED: AddCreditRefusal
 ADD_CREDIT_REFUSAL_DECLINED: AddCreditRefusal
 ADD_CREDIT_REFUSAL_IN_PROGRESS: AddCreditRefusal
+CARD_SETUP_SETTLEMENT_UNSPECIFIED: CardSetupSettlement
+CARD_SETUP_SETTLEMENT_FUNDED: CardSetupSettlement
+CARD_SETUP_SETTLEMENT_TOPPED_UP: CardSetupSettlement
+CARD_SETUP_SETTLEMENT_PENDING: CardSetupSettlement
+CARD_SETUP_SETTLEMENT_OUT_OF_CREDIT: CardSetupSettlement
+CARD_SETUP_SETTLEMENT_NOT_ENFORCED: CardSetupSettlement
 
 class ListOrgPlansRequest(_message.Message):
     __slots__ = ()
@@ -254,6 +269,90 @@ class AddCreditResponse(_message.Message):
     refusal: AddCreditRefusal
     decline_code: str
     def __init__(self, outcome: _Optional[_Union[AddCreditOutcome, str]] = ..., amount_cents: _Optional[int] = ..., payment_url: _Optional[str] = ..., refusal: _Optional[_Union[AddCreditRefusal, str]] = ..., decline_code: _Optional[str] = ...) -> None: ...
+
+class ListPaymentMethodsRequest(_message.Message):
+    __slots__ = ("org_id",)
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    def __init__(self, org_id: _Optional[str] = ...) -> None: ...
+
+class ListPaymentMethodsResponse(_message.Message):
+    __slots__ = ("payment_methods", "default_id", "publishable_key")
+    PAYMENT_METHODS_FIELD_NUMBER: _ClassVar[int]
+    DEFAULT_ID_FIELD_NUMBER: _ClassVar[int]
+    PUBLISHABLE_KEY_FIELD_NUMBER: _ClassVar[int]
+    payment_methods: _containers.RepeatedCompositeFieldContainer[SavedPaymentMethod]
+    default_id: str
+    publishable_key: str
+    def __init__(self, payment_methods: _Optional[_Iterable[_Union[SavedPaymentMethod, _Mapping]]] = ..., default_id: _Optional[str] = ..., publishable_key: _Optional[str] = ...) -> None: ...
+
+class SavedPaymentMethod(_message.Message):
+    __slots__ = ("id", "card")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    CARD_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    card: PaymentCard
+    def __init__(self, id: _Optional[str] = ..., card: _Optional[_Union[PaymentCard, _Mapping]] = ...) -> None: ...
+
+class BeginCardSetupRequest(_message.Message):
+    __slots__ = ("org_id", "auto_top_up_enabled", "auto_top_up_cents", "credit_cents")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    AUTO_TOP_UP_ENABLED_FIELD_NUMBER: _ClassVar[int]
+    AUTO_TOP_UP_CENTS_FIELD_NUMBER: _ClassVar[int]
+    CREDIT_CENTS_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    auto_top_up_enabled: bool
+    auto_top_up_cents: int
+    credit_cents: int
+    def __init__(self, org_id: _Optional[str] = ..., auto_top_up_enabled: _Optional[bool] = ..., auto_top_up_cents: _Optional[int] = ..., credit_cents: _Optional[int] = ...) -> None: ...
+
+class BeginCardSetupResponse(_message.Message):
+    __slots__ = ("client_secret",)
+    CLIENT_SECRET_FIELD_NUMBER: _ClassVar[int]
+    client_secret: str
+    def __init__(self, client_secret: _Optional[str] = ...) -> None: ...
+
+class FinishCardSetupRequest(_message.Message):
+    __slots__ = ("org_id", "setup_intent_id")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    SETUP_INTENT_ID_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    setup_intent_id: str
+    def __init__(self, org_id: _Optional[str] = ..., setup_intent_id: _Optional[str] = ...) -> None: ...
+
+class FinishCardSetupResponse(_message.Message):
+    __slots__ = ("settlement", "credit", "auto_top_up_enabled")
+    SETTLEMENT_FIELD_NUMBER: _ClassVar[int]
+    CREDIT_FIELD_NUMBER: _ClassVar[int]
+    AUTO_TOP_UP_ENABLED_FIELD_NUMBER: _ClassVar[int]
+    settlement: CardSetupSettlement
+    credit: AddCreditResponse
+    auto_top_up_enabled: bool
+    def __init__(self, settlement: _Optional[_Union[CardSetupSettlement, str]] = ..., credit: _Optional[_Union[AddCreditResponse, _Mapping]] = ..., auto_top_up_enabled: _Optional[bool] = ...) -> None: ...
+
+class SetDefaultPaymentMethodRequest(_message.Message):
+    __slots__ = ("org_id", "payment_method_id")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    PAYMENT_METHOD_ID_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    payment_method_id: str
+    def __init__(self, org_id: _Optional[str] = ..., payment_method_id: _Optional[str] = ...) -> None: ...
+
+class SetDefaultPaymentMethodResponse(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class RemovePaymentMethodRequest(_message.Message):
+    __slots__ = ("org_id", "payment_method_id")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    PAYMENT_METHOD_ID_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    payment_method_id: str
+    def __init__(self, org_id: _Optional[str] = ..., payment_method_id: _Optional[str] = ...) -> None: ...
+
+class RemovePaymentMethodResponse(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
 
 class BillingLimitUsage(_message.Message):
     __slots__ = ("used", "max")
