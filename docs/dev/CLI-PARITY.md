@@ -10,17 +10,28 @@ A gap is fixed with one implementation that both placements call, where only
 the store differs: the local credential authority (the operating system's
 protected store) or the platform credential service. Never a second copy.
 
-## Where it stands (2026-11-17)
+## Where it stands (2026-11-18)
 
 The tables below are the audit as it ran on 2026-11-15. Since then:
 
-- **Same in both now:** C1, C4's refusal sentences and C5 (#5097); C8, a
-  local default profile (#4924); the one `connect` flow and the
-  one-GitHub-connection rule of C2 and C3 (#4904).
-- **Open:** the rest of C2 and C3 (the reconnect question still shows an ID
-  and a revision, and `connect`'s result isn't yet printed by C1's renderer;
-  #4717 track B); the save refusals of a `connect` (#4826); the same name
-  under two providers (#4928); C6, C7 and C9, tracked on #4717.
+- **Same in both now:**
+  - C1, C4's refusal sentences and C5 (#5097);
+  - C2 and C3: one `connect` flow and one GitHub connection (#4904), and the
+    reconnect question with no ID or revision, its result on stdout and
+    `--output json` (#5277);
+  - a `connect` whose save is refused says why in the same words in both
+    placements (#4826, #5269);
+  - C6: `delete` and `revoke` revoke first and say what the provider still
+    holds (#4908, #4966, #4991), and the dashboard's GitHub disconnect does
+    the same (#5252);
+  - C8, a local default profile (#4924).
+- **Open:**
+  - C6's local placement asking OpenAI itself (#4982);
+  - C7, the cloud's profile revisions;
+  - the same name under two providers (#4928);
+  - C9, an older `cw` against a newer authority saying what to do;
+  - local store waits and refusals in words (#5271), and a Linux store kept
+    inside its credential root (#5255).
 
 A row below keeps its 2026-11-15 wording until the change that closes it
 updates it.
