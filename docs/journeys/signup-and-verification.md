@@ -22,7 +22,7 @@ Updated 2026-11-18.
 | `signup-provider` | buttons, start, cancel and state refusals observed 2026-11-17 at `5c6631406` (#4062); a real provider sign-in reported working by the owner 2026-11-14, not walked | buttons, start, cancel and state refusals observed 2026-11-17 at v0.4.22 (#4062); a real provider sign-in reported working by the owner 2026-11-14, not walked |
 | `signup-gates` | not yet observed | not yet observed |
 | `account-password-reset` | not yet observed | not yet observed |
-| `account-admin-delete` | not yet observed | not yet observed |
+| `account-admin-delete` | observed 2026-11-18 on Kind at `a4a3c815d`, stand-in (#4541) | not yet observed |
 | `signup-unverified-purge` | observed 2026-11-15 at b183980df, a seeded account and a one-hour lifetime | enforce passes observed 2026-11-18 at v0.4.22, nothing old enough yet; the first deletion is due after 2026-11-20 18:05Z |
 | `account-receipt-email` | not yet observed | not yet observed |
 | `account-fresh-sign-in` | not yet observed | not yet observed |
@@ -418,9 +418,11 @@ the purge". The page names no money (owner, 2026-11-15, #3013).
   5. Type the account's address, your password and a current code, and press
      it.
 - **Proof:**
-  - step 3 says "The address you typed is not this account's. Nothing was
-    deleted." and step 4 "Your password or code is incorrect. Nothing was
-    deleted."; the account still signs in after both;
+  - in step 3 the browser refuses the form, because the address field must
+    match the account's address; a client that skips that check gets "The
+    address you typed is not this account's. Nothing was deleted." Step 4
+    says "Your password or code is incorrect. Nothing was deleted." The
+    account still signs in after both;
   - step 5 returns to the list with "Deletion started for <address>.";
   - the account can no longer sign in, and its sandboxes and personal
     organizations are gone;
@@ -430,7 +432,17 @@ the purge". The page names no money (owner, 2026-11-15, #3013).
   - an admin's own account and other admins' accounts are deleted another
     way: Settings → Delete account, after a demotion;
   - each admin may start 10 deletions an hour, a count no setting raises.
-- **Observed:** not yet observed.
+- **Observed:**
+  - Kind, 2026-11-18, at `a4a3c815d`: working, as a stand-in for Dev
+    (cw-accounts). The list rows, the refused only-owner case, the plan
+    (a personal organization and a shared membership), steps 3 to 5 and the
+    already-running page read as above. The operation completed in about 38
+    seconds with `initiator = admin`, the walker as actor and `notify_email`
+    set. The account, its personal organization and its membership were
+    gone, and its sign-in failed. Kind differs from Dev here: the accounts
+    were seeded in the database instead of by the scratch-account script,
+    nothing sent the email, the personal organization had no sandbox, and
+    the hourly limit was not walked. Recorded on #4541, comment 114759.
 
 ## `signup-unverified-purge`: an unverified sign-up is deleted after 7 days
 
