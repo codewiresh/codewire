@@ -852,9 +852,12 @@ def assert_derp_admission_listener_boundary(
 
     mesh = reader("crates/codewire-mesh/src/server.rs")
     routes = mesh.find("fn router_from_state")
-    if routes < 0:
+    # Only the function's body builds the public app; tests after it may
+    # name the derp_verify listener's config.
+    routes_end = mesh.find("\n}\n", routes)
+    if routes < 0 or routes_end < 0:
         fail("Mesh must build its public app in router_from_state")
-    elif "derp_verify" in mesh[routes:]:
+    elif "derp_verify" in mesh[routes:routes_end]:
         fail("DerpAdmissionService is prohibited from Mesh's public app")
     if mesh.count("crate::derp_verify::router(") != 1 or not re.search(
         r"match state\.config\.derp_verify_addr \{[\s\S]*?"
@@ -1227,6 +1230,21 @@ def internal_connect_listener_self_test() -> None:
             'AppBuilder::new("mesh").with_connect_routes(crate::derp_verify::router(state.mesh_coordinate.clone()))',
         ),
     )
+    mesh_source = source["crates/codewire-mesh/src/server.rs"]
+    routes_at = mesh_source.find("fn router_from_state")
+    body_end = mesh_source.find("\n}\n", routes_at)
+    if routes_at < 0 or body_end < 0:
+        raise RuntimeError("self-test fixture: Mesh's router_from_state has no body")
+    after_routes = failures_for(
+        label="Mesh code after router_from_state naming derp_verify",
+        replacement=(
+            "crates/codewire-mesh/src/server.rs",
+            mesh_source[routes_at : body_end + 3],
+            mesh_source[routes_at : body_end + 3] + "\nfn config() { let _ = derp_verify_addr; }\n",
+        ),
+    )
+    if after_routes:
+        raise RuntimeError(f"Mesh code after router_from_state naming derp_verify: rejected {after_routes!r}")
     expect_rejection(
         "coordinator Service without the derp-verify port",
         "must expose derp-verify 8097",
