@@ -24,7 +24,7 @@ observed**.
 | `cred-sign-in-screen` | partly observed, #4885 at aea6abdb8, 2026-11-16 (steps 1 and 2 for Claude and Codex at a pty; GitHub, `cw login`, piped, `TERM=dumb` and SSH not yet observed) | not yet observed | not yet observed |
 | `profile-default` | not yet observed | not yet observed | not yet observed |
 | `cred-delivery-diagnosis` | not yet observed | not yet observed | local VMs only |
-| `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, and the early replacements on that build plus their change, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | not yet observed | local VMs only |
+| `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, and the early replacements on that build plus their change, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | observed, #5286: main's tree at 57b68c6be (#5295 and #5312), 2026-11-18, with a name resolving only to private addresses; the provider came back at the regular replacement, not the early ones (a sign-in's token host not walked) | local VMs only |
 | `cred-file-store` | not yet built (#5255) | the macOS file store; not part of this check | local stores only |
 
 ## Before the walk
@@ -605,8 +605,25 @@ hosted Sandbox's broker is the platform's.
     lookup while the name stayed dropped. The name was answered again 13
     seconds before the fourth, which came up in 0.08 s with `unresolved=-`:
     Anthropic then answered the made-up key itself (401), with no restart.
-  - Not walked: a name that resolves only to an address Codewire will not
-    dial, and a sign-in whose token host is unresolvable. Unit tests cover
+  - macOS 27.2.1, a development build of main's tree at 57b68c6be (#5295
+    with #5312's compile fix), 2026-11-18, by cw-mac, in a scratch `HOME`
+    with a throwaway keychain (`CODEWIRE_LOCAL_CREDENTIAL_KEYCHAIN`),
+    synthetic Anthropic and OpenAI keys and a generated SSH key in profile
+    `unres`, and `api.openai.com` pointed at `10.255.255.1` and `fd00::1`
+    in `/etc/hosts`. One IPv4 line was not enough: DNS still gave the name
+    public IPv6 addresses. The create took 57.9 s, against 59.3 s with
+    `--no-profile`. In the VM, Anthropic answered the synthetic key with its
+    own 401, OpenAI's route got 502 `Codewire: OpenAI couldn't be reached;
+    try again.`, and the agent offered the profile's SSH key. `brokers.log`
+    read `broker_ready … elapsed_ms=447 unresolved=api.openai.com`. With the
+    lines removed, the route got OpenAI's 401 at 423 s, with no restart, and
+    a later `broker_ready … unresolved=-`: the regular replacement, since
+    the early ones are not in that tree. A stop, then a start with the name
+    unreachable again, started in 6.2 s with `unresolved=api.openai.com`.
+    Commands and outputs: #5286.
+  - Not walked on Linux: a name that resolves only to an address Codewire
+    will not dial (walked on the Mac above), and on both, a sign-in whose
+    token host is unresolvable. Unit tests cover
     both (`resolution_for_a_start_leaves_a_failed_host_unresolved_and_serves_the_rest`,
     `a_forced_refresh_is_not_begun_toward_a_provider_with_no_address`,
     `a_github_app_refresh_is_not_begun_toward_an_endpoint_with_no_address`).
