@@ -65,18 +65,22 @@ SELECTION_JOB = "Verification selection"
 GATE_STEP = "Wait for this run's admission"
 # Not "blocked": a run awaiting approval holds no slot until it is approved.
 UNFINISHED_RUN_STATES = ("waiting", "running", "unknown")
-# Two at a time, each with a pull request build VM of its own (owner,
-# 2026-11-18: "I'm fine with the limit being at two for now for PRs.";
-# codewire#5311).
-ADMITTED_LIMIT = 2
-# Waiting gates hold light runner slots. The light runner takes 24 jobs
-# (owner, 2026-11-14: faster jobs, not more of them; infra#2471), so at most 2
-# wait and at least 22 slots stay for every repository's real light jobs. At 6,
-# on 2026-11-16, seven gates held slots and polled for a median 2,875 s while
-# infra's contract shards and the pull requests' own light jobs queued behind
-# them (infra#1534); an overflowed run's build still waits its turn on the
-# build runners, holding no slot.
-WAITING_LIMIT = 2
+# One at a time until one run is under five minutes, then more only if the
+# hosts have room (owner, 2026-11-18: "actually do 1 right now ... see how
+# fast we can get them, possible that we get sub 5 minutes, then we can see if
+# there is more resources for more."; codewire#5311).
+ADMITTED_LIMIT = 1
+# Waiting gates hold light runner slots, and past WAITING_LIMIT the oldest
+# start over the limit, so this is what keeps ADMITTED_LIMIT true. At 2, on
+# 2026-11-18, overflow let eight pull request runs in at once against a limit
+# of two, and each ran 2x slower (codewire#5311; owner: "fix the leak so just
+# 2 run"). Each light runner VM takes 24 jobs (infra#2471); at 12, half of one
+# VM stays for every repository's real light jobs even with a single VM, and
+# 36 of the 48 today. The day's peak was eight runs, seven of them waiting, so
+# overflow is left for the rare surge it was made for: at 6, on 2026-11-16,
+# seven gates held slots for a median 2,875 s while infra's contract shards
+# queued behind them (infra#1534).
+WAITING_LIMIT = 12
 POLL_SECONDS = 45
 # Selection's 25 minutes follow the wait inside its job's 235, and the light
 # runner's 240-minute cap.
