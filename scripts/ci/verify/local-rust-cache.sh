@@ -108,16 +108,28 @@ local_rust_cache_server_check_supported() {
 # accepted is listed connected (03); one it has not accepted yet, connecting
 # (02).
 local_rust_cache_server_socket() {
-  awk -v path="$1" '
-    index($0, " " path) {
-      name = $0
-      for (field = 1; field <= 7; field++) sub(/^[^ ]+ +/, "", name)
-      if (name != path) next
-      if ($4 == "00010000") inode = $7
-      else if ($6 == "02" || $6 == "03") clients++
-    }
-    END { if (inode != "") print inode, clients + 0 }
-  ' /proc/net/unix
+  local found='' tries=3
+  # The kernel lists /proc/net/unix a chunk per read, and sockets opened or
+  # closed elsewhere between chunks can shift the listing past a line, so
+  # one pass can miss the listening socket while it is there. Read as "no
+  # server", a miss skips the check and drops the progress mark, so while the
+  # socket file exists, read again before deciding.
+  while ((tries-- > 0)); do
+    found="$(
+      awk -v path="$1" '
+        index($0, " " path) {
+          name = $0
+          for (field = 1; field <= 7; field++) sub(/^[^ ]+ +/, "", name)
+          if (name != path) next
+          if ($4 == "00010000") inode = $7
+          else if ($6 == "02" || $6 == "03") clients++
+        }
+        END { if (inode != "") print inode, clients + 0 }
+      ' /proc/net/unix
+    )"
+    [[ -z "$found" && -S "$1" ]] || break
+  done
+  [[ -z "$found" ]] || printf '%s\n' "$found"
 }
 
 # Print how many compiles the server has finished, or nothing when it does

@@ -393,7 +393,7 @@ check "$base" || fail 'a short stall failed the check'
 assert_kept "$base" 'a four-minute stall'
 age_mark "$base" 400 30
 check "$base" || fail 'a stopped hung server failed the check'
-! server_running "$base" || fail 'the hung server still runs'
+! server_running "$base" || fail "the hung server still runs: $(cat "$hang/stderr")"
 [[ "$(grep -c -- '^--stop-server ' "$hang/fake/calls")" == 1 ]] ||
   fail '--stop-server was not tried once first'
 grep -Eq "^CODEWIRE_LOCAL_RUST_CACHE state=restarted reason=server-hung at=[0-9TZ:-]+ pid=[0-9]+ clients=3 stalled=[0-9]+s by=TERM\$" \
@@ -411,8 +411,28 @@ start_server "$base" 2 --ignore-stop --ignore-term
 check "$base"
 age_mark "$base" 400 30
 check "$base" || fail 'a killed hung server failed the check'
-! server_running "$base" || fail 'the TERM-proof hung server still runs'
+! server_running "$base" || fail "the TERM-proof hung server still runs: $(cat "$hang/stderr")"
 grep -Fq ' by=KILL' "$hang/stderr" || fail "kill status: $(cat "$hang/stderr")"
+
+# One pass over /proc/net/unix can miss the listening socket while sockets
+# change elsewhere; while the socket file exists the helper reads again, so a
+# single miss is not taken for "no server".
+base="$hang/missed"
+start_server "$base" 2
+mkdir -p "$hang/missing-awk"
+cat >"$hang/missing-awk/awk" <<EOF
+#!/usr/bin/env bash
+if [[ ! -e "$hang/missing-awk/missed" ]]; then
+  : >"$hang/missing-awk/missed"
+  exit 0
+fi
+exec $(command -v awk) "\$@"
+EOF
+chmod +x "$hang/missing-awk/awk"
+seen="$(PATH="$hang/missing-awk:$PATH" local_rust_cache_server_socket "$base/server.sock")"
+[[ -e "$hang/missing-awk/missed" ]] || fail 'the stand-in awk was not used'
+[[ "$seen" =~ ^[0-9]+\ 2$ ]] || fail "one missed read hid the server: '$seen'"
+: >"$base/server.sock.stop"
 
 # Unresponsive: the server accepts no client and answers no statistics, as a
 # stopped or deadlocked one does; five minutes of that is a hang too.
@@ -424,7 +444,7 @@ check "$base"
 age_mark "$base" 400 30
 check "$base" || fail 'a stopped unresponsive server failed the check'
 rm -- "$hang/fake/stats-unanswered"
-! server_running "$base" || fail 'the unresponsive server still runs'
+! server_running "$base" || fail "the unresponsive server still runs: $(cat "$hang/stderr")"
 grep -Eq ' clients=2 stalled=[0-9]+s by=stop-server$' "$hang/stderr" ||
   fail "unresponsive status: $(cat "$hang/stderr")"
 
