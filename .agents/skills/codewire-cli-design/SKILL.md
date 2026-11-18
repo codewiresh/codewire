@@ -102,6 +102,14 @@ the docs, and nothing on screen is internal.
   one of them.
 - A network step says where it connects before it waits, and fails with a
   timeout the user can read, within the step's bound. It is never silent.
+- A local dependency that may not answer, such as the keyring (Secret
+  Service or the login keychain) or the local credential authority, is waited
+  on the same way (#5271). After a second without an answer, stderr names
+  what `cw` waits for and what the person can do (`Waiting for your keyring
+  to answer · unlock it if it asks`). Each bound is longer than the bound it
+  nests in, so the dependency's own worded answer arrives before a transport
+  timeout. When it gives up, the error names the dependency and the next
+  step, never a transport or RPC error.
 
 ## Empty and first-run states
 

@@ -63,6 +63,17 @@ only what differs.
    a title line `Connect PROVIDER as NAME, on this computer` (or `in your
    Codewire account`), the step, then one result line
    `✓ PROVIDER connected as ACCOUNT`. Each section shows its screen.
+   Locally, a keyring that doesn't answer (a hidden unlock prompt, a stuck
+   daemon) is shown within a second, on stderr: `Waiting for your keyring
+   (Secret Service) to answer · unlock it if it asks`, or `your login
+   keychain` on macOS. When it gives up (the keyring's bound is 2 minutes, so a
+   person can still answer a prompt), the command says the keyring didn't
+   answer and gives the next step: unlock it, or restart it, then run the
+   command again, or keep the credential on the platform. It shows no gRPC or
+   transport text and exits non-zero. `cw doctor` reports a missing, locked
+   or unanswering local store as a warning with the same next step. Walk it only inside a private D-Bus
+   session (`scripts/ci/verify/lib/local-smoke-isolation.sh`) with its keyring
+   stopped, never the host's keyring (#5271). Not yet observed.
 2. **List:** `cw credentials --local|--cloud list` and `list --output json`.
    Expect the credential with its provider, kind, status `active` and, where
    the provider gives one, an account hint.
