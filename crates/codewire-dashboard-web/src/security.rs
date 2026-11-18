@@ -931,5 +931,18 @@ mod tests {
             &HeaderMap::new(),
             "https://dashboard.example.test"
         ));
+
+        // A form post under no-referrer sends `Origin: null`: refused, even
+        // beside a same-origin Referer, never read as "no Origin" (#4750).
+        let mut null_origin = HeaderMap::new();
+        null_origin.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        null_origin.insert(
+            header::REFERER,
+            HeaderValue::from_static("https://dashboard.example.test/acme/billing/"),
+        );
+        assert!(!request_has_same_origin(
+            &null_origin,
+            "https://dashboard.example.test"
+        ));
     }
 }

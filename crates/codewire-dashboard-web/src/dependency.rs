@@ -14,6 +14,7 @@ pub(crate) enum PageDependency {
     BillingUsage,
     BillingInvoices,
     BillingEvents,
+    BillingCards,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,7 +25,7 @@ enum Criticality {
 
 impl PageDependency {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::DashboardOrganizations,
         Self::PersonalSettingsOrganizations,
         Self::PersonalSettingsSandboxRail,
@@ -33,6 +34,7 @@ impl PageDependency {
         Self::BillingUsage,
         Self::BillingInvoices,
         Self::BillingEvents,
+        Self::BillingCards,
     ];
 
     fn criticality(self) -> Criticality {
@@ -43,7 +45,8 @@ impl PageDependency {
             | Self::SettingsGitIdentity
             | Self::BillingUsage
             | Self::BillingInvoices
-            | Self::BillingEvents => Criticality::Optional,
+            | Self::BillingEvents
+            | Self::BillingCards => Criticality::Optional,
         }
     }
 

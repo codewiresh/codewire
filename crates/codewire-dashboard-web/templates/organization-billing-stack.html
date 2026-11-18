@@ -1,0 +1,143 @@
+<div class="cw-billing-stack" id="billing-stack" hx-get="/{{ organization.slug }}/_fragments/billing" hx-trigger="codewire:live:credit from:body, codewire:live:resync from:body" hx-swap="outerHTML">
+          {% if !billing.message.is_empty() %}<p class="cw-toast" role="status">{{ billing.message }}</p>{% endif %}
+          {% if !billing.error.is_empty() %}<div class="cw-alert cw-alert--error" role="alert">{{ billing.error }}</div>{% endif %}
+          {% if !billing.billing_enabled %}
+          <section class="cw-card" aria-label="Billing"><div class="cw-state"><p>Billing is not configured. Sandboxes run freely in dev mode.</p></div></section>
+          {% else if billing.unmetered %}
+          <section class="cw-card" aria-label="Compute credit"><div class="cw-state"><p>This organization is not charged for compute and has no Sandbox quota.</p></div></section>
+          {% else %}
+          <header class="cw-balance-head" aria-label="Compute credit">
+            <div><p class="cw-muted">Compute credit</p><p class="cw-balance">{% if billing.credit_negative %}<span class="cw-badge" data-tone="warning">{{ billing.credit_balance }}</span>{% else %}{{ billing.credit_balance }}{% endif %}</p></div>
+            {% if !billing.runway.is_empty() %}<p class="cw-muted">{{ billing.runway }}</p>{% endif %}
+          </header>
+          {% endif %}
+
+          {% if billing.billing_enabled %}<section class="cw-card" aria-labelledby="payment-methods-heading">
+            <header class="cw-card-header cw-billing-card-head"><div><h2 id="payment-methods-heading">Payment methods</h2><p>{% if billing.cards.is_empty() %}No card yet.{% if !billing.can_manage %} An owner or admin can add one.{% endif %}{% else %}Stripe holds the cards; Codewire never sees their numbers.{% endif %}</p></div>{% if billing.can_manage %}<button class="cw-button" type="button" data-dialog-open="add-card-dialog">Add card</button>{% endif %}</header>
+            {% if !billing.cards_available %}<div class="cw-card-body"><div class="cw-alert cw-alert--warning" role="status">Saved cards are temporarily unavailable. Adding a card still works.</div></div>
+            {% else if !billing.cards.is_empty() %}<div class="cw-card-body">
+              <ul class="cw-row-list">
+                {% for saved in billing.cards %}<li class="cw-payment-method">
+                  <div>
+                    <p class="cw-badge-row"><strong>{{ saved.card.brand }}</strong> <span class="cw-mono"><span aria-hidden="true">•••• </span><span class="cw-sr-only">ending in </span>{{ saved.card.last4 }}</span>{% if saved.default %}<span class="cw-badge" data-tone="info">Default</span>{% endif %}{% if saved.card.expired %}<span class="cw-badge" data-tone="warning">Expired {{ saved.card.expiry }}</span>{% endif %}</p>
+                    {% if !saved.card.expired %}<p class="cw-muted">Expires {{ saved.card.expiry }}</p>{% endif %}
+                  </div>
+                  {% if billing.can_manage %}<details class="cw-menu">
+                    <summary class="cw-icon-button" aria-label="Actions for {{ saved.card.brand }} ending in {{ saved.card.last4 }}"><span aria-hidden="true">⋯</span></summary>
+                    <div class="cw-menu-panel cw-menu-panel--end" role="menu">
+                      {% if !saved.default %}<form method="post" action="/{{ organization.slug }}/billing/_actions/cards/default"><input type="hidden" name="_csrf" value="{{ billing.csrf_token }}"><input type="hidden" name="payment_method" value="{{ saved.id }}"><button class="cw-menu-item" type="submit" role="menuitem">Make default</button></form>
+                      <hr class="cw-menu-separator">{% endif %}
+                      <button class="cw-menu-item cw-menu-danger" type="button" role="menuitem" data-dialog-open="{{ saved.dialog_id }}">Remove card…</button>
+                    </div>
+                  </details>
+                  <dialog class="cw-dialog" id="{{ saved.dialog_id }}" data-dialog aria-labelledby="{{ saved.dialog_id }}-title">
+                    <form method="post" action="/{{ organization.slug }}/billing/_actions/cards/remove">
+                      <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}"><input type="hidden" name="payment_method" value="{{ saved.id }}">
+                      <header class="cw-dialog-header"><h2 id="{{ saved.dialog_id }}-title">Remove {{ saved.label }}?</h2></header>
+                      <div class="cw-dialog-body"><p>{% if saved.default %}It's your default card. {% if billing.cards.len() > 1 %}Your most recently added other card becomes the default, and automatic top-up charges it from now on.{% else %}Automatic top-up stops until you add another card.{% endif %}{% else %}Top-ups keep charging your default card.{% endif %}</p></div>
+                      <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close>Cancel</button><button class="cw-button" type="submit">Remove card</button></footer>
+                    </form>
+                  </dialog>{% endif %}
+                </li>{% endfor %}
+              </ul>
+            </div>{% endif %}
+          </section>{% endif %}
+
+          {% if billing.billing_enabled && billing.can_manage && !billing.unmetered %}<section class="cw-card" aria-labelledby="top-up-heading">
+            <header class="cw-card-header"><div><h2 id="top-up-heading">Automatic top-up</h2></div></header>
+            <div class="cw-card-body">
+              <form class="cw-top-up-line" method="post" action="/{{ organization.slug }}/billing/_actions/auto-top-up">
+                <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
+                <input class="cw-switch" type="checkbox" role="switch" id="top-up-enabled" name="enabled" value="true" aria-describedby="top-up-help" data-submit-on-change{% if billing.auto_top_up_enabled %} checked{% endif %}>
+                <label class="cw-label" for="top-up-enabled">{% if billing.default_card.is_empty() %}Charge your card when the balance reaches €0{% else %}Charge {{ billing.default_card }} when the balance reaches €0{% endif %}</label>
+                <button class="cw-field-help-trigger" id="top-up-help-trigger" type="button" popovertarget="top-up-help" popovertargetaction="show" aria-label="About automatic top-up" data-field-help-trigger>i</button>
+                <p class="cw-field-help-popover" id="top-up-help" popover="auto" role="tooltip" data-field-help-popover>{% if !billing.has_payment_method %}Starts when you save a card. {% if billing.balance_empty %}With the balance at {{ billing.credit_balance }}, saving the card charges €{{ billing.auto_top_up_euros }} at once.{% endif %}{% else %}Charges your default card €{{ billing.auto_top_up_euros }} whenever the balance reaches €0, until you turn it off. With it off, new Sandboxes and starts are refused once credit runs out.{% endif %}</p>
+                <label class="cw-sr-only" for="top-up-amount">Top-up amount</label>
+                <select class="cw-select" id="top-up-amount" name="amount" data-submit-on-change>{% for choice in billing.top_up_choices %}<option value="{{ choice.euros }}"{% if choice.selected %} selected{% endif %}>€{{ choice.euros }}</option>{% endfor %}</select>
+                <noscript><button class="cw-button cw-button--outline cw-button--small" type="submit">Save</button></noscript>
+              </form>
+            </div>
+          </section>
+
+          <section class="cw-card" aria-labelledby="add-credit-heading">
+            <header class="cw-card-header"><div class="cw-billing-heading-help"><h2 id="add-credit-heading">Add credit</h2><button class="cw-field-help-trigger" id="add-credit-help-trigger" type="button" popovertarget="add-credit-help" popovertargetaction="show" aria-label="About adding credit" data-field-help-trigger>i</button><p class="cw-field-help-popover" id="add-credit-help" popover="auto" role="tooltip" data-field-help-popover>A one-off payment{% if !billing.default_card.is_empty() %}, charged to {{ billing.default_card }}{% else %}. The card is saved for next time{% endif %}. From €5 to €1,000. Separate from automatic top-up.</p></div></header>
+            <div class="cw-card-body">
+              <form class="cw-add-credit" method="post" action="/{{ organization.slug }}/billing/_actions/add-credit" aria-labelledby="add-credit-heading" data-add-credit{% if !billing.has_payment_method %} data-add-credit-new-card="add-credit-card"{% endif %}>
+                <input type="hidden" name="_csrf" value="{{ billing.csrf_token }}">
+                <input type="hidden" name="request" value="{{ billing.add_credit_request }}">
+                <div class="cw-add-credit-row">
+                  <fieldset class="cw-add-credit-amounts">
+                    <legend class="cw-sr-only">Amount</legend>
+                    <div class="cw-add-credit-chips">
+                      <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="50"><span>€50</span></label>
+                      <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="100" checked><span>€100</span></label>
+                      <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="250"><span>€250</span></label>
+                      <label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="500"><span>€500</span></label>
+                    </div>
+                  </fieldset>
+                  <label class="cw-sr-only" for="add-credit-amount">Other amount in euros</label>
+                  <input class="cw-input cw-add-credit-other" id="add-credit-amount" type="text" name="amount" inputmode="decimal" pattern="[0-9]{1,4}(\.[0-9]{1,2})?" placeholder="Other €" data-add-credit-other>
+                  <button class="cw-button" type="submit" data-add-credit-submit>Pay</button>
+                </div>
+                {% if !billing.has_payment_method %}<div class="cw-card-form" id="add-credit-card" data-card-form hidden>
+                  <div class="cw-card-element" data-card-element></div>
+                  <p class="cw-field-error" role="alert" data-card-error hidden></p>
+                  <div class="cw-top-up-line">
+                    <input class="cw-switch" type="checkbox" role="switch" id="add-credit-top-up" name="top_up" value="true" data-card-top-up{% if billing.auto_top_up_enabled %} checked{% endif %}>
+                    <label class="cw-label" for="add-credit-top-up">Automatic top-up</label>
+                    <label class="cw-sr-only" for="add-credit-top-up-amount">Top-up amount</label>
+                    <select class="cw-select" id="add-credit-top-up-amount" name="top_up_amount" data-card-top-up-amount>{% for choice in billing.top_up_choices %}<option value="{{ choice.euros }}"{% if choice.selected %} selected{% endif %}>€{{ choice.euros }}</option>{% endfor %}</select>
+                  </div>
+                  <p class="cw-muted" role="status" data-card-status hidden></p>
+                </div>{% endif %}
+              </form>
+            </div>
+          </section>{% endif %}
+
+          <section class="cw-card" aria-labelledby="invoices-heading">
+            <header class="cw-card-header"><div><h2 id="invoices-heading">Invoices</h2><p>Every charge, with its receipt.</p></div></header>
+            <div class="cw-card-body">
+              {% if !billing.invoices_available %}<div class="cw-alert cw-alert--warning" role="status">Invoice history is temporarily unavailable.</div>{% else if billing.invoices.is_empty() %}<p class="cw-muted">No invoices yet.</p>{% else %}
+              <div class="cw-table-wrap"><table class="cw-table"><caption class="cw-sr-only">Invoices</caption><thead><tr><th scope="col">Period</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col">Documents</th></tr></thead><tbody>
+                {% for invoice in billing.invoices %}<tr><td>{{ invoice.period }}</td><td>{{ invoice.amount }}</td><td><span class="cw-badge">{{ invoice.status }}</span></td><td>{% if invoice.has_hosted_url %}<a href="{{ invoice.hosted_url }}" target="_blank" rel="noreferrer">View ↗</a>{% endif %}{% if invoice.has_pdf_url %} <a href="{{ invoice.pdf_url }}" target="_blank" rel="noreferrer">PDF ↗</a>{% endif %}</td></tr>{% endfor %}
+              </tbody></table></div>{% endif %}
+            </div>
+          </section>
+
+          <section class="cw-card" aria-labelledby="usage-heading">
+            <header class="cw-card-header"><div><h2 id="usage-heading">Sandbox Usage</h2><p>Credit drawn this month, per second of running Sandboxes{% if billing.billing_enabled && !billing.unmetered %}: {{ billing.cpu_rate }} per vCPU-hour, {{ billing.memory_rate }} per GiB-hour of memory, {{ billing.disk_rate }} per GiB-hour of disk{% endif %}.</p></div></header>
+            <div class="cw-card-body">
+              {% if !billing.usage_available %}
+              <div class="cw-alert cw-alert--warning" role="status">Usage is temporarily unavailable. Credit and payment controls remain usable.</div>
+              {% else if billing.has_current_month %}
+              <div class="cw-stat-grid cw-stat-grid--three">
+                <div class="cw-stat"><span>Current Month</span><strong>{{ billing.current_cost }}</strong></div>
+                <div class="cw-stat"><span>CPU Hours</span><strong>{{ billing.cpu_hours }}</strong></div>
+                <div class="cw-stat"><span>Memory GiB-Hours</span><strong>{{ billing.memory_hours }}</strong></div>
+              </div>
+              {% if !billing.usage_bars.is_empty() %}
+              <figure class="cw-usage-chart">
+                <figcaption>Hourly cost, most recent 24 hours</figcaption>
+                <svg viewBox="0 0 304 88" preserveAspectRatio="none" role="img" aria-labelledby="usage-chart-title usage-chart-description">
+                  <title id="usage-chart-title">Hourly Sandbox cost</title>
+                  <desc id="usage-chart-description">Bar chart of hourly Sandbox cost. Exact values are available from each bar and the Sandbox table.</desc>
+                  <path class="cw-chart-axis" d="M0 84H304"/>
+                  {% for bar in billing.usage_bars %}<rect class="cw-chart-bar" x="{{ bar.x }}" y="{{ bar.y }}" width="8" height="{{ bar.height }}" tabindex="0"><title>{{ bar.label }}</title></rect>{% endfor %}
+                </svg>
+              </figure>
+              {% endif %}
+              {% if !billing.usage.is_empty() %}
+              <div class="cw-table-wrap"><table class="cw-table"><caption>Usage by Sandbox</caption><thead><tr><th scope="col">Sandbox</th><th scope="col">Cost</th></tr></thead><tbody>{% for row in billing.usage %}<tr><td>{{ row.name }}</td><td>{{ row.cost }}</td></tr>{% endfor %}</tbody></table></div>
+              {% endif %}
+              {% else %}<p class="cw-muted">No usage yet this month.</p>{% endif %}
+            </div>
+          </section>
+
+          {% if !billing.events_available %}<section class="cw-card" aria-labelledby="activity-heading">
+            <header class="cw-card-header"><div><h2 id="activity-heading">Recent Activity</h2><p>Latest account-level billing activity.</p></div></header>
+            <div class="cw-card-body"><div class="cw-alert cw-alert--warning" role="status">Recent billing activity is temporarily unavailable.</div></div>
+          </section>{% else if !billing.events.is_empty() %}<section class="cw-card" aria-labelledby="activity-heading">
+            <header class="cw-card-header"><div><h2 id="activity-heading">Recent Activity</h2><p>Latest account-level billing activity.</p></div></header>
+            <div class="cw-card-body"><div class="cw-table-wrap"><table class="cw-table"><thead><tr><th scope="col">Event</th><th scope="col">Occurred</th><th scope="col">Amount</th></tr></thead><tbody>{% for event in billing.events %}<tr><td><code>{{ event.event_type }}</code></td><td>{{ event.occurred }}</td><td>{% if event.has_amount %}{{ event.amount }}{% else %}—{% endif %}</td></tr>{% endfor %}</tbody></table></div></div>
+          </section>{% endif %}
+        </div>

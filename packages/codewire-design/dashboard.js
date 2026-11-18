@@ -78,11 +78,10 @@ const app = document.querySelector("[data-dashboard-app]");
     const control = event.target;
     if (control instanceof HTMLInputElement && control.matches("[data-submit-on-change]")) control.form?.requestSubmit();
   });
-  // Add credit: a chip chooses the amount, Custom shows its field, and the
-  // button names what it adds ("Add €100"). Without script every chip and
-  // the custom field show and the button reads "Add credit". The custom
-  // field is disabled while hidden, so a stale value there never blocks or
-  // joins the submission.
+  // Add credit: a chip or the Other field chooses the amount, and the button
+  // names what it pays ("Pay €100"). Typing an amount clears the chips, and
+  // a chip clears the field; without script the button reads "Pay" and an
+  // amount typed in Other wins over a chip.
   const creditEuros = (text) => {
     const match = /^(\d{1,4})(?:\.(\d{1,2}))?$/.exec(text.trim());
     if (!match) return null;
@@ -90,26 +89,23 @@ const app = document.querySelector("[data-dashboard-app]");
     if (cents < 500 || cents > 100000) return null;
     return cents % 100 === 0 ? String(cents / 100) : (cents / 100).toFixed(2);
   };
-  const syncAddCredit = (form) => {
+  const syncAddCredit = (form, changed) => {
+    const other = form.querySelector("[data-add-credit-other]");
+    const chips = form.querySelectorAll('input[name="choice"]');
+    if (changed === other && other.value.trim()) chips.forEach((chip) => { chip.checked = false; });
+    if (changed instanceof HTMLInputElement && changed.name === "choice" && other) other.value = "";
+    const typed = other?.value.trim() || "";
     const choice = form.querySelector('input[name="choice"]:checked');
-    const custom = form.querySelector("[data-add-credit-custom]");
-    const amount = form.querySelector('input[name="amount"]');
+    const euros = typed ? creditEuros(typed) : choice ? creditEuros(choice.value) : null;
     const submit = form.querySelector("[data-add-credit-submit]");
-    const isCustom = choice?.value === "custom";
-    if (custom instanceof HTMLElement) custom.hidden = !isCustom;
-    if (amount instanceof HTMLInputElement) {
-      amount.disabled = !isCustom;
-      amount.required = isCustom;
-    }
-    const euros = !choice ? null : isCustom ? creditEuros(amount?.value || "") : creditEuros(choice.value);
-    if (submit) submit.textContent = euros ? `Add €${euros}` : "Add credit";
+    if (submit) submit.textContent = euros ? `Pay €${euros}` : "Pay";
   };
   const addCreditForms = () => document.querySelectorAll("form[data-add-credit]");
   addCreditForms().forEach(syncAddCredit);
   for (const type of ["change", "input"]) {
     document.addEventListener(type, (event) => {
       const form = event.target instanceof Element ? event.target.closest("form[data-add-credit]") : null;
-      if (form instanceof HTMLFormElement) syncAddCredit(form);
+      if (form instanceof HTMLFormElement) syncAddCredit(form, event.target);
     });
   }
   // One purchase per click: a second submit while the first is on its way is
@@ -117,7 +113,9 @@ const app = document.querySelector("[data-dashboard-app]");
   // back from Stripe restores the form.
   document.addEventListener("submit", (event) => {
     const form = event.target;
-    if (!(form instanceof HTMLFormElement) || !form.matches("form[data-add-credit]")) return;
+    // With no card yet, billing-cards.js owns the form: Stripe's card form
+    // opens under it first.
+    if (!(form instanceof HTMLFormElement) || !form.matches("form[data-add-credit]:not([data-add-credit-new-card])")) return;
     if (form.dataset.submitting === "true") {
       event.preventDefault();
       return;

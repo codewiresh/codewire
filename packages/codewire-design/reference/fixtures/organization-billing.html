@@ -5,6 +5,10 @@
   <title>Organization billing fixture</title>
   <link rel="stylesheet" href="../../styles.css"><link rel="stylesheet" href="../../components.css">
   <link rel="stylesheet" href="../../routes/dashboard.css"><link rel="stylesheet" href="../../routes/organizations.css"><link rel="stylesheet" href="../../routes/billing-admin.css">
+  <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true},{"code":"...","swap":true}]}'>
+  <script src="/assets/codewire/htmx-2.0.10.min.js" integrity="sha384-H5SrcfygHmAuTDZphMHqBJLc3FhssKjG7w/CeCpFReSfwBWDTKpkzPP8c+cLsK+V" defer></script>
+  <script src="../../dashboard.js" defer></script>
+  <script src="../../billing-cards.js" defer></script>
 </head>
 <body class="cw-body" data-route="organization" data-dashboard-app>
   <main class="cw-main"><header class="cw-console-header"><div class="cw-console-breadcrumb"><span>example-org</span><span>/</span><strong>billing</strong></div><div class="cw-console-account"><a class="cw-button cw-button--outline cw-button--small" href="mailto:support@codewire.sh?subject=%5BSupport%5D">Support</a></div></header><div class="cw-page cw-org-management-page"><div class="cw-org-management-layout"><aside class="cw-context-nav"><header class="cw-context-nav-heading"><h2>Settings</h2></header>
@@ -16,67 +20,211 @@
 <h3 id="settings-admin-title" class="cw-section-label">Admin</h3><ul aria-labelledby="settings-admin-title"><li><a class="cw-nav-link" href="/admin/">Overview</a></li><li><a class="cw-nav-link" href="/admin/billing/">Billing catalog</a></li><li><a class="cw-nav-link" href="/admin/audit/">Audit log</a></li></ul>
 </nav></aside><div class="cw-context-main">
     <header class="cw-context-page-header"><a href="index.html">Back to fixtures</a><h1>Billing</h1><p>Compute credit, usage, invoices, and recent billing activity.</p></header>
-    <div class="cw-billing-stack">
-      <section class="cw-card" aria-labelledby="credit-heading">
-        <header class="cw-card-header"><div><h2 id="credit-heading">Compute credit</h2><p>Running Sandboxes draw prepaid credit each second at this organization's rates. A stopped Sandbox costs nothing.</p></div></header>
-        <div class="cw-card-body cw-admin-section">
-          <dl class="cw-stat-grid">
-            <div class="cw-stat"><dt>Balance</dt><dd>€42.50</dd></div>
-            <div class="cw-stat"><dt>vCPU</dt><dd>€0.0438 <small>per hour</small></dd></div>
-            <div class="cw-stat"><dt>Memory</dt><dd>€0.0141 <small>per GiB-hour</small></dd></div>
-            <div class="cw-stat"><dt>Disk</dt><dd>€0.000087 <small>per GiB-hour</small></dd></div>
-          </dl>
-        </div>
-      </section>
+    <div class="cw-billing-stack" id="billing-stack" hx-get="/example-org/_fragments/billing" hx-trigger="codewire:live:credit from:body, codewire:live:resync from:body" hx-swap="outerHTML">
+          <header class="cw-balance-head" aria-label="Compute credit">
+            <div><p class="cw-muted">Compute credit</p><p class="cw-balance">€42.18</p></div>
+            <p class="cw-muted">About 2 days at current use</p>
+          </header>
 
-      <section class="cw-card" aria-labelledby="payment-methods-heading">
-        <header class="cw-card-header"><div><h2 id="payment-methods-heading">Payment methods</h2><p>Top-ups charge the default card. Stripe holds the card; Codewire never sees its number.</p></div></header>
-        <div class="cw-card-body">
-          <ul class="cw-row-list">
-            <li class="cw-payment-method">
-              <div>
-                <p class="cw-badge-row"><strong>Visa</strong> <span class="cw-mono"><span aria-hidden="true">•••• </span><span class="cw-sr-only">ending in </span>4242</span><span class="cw-badge">Default</span></p>
-                <p class="cw-muted">Expires 11/2026</p>
-              </div>
-              <form method="post" action="#portal">
+          <section class="cw-card" aria-labelledby="billing-stack-payment-methods-heading">
+            <header class="cw-card-header cw-billing-card-head"><div><h2 id="billing-stack-payment-methods-heading">Payment methods</h2><p>Stripe holds the cards; Codewire never sees their numbers.</p></div><button class="cw-button" type="button" data-dialog-open="add-card-dialog">Add card</button></header>
+            <div class="cw-card-body">
+              <ul class="cw-row-list">
+                <li class="cw-payment-method">
+                  <div>
+                    <p class="cw-badge-row"><strong>Visa</strong> <span class="cw-mono"><span aria-hidden="true">•••• </span><span class="cw-sr-only">ending in </span>4242</span><span class="cw-badge" data-tone="info">Default</span></p>
+                    <p class="cw-muted">Expires 08/2028</p>
+                  </div>
+                  <details class="cw-menu">
+                    <summary class="cw-icon-button" aria-label="Actions for Visa ending in 4242"><span aria-hidden="true">⋯</span></summary>
+                    <div class="cw-menu-panel cw-menu-panel--end" role="menu">
+
+                      <button class="cw-menu-item cw-menu-danger" type="button" role="menuitem" data-dialog-open="remove-card-0">Remove card…</button>
+                    </div>
+                  </details>
+                  <dialog class="cw-dialog" id="remove-card-0" data-dialog aria-labelledby="remove-card-0-title">
+                    <form method="post" action="#remove">
+                      <input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="payment_method" value="pm_fixture_0">
+                      <header class="cw-dialog-header"><h2 id="remove-card-0-title">Remove Visa •••• 4242?</h2></header>
+                      <div class="cw-dialog-body"><p>It's your default card. Your most recently added other card becomes the default, and automatic top-up charges it from now on.</p></div>
+                      <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close>Cancel</button><button class="cw-button" type="submit">Remove card</button></footer>
+                    </form>
+                  </dialog>
+                </li>
+                <li class="cw-payment-method">
+                  <div>
+                    <p class="cw-badge-row"><strong>Mastercard</strong> <span class="cw-mono"><span aria-hidden="true">•••• </span><span class="cw-sr-only">ending in </span>5454</span></p>
+                    <p class="cw-muted">Expires 03/2027</p>
+                  </div>
+                  <details class="cw-menu">
+                    <summary class="cw-icon-button" aria-label="Actions for Mastercard ending in 5454"><span aria-hidden="true">⋯</span></summary>
+                    <div class="cw-menu-panel cw-menu-panel--end" role="menu">
+                      <form method="post" action="#default"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="payment_method" value="pm_fixture_1"><button class="cw-menu-item" type="submit" role="menuitem">Make default</button></form>
+                      <hr class="cw-menu-separator">
+                      <button class="cw-menu-item cw-menu-danger" type="button" role="menuitem" data-dialog-open="remove-card-1">Remove card…</button>
+                    </div>
+                  </details>
+                  <dialog class="cw-dialog" id="remove-card-1" data-dialog aria-labelledby="remove-card-1-title">
+                    <form method="post" action="#remove">
+                      <input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="payment_method" value="pm_fixture_1">
+                      <header class="cw-dialog-header"><h2 id="remove-card-1-title">Remove Mastercard •••• 5454?</h2></header>
+                      <div class="cw-dialog-body"><p>Top-ups keep charging your default card.</p></div>
+                      <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close>Cancel</button><button class="cw-button" type="submit">Remove card</button></footer>
+                    </form>
+                  </dialog>
+                </li>
+                <li class="cw-payment-method">
+                  <div>
+                    <p class="cw-badge-row"><strong>American Express</strong> <span class="cw-mono"><span aria-hidden="true">•••• </span><span class="cw-sr-only">ending in </span>0005</span><span class="cw-badge" data-tone="warning">Expired 10/2026</span></p>
+
+                  </div>
+                  <details class="cw-menu">
+                    <summary class="cw-icon-button" aria-label="Actions for American Express ending in 0005"><span aria-hidden="true">⋯</span></summary>
+                    <div class="cw-menu-panel cw-menu-panel--end" role="menu">
+                      <form method="post" action="#default"><input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="payment_method" value="pm_fixture_2"><button class="cw-menu-item" type="submit" role="menuitem">Make default</button></form>
+                      <hr class="cw-menu-separator">
+                      <button class="cw-menu-item cw-menu-danger" type="button" role="menuitem" data-dialog-open="remove-card-2">Remove card…</button>
+                    </div>
+                  </details>
+                  <dialog class="cw-dialog" id="remove-card-2" data-dialog aria-labelledby="remove-card-2-title">
+                    <form method="post" action="#remove">
+                      <input type="hidden" name="_csrf" value="design-fixture-only"><input type="hidden" name="payment_method" value="pm_fixture_2">
+                      <header class="cw-dialog-header"><h2 id="remove-card-2-title">Remove American Express •••• 0005?</h2></header>
+                      <div class="cw-dialog-body"><p>Top-ups keep charging your default card.</p></div>
+                      <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close>Cancel</button><button class="cw-button" type="submit">Remove card</button></footer>
+                    </form>
+                  </dialog>
+                </li>
+              </ul>
+            </div>
+          </section>
+
+          <section class="cw-card" aria-labelledby="billing-stack-top-up-heading">
+            <header class="cw-card-header"><div><h2 id="billing-stack-top-up-heading">Automatic top-up</h2></div></header>
+            <div class="cw-card-body">
+              <form class="cw-top-up-line" method="post" action="#auto-top-up">
                 <input type="hidden" name="_csrf" value="design-fixture-only">
-                <button class="cw-button cw-button--outline cw-button--small" type="submit">Manage in Stripe ↗</button>
+                <input class="cw-switch" type="checkbox" role="switch" id="billing-stack-top-up-enabled" name="enabled" value="true" aria-describedby="billing-stack-top-up-help" checked>
+                <label class="cw-label" for="billing-stack-top-up-enabled">Charge Visa •••• 4242 when the balance reaches €0</label>
+                <button class="cw-field-help-trigger" id="billing-stack-top-up-help-trigger" type="button" popovertarget="billing-stack-top-up-help" popovertargetaction="show" aria-label="About automatic top-up" data-field-help-trigger>i</button>
+                <p class="cw-field-help-popover" id="billing-stack-top-up-help" popover="auto" role="tooltip" data-field-help-popover>Charges your default card €20 whenever the balance reaches €0, until you turn it off. With it off, new Sandboxes and starts are refused once credit runs out.</p>
+                <label class="cw-sr-only" for="billing-stack-top-up-amount">Top-up amount</label><select class="cw-select" id="billing-stack-top-up-amount" name="amount"><option value="10">€10</option><option value="20" selected>€20</option><option value="50">€50</option><option value="100">€100</option></select>
               </form>
-            </li>
-          </ul>
-        </div>
-      </section>
+            </div>
+          </section>
 
-      <section class="cw-card" aria-labelledby="payment-methods-expired-heading">
-        <header class="cw-card-header"><div><h2 id="payment-methods-expired-heading">Payment methods, expired card</h2><p>The same section when the default card's expiry month has passed.</p></div></header>
-        <div class="cw-card-body">
-          <ul class="cw-row-list">
-            <li class="cw-payment-method">
-              <div>
-                <p class="cw-badge-row"><strong>American Express</strong> <span class="cw-mono"><span aria-hidden="true">•••• </span><span class="cw-sr-only">ending in </span>0005</span><span class="cw-badge">Default</span><span class="cw-badge" data-tone="warning">Expired 10/2026</span></p>
-              </div>
-              <form method="post" action="#portal">
+          <section class="cw-card" aria-labelledby="billing-stack-add-credit-heading">
+            <header class="cw-card-header"><div class="cw-billing-heading-help"><h2 id="billing-stack-add-credit-heading">Add credit</h2><button class="cw-field-help-trigger" id="billing-stack-add-credit-help-trigger" type="button" popovertarget="billing-stack-add-credit-help" popovertargetaction="show" aria-label="About adding credit" data-field-help-trigger>i</button><p class="cw-field-help-popover" id="billing-stack-add-credit-help" popover="auto" role="tooltip" data-field-help-popover>A one-off payment, charged to Visa •••• 4242. From €5 to €1,000. Separate from automatic top-up.</p></div></header>
+            <div class="cw-card-body">
+              <form class="cw-add-credit" method="post" action="#add-credit" aria-labelledby="billing-stack-add-credit-heading" data-add-credit>
                 <input type="hidden" name="_csrf" value="design-fixture-only">
-                <button class="cw-button cw-button--outline cw-button--small" type="submit">Manage in Stripe ↗</button>
-              </form>
-            </li>
-          </ul>
-        </div>
-      </section>
+                <input type="hidden" name="request" value="design-fixture-request-0001">
+                <div class="cw-add-credit-row">
+                  <fieldset class="cw-add-credit-amounts">
+                    <legend class="cw-sr-only">Amount</legend>
+                    <div class="cw-add-credit-chips"><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="50"><span>€50</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="100" checked><span>€100</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="250"><span>€250</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="500"><span>€500</span></label></div>
+                  </fieldset>
+                  <label class="cw-sr-only" for="billing-stack-add-credit-amount">Other amount in euros</label>
+                  <input class="cw-input cw-add-credit-other" id="billing-stack-add-credit-amount" type="text" name="amount" inputmode="decimal" pattern="[0-9]{1,4}(\.[0-9]{1,2})?" placeholder="Other €" data-add-credit-other>
+                  <button class="cw-button" type="submit" data-add-credit-submit>Pay</button>
+                </div>
 
-      <section class="cw-card" aria-labelledby="payment-methods-none-heading">
-        <header class="cw-card-header"><div><h2 id="payment-methods-none-heading">Payment methods, none yet</h2><p>The same section before a card is added.</p></div></header>
-        <div class="cw-card-body">
-          <div class="cw-payment-method">
-            <p class="cw-muted">No payment method yet.</p>
-            <form method="post" action="#setup">
-              <input type="hidden" name="_csrf" value="design-fixture-only">
-              <button class="cw-button cw-button--small" type="submit">Add payment method</button>
-            </form>
+              </form>
+            </div>
+          </section>
+
+          <section class="cw-card" aria-labelledby="billing-stack-invoices-heading">
+            <header class="cw-card-header"><div><h2 id="billing-stack-invoices-heading">Invoices</h2><p>Every charge, with its receipt.</p></div></header>
+            <div class="cw-card-body">
+              <div class="cw-table-wrap"><table class="cw-table"><caption class="cw-sr-only">Invoices</caption><thead><tr><th scope="col">Period</th><th scope="col">Amount</th><th scope="col">Status</th><th scope="col">Documents</th></tr></thead><tbody>
+                <tr><td>2026-11-14</td><td>€50.00</td><td><span class="cw-badge">paid</span></td><td><a href="#invoice" target="_blank" rel="noreferrer">View ↗</a> <a href="#pdf" target="_blank" rel="noreferrer">PDF ↗</a></td></tr>
+                <tr><td>2026-11-11</td><td>€20.00</td><td><span class="cw-badge">paid</span></td><td><a href="#invoice" target="_blank" rel="noreferrer">View ↗</a> <a href="#pdf" target="_blank" rel="noreferrer">PDF ↗</a></td></tr>
+              </tbody></table></div>
+            </div>
+          </section>
+        </div>
+
+    <h2 class="cw-section-label">A new organization: no card, no credit</h2>
+    <div class="cw-billing-stack" id="billing-stack-empty">
+          <header class="cw-balance-head" aria-label="Compute credit">
+            <div><p class="cw-muted">Compute credit</p><p class="cw-balance">€0.00</p></div>
+
+          </header>
+
+          <section class="cw-card" aria-labelledby="billing-stack-empty-payment-methods-heading">
+            <header class="cw-card-header cw-billing-card-head"><div><h2 id="billing-stack-empty-payment-methods-heading">Payment methods</h2><p>No card yet.</p></div><button class="cw-button" type="button" data-dialog-open="add-card-dialog">Add card</button></header>
+
+          </section>
+
+          <section class="cw-card" aria-labelledby="billing-stack-empty-top-up-heading">
+            <header class="cw-card-header"><div><h2 id="billing-stack-empty-top-up-heading">Automatic top-up</h2></div></header>
+            <div class="cw-card-body">
+              <form class="cw-top-up-line" method="post" action="#auto-top-up">
+                <input type="hidden" name="_csrf" value="design-fixture-only">
+                <input class="cw-switch" type="checkbox" role="switch" id="billing-stack-empty-top-up-enabled" name="enabled" value="true" aria-describedby="billing-stack-empty-top-up-help" checked>
+                <label class="cw-label" for="billing-stack-empty-top-up-enabled">Charge your card when the balance reaches €0</label>
+                <button class="cw-field-help-trigger" id="billing-stack-empty-top-up-help-trigger" type="button" popovertarget="billing-stack-empty-top-up-help" popovertargetaction="show" aria-label="About automatic top-up" data-field-help-trigger>i</button>
+                <p class="cw-field-help-popover" id="billing-stack-empty-top-up-help" popover="auto" role="tooltip" data-field-help-popover>Starts when you save a card. With the balance at €0.00, saving the card charges €20 at once.</p>
+                <label class="cw-sr-only" for="billing-stack-empty-top-up-amount">Top-up amount</label><select class="cw-select" id="billing-stack-empty-top-up-amount" name="amount"><option value="10">€10</option><option value="20" selected>€20</option><option value="50">€50</option><option value="100">€100</option></select>
+              </form>
+            </div>
+          </section>
+
+          <section class="cw-card" aria-labelledby="billing-stack-empty-add-credit-heading">
+            <header class="cw-card-header"><div class="cw-billing-heading-help"><h2 id="billing-stack-empty-add-credit-heading">Add credit</h2><button class="cw-field-help-trigger" id="billing-stack-empty-add-credit-help-trigger" type="button" popovertarget="billing-stack-empty-add-credit-help" popovertargetaction="show" aria-label="About adding credit" data-field-help-trigger>i</button><p class="cw-field-help-popover" id="billing-stack-empty-add-credit-help" popover="auto" role="tooltip" data-field-help-popover>A one-off payment. The card is saved for next time. From €5 to €1,000. Separate from automatic top-up.</p></div></header>
+            <div class="cw-card-body">
+              <form class="cw-add-credit" method="post" action="#add-credit" aria-labelledby="billing-stack-empty-add-credit-heading" data-add-credit data-add-credit-new-card="billing-stack-empty-add-credit-card">
+                <input type="hidden" name="_csrf" value="design-fixture-only">
+                <input type="hidden" name="request" value="design-fixture-request-0001">
+                <div class="cw-add-credit-row">
+                  <fieldset class="cw-add-credit-amounts">
+                    <legend class="cw-sr-only">Amount</legend>
+                    <div class="cw-add-credit-chips"><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="50"><span>€50</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="100" checked><span>€100</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="250"><span>€250</span></label><label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="500"><span>€500</span></label></div>
+                  </fieldset>
+                  <label class="cw-sr-only" for="billing-stack-empty-add-credit-amount">Other amount in euros</label>
+                  <input class="cw-input cw-add-credit-other" id="billing-stack-empty-add-credit-amount" type="text" name="amount" inputmode="decimal" pattern="[0-9]{1,4}(\.[0-9]{1,2})?" placeholder="Other €" data-add-credit-other>
+                  <button class="cw-button" type="submit" data-add-credit-submit>Pay</button>
+                </div>
+                <div class="cw-card-form" id="billing-stack-empty-add-credit-card" data-card-form hidden>
+                  <div class="cw-card-element" data-card-element></div>
+                  <p class="cw-field-error" role="alert" data-card-error hidden></p>
+                  <div class="cw-top-up-line">
+                    <input class="cw-switch" type="checkbox" role="switch" id="billing-stack-empty-add-credit-top-up" name="top_up" value="true" data-card-top-up checked>
+                    <label class="cw-label" for="billing-stack-empty-add-credit-top-up">Automatic top-up</label>
+                    <label class="cw-sr-only" for="billing-stack-empty-add-credit-top-up-amount">Top-up amount</label><select class="cw-select" id="billing-stack-empty-add-credit-top-up-amount" name="top_up_amount" data-card-top-up-amount><option value="10">€10</option><option value="20" selected>€20</option><option value="50">€50</option><option value="100">€100</option></select>
+                  </div>
+                  <p class="cw-muted" role="status" data-card-status hidden></p>
+                </div>
+              </form>
+            </div>
+          </section>
+
+          <section class="cw-card" aria-labelledby="billing-stack-empty-invoices-heading">
+            <header class="cw-card-header"><div><h2 id="billing-stack-empty-invoices-heading">Invoices</h2><p>Every charge, with its receipt.</p></div></header>
+            <div class="cw-card-body">
+              <p class="cw-muted">No invoices yet.</p>
+            </div>
+          </section>
+        </div>
+    <dialog class="cw-dialog" id="add-card-dialog" data-dialog aria-labelledby="add-card-title">
+      <form class="cw-card-form" method="dialog" data-card-form data-card-dialog>
+        <header class="cw-dialog-header"><h2 id="add-card-title">Add card</h2></header>
+        <div class="cw-dialog-body">
+          <div class="cw-card-element" data-card-element></div>
+          <p class="cw-field-error" role="alert" data-card-error hidden></p>
+          <div class="cw-top-up-line">
+            <input class="cw-switch" type="checkbox" role="switch" id="add-card-top-up" name="top_up" value="true" checked aria-describedby="add-card-top-up-help" data-card-top-up>
+            <label class="cw-label" for="add-card-top-up">Automatic top-up</label>
+            <button class="cw-field-help-trigger" id="add-card-top-up-help-trigger" type="button" popovertarget="add-card-top-up-help" popovertargetaction="show" aria-label="About automatic top-up" data-field-help-trigger>i</button>
+            <p class="cw-field-help-popover" id="add-card-top-up-help" popover="auto" role="tooltip" data-field-help-popover><strong>Your balance is €0.00, so saving charges <span data-card-top-up-euros>€20</span> now.</strong> After that, this card is charged <span data-card-top-up-euros>€20</span> whenever your balance reaches €0. Turn it off anytime on Billing.</p>
+            <label class="cw-sr-only" for="add-card-top-up-amount">Top-up amount</label><select class="cw-select" id="add-card-top-up-amount" name="top_up_amount" data-card-top-up-amount><option value="10">€10</option><option value="20" selected>€20</option><option value="50">€50</option><option value="100">€100</option></select>
           </div>
+          <p class="cw-muted" role="status" data-card-status hidden></p>
         </div>
-      </section>
-    </div>
+        <footer class="cw-dialog-actions"><button class="cw-button cw-button--outline" type="button" data-dialog-close data-card-cancel>Cancel</button><button class="cw-button" type="submit" data-card-submit data-card-pays>Save card and pay €20</button></footer>
+      </form>
+    </dialog>
+    <div hidden data-card-setup data-card-stripe="data:text/javascript," data-card-key="pk_test_design_fixture" data-card-begin="#card-setup" data-card-finish="#card-setup-finish"><input type="hidden" name="_csrf" value="design-fixture-only"></div>
   </div></div></div></main>
 </body>
 </html>

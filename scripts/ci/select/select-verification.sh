@@ -1504,6 +1504,7 @@ if [ "$event_selected" = false ]; then
       apps/dashboard/e2e/ssr-dashboard.account-dialogs.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.account-home.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.anchor-lines.ssr.ts|\
+      apps/dashboard/e2e/ssr-dashboard.billing-cards.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.create-help.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.creation-disclosure.ssr.ts|\
       apps/dashboard/e2e/ssr-dashboard.credential-dialogs.ssr.ts|\

@@ -1,14 +1,16 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
-    Form,
-    extract::{Path, Query, State},
+    Form, Json,
+    extract::{Path, Query, RawQuery, State},
     http::{HeaderMap, StatusCode},
-    response::Response,
+    response::{IntoResponse, Response},
 };
-use codewire_proto::codewire::console::v1::{AddCreditOutcome, AddCreditRefusal};
+use codewire_proto::codewire::console::v1::{
+    AddCreditOutcome, AddCreditRefusal, AddCreditResponse, CardSetupSettlement,
+};
 use connectrpc::ErrorCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     billing_banner::{BannerViewer, SandboxLoad, billing_banner},
@@ -20,7 +22,7 @@ use crate::{
     },
     security::{csrf_cookie, new_csrf_token, page_csrf_token, with_csrf_cookie},
     state::AppState,
-    templates::{BillingBannerTemplate, OrganizationBillingTemplate},
+    templates::{BillingBannerTemplate, BillingStackTemplate, OrganizationBillingTemplate},
 };
 
 /// How long the banner waits for the organization's Sandboxes.
@@ -37,10 +39,54 @@ pub(super) struct BillingQuery {
     amount: String,
 }
 
+/// A card action: which of the organization's cards.
 #[derive(Debug, Deserialize)]
-pub(super) struct BillingSubmission {
+pub(super) struct CardSubmission {
     #[serde(rename = "_csrf")]
     csrf: String,
+    payment_method: String,
+}
+
+/// The card form's save: what it chooses beside the card, which billing
+/// keeps in the SetupIntent it makes.
+#[derive(Debug, Deserialize)]
+pub(super) struct CardBeginSubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    /// Present only when the switch is on.
+    #[serde(default)]
+    top_up: Option<String>,
+    /// Euros, as the amount control offers them.
+    top_up_amount: String,
+    /// Present when Add credit with no card yet is buying credit, with its
+    /// chip and custom amount.
+    #[serde(default)]
+    credit: Option<String>,
+    #[serde(default)]
+    credit_choice: String,
+    #[serde(default)]
+    credit_amount: String,
+}
+
+/// The card form's finish, once Stripe confirmed the card in the page: the
+/// SetupIntent and nothing else.
+#[derive(Debug, Deserialize)]
+pub(super) struct CardFinishSubmission {
+    #[serde(rename = "_csrf")]
+    csrf: String,
+    setup_intent: String,
+}
+
+/// What the card form's script reads back: where to go next, or what to
+/// show at the field.
+#[derive(Debug, Default, Serialize, PartialEq, Eq)]
+pub(super) struct CardSetupAnswer {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    client_secret: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    location: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    error: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,18 +109,41 @@ pub(super) struct AddCreditSubmission {
     /// A chip's euros ("100"), or "custom".
     #[serde(default)]
     choice: String,
-    /// The custom amount in euros, used only when the choice is "custom".
+    /// The amount typed in Other, in euros; it wins over a chip.
     #[serde(default)]
     amount: String,
+}
+
+/// Stripe's return from a bank's redirect names the SetupIntent and its
+/// client secret. Nothing here needs the secret, so the page first sends the
+/// browser to the same address without it: it stays out of history, and out
+/// of any page an error shows instead of Billing (#4750). `None` when the
+/// address has no secret.
+fn without_client_secret(path: &str, raw_query: Option<&str>) -> Option<String> {
+    const SECRET: &str = "setup_intent_client_secret";
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(raw_query?.as_bytes())
+        .into_owned()
+        .collect();
+    if !pairs.iter().any(|(name, _)| name == SECRET) {
+        return None;
+    }
+    let kept = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(pairs.iter().filter(|(name, _)| name != SECRET))
+        .finish();
+    Some(if kept.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{path}?{kept}")
+    })
 }
 
 /// The amounts the chips offer, in euros (owner, 2026-11-11, #3381).
 const CREDIT_CHIPS: [i32; 4] = [50, 100, 250, 500];
 
-/// The chosen amount in cents: a chip, or a custom amount from EUR 5 to
-/// EUR 1,000 with at most two decimals.
+/// The chosen amount in cents: an amount typed in Other, from EUR 5 to
+/// EUR 1,000 with at most two decimals, wins over a chip.
 fn credit_cents(choice: &str, amount: &str) -> Option<i32> {
-    if choice == "custom" {
+    if choice == "custom" || !amount.trim().is_empty() {
         return billing_connect::top_up_cents(amount);
     }
     CREDIT_CHIPS
@@ -83,13 +152,31 @@ fn credit_cents(choice: &str, amount: &str) -> Option<i32> {
         .map(|euros| euros * 100)
 }
 
+/// The Billing page. Every answer it gives, an error page or a redirect
+/// included, carries the page's referrer policy.
 pub(super) async fn page(
+    state: State<AppState>,
+    slug: Path<String>,
+    query: Query<BillingQuery>,
+    raw_query: RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    crate::response::with_billing_referrer_policy(
+        page_answer(state, slug, query, raw_query, headers).await,
+    )
+}
+
+async fn page_answer(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     Query(query): Query<BillingQuery>,
+    RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let continuation = billing_path(&slug);
+    if let Some(clean) = without_client_secret(&continuation, raw_query.as_deref()) {
+        return redirect(clean, &headers);
+    }
     let (dashboard, organization, cookie) =
         match get_context(&state, &headers, &slug, &continuation).await {
             Ok(context) => context,
@@ -102,12 +189,15 @@ pub(super) async fn page(
         &organization.id,
         organization.can_admin,
         token.clone(),
-        billing_message(&query.message, &query.amount),
+        String::new(),
         billing_error(&query.error).to_owned(),
     )
     .await
     {
-        Ok(billing) => billing,
+        Ok(mut billing) => {
+            billing.message = billing_message(&query.message, &query.amount, &billing.default_card);
+            billing
+        }
         Err(error) => return connect_page_error(error, &continuation, &headers),
     };
     with_csrf_cookie(
@@ -121,27 +211,249 @@ pub(super) async fn page(
     )
 }
 
-pub(super) async fn portal(
+/// The Billing page's live part, re-fetched when its credit changes
+/// (`codewire:live:credit`) or the stream resyncs (#4762).
+pub(super) async fn stack_fragment(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     headers: HeaderMap,
-    Form(submission): Form<BillingSubmission>,
 ) -> Response {
-    billing_session(&state, &slug, &headers, &submission.csrf, true).await
+    let continuation = billing_path(&slug);
+    let (_, organization, cookie) =
+        match get_context_without_rail(&state, &headers, &slug, &continuation).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    let token = page_csrf_token(&headers);
+    match billing_connect::billing_page(
+        &state,
+        cookie,
+        &organization.id,
+        organization.can_admin,
+        token,
+        String::new(),
+        String::new(),
+    )
+    .await
+    {
+        Ok(billing) => render_template(
+            StatusCode::OK,
+            BillingStackTemplate {
+                organization: &organization,
+                billing: &billing,
+            },
+        ),
+        Err(error) => connect_page_error(error, &continuation, &headers),
+    }
 }
 
-pub(super) async fn setup(
+/// Starts adding a card once it is saved in the page: billing makes the
+/// SetupIntent with the choices, and the script confirms the card with its
+/// client secret.
+pub(super) async fn begin_card_setup(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     headers: HeaderMap,
-    Form(submission): Form<BillingSubmission>,
+    Form(submission): Form<CardBeginSubmission>,
 ) -> Response {
-    billing_session(&state, &slug, &headers, &submission.csrf, false).await
+    let path = billing_path(&slug);
+    let (_, organization, cookie) =
+        match action_context(&state, &headers, &slug, &submission.csrf, path).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    if !organization.can_admin {
+        return card_answer_error(StatusCode::FORBIDDEN, "not-authorized");
+    }
+    let Some(top_up_cents) = billing_connect::top_up_cents(&submission.top_up_amount) else {
+        return card_answer_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid-top-up");
+    };
+    let credit_cents = match submission.credit {
+        None => None,
+        Some(_) => match credit_cents(&submission.credit_choice, &submission.credit_amount) {
+            Some(cents) => Some(cents),
+            None => return card_answer_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid-credit"),
+        },
+    };
+    let choice = billing_connect::CardSetupChoice {
+        auto_top_up_enabled: submission.top_up.as_deref() == Some("true"),
+        auto_top_up_cents: top_up_cents,
+        credit_cents,
+    };
+    match billing_connect::begin_card_setup(&state, cookie, organization.id, choice).await {
+        Ok(client_secret) => Json(CardSetupAnswer {
+            client_secret,
+            ..Default::default()
+        })
+        .into_response(),
+        Err(error) if error.code == ErrorCode::NotFound => {
+            card_answer_error(StatusCode::SERVICE_UNAVAILABLE, "card-form-off")
+        }
+        // Billing's card-setup caps (#4874): too many tries in an hour or a
+        // day, as card testing would need. The page says so in its own words,
+        // as it does every billing error; which window applies is billing's.
+        Err(error) if error.code == ErrorCode::ResourceExhausted => {
+            card_answer_error(StatusCode::TOO_MANY_REQUESTS, "card-setup-limit")
+        }
+        Err(error) => card_answer_error(StatusCode::BAD_GATEWAY, mutation_error(&error)),
+    }
 }
 
-/// Buys a one-time amount of credit (#3381): back to Billing once the card is
-/// charged, or on to Stripe where the bank wants the payment approved or
-/// there is no card yet.
+/// Finishes adding a card once Stripe confirmed it in the page: billing
+/// makes it the default, buys the credit chosen at Begin, saves the top-up
+/// setting chosen there and settles; the page then goes back to Billing
+/// saying what happened.
+pub(super) async fn finish_card_setup(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Form(submission): Form<CardFinishSubmission>,
+) -> Response {
+    let path = billing_path(&slug);
+    let (_, organization, cookie) =
+        match action_context(&state, &headers, &slug, &submission.csrf, path.clone()).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    if !organization.can_admin {
+        return card_answer_error(StatusCode::FORBIDDEN, "not-authorized");
+    }
+    let done = match billing_connect::finish_card_setup(
+        &state,
+        cookie,
+        organization.id,
+        submission.setup_intent,
+    )
+    .await
+    {
+        Ok(done) => done,
+        Err(error) => {
+            return card_answer_error(StatusCode::BAD_GATEWAY, mutation_error(&error));
+        }
+    };
+    Json(CardSetupAnswer {
+        location: card_saved_location(&path, &done),
+        ..Default::default()
+    })
+    .into_response()
+}
+
+/// Where the page goes once a card is saved: Billing, saying what saving it
+/// did. A declined credit purchase says so; the card is saved either way.
+fn card_saved_location(path: &str, done: &billing_connect::CardSetupDone) -> String {
+    if let Some(credit) = &done.credit {
+        return match credit.outcome.as_known() {
+            Some(AddCreditOutcome::Paid) => {
+                format!(
+                    "{path}?message=card-credit-added&amount={}",
+                    credit.amount_cents
+                )
+            }
+            // The bank wants the payment approved: Stripe's invoice page,
+            // where it is paid, as Add credit with a saved card does.
+            Some(AddCreditOutcome::ActionRequired) => {
+                let url = billing_connect::safe_stripe_url(credit.payment_url.clone());
+                if url.is_empty() {
+                    format!("{path}?message=card-saved&error=invalid-redirect")
+                } else {
+                    url
+                }
+            }
+            _ => format!("{path}?message=card-saved&error={}", credit_refusal(credit)),
+        };
+    }
+    let message = match done.settlement {
+        CardSetupSettlement::ToppedUp => "card-topped-up",
+        CardSetupSettlement::Pending => "card-top-up-pending",
+        CardSetupSettlement::OutOfCredit if done.auto_top_up_enabled => "card-top-up-declined",
+        _ => "card-saved",
+    };
+    format!("{path}?message={message}")
+}
+
+/// The page's error code for a purchase that wasn't paid at once.
+fn credit_refusal(credit: &AddCreditResponse) -> &'static str {
+    match (credit.outcome.as_known(), credit.refusal.as_known()) {
+        (_, Some(AddCreditRefusal::InProgress)) => "credit-in-progress",
+        (Some(AddCreditOutcome::Refused), _) => credit_decline(&credit.decline_code),
+        _ => "unavailable",
+    }
+}
+
+fn card_answer_error(status: StatusCode, code: &str) -> Response {
+    (
+        status,
+        Json(CardSetupAnswer {
+            error: billing_error(code).to_owned(),
+            ..Default::default()
+        }),
+    )
+        .into_response()
+}
+
+/// Makes one of the organization's cards the one top-ups charge.
+pub(super) async fn make_default_card(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Form(submission): Form<CardSubmission>,
+) -> Response {
+    card_action(&state, &slug, &headers, submission, true).await
+}
+
+/// Removes one of the organization's cards.
+pub(super) async fn remove_card(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Form(submission): Form<CardSubmission>,
+) -> Response {
+    card_action(&state, &slug, &headers, submission, false).await
+}
+
+async fn card_action(
+    state: &AppState,
+    slug: &str,
+    headers: &HeaderMap,
+    submission: CardSubmission,
+    make_default: bool,
+) -> Response {
+    let path = billing_path(slug);
+    let (_, organization, cookie) =
+        match action_context(state, headers, slug, &submission.csrf, path.clone()).await {
+            Ok(context) => context,
+            Err(response) => return response,
+        };
+    if !organization.can_admin {
+        return mutation_redirect(path, "", "not-authorized", headers);
+    }
+    let result = if make_default {
+        billing_connect::set_default_card(state, cookie, organization.id, submission.payment_method)
+            .await
+    } else {
+        billing_connect::remove_card(state, cookie, organization.id, submission.payment_method)
+            .await
+    };
+    match result {
+        Ok(()) => mutation_redirect(
+            path,
+            if make_default {
+                "card-default"
+            } else {
+                "card-removed"
+            },
+            "",
+            headers,
+        ),
+        Err(error) if error.code == ErrorCode::Unauthenticated => login_redirect(&path, headers),
+        Err(error) => mutation_redirect(path, "", mutation_error(&error), headers),
+    }
+}
+
+/// Buys a one-time amount of credit with the saved card (#3381): back to
+/// Billing once the card is charged, or on to Stripe's invoice page where the
+/// bank wants the payment approved. With no card yet, the page's card form
+/// buys it as it saves the card (#4750).
 pub(super) async fn add_credit(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -248,56 +560,48 @@ pub(super) async fn auto_top_up(
     }
 }
 
-async fn billing_session(
-    state: &AppState,
-    slug: &str,
-    headers: &HeaderMap,
-    csrf: &str,
-    portal: bool,
-) -> Response {
-    let path = billing_path(slug);
-    let (_, organization, cookie) =
-        match action_context(state, headers, slug, csrf, path.clone()).await {
-            Ok(context) => context,
-            Err(response) => return response,
-        };
-    if !organization.can_admin {
-        return mutation_redirect(path, "", "not-authorized", headers);
-    }
-    let return_url = format!("{}{}", state.public_origin, organization.billing_url);
-    let result = if portal {
-        billing_connect::create_portal_session(state, cookie, organization.id, return_url).await
-    } else {
-        billing_connect::create_setup_session(state, cookie, organization.id, return_url).await
-    };
-    match result {
-        Ok(raw_url) => {
-            let url = billing_connect::safe_stripe_url(raw_url);
-            if url.is_empty() {
-                mutation_redirect(path, "", "invalid-redirect", headers)
-            } else {
-                redirect(url, headers)
-            }
-        }
-        Err(error) if error.code == ErrorCode::Unauthenticated => login_redirect(&path, headers),
-        Err(error) => mutation_redirect(path, "", mutation_error(&error), headers),
-    }
-}
-
 fn billing_path(slug: &str) -> String {
     format!("/{slug}/billing/")
 }
 
 /// The page's confirmation for a message code. The credit messages name the
-/// amount, read as a number of cents and written as euros.
-fn billing_message(value: &str, amount: &str) -> String {
+/// amount, read as a number of cents and written as euros; the card messages
+/// name the default card ("Visa •••• 4242"), or say "Your card" without one.
+fn billing_message(value: &str, amount: &str, default_card: &str) -> String {
     let euros = amount
         .parse::<i32>()
         .ok()
         .filter(|cents| (500..=100_000).contains(cents))
         .map(|cents| format!("€{}", billing_connect::top_up_euros(cents)));
+    let card = if default_card.is_empty() {
+        "Your card"
+    } else {
+        default_card
+    };
+    let saved = if default_card.is_empty() {
+        "Your card is saved as your default card.".to_owned()
+    } else {
+        format!("{card} saved as your default card.")
+    };
     match (value, euros) {
-        ("payment-updated", _) => "Payment details updated.".to_owned(),
+        ("card-saved", _) => saved,
+        ("card-topped-up", _) => {
+            format!("{saved} Automatic top-up added credit; the receipt is on its way.")
+        }
+        ("card-top-up-pending", _) => {
+            format!("{saved} Automatic top-up is charging it; your credit updates in a moment.")
+        }
+        ("card-top-up-declined", _) => {
+            format!("{saved} Its automatic top-up was declined, so no credit was added.")
+        }
+        ("card-credit-added", Some(euros)) => {
+            format!("{saved} {euros} added to your credit; the receipt is on its way.")
+        }
+        ("card-credit-added", None) => format!("{saved} Credit added."),
+        ("card-default", _) => {
+            format!("{card} is now your default card. Top-ups charge it from now on.")
+        }
+        ("card-removed", _) => "Card removed.".to_owned(),
         ("top-up-saved", _) => "Automatic top-up saved.".to_owned(),
         ("credit-added", Some(euros)) => format!("{euros} added to your credit."),
         ("credit-added", None) => "Credit added.".to_owned(),
@@ -310,9 +614,9 @@ fn billing_message(value: &str, amount: &str) -> String {
 }
 
 /// The billing banner, loaded after an organization page has rendered so it
-/// never holds the page up. It answers with one `.cw-banner`, or with an
-/// empty body that removes the placeholder, whenever there is nothing to say
-/// or anything it needs is unavailable.
+/// never holds the page up. It answers with one `.cw-banner`, or with a
+/// hidden placeholder whenever there is nothing to say or anything it needs
+/// is unavailable; either is fetched again when the credit changes.
 pub(super) async fn banner_fragment(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -360,7 +664,13 @@ pub(super) async fn banner_fragment(
         // The page itself answers for its session and organization.
         Err(_) => None,
     };
-    render_template(StatusCode::OK, BillingBannerTemplate { banner })
+    render_template(
+        StatusCode::OK,
+        BillingBannerTemplate {
+            banner,
+            slug: &slug,
+        },
+    )
 }
 
 fn billing_error(value: &str) -> &'static str {
@@ -369,6 +679,14 @@ fn billing_error(value: &str) -> &'static str {
         "invalid" => "The billing request was invalid.",
         "not-found" => "Billing details were not found for this organization.",
         "invalid-redirect" => "The billing provider returned an unsafe destination.",
+        "card-form-off" => "Adding a card isn't available right now. Try again later.",
+        "card-not-confirmed" => "Your bank didn't confirm the card. Nothing was saved.",
+        "card-unfinished" => {
+            "Your card is saved with Stripe, but Codewire couldn't finish adding it. Add it again to finish."
+        }
+        "card-setup-limit" => {
+            "Too many tries at adding a card, so nothing was saved or charged. Try again later, or contact support."
+        }
         "invalid-top-up" => "Enter a top-up amount from €5 to €1,000, with at most two decimals.",
         "invalid-credit" => {
             "Choose an amount, or enter one from €5 to €1,000 with at most two decimals."
@@ -377,14 +695,12 @@ fn billing_error(value: &str) -> &'static str {
             "A payment for this organization's credit is already being processed. Try again in a minute."
         }
         "credit-declined" => {
-            "Your card was declined, so no credit was added. Update your payment method in Stripe, or try again."
+            "Your card was declined, so no credit was added. Try again, or add another card."
         }
         "credit-insufficient-funds" => {
             "Your card was declined for insufficient funds, so no credit was added."
         }
-        "credit-expired-card" => {
-            "Your card has expired, so no credit was added. Update your payment method in Stripe."
-        }
+        "credit-expired-card" => "Your card has expired, so no credit was added. Add another card.",
         "credit-cancelled" => "Payment cancelled. No credit was added.",
         "unavailable" => "The billing service is temporarily unavailable.",
         _ => "",
@@ -406,13 +722,11 @@ mod tests {
 
     #[test]
     fn billing_feedback_is_allowlisted() {
+        // The Stripe portal it came back from is gone (#4750).
+        assert_eq!(billing_message("payment-updated", "", ""), "");
+        assert_eq!(billing_message("<script>", "10000", ""), "");
         assert_eq!(
-            billing_message("payment-updated", ""),
-            "Payment details updated."
-        );
-        assert_eq!(billing_message("<script>", "10000"), "");
-        assert_eq!(
-            billing_message("top-up-saved", ""),
+            billing_message("top-up-saved", "", ""),
             "Automatic top-up saved."
         );
         assert_eq!(
@@ -423,24 +737,81 @@ mod tests {
     }
 
     #[test]
+    fn a_banks_return_loses_its_client_secret_and_keeps_the_rest() {
+        let path = "/acme/billing/";
+        assert_eq!(
+            without_client_secret(
+                path,
+                Some("card_return=1&setup_intent=seti_123&setup_intent_client_secret=seti_123_secret_abc&redirect_status=succeeded")
+            )
+            .as_deref(),
+            Some("/acme/billing/?card_return=1&setup_intent=seti_123&redirect_status=succeeded")
+        );
+        assert_eq!(
+            without_client_secret(path, Some("setup_intent_client_secret=x")).as_deref(),
+            Some(path)
+        );
+        for query in [
+            None,
+            Some(""),
+            Some("message=card-saved"),
+            Some("card_return=1&setup_intent=seti_123"),
+        ] {
+            assert_eq!(without_client_secret(path, query), None, "{query:?}");
+        }
+    }
+
+    #[test]
+    fn card_messages_name_the_card_and_what_saving_it_did() {
+        let card = "Visa •••• 4242";
+        assert_eq!(
+            billing_message("card-saved", "", card),
+            "Visa •••• 4242 saved as your default card."
+        );
+        assert_eq!(
+            billing_message("card-topped-up", "", card),
+            "Visa •••• 4242 saved as your default card. Automatic top-up added credit; the receipt is on its way."
+        );
+        assert_eq!(
+            billing_message("card-credit-added", "10000", card),
+            "Visa •••• 4242 saved as your default card. €100 added to your credit; the receipt is on its way."
+        );
+        assert_eq!(
+            billing_message("card-top-up-declined", "", card),
+            "Visa •••• 4242 saved as your default card. Its automatic top-up was declined, so no credit was added."
+        );
+        assert_eq!(
+            billing_message("card-default", "", card),
+            "Visa •••• 4242 is now your default card. Top-ups charge it from now on."
+        );
+        // Without a card to name, it says "Your card".
+        assert_eq!(
+            billing_message("card-saved", "", ""),
+            "Your card is saved as your default card."
+        );
+        assert!(!billing_error("card-setup-limit").is_empty());
+        assert!(!billing_error("card-form-off").is_empty());
+    }
+
+    #[test]
     fn credit_messages_name_the_amount_only_when_it_is_one() {
         assert_eq!(
-            billing_message("credit-added", "10000"),
+            billing_message("credit-added", "10000", ""),
             "€100 added to your credit."
         );
         assert_eq!(
-            billing_message("credit-added", "1250"),
+            billing_message("credit-added", "1250", ""),
             "€12.50 added to your credit."
         );
         assert_eq!(
-            billing_message("credit-paid", "25000"),
+            billing_message("credit-paid", "25000", ""),
             "Payment received. €250 is added to your credit in a moment."
         );
         // A missing, malformed or out-of-range amount is never echoed.
         for amount in ["", "<b>1</b>", "499", "100001", "-500", "1e4"] {
-            assert_eq!(billing_message("credit-added", amount), "Credit added.");
+            assert_eq!(billing_message("credit-added", amount, ""), "Credit added.");
             assert_eq!(
-                billing_message("credit-paid", amount),
+                billing_message("credit-paid", amount, ""),
                 "Payment received. Your credit updates in a moment."
             );
         }
@@ -453,7 +824,9 @@ mod tests {
     #[test]
     fn a_credit_choice_is_a_chip_or_a_custom_amount() {
         assert_eq!(credit_cents("50", ""), Some(5_000));
-        assert_eq!(credit_cents("100", "7"), Some(10_000));
+        // An amount typed in Other wins over a chip.
+        assert_eq!(credit_cents("100", "7"), Some(700));
+        assert_eq!(credit_cents("100", " "), Some(10_000));
         assert_eq!(credit_cents("250", ""), Some(25_000));
         assert_eq!(credit_cents("500", ""), Some(50_000));
         assert_eq!(credit_cents("custom", "12.50"), Some(1_250));

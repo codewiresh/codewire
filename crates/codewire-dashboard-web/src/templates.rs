@@ -399,11 +399,23 @@ pub(crate) struct EnvironmentListTemplate<'a> {
     pub(crate) page: &'a EnvironmentsPageView,
 }
 
-/// The billing banner fragment: one `.cw-banner`, or nothing.
+/// The billing banner fragment: one `.cw-banner`, or a hidden placeholder.
+/// Either re-fetches itself when the organization's credit changes or the
+/// live stream resyncs (#4762), so a banner appears and goes without a
+/// reload.
 #[derive(Template)]
 #[template(path = "billing-banner.html")]
-pub(crate) struct BillingBannerTemplate {
+pub(crate) struct BillingBannerTemplate<'a> {
     pub(crate) banner: Option<BillingBannerView>,
+    pub(crate) slug: &'a str,
+}
+
+/// The Billing page's live part, which its fragment re-renders.
+#[derive(Template)]
+#[template(path = "organization-billing-stack.html")]
+pub(crate) struct BillingStackTemplate<'a> {
+    pub(crate) organization: &'a OrganizationContext,
+    pub(crate) billing: &'a BillingPageView,
 }
 
 #[derive(Template)]

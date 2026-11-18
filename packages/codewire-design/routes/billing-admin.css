@@ -57,22 +57,27 @@ dl.cw-stat-grid { margin: 0; }
 .cw-price-form { grid-template-columns: repeat(5, minmax(0, 1fr)); margin-top: var(--space-3); }
 .cw-form-action { display: flex; align-items: end; }
 /* Add credit and automatic top-up are two panels of one kind. Add credit: its title and terms, the amount chips, the custom amount while Custom is chosen, then the button that names what it adds. */
-.cw-top-up, .cw-add-credit { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-base); }
-.cw-add-credit h3 { margin: 0; font-size: var(--text-body); font-weight: var(--weight-semibold); }
-.cw-add-credit > p { margin: 0; }
+/* The balance heads the page: its label over the figure, the runway on the right. */
+.cw-balance-head { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: var(--space-3); padding: 0 var(--space-1); }
+.cw-balance-head p { margin: 0; }
+.cw-balance { font-size: var(--text-page); font-weight: var(--weight-semibold); }
+/* Payment methods: the heading and its description on the left, Add card on the right. */
+.cw-billing-card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.cw-billing-heading-help { display: flex; align-items: center; gap: var(--space-2); }
+/* Automatic top-up is one line: the switch, its name, the i, then the amount on the right. */
+.cw-top-up-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.cw-top-up-line .cw-label { margin: 0; }
+.cw-top-up-line .cw-select { width: auto; min-width: var(--control-width-sm); margin-left: auto; }
+/* Add credit: the chips, Other and Pay on one row; with no card yet, Stripe's form opens under it. */
+.cw-add-credit { display: grid; gap: var(--space-3); }
 .cw-add-credit-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-.cw-add-credit .cw-input { width: var(--control-width-sm); }
-/* One row: the amounts on the left, the button on the right; a custom amount opens under them. */
-.cw-add-credit-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3) var(--space-4); }
-.cw-add-credit-amounts { grid-column: 1; grid-row: 1; margin: 0; padding: 0; border: 0; min-width: 0; }
-.cw-add-credit-row > [data-add-credit-custom] { grid-column: 1 / -1; grid-row: 2; }
-.cw-add-credit-action { display: flex; grid-column: 2; grid-row: 1; }
-/* Automatic top-up: the title, its state and the switch on one line, the terms under it, then the amount. */
-.cw-top-up-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
-.cw-top-up-head h3 { margin: 0; font-size: var(--text-body); font-weight: var(--weight-semibold); }
-.cw-top-up > p { margin: 0; }
-.cw-top-up-amount { display: flex; align-items: center; gap: var(--space-3); }
-.cw-top-up-amount .cw-input { width: var(--control-width-sm); }
+.cw-add-credit-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.cw-add-credit-amounts { margin: 0; padding: 0; border: 0; min-width: 0; }
+.cw-add-credit-other { width: var(--control-width-sm); }
+.cw-add-credit-row .cw-button { margin-left: auto; }
+.cw-card-form { display: grid; gap: var(--space-3); }
+.cw-card-form > p { margin: 0; }
+.cw-card-element { min-height: var(--control-height); }
 .cw-preview { display: grid; gap: var(--space-4); padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-base); }
 .cw-danger-zone, .cw-archive-form, .cw-setting-row { display: flex; align-items: end; gap: var(--space-3); }
 .cw-danger-zone { justify-content: flex-end; padding-top: var(--space-3); border-top: 1px solid var(--border-subtle); }
@@ -100,6 +105,8 @@ dl.cw-stat-grid { margin: 0; }
 
 @media (max-width: 48rem) {
   .cw-payment-method { grid-template-columns: minmax(0, 1fr); justify-items: start; }
+  /* A saved card keeps its menu on the right, so the menu opens on screen. */
+  .cw-payment-method:has(> .cw-menu) { grid-template-columns: minmax(0, 1fr) auto; }
   .cw-stat-grid, .cw-stat-grid--three, .cw-organization-settings { grid-template-columns: minmax(0, 1fr); }
   .cw-organization-toggle { flex-wrap: nowrap; }
   .cw-admin-heading, .cw-filter-form, .cw-setting-row { align-items: stretch; flex-direction: column; }

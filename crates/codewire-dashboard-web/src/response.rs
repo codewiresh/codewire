@@ -103,22 +103,60 @@ pub(crate) fn render_account_settings_page(
     response
 }
 
-/// The billing page's forms POST to billing's setup, portal and add-credit
-/// actions, which answer with a redirect to Stripe's hosted Checkout, billing
-/// portal or, for a charge the bank wants approved, the invoice's payment page.
-/// Chromium applies this page's form-action to that cross-origin redirect too,
-/// so only these three Stripe hosts are added, and only here (#3381: "Add
-/// payment method" and "Manage in Stripe" did nothing).
+/// The Billing page's policy (#4750): Stripe's script, its card form's
+/// frames and its API, for the card form that stays in the page, and the two
+/// Stripe pages a form may still redirect to. Chromium applies form-action to
+/// a form's cross-origin redirect too: Add credit goes on to the invoice's
+/// payment page when the bank wants a charge approved, and to Checkout for an
+/// organization billing finds without a card. Only this page gets any of it.
+const BILLING_POLICY: [(&str, &str); 4] = [
+    (
+        "connect-src 'self'",
+        "connect-src 'self' https://api.stripe.com",
+    ),
+    (
+        "form-action 'self'",
+        "form-action 'self' https://checkout.stripe.com https://invoice.stripe.com",
+    ),
+    (
+        "script-src 'self'",
+        "script-src 'self' https://js.stripe.com https://*.js.stripe.com",
+    ),
+    (
+        "img-src 'self' data:",
+        "img-src 'self' data: https://*.stripe.com",
+    ),
+];
+const BILLING_FRAMES: &str =
+    "frame-src https://js.stripe.com https://*.js.stripe.com https://hooks.stripe.com";
+
+/// `response` with the Billing page's referrer policy, whatever its status.
+/// Back from a bank's redirect, the page's URL names a SetupIntent until the
+/// card script cleans it: no request it makes may carry the path or query on,
+/// to Stripe or to the console's own logs (#4750). Not no-referrer: under it
+/// a form post sends `Origin: null`, which the same-origin CSRF gate refuses
+/// (as personal_secrets.rs notes).
+pub(crate) fn with_billing_referrer_policy(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("strict-origin"),
+    );
+    response
+}
+
 pub(crate) fn render_billing_page(template: impl Template) -> Response {
-    let mut response = render_page(template);
+    let mut response = with_billing_referrer_policy(render_page(template));
     if response.status() == StatusCode::OK {
-        let policy = CONTENT_SECURITY_POLICY.replace(
-            "form-action 'self'",
-            "form-action 'self' https://checkout.stripe.com https://billing.stripe.com https://invoice.stripe.com",
-        );
+        let mut policy = BILLING_POLICY
+            .iter()
+            .fold(CONTENT_SECURITY_POLICY.to_owned(), |policy, (from, to)| {
+                policy.replace(from, to)
+            });
+        policy.push_str("; ");
+        policy.push_str(BILLING_FRAMES);
         response.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_str(&policy).expect("static billing form policy"),
+            HeaderValue::from_str(&policy).expect("static billing policy"),
         );
     }
     response
@@ -378,29 +416,58 @@ mod tests {
     }
 
     #[test]
-    fn only_the_billing_page_allows_the_stripe_form_redirects() {
+    fn only_the_billing_page_allows_stripe() {
         #[derive(Template)]
         #[template(source = "<main>Billing</main>", ext = "html")]
         struct Billing;
 
         let response = render_billing_page(Billing);
         assert_eq!(response.status(), StatusCode::OK);
+        // A bank's return URL names a SetupIntent: the Referer carries the
+        // origin only, and a form post keeps its Origin for the CSRF gate.
+        assert_eq!(response.headers()[header::REFERRER_POLICY], "strict-origin");
         let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
             .to_str()
             .unwrap();
-        assert!(
-            policy.contains(
-                "form-action 'self' https://checkout.stripe.com https://billing.stripe.com https://invoice.stripe.com;"
-            ),
-            "{policy}"
-        );
-        assert_eq!(
-            policy.replace(
-                "form-action 'self' https://checkout.stripe.com https://billing.stripe.com https://invoice.stripe.com",
-                "form-action 'self'"
-            ),
-            CONTENT_SECURITY_POLICY
-        );
+        let directives: Vec<&str> = policy.split(';').map(str::trim).collect();
+        // Each directive appears once: a second one would be ignored.
+        for name in [
+            "connect-src",
+            "form-action",
+            "script-src",
+            "frame-src",
+            "img-src",
+        ] {
+            let count = directives
+                .iter()
+                .filter(|directive| directive.split_whitespace().next() == Some(name))
+                .count();
+            assert_eq!(count, 1, "{name}: {policy}");
+        }
+        for expected in [
+            "connect-src 'self' https://api.stripe.com",
+            "form-action 'self' https://checkout.stripe.com https://invoice.stripe.com",
+            "script-src 'self' https://js.stripe.com https://*.js.stripe.com",
+            "frame-src https://js.stripe.com https://*.js.stripe.com https://hooks.stripe.com",
+            "img-src 'self' data: https://*.stripe.com",
+        ] {
+            assert!(directives.contains(&expected), "{policy}");
+        }
+        // Everything else is the dashboard's own policy.
+        let others: Vec<&str> = directives
+            .into_iter()
+            .filter(|directive| !directive.contains("stripe.com"))
+            .collect();
+        let base: Vec<&str> = CONTENT_SECURITY_POLICY
+            .split(';')
+            .map(str::trim)
+            .filter(|directive| {
+                !["connect-src", "form-action", "script-src", "img-src"]
+                    .iter()
+                    .any(|name| directive.starts_with(name))
+            })
+            .collect();
+        assert_eq!(others, base);
         for other in [
             render_page(Billing),
             render_credential_settings_page(Billing),

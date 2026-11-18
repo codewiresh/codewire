@@ -2,15 +2,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::http::HeaderValue;
 use codewire_proto::codewire::console::v1::{
-    AddCreditRequest, AddCreditResponse, BillingServiceClient, CreatePortalSessionRequest,
-    CreateSetupSessionRequest, GetBillingOverviewRequest, GetEnvironmentUsageRequest,
-    GetSignupCreditRequest, ListBillingEventsRequest, ListInvoicesRequest, UpdateAutoTopUpRequest,
+    AddCreditRequest, AddCreditResponse, BeginCardSetupRequest, BillingServiceClient,
+    CardSetupSettlement, FinishCardSetupRequest, GetBillingOverviewRequest,
+    GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetSignupCreditRequest,
+    ListBillingEventsRequest, ListInvoicesRequest, ListPaymentMethodsRequest,
+    RemovePaymentMethodRequest, SavedPaymentMethod, SetDefaultPaymentMethodRequest,
+    UpdateAutoTopUpRequest,
 };
 use connectrpc::{ConnectError, client::ClientConfig};
 
 use crate::{
     admin_connect::euro_text,
-    billing_banner::CreditFacts,
+    billing_banner::{CreditFacts, SandboxLoad, runway_text},
     dependency::{DependencyResult, PageDependency, resolve_connect},
     state::AppState,
     time_display::calendar_date,
@@ -19,6 +22,8 @@ use crate::{
 };
 
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the Billing page waits for the Sandboxes its runway reads.
+const RUNWAY_SANDBOXES_TIMEOUT: Duration = Duration::from_secs(2);
 /// A purchase charges the card through several Stripe calls, which billing
 /// bounds at 30 seconds.
 const ADD_CREDIT_TIMEOUT: Duration = Duration::from_secs(40);
@@ -96,9 +101,13 @@ pub(crate) async fn credit_facts(
     let Ok(Ok(overview)) = tokio::time::timeout(CREDIT_FACTS_TIMEOUT, request).await else {
         return None;
     };
-    let overview = overview.into_owned();
-    let rates = overview.rates.into_option().unwrap_or_default();
-    Some(CreditFacts {
+    Some(facts_of(&overview.into_owned()))
+}
+
+/// The credit facts an overview states.
+fn facts_of(overview: &GetBillingOverviewResponse) -> CreditFacts {
+    let rates = overview.rates.as_option().cloned().unwrap_or_default();
+    CreditFacts {
         balance_nano_eur: overview.credit_balance_nano_eur,
         has_card: overview.has_payment_method,
         auto_top_up: overview.auto_top_up_enabled,
@@ -109,9 +118,9 @@ pub(crate) async fn credit_facts(
         disk_nano_eur_per_gib_hour: rates.disk_nano_eur_per_gib_hour,
         exhausted_at: overview
             .credit_exhausted_at
-            .into_option()
+            .as_option()
             .map(|value| value.seconds),
-    })
+    }
 }
 
 #[derive(Debug)]
@@ -177,6 +186,64 @@ impl PaymentCardView {
     }
 }
 
+/// One saved card as its row on the Billing page shows it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SavedCardView {
+    /// Stripe's PaymentMethod id, which the card's actions name.
+    pub(crate) id: String,
+    pub(crate) card: PaymentCardView,
+    pub(crate) default: bool,
+    /// The card as the page names it: "Visa •••• 4242".
+    pub(crate) label: String,
+    /// The id of its Remove dialog, unique on the page.
+    pub(crate) dialog_id: String,
+}
+
+impl SavedCardView {
+    /// `None` for a payment method Stripe gave no card details for.
+    pub(crate) fn new(
+        saved: &SavedPaymentMethod,
+        default_id: &str,
+        index: usize,
+        today: chrono::NaiveDate,
+    ) -> Option<Self> {
+        let card = PaymentCardView::new(saved.card.as_option()?, today);
+        Some(Self {
+            id: saved.id.clone(),
+            default: !default_id.is_empty() && saved.id == default_id,
+            label: format!("{} •••• {}", card.brand, card.last4),
+            dialog_id: format!("remove-card-{index}"),
+            card,
+        })
+    }
+}
+
+/// One amount the automatic top-up offers, in euros.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TopUpChoice {
+    pub(crate) euros: String,
+    pub(crate) selected: bool,
+}
+
+/// The amounts automatic top-up offers (v4, owner 2026-11-14, #4750), and
+/// the organization's own amount when it is none of them.
+const TOP_UP_EUROS: [i32; 4] = [10, 20, 50, 100];
+
+pub(crate) fn top_up_choices(cents: i32) -> Vec<TopUpChoice> {
+    let mut amounts: Vec<i32> = TOP_UP_EUROS.iter().map(|euros| euros * 100).collect();
+    if !amounts.contains(&cents) && (500..=100_000).contains(&cents) {
+        amounts.push(cents);
+        amounts.sort_unstable();
+    }
+    amounts
+        .into_iter()
+        .map(|amount| TopUpChoice {
+            euros: top_up_euros(amount),
+            selected: amount == cents,
+        })
+        .collect()
+}
+
 /// Stripe's card brand codes as people name them; any other is "Card".
 pub(crate) fn card_brand_name(code: &str) -> &'static str {
     match code {
@@ -199,12 +266,26 @@ pub(crate) fn card_brand_name(code: &str) -> &'static str {
 pub(crate) struct BillingPageView {
     pub(crate) billing_enabled: bool,
     pub(crate) has_payment_method: bool,
-    /// The default card. `None` without a payment method, or when it is not
-    /// a card or Stripe gave no details; the page then names it generically.
-    pub(crate) card: Option<PaymentCardView>,
+    /// The organization's saved cards, newest first (#4750).
+    pub(crate) cards: Vec<SavedCardView>,
+    /// Billing answered with the cards; otherwise the list says it is
+    /// unavailable.
+    pub(crate) cards_available: bool,
+    /// Stripe's publishable key, which the card form mounts with; empty when
+    /// the form is not configured or the cards are unavailable, and then the
+    /// form says adding a card isn't available.
+    pub(crate) card_key: String,
+    /// The default card as the page names it ("Visa •••• 4242"), or empty.
+    pub(crate) default_card: String,
     /// Prepaid compute credit (#3381), in euros.
     pub(crate) credit_balance: String,
     pub(crate) credit_negative: bool,
+    /// No credit left: saving a card with top-up on charges it at once, so
+    /// the button names the charge.
+    pub(crate) balance_empty: bool,
+    /// How long the credit lasts at the running Sandboxes' rate ("About 2
+    /// days at current use"), or empty when nothing runs or it is unknown.
+    pub(crate) runway: String,
     /// No charge at all: the rates are zero and there is no quota.
     pub(crate) unmetered: bool,
     pub(crate) cpu_rate: String,
@@ -213,11 +294,10 @@ pub(crate) struct BillingPageView {
     pub(crate) auto_top_up_enabled: bool,
     /// The automatic top-up in euros, as the form shows it ("20").
     pub(crate) auto_top_up_euros: String,
+    pub(crate) top_up_choices: Vec<TopUpChoice>,
     /// The key of this page's Add credit attempt: a resubmitted form never
     /// charges twice.
     pub(crate) add_credit_request: String,
-    pub(crate) credit_exhausted: bool,
-    pub(crate) credit_exhausted_since: String,
     pub(crate) can_manage: bool,
     pub(crate) usage_available: bool,
     pub(crate) has_current_month: bool,
@@ -362,8 +442,9 @@ pub(crate) async fn billing_page(
     let overview_client = client(state, cookie.clone());
     let usage_client = client(state, cookie.clone());
     let invoices_client = client(state, cookie.clone());
-    let events_client = client(state, cookie);
-    let (overview, usage, invoices, events) = tokio::join!(
+    let events_client = client(state, cookie.clone());
+    let cards_client = client(state, cookie.clone());
+    let (overview, usage, invoices, events, cards, sandboxes) = tokio::join!(
         overview_client.get_billing_overview(GetBillingOverviewRequest {
             org_id: org_id.to_owned(),
             ..Default::default()
@@ -380,6 +461,15 @@ pub(crate) async fn billing_page(
             org_id: org_id.to_owned(),
             ..Default::default()
         }),
+        cards_client.list_payment_methods(ListPaymentMethodsRequest {
+            org_id: org_id.to_owned(),
+            ..Default::default()
+        }),
+        // Only the balance's runway reads them; without them it says nothing.
+        tokio::time::timeout(
+            RUNWAY_SANDBOXES_TIMEOUT,
+            crate::environment_connect::environments(state, cookie, org_id, false),
+        ),
     );
     let overview = match resolve_connect(PageDependency::BillingOverview, overview)? {
         DependencyResult::Available(overview) => overview.into_owned(),
@@ -396,11 +486,41 @@ pub(crate) async fn billing_page(
     let events = resolve_connect(PageDependency::BillingEvents, events)?
         .into_option()
         .map(|response| response.into_owned());
-
-    let exhausted_at = overview
-        .credit_exhausted_at
+    let cards = resolve_connect(PageDependency::BillingCards, cards)?
         .into_option()
-        .map(|value| value.seconds);
+        .map(|response| response.into_owned());
+    let facts = facts_of(&overview);
+    let runway = sandboxes
+        .ok()
+        .and_then(Result::ok)
+        .and_then(|rows| {
+            let loads: Vec<SandboxLoad> = rows.iter().map(SandboxLoad::from).collect();
+            runway_text(&facts, &loads)
+        })
+        .unwrap_or_default();
+    let today = chrono::Utc::now().date_naive();
+    let cards_available = cards.is_some();
+    let card_key = cards
+        .as_ref()
+        .map(|list| list.publishable_key.clone())
+        .unwrap_or_default();
+    let cards: Vec<SavedCardView> = cards
+        .map(|list| {
+            list.payment_methods
+                .iter()
+                .enumerate()
+                .filter_map(|(index, saved)| {
+                    SavedCardView::new(saved, &list.default_id, index, today)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let default_card = cards
+        .iter()
+        .find(|card| card.default)
+        .map(|card| card.label.clone())
+        .unwrap_or_default();
+
     let rates = overview.rates.into_option().unwrap_or_default();
     let usage_available = usage.is_some();
     let (current_month, hourly, usage_rows) = usage.map_or_else(
@@ -464,22 +584,22 @@ pub(crate) async fn billing_page(
     Ok(BillingPageView {
         billing_enabled: overview.billing_enabled,
         has_payment_method: overview.has_payment_method,
-        card: overview
-            .default_card
-            .as_option()
-            .filter(|_| overview.has_payment_method)
-            .map(|card| PaymentCardView::new(card, chrono::Utc::now().date_naive())),
+        cards,
+        cards_available,
+        card_key,
+        default_card,
         credit_balance: euro_text(overview.credit_balance_nano_eur),
         credit_negative: overview.credit_balance_nano_eur < 0,
+        balance_empty: overview.credit_balance_nano_eur <= 0,
+        runway,
         unmetered: overview.unmetered,
         cpu_rate: euro_text(rates.cpu_nano_eur_per_vcpu_hour),
         memory_rate: euro_text(rates.memory_nano_eur_per_gib_hour),
         disk_rate: euro_text(rates.disk_nano_eur_per_gib_hour),
         auto_top_up_enabled: overview.auto_top_up_enabled,
         auto_top_up_euros: top_up_euros(overview.auto_top_up_cents),
+        top_up_choices: top_up_choices(overview.auto_top_up_cents),
         add_credit_request: crate::security::new_csrf_token(),
-        credit_exhausted: exhausted_at.is_some(),
-        credit_exhausted_since: exhausted_at.map(calendar_date).unwrap_or_default(),
         can_manage,
         usage_available,
         has_current_month,
@@ -552,39 +672,108 @@ pub(crate) async fn billing_page(
     })
 }
 
-pub(crate) async fn create_portal_session(
-    state: &AppState,
-    cookie: HeaderValue,
-    org_id: String,
-    return_url: String,
-) -> Result<String, ConnectError> {
-    Ok(client(state, cookie)
-        .create_portal_session(CreatePortalSessionRequest {
-            org_id,
-            return_url,
-            ..Default::default()
-        })
-        .await?
-        .into_owned()
-        .portal_url)
+/// What saving a card chooses beside it. Billing keeps them in the
+/// SetupIntent and reads them back only from there when it finishes.
+pub(crate) struct CardSetupChoice {
+    pub(crate) auto_top_up_enabled: bool,
+    pub(crate) auto_top_up_cents: i32,
+    /// Add credit with no card yet: the amount in cents.
+    pub(crate) credit_cents: Option<i32>,
 }
 
-pub(crate) async fn create_setup_session(
+/// Starts adding a card once it is saved: the client secret the card form
+/// confirms with.
+pub(crate) async fn begin_card_setup(
     state: &AppState,
     cookie: HeaderValue,
     org_id: String,
-    return_url: String,
+    choice: CardSetupChoice,
 ) -> Result<String, ConnectError> {
-    Ok(client(state, cookie)
-        .create_setup_session(CreateSetupSessionRequest {
+    let response = client(state, cookie)
+        .begin_card_setup(BeginCardSetupRequest {
             org_id,
-            success_url: return_url.clone(),
-            cancel_url: return_url,
+            auto_top_up_enabled: choice.auto_top_up_enabled,
+            auto_top_up_cents: choice.auto_top_up_cents,
+            credit_cents: choice.credit_cents.unwrap_or_default(),
             ..Default::default()
         })
         .await?
-        .into_owned()
-        .checkout_url)
+        .into_owned();
+    Ok(response.client_secret)
+}
+
+/// What finishing a card setup did.
+pub(crate) struct CardSetupDone {
+    pub(crate) settlement: CardSetupSettlement,
+    /// How the credit chosen ended, when there was one.
+    pub(crate) credit: Option<AddCreditResponse>,
+    /// The top-up setting billing saved.
+    pub(crate) auto_top_up_enabled: bool,
+}
+
+pub(crate) async fn finish_card_setup(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: String,
+    setup_intent_id: String,
+) -> Result<CardSetupDone, ConnectError> {
+    // Settling can charge the card through several Stripe calls.
+    let client = BillingServiceClient::new(
+        BrowserTransport {
+            http: state.http.clone(),
+            cookie: Some(cookie),
+            origin: None,
+        },
+        ClientConfig::new(state.billing_origin.clone()).with_default_timeout(ADD_CREDIT_TIMEOUT),
+    );
+    let response = client
+        .finish_card_setup(FinishCardSetupRequest {
+            org_id,
+            setup_intent_id,
+            ..Default::default()
+        })
+        .await?
+        .into_owned();
+    Ok(CardSetupDone {
+        settlement: response
+            .settlement
+            .as_known()
+            .unwrap_or(CardSetupSettlement::Unspecified),
+        credit: response.credit.into_option(),
+        auto_top_up_enabled: response.auto_top_up_enabled,
+    })
+}
+
+pub(crate) async fn set_default_card(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: String,
+    payment_method_id: String,
+) -> Result<(), ConnectError> {
+    client(state, cookie)
+        .set_default_payment_method(SetDefaultPaymentMethodRequest {
+            org_id,
+            payment_method_id,
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn remove_card(
+    state: &AppState,
+    cookie: HeaderValue,
+    org_id: String,
+    payment_method_id: String,
+) -> Result<(), ConnectError> {
+    client(state, cookie)
+        .remove_payment_method(RemovePaymentMethodRequest {
+            org_id,
+            payment_method_id,
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
 }
 
 /// Turns automatic top-up on or off and sets its amount, in cents.
@@ -817,184 +1006,199 @@ mod tests {
         .expect("render billing")
     }
 
-    #[test]
-    fn automatic_top_up_is_a_switch_with_its_terms_and_amount() {
-        let view = |enabled: bool| BillingPageView {
-            billing_enabled: true,
-            can_manage: true,
-            has_payment_method: true,
-            credit_balance: "€19.87".into(),
-            auto_top_up_enabled: enabled,
-            auto_top_up_euros: "20".into(),
-            csrf_token: "csrf".into(),
-            ..Default::default()
-        };
-        let terms = "Charge my saved payment method €20 whenever my credit balance runs out. \
-                     Charges continue until I turn this off, which I can do anytime on this \
-                     page or by contacting support.";
-
-        // On: the switch is checked and saves as it changes; the amount
-        // starts at the stored value and saves with its own button.
-        let on = render(&view(true));
-        assert!(on.contains(
-            r#"<h3 id="top-up-title">Automatic top-up <span class="cw-badge" data-tone="success">On</span></h3>"#
-        ));
-        assert!(on.contains(
-            r#"<input class="cw-switch" type="checkbox" role="switch" name="enabled" value="true" aria-labelledby="top-up-title" aria-describedby="top-up-terms" data-submit-on-change checked>"#
-        ));
-        assert!(on.contains(terms));
-        assert!(on.contains(r#"name="amount" inputmode="decimal""#));
-        assert!(on.contains(r#"value="20" aria-describedby="top-up-amount-hint" required"#));
-        assert!(on.contains(
-            r#"<button class="cw-button cw-button--outline" type="submit">Save</button>"#
-        ));
-
-        // Off: the same form with the switch unchecked; turning it on posts
-        // enabled=true, and saving while off posts no enabled at all.
-        let off = render(&view(false));
-        assert!(off.contains(r#"<span class="cw-badge">Off</span>"#));
-        assert!(off.contains(r#"data-submit-on-change>"#));
-        assert!(!off.contains(r#"data-submit-on-change checked"#));
-        assert!(off.contains(terms));
-        assert!(off.contains(r#"name="amount" inputmode="decimal""#));
-    }
-
-    #[test]
-    fn compute_credit_shows_balance_rates_top_up_and_exhaustion() {
-        let billing = BillingPageView {
-            billing_enabled: true,
-            can_manage: true,
-            credit_balance: "-€0.25".into(),
-            credit_negative: true,
-            cpu_rate: "€0.0438".into(),
-            memory_rate: "€0.0141".into(),
-            disk_rate: "€0.000087".into(),
-            auto_top_up_enabled: true,
-            auto_top_up_euros: "20".into(),
-            credit_exhausted: true,
-            credit_exhausted_since: "Oct 28, 2026".into(),
-            csrf_token: "csrf".into(),
-            ..Default::default()
-        };
-        let body = render(&billing);
-        assert!(body.contains(r#"<h2 id="credit-heading">Compute credit</h2>"#));
-        assert!(body.contains(
-            r#"<dt>Balance</dt><dd><span class="cw-badge" data-tone="warning">-€0.25</span></dd>"#
-        ));
-        assert!(body.contains("<dt>vCPU</dt><dd>€0.0438 <small>per hour</small></dd>"));
-        assert!(body.contains("ran out of compute credit on Oct 28, 2026"));
-        // No card yet: the setup action, and no credit is promised for one.
-        assert!(body.contains(r#"action="/test/billing/_actions/setup""#));
-        assert!(body.contains("<p class=\"cw-muted\">No payment method yet.</p>"));
-        assert!(!body.contains("grants"));
-        // Automatic top-up without a card: shown off even though the stored
-        // setting is on (nothing can be charged), its switch disabled, saying
-        // a payment method comes first, and no amount to set.
-        assert!(body.contains(r#"action="/test/billing/_actions/auto-top-up""#));
-        assert!(body.contains(
-            r#"<h3 id="top-up-title">Automatic top-up <span class="cw-badge">Off</span></h3>"#
-        ));
-        assert!(body.contains(r#"data-submit-on-change disabled>"#));
-        assert!(body.contains("Add a payment method to turn on automatic top-up."));
-        assert!(!body.contains(r#"id="top-up-amount""#));
-        // No plan, seat or trial language is left.
-        for retired in ["Plan", "trial", "Trial", "seat"] {
-            assert!(!body.contains(retired), "{retired}");
-        }
-
-        // An Unlimited organization sees no rates or top-up.
-        let body = render(&BillingPageView {
-            billing_enabled: true,
-            can_manage: true,
-            unmetered: true,
-            // Switched to Unlimited a moment ago: billing clears this on its
-            // next pass, and the page never claims creates are refused.
-            credit_exhausted: true,
-            credit_exhausted_since: "Oct 28, 2026".into(),
-            csrf_token: "csrf".into(),
-            ..Default::default()
-        });
-        assert!(body.contains("not charged for compute"));
-        assert!(!body.contains("ran out of compute credit"));
-        assert!(!body.contains("auto-top-up"));
-        assert!(!body.contains("<dt>vCPU</dt>"));
-    }
-
     fn credit_view(has_payment_method: bool) -> BillingPageView {
         BillingPageView {
             billing_enabled: true,
             can_manage: true,
             has_payment_method,
+            cards_available: true,
+            card_key: "pk_test_synthetic".into(),
             credit_balance: "€4.20".into(),
             auto_top_up_enabled: true,
             auto_top_up_euros: "20".into(),
+            top_up_choices: top_up_choices(2000),
             add_credit_request: "add-credit-request-synthetic".into(),
             csrf_token: "csrf".into(),
             ..Default::default()
         }
     }
 
-    #[test]
-    fn add_credit_offers_chips_a_custom_amount_and_one_button() {
-        let body = render(&credit_view(true));
-        // One form, before automatic top-up, posting the page's attempt key.
-        assert!(body.contains(
-            r#"<form class="cw-add-credit" method="post" action="/test/billing/_actions/add-credit" aria-labelledby="add-credit-title" aria-describedby="add-credit-terms" data-add-credit>"#
-        ));
-        let add = body.find("data-add-credit>").unwrap();
-        let top_up = body.find(r#"<form class="cw-top-up""#).unwrap();
-        assert!(add < top_up, "Add credit comes before automatic top-up");
-        assert!(body.contains(r#"<input type="hidden" name="_csrf" value="csrf">"#));
-        assert!(body.contains(
-            r#"<input type="hidden" name="request" value="add-credit-request-synthetic">"#
-        ));
-        assert!(body.contains(r#"<h3 id="add-credit-title">Add credit</h3>"#));
-        // The chips are one radio group, EUR 100 chosen to start with. They
-        // share one row with the button, so the group's name is for screen
-        // readers only.
-        assert!(body.contains(r#"<div class="cw-add-credit-row">"#));
-        assert!(body.contains(r#"<legend class="cw-sr-only">Amount</legend>"#));
-        for (value, label, checked) in [
-            ("50", "€50", ""),
-            ("100", "€100", " checked"),
-            ("250", "€250", ""),
-            ("500", "€500", ""),
-            ("custom", "Custom", ""),
-        ] {
-            assert!(
-                body.contains(&format!(
-                    r#"<label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="{value}"{checked}><span>{label}</span></label>"#
-                )),
-                "{label}"
-            );
-        }
-        assert_eq!(body.matches(r#"name="choice""#).count(), 5);
-        assert_eq!(
-            body.matches(r#"name="choice" value="100" checked"#).count(),
-            1
-        );
-        // Without script the custom field shows, not required, and the
-        // button says what it does without an amount.
-        assert!(body.contains(
-            r#"<input class="cw-input" id="add-credit-amount" type="text" name="amount" inputmode="decimal" pattern="[0-9]{1,4}(\.[0-9]{1,2})?" aria-describedby="add-credit-amount-hint">"#
-        ));
-        assert!(body.contains(r#"<div class="cw-field" data-add-credit-custom>"#));
-        assert!(body.contains(
-            r#"<button class="cw-button" type="submit" data-add-credit-submit>Add credit</button>"#
-        ));
-        // With a card the charge is to it; without, Stripe takes the card.
-        assert!(body.contains(
-            "Charge my saved payment method once. If my bank asks me to approve the payment, I finish on Stripe."
-        ));
-        let no_card = render(&credit_view(false));
-        assert!(no_card.contains(
-            "Pay once on Stripe. The card is saved to this organization for later top-ups."
-        ));
-        assert!(no_card.contains("/test/billing/_actions/add-credit"));
+    /// One of the page's parts, from its opening tag to the next `</section>`.
+    fn part<'a>(body: &'a str, opening: &str) -> &'a str {
+        let start = body.find(opening).unwrap_or_else(|| panic!("{opening}"));
+        let end = start + body[start..].find("</section>").unwrap();
+        &body[start..end]
     }
 
     #[test]
-    fn add_credit_is_only_for_those_who_manage_a_charged_organization() {
+    fn billing_reads_balance_cards_top_up_add_credit_then_invoices() {
+        let body = render(&BillingPageView {
+            runway: "About 2 days at current use".into(),
+            ..credit_view(true)
+        });
+        let order: Vec<usize> = [
+            r#"<header class="cw-balance-head" aria-label="Compute credit">"#,
+            r#"<h2 id="payment-methods-heading">Payment methods</h2>"#,
+            r#"<h2 id="top-up-heading">Automatic top-up</h2>"#,
+            r#"<h2 id="add-credit-heading">Add credit</h2>"#,
+            r#"<h2 id="invoices-heading">Invoices</h2>"#,
+            r#"<h2 id="usage-heading">Sandbox Usage</h2>"#,
+        ]
+        .iter()
+        .map(|part| body.find(part).unwrap_or_else(|| panic!("{part}")))
+        .collect();
+        assert!(order.is_sorted(), "{order:?}");
+        assert!(body.contains(r#"<p class="cw-balance">€4.20</p>"#));
+        assert!(body.contains(r#"<p class="cw-muted">About 2 days at current use</p>"#));
+        // Add card is the page's first action, at primary weight.
+        assert!(body.contains(
+            r#"<button class="cw-button" type="button" data-dialog-open="add-card-dialog">Add card</button>"#
+        ));
+        // The stack re-renders itself when the credit changes (#4762).
+        assert!(body.contains(
+            r#"hx-get="/test/_fragments/billing" hx-trigger="codewire:live:credit from:body, codewire:live:resync from:body""#
+        ));
+        // No plan, seat or trial language is left, and no hosted setup.
+        for retired in [
+            "Plan",
+            "trial",
+            "Trial",
+            "seat",
+            "_actions/setup",
+            "_actions/portal",
+            "Manage in Stripe",
+        ] {
+            assert!(!body.contains(retired), "{retired}");
+        }
+    }
+
+    #[test]
+    fn automatic_top_up_is_one_line_with_its_card_and_amount() {
+        let mut view = credit_view(true);
+        view.default_card = "Visa •••• 4242".into();
+        let on = render(&view);
+        let line = part(
+            &on,
+            r#"<section class="cw-card" aria-labelledby="top-up-heading">"#,
+        );
+        assert!(line.contains(r#"action="/test/billing/_actions/auto-top-up""#));
+        assert!(line.contains(
+            r#"<input class="cw-switch" type="checkbox" role="switch" id="top-up-enabled" name="enabled" value="true" aria-describedby="top-up-help" data-submit-on-change checked>"#
+        ));
+        assert!(line.contains("Charge Visa •••• 4242 when the balance reaches €0"));
+        assert!(
+            line.contains(
+                r#"aria-label="About automatic top-up" data-field-help-trigger>i</button>"#
+            )
+        );
+        for (euros, selected) in [("10", ""), ("20", " selected"), ("50", ""), ("100", "")] {
+            assert!(
+                line.contains(&format!(
+                    r#"<option value="{euros}"{selected}>€{euros}</option>"#
+                )),
+                "{euros}"
+            );
+        }
+        // No card yet: the setting shows, ready for the first card, and its
+        // help says saving one charges at once when the balance is empty.
+        let mut none = credit_view(false);
+        none.balance_empty = true;
+        none.credit_balance = "€0.00".into();
+        let none = render(&none);
+        let line = part(
+            &none,
+            r#"<section class="cw-card" aria-labelledby="top-up-heading">"#,
+        );
+        assert!(line.contains("Charge your card when the balance reaches €0"));
+        assert!(line.contains("Starts when you save a card. With the balance at €0.00, saving the card charges €20 at once."));
+        assert!(!line.contains("disabled"));
+        // An amount of its own is offered beside the presets.
+        let choices = top_up_choices(2_500);
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice.euros.as_str())
+                .collect::<Vec<_>>(),
+            ["10", "20", "25", "50", "100"]
+        );
+        assert!(choices[2].selected);
+    }
+
+    #[test]
+    fn add_card_names_the_charge_only_when_the_balance_is_empty() {
+        let mut empty = credit_view(false);
+        empty.balance_empty = true;
+        empty.credit_balance = "€0.00".into();
+        let body = render(&empty);
+        let dialog = &body[body
+            .find(r#"<dialog class="cw-dialog" id="add-card-dialog""#)
+            .unwrap()..];
+        let dialog = &dialog[..dialog.find("</dialog>").unwrap()];
+        assert!(dialog.contains(r#"<div class="cw-card-element" data-card-element></div>"#));
+        assert!(dialog.contains(
+            r#"<input class="cw-switch" type="checkbox" role="switch" id="add-card-top-up" name="top_up" value="true" checked"#
+        ));
+        assert!(dialog.contains("<strong>Your balance is €0.00, so saving charges"));
+        assert!(dialog.contains(r#"data-card-submit data-card-pays>Save card</button>"#));
+        let funded = render(&credit_view(true));
+        let dialog = &funded[funded.find(r#"id="add-card-dialog""#).unwrap()..];
+        let dialog = &dialog[..dialog.find("</dialog>").unwrap()];
+        assert!(dialog.contains("Nothing is charged now."));
+        assert!(dialog.contains(r#"data-card-submit>Save card</button>"#));
+        // The card form's script, its endpoints and Stripe.js's address; the
+        // script fetches Stripe only once a card form opens.
+        assert!(
+            funded
+                .contains(r#"<script src="/assets/codewire/billing-cards-v1.js" defer></script>"#)
+        );
+        assert!(funded.contains(r#"data-card-begin="/test/billing/_actions/card-setup""#));
+        // The key the form mounts with, before any SetupIntent exists.
+        assert!(funded.contains(r#"data-card-key="pk_test_synthetic""#));
+        assert!(funded.contains(r#"data-card-finish="/test/billing/_actions/card-setup/finish""#));
+        assert!(!funded.contains(r#"<script src="https://js.stripe.com"#));
+    }
+
+    #[test]
+    fn add_credit_offers_chips_other_and_pay() {
+        let body = render(&credit_view(true));
+        let add = part(
+            &body,
+            r#"<section class="cw-card" aria-labelledby="add-credit-heading">"#,
+        );
+        assert!(add.contains(
+            r#"<form class="cw-add-credit" method="post" action="/test/billing/_actions/add-credit" aria-labelledby="add-credit-heading" data-add-credit>"#
+        ));
+        assert!(add.contains(
+            r#"<input type="hidden" name="request" value="add-credit-request-synthetic">"#
+        ));
+        for (value, checked) in [("50", ""), ("100", " checked"), ("250", ""), ("500", "")] {
+            assert!(add.contains(&format!(
+                r#"<label class="cw-toggle-chip"><input class="cw-radio" type="radio" name="choice" value="{value}"{checked}><span>€{value}</span></label>"#
+            )), "{value}");
+        }
+        assert!(add.contains(r#"placeholder="Other €" data-add-credit-other>"#));
+        // Without script the button says what it does without an amount.
+        assert!(add.contains(
+            r#"<button class="cw-button" type="submit" data-add-credit-submit>Pay</button>"#
+        ));
+        assert!(!add.contains("data-card-form"));
+        // With no card yet, Stripe's form opens under it in the page.
+        let none = render(&credit_view(false));
+        let add = part(
+            &none,
+            r#"<section class="cw-card" aria-labelledby="add-credit-heading">"#,
+        );
+        assert!(add.contains(r#"data-add-credit data-add-credit-new-card="add-credit-card">"#));
+        assert!(
+            add.contains(
+                r#"<div class="cw-card-form" id="add-credit-card" data-card-form hidden>"#
+            )
+        );
+        assert!(add.contains("The card is saved for next time."));
+    }
+
+    #[test]
+    fn add_credit_and_cards_are_only_for_those_who_manage_a_charged_organization() {
         for (name, view) in [
             (
                 "member",
@@ -1020,8 +1224,21 @@ mod tests {
         ] {
             let body = render(&view);
             assert!(!body.contains("add-credit"), "{name}");
-            assert!(!body.contains("Add credit"), "{name}");
+            assert!(!body.contains("auto-top-up"), "{name}");
         }
+        let member = render(&BillingPageView {
+            can_manage: false,
+            ..credit_view(true)
+        });
+        assert!(!member.contains("add-card-dialog"));
+        assert!(!member.contains("billing-cards-v1.js"));
+        assert!(member.contains("No card yet. An owner or admin can add one."));
+        let unmetered = render(&BillingPageView {
+            unmetered: true,
+            ..credit_view(true)
+        });
+        assert!(unmetered.contains("not charged for compute"));
+        assert!(!unmetered.contains("cw-balance-head"));
     }
 
     fn card(brand: &str, exp_month: i32, exp_year: i32) -> PaymentCardView {
@@ -1065,92 +1282,82 @@ mod tests {
         }
     }
 
+    fn saved(id: &str, brand: &str, last4: &str, default: bool, index: usize) -> SavedCardView {
+        SavedCardView::new(
+            &SavedPaymentMethod {
+                id: id.into(),
+                card: codewire_proto::codewire::console::v1::PaymentCard {
+                    brand: brand.into(),
+                    last4: last4.into(),
+                    exp_month: 8,
+                    exp_year: 2028,
+                    ..Default::default()
+                }
+                .into(),
+                ..Default::default()
+            },
+            if default { id } else { "" },
+            index,
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 11).unwrap(),
+        )
+        .unwrap()
+    }
+
     #[test]
-    fn payment_methods_show_the_default_card_and_who_can_change_it() {
-        let section = |billing: BillingPageView| {
-            let body = render(&BillingPageView {
-                billing_enabled: true,
-                csrf_token: "csrf".into(),
-                ..billing
-            });
-            let start = body
-                .find(r#"<section class="cw-card" aria-labelledby="payment-methods-heading">"#)
-                .expect("payment methods section");
-            let end = start + body[start..].find("</section>").unwrap();
-            body[start..end].to_owned()
+    fn saved_cards_show_the_default_and_a_menu_to_change_or_remove_one() {
+        let billing = BillingPageView {
+            cards: vec![
+                saved("pm_visa", "visa", "4242", true, 0),
+                saved("pm_mc", "mastercard", "5454", false, 1),
+            ],
+            default_card: "Visa •••• 4242".into(),
+            ..credit_view(true)
         };
-
-        // No card: the add action for a manager, a pointer for anyone else.
-        let none = section(BillingPageView {
-            can_manage: true,
-            ..Default::default()
-        });
-        assert!(none.contains(r#"<h2 id="payment-methods-heading">Payment methods</h2>"#));
-        assert!(none.contains("<p class=\"cw-muted\">No payment method yet.</p>"));
-        assert!(none.contains(r#"action="/test/billing/_actions/setup""#));
-        assert!(none.contains(r#"type="submit">Add payment method</button>"#));
-        assert!(!none.contains("_actions/portal"));
-        let none = section(BillingPageView::default());
-        assert!(none.contains("No payment method yet. An owner or admin can add one."));
-        assert!(!none.contains("<form"));
-
-        // A card: brand, last four, Default and its expiry, managed in Stripe.
-        let visa = section(BillingPageView {
-            can_manage: true,
-            has_payment_method: true,
-            card: Some(card("visa", 11, 2026)),
-            ..Default::default()
-        });
-        assert!(visa.contains(
-            r#"<p class="cw-badge-row"><strong>Visa</strong> <span class="cw-mono"><span aria-hidden="true">•••• </span><span class="cw-sr-only">ending in </span>4242</span><span class="cw-badge">Default</span></p>"#
+        let body = render(&billing);
+        let list = part(
+            &body,
+            r#"<section class="cw-card" aria-labelledby="payment-methods-heading">"#,
+        );
+        assert!(list.contains(
+            r#"<p class="cw-badge-row"><strong>Visa</strong> <span class="cw-mono"><span aria-hidden="true">•••• </span><span class="cw-sr-only">ending in </span>4242</span><span class="cw-badge" data-tone="info">Default</span></p>"#
         ));
-        assert!(visa.contains(r#"<p class="cw-muted">Expires 11/2026</p>"#));
-        assert!(visa.contains(r#"action="/test/billing/_actions/portal""#));
-        assert!(visa.contains(r#"type="submit">Manage in Stripe ↗</button>"#));
-        assert!(!visa.contains("_actions/setup"));
-        assert!(!visa.contains("Expired"));
-
-        // An expired card says so in a warning pill, in place of its expiry.
-        let expired = section(BillingPageView {
-            can_manage: true,
-            has_payment_method: true,
-            card: Some(card("amex", 10, 2026)),
-            ..Default::default()
-        });
-        assert!(expired.contains("<strong>American Express</strong>"));
-        assert!(expired.contains(
-            r#"<span class="cw-badge">Default</span><span class="cw-badge" data-tone="warning">Expired 10/2026</span>"#
+        assert!(list.contains(r#"<p class="cw-muted">Expires 08/2028</p>"#));
+        assert!(list.contains(r#"aria-label="Actions for Visa ending in 4242""#));
+        // Make default is offered only for a card that isn't the default.
+        assert_eq!(list.matches(">Make default</button>").count(), 1);
+        assert!(list.contains(r#"<input type="hidden" name="payment_method" value="pm_mc"><button class="cw-menu-item" type="submit" role="menuitem">Make default</button>"#));
+        assert!(list.contains(r#"action="/test/billing/_actions/cards/default""#));
+        // Removing says what changes.
+        assert!(list.contains(r#"<h2 id="remove-card-0-title">Remove Visa •••• 4242?</h2>"#));
+        assert!(list.contains(
+            "It's your default card. Your most recently added other card becomes the default"
         ));
-        assert!(!expired.contains("Expires"));
-
-        // A member who can't manage billing sees the card and no action.
-        let member = section(BillingPageView {
-            has_payment_method: true,
-            card: Some(card("visa", 11, 2026)),
-            ..Default::default()
+        assert!(list.contains(r#"action="/test/billing/_actions/cards/remove""#));
+        let only = render(&BillingPageView {
+            cards: vec![saved("pm_visa", "visa", "4242", true, 0)],
+            ..credit_view(true)
         });
-        assert!(member.contains("4242</span><span class=\"cw-badge\">Default</span>"));
-        assert!(!member.contains("<form"));
-        assert!(!member.contains("<button"));
-
-        // A default that is not a card, or without details, is still shown.
-        let other = section(BillingPageView {
-            can_manage: true,
-            has_payment_method: true,
-            ..Default::default()
+        assert!(only.contains("Automatic top-up stops until you add another card."));
+        // A member sees the cards and no actions.
+        let member = render(&BillingPageView {
+            can_manage: false,
+            ..billing
         });
-        assert!(other.contains(
-            r#"<p class="cw-badge-row"><strong>Payment method</strong><span class="cw-badge">Default</span></p>"#
-        ));
-        assert!(other.contains("_actions/portal"));
-
-        // Without billing there is no section.
-        let body = render(&BillingPageView {
-            has_payment_method: true,
-            card: Some(card("visa", 11, 2026)),
-            ..Default::default()
+        let list = part(
+            &member,
+            r#"<section class="cw-card" aria-labelledby="payment-methods-heading">"#,
+        );
+        assert!(list.contains("4242"));
+        assert!(!list.contains("<button") && !list.contains("<form"));
+        // Billing couldn't list them: said, and Add card still works.
+        let down = render(&BillingPageView {
+            cards_available: false,
+            ..credit_view(true)
         });
-        assert!(!body.contains("Payment methods"));
+        assert!(
+            down.contains("Saved cards are temporarily unavailable. Adding a card still works.")
+        );
+        assert!(down.contains(r#"data-dialog-open="add-card-dialog""#));
     }
 
     #[test]
@@ -1221,6 +1428,7 @@ mod tests {
                 usage_available: true,
                 invoices_available: true,
                 events_available: true,
+                cards_available: true,
                 csrf_token: "csrf".into(),
                 ..Default::default()
             };
@@ -1236,7 +1444,7 @@ mod tests {
 
             assert!(body.contains(notice), "{name}");
             assert!(body.contains("€42.50"), "{name}");
-            assert!(body.contains("/test/billing/_actions/setup"), "{name}");
+            assert!(body.contains("/test/billing/_actions/card-setup"), "{name}");
             assert!(!body.contains("upstream-sensitive-detail"), "{name}");
         }
     }

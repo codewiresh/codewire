@@ -48,6 +48,8 @@ pub(crate) const TERMINAL_PROTOCOL_SCRIPT_PATH: &str = "/assets/codewire/termina
 pub(crate) const TERMINAL_READINESS_SCRIPT_PATH: &str = "/assets/codewire/terminal-readiness-v7.js";
 pub(crate) const SETUP_PROGRESS_SCRIPT_PATH: &str = "/assets/codewire/setup-progress-v6.js";
 pub(crate) const SANDBOX_RESIZE_SCRIPT_PATH: &str = "/assets/codewire/sandbox-resize-v3.js";
+/// The Billing page's card form, over Stripe's Payment Element (#4750).
+pub(crate) const BILLING_CARDS_SCRIPT_PATH: &str = "/assets/codewire/billing-cards-v1.js";
 pub(crate) const TERMINAL_RENDERER_SCRIPT_PATH: &str = "/assets/codewire/terminal-renderer-v1.js";
 pub(crate) const TERMINAL_PRESENTATION_SCRIPT_PATH: &str =
     "/assets/codewire/terminal-presentation-v2.js";
@@ -118,6 +120,8 @@ const SETUP_PROGRESS_SCRIPT: &str =
     include_str!("../../../packages/codewire-design/setup-progress.js");
 const SANDBOX_RESIZE_SCRIPT: &str =
     include_str!("../../../packages/codewire-design/sandbox-resize.js");
+const BILLING_CARDS_SCRIPT: &str =
+    include_str!("../../../packages/codewire-design/billing-cards.js");
 const TERMINAL_RENDERER_SCRIPT: &str =
     include_str!("../../../packages/codewire-design/terminal-renderer.js");
 const TERMINAL_PRESENTATION_SCRIPT: &str =
@@ -222,6 +226,11 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         SANDBOX_RESIZE_SCRIPT_PATH,
         JS,
         SANDBOX_RESIZE_SCRIPT.as_bytes(),
+    ),
+    (
+        BILLING_CARDS_SCRIPT_PATH,
+        JS,
+        BILLING_CARDS_SCRIPT.as_bytes(),
     ),
     (
         TERMINAL_READINESS_SCRIPT_PATH,

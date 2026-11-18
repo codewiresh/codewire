@@ -311,8 +311,22 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route("/{slug}/billing", get(slash_redirect))
         .route("/{slug}/billing/", get(billing::page))
-        .route("/{slug}/billing/_actions/portal", post(billing::portal))
-        .route("/{slug}/billing/_actions/setup", post(billing::setup))
+        .route(
+            "/{slug}/billing/_actions/card-setup",
+            post(billing::begin_card_setup),
+        )
+        .route(
+            "/{slug}/billing/_actions/card-setup/finish",
+            post(billing::finish_card_setup),
+        )
+        .route(
+            "/{slug}/billing/_actions/cards/default",
+            post(billing::make_default_card),
+        )
+        .route(
+            "/{slug}/billing/_actions/cards/remove",
+            post(billing::remove_card),
+        )
         .route(
             "/{slug}/billing/_actions/auto-top-up",
             post(billing::auto_top_up),
@@ -410,6 +424,7 @@ pub(crate) fn router() -> Router<AppState> {
             "/{slug}/_fragments/sandbox-rail",
             get(environments::rail_fragment),
         )
+        .route("/{slug}/_fragments/billing", get(billing::stack_fragment))
         .route(
             "/{slug}/_fragments/billing-banner",
             get(billing::banner_fragment),

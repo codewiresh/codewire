@@ -47,29 +47,47 @@ the first Production release after codewire/deploy#245.
 
 ## 1. `billing-card`: add a card
 
-- **Entry points:** the Billing page (`/<org>/billing/`), **Add payment
-  method**; the "Add a card or credit" link that `cw create --cloud` prints
-  at €0.
+- **Entry points:** the Billing page (`/<org>/billing/`), **Add card**, the
+  page's first action; the "Add a card or credit" link that `cw create
+  --cloud` prints at €0.
 - **States to exercise:** no card yet; a card added at an empty balance; a
-  second card the same day; a card that declines; too many tries (#4874).
-- **Driving it:**
-  1. At €0 with no card, choose **Add payment method**. Stripe's page
-     offers cards only.
-  2. Enter the card and save. Stripe returns to the Billing page.
-  3. Add a card again: a fresh Stripe session opens, not "You're all done
-     here".
-- **Proof:** **Payment methods** shows the card. At an empty balance, adding
-  it charges whole €20 top-ups until the balance is above zero, as one
-  charge (owner, 2026-11-11). One paid invoice appears under **Invoices**,
+  second card, made the default from its menu; removing the default; a card
+  that declines (`4000 0000 0000 0002`); a bank that asks to confirm
+  (`4000 0025 0000 3155`); too many tries (#4874); a return link the page
+  didn't start.
+- **Driving it** (design v4, #4750; the card form stays in the page):
+  1. At €0 with no card, choose **Add card**. A dialog opens with Stripe's
+     card field, and **Automatic top-up** on at €20 beside it. Its button
+     reads **Save card and pay €20**, because saving at an empty balance
+     charges the top-up (owner, 2026-11-14). With top-up off, it reads
+     **Save card**.
+  2. Enter the card and save. A bank's check opens over the dialog. On
+     success the dialog closes, and a notice names the card and any charge.
+  3. From a card's **⋯** menu, **Make default**, or **Remove card…**. The
+     Remove dialog says what happens to the default and to top-up.
+- **Proof:** **Payment methods** lists the card, marked **Default**. At an
+  empty balance with top-up on, saving it charges whole €20 top-ups until the
+  balance is above zero, as one charge (owner, 2026-11-11). A declined card
+  or a cancelled bank check says so at the field, and nothing is saved or
+  charged. One paid invoice appears under **Invoices**,
   and the balance moves by the amount paid.
 - **Too many tries** (#4874, against card testing): an organization starts at
   most 10 card setups an hour, and a user at most 20 a day across all their
-  organizations; every start counts, saved or not. The next try is refused
+  organizations; every save counts, accepted or not, and opening the form
+  counts nothing. The next try is refused
   before Stripe is called, so nothing is saved or charged; the dashboard
   says there were too many tries and to try again later, and the form opens
   again once the hour (or the day) has passed. Billing counts the refusal in
   `codewire_rate_limit_refusals_total` and logs the organization and user.
   Not yet observed on Dev or Production.
+- **A return link the page didn't start** (#4750): a bank's check that needs
+  a full redirect returns to Billing with Stripe's SetupIntent in the
+  address. What the card is for (top-up, credit) is what was chosen when it
+  was saved, kept by billing, never read from the address; a SetupIntent
+  finishes once, within an hour. So a crafted or replayed link buys nothing
+  and changes no setting; the page says Codewire couldn't finish adding the
+  card.
+  Not yet observed on Kind, Dev or Production.
 - **Gotchas:** the headless browser could not complete Stripe's declined-card
   flow (Stripe answered "Your internet connection is unstable"); walk the
   declined card in a real browser.
@@ -102,11 +120,12 @@ the first Production release after codewire/deploy#245.
 ## 3. `billing-add-credit`: add credit once
 
 - **Entry points:** the Billing page, **Add credit**: €50, €100, €250, €500
-  or **Custom** (€5 to €1,000) (#4288).
-- **States to exercise:** a saved card; a bank that asks for confirmation
-  (SCA), which goes to Stripe's page; no card yet, where Stripe's page takes
-  the card and the payment together.
-- **Driving it:** choose an amount and confirm.
+  or **Other €** (€5 to €1,000) (#4288), and **Pay €N**.
+- **States to exercise:** a saved card; a bank that asks to confirm a charge
+  on a saved card, which goes on to Stripe's invoice page; no card yet,
+  where **Pay** first opens Stripe's card field under Add credit, then saves
+  the card and buys the credit with it, with no top-up on top (#4750).
+- **Driving it:** choose an amount and **Pay**.
 - **Proof:** the balance rises by exactly that amount, and one paid invoice
   for it appears under **Invoices**.
 - **Observed:** not yet observed.

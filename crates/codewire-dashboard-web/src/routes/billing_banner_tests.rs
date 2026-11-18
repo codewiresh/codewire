@@ -285,7 +285,7 @@ async fn an_organization_out_of_credit_gets_the_danger_banner() {
     assert_eq!(status, StatusCode::OK, "{calls:?}");
     assert_eq!(
         html.trim(),
-        "<aside class=\"cw-banner\" data-tone=\"danger\" aria-label=\"Billing\"><p>Out of credit: cloud sandboxes can’t start, and running ones stop now.</p><a class=\"cw-banner-action\" href=\"/synthetic/billing/\">Add a card</a></aside>"
+        "<aside class=\"cw-banner\" data-tone=\"danger\" aria-label=\"Billing\" hx-get=\"/synthetic/_fragments/billing-banner\" hx-trigger=\"codewire:live:credit from:body, codewire:live:resync from:body\" hx-swap=\"outerHTML\"><p>Out of credit: cloud sandboxes can’t start, and running ones stop now.</p><a class=\"cw-banner-action\" href=\"/synthetic/billing/\">Add a card</a></aside>"
     );
     assert_eq!(count(&calls, "/GetBillingOverview"), 1, "{calls:?}");
     assert_eq!(count(&calls, "/ListEnvironments"), 1, "{calls:?}");
@@ -302,14 +302,15 @@ async fn an_organization_out_of_credit_gets_the_danger_banner() {
     .await;
     assert_eq!(
         html.trim(),
-        "<aside class=\"cw-banner\" data-tone=\"danger\" aria-label=\"Billing\"><p>Out of credit: cloud sandboxes can’t start.</p></aside>"
+        "<aside class=\"cw-banner\" data-tone=\"danger\" aria-label=\"Billing\" hx-get=\"/synthetic/_fragments/billing-banner\" hx-trigger=\"codewire:live:credit from:body, codewire:live:resync from:body\" hx-swap=\"outerHTML\"><p>Out of credit: cloud sandboxes can’t start.</p></aside>"
     );
 }
 
-/// Nothing to say, or billing that does not answer: an empty body, which
-/// removes the placeholder. A healthy organization's Sandboxes are not read.
+/// Nothing to say, or billing that does not answer: a hidden placeholder
+/// that fetches the banner again when the credit changes (#4762). A healthy
+/// organization's Sandboxes are not read.
 #[tokio::test]
-async fn a_healthy_organization_or_unavailable_billing_gets_an_empty_body() {
+async fn a_healthy_organization_or_unavailable_billing_gets_a_hidden_placeholder() {
     for (overview, sandbox_reads) in [(Some(healthy()), 0), (None, 0)] {
         let (status, html, calls) = get(
             Scenario {
@@ -321,7 +322,11 @@ async fn a_healthy_organization_or_unavailable_billing_gets_an_empty_body() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{calls:?}");
-        assert_eq!(html.trim(), "", "{calls:?}");
+        assert_eq!(
+            html.trim(),
+            "<div hidden hx-get=\"/synthetic/_fragments/billing-banner\" hx-trigger=\"codewire:live:credit from:body, codewire:live:resync from:body\" hx-swap=\"outerHTML\"></div>",
+            "{calls:?}"
+        );
         assert_eq!(
             count(&calls, "/ListEnvironments"),
             sandbox_reads,
@@ -433,4 +438,37 @@ fn a_card_on_file_asks_for_credit() {
         html.contains("An organization owner or admin adds credit on its Billing page."),
         "{html}"
     );
+}
+
+/// Every Billing answer, the error page included, sends only its origin as a
+/// Referer and keeps form posts' Origin (#4750).
+#[tokio::test]
+async fn every_billing_answer_carries_the_strict_origin_referrer_policy() {
+    for overview in [Some(exhausted()), None] {
+        let failing = overview.is_none();
+        let (upstream, _calls) = upstream(Scenario {
+            role: OrgRole::Owner,
+            overview,
+            running: false,
+        })
+        .await;
+        let dashboard = serve(crate::app(config(&upstream.origin))).await;
+        let response = client()
+            .get(format!("{}/synthetic/billing/", dashboard.origin))
+            .headers(session())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status().is_success(),
+            !failing,
+            "{}",
+            response.status()
+        );
+        assert_eq!(
+            response.headers()[axum::http::header::REFERRER_POLICY],
+            "strict-origin",
+            "failing billing: {failing}"
+        );
+    }
 }

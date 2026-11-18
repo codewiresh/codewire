@@ -179,6 +179,23 @@ pub(crate) fn billing_banner(
     })
 }
 
+/// How long the credit lasts at the running Sandboxes' rate, as the Billing
+/// page's balance says it ("About 2 days at current use"). `None` when
+/// nothing runs, nothing is charged, or no credit is left.
+pub(crate) fn runway_text(facts: &CreditFacts, sandboxes: &[SandboxLoad]) -> Option<String> {
+    let hourly = hourly_cost_scaled(facts, sandboxes);
+    let balance = i128::from(facts.balance_nano_eur) * SIZE_DENOMINATOR;
+    if hourly <= 0 || balance <= 0 {
+        return None;
+    }
+    Some(match balance / hourly {
+        0 => "Less than an hour at current use".to_owned(),
+        1 => "About 1 hour at current use".to_owned(),
+        hours @ 2..48 => format!("About {hours} hours at current use"),
+        hours => format!("About {} days at current use", hours / 24),
+    })
+}
+
 /// What the running Sandboxes cost per hour, in nano-euros times
 /// `SIZE_DENOMINATOR`, so nothing is rounded before the comparison.
 fn hourly_cost_scaled(facts: &CreditFacts, sandboxes: &[SandboxLoad]) -> i128 {

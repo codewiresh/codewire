@@ -75,12 +75,16 @@ test.describe.serial("server-rendered billing and administration", () => {
 
     const response = await page.goto(`/${slug}/billing/`);
     expect(response?.status()).toBe(200);
-    // "Add payment method", "Manage in Stripe" and "Add credit" POST here and
-    // may be redirected to Stripe; Chromium applies this page's form-action to
-    // that redirect.
-    expect(response?.headers()["content-security-policy"]).toContain(
-      "form-action 'self' https://checkout.stripe.com https://billing.stripe.com https://invoice.stripe.com;",
-    );
+    // The card form stays in the page (#4750): Stripe's script, frames and
+    // API are allowed here only, and Add credit may still go on to Stripe's
+    // invoice page when the bank wants a charge approved.
+    const policy = response?.headers()["content-security-policy"] || "";
+    for (const directive of [
+      "connect-src 'self' https://api.stripe.com",
+      "form-action 'self' https://checkout.stripe.com https://invoice.stripe.com",
+      "script-src 'self' https://js.stripe.com https://*.js.stripe.com",
+      "frame-src https://js.stripe.com https://*.js.stripe.com https://hooks.stripe.com",
+    ]) expect(policy.split(";").map((part) => part.trim())).toContain(directive);
     await expect(page.locator(".cw-org-switcher-label").first()).toHaveText("SSR Billing");
     await expect(page.getByLabel("Organization navigation").getByRole("link", {
       name: "Billing",
@@ -89,9 +93,10 @@ test.describe.serial("server-rendered billing and administration", () => {
       "aria-current",
       "page",
     );
-    await expect(page.getByRole("heading", { name: "Compute credit" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Sandbox Usage" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Invoices" })).toBeVisible();
+    // Stripe.js loads only when a card form opens, so a visit fetches
+    // nothing from Stripe.
     expect(browserRequests.every((url) => url.startsWith(`${ssrUrl}/`))).toBe(true);
     expect(browserRequests.some((url) => new URL(url).pathname.includes("BillingService"))).toBe(false);
 
