@@ -1,0 +1,12 @@
+# Paths whose pull requests the merge queue lands alone, one batch each
+# (infra tools/merge-queue, MQ_SOLO_PATHS_FILE; read from main). One glob per
+# line, `*` within one path component.
+#
+# A migration takes the next free number at its own merge, and two in one
+# batch could collide; a descriptor or proto change regenerates clients every
+# other change builds on. The codewire-ci skill keeps one of each in flight.
+crates/*/migrations/**
+proto/**
+crates/*/proto/**
+libs/*/proto/**
+**/*.proto
