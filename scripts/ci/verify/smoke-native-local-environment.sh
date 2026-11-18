@@ -130,6 +130,10 @@ NETWORK_QUALIFICATION=0
 NETWORK_PROBE_PID=''
 BROKER_RENEWAL_OBSERVATION=0
 BROKER_RENEWAL_PROBE_PID=''
+EGRESS_INTERCEPTION=0
+EGRESS_INTERCEPTION_RENEWALS=1
+EGRESS_INTERCEPTION_RENEWALS_SEEN=0
+INTERCEPT_DECISIONS_SEEN=0
 # Public HTTPS targets for the opt-in network qualification. The guest reaches
 # them only through the packet worker and the developer-policy egress broker;
 # the host measures the same URLs for its baseline.
@@ -162,6 +166,7 @@ usage: smoke-native-local-environment.sh \
   [--workspace-image-import-bin ABSOLUTE_PATH] \
   [--network-qualification] \
   [--broker-renewal-observation] \
+  [--egress-interception [--egress-interception-renewals COUNT]] \
   [--scratch-parent ABSOLUTE_DIRECTORY]
 
 Runs the built cw Linux/KVM native-environment product smoke with 2 vCPUs and
@@ -249,6 +254,31 @@ requests in flight through the credential bridge. Every request must succeed,
 the successor must start about 90 seconds before the predecessor's 600-second
 lifetime ends, the predecessor must exit only after that, and the successor
 must keep serving.
+
+--egress-interception requires --managed-credential-broker alone and replaces
+its application-secret, managed-agent and credential-broker scenarios, whose
+provider requests use the loopback route an intercepting boot removes. It
+turns interception on for the VM (the egress-intercept file in the native
+state root) and proves, with the synthetic Anthropic API key:
+the boot intercepts and its front door is paired; each credential broker is
+told where the boot's secrets are by a descriptor number and keeps nothing
+open under it; the guest holds only the environment's placeholder and trusts
+the boot's certificate authority; a guest request to api.anthropic.com
+carrying the placeholder is served, which the
+synthetic provider does only for the stored key, and its reply comes back
+redacted; the placeholder beside another credential is refused; the key is in
+the memory of none of the runner, the packet worker, the egress broker and the
+front door (the credential broker holds it, by design); killing the front door
+ends that request at once with a closed connection while the VM keeps running,
+and a stop and start restores it with the same placeholder; and the request is
+still served after the credential broker's renewal, once by default and COUNT
+times (1 to 3) with --egress-interception-renewals, each about one broker
+lifetime. Nothing dials the provider: an intercepted connection is handed to
+the front door, and the synthetic provider answers inside the credential
+broker. Not covered here: a request with the user's own key (the synthetic
+provider refuses every other key; the credential broker's tests cover it), a
+request with no Codewire value under the locked policy, the Claude sign-in's
+login file, and a VM checkpoint restore.
 USAGE
 }
 
@@ -347,6 +377,17 @@ while [[ $# -gt 0 ]]; do
       BROKER_RENEWAL_OBSERVATION=1
       shift
       ;;
+    --egress-interception)
+      [[ "$EGRESS_INTERCEPTION" -eq 0 ]] || { usage; exit 2; }
+      EGRESS_INTERCEPTION=1
+      shift
+      ;;
+    --egress-interception-renewals)
+      [[ "$#" -ge 2 && "$EGRESS_INTERCEPTION_RENEWALS_SEEN" -eq 0 && "$2" =~ ^[1-3]$ ]] || { usage; exit 2; }
+      EGRESS_INTERCEPTION_RENEWALS="$2"
+      EGRESS_INTERCEPTION_RENEWALS_SEEN=1
+      shift 2
+      ;;
     --managed-agent-cw-image-receipt)
       [[ $# -ge 2 && -n "$2" && "$MANAGED_AGENT_CW_IMAGE_RECEIPT_SEEN" -eq 0 ]] || { usage; exit 2; }
       MANAGED_AGENT_CW_IMAGE_RECEIPT_SEEN=1
@@ -390,6 +431,18 @@ done
 if [[ "$BROKER_RENEWAL_OBSERVATION" -eq 1 ]]; then
   [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 && "$MANAGED_AGENT_SESSIONS" -eq 0 &&
      "$MANAGED_AGENT_CW_IMAGE_RECEIPT_SEEN" -eq 0 &&
+     $(( MANAGED_AGENT_UPDATE_RUNTIME_SEEN + MANAGED_AGENT_UPDATE_IMAGE_SEEN + MANAGED_AGENT_UPDATE_SHA_SEEN )) -eq 0 ]] ||
+    { usage; exit 2; }
+fi
+
+# Interception replaces the loopback provider route the other managed
+# scenarios drive, and the front door is a process the network qualification
+# does not know yet.
+[[ "$EGRESS_INTERCEPTION_RENEWALS_SEEN" -eq 0 || "$EGRESS_INTERCEPTION" -eq 1 ]] || { usage; exit 2; }
+if [[ "$EGRESS_INTERCEPTION" -eq 1 ]]; then
+  [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 && "$MANAGED_AGENT_SESSIONS" -eq 0 &&
+     "$MANAGED_AGENT_CW_IMAGE_RECEIPT_SEEN" -eq 0 && "$BROKER_RENEWAL_OBSERVATION" -eq 0 &&
+     "$NETWORK_QUALIFICATION" -eq 0 &&
      $(( MANAGED_AGENT_UPDATE_RUNTIME_SEEN + MANAGED_AGENT_UPDATE_IMAGE_SEEN + MANAGED_AGENT_UPDATE_SHA_SEEN )) -eq 0 ]] ||
     { usage; exit 2; }
 fi
@@ -1212,6 +1265,256 @@ if not lifetime - 5 <= served <= lifetime + 20:
 PY
   cat "$SMOKE_ROOT/broker-renewal.log" >>"$TRANSCRIPT"
   log 'broker renewal: passed'
+}
+
+# Egress interception (--egress-interception, #3999). The guest sends its
+# provider request to the provider's own name; the egress broker hands the
+# connection to the VM's front door, which ends TLS with the boot's
+# certificate authority and passes the request to the credential broker, where
+# the environment's placeholder is exchanged for the stored key.
+process_ended() {
+  # Gone, or exited and not yet reaped. The state follows the command name,
+  # which may hold spaces, so it is read after the name's closing bracket.
+  local stat suffix
+  stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
+  suffix="${stat##*) }"
+  [[ "${suffix%% *}" == Z || "${suffix%% *}" == X ]]
+}
+
+require_broker_boot_secrets_closed() {
+  # An intercepting boot's credential broker is told where the boot's secrets
+  # are by a descriptor number, never by a value, and reads them once: no
+  # pipe or memory file stays open under that number.
+  local label="$1" pid="$2" named target
+  named="$(/usr/bin/env python3 - "$pid" <<'PY'
+import re
+import sys
+
+try:
+    with open(f"/proc/{sys.argv[1]}/cmdline", "rb") as source:
+        argv = [value.decode("utf-8", "replace") for value in source.read().split(b"\0") if value]
+except OSError:
+    sys.exit("the broker is gone")
+if argv.count("--boot-secrets-fd") != 1 or argv[-1] == "--boot-secrets-fd":
+    sys.exit("the command line does not name the boot secrets' descriptor once")
+number = argv[argv.index("--boot-secrets-fd") + 1]
+if not re.fullmatch(r"[0-9]{1,3}", number):
+    sys.exit("the boot secrets are not named by a descriptor number")
+# A path has a slash and an identifier has 36 characters; a secret has neither.
+if any(re.fullmatch(r"[A-Za-z0-9_=-]{40,}", value) for value in argv):
+    sys.exit("the command line holds a value long enough to be a secret")
+print(number)
+PY
+)" || die "$label: the credential broker's command line is not an intercepting boot's"
+  sudo -n test -d "/proc/$pid/fd" || die "$label: the credential broker's descriptors could not be read"
+  target="$(sudo -n readlink "/proc/$pid/fd/$named" 2>/dev/null || true)"
+  [[ "$target" != pipe:* && "$target" != /memfd:* ]] ||
+    die "$label: the credential broker still holds its boot secrets' descriptor open ($target)"
+}
+
+front_door_children() {
+  # One PID per live front door of this exact environment under the current
+  # runner.
+  /usr/bin/env python3 - "$RUNNER_PID" "$CW_BIN" "$ENVIRONMENT_ID" <<'PY'
+import os
+import sys
+
+runner, cw, environment = sys.argv[1], os.fsencode(os.path.realpath(sys.argv[2])), os.fsencode(sys.argv[3])
+for entry in os.listdir("/proc"):
+    if not entry.isdigit():
+        continue
+    try:
+        with open(f"/proc/{entry}/cmdline", "rb") as source:
+            argv = source.read().split(b"\0")
+        with open(f"/proc/{entry}/stat", "r", encoding="ascii") as source:
+            fields = source.read().rsplit(") ", 1)[1].split()
+    except OSError:
+        continue
+    if fields[0] in ("Z", "X") or fields[1] != runner or len(argv) < 4 or argv[0] != cw:
+        continue
+    if argv[1:4] == [b"__native-front-door", b"--environment-id", environment]:
+        print(entry)
+PY
+}
+
+require_boot_intercepts() {
+  # The current boot intercepts and its front door is paired. The
+  # supervisor's log spans boots, so this boot's decision is one more than
+  # were there before; the runner's log starts again at each boot, so a
+  # pairing in it is this boot's.
+  local label="$1" decisions decision paired=0 front_doors
+  jq -e '.intercept == true' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json" >/dev/null ||
+    die "$label: the VM's recorded state does not say it intercepts"
+  decisions="$(grep -Ec ' event=egress_intercept( |$)' "$STATE_ROOT/logs/supervisor.log" || true)"
+  [[ "$decisions" -gt "$INTERCEPT_DECISIONS_SEEN" ]] ||
+    die "$label: the supervisor logged no interception decision for this boot"
+  INTERCEPT_DECISIONS_SEEN="$decisions"
+  decision="$(grep -E ' event=egress_intercept( |$)' "$STATE_ROOT/logs/supervisor.log" | tail -n 1)"
+  [[ "$decision" == *' switch=on'* && "$decision" != *' skipped='* ]] ||
+    die "$label: the supervisor did not turn interception on for this boot: ${decision:-no decision logged}"
+  for _attempt in {1..50}; do
+    paired="$(grep -Ec ' event=front_door_pairing( .*)? outcome=paired( |$)' \
+      "$STATE_ROOT/logs/runner-$ENVIRONMENT_ID.log" || true)"
+    [[ "$paired" -ge 1 ]] && break
+    sleep 0.2
+  done
+  [[ "$paired" -ge 1 ]] || die "$label: the runner recorded no front-door pairing"
+  front_doors="$(front_door_children | wc -l)"
+  [[ "$front_doors" -eq 1 ]] || die "$label: the runner has $front_doors front-door processes"
+}
+
+# What the guest sends: the request Claude Code makes with this credential
+# form, a bearer token taken from ANTHROPIC_AUTH_TOKEN, to the provider's own
+# host, trusting what NODE_EXTRA_CA_CERTS names. Prints one JSON object: the
+# status, the two headers the synthetic provider echoes its key in, and the
+# body; or the error that ended the request; and how long either took. The
+# request has its own agent because the default one gives a connection 5 s to
+# be made, which a name that does not resolve outlasts: the failure then reads
+# "timeout" where the cause is the lookup.
+readonly INTERCEPTED_REQUEST_SCRIPT='
+const https=require("https");
+const conflict=process.argv[1]==="conflict";
+const headers={"content-type":"application/json","anthropic-version":"2023-06-01","accept-encoding":"identity","authorization":"Bearer "+process.env.ANTHROPIC_AUTH_TOKEN};
+if(conflict)headers["x-api-key"]="not-a-codewire-value";
+const body=JSON.stringify({model:"claude-sonnet-4-6",messages:[{role:"user",content:"Return the synthetic marker."}]});
+headers["content-length"]=Buffer.byteLength(body);
+const started=Date.now();
+const done=result=>{result.elapsed_ms=Date.now()-started;process.stdout.write(JSON.stringify(result)+"\n");process.exit(0);};
+const request=https.request("https://api.anthropic.com/v1/messages/count_tokens",{method:"POST",headers,agent:new https.Agent({timeout:15000})},response=>{
+  const chunks=[];let size=0;
+  response.on("data",chunk=>{size+=chunk.length;if(size>262144)request.destroy(new Error("oversized"));else chunks.push(chunk);});
+  response.on("end",()=>done({status:response.statusCode,request_id:response.headers["request-id"]??null,opaque:response.headers["x-error-json"]??null,body:Buffer.concat(chunks).toString("utf8")}));
+});
+request.setTimeout(15000,()=>request.destroy(new Error("timeout")));
+request.on("error",error=>done({error:error.code||error.message}));
+request.end(body);'
+
+intercepted_request() {
+  # Leaves the guest's JSON answer in LAST_STDOUT. The key never enters the
+  # guest, so that it is not in the answer is checked here, on the host.
+  run_cw run --no-tty -- node -e "$INTERCEPTED_REQUEST_SCRIPT" "${1:-swap}"
+  ! grep -Fq -- "$ANTHROPIC_CREDENTIAL_CANARY" "$LAST_STDOUT" ||
+    die 'the stored key came back to the guest in an intercepted reply'
+}
+
+require_intercepted_request_served() {
+  local label="$1"
+  intercepted_request swap
+  # The synthetic provider counts tokens only for the stored key, and echoes
+  # that key in two headers, which must arrive redacted.
+  jq -e '
+    .status == 200 and (.body | fromjson) == {"input_tokens": 42} and
+    (.request_id | type == "string" and contains("[REDACTED]")) and
+    (.opaque | type == "string" and contains("[REDACTED]"))
+  ' "$LAST_STDOUT" >/dev/null ||
+    die "$label: the intercepted request was not served with the stored key: $(head -c 600 "$LAST_STDOUT")"
+}
+
+guest_interception_environment() {
+  # shellcheck disable=SC2016 # Expanded by the guest shell.
+  run_cw run --no-tty -- /bin/sh -c '
+    printf "token=%s\n" "${ANTHROPIC_AUTH_TOKEN-}"
+    printf "authority=%s\n" "${NODE_EXTRA_CA_CERTS-}"
+    [ -z "${ANTHROPIC_BASE_URL+x}" ] || printf "set=ANTHROPIC_BASE_URL\n"
+    [ -z "${ANTHROPIC_API_KEY+x}" ] || printf "set=ANTHROPIC_API_KEY\n"
+    [ -z "${CLAUDE_CODE_OAUTH_TOKEN+x}" ] || printf "set=CLAUDE_CODE_OAUTH_TOKEN\n"
+    [ ! -s "${NODE_EXTRA_CA_CERTS-/nonexistent}" ] || printf "authority-file=present\n"
+    printf "provider-values=%s\n" "$(env | grep -c "cwlocal")"
+  ' interception-environment
+}
+
+run_egress_interception_smoke() {
+  local placeholder killed front_door restored predecessor predecessor_start successor children deadline pid
+  local renewal paired
+  log 'interception: the boot intercepts and its front door is paired'
+  require_boot_intercepts 'first boot'
+  mapfile -t children < <(environment_broker_children)
+  [[ ${#children[@]} -eq 1 ]] || die "expected exactly one local broker child, found ${#children[@]}"
+  require_broker_boot_secrets_closed 'first boot' "${children[0]%% *}"
+
+  log 'interception: the guest holds only its placeholder and trusts the boot authority'
+  guest_interception_environment
+  placeholder="$(sed -n 's/^token=//p' "$LAST_STDOUT")"
+  [[ "$placeholder" =~ ^cwp1_[A-Za-z0-9_-]{43}$ ]] ||
+    die 'the guest does not hold a placeholder as its Anthropic token'
+  { grep -Fxq 'authority=/run/codewire-host/egress-ca.pem' "$LAST_STDOUT" &&
+    grep -Fxq 'authority-file=present' "$LAST_STDOUT"; } ||
+    die "the guest does not trust the boot's certificate authority"
+  ! grep -q '^set=' "$LAST_STDOUT" ||
+    die "the guest has a provider variable interception removes: $(grep '^set=' "$LAST_STDOUT" | tr '\n' ' ')"
+  grep -Fxq 'provider-values=0' "$LAST_STDOUT" ||
+    die "a synthetic provider value is in the guest's environment"
+
+  log 'interception: a request carrying the placeholder is served with the stored key'
+  require_intercepted_request_served 'first boot'
+
+  log 'interception: the placeholder beside another credential is refused'
+  intercepted_request conflict
+  jq -e '.status == 400 and (.body | fromjson | .error.code) == "credential_conflict"' \
+    "$LAST_STDOUT" >/dev/null ||
+    die "a placeholder beside another credential was not refused: $(head -c 600 "$LAST_STDOUT")"
+
+  scan_serving_processes_for_credential_canaries
+
+  log 'interception: killing the front door fails intercepted requests closed'
+  killed="$(kill_network_process __native-front-door)" || die 'the front door could not be killed'
+  read -r front_door _ <<<"$killed"
+  wait_for_pid_death "$front_door" || die 'the front door survived its kill'
+  intercepted_request swap
+  # Only a connection ended at once shows the refusal. A timeout or a lookup
+  # error is something else, and a connection that left for the provider and
+  # was dropped on the way would end in one.
+  jq -e '
+    (has("status") | not) and .elapsed_ms < 5000 and
+    (.error == "ECONNRESET" or .error == "ECONNREFUSED" or .error == "EPIPE")
+  ' "$LAST_STDOUT" >/dev/null ||
+    die "a request with no front door did not end at once with a closed connection: $(head -c 600 "$LAST_STDOUT")"
+  [[ "$(front_door_children | wc -l)" -eq 0 ]] ||
+    die 'a front door was running when the request was refused'
+  run_cw info --local "$NAME" --output json
+  jq -e '.state == "running"' "$LAST_STDOUT" >/dev/null ||
+    die 'the VM did not keep running without its front door'
+
+  log 'interception: a stop and start brings it back with the same placeholder'
+  restart_failed_environment 'front door'
+  require_boot_intercepts 'second boot'
+  guest_interception_environment
+  restored="$(sed -n 's/^token=//p' "$LAST_STDOUT")"
+  [[ "$restored" == "$placeholder" ]] || die 'the placeholder changed across a stop and start'
+  require_intercepted_request_served 'second boot'
+
+  # Last, because each takes one broker lifetime: an agent that works for ten
+  # minutes and then fails until a stop and start does not work. The second
+  # renewal shows the first session's place was given up.
+  for (( renewal = 1; renewal <= EGRESS_INTERCEPTION_RENEWALS; renewal++ )); do
+    log "interception: waiting out credential broker renewal $renewal of $EGRESS_INTERCEPTION_RENEWALS (up to about $BROKER_LIFETIME_SECONDS s)"
+    mapfile -t children < <(environment_broker_children)
+    [[ ${#children[@]} -eq 1 ]] || die "expected exactly one local broker child, found ${#children[@]}"
+    read -r predecessor predecessor_start <<<"${children[0]}"
+    deadline="$(awk -v at="$predecessor_start" -v life="$BROKER_LIFETIME_SECONDS" 'BEGIN { printf "%d", at + life + 60 }')"
+    successor=''
+    while [[ -z "$successor" ]] || ! process_ended "$predecessor"; do
+      (( $(date +%s) <= deadline )) || die 'the local broker was not replaced within its lifetime'
+      while read -r pid _; do
+        [[ -n "$pid" && "$pid" != "$predecessor" ]] && successor="$pid"
+      done < <(environment_broker_children)
+      sleep 1
+    done
+    # The successor's own pairing in this boot's log, before the request
+    # that depends on it.
+    paired=0
+    for _attempt in {1..150}; do
+      paired="$(grep -Ec ' event=front_door_pairing( .*)? outcome=paired( |$)' \
+        "$STATE_ROOT/logs/runner-$ENVIRONMENT_ID.log" || true)"
+      [[ "$paired" -gt "$renewal" ]] && break
+      sleep 0.2
+    done
+    [[ "$paired" -gt "$renewal" ]] ||
+      die "renewal $renewal: $paired front-door pairings are recorded for this boot, not $(( renewal + 1 ))"
+    require_broker_boot_secrets_closed "renewal $renewal" "$successor"
+    require_intercepted_request_served "after credential broker renewal $renewal"
+  done
+  log 'interception: passed'
 }
 
 # Linux network qualification (--network-qualification). The packet worker,
@@ -2673,8 +2976,9 @@ signal.pause()
   local -a pids
   mapfile -t pids < <(jq -r --argjson runner "$RUNNER_PID" '
     [$runner] + [.processes[] | select(.role == "__native-network-worker" or
-      .role == "__native-egress-broker") | .pid] | unique | .[]' "$report")
-  [[ "${#pids[@]}" -ge 3 ]] || die "memory scan found ${#pids[@]} serving processes ($report)"
+      .role == "__native-egress-broker" or .role == "__native-front-door") | .pid] | unique | .[]' "$report")
+  [[ "${#pids[@]}" -ge $(( 3 + EGRESS_INTERCEPTION )) ]] ||
+    die "memory scan found ${#pids[@]} serving processes ($report)"
   local status=0
   # shellcheck disable=SC2024 # The report belongs to this user, not to root.
   printf '%s\n' "$canaries" | sudo -n /usr/bin/python3 -I "$scanner" "${pids[@]}" \
@@ -3357,6 +3661,10 @@ else
   CREATE_DOCKER_ARGS=(--docker-disk 1Gi)
   EXPECTED_OWNED_OBJECT_COUNT=4
 fi
+if [[ "$EGRESS_INTERCEPTION" -eq 1 ]]; then
+  # The supervisor reads the switch once at each boot.
+  printf 'on\n' >"$STATE_ROOT/egress-intercept"
+fi
 ALLOW_REGISTRY_EGRESS=1
 CW_COMMAND_TIMEOUT_SECONDS=1500
 run_cw create --local --name "$NAME" --cpu 2 --memory 16GB \
@@ -3499,6 +3807,8 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     if [[ "$NETWORK_QUALIFICATION" -eq 1 ]]; then
       run_network_qualification
     fi
+  elif [[ "$EGRESS_INTERCEPTION" -eq 1 ]]; then
+    run_egress_interception_smoke
   else
     run_application_secret_smoke
     if [[ "$MANAGED_AGENT_SESSIONS" -eq 1 ]]; then
