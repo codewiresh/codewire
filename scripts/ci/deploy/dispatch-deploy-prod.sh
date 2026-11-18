@@ -26,13 +26,19 @@ readonly deploy_api="${server_url%/}/api/v1/repos/codewire/deploy/actions"
 readonly dispatch_url="$deploy_api/workflows/promote-prod.yaml/dispatches"
 # promote-prod usually finishes within four minutes of being dispatched, and
 # its Production check (deploy#170) may wait up to 22 more for Production to
-# run the release. The integration token lasts an hour; the wait renews it
-# well before that.
+# run the release. Forgejo's Actions ID tokens, which the integration token
+# is, last five minutes (infra's Forgejo ID_TOKEN_EXPIRATION_TIME: 300; every
+# consumer mints at the point of use), so the wait renews the token once it is
+# four minutes old, before any lookup could present an expired one.
 readonly wait_seconds="${DEPLOY_PROD_WAIT_SECONDS:-2700}"
 readonly poll_seconds="${DEPLOY_PROD_POLL_SECONDS:-20}"
-readonly renew_seconds=600
+readonly renew_seconds="${DEPLOY_PROD_RENEW_SECONDS:-240}"
 [[ "$wait_seconds" =~ ^[1-9][0-9]*$ ]] ||
   fail 'the deploy run wait must be a whole number of seconds'
+[[ "$renew_seconds" =~ ^[1-9][0-9]*$ ]] ||
+  fail 'the token renewal age must be a whole number of seconds'
+((renew_seconds < 300)) ||
+  fail 'the token renewal age must be under the token lifetime of 300 seconds'
 [[ "$poll_seconds" =~ ^[0-9]+$ ]] ||
   fail 'the deploy run poll interval must be a whole number of seconds'
 umask 077

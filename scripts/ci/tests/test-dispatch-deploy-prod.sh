@@ -153,6 +153,16 @@ grep -Fq "deploy run 704 succeeded: Production accepted $SOURCE_TAG" "$output" |
 [[ "$(wc -l <"$work/capture/token-fetches")" -eq 1 ]] ||
   fail 'the dispatch renewed a token that was still fresh'
 
+# A token as old as the renewal age is renewed before the next lookup, so a
+# wait longer than the token's five minutes is never refused: no lookup fails.
+reset_wait
+DEPLOY_PROD_POLL_SECONDS=1 DEPLOY_PROD_RENEW_SECONDS=1 MOCK_RUN_STATES=running,running,success \
+  "$DISPATCH" "$SOURCE_TAG" >"$work/age.out" 2>&1 ||
+  fail "a wait past the renewal age failed: $(cat "$work/age.out")"
+! grep -Fq 'lookup failed' "$work/age.out" || fail "an aged token reached a lookup: $(cat "$work/age.out")"
+[[ "$(wc -l <"$work/capture/token-fetches")" -eq 4 ]] ||
+  fail "an aged token was not renewed before each lookup: $(wc -l <"$work/capture/token-fetches") fetches"
+
 # A refused token is renewed before the next lookup, which presents the new
 # one; a renewal that fails is retried, and its failure is reported.
 reset_wait
@@ -325,8 +335,24 @@ for bad in 1.5 -1 20s; do
   grep -Fq 'the deploy run poll interval must be a whole number of seconds' "$work/bad-poll.out" ||
     fail "poll interval '$bad' was not refused as such"
 done
+for bad in 0 1.5 -1 240s; do
+  if DEPLOY_PROD_RENEW_SECONDS="$bad" CURL_BIN="$work/curl-never" "$DISPATCH" "$SOURCE_TAG" \
+      >"$work/bad-renew.out" 2>&1; then
+    fail "renewal age '$bad' was accepted"
+  fi
+  grep -Fq 'the token renewal age must be a whole number of seconds' "$work/bad-renew.out" ||
+    fail "renewal age '$bad' was not refused as such"
+done
+for bad in 300 600; do
+  if DEPLOY_PROD_RENEW_SECONDS="$bad" CURL_BIN="$work/curl-never" "$DISPATCH" "$SOURCE_TAG" \
+      >"$work/bad-renew.out" 2>&1; then
+    fail "renewal age '$bad', past the token's lifetime, was accepted"
+  fi
+  grep -Fq 'the token renewal age must be under the token lifetime of 300 seconds' "$work/bad-renew.out" ||
+    fail "renewal age '$bad' was not refused for the token lifetime"
+done
 reset_wait
-[[ ! -e "$marker" ]] || fail 'a refused wait or poll interval reached curl'
+[[ ! -e "$marker" ]] || fail 'a refused wait, poll interval or renewal age reached curl'
 
 if env -u GITHUB_SERVER_URL CURL_BIN="$work/curl-never" "$DISPATCH" "$SOURCE_TAG" \
     >"$work/no-server.out" 2>&1; then
