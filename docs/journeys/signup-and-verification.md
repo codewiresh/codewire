@@ -11,7 +11,7 @@ Production. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-17.
+Updated 2026-11-18.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -23,6 +23,7 @@ Updated 2026-11-17.
 | `signup-gates` | not yet observed | not yet observed |
 | `account-password-reset` | not yet observed | not yet observed |
 | `account-admin-delete` | not yet observed | not yet observed |
+| `signup-unverified-purge` | observed 2026-11-15 at b183980df, a seeded account and a one-hour lifetime | enforce passes observed 2026-11-18 at v0.4.22, nothing old enough yet; the first deletion is due after 2026-11-20 18:05Z |
 | `account-receipt-email` | not yet observed | not yet observed |
 
 ## Before the walk
@@ -382,6 +383,68 @@ the purge". The page names no money (owner, 2026-11-15, #3013).
     way: Settings → Delete account, after a demotion;
   - each admin may start 10 deletions an hour, a count no setting raises.
 - **Observed:** not yet observed.
+
+## `signup-unverified-purge`: an unverified sign-up is deleted after 7 days
+
+Issue: #4541. The rules are in AUTH-POLICY's "Account deletion by an admin or
+the purge": an email sign-up still unverified 7 days after it was created is
+deleted, which frees its address (owner, 2026-11-13, #4541).
+
+- **Entry points:** none a user takes. The orchestration leader runs it at
+  most once an hour; `UNVERIFIED_SIGNUP_PURGE` is `off`, `report` (the
+  default) or `enforce`. Dev and Production set `enforce`.
+- **States to exercise:**
+  - an unverified sign-up older than the lifetime, holding nothing: deleted;
+  - one younger than the lifetime: left;
+  - one that holds something (a membership, a sandbox, an API key, a user
+    secret, a GitHub or Google sign-in): kept, and counted as kept;
+  - an address verified between the selection and the deletion: kept,
+    because each condition is checked again with the account's row locked;
+  - `report`: every check runs and nothing is deleted.
+- **Driving it:**
+  1. On Dev, seed an unverified email sign-up that holds nothing with
+     `scripts/runtime/dev/provision-dev-scratch-account.sh --unverified --label <label>`
+     (through Infra's kube-access wrapper; Turnstile refuses a scripted
+     browser sign-up).
+  2. Count the purge's candidates read-only, with its own conditions and no
+     age filter: the seeded account is the one.
+  3. Shorten the lifetime on Dev with `UNVERIFIED_SIGNUP_LIFETIME_SECS`
+     (never below an hour, never set in Production) through a reviewed deploy
+     PR, and wait for the first hourly pass after the rollout.
+  4. Restore the 7-day lifetime through the deploy PR prepared before step 3.
+  On Production, read the leader's hourly pass lines and, after an account
+  turns 7 days old, check it is gone.
+- **Proof:**
+  - the leader logs `reconciler: unverified sign-up purge` with
+    `setting=Enforce` and its counts (`deleted`, `would_delete`, `kept`,
+    `failed`, `held`), and `reconciler: unverified sign-up deletion begun`
+    with the operation id. It logs no addresses;
+  - `account_deletion_operations` has the operation with
+    `initiator = unverified_purge`, no actor and `state = completed`;
+  - `users` has no row for the account's id or its address, so the address
+    can sign up again;
+  - no mail goes to the address.
+- **Gotchas:**
+  - a repeated sign-up of a pending address doesn't move `created_at`, so the
+    7 days count from the first sign-up;
+  - GitHub and Google sign-ups are created verified and never match;
+  - a self-hosted server without mail keeps `report` (AUTH-POLICY).
+- **Observed:**
+  - Dev, 2026-11-15, at b183980df: working (cw-accounts). The account was
+    seeded at 15:49:52Z, `enforce` with a one-hour lifetime came from
+    codewire/deploy#278, and the leader's first pass at 19:45:04Z logged
+    `deleted=1 would_delete=0 kept=0 failed=0 held=0`. The operation read
+    `initiator = unverified_purge`, `state = completed`, no actor, and `users`
+    had no row for the id or the address. codewire/deploy#280 restored the
+    7-day lifetime and kept `enforce`. Recorded on #4541,
+    comment 104943.
+  - Production, 2026-11-18, at v0.4.22: `enforce` passes running. Six hourly
+    passes from 06:08Z to 11:09Z logged `setting=Enforce lifetime_secs=604800
+    deleted=0 would_delete=0 kept=0 failed=0 held=0`. Nothing is old enough
+    yet: the three unverified accounts are #2053's simulator sign-ups from
+    2026-11-13 18:04Z to 18:56Z, due after 2026-11-20 18:05Z. The pass lines
+    and the read-only replica count are recorded on #4541,
+    comment 114161.
 
 ## `account-receipt-email`: the receipt after a top-up
 
