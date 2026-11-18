@@ -16,8 +16,8 @@ impl CodewireClient {
     ) -> Result<GetEnvironmentCreateOptionsResponse, ClientError> {
         // Built per call: only a create reads it, and `lib.rs` stays as it is.
         EnvironmentSetupServiceClient::new(
-            ReqwestConnectTransport(self.http.clone()),
-            self.config.connect_config()?,
+            ReqwestConnectTransport(self.http().clone()),
+            self.config().connect_config()?,
         )
         .get_environment_create_options_with_options(request, self.auth_options().await?)
         .await
