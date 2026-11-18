@@ -53,6 +53,8 @@ if [[ "$1" == --pull ]]; then role=pull; shift; fi
 printf '%s\n' "$role" >>"$FAKE_FETCH_LOG"
 printf 'robot-%s\n' "$role" >"$1"
 printf 'synthetic\n' >"$2"
+# The real fetcher prints this on stdout; the script's own stdout stays one line.
+printf 'Fetched the paired Harbor %s credential into private files\n' "$role"
 EOF
 chmod 0755 "$work/bin/docker" "$work/bin/fetch"
 

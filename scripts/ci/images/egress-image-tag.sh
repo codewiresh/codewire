@@ -53,11 +53,13 @@ trap cleanup EXIT
 docker_config="$work/docker-config"
 mkdir -m 0700 "$docker_config"
 
-# Reading needs only the pull robot; creating a tag needs the publisher.
+# Reading needs only the pull robot; creating a tag needs the publisher. The
+# fetcher's progress line goes to stderr: callers capture this script's stdout
+# as its answer, which is exactly one line.
 if [[ "$command" == tag ]]; then
-  "$fetcher" "$work/username" "$work/password"
+  "$fetcher" "$work/username" "$work/password" >&2
 else
-  "$fetcher" --pull "$work/username" "$work/password"
+  "$fetcher" --pull "$work/username" "$work/password" >&2
 fi
 DOCKER_CONFIG="$docker_config" "$docker_bin" login "$REGISTRY" \
   --username "$(cat "$work/username")" --password-stdin <"$work/password" >/dev/null

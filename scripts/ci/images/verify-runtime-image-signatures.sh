@@ -94,8 +94,9 @@ fi
 
 # Verification needs only read access: use the pull identity every deployment
 # uses, never the publisher.
+# Its progress line goes to stderr, so --egress prints only source SHAs.
 "${OPENBAO_HARBOR_CREDENTIAL_FETCHER:-$ROOT/scripts/ci/setup/fetch-openbao-harbor-credentials.sh}" --pull \
-  "$work/harbor-username" "$work/harbor-password"
+  "$work/harbor-username" "$work/harbor-password" >&2
 DOCKER_CONFIG="$docker_config" docker login "$HARBOR_HOST" \
   --username "$(<"$work/harbor-username")" \
   --password-stdin <"$work/harbor-password" >/dev/null

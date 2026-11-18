@@ -36,6 +36,8 @@ printf '%s\n' "$*" >>"${FETCH_LOG:?}"
 [[ "${1:-}" == --pull ]]
 printf '%s\n' 'robot$codewire+pull' >"$2"
 printf '%s\n' 'synthetic-pull-password' >"$3"
+# The real fetcher prints this on stdout; --egress's stdout stays only SHAs.
+printf 'Fetched the paired Harbor pull credential into private files\n'
 FETCH
 chmod 0755 "$work/fetcher"
 
