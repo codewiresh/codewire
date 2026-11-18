@@ -40,6 +40,9 @@ pub(crate) enum IdentityErrorCode {
     RateLimited,
     /// The rate limit couldn't be read, so the request was refused (#3256).
     RateLimitUnavailable,
+    /// The sign-up's account was saved, but its verification email couldn't
+    /// be sent; submitting again sends a new one (#4723).
+    VerificationEmailUnsent,
 }
 
 #[derive(Deserialize)]
@@ -291,7 +294,8 @@ where
                 code:
                     Some(
                         code @ (IdentityErrorCode::RateLimited
-                        | IdentityErrorCode::RateLimitUnavailable),
+                        | IdentityErrorCode::RateLimitUnavailable
+                        | IdentityErrorCode::VerificationEmailUnsent),
                     ),
                 ..
             }) => (None, Some(code), None),
@@ -363,7 +367,7 @@ pub(crate) fn user_message(status: StatusCode, operation: &'static str) -> &'sta
         }
         (StatusCode::CONFLICT, "sign-up") => "An account with this email already exists.",
         (StatusCode::SERVICE_UNAVAILABLE, "sign-up") => {
-            "Your request was saved, but verification email delivery is temporarily unavailable. Complete the challenge and submit again shortly."
+            "Sign-up is temporarily unavailable. Try again in a few minutes."
         }
         (StatusCode::BAD_REQUEST, "reset-password") => {
             "The reset link is invalid or expired, or the password does not meet the requirements."

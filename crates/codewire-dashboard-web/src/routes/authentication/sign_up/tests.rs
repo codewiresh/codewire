@@ -180,7 +180,8 @@ async fn provider_sign_up_sends_only_the_edge_hop_and_nothing_without_one() {
 }
 
 /// An identity service whose sign-ups are refused with `status`, `code` and,
-/// when given, `Retry-After`, as the IdP's sign-up limits refuse them.
+/// when given, `Retry-After`, as the IdP's sign-up limits refuse them. An
+/// empty `code` sends none, as the IdP's uncoded errors do.
 async fn refusing_identity(
     status: StatusCode,
     code: &str,
@@ -200,10 +201,13 @@ async fn refusing_identity(
                     }))
                     .into_response();
                 }
-                let body = Json(serde_json::json!({
-                    "code": code,
+                let mut body = serde_json::json!({
                     "detail": "internal detail the page never shows",
-                }));
+                });
+                if !code.is_empty() {
+                    body["code"] = code.into();
+                }
+                let body = Json(body);
                 match retry_after {
                     Some(seconds) => {
                         (status, [(header::RETRY_AFTER, seconds)], body).into_response()
@@ -287,6 +291,34 @@ async fn a_limited_sign_up_says_so_and_when_to_try_again() {
             assert!(!body.contains("internal detail"), "{path} {code}");
             assert!(!body.contains("Wait a moment"), "{path} {code}");
         }
+    }
+}
+
+/// Only a sign-up whose account was saved but whose verification email
+/// couldn't be sent says the request was saved; any other unavailable sign-up
+/// says sign-up is unavailable and nothing more (#4723).
+#[tokio::test]
+async fn an_unavailable_sign_up_says_it_was_saved_only_when_it_was() {
+    const UNAVAILABLE: &str = "Sign-up is temporarily unavailable. Try again in a few minutes.";
+    const SAVED: &str = "Your request was saved";
+    for (code, expected, absent) in [
+        ("", UNAVAILABLE, SAVED),
+        ("verification_email_unsent", SAVED, UNAVAILABLE),
+    ] {
+        let identity = refusing_identity(StatusCode::SERVICE_UNAVAILABLE, code, None).await;
+        let dashboard = serve(crate::app(config(&identity.origin))).await;
+        let csrf = crate::security::new_csrf_token();
+        let (answered, body) = page(
+            &dashboard,
+            "/signup/_actions/sign-up",
+            browser(&csrf, Some(EDGE_HOP), false),
+            &sign_up_form(&csrf),
+        )
+        .await;
+        assert_eq!(answered, StatusCode::SERVICE_UNAVAILABLE, "{code}");
+        assert!(body.contains(expected), "{code}: {body}");
+        assert!(!body.contains(absent), "{code}: {body}");
+        assert!(!body.contains("internal detail"), "{code}");
     }
 }
 

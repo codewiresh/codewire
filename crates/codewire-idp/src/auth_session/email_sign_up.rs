@@ -408,3 +408,53 @@ async fn invite_only_admission(
     }
     Ok(admission)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An account saved whose verification email couldn't be sent is the one
+    /// sign-up 503 with a code, so the page can say it was saved (#4723).
+    #[tokio::test]
+    async fn an_unsent_verification_email_answers_with_its_code() {
+        let state = SessionAuthState {
+            // Never connected: no mail is configured, so no mail is counted.
+            pool: PgPool::connect_lazy("postgres://localhost/none").unwrap(),
+            secure: false,
+            signup_invite_policy: SignupInvitePolicy::open(),
+            frontend_url: String::new(),
+            email: EmailClient::disabled(),
+            human_verification: HumanVerification::TrustedTest,
+            turnstile_bypass_email: String::new(),
+            client_address_key: "synthetic-client-address-key".into(),
+            http: reqwest::Client::new(),
+        };
+        let user = UserResponse {
+            id: "synthetic-user".into(),
+            email: "synthetic@example.invalid".into(),
+            email_verified: false,
+            name: None,
+            image: None,
+            is_admin: false,
+            two_factor_enabled: false,
+            cli_signed_in: false,
+            created_at: String::new(),
+        };
+
+        let answered =
+            deliver_signup_verification(&state, user, "synthetic-token".into(), false).await;
+
+        assert!(
+            matches!(
+                answered,
+                Err(AppError::Coded {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    code: "verification_email_unsent",
+                    ..
+                })
+            ),
+            "{:?}",
+            answered.err()
+        );
+    }
+}

@@ -855,10 +855,14 @@ async fn deliver_signup_verification(
         && let Err(error) = send_verification_email(&state.email, &user.email, &verify_url).await
     {
         tracing::error!(%error, user_id = %user.id, "failed to send signup verification email");
-        return Err(AppError::ServiceUnavailable(
-            "Your account was saved, but email delivery is temporarily unavailable. Try again shortly."
+        // The only sign-up 503 after the account is saved; its code lets the
+        // page say so, and every other one says nothing was saved (#4723).
+        return Err(AppError::Coded {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "verification_email_unsent",
+            detail: "Your account was saved, but email delivery is temporarily unavailable. Try again shortly."
                 .into(),
-        ));
+        });
     }
     Ok((
         StatusCode::ACCEPTED,

@@ -250,11 +250,17 @@ Issue: #4062. Launch step 1 (`launch-signup`) walks this on Production.
 
 ## `signup-gates`: the abuse gates in front of sign-up and sign-in
 
-Issue: #3297 (items 7, 8, 11 and 14).
+Issue: #3297 (items 7, 8, 11 and 14); the unavailable page's words are
+#4723's.
 
 - **Entry points:** the sign-up, sign-in and forgotten-password pages.
 - **States to exercise:**
-  - sign-up on a surface with no Turnstile secret: refused, no account;
+  - sign-up on a surface with no Turnstile secret or no mail: refused, no
+    account, and the page says "Sign-up is temporarily unavailable. Try
+    again in a few minutes.", never that the request was saved;
+  - a sign-up whose account was saved but whose verification email couldn't
+    be sent: the page says the request was saved and to submit again, which
+    sends a new link;
   - five wrong passwords lock the account for fifteen minutes;
   - the edge rate limits on the sign-up and sign-in routes;
   - the IdP's sign-up limits: thirty sign-ups an hour from one client address
@@ -270,6 +276,10 @@ Issue: #3297 (items 7, 8, 11 and 14).
      account already exists, and the thirty-first is refused with "Too many
      sign-ups right now. Try again in N minutes." (#4695). No account is
      created and no mail is sent.
+  3. On a surface with no Turnstile secret (the local Kind cluster), sign up
+     with an address that has no account and isn't the e2e bypass address:
+     the page says "Sign-up is temporarily unavailable. Try again in a few
+     minutes.", and the address still has no account.
 - **Proof:** the `429` on the right password, and no session. For the
   sign-ups:
   - the IdP's `sign-up refused by its rate limit` warning with
@@ -278,12 +288,23 @@ Issue: #3297 (items 7, 8, 11 and 14).
     by 30, so the address count refused and the server-wide one had room;
   - no other `signup_address:` key changed during the walk, so the count was
     the walker's alone.
+  - for step 3, no `users` row for the address. A walk can't make mail fail,
+    so the saved state's words are proven by the dashboard's sign-up tests
+    and the IdP's test of the code it sends for it.
 - **Gotchas:** the lockout is per account. The edge rate limits have no
   command yet (#3297). Step 2 refuses every sign-up from the walking
   machine's address for the rest of the hour, so walk it where no one else
   signs up from that address. Keep its sign-ups under ten in any ten
   seconds, or the edge's own limit blocks them before the IdP counts them.
-- **Observed:** not yet observed.
+- **Observed:** step 3 on the local Kind cluster, 2026-11-17, in a browser
+  through the cluster's ingress. With main's dashboard and IdP (2a8adbc94),
+  a sign-up for `walk4723-base-2116@example.test` answered `503` with "Your
+  request was saved, but verification email delivery is temporarily
+  unavailable. Complete the challenge and submit again shortly.", though no
+  `users` row existed: the #4723 symptom. With #4723's dashboard and IdP
+  deployed, `walk4723-fixed-0905@example.test` answered `503` with "Sign-up
+  is temporarily unavailable. Try again in a few minutes.", and again no
+  `users` row. Steps 1 and 2 are not yet observed.
 
 ## `account-password-reset`: a forgotten password
 

@@ -269,13 +269,17 @@ pub(in crate::routes) async fn signup_complete_action(
 }
 
 /// What a refused sign-up says. One the sign-up limits refused names what was
-/// limited and when to try again (#4695); the IdP's own detail never reaches
-/// the page.
+/// limited and when to try again (#4695). Only the code for an unsent
+/// verification email says anything was saved (#4723). The IdP's own detail
+/// never reaches the page.
 fn refusal_message<T>(identity: &IdentityResponse<T>, operation: &'static str) -> String {
     match identity.error_code {
         Some(IdentityErrorCode::RateLimited) => limited_message(identity.retry_after),
         Some(IdentityErrorCode::RateLimitUnavailable) => {
             "Sign-up is temporarily unavailable. Try again in a few minutes.".to_owned()
+        }
+        Some(IdentityErrorCode::VerificationEmailUnsent) => {
+            "Your request was saved, but verification email delivery is temporarily unavailable. Complete the challenge and submit again shortly.".to_owned()
         }
         _ => user_message(identity.status, operation).to_owned(),
     }
