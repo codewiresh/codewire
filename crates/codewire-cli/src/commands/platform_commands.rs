@@ -1443,6 +1443,7 @@ pub(crate) async fn collect_doctor_report(
         doctor_completion_check(),
         doctor_ssh_config_check(),
         doctor_checks::doctor_local_egress_check().await,
+        doctor_checks::doctor_local_store_check().await,
     ];
 
     DoctorReport {

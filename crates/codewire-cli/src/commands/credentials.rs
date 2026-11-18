@@ -21,6 +21,7 @@ use codewire_protected_store::ProtectedValue;
 pub(in crate::commands) mod confirm;
 mod delete;
 pub(in crate::commands) mod output;
+mod store_wait;
 
 use output::save_refusal::{Answer, Kind, Save, save_error};
 
@@ -193,7 +194,7 @@ async fn probe_local_store(
     client: &mut LocalCredentialClient,
     save: Save<'_>,
 ) -> anyhow::Result<()> {
-    match client.probe_protected_store().await {
+    match store_wait::waiting_on_store(false, client.probe_protected_store()).await {
         Ok(()) => Ok(()),
         Err(status) => match probe_refusal(save, &status) {
             Some(refusal) => Err(refusal),
@@ -444,16 +445,19 @@ impl ConnectStore for LocalConnectStore<'_> {
             .then(|| ProtectedValue::from_slice(approval.material.expose_secret()).ok())
             .flatten();
         let name = target.name.clone();
-        let saved = publish_oauth_connection(
-            self.client,
-            OAuthConnectionTarget {
-                provider,
-                authentication_kind,
-                display_name: target.name,
-                existing: target.existing,
-            },
-            approval.material,
-            approval.account_hint,
+        let saved = store_wait::waiting_on_store(
+            matches!(format, OutputFormat::Json),
+            publish_oauth_connection(
+                self.client,
+                OAuthConnectionTarget {
+                    provider,
+                    authentication_kind,
+                    display_name: target.name,
+                    existing: target.existing,
+                },
+                approval.material,
+                approval.account_hint,
+            ),
         )
         .await;
         let record = match saved {
@@ -823,15 +827,17 @@ async fn add_credential(
             },
             name: &name,
         };
-        let record = client
-            .add_ssh_credential(
+        let record = store_wait::waiting_on_store(
+            false,
+            client.add_ssh_credential(
                 name.clone(),
                 input.private_key,
                 input.passphrase,
                 args.expires_at,
-            )
-            .await
-            .map_err(|status| local_save_error(save, &status))?;
+            ),
+        )
+        .await
+        .map_err(|status| local_save_error(save, &status))?;
         remember_local(&record, execution);
         return print_credentials(&[record], OutputFormat::Text);
     }
@@ -898,8 +904,7 @@ async fn add_credential(
         },
         name: &name,
     };
-    let record = client
-        .add_credential(input, material)
+    let record = store_wait::waiting_on_store(false, client.add_credential(input, material))
         .await
         .map_err(|status| local_save_error(save, &status))?;
     remember_local(&record, execution);
@@ -978,16 +983,18 @@ async fn rotate_credential(
         kind: Kind::Rotate { what: &what },
         name: &record.metadata.display_name,
     };
-    let rotated = client
-        .rotate_credential_material(
+    let rotated = store_wait::waiting_on_store(
+        false,
+        client.rotate_credential_material(
             &record.metadata.id,
             record.metadata.revocation_generation,
             material,
             args.expires_at,
             record.metadata.account_hint.clone(),
-        )
-        .await
-        .map_err(|status| local_save_error(save, &status))?;
+        ),
+    )
+    .await
+    .map_err(|status| local_save_error(save, &status))?;
     print_credentials(&[rotated], OutputFormat::Text)
 }
 
@@ -1050,10 +1057,12 @@ async fn generate_local_ssh(
         },
         name: &name,
     };
-    let record = client
-        .generate_ssh_credential(name.clone(), args.expires_at)
-        .await
-        .map_err(|status| local_save_error(save, &status))?;
+    let record = store_wait::waiting_on_store(
+        false,
+        client.generate_ssh_credential(name.clone(), args.expires_at),
+    )
+    .await
+    .map_err(|status| local_save_error(save, &status))?;
     print_credentials(std::slice::from_ref(&record), OutputFormat::Text)?;
     eprintln!("{SSH_PUBLIC_KEY_GITHUB_HINT}");
     Ok(record)

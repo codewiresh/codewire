@@ -144,6 +144,13 @@ pub(crate) async fn connect_local_credential_authority() -> anyhow::Result<Local
     connect_configured_authority(&config, &store).await
 }
 
+/// The local credential authority already serving this root, if one is;
+/// nothing is started.
+pub(crate) async fn running_local_credential_authority() -> Option<LocalCredentialClient> {
+    let config = authority_config(local_credential_root(&OsEnv).ok()?).ok()?;
+    LocalCredentialClient::connect(&config).await.ok()
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) async fn admit_existing_local_credential_authority() -> anyhow::Result<()> {
     let env = OsEnv;

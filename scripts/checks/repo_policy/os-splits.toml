@@ -116,6 +116,8 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/commands/credential_repository/revocation.rs" = { group = "credentials", count = 6 }
 "crates/codewire-cli/src/commands/credential_repository/ssh.rs" = { group = "credentials", count = 6 }
 "crates/codewire-cli/src/commands/credentials/output/save_refusal.rs" = { group = "credentials", count = 3 }
+"crates/codewire-cli/src/commands/credentials/store_wait.rs" = { group = "credentials", count = 1 }
+"crates/codewire-cli/src/commands/credentials/store_wait/tests.rs" = { group = "linux-tests", count = 1 }
 "crates/codewire-cli/src/commands/environment.rs" = { group = "vm-backend", count = 2 }
 "crates/codewire-cli/src/commands/flat.rs" = { group = "member", count = 1 }
 "crates/codewire-cli/src/commands/host.rs" = { group = "member", count = 8 }
@@ -131,6 +133,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/commands/native/local_https/trust.rs" = { group = "local-https", count = 2 }
 "crates/codewire-cli/src/commands/native/sources.rs" = { group = "vm-backend", count = 1 }
 "crates/codewire-cli/src/commands/platform_commands.rs" = { group = "browser", count = 1 }
+"crates/codewire-cli/src/commands/platform_commands/doctor_checks.rs" = { group = "dispatch", count = 3 }
 "crates/codewire-cli/src/commands/sessions.rs" = { group = "member", count = 7 }
 "crates/codewire-cli/src/commands/sessions/agents.rs" = { group = "hosted", count = 55 }
 "crates/codewire-cli/src/commands/sessions/agents/dispatch.rs" = { group = "member", count = 2 }

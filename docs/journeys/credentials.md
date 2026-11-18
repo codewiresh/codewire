@@ -92,9 +92,11 @@ only what differs.
    text and exits non-zero. The authority never made that write ready, so
    nothing lists or uses it; a stray value can stay in the keyring until the
    pending row's cleanup removes it, and is never used (cw-network,
-   2026-11-18, #5271). `cw doctor` reports a missing, locked or unanswering
-   local store as a warning with the same next step. The waiting line and
-   `cw doctor` come in #5271's second change. Walk it only inside a private
+   2026-11-18, #5271). `cw doctor` asks a local credential authority that is
+   already running (never starting one) for a test write: a missing, locked
+   or unanswering local store is a warning with the same next step, and one
+   that doesn't answer within 10 s says so. Piped, the waiting line is one
+   plain line; with `--output json` there is none. Walk it only inside a private
    D-Bus session (`scripts/ci/verify/lib/local-smoke-isolation.sh`) with its
    keyring stopped, never the host's keyring (#5271). Not yet observed.
    A save refused after the provider step says why in fixed words and that
