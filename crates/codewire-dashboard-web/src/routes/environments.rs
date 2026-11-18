@@ -3102,6 +3102,7 @@ mod tests {
             provisioned_disk_gb: 0,
             sidebar_collapsed: false,
             support_mailto: String::new(),
+            updates_enabled: false,
         };
         let terminal_page = crate::view::TerminalPageView {
             account_id: "account".into(),

@@ -87,6 +87,7 @@ fn admin_audit_template_escapes_sensitive_upstream_fields() {
         provisioned_disk_gb: 0,
         sidebar_collapsed: false,
         support_mailto: String::new(),
+        updates_enabled: false,
     };
     let logs = vec![AuditLogRow {
         occurred: "Just now".into(),
@@ -253,6 +254,33 @@ fn the_support_button_follows_the_configured_address() {
     }
 }
 
+/// The sidebar links Updates, above Documentation, only where the deployment
+/// serves the page.
+#[test]
+fn the_sidebar_links_updates_only_where_the_page_is_served() {
+    for updates_enabled in [true, false] {
+        let view = DashboardView {
+            updates_enabled,
+            ..Default::default()
+        };
+        let body = AdminFeedbackTemplate {
+            view: &view,
+            rows: &[],
+            filter: FeedbackFilter::All,
+            later_page: false,
+            first_page_url: "",
+            next_page_url: "",
+        }
+        .render()
+        .unwrap();
+        let updates = body.find(r#"href="/updates""#);
+        assert_eq!(updates.is_some(), updates_enabled);
+        if let Some(updates) = updates {
+            assert!(updates < body.find(r#"href="/docs">"#).unwrap());
+        }
+    }
+}
+
 /// Both copies of the Sandbox rail (desktop sidebar and mobile drawer) wait
 /// for dashboard.js to refresh the one on screen; htmx itself never loads or
 /// polls either, so a page makes one rail request, not two (#3395).
@@ -295,6 +323,7 @@ fn the_shell_renders_the_collapsed_sidebar_and_both_sidebar_buttons() {
         let view = DashboardView {
             sidebar_collapsed: collapsed,
             support_mailto: String::new(),
+            updates_enabled: false,
             ..Default::default()
         };
         let body = AdminAuditTemplate {
@@ -346,6 +375,7 @@ fn admin_accounts_template_escapes_access_request_fields() {
         provisioned_disk_gb: 0,
         sidebar_collapsed: false,
         support_mailto: String::new(),
+        updates_enabled: false,
     };
     let accounts = vec![AccountAccessView {
         id: "user-safe".into(),
@@ -416,6 +446,7 @@ fn only_an_unverified_account_offers_to_resend_its_verification_email() {
         provisioned_disk_gb: 0,
         sidebar_collapsed: false,
         support_mailto: String::new(),
+        updates_enabled: false,
     };
     let account = |id: &str, email_verified: bool| AccountAccessView {
         id: id.into(),
@@ -487,6 +518,7 @@ fn account_access_offers_suspend_and_unsuspend_behind_a_confirmation() {
         provisioned_disk_gb: 0,
         sidebar_collapsed: false,
         support_mailto: String::new(),
+        updates_enabled: false,
     };
     let account = |id: &str, suspended: bool, own: bool| AccountAccessView {
         id: id.into(),

@@ -862,6 +862,8 @@ pub(crate) struct DashboardView {
     pub(crate) sidebar_collapsed: bool,
     /// The header's Support link (`mailto:`); empty hides the button.
     pub(crate) support_mailto: String,
+    /// This deployment serves the public Updates page, so the sidebar links it.
+    pub(crate) updates_enabled: bool,
 }
 
 impl DashboardView {

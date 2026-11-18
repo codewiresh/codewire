@@ -358,6 +358,16 @@ The dashboard header's Support button writes an email to this address with the s
 |---|---|---|---|
 | `CODEWIRE_SUPPORT_EMAIL` | No | The address the dashboard's Support button writes to. Unset or empty hides the button. Any value that is not one email address stops the dashboard at startup. | `support@example.com` |
 
+## Updates page
+
+The dashboard's public `/updates` page lists the posts of one site in a Liminal CMS, newest first, and the console sidebar links it above Documentation. The dashboard reads `GET /api/v1/posts` with the site's key at most once every five minutes, keeps the last list it read while the CMS is down, and cleans each post's HTML again before showing it. Images load only from `LIMINAL_MEDIA_ORIGIN`, the one image host the page's Content-Security-Policy admits; without it posts show no images. Without both `LIMINAL_ORIGIN` and `LIMINAL_API_KEY` there is no page and no link.
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `LIMINAL_ORIGIN` | No | The CMS origin, `https://` with no path; plain `http://` only on loopback, since the key is sent to it. Set together with `LIMINAL_API_KEY`; one without the other stops the dashboard at startup. | `https://cms.example.com` |
+| `LIMINAL_API_KEY` | No | The site-scoped read key from the site's API keys screen. A secret: deliver it from a Secret, never a ConfigMap. The manifests read it from the `codewire-dashboard-liminal` Secret and `LIMINAL_ORIGIN` from the `codewire-dashboard-public-config` ConfigMap, both optional. | |
+| `LIMINAL_MEDIA_ORIGIN` | No | The origin the CMS serves post images from, `https://` with no path (plain `http://` only on loopback). Image URLs elsewhere lose their `src`. Needs the two values above; from the same ConfigMap. | `https://media.example.com` |
+
 ## Browser origins
 
 Every Codewire service the browser calls is served from the dashboard's own origin, so by default no service answers cross-origin (CORS) requests at all.

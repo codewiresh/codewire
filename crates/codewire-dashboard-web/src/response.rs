@@ -162,6 +162,32 @@ pub(crate) fn render_billing_page(template: impl Template) -> Response {
     response
 }
 
+/// The Updates page shows its CMS posts' images, which the CMS keeps on one
+/// media origin; the post HTML is cleaned to images from that origin, so only
+/// it is added, and only on this page. Any other image host would let a post
+/// count its readers.
+pub(crate) fn render_updates_page(
+    status: StatusCode,
+    template: impl Template,
+    media_origin: Option<&str>,
+) -> Response {
+    let mut response = render_template(status, template);
+    if response.status() == status
+        && let Some(media_origin) = media_origin
+    {
+        let policy = CONTENT_SECURITY_POLICY.replace(
+            "img-src 'self' data:",
+            &format!("img-src 'self' data: {media_origin}"),
+        );
+        if let Ok(policy) = HeaderValue::from_str(&policy) {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_SECURITY_POLICY, policy);
+        }
+    }
+    response
+}
+
 pub(crate) fn render_page_with_connect_origin(
     template: impl Template,
     connect_origin: &str,

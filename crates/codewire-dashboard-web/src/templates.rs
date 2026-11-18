@@ -38,6 +38,13 @@ pub(crate) struct PrivacyTemplate;
 #[template(path = "terms.html")]
 pub(crate) struct TermsTemplate;
 
+/// The public Updates page. `posts` is `None` when Liminal has never answered.
+#[derive(Template)]
+#[template(path = "updates.html")]
+pub(crate) struct UpdatesTemplate {
+    pub(crate) posts: Option<std::sync::Arc<Vec<crate::updates_connect::UpdatePost>>>,
+}
+
 #[derive(Template)]
 #[template(path = "settings-secrets.html")]
 pub(crate) struct SettingsSecretsTemplate<'a> {

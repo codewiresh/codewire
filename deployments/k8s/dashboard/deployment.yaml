@@ -64,6 +64,26 @@ spec:
                   name: codewire-dashboard-public-config
                   key: GITHUB_APP_CLIENT_ID
                   optional: true
+            # The Updates page's CMS (docs/CONFIGURATION.md, "Updates page"):
+            # both unset, the default, leaves it off.
+            - name: LIMINAL_ORIGIN
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-dashboard-public-config
+                  key: LIMINAL_ORIGIN
+                  optional: true
+            - name: LIMINAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-dashboard-liminal
+                  key: LIMINAL_API_KEY
+                  optional: true
+            - name: LIMINAL_MEDIA_ORIGIN
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-dashboard-public-config
+                  key: LIMINAL_MEDIA_ORIGIN
+                  optional: true
           ports:
             - containerPort: 5173
               name: http

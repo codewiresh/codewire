@@ -26,6 +26,7 @@ runs the same commands and holds the result to the same standard.
 | [hosts.md](hosts.md) | Hosts (#3609): enroll a computer, keep its agent connected through proxies, logouts and reboots, the Hosts page, and environments created on a host |
 | [snapshots-and-forks.md](snapshots-and-forks.md) | Disk snapshots and forks: capture, list, inspect and remove a snapshot, and create sandboxes from it, in the cloud and on a local VM (#3046, #4370) |
 | [credentials.md](credentials.md) | Connecting provider credentials with `cw credentials`, the same with `--local` and `--cloud` (#4717): first the Claude sign-in (#4714) |
+| [updates.md](updates.md) | The public Updates page: a Liminal CMS site's posts, newest first, the sidebar link, the CMS down and the page switched off. Written first; every step is not yet observed |
 | [feedback.md](feedback.md) | Feedback (#4061): `cw feedback` signed in and anonymous, the stored row, the hourly limits and the admin page |
 | [sandbox-identity.md](sandbox-identity.md) | Sandbox identity (#4661): each organization's OIDC issuer, its keys and their rotation, and later the tokens sandboxes present to Kubernetes, OpenBao and cloud verifiers |
 | [network-and-egress.md](network-and-egress.md) | Network policies, refusals and agents through the front door (#3997): choosing what an environment may reach, the refusal log, and Claude Code and Codex with stock settings and no token inside. Written first; every step is not yet observed |

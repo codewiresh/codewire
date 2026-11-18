@@ -8,6 +8,7 @@ license = "AGPL-3.0-only"
 description = "Production server-rendered Codewire dashboard adapter."
 
 [dependencies]
+ammonia = { workspace = true }
 anyhow = { workspace = true }
 askama = { workspace = true }
 axum = { workspace = true }

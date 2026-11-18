@@ -149,6 +149,7 @@ pub(super) async fn dashboard_view(
         provisioned_disk_gb: 0,
         sidebar_collapsed: sidebar_collapsed(headers),
         support_mailto: state.support_mailto.clone(),
+        updates_enabled: state.updates.is_some(),
     })
 }
 
@@ -246,6 +247,7 @@ fn shell_from_organizations(
         provisioned_disk_gb: 0,
         sidebar_collapsed: sidebar_collapsed(headers),
         support_mailto: state.support_mailto.clone(),
+        updates_enabled: state.updates.is_some(),
     }
 }
 

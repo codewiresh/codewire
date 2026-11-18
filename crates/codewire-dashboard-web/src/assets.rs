@@ -436,6 +436,22 @@ mod tests {
                 include_str!("../../../packages/codewire-design/reference/fixtures/terms.html"),
                 crate::templates::TermsTemplate.render().unwrap(),
             ),
+            (
+                include_str!("../../../packages/codewire-design/reference/fixtures/updates.html"),
+                crate::templates::UpdatesTemplate {
+                    posts: Some(std::sync::Arc::new(crate::updates_connect::fixture_posts())),
+                }
+                .render()
+                .unwrap(),
+            ),
+            (
+                include_str!(
+                    "../../../packages/codewire-design/reference/fixtures/updates-unavailable.html"
+                ),
+                crate::templates::UpdatesTemplate { posts: None }
+                    .render()
+                    .unwrap(),
+            ),
         ] {
             let prefix = "../../";
             let mut normalized = fixture.to_owned();

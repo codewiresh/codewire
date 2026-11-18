@@ -490,6 +490,7 @@ mod tests {
             github_app_slug: String::new(),
             github_app_client_id: String::new(),
             support_email: None,
+            updates_site: None,
         });
         let cookie = HeaderValue::from_static("codewire.session_token=synthetic");
         let start_with = |n| {
@@ -604,6 +605,7 @@ mod tests {
             github_app_slug: String::new(),
             github_app_client_id: String::new(),
             support_email: None,
+            updates_site: None,
         });
         let cookie = HeaderValue::from_static("codewire.session_token=synthetic");
         for (password, proof) in [
@@ -663,6 +665,7 @@ mod tests {
             github_app_slug: String::new(),
             github_app_client_id: String::new(),
             support_email: None,
+            updates_site: None,
         });
         let built = request(
             &state,

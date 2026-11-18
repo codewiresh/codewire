@@ -1,16 +1,17 @@
 use axum::{
     extract::{Query, State},
     http::{HeaderValue, StatusCode, header},
-    response::Response,
+    response::{IntoResponse as _, Response},
 };
 use serde::Deserialize;
 
 use crate::{
-    response::{render_page, render_template},
+    response::{render_page, render_template, render_updates_page},
     security::HOME_CACHE_CONTROL,
     state::AppState,
     templates::{
         AuthStatusTemplate, HomeTemplate, PricingTemplate, PrivacyTemplate, TermsTemplate,
+        UpdatesTemplate,
     },
     view::AuthQuery,
 };
@@ -47,6 +48,27 @@ pub(super) async fn privacy() -> Response {
 /// The terms of service: public, the same signed in or out.
 pub(super) async fn terms() -> Response {
     render_page(TermsTemplate)
+}
+
+/// What's new: the configured Liminal site's posts, the same signed in or
+/// out. Not found where no site is configured; unavailable while Liminal has
+/// never answered. Like every page but the homepage it is never shared by a
+/// cache (#5054); `updates_connect` keeps the posts for five minutes instead.
+pub(super) async fn updates(State(state): State<AppState>) -> Response {
+    let Some(updates) = state.updates.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let posts = crate::updates_connect::posts(&state).await;
+    let status = if posts.is_some() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    render_updates_page(
+        status,
+        UpdatesTemplate { posts },
+        updates.site().media_origin(),
+    )
 }
 
 pub(super) async fn verify_email(
@@ -144,6 +166,7 @@ mod tests {
             github_app_slug: String::new(),
             github_app_client_id: String::new(),
             support_email: None,
+            updates_site: None,
         }
     }
 
@@ -222,6 +245,7 @@ mod tests {
             github_app_slug: String::new(),
             github_app_client_id: String::new(),
             support_email: None,
+            updates_site: None,
         });
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
@@ -277,3 +301,7 @@ mod tests {
         server.await.unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "updates_tests.rs"]
+mod updates_tests;

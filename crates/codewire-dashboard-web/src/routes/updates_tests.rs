@@ -1,0 +1,203 @@
+//! The public Updates page against a synthetic Liminal that checks the
+//! site's bearer key and can be made to fail.
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+
+use axum::{
+    Json, Router,
+    http::{HeaderMap, StatusCode, header},
+    response::IntoResponse as _,
+    routing::get,
+};
+
+const KEY: &str = "lim_sk_synthetic";
+
+struct TestServer {
+    origin: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn serve(router: Router) -> TestServer {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    TestServer { origin, task }
+}
+
+#[derive(Clone, Default)]
+struct Liminal {
+    failing: Arc<AtomicBool>,
+    reads: Arc<AtomicUsize>,
+}
+
+async fn liminal(state: Liminal) -> TestServer {
+    serve(Router::new().route(
+        "/api/v1/posts",
+        get(move |headers: HeaderMap| async move {
+            state.reads.fetch_add(1, Ordering::SeqCst);
+            if headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                != Some(&format!("Bearer {KEY}"))
+            {
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            if state.failing.load(Ordering::SeqCst) {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            Json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "00000000-0000-4000-8000-000000000001",
+                        "kind": "post",
+                        "title": "Snapshots <and> forks",
+                        "html": "<p>Fork a sandbox.</p><script>alert(1)</script><img src=\"https://media.synthetic.test/fork.png\" alt=\"Fork\"><img src=\"https://tracker.synthetic.test/pixel.gif\">",
+                        "slug": "snapshots",
+                        "excerpt": "",
+                        "published_at": "2026-11-18T09:00:00Z",
+                        "tags": [],
+                        "authors": []
+                    }
+                ],
+                "next_cursor": null
+            }))
+            .into_response()
+        }),
+    ))
+    .await
+}
+
+fn config(updates_origin: Option<&str>, media_origin: Option<&str>) -> crate::Config {
+    crate::Config {
+        listen_addr: "127.0.0.1:0".parse().unwrap(),
+        runtime_mode: crate::RuntimeMode::CurrentThread,
+        public_origin: "https://dashboard.synthetic.invalid".into(),
+        api_origin: "http://127.0.0.1:9".parse().unwrap(),
+        credential_origin: "http://127.0.0.1:9".parse().unwrap(),
+        identity_origin_string: "http://127.0.0.1:9".into(),
+        browser_api_origin: "https://dashboard.synthetic.invalid".into(),
+        billing_origin: "http://127.0.0.1:9".parse().unwrap(),
+        docs_root: std::path::PathBuf::new(),
+        confidential_storage_enabled: false,
+        turnstile_site_key: String::new(),
+        github_app_slug: String::new(),
+        github_app_client_id: String::new(),
+        support_email: None,
+        updates_site: updates_origin.map(|origin| {
+            crate::updates_connect::LiminalSite::new(
+                origin.to_owned(),
+                KEY.to_owned(),
+                media_origin.map(str::to_owned),
+            )
+        }),
+    }
+}
+
+async fn get_updates(dashboard: &TestServer) -> reqwest::Response {
+    reqwest::Client::builder()
+        .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
+        .build()
+        .unwrap()
+        .get(format!("{}/updates", dashboard.origin))
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_page_shows_cleaned_posts_and_keeps_them_through_a_liminal_failure() {
+    let state = Liminal::default();
+    let upstream = liminal(state.clone()).await;
+    let dashboard = serve(crate::app(config(
+        Some(&upstream.origin),
+        Some("https://media.synthetic.test"),
+    )))
+    .await;
+
+    let response = get_updates(&dashboard).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers()[header::CACHE_CONTROL]
+            .to_str()
+            .unwrap()
+            .split(',')
+            .any(|directive| directive.trim() == "no-store")
+    );
+    let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        policy.contains("img-src 'self' data: https://media.synthetic.test;"),
+        "{policy}"
+    );
+    assert!(policy.contains("script-src 'self';"), "{policy}");
+    let body = response.text().await.unwrap();
+    assert!(body.contains(r#"<h2 id="update-snapshots">Snapshots &#60;and&#62; forks</h2>"#));
+    assert!(body.contains(r#"<time datetime="2026-11-18">Nov 18, 2026</time>"#));
+    assert!(body.contains("<p>Fork a sandbox.</p>"));
+    assert!(!body.contains("alert(1)"));
+    assert!(body.contains(r#"<img src="https://media.synthetic.test/fork.png" alt="Fork">"#));
+    assert!(!body.contains("tracker.synthetic.test"));
+
+    state.failing.store(true, Ordering::SeqCst);
+    let response = get_updates(&dashboard).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.text().await.unwrap().contains("Fork a sandbox."));
+    assert_eq!(state.reads.load(Ordering::SeqCst), 1, "read once per TTL");
+}
+
+#[tokio::test]
+async fn the_page_says_it_is_unavailable_until_liminal_first_answers() {
+    let state = Liminal::default();
+    state.failing.store(true, Ordering::SeqCst);
+    let upstream = liminal(state.clone()).await;
+    let dashboard = serve(crate::app(config(Some(&upstream.origin), None))).await;
+
+    let response = get_updates(&dashboard).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(policy.contains("img-src 'self' data:;"), "{policy}");
+    assert!(
+        response.headers()[header::CACHE_CONTROL]
+            .to_str()
+            .unwrap()
+            .contains("no-store")
+    );
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .contains("Updates can’t be loaded right now.")
+    );
+
+    let again = get_updates(&dashboard).await;
+    assert_eq!(again.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        state.reads.load(Ordering::SeqCst),
+        1,
+        "a failed read is retried only after the back-off"
+    );
+}
+
+#[tokio::test]
+async fn without_a_liminal_site_there_is_no_page() {
+    let dashboard = serve(crate::app(config(None, None))).await;
+    assert_eq!(
+        get_updates(&dashboard).await.status(),
+        StatusCode::NOT_FOUND
+    );
+}

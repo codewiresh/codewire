@@ -53,6 +53,10 @@ pub struct Config {
     /// `CODEWIRE_SUPPORT_EMAIL`; unset hides the button, since a self-hosted
     /// deployment without its own support address has nowhere to send it.
     pub(crate) support_email: Option<String>,
+    /// The Liminal site the public Updates page reads, from `LIMINAL_ORIGIN`
+    /// and `LIMINAL_API_KEY`; both unset turns the page and its sidebar link
+    /// off, so a self-hosted deployment points at no one else's CMS.
+    pub(crate) updates_site: Option<crate::updates_connect::LiminalSite>,
 }
 
 impl Config {
@@ -115,6 +119,11 @@ impl Config {
                 bail!("CODEWIRE_SUPPORT_EMAIL must be valid UTF-8")
             }
         };
+        let updates_site = parse_updates_site(
+            optional_env("LIMINAL_ORIGIN")?,
+            optional_env("LIMINAL_API_KEY")?,
+            optional_env("LIMINAL_MEDIA_ORIGIN")?,
+        )?;
 
         Ok(Self {
             listen_addr,
@@ -131,6 +140,7 @@ impl Config {
             github_app_slug,
             github_app_client_id,
             support_email,
+            updates_site,
         })
     }
 }
@@ -151,6 +161,62 @@ fn parse_support_email(value: &str) -> anyhow::Result<Option<String>> {
         bail!("CODEWIRE_SUPPORT_EMAIL must be one email address, such as support@example.com");
     }
     Ok(Some(value.to_owned()))
+}
+
+/// An environment variable's value, `None` when it is unset or blank.
+fn optional_env(name: &str) -> anyhow::Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => bail!("{name} must be valid UTF-8"),
+    }
+}
+
+/// Both values or neither: one without the other is a half-configured
+/// deployment, which refuses to start rather than hide the page silently. The
+/// media origin is optional, and only with a site.
+fn parse_updates_site(
+    origin: Option<String>,
+    api_key: Option<String>,
+    media_origin: Option<String>,
+) -> anyhow::Result<Option<crate::updates_connect::LiminalSite>> {
+    let (origin, api_key) = match (origin, api_key) {
+        (None, None) if media_origin.is_none() => return Ok(None),
+        (None, None) => bail!("LIMINAL_MEDIA_ORIGIN needs LIMINAL_ORIGIN and LIMINAL_API_KEY"),
+        (Some(origin), Some(api_key)) => (origin, api_key),
+        _ => bail!("LIMINAL_ORIGIN and LIMINAL_API_KEY are set together or not at all"),
+    };
+    let media_origin = media_origin
+        .map(|media_origin| parse_liminal_origin("LIMINAL_MEDIA_ORIGIN", media_origin))
+        .transpose()?;
+    let origin = parse_liminal_origin("LIMINAL_ORIGIN", origin)?;
+    let api_key = api_key.trim().to_owned();
+    if api_key.len() > 512 || !api_key.bytes().all(|byte| byte.is_ascii_graphic()) {
+        bail!("LIMINAL_API_KEY must be one Liminal API key");
+    }
+    Ok(Some(crate::updates_connect::LiminalSite::new(
+        origin,
+        api_key,
+        media_origin,
+    )))
+}
+
+/// An HTTPS origin: the dashboard sends the site's key to it, so plain HTTP
+/// is refused except on loopback, where it never leaves the machine.
+fn parse_liminal_origin(label: &str, raw: String) -> anyhow::Result<String> {
+    let (_, origin) = parse_origin(label, raw)?;
+    let url = Url::parse(&origin).context("a parsed origin is a URL")?;
+    let loopback = match url.host() {
+        Some(url::Host::Domain(host)) => host == "localhost",
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    };
+    if url.scheme() != "https" && !loopback {
+        bail!("{label} must be an https:// origin");
+    }
+    Ok(origin)
 }
 
 fn parse_github_app_client_id(value: String) -> anyhow::Result<String> {
@@ -223,6 +289,84 @@ fn parse_origin(label: &str, raw: String) -> anyhow::Result<(http::Uri, String)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_updates_site_needs_both_its_origin_and_its_key() {
+        assert!(parse_updates_site(None, None, None).unwrap().is_none());
+        let site = parse_updates_site(
+            Some("https://cms.example.com/".to_owned()),
+            Some(" lim_sk_test ".to_owned()),
+            Some("https://media.example.com/".to_owned()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(site.posts_url(), "https://cms.example.com/api/v1/posts");
+        assert_eq!(site.media_origin(), Some("https://media.example.com"));
+        assert!(!format!("{site:?}").contains("lim_sk_test"));
+        let owned = |value: Option<&str>| value.map(str::to_owned);
+        for (origin, api_key, media_origin) in [
+            (Some("https://cms.example.com"), None, None),
+            (None, Some("lim_sk_test"), None),
+            (None, None, Some("https://media.example.com")),
+            (
+                Some("https://cms.example.com/blog"),
+                Some("lim_sk_test"),
+                None,
+            ),
+            (Some("https://cms.example.com"), Some("lim sk"), None),
+            (
+                Some("https://cms.example.com"),
+                Some("lim_sk_test"),
+                Some("https://media.example.com/images"),
+            ),
+            (Some("http://cms.example.com"), Some("lim_sk_test"), None),
+            (
+                Some("https://cms.example.com"),
+                Some("lim_sk_test"),
+                Some("http://media.example.com"),
+            ),
+        ] {
+            assert!(
+                parse_updates_site(owned(origin), owned(api_key), owned(media_origin)).is_err(),
+                "{origin:?} {api_key:?} {media_origin:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_http_is_admitted_only_on_loopback() {
+        for origin in [
+            "http://127.0.0.1:18471",
+            "http://localhost:3000",
+            "http://[::1]:3000",
+        ] {
+            assert!(
+                parse_updates_site(
+                    Some(origin.to_owned()),
+                    Some("lim_sk_test".to_owned()),
+                    None
+                )
+                .unwrap()
+                .is_some(),
+                "{origin}"
+            );
+        }
+        for origin in [
+            "http://cms.example.com",
+            "http://10.0.0.1",
+            "http://localhost.example.com",
+        ] {
+            assert!(
+                parse_updates_site(
+                    Some(origin.to_owned()),
+                    Some("lim_sk_test".to_owned()),
+                    None
+                )
+                .is_err(),
+                "{origin}"
+            );
+        }
+    }
 
     #[test]
     fn the_support_email_is_one_address_or_nothing() {

@@ -500,9 +500,14 @@ ul.body { margin: 0; padding: 0; list-style: none; row-gap: var(--gap); }
 .legal ul { display: flex; gap: var(--space-xl); margin: 0; padding: 0; list-style: none; }
 .legal a[aria-current="page"] { color: var(--ink); }
 .doc-foot { padding-block: calc(var(--base) * 2) calc(var(--base) * 4); box-shadow: var(--line-top); }
+/* Updates uses the same rows, one per post: its title and date share the heading column, and an image in its text
+   keeps to the measure. */
+.update-head { grid-column: 1 / 4; }
+.update-head p { margin: var(--base) 0 0; }
+.clause-body img { max-width: 100%; height: auto; }
 
 @media (max-width: 900px) {
-  .doc-intro p, .clause h2, .clause-body { grid-column: 1 / -1; }
+  .doc-intro p, .clause h2, .clause-body, .update-head { grid-column: 1 / -1; }
 }
 
 .cw-handoff-intro { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-m) var(--space-l); }

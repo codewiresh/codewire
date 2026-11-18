@@ -41,6 +41,7 @@ mod templates;
 mod test_support;
 mod time_display;
 mod transport;
+mod updates_connect;
 mod view;
 
 use axum::Router;
