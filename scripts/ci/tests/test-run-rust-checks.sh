@@ -40,6 +40,16 @@ set -euo pipefail
 name="$1"
 echo "$name target=${CARGO_TARGET_DIR:-} desktop=${CODEWIRE_DESKTOP_CARGO_TARGET_DIR:-} zigbuild=${CARGO_ZIGBUILD_CACHE_DIR:-} selection=${VERIFICATION_SELECTION:-}" >> "$CHECK_STATE/env"
 echo "output of $name"
+# With STARTS=N, a check ends only once N checks have recorded their start, so
+# checks the script runs at once all start before any ends however slow the
+# runner is, and checks run one after another never do. The wait is a hang
+# guard, not a speed expectation.
+if [ -n "${STARTS:-}" ]; then
+  for _ in $(seq 600); do
+    [ "$(grep -c ' start ' "$CHECK_STATE/times")" -ge "$STARTS" ] && break
+    sleep 0.1
+  done
+fi
 if [ "$name" = compile ]; then sleep "${COMPILE_SLEEP:-3}"; else sleep "${CHECK_SLEEP:-1}"; fi
 # With BARRIER (#4184), compile ends only once every other check's status is
 # on disk in the script's log folder, and keeps a copy of each as it stood
@@ -110,18 +120,19 @@ ran() { cut -d' ' -f1 "$work/state/times" | sort -u | tr '\n' ' '; }
 printed() { sed -nE "s/^\[rust-checks\] (.*): start$/\1/p" "$work/out" | tr '\n' '|'; }
 
 # Every check selected: all five run, and every one starts before any ends.
+# The order is the order the records were appended, not their times, so a
+# busy runner can't make checks that ran at once look sequential (#3877,
+# #4051, #4192 widened time windows here; STARTS removes the window).
 checks '|rust|transport|' BUILD_ONCE_LOCAL_VMM=true DESKTOP_PACKAGE_SELECTED=true CW_PACKAGE_SELECTED=true \
-  BARRIER=1
+  BARRIER=1 STARTS=5
 [ "$rc" -eq 0 ] || fail "every check passed but the script failed: $(cat "$work/out")"
 [ "$(ran)" = 'compile cw-darwin desktop features local-vmm ' ] || fail "not every check ran: $(ran)"
-last_start=0 first_end=''
 for check in compile features local-vmm desktop cw-darwin; do
-  started="$(at "$check" start)" ended="$(at "$check" end)"
-  [ -n "$started" ] && [ -n "$ended" ] || fail "the $check check did not run to its end"
-  (( started > last_start )) && last_start="$started"
-  if [ -z "$first_end" ] || (( ended < first_end )); then first_end="$ended"; fi
+  [ -n "$(at "$check" start)" ] && [ -n "$(at "$check" end)" ] || fail "the $check check did not run to its end"
 done
-(( last_start < first_end )) || fail 'the checks ran one after another: a check ended before another started'
+last_start="$(grep -n ' start ' "$work/state/times" | tail -1 | cut -d: -f1)"
+first_end="$(grep -n ' end ' "$work/state/times" | head -1 | cut -d: -f1)"
+(( last_start < first_end )) || fail "the checks ran one after another: a check ended before another started: $(cat "$work/state/times")"
 # Each check in its own target folder, each Darwin check with its own
 # cargo-zigbuild wrapper folder.
 for expected in \
