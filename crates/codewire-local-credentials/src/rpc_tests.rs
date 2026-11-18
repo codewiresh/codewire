@@ -2623,6 +2623,241 @@ async fn move_default_away(client: &mut LocalCredentialClient) {
     );
 }
 
+/// Each lease the test executor took: credential, generation, material.
+type Leases = Arc<std::sync::Mutex<Vec<(String, u64, Vec<u8>)>>>;
+
+/// The provider revocation executor, played in process (#4717): it leases
+/// over the inherited stream as the real child does, reads the leased
+/// generation from the store, records it, and reports `answer`.
+struct TestRevocationSpawner {
+    store: TestProtectedStore,
+    answer: Option<crate::control::v1::ProviderRevocation>,
+    leased: Leases,
+    spawned: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl crate::LocalRevocationProcessSpawner for TestRevocationSpawner {
+    fn spawn(
+        &self,
+        config: &crate::LocalRevocationProcessConfig,
+        authority_peer: std::os::unix::net::UnixStream,
+    ) -> Result<tokio::process::Child, crate::LocalRevocationSpawnError> {
+        self.spawned
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let Some(answer) = self.answer else {
+            return Err(crate::LocalRevocationSpawnError::Spawn);
+        };
+        authority_peer
+            .set_nonblocking(true)
+            .map_err(|_| crate::LocalRevocationSpawnError::Spawn)?;
+        let stream = UnixStream::from_std(authority_peer)
+            .map_err(|_| crate::LocalRevocationSpawnError::Spawn)?;
+        let store = self.store.clone();
+        let leased = Arc::clone(&self.leased);
+        let request_id = config.request_id;
+        tokio::spawn(async move {
+            let Ok(mut client) =
+                crate::LocalRevocationLeaseClient::connect(stream, request_id).await
+            else {
+                return;
+            };
+            if client.report_ready().await.is_err() {
+                return;
+            }
+            let Ok((credential_id, generation)) = client.lease().await else {
+                return;
+            };
+            let material = crate::read_leased_material(&store, &credential_id, generation)
+                .map(|value| value.expose_secret().to_vec())
+                .unwrap_or_default();
+            leased
+                .lock()
+                .unwrap()
+                .push((credential_id, generation, material));
+            let _ = client.report(answer).await;
+        });
+        let mut child = tokio::process::Command::new("/bin/sh");
+        child
+            .arg("-c")
+            .arg("sleep 30")
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        child
+            .spawn()
+            .map_err(|_| crate::LocalRevocationSpawnError::Spawn)
+    }
+}
+
+fn revocation_spawner(
+    store: &TestProtectedStore,
+    answer: Option<crate::control::v1::ProviderRevocation>,
+) -> Arc<TestRevocationSpawner> {
+    Arc::new(TestRevocationSpawner {
+        store: store.clone(),
+        answer,
+        leased: Arc::default(),
+        spawned: Arc::default(),
+    })
+}
+
+async fn start_server_with_revocation_spawner(
+    config: AuthorityRuntimeConfig,
+    store: TestProtectedStore,
+    spawner: Arc<TestRevocationSpawner>,
+) -> (
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<(), AuthorityRuntimeError>>,
+) {
+    start_listening_authority(
+        config,
+        store,
+        codewire_access::builtin_provider_catalog(),
+        crate::service::AuthorityRuntimeAdapters {
+            revocation_spawner: Some(spawner),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+fn confirmed() -> crate::control::v1::ProviderRevocation {
+    crate::control::v1::ProviderRevocation {
+        outcome: crate::control::v1::ProviderRevocationOutcome::Confirmed.into(),
+        failure: crate::control::v1::ProviderRevocationFailure::Unspecified.into(),
+        http_status: 0,
+    }
+}
+
+async fn add_revocable(
+    client: &mut LocalCredentialClient,
+    provider_name: &str,
+    kind: CredentialAuthKind,
+    name: &str,
+) -> CredentialRecord {
+    client
+        .add_credential(
+            NewCredential {
+                provider: provider(provider_name),
+                authentication_kind: kind,
+                display_name: name.into(),
+                account_hint: None,
+                expires_at_unix: Some(4_102_444_800),
+            },
+            ProtectedValue::from_slice(FIRST_MATERIAL).unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_codex_revoke_asks_its_provider_through_one_executor_of_the_revoked_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let spawner = revocation_spawner(&store, Some(confirmed()));
+    let (shutdown, server) =
+        start_server_with_revocation_spawner(config.clone(), store, Arc::clone(&spawner)).await;
+    let mut client = connect_when_ready(&config).await;
+    let credential = add_revocable(
+        &mut client,
+        "openai",
+        CredentialAuthKind::OAuth,
+        "codex-revoked",
+    )
+    .await;
+    let (revoked, answer) = client
+        .revoke_credential_at_provider(&credential.metadata.id)
+        .await
+        .unwrap();
+    assert_eq!(revoked.metadata.status, CredentialStatus::Revoked);
+    assert_eq!(answer, Some(confirmed()));
+    let leased = spawner.leased.lock().unwrap().clone();
+    assert_eq!(leased.len(), 1, "one executor, one lease");
+    assert_eq!(leased[0].0, credential.metadata.id.as_str());
+    assert_eq!(
+        leased[0].2, FIRST_MATERIAL,
+        "the revoked generation is still readable"
+    );
+    let _ = shutdown.send(());
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn an_executor_that_cannot_start_is_reported_as_not_read_and_the_revoke_stands() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let spawner = revocation_spawner(&store, None);
+    let (shutdown, server) =
+        start_server_with_revocation_spawner(config.clone(), store, Arc::clone(&spawner)).await;
+    let mut client = connect_when_ready(&config).await;
+    let credential = add_revocable(
+        &mut client,
+        "openai",
+        CredentialAuthKind::OAuth,
+        "codex-no-executor",
+    )
+    .await;
+    let (revoked, answer) = client
+        .revoke_credential_at_provider(&credential.metadata.id)
+        .await
+        .unwrap();
+    assert_eq!(revoked.metadata.status, CredentialStatus::Revoked);
+    let answer = answer.unwrap();
+    assert_eq!(
+        answer.outcome,
+        i32::from(crate::control::v1::ProviderRevocationOutcome::Failed)
+    );
+    assert_eq!(
+        answer.failure,
+        i32::from(crate::control::v1::ProviderRevocationFailure::NotRead)
+    );
+    let _ = shutdown.send(());
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_provider_without_revocation_is_not_asked_and_a_repeat_reports_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let spawner = revocation_spawner(&store, Some(confirmed()));
+    let (shutdown, server) =
+        start_server_with_revocation_spawner(config.clone(), store, Arc::clone(&spawner)).await;
+    let mut client = connect_when_ready(&config).await;
+    let key = add_revocable(
+        &mut client,
+        "anthropic",
+        CredentialAuthKind::ApiKey,
+        "anthropic-key",
+    )
+    .await;
+    let (_, answer) = client
+        .revoke_credential_at_provider(&key.metadata.id)
+        .await
+        .unwrap();
+    let answer = answer.unwrap();
+    assert_eq!(
+        answer.outcome,
+        i32::from(crate::control::v1::ProviderRevocationOutcome::NotAvailable)
+    );
+    let (_, again) = client
+        .revoke_credential_at_provider(&key.metadata.id)
+        .await
+        .unwrap();
+    assert_eq!(again, None, "a revoked credential is not asked again");
+    assert_eq!(
+        spawner.spawned.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no executor for a provider without revocation"
+    );
+    let _ = shutdown.send(());
+    server.await.unwrap().unwrap();
+}
+
 /// An authority tells its clients the runner protocol its brokers accept,
 /// which is its spawner's to say (#5238): a client whose runner speaks
 /// another protocol, or one that gets no answer, takes the authority for

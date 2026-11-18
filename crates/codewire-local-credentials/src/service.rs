@@ -64,11 +64,13 @@ const BROKER_STABLE_RUNTIME: std::time::Duration = std::time::Duration::from_sec
 const REPOSITORY_STREAM_CHUNK_BYTES: usize = 48 * 1024;
 
 mod broker_child;
+mod credential_lifecycle;
 mod renewal;
 use renewal::BrokerRenewal;
 mod grants;
 mod placeholders;
 mod profiles;
+mod provider_revocation;
 use profiles::profile_id;
 mod repository;
 mod ssh_enrollment;
@@ -98,22 +100,10 @@ struct AuthorityRpc<S: ProtectedStore> {
     authority: Arc<LocalCredentialAuthority<S>>,
     brokers: Arc<BrokerProcessManager<S>>,
     repositories: Arc<RepositoryProcessManager<S>>,
+    revocations: Arc<provider_revocation::ProviderRevocations<S>>,
     broker_audit: Arc<BrokerLeaseAuditLog>,
     shutdown: watch::Sender<bool>,
     ssh_enrollment_workers: SshEnrollmentWorkers,
-}
-
-impl<S: ProtectedStore> Clone for AuthorityRpc<S> {
-    fn clone(&self) -> Self {
-        Self {
-            authority: Arc::clone(&self.authority),
-            brokers: Arc::clone(&self.brokers),
-            repositories: Arc::clone(&self.repositories),
-            broker_audit: Arc::clone(&self.broker_audit),
-            shutdown: self.shutdown.clone(),
-            ssh_enrollment_workers: self.ssh_enrollment_workers.clone(),
-        }
-    }
 }
 
 pub async fn serve_local_credential_authority<S: ProtectedStore + 'static>(
@@ -132,6 +122,7 @@ pub async fn serve_os_local_credential_authority_with_process_spawners(
     store: AuthorityProtectedStore,
     broker_spawner: Arc<dyn LocalBrokerProcessSpawner>,
     repository_spawner: Arc<dyn LocalRepositoryProcessSpawner>,
+    revocation_spawner: Arc<dyn crate::LocalRevocationProcessSpawner>,
     ssh_signer: Arc<dyn LocalSshSigner>,
     platform_connector: Arc<dyn crate::PlatformCredentialConnector>,
 ) -> Result<(), AuthorityRuntimeError> {
@@ -142,6 +133,7 @@ pub async fn serve_os_local_credential_authority_with_process_spawners(
         AuthorityRuntimeAdapters {
             broker_spawner: Some(broker_spawner),
             repository_spawner: Some(repository_spawner),
+            revocation_spawner: Some(revocation_spawner),
             ssh_signer: Some(ssh_signer),
             platform_connector: Some(platform_connector),
             #[cfg(test)]
@@ -268,6 +260,7 @@ where
 pub(crate) struct AuthorityRuntimeAdapters {
     pub broker_spawner: Option<Arc<dyn LocalBrokerProcessSpawner>>,
     pub repository_spawner: Option<Arc<dyn LocalRepositoryProcessSpawner>>,
+    pub revocation_spawner: Option<Arc<dyn crate::LocalRevocationProcessSpawner>>,
     pub ssh_signer: Option<Arc<dyn LocalSshSigner>>,
     pub platform_connector: Option<Arc<dyn crate::PlatformCredentialConnector>>,
     /// Tests learn here that the authority's socket is bound and listening,
@@ -305,6 +298,7 @@ where
     let AuthorityRuntimeAdapters {
         broker_spawner,
         repository_spawner,
+        revocation_spawner,
         ssh_signer,
         platform_connector,
         #[cfg(test)]
@@ -342,6 +336,8 @@ where
         platform_connector.clone(),
         Arc::new(BrokerLog::in_root(&authority_root)),
     ));
+    let revocations =
+        provider_revocation::ProviderRevocations::start(&authority, revocation_spawner);
     let repositories = Arc::new(RepositoryProcessManager::new(
         Arc::clone(&authority),
         repository_spawner,
@@ -356,6 +352,7 @@ where
         authority,
         brokers: Arc::clone(&brokers),
         repositories: Arc::clone(&repositories),
+        revocations,
         broker_audit,
         shutdown: shutdown_tx,
         ssh_enrollment_workers: ssh_enrollment_workers.clone(),
@@ -1228,20 +1225,21 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         &self,
         request: Request<v1::CredentialSelector>,
     ) -> Result<Response<v1::Credential>, Status> {
-        let id = credential_id(request.into_inner().credential_id)?;
-        let authority = Arc::clone(&self.authority);
-        let record = run_blocking(move || authority.revoke_credential(&id)).await?;
-        Ok(Response::new(credential_to_proto(record)))
+        credential_lifecycle::revoke(&self.authority, request.into_inner()).await
     }
 
     async fn delete_credential(
         &self,
         request: Request<v1::CredentialSelector>,
     ) -> Result<Response<v1::DeleteCredentialResponse>, Status> {
-        let id = credential_id(request.into_inner().credential_id)?;
-        let authority = Arc::clone(&self.authority);
-        run_blocking(move || authority.delete_credential(&id)).await?;
-        Ok(Response::new(v1::DeleteCredentialResponse {}))
+        credential_lifecycle::delete(&self.authority, request.into_inner()).await
+    }
+
+    async fn revoke_credential_at_provider(
+        &self,
+        request: Request<v1::CredentialSelector>,
+    ) -> Result<Response<v1::RevokeCredentialAtProviderResponse>, Status> {
+        credential_lifecycle::revoke_at_provider(&self.revocations, request.into_inner()).await
     }
 
     async fn create_secret_project(

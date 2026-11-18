@@ -185,6 +185,7 @@ fn main() {
                 "__local-credential-broker"
                     | "__local-credential-broker-confinement-probe"
                     | "__local-git-repository-executor"
+                    | "__local-provider-revocation-executor"
                     | "__local-git-credential-helper"
             )
         )
@@ -197,6 +198,7 @@ fn main() {
             Some(
                 "__local-credential-broker"
                     | "__local-git-repository-executor"
+                    | "__local-provider-revocation-executor"
                     | "__local-git-credential-helper"
             )
         )

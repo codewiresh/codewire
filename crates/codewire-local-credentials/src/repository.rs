@@ -1032,9 +1032,9 @@ where
     }
 }
 
-struct ObservedRepositoryStream {
-    inner: UnixStream,
-    closed: Option<oneshot::Sender<()>>,
+pub(crate) struct ObservedRepositoryStream {
+    pub(crate) inner: UnixStream,
+    pub(crate) closed: Option<oneshot::Sender<()>>,
 }
 
 impl Drop for ObservedRepositoryStream {

@@ -937,19 +937,28 @@ async fn revoke_credential(
     )? {
         return Ok(());
     }
-    let revoked = client
-        .revoke_credential(&record.metadata.id)
-        .await
-        .context("revoke local credential")?;
+    // An authority that serves it also asks the provider (#4717).
+    let (revoked, answer) = if delete::authority_asks_provider(client.info().protocol_version) {
+        let (revoked, reported) = client
+            .revoke_credential_at_provider(&record.metadata.id)
+            .await
+            .context("revoke local credential")?;
+        (revoked, delete::provider_answer(reported.as_ref()))
+    } else {
+        let revoked = client
+            .revoke_credential(&record.metadata.id)
+            .await
+            .context("revoke local credential")?;
+        (revoked, output::ProviderAnswer::NotAsked)
+    };
     if matches!(args.output, OutputFormat::Json) {
         return print_credentials(&[revoked], args.output);
     }
     output::print_done(&output::revoked("local", name));
-    // The local placement does not ask a provider yet (#4717 C6, part b2).
     if let Some(line) = output::at_provider(
         record.metadata.provider.as_str(),
         output::authentication_kind_label(record.metadata.authentication_kind),
-        output::ProviderAnswer::NotAsked,
+        answer,
     ) {
         eprintln!("{line}");
     }

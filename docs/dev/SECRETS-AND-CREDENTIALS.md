@@ -207,8 +207,10 @@ profile, and `set github` is refused.
 The first profile `set` creates the profile if absent. Enrollment does not
 silently select an identity. Profiles retain immutable revisions and current
 user/organization authorization. Editing a profile does not advance existing
-environment bindings. Codewire revocation stops Codewire use; it is not a
-promise of provider-side logout.
+environment bindings. Codewire revocation stops Codewire use at once. Where
+the provider offers a revocation Codewire can ask for, revoking also asks it,
+and `cw` reports the answer ([Revoking at the provider](#revoking-at-the-provider));
+it is never a promise of provider-side logout.
 
 For CLI OAuth reconnect, repeat `connect codex|github|claude --name NAME`. The GitHub
 CLI command uses the Codewire GitHub App's device flow for a terminal or
@@ -1161,6 +1163,62 @@ platform broker; application values reach only the authorized launcher. There
 is no Pod impersonation and no persistent copy of platform provider material.
 The platform trusts authenticated host assertions about local VM identity;
 this is not independent VM attestation.
+
+### Revoking at the provider
+
+Codewire's own revoke commits first. Only then is the provider asked, once,
+and its answer is only reported: `cw` says a provider revoked something only
+when it confirmed it (#4717). Nothing retries.
+
+- **What can be asked:** a Codex (ChatGPT) sign-in, at OpenAI's RFC 7009
+  endpoint, in both placements. A GitHub App connection's access token, in the
+  platform only, because only the platform holds the App's secret. GitHub keeps
+  the user's authorization of Codewire until they revoke it in GitHub's
+  settings, and `cw` names that page. API keys and a pre-App raw GitHub token
+  have no revocation Codewire can ask for: they stay valid at the provider
+  until revoked there.
+- **Platform:** the credential service reads the token, publishes the
+  revoke, then asks, over one-route transports (`CodexTokenRevocation`,
+  `GitHubAppTokenRevocation`) with an 8 s bound. The revoke response carries
+  `provider_revocation`.
+- **Local:** the credential authority makes no request. For an active Codex
+  sign-in it starts one confined one-shot executor,
+  `cw __local-provider-revocation-executor`, after the revoke has committed:
+  - **How it starts:** confined as the repository executor is, with an empty
+    environment, only its lease stream on FD 3, not dumpable, and a
+    parent-death signal on Linux or the process-group drain on macOS. It
+    checks that setup at entry.
+  - **What it holds:** one lease, the revoked credential's ID and material
+    generation (a revoked credential keeps its material until delete).
+  - **Its store reach:** it opens the OS store itself, Secret Service on
+    Linux or the selected backend on macOS, as the GitHub repository executor
+    does, and reads only that generation's entry. It does not receive the
+    value over FD 3 yet; #4984 passes it there for both executors.
+  - **Its one route:** it asks OpenAI over a transport that admits only
+    `CodexTokenRevocation`.
+  - **What it reports:** only the outcome class and the HTTP status. The token
+    is never sent back, printed or kept.
+  - **Its bound:** the authority stops and reaps it within 20 s, whatever it
+    reported, and an executor that never reports is NOT_READ. It needs no
+    directory, because it writes nothing.
+  - **A locked store:** on Linux, reading a locked Secret Service item asks
+    the desktop to unlock it. The executor waits for that, and if nobody
+    unlocks it, the 20 s bound ends the run with NOT_READ.
+  - **Older authorities:** the CLI asks only an authority that serves
+    `AuthorityFeature::ProviderRevocation`. An older one revokes without
+    asking, and `cw` says the provider wasn't asked.
+- **A refresh in flight:** a refresh exchange may already have rotated the
+  stored token, and OpenAI answers 200 about a token it no longer knows. The
+  local authority reads the credential's refresh marker under the same
+  connection hold as the revoke. If a refresh had started, no executor runs,
+  and the answer is NOT_READ.
+- **The synthetic transport:** under the non-shipping
+  `local-broker-synthetic-smoke` feature, the executor answers in process. The
+  release `cw` is built from `codewire-cli-bin`, which has no default features,
+  with no `--features` (`scripts/ci/release/package-cw-release.sh`). Release
+  admission refuses a `cw` built with the feature: `cw_release.py`'s
+  `check_build_inputs` refuses a dep-info that lists the feature's module
+  (#4986).
 
 ### Transparent provider routes
 

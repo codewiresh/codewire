@@ -27,7 +27,8 @@ use std::process::{ExitStatus, Stdio};
 use codewire_local_credentials::{
     AuthorityProtectedStore, LocalBrokerProcessConfig, LocalBrokerProcessSpawner,
     LocalBrokerSpawnError, LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner,
-    LocalRepositorySpawnError, LocalRepositoryTransport, ProviderLookup, SpawnedAuthority,
+    LocalRepositorySpawnError, LocalRepositoryTransport, LocalRevocationProcessConfig,
+    LocalRevocationProcessSpawner, LocalRevocationSpawnError, ProviderLookup, SpawnedAuthority,
 };
 
 use super::super::credential_darwin::{admit_runtime_git, child_store_arguments};
@@ -394,6 +395,42 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
         command
             .spawn()
             .map_err(|_| LocalRepositorySpawnError::Spawn)
+    }
+}
+
+/// The one-shot provider revocation executor (#4717): it opens the
+/// authority's store as the other children do and starts no descendant, so
+/// its stderr is not kept.
+impl LocalRevocationProcessSpawner for CwLocalCredentialProcessSpawner {
+    fn spawn(
+        &self,
+        config: &LocalRevocationProcessConfig,
+        authority_peer: std::os::unix::net::UnixStream,
+    ) -> Result<tokio::process::Child, LocalRevocationSpawnError> {
+        let authority_fd = authority_peer.as_raw_fd();
+        if authority_fd < 3 {
+            return Err(LocalRevocationSpawnError::InvalidConfiguration);
+        }
+        let store_arguments = child_store_arguments(&self.store, &self.authority_root)
+            .ok_or(LocalRevocationSpawnError::InvalidConfiguration)?;
+        let mut command = tokio::process::Command::new(&self.executable);
+        command
+            .arg("__local-provider-revocation-executor")
+            .arg("--authority-fd")
+            .arg("3")
+            .arg("--request-id")
+            .arg(config.request_id.to_string())
+            .args(store_arguments)
+            .env_clear()
+            .current_dir("/")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        bind_child_to_authority(&mut command, authority_fd);
+        command
+            .spawn()
+            .map_err(|_| LocalRevocationSpawnError::Spawn)
     }
 }
 

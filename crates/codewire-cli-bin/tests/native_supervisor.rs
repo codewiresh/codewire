@@ -69,6 +69,7 @@ fn local_vm_roles_are_hidden_and_other_host_effect_entrypoints_stay_unavailable(
         "__local-credential-authority",
         "__local-credential-broker",
         "__local-git-repository-executor",
+        "__local-provider-revocation-executor",
         "__local-git-credential-helper",
         "__native-runner",
         "__native-network-worker",

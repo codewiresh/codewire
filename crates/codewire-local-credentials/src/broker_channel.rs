@@ -2466,6 +2466,115 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn a_revoke_during_a_started_refresh_offers_no_generation_to_ask_about() {
+        // #4717: the started exchange may already have rotated the stored
+        // token, so a provider revocation must not ask about it.
+        let temp = tempfile::tempdir().unwrap();
+        let store = TestProtectedStore::default();
+        let authority = Arc::new(
+            LocalCredentialAuthority::open(
+                &temp.path().join("authority"),
+                store.clone(),
+                catalog_with_authentication(CredentialAuthKind::OAuth),
+            )
+            .unwrap(),
+        );
+        let credential = authority
+            .add_credential(
+                NewCredential {
+                    provider: ProviderId::parse("openai").unwrap(),
+                    authentication_kind: CredentialAuthKind::OAuth,
+                    display_name: "synthetic-oauth".into(),
+                    account_hint: None,
+                    expires_at_unix: None,
+                },
+                ProtectedValue::from_slice(b"synthetic-old-oauth-bundle").unwrap(),
+            )
+            .unwrap();
+        let profile = authority
+            .create_profile(
+                AccessProfileName::parse("synthetic-oauth").unwrap(),
+                BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+            )
+            .unwrap();
+        let environment_id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
+        authority
+            .create_environment_access_binding(EnvironmentAccessBinding {
+                environment_id: environment_id.clone(),
+                profile_id: profile.profile.id,
+                profile_revision: profile.profile.revision,
+            })
+            .unwrap();
+
+        let (server_stream, client_stream) = UnixStream::pair().unwrap();
+        let server = tokio::spawn(serve_broker_lease_channel(
+            Arc::clone(&authority),
+            server_stream,
+            environment_id.clone(),
+            7,
+            Some(
+                authority
+                    .get_environment_access_binding(&environment_id)
+                    .unwrap()
+                    .binding,
+            ),
+        ));
+        let mut client = LocalCredentialBrokerLeaseClient::connect(
+            client_stream,
+            store.clone(),
+            environment_id.clone(),
+            7,
+        )
+        .await
+        .unwrap();
+        let lease = client
+            .lease_operation(
+                Uuid::new_v4(),
+                CapabilitySlot::codex(),
+                BrokerOperationId::parse("responses").unwrap(),
+                BrokerRouteId::parse("openai-api").unwrap(),
+            )
+            .await
+            .unwrap();
+        let credential_id = lease.credential.metadata.id.clone();
+        let material_generation = lease.material_generation();
+        let grant = lease.grant.clone();
+        assert_eq!(
+            lease.with_material(|value| value.to_vec()),
+            b"synthetic-old-oauth-bundle"
+        );
+
+        let BrokerCredentialRefreshAdmission::Reserved(permit) = client
+            .begin_credential_refresh(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                grant,
+                BrokerOperationId::parse("responses").unwrap(),
+                BrokerRouteId::parse("openai-api").unwrap(),
+                material_generation,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected reservation");
+        };
+        let _started = client.start_credential_refresh(permit).await.unwrap();
+        let (record, generation, was_active) =
+            authority.revoke_for_provider(&credential_id).unwrap();
+        assert!(was_active);
+        assert_eq!(
+            record.metadata.status,
+            codewire_access::CredentialStatus::Revoked
+        );
+        assert_eq!(
+            generation, None,
+            "a started refresh leaves nothing to ask about"
+        );
+        drop(client);
+        server.abort();
+    }
+
     /// One OAuth credential selected for one environment generation.
     struct RefreshFixture {
         _temp: tempfile::TempDir,

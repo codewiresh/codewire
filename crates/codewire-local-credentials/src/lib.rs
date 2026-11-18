@@ -26,7 +26,9 @@ mod error;
 mod placeholder;
 mod platform;
 mod profile_rows;
+mod provider_revocation;
 mod repository;
+mod revocation;
 mod service;
 mod store_backend;
 mod store_probe;
@@ -64,10 +66,20 @@ pub use client::{
     AuthorityInfo, EnvironmentGrants, LocalCredentialClient, LocalCredentialControlClient,
     PreparedGitRepository, SpawnedAuthority,
 };
+pub use control::v1::{
+    ProviderRevocation as LocalProviderRevocation,
+    ProviderRevocationFailure as LocalProviderRevocationFailure,
+    ProviderRevocationOutcome as LocalProviderRevocationOutcome,
+};
 pub use error::LocalCredentialError;
 pub use platform::{
     PlatformCredentialBinding, PlatformCredentialConnector, PlatformCredentialInput,
     PlatformCredentialOutput,
+};
+pub use provider_revocation::{
+    LocalRevocationLeaseClient, LocalRevocationProcessConfig, LocalRevocationProcessSpawner,
+    LocalRevocationSpawnError, REVOCATION_LEASE_PROTOCOL_VERSION, RevocationLeaseChannelError,
+    read_leased_material, run_revocation_executor,
 };
 pub use repository::{
     GitHubLoginRenewer, GitHubLoginState, LocalCredentialRepositoryLeaseClient, LocalRepositoryGit,
@@ -1534,40 +1546,6 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             }
             _ => Err(LocalCredentialError::StaleCredentialRefresh),
         }
-    }
-
-    pub fn revoke_credential(
-        &self,
-        id: &CredentialId,
-    ) -> Result<CredentialRecord, LocalCredentialError> {
-        let connection = self.connection()?;
-        let current = load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
-        if current.public.metadata.status == CredentialStatus::Revoked {
-            return Ok(current.public);
-        }
-        let generation = current
-            .public
-            .metadata
-            .revocation_generation
-            .checked_add(1)
-            .ok_or(LocalCredentialError::CorruptMetadata)?;
-        let changed = connection
-            .execute(
-                "UPDATE credentials
-                 SET status = 'revoked', revocation_generation = ?2, updated_at_unix_ms = ?3
-                 WHERE id = ?1 AND material_state = 'ready'",
-                params![
-                    id.as_str(),
-                    i64::try_from(generation).map_err(|_| LocalCredentialError::CorruptMetadata)?,
-                    i64::try_from(unix_millis()?).map_err(|_| LocalCredentialError::InvalidTime)?
-                ],
-            )
-            .map_err(database_error)?;
-        if changed != 1 {
-            return Err(LocalCredentialError::CorruptMetadata);
-        }
-        load_internal_credential(&connection, id, Some(MaterialState::Ready))
-            .map(|record| record.public)
     }
 
     pub fn delete_credential(&self, id: &CredentialId) -> Result<(), LocalCredentialError> {

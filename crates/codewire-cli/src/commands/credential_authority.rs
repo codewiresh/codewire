@@ -20,7 +20,8 @@ use anyhow::Context as _;
 use codewire_local_credentials::{
     AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, LocalBrokerProcessConfig, LocalBrokerProcessSpawner,
     LocalBrokerSpawnError, LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner,
-    LocalRepositorySpawnError, ProviderLookup,
+    LocalRepositorySpawnError, LocalRevocationProcessConfig, LocalRevocationProcessSpawner,
+    LocalRevocationSpawnError, ProviderLookup,
 };
 use codewire_local_credentials::{
     AuthorityFeature, AuthorityProtectedStore, AuthorityRuntimeConfig, AuthorityRuntimeError,
@@ -96,6 +97,7 @@ pub(crate) async fn run_local_credential_authority(
     let result = serve_os_local_credential_authority_with_process_spawners(
         config,
         store,
+        spawner.clone(),
         spawner.clone(),
         spawner,
         signer.clone(),
@@ -730,44 +732,92 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
             // pipe, discarding diagnostics, before acknowledging cleanup.
             command.stderr(Stdio::piped());
         }
-        // SAFETY: this post-fork hook transfers one authority-created socket
-        // to FD 3 and applies the same capability-empty, no-new-privileges,
-        // non-dumpable, parent-bound confinement as the long-lived broker.
-        unsafe {
-            command.pre_exec(move || {
-                confine_spawned_process()?;
-                if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0
-                    || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0
-                    || libc::setsid() < 0
-                {
-                    return Err(io::Error::last_os_error());
-                }
-                if libc::getppid() != parent_pid {
-                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
-                }
-                if authority_fd == 3 {
-                    if libc::fcntl(3, libc::F_SETFD, 0) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                } else if libc::dup3(authority_fd, 3, 0) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                if libc::syscall(
-                    libc::SYS_close_range,
-                    4_u32,
-                    u32::MAX,
-                    libc::CLOSE_RANGE_CLOEXEC,
-                ) != 0
-                {
-                    return Err(io::Error::last_os_error());
-                }
-                libc::umask(0o077);
-                Ok(())
-            });
-        }
+        confine_executor_to_fd3(&mut command, authority_fd, parent_pid);
         command
             .spawn()
             .map_err(|_| LocalRepositorySpawnError::Spawn)
+    }
+}
+
+/// The one-shot provider revocation executor (#4717): the local GitHub
+/// executor's environment (the child reads the OS store) and confinement.
+#[cfg(target_os = "linux")]
+impl LocalRevocationProcessSpawner for CwLocalCredentialProcessSpawner {
+    fn spawn(
+        &self,
+        config: &LocalRevocationProcessConfig,
+        authority_peer: std::os::unix::net::UnixStream,
+    ) -> Result<tokio::process::Child, LocalRevocationSpawnError> {
+        let authority_fd = authority_peer.as_raw_fd();
+        if authority_fd < 3 {
+            return Err(LocalRevocationSpawnError::InvalidConfiguration);
+        }
+        let parent_pid = unsafe { libc::getpid() };
+        let mut command = tokio::process::Command::new(&self.executable);
+        command
+            .arg("__local-provider-revocation-executor")
+            .arg("--authority-fd")
+            .arg("3")
+            .arg("--request-id")
+            .arg(config.request_id.to_string())
+            .env_clear()
+            .envs(authority_environment(|name| env::var_os(name)))
+            .current_dir("/")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        confine_executor_to_fd3(&mut command, authority_fd, parent_pid);
+        command
+            .spawn()
+            .map_err(|_| LocalRevocationSpawnError::Spawn)
+    }
+}
+
+/// The post-fork setup both one-shot executors share: the one
+/// authority-created socket moved to FD 3, and the long-lived broker's
+/// capability-empty, no-new-privileges, non-dumpable, parent-bound
+/// confinement.
+#[cfg(target_os = "linux")]
+fn confine_executor_to_fd3(
+    command: &mut tokio::process::Command,
+    authority_fd: std::os::fd::RawFd,
+    parent_pid: libc::pid_t,
+) {
+    // SAFETY: this post-fork hook transfers one authority-created socket
+    // to FD 3 and applies the same capability-empty, no-new-privileges,
+    // non-dumpable, parent-bound confinement as the long-lived broker.
+    unsafe {
+        command.pre_exec(move || {
+            confine_spawned_process()?;
+            if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0
+                || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0
+                || libc::setsid() < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::getppid() != parent_pid {
+                return Err(io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            if authority_fd == 3 {
+                if libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            } else if libc::dup3(authority_fd, 3, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::syscall(
+                libc::SYS_close_range,
+                4_u32,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            ) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            libc::umask(0o077);
+            Ok(())
+        });
     }
 }
 

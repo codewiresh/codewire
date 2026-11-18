@@ -1328,6 +1328,7 @@ mod tests {
             "__local-credential-authority-probe",
             "__local-credential-broker",
             "__local-git-repository-executor",
+            "__local-provider-revocation-executor",
             "__local-git-credential-helper",
         ] {
             let error = crate::Cli::try_parse_from(["cw", command]).unwrap_err();

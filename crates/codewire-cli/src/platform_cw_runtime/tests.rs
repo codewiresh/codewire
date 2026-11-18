@@ -1616,6 +1616,7 @@ fn platform_image_dispatch_private_roles_skip_all_admission() {
         "__local-derp",
         "__local-credential-broker",
         "__local-git-repository-executor",
+        "__local-provider-revocation-executor",
         "__unknown-future-helper",
     ] {
         assert!(

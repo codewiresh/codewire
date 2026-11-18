@@ -7,6 +7,8 @@ use command_line::requested_json_output;
 pub mod config;
 mod console_client;
 mod credit_refusal;
+mod placement_scope;
+use placement_scope::validate_placement_scope;
 mod environment_client;
 mod error_report;
 #[cfg(feature = "fuzzing")]
@@ -598,6 +600,9 @@ enum Command {
     #[command(name = "__local-git-repository-executor", hide = true)]
     LocalGitRepositoryExecutor(LocalGitRepositoryExecutorArgs),
     #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[command(name = "__local-provider-revocation-executor", hide = true)]
+    LocalProviderRevocationExecutor(commands::revocation::LocalProviderRevocationExecutorArgs),
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__local-git-credential-helper", hide = true)]
     LocalGitCredentialHelper(LocalGitCredentialHelperArgs),
     #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
@@ -1063,6 +1068,10 @@ where
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::LocalGitRepositoryExecutor(args) => run_local_git_repository_executor(args).await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Command::LocalProviderRevocationExecutor(args) => {
+            commands::revocation::run_local_provider_revocation_executor(args).await
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::LocalGitCredentialHelper(args) => run_local_git_credential_helper(args),
         #[cfg(all(target_os = "linux", feature = "local-broker-synthetic-smoke"))]
         Command::LocalCredentialBrokerSyntheticSmokeCheck => {
@@ -1117,99 +1126,6 @@ where
         refresh_rex_selection();
     }
     update::notice::report(&command, &matches, result, json)
-}
-
-/// `--local` / `--cloud` reach every command through the one global pair.
-/// A command that does not read a placement refuses it before any effect,
-/// so an explicit placement is never ignored or reinterpreted.
-fn validate_placement_scope(
-    command: &Command,
-    name: &str,
-    placement: Option<EnvironmentPlacement>,
-    member: bool,
-) -> anyhow::Result<()> {
-    let Some(placement) = placement else {
-        return Ok(());
-    };
-    let flag = match placement {
-        EnvironmentPlacement::Local => "--local",
-        EnvironmentPlacement::Platform => "--cloud",
-    };
-    anyhow::ensure!(
-        !member,
-        "{flag} cannot be combined with --member, which names its pinned host target"
-    );
-    if let Command::Setup(SetupArgs {
-        command: Some(setup),
-        ..
-    }) = command
-    {
-        let name = match setup {
-            SetupCommand::Ssh(_) => "ssh",
-            SetupCommand::Rex(_) => "rex",
-        };
-        anyhow::bail!("{flag} does not apply to `cw setup {name}`");
-    }
-    let reads = matches!(
-        command,
-        Command::Setup(_)
-            // Which one the feedback says the sender works in.
-            | Command::Feedback(_)
-            | Command::Use(_)
-            | Command::Credentials(_)
-            | Command::Policy(_)
-            | Command::Snapshot(_)
-            | Command::Checkpoint(_)
-            | Command::Secrets(_)
-            | Command::Env(_)
-            | Command::Run(_)
-            | Command::Exec(_)
-            | Command::Attach(_)
-            | Command::Send(_)
-            | Command::Wait(_)
-            | Command::Shell(_)
-            | Command::Vscode(_)
-            | Command::Ls(_)
-            | Command::Logs(_)
-            | Command::Stop(_)
-            | Command::Restart(_)
-            | Command::Info(_)
-            | Command::Export(_)
-            | Command::Create(_)
-            | Command::Start(_)
-            | Command::Rm(_)
-            | Command::Update(_)
-            | Command::Cp(_)
-            | Command::Ports(_)
-            | Command::Runtime(_)
-            | Command::Agent(_)
-            | Command::Daemon(_)
-            | Command::Resize(_)
-            | Command::Report(_)
-            | Command::Extend(_)
-            | Command::Access(_)
-            | Command::Share(_)
-            | Command::Protect(_)
-            | Command::Unprotect(_)
-            | Command::CancelDelete(_)
-            | Command::Prune(_)
-            | Command::Nuke(_)
-            | Command::RefreshSkills(_)
-            // `cw --cloud ssh known-hosts`, as the `cw-cloud-*` block runs it.
-            | Command::Ssh { .. }
-            // --cloud: the platform's hosted Mesh; --local: the local Mesh service.
-            | Command::Network { .. }
-    );
-    // The managed session controls and the environment a message or inbox
-    // addresses exist only on Unix.
-    #[cfg(unix)]
-    let reads = reads
-        || matches!(
-            command,
-            Command::Interrupt(_) | Command::Steer(_) | Command::Msg(_) | Command::Inbox(_)
-        );
-    anyhow::ensure!(reads, "{flag} does not apply to `cw {name}`");
-    Ok(())
 }
 
 async fn run_hosted_daemon() -> anyhow::Result<()> {

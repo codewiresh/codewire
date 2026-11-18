@@ -114,6 +114,7 @@ async fn github_app_transport() -> Result<
     ))
 }
 
+pub(crate) mod revocation;
 mod ssh;
 pub(crate) use ssh::run_git_ssh_helper;
 
@@ -351,7 +352,7 @@ pub(crate) fn run_local_git_credential_helper(
 }
 
 #[cfg(target_os = "linux")]
-fn verify_repository_executor_confinement() -> anyhow::Result<()> {
+pub(super) fn verify_repository_executor_confinement() -> anyhow::Result<()> {
     verify_common_confinement()?;
     let pid = rustix::process::getpid();
     anyhow::ensure!(
@@ -415,7 +416,7 @@ fn verify_common_confinement() -> anyhow::Result<()> {
 /// environment and no core files; it exits with that authority and refuses
 /// debugger attachment.
 #[cfg(target_os = "macos")]
-fn verify_repository_executor_confinement() -> anyhow::Result<()> {
+pub(super) fn verify_repository_executor_confinement() -> anyhow::Result<()> {
     verify_common_confinement()?;
     anyhow::ensure!(
         isolated_session_and_environment(),

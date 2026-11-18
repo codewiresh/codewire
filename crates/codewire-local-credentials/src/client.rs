@@ -25,6 +25,7 @@ use workload_secrets::{
 };
 mod grants;
 mod profiles;
+mod provider_revocation;
 mod store_probe;
 
 pub use grants::EnvironmentGrants;

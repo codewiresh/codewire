@@ -107,11 +107,12 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/build_record.rs" = { group = "executable", count = 1 }
 "crates/codewire-cli/src/commands/checkpoint.rs" = { group = "snapshots", count = 5 }
 "crates/codewire-cli/src/commands/collaboration.rs" = { group = "member", count = 1 }
-"crates/codewire-cli/src/commands/credential_authority.rs" = { group = "credentials", count = 36 }
+"crates/codewire-cli/src/commands/credential_authority.rs" = { group = "credentials", count = 38 }
 "crates/codewire-cli/src/commands/credential_authority/ssh.rs" = { group = "credentials", count = 17 }
 "crates/codewire-cli/src/commands/credential_broker.rs" = { group = "credentials", count = 17 }
 "crates/codewire-cli/src/commands/credential_input.rs" = { group = "credentials", count = 4 }
 "crates/codewire-cli/src/commands/credential_repository.rs" = { group = "credentials", count = 24 }
+"crates/codewire-cli/src/commands/credential_repository/revocation.rs" = { group = "credentials", count = 6 }
 "crates/codewire-cli/src/commands/credential_repository/ssh.rs" = { group = "credentials", count = 6 }
 "crates/codewire-cli/src/commands/credentials/output/save_refusal.rs" = { group = "credentials", count = 1 }
 "crates/codewire-cli/src/commands/environment.rs" = { group = "vm-backend", count = 2 }

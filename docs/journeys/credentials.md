@@ -188,10 +188,12 @@ only what differs.
   shows a person is not yet observed. In the Kind suite's session, which
   forces the proxy provider beside a delivered login, Codex waited on its own
   token refresh until the session timed out.
-- **Remove:** in the cloud, delete also asks OpenAI to revoke the sign-in,
-  and `cw` says whether OpenAI confirmed it. Locally `cw` doesn't ask yet
-  (#4717, C6 part b2) and says the sign-in stays valid until it expires, and
-  that you can sign out of all ChatGPT devices under Settings → Security.
+- **Remove:** in both placements, delete (and revoke) also asks OpenAI to
+  revoke the sign-in, and `cw` says whether OpenAI confirmed it. Locally the
+  authority asks through a confined one-shot executor, never itself. An older
+  authority doesn't ask, and `cw` says the sign-in stays valid until it
+  expires, and that you can sign out of all ChatGPT devices under Settings →
+  Security.
 
 ## 3. `cred-openai-key`: add an OpenAI API key
 
