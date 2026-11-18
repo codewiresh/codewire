@@ -28,12 +28,14 @@ observed**.
 
 ## Before the walk
 
-- **Local, Linux:** never walk against the workstation's own keyring. Give the
-  walk a throwaway `HOME` and a private Secret Service, its own
-  `dbus-daemon` and `gnome-keyring-daemon` on a private `XDG_RUNTIME_DIR`, as
-  `scripts/ci/verify/smoke-native-local-environment.sh` starts them. `cw`'s
+- **Local, Linux:** never walk against the workstation's own keyring. A
+  throwaway `HOME` alone doesn't keep `cw` out of it (#5255). Give the walk a
+  private Secret Service too, its own `dbus-daemon` and
+  `gnome-keyring-daemon` on a private `XDG_RUNTIME_DIR`, as
+  `scripts/ci/verify/lib/local-smoke-isolation.sh` starts them. `cw`'s
   authority reads only `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`, so
-  that pair selects the store. The runtime is built from the same source as
+  that pair selects the store. Never script or loop calls to the
+  workstation's own Secret Service (#5256). The runtime is built from the same source as
   `cw` (`docs/dev/LINUX-LOCAL-VMS.md`).
 - **Local, Mac:** cw-dogfood's `cw` on the M3, in a session where the login
   keychain is unlocked (a GUI or rex shell; over SSH, `security

@@ -540,6 +540,21 @@ account's home directory, whatever `HOME` says) unless
 in the first place (#4819). Run it with its own `HOME`, or set the variable
 to a scratch root, or to your store to use it on purpose.
 
+A separate `HOME` or state root keeps VMs and settings apart, not
+credentials (#5255). On Linux, local credentials go to the Secret Service on
+your session bus, whatever `HOME` or the `CODEWIRE_` variables say. A
+`cw` run from a scratch `HOME` stores what it adds in your own keyring, where
+any process in your session can read it. Deleting the scratch root leaves
+those entries behind: run `cw credentials --local delete NAME` for each
+credential first, and the few entries the store keeps for itself still stay.
+Every entry is named by a fresh random ID, so two roots never overwrite each
+other. To keep a test or a walk out of your keyring, run it in a
+private session bus and keyring, as
+`scripts/ci/verify/lib/local-smoke-isolation.sh` sets one up for the local
+VM credentials smoke (#5220). Never script or loop calls to your own Secret
+Service: a loop of short D-Bus reads has crashed a desktop keyring daemon
+(#5256).
+
 ## Troubleshooting
 
 **`this host cannot run local VMs yet`**: fix each listed item, then rerun the
