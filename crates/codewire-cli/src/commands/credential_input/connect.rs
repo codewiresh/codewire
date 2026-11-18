@@ -245,6 +245,12 @@ pub(in crate::commands) trait ConnectStore {
 
     fn describe(record: &Self::Record) -> anyhow::Result<Reconnecting>;
 
+    /// Whether the store can save a credential now, asked just before the
+    /// provider step so a sign-in is never spent on a store that would refuse
+    /// it (#4826). The cloud asks nothing here: its service runs the provider
+    /// step and the save together.
+    async fn ready(&mut self, provider: CredentialConnectProviderArg) -> anyhow::Result<()>;
+
     /// The provider step. Where this process waits for the provider it ends
     /// at the first Ctrl-C through `interrupt`.
     async fn approve(
@@ -325,6 +331,7 @@ async fn connect_with<S: ConnectStore>(
         name,
         existing,
     };
+    store.ready(provider).await?;
     let mut interrupt = Interrupt::default();
     let approval = store.approve(&target, &mut interrupt).await?;
     // A Ctrl-C while the provider answered, or since, is a cancellation

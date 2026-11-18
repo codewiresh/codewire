@@ -5,7 +5,7 @@ use std::future::Future;
 use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use codewire_access::{
     AccessError, AccessProfileId, AccessProfileName, AccessProfileReference, CapabilitySlot,
@@ -14,7 +14,7 @@ use codewire_access::{
 };
 use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, ProtectedStore, ProtectedStorePersistence, ProtectedValue,
-    ssh_material::{SshMaterialError, generate_ed25519, import_openssh},
+    ssh_material::{generate_ed25519, import_openssh},
 };
 use futures::FutureExt as _;
 use tokio::net::UnixStream;
@@ -76,14 +76,13 @@ const BROKER_SUCCESSOR_LEAD: Duration = Duration::from_secs(90);
 const BROKER_SUCCESSOR_RETRY_FIRST: Duration = Duration::from_secs(3);
 const BROKER_SUCCESSOR_RETRY_MAX: Duration = Duration::from_secs(15);
 const REPOSITORY_STREAM_CHUNK_BYTES: usize = 48 * 1024;
-const MAX_SSH_ENROLLMENT_WORKERS: u32 = 8;
-const SSH_ENROLLMENT_DEADLINE: Duration = Duration::from_secs(30);
 
 mod grants;
 mod placeholders;
 mod profiles;
 use profiles::profile_id;
 mod repository;
+mod ssh_enrollment;
 mod store_status;
 mod workload_secrets;
 
@@ -93,6 +92,12 @@ use profiles::{
 };
 pub(crate) use repository::REPOSITORY_PREPARATION_TIMEOUT;
 use repository::{PreparedRepository, RepositoryProcessManager, cleanup_repository_ssh_runtimes};
+#[cfg(test)]
+use ssh_enrollment::{MAX_SSH_ENROLLMENT_WORKERS, validate_ssh_expiry_at};
+use ssh_enrollment::{
+    SSH_ENROLLMENT_DEADLINE, SshEnrollmentWorkers, ssh_enrollment_check,
+    status_for_ssh_material_error, validate_ssh_expiry,
+};
 use workload_secrets::{
     resolved_secret_to_proto, secret_project_to_proto, workload_secret_selection_from_proto,
     workload_secret_to_proto,
@@ -116,90 +121,6 @@ impl<S: ProtectedStore> Clone for AuthorityRpc<S> {
             broker_audit: Arc::clone(&self.broker_audit),
             shutdown: self.shutdown.clone(),
             ssh_enrollment_workers: self.ssh_enrollment_workers.clone(),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct SshEnrollmentWorkers {
-    permits: Arc<tokio::sync::Semaphore>,
-    shutdown: watch::Sender<bool>,
-}
-
-struct SshEnrollmentCancellation {
-    shutdown: watch::Receiver<bool>,
-    request: watch::Receiver<bool>,
-}
-
-impl SshEnrollmentCancellation {
-    fn is_cancelled(&self) -> bool {
-        *self.shutdown.borrow() || *self.request.borrow()
-    }
-}
-
-struct SshEnrollmentRequestGuard {
-    cancelled: watch::Sender<bool>,
-}
-
-impl Drop for SshEnrollmentRequestGuard {
-    fn drop(&mut self) {
-        self.cancelled.send_replace(true);
-    }
-}
-
-impl SshEnrollmentWorkers {
-    fn new() -> Self {
-        let (shutdown, _) = watch::channel(false);
-        Self {
-            permits: Arc::new(tokio::sync::Semaphore::new(
-                MAX_SSH_ENROLLMENT_WORKERS as usize,
-            )),
-            shutdown,
-        }
-    }
-
-    async fn run<T>(
-        &self,
-        operation: impl FnOnce(SshEnrollmentCancellation) -> Result<T, Status> + Send + 'static,
-    ) -> Result<T, Status>
-    where
-        T: Send + 'static,
-    {
-        let shutdown = self.shutdown.subscribe();
-        if *shutdown.borrow() {
-            return Err(Status::unavailable(
-                "local SSH credential enrollment is stopping",
-            ));
-        }
-        let permit = Arc::clone(&self.permits)
-            .try_acquire_owned()
-            .map_err(|_| Status::resource_exhausted("local SSH enrollment workers are busy"))?;
-        if *shutdown.borrow() {
-            return Err(Status::unavailable(
-                "local SSH credential enrollment is stopping",
-            ));
-        }
-        let (request_cancelled, request) = watch::channel(false);
-        let request_guard = SshEnrollmentRequestGuard {
-            cancelled: request_cancelled,
-        };
-        let result = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            operation(SshEnrollmentCancellation { shutdown, request })
-        })
-        .await
-        .map_err(|_| Status::internal("local SSH enrollment worker failed"))?;
-        drop(request_guard);
-        result
-    }
-
-    async fn shutdown(&self) {
-        self.shutdown.send_replace(true);
-        if let Ok(permits) = Arc::clone(&self.permits)
-            .acquire_many_owned(MAX_SSH_ENROLLMENT_WORKERS)
-            .await
-        {
-            drop(permits);
         }
     }
 }
@@ -1454,6 +1375,15 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         Ok(Response::new(v1::ShutdownAuthorityResponse {}))
     }
 
+    async fn probe_protected_store(
+        &self,
+        _request: Request<v1::ProbeProtectedStoreRequest>,
+    ) -> Result<Response<v1::ProbeProtectedStoreResponse>, Status> {
+        let authority = Arc::clone(&self.authority);
+        run_blocking(move || authority.probe_protected_store()).await?;
+        Ok(Response::new(v1::ProbeProtectedStoreResponse {}))
+    }
+
     async fn add_credential(
         &self,
         request: Request<v1::AddCredentialRequest>,
@@ -2227,46 +2157,6 @@ where
         .await
         .map_err(|_| Status::internal("local credential authority worker failed"))?
         .map_err(status_for_error)
-}
-
-fn ssh_enrollment_check(
-    deadline: Instant,
-    cancelled: &SshEnrollmentCancellation,
-) -> Result<(), LocalCredentialError> {
-    if cancelled.is_cancelled() {
-        Err(LocalCredentialError::SshEnrollmentClosed)
-    } else if Instant::now() >= deadline {
-        Err(LocalCredentialError::SshEnrollmentDeadlineElapsed)
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_ssh_expiry(expires_at_unix: Option<u64>) -> Result<(), Status> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| Status::internal("local credential authority time is invalid"))?
-        .as_secs();
-    validate_ssh_expiry_at(expires_at_unix, now)
-}
-
-fn validate_ssh_expiry_at(expires_at_unix: Option<u64>, now: u64) -> Result<(), Status> {
-    if expires_at_unix.is_some_and(|value| value <= now || i64::try_from(value).is_err()) {
-        Err(Status::invalid_argument(
-            "SSH credential expiry must be a future Unix timestamp",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn status_for_ssh_material_error(error: SshMaterialError) -> Status {
-    match error {
-        SshMaterialError::EntropyUnavailable => {
-            Status::unavailable("SSH key generation entropy is unavailable")
-        }
-        _ => Status::invalid_argument(error.to_string()),
-    }
 }
 
 fn credential_id(value: String) -> Result<CredentialId, Status> {

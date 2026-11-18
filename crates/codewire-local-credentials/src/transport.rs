@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 22;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 23;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -59,6 +59,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         22,
         "EnsureEnvironmentBroker carries a boot's secrets, held in memory and handed to each broker on an inherited descriptor (#3999)",
     ),
+    (
+        23,
+        "ProbeProtectedStore writes and deletes a canary in the store before a provider sign-in (#4826)",
+    ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 
@@ -91,10 +95,13 @@ pub enum AuthorityFeature {
     /// inherited descriptor (#3999). An older authority drops them, and its
     /// brokers could never pair with the front door.
     BootSecrets,
+    /// `ProbeProtectedStore`: whether the store accepts a write now, asked
+    /// before a provider sign-in. An older authority answers Unimplemented.
+    StoreProbe,
 }
 
 impl AuthorityFeature {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::PlatformGithub,
         Self::ClaudeSignIn,
         Self::DefaultProfile,
@@ -102,6 +109,7 @@ impl AuthorityFeature {
         Self::NetworkPolicyGithub,
         Self::ClaudeToken,
         Self::BootSecrets,
+        Self::StoreProbe,
     ];
 
     /// The protocol that introduced it.
@@ -114,6 +122,7 @@ impl AuthorityFeature {
             Self::NetworkPolicyGithub => 20,
             Self::ClaudeToken => 21,
             Self::BootSecrets => 22,
+            Self::StoreProbe => 23,
         }
     }
 

@@ -196,7 +196,8 @@ async fn connect_configured_authority(
     Ok(client)
 }
 
-/// The local credential authority, one that serves `feature`. An authority
+/// The local credential authority, one that serves `feature`; `needed_for`
+/// says what an older one can't do. An authority
 /// older than this cw keeps serving after an update while a local VM may run;
 /// once none does it is replaced here, as a boot command replaces it, before
 /// the command asks anything of a provider. While one may run, the command
@@ -205,6 +206,21 @@ async fn connect_configured_authority(
 pub(crate) async fn connect_local_credential_authority_serving(
     feature: AuthorityFeature,
     needed_for: &str,
+) -> anyhow::Result<LocalCredentialClient> {
+    let client = connect_local_credential_authority_preferring(feature).await?;
+    anyhow::ensure!(
+        feature.served_by(client.info().protocol_version),
+        "your local credentials are still kept by the cw you updated from, which can't {needed_for}; it switches to this cw once no local VM runs: stop them (`cw --local stop NAME`), then run this again"
+    );
+    Ok(client)
+}
+
+/// The local credential authority, preferring one that serves `feature`: an
+/// older authority is replaced once no local VM runs, as for
+/// [`connect_local_credential_authority_serving`], but while one may run the
+/// older authority is returned, and the caller does without `feature`.
+pub(crate) async fn connect_local_credential_authority_preferring(
+    feature: AuthorityFeature,
 ) -> anyhow::Result<LocalCredentialClient> {
     let client = connect_local_credential_authority().await?;
     if feature.served_by(client.info().protocol_version) {
@@ -222,12 +238,7 @@ pub(crate) async fn connect_local_credential_authority_serving(
             .map_err(anyhow::Error::from)
     })
     .await?;
-    let client = connect_local_credential_authority().await?;
-    anyhow::ensure!(
-        feature.served_by(client.info().protocol_version),
-        "your local credentials are still kept by the cw you updated from, which can't store {needed_for}; it switches to this cw once no local VM runs: stop them (`cw --local stop NAME`), then run this again"
-    );
-    Ok(client)
+    connect_local_credential_authority().await
 }
 
 /// Replace a running authority that is another cw's, so the VM a boot command

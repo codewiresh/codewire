@@ -22,12 +22,14 @@ mod claude_token;
 mod client;
 mod control;
 mod default_profile;
+mod error;
 mod placeholder;
 mod platform;
 mod profile_rows;
 mod repository;
 mod service;
 mod store_backend;
+mod store_probe;
 mod transport;
 mod workload_secret;
 
@@ -61,6 +63,7 @@ pub use client::{
     AuthorityInfo, EnvironmentGrants, LocalCredentialClient, LocalCredentialControlClient,
     PreparedGitRepository, SpawnedAuthority,
 };
+pub use error::LocalCredentialError;
 pub use platform::{
     PlatformCredentialBinding, PlatformCredentialConnector, PlatformCredentialInput,
     PlatformCredentialOutput,
@@ -116,7 +119,6 @@ use codewire_protected_store::{
 use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use uuid::Uuid;
 
 #[cfg(unix)]
@@ -3869,99 +3871,6 @@ fn map_insert_error(error: rusqlite::Error) -> LocalCredentialError {
     } else {
         database_error(error)
     }
-}
-
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum LocalCredentialError {
-    #[error("local credential metadata path is not an owner-only directory or private file")]
-    InvalidDatabasePath,
-    #[error("local credential metadata database is unavailable")]
-    DatabaseUnavailable,
-    #[error("local credential authority is already running")]
-    AlreadyRunning,
-    #[error("local credential metadata database is invalid")]
-    InvalidDatabase,
-    #[error("local credential metadata schema is unsupported")]
-    UnsupportedSchema,
-    #[error("local credential metadata is corrupt")]
-    CorruptMetadata,
-    /// Stored values were left in the recorded backend, unchanged.
-    #[error("local protected storage could not switch backends: {0}")]
-    ProtectedStoreSwitch(ProtectedStoreError),
-    #[error("local credential authority owner does not match persisted metadata")]
-    OwnerMismatch,
-    #[error("local credential protected-store backend does not match persisted metadata")]
-    ProtectedStoreMismatch,
-    #[error("local credential operation is unsupported on this platform")]
-    UnsupportedPlatform,
-    #[error("local credential time value is invalid")]
-    InvalidTime,
-    #[error(
-        "a local credential, access profile, secret project, or workload-secret key already exists"
-    )]
-    AlreadyExists,
-    #[error("a local GitHub connection already exists; reconnect or delete it")]
-    GitHubAlreadyConnected,
-    #[error(
-        "local credential metadata has more than one active GitHub connection; keep one before upgrading"
-    )]
-    AmbiguousGitHubConnections,
-    #[error("local credential was not found")]
-    CredentialNotFound,
-    #[error("local credential is not available")]
-    CredentialUnavailable,
-    #[error("local credential is inactive")]
-    CredentialInactive,
-    #[error("local credential material is missing from protected storage")]
-    CredentialMaterialMissing,
-    #[error("SSH credentials require the dedicated enrollment operation")]
-    SshCredentialRequiresEnrollment,
-    #[error("local SSH credential enrollment admission is closed")]
-    SshEnrollmentClosed,
-    #[error("local SSH credential enrollment deadline elapsed")]
-    SshEnrollmentDeadlineElapsed,
-    #[error("local credential operation lease is unavailable")]
-    CredentialOperationLeaseDenied,
-    #[error("local credential refresh is already in progress")]
-    CredentialRefreshInProgress,
-    #[error("local credential refresh is stale or invalid")]
-    StaleCredentialRefresh,
-    #[error("local credential revision changed or was not supplied")]
-    StaleCredentialRevision,
-    #[error("local credential protected entry unexpectedly already exists")]
-    ProtectedEntryCollision,
-    #[error("local credential is selected by an access profile or environment")]
-    CredentialInUse,
-    #[error("local access profile was not found")]
-    ProfileNotFound,
-    #[error("local access profile revision was not found")]
-    ProfileRevisionNotFound,
-    #[error("local access profile revision changed")]
-    StaleProfileRevision,
-    #[error("local access profile is selected by an environment")]
-    ProfileInUse,
-    #[error("local access profile is the default")]
-    ProfileIsDefault,
-    #[error("local environment access binding already exists")]
-    EnvironmentBindingAlreadyExists,
-    #[error("local environment access binding was not found")]
-    EnvironmentBindingNotFound,
-    #[error("local environment access binding changed")]
-    StaleEnvironmentBinding,
-    #[error("local secret project was not found")]
-    SecretProjectNotFound,
-    #[error("local workload secret was not found")]
-    WorkloadSecretNotFound,
-    #[error("local workload secret request is invalid")]
-    InvalidWorkloadSecret,
-    #[error("organization workload secrets are unsupported locally")]
-    OrganizationSecretsUnsupported,
-    #[error("local workload secret material is missing from protected storage")]
-    WorkloadSecretMaterialMissing,
-    #[error(transparent)]
-    Access(#[from] AccessError),
-    #[error(transparent)]
-    ProtectedStore(#[from] ProtectedStoreError),
 }
 
 #[cfg(all(test, target_os = "linux"))]

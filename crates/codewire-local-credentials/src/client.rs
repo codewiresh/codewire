@@ -25,6 +25,7 @@ use workload_secrets::{
 };
 mod grants;
 mod profiles;
+mod store_probe;
 
 pub use grants::EnvironmentGrants;
 
@@ -32,8 +33,7 @@ use crate::broker_channel::MAX_BROKER_LEASE_AUDIT_LIST_LIMIT;
 use crate::control::v1::local_credential_authority_service_client::LocalCredentialAuthorityServiceClient;
 use crate::control::v1::{self, CredentialAuthenticationKind};
 use crate::repository::{MAX_GIT_BUNDLE_BYTES, valid_git_selector};
-use crate::service::REPOSITORY_PREPARATION_TIMEOUT;
-use crate::service::auth_kind_to_proto;
+use crate::service::{REPOSITORY_PREPARATION_TIMEOUT, auth_kind_to_proto};
 use crate::transport::{
     AUTHORITY_PROTOCOL_VERSION, AuthorityRuntimeConfig, AuthorityRuntimeError,
     MINIMUM_AUTHORITY_PROTOCOL_VERSION, connect_owner_only, connect_owner_only_with_timeout,

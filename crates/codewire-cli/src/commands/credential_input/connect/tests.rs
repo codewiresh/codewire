@@ -7,6 +7,8 @@ use super::*;
 struct Fake {
     records: Vec<FakeRecord>,
     press_ctrl_c_while_approving: bool,
+    not_ready: Option<&'static str>,
+    readiness_checks: usize,
     approvals: usize,
     discarded: usize,
     published: Vec<Option<String>>,
@@ -74,11 +76,23 @@ impl ConnectStore for Fake {
         })
     }
 
+    async fn ready(&mut self, _: CredentialConnectProviderArg) -> anyhow::Result<()> {
+        self.readiness_checks += 1;
+        match self.not_ready {
+            Some(refusal) => anyhow::bail!(refusal),
+            None => Ok(()),
+        }
+    }
+
     async fn approve(
         &mut self,
         _: &ConnectTarget<FakeRecord>,
         interrupt: &mut Interrupt,
     ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.readiness_checks > 0,
+            "approved before the store was checked"
+        );
         self.approvals += 1;
         if self.press_ctrl_c_while_approving {
             press(interrupt);
@@ -237,6 +251,38 @@ async fn only_github_is_one_connection_per_user() {
         "{error}"
     );
     assert_eq!(store.approvals, 0);
+}
+
+/// A store that can't save now stops a connect, new or a reconnect, with its
+/// own sentence before any provider step, and saves nothing (#4826).
+#[tokio::test]
+async fn a_store_that_cannot_save_stops_the_connect_before_the_provider_step() {
+    for existing in [false, true] {
+        let mut store = Fake {
+            records: if existing {
+                vec![record("work", "anthropic")]
+            } else {
+                Vec::new()
+            },
+            not_ready: Some("the local credential store can't save a Claude sign-in now"),
+            ..Fake::default()
+        };
+        let error = run(
+            &mut store,
+            args(CredentialConnectProviderArg::Claude, "work", true),
+            false,
+            no_prompt,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the local credential store can't save a Claude sign-in now"
+        );
+        assert_eq!(store.readiness_checks, 1);
+        assert_eq!(store.approvals, 0);
+        assert!(store.published.is_empty());
+    }
 }
 
 #[tokio::test]

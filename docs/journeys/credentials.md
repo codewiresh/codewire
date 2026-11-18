@@ -63,6 +63,10 @@ only what differs.
    a title line `Connect PROVIDER as NAME, on this computer` (or `in your
    Codewire account`), the step, then one result line
    `✓ PROVIDER connected as ACCOUNT`. Each section shows its screen.
+   Locally, a `connect` checks that the store accepts a write before the
+   provider step: an older store with a local VM running, or a missing or
+   locked keychain, stops `cw` before any code or link appears, saying what
+   to do, and nothing is saved.
    Locally, a keyring that doesn't answer (a hidden unlock prompt, a stuck
    daemon) is shown within a second, on stderr: `Waiting for your keyring
    (Secret Service) to answer · unlock it if it asks`, or `your login
@@ -239,10 +243,8 @@ Issues: #4714 (local), #2559 (cloud).
 
   A person signs in with a Pro, Max, Team or Enterprise plan and pastes the
   `code#state` Claude shows. The copy key under the link comes with #4885.
-  Locally, the store is checked before the link appears: an older store with
-  a local VM running stops `cw` first, saying what to do. A missing or locked
-  keychain is checked there too once the store probe lands (#4717, track
-  A3); until then it is refused after the sign-in, and nothing is saved.
+  Locally, the store is checked before the link appears, as for every
+  connect (see "Every setup's steps").
 - **List:** KIND `Claude (sign-in)` in both placements, and
   `"authentication_kind": "claude_sign_in"` in both placements' JSON, with
   the Claude account's email as its `account_hint`.
@@ -258,6 +260,17 @@ Issues: #4714 (local), #2559 (cloud).
   sign-in says to start again; Ctrl-C after pasting the code and before the
   save saves nothing and says so ("canceled; no credential was changed"),
   not yet observed.
+- **Store check after a `cw` update** (#4826), locally, with a store the
+  earlier `cw` left running, which can't check itself first:
+  - with a local VM running: the store stays, the connect goes on without
+    the check, and `cw` prints `! Couldn't check the local credential store
+    first: it's still the one the cw you updated from started, while local
+    VMs run.` before the link;
+  - with no local VM running: the store is replaced before the link, and the
+    check runs; with the login keychain locked, the connect stops there with
+    the store's own sentence, before any link.
+
+  Not yet observed.
 - **Stopped mid-refresh:** a local store whose authority stopped during the
   sign-in's refresh (killed, a crash or a power loss) still opens, and
   `cw credentials --local list` shows the sign-in refreshed, as it was, or

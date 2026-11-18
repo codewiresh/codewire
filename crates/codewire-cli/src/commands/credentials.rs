@@ -71,6 +71,18 @@ async fn handle_local_with_receipt(
         }
         None => connect_local_credential_authority().await?,
     };
+    // A connect checks the store first where it can (#4826), but an older
+    // store left serving running VMs still saves a connect correctly, so it
+    // goes on without the check.
+    let store_probe = codewire_local_credentials::AuthorityFeature::StoreProbe;
+    if matches!(
+        operation,
+        CredentialOperation::Credential(CredentialsCommand::Connect(_))
+    ) && !store_probe.served_by(client.info().protocol_version)
+    {
+        drop(client);
+        client = super::connect_local_credential_authority_preferring(store_probe).await?;
+    }
     let command = match operation {
         CredentialOperation::Profile(command) => {
             return profile_command(&mut client, command).await;
@@ -112,9 +124,10 @@ async fn handle_local_with_receipt(
     }
 }
 
-/// The authority feature a command needs before it asks a provider anything.
-/// A Claude sign-in needs an authority that can store it, settled before the
-/// browser step, so a sign-in is never spent on one that would refuse it.
+/// The newest authority feature a command needs before it asks a provider
+/// anything, and what an older authority can't do. Every connect probes the
+/// store first (which also covers storing a Claude sign-in), so a sign-in is
+/// never spent on an authority that would refuse it.
 fn authority_feature_needed(
     operation: &CredentialOperation,
 ) -> Option<(codewire_local_credentials::AuthorityFeature, &'static str)> {
@@ -168,6 +181,50 @@ async fn connect_credential(
 ) -> anyhow::Result<()> {
     super::credential_input::connect::connect(&mut LocalConnectStore { client }, args, execution)
         .await
+}
+
+/// The store must accept a write before any provider step (#4826): a refusal
+/// stops here with the store's own sentence, and no sign-in is started.
+async fn probe_local_store(client: &mut LocalCredentialClient, what: &str) -> anyhow::Result<()> {
+    match client.probe_protected_store().await {
+        Ok(()) => Ok(()),
+        Err(status) => match probe_refusal(what, &status) {
+            Some(refusal) => Err(refusal),
+            None => {
+                print_store_check_skipped();
+                Ok(())
+            }
+        },
+    }
+}
+
+/// What a failed probe means: `None` for an authority without the call, which
+/// the connect goes on without; otherwise why it stops, before any sign-in.
+fn probe_refusal(what: &str, status: &tonic::Status) -> Option<anyhow::Error> {
+    use std::error::Error as _;
+    if status.code() == tonic::Code::Unimplemented {
+        return None;
+    }
+    Some(if status.source().is_some() {
+        anyhow::anyhow!("couldn't reach the local credential store, so your {what} wasn't saved")
+    } else {
+        anyhow::anyhow!(
+            "the local credential store can't save a {what} now, so nothing was saved: {}",
+            status.message()
+        )
+    })
+}
+
+/// Said once when a connect goes on without checking the store first.
+const STORE_CHECK_SKIPPED: &str = "Couldn't check the local credential store first: it's still the one the cw you updated from started, while local VMs run.";
+
+fn print_store_check_skipped() {
+    let style =
+        crate::output::Capabilities::from_process(crate::output::OutputMode::Text).stderr_style();
+    eprintln!(
+        "{} {STORE_CHECK_SKIPPED}",
+        style.status(crate::output::Status::Attention)
+    );
 }
 
 /// The local authority's side of `cw credentials connect`: the provider login
@@ -235,6 +292,17 @@ impl ConnectStore for LocalConnectStore<'_> {
             revision: record.metadata.revocation_generation,
             status: status_label(record.metadata.status),
         })
+    }
+
+    async fn ready(&mut self, provider: CredentialConnectProviderArg) -> anyhow::Result<()> {
+        if codewire_local_credentials::AuthorityFeature::StoreProbe
+            .served_by(self.client.info().protocol_version)
+        {
+            probe_local_store(self.client, connected_noun(provider)).await
+        } else {
+            print_store_check_skipped();
+            Ok(())
+        }
     }
 
     async fn approve(
@@ -1312,6 +1380,8 @@ async fn print_profile_revisions(
 }
 
 #[cfg(test)]
+mod local_store_tests;
+#[cfg(test)]
 mod tests {
     #[test]
     fn oversized_stdin_after_maximum_crlf_is_not_silently_truncated() {
@@ -1346,7 +1416,7 @@ mod tests {
     const READINESS_HANG_GUARD: Duration = Duration::from_secs(120);
 
     /// Connects once the in-process synthetic authority listens.
-    async fn connect_ready_authority<T>(
+    pub(super) async fn connect_ready_authority<T>(
         config: &codewire_local_credentials::AuthorityRuntimeConfig,
         server: &tokio::task::JoinHandle<T>,
     ) -> LocalCredentialClient {
@@ -1507,8 +1577,10 @@ mod tests {
         );
     }
 
+    /// Only a Claude sign-in needs a newer authority; the store check is a
+    /// preference a connect goes on without (#4826, #4967).
     #[test]
-    fn a_claude_sign_in_needs_an_authority_that_stores_one_before_the_browser_step() {
+    fn only_a_claude_sign_in_needs_a_newer_authority() {
         use codewire_local_credentials::AuthorityFeature;
         let connect = |provider| {
             CredentialOperation::Credential(CredentialsCommand::Connect(CredentialConnectArgs {
@@ -1521,14 +1593,43 @@ mod tests {
         let (feature, _) = authority_feature_needed(&connect(CredentialConnectProviderArg::Claude))
             .expect("a Claude sign-in names the feature it needs");
         assert_eq!(feature, AuthorityFeature::ClaudeSignIn);
-        // The v0.4.18 authority (protocol 16) is older and must not be asked.
-        assert!(!feature.served_by(16));
         for provider in [
             CredentialConnectProviderArg::Codex,
             CredentialConnectProviderArg::Github,
         ] {
             assert_eq!(authority_feature_needed(&connect(provider)), None);
         }
+    }
+
+    /// An authority without the probe lets the connect go on; a store's
+    /// refusal and a lost connection stop it, each in its own words.
+    #[test]
+    fn a_failed_probe_stops_the_connect_unless_the_authority_lacks_the_call() {
+        assert!(
+            probe_refusal(
+                "Claude sign-in",
+                &tonic::Status::unimplemented("no such method")
+            )
+            .is_none()
+        );
+        let refused = probe_refusal(
+            "Claude sign-in",
+            &tonic::Status::unavailable("local protected storage did not respond in time"),
+        )
+        .expect("a refusal stops the connect");
+        assert_eq!(
+            refused.to_string(),
+            "the local credential store can't save a Claude sign-in now, so nothing was saved: local protected storage did not respond in time"
+        );
+        let lost = probe_refusal(
+            "Codex sign-in",
+            &tonic::Status::from_error(Box::new(std::io::Error::other("connection reset"))),
+        )
+        .expect("a lost connection stops the connect");
+        assert_eq!(
+            lost.to_string(),
+            "couldn't reach the local credential store, so your Codex sign-in wasn't saved"
+        );
     }
 
     #[test]

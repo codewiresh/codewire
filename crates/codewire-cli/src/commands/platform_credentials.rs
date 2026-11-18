@@ -366,6 +366,10 @@ impl ConnectStore for CloudConnectStore<'_> {
         })
     }
 
+    async fn ready(&mut self, _: CredentialConnectProviderArg) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn approve(
         &mut self,
         target: &ConnectTarget<rpc::Credential>,
@@ -1073,6 +1077,25 @@ mod tests {
         validate_update_ack(&expected, &response.credential.into_option().unwrap()).unwrap();
         server.verify().await;
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    /// The cloud's service runs the provider step and the save together, so
+    /// a cloud connect asks nothing of the store first.
+    #[tokio::test]
+    async fn a_cloud_connect_asks_nothing_before_the_provider_step() {
+        let server = MockServer::start().await;
+        let client = client(&server);
+        for provider in [
+            CredentialConnectProviderArg::Claude,
+            CredentialConnectProviderArg::Codex,
+            CredentialConnectProviderArg::Github,
+        ] {
+            CloudConnectStore { client: &client }
+                .ready(provider)
+                .await
+                .unwrap();
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     fn client(server: &MockServer) -> CodewireClient {
