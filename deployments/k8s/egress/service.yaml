@@ -1,0 +1,23 @@
+# The address a broker-mode sandbox dials for its egress stream. Local
+# traffic policy: a sandbox reaches only the cw-egress on its own node, or
+# nothing. The stream is plaintext on the Pod network on that basis (#4000);
+# a contract test pins internalTrafficPolicy.
+apiVersion: v1
+kind: Service
+metadata:
+  name: codewire-egress
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: egress
+spec:
+  type: ClusterIP
+  internalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: egress
+  ports:
+    - port: 8089
+      targetPort: 8089
+      protocol: TCP
+      name: stream

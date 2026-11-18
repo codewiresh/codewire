@@ -2064,6 +2064,9 @@ run_paths_case workspace_image_pin_proposal pull_request refs/pull/2255/head fal
   'go_consumer_interop go_support policy release confidential_script_tests security security_js' \
   scripts/ci/images/propose-workspace-image-pin.sh \
   scripts/ci/tests/test-propose-workspace-image-pin.sh \
+  scripts/ci/images/propose-egress-image-pin.sh \
+  scripts/ci/images/egress-image-pin.py \
+  scripts/ci/tests/test-propose-egress-image-pin.sh \
   scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh \
   scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh
 # The owner-dispatched SDK releases select the release proofs (#3512); each

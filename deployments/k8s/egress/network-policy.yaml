@@ -1,0 +1,79 @@
+# Layer 1 of cw-egress's network policy (private-docs designs/hosted-egress.md,
+# "The Pod's network policy, in two layers"); infra adds layer 2, a
+# CiliumNetworkPolicy that denies the host, other nodes and the API server.
+#
+# Ingress: only a broker-mode sandbox Pod may open the stream port. The probe
+# port is not listed: only the node reaches it, and a node is never blocked.
+# Egress: orchestration's internal listener in this namespace, DNS to the
+# resolvers the overlay configures (it replaces the documentation address
+# below with exactly the nameservers it sets), and public addresses only,
+# never private, shared, link-local or loopback ranges.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: codewire-egress
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: egress
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              codewire.sh/resource-type: sandbox
+          podSelector:
+            matchLabels:
+              codewire.sh/egress: broker
+      ports:
+        - protocol: TCP
+          port: 8089
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: codewire
+              app.kubernetes.io/component: orchestration
+      ports:
+        - protocol: TCP
+          port: 8088
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.53/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - ::1/128
+              # IPv4-mapped, NAT64 and 6to4 addresses reach IPv4, private
+              # ranges and metadata included.
+              - ::ffff:0:0/96
+              - 64:ff9b::/96
+              - 64:ff9b:1::/48
+              - 2002::/16
+              - fc00::/7
+              - fe80::/10

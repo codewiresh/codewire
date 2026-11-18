@@ -1,0 +1,20 @@
+# cw-egress, the per-node egress supervisor for hosted sandboxes (#4000;
+# private-docs designs/hosted-egress.md, "The image and its deployment").
+# A Component, not part of base: an overlay opts in, and its contract test
+# then holds that overlay to the shape below. It runs in the server namespace,
+# where orchestration's internal roots ConfigMap is published. Node drains skip
+# DaemonSet Pods, which is intended: a draining node's sandboxes keep their
+# egress until they move.
+#
+# The image is pinned here, by digest, only by a merged "bump cw-egress" pull
+# request; no overlay sets it. Until the first signed image is pinned, the
+# placeholder below resolves to nothing, so an overlay that opts in early
+# fails to pull rather than running an unpinned image.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - serviceaccount.yaml
+  - daemonset.yaml
+  - service.yaml
+  - network-policy.yaml

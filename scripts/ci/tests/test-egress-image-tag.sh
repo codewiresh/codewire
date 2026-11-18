@@ -84,6 +84,13 @@ grep -Fq 'left as it is' "$work/again.out" || fail 'a second build did not leave
 "$SCRIPT" tag "$first" "$fingerprint" | grep -Fq "already names $first" ||
   fail 'retagging the same digest was not a no-op'
 
+[[ "$("$SCRIPT" fp-digest "$fingerprint")" == "${first##*@}" ]] || fail 'fp-digest did not print the tagged digest'
+other_fingerprint="$(printf 'e%.0s' {1..64})"
+if "$SCRIPT" fp-digest "$other_fingerprint" >/dev/null 2>&1; then
+  fail 'fp-digest of a missing tag succeeded'
+else
+  [[ $? -eq 3 ]] || fail 'fp-digest of a missing tag did not exit 3'
+fi
 printf '%s\n' "${second##*@}" >"$FAKE_REGISTRY/egress_$source_sha"
 [[ "$("$SCRIPT" source-digest "$source_sha")" == "${second##*@}" ]] ||
   fail 'the source tag digest was not read'

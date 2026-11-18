@@ -5,6 +5,7 @@
 # fingerprint.
 #
 #   egress-image-tag.sh exists FINGERPRINT         prints present or absent
+#   egress-image-tag.sh fp-digest FINGERPRINT      prints the digest of :fp-FINGERPRINT, or exits 3
 #   egress-image-tag.sh source-digest SOURCE_SHA   prints the digest of :SOURCE_SHA
 #   egress-image-tag.sh tag DIGEST_REF FINGERPRINT creates :fp-FINGERPRINT, once
 #
@@ -17,7 +18,7 @@
 set -euo pipefail
 
 usage() {
-  echo 'Usage: egress-image-tag.sh exists FINGERPRINT | source-digest SOURCE_SHA | tag DIGEST_REF FINGERPRINT' >&2
+  echo 'Usage: egress-image-tag.sh exists|fp-digest FINGERPRINT | source-digest SOURCE_SHA | tag DIGEST_REF FINGERPRINT' >&2
   exit 2
 }
 
@@ -30,7 +31,7 @@ docker_bin="${DOCKER_BIN:-docker}"
 command="$1"
 shift
 case "$command" in
-  exists)
+  exists|fp-digest)
     [[ $# -eq 1 && "$1" =~ ^[0-9a-f]{64}$ ]] || usage
     ;;
   source-digest)
@@ -95,6 +96,9 @@ case "$command" in
       [[ "$status" -eq 3 ]] || exit "$status"
       echo absent
     fi
+    ;;
+  fp-digest)
+    manifest_digest "$REPOSITORY:fp-$1"
     ;;
   source-digest)
     manifest_digest "$REPOSITORY:$1"

@@ -127,7 +127,8 @@ grep -qF 'scripts/ci/images/build-push-image.sh confidential-probe images/confid
   "$WORKFLOW" || fail 'confidential probe is not built by the canonical Gitea helper'
 publish_job="$(sed -n '/^  publish-support-images:/,/^  publish-confidential-probe:/p' "$WORKFLOW")"
 probe_job="$(sed -n '/^  publish-confidential-probe:/,/^  propose-workspace-image-pin:/p' "$WORKFLOW")"
-pin_job="$(sed -n '/^  propose-workspace-image-pin:/,/^  alias-support-pair:/p' "$WORKFLOW")"
+pin_job="$(sed -n '/^  propose-workspace-image-pin:/,/^  # The cw-egress pin/p' "$WORKFLOW")"
+egress_pin_job="$(sed -n '/^  propose-egress-image-pin:/,/^  alias-support-pair:/p' "$WORKFLOW")"
 alias_job="$(sed -n '/^  alias-support-pair:/,$p' "$WORKFLOW")"
 # The probe builds on the trusted BuildKit builder, never on a BuildKit image
 # this job pulls itself, except under the owner's exact-commit recovery.
@@ -1061,6 +1062,21 @@ grep -qF "::error::the %s support build exceeded its %s-minute budget in the %s 
 # failing job's log (infra#1229).
 if grep -qE '/actions/runs/[^ ]*/cancel' "$WORKFLOW"; then
   fail 'a support pair half cancels its own run'
+fi
+
+# The cw-egress pin proposal runs only on main's push, reads only the bot
+# token and the Harbor pull credential, and proposes only through the
+# verifying script (private-docs designs/hosted-egress.md).
+[[ -n "$egress_pin_job" ]] || fail 'the cw-egress pin proposal job is missing'
+grep -Fq "    if: \${{ github.event_name == 'push' }}" <<<"$egress_pin_job" ||
+  fail 'the cw-egress pin proposal runs on more than main'"'"'s push'
+grep -Fq 'scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh' <<<"$egress_pin_job" &&
+  grep -Fq 'scripts/ci/images/propose-egress-image-pin.sh' <<<"$egress_pin_job" ||
+  fail 'the cw-egress pin proposal does not run the verifying proposer as the bot'
+grep -Fq 'persist-credentials: false' <<<"$egress_pin_job" ||
+  fail 'the cw-egress pin proposal keeps the job token in its checkout'
+if grep -Eq 'sign-runtime-image-set|egress-image-tag.sh tag|build-push|publish-image' <<<"$egress_pin_job"; then
+  fail 'the cw-egress pin proposal builds, signs, tags or publishes'
 fi
 
 echo 'support-image workflow contract: OK'

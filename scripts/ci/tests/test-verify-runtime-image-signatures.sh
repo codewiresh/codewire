@@ -66,12 +66,23 @@ for ((index = 0; index < ${#args[@]}; index += 1)); do
       ;;
   esac
 done
+# An egress verify names no source and asks for JSON: every matching
+# signature's payload, with its source annotation, as Cosign prints it.
+json=false
+[[ " $* " != *' --output json '* ]] || json=true
+matched=()
 while read -r signed_ref signed_family signed_source signed_verified; do
-  [[ "$signed_ref" == "${!#}" && "$signed_family" == "$family" && "$signed_source" == "$source" ]] ||
-    continue
+  [[ "$signed_ref" == "${!#}" && "$signed_family" == "$family" ]] || continue
+  [[ -z "$source" || "$signed_source" == "$source" ]] || continue
   [[ -z "$verified" || "$signed_verified" == "$verified" ]] || continue
-  exit 0
+  matched+=("$signed_source")
 done <"$SIGNATURES"
+if [[ "${#matched[@]}" -gt 0 ]]; then
+  if [[ "$json" == true ]]; then
+    printf '%s\n' "${matched[@]}" | jq -R '{optional: {"dev.codewire.source-sha": .}}' | jq -s .
+  fi
+  exit 0
+fi
 echo 'no matching signatures' >&2
 exit 10
 COSIGN
@@ -196,5 +207,39 @@ grep -Fq 'Approved Cosign image was not preloaded' "$work/no-cosign.err" ||
 if PATH="$work/bin:$PATH" "$VERIFIER" "$bundle" >/dev/null 2>&1; then
   fail "the verifier accepted a missing public key argument"
 fi
+
+# --egress verifies one cw-egress image and prints the sources its
+# main-CI-verified signatures name, for the pin proposal to check.
+egress_ref="registry.example.invalid/codewire/egress@$digest"
+verify_egress() {
+  PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+    DOCKER_LOG="$docker_log" COSIGN_LOG="$cosign_log" FETCH_LOG="$fetch_log" \
+    SIGNATURES="$signatures" FAKE_COSIGN_BINARY="$work/fake-cosign" \
+    OPENBAO_HARBOR_CREDENTIAL_FETCHER="$work/fetcher" \
+    "$VERIFIER" --egress "$1" "$public_key"
+}
+: >"$signatures"
+if verify_egress "$egress_ref" >"$work/egress-none.out" 2>"$work/egress-none.err"; then
+  fail 'an unsigned cw-egress image was accepted'
+fi
+grep -Fq 'no valid main-CI-verified signature' "$work/egress-none.err" ||
+  fail 'the unsigned cw-egress refusal was not attributable'
+printf '%s egress %s none\n' "$egress_ref" "$other_sha" >>"$signatures"
+if verify_egress "$egress_ref" >/dev/null 2>&1; then
+  fail 'a cw-egress signature without the main-CI verdict was accepted'
+fi
+printf '%s egress %s main-ci\n' "$egress_ref" "$source_sha" >>"$signatures"
+printf '%s mesh %s main-ci\n' "$egress_ref" "$other_sha" >>"$signatures"
+verify_egress "$egress_ref" >"$work/egress.out" 2>"$work/egress.err" || {
+  cat "$work/egress.err" >&2
+  fail 'a signed cw-egress image was refused'
+}
+[[ "$(cat "$work/egress.out")" == "$source_sha" ]] ||
+  fail 'the verifier did not print exactly the source of the verified egress signature'
+for refused in "registry.example.invalid/codewire/mesh@$digest" "registry.example.invalid/codewire/egress:$source_sha"; do
+  if verify_egress "$refused" >/dev/null 2>&1; then
+    fail "the egress verifier accepted $refused"
+  fi
+done
 
 printf '[test-verify-runtime-image-signatures] Production signature reuse contract passed\n'

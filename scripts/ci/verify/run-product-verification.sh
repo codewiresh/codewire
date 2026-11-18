@@ -778,6 +778,8 @@ run_repo_rules() {
   python3 -B scripts/ci/tests/test-runtime-profile.py
   scripts/ci/tests/test-admin-proto-boundary.sh
   python3 scripts/checks/repo_checks.py license-map
+  python3 scripts/checks/repo_checks.py egress-manifests --self-test
+  python3 scripts/checks/repo_checks.py egress-manifests
   python3 scripts/checks/repo_checks.py kind-suite-rows --self-test
   python3 scripts/checks/repo_checks.py kind-suite-rows
   python3 scripts/checks/repo_checks.py journey-paths --self-test
@@ -1827,6 +1829,7 @@ run_release() {
   scripts/ci/tests/test-support-images-workflow.sh
   scripts/ci/tests/test-run-workspace-contract-on-image.sh
   scripts/ci/tests/test-propose-workspace-image-pin.sh
+  scripts/ci/tests/test-propose-egress-image-pin.sh
   scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh
   python3 -B scripts/ci/tests/test-sdk-release-workflow.py
   python3 -B scripts/ci/tests/test-scorecard-workflow.py

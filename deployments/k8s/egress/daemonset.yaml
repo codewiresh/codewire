@@ -1,0 +1,135 @@
+# One cw-egress on every sandbox runtime node. For each admitted sandbox
+# stream it runs a confined network worker and egress broker pair (#4000).
+# It holds no credentials and reads no Kubernetes object; orchestration
+# admits every stream and assigns every policy (private-docs
+# designs/hosted-egress.md, "The image and its deployment").
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: codewire-egress
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: egress
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: egress
+  updateStrategy:
+    # A new version starts beside the old one on each node, and the old Pod
+    # is told to stop only once the new one is Ready. While it terminates it
+    # is no longer a ready endpoint, so new streams reach only the new
+    # version, and it drains the streams it has (#4000, item 5).
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codewire
+        app.kubernetes.io/component: egress
+    spec:
+      serviceAccountName: codewire-egress
+      automountServiceAccountToken: false
+      # Its Pod reaches no server that answers cluster names: each overlay
+      # that opts in replaces this nameserver with its nodes' own resolvers.
+      # The placeholder is a documentation address, so an overlay that forgets
+      # resolves nothing rather than something it should not.
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - 192.0.2.53
+      # cw-egress reaches orchestration by the address Kubernetes gives it in
+      # its service environment, never by name.
+      enableServiceLinks: true
+      imagePullSecrets:
+        - name: harbor-registry
+      nodeSelector:
+        node.codewire.sh/purpose: sandbox-runtime
+      tolerations:
+        - key: node.codewire.sh/runtime-candidate
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      # The drain below plus 30 s, so cw-egress cuts the last streams and
+      # flushes their records itself before the kubelet kills it.
+      terminationGracePeriodSeconds: 1830
+      containers:
+        - name: egress
+          # The component's images entry pins this to a signed digest; no
+          # overlay sets it.
+          image: git.example.com/codewire/egress
+          ports:
+            - containerPort: 8089
+              protocol: TCP
+              name: stream
+            # Probes and metrics. The PodMonitor scrapes the port named http.
+            - containerPort: 8098
+              name: http
+          envFrom:
+            - configMapRef:
+                name: codewire-config
+          env:
+            # How long a stopping cw-egress keeps a sandbox that has open
+            # connections before it resets them once; a sandbox with none
+            # open moves at once (#4000, item 5).
+            - name: CODEWIRE_EGRESS_DRAIN_SECONDS
+              value: "1800"
+            - name: CODEWIRE_EGRESS_NODE_TOKEN_PATH
+              value: /var/run/secrets/codewire/egress-node/token
+            # Orchestration's internal listener (8088), verified against its
+            # published roots. The URL's host is only the TLS and request
+            # name; cw-egress dials ORCHESTRATION_ADDR, whose port must be
+            # the URL's, or it refuses to start.
+            - name: CODEWIRE_EGRESS_ORCHESTRATION_URL
+              value: https://codewire-orchestration.prod.svc.cluster.local:8088
+            - name: CODEWIRE_EGRESS_ORCHESTRATION_ADDR
+              value: $(CODEWIRE_ORCHESTRATION_SERVICE_HOST):8088
+            - name: CODEWIRE_EGRESS_ORCHESTRATION_ROOTS
+              value: /run/codewire-orchestration-internal-roots/ca.crt
+          volumeMounts:
+            - name: egress-node-token
+              mountPath: /var/run/secrets/codewire/egress-node
+              readOnly: true
+            - name: orchestration-roots
+              mountPath: /run/codewire-orchestration-internal-roots
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: egress-node-token
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  audience: codewire.internal.egress-node.v1
+                  expirationSeconds: 600
+                  path: token
+        # Published in the server namespace on every cluster, because Mesh
+        # reads it there: infra on Dev and Production, local-internal-tls.sh
+        # on Kind. This only mounts it.
+        - name: orchestration-roots
+          configMap:
+            name: codewire-orchestration-internal-roots

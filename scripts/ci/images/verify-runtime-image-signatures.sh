@@ -15,8 +15,19 @@
 # commit Dev delivered since. This only verifies: it never signs.
 set -euo pipefail
 
+# --egress verifies one cw-egress image, which is in no ImageBundle: a valid
+# main-CI-verified signature with its family, and it prints the source SHA
+# each such signature names, for the caller to check against main
+# (private-docs designs/hosted-egress.md, "The image and its deployment").
+egress_ref=''
+if [[ "${1:-}" == --egress ]]; then
+  egress_ref="${2:-}"
+  shift 2 || true
+  set -- "$egress_ref" "$@"
+fi
 if [[ $# -ne 2 ]]; then
   echo 'Usage: verify-runtime-image-signatures.sh IMAGE_BUNDLE PUBLIC_KEY' >&2
+  echo '       verify-runtime-image-signatures.sh --egress HARBOR_EGRESS_REF PUBLIC_KEY' >&2
   exit 2
 fi
 
@@ -28,7 +39,9 @@ readonly HARBOR_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}
 readonly COSIGN_IMAGE="$HARBOR_HOST/oci-approved/sigstore/cosign/cosign@sha256:6ca1127dc1e9ff19f3f2bfa214936813a86fbbf52919652eda49d393c888ad3c"
 readonly ref_pattern="^${HARBOR_HOST//./\\.}/codewire/(dashboard|derp|daemon|services|mesh)@sha256:[0-9a-f]{64}\$"
 
-for input in "$BUNDLE_INPUT" "$PUBLIC_KEY_INPUT"; do
+inputs=("$PUBLIC_KEY_INPUT")
+[[ -n "$egress_ref" ]] || inputs+=("$BUNDLE_INPUT")
+for input in "${inputs[@]}"; do
   [[ -f "$input" && -r "$input" && ! -L "$input" ]] || {
     echo "Runtime signature input is missing, unreadable, or a symbolic link: $input" >&2
     exit 1
@@ -54,23 +67,30 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -m 0700 "$docker_config"
-install -m 0400 "$BUNDLE_INPUT" "$bundle"
 install -m 0400 "$PUBLIC_KEY_INPUT" "$public_key"
 openssl pkey -pubin -in "$public_key" -noout >/dev/null 2>&1 || {
   echo 'Runtime signing public key is invalid' >&2
   exit 1
 }
-python3 "$ROOT/scripts/ci/images/image-bundle.py" validate "$bundle"
-source_sha="$(jq -er '.source.sha' "$bundle")"
-[[ "$source_sha" =~ ^[0-9a-f]{40}$ && "$source_sha" != 0000000000000000000000000000000000000000 ]] || {
-  echo 'Runtime image bundle has no exact source SHA' >&2
-  exit 1
-}
-entries="$(jq -r '.images[] | [.family, .ref] | @tsv' "$bundle")"
-[[ "$(wc -l <<<"$entries")" -eq 5 ]] || {
-  echo 'Runtime image bundle must name exactly five images' >&2
-  exit 1
-}
+if [[ -n "$egress_ref" ]]; then
+  [[ "$egress_ref" =~ ^"$HARBOR_HOST"/codewire/egress@sha256:[0-9a-f]{64}$ ]] || {
+    echo 'The egress image to verify must be a codewire/egress digest reference in Harbor' >&2
+    exit 1
+  }
+else
+  install -m 0400 "$BUNDLE_INPUT" "$bundle"
+  python3 "$ROOT/scripts/ci/images/image-bundle.py" validate "$bundle"
+  source_sha="$(jq -er '.source.sha' "$bundle")"
+  [[ "$source_sha" =~ ^[0-9a-f]{40}$ && "$source_sha" != 0000000000000000000000000000000000000000 ]] || {
+    echo 'Runtime image bundle has no exact source SHA' >&2
+    exit 1
+  }
+  entries="$(jq -r '.images[] | [.family, .ref] | @tsv' "$bundle")"
+  [[ "$(wc -l <<<"$entries")" -eq 5 ]] || {
+    echo 'Runtime image bundle must name exactly five images' >&2
+    exit 1
+  }
+fi
 
 # Verification needs only read access: use the pull identity every deployment
 # uses, never the publisher.
@@ -98,6 +118,31 @@ cosign_container=''
   exit 1
 }
 chmod 0500 "$cosign_binary"
+
+if [[ -n "$egress_ref" ]]; then
+  if ! env -u BAO_ADDR -u BAO_TOKEN DOCKER_CONFIG="$docker_config" GOMAXPROCS=2 \
+      "$cosign_binary" verify \
+        --key "$public_key" \
+        --insecure-ignore-tlog \
+        --new-bundle-format=true \
+        --annotations "dev.codewire.image-family=egress" \
+        --annotations "dev.codewire.verified=main-ci" \
+        --output json \
+        "$egress_ref" >"$work/egress.verify.json" 2>"$work/egress.verify.err"; then
+    echo "The cw-egress image has no valid main-CI-verified signature: $egress_ref" >&2
+    sed -n '1,5p' "$work/egress.verify.err" >&2
+    exit 1
+  fi
+  # Each verified signature names the source it was built from; the caller
+  # accepts the image only for one of those that main contains.
+  jq -er '[.[] | .optional["dev.codewire.source-sha"] | strings
+           | select(test("^[0-9a-f]{40}$"))] | unique | select(length > 0) | .[]' \
+    "$work/egress.verify.json" || {
+    echo "The cw-egress image's signatures name no exact source: $egress_ref" >&2
+    exit 1
+  }
+  exit 0
+fi
 
 failed=()
 while IFS=$'\t' read -r family reference; do

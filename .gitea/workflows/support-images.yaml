@@ -455,6 +455,37 @@ jobs:
           WORKSPACE_PIN_BOT_TOKEN_FILE="$bot_work/token" \
             scripts/ci/images/propose-workspace-image-pin.sh "$WORKSPACE_REF"
 
+  # The cw-egress pin (private-docs designs/hosted-egress.md, "The image and
+  # its deployment"). Dev delivery builds and signs the image; this proposes it
+  # as the component's pin once a main-CI-verified signature of it names a
+  # source on main with main's egress inputs. Same bot and branch rules as the
+  # workspace pin: it opens or updates one pull request and cannot merge.
+  propose-egress-image-pin:
+    # zizmor: ignore[excessive-permissions] This exact protected job reads only the workspace-pin bot token and the Harbor pull credential, just in time.
+    name: Propose the signed cw-egress image pin
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
+    timeout-minutes: 20
+    if: ${{ github.event_name == 'push' }}
+    env:
+      OPENBAO_ROLE: codewire-source-support-publisher
+      CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+      OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Propose the pin as the workspace-pin bot
+        run: |
+          set -euo pipefail
+          bot_work="$(mktemp -d "$RUNNER_TEMP/egress-pin-bot.XXXXXX")"
+          trap 'find "$bot_work" -type f -exec shred -u {} +; rm -rf "$bot_work"' EXIT
+          scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh "$bot_work/token"
+          WORKSPACE_PIN_BOT_TOKEN_FILE="$bot_work/token" \
+            scripts/ci/images/propose-egress-image-pin.sh
+
   # A commit whose base and workspace fingerprints equal the published pair's
   # the planner validated gets that pair's exact indexes under its own commit
   # tag, in Harbor and the GHCR mirror, with the join's publisher identity: no
