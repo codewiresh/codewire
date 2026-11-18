@@ -15,13 +15,17 @@ fj actions runs list -R origin --output json
 fj actions runs logs 789 --job 101 -R origin
 ```
 
-Paginate audits. Create with `fj pr -R origin create` and use the checked-in
-merge helper after reviewing the exact head and required checks. It supplies
-both title and body explicitly: the CLI's default body can contain a forge URL,
-regardless of the repository's web merge template.
+Paginate audits. Create with `fj pr -R origin create`. Once `main` lands only
+through the merge queue (infra#2599), queue a reviewed pull request with
+`queue-pr.sh`: it sets the title and the `merge-queue` label, and the queue
+lands the pull request when its head is green and approved, with an explicit
+title and body (the CLI's default body can contain a forge URL). Until then,
+use the checked-in merge helper after reviewing the exact head and required
+checks; once Forgejo refuses it, it names the queue-pr.sh command.
 
 ```sh
-scripts/dev/merge-pr.sh 456 "feat: do the thing"
+scripts/dev/queue-pr.sh 456 "feat: do the thing"   # once main lands through the queue
+scripts/dev/merge-pr.sh 456 "feat: do the thing"   # until then
 ```
 
 A Tier 2 or Tier 3 pull request's body has a line `Safe because:` naming the
