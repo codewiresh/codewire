@@ -393,7 +393,7 @@ check "$base" || fail 'a short stall failed the check'
 assert_kept "$base" 'a four-minute stall'
 age_mark "$base" 400 30
 check "$base" || fail 'a stopped hung server failed the check'
-! server_running "$base" || fail "the hung server still runs: $(cat "$hang/stderr")"
+! server_running "$base" || fail "the hung server still runs: $(cat "$hang/stderr"; cat "$base/server-check.log" 2>/dev/null)"
 [[ "$(grep -c -- '^--stop-server ' "$hang/fake/calls")" == 1 ]] ||
   fail '--stop-server was not tried once first'
 grep -Eq "^CODEWIRE_LOCAL_RUST_CACHE state=restarted reason=server-hung at=[0-9TZ:-]+ pid=[0-9]+ clients=3 stalled=[0-9]+s by=TERM\$" \
@@ -411,7 +411,7 @@ start_server "$base" 2 --ignore-stop --ignore-term
 check "$base"
 age_mark "$base" 400 30
 check "$base" || fail 'a killed hung server failed the check'
-! server_running "$base" || fail "the TERM-proof hung server still runs: $(cat "$hang/stderr")"
+! server_running "$base" || fail "the TERM-proof hung server still runs: $(cat "$hang/stderr"; cat "$base/server-check.log" 2>/dev/null)"
 grep -Fq ' by=KILL' "$hang/stderr" || fail "kill status: $(cat "$hang/stderr")"
 
 # One pass over /proc/net/unix can miss the listening socket while sockets
@@ -444,7 +444,7 @@ check "$base"
 age_mark "$base" 400 30
 check "$base" || fail 'a stopped unresponsive server failed the check'
 rm -- "$hang/fake/stats-unanswered"
-! server_running "$base" || fail "the unresponsive server still runs: $(cat "$hang/stderr")"
+! server_running "$base" || fail "the unresponsive server still runs: $(cat "$hang/stderr"; cat "$base/server-check.log" 2>/dev/null)"
 grep -Eq ' clients=2 stalled=[0-9]+s by=stop-server$' "$hang/stderr" ||
   fail "unresponsive status: $(cat "$hang/stderr")"
 
@@ -468,6 +468,8 @@ age_mark "$base" 400 30
 check "$base"
 assert_kept "$base" 'a server running a compiler'
 (($(date +%s) - $(marked_since "$base") < 60)) || fail 'a running compiler did not restart the clock'
+grep -Eq '^CODEWIRE_LOCAL_RUST_CACHE state=kept reason=compiling pid=[0-9]+$' "$base/server-check.log" ||
+  fail "a server kept for its compiler did not say why: $(cat "$base/server-check.log" 2>/dev/null)"
 
 # Healthy: no client waits, so an old mark is dropped and nothing is stopped.
 base="$hang/idle"

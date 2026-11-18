@@ -237,10 +237,18 @@ local_rust_cache_count_restart() {
   fi
 }
 
+# Record in the log beside the cache only, not on stderr. Besides restarts,
+# this says why a check that reached a stall did not stop the server, or why it
+# did not look at all: those paths were silent, and a failed test could not say
+# which one it took.
+local_rust_cache_note_server() {
+  printf 'CODEWIRE_LOCAL_RUST_CACHE %s\n' "$2" >>"$1/server-check.log" 2>/dev/null || true
+}
+
 # Report a restart to the caller and in the account's log beside the cache.
 local_rust_cache_log_server() {
   local_rust_cache_status "$2"
-  printf 'CODEWIRE_LOCAL_RUST_CACHE %s\n' "$2" >>"$1/server-check.log" 2>/dev/null || true
+  local_rust_cache_note_server "$1" "$2"
 }
 
 # One observation of the server at BASE, under the check lock. Its progress
@@ -249,7 +257,7 @@ local_rust_cache_log_server() {
 # Returns 3 when a hung server could not be stopped.
 local_rust_cache_observe_server() {
   local base="$1" sccache_bin="$2" mark="$1/server-progress"
-  local inode='' clients='' answered progress now at pid start by
+  local inode='' clients='' answered progress now at pid start by again
   local marked_inode='' marked_progress='' since='' seen=''
   IFS=' ' read -r inode clients <<<"$(local_rust_cache_server_socket "$base/server.sock")" || true
   if [[ -z "$inode" || "${clients:-0}" == 0 ]]; then
@@ -271,16 +279,22 @@ local_rust_cache_observe_server() {
       ((now - seen > CODEWIRE_LOCAL_SCCACHE_OBSERVATION_GAP_SECONDS)); then
     since="$now"
   fi
-  if ((now - since >= CODEWIRE_LOCAL_SCCACHE_STALL_SECONDS)) &&
-      pid="$(local_rust_cache_socket_owner "$inode")" &&
-      start="$(local_rust_cache_process_start "$pid")"; then
-    if local_rust_cache_server_compiling "$pid"; then
+  if ((now - since >= CODEWIRE_LOCAL_SCCACHE_STALL_SECONDS)); then
+    if ! pid="$(local_rust_cache_socket_owner "$inode")" ||
+        ! start="$(local_rust_cache_process_start "$pid")"; then
+      local_rust_cache_note_server "$base" "state=kept reason=owner-unknown inode=$inode"
+    elif local_rust_cache_server_compiling "$pid"; then
+      local_rust_cache_note_server "$base" "state=kept reason=compiling pid=$pid"
       since="$now"
     else
       # A compiler that has just exited is counted a moment later.
       sleep 1
-      if local_rust_cache_server_compiling "$pid" ||
-          [[ "$(local_rust_cache_server_progress "$base" "$sccache_bin")" != "$answered" ]]; then
+      if local_rust_cache_server_compiling "$pid"; then
+        local_rust_cache_note_server "$base" "state=kept reason=compiling pid=$pid"
+        since="$now"
+      elif again="$(local_rust_cache_server_progress "$base" "$sccache_bin")" || again='';
+          [[ "$again" != "$answered" ]]; then
+        local_rust_cache_note_server "$base" "state=kept reason=progress-changed pid=$pid answered=${answered:-none} then=${again:-none}"
         since="$now"
       else
         at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -309,7 +323,7 @@ local_rust_cache_check_server() {
   local status=0
   local_rust_cache_server_check_supported || return 0
   (
-    flock -w 30 9 || exit 0
+    flock -w 30 9 || { local_rust_cache_note_server "$1" 'state=skipped reason=check-lock-busy'; exit 0; }
     local_rust_cache_observe_server "$@"
   ) 9>>"$1/server-check.lock" || status=$?
   [[ "$status" != 3 ]]
