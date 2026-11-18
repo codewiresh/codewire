@@ -65,9 +65,10 @@ SELECTION_JOB = "Verification selection"
 GATE_STEP = "Wait for this run's admission"
 # Not "blocked": a run awaiting approval holds no slot until it is approved.
 UNFINISHED_RUN_STATES = ("waiting", "running", "unknown")
-# One at a time, so every pull request run is a clean run (owner, 2026-11-18:
-# "The admitted limit for PRs should be one."; codewire#5311).
-ADMITTED_LIMIT = 1
+# Two at a time, each with a pull request build VM of its own (owner,
+# 2026-11-18: "I'm fine with the limit being at two for now for PRs.";
+# codewire#5311).
+ADMITTED_LIMIT = 2
 # Waiting gates hold light runner slots. The light runner takes 24 jobs
 # (owner, 2026-11-14: faster jobs, not more of them; infra#2471), so at most 2
 # wait and at least 22 slots stay for every repository's real light jobs. At 6,

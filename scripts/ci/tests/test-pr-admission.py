@@ -148,18 +148,20 @@ class PrAdmission(unittest.TestCase):
 
     def setUp(self) -> None:
         # The cases were written for six admitted runs at once, and read the
-        # algorithm at that limit; test_the_limit_is_one reads the shipped one.
+        # algorithm at that limit; test_the_limit_is_two reads the shipped one.
         patcher = mock.patch.object(gate, "ADMITTED_LIMIT", 6)
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_the_limit_is_one(self) -> None:
-        # Owner, 2026-11-18: "The admitted limit for PRs should be one."
+    def test_the_limit_is_two(self) -> None:
+        # Owner, 2026-11-18: "I'm fine with the limit being at two for now for
+        # PRs." (codewire#5311).
         mock.patch.stopall()
-        self.assertEqual(gate.ADMITTED_LIMIT, 1)
-        self.assertEqual(self.decide({10: "waiting"}, 10)[0], gate.ADMITTED)
-        self.assertEqual(self.decide({1: "admitted", 10: "waiting"}, 10)[0], gate.WAIT)
-        self.assertEqual(self.decide({1: "admitted", 9: "waiting", 10: "waiting"}, 9)[0], gate.WAIT)
+        self.assertEqual(gate.ADMITTED_LIMIT, 2)
+        self.assertEqual(self.decide({1: "admitted", 10: "waiting"}, 10)[0], gate.ADMITTED)
+        self.assertEqual(self.decide({1: "admitted", 2: "admitted", 10: "waiting"}, 10)[0], gate.WAIT)
+        self.assertEqual(self.decide({1: "admitted", 9: "waiting", 10: "waiting"}, 9)[0], gate.ADMITTED)
+        self.assertEqual(self.decide({1: "admitted", 9: "waiting", 10: "waiting"}, 10)[0], gate.WAIT)
 
     def decide(self, state: dict, own: int, *, blocked=(), unreadable=(), **options):
         return gate.decide(FakeForgejo([state], blocked=blocked, unreadable=unreadable, shape=self.SHAPE),
