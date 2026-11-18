@@ -292,12 +292,18 @@ async function challengeFrom(child: ChildProcess, deadline: number): Promise<Dev
   });
 }
 
-function drain(stream: NodeJS.ReadableStream, child: ChildProcess): void {
+// The login's private stderr, kept only to name a failed login's class from
+// the closed cw_failure_class set, as runText does; it is never repeated.
+function collect(stream: NodeJS.ReadableStream, child: ChildProcess): () => string {
   let bytes = 0;
-  stream.on("data", (chunk: Buffer | string) => {
+  let text = "";
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk: string) => {
     bytes += Buffer.byteLength(chunk);
-    if (bytes > MAX_PRIVATE_OUTPUT_BYTES) signalProcessGroup(child, "SIGTERM");
+    if (bytes <= MAX_PRIVATE_OUTPUT_BYTES) text += chunk;
+    else signalProcessGroup(child, "SIGTERM");
   });
+  return () => text;
 }
 
 function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
@@ -517,7 +523,7 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
       env, stdio: ["ignore", "pipe", "pipe"], detached: true,
     });
     if (!login.stdout || !login.stderr) fail("child-process");
-    drain(login.stderr, login);
+    const loginStderr = collect(login.stderr, login);
     const challenge = await challengeFrom(login, deadline);
     context = await chromium.launchPersistentContext(browserProfile, {
       executablePath: options.chromiumExecutable,
@@ -536,7 +542,7 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
     await withinDeadline(() => approveInOrdinaryBrowser(page!, challenge, credentials), deadline);
     const loginExit = await childExit(login, deadline);
     if (signalStage) fail(signalStage);
-    if (loginExit !== 0) fail("cli-device-login");
+    if (loginExit !== 0) fail("cli-device-login", cwFailureClass(loginExit, loginStderr()));
     login = undefined;
     const savedRaw = await readFile(join(options.configDir, "credentials.json"), "utf8")
       .catch(() => fail("saved-oauth-invalid"));

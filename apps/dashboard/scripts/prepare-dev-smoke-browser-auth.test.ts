@@ -254,6 +254,10 @@ async function fixture(mode = "success") {
     : JSON.stringify({ id: USER, email: EMAIL });
   const login = mode === "drift"
     ? "printf 'changed challenge output\\n'; exit 1"
+    : mode === "login-http"
+      ? `printf '%s\\n' 'Opening browser to authorize...' "If browser doesn't open, visit: https://codewire-dev.sh/device" 'Your code: ABCD-1234'
+         printf '%s\\n' 'Error: poll for the device token: HTTP status server error (503 Service Unavailable) (hostile-cw-stderr-canary)' >&2
+         exit 1`
     : mode === "timeout"
       ? "exec sleep 30"
       : `printf '%s\\n' 'Opening browser to authorize...' "If browser doesn't open, visit: https://codewire-dev.sh/device" 'Your code: ABCD-1234'
@@ -443,6 +447,21 @@ test("a failed cw lookup carries its cw failure class, not an assertion", async 
     "[dev-smoke-browser-auth] failure-class: dns",
   ]);
   expect(await readFile(join(value.directory, "audit"), "utf8")).toBe("logout\n");
+  expect(await readdir(value.config)).toEqual([]);
+});
+
+// A failed device login names its cause from the same closed set, never its
+// stderr, and leaves nothing in the owned config.
+test("a failed device login carries its cw failure class, not an assertion", async () => {
+  const value = await fixture("login-http");
+  const result = await helper.main(value.args, JOURNEY_DEADLINE_MS).catch((error) => error);
+  expect(result).toBeInstanceOf(helper.FixedStageError);
+  expect(result.stage).toBe("cli-device-login");
+  expect(result.failureClass).toBe("http_503");
+  expect(helper.failureLines(result)).toEqual([
+    "[dev-smoke-browser-auth] ERROR: cli-device-login",
+    "[dev-smoke-browser-auth] failure-class: http_503",
+  ]);
   expect(await readdir(value.config)).toEqual([]);
 });
 
