@@ -2830,8 +2830,14 @@ if grep -Eq 'cargo_ci build .*-p codewire-orchestration' <<<"$orchestration_buil
   exit 1
 fi
 grep -qF 'cargo clippy --locked -p codewire-credential-service --features enrollment --all-targets -- -D warnings' "$ROOT/scripts/ci/verify/run-product-verification.sh"
-grep -qF 'assert_passed_count "idp db_flow" "$logfile" 26' "$integration_runner"
-grep -qF 'assert_passed_count "idp two-factor replacement" "$logfile" 16' "$integration_runner"
+grep -qF 'listed_run "idp db_flow" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" --' "$integration_runner"
+grep -qF 'listed_run "idp two-factor replacement" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" --' "$integration_runner"
+# A lane's count comes from the tests it runs, never from a number here: a
+# pull request's tests are built from it merged onto main (codewire#5311).
+if grep -n 'assert_passed_count' "$integration_runner"; then
+  echo 'a service lane checks a test count written in the script' >&2
+  exit 1
+fi
 grep -qF 'selected service_connectcore && run_connect_auth_matrix' \
   "$integration_runner"
 if rg -n 'run_connectcore|CONNECTCORE_BASE_URLS|go test.*connectcore' \

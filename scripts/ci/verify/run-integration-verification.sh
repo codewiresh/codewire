@@ -125,7 +125,7 @@ cargo_ci() {
 #   beside them.
 # - RUST_DATABASE_ARCHIVES (a test job): every `cargo test` of a lane runs the
 #   same tests from those archives with cargo-nextest (RUST_TEST_NEXTEST),
-#   and prints cargo's "test result" line, so assert_passed_count and the
+#   and prints cargo's "test result" line, so counted_suite, listed_run and the
 #   lanes' output checks read it as before. `cargo build` of the migration
 #   runner is a no-op: the archives carry it.
 # - services-PLANE-archives and RUST_SERVICE_ARCHIVES do the same for one
@@ -474,14 +474,6 @@ on_exit() {
 }
 trap on_exit EXIT
 
-assert_passed_count() {
-  local label="$1" logfile="$2" expected="$3" count
-  count="$(sed -nE 's/.*test result: ok\. ([0-9]+) passed.*/\1/p' "$logfile" | tail -n 1)"
-  if [ "$count" != "$expected" ]; then
-    echo "::error::${label} reported ${count:-no} passing tests; expected ${expected}"
-    return 1
-  fi
-}
 
 # suite_tests COMMAND...: the names of the tests COMMAND, a `cargo test` with
 # its filter and test arguments, would run, one per line. libtest's --list
@@ -563,6 +555,48 @@ counted_suite() {
   passed="$(sed -nE 's/.*test result: ok\. ([0-9]+) passed.*/\1/p' "$logfile" | tail -n 1)"
   if [ "$passed" != "$expected" ]; then
     echo "::error::${label} passed ${passed:-no} of the ${expected} tests its filter lists"
+    return 1
+  fi
+}
+
+# listed_run LABEL LOGFILE [VARIABLE=VALUE...] -- COMMAND...: a service lane's
+# `cargo test`, run like counted_suite but kept out of the database coverage
+# listings. It must pass exactly the tests COMMAND itself lists, at least one,
+# and none may skip itself for want of its database. The count comes from the
+# test binaries that run, never from this script: a pull request's lanes are
+# its own copy of this script, but its tests are built from it merged onto
+# main, which may hold tests this copy has never seen. A number written here
+# failed every older pull request whenever main added a test (#5260 against
+# idp's oauth_sign_in, "32 passing tests; expected 31"; codewire#5311).
+listed_run() {
+  local label="$1" logfile="$2" expected passed
+  shift 2
+  local -a variables=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+    variables+=("$1")
+    shift
+  done
+  [ "$#" -gt 1 ] || { echo "::error::${label}: listed_run needs -- COMMAND" >&2; return 2; }
+  shift
+  expected="$(
+    for arg in "${variables[@]}"; do export "${arg?}"; done
+    suite_tests "$@" | wc -l
+  )"
+  if [ "$expected" -eq 0 ]; then
+    echo "::error::${label} selects no test; its filter matches nothing"
+    return 1
+  fi
+  (
+    for arg in "${variables[@]}"; do export "${arg?}"; done
+    "$@"
+  ) | tee "$logfile"
+  if grep -q 'DATABASE_URL unset' "$logfile"; then
+    echo "::error::${label} skipped: a test found no database"
+    return 1
+  fi
+  passed="$(sed -nE 's/.*test result: ok\. ([0-9]+) passed.*/\1/p' "$logfile" | tail -n 1)"
+  if [ "$passed" != "$expected" ]; then
+    echo "::error::${label} passed ${passed:-no} of the ${expected} tests it lists"
     return 1
   fi
 }
@@ -1822,103 +1856,55 @@ run_idp_flow() {
     ' >/dev/null
   stop_proc idp
 
-  DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo_ci test --profile ci -p codewire-idp --test db_flow -- --nocapture \
-    | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::idp db_flow skipped"
-    return 1
-  fi
-  assert_passed_count "idp db_flow" "$logfile" 26
+  listed_run "idp db_flow" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-idp --test db_flow -- --nocapture
 }
 
 run_idp_session_inventory() {
   local logfile="$RUN_DIR/idp-session-inventory.log"
-  DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo_ci test --profile ci -p codewire-idp --test session_inventory -- --nocapture \
-    | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::idp session inventory DB tests skipped"
-    return 1
-  fi
-  assert_passed_count "idp session inventory" "$logfile" 7
+  listed_run "idp session inventory" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-idp --test session_inventory -- --nocapture
 }
 
 run_idp_two_factor() {
   local logfile="$RUN_DIR/idp-two-factor-replacement.log"
-  DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo_ci test --profile ci -p codewire-idp --test two_factor_replacement -- --nocapture \
-    | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::idp two-factor replacement DB tests skipped"
-    return 1
-  fi
-  assert_passed_count "idp two-factor replacement" "$logfile" 16
+  listed_run "idp two-factor replacement" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-idp --test two_factor_replacement -- --nocapture
 }
 
 run_idp_rewrap_cli() {
   local logfile="$RUN_DIR/idp-rewrap-cli.log"
-  DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo_ci test --profile ci -p codewire-idp --test rewrap_cli -- --nocapture \
-    | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::idp rewrap CLI DB test skipped"
-    return 1
-  fi
-  assert_passed_count "idp rewrap CLI" "$logfile" 2
+  listed_run "idp rewrap CLI" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-idp --test rewrap_cli -- --nocapture
 }
 
 # Sign in with GitHub or Google (#4062), against in-process fake providers.
 run_idp_oauth_sign_in() {
   local logfile="$RUN_DIR/idp-oauth-sign-in.log"
-  DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo_ci test --profile ci -p codewire-idp --test oauth_sign_in -- --nocapture \
-    | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::idp OAuth sign-in DB tests skipped"
-    return 1
-  fi
-  assert_passed_count "idp OAuth sign-in" "$logfile" 32
+  listed_run "idp OAuth sign-in" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-idp --test oauth_sign_in -- --nocapture
 }
 
 # The organization invitation email sender (#3847), with a recording mailer.
 run_idp_invitation_email() {
   local logfile="$RUN_DIR/idp-invitation-email.log"
-  DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo_ci test --profile ci -p codewire-idp --test invitation_email -- --nocapture \
-    | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::idp invitation email DB tests skipped"
-    return 1
-  fi
-  assert_passed_count "idp invitation email" "$logfile" 7
+  listed_run "idp invitation email" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-idp --test invitation_email -- --nocapture
 }
 
 # Adding a password to a GitHub- or Google-only account (#4528).
 run_idp_password_add() {
   local logfile="$RUN_DIR/idp-password-add.log"
-  DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo_ci test --profile ci -p codewire-idp --test password_add -- --nocapture \
-    | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::idp password add DB tests skipped"
-    return 1
-  fi
-  assert_passed_count "idp password add" "$logfile" 3
+  listed_run "idp password add" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-idp --test password_add -- --nocapture
 }
 
 # The sign-up limits (#3297). It owns the signup:all and signup_address
 # counters while it runs, so it runs alone, after the suites that sign up.
 run_idp_signup_limit() {
   local logfile="$RUN_DIR/idp-signup-limit.log"
-  DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo_ci test --profile ci -p codewire-idp --test signup_limit -- --nocapture \
-    | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::idp sign-up limit DB tests skipped"
-    return 1
-  fi
-  assert_passed_count "idp sign-up limit" "$logfile" 1
+  listed_run "idp sign-up limit" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-idp --test signup_limit -- --nocapture
 }
 
 run_idp() {
@@ -1934,27 +1920,18 @@ run_idp() {
 
 run_coordinator() {
   local logfile="$RUN_DIR/coordinator-protocol-auth.log"
-  DATABASE_URL="$DATABASE_URL_RUST" cargo_ci test --profile ci \
-    -p codewire-coordinator --lib \
-    connect::tests::production_user_credentials_match_for_connect_and_grpc \
-    -- --exact --nocapture | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::coordinator protocol auth matrix skipped"
-    return 1
-  fi
-  assert_passed_count "coordinator protocol auth matrix" "$logfile" 1
+  listed_run "coordinator protocol auth matrix" "$logfile" \
+      DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-coordinator --lib \
+      connect::tests::production_user_credentials_match_for_connect_and_grpc -- --exact \
+      --nocapture
 
   # #3828: a client loses its session when a re-check refuses its access.
   logfile="$RUN_DIR/coordinator-client-recheck.log"
-  DATABASE_URL="$DATABASE_URL_RUST" cargo_ci test --profile ci \
-    -p codewire-coordinator --lib \
-    connect::tests::production_client_session_ends_when_its_access_is_revoked \
-    -- --exact --nocapture | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::coordinator client re-check skipped"
-    return 1
-  fi
-  assert_passed_count "coordinator client re-check" "$logfile" 1
+  listed_run "coordinator client re-check" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-coordinator --lib \
+      connect::tests::production_client_session_ends_when_its_access_is_revoked -- --exact \
+      --nocapture
 
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
     -f "${BUILD_SOURCE_DIR:-$ROOT}/tests/fixtures/coordinator/seed.sql"
@@ -1966,15 +1943,12 @@ run_coordinator() {
     ENVIRONMENT=local "$CARGO_CI_DIR/codewire-coordinator"
   wait_http coordinator-ready "http://127.0.0.1:${COORDINATOR_PORT}/readyz" \
     "$RUN_DIR/coordinator.pid"
-  COORDINATOR_BASE_URL="http://127.0.0.1:${COORDINATOR_PORT}" \
-    COORDINATOR_SEEDED=1 \
-    COORDINATOR_USER_SESSION_TOKEN=coordinator-contract-session-token \
-    COORDINATOR_SESSION_SECRET="$SESSION_SECRET" \
-    cargo_ci test --locked --profile ci -p codewire-coordinator \
-      --test wire_contract configured_coordinator_wire_contract -- \
-      --ignored --exact --nocapture | tee "$RUN_DIR/coordinator-contract.log"
-  assert_passed_count \
-    "Rust coordinator wire contract" "$RUN_DIR/coordinator-contract.log" 1
+  listed_run "Rust coordinator wire contract" "$RUN_DIR/coordinator-contract.log" \
+      COORDINATOR_BASE_URL="http://127.0.0.1:${COORDINATOR_PORT}" COORDINATOR_SEEDED=1 \
+      COORDINATOR_USER_SESSION_TOKEN=coordinator-contract-session-token \
+      COORDINATOR_SESSION_SECRET="$SESSION_SECRET" -- \
+    cargo_ci test --locked --profile ci -p codewire-coordinator --test wire_contract \
+      configured_coordinator_wire_contract -- --ignored --exact --nocapture
   stop_proc coordinator
 }
 
@@ -2010,14 +1984,12 @@ run_billing() {
   start_billing
   (
     cd "$ROOT"
-    BILLING_BASE_URL="http://127.0.0.1:${BILLING_PORT}" \
-      BILLING_ADMIN_SESSION_TOKEN=contract-admin-session-token \
-      BILLING_USER_SESSION_TOKEN=contract-user-session-token BILLING_SEEDED=1 \
-      cargo_ci test --locked --profile ci -p codewire-billing \
-        --test wire_contract configured_billing_wire_contract \
-        -- --ignored --exact --nocapture | tee "$RUN_DIR/billing-contract.log"
-    assert_passed_count \
-      "configured Rust billing Connect contract" "$RUN_DIR/billing-contract.log" 1
+    listed_run "configured Rust billing Connect contract" "$RUN_DIR/billing-contract.log" \
+        BILLING_BASE_URL="http://127.0.0.1:${BILLING_PORT}" \
+        BILLING_ADMIN_SESSION_TOKEN=contract-admin-session-token \
+        BILLING_USER_SESSION_TOKEN=contract-user-session-token BILLING_SEEDED=1 -- \
+      cargo_ci test --locked --profile ci -p codewire-billing --test wire_contract \
+        configured_billing_wire_contract -- --ignored --exact --nocapture
   )
   stop_proc billing
 }
@@ -2422,18 +2394,16 @@ run_orchestration() {
   local logfile
   start_orchestration
   logfile="$RUN_DIR/orchestration-contract.log"
-  ORCHESTRATION_BASE_URL="http://127.0.0.1:${ORCHESTRATION_PORT}" \
-    ORCHESTRATION_GLOBAL_ADMIN_SESSION_TOKEN=orchestration-global-admin-session-token \
-    ORCHESTRATION_ADMIN_SESSION_TOKEN=apikey-contract-admin-session-token \
-    ORCHESTRATION_USER_SESSION_TOKEN=apikey-contract-user-session-token \
-    ORCHESTRATION_SEEDED=1 ORCHESTRATION_KUBE_MODE=configured \
-    ORCHESTRATION_CONTRACT_SCOPE=complete \
-    TEST_DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo_ci test --locked --profile ci -p codewire-orchestration \
-      --test wire_contract --features kind-e2e \
-      configured_orchestration_wire_contract -- \
-      --ignored --exact --nocapture | tee "$logfile"
-  assert_passed_count "Rust orchestration wire contract" "$logfile" 1
+  listed_run "Rust orchestration wire contract" "$logfile" \
+      ORCHESTRATION_BASE_URL="http://127.0.0.1:${ORCHESTRATION_PORT}" \
+      ORCHESTRATION_GLOBAL_ADMIN_SESSION_TOKEN=orchestration-global-admin-session-token \
+      ORCHESTRATION_ADMIN_SESSION_TOKEN=apikey-contract-admin-session-token \
+      ORCHESTRATION_USER_SESSION_TOKEN=apikey-contract-user-session-token \
+      ORCHESTRATION_SEEDED=1 ORCHESTRATION_KUBE_MODE=configured \
+      ORCHESTRATION_CONTRACT_SCOPE=complete TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --locked --profile ci -p codewire-orchestration --test wire_contract \
+      --features kind-e2e configured_orchestration_wire_contract -- --ignored --exact \
+      --nocapture
 
   SMOKE_CONNECT_BASE_URL="http://127.0.0.1:${ORCHESTRATION_PORT}" \
     SMOKE_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -2447,30 +2417,22 @@ run_orchestration() {
   stop_orchestration_daemon
   start_orchestration_process unconfigured
   logfile="$RUN_DIR/orchestration-kube-unconfigured-contract.log"
-  ORCHESTRATION_BASE_URL="http://127.0.0.1:${ORCHESTRATION_PORT}" \
-    ORCHESTRATION_GLOBAL_ADMIN_SESSION_TOKEN=orchestration-global-admin-session-token \
-    ORCHESTRATION_ADMIN_SESSION_TOKEN=apikey-contract-admin-session-token \
-    ORCHESTRATION_USER_SESSION_TOKEN=apikey-contract-user-session-token \
-    ORCHESTRATION_SEEDED=1 ORCHESTRATION_KUBE_MODE=unconfigured \
-    ORCHESTRATION_CONTRACT_SCOPE=runtime \
-    cargo_ci test --locked --profile ci -p codewire-orchestration \
-      --test wire_contract --features kind-e2e \
-      configured_orchestration_wire_contract -- \
-      --ignored --exact --nocapture | tee "$logfile"
-  assert_passed_count "Rust orchestration kube-unconfigured contract" "$logfile" 1
+  listed_run "Rust orchestration kube-unconfigured contract" "$logfile" \
+      ORCHESTRATION_BASE_URL="http://127.0.0.1:${ORCHESTRATION_PORT}" \
+      ORCHESTRATION_GLOBAL_ADMIN_SESSION_TOKEN=orchestration-global-admin-session-token \
+      ORCHESTRATION_ADMIN_SESSION_TOKEN=apikey-contract-admin-session-token \
+      ORCHESTRATION_USER_SESSION_TOKEN=apikey-contract-user-session-token \
+      ORCHESTRATION_SEEDED=1 ORCHESTRATION_KUBE_MODE=unconfigured \
+      ORCHESTRATION_CONTRACT_SCOPE=runtime -- \
+    cargo_ci test --locked --profile ci -p codewire-orchestration --test wire_contract \
+      --features kind-e2e configured_orchestration_wire_contract -- --ignored --exact \
+      --nocapture
 }
 
 run_connect_auth_matrix() {
   local logfile="$RUN_DIR/connect-auth.log"
-  DATABASE_URL="$DATABASE_URL_RUST" \
-    cargo_ci test --profile ci -p codewire-server-core --test connect_auth \
-    -- --nocapture \
-    | tee "$logfile"
-  if grep -q 'DATABASE_URL unset' "$logfile"; then
-    echo "::error::Connect auth matrix skipped"
-    return 1
-  fi
-  assert_passed_count "Connect auth matrix" "$logfile" 6
+  listed_run "Connect auth matrix" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-server-core --test connect_auth -- --nocapture
 }
 
 run_billing_temporal() {
@@ -2537,21 +2499,18 @@ run_nats() {
   local logfile
   start_nats
   logfile="$RUN_DIR/coordinator-nats-kv.log"
-  NATS_URL="$NATS_URL" cargo_ci test --profile ci -p codewire-coordinator \
-    --lib coordination_plane_round_trips_nats_and_kv -- --ignored --nocapture \
-    | tee "$logfile"
-  assert_passed_count "coordinator NATS/KV smoke" "$logfile" 1
+  listed_run "coordinator NATS/KV smoke" "$logfile" NATS_URL="$NATS_URL" -- \
+    cargo_ci test --profile ci -p codewire-coordinator --lib \
+      coordination_plane_round_trips_nats_and_kv -- --ignored --nocapture
   logfile="$RUN_DIR/coordinator-generated-cross-replica.log"
-  NATS_URL="$NATS_URL" cargo_ci test --profile ci -p codewire-coordinator \
-    --lib generated_protocol_cross_replica_fanout_round_trips_over_nats \
-    -- --ignored --nocapture | tee "$logfile"
-  assert_passed_count "coordinator generated cross-replica smoke" "$logfile" 1
+  listed_run "coordinator generated cross-replica smoke" "$logfile" NATS_URL="$NATS_URL" -- \
+    cargo_ci test --profile ci -p codewire-coordinator --lib \
+      generated_protocol_cross_replica_fanout_round_trips_over_nats -- --ignored --nocapture
   # Mesh replicas sharing their live registry through one KV bucket (#3542).
   logfile="$RUN_DIR/mesh-shared-registry.log"
-  NATS_URL="$NATS_URL" cargo_ci test --profile ci -p codewire-mesh \
-    --lib mesh_coordinate::shared::tests::nats_tests -- --ignored --nocapture \
-    | tee "$logfile"
-  assert_passed_count "Mesh shared registry" "$logfile" 22
+  listed_run "Mesh shared registry" "$logfile" NATS_URL="$NATS_URL" -- \
+    cargo_ci test --profile ci -p codewire-mesh --lib \
+      mesh_coordinate::shared::tests::nats_tests -- --ignored --nocapture
 }
 
 # The control plane's suites run in lanes when each can have its own

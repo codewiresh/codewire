@@ -1254,4 +1254,43 @@ for binary in codewire-db-migrate cw; do
     { echo "the runtime-plane archive build did not keep $binary" >&2; exit 1; }
 done
 
+# A service lane (listed_run) passes exactly the tests its own command lists,
+# so its count follows the binaries that run. A pull request's tests are
+# built from it merged onto main: #5260's copy of the script expected 31 idp
+# OAuth sign-in tests while the merged binary held 32 (codewire#5311).
+listed_run_case() {
+  local failure="$1" listed="$2" expected_status="$3" message="$4" output status=0
+  output="$(
+    RUN_DIR="$TMP/listed-run" LISTED="$listed" FAILURE="$failure" bash -c '
+      set -euo pipefail
+      eval "$(sed -n "/^suite_tests() {/,/^}$/p;/^listed_run() {/,/^}$/p" "$1")"
+      mkdir -p "$RUN_DIR"
+      # A cargo test of $LISTED tests: --list names them, --ignored adds none,
+      # and a run passes them all, one fewer, or skips for want of a database.
+      fake_test() {
+        local arg list=false
+        for arg in "$@"; do [ "$arg" != --list ] || list=true; done
+        if [ "$list" = true ]; then
+          [[ " $* " == *" --ignored "* ]] || for ((i = 1; i <= LISTED; i++)); do echo "t$i: test"; done
+          return 0
+        fi
+        [ "$LANE_VARIABLE" = set ] || { echo "the lane variable did not reach the run"; return 1; }
+        case "$FAILURE" in
+          fewer) echo "test result: ok. $((LISTED - 1)) passed; 0 failed" ;;
+          skip) echo "DATABASE_URL unset"; echo "test result: ok. $LISTED passed; 0 failed" ;;
+          *) echo "test result: ok. $LISTED passed; 0 failed" ;;
+        esac
+      }
+      listed_run "idp OAuth sign-in" "$RUN_DIR/lane.log" LANE_VARIABLE=set -- \
+        fake_test -p codewire-idp --test oauth_sign_in -- --nocapture
+    ' _ "$ROOT/scripts/ci/verify/run-integration-verification.sh" 2>&1
+  )" || status=$?
+  [ "$status" -eq "$expected_status" ] && grep -Fq -- "$message" <<<"$output" ||
+    { printf '%s\n' "$output" >&2; echo "listed_run case $failure/$listed: status $status, wanted $expected_status and '$message'" >&2; exit 1; }
+}
+listed_run_case none 32 0 'test result: ok. 32 passed'
+listed_run_case fewer 32 1 'idp OAuth sign-in passed 31 of the 32 tests it lists'
+listed_run_case none 0 1 'idp OAuth sign-in selects no test; its filter matches nothing'
+listed_run_case skip 7 1 'idp OAuth sign-in skipped: a test found no database'
+
 printf '[test-integration-postgres] hermetic selection, prerequisite, scope, and cleanup cases passed\n'
