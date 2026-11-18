@@ -527,7 +527,10 @@ async fn delegation_setup_cancel_drops_pending_shared_auth_without_transport_dis
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
-#[tokio::test]
+// The deadline is the subject here, so it runs on a paused clock, as its
+// sibling does (#4345): 20 ms of real time ran out inside the first poll on
+// a loaded runner (run 61423), and the wait below advances straight to it.
+#[tokio::test(start_paused = true)]
 async fn delegation_auth_ready_after_original_deadline_does_not_dispatch() {
     let (transport, _peer) = transport();
     let calls = transport.calls.clone();
