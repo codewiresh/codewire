@@ -13,6 +13,8 @@ pub mod broker_control;
 pub mod darwin;
 pub mod host_addresses;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod hosted;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod parent;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod session;

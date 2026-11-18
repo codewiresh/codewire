@@ -677,15 +677,14 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TlsL
     }
 }
 
-#[tokio::test]
-async fn the_binding_origin_is_looked_up_absolute_but_verified_and_addressed_as_configured() {
-    let ca = Ca::new();
-    // The leaf names the origin's host without a dot, as cert-manager issues
-    // orchestration's internal leaf.
-    let files = Files::new(&ca, BINDING_HOST);
+/// Serves `GET /` over `identity`, answering with the TLS server name and
+/// HTTP authority the client presented. Returns the port and the server task.
+async fn presented_names_server(
+    identity: ServerTlsFiles,
+) -> (u16, JoinHandle<std::io::Result<()>>) {
     let socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = socket.local_addr().unwrap().port();
-    let listener = TlsListener::new(socket, files.identity.clone()).unwrap();
+    let listener = TlsListener::new(socket, identity).unwrap();
     let app = Router::new().route(
         "/",
         route_get(
@@ -711,6 +710,33 @@ async fn the_binding_origin_is_looked_up_absolute_but_verified_and_addressed_as_
         )
         .await
     });
+    (port, server)
+}
+
+fn get_root(origin: &str) -> http::Request<connectrpc::client::ClientBody> {
+    use http_body_util::BodyExt as _;
+    http::Request::get(format!("{origin}/"))
+        .body(
+            http_body_util::Empty::<bytes::Bytes>::new()
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .unwrap()
+}
+
+async fn body_text(response: http::Response<hyper::body::Incoming>) -> String {
+    use http_body_util::BodyExt as _;
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
+#[tokio::test]
+async fn the_binding_origin_is_looked_up_absolute_but_verified_and_addressed_as_configured() {
+    let ca = Ca::new();
+    // The leaf names the origin's host without a dot, as cert-manager issues
+    // orchestration's internal leaf.
+    let files = Files::new(&ca, BINDING_HOST);
+    let (port, server) = presented_names_server(files.identity.clone()).await;
 
     let origin = format!("https://{BINDING_HOST}:{port}");
     // HTTP/1.1 like the daemon's binding client, so the authority is a Host
@@ -719,34 +745,63 @@ async fn the_binding_origin_is_looked_up_absolute_but_verified_and_addressed_as_
         .unwrap()
         .http1_only();
     let resolver = PodResolver::default();
-    let request = {
-        use http_body_util::BodyExt as _;
-        http::Request::get(format!("{origin}/"))
-            .body(
-                http_body_util::Empty::<bytes::Bytes>::new()
-                    .map_err(|never| match never {})
-                    .boxed(),
-            )
-            .unwrap()
-    };
     let response = tokio::time::timeout(
         TEST_TIMEOUT,
-        transport.send_resolving(resolver.clone(), request),
+        transport.send_resolving(resolver.clone(), get_root(&origin)),
     )
     .await
     .unwrap()
     .unwrap();
-    let body = {
-        use http_body_util::BodyExt as _;
-        response.into_body().collect().await.unwrap().to_bytes()
-    };
     assert_eq!(
-        String::from_utf8(body.to_vec()).unwrap(),
+        body_text(response).await,
         format!("sni={BINDING_HOST} host={BINDING_HOST}:{port}")
     );
     assert_eq!(resolver.asked(), [format!("{BINDING_HOST}.")]);
     assert_eq!(resolver.queries(), [BINDING_HOST]);
     server.abort();
+}
+
+#[tokio::test]
+async fn a_transport_given_an_address_dials_it_and_still_verifies_and_addresses_the_origin() {
+    let ca = Ca::new();
+    let files = Files::new(&ca, BINDING_HOST);
+    let (port, server) = presented_names_server(files.identity.clone()).await;
+
+    // The origin's host has no DNS answer anywhere: only the given address
+    // reaches the server.
+    let origin = format!("https://{BINDING_HOST}:{port}");
+    let transport = ConnectOriginTransport::for_origin(&origin, &files.roots)
+        .unwrap()
+        .http1_only()
+        .dialing(std::net::Ipv4Addr::LOCALHOST.into());
+    let response = tokio::time::timeout(
+        TEST_TIMEOUT,
+        connectrpc::client::ClientTransport::send(&transport, get_root(&origin)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        body_text(response).await,
+        format!("sni={BINDING_HOST} host={BINDING_HOST}:{port}")
+    );
+
+    // The name is still verified: a leaf for another host is refused.
+    let other = Files::new(&ca, "other.example");
+    let (other_port, other_server) = presented_names_server(other.identity.clone()).await;
+    let origin = format!("https://{BINDING_HOST}:{other_port}");
+    let transport = ConnectOriginTransport::for_origin(&origin, &files.roots)
+        .unwrap()
+        .dialing(std::net::Ipv4Addr::LOCALHOST.into());
+    let refused = tokio::time::timeout(
+        TEST_TIMEOUT,
+        connectrpc::client::ClientTransport::send(&transport, get_root(&origin)),
+    )
+    .await
+    .unwrap();
+    assert!(refused.is_err());
+    server.abort();
+    other_server.abort();
 }
 
 #[tokio::test]

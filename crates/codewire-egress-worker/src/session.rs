@@ -11,6 +11,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -20,13 +21,13 @@ use codewire_netstack::{
     parse_ipv4_dns_question,
 };
 use codewire_network_session::{
-    EgressTrust, NETWORK_FRAME_HEADER_LEN, NETWORK_GUEST_ACK_LEN, NetworkGuestAck,
+    EgressTrust, NETWORK_FRAME_HEADER_LEN, NETWORK_GUEST_ACK_LEN, NetworkFrame, NetworkGuestAck,
     NetworkHostHello, NetworkHostReady, NetworkKey, NetworkRole, NetworkSession, PacketBound,
-    SessionLimits, encoded_network_frame_len,
+    SelfCheck, SelfCheckFailure, SessionLimits, encoded_network_frame_len,
 };
 use rand::{RngCore as _, rngs::OsRng};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
@@ -142,6 +143,49 @@ pub enum NetworkSessionError {
     FrameIo,
     #[error("network session packet engine failed")]
     Engine,
+    #[error("the guest's egress self-check found a way around its egress")]
+    SelfCheckFailed(SelfCheckFailure),
+}
+
+/// What a hosted session adds to a local one (#4000). The host's first frame
+/// carries `trust`, and the guest's first frame must be its self-check, whose
+/// result goes to `self_check`. No guest packet is forwarded before it passes.
+///
+/// Once `drain` fires, the session ends at the first moment it holds no open
+/// flow: no TCP connection, no dial and no lookup in flight. A hosted session
+/// returns `Ok` only then.
+pub struct HostedChecks {
+    pub trust: EgressTrust,
+    pub self_check: oneshot::Sender<SelfCheck>,
+    pub drain: oneshot::Receiver<()>,
+}
+
+/// One cw-egress stream's session (#4000): identified by its Pod's UID, with
+/// generation 1, [`SessionLimits::HOSTED`] and no ingress.
+pub async fn run_hosted_network_session<S, B, R>(
+    stream: S,
+    key: NetworkKey,
+    pod_uid: Uuid,
+    broker: Arc<B>,
+    checks: HostedChecks,
+    ready: R,
+) -> Result<(), NetworkSessionError>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    B: EgressBroker,
+    R: FnOnce() -> io::Result<()> + Send,
+{
+    run_session(
+        stream,
+        key,
+        (pod_uid, 1),
+        SessionLimits::HOSTED,
+        broker,
+        None,
+        Some(checks),
+        ready,
+    )
+    .await
 }
 
 /// Run one authenticated generation-bound packet engine over an injected
@@ -169,13 +213,42 @@ where
 
 #[allow(clippy::too_many_arguments)] // The public entry point plus the ingress channel.
 pub async fn run_network_session_with_ingress<S, B, R>(
-    mut stream: S,
+    stream: S,
     key: NetworkKey,
     vm_id: Uuid,
     generation: u64,
     limits: SessionLimits,
     broker: Arc<B>,
     inbound: Option<mpsc::Receiver<InboundGuestStream>>,
+    ready: R,
+) -> Result<(), NetworkSessionError>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    B: EgressBroker,
+    R: FnOnce() -> io::Result<()> + Send,
+{
+    run_session(
+        stream,
+        key,
+        (vm_id, generation),
+        limits,
+        broker,
+        inbound,
+        None,
+        ready,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)] // The local entry point's plus the hosted checks.
+async fn run_session<S, B, R>(
+    mut stream: S,
+    key: NetworkKey,
+    (vm_id, generation): (Uuid, u64),
+    limits: SessionLimits,
+    broker: Arc<B>,
+    inbound: Option<mpsc::Receiver<InboundGuestStream>>,
+    hosted: Option<HostedChecks>,
     ready: R,
 ) -> Result<(), NetworkSessionError>
 where
@@ -224,8 +297,12 @@ where
     let mut session = NetworkSession::new(&key, &nonce, NetworkRole::Host, bound)
         .map_err(|_| NetworkSessionError::Protocol)?;
     // A local VM's egress CA rides in its seed, so its first frame says none.
+    let (trust, self_check, drain) = match hosted {
+        Some(checks) => (checks.trust, Some(checks.self_check), Some(checks.drain)),
+        None => (EgressTrust::None, None, None),
+    };
     let egress_trust = session
-        .encode_egress_trust(&EgressTrust::None)
+        .encode_egress_trust(&trust)
         .map_err(|_| NetworkSessionError::Protocol)?;
     let session = Arc::new(Mutex::new(session));
 
@@ -249,15 +326,35 @@ where
 
     let (stream_read, stream_write) = tokio::io::split(stream);
     let (guest_packet_tx, guest_packets) = mpsc::channel(PACKET_QUEUE);
-    let reader =
-        read_authenticated_frames(stream_read, Arc::clone(&session), bound, guest_packet_tx);
+    let reader = read_authenticated_frames(
+        stream_read,
+        Arc::clone(&session),
+        bound,
+        guest_packet_tx,
+        self_check,
+    );
     let writer = write_authenticated_frames(stream_write, session, bound, outbound_packets);
-    let dispatcher = dispatch_packets(guest_packets, stack, to_stack, from_stack, broker, inbound);
+    let dispatcher = dispatch_packets(
+        guest_packets,
+        stack,
+        to_stack,
+        from_stack,
+        broker,
+        inbound,
+        drain,
+    );
     tokio::pin!(reader, writer, dispatcher);
     tokio::select! {
         result = &mut reader => result,
         result = &mut writer => result,
-        result = &mut dispatcher => result,
+        result = &mut dispatcher => {
+            if result.is_ok() {
+                // Drained: the last replies may still wait in the outbound
+                // queue, such as the answer to the lookup that just finished.
+                let _ = tokio::time::timeout(DRAIN_FLUSH, &mut writer).await;
+            }
+            result
+        }
     }
 }
 
@@ -283,24 +380,27 @@ async fn read_authenticated_frames<R>(
     session: Arc<Mutex<NetworkSession>>,
     bound: PacketBound,
     packets: mpsc::Sender<Vec<u8>>,
+    self_check: Option<oneshot::Sender<SelfCheck>>,
 ) -> Result<(), NetworkSessionError>
 where
     R: AsyncRead + Unpin,
 {
+    if let Some(result) = self_check {
+        // A hosted guest's first frame is its self-check, read once; anything
+        // else ends the session before a packet moves.
+        let frame = read_frame(&mut stream, bound).await?;
+        let decoded = session.lock().await.decode_frame(&frame);
+        let Ok(NetworkFrame::SelfCheck(check)) = decoded else {
+            return Err(NetworkSessionError::Protocol);
+        };
+        // The worker may already be ending, and then nobody waits for it.
+        let _ = result.send(check);
+        if let SelfCheck::Failed(failure) = check {
+            return Err(NetworkSessionError::SelfCheckFailed(failure));
+        }
+    }
     loop {
-        let mut header = [0_u8; NETWORK_FRAME_HEADER_LEN];
-        stream
-            .read_exact(&mut header)
-            .await
-            .map_err(|_| NetworkSessionError::FrameIo)?;
-        let frame_len =
-            encoded_network_frame_len(&header, bound).map_err(|_| NetworkSessionError::Protocol)?;
-        let mut frame = vec![0_u8; frame_len];
-        frame[..NETWORK_FRAME_HEADER_LEN].copy_from_slice(&header);
-        stream
-            .read_exact(&mut frame[NETWORK_FRAME_HEADER_LEN..])
-            .await
-            .map_err(|_| NetworkSessionError::FrameIo)?;
+        let frame = read_frame(&mut stream, bound).await?;
         let packet = session
             .lock()
             .await
@@ -311,6 +411,26 @@ where
             .await
             .map_err(|_| NetworkSessionError::Engine)?;
     }
+}
+
+async fn read_frame<R>(stream: &mut R, bound: PacketBound) -> Result<Vec<u8>, NetworkSessionError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut header = [0_u8; NETWORK_FRAME_HEADER_LEN];
+    stream
+        .read_exact(&mut header)
+        .await
+        .map_err(|_| NetworkSessionError::FrameIo)?;
+    let frame_len =
+        encoded_network_frame_len(&header, bound).map_err(|_| NetworkSessionError::Protocol)?;
+    let mut frame = vec![0_u8; frame_len];
+    frame[..NETWORK_FRAME_HEADER_LEN].copy_from_slice(&header);
+    stream
+        .read_exact(&mut frame[NETWORK_FRAME_HEADER_LEN..])
+        .await
+        .map_err(|_| NetworkSessionError::FrameIo)?;
+    Ok(frame)
 }
 
 async fn write_authenticated_frames<W>(
@@ -366,7 +486,43 @@ impl DialedUpstreams {
             .remove(flow)
             .map(|(upstream, _)| upstream)
     }
+
+    /// Whether a dialed upstream still waits for its guest connection.
+    fn any_waiting(&self) -> bool {
+        let now = tokio::time::Instant::now();
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .any(|(_, at)| now.duration_since(*at) < DIALED_UPSTREAM_TIMEOUT)
+    }
 }
+
+/// The guest's TCP connections bridged to an upstream right now.
+#[derive(Default)]
+struct OpenBridges(AtomicUsize);
+
+/// Counts one bridge while it lives.
+struct OpenBridge(Arc<OpenBridges>);
+
+impl OpenBridge {
+    fn new(open: &Arc<OpenBridges>) -> Self {
+        open.0.fetch_add(1, Ordering::AcqRel);
+        Self(Arc::clone(open))
+    }
+}
+
+impl Drop for OpenBridge {
+    fn drop(&mut self) {
+        self.0.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// How often a draining session looks again for its idle moment, so a dial
+/// that expires unused is noticed.
+const DRAIN_RECHECK: Duration = Duration::from_secs(1);
+/// How long a drained session waits for its queued replies to be written.
+const DRAIN_FLUSH: Duration = Duration::from_secs(1);
 
 async fn dispatch_packets<B: EgressBroker>(
     mut packets: mpsc::Receiver<Vec<u8>>,
@@ -375,6 +531,7 @@ async fn dispatch_packets<B: EgressBroker>(
     outbound: mpsc::Sender<Vec<u8>>,
     broker: Arc<B>,
     mut inbound: Option<mpsc::Receiver<InboundGuestStream>>,
+    mut drain: Option<oneshot::Receiver<()>>,
 ) -> Result<(), NetworkSessionError> {
     // One catch-all listener accepts every guest connection, whatever its
     // destination; only the netstack's connection limit bounds them (#2993).
@@ -383,14 +540,42 @@ async fn dispatch_packets<B: EgressBroker>(
         .await
         .map_err(|_| NetworkSessionError::Engine)?;
     let dialed = Arc::new(DialedUpstreams::default());
+    let open = Arc::new(OpenBridges::default());
     let mut egress = JoinSet::new();
-    egress.spawn(serve_listener(listener, Arc::clone(&dialed)));
+    egress.spawn(serve_listener(
+        listener,
+        Arc::clone(&dialed),
+        Arc::clone(&open),
+    ));
     let mut dials = JoinSet::new();
     let mut dialing = HashSet::<(SocketAddr, SocketAddr)>::new();
     let mut inbound_bridges = JoinSet::new();
     let mut dns_questions = JoinSet::new();
+    let mut draining = false;
+    let mut recheck = tokio::time::interval(DRAIN_RECHECK);
     loop {
+        if draining
+            && open.0.load(Ordering::Acquire) == 0
+            && dials.is_empty()
+            && dns_questions.is_empty()
+            && inbound_bridges.is_empty()
+            && !dialed.any_waiting()
+        {
+            return Ok(());
+        }
         let packet = tokio::select! {
+            requested = async {
+                match drain.as_mut() {
+                    Some(request) => request.await,
+                    None => std::future::pending().await,
+                }
+            }, if drain.is_some() => {
+                drain = None;
+                // A request whose sender is gone asks for nothing.
+                draining |= requested.is_ok();
+                continue;
+            }
+            _ = recheck.tick(), if draining => continue,
             packet = packets.recv() => {
                 packet.ok_or(NetworkSessionError::FrameIo)?
             }
@@ -601,7 +786,11 @@ async fn next_inbound_guest_stream(
 
 /// Bridge every guest connection the catch-all listener accepts to the
 /// upstream already dialed for it.
-async fn serve_listener(mut listener: TcpListener, dialed: Arc<DialedUpstreams>) {
+async fn serve_listener(
+    mut listener: TcpListener,
+    dialed: Arc<DialedUpstreams>,
+    open: Arc<OpenBridges>,
+) {
     let mut bridges = JoinSet::new();
     loop {
         tokio::select! {
@@ -612,7 +801,9 @@ async fn serve_listener(mut listener: TcpListener, dialed: Arc<DialedUpstreams>)
                 let Some(mut upstream) = dialed.take(&(guest.peer_addr(), guest.local_addr())) else {
                     continue;
                 };
+                let bridge = OpenBridge::new(&open);
                 bridges.spawn(async move {
+                    let _bridge = bridge;
                     let _ = tokio::io::copy_bidirectional(&mut guest, &mut upstream).await;
                     let _ = guest.shutdown().await;
                     let _ = upstream.shutdown().await;
@@ -637,6 +828,8 @@ mod tests {
     use tokio::sync::Semaphore;
 
     use super::*;
+
+    mod hosted;
 
     const TOKEN: &str = "portable-session-test-token-0123456789";
     const TEST_DNS_NAME: &str = "fixture.codewire.test";

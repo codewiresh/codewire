@@ -1,0 +1,376 @@
+//! cw-egress's calls to orchestration's `EgressService` (#4000), on the
+//! internal listener over TLS with its published roots. Every call presents
+//! cw-egress's own projected token, re-read from its file each time because
+//! the kubelet rotates it.
+//!
+//! An assignment is parsed once, here: cw-egress compiles the policy document
+//! itself and refuses one whose digest is not the one it was sent with.
+
+use std::net::IpAddr;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use codewire_egress_policy::{CompiledPolicy, PolicyDigest, PolicyDocument};
+use codewire_proto::codewire::internal::v1::__buffa::oneof::egress_assignment::Binding;
+use codewire_proto::codewire::internal::v1::{
+    AdmitRequest, EgressAssignment, EgressServiceClient, WatchAssignmentRequest,
+    WatchAssignmentResponse,
+};
+use codewire_tls::ConnectOriginTransport;
+use connectrpc::client::{CallOptions, ClientConfig};
+use connectrpc::{ConnectError, ErrorCode};
+use http::HeaderValue;
+use http::header::AUTHORIZATION;
+use thiserror::Error;
+use zeroize::Zeroizing;
+
+/// The longest one unary call to orchestration may take.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A destination every sandbox may reach whatever its policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlatformAllow {
+    pub host: String,
+    pub port: u16,
+}
+
+/// The policy a bound sandbox enforces, compiled here from its document.
+#[derive(Debug, Clone)]
+pub struct AssignedPolicy {
+    pub reference: String,
+    pub revision: u32,
+    pub policy: CompiledPolicy,
+}
+
+/// What orchestration assigned a Pod.
+#[derive(Debug, Clone)]
+pub enum Assignment {
+    /// An identity-free warm member: platform allows only.
+    Unbound { platform: Vec<PlatformAllow> },
+    Bound {
+        environment_id: String,
+        operation_generation: i64,
+        policy: AssignedPolicy,
+        platform: Vec<PlatformAllow>,
+    },
+}
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum AssignmentError {
+    #[error("the assignment names neither a bound nor an unbound Pod")]
+    Missing,
+    #[error("a platform allow is not a host and port")]
+    PlatformAllow,
+    #[error("the policy document does not compile")]
+    Document,
+    #[error("the policy document does not reproduce its digest")]
+    DigestMismatch,
+}
+
+/// Parses an assignment as orchestration sent it.
+pub fn assignment(assignment: &EgressAssignment) -> Result<Assignment, AssignmentError> {
+    let platform = assignment
+        .platform_allows
+        .iter()
+        .map(|allow| {
+            let port = u16::try_from(allow.port)
+                .ok()
+                .filter(|port| *port != 0)
+                .ok_or(AssignmentError::PlatformAllow)?;
+            if allow.host.is_empty() {
+                return Err(AssignmentError::PlatformAllow);
+            }
+            Ok(PlatformAllow {
+                host: allow.host.clone(),
+                port,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    match assignment
+        .binding
+        .as_ref()
+        .ok_or(AssignmentError::Missing)?
+    {
+        Binding::Unbound(_) => Ok(Assignment::Unbound { platform }),
+        Binding::Bound(bound) => {
+            let revision = bound.policy.as_option().ok_or(AssignmentError::Missing)?;
+            let document: PolicyDocument = serde_json::from_slice(&revision.document)
+                .map_err(|_| AssignmentError::Document)?;
+            let policy =
+                CompiledPolicy::compile(document).map_err(|_| AssignmentError::Document)?;
+            let digest: [u8; 32] = revision
+                .digest
+                .as_slice()
+                .try_into()
+                .map_err(|_| AssignmentError::DigestMismatch)?;
+            if policy.digest() != PolicyDigest::from_bytes(digest) {
+                return Err(AssignmentError::DigestMismatch);
+            }
+            Ok(Assignment::Bound {
+                environment_id: bound.environment_id.clone(),
+                operation_generation: bound.operation_generation,
+                policy: AssignedPolicy {
+                    reference: revision.reference.clone(),
+                    revision: revision.revision,
+                    policy,
+                },
+                platform,
+            })
+        }
+    }
+}
+
+/// An admitted stream's Pod.
+#[derive(Debug, Clone)]
+pub struct Admitted {
+    pub pod_uid: String,
+    pub pod_name: String,
+    pub assignment: Result<Assignment, AssignmentError>,
+}
+
+#[derive(Debug, Error)]
+pub enum CallError {
+    /// Orchestration refused: the stream is not admitted, or the Pod is not
+    /// on this node. The stream is closed.
+    #[error("orchestration refused the egress stream")]
+    Refused,
+    /// Too many starts from this peer; the guest retries later.
+    #[error("egress stream starts from this peer are limited")]
+    Limited,
+    /// Orchestration could not answer; a new stream fails closed, an
+    /// established one keeps its last assignment.
+    #[error("orchestration is unavailable: {0}")]
+    Unavailable(String),
+}
+
+impl From<ConnectError> for CallError {
+    fn from(error: ConnectError) -> Self {
+        match error.code {
+            ErrorCode::PermissionDenied
+            | ErrorCode::Unauthenticated
+            | ErrorCode::InvalidArgument => Self::Refused,
+            ErrorCode::ResourceExhausted => Self::Limited,
+            _ => Self::Unavailable(format!("{:?}", error.code)),
+        }
+    }
+}
+
+/// Where orchestration is and how cw-egress proves who it is.
+#[derive(Debug, Clone)]
+pub struct Orchestration {
+    pub url: String,
+    pub address: IpAddr,
+    pub roots: PathBuf,
+    pub token_path: PathBuf,
+}
+
+impl Orchestration {
+    fn client(&self) -> Result<EgressServiceClient<ConnectOriginTransport>, CallError> {
+        let config = ClientConfig::new(
+            self.url
+                .parse()
+                .map_err(|_| CallError::Unavailable("orchestration URL".into()))?,
+        )
+        .with_default_timeout(CALL_TIMEOUT);
+        let transport = ConnectOriginTransport::for_origin(&self.url, &self.roots)
+            .map_err(|_| CallError::Unavailable("orchestration TLS roots".into()))?
+            .dialing(self.address);
+        Ok(EgressServiceClient::new(transport, config))
+    }
+
+    fn options(&self) -> Result<CallOptions, CallError> {
+        let token = Zeroizing::new(
+            std::fs::read_to_string(&self.token_path)
+                .map_err(|_| CallError::Unavailable("egress-node token".into()))?,
+        );
+        let mut value = HeaderValue::from_str(&format!("Bearer {}", token.trim()))
+            .map_err(|_| CallError::Unavailable("egress-node token".into()))?;
+        value.set_sensitive(true);
+        CallOptions::default()
+            .try_with_header(AUTHORIZATION, value)
+            .map_err(|_| CallError::Unavailable("egress-node token".into()))
+    }
+
+    /// Asks orchestration to admit a guest's stream from `peer`.
+    pub async fn admit(&self, guest_token: &str, peer: IpAddr) -> Result<Admitted, CallError> {
+        let response = self
+            .client()?
+            .admit_with_options(
+                AdmitRequest {
+                    guest_token: guest_token.to_owned(),
+                    peer_ip: peer.to_string(),
+                    ..Default::default()
+                },
+                self.options()?,
+            )
+            .await?
+            .into_owned();
+        let assignment = response
+            .assignment
+            .as_option()
+            .ok_or(AssignmentError::Missing)
+            .and_then(assignment);
+        Ok(Admitted {
+            pod_uid: response.pod_uid.clone(),
+            pod_name: response.pod_name.clone(),
+            assignment,
+        })
+    }
+
+    /// Follows an admitted Pod's assignment. `on_change` gets each one, the
+    /// current first; the call returns when orchestration ends the stream.
+    pub async fn watch(
+        &self,
+        pod_uid: &str,
+        pod_name: &str,
+        mut on_change: impl FnMut(Result<Assignment, AssignmentError>),
+    ) -> Result<(), CallError> {
+        let mut stream = self
+            .client()?
+            .watch_assignment_with_options(
+                WatchAssignmentRequest {
+                    pod_uid: pod_uid.to_owned(),
+                    pod_name: pod_name.to_owned(),
+                    ..Default::default()
+                },
+                self.options()?,
+            )
+            .await?;
+        while let Some(message) = stream.message::<WatchAssignmentResponse>().await? {
+            let message = message.to_owned_message();
+            on_change(
+                message
+                    .assignment
+                    .as_option()
+                    .ok_or(AssignmentError::Missing)
+                    .and_then(assignment),
+            );
+        }
+        Ok(())
+    }
+}
+
+mod report;
+
+pub use report::{Enforcement, RECORDS_PER_CALL, wire_record};
+
+#[cfg(test)]
+mod tests {
+    use codewire_egress_policy::BuiltinPolicy;
+    use codewire_proto::codewire::internal::v1::{
+        BoundAssignment, EgressPolicyRevision, PlatformAllow as WireAllow,
+    };
+
+    use super::*;
+
+    fn platform() -> Vec<WireAllow> {
+        vec![WireAllow {
+            host: "control.example.com".into(),
+            port: 443,
+            ..Default::default()
+        }]
+    }
+
+    fn bound(document: Vec<u8>, digest: Vec<u8>) -> EgressAssignment {
+        EgressAssignment {
+            binding: Some(Binding::Bound(Box::new(BoundAssignment {
+                environment_id: "env".into(),
+                operation_generation: 3,
+                policy: Some(EgressPolicyRevision {
+                    reference: "locked".into(),
+                    revision: 0,
+                    document,
+                    digest,
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            }))),
+            platform_allows: platform(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_bound_assignment_is_compiled_and_its_digest_checked() {
+        let locked = BuiltinPolicy::Locked.compile();
+        let document = locked.canonical_json().unwrap();
+        let digest = locked.digest().as_bytes().to_vec();
+        let Assignment::Bound {
+            policy, platform, ..
+        } = assignment(&bound(document.clone(), digest)).unwrap()
+        else {
+            panic!("bound");
+        };
+        assert_eq!(policy.policy.digest(), locked.digest());
+        assert_eq!(platform[0].port, 443);
+
+        assert_eq!(
+            assignment(&bound(document, vec![9; 32])).unwrap_err(),
+            AssignmentError::DigestMismatch
+        );
+        assert_eq!(
+            assignment(&bound(b"{".to_vec(), vec![9; 32])).unwrap_err(),
+            AssignmentError::Document
+        );
+    }
+
+    #[test]
+    fn an_unbound_assignment_carries_only_platform_allows() {
+        let unbound = EgressAssignment {
+            binding: Some(Binding::Unbound(Box::default())),
+            platform_allows: platform(),
+            ..Default::default()
+        };
+        let Assignment::Unbound { platform } = assignment(&unbound).unwrap() else {
+            panic!("unbound");
+        };
+        assert_eq!(platform.len(), 1);
+        assert_eq!(
+            assignment(&EgressAssignment::default()).unwrap_err(),
+            AssignmentError::Missing
+        );
+    }
+
+    #[test]
+    fn a_platform_allow_without_a_port_or_host_is_refused() {
+        let mut bad = EgressAssignment {
+            binding: Some(Binding::Unbound(Box::default())),
+            platform_allows: vec![WireAllow {
+                host: "control.example.com".into(),
+                port: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            assignment(&bad).unwrap_err(),
+            AssignmentError::PlatformAllow
+        );
+        bad.platform_allows[0] = WireAllow {
+            host: String::new(),
+            port: 443,
+            ..Default::default()
+        };
+        assert_eq!(
+            assignment(&bad).unwrap_err(),
+            AssignmentError::PlatformAllow
+        );
+    }
+
+    #[test]
+    fn refusals_and_limits_are_told_apart_from_an_outage() {
+        assert!(matches!(
+            CallError::from(ConnectError::permission_denied("no")),
+            CallError::Refused
+        ));
+        assert!(matches!(
+            CallError::from(ConnectError::resource_exhausted("later")),
+            CallError::Limited
+        ));
+        assert!(matches!(
+            CallError::from(ConnectError::unavailable("down")),
+            CallError::Unavailable(_)
+        ));
+    }
+}

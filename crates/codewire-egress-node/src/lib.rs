@@ -11,7 +11,20 @@
 
 #![forbid(unsafe_code)]
 
+pub mod admission;
+pub mod admitted;
+#[cfg(target_os = "linux")]
+pub mod children;
+pub mod drain;
+#[cfg(target_os = "linux")]
+pub mod launch;
+#[cfg(target_os = "linux")]
+pub mod node;
+pub mod orchestration;
 pub mod replacement;
+pub mod reporter;
+pub mod settings;
+pub mod supervisor;
 
 /// The stream's hello and key are the session protocol's, shared with the
 /// guest that dials cw-egress.

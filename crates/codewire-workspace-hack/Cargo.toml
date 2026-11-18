@@ -111,7 +111,7 @@ regex-automata = { version = "0.4.14" }
 regex-syntax = { version = "0.8.10" }
 ring = { version = "0.17.14" }
 rsa = { version = "0.10.0-rc.18", features = ["sha2"] }
-rustix = { version = "1.1.6", features = ["event", "fs", "net", "pipe", "process", "thread"] }
+rustix = { version = "1.1.6", features = ["event", "fs", "net", "pipe", "process", "rand", "thread"] }
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }
 sec1 = { version = "0.8.1", features = ["ctutils", "pem", "std", "subtle"] }
@@ -248,7 +248,7 @@ regex-automata = { version = "0.4.14" }
 regex-syntax = { version = "0.8.10" }
 ring = { version = "0.17.14" }
 rsa = { version = "0.10.0-rc.18", features = ["sha2"] }
-rustix = { version = "1.1.6", features = ["event", "fs", "net", "pipe", "process", "thread"] }
+rustix = { version = "1.1.6", features = ["event", "fs", "net", "pipe", "process", "rand", "thread"] }
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["ring", "std"] }
 sec1 = { version = "0.8.1", features = ["ctutils", "pem", "std", "subtle"] }

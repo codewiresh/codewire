@@ -11,8 +11,12 @@
 //! otherwise be tried with each search domain appended first, and a static
 //! musl `cw` abandons the whole lookup when one of those answers SERVFAIL.
 //! The TLS server name and the HTTP authority keep the origin's host.
+//!
+//! A caller that must not resolve cluster names at all (cw-egress, whose Pod
+//! has no cluster DNS) gives the address to dial instead; the origin's host
+//! is then only the name TLS verifies and the request addresses.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::task::{Context, Poll};
 
@@ -36,6 +40,7 @@ pub struct ConnectOriginTransport {
     authority: http::uri::Authority,
     endpoint: ClientTlsEndpoint,
     http1_only: bool,
+    dial: Option<IpAddr>,
 }
 
 impl std::fmt::Debug for ConnectOriginTransport {
@@ -74,6 +79,7 @@ impl ConnectOriginTransport {
             authority,
             endpoint,
             http1_only: false,
+            dial: None,
         })
     }
 
@@ -82,6 +88,13 @@ impl ConnectOriginTransport {
     /// listener.
     pub fn http1_only(mut self) -> Self {
         self.http1_only = true;
+        self
+    }
+
+    /// Connect to `address`, at the origin's port, without looking the
+    /// origin's host up.
+    pub fn dialing(mut self, address: IpAddr) -> Self {
+        self.dial = Some(address);
         self
     }
 }
@@ -94,7 +107,10 @@ impl ClientTransport for ConnectOriginTransport {
         &self,
         request: Request<ClientBody>,
     ) -> BoxFuture<'static, Result<Response<Incoming>, ConnectError>> {
-        self.send_resolving(GaiResolver::new(), request)
+        match self.dial {
+            Some(address) => self.send_resolving(Dial(address), request),
+            None => self.send_resolving(GaiResolver::new(), request),
+        }
     }
 }
 
@@ -150,6 +166,25 @@ impl ConnectOriginTransport {
                     ConnectError::unavailable_from_transport("HTTPS request failed", error)
                 })
         })
+    }
+}
+
+/// Answers every lookup with the one configured address. The connector then
+/// gives it the origin's port.
+#[derive(Clone, Copy)]
+pub(crate) struct Dial(pub(crate) IpAddr);
+
+impl Service<Name> for Dial {
+    type Response = std::iter::Once<SocketAddr>;
+    type Error = std::convert::Infallible;
+    type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: Name) -> Self::Future {
+        std::future::ready(Ok(std::iter::once(SocketAddr::new(self.0, 0))))
     }
 }
 

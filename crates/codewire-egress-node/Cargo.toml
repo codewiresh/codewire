@@ -7,10 +7,39 @@ license = "AGPL-3.0-only"
 authors.workspace = true
 description = "cw-egress: the per-node egress supervisor for hosted sandboxes"
 
+[[bin]]
+name = "cw-egress"
+path = "src/main.rs"
+
+# Its own `main`: the launcher starts children only from its own image, so
+# the test binary dispatches the child command words itself.
+[[test]]
+name = "launch"
+harness = false
+
 [dependencies]
+codewire-confinement = { workspace = true }
+codewire-egress-broker = { workspace = true }
+codewire-egress-policy = { workspace = true }
+codewire-egress-worker = { workspace = true }
 codewire-network-session = { workspace = true }
+codewire-proto = { workspace = true, features = ["client"] }
+codewire-tls = { workspace = true }
+connectrpc = { workspace = true, features = ["client"] }
+http = { workspace = true }
+rustix = { workspace = true, features = ["rand"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
+rustix = { workspace = true, features = ["process"] }
+tokio = { workspace = true, features = ["test-util"] }
 codewire-workspace-hack.workspace = true
 
 [lints]

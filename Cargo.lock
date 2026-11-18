@@ -2025,8 +2025,25 @@ dependencies = [
 name = "codewire-egress-node"
 version = "0.1.0"
 dependencies = [
+ "codewire-confinement",
+ "codewire-egress-broker",
+ "codewire-egress-policy",
+ "codewire-egress-worker",
  "codewire-network-session",
+ "codewire-proto",
+ "codewire-tls",
  "codewire-workspace-hack",
+ "connectrpc",
+ "http",
+ "rustix",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

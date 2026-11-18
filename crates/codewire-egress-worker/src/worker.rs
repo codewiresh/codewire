@@ -32,6 +32,8 @@ use zeroize::Zeroizing;
 pub use crate::session::{
     AsyncReadWrite, BoxedBrokerStream, BrokerDnsAnswer, DenyBroker, EgressBroker, TcpFlow,
 };
+use codewire_network_session::SelfCheckFailure;
+
 use crate::session::{
     InboundGuestStream, NetworkSessionError, run_network_session,
     run_network_session_with_ingress as run_portable_network_session_with_ingress,
@@ -128,6 +130,9 @@ pub enum NetworkWorkerStartupFailure {
     FrameIo,
     Engine,
     PrivilegeConfinement,
+    SelfCheckDirectDial,
+    SelfCheckDns,
+    SelfCheckRouting,
 }
 
 impl NetworkWorkerStartupFailure {
@@ -153,6 +158,9 @@ impl NetworkWorkerStartupFailure {
             Self::FrameIo => "frame-io",
             Self::Engine => "engine",
             Self::PrivilegeConfinement => "privilege-confinement",
+            Self::SelfCheckDirectDial => "self-check-direct-dial",
+            Self::SelfCheckDns => "self-check-dns",
+            Self::SelfCheckRouting => "self-check-routing",
         }
     }
 
@@ -178,6 +186,9 @@ impl NetworkWorkerStartupFailure {
             Self::FrameIo => 37,
             Self::Engine => 38,
             Self::PrivilegeConfinement => 39,
+            Self::SelfCheckDirectDial => 40,
+            Self::SelfCheckDns => 41,
+            Self::SelfCheckRouting => 42,
         }
     }
 
@@ -203,6 +214,9 @@ impl NetworkWorkerStartupFailure {
             Self::FrameIo => "network_worker_frame_io",
             Self::Engine => "network_worker_engine",
             Self::PrivilegeConfinement => "network_worker_privilege_confinement",
+            Self::SelfCheckDirectDial => "network_worker_self_check_direct_dial",
+            Self::SelfCheckDns => "network_worker_self_check_dns",
+            Self::SelfCheckRouting => "network_worker_self_check_routing",
         }
     }
 
@@ -228,6 +242,9 @@ impl NetworkWorkerStartupFailure {
             37 => Self::FrameIo,
             38 => Self::Engine,
             39 => Self::PrivilegeConfinement,
+            40 => Self::SelfCheckDirectDial,
+            41 => Self::SelfCheckDns,
+            42 => Self::SelfCheckRouting,
             _ => return None,
         })
     }
@@ -254,6 +271,9 @@ impl NetworkWorkerStartupFailure {
             Self::FrameIo => b"CWNETW1 failed-frame-io\n",
             Self::Engine => b"CWNETW1 failed-engine\n",
             Self::PrivilegeConfinement => b"CWNETW1 failed-privilege-confinement\n",
+            Self::SelfCheckDirectDial => b"CWNETW1 failed-self-check-direct-dial\n",
+            Self::SelfCheckDns => b"CWNETW1 failed-self-check-dns\n",
+            Self::SelfCheckRouting => b"CWNETW1 failed-self-check-routing\n",
         }
     }
 }
@@ -289,6 +309,9 @@ pub fn decode_worker_startup_status(bytes: &[u8]) -> Option<NetworkWorkerStartup
         NetworkWorkerStartupFailure::FrameIo,
         NetworkWorkerStartupFailure::Engine,
         NetworkWorkerStartupFailure::PrivilegeConfinement,
+        NetworkWorkerStartupFailure::SelfCheckDirectDial,
+        NetworkWorkerStartupFailure::SelfCheckDns,
+        NetworkWorkerStartupFailure::SelfCheckRouting,
     ]
     .into_iter()
     .find(|failure| bytes == failure.message())
@@ -1116,6 +1139,14 @@ const NETWORK_WORKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[libc::SYS_fork, l
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const NETWORK_WORKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[];
 
+/// The syscall layer alone, for a test that runs code under it in a child
+/// that already has a second thread. Production confines only through
+/// [`confine_network_worker`].
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn install_network_worker_seccomp_for_test() -> Result<(), NetworkWorkerError> {
+    install_network_worker_seccomp()
+}
+
 /// Install the worker's dedicated syscall layer only after the exact
 /// single-threaded Tokio runtime has created its private internal wakeup
 /// descriptor. No guest-controlled byte is read before this filter is active.
@@ -1170,7 +1201,7 @@ pub fn validate_inherited_unix_socket(descriptor: RawFd) -> Result<(), NetworkWo
     Ok(())
 }
 
-fn socket_option(descriptor: RawFd, option: i32) -> Result<i32, NetworkWorkerError> {
+pub fn socket_option(descriptor: RawFd, option: i32) -> Result<i32, NetworkWorkerError> {
     let mut value = 0_i32;
     let mut length = std::mem::size_of::<i32>() as libc::socklen_t;
     // SAFETY: `value` is a live `i32` and `length` holds its size, so the kernel writes
@@ -1322,6 +1353,12 @@ pub enum NetworkWorkerError {
     FrameIo,
     #[error("network worker engine failed")]
     Engine,
+    #[error("the guest's self-check reached the Internet past its egress")]
+    SelfCheckDirectDial,
+    #[error("the guest's self-check reached the cluster's DNS past its egress")]
+    SelfCheckDns,
+    #[error("the guest's self-check found its routing bypasses its egress")]
+    SelfCheckRouting,
 }
 
 impl From<NetworkSessionError> for NetworkWorkerError {
@@ -1338,6 +1375,13 @@ impl From<NetworkSessionError> for NetworkWorkerError {
             NetworkSessionError::Protocol => Self::Protocol,
             NetworkSessionError::FrameIo => Self::FrameIo,
             NetworkSessionError::Engine => Self::Engine,
+            NetworkSessionError::SelfCheckFailed(SelfCheckFailure::DirectDial) => {
+                Self::SelfCheckDirectDial
+            }
+            NetworkSessionError::SelfCheckFailed(SelfCheckFailure::Dns) => Self::SelfCheckDns,
+            NetworkSessionError::SelfCheckFailed(SelfCheckFailure::Routing) => {
+                Self::SelfCheckRouting
+            }
         }
     }
 }
@@ -1371,6 +1415,9 @@ impl NetworkWorkerError {
             Self::FrameIo => NetworkWorkerStartupFailure::FrameIo,
             Self::Engine => NetworkWorkerStartupFailure::Engine,
             Self::PrivilegeConfinement => NetworkWorkerStartupFailure::PrivilegeConfinement,
+            Self::SelfCheckDirectDial => NetworkWorkerStartupFailure::SelfCheckDirectDial,
+            Self::SelfCheckDns => NetworkWorkerStartupFailure::SelfCheckDns,
+            Self::SelfCheckRouting => NetworkWorkerStartupFailure::SelfCheckRouting,
         }
     }
 }
