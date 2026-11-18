@@ -3,6 +3,8 @@
 #
 #   build-push-runtime-images.sh services   # dashboard, services, mesh, derp
 #   build-push-runtime-images.sh daemon     # the static CW producer and daemon
+#   build-push-runtime-images.sh egress     # cw-egress, built and signed but never
+#                                           # delivered by Dev delivery
 #
 # Each half runs in its own protected job, so the daemon's static CW
 # producer, the longest single build, runs beside the service Bake instead of
@@ -25,15 +27,16 @@ readonly PUBLISH_REGISTRY_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image regi
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 
 if [ "$#" -ne 1 ]; then
-  echo 'Usage: build-push-runtime-images.sh services|daemon' >&2
+  echo 'Usage: build-push-runtime-images.sh services|daemon|egress' >&2
   exit 2
 fi
 readonly runtime_group="$1"
 case "$runtime_group" in
   services) image_families=(services mesh dashboard derp) ;;
   daemon) image_families=(daemon) ;;
+  egress) image_families=(egress) ;;
   *)
-    echo 'Runtime image group must be exactly services or daemon' >&2
+    echo 'Runtime image group must be exactly services, daemon or egress' >&2
     exit 2
     ;;
 esac
@@ -332,8 +335,10 @@ if [ "$runtime_group" = services ]; then
   build_one mesh deployments/docker/mesh.Dockerfile
   build_one dashboard apps/dashboard/Dockerfile
   build_one derp deployments/docker/derp.Dockerfile
-else
+elif [ "$runtime_group" = daemon ]; then
   build_one daemon deployments/docker/daemon.Dockerfile
+else
+  build_one egress deployments/docker/egress.Dockerfile
 fi
 
 if [ "${#carried_families[@]}" -gt 0 ]; then

@@ -195,11 +195,13 @@ for job_header in '  build-support-amd64:' '  build-support-arm64:'; do
   grep -Fq 'shred -u' <<<"$support_job" || fail "support build job${job_header%:} does not remove the credential"
 done
 
-# Only the two protected build halves reference the protected compiler cache;
-# the publishing job and deploy selection never do.
-readonly -a protected_cache_jobs=('  build-service-images:' '  build-daemon-image:')
+# Only the protected builds reference the protected compiler cache: the two
+# runtime halves and the cw-egress build, which builds and signs beside them
+# but is never delivered. The publishing job, the cw-egress sign job and
+# deploy selection never do.
+readonly -a protected_cache_jobs=('  build-service-images:' '  build-daemon-image:' '  build-egress-image:')
 outside_build_jobs="$(awk '
-  /^  [A-Za-z0-9_-]+:$/ { capture = ($0 != "  build-service-images:" && $0 != "  build-daemon-image:") }
+  /^  [A-Za-z0-9_-]+:$/ { capture = ($0 != "  build-service-images:" && $0 != "  build-daemon-image:" && $0 != "  build-egress-image:") }
   capture { print }
 ' "$DEPLOY_WORKFLOW")"
 for marker in "${protected_markers[@]}"; do

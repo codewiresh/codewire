@@ -10,13 +10,24 @@
 # former. Without that run this signs nothing.
 set -euo pipefail
 
+# --egress signs one cw-egress image, which Dev delivery builds and signs but
+# never delivers, so it is in no ImageBundle (private-docs
+# designs/hosted-egress.md, "The image and its deployment"). It takes the
+# Harbor reference by digest and signs it exactly as a runtime family.
 sign_target=delivery
+egress_ref=''
 if [[ "${1:-}" == --ghcr-mirror ]]; then
   sign_target=ghcr-mirror
   shift
+elif [[ "${1:-}" == --egress ]]; then
+  sign_target=egress
+  egress_ref="${2:-}"
+  shift 2 || true
+  set -- "$egress_ref" "$@"
 fi
 if [[ $# -ne 2 ]]; then
   echo 'Usage: sign-runtime-image-set.sh [--ghcr-mirror] IMAGE_BUNDLE PUBLIC_KEY' >&2
+  echo '       sign-runtime-image-set.sh --egress HARBOR_EGRESS_REF PUBLIC_KEY' >&2
   exit 2
 fi
 
@@ -56,7 +67,9 @@ readonly MAIN_CI_RUN="${CODEWIRE_MAIN_CI_RUN:-}"
   echo 'Runtime signing requires an exact Git object ID' >&2
   exit 1
 }
-for input in "$BUNDLE_INPUT" "$PUBLIC_KEY_INPUT" "$SIGNING_CONFIG_SOURCE"; do
+signing_inputs=("$PUBLIC_KEY_INPUT" "$SIGNING_CONFIG_SOURCE")
+[[ "$sign_target" == egress ]] || signing_inputs+=("$BUNDLE_INPUT")
+for input in "${signing_inputs[@]}"; do
   [[ -f "$input" && -r "$input" && ! -L "$input" ]] || {
     echo "Runtime signing input is missing, unreadable, or a symbolic link: $input" >&2
     exit 1
@@ -86,7 +99,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -m 0700 "$docker_config"
-install -m 0400 "$BUNDLE_INPUT" "$bundle"
+[[ "$sign_target" == egress ]] || install -m 0400 "$BUNDLE_INPUT" "$bundle"
 install -m 0400 "$PUBLIC_KEY_INPUT" "$public_key"
 install -m 0400 "$SIGNING_CONFIG_SOURCE" "$signing_config"
 openssl pkey -pubin -in "$public_key" -noout >/dev/null 2>&1 || {
@@ -102,11 +115,18 @@ jq -e '
   echo 'Private Cosign signing configuration is invalid' >&2
   exit 1
 }
-python3 "$ROOT/scripts/ci/images/image-bundle.py" validate "$bundle"
-jq -e --arg sha "$GITHUB_SHA" '.source.sha == $sha' "$bundle" >/dev/null || {
-  echo 'Runtime image bundle source does not match the workflow source' >&2
-  exit 1
-}
+if [[ "$sign_target" == egress ]]; then
+  [[ "$egress_ref" =~ ^"$HARBOR_HOST"/codewire/egress@sha256:[0-9a-f]{64}$ ]] || {
+    echo 'The egress image to sign must be a codewire/egress digest reference in Harbor' >&2
+    exit 1
+  }
+else
+  python3 "$ROOT/scripts/ci/images/image-bundle.py" validate "$bundle"
+  jq -e --arg sha "$GITHUB_SHA" '.source.sha == $sha' "$bundle" >/dev/null || {
+    echo 'Runtime image bundle source does not match the workflow source' >&2
+    exit 1
+  }
+fi
 
 # A carried-forward image keeps the provenance of the protected build that
 # produced its bits, which is the planner-certified deployed baseline, not the
@@ -306,7 +326,7 @@ sign_family() {
   mkdir -m 0700 "$token_dir"
   digest="${harbor_ref##*@}"
   built_from="$(built_from_for "$family")"
-  if [[ "$sign_target" == delivery ]]; then
+  if [[ "$sign_target" == delivery || "$sign_target" == egress ]]; then
     reference="$harbor_ref"
   else
     reference="$GHCR_HOST/codewiresh/${family}@${digest}"
@@ -314,6 +334,12 @@ sign_family() {
   verify_native_attestations "$family" "$reference" "$built_from"
   sign_reference "$family" "$reference" "$built_from"
 }
+
+if [[ "$sign_target" == egress ]]; then
+  sign_family egress "$egress_ref"
+  echo "Verified and signed the exact cw-egress image in Harbor, verified by ci.yaml run $MAIN_CI_RUN"
+  exit 0
+fi
 
 # The five families are independent: verify and sign them concurrently, each
 # with its own identity exchange, then report them in bundle order. Any

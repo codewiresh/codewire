@@ -837,6 +837,8 @@ run_paths_case protected_runtime_signing pull_request refs/pull/2005/head false 
   scripts/ci/images/cosign-private-signing-config.json \
   scripts/ci/images/sign-runtime-image-set.sh \
   scripts/ci/tests/test-sign-runtime-image-set.sh \
+  scripts/ci/images/egress-image-tag.sh \
+  scripts/ci/tests/test-egress-image-tag.sh \
   scripts/ci/trust/codewire-runtime-signing.pub
 # The protected Dev runtime builder and its contract never build a Kind image:
 # they select Deploy and release verification, not Kind, even on main.

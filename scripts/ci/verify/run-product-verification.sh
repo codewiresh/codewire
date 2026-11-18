@@ -1819,6 +1819,7 @@ run_release() {
   scripts/ci/tests/test-publish-image-to-harbor.sh
   scripts/ci/tests/test-alias-support-pair.sh
   scripts/ci/tests/test-sign-runtime-image-set.sh
+  scripts/ci/tests/test-egress-image-tag.sh
   scripts/ci/tests/test-verify-runtime-image-signatures.sh
   scripts/ci/tests/test-resolve-published-support-pair.sh
   scripts/ci/tests/test-run-skopeo-container.sh

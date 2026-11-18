@@ -1,0 +1,12 @@
+# BuildKit per-Dockerfile ignore for the cw-egress image.
+*
+!Cargo.toml
+!Cargo.lock
+!third_party
+!third_party/sqlx-sqlite-unused
+!third_party/sqlx-sqlite-unused/**
+!crates
+!crates/**
+!proto
+!proto/**
+crates/**/target

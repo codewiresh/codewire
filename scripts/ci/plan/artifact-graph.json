@@ -306,6 +306,20 @@
         "third_party/sqlx-sqlite-unused/**"
       ]
     },
+    "egress_image": {
+      "kind": "file-set",
+      "inputs": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/**",
+        "deployments/docker/egress.Dockerfile",
+        "deployments/docker/egress.Dockerfile.dockerignore",
+        "deployments/docker/rust-base.Dockerfile",
+        "docker-bake.hcl",
+        "proto/**",
+        "third_party/sqlx-sqlite-unused/**"
+      ]
+    },
     "base_image": {
       "kind": "file-set",
       "inputs": ["images/base/**"]

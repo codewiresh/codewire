@@ -27,6 +27,10 @@ DEV_RELEASE_ARTIFACT = "dev_release_tree"
 # can be accepted only by promoting that exact source.
 DEV_ACCEPTANCE_ARTIFACT = "dev_acceptance_harness"
 DEPLOY_ARTIFACTS = (DEV_RELEASE_ARTIFACT, DEV_ACCEPTANCE_ARTIFACT, *RUNTIME_ARTIFACTS)
+# cw-egress is built and signed by Dev delivery's workflow but never delivered
+# by it, so it never selects a delivery: only its fingerprint, which keys the
+# image (private-docs designs/hosted-egress.md, "The image and its deployment").
+EGRESS_ARTIFACT = "egress_image"
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 STATE_VALUES = {"affected", "unaffected", "unclassified"}
@@ -62,6 +66,22 @@ def artifact_state(plan: dict[str, Any], name: str) -> str:
     if state not in STATE_VALUES:
         raise AdapterError(f"plan artifact {name} has invalid state")
     return state
+
+
+def egress_fingerprint(plan: dict[str, Any]) -> str:
+    """The egress image's head fingerprint, or empty when the planner gave
+    none (an unclassified run): then no egress image is built for this commit,
+    and the next commit with a fingerprint builds it."""
+    artifacts = plan.get("artifacts")
+    entry = artifacts.get(EGRESS_ARTIFACT) if isinstance(artifacts, dict) else None
+    if not isinstance(entry, dict):
+        raise AdapterError(f"plan omits artifact {EGRESS_ARTIFACT}")
+    fingerprint = entry.get("head_fingerprint")
+    if fingerprint is None:
+        return ""
+    if not isinstance(fingerprint, str) or not HEX64_RE.fullmatch(fingerprint):
+        raise AdapterError(f"plan artifact {EGRESS_ARTIFACT} has an invalid fingerprint")
+    return fingerprint
 
 
 def trusted_outputs(path: Path, expected_head: str, expected_head_tree: str) -> dict[str, str]:
@@ -134,6 +154,7 @@ def trusted_outputs(path: Path, expected_head: str, expected_head_tree: str) -> 
         "ci_plan_sha256": hashlib.sha256(raw).hexdigest(),
         "ci_policy_sha256": require_string(trusted, "policy_sha256", HEX64_RE),
         "baseline_valid": str(valid).lower(),
+        "egress_image_fingerprint": egress_fingerprint(plan),
     }
     outputs.update({f"{name}_state": state for name, state in states.items()})
     return outputs
@@ -153,6 +174,7 @@ def fail_closed_outputs(head: str, head_tree: str) -> dict[str, str]:
         "ci_plan_sha256": ZERO_HASH,
         "ci_policy_sha256": ZERO_HASH,
         "baseline_valid": "false",
+        "egress_image_fingerprint": "",
     }
     outputs.update({f"{name}_state": state for name, state in states.items()})
     return outputs

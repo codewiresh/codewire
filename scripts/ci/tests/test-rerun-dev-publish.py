@@ -277,6 +277,77 @@ def actions_if(expression: str, context: dict[str, str]) -> bool:
     return bool(eval(python, {"__builtins__": {}}, {}))  # noqa: S307 - checked above
 
 
+EGRESS_JOB = 605
+
+
+def egress_jobs(state: str | None) -> list[dict]:
+    jobs = dev_jobs("success")
+    if state is not None:
+        jobs.append({"id": EGRESS_JOB, "run_id": DEV_RUN, "attempt": 1,
+                     "name": "Sign the cw-egress image", "status": state})
+    return jobs
+
+
+def egress_forgejo(states, *, sign_log: str = WAITED_LOG, reruns=None) -> fx.FakeForgejo:
+    api = forgejo(states, reruns=None)
+    api.logs[EGRESS_JOB] = sign_log
+    api.reruns[EGRESS_JOB] = reruns or [204]
+    return api
+
+
+class EgressTriggerTests(unittest.TestCase):
+    """The cw-egress sign job reads main CI's verdict as the publish job does,
+    and is rerun when it finished before that verdict came."""
+
+    def trigger(self, api: fx.FakeForgejo, own_run: int = CI_RUN, wait: float = 60):
+        clock = Clock()
+        lines: list[str] = []
+        status = publish.egress_trigger(api, SHA, TREE, own_run, wait_seconds=wait, poll_seconds=10,
+                                        sleep=clock.sleep, clock=clock, log=lines.append)
+        return status, "\n".join(lines), clock
+
+    def test_a_sign_job_that_finished_before_the_verdict_is_rerun(self) -> None:
+        api = egress_forgejo(egress_jobs("success"))
+        status, log, _ = self.trigger(api)
+        self.assertEqual((status, api.posts), (0, [f"/actions/jobs/{EGRESS_JOB}/rerun"]))
+        self.assertIn(f"reran Deploy Dev run {DEV_RUN}'s cw-egress sign job {EGRESS_JOB}", log)
+
+    def test_a_signed_or_current_image_is_not_signed_again(self) -> None:
+        for line in ("Verified and signed the exact cw-egress image in Harbor, verified by ci.yaml run 41",
+                     "cw-egress image already signed: registry.example.invalid/codewire/egress@sha256:" + "a" * 64):
+            with self.subTest(line=line):
+                api = egress_forgejo(egress_jobs("success"), sign_log=fx.log_lines(line))
+                status, log, _ = self.trigger(api)
+                self.assertEqual((status, api.posts), (0, []))
+                self.assertIn("already signed", log)
+
+    def test_nothing_is_owed_without_a_job_to_rerun(self) -> None:
+        for state, expected in ((None, "has no cw-egress sign job"), ("skipped", "skipped"),
+                                ("blocked", "reads this verdict itself")):
+            with self.subTest(state=state):
+                api = egress_forgejo(egress_jobs(state))
+                status, log, _ = self.trigger(api)
+                self.assertEqual((status, api.posts), (0, []))
+                self.assertIn(expected, log)
+
+    def test_another_runs_verdict_starts_nothing(self) -> None:
+        api = egress_forgejo(egress_jobs("success"))
+        status, _, _ = self.trigger(api, own_run=CI_RUN + 1)
+        self.assertEqual((status, api.posts), (0, []))
+
+    def test_a_running_sign_job_is_waited_for_then_rerun(self) -> None:
+        api = egress_forgejo([egress_jobs("running"), egress_jobs("success")])
+        status, _, clock = self.trigger(api)
+        self.assertEqual((status, len(api.posts)), (0, 1))
+        self.assertEqual(clock.sleeps, [10])
+
+    def test_a_refused_rerun_is_a_missed_trigger(self) -> None:
+        api = egress_forgejo(egress_jobs("failure"), reruns=[500])
+        status, log, _ = self.trigger(api)
+        self.assertEqual(status, 1)
+        self.assertIn("::error::missed trigger", log)
+
+
 class CiWorkflowTests(unittest.TestCase):
     """Only CI's final job, on a push to main after a green verdict, reruns."""
 

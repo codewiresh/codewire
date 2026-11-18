@@ -27,6 +27,12 @@ and only while the commit moves Dev forward. Whichever finishes last delivers:
 
 A missing Deploy Dev run and builds that failed deliver nothing; that is
 logged and is no error.
+
+The same run's cw-egress sign job, which Dev delivery runs but never delivers
+(private-docs designs/hosted-egress.md, "The image and its deployment"), reads
+the verdict the same way: when it finished without signing because main CI was
+still running, this reruns it. It is never waited for longer than the publish
+job, and a run without it owes nothing.
 """
 
 from __future__ import annotations
@@ -48,6 +54,10 @@ DEPLOY_WORKFLOW = "deploy-dev.yaml"
 SELECTION_JOB = "Deploy selection"
 BUILD_JOBS = ("Build and push the service runtime images", "Build and push the daemon runtime image")
 PUBLISH_JOB = "Publish the exact runtime image set"
+EGRESS_SIGN_JOB = "Sign the cw-egress image"
+# The sign job prints one of these once the image it built carries a valid
+# main-ci signature.
+EGRESS_SIGNED = ("Verified and signed the exact cw-egress image", "cw-egress image already signed")
 # dispatch-deploy-dev.sh prints this once promote-dev accepted the commit.
 DELIVERED = "[dispatch-deploy-dev] accepted canonical source {sha} as deploy run"
 DEFAULT_WAIT_SECONDS = 600
@@ -189,6 +199,74 @@ def trigger(
         return 1
 
 
+def egress_trigger(
+    api,
+    sha: str,
+    tree: str,
+    own_run_id: int,
+    *,
+    wait_seconds: float = DEFAULT_WAIT_SECONDS,
+    poll_seconds: float = DEFAULT_POLL_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    log: Callable[[str], None] = print,
+) -> int:
+    """0 when nothing is owed or the egress sign job was started; 1 on a missed trigger."""
+    try:
+        result = verdicts.verdict(api, sha, tree)
+        if not result.verified or result.run_id != own_run_id:
+            return 0
+        runs = verdicts.main_push_runs(api, DEPLOY_WORKFLOW, sha)
+        if not runs:
+            return 0
+        run_id = max(run["id"] for run in runs)
+        deadline = clock() + wait_seconds
+        refused = False
+        while True:
+            jobs = verdicts.jobs_of(api, run_id)
+            if not any(job.get("name") == EGRESS_SIGN_JOB for job in jobs):
+                log(f"Deploy Dev run {run_id} has no cw-egress sign job; nothing to sign for {sha}")
+                return 0
+            sign = verdicts.named_job(jobs, EGRESS_SIGN_JOB, run_id)
+            job_id = sign["id"]
+            state = verdicts.state_of(sign)
+            if state in ("skipped", "cancelled"):
+                log(f"Deploy Dev run {run_id}'s cw-egress sign job {job_id} {state}; nothing to sign for {sha}")
+                return 0
+            if state == "not-started":
+                log(f"Deploy Dev run {run_id}'s cw-egress sign job {job_id} has not started; "
+                    f"it reads this verdict itself when it runs")
+                return 0
+            if state in ("success", "failure"):
+                text = api.get_text(f"/actions/jobs/{job_id}/logs")
+                if any(line in text for line in EGRESS_SIGNED):
+                    log(f"Deploy Dev run {run_id}'s cw-egress sign job {job_id} already signed for {sha}")
+                    return 0
+                if refused:
+                    log(f"::error::missed trigger: Forgejo refused to rerun Deploy Dev run {run_id}'s "
+                        f"finished cw-egress sign job {job_id} (HTTP 400); its image is not signed")
+                    return 1
+                status = api.post(f"/actions/jobs/{job_id}/rerun")
+                if status in (200, 201, 204):
+                    log(f"reran Deploy Dev run {run_id}'s cw-egress sign job {job_id} for {sha}")
+                    return 0
+                if status != 400:
+                    log(f"::error::missed trigger: Forgejo refused to rerun Deploy Dev run {run_id}'s "
+                        f"cw-egress sign job {job_id} (HTTP {status}); its image is not signed")
+                    return 1
+                refused = True
+            else:
+                refused = False
+            if clock() >= deadline:
+                log(f"::error::missed trigger: Deploy Dev run {run_id}'s cw-egress sign job {job_id} was "
+                    f"still running after {int(wait_seconds)} s; rerun it once it finishes")
+                return 1
+            sleep(poll_seconds)
+    except verdicts.Unproven as exc:
+        log(f"::error::missed trigger: cannot read the records cw-egress signing of {sha} needs ({exc})")
+        return 1
+
+
 def seconds(environ: dict[str, str], key: str, default: int) -> int:
     value = environ.get(key, "")
     if not value:
@@ -221,11 +299,13 @@ def main() -> int:
     except verdicts.Unproven as exc:
         print(f"::error::missed trigger: the Forgejo API is unusable ({exc})", file=sys.stderr)
         return 1
-    return trigger(
-        api, sha, tree, int(run_id),
-        wait_seconds=seconds(environ, "CODEWIRE_DEV_PUBLISH_WAIT_SECONDS", DEFAULT_WAIT_SECONDS),
-        poll_seconds=seconds(environ, "CODEWIRE_DEV_PUBLISH_POLL_SECONDS", DEFAULT_POLL_SECONDS),
-    )
+    bounds = {
+        "wait_seconds": seconds(environ, "CODEWIRE_DEV_PUBLISH_WAIT_SECONDS", DEFAULT_WAIT_SECONDS),
+        "poll_seconds": seconds(environ, "CODEWIRE_DEV_PUBLISH_POLL_SECONDS", DEFAULT_POLL_SECONDS),
+    }
+    delivered = trigger(api, sha, tree, int(run_id), **bounds)
+    signed = egress_trigger(api, sha, tree, int(run_id), **bounds)
+    return max(delivered, signed)
 
 
 if __name__ == "__main__":

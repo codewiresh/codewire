@@ -850,6 +850,7 @@ case "$image_name:$dockerfile_from_context" in
   derp:deployments/docker/derp.Dockerfile) product_bake_target=derp ;;
   daemon:deployments/docker/daemon.Dockerfile) product_bake_target=daemon ;;
   mesh:deployments/docker/mesh.Dockerfile) product_bake_target=mesh ;;
+  egress:deployments/docker/egress.Dockerfile) product_bake_target=egress ;;
   services:deployments/docker/services.Dockerfile) product_bake_target=services ;;
 esac
 if [ "$build_runtime_set" = 1 ] && [ "$product_bake_target" != services ]; then

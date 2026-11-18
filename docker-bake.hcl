@@ -106,6 +106,18 @@ target "mesh" {
   }
 }
 
+# cw-egress is outside the runtime set: Dev delivery never delivers it, and
+# only a merged pin in deployments/k8s/egress selects its digest
+# (private-docs designs/hosted-egress.md, "The image and its deployment").
+target "egress" {
+  inherits   = ["_rust-product"]
+  dockerfile = "deployments/docker/egress.Dockerfile"
+  tags       = ["${IMAGE_PREFIX}-egress:${IMAGE_TAG}"]
+  labels = {
+    "org.opencontainers.image.title" = "codewire-egress"
+  }
+}
+
 target "daemon" {
   # Build through scripts/ci/images/build-product-images.sh (or the owning
   # Kind/protected wrapper). It admits and binds codewire-verified-cw before

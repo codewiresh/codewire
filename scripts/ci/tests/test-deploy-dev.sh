@@ -155,7 +155,9 @@ for half in "$service_job" "$daemon_job"; do
   grep -Fxq "      CODEWIRE_IN_JOB_BUILD: \${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}" <<<"$half" ||
     fail "a runtime image build lacks the owner's exact-commit recovery switch"
 done
-publish_job="$(sed -n '/^  publish-runtime-images:/,$p' "$WORKFLOW")"
+publish_job="$(sed -n '/^  publish-runtime-images:/,/^  # cw-egress is built and signed here/p' "$WORKFLOW")"
+egress_build_job="$(sed -n '/^  build-egress-image:/,/^  sign-egress-image:/p' "$WORKFLOW")"
+egress_sign_job="$(sed -n '/^  sign-egress-image:/,/^  dev-delivery-deferred:/p' "$WORKFLOW")"
 
 assert_build_half() {
   local half="$1" job="$2"
@@ -278,8 +280,9 @@ for signer in 'Sign the exact runtime set' 'Sign the GHCR mirror without gating 
     <<<"$(step_of_job "$publish_job" "$signer")" ||
     fail "the step '$signer' does not sign with the verifying main CI run"
 done
-# Signing happens only here: no other job of any workflow signs a runtime set.
-[[ "$(grep -Fc 'sign-runtime-image-set.sh' "$WORKFLOW")" -eq 2 ]] ||
+# Signing happens only here and in the cw-egress sign job, checked below: no
+# other job of any workflow signs a runtime image.
+[[ "$(grep -Fc 'sign-runtime-image-set.sh' <<<"$publish_job")" -eq 2 ]] ||
   fail "a runtime set is signed outside the publishing job"
 while IFS= read -r -d '' other_workflow; do
   [[ "$other_workflow" == "$WORKFLOW" ]] && continue
@@ -609,5 +612,47 @@ default_mesh_transport="$(helm template test "$MESH_CHART" \
 if grep -Fq -- '--derp-url' <<<"$default_mesh_transport"; then
   fail "an unselected chart relay must not render an empty DERP override"
 fi
+
+# cw-egress is built and signed by Dev delivery but never delivered
+# (private-docs designs/hosted-egress.md, "The image and its deployment").
+[[ -n "$egress_build_job" && -n "$egress_sign_job" ]] || fail 'the cw-egress build or sign job is missing'
+# Its build waits for the publish job, so it never competes with a delivery
+# for the trusted builder, and builds only without a signed image of its inputs.
+grep -Fxq '    needs: [deploy-selection, publish-runtime-images]' <<<"$egress_build_job" ||
+  fail 'the cw-egress build does not wait for the publish job'
+grep -Fq '    if: ${{ always() && ' <<<"$egress_build_job" ||
+  fail 'the cw-egress build does not run once publish has finished or been skipped'
+grep -Fq "scripts/ci/images/egress-image-tag.sh exists" <<<"$egress_build_job" ||
+  fail 'the cw-egress build does not look for a signed image of its inputs first'
+if grep -Eq 'sign-runtime-image-set|cosign|egress-image-tag.sh tag|dispatch-deploy-dev' <<<"$egress_build_job"; then
+  fail 'the cw-egress build signs, tags or dispatches'
+fi
+# Nothing on the delivery path waits for either egress job.
+if grep -E '^    needs:' "$WORKFLOW" | grep -Eq 'build-egress-image|sign-egress-image' \
+    && [[ "$(grep -cE '^    needs:.*build-egress-image' "$WORKFLOW")" -ne 1 ]]; then
+  fail 'a job other than the cw-egress sign job waits for the cw-egress build'
+fi
+if grep -E '^    needs:' "$WORKFLOW" | grep -q 'sign-egress-image'; then
+  fail 'a job waits for the cw-egress sign job'
+fi
+# The sign job signs only the build's reported digest, after main CI's
+# verdict, and only while this commit's source tag still names it.
+grep -Fq 'main-ci-verdict.py check' <<<"$egress_sign_job" ||
+  fail 'the cw-egress sign job does not read main CI'"'"'s verdict'
+grep -Fq "if: \${{ steps.verdict.outputs.verified == 'true' }}" <<<"$egress_sign_job" ||
+  fail 'the cw-egress sign job signs without a verified verdict'
+grep -Fq 'CODEWIRE_EGRESS_CANDIDATE: ${{ needs.build-egress-image.outputs.candidate_ref }}' <<<"$egress_sign_job" ||
+  fail 'the cw-egress sign job signs something other than the build'"'"'s digest'
+source_check_line="$(grep -n 'egress-image-tag.sh source-digest' <<<"$egress_sign_job" | cut -d: -f1)"
+sign_line="$(grep -n 'sign-runtime-image-set.sh --egress' <<<"$egress_sign_job" | cut -d: -f1)"
+tag_line="$(grep -n 'egress-image-tag.sh tag' <<<"$egress_sign_job" | cut -d: -f1)"
+[[ -n "$source_check_line" && -n "$sign_line" && -n "$tag_line" ]] &&
+  ((source_check_line < sign_line && sign_line < tag_line)) ||
+  fail 'the cw-egress sign job does not check the source tag, then sign, then tag, in that order'
+# Only the publish job and the cw-egress sign job sign, in every workflow.
+signers="$(grep -l 'sign-runtime-image-set.sh' "$ROOT"/.gitea/workflows/*.yaml)"
+[[ "$signers" == "$WORKFLOW" ]] || fail "a workflow other than Deploy Dev signs runtime images: $signers"
+[[ "$(grep -c 'sign-runtime-image-set.sh' "$WORKFLOW")" -eq 3 ]] ||
+  fail 'a job other than the publish job and the cw-egress sign job signs runtime images'
 
 printf '[test-deploy-dev] SHA-only dispatch contract passed\n'

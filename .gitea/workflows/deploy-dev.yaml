@@ -56,6 +56,7 @@ jobs:
       ci_policy_sha256: ${{ steps.select.outputs.ci_policy_sha256 }}
       baseline_valid: ${{ steps.select.outputs.baseline_valid }}
       dev_release_tree_state: ${{ steps.select.outputs.dev_release_tree_state }}
+      egress_image_fingerprint: ${{ steps.select.outputs.egress_image_fingerprint }}
     steps:
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -370,6 +371,113 @@ jobs:
           scripts/ci/images/sign-runtime-image-set.sh --ghcr-mirror \
             "${RUNNER_TEMP:?}/codewire-dev-image-bundle.json" \
             scripts/ci/trust/codewire-runtime-signing.pub
+
+  # cw-egress is built and signed here but never delivered: only a merged pin
+  # in deployments/k8s/egress decides what runs (private-docs
+  # designs/hosted-egress.md, "The image and its deployment"). Its build starts
+  # once the publish job has finished or been skipped, so it never competes
+  # with a delivery for the trusted builder, and nothing on the delivery path
+  # needs either job. It builds only when no signed image of its inputs'
+  # fingerprint exists.
+  build-egress-image:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
+    name: Build and push the cw-egress image
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
+    timeout-minutes: 110
+    needs: [deploy-selection, publish-runtime-images]
+    if: ${{ always() && needs.deploy-selection.result == 'success' && needs.deploy-selection.outputs.egress_image_fingerprint != '' }}
+    outputs:
+      candidate_ref: ${{ steps.build.outputs.egress_candidate_ref }}
+    env:
+      OPENBAO_ROLE: codewire-source-dev-publisher
+      CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+      OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+      CODEWIRE_EGRESS_FINGERPRINT: ${{ needs.deploy-selection.outputs.egress_image_fingerprint }}
+      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # A fp- tag exists only once a build of these inputs was signed
+      # (egress-image-tag.sh), so a present one means there is nothing to build.
+      - name: Look for a signed image of these inputs
+        id: existing
+        run: |
+          set -euo pipefail
+          state="$(scripts/ci/images/egress-image-tag.sh exists "$CODEWIRE_EGRESS_FINGERPRINT")"
+          echo "cw-egress image for fingerprint $CODEWIRE_EGRESS_FINGERPRINT: $state"
+          echo "state=$state" >>"$GITHUB_OUTPUT"
+
+      - name: Select the protected R2 compiler cache
+        id: compiler-cache
+        if: ${{ steps.existing.outputs.state == 'absent' }}
+        run: |
+          scripts/ci/setup/select-protected-rust-cache.sh \
+            "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"
+
+      - name: Build and push the cw-egress image
+        id: build
+        if: ${{ steps.existing.outputs.state == 'absent' }}
+        env:
+          CODEWIRE_SCCACHE_MODE: ${{ steps.compiler-cache.outputs.mode == 'r2' && 'r2' || 'local' }}
+          SCCACHE_BUCKET: ${{ vars.CODEWIRE_CI_SCCACHE_BUCKET_PROTECTED }}
+          SCCACHE_ENDPOINT: ${{ vars.CODEWIRE_R2_CACHE_ENDPOINT }}
+          CODEWIRE_SCCACHE_PREFIX: protected/codewire/v1
+          CODEWIRE_SCCACHE_CREDENTIALS_FILE: ${{ runner.temp }}/codewire-sccache-r2-protected.aws
+          CODEWIRE_RUNTIME_CARRY_FORWARD: '0'
+        run: scripts/ci/images/build-push-runtime-images.sh egress
+
+      - name: Remove the protected R2 compiler-cache credential
+        if: ${{ always() }}
+        run: |
+          shred -u -- "$RUNNER_TEMP/codewire-sccache-r2-protected.aws" 2>/dev/null ||
+            rm -f -- "$RUNNER_TEMP/codewire-sccache-r2-protected.aws"
+
+  # Signs only the digest this run's build reported, after main CI's verdict
+  # for this exact commit, as the publish job does. A verdict that comes later
+  # reaches it when main CI's last job reruns it (rerun-dev-publish.py).
+  sign-egress-image:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this protected job receives only its job-scoped OIDC and allowlisted server-side capabilities.
+    name: Sign the cw-egress image
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
+    timeout-minutes: 30
+    needs: [deploy-selection, build-egress-image]
+    if: ${{ always() && needs.build-egress-image.result == 'success' && needs.build-egress-image.outputs.candidate_ref != '' }}
+    env:
+      OPENBAO_ROLE: codewire-source-dev-publisher
+      CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+      OPENBAO_AUDIENCE: openbao-codewire-source-dev-publisher
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Read main CI's verdict for this commit
+        id: verdict
+        env:
+          GITEA_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 -I -B scripts/ci/plan/main-ci-verdict.py check \
+            --sha "$GITHUB_SHA" --tree "$(git rev-parse "$GITHUB_SHA^{tree}")" --github-output
+
+      # Signs nothing a tag points at: only the build's reported digest, and
+      # only while this commit's source tag still names it.
+      - name: Sign the exact cw-egress image this run built
+        if: ${{ steps.verdict.outputs.verified == 'true' }}
+        env:
+          CODEWIRE_MAIN_CI_RUN: ${{ steps.verdict.outputs.ci_run }}
+          CODEWIRE_EGRESS_CANDIDATE: ${{ needs.build-egress-image.outputs.candidate_ref }}
+          CODEWIRE_EGRESS_FINGERPRINT: ${{ needs.deploy-selection.outputs.egress_image_fingerprint }}
+        run: |
+          set -euo pipefail
+          source_digest="$(scripts/ci/images/egress-image-tag.sh source-digest "$GITHUB_SHA")"
+          [[ "$source_digest" == "${CODEWIRE_EGRESS_CANDIDATE##*@}" ]] || {
+            echo "::error::the cw-egress source tag names $source_digest, not the digest this run built" >&2
+            exit 1
+          }
+          scripts/ci/images/sign-runtime-image-set.sh --egress "$CODEWIRE_EGRESS_CANDIDATE" \
+            scripts/ci/trust/codewire-runtime-signing.pub
+          scripts/ci/images/egress-image-tag.sh tag "$CODEWIRE_EGRESS_CANDIDATE" "$CODEWIRE_EGRESS_FINGERPRINT"
 
   # A run that deferred builds nothing; this job's success is how the delivery
   # in flight knows to hand it the turn (wait-for-dev-delivery-turn.py).

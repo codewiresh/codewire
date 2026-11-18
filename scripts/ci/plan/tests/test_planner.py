@@ -340,6 +340,17 @@ class FixtureRepository:
                         "proto/**",
                     ],
                 },
+                "egress_image": {
+                    "kind": "file-set",
+                    "inputs": [
+                        "Cargo.toml",
+                        "Cargo.lock",
+                        "crates/**",
+                        "deployments/docker/egress.Dockerfile",
+                        "deployments/docker/egress.Dockerfile.dockerignore",
+                        "proto/**",
+                    ],
+                },
                 "base_image": {
                     "kind": "file-set",
                     "inputs": ["images/base/**"],
@@ -590,7 +601,7 @@ dependencies = ["core"]
         self.write("proto/codewire/v1/api.proto", "syntax = \"proto3\";\n")
         # The root manifest's [patch] stand-in, a daemon image input (#3980).
         self.write("third_party/sqlx-sqlite-unused/Cargo.toml", "[package]\n")
-        for family in ("daemon", "derp", "services", "mesh"):
+        for family in ("daemon", "derp", "services", "mesh", "egress"):
             self.write(
                 f"deployments/docker/{family}.Dockerfile",
                 f"FROM fixture-{family}@sha256:one\n",

@@ -465,4 +465,35 @@ fi
 grep -Fq 'Runtime provenance is invalid for mesh' "$work/rebadged.err" ||
   fail 'wrong-revision carried provenance rejection was not attributable'
 
+# cw-egress is signed alone (--egress), never through an ImageBundle: one
+# Harbor codewire/egress reference by digest, signed exactly as a runtime
+# family, and nothing else accepted.
+egress_ref="registry.example.invalid/codewire/egress@$digest"
+: >"$signature_state"
+: >"$signature_annotations"
+if ! PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+    "$SIGNER" --egress "$egress_ref" "$public_key" >"$work/egress.out" 2>"$work/egress.err"; then
+  sed -n '1,40p' "$work/egress.err" >&2
+  fail 'egress signing fixture failed'
+fi
+[[ "$(wc -l <"$signature_state")" -eq 1 ]] && grep -Fxq "$egress_ref" "$signature_state" ||
+  fail 'egress signing did not sign exactly the egress reference'
+grep -Fq "$egress_ref dev.codewire.image-family=egress" "$signature_annotations" ||
+  fail 'egress signature did not name its family'
+grep -Fq 'Verified and signed the exact cw-egress image in Harbor' "$work/egress.out" ||
+  fail 'egress signing omitted its result'
+for refused in \
+    "registry.example.invalid/codewire/mesh@$digest" \
+    "registry.example.invalid/codewire/egress:$source_sha" \
+    "ghcr.io/codewiresh/egress@$digest"; do
+  : >"$signature_state"
+  if PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
+      "$SIGNER" --egress "$refused" "$public_key" >/dev/null 2>"$work/egress-refused.err"; then
+    fail "egress signing accepted $refused"
+  fi
+  grep -Fq 'must be a codewire/egress digest reference in Harbor' "$work/egress-refused.err" ||
+    fail "egress refusal of $refused was not attributable"
+  [[ ! -s "$signature_state" ]] || fail "egress signing signed something for $refused"
+done
+
 printf '[test-sign-runtime-image-set] closed protected signing contract passed\n'

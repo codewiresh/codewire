@@ -20,12 +20,14 @@ RUNTIME_ARTIFACTS = (
     "mesh_image",
 )
 ARTIFACTS = ("dev_release_tree", "dev_acceptance_harness", *RUNTIME_ARTIFACTS)
+EGRESS_FINGERPRINT = "f" * 64
 
 
 def plan_document(
     states: dict[str, str] | None = None,
     *,
     baseline_valid: bool = True,
+    egress: dict | None = None,
 ) -> dict:
     effective_states = {name: "unaffected" for name in ARTIFACTS}
     effective_states.update(states or {})
@@ -51,7 +53,10 @@ def plan_document(
         },
         "verification": {},
         "artifacts": {
-            name: {"state": effective_states[name]} for name in ARTIFACTS
+            **{name: {"state": effective_states[name]} for name in ARTIFACTS},
+            "egress_image": egress
+            if egress is not None
+            else {"state": "unaffected", "head_fingerprint": EGRESS_FINGERPRINT},
         },
         "degraded_reasons": [],
     }
@@ -199,6 +204,35 @@ class DeployPlanAdapterTests(unittest.TestCase):
         self.assertEqual(outputs["deploy_dev"], "true")
         self.assertEqual(outputs["reason"], "plan_invalid")
         self.assertIn("duplicate JSON key", error)
+
+    # cw-egress is built and signed by Dev delivery's workflow, never
+    # delivered by it: its fingerprint keys the image, and its state selects
+    # nothing.
+    def test_the_egress_fingerprint_is_passed_on(self) -> None:
+        outputs, _ = self.apply(plan_document())
+        self.assertEqual(outputs["egress_image_fingerprint"], EGRESS_FINGERPRINT)
+
+    def test_an_egress_change_alone_selects_no_delivery(self) -> None:
+        outputs, _ = self.apply(
+            plan_document(egress={"state": "affected", "head_fingerprint": "e" * 64})
+        )
+        self.assertEqual(outputs["deploy_dev"], "false")
+        self.assertEqual(outputs["egress_image_fingerprint"], "e" * 64)
+        self.assertNotIn("egress_image", outputs["matched_categories"])
+
+    def test_no_fingerprint_builds_no_egress_image(self) -> None:
+        outputs, _ = self.apply(
+            plan_document(egress={"state": "unclassified", "head_fingerprint": None})
+        )
+        self.assertEqual(outputs["egress_image_fingerprint"], "")
+
+    def test_a_malformed_egress_fingerprint_fails_closed(self) -> None:
+        for fingerprint in ("F" * 64, 7):
+            egress = {"state": "unaffected", "head_fingerprint": fingerprint}
+            with self.subTest(fingerprint=fingerprint):
+                outputs, _ = self.apply(plan_document(egress=egress))
+                self.assertEqual(outputs["reason"], "plan_invalid")
+                self.assertEqual(outputs["egress_image_fingerprint"], "")
 
 
 if __name__ == "__main__":
