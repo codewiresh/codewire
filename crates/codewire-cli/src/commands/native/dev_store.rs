@@ -12,7 +12,7 @@ use super::{NATIVE_STATE_ROOT_ENV, absolute_override};
 /// The local VM state root: `CODEWIRE_NATIVE_STATE_ROOT`, else
 /// `MESH_DATA_DIR/native-v1`, which a development build refuses when it is
 /// the account's own store.
-pub(super) fn state_root(mesh_data_dir: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn state_root(mesh_data_dir: &Path) -> anyhow::Result<PathBuf> {
     if let Some(root) = absolute_override(NATIVE_STATE_ROOT_ENV)? {
         return Ok(root);
     }

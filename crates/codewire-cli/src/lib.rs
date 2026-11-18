@@ -3,6 +3,7 @@
 
 mod build_record;
 mod command_line;
+pub mod completion;
 use command_line::requested_json_output;
 pub mod config;
 mod console_client;
@@ -55,7 +56,6 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use chrono::{DateTime, SecondsFormat, Utc};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
-use clap_complete::{Shell, generate};
 use codewire_client::{
     ApiKey, AuthUser as PlatformUser, CreateApiKeyRequest, OAuthClient, OAuthCredentials,
     OAuthUserInfo,

@@ -1,7 +1,7 @@
 ---
 title: cw itself
 description: version, install, upgrade, doctor, feedback, config and completion.
-updated: 2026-11-15
+updated: 2026-11-17
 weight: 8
 aliases: ["/cli/cw"]
 ---
@@ -228,4 +228,8 @@ cw completion --install
 ```
 
 Prints a completion script (zsh by default), or installs one for the shell in
-`$SHELL` (zsh, bash or fish).
+`$SHELL` (zsh, bash or fish). The shell asks `cw` as you press Tab, so `cw
+attach <Tab>` offers the names of your environments; it offers local ones
+from the VMs on this computer, and never starts anything or asks you to sign
+in. The script names the `cw` version that wrote it, and `cw doctor` says
+when to install it again.

@@ -27,7 +27,7 @@ use super::*;
 use crate::commands::progress::terminal_text;
 
 mod create_hint;
-mod dev_store;
+pub(crate) mod dev_store;
 mod error_view;
 pub(crate) mod host_create;
 mod host_support;

@@ -149,7 +149,7 @@ futures-lite = "2"
 thiserror = "2"
 anyhow = "1"
 clap = { version = "4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
-clap_complete = "4"
+clap_complete = { version = "=4.6.7", features = ["unstable-dynamic"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 prometheus = "0.14"

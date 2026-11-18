@@ -1970,11 +1970,8 @@ pub(crate) fn doctor_completion_check() -> DoctorCheck {
             format!("{} completion not installed", shell.name()),
         );
     };
-    doctor_check(
-        "completion",
-        DoctorStatus::Ok,
-        format!("{} at {}", shell.name(), path.display()),
-    )
+    let installed = fs::read_to_string(&path).unwrap_or_default();
+    crate::completion::file_check(shell, &path, &installed)
 }
 
 pub(crate) fn doctor_platform_client(
@@ -2083,15 +2080,8 @@ pub(crate) fn handle_completion_command(args: CompletionArgs) -> anyhow::Result<
 
     let shell = args.shell.unwrap_or(CompletionShell::Zsh);
     let mut stdout = std::io::stdout();
-    stdout.write_all(&completion_script(shell))?;
+    stdout.write_all(&crate::completion::registration_script(shell)?)?;
     Ok(())
-}
-
-pub(crate) fn completion_script(shell: CompletionShell) -> Vec<u8> {
-    let mut cmd = Cli::command();
-    let mut out = Vec::new();
-    generate(shell.clap_shell(), &mut cmd, "cw", &mut out);
-    out
 }
 
 pub(crate) const SSH_CONFIG_MARKER_START: &str = "# ---- START CODEWIRE ----";
@@ -3159,7 +3149,7 @@ pub(crate) fn write_completion_file(path: &Path, shell: CompletionShell) -> anyh
         .parent()
         .with_context(|| format!("completion path has no parent: {}", path.display()))?;
     fs::create_dir_all(parent)?;
-    fs::write(path, completion_script(shell))?;
+    fs::write(path, crate::completion::registration_script(shell)?)?;
     Ok(())
 }
 
@@ -3191,15 +3181,6 @@ impl CompletionShell {
             CompletionShell::Zsh => "zsh",
             CompletionShell::Fish => "fish",
             CompletionShell::Powershell => "powershell",
-        }
-    }
-
-    pub(crate) fn clap_shell(self) -> Shell {
-        match self {
-            CompletionShell::Bash => Shell::Bash,
-            CompletionShell::Zsh => Shell::Zsh,
-            CompletionShell::Fish => Shell::Fish,
-            CompletionShell::Powershell => Shell::PowerShell,
         }
     }
 }

@@ -1,7 +1,7 @@
 ---
 title: Install and sign in
 description: Install cw, sign in, check what your machine needs for local VMs, and uninstall.
-updated: 2026-11-14
+updated: 2026-11-17
 weight: 6
 aliases: ["/guides/update"]
 ---
@@ -36,6 +36,10 @@ curl -fsSL https://get.codewire.sh | sh -s -- --version v0.4.19  # an exact rele
 cw completion --install          # zsh, bash or fish, from $SHELL
 eval "$(cw completion zsh)"      # or generate it yourself
 ```
+
+Completion offers commands and flags, and the names a command takes:
+environments, from the VMs on this computer. A new `cw` may need the script
+installed again; `cw doctor` says so.
 
 ## Sign in
 

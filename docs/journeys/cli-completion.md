@@ -11,11 +11,12 @@ completion"). The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-16. Written first; nothing here is observed.
+Updated 2026-11-17. Written first; only the local half of
+`complete-environments` is observed so far.
 
 | ID | Local | Dev | Production |
 | --- | --- | --- | --- |
-| `complete-environments` | not yet observed | not yet observed | not applicable |
+| `complete-environments` | local names observed 2026-11-17; cloud names not yet | not yet observed | not applicable |
 | `complete-sessions` | not yet observed | not yet observed | not applicable |
 | `complete-account-names` | not yet observed | not yet observed | not applicable |
 | `complete-snapshots` | not yet observed | not yet observed | not applicable |
@@ -64,8 +65,8 @@ A completion offers names only. Where a name and an ID both identify a thing,
 the name is offered; a session with no name offers its short ID, which
 `--session` accepts, and a credential name that two providers share is offered
 as `PROVIDER/NAME` once #4928 lands. Free text completes nothing: the words of
-a message (`cw msg`) and the command `cw exec` runs. No secret value, token, key or hash is ever read for
-completion, let alone offered.
+a message (`cw msg`) and the command `cw exec` runs. No secret value, token, key
+or hash is ever read for completion, let alone offered.
 
 ## `complete-environments`: `cw attach <TAB>`
 
@@ -84,7 +85,19 @@ completion, let alone offered.
   placement, as sets, in all three shells; the engine call returns the same
   set in a test with fixed local state and a stub cloud list.
 - **Gotchas:** a shell that caches completions (zsh `_cache`, fish's
-  `__fish_complete`) can show a stale list; use a new shell.
+  `__fish_complete`) can show a stale list; use a new shell. `cw msg <TAB>`
+  offers no environment yet: its ENV sits inside the `ENV_AND_TEXT`
+  positional, and #5085 may split that argument.
+- **Observed:**
+  - 2026-11-17, local build of #5195 at 0f4525500 (zsh 5.9 and bash 5.3 by
+    keypress through a pty, fish 4.9 by `complete -C` in a container),
+    throwaway `HOME`, a copy of a real supervisor database naming one stopped
+    VM (a development build refuses the user's own store, so the copy was
+    given as `CODEWIRE_NATIVE_STATE_ROOT`): `cw attach <TAB>` offered the VM
+    and the flags, `cw attach or<TAB>` completed the whole name, `cw exec --in
+    <TAB>` completed it, and `cw --cloud attach <TAB>` offered no local name.
+    Local names only; cloud names, `cw ls -o json` set equality and a walk on
+    Dev are not yet observed (#5195).
 
 ## `complete-sessions`: `cw msg ENV --session <TAB>`
 
@@ -163,5 +176,6 @@ completion, let alone offered.
   longer agree, so `cw doctor` names both versions and the command).
 - **Proof:** `cw doctor` reports completion installed with names, or says
   `cw completion --install` is needed and why; an old static script is named
-  as such; the installed file's first line names the `cw` version that wrote
-  it; the install docs list what completes and match this table.
+  as such; the installed file's header line (its first, or its second under
+  zsh's `#compdef`) names the `cw` version that wrote it; the install docs
+  list what completes and match this table.
