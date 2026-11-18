@@ -116,7 +116,9 @@ jobs:
       cw_package_selected: ${{ steps.select.outputs.cw_package_selected }}
       desktop_package_state: ${{ steps.select.outputs.desktop_package_state }}
       desktop_package_selected: ${{ steps.select.outputs.desktop_package_selected }}
-      tested_tree_receipt: ${{ steps.receipt.outputs.tested_tree_receipt }}
+      # The receipt is checked only on a push to main; any other run falls
+      # back to full verification, as the checker itself answered.
+      tested_tree_receipt: ${{ steps.receipt.outputs.tested_tree_receipt || 'fallback' }}
       tested_tree_reason: ${{ steps.receipt.outputs.tested_tree_reason }}
       tested_tree_pr: ${{ steps.receipt.outputs.tested_tree_pr }}
       tested_tree_head: ${{ steps.receipt.outputs.tested_tree_head }}
@@ -365,8 +367,12 @@ jobs:
             cat "$facts_output" >> "$workflow_output"
           fi
 
+      # Only a push to main can carry a tested-tree receipt; for every other
+      # run the checker printed "fallback" and stopped, a 5 s step of runner
+      # overhead on each pull request (codewire#5311).
       - name: Verify exact tested-tree receipt
         id: receipt
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           GITEA_TOKEN: ${{ github.token }}
           # A receipt covers only its pull request's change, so it stands for
@@ -446,7 +452,7 @@ jobs:
         env:
           VERIFICATION_SUPERSEDED: ${{ steps.superseded.outputs.superseded }}
           VERIFICATION_SELECTION: ${{ steps.select.outputs.selection }}
-          VERIFICATION_TESTED_TREE_RECEIPT: ${{ steps.receipt.outputs.tested_tree_receipt }}
+          VERIFICATION_TESTED_TREE_RECEIPT: ${{ steps.receipt.outputs.tested_tree_receipt || 'fallback' }}
           CW_PACKAGE_SELECTED: ${{ steps.select.outputs.cw_package_selected }}
           DESKTOP_PACKAGE_SELECTED: ${{ steps.select.outputs.desktop_package_selected }}
           # Read only by a pull request's trusted dispatcher that predates the
