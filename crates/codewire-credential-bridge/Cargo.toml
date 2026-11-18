@@ -7,6 +7,11 @@ authors.workspace = true
 license = "AGPL-3.0-only"
 description = "Material-free bounded credential HTTP and frame bridge"
 
+[features]
+# Hooks for another crate's tests, such as lowering a limit so that a test can
+# cross it cheaply. Never enabled by a shipped build.
+test-support = []
+
 [dependencies]
 axum = { workspace = true }
 bytes = { workspace = true }

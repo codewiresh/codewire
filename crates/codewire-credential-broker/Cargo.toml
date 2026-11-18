@@ -62,6 +62,7 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 codewire-server-core = { workspace = true }
 codewire-tls = { workspace = true, features = ["test-support"] }
+codewire-credential-bridge = { workspace = true, features = ["test-support"] }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

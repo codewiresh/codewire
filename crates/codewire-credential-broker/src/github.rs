@@ -43,13 +43,23 @@ pub mod repositories;
 const TOKEN: &str = "GITHUB_OAUTH_TOKEN";
 pub(crate) const API_VERSION: &str = "2022-11-28";
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
-/// The limit of a response to a request whose body did not stream. Tests
-/// cross one megabyte instead: crossing the real limit took each of two
-/// tests 92 seconds (#5311).
+/// The limit, as shipped, of a response to a request whose body did not
+/// stream: the guest bridge's own.
+const SHIPPED_MAX_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
+/// The limit the route enforces. Tests cross one megabyte instead: crossing
+/// the shipped limit took each of two tests 92 seconds (#5311).
 #[cfg(not(test))]
-const MAX_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: usize = SHIPPED_MAX_RESPONSE_BYTES;
 #[cfg(test)]
 pub(crate) const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+// Checked in every build: the shipped limit is the guest bridge's, and no
+// build's route allows more.
+const _: () = {
+    assert!(
+        SHIPPED_MAX_RESPONSE_BYTES == codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES
+    );
+    assert!(MAX_RESPONSE_BYTES <= SHIPPED_MAX_RESPONSE_BYTES);
+};
 const REQUEST_HEADERS: &[&str] = &[
     "accept",
     "content-type",

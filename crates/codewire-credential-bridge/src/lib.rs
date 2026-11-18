@@ -367,8 +367,9 @@ impl CredentialBridge {
 
     /// Lower the response limit of requests whose body does not stream, for
     /// a test that has to cross it: crossing the real one moves a quarter of
-    /// a gigabyte (#5311). It can only lower the limit.
-    #[doc(hidden)]
+    /// a gigabyte (#5311). It can only lower the limit, and only a build with
+    /// the `test-support` feature has it.
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn lower_whole_body_response_limit(&self, bytes: usize) {
         let mut state = self.inner.lock().await;
         state.whole_body_response_limit = state.whole_body_response_limit.min(bytes);
