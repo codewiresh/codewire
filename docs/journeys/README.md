@@ -34,6 +34,7 @@ runs the same commands and holds the result to the same standard.
 | [mesh.md](mesh.md) | Mesh Networks (#3350, #5115, #5118, #5119): Sandboxes on one Mesh Network reach each other's published ports and nothing else does, and the dashboard shows the same Mesh Networks, nodes and join state as `cw`. Written first; every step is not yet observed |
 | [account-access.md](account-access.md) | What an account can still reach after a sign-out, a disable or a revoked credential (#3586): first, a terminal ticket from a session that has ended |
 | [deletion.md](deletion.md) | Deleting an account or an organization (#4823): the account-deletion page and `cw org delete` say it is permanent, before it happens |
+| [edge-caching.md](edge-caching.md) | Caching at the edge (#5054, #5123, #5072): no cache in front of Codewire keeps one caller's response for another; the anonymous homepage is the one reviewed exception. Written first; not yet observed |
 
 ## What a journey file holds
 

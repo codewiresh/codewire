@@ -366,6 +366,17 @@ Every Codewire service the browser calls is served from the dashboard's own orig
 |---|---|---|---|
 | `CODEWIRE_CORS_ALLOWED_ORIGINS` | No | Comma-separated browser origins, each exactly `scheme://host[:port]` with `http` or `https` and no path, query or wildcard, that may call the Codewire backend services cross-origin, for a deployment whose browser front end is on another origin. Only these get `Access-Control-Allow-Origin`, for `GET` and `POST`, never with credentials. Unset or empty means no CORS. Any other form stops the service at startup. | `https://app.example.com` |
 
+## Caching at the edge
+
+The dashboard sends `Cache-Control: no-store, private` on every page,
+fragment, event stream, action and redirect, and on any response that sets a
+cookie, so no cache keeps one visitor's response for another. Only these may
+be cached, and each says so in its own `Cache-Control`: the content-hashed
+assets under `/assets/`, the docs pages, and the homepage for a visitor who is
+not signed in (`public, max-age=0, s-maxage=300`). An edge or CDN in front of
+the dashboard must respect the origin's `Cache-Control` and never cache a
+response that has none.
+
 ## Workspace network
 
 | Variable | Required | Meaning | Example |

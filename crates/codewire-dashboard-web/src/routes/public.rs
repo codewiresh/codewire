@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 use crate::{
     response::{render_page, render_template},
+    security::HOME_CACHE_CONTROL,
     state::AppState,
     templates::{
         AuthStatusTemplate, HomeTemplate, PricingTemplate, PrivacyTemplate, TermsTemplate,
@@ -19,12 +20,6 @@ struct VerifyEmailResponse {
     #[serde(default, rename = "accessPending")]
     access_pending: bool,
 }
-
-/// The homepage is the same for every visitor: browsers check back on each
-/// view, and a shared cache (the CDN) may serve one copy for five minutes.
-/// `security::keep_cookie_responses_private` takes this back whenever the
-/// response sets a cookie.
-pub(crate) const HOME_CACHE_CONTROL: &str = "public, max-age=0, s-maxage=300";
 
 pub(super) async fn home() -> Response {
     let mut response = render_page(HomeTemplate);
@@ -180,7 +175,7 @@ mod tests {
         assert!(signed_in.headers().contains_key(header::SET_COOKIE));
         assert_eq!(
             signed_in.headers()[header::CACHE_CONTROL],
-            "private, no-store"
+            crate::security::PRIVATE_CACHE_CONTROL
         );
 
         // Other pages stay private.

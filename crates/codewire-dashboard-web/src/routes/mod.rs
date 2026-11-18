@@ -8,6 +8,8 @@
 mod admin;
 mod authentication;
 mod billing;
+#[cfg(test)]
+mod cache_policy_tests;
 mod credentials;
 mod dashboard;
 mod device;

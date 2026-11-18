@@ -65,9 +65,7 @@ pub fn app(config: Config) -> Router {
                     state.clone(),
                     routes::remember_organization,
                 ))
-                .layer(axum::middleware::map_response(
-                    security::keep_cookie_responses_private,
-                ))
+                .layer(axum::middleware::from_fn(security::keep_responses_private))
                 .layer(axum::middleware::from_fn(
                     server_timing::total_for_signed_in_pages,
                 )),
@@ -75,6 +73,9 @@ pub fn app(config: Config) -> Router {
         .merge(assets::router())
         .merge(docs::router())
         .with_state(state)
+        .layer(axum::middleware::map_response(
+            security::mark_unmarked_responses_private,
+        ))
         .layer(codewire_server_core::http::request_trace_layer())
 }
 

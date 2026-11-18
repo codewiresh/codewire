@@ -455,23 +455,59 @@ pub(crate) async fn ensure_page_csrf_cookie(
     with_csrf_cookie(response, csrf_cookie(&state.public_origin, &token))
 }
 
-/// A response that sets a cookie belongs to one visitor: no shared cache may
-/// keep it, whatever the handler chose (the homepage is otherwise public).
-/// Responses that already forbid shared caching keep their own policy.
-pub(crate) async fn keep_cookie_responses_private(mut response: Response) -> Response {
-    let already_private = response
+/// The homepage is the same for every visitor: browsers check back on each
+/// view, and a shared cache (the CDN) may serve one copy for five minutes.
+/// [`keep_responses_private`] takes this back whenever the response sets
+/// a cookie.
+pub(crate) const HOME_CACHE_CONTROL: &str = "public, max-age=0, s-maxage=300";
+
+/// What every response that belongs to one visitor says (#5054).
+pub(crate) const PRIVATE_CACHE_CONTROL: &str = "no-store, private";
+
+fn forbids_storage(response: &Response) -> bool {
+    response
         .headers()
         .get(header::CACHE_CONTROL)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| {
             value
                 .split(',')
-                .any(|directive| matches!(directive.trim(), "no-store" | "private"))
-        });
-    if response.headers().contains_key(header::SET_COOKIE) && !already_private {
+                .any(|directive| directive.trim() == "no-store")
+        })
+}
+
+/// The dashboard's own routes answer one visitor at a time, so nothing may
+/// keep their responses: signed-in pages, fragments, event streams, actions
+/// and redirects say `no-store, private`, whatever the handler chose, unless
+/// it already forbids storage. An edge that caches what isn't marked would
+/// otherwise serve one visitor's page to another (#5054). The anonymous
+/// homepage keeps its explicit public policy while it sets no cookie.
+pub(crate) async fn keep_responses_private(request: Request, next: Next) -> Response {
+    let home = request.uri().path() == "/";
+    let mut response = next.run(request).await;
+    let public_home = home
+        && !response.headers().contains_key(header::SET_COOKIE)
+        && response.headers().get(header::CACHE_CONTROL)
+            == Some(&HeaderValue::from_static(HOME_CACHE_CONTROL));
+    if !public_home && !forbids_storage(&response) {
         response.headers_mut().insert(
             header::CACHE_CONTROL,
-            HeaderValue::from_static("private, no-store"),
+            HeaderValue::from_static(PRIVATE_CACHE_CONTROL),
+        );
+    }
+    response
+}
+
+/// Anything else the app answers without a cache policy, such as the
+/// not-found fallback, is private too; the hashed assets and the docs set
+/// their own public policy. A response that sets a cookie is never shared.
+pub(crate) async fn mark_unmarked_responses_private(mut response: Response) -> Response {
+    let unmarked = !response.headers().contains_key(header::CACHE_CONTROL);
+    let cookie = response.headers().contains_key(header::SET_COOKIE);
+    if unmarked || (cookie && !forbids_storage(&response)) {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(PRIVATE_CACHE_CONTROL),
         );
     }
     response
