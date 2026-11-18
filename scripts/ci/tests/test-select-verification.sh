@@ -437,7 +437,7 @@ run_graph_case graph_ignores_root_manifest \
   "contracts contracts_proto policy $graph_workspace" "$failing_cargo" \
   Cargo.toml Cargo.lock
 run_graph_case graph_ignores_proto \
-  'contracts contracts_proto go_consumer_interop go_support policy' "$failing_cargo" \
+  'contracts contracts_proto go_consumer_interop go_support policy sdk_go sdk_python sdk_ts' "$failing_cargo" \
   proto/codewire/v1/api_key.proto
 for name in graph_ignores_docs graph_ignores_root_manifest graph_ignores_proto; do
   if [ -s "$TMP/${name}.stderr" ]; then
@@ -1562,8 +1562,13 @@ run_paths_case derp_contract pull_request refs/pull/101/head false \
   'policy transport transport_derp_contract transport_pkg_codewire_derp' \
   tests/contract/derp/derp_test.go
 run_paths_case proto pull_request refs/pull/11/head false \
-  'contracts contracts_proto go_consumer_interop go_support policy' \
+  'contracts contracts_proto go_consumer_interop go_support policy sdk_go sdk_python sdk_ts' \
   proto/codewire/v1/api_key.proto
+# Every v1 schema runs the SDKs: #5270's network_policy.proto field skipped
+# them on its PR and failed the TS descriptor coverage on main.
+run_paths_case network_policy_proto pull_request refs/pull/5270/head false \
+  'contracts contracts_proto go_consumer_interop go_support policy sdk_go sdk_python sdk_ts' \
+  proto/codewire/v1/network_policy.proto
 run_paths_case common_proto pull_request refs/pull/109/head false \
   'contracts contracts_proto go_consumer_interop go_support policy rust rust_pkg_codewire rust_pkg_codewire_cli rust_pkg_codewire_client rust_pkg_codewire_dashboard_web rust_pkg_codewire_orchestration rust_pkg_codewire_project_proto rust_pkg_codewire_proto sdk_go sdk_python sdk_ts transport transport_pkg_codewire_local_vmm transport_pkg_codewire_vmm_guest_probe web' \
   proto/codewire/v1/common.proto

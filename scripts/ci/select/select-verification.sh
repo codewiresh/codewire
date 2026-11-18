@@ -1186,10 +1186,11 @@ if [ "$event_selected" = false ]; then
     esac
 
     case "$path" in
-      proto/codewire/v1/common.proto|proto/codewire/v1/environment.proto|\
-      proto/codewire/v1/preset.proto)
-        # These public adapters are hand-owned in every SDK. Run all three
-        # whenever their canonical request/response schema changes.
+      proto/codewire/v1/*.proto)
+        # The SDKs hand-own adapters and descriptor-coverage checks for most
+        # public v1 messages, so any v1 schema change runs all three. A
+        # per-file list missed network_policy.proto and let main go red
+        # (#5270).
         select_token sdk_go
         select_token sdk_python
         select_token sdk_ts
