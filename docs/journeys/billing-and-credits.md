@@ -96,6 +96,29 @@ the first Production release after codewire/deploy#245.
     added; balance €0 → €20.00 with one paid €20.00 invoice.
   - Dev, `e7f3c85c6`, 2026-11-11 (#3381): Stripe offers cards only, and a
     second add-card opens a fresh session.
+  - Kind, the in-page card form (#4750), 2026-11-18. Dev was impractical:
+    its agent identities sign in with API keys only, and a fresh browser
+    identity needs a provisioning path agents don't use. The cluster ran
+    #4874 and #4941 as merged (the card code differs from `c50de4a78` only
+    in a doc comment), with Dev's Stripe test keys. Two fresh
+    organizations at €0, each with test card 4242, in headless Chromium at
+    1440:
+    - Top-up switched off in the dialog: the button read **Save card**. The
+      notice was "Visa •••• 4242 saved as your default card." Nothing was
+      charged and the balance stayed €0.00. The Automatic top-up switch
+      showed off beside "Charge Visa •••• 4242 when the balance reaches €0".
+      The organization's `auto_top_up_enabled` was false, with no top-up or
+      ledger row.
+    - Top-up left on: the button read **Save card and pay €20**. The notice
+      was "…saved as your default card. Automatic top-up added credit; the
+      receipt is on its way." The balance went €0 → €20.00, the switch
+      showed on, and there was one `billing_top_ups` row, 2,000 cents,
+      `paid`, with a Stripe test-mode invoice, and one €20 `top_up` ledger
+      entry.
+    - Not observed on Kind: the invoice under **Invoices**, which billing
+      lists only after Stripe's `invoice.paid` webhook. Kind receives no
+      Stripe webhooks.
+    - Recorded on #4750, comments 115389 and 115402.
   - Production: not yet observed.
 
 ## 2. `billing-auto-top-up`: automatic top-up
