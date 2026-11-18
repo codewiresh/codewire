@@ -1433,7 +1433,7 @@ with #4971.
 | `placeholder_outside_route` | 403 | a request to `github.com` or `api.github.com` carries a placeholder-shaped value and is not one the GitHub route serves with the managed credential: anything but Git fetch and push and the API operations the route grants (Git LFS, for one). Until #5057 renders it, the API host answers JSON with `message` and `code`, which `gh` shows, and the Git host plain text, as `network_policy_refuses_github` does | "Codewire's GitHub connection serves Git fetch and push and a fixed set of GitHub API operations. This request is not one of them, so it was not sent. Git LFS is not served." Fix: use your own GitHub token for this request |
 | `body_too_large` | 413 | a body over 4 MiB on a host that doesn't stream, or a GitHub API request over 4 MiB that carries the placeholder | "Codewire: this request's body is over the 4 MiB Codewire forwards to HOST." |
 | `busy` | 503 | the bridge's limits on requests or WebSockets in flight | "Codewire: too many requests are in flight; try again." |
-| `upstream_failed` | 502, or 504 when no answer came in time | PROVIDER couldn't be reached, or answered in a way Codewire won't pass on | "Codewire: PROVIDER couldn't be reached; try again." |
+| `upstream_failed` | 502, or 504 when no answer came in time | PROVIDER couldn't be reached, or answered in a way Codewire won't pass on. In a local VM that includes a provider whose name did not resolve when the VM's credential broker started (#5286) | "Codewire: PROVIDER couldn't be reached; try again." |
 | `name_not_allowed` | 403 | a request on an intercepted host without a Codewire value, which the network policy refuses (design 3a) | "Codewire: this environment's network policy doesn't allow this request to HOST." The owner's `cw policy log` (#5058) shows it; until that exists, no fix line |
 | `unavailable` | 503 | the request can't be checked against the network policy now: the signed policy decision is missing or doesn't match | "Codewire: this request to HOST can't be checked against the network policy right now; try again." |
 
@@ -1498,6 +1498,64 @@ since Git prints it after `remote:`. Tests match every body
 against its fixed template, check that no label appears, and place a canary
 in the request, including one in a Host subname under a suffix binding, that
 must never come back.
+
+### A provider that can't be looked up when a local VM starts (#5286)
+
+A local VM's credential broker looks up its providers' addresses once, at
+its start, before it confines itself, and dials only those addresses for as
+long as it serves. A request can then never be steered by a second lookup,
+and the confined broker does no DNS. So whether a provider's name resolves
+is settled at a broker's start. It never settles whether the VM starts:
+reaching a provider is the workload's business, and a VM with a credential
+profile boots offline as one without does.
+
+- **The broker starts whatever resolves.** A name that does not resolve, or
+  resolves only to addresses Codewire will not dial, is a host this broker
+  has no address for; the broker still starts and serves the VM. That
+  covers every lookup a broker makes at its start, the GitHub App's refresh
+  endpoint among them, which is looked up apart from the others. The
+  lookups run at the same time, each on a thread that has ended before the
+  broker confines itself, so the start waits for them at most one resolver
+  timeout in all, whatever the number of providers: five seconds with the
+  released `cw`, whose own resolver sends each lookup to the system's.
+- **Which providers are unserved.** A slot's provider is unserved by a
+  broker when any host its requests or its refreshes go to has no address
+  there, not only the host a request names. A Claude sign-in needs
+  `api.anthropic.com` and its token host `platform.claude.com`; a ChatGPT
+  sign-in needs `chatgpt.com` and `auth.openai.com`; the GitHub connection
+  needs `api.github.com` and `github.com`. With one of a slot's hosts
+  missing the whole slot is unserved, so a request is never let through to
+  an API host only to need a refresh at a token host the broker cannot
+  dial.
+- **A request to an unserved provider** is refused as `upstream_failed`
+  (502) before any credential is leased. No refresh is begun for it either,
+  whatever would begin one: a lease whose token is due, a provider's 401
+  that forces one, or the front door's token endpoint. A refresh that fails
+  in transport is recorded as an attempt of unknown outcome, which ends a
+  sign-in, so one is never begun toward a host the broker cannot dial. The
+  profile's other providers, and its SSH key, are served.
+- **It mends by itself.** While a broker has an unserved provider, the
+  credential service starts a replacement, first after five seconds and
+  then at intervals that double up to a minute. A replacement takes over
+  only if it resolves every name the serving broker has and at least one
+  more; otherwise it ends before it opens the guest's bridge, and the
+  serving broker goes on. So the provider's requests work again within
+  about a minute of its name resolving, with no restart of the VM.
+- **The regular replacement** every 600 seconds takes over only if it
+  resolves every name the serving broker has. When it cannot, the serving
+  broker goes on to the end of its lifetime, as before, and a new broker
+  then starts with whatever resolves.
+- **What is recorded.** The credential service's broker log names the
+  unresolved hosts on a broker's `broker_ready` line (`unresolved=`), and
+  again when a replacement has them back.
+
+**Not yet built** (#5286). Today a broker whose lookup fails exits at its
+start (`CW_BROKER_EXIT stage=provider.resolve`), the lookups run one after
+another, the credential service starts the broker again with the same
+result, and the VM's create or start fails with `create_failed` or
+`start_guest_start_failed` and no cause. Seen with released v0.4.22 on a
+host whose firewall dropped the broker's lookup, 2026-11-18. The journey
+step is `cred-provider-unresolved` in `docs/journeys/credentials.md`.
 
 ### Diagnosing delivery in a local VM (in progress, #4882)
 

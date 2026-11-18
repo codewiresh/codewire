@@ -24,6 +24,7 @@ observed**.
 | `cred-sign-in-screen` | partly observed, #4885 at aea6abdb8, 2026-11-16 (steps 1 and 2 for Claude and Codex at a pty; GitHub, `cw login`, piped, `TERM=dumb` and SSH not yet observed) | not yet observed | not yet observed |
 | `profile-default` | not yet observed | not yet observed | not yet observed |
 | `cred-delivery-diagnosis` | not yet observed | not yet observed | local VMs only |
+| `cred-provider-unresolved` | not yet observed (#5286): failure observed with v0.4.22, 2026-11-18 | not yet observed | local VMs only |
 
 ## Before the walk
 
@@ -493,3 +494,63 @@ lines are in its Pod log.
     part is empty until the VM asks again.
   - A VM started before the update keeps its older guest until it restarts.
 - **Observed:** not yet observed.
+
+## 11. `cred-provider-unresolved`: a provider's name doesn't resolve when a local VM starts
+
+Issue: #5286. The rules are in `docs/dev/SECRETS-AND-CREDENTIALS.md`, "A
+provider that can't be looked up when a local VM starts". Local VMs only: a
+hosted Sandbox's broker is the platform's.
+
+- **Entry points:** `cw create --local --profile`, `cw --local start`, and
+  the agent's requests in the VM.
+- **States to exercise:**
+  - a profile with one API key whose provider's name does not resolve on the
+    host: create, and start after a stop;
+  - a profile with two providers, one resolving and one not, and an SSH key;
+  - the name resolving again while the VM runs;
+  - the name resolving only to an address Codewire will not dial (a private
+    one);
+  - the host offline altogether.
+- **Driving it:** with the throwaway `HOME` and private store of
+  [Before the walk](#before-the-walk), synthetic keys, and the name made
+  unresolvable for the host's `cw` (a resolver that does not answer for it):
+  1. `cw credentials --local add anthropic --name unres-anthropic` and
+     `add openai --name unres-openai`, keys from stdin; `set` both in
+     profile `unres`, with an SSH key.
+  2. `cw create --local --name unres-env --no-file --profile local:unres
+     --yes`, with one provider's name unresolvable.
+  3. In the VM, a request on each provider's route, and `ssh -T` through the
+     profile's key.
+  4. Make the name resolvable, wait a minute and a half, and repeat the
+     request.
+  5. `cw --local stop unres-env`, `cw --local start unres-env` with the name
+     unresolvable again; then remove the VM, the profile and the keys.
+- **Proof:**
+  - step 2 succeeds, in the time a create with `--no-profile` takes plus at
+    most five seconds;
+  - the resolving provider's request reaches it (a synthetic key gets the
+    provider's own 401), SSH signs, and the other provider's request gets
+    502 with `Codewire: PROVIDER couldn't be reached; try again.`;
+  - the credential service's `brokers.log` has `broker_ready` with
+    `unresolved=` naming exactly the unresolvable host;
+  - after step 4 the request reaches the provider with no restart, and the
+    log has a later `broker_ready` without that host;
+  - with a sign-in in the profile and its token host unresolvable, the
+    sign-in is still usable once the name resolves: no refresh was begun
+    while it did not.
+- **Gotchas:**
+  - A host firewall that filters by process may answer the broker's lookup
+    and not another `cw` process's, or the other way round: the lookup that
+    counts is the broker's own (`cw __local-credential-broker`).
+  - A `cw` built against the system C library uses its resolver, whose
+    timeout may be longer than five seconds.
+- **Observed:**
+  - Linux, released v0.4.22, 2026-11-18: failure observed, the symptom #5286
+    fixes. In the smoke library's private store, with a synthetic Anthropic
+    key in the profile and the broker's lookup of `api.anthropic.com`
+    dropped by the host's firewall, `cw create --local --profile` failed
+    twice with `create_failed` and "the local VM runtime gave no cause";
+    each broker ended `CW_BROKER_EXIT stage=provider.resolve kind=other`
+    5.02 s after its start, and `brokers.log` read `broker_not_ready
+    reason=lease_closed_before_ready … error=-`. With the lookup answered,
+    the same create started and `broker_ready` came after 0.2 s.
