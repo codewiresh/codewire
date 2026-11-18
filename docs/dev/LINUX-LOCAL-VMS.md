@@ -488,13 +488,52 @@ a VM that this cw starts its credentials.
   your local VMs dev, web keep your local credentials with the cw you updated from, which can't give a VM started by this cw its credentials; it switches to this cw once they stop (`cw --local stop NAME`)
   ```
 
-  A VM with no credential profile starts as before.
-- **What the logs say.** When a helper process of a VM ends during a start,
-  the runner's log line for the failed start carries that process's exit
-  status. A start that failed because its credential broker never became
-  ready says so, and does not name whichever other helper ended first. A
-  broker that refuses its runner's protocol records both protocol numbers in
-  the credential service's broker log.
+  A VM with no credential profile starts as before. One command is not
+  refused: `cw --local restart NAME` when NAME is the only VM that keeps the
+  other cw's service. Its own stop is what frees the service, so the check
+  is made after the stop and the start replaces the service.
+- **What the logs say.** A start that fails says why in two places, the
+  runner's log (`logs/runner-ID.log` under the local VM state) and the
+  credential service's broker log (`logs/brokers.log` under the credential
+  state):
+  - **The helper that ended.** When a helper process of the VM ended during
+    the start, the runner's `vm_start_failed` line carries `helper_exit=`:
+    the exit code (`code_72`) or the signal (`signal_9`), and after it the
+    runner's name for a code it knows (`code_72_egress_broker_protocol`).
+  - **Whether the broker came.** The runner records when the VM's
+    credential broker connects for the generation, and every
+    `vm_start_failed` line says `broker=connected`, `broker=never`, or
+    `broker=none` for a VM with no credential profile.
+  - **The cause, when the evidence is there.** A failed start is reported
+    as `credential_broker_unavailable`, in `cw`'s error and the
+    supervisor's line for the operation, only when all of this holds for the
+    generation: the VM has a credential profile; the guest's daemon had
+    answered, which is where the guest starts waiting for its broker; no
+    broker had connected; and what the runner saw is not a failure the guest
+    reported about itself (its setup, its workspace, missing Docker
+    tooling). What the runner saw stays beside it as `observed=`, for
+    example `observed=egress_broker_exited`: the guest gives up when its
+    broker never comes, and the other helpers end as it goes down. `cw`
+    then says that the VM's credentials could not be served and names the
+    broker log. Any earlier failure keeps its own code whatever the profile:
+    the VMM ending at boot, a helper ending before the guest's daemon
+    answers, a guest that shuts down on a bad image. A broker that connected
+    and then ended is not covered by this rule.
+  - **A helper before the front door.** A helper that ended before the
+    front door stopped is the cause, and the front door's stop its
+    consequence.
+  - **The broker's own word.** A `broker_not_ready` line carries the
+    broker's exit status and its last word (`stage`, `kind`) whenever the
+    broker has ended: the service waits up to a quarter of a second for a
+    broker whose channel closed to end, instead of recording
+    `status=running` with no error. A broker that refuses its runner's
+    protocol says `kind=runner_protocol_mismatch` with both numbers
+    (`broker=14 runner=13`).
+  - **After a failed create.** The VM is removed, and the runner's log of
+    the failed start is kept as `logs/runner-failed-create-NAME.log`, moved
+    there by a rename. The next failed create of that name replaces it, and
+    a create of that name that succeeds removes it, so a retry or a second
+    create running beside it loses nothing.
 
 **Built in part** (#5238). The first three points are built: a service
 reports the runner protocol its brokers accept; one that reports another,
@@ -508,9 +547,16 @@ v0.4.21 share while their runner protocols differ: with v0.4.21 a service
 left running by v0.4.15 is never replaced, not even with every VM stopped,
 and from v0.4.22 only because that number happened to move.
 
-**Not yet built:** what the logs say. A start that fails for another reason
-after a helper process ended still records `detail=egress_broker_exited`
-or the like with no exit status. The journey step is
+**Not yet built:** what the logs say, and the restart that is not refused.
+Today a start that fails after a helper process ended records
+`detail=egress_broker_exited` or the like with no exit status, and that
+helper is usually not the cause: the egress broker never waits for the
+credential broker, and ends only as the guest goes down. A broker that ended
+at its first step reads `broker_not_ready … status=running … error=-`. A
+runner protocol mismatch reads `kind=other`. A failed create removes the
+runner's log with the VM. `cw --local restart` of the only VM that keeps the
+other cw's service is refused and told to stop that same VM; `cw --local
+stop NAME` then `cw --local start NAME` works. The journey step is
 `local-vm-upgrade-credentials` in `docs/journeys/local-vm-upgrade.md`.
 
 A VM keeps the guest kernel and root it was created with, so neither an upgrade

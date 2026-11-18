@@ -266,6 +266,22 @@ Issue: #5238. The spec is "Credentials after an upgrade" in
        at the generation it had.
     6. `cw --local stop up-keep`, then `cw --local start up-keep` and the
        update again: it succeeds.
+  - **The only VM, restarted**, in a third scratch `HOME` prepared as in
+    step 4:
+    7. With the release under test: `cw --local restart up-keep`. It is not
+       refused: the VM stops, the service is replaced, and the VM starts.
+  - **A broker that cannot start**, to read the logs. In a `HOME` of the
+    release under test, with a VM that has a credential profile: stop the
+    VM, replace the credential service's `cw` by one whose broker ends at
+    its first step (the local VM credentials smoke's way of doing it, when
+    that case is written; #5220), and start the VM.
+    8. `cw --local start NAME` fails. Read `logs/runner-ID.log` and the
+       credential service's `logs/brokers.log`.
+    9. `cw create --local --name up-fail --profile local:up --no-file --yes`
+       in the same state fails; read `logs/runner-failed-create-up-fail.log`.
+    10. The negative: with the credential service working again, start a VM
+        that has a credential profile and end its VMM while it boots (the
+        runner's own tests' way of doing it). Read `logs/runner-ID.log`.
   - Afterwards, in each `HOME`: `cw credentials --local delete up-key`, which
     also removes the key from the operating system's keyring, and
     `cw --local rm` of its VM.
@@ -282,7 +298,22 @@ Issue: #5238. The spec is "Credentials after an upgrade" in
     in `crates/codewire-cli/src/commands/credential_authority.rs`;
   - no start fails in the guest start for want of a credential broker. Where
     one does fail for another reason, the runner's log line carries the exit
-    status of the helper that ended.
+    status of the helper that ended;
+  - step 7 leaves the VM running on the release under test's service, with
+    no refusal;
+  - step 8: `cw` says the VM's credentials could not be served and names the
+    broker log, with `credential_broker_unavailable` and `observed=` naming
+    what the runner saw; the runner's `vm_start_failed` line reads
+    `broker=never`, and `helper_exit=` names the exit of any helper that
+    ended; the broker log's `broker_not_ready` line carries the broker's
+    exit status and its `stage` and `kind`, never `status=running …
+    error=-`. For a broker of another runner protocol the kind is
+    `runner_protocol_mismatch` with both numbers;
+  - step 9: the VM is gone and `logs/runner-failed-create-up-fail.log` holds
+    the failed start's lines;
+  - step 10: the start fails as `vmm_exited`, with `helper_exit=` naming the
+    VMM's exit, and nothing sends the user to the broker log, although the
+    VM has a credential profile and no broker had connected.
 - **Gotchas:**
   - The earlier side must be a released build: a `cw` built from source has
     no provenance.
@@ -313,3 +344,4 @@ Issue: #5238. The spec is "Credentials after an upgrade" in
     replaced the credential service with v0.4.22's and the VM ran with its
     profile. Observed working for that pair of releases; the steps as
     written, and the logs' lines, are not yet observed (#5238).
+  - Steps 7 to 10 and their proofs: not yet observed (#5238 part 3).
