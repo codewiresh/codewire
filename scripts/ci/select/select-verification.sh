@@ -114,6 +114,30 @@ discover_pr_changed_files() {
   git diff --name-only "${base}...HEAD" > "$out"
 }
 
+# A pull request's build runs its own head's scripts. A head from before the
+# build folder move (#5263) runs the old build-once.sh, which deletes the pull
+# request build machines' warm build folder, so the next build of every other
+# pull request starts cold (codewire#5146, run 60123). Such a head is refused
+# until main is merged into it. It reads the event's head, GITHUB_SHA: HEAD
+# is the head merged onto main by then. In CI both commits must be present
+# (the source checkout fetches full history), so a narrower checkout fails
+# closed; a local run whose repository lacks them (a scratch test
+# repository) has nothing to compare against.
+pr_required_main_commit="${SELECT_PR_REQUIRED_MAIN_COMMIT:-df3ef3f23ef05b9652e66508b39bdd9a23cafaad}"
+refuse_pr_head_before_required_main() {
+  local head="${GITHUB_SHA:-HEAD}" resolved
+  if ! git cat-file -e "${pr_required_main_commit}^{commit}" 2>/dev/null \
+      || ! resolved="$(git rev-parse --verify "${head}^{commit}" 2>/dev/null)"; then
+    [ "${GITHUB_ACTIONS:-}" = true ] || return 0
+    echo "::error::selector: cannot compare this pull request's head ${head:0:12} with main's ${pr_required_main_commit:0:12} (#5263): a commit is missing from the checkout" >&2
+    exit 1
+  fi
+  head="$resolved"
+  git merge-base --is-ancestor "$pr_required_main_commit" "$head" && return 0
+  echo "::error::this pull request's head ${head:0:12} predates main's ${pr_required_main_commit:0:12} (#5263, the CI build folder move), whose CI it needs: merge main into this pull request and push again (git fetch origin main && git merge origin/main)" >&2
+  exit 1
+}
+
 discover_push_changed_files() {
   local out="$1"
   local before="${PUSH_BEFORE_SHA:-}"
@@ -624,6 +648,7 @@ fi
 if [ "$event_selected" = false ] && [ "$explicit_paths" = false ]; then
   case "$event" in
     pull_request)
+      refuse_pr_head_before_required_main
       if ! discover_pr_changed_files "$tmp"; then
         echo "selector: pull-request baseline is unavailable" >&2
         exit 2

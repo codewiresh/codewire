@@ -2947,13 +2947,51 @@ printf 'pub fn selected() {}\n' > "$repo/crates/codewire-cli/src/lib.rs"
 git -C "$repo" add crates/codewire-cli/src/lib.rs
 git -C "$repo" -c commit.gpgsign=false commit -q -m feature
 git -C "$repo" remote add origin .
-output="$(cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+output="$(cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u GITHUB_ACTIONS -u GITHUB_SHA \
   GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF=main \
   VERIFICATION_REMOTE=origin KIND_E2E_OPT_IN=false "$SELECTOR")"
 assert_tokens discovered_pr 'policy rust rust_pkg_codewire_cli' "$output"
+# A head that contains the required main commit is selected as usual; one that
+# lacks it is refused before discovery, with the repair (codewire#5146). The
+# check reads the event's head, GITHUB_SHA, never HEAD.
+feature_head="$(git -C "$repo" rev-parse HEAD)"
+output="$(cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u GITHUB_ACTIONS -u GITHUB_SHA \
+  GITHUB_EVENT_NAME=pull_request GITHUB_SHA="$feature_head" GITHUB_BASE_REF=main SELECT_PR_REQUIRED_MAIN_COMMIT="$base" \
+  VERIFICATION_REMOTE=origin KIND_E2E_OPT_IN=false "$SELECTOR")"
+assert_tokens discovered_pr_after_required_main 'policy rust rust_pkg_codewire_cli' "$output"
+unmerged_main="$(git -C "$repo" -c commit.gpgsign=false commit-tree -p "$base" -m 'main only' "$base^{tree}")"
+old_head_stdout="$TMP/old-head-pr.stdout"
+old_head_stderr="$TMP/old-head-pr.stderr"
+if (cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u GITHUB_ACTIONS -u GITHUB_SHA \
+    GITHUB_EVENT_NAME=pull_request GITHUB_SHA="$feature_head" GITHUB_BASE_REF=main SELECT_PR_REQUIRED_MAIN_COMMIT="$unmerged_main" \
+    VERIFICATION_REMOTE=origin KIND_E2E_OPT_IN=false \
+    "$SELECTOR" >"$old_head_stdout" 2>"$old_head_stderr"); then
+  echo 'selector accepted a pull request head that lacks the required main commit' >&2
+  exit 1
+fi
+[ ! -s "$old_head_stdout" ] || {
+  echo 'a refused pull request head emitted machine-readable output' >&2
+  exit 1
+}
+grep -qF 'merge main into this pull request and push again' "$old_head_stderr"
+# In CI a commit the check cannot find refuses the run: a narrower checkout
+# must not switch the check off.
+if (cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH GITHUB_ACTIONS=true \
+    GITHUB_EVENT_NAME=pull_request GITHUB_SHA="$feature_head" GITHUB_BASE_REF=main \
+    SELECT_PR_REQUIRED_MAIN_COMMIT=0123456789abcdef0123456789abcdef01234567 \
+    VERIFICATION_REMOTE=origin KIND_E2E_OPT_IN=false \
+    "$SELECTOR" >"$old_head_stdout" 2>"$old_head_stderr"); then
+  echo 'selector accepted a pull request in CI without the commit it compares against' >&2
+  exit 1
+fi
+[ ! -s "$old_head_stdout" ] || {
+  echo 'a refused pull request head emitted machine-readable output' >&2
+  exit 1
+}
+grep -qF 'a commit is missing from the checkout' "$old_head_stderr"
 missing_stdout="$TMP/missing-pr.stdout"
 missing_stderr="$TMP/missing-pr.stderr"
-if (cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH \
+if (cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u GITHUB_ACTIONS -u GITHUB_SHA \
     GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF= \
     VERIFICATION_REMOTE=origin KIND_E2E_OPT_IN=false \
     "$SELECTOR" >"$missing_stdout" 2>"$missing_stderr"); then
@@ -3065,7 +3103,7 @@ for ref in refs/heads/main refs/heads/other; do
   fi
   [[ ! -s "$missing_stdout" ]] || { echo 'failed discovery emitted a contract' >&2; exit 1; }
 done
-if (cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH GITHUB_EVENT_NAME=pull_request \
+if (cd "$repo" && env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH -u GITHUB_ACTIONS -u GITHUB_SHA GITHUB_EVENT_NAME=pull_request \
     GITHUB_BASE_REF= VERIFICATION_REMOTE=origin PUSH_BASE_UNVERIFIED=true \
     "$SELECTOR" >"$missing_stdout" 2>"$missing_stderr"); then
   echo 'main fallback accepted an unverified pull request baseline' >&2
