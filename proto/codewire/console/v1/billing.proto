@@ -197,6 +197,16 @@ message GetBillingOverviewResponse {
   // has_payment_method. Unset when there is no default, it is not a card, or
   // Stripe could not be read.
   PaymentCard default_card = 24;
+  // Out of credit, and automatic top-up is charging the card this much, in
+  // euro cents, to lift the balance above zero; 0 otherwise. A declined
+  // charge, no card or top-up off marks the organization as having no way to
+  // get credit, and then nothing is charging (#4754).
+  int32 top_up_charging_cents = 25;
+  // Whether this deployment enforces credit: an empty balance then refuses
+  // creates and starts, and automatic top-up charges the card. Without it
+  // nothing is refused or charged, so the console says nothing of running
+  // low (#4754).
+  bool credit_enforced = 26;
 }
 
 // What a receipt shows of a card: never its number or fingerprint.

@@ -551,6 +551,8 @@ fn proto_billing_overview(value: BillingOverviewResponse) -> AppResult<GetBillin
         credit_exhausted_at: optional_timestamp(value.credit.exhausted_at.as_deref())?.into(),
         month_usage_nano_eur: value.credit.month_usage_nano_eur,
         default_card: value.default_card.map(proto_card).into(),
+        top_up_charging_cents: value.credit.top_up_charging_cents,
+        credit_enforced: value.credit.credit_enforced,
         ..Default::default()
     })
 }

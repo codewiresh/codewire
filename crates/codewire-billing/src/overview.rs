@@ -71,6 +71,11 @@ pub struct CreditOverview {
     pub auto_top_up_enabled: bool,
     pub auto_top_up_cents: i32,
     pub exhausted_at: Option<String>,
+    /// What automatic top-up is charging the card while the organization is
+    /// out of credit, in euro cents; 0 when nothing is (#4754).
+    pub top_up_charging_cents: i32,
+    /// This deployment enforces credit (`CODEWIRE_CREDIT_ENFORCEMENT`).
+    pub credit_enforced: bool,
     pub month_usage_nano_eur: i64,
 }
 
@@ -294,7 +299,17 @@ async fn credit_overview(
     month_start: DateTime<Utc>,
     enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
 ) -> AppResult<CreditOverview> {
-    type Row = (String, i64, i64, i64, i64, bool, i32, Option<DateTime<Utc>>);
+    type Row = (
+        String,
+        i64,
+        i64,
+        i64,
+        i64,
+        bool,
+        i32,
+        Option<DateTime<Utc>>,
+        bool,
+    );
     let row: Row = sqlx::query_as(
         r#"SELECT
                o.rate_card, r.cpu_nano_eur_per_vcpu_hour,
@@ -303,7 +318,8 @@ async fn credit_overview(
                          WHERE organization_id = o.id), 0),
                o.auto_top_up_enabled,
                o.auto_top_up_cents,
-               o.credit_exhausted_at
+               o.credit_exhausted_at,
+               o.stripe_customer_id IS NOT NULL
            FROM organizations o
            JOIN billing_rate_cards r ON r.rate_card = o.rate_card
            WHERE o.id = $1"#,
@@ -312,7 +328,7 @@ async fn credit_overview(
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound("organization not found".into()))?;
-    let (rate_card, cpu, memory, disk, balance, enabled, cents, exhausted_at) = row;
+    let (rate_card, cpu, memory, disk, balance, enabled, cents, exhausted_at, has_customer) = row;
     let unmetered = rate_card == crate::credit::UNLIMITED_RATE_CARD;
     let month = crate::usage_cost::month_usage_nano_eur(pool, org_id, month_start).await?;
     Ok(CreditOverview {
@@ -333,6 +349,19 @@ async fn credit_overview(
             Utc::now(),
         )
         .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        top_up_charging_cents: if top_up_charging(
+            enforcement,
+            unmetered,
+            balance,
+            enabled,
+            has_customer,
+            exhausted_at,
+        ) {
+            crate::credit::top_up_charge_cents(balance, cents)
+        } else {
+            0
+        },
+        credit_enforced: enforcement.is_on(),
         month_usage_nano_eur: month,
     })
 }
@@ -351,6 +380,29 @@ fn out_of_credit_since(
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
     (enforcement.is_on() && !unmetered && balance_nano_eur <= 0).then(|| marked_at.unwrap_or(now))
+}
+
+/// Whether automatic top-up is charging the card for an organization that is
+/// out of credit. Settlement marks `credit_exhausted_at` when it cannot get
+/// credit (no card, top-up off, or a declined charge) and does not charge a
+/// marked organization again, so an unmarked one with top-up on is being
+/// charged, or is about to be. Until its next tick, though, an organization
+/// that never saved a card is unmarked too; without a Stripe customer there
+/// is nothing to charge, so it is not charging (#4754).
+fn top_up_charging(
+    enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
+    unmetered: bool,
+    balance_nano_eur: i64,
+    auto_top_up_enabled: bool,
+    has_customer: bool,
+    marked_at: Option<DateTime<Utc>>,
+) -> bool {
+    enforcement.is_on()
+        && !unmetered
+        && balance_nano_eur <= 0
+        && auto_top_up_enabled
+        && has_customer
+        && marked_at.is_none()
 }
 
 /// The smallest and largest automatic top-up: EUR 5 and EUR 1,000.
@@ -824,5 +876,23 @@ mod tests {
         // Never while credit isn't enforced, or on the Unlimited card.
         assert_eq!(out_of_credit_since(Off, false, -1, Some(marked), now), None);
         assert_eq!(out_of_credit_since(On, true, -1, Some(marked), now), None);
+    }
+
+    #[test]
+    fn top_up_is_charging_only_until_settlement_marks_the_organization() {
+        use codewire_server_core::credit_enforcement::CreditEnforcement::{Off, On};
+        let marked = Some(Utc::now());
+        assert!(top_up_charging(On, false, 0, true, true, None));
+        assert!(top_up_charging(On, false, -1_140_000_000, true, true, None));
+        // A declined charge, or no card, marks it: no longer charging.
+        assert!(!top_up_charging(On, false, -1, true, true, marked));
+        // An organization that never saved a card has nothing to charge, even
+        // before settlement marks it.
+        assert!(!top_up_charging(On, false, 0, true, false, None));
+        // Funded, top-up off, Unlimited, or credit not enforced.
+        assert!(!top_up_charging(On, false, 1, true, true, None));
+        assert!(!top_up_charging(On, false, -1, false, true, None));
+        assert!(!top_up_charging(On, true, -1, true, true, None));
+        assert!(!top_up_charging(Off, false, -1, true, true, None));
     }
 }

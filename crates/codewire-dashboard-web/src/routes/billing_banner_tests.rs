@@ -77,6 +77,7 @@ struct Scenario {
 fn exhausted() -> GetBillingOverviewResponse {
     let mut overview = GetBillingOverviewResponse {
         billing_enabled: true,
+        credit_enforced: true,
         auto_top_up_enabled: true,
         ..Default::default()
     };
@@ -92,6 +93,7 @@ fn exhausted() -> GetBillingOverviewResponse {
 fn healthy() -> GetBillingOverviewResponse {
     let mut overview = GetBillingOverviewResponse {
         billing_enabled: true,
+        credit_enforced: true,
         has_payment_method: true,
         auto_top_up_enabled: true,
         credit_balance_nano_eur: 50_000_000_000,
@@ -286,7 +288,7 @@ async fn an_organization_out_of_credit_gets_the_danger_banner() {
     assert_eq!(status, StatusCode::OK, "{calls:?}");
     assert_eq!(
         html.trim(),
-        "<aside class=\"cw-banner\" data-tone=\"danger\" aria-label=\"Billing\" hx-get=\"/synthetic/_fragments/billing-banner\" hx-trigger=\"codewire:live:credit from:body, codewire:live:resync from:body\" hx-swap=\"outerHTML\"><p>Out of credit: cloud sandboxes can’t start, and running ones stop now.</p><a class=\"cw-banner-action\" href=\"/synthetic/billing/\">Add a card</a></aside>"
+        "<aside class=\"cw-banner\" data-tone=\"danger\" aria-label=\"Billing\" hx-get=\"/synthetic/_fragments/billing-banner\" hx-trigger=\"codewire:live:credit from:body, codewire:live:resync from:body\" hx-swap=\"outerHTML\"><p>Out of compute credit: new Sandboxes and starts are refused; running Sandboxes stop now, and their storage is kept.</p><a class=\"cw-banner-action\" href=\"/synthetic/billing/\">Add a card</a></aside>"
     );
     assert_eq!(count(&calls, "/GetBillingOverview"), 1, "{calls:?}");
     assert_eq!(count(&calls, "/ListEnvironments"), 1, "{calls:?}");
@@ -303,16 +305,17 @@ async fn an_organization_out_of_credit_gets_the_danger_banner() {
     .await;
     assert_eq!(
         html.trim(),
-        "<aside class=\"cw-banner\" data-tone=\"danger\" aria-label=\"Billing\" hx-get=\"/synthetic/_fragments/billing-banner\" hx-trigger=\"codewire:live:credit from:body, codewire:live:resync from:body\" hx-swap=\"outerHTML\"><p>Out of credit: cloud sandboxes can’t start.</p></aside>"
+        "<aside class=\"cw-banner\" data-tone=\"danger\" aria-label=\"Billing\" hx-get=\"/synthetic/_fragments/billing-banner\" hx-trigger=\"codewire:live:credit from:body, codewire:live:resync from:body\" hx-swap=\"outerHTML\"><p>Out of compute credit: new Sandboxes and starts are refused.</p></aside>"
     );
 }
 
 /// Nothing to say, or billing that does not answer: a hidden placeholder
 /// that fetches the banner again when the credit changes (#4762). A healthy
-/// organization's Sandboxes are not read.
+/// organization's Sandboxes are read, since enough of them running would
+/// leave it under 24 hours (#4754); unavailable billing reads nothing more.
 #[tokio::test]
 async fn a_healthy_organization_or_unavailable_billing_gets_a_hidden_placeholder() {
-    for (overview, sandbox_reads) in [(Some(healthy()), 0), (None, 0)] {
+    for (overview, sandbox_reads) in [(Some(healthy()), 1), (None, 0)] {
         let (status, html, calls) = get(
             Scenario {
                 role: OrgRole::Owner,
@@ -409,7 +412,10 @@ fn a_card_on_file_asks_for_credit() {
         only_owner: false,
     });
     let mut form = super::super::environments::default_create_form(CSRF.into(), true);
-    form.credit_refusal = Some(crate::billing_banner::CreditRefusal { has_card: true });
+    form.credit_refusal = Some(crate::billing_banner::CreditRefusal {
+        has_card: true,
+        top_up_charging: false,
+    });
     let html = crate::templates::EnvironmentCreateFormTemplate {
         organization: &organization,
         form: &form,

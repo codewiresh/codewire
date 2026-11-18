@@ -21,6 +21,7 @@ the first Production release after codewire/deploy#245.
 | `billing-costs` | observed 2026-11-13 (#3954) | not yet observed |
 | `billing-zero-refusal` | observed 2026-11-11 and 2026-11-13 (#3381) | not yet observed |
 | `billing-admin-adjust` | not yet observed | not yet observed |
+| `billing-banner` | not yet observed | not yet observed |
 | `billing-notice` | sent once observed 2026-11-13 (#4087); failure backoff not observed | not yet observed |
 | `billing-stripe-delivery` | observed 2026-10-24 (#3263) | endpoint created 2026-10-24; delivery not yet observed |
 
@@ -302,4 +303,38 @@ Issue: #4754.
     (`FailedPrecondition`), so no client can skip the question;
   - after a confirmed negative result with top-up on, the card is charged
     within seconds (#4777), and the Billing page shows the charge.
+
+## 10. `billing-banner`: every page says where credit stands
+
+Issue: #4754. Design: private-docs `designs/billing-compute-credits.md`,
+"What the console says about credit".
+
+- **Entry points:** the banner across the top of every page of a metered
+  organization, and Create Sandbox's drawer.
+- **States to exercise:**
+  - low with top-up off: under €5, and under 24 hours at current use;
+  - low with top-up on and a card;
+  - €0 or below while automatic top-up charges the card;
+  - €0 or below with no card, top-up off, or a declined charge, with and
+    without Sandboxes running;
+  - back above €0, and Unlimited;
+  - each as an owner and as a member.
+- **Driving it:** with credit enforced, set the balance through the admin
+  organization page's credit adjustment (`billing-admin-adjust`). Turn
+  top-up on and off on the Billing page; Stripe's test card
+  `4000 0000 0000 0341` saves and then declines its charges. Keep a
+  Sandbox running for the "at current use" states.
+- **Proof:**
+  - each state's banner reads as the design says: its tone, its words, the
+    charge and the card;
+  - an owner or admin sees the card's brand and last four, and the action
+    (Add credit, or Add a card) where one applies; a member reads "the saved
+    card" and sees no action;
+  - in both €0 states Create Sandbox's drawer says why instead of failing on
+    submit, and while top-up charges it offers no Add credit;
+  - each change shows within a few seconds without a reload
+    (`codewire:live:credit`), and a balance back above €0 clears the banner
+    and the refusal.
+- **Gotchas:** where credit isn't enforced (`CODEWIRE_CREDIT_ENFORCEMENT`
+  unset), there is no banner at all: nothing would be refused or charged.
 - **Observed:** not yet observed.

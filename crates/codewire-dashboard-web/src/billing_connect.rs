@@ -110,7 +110,14 @@ fn facts_of(overview: &GetBillingOverviewResponse) -> CreditFacts {
     CreditFacts {
         balance_nano_eur: overview.credit_balance_nano_eur,
         has_card: overview.has_payment_method,
+        card: overview
+            .default_card
+            .as_option()
+            .map(|card| format!("{} •••• {}", card_brand_name(&card.brand), card.last4)),
         auto_top_up: overview.auto_top_up_enabled,
+        auto_top_up_cents: overview.auto_top_up_cents,
+        top_up_charging_cents: overview.top_up_charging_cents,
+        enforced: overview.credit_enforced,
         billing_enabled: overview.billing_enabled,
         unmetered: overview.unmetered,
         cpu_nano_eur_per_vcpu_hour: rates.cpu_nano_eur_per_vcpu_hour,
