@@ -45,4 +45,10 @@ while IFS= read -r lock; do
   fi
 done < <(git -C "$root" ls-tree -r --name-only "$tree" | grep -E '(^|/)([A-Za-z0-9_-]+\.)?Cargo\.lock$')
 
-exec fj pr -R origin merge "$pr" -M squash -t "$title" -m "Reviewed-on: #$pr"
+if ! fj pr -R origin merge "$pr" -M squash -t "$title" -m "Reviewed-on: #$pr"; then
+  # Once main lands only through the merge queue (infra#2599), Forgejo refuses
+  # every other merge.
+  printf 'merge-pr.sh: Forgejo refused the merge; if main lands through the merge queue, queue it: scripts/dev/queue-pr.sh %s "%s"\n' \
+    "$pr" "$subject" >&2
+  exit 1
+fi

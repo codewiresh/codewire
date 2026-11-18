@@ -454,6 +454,38 @@ grep -qF "zz-access 0.1.0 depends on 'base64', which matches 2 locked packages" 
   fail "the refused merge did not name the ambiguous dependency: $(cat "$work/merge-43.out")"
 [[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a refused merge contacted the forge'
 [[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'invalid merge arguments contacted the forge'
+# A refused merge names the queue's path (infra#2599): once main lands only
+# through the merge queue, Forgejo refuses every other merge.
+cat >"$work/merge-bin/fj" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+if merge_pr 42 'fix: safe title' >"$work/merge-refused.out" 2>&1; then
+  fail 'merge-pr.sh passed a merge Forgejo refused'
+fi
+grep -qF 'queue it: scripts/dev/queue-pr.sh 42 "fix: safe title"' "$work/merge-refused.out" ||
+  fail "a refused merge did not name the queue: $(cat "$work/merge-refused.out")"
+# queue-pr.sh: the same checks, then the title and the label, one call each.
+cat >"$work/merge-bin/fj" <<'SH'
+#!/usr/bin/env bash
+{ printf '%s\0' "$@"; printf '\n'; } >>"${MERGE_TEST_ARGS:?}"
+SH
+cp "$ROOT/scripts/dev/queue-pr.sh" "$merge_repo/scripts/dev/"
+queue_pr() { PATH="$work/merge-bin:$PATH" bash "$merge_repo/scripts/dev/queue-pr.sh" "$@"; }
+queue_pr 42 'fix: safe title (#42)' >"$work/queue.out"
+python3 - "$MERGE_TEST_ARGS" <<'PYTEST'
+import sys
+from pathlib import Path
+calls = [line.split(b'\0')[:-1] for line in Path(sys.argv[1]).read_bytes().split(b'\n')[:-1]]
+assert calls == [[b'pr', b'-R', b'origin', b'edit', b'42', b'title', b'fix: safe title'],
+                 [b'pr', b'-R', b'origin', b'edit', b'42', b'labels', b'-a', b'merge-queue']], calls
+PYTEST
+grep -qF '#42 is queued as "fix: safe title (#42)"' "$work/queue.out" || fail "queue-pr.sh did not say what it queued"
+rm "$MERGE_TEST_ARGS"
+if queue_pr 42 wip >/dev/null 2>&1 || queue_pr 43 'feat: access' >/dev/null 2>&1; then
+  fail 'queue-pr.sh queued a placeholder title or a merge Cargo refuses'
+fi
+[[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a refused queue contacted the forge'
 python3 - "$ROOT/.gitea/default_merge_message/SQUASH_TEMPLATE.md" <<'PYTEST'
 import sys
 from pathlib import Path
@@ -462,6 +494,6 @@ rendered=Template(Path(sys.argv[1]).read_text()).substitute(
     PullRequestTitle='fix: safe title', PullRequestIndex='42')
 assert rendered == 'fix: safe title (#42)\n\nReviewed-on: #42\n', rendered
 PYTEST
-printf '[test-check-mirror-content] explicit merge metadata and template: 7 cases passed\n'
+printf '[test-check-mirror-content] explicit merge metadata, the queue path and template: 10 cases passed\n'
 
 printf '[test-check-mirror-content] mirror content gate contract passed\n'
