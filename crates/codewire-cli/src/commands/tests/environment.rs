@@ -2752,6 +2752,39 @@ fn format_env_info_text_uses_go_style_labels() {
 }
 
 #[test]
+fn format_env_info_text_says_why_hosted_egress_is_blocked_and_json_keeps_the_codes() {
+    let mut environment = test_environment(
+        "12345678-abcd-4000-9000-000000000001",
+        Some("builder"),
+        "running",
+    );
+    assert!(!format_env_info_text(&environment).contains("Egress:"));
+    for (enforcement, failure, line) in [
+        ("not_enforced", None, "Egress:        not enforced\n"),
+        ("enforced", None, "Egress:        enforced\n"),
+        (
+            "failed_closed",
+            Some("lockdown_not_applied"),
+            "Egress:        blocked: the platform's egress lockdown is not in place\n",
+        ),
+        (
+            "failed_closed",
+            Some("self_check_failed"),
+            "Egress:        blocked: its egress self-check failed\n",
+        ),
+    ] {
+        environment.egress_enforcement = Some(enforcement.to_string());
+        environment.egress_failure = failure.map(str::to_string);
+        let text = format_env_info_text(&environment);
+        assert!(text.contains(line), "{enforcement}: {text}");
+        assert!(!text.contains("lockdown_not_applied"), "{text}");
+    }
+    let json = serde_json::to_value(&environment).unwrap();
+    assert_eq!(json["egress_enforcement"], "failed_closed");
+    assert_eq!(json["egress_failure"], "self_check_failed");
+}
+
+#[test]
 fn format_env_info_text_shows_a_replacement_or_restart_as_a_notice() {
     let mut environment = test_environment(
         "12345678-abcd-4000-9000-000000000001",

@@ -5,11 +5,17 @@
 //! ([`record_bind`]), or taken back from the live binding when a row is
 //! re-created; a report never names one. Records are kept for the
 //! environment the bind recorded, at most [`EGRESS_RECORD_LIMIT`] of them.
+//!
+//! One column is orchestration's own (migration 0033, #5068): the lockdown
+//! check's refusal of the Pod. No report writes it, and it outlives every
+//! report until [`clear_lockdown_refusal`], a bind elsewhere or the release.
 
 use codewire_egress_policy::lease::RefusalReason;
 use codewire_egress_policy::record::EGRESS_RECORD_LIMIT;
 use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
+
+use super::lockdown::LockdownRefusal;
 
 /// The most records one `ReportRecords` call may carry.
 pub const MAX_RECORDS_PER_REPORT: usize = 256;
@@ -104,7 +110,10 @@ pub async fn record_bind(
     sqlx::query(
         "INSERT INTO sandbox_egress_enforcement (pod_uid, environment_id, node, state)
          VALUES ($1, $2, '', 'disconnected')
-         ON CONFLICT (pod_uid) DO UPDATE SET environment_id = EXCLUDED.environment_id",
+         ON CONFLICT (pod_uid) DO UPDATE SET environment_id = EXCLUDED.environment_id,
+            lockdown_refusal = CASE
+                WHEN sandbox_egress_enforcement.environment_id IS DISTINCT FROM EXCLUDED.environment_id
+                THEN NULL ELSE sandbox_egress_enforcement.lockdown_refusal END",
     )
     .bind(pod_uid)
     .bind(environment_id)
@@ -124,6 +133,41 @@ pub async fn release_pod(tx: &mut PgConnection, pod_uid: &str) -> Result<(), sql
         .bind(pod_uid)
         .execute(tx)
         .await?;
+    Ok(())
+}
+
+/// Records that the lockdown check refused `pod_uid` and ended its stream, so
+/// the environment's status reads `FAILED_CLOSED` whatever cw-egress reports
+/// after. The environment comes from the live binding, as for a report.
+pub async fn record_lockdown_refusal(
+    pool: &PgPool,
+    pod_uid: &str,
+    refusal: &LockdownRefusal,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO sandbox_egress_enforcement
+            (pod_uid, environment_id, node, state, lockdown_refusal)
+         VALUES ($1, (SELECT environment_id FROM sandbox_workspace_bindings
+                       WHERE pod_uid = $1 AND released_at IS NULL),
+                 '', 'disconnected', $2)
+         ON CONFLICT (pod_uid) DO UPDATE SET lockdown_refusal = EXCLUDED.lockdown_refusal",
+    )
+    .bind(pod_uid)
+    .bind(refusal.reason())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The Pod's lockdown check passed: an earlier refusal no longer describes it.
+pub async fn clear_lockdown_refusal(pool: &PgPool, pod_uid: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE sandbox_egress_enforcement SET lockdown_refusal = NULL
+          WHERE pod_uid = $1 AND lockdown_refusal IS NOT NULL",
+    )
+    .bind(pod_uid)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

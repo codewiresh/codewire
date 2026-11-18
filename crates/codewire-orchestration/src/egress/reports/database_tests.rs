@@ -376,7 +376,12 @@ async fn db_status_reads_what_the_current_pod_enforces() -> anyhow::Result<()> {
             },
         )
         .await?;
-        anyhow::ensure!(status(&db).await? == EnforcementView::FailedClosed);
+        anyhow::ensure!(
+            status(&db).await?
+                == EnforcementView::FailedClosed(
+                    crate::api::network_policies::FailedClosedReason::SelfCheckFailed
+                )
+        );
 
         // A report nobody has refreshed for longer than the bound says nothing.
         record_enforcement(
@@ -411,6 +416,126 @@ async fn db_status_reads_what_the_current_pod_enforces() -> anyhow::Result<()> {
             status(&db).await? == EnforcementView::NotEnforced,
             "the new Pod"
         );
+        anyhow::Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+async fn stored_refusal(db: &TestDatabase, pod: &str) -> anyhow::Result<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT lockdown_refusal FROM sandbox_egress_enforcement WHERE pod_uid = $1",
+    )
+    .bind(pod)
+    .fetch_one(&db.pool)
+    .await?)
+}
+
+/// Every refusal the lockdown check can name. The match fails to compile
+/// when one is added, so the stored column's constraint is checked for it.
+fn every_lockdown_refusal() -> [LockdownRefusal; 6] {
+    let every = [
+        LockdownRefusal::NotBrokerMode,
+        LockdownRefusal::NotLabelledForItsBinding,
+        LockdownRefusal::PolicyUnmanaged,
+        LockdownRefusal::PolicyMissing,
+        LockdownRefusal::PolicyDiffers,
+        LockdownRefusal::PolicyDoesNotSelect,
+    ];
+    for refusal in &every {
+        match refusal {
+            LockdownRefusal::NotBrokerMode
+            | LockdownRefusal::NotLabelledForItsBinding
+            | LockdownRefusal::PolicyUnmanaged
+            | LockdownRefusal::PolicyMissing
+            | LockdownRefusal::PolicyDiffers
+            | LockdownRefusal::PolicyDoesNotSelect => {}
+        }
+    }
+    every
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_lockdown_refusal_is_the_status_until_the_lockdown_passes_or_the_pod_moves()
+-> anyhow::Result<()> {
+    use crate::api::network_policies::{EnforcementView, FailedClosedReason};
+    let not_applied = EnforcementView::FailedClosed(FailedClosedReason::LockdownNotApplied);
+    let db = TestDatabase::create().await?;
+    let result = async {
+        environment(&db).await?;
+        bind(&db, POD).await?;
+        for refusal in every_lockdown_refusal() {
+            record_lockdown_refusal(&db.pool, POD, &refusal).await?;
+            anyhow::ensure!(stored_refusal(&db, POD).await?.as_deref() == Some(refusal.reason()));
+        }
+        record_lockdown_refusal(&db.pool, POD, &LockdownRefusal::PolicyMissing).await?;
+        anyhow::ensure!(status(&db).await? == not_applied, "refused");
+        anyhow::ensure!(
+            stored_refusal(&db, POD).await?.as_deref() == Some("policy_missing"),
+            "the exact refusal is kept for operators"
+        );
+
+        // Nothing cw-egress reports, and no age, replaces it.
+        let selected = *codewire_egress_policy::PolicyDocument::parse_yaml(
+            codewire_egress_policy::HOSTED_DEFAULT_YAML,
+        )?
+        .digest()
+        .as_bytes();
+        for report in [
+            Enforcement::Enforced {
+                revision: 0,
+                digest: selected,
+            },
+            Enforcement::Disconnected,
+        ] {
+            record_enforcement(&db.pool, POD, "runtime-a", &report).await?;
+            anyhow::ensure!(status(&db).await? == not_applied, "after {report:?}");
+        }
+        sqlx::query(
+            "UPDATE sandbox_egress_enforcement \
+             SET reported_at = now() - interval '1 day' WHERE pod_uid = $1",
+        )
+        .bind(POD)
+        .execute(&db.pool)
+        .await?;
+        anyhow::ensure!(status(&db).await? == not_applied, "at any age");
+        // The bind transaction announcing the same environment keeps it.
+        let mut tx = db.pool.begin().await?;
+        record_bind(&mut tx, POD, ENV).await?;
+        tx.commit().await?;
+        anyhow::ensure!(status(&db).await? == not_applied, "the same binding");
+
+        // A passing check clears it; the report is the status again.
+        clear_lockdown_refusal(&db.pool, POD).await?;
+        anyhow::ensure!(stored_refusal(&db, POD).await?.is_none(), "cleared");
+        anyhow::ensure!(
+            status(&db).await? == EnforcementView::NotEnforced,
+            "stale report"
+        );
+
+        // A bind to another environment clears it.
+        record_lockdown_refusal(&db.pool, POD, &LockdownRefusal::PolicyDiffers).await?;
+        sqlx::query(
+            "INSERT INTO environments \
+             (id, org_id, created_by, preset_id, type, name, state, desired_state, project_spec) \
+             SELECT 'env-reports-other', org_id, created_by, preset_id, type, 'other', state, \
+                    desired_state, project_spec FROM environments WHERE id = $1",
+        )
+        .bind(ENV)
+        .execute(&db.pool)
+        .await?;
+        let mut tx = db.pool.begin().await?;
+        record_bind(&mut tx, POD, "env-reports-other").await?;
+        tx.commit().await?;
+        anyhow::ensure!(stored_refusal(&db, POD).await?.is_none(), "bound elsewhere");
+
+        // The release removes the Pod's row, refusal and all.
+        record_lockdown_refusal(&db.pool, POD, &LockdownRefusal::PolicyDiffers).await?;
+        let mut tx = db.pool.begin().await?;
+        release_pod(&mut tx, POD).await?;
+        tx.commit().await?;
+        anyhow::ensure!(enforcement(&db, POD).await?.is_none(), "released");
         anyhow::Ok(())
     }
     .await;

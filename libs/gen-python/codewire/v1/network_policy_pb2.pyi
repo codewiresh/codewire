@@ -171,7 +171,7 @@ class UpdateEnvironmentNetworkPolicyResponse(_message.Message):
     def __init__(self, network_policy: _Optional[_Union[EnvironmentNetworkPolicy, _Mapping]] = ...) -> None: ...
 
 class EnvironmentNetworkPolicy(_message.Message):
-    __slots__ = ("reference", "name", "revision", "digest", "enforcement", "enforced_revision", "enforced_digest", "enforced_at")
+    __slots__ = ("reference", "name", "revision", "digest", "enforcement", "enforced_revision", "enforced_digest", "enforced_at", "failure_code")
     REFERENCE_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     REVISION_FIELD_NUMBER: _ClassVar[int]
@@ -180,6 +180,7 @@ class EnvironmentNetworkPolicy(_message.Message):
     ENFORCED_REVISION_FIELD_NUMBER: _ClassVar[int]
     ENFORCED_DIGEST_FIELD_NUMBER: _ClassVar[int]
     ENFORCED_AT_FIELD_NUMBER: _ClassVar[int]
+    FAILURE_CODE_FIELD_NUMBER: _ClassVar[int]
     reference: str
     name: str
     revision: int
@@ -188,4 +189,5 @@ class EnvironmentNetworkPolicy(_message.Message):
     enforced_revision: int
     enforced_digest: str
     enforced_at: _timestamp_pb2.Timestamp
-    def __init__(self, reference: _Optional[str] = ..., name: _Optional[str] = ..., revision: _Optional[int] = ..., digest: _Optional[str] = ..., enforcement: _Optional[_Union[NetworkPolicyEnforcement, str]] = ..., enforced_revision: _Optional[int] = ..., enforced_digest: _Optional[str] = ..., enforced_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    failure_code: str
+    def __init__(self, reference: _Optional[str] = ..., name: _Optional[str] = ..., revision: _Optional[int] = ..., digest: _Optional[str] = ..., enforcement: _Optional[_Union[NetworkPolicyEnforcement, str]] = ..., enforced_revision: _Optional[int] = ..., enforced_digest: _Optional[str] = ..., enforced_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., failure_code: _Optional[str] = ...) -> None: ...

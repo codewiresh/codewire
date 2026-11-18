@@ -50,6 +50,15 @@ pub struct Environment {
     /// Why joining `network` failed, with `network_state` `failed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network_failure: Option<String>,
+    /// What enforces a hosted environment's egress (#4000): `not_enforced`,
+    /// `enforced`, `enforcing` or `failed_closed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub egress_enforcement: Option<String>,
+    /// Why egress failed closed, with `egress_enforcement` `failed_closed`
+    /// (#5068): `self_check_failed`, `policy_digest_mismatch` or
+    /// `lockdown_not_applied`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub egress_failure: Option<String>,
     pub operation_generation: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_selection: Option<EnvironmentSourceSelection>,

@@ -241,7 +241,8 @@ impl EgressServiceState {
     /// the cluster holds for the environment `binding` records is the one
     /// orchestration renders for it, and selects the guest. `Some` is why it
     /// is not; an error is a read that could not be made, never a pass.
-    /// Nothing the guest reports is read here.
+    /// Nothing the guest reports is read here. A pass clears a refusal stored
+    /// for the guest earlier (#5068).
     async fn lockdown_refusal(
         &self,
         guest: &GuestPod,
@@ -262,21 +263,35 @@ impl EgressServiceState {
             )
             .await
             .map_err(|error| unavailable("read the guest's NetworkPolicy", error))?;
-        Ok(lockdown::lockdown_applied(
+        let refusal = lockdown::lockdown_applied(
             facts,
             &binding.environment_id,
             rendered.as_ref(),
             live.as_ref(),
         )
-        .err())
+        .err();
+        if refusal.is_none()
+            && let Err(error) = reports::clear_lockdown_refusal(&self.pool, &guest.uid).await
+        {
+            tracing::warn!(%error, pod = %guest.name, "clearing a passed lockdown's refusal failed");
+        }
+        Ok(refusal)
     }
 
     /// The guest fails closed for `refusal`, as it does for a failed probe:
-    /// counted by reason and logged.
-    // TODO(#4000 P2b): record FAILED_CLOSED with `self_check_failed` for the
-    // Pod once enforcement storage lands; until then it is counted and logged.
-    fn failed_closed(&self, guest: &GuestPod, refusal: &lockdown::LockdownRefusal) -> ConnectError {
+    /// counted by reason, logged, and recorded as its enforcement status
+    /// (#5068). A failed record is logged and changes nothing else: the
+    /// stream ends either way.
+    async fn failed_closed(
+        &self,
+        guest: &GuestPod,
+        refusal: &lockdown::LockdownRefusal,
+    ) -> ConnectError {
         lockdown::count_failed_closed(refusal);
+        if let Err(error) = reports::record_lockdown_refusal(&self.pool, &guest.uid, refusal).await
+        {
+            tracing::warn!(%error, pod = %guest.name, "recording a lockdown refusal failed");
+        }
         tracing::warn!(
             reason = refusal.reason(),
             pod = %guest.name,
@@ -295,7 +310,7 @@ impl EgressServiceState {
         binding: &LiveBinding,
     ) -> Result<(), ConnectError> {
         match self.lockdown_refusal(guest, facts, binding).await? {
-            Some(refusal) => Err(self.failed_closed(guest, &refusal)),
+            Some(refusal) => Err(self.failed_closed(guest, &refusal).await),
             None => Ok(()),
         }
     }
@@ -453,7 +468,7 @@ impl Watch {
                 .await
             {
                 Ok(watched) => {
-                    if let Err(error) = self.take(watched) {
+                    if let Err(error) = self.take(watched).await {
                         self.ended = true;
                         return Some((Err(error), self));
                     }
@@ -484,7 +499,7 @@ impl Watch {
     /// Take one read as what to send next. A withheld bound assignment is
     /// sent as unbound; once it has been withheld for
     /// [`LOCKDOWN_BIND_GRACE`] the watch ends instead, failing closed.
-    fn take(&mut self, watched: Watched) -> Result<(), ConnectError> {
+    async fn take(&mut self, watched: Watched) -> Result<(), ConnectError> {
         match watched {
             Watched::Assignment(assignment) => {
                 self.withheld_since = None;
@@ -501,7 +516,7 @@ impl Watch {
                     now
                 });
                 if now.duration_since(since) >= LOCKDOWN_BIND_GRACE {
-                    return Err(self.state.failed_closed(&self.guest, &refusal));
+                    return Err(self.state.failed_closed(&self.guest, &refusal).await);
                 }
                 self.next = Some(Assignment::Unbound);
             }
@@ -632,7 +647,7 @@ impl EgressService for EgressConnectService {
             read_failures: 0,
             ended: false,
         };
-        watch.take(first)?;
+        watch.take(first).await?;
         let stream = futures::stream::unfold(watch, Watch::step);
         connectrpc::Response::stream_ok(stream)
     }

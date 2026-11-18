@@ -53,6 +53,7 @@ mod tests {
     mod credit_ledger_outlives_organization;
     mod cw_runtime_resolution;
     mod default_access_profile;
+    mod egress_lockdown_refusal;
     mod environment_error_code;
     mod environment_mesh;
     mod environment_quota_defaults;
@@ -91,9 +92,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced), 0002 to 0032.
+    // (which equals the 41-migration history it replaced), 0002 to 0033.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "b05831800c5a478b9b50e0c2e14a45a0d3f71d0a18d9f28387ca5a97a2797dca";
+        "af292cfc160a3887beebe12b4663ed2e05b2772d37c3c3ae2e605ed03416c74a";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -172,6 +173,8 @@ mod tests {
 
     // SHA-384 of 0030_sandbox_egress.sql (#4000).
     const APPLIED_SANDBOX_EGRESS_CHECKSUM: &str = "060c5a6779c3363d0ef750233672b62e0e60978c26ec296d58c14705a57ff68543e01fd06b8758d8c608d10889f5ab3d";
+    // SHA-384 of 0033_egress_lockdown_refusal.sql (#5068).
+    const APPLIED_EGRESS_LOCKDOWN_REFUSAL_CHECKSUM: &str = "ba15daf4f5299549d66d3312664ea3b558c916a02222c46cfa8e4a5b59fb0883a85dfb7e83cb158c38c0c52eebc02f88";
 
     // SHA-384 of 0027_account_suspension.sql (#3297).
     const APPLIED_ACCOUNT_SUSPENSION_CHECKSUM: &str = "1d65c097962b0485945992adfa2bb69e53886b2195359748805e894a37192d1bcc7659ab74d2019845b128b1b0e5dbf4";
@@ -1292,6 +1295,7 @@ mod tests {
             (30, APPLIED_SANDBOX_EGRESS_CHECKSUM),
             (31, APPLIED_CREDIT_LEDGER_OUTLIVES_ORGANIZATION_CHECKSUM),
             (32, APPLIED_PLATFORM_INTERCEPTION_CAS_CHECKSUM),
+            (33, APPLIED_EGRESS_LOCKDOWN_REFUSAL_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1322,10 +1326,10 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 32
+                first.len() == 33
                     && first.iter().map(|migration| migration.0).eq([
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-                        22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32
+                        22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33
                     ])
                     && first.iter().all(|migration| migration.2)
             );

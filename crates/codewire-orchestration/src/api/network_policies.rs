@@ -31,6 +31,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, PgPool, Row};
 
 use super::environments::coded;
+use crate::egress::reports::FailureCode;
 
 #[cfg(test)]
 mod database_tests;
@@ -129,8 +130,38 @@ pub enum EnforcementView {
     Enforced(EnforcedRevision),
     /// An older revision is in force while the selected one is applied.
     Enforcing(EnforcedRevision),
-    /// The sandbox has no egress: its self-check or the policy failed.
-    FailedClosed,
+    /// The sandbox has no egress: its self-check, its policy or its lockdown
+    /// failed.
+    FailedClosed(FailedClosedReason),
+}
+
+/// Why a sandbox failed closed, as its public status names it (#5068). The
+/// lockdown check's exact refusal is for operators and is not among these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailedClosedReason {
+    SelfCheckFailed,
+    PolicyDigestMismatch,
+    LockdownNotApplied,
+}
+
+impl FailedClosedReason {
+    /// The public `failure_code`.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::SelfCheckFailed => "self_check_failed",
+            Self::PolicyDigestMismatch => "policy_digest_mismatch",
+            Self::LockdownNotApplied => "lockdown_not_applied",
+        }
+    }
+}
+
+impl From<FailureCode> for FailedClosedReason {
+    fn from(code: FailureCode) -> Self {
+        match code {
+            FailureCode::SelfCheckFailed => Self::SelfCheckFailed,
+            FailureCode::PolicyDigestMismatch => Self::PolicyDigestMismatch,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,10 +174,16 @@ pub struct EnforcedRevision {
 
 impl EnforcementView {
     /// From the current Pod's enforcement row, against the selected digest.
-    /// A report older than [`ENFORCEMENT_REPORT_STALE_MINUTES`] says nothing
-    /// about now: cw-egress refreshes every live Pod's report every 5
+    /// Orchestration's own lockdown refusal decides first, at any age: it
+    /// stands until the lockdown passes, whatever cw-egress reports after.
+    /// Otherwise a report older than [`ENFORCEMENT_REPORT_STALE_MINUTES`] says
+    /// nothing about now: cw-egress refreshes every live Pod's report every 5
     /// minutes, so a stale row means its cw-egress is gone.
     fn from_row(row: &PgRow, selected_digest: &str) -> Result<Self, sqlx::Error> {
+        let lockdown_refused: Option<bool> = row.try_get("egress_lockdown_refused")?;
+        if lockdown_refused == Some(true) {
+            return Ok(Self::FailedClosed(FailedClosedReason::LockdownNotApplied));
+        }
         let state: Option<String> = row.try_get("egress_state")?;
         let fresh: Option<bool> = row.try_get("egress_report_fresh")?;
         if fresh != Some(true) {
@@ -154,7 +191,11 @@ impl EnforcementView {
         }
         Ok(match state.as_deref() {
             None | Some("disconnected") => Self::NotEnforced,
-            Some("failed_closed") => Self::FailedClosed,
+            Some("failed_closed") => {
+                let detail: String = row.try_get("egress_detail")?;
+                let code = FailureCode::parse(&detail).ok_or_else(corrupt_selection)?;
+                Self::FailedClosed(code.into())
+            }
             Some("enforced") => {
                 let revision: i32 = row.try_get("egress_revision")?;
                 let digest: Vec<u8> = row.try_get("egress_digest")?;
@@ -201,7 +242,8 @@ macro_rules! environment_policy_cols {
     np.builtin AS network_policy_builtin, npp.name AS network_policy_name,
     npp.current_revision AS network_policy_revision, npr.digest AS network_policy_digest,
     se.state AS egress_state, se.revision AS egress_revision, se.digest AS egress_digest,
-    se.reported_at AS egress_reported_at,
+    se.reported_at AS egress_reported_at, se.detail AS egress_detail,
+    se.lockdown_refusal IS NOT NULL AS egress_lockdown_refused,
     se.reported_at > now() - interval '15 minutes' AS egress_report_fresh"
     };
 }

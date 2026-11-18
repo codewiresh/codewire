@@ -309,7 +309,7 @@ fn state(cluster: &Arc<Cluster>, bindings: Arc<dyn BindingStore>) -> EgressServi
     EgressServiceState {
         attestation,
         bindings,
-        pool: PgPool::connect_lazy("postgres://unused@127.0.0.1:1/unused").unwrap(),
+        pool: unreachable_pool(),
         server_namespace: SERVER.into(),
         sandbox_namespace: SANDBOXES.into(),
         platform: vec![PlatformDestination {
@@ -490,6 +490,30 @@ async fn cw_egress_in_another_namespace_is_refused() {
 }
 
 #[tokio::test]
+async fn cw_egress_cannot_report_a_lockdown_refusal() {
+    // Only orchestration's own check records one (#5068). The store's pool
+    // connects nowhere: reaching it would answer 503.
+    for detail in [
+        "lockdown_not_applied",
+        "not_broker_mode",
+        "not_labelled_for_its_binding",
+        "policy_unmanaged",
+        "policy_missing",
+        "policy_differs",
+        "policy_does_not_select",
+    ] {
+        let body = json!({
+            "podUid": GUEST_UID,
+            "podName": GUEST,
+            "state": "EGRESS_ENFORCEMENT_STATE_FAILED_CLOSED",
+            "detail": detail,
+        });
+        let (status, response) = call(&Cluster::healthy(), "ReportEnforcement", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{detail}: {response}");
+    }
+}
+
+#[tokio::test]
 async fn malformed_reports_are_refused_before_anything_is_stored() {
     // The store's pool connects nowhere: reaching it would answer 503.
     let guest = json!({"podUid": GUEST_UID, "podName": GUEST});
@@ -601,7 +625,7 @@ rules:
     let state = EgressServiceState {
         attestation,
         bindings: Arc::new(Unbound),
-        pool: PgPool::connect_lazy("postgres://unused@127.0.0.1:1/unused").unwrap(),
+        pool: unreachable_pool(),
         server_namespace: SERVER.into(),
         sandbox_namespace: SANDBOXES.into(),
         platform: configured.clone(),
@@ -666,7 +690,7 @@ fn watch(cluster: &Arc<Cluster>, expires_in: Duration) -> Watch {
         state: Arc::new(EgressServiceState {
             attestation,
             bindings: Arc::new(Unbound),
-            pool: PgPool::connect_lazy("postgres://unused@127.0.0.1:1/unused").unwrap(),
+            pool: unreachable_pool(),
             server_namespace: SERVER.into(),
             sandbox_namespace: SANDBOXES.into(),
             platform: Vec::new(),
@@ -1129,6 +1153,15 @@ fn watch_of(state: EgressServiceState) -> Watch {
     }
 }
 
+/// A pool that connects nowhere, and says so at once rather than after the
+/// default acquire timeout: reaching the store answers 503.
+fn unreachable_pool() -> PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(100))
+        .connect_lazy("postgres://unused@127.0.0.1:1/unused")
+        .unwrap()
+}
+
 /// A member admitted unbound and its open watch, which has sent "unbound".
 async fn admitted_unbound(cluster: &Arc<Cluster>) -> (Arc<Claimable>, Watch) {
     let member = Arc::new(Claimable::default());
@@ -1140,7 +1173,7 @@ async fn admitted_unbound(cluster: &Arc<Cluster>) -> (Arc<Claimable>, Watch) {
     let guest = state.named_guest(GUEST, GUEST_UID);
     let first = state.watched_assignment(&guest, None).await.unwrap();
     let mut watch = watch_of(state);
-    watch.take(first).unwrap();
+    watch.take(first).await.unwrap();
     let (first, watch) = watch.step().await.unwrap();
     assert!(
         matches!(first.unwrap().assignment.binding, Some(Binding::Unbound(_))),
@@ -1242,16 +1275,17 @@ async fn a_member_claimed_under_the_rendered_policy_passes_the_gate() {
     );
 }
 
-/// A sandbox failed closed is counted by its reason, which an alert reads
-/// until the status records it. Nothing else in these tests fails a guest
-/// closed for this reason, so the count is exact.
+/// A sandbox failed closed is counted by its reason, which an alert reads,
+/// and still fails closed when its status cannot be recorded: the store's
+/// pool here connects nowhere (#5068). Nothing else in these tests fails a
+/// guest closed for this reason, so the count is exact.
 #[tokio::test]
-async fn a_sandbox_failed_closed_is_counted_by_its_reason() {
+async fn a_sandbox_failed_closed_is_counted_by_its_reason_even_when_it_cannot_be_recorded() {
     let state = state(&Cluster::healthy(), Arc::new(Unbound));
     let guest = state.named_guest(GUEST, GUEST_UID);
     let refusal = lockdown::LockdownRefusal::NotBrokerMode;
     let before = lockdown::failed_closed(&refusal);
-    let error = state.failed_closed(&guest, &refusal);
+    let error = state.failed_closed(&guest, &refusal).await;
     assert_eq!(error.code, connectrpc::ErrorCode::PermissionDenied);
     assert_eq!(lockdown::failed_closed(&refusal), before + 1);
     assert_eq!(refusal.reason(), "not_broker_mode");

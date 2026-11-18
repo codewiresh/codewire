@@ -212,4 +212,8 @@ message EnvironmentNetworkPolicy {
   uint32 enforced_revision = 6;
   string enforced_digest = 7;
   google.protobuf.Timestamp enforced_at = 8;
+  // Why the environment failed closed; empty unless enforcement is
+  // FAILED_CLOSED. One of `self_check_failed`, `policy_digest_mismatch` or
+  // `lockdown_not_applied`.
+  string failure_code = 9;
 }

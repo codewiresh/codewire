@@ -12,7 +12,9 @@ use crate::organization_client::preset_from_proto;
 use crate::presentation::*;
 
 mod create_request;
+mod network_status;
 use create_request::{create_environment_request_from_proto, proto_create_environment_request};
+use network_status::{egress_enforcement, network_failure, network_state};
 
 /// Typed EnvironmentService facade preserving the CLI's established
 /// presentation shapes over the shared Connect client.
@@ -1419,6 +1421,13 @@ pub(crate) fn environment_network_policy_from_proto(
 fn environment_from_proto(value: rpc::Environment) -> anyhow::Result<Environment> {
     let state = setup::environment_state_token(&value.state);
     let desired_state = setup::desired_state_token(&value.desired_state);
+    let (egress_enforcement, egress_failure) = match value.network_policy.as_option() {
+        Some(policy) => (
+            egress_enforcement(policy.enforcement),
+            empty_to_none(policy.failure_code.clone()),
+        ),
+        None => (None, None),
+    };
     Ok(Environment {
         network_policy: value
             .network_policy
@@ -1482,38 +1491,9 @@ fn environment_from_proto(value: rpc::Environment) -> anyhow::Result<Environment
         network_state: network_state(value.network_state),
         network_failure: network_failure(value.network_failure),
         network: empty_to_none(value.network),
+        egress_enforcement,
+        egress_failure,
     })
-}
-
-/// The attachment state's name; absent when the environment names no
-/// network, `unknown` for a value this CLI does not know.
-fn network_state(value: rpc::EnumValue<rpc::NetworkAttachmentState>) -> Option<String> {
-    Some(
-        match value.as_known() {
-            Some(rpc::NetworkAttachmentState::Unspecified) => return None,
-            Some(rpc::NetworkAttachmentState::Pending) => "pending",
-            Some(rpc::NetworkAttachmentState::Attached) => "attached",
-            Some(rpc::NetworkAttachmentState::Failed) => "failed",
-            Some(rpc::NetworkAttachmentState::Revoked) => "revoked",
-            None => "unknown",
-        }
-        .to_owned(),
-    )
-}
-
-fn network_failure(value: rpc::EnumValue<rpc::NetworkAttachmentFailure>) -> Option<String> {
-    Some(
-        match value.as_known() {
-            Some(rpc::NetworkAttachmentFailure::Unspecified) => return None,
-            Some(rpc::NetworkAttachmentFailure::MeshUnreachable) => "mesh_unreachable",
-            Some(rpc::NetworkAttachmentFailure::NetworkNotFound) => "network_not_found",
-            Some(rpc::NetworkAttachmentFailure::NotAMember) => "not_a_member",
-            Some(rpc::NetworkAttachmentFailure::NodeNameTaken) => "node_name_taken",
-            Some(rpc::NetworkAttachmentFailure::Refused) => "refused",
-            None => "unknown",
-        }
-        .to_owned(),
-    )
 }
 
 fn legacy_environment_resize_response(

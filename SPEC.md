@@ -843,8 +843,9 @@ while the check refuses, the assignment is withheld and the member stays
 unbound, on `locked`. A refusal that lasts the bind grace, 30 seconds
 (`LOCKDOWN_BIND_GRACE`), ends the member's assignment stream, and the sandbox
 fails closed. Each sandbox failed closed
-this way is counted by reason and logged; writing it into the environment's
-enforcement status (below) is not wired yet. Two limits remain. A policy changed later
+this way is counted by reason, logged, and recorded as the environment's
+enforcement status, `FAILED_CLOSED` with `lockdown_not_applied` (below;
+#5068). Two limits remain. A policy changed later
 under an already bound sandbox is not checked again, and neither is anything
 checked on a timer; both are tracked follow-ups, and the static floor stays
 the boundary that does not depend on this check. And after a release changes

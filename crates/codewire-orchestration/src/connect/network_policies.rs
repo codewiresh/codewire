@@ -274,6 +274,10 @@ fn proto_usage(usage: PolicyUsage) -> NetworkPolicyUsage {
 /// the environment's current Pod enforces (#4000).
 pub(crate) fn proto_environment_policy(view: EnvironmentPolicyView) -> EnvironmentNetworkPolicy {
     use crate::api::network_policies::EnforcementView;
+    let failure_code = match view.enforcement {
+        EnforcementView::FailedClosed(reason) => reason.code(),
+        _ => "",
+    };
     let (enforcement, enforced) = match view.enforcement {
         EnforcementView::NotEnforced => (
             NetworkPolicyEnforcement::NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED,
@@ -287,7 +291,7 @@ pub(crate) fn proto_environment_policy(view: EnvironmentPolicyView) -> Environme
             NetworkPolicyEnforcement::NETWORK_POLICY_ENFORCEMENT_ENFORCING,
             Some(at),
         ),
-        EnforcementView::FailedClosed => (
+        EnforcementView::FailedClosed(_) => (
             NetworkPolicyEnforcement::NETWORK_POLICY_ENFORCEMENT_FAILED_CLOSED,
             None,
         ),
@@ -309,6 +313,7 @@ pub(crate) fn proto_environment_policy(view: EnvironmentPolicyView) -> Environme
         enforced_revision,
         enforced_digest,
         enforced_at,
+        failure_code: failure_code.to_owned(),
         ..Default::default()
     }
 }

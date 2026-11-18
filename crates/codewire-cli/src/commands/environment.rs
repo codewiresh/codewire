@@ -5,6 +5,7 @@ use crate::commands::progress::terminal_text;
 
 mod cp;
 mod host_placement;
+mod info;
 pub(crate) mod lifecycle;
 mod platform_create;
 pub(crate) mod progress;
@@ -12,6 +13,7 @@ mod runtime;
 mod sources;
 mod transfer;
 use cp::handle_unified_environment_cp;
+pub(crate) use info::{env_created_label, env_state_label, format_env_info_text};
 use platform_create::handle_platform_env_create;
 
 use progress::{FollowPolicy, StartProgress, format_environment_logs_plain};
@@ -3931,124 +3933,4 @@ pub(crate) fn env_bulk_label(environment: &Environment) -> String {
         Some(name) => format!("{} ({name})", environment.id),
         None => environment.id.clone(),
     }
-}
-
-pub(crate) fn format_env_info_text(environment: &Environment) -> String {
-    let mut output = String::new();
-    output.push_str(&format!("{:<14} {}\n", "ID:", environment.id));
-    output.push_str(&format!(
-        "{:<14} {}\n",
-        "Name:",
-        environment
-            .name
-            .as_deref()
-            .and_then(trimmed_str)
-            .unwrap_or("--")
-    ));
-    output.push_str(&format!(
-        "{:<14} {}\n",
-        "Type:",
-        env_type_label(environment)
-    ));
-    output.push_str(&format!(
-        "{:<14} {}\n",
-        "State:",
-        env_state_label(environment)
-    ));
-    output.push_str(&format!(
-        "{:<14} {}\n",
-        "DesiredState:",
-        trimmed_str(&environment.desired_state).unwrap_or("--")
-    ));
-    output.push_str(&format!(
-        "{:<14} {}\n",
-        "PresetID:",
-        trimmed_str(&environment.preset_id).unwrap_or("--")
-    ));
-    if let Some(network) = environment.network.as_deref().and_then(trimmed_str) {
-        output.push_str(&format!("{:<14} {}\n", "Network:", network));
-    }
-    if let Some(policy) = &environment.network_policy {
-        output.push_str(&format!("{:<14} {}\n", "NetworkPolicy:", policy.summary()));
-    }
-    output.push_str(&format!("CPU:           {}m\n", environment.cpu_millicores));
-    output.push_str(&format!(
-        "Isolation:     {}\n",
-        trimmed_str(&environment.isolation_tier).unwrap_or("standard")
-    ));
-    output.push_str(&format!("Memory:        {}MB\n", environment.memory_mb));
-    output.push_str(&format!("Disk:          {}GB\n", environment.disk_gb));
-    output.push_str(&format!(
-        "CreatedBy:     {}\n",
-        trimmed_str(&environment.created_by).unwrap_or("--")
-    ));
-    output.push_str(&format!(
-        "CreatedAt:     {}\n",
-        trimmed_str(&environment.created_at).unwrap_or("--")
-    ));
-    if let Some(started_at) = environment.started_at.as_deref().and_then(trimmed_str) {
-        output.push_str(&format!("StartedAt:     {started_at}\n"));
-    }
-    if let Some(stopped_at) = environment.stopped_at.as_deref().and_then(trimmed_str) {
-        output.push_str(&format!("StoppedAt:     {stopped_at}\n"));
-    }
-    if let Some(shutdown_at) = environment.shutdown_at.as_deref().and_then(trimmed_str) {
-        output.push_str(&format!("ShutdownAt:    {shutdown_at}\n"));
-    }
-    if let Some(ttl_seconds) = environment.ttl_seconds {
-        output.push_str(&format!("TTL:           {ttl_seconds}s\n"));
-    }
-    if let Some(error_reason) = environment.error_reason.as_deref().and_then(trimmed_str) {
-        // A runtime being replaced, or running again after a failure, is a
-        // notice, not a current fault.
-        let label = if matches!(
-            environment.error_code.as_deref(),
-            Some("sandbox_replacing" | "sandbox_restarted")
-        ) {
-            "Notice:        "
-        } else {
-            "ErrorReason:   "
-        };
-        output.push_str(&format!("{label}{error_reason}\n"));
-    }
-    output.push_str(&lifecycle::recoverable_line(environment));
-    output.push_str(&format!(
-        "TotalRunning:  {}s\n",
-        environment.total_running_seconds
-    ));
-    if environment.protected {
-        output.push_str(&format!("{:<14} yes\n", "Protected:"));
-    }
-    if let Some(deleting_at) = environment
-        .deletion_grace_until
-        .as_deref()
-        .and_then(trimmed_str)
-    {
-        output.push_str(&format!("{:<14} {}\n", "DeletingAt:", deleting_at));
-    }
-    output
-}
-
-pub(crate) fn env_type_label(environment: &Environment) -> &str {
-    trimmed_str(&environment.environment_type).unwrap_or("--")
-}
-
-pub(crate) fn env_state_label(environment: &Environment) -> &str {
-    if environment
-        .deletion_grace_until
-        .as_deref()
-        .and_then(trimmed_str)
-        .is_some()
-        && !matches!(environment.state.as_str(), "destroyed" | "destroying")
-    {
-        return "deleting";
-    }
-    if environment.failed_create() {
-        return "failed";
-    }
-    trimmed_str(&environment.state).unwrap_or("--")
-}
-
-pub(crate) fn env_created_label(environment: &Environment) -> &str {
-    trimmed_str(&environment.created_at).unwrap_or("--")
 }
