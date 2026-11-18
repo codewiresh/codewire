@@ -37,7 +37,9 @@ use crate::view::{
 };
 
 mod lifecycle;
-pub(crate) use lifecycle::{GitHubAnswer, delete_credential, revoke_credential};
+pub(crate) use lifecycle::{DeleteError, GitHubAnswer, delete_credential, revoke_credential};
+mod status;
+use status::{credential_status, credential_status_at};
 
 const PAGE_SIZE: i32 = 100;
 const MAX_PAGES: usize = 10;
@@ -53,8 +55,6 @@ const CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS: u64 = 365 * 24 * 60 * 60;
 /// Acknowledged expiry may differ from this page's clock by request time and
 /// ordinary clock skew, never by a different lifetime.
 const CLAUDE_SUBSCRIPTION_TOKEN_EXPIRY_TOLERANCE_SECONDS: u64 = 24 * 60 * 60;
-/// A subscription token this close to its recorded expiry reads Expires soon.
-const EXPIRES_SOON_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 #[derive(Clone, Copy)]
 pub(crate) enum OAuthProvider {
@@ -1551,43 +1551,6 @@ fn form_slot(form: &'static str) -> &'static str {
     match form {
         "claude" | "claude-sign-in" => "anthropic",
         form => form,
-    }
-}
-
-/// The status a row and its profiles read. A Claude subscription token's
-/// recorded expiry is shown as Expired once it passes and as Expires soon in
-/// its last thirty days; every other form reads its service status alone.
-fn credential_status_at(
-    credential: &Credential,
-    form: &str,
-    now: u64,
-) -> Result<(&'static str, &'static str), ConnectError> {
-    let status = credential_status(credential)?;
-    if form != "claude" || credential.status != CredentialStatus::Active {
-        return Ok(status);
-    }
-    Ok(match credential.expires_at_unix {
-        Some(expiry) if expiry <= now => ("Expired", "warning"),
-        Some(expiry) if expiry - now <= EXPIRES_SOON_SECONDS => ("Expires soon", "warning"),
-        _ => status,
-    })
-}
-
-fn credential_status(
-    credential: &Credential,
-) -> Result<(&'static str, &'static str), ConnectError> {
-    if credential.status == CredentialStatus::Active {
-        Ok(("Active", "success"))
-    } else if credential.status == CredentialStatus::Revoked {
-        Ok(("Revoked", "danger"))
-    } else if credential.status == CredentialStatus::Expired {
-        Ok(("Expired", "warning"))
-    } else if credential.status == CredentialStatus::RefreshFailed {
-        // The provider refused or lost the stored refresh token; only the
-        // owner can restore it. Say what to do, not what failed.
-        Ok(("Reconnect needed", "warning"))
-    } else {
-        Err(invalid_metadata())
     }
 }
 

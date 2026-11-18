@@ -8,7 +8,7 @@ use super::{
     mutation_cookie, page_error_redirect, page_redirect, row_action_dialog, valid_generation,
 };
 use crate::{
-    credentials_connect::{self, GitHubAnswer},
+    credentials_connect::{self, DeleteError, GitHubAnswer},
     environment_source_forms::exact_id,
     state::AppState,
 };
@@ -69,6 +69,7 @@ async fn credential_revision_action(
         )
         .await
         .map(|()| None)
+        .map_err(DeleteError::Unchanged)
     };
     // A GitHub disconnect says what GitHub still holds (#4717 C6).
     let done = match result {
@@ -76,11 +77,37 @@ async fn credential_revision_action(
         Ok(Some(GitHubAnswer::NotConfirmed)) => "github-disconnected",
         Ok(None) if delete => "credential-deleted",
         Ok(None) => "credential-revoked",
-        Err(error) => {
+        Err(DeleteError::RevokedNotRemoved) => {
+            return page_error_redirect(GITHUB_REVOKED_NOT_REMOVED, &dialog, &query, &headers);
+        }
+        Err(DeleteError::Unchanged(error)) => {
             return credential_mutation_error(error.code, delete, &dialog, &query, &headers);
         }
     };
     page_redirect(done, false, &query, &headers)
+}
+
+const GITHUB_REVOKED_NOT_REMOVED: &str = "github-revoked-not-removed";
+
+/// What a GitHub disconnect says once it's done (#4717 C6).
+pub(super) fn github_message(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "github-disconnected" => {
+            "GitHub disconnected. The Codewire app stays installed on GitHub; to remove it, uninstall it at https://github.com/settings/installations."
+        }
+        "github-disconnected-confirmed" => {
+            "GitHub disconnected, and GitHub confirmed Codewire's access is revoked. The Codewire app stays installed on GitHub; to remove it, uninstall it at https://github.com/settings/installations."
+        }
+        _ => return None,
+    })
+}
+
+/// What a GitHub disconnect says when the revoke held but its record
+/// stayed (owner, 2026-11-17, on #4717).
+pub(super) fn github_error(code: &str) -> Option<&'static str> {
+    (code == GITHUB_REVOKED_NOT_REMOVED).then_some(
+        "GitHub is disconnected, but Codewire couldn't remove its record. Disconnect again to finish.",
+    )
 }
 
 #[cfg(test)]

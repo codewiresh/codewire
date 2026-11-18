@@ -49,6 +49,23 @@ pub(crate) enum GitHubAnswer {
     NotConfirmed,
 }
 
+/// Why a delete or a GitHub disconnect stopped.
+#[derive(Debug)]
+pub(crate) enum DeleteError {
+    /// Nothing changed: the read, the revision check or Codewire's revoke
+    /// failed.
+    Unchanged(ConnectError),
+    /// The GitHub connection was revoked, but its record wasn't removed;
+    /// Disconnect again removes the revoked revision (#4717 C6).
+    RevokedNotRemoved,
+}
+
+impl From<ConnectError> for DeleteError {
+    fn from(error: ConnectError) -> Self {
+        Self::Unchanged(error)
+    }
+}
+
 /// Deletes a revoked credential, or disconnects GitHub, the account's one
 /// connection: an active one is revoked first, as the CLI's delete does, so
 /// GitHub is asked to revoke its access token, then the revoked revision is
@@ -58,13 +75,13 @@ pub(crate) async fn delete_credential(
     cookie: HeaderValue,
     credential_id: String,
     expected_generation: u64,
-) -> Result<Option<GitHubAnswer>, ConnectError> {
+) -> Result<Option<GitHubAnswer>, DeleteError> {
     let current = get_exact_credential(state, cookie.clone(), &credential_id).await?;
     let active = current.status != CredentialStatus::Revoked;
     if current.revocation_generation != expected_generation
         || active && !is_github_connection(&current)
     {
-        return Err(ConnectError::aborted("credential metadata changed"));
+        return Err(ConnectError::aborted("credential metadata changed").into());
     }
     let (revision, answer) = if active {
         let (revision, answer) =
@@ -73,14 +90,21 @@ pub(crate) async fn delete_credential(
     } else {
         (expected_generation, None)
     };
-    mutation_client(state, cookie)
+    let deleted = mutation_client(state, cookie)
         .delete_credential(DeleteCredentialRequest {
             credential_id,
             expected_revocation_generation: revision,
             ..Default::default()
         })
-        .await?;
-    Ok(answer)
+        .await;
+    match deleted {
+        Ok(_) => Ok(answer),
+        // The revoke held, so the person is told GitHub is disconnected.
+        // Disconnecting again can't meet InUse: no profile entry can name a
+        // GitHub credential (`platform_access_profile_entries_slot_check`).
+        Err(_) if answer.is_some() => Err(DeleteError::RevokedNotRemoved),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Revokes the exact GitHub revision; Codewire's revoke failing stops the

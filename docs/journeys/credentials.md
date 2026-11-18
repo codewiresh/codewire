@@ -163,7 +163,10 @@ only what differs.
     access token, then removes it, and says whether GitHub confirmed. It says
     the Codewire app stays installed on GitHub and names
     github.com/settings/installations to uninstall it. If the revoke fails,
-    nothing is removed. Not yet observed.
+    nothing is removed. If the revoke succeeds but the removal fails, the
+    dialog says GitHub is disconnected but Codewire couldn't remove its
+    record, and to disconnect again to finish; until then the card reads
+    Disconnected. Not yet observed.
 
 ## 2. `cred-codex-sign-in`: connect Codex with ChatGPT
 

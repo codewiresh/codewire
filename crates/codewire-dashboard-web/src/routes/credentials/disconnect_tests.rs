@@ -88,8 +88,11 @@ fn github(status: CredentialStatus, generation: u64) -> Credential {
 
 /// The synthetic services: an enrolled session, the active GitHub
 /// connection at the shown revision, a revoke answered with `answer` (or
-/// refused when `None`), and a delete that succeeds.
-async fn upstream(answer: Option<ProviderRevocationOutcome>) -> (TestServer, Calls) {
+/// refused when `None`), and a delete that succeeds unless `delete_fails`.
+async fn upstream(
+    answer: Option<ProviderRevocationOutcome>,
+    delete_fails: bool,
+) -> (TestServer, Calls) {
     let calls = Calls::default();
     let captured = calls.clone();
     let router = Router::new().fallback(any(move |request: axum::extract::Request| {
@@ -123,6 +126,11 @@ async fn upstream(answer: Option<ProviderRevocationOutcome>) -> (TestServer, Cal
                     )
                         .into_response(),
                 },
+                DELETE_RPC if delete_fails => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({"code": "unavailable", "message": "synthetic"})),
+                )
+                    .into_response(),
                 DELETE_RPC => proto(DeleteCredentialResponse::default()),
                 _ => (StatusCode::NOT_FOUND, "unexpected").into_response(),
             }
@@ -193,7 +201,7 @@ async fn disconnect_revokes_the_shown_revision_then_deletes_the_revoked_one() {
             "message=github-disconnected",
         ),
     ] {
-        let (services, calls) = upstream(Some(outcome)).await;
+        let (services, calls) = upstream(Some(outcome), false).await;
         let dashboard = serve(crate::app(config(&services.origin))).await;
         let (status, location) = disconnect(&dashboard).await;
         assert_eq!(status, StatusCode::SEE_OTHER, "{outcome:?}");
@@ -221,7 +229,7 @@ async fn disconnect_revokes_the_shown_revision_then_deletes_the_revoked_one() {
 
 #[tokio::test]
 async fn a_disconnect_whose_revoke_fails_deletes_nothing() {
-    let (services, calls) = upstream(None).await;
+    let (services, calls) = upstream(None, false).await;
     let dashboard = serve(crate::app(config(&services.origin))).await;
     let (status, location) = disconnect(&dashboard).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
@@ -233,5 +241,30 @@ async fn a_disconnect_whose_revoke_fails_deletes_nothing() {
             .collect::<Vec<_>>(),
         [REVOKE_RPC],
         "nothing is deleted after a failed revoke"
+    );
+}
+
+/// The revoke held but the record stayed: the page says GitHub is
+/// disconnected and to disconnect again (owner, 2026-11-17, on #4717).
+#[tokio::test]
+async fn a_disconnect_whose_delete_fails_after_the_revoke_says_to_disconnect_again() {
+    let (services, calls) = upstream(Some(ProviderRevocationOutcome::Confirmed), true).await;
+    let dashboard = serve(crate::app(config(&services.origin))).await;
+    let (status, location) = disconnect(&dashboard).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert!(
+        location.contains("error=github-revoked-not-removed"),
+        "{location}"
+    );
+    assert_eq!(
+        mutations(&calls)
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
+        [REVOKE_RPC, DELETE_RPC]
+    );
+    assert_eq!(
+        super::super::approved_error("github-revoked-not-removed"),
+        "GitHub is disconnected, but Codewire couldn't remove its record. Disconnect again to finish."
     );
 }

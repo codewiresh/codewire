@@ -1566,6 +1566,9 @@ fn page_error_redirect(
 }
 
 fn approved_message(code: &str) -> &'static str {
+    if let Some(message) = lifecycle::github_message(code) {
+        return message;
+    }
     match code {
         "identity-saved" => "Git commit identity saved.",
         "credential-added" => "API key credential added.",
@@ -1577,12 +1580,6 @@ fn approved_message(code: &str) -> &'static str {
         "claude-token-replaced" => "Claude subscription token replaced.",
         "credential-revoked" => "Credential revoked.",
         "credential-deleted" => "Credential deleted.",
-        "github-disconnected" => {
-            "GitHub disconnected. The Codewire app stays installed on GitHub; to remove it, uninstall it at https://github.com/settings/installations."
-        }
-        "github-disconnected-confirmed" => {
-            "GitHub disconnected, and GitHub confirmed Codewire's access is revoked. The Codewire app stays installed on GitHub; to remove it, uninstall it at https://github.com/settings/installations."
-        }
         "credential-connected" => "Credential connected.",
         "github-app-connected" => "GitHub connected through the GitHub App.",
         "github-permissions-updated" => "GitHub permissions updated.",
@@ -1596,6 +1593,9 @@ fn approved_message(code: &str) -> &'static str {
 }
 
 fn approved_error(code: &str) -> &'static str {
+    if let Some(error) = lifecycle::github_error(code) {
+        return error;
+    }
     match code {
         "identity-invalid" => "The Git commit identity submission is invalid or too long.",
         "identity-request-failed" => {
