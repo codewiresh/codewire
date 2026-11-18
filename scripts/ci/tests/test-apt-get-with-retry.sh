@@ -9,7 +9,16 @@ readonly CI_MIRROR=http://apt-snapshot-cache.forgejo-runner-control.svc.cluster.
 mkdir -p "$ROOT/.tmp"
 TEST_TMP="$(mktemp -d "${TMPDIR:-$ROOT/.tmp}/apt-get-with-retry.XXXXXX")"
 readonly TEST_TMP
-trap 'rm -rf "$TEST_TMP"' EXIT
+# A failure names its cause: set -e alone once ended this test with nothing in
+# the log (codewire run 61430). Remember the last command that failed while
+# errexit was on (expected failures run with it off) and print it on exit.
+set -o errtrace
+failed_command='' code=0
+trap 'code=$?; [[ $- != *e* ]] || failed_command="line $LINENO: $BASH_COMMAND (exit $code)"' ERR
+trap 'status=$?; rm -rf "$TEST_TMP"
+  if ((status != 0)) && [[ -n "$failed_command" ]]; then
+    printf "[test-apt-get-with-retry] ERROR: stopped at %s\n" "$failed_command" >&2
+  fi' EXIT
 
 fail() {
   printf '[test-apt-get-with-retry] ERROR: %s\n' "$*" >&2
@@ -70,15 +79,18 @@ case "$result" in
     [[ "$PPID" == "${FAKE_TIMEOUT_PID:-}" ]] || exit 93
     child_pid=''
     terminate() {
+      # Record the TERM first: timeout's KILL follows 3 s later, and on a
+      # loaded runner the wait below could still be running then.
+      printf 'TERM\n' >"$FAKE_APT_ARGV.$count.terminated"
       if [[ -n "$child_pid" ]]; then
         kill -TERM "$child_pid" 2>/dev/null || true
         wait "$child_pid" 2>/dev/null || true
       fi
-      printf 'TERM\n' >"$FAKE_APT_ARGV.$count.terminated"
       exit 143
     }
     trap terminate TERM
-    /usr/bin/sleep 10 &
+    # A hang guard, not a deadline: the group's TERM ends this child at once.
+    /usr/bin/sleep 300 &
     child_pid=$!
     printf '%s\n' "$$" >"$FAKE_APT_ARGV.$count.apt-pid"
     printf '%s\n' "$child_pid" >"$FAKE_APT_ARGV.$count.child-pid"
