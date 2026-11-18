@@ -1237,7 +1237,7 @@ kind_suite_smoke_groups() {
   case "$1" in
     edge-contract | final-fencing | runtime-acceptance) printf '%s\n' orchestration ;;
     credentials) printf '%s\n' cli ;;
-    workspace-services) printf '%s\n' orchestration client cli ;;
+    workspace-services) printf '%s\n' orchestration client client-ffi cli ;;
     integrated) printf '%s\n' client-kind-e2e billing ;;
     cw-runtime | cw-managed-agents) printf '%s\n' client cli ;;
     *)
@@ -3762,8 +3762,49 @@ workspace_service_smokes() {
     "$CARGO_CI_DIR/exec-smoke" || return $?
   file_service_smoke || return $?
   environment_resize_smoke || return $?
+  environment_create_smoke || return $?
   workspace_user_ssh_smoke || return $?
 }
+
+# The iOS Create sheet's create (#3825, docs/journeys/ios-app.md ios-create):
+# the app's create_from_form through the TLS ingress sees an empty form
+# refused, creates from a preset alone and finds the preset's project saved,
+# then deletes the environment. The smoke's identity is a member, who cannot
+# create presets, and environments keep their preset's row, so the smoke owns
+# one preset, written here with the cluster's workspace image and kept.
+environment_create_smoke() (
+  local certificate_dir certificate_pem workspace_image status
+  log "running the iOS app's create from a preset alone"
+  workspace_image="$(kind_workspace_runtime_image)" || return $?
+  kubectl -n "$NS" exec -i deploy/postgres -- \
+    psql -U codewire -d codewire -v ON_ERROR_STOP=1 -v image="$workspace_image" <<'SQL' >/dev/null || return $?
+INSERT INTO environment_presets (id, org_id, name, official, project_spec)
+VALUES ('preset_kind_ios_create', 'org_contract_1', 'kind-ios-create', false,
+        jsonb_build_object('schema_version', 1, 'image', :'image', 'working_directory', '/workspace'))
+ON CONFLICT (id) DO UPDATE SET project_spec = EXCLUDED.project_spec;
+SQL
+  certificate_dir="$(mktemp -d)" || return $?
+  certificate_pem="$certificate_dir/ca.pem"
+  kubectl -n "$NS" get secret/codewire-kind-ingress-ca \
+    -o 'jsonpath={.data.ca\.crt}' | base64 --decode > "$certificate_pem" || {
+      status=$?
+      rm -rf "$certificate_dir"
+      return "$status"
+    }
+  if ! SMOKE_CONNECT_BASE_URL="$KIND_INGRESS_TLS_URL" \
+    SMOKE_CA_CERT_FILE="$certificate_pem" \
+    SMOKE_ORG_ID=org_contract_1 \
+    SMOKE_ACCESS_TOKEN=at_kind_connect_oidc_codewire_api \
+    SMOKE_WORKSPACE_IMAGE="$workspace_image" \
+    SMOKE_PRESET_ID=preset_kind_ios_create \
+    SMOKE_RUN_ID="$(date +%s)-$$" \
+    "$CARGO_CI_DIR/examples/environment-create-smoke"; then
+    rm -rf "$certificate_dir"
+    return 1
+  fi
+  rm -rf "$certificate_dir" || return $?
+  log "the iOS app's preset-only create green"
+)
 
 # Bound on a new Sandbox answering its first OpenSSH command, from the create
 # request.

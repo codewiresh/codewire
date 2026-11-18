@@ -12,8 +12,9 @@
 # Each GROUP is one build of the smoke inventory
 # (scripts/ci/verify/kind/smokes.txt), which names its crate, features and
 # programs: orchestration (the orchestration smokes), client (the client
-# examples), client-kind-e2e (the coordinator ingress example), cli (the host
-# cw) and billing (the billing wire contract). No GROUP builds them all.
+# examples), client-kind-e2e (the coordinator ingress example), client-ffi (the
+# iOS app's create), cli (the host cw) and billing (the billing wire
+# contract). No GROUP builds them all.
 # `make kind-test` sets KIND_SMOKE_RUN once per run, and each suite names the
 # groups it runs (common.sh kind_suite_smoke_groups): a group that run already
 # built is not built again (#2973).

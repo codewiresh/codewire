@@ -143,7 +143,9 @@ map_token() {
     rust_pkg_codewire_workspace_image)
       unobserved "$token" 'a workspace image pin is observed on Dev' ;;
     rust_pkg_codewire_desktop | rust_pkg_codewire_types) unobserved "$token" 'desktop only' ;;
-    rust_pkg_codewire_client_ffi) unobserved "$token" 'iOS app only; Kind runs no iOS client' ;;
+    # The iOS app's create from its form (environment-create-smoke); its
+    # shell and the app itself are observed on a phone.
+    rust_pkg_codewire_client_ffi) want "$token" workspace-services ;;
     rust_pkg_codewire_cw_release)
       unobserved "$token" 'cw release store: SUITES=cw-runtime on a named profile' ;;
     rust_pkg_* | transport_pkg_*) full "$token" 'no retained suite is mapped to this crate yet' ;;

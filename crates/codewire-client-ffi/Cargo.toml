@@ -14,6 +14,8 @@ crate-type = ["lib", "staticlib"]
 [dependencies]
 anyhow = { workspace = true }
 codewire-client = { workspace = true, features = ["tailnet-session"] }
+codewire-project = { workspace = true }
+codewire-project-proto = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 uniffi = { version = "=0.31.1", default-features = false }
@@ -26,6 +28,8 @@ bindgen = ["uniffi/bindgen"]
 
 [dev-dependencies]
 codewire-workspace-hack.workspace = true
+# The Kind create smoke trusts the cluster's ingress CA.
+reqwest = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

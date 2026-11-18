@@ -217,10 +217,3 @@ fn a_create_needs_an_organization_and_a_follow_an_environment() {
         Err(ShellError::Invalid { message }) if message == "the environment is empty"
     ));
 }
-
-#[test]
-fn an_empty_name_or_preset_is_left_to_the_server() {
-    assert_eq!(non_empty(Some("  ".into())), None);
-    assert_eq!(non_empty(None), None);
-    assert_eq!(non_empty(Some(" api ".into())), Some("api".into()));
-}

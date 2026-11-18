@@ -2,9 +2,10 @@
 
 use std::collections::BTreeMap;
 
+use codewire_project_proto::{SourceChoice, personal_access, source_selection};
 use codewire_proto::codewire::v1::{
-    CreateEnvironmentRequest, EnvironmentSourceSelection, ProjectCredentialBinding,
-    ProjectSecretBindings, ProjectStoragePlacement, UpdateEnvironmentSourcesRequest,
+    CreateEnvironmentRequest, EnvironmentSourceSelection, ProjectStoragePlacement,
+    UpdateEnvironmentSourcesRequest,
 };
 
 pub(crate) const INVALID_SELECTION: &str =
@@ -21,23 +22,12 @@ impl SourceSubmission {
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self, ()> {
         let values = source_fields(bytes)?;
         let selection = selection(&values, "")?;
-        let (confirm_personal_secrets, confirm_personal_credentials) =
-            personal_access_intent(&selection);
+        let access = personal_access(&selection);
         Ok(Self {
             selection,
-            confirm_personal_secrets,
-            confirm_personal_credentials,
+            confirm_personal_secrets: access.secrets,
+            confirm_personal_credentials: access.credentials,
         })
-    }
-
-    pub(crate) fn apply_create(&self, request: &mut CreateEnvironmentRequest) -> Result<(), ()> {
-        let spec = request.project_spec.as_option_mut().ok_or(())?;
-        spec.secrets = self.selection.secrets.clone();
-        spec.credentials = self.selection.credentials.clone();
-        request.expected_profile_revision = self.selection.profile_revision;
-        request.confirm_personal_secrets = self.confirm_personal_secrets;
-        request.confirm_personal_credentials = self.confirm_personal_credentials;
-        Ok(())
     }
 
     pub(crate) fn hydrate(&self, fields: &mut crate::view::EnvironmentSourceFieldsView) {
@@ -95,8 +85,7 @@ pub(crate) fn update_request(
     let values = source_fields(bytes)?;
     let generation = positive(values.get("expected_operation_generation").ok_or(())?)?;
     let replacement = selection(&values, "")?;
-    let (confirm_personal_secrets, confirm_personal_credentials) =
-        personal_access_intent(&replacement);
+    let access = personal_access(&replacement);
     Ok(UpdateEnvironmentSourcesRequest {
         org_id: organization.into(),
         environment_id: environment.into(),
@@ -104,24 +93,10 @@ pub(crate) fn update_request(
         expected: Some(selection(&values, "expected_")?).into(),
         replacement: Some(replacement).into(),
         allow_restart: checkbox(&values, "allow_restart", "true")?,
-        confirm_personal_secrets,
-        confirm_personal_credentials,
+        confirm_personal_secrets: access.secrets,
+        confirm_personal_credentials: access.credentials,
         ..Default::default()
     })
-}
-
-/// An explicit, validated selection authorizes only its selected personal
-/// sources. Keep the API's guards and exact revision binding; merely loading
-/// catalog metadata or carrying an expected prior selection grants nothing.
-fn personal_access_intent(selection: &EnvironmentSourceSelection) -> (bool, bool) {
-    (
-        selection.secrets.as_option().is_some_and(|secrets| {
-            secrets.user.is_some_and(|placement| {
-                placement.as_known() == Some(ProjectStoragePlacement::Platform)
-            })
-        }),
-        selection.credentials.is_set(),
-    )
 }
 
 fn source_fields(bytes: &[u8]) -> Result<BTreeMap<String, String>, ()> {
@@ -170,12 +145,11 @@ fn selection(
     prefix: &str,
 ) -> Result<EnvironmentSourceSelection, ()> {
     let project_key = format!("{prefix}secret_project");
-    let project = fields
+    let secret_project = fields
         .get(&project_key)
         .filter(|value| !value.is_empty())
-        .map(|value| exact_id(value).map(|id| format!("platform:id:{id}")))
-        .transpose()?
-        .unwrap_or_default();
+        .map(|value| exact_id(value))
+        .transpose()?;
     let credentials_key = format!("{prefix}credential_profile");
     let selected = fields
         .get(&credentials_key)
@@ -185,26 +159,16 @@ fn selection(
             Ok::<_, ()>((exact_id(id)?, positive(revision)?))
         })
         .transpose()?;
-    let organization = checkbox(fields, &format!("{prefix}include_org_secrets"), "platform")?;
-    let user = checkbox(fields, &format!("{prefix}include_user_secrets"), "platform")?;
-    Ok(EnvironmentSourceSelection {
-        secrets: Some(ProjectSecretBindings {
-            project,
-            organization,
-            user: user.then(|| ProjectStoragePlacement::Platform.into()),
-            ..Default::default()
-        })
-        .into(),
-        credentials: selected
-            .as_ref()
-            .map(|(id, _)| ProjectCredentialBinding {
-                profile: format!("platform:id:{id}"),
-                ..Default::default()
-            })
-            .into(),
-        profile_revision: selected.map(|(_, revision)| revision),
-        ..Default::default()
-    })
+    Ok(source_selection(SourceChoice {
+        secret_project,
+        organization_secrets: checkbox(
+            fields,
+            &format!("{prefix}include_org_secrets"),
+            "platform",
+        )?,
+        personal_secrets: checkbox(fields, &format!("{prefix}include_user_secrets"), "platform")?,
+        credential_profile: selected,
+    }))
 }
 
 pub(crate) fn exact_id(value: &str) -> Result<&str, ()> {
@@ -237,8 +201,22 @@ fn checkbox(fields: &BTreeMap<String, String>, key: &str, expected: &str) -> Res
 
 #[cfg(test)]
 mod tests {
+    use codewire_project::create_input::{CreateDraft, Isolation};
+
     use super::*;
     const ID: &str = "6bf8d155-e84c-4fc5-b479-b17022fe41dd";
+
+    fn create_with(source: &SourceSubmission) -> CreateEnvironmentRequest {
+        let draft = CreateDraft {
+            preset_id: None,
+            name: None,
+            ttl_seconds: None,
+            isolation: Isolation::Standard,
+            omit_application_previews: false,
+            project_spec: Default::default(),
+        };
+        codewire_project_proto::create_request("org-test", draft, &source.selection)
+    }
 
     #[test]
     fn create_form_derives_intent_from_selection_and_pins_exact_revision() {
@@ -246,11 +224,7 @@ mod tests {
             "secret_project={ID}&credential_profile={ID}%407&include_user_secrets=platform"
         );
         let source = SourceSubmission::parse(bytes.as_bytes()).unwrap();
-        let mut request = CreateEnvironmentRequest {
-            project_spec: Some(codewire_project_proto::to_proto(Default::default())).into(),
-            ..Default::default()
-        };
-        source.apply_create(&mut request).unwrap();
+        let request = create_with(&source);
         assert_eq!(request.expected_profile_revision, Some(7));
         assert!(request.confirm_personal_secrets && request.confirm_personal_credentials);
         assert_eq!(
@@ -282,13 +256,7 @@ mod tests {
             ),
         ] {
             let source = SourceSubmission::parse(bytes.as_bytes()).unwrap();
-            let mut request = CreateEnvironmentRequest {
-                project_spec: Some(codewire_project_proto::to_proto(Default::default())).into(),
-                confirm_personal_secrets: true,
-                confirm_personal_credentials: true,
-                ..Default::default()
-            };
-            source.apply_create(&mut request).unwrap();
+            let request = create_with(&source);
             assert_eq!(request.confirm_personal_secrets, personal_secrets);
             assert_eq!(request.confirm_personal_credentials, personal_credentials);
             assert_eq!(

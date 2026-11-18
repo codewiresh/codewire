@@ -1638,7 +1638,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "codewire-client",
+ "codewire-project",
+ "codewire-project-proto",
  "codewire-workspace-hack",
+ "reqwest",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

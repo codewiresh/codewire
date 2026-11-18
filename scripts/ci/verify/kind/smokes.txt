@@ -21,5 +21,6 @@ client           codewire-client         -         example  platform-run-smoke
 client           codewire-client         -         example  environment-session-smoke
 client           codewire-client         -         example  environment-cw-runtime-smoke
 client-kind-e2e  codewire-client         kind-e2e  example  coordinator-ingress-smoke
+client-ffi       codewire-client-ffi     -         example  environment-create-smoke
 cli              codewire-cli-bin        -         bin      cw
 billing          codewire-billing        -         test     wire_contract

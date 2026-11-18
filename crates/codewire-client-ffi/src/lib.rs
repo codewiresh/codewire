@@ -26,8 +26,10 @@ uniffi::setup_scaffolding!();
 
 mod create;
 pub use create::{
-    CreatedEnvironment, EnvironmentSetup, OrgTarget, PresetSummary, SetupOutcome, SetupStep,
-    SetupStepObserver, StepStatus, create_environment, list_presets,
+    CreateForm, CreateOptions, CreateOutcome, CreatedEnvironment, EnvironmentSetup, FieldRefusal,
+    FormField, OrgTarget, PortField, PresetOption, PreviewAccess, ProfileChoice, RepositoryField,
+    SetupOutcome, SetupStep, SetupStepObserver, SourceChoice, StepStatus, create_environment,
+    create_from_form, create_options,
 };
 
 /// The command a hosted shell runs: the user's login shell.

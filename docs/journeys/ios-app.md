@@ -82,6 +82,13 @@ build signs in to Production only.
   lists; `cw info NAME` shows the image, resources and repository the form
   asked for; its setup steps match `cw logs NAME --setup` row for row; the shell
   answers `echo $HOSTNAME` with the environment's host name.
+- **Before the phone:** the Kind workspace-services suite's
+  `environment_create_smoke` (`make kind-test SUITES=workspace-services`)
+  runs the app's own create (`create_from_form` in `codewire-client-ffi`)
+  through the public API. An empty form is refused for its image before
+  anything is sent. A preset alone is accepted, and the environment's saved
+  project carries the preset's image. Kind is not the phone: the walk above
+  is the observation.
 - **Gotchas:** a create counts against the organization's credit; remove each
   environment. The app follows the first run of setup only; a restart later
   is the list's to show.

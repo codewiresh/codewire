@@ -9,6 +9,7 @@
 
 mod auth;
 mod coordinator;
+pub mod create_options;
 mod credential_delegation;
 pub mod environment_setup;
 #[cfg(feature = "tailnet-session")]

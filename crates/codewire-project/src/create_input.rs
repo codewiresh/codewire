@@ -176,6 +176,31 @@ impl fmt::Display for CreateError {
     }
 }
 
+impl PresetDefaults {
+    /// A preset's defaults: its canonical project and its default lifetime.
+    pub fn from_project(spec: ProjectSpec, ttl_seconds: Option<i32>) -> Self {
+        Self {
+            image: spec.image,
+            cpu_millicores: spec.resources.cpu_millicores,
+            memory_mib: spec.resources.memory_mib,
+            disk_gib: spec.resources.disk_gib,
+            ttl_seconds,
+            install_command: spec.install_command,
+            startup_script: spec.startup_script,
+            agents: spec.agents.tools,
+            app_ports: spec
+                .application_ports
+                .into_iter()
+                .map(|port| PortInput {
+                    port: port.port.to_string(),
+                    label: port.label,
+                    access: port.access,
+                })
+                .collect(),
+        }
+    }
+}
+
 impl CreateInput {
     /// Fills only the fields the form left empty, so an edit always wins.
     pub fn apply_preset_defaults(&mut self, preset: &PresetDefaults) {

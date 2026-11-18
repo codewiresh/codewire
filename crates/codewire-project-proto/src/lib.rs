@@ -9,7 +9,7 @@ use codewire_proto::codewire::v1 as proto;
 
 mod create;
 
-pub use create::create_request;
+pub use create::{PersonalAccess, SourceChoice, create_request, personal_access, source_selection};
 
 pub fn from_proto(
     value: proto::ProjectSpec,

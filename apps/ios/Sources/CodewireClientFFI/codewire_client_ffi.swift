@@ -473,6 +473,22 @@ fileprivate struct FfiConverterInt32: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -1421,6 +1437,215 @@ public func FfiConverterTypeShellObserver_lower(_ value: ShellObserver) -> UInt6
 
 
 
+/**
+ * The sheet's fields as typed. Numbers and lifetimes stay text so a refusal
+ * names the field, as on the dashboard.
+ */
+public struct CreateForm: Equatable, Hashable {
+    public var name: String
+    public var presetId: String
+    public var image: String
+    /**
+     * Millicores.
+     */
+    public var cpu: String
+    /**
+     * MiB.
+     */
+    public var memory: String
+    /**
+     * GiB.
+     */
+    public var disk: String
+    /**
+     * A number with `s`, `m`, `h` or `d`; minutes without one.
+     */
+    public var deleteAfter: String
+    public var confidential: Bool
+    public var installCommand: String
+    public var startupScript: String
+    public var repositories: [RepositoryField]
+    public var ports: [PortField]
+    /**
+     * The person chose the ports, so none means none, not the preset's.
+     */
+    public var portsChosen: Bool
+    public var sources: SourceChoice
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, presetId: String, image: String, 
+        /**
+         * Millicores.
+         */cpu: String, 
+        /**
+         * MiB.
+         */memory: String, 
+        /**
+         * GiB.
+         */disk: String, 
+        /**
+         * A number with `s`, `m`, `h` or `d`; minutes without one.
+         */deleteAfter: String, confidential: Bool, installCommand: String, startupScript: String, repositories: [RepositoryField], ports: [PortField], 
+        /**
+         * The person chose the ports, so none means none, not the preset's.
+         */portsChosen: Bool, sources: SourceChoice) {
+        self.name = name
+        self.presetId = presetId
+        self.image = image
+        self.cpu = cpu
+        self.memory = memory
+        self.disk = disk
+        self.deleteAfter = deleteAfter
+        self.confidential = confidential
+        self.installCommand = installCommand
+        self.startupScript = startupScript
+        self.repositories = repositories
+        self.ports = ports
+        self.portsChosen = portsChosen
+        self.sources = sources
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CreateForm: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCreateForm: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CreateForm {
+        return
+            try CreateForm(
+                name: FfiConverterString.read(from: &buf), 
+                presetId: FfiConverterString.read(from: &buf), 
+                image: FfiConverterString.read(from: &buf), 
+                cpu: FfiConverterString.read(from: &buf), 
+                memory: FfiConverterString.read(from: &buf), 
+                disk: FfiConverterString.read(from: &buf), 
+                deleteAfter: FfiConverterString.read(from: &buf), 
+                confidential: FfiConverterBool.read(from: &buf), 
+                installCommand: FfiConverterString.read(from: &buf), 
+                startupScript: FfiConverterString.read(from: &buf), 
+                repositories: FfiConverterSequenceTypeRepositoryField.read(from: &buf), 
+                ports: FfiConverterSequenceTypePortField.read(from: &buf), 
+                portsChosen: FfiConverterBool.read(from: &buf), 
+                sources: FfiConverterTypeSourceChoice.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CreateForm, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.presetId, into: &buf)
+        FfiConverterString.write(value.image, into: &buf)
+        FfiConverterString.write(value.cpu, into: &buf)
+        FfiConverterString.write(value.memory, into: &buf)
+        FfiConverterString.write(value.disk, into: &buf)
+        FfiConverterString.write(value.deleteAfter, into: &buf)
+        FfiConverterBool.write(value.confidential, into: &buf)
+        FfiConverterString.write(value.installCommand, into: &buf)
+        FfiConverterString.write(value.startupScript, into: &buf)
+        FfiConverterSequenceTypeRepositoryField.write(value.repositories, into: &buf)
+        FfiConverterSequenceTypePortField.write(value.ports, into: &buf)
+        FfiConverterBool.write(value.portsChosen, into: &buf)
+        FfiConverterTypeSourceChoice.write(value.sources, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCreateForm_lift(_ buf: RustBuffer) throws -> CreateForm {
+    return try FfiConverterTypeCreateForm.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCreateForm_lower(_ value: CreateForm) -> RustBuffer {
+    return FfiConverterTypeCreateForm.lower(value)
+}
+
+
+/**
+ * What the organization offers a new environment.
+ */
+public struct CreateOptions: Equatable, Hashable {
+    public var presets: [PresetOption]
+    /**
+     * The organization opted in to the confidential tier.
+     */
+    public var confidentialAvailable: Bool
+    /**
+     * The domain previews are served under; empty when previews are off.
+     */
+    public var previewBaseDomain: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(presets: [PresetOption], 
+        /**
+         * The organization opted in to the confidential tier.
+         */confidentialAvailable: Bool, 
+        /**
+         * The domain previews are served under; empty when previews are off.
+         */previewBaseDomain: String) {
+        self.presets = presets
+        self.confidentialAvailable = confidentialAvailable
+        self.previewBaseDomain = previewBaseDomain
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CreateOptions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCreateOptions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CreateOptions {
+        return
+            try CreateOptions(
+                presets: FfiConverterSequenceTypePresetOption.read(from: &buf), 
+                confidentialAvailable: FfiConverterBool.read(from: &buf), 
+                previewBaseDomain: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CreateOptions, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypePresetOption.write(value.presets, into: &buf)
+        FfiConverterBool.write(value.confidentialAvailable, into: &buf)
+        FfiConverterString.write(value.previewBaseDomain, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCreateOptions_lift(_ buf: RustBuffer) throws -> CreateOptions {
+    return try FfiConverterTypeCreateOptions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCreateOptions_lower(_ value: CreateOptions) -> RustBuffer {
+    return FfiConverterTypeCreateOptions.lower(value)
+}
+
+
 public struct CreatedEnvironment: Equatable, Hashable {
     public var id: String
     public var name: String
@@ -1472,6 +1697,63 @@ public func FfiConverterTypeCreatedEnvironment_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeCreatedEnvironment_lower(_ value: CreatedEnvironment) -> RustBuffer {
     return FfiConverterTypeCreatedEnvironment.lower(value)
+}
+
+
+/**
+ * A refusal and the field it belongs to, in the dashboard's words.
+ */
+public struct FieldRefusal: Equatable, Hashable {
+    public var field: FormField
+    public var message: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(field: FormField, message: String) {
+        self.field = field
+        self.message = message
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FieldRefusal: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFieldRefusal: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FieldRefusal {
+        return
+            try FieldRefusal(
+                field: FfiConverterTypeFormField.read(from: &buf), 
+                message: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FieldRefusal, into buf: inout [UInt8]) {
+        FfiConverterTypeFormField.write(value.field, into: &buf)
+        FfiConverterString.write(value.message, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFieldRefusal_lift(_ buf: RustBuffer) throws -> FieldRefusal {
+    return try FfiConverterTypeFieldRefusal.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFieldRefusal_lower(_ value: FieldRefusal) -> RustBuffer {
+    return FfiConverterTypeFieldRefusal.lower(value)
 }
 
 
@@ -1536,25 +1818,17 @@ public func FfiConverterTypeOrgTarget_lower(_ value: OrgTarget) -> RustBuffer {
 }
 
 
-public struct PresetSummary: Equatable, Hashable {
-    public var id: String
-    public var name: String
-    public var description: String?
-    /**
-     * Codewire's own preset, offered to every organization.
-     */
-    public var official: Bool
+public struct PortField: Equatable, Hashable {
+    public var port: String
+    public var label: String
+    public var access: PreviewAccess
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, name: String, description: String?, 
-        /**
-         * Codewire's own preset, offered to every organization.
-         */official: Bool) {
-        self.id = id
-        self.name = name
-        self.description = description
-        self.official = official
+    public init(port: String, label: String, access: PreviewAccess) {
+        self.port = port
+        self.label = label
+        self.access = access
     }
 
     
@@ -1563,28 +1837,130 @@ public struct PresetSummary: Equatable, Hashable {
 }
 
 #if compiler(>=6)
-extension PresetSummary: Sendable {}
+extension PortField: Sendable {}
 #endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypePresetSummary: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PresetSummary {
+public struct FfiConverterTypePortField: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PortField {
         return
-            try PresetSummary(
-                id: FfiConverterString.read(from: &buf), 
-                name: FfiConverterString.read(from: &buf), 
-                description: FfiConverterOptionString.read(from: &buf), 
-                official: FfiConverterBool.read(from: &buf)
+            try PortField(
+                port: FfiConverterString.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                access: FfiConverterTypePreviewAccess.read(from: &buf)
         )
     }
 
-    public static func write(_ value: PresetSummary, into buf: inout [UInt8]) {
+    public static func write(_ value: PortField, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.port, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterTypePreviewAccess.write(value.access, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePortField_lift(_ buf: RustBuffer) throws -> PortField {
+    return try FfiConverterTypePortField.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePortField_lower(_ value: PortField) -> RustBuffer {
+    return FfiConverterTypePortField.lower(value)
+}
+
+
+/**
+ * A preset, with its defaults as the form shows them: a field left empty
+ * takes the preset's value.
+ */
+public struct PresetOption: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    public var description: String?
+    /**
+     * Codewire's own preset, offered to every organization.
+     */
+    public var official: Bool
+    public var image: String
+    public var cpu: String
+    public var memory: String
+    public var disk: String
+    public var deleteAfter: String
+    public var installCommand: String
+    public var startupScript: String
+    public var ports: [PortField]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, description: String?, 
+        /**
+         * Codewire's own preset, offered to every organization.
+         */official: Bool, image: String, cpu: String, memory: String, disk: String, deleteAfter: String, installCommand: String, startupScript: String, ports: [PortField]) {
+        self.id = id
+        self.name = name
+        self.description = description
+        self.official = official
+        self.image = image
+        self.cpu = cpu
+        self.memory = memory
+        self.disk = disk
+        self.deleteAfter = deleteAfter
+        self.installCommand = installCommand
+        self.startupScript = startupScript
+        self.ports = ports
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PresetOption: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePresetOption: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PresetOption {
+        return
+            try PresetOption(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                description: FfiConverterOptionString.read(from: &buf), 
+                official: FfiConverterBool.read(from: &buf), 
+                image: FfiConverterString.read(from: &buf), 
+                cpu: FfiConverterString.read(from: &buf), 
+                memory: FfiConverterString.read(from: &buf), 
+                disk: FfiConverterString.read(from: &buf), 
+                deleteAfter: FfiConverterString.read(from: &buf), 
+                installCommand: FfiConverterString.read(from: &buf), 
+                startupScript: FfiConverterString.read(from: &buf), 
+                ports: FfiConverterSequenceTypePortField.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PresetOption, into buf: inout [UInt8]) {
         FfiConverterString.write(value.id, into: &buf)
         FfiConverterString.write(value.name, into: &buf)
         FfiConverterOptionString.write(value.description, into: &buf)
         FfiConverterBool.write(value.official, into: &buf)
+        FfiConverterString.write(value.image, into: &buf)
+        FfiConverterString.write(value.cpu, into: &buf)
+        FfiConverterString.write(value.memory, into: &buf)
+        FfiConverterString.write(value.disk, into: &buf)
+        FfiConverterString.write(value.deleteAfter, into: &buf)
+        FfiConverterString.write(value.installCommand, into: &buf)
+        FfiConverterString.write(value.startupScript, into: &buf)
+        FfiConverterSequenceTypePortField.write(value.ports, into: &buf)
     }
 }
 
@@ -1592,15 +1968,136 @@ public struct FfiConverterTypePresetSummary: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypePresetSummary_lift(_ buf: RustBuffer) throws -> PresetSummary {
-    return try FfiConverterTypePresetSummary.lift(buf)
+public func FfiConverterTypePresetOption_lift(_ buf: RustBuffer) throws -> PresetOption {
+    return try FfiConverterTypePresetOption.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypePresetSummary_lower(_ value: PresetSummary) -> RustBuffer {
-    return FfiConverterTypePresetSummary.lower(value)
+public func FfiConverterTypePresetOption_lower(_ value: PresetOption) -> RustBuffer {
+    return FfiConverterTypePresetOption.lower(value)
+}
+
+
+/**
+ * A credential profile at the revision the list showed.
+ */
+public struct ProfileChoice: Equatable, Hashable {
+    public var id: String
+    public var revision: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, revision: UInt64) {
+        self.id = id
+        self.revision = revision
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ProfileChoice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProfileChoice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProfileChoice {
+        return
+            try ProfileChoice(
+                id: FfiConverterString.read(from: &buf), 
+                revision: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ProfileChoice, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterUInt64.write(value.revision, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProfileChoice_lift(_ buf: RustBuffer) throws -> ProfileChoice {
+    return try FfiConverterTypeProfileChoice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProfileChoice_lower(_ value: ProfileChoice) -> RustBuffer {
+    return FfiConverterTypeProfileChoice.lower(value)
+}
+
+
+public struct RepositoryField: Equatable, Hashable {
+    public var url: String
+    public var branch: String
+    /**
+     * Under `/workspace`; empty uses the repository's name.
+     */
+    public var mountPath: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(url: String, branch: String, 
+        /**
+         * Under `/workspace`; empty uses the repository's name.
+         */mountPath: String) {
+        self.url = url
+        self.branch = branch
+        self.mountPath = mountPath
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension RepositoryField: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRepositoryField: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RepositoryField {
+        return
+            try RepositoryField(
+                url: FfiConverterString.read(from: &buf), 
+                branch: FfiConverterString.read(from: &buf), 
+                mountPath: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RepositoryField, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterString.write(value.branch, into: &buf)
+        FfiConverterString.write(value.mountPath, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRepositoryField_lift(_ buf: RustBuffer) throws -> RepositoryField {
+    return try FfiConverterTypeRepositoryField.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRepositoryField_lower(_ value: RepositoryField) -> RustBuffer {
+    return FfiConverterTypeRepositoryField.lower(value)
 }
 
 
@@ -1756,6 +2253,369 @@ public func FfiConverterTypeShellTarget_lift(_ buf: RustBuffer) throws -> ShellT
 public func FfiConverterTypeShellTarget_lower(_ value: ShellTarget) -> RustBuffer {
     return FfiConverterTypeShellTarget.lower(value)
 }
+
+
+/**
+ * The environment's sources, by the ids the source lists gave.
+ */
+public struct SourceChoice: Equatable, Hashable {
+    public var secretProjectId: String?
+    public var organizationSecrets: Bool
+    public var personalSecrets: Bool
+    public var credentialProfile: ProfileChoice?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(secretProjectId: String?, organizationSecrets: Bool, personalSecrets: Bool, credentialProfile: ProfileChoice?) {
+        self.secretProjectId = secretProjectId
+        self.organizationSecrets = organizationSecrets
+        self.personalSecrets = personalSecrets
+        self.credentialProfile = credentialProfile
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SourceChoice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSourceChoice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SourceChoice {
+        return
+            try SourceChoice(
+                secretProjectId: FfiConverterOptionString.read(from: &buf), 
+                organizationSecrets: FfiConverterBool.read(from: &buf), 
+                personalSecrets: FfiConverterBool.read(from: &buf), 
+                credentialProfile: FfiConverterOptionTypeProfileChoice.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SourceChoice, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.secretProjectId, into: &buf)
+        FfiConverterBool.write(value.organizationSecrets, into: &buf)
+        FfiConverterBool.write(value.personalSecrets, into: &buf)
+        FfiConverterOptionTypeProfileChoice.write(value.credentialProfile, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSourceChoice_lift(_ buf: RustBuffer) throws -> SourceChoice {
+    return try FfiConverterTypeSourceChoice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSourceChoice_lower(_ value: SourceChoice) -> RustBuffer {
+    return FfiConverterTypeSourceChoice.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum CreateOutcome: Equatable, Hashable {
+    
+    case created(environment: CreatedEnvironment
+    )
+    /**
+     * The form's rules refused it; nothing was sent.
+     */
+    case refused(refusals: [FieldRefusal]
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension CreateOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCreateOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = CreateOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CreateOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .created(environment: try FfiConverterTypeCreatedEnvironment.read(from: &buf)
+        )
+        
+        case 2: return .refused(refusals: try FfiConverterSequenceTypeFieldRefusal.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CreateOutcome, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .created(environment):
+            writeInt(&buf, Int32(1))
+            FfiConverterTypeCreatedEnvironment.write(environment, into: &buf)
+            
+        
+        case let .refused(refusals):
+            writeInt(&buf, Int32(2))
+            FfiConverterSequenceTypeFieldRefusal.write(refusals, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCreateOutcome_lift(_ buf: RustBuffer) throws -> CreateOutcome {
+    return try FfiConverterTypeCreateOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCreateOutcome_lower(_ value: CreateOutcome) -> RustBuffer {
+    return FfiConverterTypeCreateOutcome.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum FormField: Equatable, Hashable {
+    
+    case name
+    case image
+    case cpu
+    case memory
+    case disk
+    case deleteAfter
+    case repositories
+    /**
+     * The form as a whole.
+     */
+    case form
+    case portNumber(index: UInt32
+    )
+    case portLabel(index: UInt32
+    )
+    case portAccess(index: UInt32
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FormField: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFormField: FfiConverterRustBuffer {
+    typealias SwiftType = FormField
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FormField {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .name
+        
+        case 2: return .image
+        
+        case 3: return .cpu
+        
+        case 4: return .memory
+        
+        case 5: return .disk
+        
+        case 6: return .deleteAfter
+        
+        case 7: return .repositories
+        
+        case 8: return .form
+        
+        case 9: return .portNumber(index: try FfiConverterUInt32.read(from: &buf)
+        )
+        
+        case 10: return .portLabel(index: try FfiConverterUInt32.read(from: &buf)
+        )
+        
+        case 11: return .portAccess(index: try FfiConverterUInt32.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FormField, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .name:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .image:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .cpu:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .memory:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .disk:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .deleteAfter:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .repositories:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .form:
+            writeInt(&buf, Int32(8))
+        
+        
+        case let .portNumber(index):
+            writeInt(&buf, Int32(9))
+            FfiConverterUInt32.write(index, into: &buf)
+            
+        
+        case let .portLabel(index):
+            writeInt(&buf, Int32(10))
+            FfiConverterUInt32.write(index, into: &buf)
+            
+        
+        case let .portAccess(index):
+            writeInt(&buf, Int32(11))
+            FfiConverterUInt32.write(index, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFormField_lift(_ buf: RustBuffer) throws -> FormField {
+    return try FfiConverterTypeFormField.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFormField_lower(_ value: FormField) -> RustBuffer {
+    return FfiConverterTypeFormField.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Who can open a port's HTTPS preview.
+ */
+
+public enum PreviewAccess: Equatable, Hashable {
+    
+    /**
+     * Only the person who created the environment.
+     */
+    case creator
+    case orgMembers
+    case `public`
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PreviewAccess: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePreviewAccess: FfiConverterRustBuffer {
+    typealias SwiftType = PreviewAccess
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PreviewAccess {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .creator
+        
+        case 2: return .orgMembers
+        
+        case 3: return .`public`
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PreviewAccess, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .creator:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .orgMembers:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .`public`:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePreviewAccess_lift(_ buf: RustBuffer) throws -> PreviewAccess {
+    return try FfiConverterTypePreviewAccess.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePreviewAccess_lower(_ value: PreviewAccess) -> RustBuffer {
+    return FfiConverterTypePreviewAccess.lower(value)
+}
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -2355,6 +3215,30 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeProfileChoice: FfiConverterRustBuffer {
+    typealias SwiftType = ProfileChoice?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeProfileChoice.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeProfileChoice.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeSetupStep: FfiConverterRustBuffer {
     typealias SwiftType = SetupStep?
 
@@ -2379,23 +3263,98 @@ fileprivate struct FfiConverterOptionTypeSetupStep: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterSequenceTypePresetSummary: FfiConverterRustBuffer {
-    typealias SwiftType = [PresetSummary]
+fileprivate struct FfiConverterSequenceTypeFieldRefusal: FfiConverterRustBuffer {
+    typealias SwiftType = [FieldRefusal]
 
-    public static func write(_ value: [PresetSummary], into buf: inout [UInt8]) {
+    public static func write(_ value: [FieldRefusal], into buf: inout [UInt8]) {
         let len = Int32(value.count)
         writeInt(&buf, len)
         for item in value {
-            FfiConverterTypePresetSummary.write(item, into: &buf)
+            FfiConverterTypeFieldRefusal.write(item, into: &buf)
         }
     }
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PresetSummary] {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FieldRefusal] {
         let len: Int32 = try readInt(&buf)
-        var seq = [PresetSummary]()
+        var seq = [FieldRefusal]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            seq.append(try FfiConverterTypePresetSummary.read(from: &buf))
+            seq.append(try FfiConverterTypeFieldRefusal.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePortField: FfiConverterRustBuffer {
+    typealias SwiftType = [PortField]
+
+    public static func write(_ value: [PortField], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePortField.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PortField] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PortField]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePortField.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePresetOption: FfiConverterRustBuffer {
+    typealias SwiftType = [PresetOption]
+
+    public static func write(_ value: [PresetOption], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePresetOption.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PresetOption] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PresetOption]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePresetOption.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeRepositoryField: FfiConverterRustBuffer {
+    typealias SwiftType = [RepositoryField]
+
+    public static func write(_ value: [RepositoryField], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeRepositoryField.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [RepositoryField] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [RepositoryField]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeRepositoryField.read(from: &buf))
         }
         return seq
     }
@@ -2449,34 +3408,34 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
     }
 }
 /**
- * Ask for a new environment. The server picks the name when `name` is empty
- * and applies the preset's configuration; setup starts on its own.
+ * Create from the form: a preset's defaults fill the fields left empty, the
+ * dashboard's rules check it, and the server applies its own checks.
  */
-public func createEnvironment(target: OrgTarget, name: String?, presetId: String?)async throws  -> CreatedEnvironment  {
+public func createEnvironment(target: OrgTarget, form: CreateForm)async throws  -> CreateOutcome  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_codewire_client_ffi_fn_func_create_environment(FfiConverterTypeOrgTarget_lower(target),FfiConverterOptionString.lower(name),FfiConverterOptionString.lower(presetId)
+                uniffi_codewire_client_ffi_fn_func_create_environment(FfiConverterTypeOrgTarget_lower(target),FfiConverterTypeCreateForm_lower(form)
                 )
             },
             pollFunc: ffi_codewire_client_ffi_rust_future_poll_rust_buffer,
             completeFunc: ffi_codewire_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_codewire_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeCreatedEnvironment_lift,
+            liftFunc: FfiConverterTypeCreateOutcome_lift,
             errorHandler: FfiConverterTypeShellError_lift
         )
 }
-public func listPresets(target: OrgTarget)async throws  -> [PresetSummary]  {
+public func createOptions(target: OrgTarget)async throws  -> CreateOptions  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_codewire_client_ffi_fn_func_list_presets(FfiConverterTypeOrgTarget_lower(target)
+                uniffi_codewire_client_ffi_fn_func_create_options(FfiConverterTypeOrgTarget_lower(target)
                 )
             },
             pollFunc: ffi_codewire_client_ffi_rust_future_poll_rust_buffer,
             completeFunc: ffi_codewire_client_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_codewire_client_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterSequenceTypePresetSummary.lift,
+            liftFunc: FfiConverterTypeCreateOptions_lift,
             errorHandler: FfiConverterTypeShellError_lift
         )
 }
@@ -2496,10 +3455,10 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_codewire_client_ffi_checksum_func_create_environment() != 3124) {
+    if (uniffi_codewire_client_ffi_checksum_func_create_environment() != 21005) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_codewire_client_ffi_checksum_func_list_presets() != 57371) {
+    if (uniffi_codewire_client_ffi_checksum_func_create_options() != 29583) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_codewire_client_ffi_checksum_method_shell_close() != 47127) {

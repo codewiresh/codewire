@@ -367,18 +367,12 @@ impl EnvironmentSubmission {
             }
             .to_string();
         }
-        let mut request = codewire_project_proto::create_request(org_id, draft?);
-        if self
-            .sources
-            .as_ref()
-            .ok()?
-            .apply_create(&mut request)
-            .is_err()
-        {
-            form.form_error = PROTECTED_SECRET_ACCESS_UNAVAILABLE.to_owned();
-            return None;
-        }
-        Some(request)
+        let sources = self.sources.as_ref().ok()?;
+        Some(codewire_project_proto::create_request(
+            org_id,
+            draft?,
+            &sources.selection,
+        ))
     }
 }
 

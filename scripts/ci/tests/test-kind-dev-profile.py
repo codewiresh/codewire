@@ -1210,6 +1210,15 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assertLess(result.stderr.index("suite edge-contract:"), result.stderr.index("[kind-deploy]"))
         self.assertEqual([call["args"][1] for call in self.calls("suite")], ["edge-contract", "credentials", "integrated"])
 
+    def test_selected_client_ffi_runs_the_ios_create(self) -> None:
+        # The workspace-services suite runs the iOS app's create (common.sh
+        # environment_create_smoke).
+        result = self.run_script("test-selected.sh", FAKE_SELECTION="rust|rust_pkg_codewire_client_ffi",
+                                 FAKE_CHANGES="crate codewire-client-ffi")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("suite workspace-services: rust_pkg_codewire_client_ffi", result.stderr)
+        self.assertEqual([call["args"][1] for call in self.calls("suite")], ["workspace-services"])
+
     def test_selected_cli_and_workspace_access_run_the_user_ssh_journey(self) -> None:
         # The workspace-services suite runs the user SSH journey (common.sh
         # workspace_user_ssh_smoke): the CLI and workspace-access crates select it.
@@ -1673,7 +1682,7 @@ class SmokeGroupTests(unittest.TestCase):
             return runs[name].union(*(closure(other, seen) for other in calls[name]))
 
         outputs = inventory_outputs()
-        self.assertEqual(set(outputs), {"orchestration", "client", "client-kind-e2e", "cli", "billing"})
+        self.assertEqual(set(outputs), {"orchestration", "client", "client-kind-e2e", "client-ffi", "cli", "billing"})
         common = (kind / "common.sh").read_text()
         table = common[common.index("kind_suite_smoke_groups() {"):common.index("esac", common.index("kind_suite_smoke_groups() {"))]
         mapped = {}

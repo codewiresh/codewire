@@ -1,5 +1,5 @@
-//! Creating an environment from the app (#3825): the organization's presets,
-//! the create itself, and its setup steps as they arrive, through the same
+//! Creating an environment from the app (#3825): the create form
+//! ([`form`]), and the setup steps as they arrive, through the same
 //! `codewire_client` calls and setup wait `cw create` uses
 //! (`codewire_client::environment_setup::await_setup`). The journey is
 //! `ios-create` in `docs/journeys/ios-app.md`.
@@ -13,16 +13,23 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use codewire_client::CodewireClient;
 use codewire_client::environment_setup::{
     DaemonReadyRow, DaemonWaitError, EnvironmentFacts, EnvironmentLogRow, FollowError,
     FollowPolicy, GetEnvironmentError, Interruption, PlatformEnd, PlatformLogFeed, SetupEnd,
     SetupObserver, SetupStop, SetupWaitError, SetupWaitObserver, await_daemon_ready, await_setup,
     watch_environment,
 };
-use codewire_client::{CodewireClient, CreateEnvironmentRequest, ListPresetsRequest};
 use tokio::sync::oneshot;
 
 use crate::ShellError;
+
+mod form;
+pub use form::{
+    CreateForm, CreateOptions, CreateOutcome, FieldRefusal, FormField, PortField, PresetOption,
+    PreviewAccess, ProfileChoice, RepositoryField, SourceChoice, create_environment,
+    create_from_form, create_options,
+};
 
 /// A step label's longest length, in characters, as on the dashboard.
 const MAX_LABEL_CHARS: usize = 300;
@@ -43,15 +50,6 @@ impl std::fmt::Debug for OrgTarget {
             .field("org_id", &self.org_id)
             .finish()
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct PresetSummary {
-    pub id: String,
-    pub name: String,
-    pub description: Option<String>,
-    /// Codewire's own preset, offered to every organization.
-    pub official: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -108,63 +106,6 @@ pub trait SetupStepObserver: Send + Sync {
     fn reconnecting(&self, reason: String, attempt: u32, max_reconnects: u32);
     /// Called once, last.
     fn finished(&self, outcome: SetupOutcome);
-}
-
-#[uniffi::export]
-pub async fn list_presets(target: OrgTarget) -> Result<Vec<PresetSummary>, ShellError> {
-    let client = client_for(&target)?;
-    let org_id = target.org_id.clone();
-    let presets = on_own_runtime("codewire-presets", async move {
-        client
-            .list_presets(ListPresetsRequest {
-                org_id,
-                ..Default::default()
-            })
-            .await
-    })
-    .await??
-    .presets;
-    Ok(presets
-        .into_iter()
-        .map(|preset| PresetSummary {
-            id: preset.id,
-            name: preset.name,
-            description: preset.description.filter(|text| !text.trim().is_empty()),
-            official: preset.official,
-        })
-        .collect())
-}
-
-/// Ask for a new environment. The server picks the name when `name` is empty
-/// and applies the preset's configuration; setup starts on its own.
-#[uniffi::export]
-pub async fn create_environment(
-    target: OrgTarget,
-    name: Option<String>,
-    preset_id: Option<String>,
-) -> Result<CreatedEnvironment, ShellError> {
-    let client = client_for(&target)?;
-    let request = CreateEnvironmentRequest {
-        org_id: target.org_id.clone(),
-        name: non_empty(name),
-        preset_id: non_empty(preset_id),
-        ..Default::default()
-    };
-    let response = on_own_runtime("codewire-create", async move {
-        client.create_environment(request).await
-    })
-    .await??;
-    let environment =
-        response
-            .environment
-            .into_option()
-            .ok_or_else(|| ShellError::Unavailable {
-                message: "the server answered the create without an environment".into(),
-            })?;
-    Ok(CreatedEnvironment {
-        id: environment.id,
-        name: environment.name,
-    })
 }
 
 /// Following one environment's setup.
@@ -434,12 +375,6 @@ fn daemon_wait_message(error: DaemonWaitError) -> String {
         }
         DaemonWaitError::LifecycleTimeout(_) => "The environment did not start in time".to_owned(),
     }
-}
-
-fn non_empty(value: Option<String>) -> Option<String> {
-    value
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
 }
 
 fn client_for(target: &OrgTarget) -> Result<CodewireClient, ShellError> {

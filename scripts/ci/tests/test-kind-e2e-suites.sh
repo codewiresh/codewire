@@ -261,6 +261,7 @@ SH
   workspace_access_stack_smoke() { fixture_step access; }
   file_service_smoke() { fixture_step file-composite; }
   environment_resize_smoke() { fixture_step resize; }
+  environment_create_smoke() { fixture_step create; }
   workspace_user_ssh_smoke() { fixture_step user-ssh; }
   environment_daemon_proxy_smoke() { fixture_step proxy; }
   environment_setup_terminal_smoke() { fixture_step terminal; }
@@ -411,10 +412,11 @@ expect_workspace_failure() {
   workspace_failure_cases=$((workspace_failure_cases + 1))
 }
 
-expect_workspace_failure workspace_service_smokes access 41 '^(exec-smoke|file-composite|resize|user-ssh)$'
-expect_workspace_failure workspace_service_smokes exec-smoke 43 '^(file-composite|resize|user-ssh)$'
-expect_workspace_failure workspace_service_smokes file-composite 41 '^(resize|user-ssh)$'
-expect_workspace_failure workspace_service_smokes resize 41 '^user-ssh$|green$'
+expect_workspace_failure workspace_service_smokes access 41 '^(exec-smoke|file-composite|resize|create|user-ssh)$'
+expect_workspace_failure workspace_service_smokes exec-smoke 43 '^(file-composite|resize|create|user-ssh)$'
+expect_workspace_failure workspace_service_smokes file-composite 41 '^(resize|create|user-ssh)$'
+expect_workspace_failure workspace_service_smokes resize 41 '^(create|user-ssh)$|green$'
+expect_workspace_failure workspace_service_smokes create 41 '^user-ssh$|green$'
 expect_workspace_failure workspace_service_smokes user-ssh 41 'green$'
 for failure in proxy terminal exec-service platform-run session-protocol; do
   case "$failure" in
@@ -461,6 +463,7 @@ for target in workspace_service_smokes file_service_smoke workspace_access_stack
   fi
   case "$target" in
     workspace_service_smokes) grep -Fxq resize "$CALLS" || fail 'workspace success omitted resize'
+      grep -Fxq create "$CALLS" || fail "workspace success omitted the iOS app's create"
       grep -Fxq user-ssh "$CALLS" || fail 'workspace success omitted the user SSH journey' ;;
     file_service_smoke) grep -Fq 'FileService streaming and black-box Connect contract green' "$CALLS" ||
       fail 'file-service success omitted its green result' ;;
