@@ -638,13 +638,14 @@ readonly DATABASE_LANES=(
   broker-refresh           # broker keepalive, material cache, subscription, SSH: 65 s
   orchestration            # orchestration preview, access and environments: 66 s
   orchestration-journals   # orchestration cw runtime and managed agent journals: 78 s
-  orchestration-workspaces # orchestration sources, workspaces and leases: 50 s
+  orchestration-workspaces # orchestration sources, admin, workspaces and create limits: 88 s (main run 60167)
+  orchestration-hosts      # orchestration hosts, network and egress, organizations, billing: 109 s (main run 60167)
 )
 # The order lanes start in when not all run at once: the longest first.
 readonly DATABASE_LANE_ORDER=(
-  credential-mutations orchestration-journals broker-admission broker-checked
-  broker-decisions credential-service orchestration core broker-refresh
-  orchestration-workspaces
+  credential-mutations orchestration-journals orchestration-hosts broker-admission
+  broker-checked broker-decisions credential-service orchestration core
+  broker-refresh orchestration-workspaces
 )
 
 # The database suites' builds. Each uses one package and feature set, as its
@@ -1215,7 +1216,11 @@ database_lane_orchestration_workspaces() {
     cargo test --locked -p codewire-orchestration --lib \
       'api::environments::failed_create_listing_database_tests::' \
       -- --ignored --nocapture --test-threads=1
+}
 
+# Split from orchestration-workspaces (codewire#5311): as one lane its 41 suites
+# took 204 s of main run 60167, 77 s longer than the next lane.
+database_lane_orchestration_hosts() {
   counted_suite "CLI feedback limits and admin list" cli-feedback \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
@@ -1359,17 +1364,19 @@ run_database_lane() {
     orchestration) database_lane_orchestration ;;
     orchestration-journals) database_lane_orchestration_journals ;;
     orchestration-workspaces) database_lane_orchestration_workspaces ;;
+    orchestration-hosts) database_lane_orchestration_hosts ;;
     *) echo "::error::unknown database lane: $1"; return 2 ;;
   esac
 }
 
-# At most this many database lanes run at once on a metal guest: all ten.
+# At most this many database lanes run at once on a metal guest: all eleven.
 # With all ten running (measured locally, 2026-10-26), their ten PostgreSQL
 # servers held 0.86-0.90 GiB and the runner with its test processes 1.2 GiB,
 # about 2.1 GiB of a heavy guest's 11.7; five at once held 1.1 GiB on CI
-# (main run 23934). A finished lane's PostgreSQL is removed, so only running
-# lanes hold memory.
-readonly DATABASE_LANES_MEMORY_BOUND=10
+# (main run 23934). The eleventh lane (codewire#5311) adds one server, about
+# 0.1 GiB. A finished lane's PostgreSQL is removed, so only running lanes hold
+# memory.
+readonly DATABASE_LANES_MEMORY_BOUND=11
 
 # start_lane_databases LANE...: the first lane uses the job's own database;
 # every other lane gets its own PostgreSQL beside it (on CI's job network, or
@@ -1483,11 +1490,21 @@ run_lanes() {
 
 # list_database_suites: every database lane's suites list their tests, and
 # each database test must be in exactly one listing, before any lane runs.
+# The lanes list side by side, each into its own log, printed in lane order:
+# one after another the 93 suites' listings took 35 s of main run 60167's
+# Database job (codewire#5311).
 list_database_suites() {
-  local lane
+  local lane failed=false
+  local -A list_pid=()
   for lane in "${DATABASE_LANES[@]}"; do
-    SUITE_LIST_ONLY=true run_database_lane "$lane"
+    (SUITE_LIST_ONLY=true run_database_lane "$lane") >"$RUN_DIR/database-list-$lane.log" 2>&1 &
+    list_pid[$lane]=$!
   done
+  for lane in "${DATABASE_LANES[@]}"; do
+    wait "${list_pid[$lane]}" || failed=true
+    cat "$RUN_DIR/database-list-$lane.log"
+  done
+  [ "$failed" = false ] || return 1
   python3 -B "$ROOT/scripts/ci/verify/database-test-coverage.py" \
     --root "${DATABASE_TEST_SOURCE_ROOT:-${BUILD_SOURCE_DIR:-$ROOT}}" --listings "$SUITE_LISTINGS"
 }
