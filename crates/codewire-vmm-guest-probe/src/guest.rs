@@ -2152,7 +2152,7 @@ pub async fn run_credential_forwarder() -> Result<()> {
             .context("accept credential loopback connection")?;
         let _ = client.set_nodelay(true);
         let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
-            write_credential_unavailable(&mut client).await;
+            write_refusal(&mut client, codewire_access::Refusal::Busy).await;
             continue;
         };
         tokio::spawn(async move {
@@ -2163,7 +2163,7 @@ pub async fn run_credential_forwarder() -> Result<()> {
             )
             .await;
             let Ok(Ok(mut upstream)) = upstream else {
-                write_credential_unavailable(&mut client).await;
+                write_refusal(&mut client, codewire_access::Refusal::CredentialUnavailable).await;
                 return;
             };
             let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
@@ -2190,13 +2190,27 @@ fn publish_credential_forwarder_readiness() -> Result<()> {
         .context("flush credential forwarder readiness")
 }
 
-async fn write_credential_unavailable(stream: &mut tokio::net::TcpStream) {
-    let _ = stream
-        .write_all(
-            b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 29\r\nConnection: close\r\n\r\ncredential route unavailable\n",
-        )
-        .await;
+/// Answer a managed-route connection this forwarder can't relay, before
+/// reading its request, so no provider is named.
+async fn write_refusal(stream: &mut tokio::net::TcpStream, refusal: codewire_access::Refusal) {
+    // A failed write is the client's own disconnect; there is no one to tell.
+    let _ = stream.write_all(&refusal_bytes(refusal)).await;
     let _ = stream.shutdown().await;
+}
+
+/// The bridge's refusal rendering on a raw HTTP/1.1 connection. The reason
+/// phrase is not read by clients; the status code and headers are.
+fn refusal_bytes(refusal: codewire_access::Refusal) -> Vec<u8> {
+    let body = refusal.body(None, None);
+    let mut head = format!("HTTP/1.1 {} Refused\r\n", refusal.status());
+    for (name, value) in refusal.headers() {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str(&format!(
+        "content-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    ));
+    head.into_bytes()
 }
 
 fn clear_process_capabilities() -> io::Result<()> {

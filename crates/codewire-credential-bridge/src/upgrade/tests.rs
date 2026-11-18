@@ -321,12 +321,13 @@ async fn open_sockets_are_bounded_apart_from_requests() {
         panic!("a socket past the limit was sent");
     };
     assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(refused.headers()["codewire-refusal"], "busy");
     let body = axum::body::to_bytes(refused.into_body(), 1024)
         .await
         .unwrap();
     assert_eq!(
         &body[..],
-        b"credential bridge has too many open WebSockets\n"
+        b"Codewire: too many requests are in flight; try again.\n"
     );
     host.quiet().await;
 

@@ -725,7 +725,7 @@ The local broker and the platform broker list the capability; a
 platform-delegated local broker does not yet, so its guest sends whole bodies.
 Against a host that does not list it, and from a guest that predates it, every
 request carries its whole body: a push whose body exceeds 4 MiB is refused with
-413 and the text "request body exceeds the credential bridge's 4 MiB limit",
+413 and `body_too_large` ([Refusals](#refusals-an-agent-or-a-person-can-read-5057)),
 and a response stops at 256 MiB. A streamed push is sent to GitHub once: a 401
 is returned rather than replayed after a GitHub App refresh, though the refresh
 due before sending still runs. A body frame or end the host is not expecting
@@ -864,8 +864,8 @@ commands; `gh api user`, `gh auth status` (the API root) and `gh repo view`
 (the repository's README, see
 [the exception below](#accepted-exception-the-readme-download-url-token)); and
 the issue and pull request REST calls. Anything else, such as `gh run list`,
-release uploads or `gh api` for another REST path, fails with HTTP 403 and the
-body `credential route unavailable`. `gh` finds the repository from an SSH origin (`git@github.com:owner/repo`). In a
+release uploads or `gh api` for another REST path, fails with HTTP 403 and
+`request_not_forwarded` ([Refusals](#refusals-an-agent-or-a-person-can-read-5057)). `gh` finds the repository from an SSH origin (`git@github.com:owner/repo`). In a
 checkout whose origin is `https://github.com/...`, Git reports the rewritten
 bridge URL, so `gh` does not recognize it as GitHub: pass `-R owner/repo` or
 set `GH_REPO`.
@@ -1380,12 +1380,14 @@ one list of those refusals: what the agent receives, the `Codewire-Refusal`
 reason, and what the guest's refusal list (#4015) and the owner's
 `cw policy log` (#5058) show. A new refusal is added here first.
 
-**Not yet built** (#5057 builds it): today every answered refusal except
-`credential_conflict` and the hosted Sandbox's reconnect answer reaches the
-agent as a bare status or `credential route unavailable`, with no
-`Codewire-Refusal` header; an unserved `chatgpt.com` path (#4898) is refused
-as the broker's denial (403), not yet as `path_not_served` (404). The list
-below is what #5057's code delivers.
+**Not yet built** (#5057 builds it): the guest's bridge, the TLS front door
+and the local VM's credential forwarder answer with this rendering, and the
+bridge protocol carries the reason (`CredentialBridgeRefusal`). The brokers
+don't send one yet, so a broker's refusal still reaches the agent as `denied`
+(403), `credential_unavailable` or `upstream_failed`; `credential_conflict`
+and the hosted Sandbox's reconnect answer keep the broker's own bodies until
+they move to this rendering; and an unserved `chatgpt.com` path (#4898) is
+refused as the broker's denial (403), not yet as `path_not_served` (404).
 
 **Two kinds.** Only a request the TLS front door has taken (an intercepted
 host, its connection handed off) can be answered in HTTP. Everything refused
@@ -1421,11 +1423,11 @@ with #4971.
 | `path_not_served` | 404 | the host's route doesn't cover this path (for example `chatgpt.com` outside `/backend-api/codex`, #4898) | "Codewire: this path on HOST isn't one Codewire forwards." |
 | `websocket_not_served` | 403 | a WebSocket the route doesn't carry yet (#3999 changes 9 and 10) | "Codewire: WebSockets to HOST aren't carried yet." |
 | `route_not_served` | 403 | an intercepted host whose credential route the front door doesn't serve yet (today every slot but Anthropic) | "Codewire: requests to HOST can't use this environment's credentials yet." |
-| `request_not_forwarded` | 400, 403 or 421, as today | a request the front door or bridge won't forward as it is: CONNECT, a malformed target, a host that isn't this connection's (421), a bad upgrade, an unsafe path, a method outside GET, HEAD, POST, PUT, PATCH and DELETE, an oversized query or a header it can't carry | "Codewire: this request to HOST isn't one Codewire forwards." |
+| `request_not_forwarded` | 400, 403, 408 or 421, as today | a request the front door or bridge won't forward as it is: CONNECT, a malformed target, a host that isn't this connection's (421), a bad upgrade, an unsafe path, a method outside GET, HEAD, POST, PUT, PATCH and DELETE, an oversized query, a header it can't carry, or a streamed body the client broke off (400) or stopped sending (408) | "Codewire: this request to HOST isn't one Codewire forwards." |
 | `placeholder_outside_route` | 403 | a request to `github.com` or `api.github.com` carries a placeholder-shaped value and is not one the GitHub route serves with the managed credential: anything but Git fetch and push and the API operations the route grants (Git LFS, for one). Until #5057 renders it, the API host answers JSON with `message` and `code`, which `gh` shows, and the Git host plain text, as `network_policy_refuses_github` does | "Codewire's GitHub connection serves Git fetch and push and a fixed set of GitHub API operations. This request is not one of them, so it was not sent. Git LFS is not served." Fix: use your own GitHub token for this request |
 | `body_too_large` | 413 | a body over 4 MiB on a host that doesn't stream, or a GitHub API request over 4 MiB that carries the placeholder | "Codewire: this request's body is over the 4 MiB Codewire forwards to HOST." |
 | `busy` | 503 | the bridge's limits on requests or WebSockets in flight | "Codewire: too many requests are in flight; try again." |
-| `upstream_failed` | 502 | PROVIDER couldn't be reached, or answered in a way Codewire won't pass on | "Codewire: PROVIDER couldn't be reached; try again." |
+| `upstream_failed` | 502, or 504 when no answer came in time | PROVIDER couldn't be reached, or answered in a way Codewire won't pass on | "Codewire: PROVIDER couldn't be reached; try again." |
 | `name_not_allowed` | 403 | a request on an intercepted host without a Codewire value, which the network policy refuses (design 3a) | "Codewire: this environment's network policy doesn't allow this request to HOST." The owner's `cw policy log` (#5058) shows it; until that exists, no fix line |
 | `unavailable` | 503 | the request can't be checked against the network policy now: the signed policy decision is missing or doesn't match | "Codewire: this request to HOST can't be checked against the network policy right now; try again." |
 
@@ -1463,7 +1465,11 @@ request errors keep the status they have today (400, 404, 413, 421).
   the kind of failure and the kind of fix. HOST is the canonical bound name
   from the interceptable-host table that took the connection (for a suffix
   binding, the suffix itself), never the request's Host, SNI or `:authority`,
-  which the sender chooses; PORT is the bound port;
+  which the sender chooses; PORT is the bound port. On the loopback ingress
+  no host was bound, and the sentence leaves out "to HOST" or "on HOST".
+  Before a request's route is known, or where the answer is written before
+  the request is read, no provider is known either, and the sentence says
+  "the credential" or "the provider";
 - the owner's labels (a credential's or a profile's name) only where the
   environment can already read that exact label through a channel this spec
   names. None does today, so bodies say "the PROVIDER credential this

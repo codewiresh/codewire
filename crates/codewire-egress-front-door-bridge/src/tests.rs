@@ -185,7 +185,8 @@ async fn through_loopback(
     seen
 }
 
-/// A refused request: its status, an empty body, and nothing at the host.
+/// A refused request: its status, the spec's sentence for it, naming the
+/// bound host and nothing of the request, and nothing at the host.
 async fn refused(
     host: &mut Host,
     backend: &CredentialRouteBackend,
@@ -198,7 +199,16 @@ async fn refused(
         .unwrap();
     let response = bounded(backend.forward(bound, request)).await;
     let status = response.status();
-    assert_eq!(body_of(response).await, "", "{uri}");
+    let (reason, sentence) = match status {
+        StatusCode::NOT_FOUND => ("path_not_served", format!("this path on {bound}")),
+        _ => ("request_not_forwarded", format!("this request to {bound}")),
+    };
+    assert_eq!(response.headers()["codewire-refusal"], reason, "{uri}");
+    assert_eq!(
+        body_of(response).await,
+        format!("Codewire: {sentence} isn't one Codewire forwards.\n"),
+        "{uri}"
+    );
     host.assert_untouched();
     status
 }
@@ -641,7 +651,7 @@ fn every_route_prefix_is_recognised_by_the_bridge() {
     for (prefix, method, rest, slot, route) in cases {
         let uri: Uri = format!("{prefix}{rest}").parse().unwrap();
         let classified = classify_http_request(&method, &uri, &HeaderMap::new())
-            .unwrap_or_else(|status| panic!("{prefix} refused: {status}"));
+            .unwrap_or_else(|refusal| panic!("{prefix} refused: {refusal:?}"));
         assert_eq!(
             (classified.capability_slot, classified.route),
             (slot, route),
@@ -657,6 +667,7 @@ fn rewrite(table: &RouteTable, host: &str, uri: &str) -> Result<String, StatusCo
     table
         .rewrite(host, &uri.parse().unwrap())
         .map(|uri| uri.to_string())
+        .map_err(|refusal| StatusCode::from_u16(refusal.status()).unwrap())
 }
 
 #[test]
@@ -883,8 +894,12 @@ async fn an_upgrade_on_a_session_without_websockets_is_403_and_never_reaches_the
     };
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(
+        response.headers()["codewire-refusal"],
+        "websocket_not_served"
+    );
+    assert_eq!(
         body_of(response).await,
-        "credential route does not carry WebSockets\n"
+        "Codewire: WebSockets to chatgpt.com aren't carried yet.\n"
     );
     host.assert_untouched();
 }
@@ -990,7 +1005,42 @@ async fn an_upgrade_to_a_path_no_route_covers_is_404() {
         panic!("an unrouted upgrade was accepted");
     };
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.headers()["codewire-refusal"], "path_not_served");
+    assert_eq!(
+        body_of(response).await,
+        "Codewire: this path on api.openai.com isn't one Codewire forwards.\n"
+    );
     host.assert_untouched();
+}
+
+/// What the front door refuses itself reads the same as the bridge's
+/// refusals, naming the bound host, never the request's.
+#[tokio::test]
+async fn the_front_doors_own_refusals_are_readable() {
+    let host = Host::start().await;
+    let backend = host.backend(RouteTable::defaults());
+    for (refusal, status) in [
+        (FrontDoorRefusal::Malformed, StatusCode::BAD_REQUEST),
+        (FrontDoorRefusal::Forbidden, StatusCode::FORBIDDEN),
+        (
+            FrontDoorRefusal::Misdirected,
+            StatusCode::MISDIRECTED_REQUEST,
+        ),
+    ] {
+        let response = backend.refuse("api.anthropic.com", refusal);
+        assert_eq!(response.status(), status);
+        assert_eq!(
+            response.headers()["codewire-refusal"],
+            "request_not_forwarded"
+        );
+        assert_eq!(
+            body_of(response).await,
+            "Codewire: this request to api.anthropic.com isn't one Codewire forwards.\n"
+        );
+    }
+    let response = backend.refuse("api.anthropic.com", FrontDoorRefusal::NotSwitched);
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(response.headers()["codewire-refusal"], "upstream_failed");
 }
 
 // ---------------------------------------------------------------------------

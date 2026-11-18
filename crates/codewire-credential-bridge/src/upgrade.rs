@@ -21,6 +21,7 @@ use axum::body::Body;
 use axum::http::header::{CONNECTION, HOST, UPGRADE};
 use axum::http::{HeaderMap, Method, Request, Response, StatusCode};
 use bytes::Bytes;
+use codewire_access::{Refusal, RefusalProvider, Unforwarded};
 use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_CAPABILITY_WEBSOCKET, CREDENTIAL_BRIDGE_MAX_IN_FLIGHT,
     CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES, CREDENTIAL_BRIDGE_STREAM_WINDOW_BYTES,
@@ -37,8 +38,8 @@ use super::upgraded_stream::{
 use super::{
     BridgeBodyStream, BridgeFailure, BridgeState, CredentialBridge, FIRST_RESPONSE_TIMEOUT,
     GuestOutput, HOST_SEND_TIMEOUT, PendingCancellation, PendingResponse, RESPONSE_BODY_BUFFER,
-    ResponsePhase, ResponseStart, classify_http_request, fixed_response, guest_message,
-    headers_from_proto, headers_to_proto, invalid_host_frame, require_live_epoch, take_registered,
+    ResponsePhase, ResponseStart, classify_http_request, guest_message, headers_from_proto,
+    headers_to_proto, invalid_host_frame, refusal_response, require_live_epoch, take_registered,
     v1,
 };
 
@@ -179,10 +180,14 @@ impl CredentialBridge {
     /// intercepted for `host`. This bridge refuses it itself when the
     /// epoch's host does not carry WebSockets or a limit is reached.
     pub async fn upgrade_intercepted(&self, host: &str, request: Request<()>) -> UpgradeAnswer {
+        let refused = |refusal, provider| {
+            UpgradeAnswer::Refused(refusal_response(refusal, provider, Some(host)))
+        };
         let frame = match upgrade_frame(host, &request) {
             Ok(frame) => frame,
-            Err(status) => return UpgradeAnswer::Refused(fixed_response(status)),
+            Err(refusal) => return refused(refusal, None),
         };
+        let provider = RefusalProvider::for_slot(&frame.capability_slot);
         let request_id = frame.request_id.clone();
         let (start_tx, start_rx) = oneshot::channel();
         let (switched_tx, switched_rx) = oneshot::channel();
@@ -192,7 +197,7 @@ impl CredentialBridge {
             let mut state = self.inner.lock().await;
             let admitted = match admit_handshake(&state) {
                 Ok(admitted) => admitted,
-                Err(refusal) => return UpgradeAnswer::Refused(refusal.response()),
+                Err(refusal) => return refused(refusal, provider),
             };
             state.pending.insert(
                 request_id.clone(),
@@ -220,7 +225,7 @@ impl CredentialBridge {
         ) {
             self.detach(epoch).await;
             cancellation.disarm();
-            return UpgradeAnswer::Refused(fixed_response(StatusCode::SERVICE_UNAVAILABLE));
+            return refused(Refusal::CredentialUnavailable, provider);
         }
         let answer = tokio::time::timeout(FIRST_RESPONSE_TIMEOUT, async {
             let mut switched_rx = switched_rx;
@@ -254,13 +259,11 @@ impl CredentialBridge {
                 *refused.headers_mut() = start.headers;
                 UpgradeAnswer::Refused(refused)
             }
-            Ok(Answer::Started(Ok(Err(failure)))) => {
-                UpgradeAnswer::Refused(fixed_response(failure.status()))
-            }
+            Ok(Answer::Started(Ok(Err(failure)))) => refused(failure.refusal(), provider),
             Ok(Answer::Started(Err(_))) | Err(_) => {
                 self.cancel(&request_id, epoch).await;
                 cancellation.disarm();
-                UpgradeAnswer::Refused(fixed_response(StatusCode::SERVICE_UNAVAILABLE))
+                refused(Refusal::CredentialUnavailable, provider)
             }
         }
     }
@@ -392,52 +395,19 @@ impl CredentialBridge {
     }
 }
 
-/// Why a handshake was refused before it reached the host. Each reason
-/// answers with its own text, which the front door logs with the status.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Refusal {
-    NoEpoch,
-    NotOffered,
-    RequestsInFlight,
-    OpenSockets,
-}
-
-impl Refusal {
-    fn response(self) -> Response<Body> {
-        let (status, reason) = match self {
-            Self::NoEpoch => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "credential route unavailable",
-            ),
-            Self::NotOffered => (
-                StatusCode::FORBIDDEN,
-                "credential route does not carry WebSockets",
-            ),
-            Self::RequestsInFlight => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "credential bridge has too many requests in flight",
-            ),
-            Self::OpenSockets => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "credential bridge has too many open WebSockets",
-            ),
-        };
-        let mut response = Response::new(Body::from(format!("{reason}\n")));
-        *response.status_mut() = status;
-        response
-    }
-}
-
 /// The active epoch and its output, when it can take one more handshake:
 /// its host carries WebSockets, a request slot is free, and a socket would
 /// be free once this one is accepted.
 fn admit_handshake(state: &BridgeState) -> Result<(u64, GuestOutput), Refusal> {
-    let active = state.active.as_ref().ok_or(Refusal::NoEpoch)?;
+    let active = state
+        .active
+        .as_ref()
+        .ok_or(Refusal::CredentialUnavailable)?;
     if !active.websockets {
-        return Err(Refusal::NotOffered);
+        return Err(Refusal::WebsocketNotServed);
     }
     if state.in_flight() >= CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
-        return Err(Refusal::RequestsInFlight);
+        return Err(Refusal::Busy);
     }
     let handshakes = state
         .pending
@@ -445,7 +415,7 @@ fn admit_handshake(state: &BridgeState) -> Result<(u64, GuestOutput), Refusal> {
         .filter(|pending| pending.switched.is_some())
         .count();
     if state.sockets.open.len() + handshakes >= MAX_OPEN_SOCKETS {
-        return Err(Refusal::OpenSockets);
+        return Err(Refusal::Busy);
     }
     Ok((active.epoch, active.output.clone()))
 }
@@ -456,13 +426,13 @@ fn admit_handshake(state: &BridgeState) -> Result<(u64, GuestOutput), Refusal> {
 fn upgrade_frame(
     host: &str,
     request: &Request<()>,
-) -> Result<v1::CredentialBridgeUpgrade, StatusCode> {
+) -> Result<v1::CredentialBridgeUpgrade, Refusal> {
     let headers = request.headers();
     let websocket = headers
         .get(UPGRADE)
         .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"websocket"));
     if request.method() != Method::GET || !websocket {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(Refusal::RequestNotForwarded(Unforwarded::Refused));
     }
     let mut plain = headers.clone();
     plain.remove(UPGRADE);
@@ -483,7 +453,8 @@ fn upgrade_frame(
         method: Method::GET.as_str().to_owned(),
         path: classified.path.to_owned(),
         query: classified.query.unwrap_or_default().to_owned(),
-        headers: headers_to_proto(&sent).map_err(|()| StatusCode::BAD_REQUEST)?,
+        headers: headers_to_proto(&sent)
+            .map_err(|()| Refusal::RequestNotForwarded(Unforwarded::Malformed))?,
         capability_slot: classified.capability_slot.to_owned(),
         route: classified.route.to_owned(),
         intercepted_host: host.to_owned(),

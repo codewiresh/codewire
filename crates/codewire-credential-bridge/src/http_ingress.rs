@@ -9,7 +9,8 @@
 use std::collections::BTreeSet;
 use std::net::Ipv6Addr;
 
-use axum::http::{HeaderMap, Method, StatusCode, Uri, header::HOST, uri::Authority};
+use axum::http::{HeaderMap, Method, Uri, header::HOST, uri::Authority};
+use codewire_access::{Refusal, Unforwarded};
 
 pub use codewire_access::{
     MANAGED_ANTHROPIC_API_PREFIX, MANAGED_ANTHROPIC_OAUTH_PREFIX, MANAGED_GITHUB_GIT_PREFIX,
@@ -44,8 +45,8 @@ pub fn classify_http_request<'a>(
     method: &Method,
     uri: &'a Uri,
     headers: &HeaderMap,
-) -> Result<ClassifiedHttpRequest<'a>, StatusCode> {
-    let denied = StatusCode::FORBIDDEN;
+) -> Result<ClassifiedHttpRequest<'a>, Refusal> {
+    let denied = Refusal::RequestNotForwarded(Unforwarded::Refused);
     if uri.scheme().is_some() || uri.authority().is_some() {
         return Err(denied);
     }
@@ -175,11 +176,11 @@ pub fn classify_intercepted_request<'a>(
     method: &Method,
     uri: &'a Uri,
     headers: &HeaderMap,
-) -> Result<ClassifiedHttpRequest<'a>, StatusCode> {
+) -> Result<ClassifiedHttpRequest<'a>, Refusal> {
     let Some((capability_slot, route)) = intercepted_host_route(host) else {
         return classify_http_request(method, uri, headers);
     };
-    let denied = StatusCode::FORBIDDEN;
+    let denied = Refusal::RequestNotForwarded(Unforwarded::Refused);
     let path = uri.path();
     let query = uri.query();
     if uri.scheme().is_some()
@@ -208,8 +209,8 @@ pub fn classify_intercepted_request<'a>(
     })
 }
 
-fn validate_host(headers: &HeaderMap) -> Result<Option<&str>, StatusCode> {
-    let denied = StatusCode::FORBIDDEN;
+fn validate_host(headers: &HeaderMap) -> Result<Option<&str>, Refusal> {
+    let denied = Refusal::RequestNotForwarded(Unforwarded::Refused);
     let mut hosts = headers.get_all(HOST).iter();
     let Some(value) = hosts.next() else {
         return Ok(None);
@@ -330,11 +331,11 @@ fn github_api_family(method: &Method, parts: &[&str], query: Option<&str>) -> bo
     }
 }
 
-fn validate_query(query: Option<&str>) -> Result<(), StatusCode> {
+fn validate_query(query: Option<&str>) -> Result<(), Refusal> {
     let Some(query) = query else {
         return Ok(());
     };
-    let denied = StatusCode::FORBIDDEN;
+    let denied = Refusal::RequestNotForwarded(Unforwarded::Refused);
     if query.is_empty() || query.len() > MAX_QUERY_BYTES {
         return Err(denied);
     }

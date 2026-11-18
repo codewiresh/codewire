@@ -27,7 +27,8 @@ use crate::hello::{self, Hello};
 use crate::serve::{Route, route};
 use crate::{
     Accepted, Backend, BoxError, CaError, EnvironmentCa, FrontDoor, FrontDoorConfig,
-    FrontDoorError, HandBackReason, MAX_CLIENT_HELLO_BYTES, ResponseBody, Served, UpgradeOutcome,
+    FrontDoorError, FrontDoorRefusal, HandBackReason, MAX_CLIENT_HELLO_BYTES, ResponseBody, Served,
+    UpgradeOutcome,
 };
 
 const BOUND: &str = "api.example.com";
@@ -752,7 +753,7 @@ fn requests_are_routed_before_the_back_end() {
             .header(UPGRADE, "WebSocket")
     };
     let h2 = |uri: &str| Request::get(uri).version(Version::HTTP_2);
-    let cases: Vec<(http::request::Builder, Result<Route, StatusCode>)> = vec![
+    let cases: Vec<(http::request::Builder, Result<Route, FrontDoorRefusal>)> = vec![
         (h1("/x?y=1"), Ok(Route::Ordinary)),
         (
             Request::get("/x").header(HOST, "API.Example.com:443"),
@@ -760,55 +761,58 @@ fn requests_are_routed_before_the_back_end() {
         ),
         (
             Request::get("/x").header(HOST, format!("{BOUND}.")),
-            Err(StatusCode::MISDIRECTED_REQUEST),
+            Err(FrontDoorRefusal::Misdirected),
         ),
         (
             h1("/x").header(HOST, BOUND),
-            Err(StatusCode::MISDIRECTED_REQUEST),
+            Err(FrontDoorRefusal::Misdirected),
         ),
         (
             Request::get("/x").header(HOST, format!("user@{BOUND}")),
-            Err(StatusCode::MISDIRECTED_REQUEST),
+            Err(FrontDoorRefusal::Misdirected),
         ),
         (
             h1("https://api.example.com/x"),
-            Err(StatusCode::BAD_REQUEST),
+            Err(FrontDoorRefusal::Malformed),
         ),
         (
             Request::connect(format!("{BOUND}:443")).header(HOST, BOUND),
-            Err(StatusCode::FORBIDDEN),
+            Err(FrontDoorRefusal::Forbidden),
         ),
         (websocket(), Ok(Route::WebSocket)),
         (
             websocket().version(Version::HTTP_10),
-            Err(StatusCode::FORBIDDEN),
+            Err(FrontDoorRefusal::Forbidden),
         ),
-        (websocket().method(Method::POST), Err(StatusCode::FORBIDDEN)),
+        (
+            websocket().method(Method::POST),
+            Err(FrontDoorRefusal::Forbidden),
+        ),
         (
             websocket().header("content-length", "5"),
-            Err(StatusCode::FORBIDDEN),
+            Err(FrontDoorRefusal::Forbidden),
         ),
         (
             websocket().header("transfer-encoding", "chunked"),
-            Err(StatusCode::FORBIDDEN),
+            Err(FrontDoorRefusal::Forbidden),
         ),
         (
             h1("/").header(CONNECTION, "upgrade").header(UPGRADE, "h2c"),
-            Err(StatusCode::FORBIDDEN),
+            Err(FrontDoorRefusal::Forbidden),
         ),
         (
             h1("/")
                 .header(CONNECTION, "upgrade")
                 .header(UPGRADE, "websocket, h2c"),
-            Err(StatusCode::FORBIDDEN),
+            Err(FrontDoorRefusal::Forbidden),
         ),
         (
             websocket().header(UPGRADE, "websocket"),
-            Err(StatusCode::FORBIDDEN),
+            Err(FrontDoorRefusal::Forbidden),
         ),
         (
             h1("/").header(UPGRADE, "websocket"),
-            Err(StatusCode::FORBIDDEN),
+            Err(FrontDoorRefusal::Forbidden),
         ),
         (h2("https://api.example.com/x?y=1"), Ok(Route::Ordinary)),
         (
@@ -818,18 +822,21 @@ fn requests_are_routed_before_the_back_end() {
         (h2("/x").header(HOST, BOUND), Ok(Route::Ordinary)),
         (
             h2("https://other.example.com/x"),
-            Err(StatusCode::MISDIRECTED_REQUEST),
+            Err(FrontDoorRefusal::Misdirected),
         ),
         (
             h2("https://api.example.com/x").header(HOST, OTHER),
-            Err(StatusCode::BAD_REQUEST),
+            Err(FrontDoorRefusal::Malformed),
         ),
-        (h2("http://api.example.com/x"), Err(StatusCode::BAD_REQUEST)),
+        (
+            h2("http://api.example.com/x"),
+            Err(FrontDoorRefusal::Malformed),
+        ),
         (
             h2("https://api.example.com/x")
                 .header(CONNECTION, "upgrade")
                 .header(UPGRADE, "websocket"),
-            Err(StatusCode::FORBIDDEN),
+            Err(FrontDoorRefusal::Forbidden),
         ),
     ];
     for (builder, expected) in cases {
@@ -854,12 +861,12 @@ fn an_authority_may_name_the_port_clients_connect_to() {
     for (authority, port, expected) in [
         (BOUND.to_owned(), 8443, Ok(Route::Ordinary)),
         (bound_on(8443), 8443, Ok(Route::Ordinary)),
-        (bound_on(443), 8443, Err(StatusCode::MISDIRECTED_REQUEST)),
-        (bound_on(8443), 443, Err(StatusCode::MISDIRECTED_REQUEST)),
+        (bound_on(443), 8443, Err(FrontDoorRefusal::Misdirected)),
+        (bound_on(8443), 443, Err(FrontDoorRefusal::Misdirected)),
         (
             format!("{OTHER}:8443"),
             8443,
-            Err(StatusCode::MISDIRECTED_REQUEST),
+            Err(FrontDoorRefusal::Misdirected),
         ),
     ] {
         let mut request = Request::get("/x")

@@ -52,9 +52,39 @@ enum CredentialBridgeFailureReason {
   CREDENTIAL_BRIDGE_FAILURE_REASON_RESPONSE_TOO_LARGE = 4;
 }
 
+// Why Codewire refused a request, one of the answered refusals that
+// docs/dev/SECRETS-AND-CREDENTIALS.md "Refusals an agent or a person can
+// read" lists. The guest renders the body and `Codewire-Refusal` header from
+// this alone, so nothing else about the refusal crosses the bridge.
+// UNSPECIFIED is an older broker's failure with no reason: the guest answers
+// it from the failure reason, a DENIED one as 403 `denied`. A value the guest
+// doesn't know, from a newer broker, reads as UNAVAILABLE.
+enum CredentialBridgeRefusal {
+  CREDENTIAL_BRIDGE_REFUSAL_UNSPECIFIED = 0;
+  CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_REVOKED = 1;
+  CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_EXPIRED = 2;
+  CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_NEEDS_RECONNECT = 3;
+  CREDENTIAL_BRIDGE_REFUSAL_NO_CREDENTIAL_SELECTED = 4;
+  CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_UNAVAILABLE = 5;
+  CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_CONFLICT = 6;
+  CREDENTIAL_BRIDGE_REFUSAL_PATH_NOT_SERVED = 7;
+  CREDENTIAL_BRIDGE_REFUSAL_WEBSOCKET_NOT_SERVED = 8;
+  CREDENTIAL_BRIDGE_REFUSAL_ROUTE_NOT_SERVED = 9;
+  // Answered with 403.
+  CREDENTIAL_BRIDGE_REFUSAL_REQUEST_NOT_FORWARDED = 10;
+  CREDENTIAL_BRIDGE_REFUSAL_BODY_TOO_LARGE = 11;
+  CREDENTIAL_BRIDGE_REFUSAL_BUSY = 12;
+  // Answered with 502.
+  CREDENTIAL_BRIDGE_REFUSAL_UPSTREAM_FAILED = 13;
+  CREDENTIAL_BRIDGE_REFUSAL_NAME_NOT_ALLOWED = 14;
+  CREDENTIAL_BRIDGE_REFUSAL_UNAVAILABLE = 15;
+}
+
 message CredentialBridgeResponseFailure {
   string request_id = 1;
   CredentialBridgeFailureReason reason = 2;
+  // Set by a broker that knows why; an older guest ignores it.
+  CredentialBridgeRefusal refusal = 3;
 }
 
 // Frames for a front-door session: a TLS front door outside the environment

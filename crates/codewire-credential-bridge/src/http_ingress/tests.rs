@@ -238,7 +238,7 @@ fn wrong_provider_hosts_routes_and_methods_are_denied() {
         let request = request(method, uri, host);
         assert_eq!(
             classify_http_request(request.method(), request.uri(), request.headers()),
-            Err(StatusCode::FORBIDDEN),
+            Err(Refusal::RequestNotForwarded(Unforwarded::Refused)),
             "{method} {uri} {host:?}",
         );
     }
@@ -906,7 +906,7 @@ fn an_intercepted_github_host_selects_its_route_on_any_path() {
                     request.uri(),
                     request.headers()
                 ),
-                Err(StatusCode::FORBIDDEN),
+                Err(Refusal::RequestNotForwarded(Unforwarded::Refused)),
                 "{host} {method} {uri}"
             );
         }
@@ -920,7 +920,7 @@ fn an_intercepted_github_host_selects_its_route_on_any_path() {
         *upgrade.uri_mut() = "/user".parse().unwrap();
         assert_eq!(
             classify_intercepted_request(host, upgrade.method(), upgrade.uri(), upgrade.headers()),
-            Err(StatusCode::FORBIDDEN),
+            Err(Refusal::RequestNotForwarded(Unforwarded::Refused)),
             "{host}: an upgrade is refused"
         );
     }
@@ -968,6 +968,6 @@ fn only_githubs_hosts_select_a_route_by_themselves() {
     let loopback = request("GET", "/rate_limit", Some("api.github.com"));
     assert_eq!(
         classify_http_request(loopback.method(), loopback.uri(), loopback.headers()),
-        Err(StatusCode::FORBIDDEN)
+        Err(Refusal::RequestNotForwarded(Unforwarded::Refused))
     );
 }

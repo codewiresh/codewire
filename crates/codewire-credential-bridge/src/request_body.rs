@@ -14,7 +14,8 @@ use std::future::Future;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{Method, StatusCode};
+use axum::http::Method;
+use codewire_access::{Refusal, Unforwarded, UpstreamFailure};
 use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_BODY_IDLE_TIMEOUT, CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
     CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES, CREDENTIAL_BRIDGE_REQUEST_BODY_WINDOW_FRAMES,
@@ -102,12 +103,12 @@ pub(super) enum UploadFailure {
 }
 
 impl UploadFailure {
-    pub(super) fn status(self) -> StatusCode {
+    pub(super) fn refusal(self) -> Refusal {
         match self {
-            Self::ClientStalled => StatusCode::REQUEST_TIMEOUT,
-            Self::ClientFailed => StatusCode::BAD_REQUEST,
-            Self::HostStalled => StatusCode::GATEWAY_TIMEOUT,
-            Self::HostLost => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ClientStalled => Refusal::RequestNotForwarded(Unforwarded::ClientStalled),
+            Self::ClientFailed => Refusal::RequestNotForwarded(Unforwarded::Malformed),
+            Self::HostStalled => Refusal::UpstreamFailed(UpstreamFailure::TimedOut),
+            Self::HostLost => Refusal::CredentialUnavailable,
         }
     }
 }

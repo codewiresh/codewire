@@ -98,6 +98,36 @@ pub trait Backend: Send + Sync + 'static {
         host: &str,
         request: Request<()>,
     ) -> impl Future<Output = UpgradeOutcome> + Send;
+
+    /// The answer when the front door refuses a request for `host` itself.
+    /// By default, the refusal's status with an empty body.
+    fn refuse(&self, _host: &str, refusal: FrontDoorRefusal) -> Response<ResponseBody> {
+        serve::empty(refusal.status())
+    }
+}
+
+/// Why the front door answered a request itself instead of the back end.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrontDoorRefusal {
+    /// 400: a target or authority it can't read as one request.
+    Malformed,
+    /// 403: CONNECT, or an upgrade other than a WebSocket.
+    Forbidden,
+    /// 421: an authority that isn't this connection's host.
+    Misdirected,
+    /// 502: the back end accepted a WebSocket without switching protocols.
+    NotSwitched,
+}
+
+impl FrontDoorRefusal {
+    pub const fn status(self) -> http::StatusCode {
+        match self {
+            Self::Malformed => http::StatusCode::BAD_REQUEST,
+            Self::Forbidden => http::StatusCode::FORBIDDEN,
+            Self::Misdirected => http::StatusCode::MISDIRECTED_REQUEST,
+            Self::NotSwitched => http::StatusCode::BAD_GATEWAY,
+        }
+    }
 }
 
 /// Limits a caller may choose per front door, and the port clients reach it

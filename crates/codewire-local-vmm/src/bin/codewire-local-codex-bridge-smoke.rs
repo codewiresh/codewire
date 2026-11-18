@@ -692,7 +692,8 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
             let (unavailable, egress) = authority_loss_output(output)?;
             require(
                 unavailable.status == 503
-                    && unavailable.body == "credential route unavailable\n"
+                    && unavailable.body
+                        == "Codewire: the credential can't be used right now; try again.\n"
                     && !unavailable.body.contains(GUEST_CALLER_BEARER),
             )?;
             stage("managed-general-egress-independent");
@@ -4014,7 +4015,7 @@ const stdinHandlers=new Map();const responseHandlers=new Map();let timer;let sec
 let httpCount=0;let tlsCount=0;let stdout='';let exitCode=null;let destroyed=false;let cleared=false;let httpOptions;let tlsOptions;let requestBody;
 const stopped=Symbol('fixture exit');
 const response={statusCode:503,headers:{},on:(name,callback)=>{responseHandlers.set(name,callback);return response;}};
-const request={setTimeout:(duration)=>{if(duration!==10000)throw new Error('timeout changed');return request;},on:()=>request,end:(body)=>{requestBody=JSON.parse(body);responseHandlers.get('data')(Buffer.from('credential route unavailable\n'));responseHandlers.get('end')();}};
+const request={setTimeout:(duration)=>{if(duration!==10000)throw new Error('timeout changed');return request;},on:()=>request,end:(body)=>{requestBody=JSON.parse(body);responseHandlers.get('data')(Buffer.from('Codewire: the credential can\'t be used right now; try again.\n'));responseHandlers.get('end')();}};
 const socket={on:()=>socket,setTimeout:(duration)=>{if(duration!==10000)throw new Error('TLS timeout changed');return socket;},end:()=>{},destroy:()=>{throw new Error('unexpected TLS failure');}};
 vm.runInNewContext(process.argv[1],{Buffer,
 setTimeout:(callback,duration)=>{if(duration!==90000)throw new Error('READY timeout changed');timer=callback;return 1;},clearTimeout:()=>{cleared=true;},
@@ -4098,7 +4099,10 @@ process.stdout.write(JSON.stringify({before,http:httpCount,tls:tlsCount,stdout,e
             })
             .unwrap();
             assert_eq!(route.status, 503);
-            assert_eq!(route.body, "credential route unavailable\n");
+            assert_eq!(
+                route.body,
+                "Codewire: the credential can't be used right now; try again.\n"
+            );
             require_general_egress_output(egress).unwrap();
         }
 
@@ -4255,7 +4259,7 @@ process.stdout.write(JSON.stringify({before,http:httpCount,tls:tlsCount,stdout,e
 
         #[test]
         fn authority_loss_output_preserves_all_general_egress_failure_assertions() {
-            let route = b"{\"status\":503,\"request_id\":null,\"body\":\"credential route unavailable\\n\"}\n";
+            let route = b"{\"status\":503,\"request_id\":null,\"body\":\"Codewire: the credential can't be used right now; try again.\\n\"}\n";
             for (exit_code, stdout, stderr, valid) in [
                 (0, GENERAL_EGRESS_MARKER.to_vec(), vec![], true),
                 (75, GENERAL_EGRESS_MARKER.to_vec(), vec![], false),

@@ -300,7 +300,7 @@ async fn an_older_host_gets_whole_bodies_with_the_old_limits() {
         .post(PUSH, pack(CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES + 1))
         .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-    assert!(text.starts_with(b"request body exceeds the credential bridge's 4 MiB limit"));
+    assert!(text.starts_with(b"Codewire: this request's body is over the 4 MiB"));
     assert_eq!(fixture.provider.bodies.lock().unwrap().len(), 1);
 }
 

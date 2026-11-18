@@ -19,7 +19,8 @@ use tokio_util::task::TaskTracker;
 
 use crate::splice::splice;
 use crate::{
-    Backend, HEADER_READ_TIMEOUT, MAX_CONCURRENT_STREAMS, MAX_HEADER_BYTES, ResponseBody, Served,
+    Backend, FrontDoorRefusal, HEADER_READ_TIMEOUT, MAX_CONCURRENT_STREAMS, MAX_HEADER_BYTES,
+    ResponseBody, Served,
 };
 
 /// One TLS connection's state, shared by its requests.
@@ -121,13 +122,13 @@ impl<B: Backend> Connection<B> {
         self.requests.fetch_add(1, Ordering::Relaxed);
         let route = match route(&mut request, &self.host, self.port) {
             Ok(route) => route,
-            Err(status) => {
+            Err(refusal) => {
                 tracing::debug!(
                     host = self.host,
                     outcome = "refused",
-                    status = status.as_u16()
+                    status = refusal.status().as_u16()
                 );
-                return empty(status);
+                return self.backend.refuse(&self.host, refusal);
             }
         };
         match route {
@@ -149,7 +150,9 @@ impl<B: Backend> Connection<B> {
         };
         if response.status() != StatusCode::SWITCHING_PROTOCOLS {
             tracing::debug!(host = self.host, outcome = "upgrade_not_switching");
-            return empty(StatusCode::BAD_GATEWAY);
+            return self
+                .backend
+                .refuse(&self.host, FrontDoorRefusal::NotSwitched);
         }
         let (mut parts, ()) = response.into_parts();
         parts
@@ -189,9 +192,9 @@ pub(crate) fn route<T>(
     request: &mut Request<T>,
     host: &str,
     port: u16,
-) -> Result<Route, StatusCode> {
+) -> Result<Route, FrontDoorRefusal> {
     if request.method() == Method::CONNECT {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(FrontDoorRefusal::Forbidden);
     }
     let uri = request.uri();
     let Some(path) = uri
@@ -199,17 +202,17 @@ pub(crate) fn route<T>(
         .filter(|path| path.as_str().starts_with('/'))
         .cloned()
     else {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(FrontDoorRefusal::Malformed);
     };
     let authority = if request.version() == Version::HTTP_2 {
         // HTTP/2 carries :scheme and :authority in the URI. A Host header may
         // stand in for :authority, and must agree with it when both appear.
         if uri.scheme_str().is_some_and(|scheme| scheme != "https") {
-            return Err(StatusCode::BAD_REQUEST);
+            return Err(FrontDoorRefusal::Malformed);
         }
         match (uri.authority(), single(request.headers(), HOST)) {
             (Some(authority), Ok(Some(header))) if header != authority.as_str() => {
-                return Err(StatusCode::BAD_REQUEST);
+                return Err(FrontDoorRefusal::Malformed);
             }
             (Some(authority), Ok(_)) => Some(authority.as_str()),
             (None, Ok(header)) => header,
@@ -217,19 +220,19 @@ pub(crate) fn route<T>(
         }
     } else {
         if uri.scheme().is_some() || uri.authority().is_some() {
-            return Err(StatusCode::BAD_REQUEST);
+            return Err(FrontDoorRefusal::Malformed);
         }
         single(request.headers(), HOST).ok().flatten()
     };
     if !authority.is_some_and(|authority| names_host(authority, host, port)) {
-        return Err(StatusCode::MISDIRECTED_REQUEST);
+        return Err(FrontDoorRefusal::Misdirected);
     }
     let route = if !request.headers().contains_key(UPGRADE) {
         Route::Ordinary
     } else if is_websocket(request) {
         Route::WebSocket
     } else {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(FrontDoorRefusal::Forbidden);
     };
     *request.uri_mut() = Uri::from(path);
     Ok(route)
@@ -280,7 +283,7 @@ fn single(headers: &HeaderMap, name: http::header::HeaderName) -> Result<Option<
     value.to_str().map(Some).map_err(|_| ())
 }
 
-fn empty(status: StatusCode) -> Response<ResponseBody> {
+pub(crate) fn empty(status: StatusCode) -> Response<ResponseBody> {
     let mut response = Response::new(empty_body());
     *response.status_mut() = status;
     response

@@ -13,6 +13,7 @@ mod managed_refresh;
 mod model;
 mod placeholder;
 mod projection;
+mod refusal;
 
 pub use catalog::{
     CLAUDE_LOGIN_OPERATION, CLAUDE_LOGIN_ROUTE, CODEX_LOGIN_OPERATION, CODEX_LOGIN_ROUTE,
@@ -54,6 +55,7 @@ pub use projection::{
     NO_PROXY_NAMES, ProjectionError, SSH_NATIVE_AUTH_SOCK, SSH_PLATFORM_AUTH_SOCK,
     github_known_hosts_additions,
 };
+pub use refusal::{REFUSAL_HEADER, Refusal, RefusalProvider, Unforwarded, UpstreamFailure};
 
 use thiserror::Error;
 

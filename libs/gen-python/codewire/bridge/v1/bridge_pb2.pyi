@@ -15,6 +15,25 @@ class CredentialBridgeFailureReason(int, metaclass=_enum_type_wrapper.EnumTypeWr
     CREDENTIAL_BRIDGE_FAILURE_REASON_UPSTREAM_FAILED: _ClassVar[CredentialBridgeFailureReason]
     CREDENTIAL_BRIDGE_FAILURE_REASON_RESPONSE_TOO_LARGE: _ClassVar[CredentialBridgeFailureReason]
 
+class CredentialBridgeRefusal(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    CREDENTIAL_BRIDGE_REFUSAL_UNSPECIFIED: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_REVOKED: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_EXPIRED: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_NEEDS_RECONNECT: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_NO_CREDENTIAL_SELECTED: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_UNAVAILABLE: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_CONFLICT: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_PATH_NOT_SERVED: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_WEBSOCKET_NOT_SERVED: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_ROUTE_NOT_SERVED: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_REQUEST_NOT_FORWARDED: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_BODY_TOO_LARGE: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_BUSY: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_UPSTREAM_FAILED: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_NAME_NOT_ALLOWED: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_UNAVAILABLE: _ClassVar[CredentialBridgeRefusal]
+
 class CredentialBridgeStreamCloseKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_UNSPECIFIED: _ClassVar[CredentialBridgeStreamCloseKind]
@@ -32,6 +51,22 @@ CREDENTIAL_BRIDGE_FAILURE_REASON_DENIED: CredentialBridgeFailureReason
 CREDENTIAL_BRIDGE_FAILURE_REASON_UNAVAILABLE: CredentialBridgeFailureReason
 CREDENTIAL_BRIDGE_FAILURE_REASON_UPSTREAM_FAILED: CredentialBridgeFailureReason
 CREDENTIAL_BRIDGE_FAILURE_REASON_RESPONSE_TOO_LARGE: CredentialBridgeFailureReason
+CREDENTIAL_BRIDGE_REFUSAL_UNSPECIFIED: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_REVOKED: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_EXPIRED: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_NEEDS_RECONNECT: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_NO_CREDENTIAL_SELECTED: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_UNAVAILABLE: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_CREDENTIAL_CONFLICT: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_PATH_NOT_SERVED: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_WEBSOCKET_NOT_SERVED: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_ROUTE_NOT_SERVED: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_REQUEST_NOT_FORWARDED: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_BODY_TOO_LARGE: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_BUSY: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_UPSTREAM_FAILED: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_NAME_NOT_ALLOWED: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_UNAVAILABLE: CredentialBridgeRefusal
 CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_UNSPECIFIED: CredentialBridgeStreamCloseKind
 CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_HALF_CLOSE: CredentialBridgeStreamCloseKind
 CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_RESET: CredentialBridgeStreamCloseKind
@@ -85,12 +120,14 @@ class CredentialBridgeResponseEnd(_message.Message):
     def __init__(self, request_id: _Optional[str] = ...) -> None: ...
 
 class CredentialBridgeResponseFailure(_message.Message):
-    __slots__ = ("request_id", "reason")
+    __slots__ = ("request_id", "reason", "refusal")
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     REASON_FIELD_NUMBER: _ClassVar[int]
+    REFUSAL_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     reason: CredentialBridgeFailureReason
-    def __init__(self, request_id: _Optional[str] = ..., reason: _Optional[_Union[CredentialBridgeFailureReason, str]] = ...) -> None: ...
+    refusal: CredentialBridgeRefusal
+    def __init__(self, request_id: _Optional[str] = ..., reason: _Optional[_Union[CredentialBridgeFailureReason, str]] = ..., refusal: _Optional[_Union[CredentialBridgeRefusal, str]] = ...) -> None: ...
 
 class CredentialBridgeUpgradeAccepted(_message.Message):
     __slots__ = ("request_id", "headers")

@@ -24,6 +24,7 @@ use axum::http::Method;
 use axum::http::header::{CONNECTION, CONTENT_LENGTH, TRANSFER_ENCODING, UPGRADE};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use bytes::Bytes as WireBytes;
+use codewire_access::{Refusal, RefusalProvider, Unforwarded, UpstreamFailure};
 use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES, CREDENTIAL_BRIDGE_MAX_HEADER_BYTES,
@@ -54,6 +55,8 @@ pub use login::{LOGIN_REQUEST_LIFETIME, LoginFailure};
 use login::{LoginCapabilities, PendingLogin, fail_logins, take_logins};
 mod projection;
 pub use projection::RelayedEnvironmentProjection;
+mod refusal;
+pub use refusal::refusal_response;
 mod request_body;
 mod upgrade;
 pub use upgrade::{MAX_OPEN_SOCKETS, UpgradeAnswer, UpgradedSocket};
@@ -270,9 +273,10 @@ struct ResponseStart {
 
 #[derive(Clone, Copy)]
 enum BridgeFailure {
+    /// A managed HTTP request refused, by the host or by this bridge.
+    Refused(Refusal),
     Denied,
     Unavailable,
-    Upstream,
     TooLarge,
     /// A streamed body did not reach the host whole.
     Upload(request_body::UploadFailure),
@@ -449,21 +453,30 @@ impl CredentialBridge {
         intercepted_host: Option<&str>,
         request: Request<Body>,
     ) -> Response<Body> {
-        match self.prepare_guest_request(intercepted_host, request).await {
-            Ok((request, body)) => match self.submit(request, body).await {
-                Ok(response) => {
-                    let mut built = Response::builder().status(response.start.status);
-                    if let Some(headers) = built.headers_mut() {
-                        *headers = response.start.headers;
-                    }
-                    built
-                        .body(Body::from_stream(response.body))
-                        .unwrap_or_else(|_| fixed_response(StatusCode::BAD_GATEWAY))
+        let (request, body) = match self.prepare_guest_request(intercepted_host, request).await {
+            Ok(prepared) => prepared,
+            Err((refusal, provider)) => {
+                return refusal_response(refusal, provider, intercepted_host);
+            }
+        };
+        let provider = RefusalProvider::for_slot(&request.capability_slot);
+        match self.submit(request, body).await {
+            Ok(response) => {
+                let mut built = Response::builder().status(response.start.status);
+                if let Some(headers) = built.headers_mut() {
+                    *headers = response.start.headers;
                 }
-                Err(error) => fixed_response(error.status()),
-            },
-            Err(BodyRefusal::Status(status)) => fixed_response(status),
-            Err(BodyRefusal::TooLarge) => too_large_response(),
+                built
+                    .body(Body::from_stream(response.body))
+                    .unwrap_or_else(|_| {
+                        refusal_response(
+                            Refusal::UpstreamFailed(UpstreamFailure::Failed),
+                            provider,
+                            intercepted_host,
+                        )
+                    })
+            }
+            Err(failure) => refusal_response(failure.refusal(), provider, intercepted_host),
         }
     }
 
@@ -572,19 +585,8 @@ impl CredentialBridge {
                 Ok(())
             }
             Some(Payload::ResponseFailure(response)) => {
-                let reason = match v1::CredentialBridgeFailureReason::try_from(response.reason) {
-                    Ok(v1::CredentialBridgeFailureReason::Denied) => BridgeFailure::Denied,
-                    Ok(v1::CredentialBridgeFailureReason::Unavailable) => {
-                        BridgeFailure::Unavailable
-                    }
-                    Ok(v1::CredentialBridgeFailureReason::UpstreamFailed) => {
-                        BridgeFailure::Upstream
-                    }
-                    Ok(v1::CredentialBridgeFailureReason::ResponseTooLarge) => {
-                        BridgeFailure::TooLarge
-                    }
-                    _ => return Err(invalid_host_frame()),
-                };
+                let refusal = refusal::from_failure(response.reason, response.refusal)
+                    .ok_or_else(invalid_host_frame)?;
                 let pending = {
                     let mut state = self.inner.lock().await;
                     require_live_epoch(&state, epoch)?;
@@ -592,7 +594,7 @@ impl CredentialBridge {
                         pending.epoch == epoch
                     })?
                 };
-                fail_pending(vec![pending], reason);
+                fail_pending(vec![pending], BridgeFailure::Refused(refusal));
                 Ok(())
             }
             Some(Payload::EnvironmentProjection(response)) => {
@@ -663,7 +665,7 @@ impl CredentialBridge {
                 return Err(BridgeFailure::Unavailable);
             }
             if state.in_flight() >= CREDENTIAL_BRIDGE_MAX_IN_FLIGHT {
-                return Err(BridgeFailure::Unavailable);
+                return Err(BridgeFailure::Refused(Refusal::Busy));
             }
             if state.contains_request(&request_id) {
                 return Err(BridgeFailure::Unavailable);
@@ -788,12 +790,14 @@ impl CredentialBridge {
     }
 
     /// The request frame and, when it streams, the body to stream. Only the
-    /// headers are read here; a whole body is collected up to 4 MiB.
+    /// headers are read here; a whole body is collected up to 4 MiB. A
+    /// refusal names the provider once the request's route is known.
     async fn prepare_guest_request(
         &self,
         intercepted_host: Option<&str>,
         request: Request<Body>,
-    ) -> Result<(v1::CredentialBridgeRequest, Option<Body>), BodyRefusal> {
+    ) -> Result<(v1::CredentialBridgeRequest, Option<Body>), (Refusal, Option<RefusalProvider>)>
+    {
         let classified = match intercepted_host {
             Some(host) => classify_intercepted_request(
                 host,
@@ -802,7 +806,9 @@ impl CredentialBridge {
                 request.headers(),
             ),
             None => classify_http_request(request.method(), request.uri(), request.headers()),
-        }?;
+        }
+        .map_err(|refusal| (refusal, None))?;
+        let provider = RefusalProvider::for_slot(classified.capability_slot);
         let streams = match intercepted_host.and_then(intercepted_host_route) {
             Some(_) => request_body::carries_body(request.method()),
             None => request_body::streamable(classified.route, request.method()),
@@ -814,7 +820,12 @@ impl CredentialBridge {
             method: request.method().as_str().to_owned(),
             path: classified.path.to_owned(),
             query: classified.query.unwrap_or_default().to_owned(),
-            headers: headers_to_proto(request.headers()).map_err(|_| StatusCode::BAD_REQUEST)?,
+            headers: headers_to_proto(request.headers()).map_err(|()| {
+                (
+                    Refusal::RequestNotForwarded(Unforwarded::Malformed),
+                    provider,
+                )
+            })?,
             body: Vec::new(),
             // Only a front-door session names the host it intercepted.
             intercepted_host: intercepted_host.unwrap_or_default().to_owned(),
@@ -825,7 +836,7 @@ impl CredentialBridge {
         }
         frame.body = to_bytes(request.into_body(), CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES)
             .await
-            .map_err(|_| BodyRefusal::TooLarge)?
+            .map_err(|_| (Refusal::BodyTooLarge, provider))?
             .to_vec();
         Ok((frame, None))
     }
@@ -1176,38 +1187,6 @@ fn prohibited_framing_header(name: &HeaderName) -> bool {
         || name.as_str() == "trailer"
 }
 
-fn fixed_response(status: StatusCode) -> Response<Body> {
-    Response::builder()
-        .status(status)
-        .header("content-type", "text/plain; charset=utf-8")
-        .body(Body::from("credential route unavailable\n"))
-        .expect("fixed credential response is valid")
-}
-
-/// Why a request was answered before it reached the host.
-enum BodyRefusal {
-    Status(StatusCode),
-    /// A whole body over 4 MiB, on an epoch whose host cannot stream it.
-    TooLarge,
-}
-
-impl From<StatusCode> for BodyRefusal {
-    fn from(status: StatusCode) -> Self {
-        Self::Status(status)
-    }
-}
-
-/// 413 that says why: Git prints this text with the status.
-fn too_large_response() -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::PAYLOAD_TOO_LARGE)
-        .header("content-type", "text/plain; charset=utf-8")
-        .body(Body::from(
-            "request body exceeds the credential bridge's 4 MiB limit: this host does not stream request bodies\n",
-        ))
-        .expect("fixed credential response is valid")
-}
-
 fn guest_message(
     payload: v1::credential_bridge_guest_message::Payload,
 ) -> v1::CredentialBridgeGuestMessage {
@@ -1299,13 +1278,16 @@ fn fail_pending(pending: Vec<PendingResponse>, failure: BridgeFailure) {
 }
 
 impl BridgeFailure {
-    fn status(self) -> StatusCode {
+    /// What a managed HTTP request answers for this failure: the status
+    /// each answered before refusals had reasons.
+    fn refusal(self) -> Refusal {
         match self {
-            Self::Denied => StatusCode::FORBIDDEN,
-            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Upstream | Self::TooLarge => StatusCode::BAD_GATEWAY,
-            Self::Upload(failure) => failure.status(),
-            Self::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+            Self::Refused(refusal) => refusal,
+            Self::Denied => Refusal::Denied,
+            Self::Unavailable => Refusal::CredentialUnavailable,
+            Self::TooLarge => Refusal::UpstreamFailed(UpstreamFailure::Failed),
+            Self::Upload(failure) => failure.refusal(),
+            Self::TimedOut => Refusal::UpstreamFailed(UpstreamFailure::TimedOut),
         }
     }
 }

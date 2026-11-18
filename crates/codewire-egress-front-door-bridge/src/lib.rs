@@ -33,18 +33,19 @@ use axum::body::Body;
 use bytes::Bytes;
 use codewire_access::{
     MANAGED_ANTHROPIC_API_PREFIX, MANAGED_ANTHROPIC_OAUTH_PREFIX, ManagedCredentialClient,
-    ManagedCredentialClients,
+    ManagedCredentialClients, Refusal, Unforwarded, UpstreamFailure,
 };
 use codewire_credential_bridge::{
     CredentialBridge, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX, UpgradeAnswer,
-    intercepted_host_route,
+    intercepted_host_route, refusal_response,
 };
-use codewire_egress_front_door::{Backend, BoxError, Incoming, ResponseBody, UpgradeOutcome};
+use codewire_egress_front_door::{
+    Backend, BoxError, FrontDoorRefusal, Incoming, ResponseBody, UpgradeOutcome,
+};
 use codewire_egress_policy::check::CheckDestination;
 use http::header::{HOST, HeaderName};
-use http::{HeaderMap, Request, Response, StatusCode, Uri};
+use http::{HeaderMap, Request, Response, Uri};
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Empty};
 use hyper::body::{Body as HttpBody, Frame, SizeHint};
 
 /// The most entries one route table holds; never more than a front door's
@@ -257,13 +258,14 @@ impl RouteTable {
     }
 
     /// The managed origin-form URI for a request to `host`, its query kept
-    /// byte for byte. `Err` is the status to answer with instead: `400` for
-    /// a path that decoding or resolution could change, `404` for a path no
-    /// route of `host` covers.
-    pub fn rewrite(&self, host: &str, uri: &Uri) -> Result<Uri, StatusCode> {
+    /// byte for byte. `Err` is the refusal to answer with instead: a path
+    /// that decoding or resolution could change isn't forwarded (400), and
+    /// one no route of `host` covers isn't served (404).
+    pub fn rewrite(&self, host: &str, uri: &Uri) -> Result<Uri, Refusal> {
+        let malformed = Refusal::RequestNotForwarded(Unforwarded::Malformed);
         let path = uri.path();
         if !plain_request_path(path) {
-            return Err(StatusCode::BAD_REQUEST);
+            return Err(malformed);
         }
         let (route, rest) = self
             .routes
@@ -271,7 +273,7 @@ impl RouteTable {
             .filter(|route| route.host == host)
             .filter_map(|route| below(path, &route.strip_prefix).map(|rest| (route, rest)))
             .max_by_key(|(route, _)| route.strip_prefix.len())
-            .ok_or(StatusCode::NOT_FOUND)?;
+            .ok_or(Refusal::PathNotServed)?;
         let mut rewritten = String::with_capacity(
             route.add_prefix.len() + rest.len() + uri.query().map_or(0, |query| query.len() + 1),
         );
@@ -281,7 +283,7 @@ impl RouteTable {
             rewritten.push('?');
             rewritten.push_str(query);
         }
-        Uri::try_from(rewritten).map_err(|_| StatusCode::BAD_REQUEST)
+        Uri::try_from(rewritten).map_err(|_| malformed)
     }
 }
 
@@ -311,7 +313,7 @@ impl CredentialRouteBackend {
     {
         let request = match self.routed(host, request) {
             Ok(request) => request,
-            Err(status) => return empty(status),
+            Err(refusal) => return refused(refusal, host),
         };
         boxed(
             self.bridge
@@ -320,18 +322,18 @@ impl CredentialRouteBackend {
         )
     }
 
-    /// `request` on its credential route, without Host, or the status to
+    /// `request` on its credential route, without Host, or the refusal to
     /// answer with instead. Requests and WebSocket upgrades take the same
     /// route.
-    fn routed<B>(&self, host: &str, request: Request<B>) -> Result<Request<B>, StatusCode> {
+    fn routed<B>(&self, host: &str, request: Request<B>) -> Result<Request<B>, Refusal> {
         let uri = self
             .routes
             .rewrite(host, request.uri())
-            .inspect_err(|status| {
+            .inspect_err(|refusal| {
                 tracing::debug!(
                     host,
                     outcome = "no_credential_route",
-                    status = status.as_u16()
+                    status = refusal.status()
                 );
             })?;
         let (mut parts, body) = request.into_parts();
@@ -353,7 +355,9 @@ impl Backend for CredentialRouteBackend {
 
     /// The bridge refuses unless its session's host carries WebSockets.
     async fn upgrade(&self, host: &str, request: Request<()>) -> UpgradeOutcome {
-        let request = self.routed(host, request).map_err(empty)?;
+        let request = self
+            .routed(host, request)
+            .map_err(|refusal| refused(refusal, host))?;
         match self.bridge.upgrade_intercepted(host, request).await {
             UpgradeAnswer::Switched { response, socket } => Ok((response, Box::new(socket))),
             UpgradeAnswer::Refused(refused) => {
@@ -365,6 +369,20 @@ impl Backend for CredentialRouteBackend {
                 Err(boxed(refused))
             }
         }
+    }
+
+    fn refuse(&self, host: &str, refusal: FrontDoorRefusal) -> Response<ResponseBody> {
+        refused(
+            match refusal {
+                FrontDoorRefusal::Malformed => Refusal::RequestNotForwarded(Unforwarded::Malformed),
+                FrontDoorRefusal::Forbidden => Refusal::RequestNotForwarded(Unforwarded::Refused),
+                FrontDoorRefusal::Misdirected => {
+                    Refusal::RequestNotForwarded(Unforwarded::Misdirected)
+                }
+                FrontDoorRefusal::NotSwitched => Refusal::UpstreamFailed(UpstreamFailure::Failed),
+            },
+            host,
+        )
     }
 }
 
@@ -433,10 +451,11 @@ fn without_host(headers: HeaderMap) -> HeaderMap {
     kept
 }
 
-fn empty(status: StatusCode) -> Response<ResponseBody> {
-    let mut response = Response::new(Empty::new().map_err(|never| match never {}).boxed());
-    *response.status_mut() = status;
-    response
+/// The front door's answer for a refusal on the bound `host`. Before the
+/// request reaches the bridge its provider isn't known, and no body here
+/// names one.
+fn refused(refusal: Refusal, host: &str) -> Response<ResponseBody> {
+    boxed(refusal_response(refusal, None, Some(host)))
 }
 
 /// The bridge's response body is `Send` but not `Sync`, which the front

@@ -365,6 +365,7 @@ async fn out_of_order_or_unknown_host_frames_fail_closed() {
                 v1::CredentialBridgeResponseFailure {
                     request_id: id.clone(),
                     reason: 0,
+                    refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
                 },
             )),
             7 => Some(HostPayload::ResponseStart(
@@ -471,11 +472,66 @@ async fn cancelled_guest_request_tolerates_late_host_frames_without_detaching_br
                 v1::CredentialBridgeResponseFailure {
                     request_id: request.request_id,
                     reason: v1::CredentialBridgeFailureReason::Denied as i32,
+                    refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
                 },
             ))
             .await;
-        assert_eq!(bounded(task).await.unwrap().status(), StatusCode::FORBIDDEN);
+        let refused = bounded(task).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        assert_eq!(refused.headers()["codewire-refusal"], "denied");
         assert!(harness.bridge.inner.lock().await.pending.is_empty());
+        harness.stop().await;
+    }
+}
+
+/// A host's refusal reaches the agent as its status, `Codewire-Refusal` and
+/// fixed body, naming the bound host and never anything from the request.
+#[tokio::test]
+async fn a_hosts_refusal_reaches_the_agent_readable_and_echoes_nothing() {
+    const CANARY: &str = "canary-5057";
+    for (wire, status, reason, body) in [
+        (
+            v1::CredentialBridgeRefusal::CredentialNeedsReconnect,
+            StatusCode::FORBIDDEN,
+            "credential_needs_reconnect",
+            "Codewire: the OpenAI credential this environment uses needs reconnecting.\nFix: in a local VM, run `cw credentials --local list` on the computer that runs it; in a hosted Sandbox, run `cw credentials --cloud list` wherever you're signed in to Codewire; then connect it again.\n",
+        ),
+        (
+            v1::CredentialBridgeRefusal::PathNotServed,
+            StatusCode::NOT_FOUND,
+            "path_not_served",
+            "Codewire: this path on api.openai.com isn't one Codewire forwards.\n",
+        ),
+    ] {
+        let mut harness = Harness::new().await;
+        let bridge = harness.bridge.clone();
+        let task = tokio::spawn(async move {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri(format!("/v1/{CANARY}?{CANARY}=1"))
+                .header("host", format!("{CANARY}.api.openai.com"))
+                .header("x-trace", CANARY)
+                .body(Body::from(CANARY))
+                .unwrap();
+            bridge.respond_intercepted("api.openai.com", request).await
+        });
+        let Some(GuestPayload::Request(request)) = harness.next().await.payload else {
+            panic!("expected a request");
+        };
+        harness
+            .send(HostPayload::ResponseFailure(
+                v1::CredentialBridgeResponseFailure {
+                    request_id: request.request_id,
+                    reason: v1::CredentialBridgeFailureReason::Denied as i32,
+                    refusal: wire as i32,
+                },
+            ))
+            .await;
+        let response = bounded(task).await.unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers()["codewire-refusal"], reason);
+        let text = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(std::str::from_utf8(&text).unwrap(), body);
         harness.stop().await;
     }
 }
@@ -633,6 +689,7 @@ async fn pending_request_limit_includes_cancelled_requests_until_terminal_frame(
             v1::CredentialBridgeResponseFailure {
                 request_id: cancelled.request_id,
                 reason: v1::CredentialBridgeFailureReason::Denied as i32,
+                refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
             },
         ))
         .await;
@@ -1036,6 +1093,7 @@ async fn draining_tombstones_hold_the_shared_budget_until_answered_or_lost() {
             v1::CredentialBridgeResponseFailure {
                 request_id: answered.request_id,
                 reason: v1::CredentialBridgeFailureReason::Denied as i32,
+                refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
             },
         ))
         .await;
@@ -1127,6 +1185,7 @@ async fn a_frame_for_the_other_epochs_request_ends_only_its_sender() {
         HostPayload::ResponseFailure(v1::CredentialBridgeResponseFailure {
             request_id: id.to_owned(),
             reason: v1::CredentialBridgeFailureReason::Denied as i32,
+            refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
         })
     };
     for frame in ["start", "end", "failure"] {

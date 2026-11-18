@@ -1,7 +1,7 @@
 use std::io;
 
 use axum::body::to_bytes;
-use axum::http::Request;
+use axum::http::{Request, StatusCode};
 use codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -154,10 +154,10 @@ async fn an_older_host_gets_the_whole_body_and_a_clear_413_past_4_mib() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let text = to_bytes(response.into_body(), 1024).await.unwrap();
-    assert!(
-        std::str::from_utf8(&text)
-            .unwrap()
-            .contains("4 MiB limit: this host does not stream request bodies")
+    // The loopback ingress has no bound host to name.
+    assert_eq!(
+        std::str::from_utf8(&text).unwrap(),
+        "Codewire: this request's body is over the 4 MiB Codewire forwards.\n"
     );
     harness.quiet().await;
 }

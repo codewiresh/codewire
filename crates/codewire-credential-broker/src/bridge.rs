@@ -1270,6 +1270,7 @@ async fn send_failure<S: CredentialBridgeResponseSink>(
                 v1::CredentialBridgeResponseFailure {
                     request_id,
                     reason: reason as i32,
+                    refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
                 },
             ),
         )
@@ -1685,6 +1686,7 @@ pub(crate) mod tests {
                 v1::CredentialBridgeResponseFailure {
                     request_id,
                     reason,
+                    ..
                 }
             )) if request_id == overflow_id.to_string()
                 && reason == v1::CredentialBridgeFailureReason::Unavailable as i32
@@ -2161,7 +2163,7 @@ pub(crate) mod tests {
         assert!(matches!(
             output_rx.recv().await,
             Some(v1::credential_bridge_host_message::Payload::ResponseFailure(
-                v1::CredentialBridgeResponseFailure { request_id: id, reason }
+                v1::CredentialBridgeResponseFailure { request_id: id, reason, .. }
             )) if id == failed.to_string()
                 && reason == v1::CredentialBridgeFailureReason::UpstreamFailed as i32
         ));
@@ -2244,7 +2246,7 @@ pub(crate) mod tests {
         assert!(matches!(
             output_rx.recv().await,
             Some(v1::credential_bridge_host_message::Payload::ResponseFailure(
-                v1::CredentialBridgeResponseFailure { request_id: id, reason }
+                v1::CredentialBridgeResponseFailure { request_id: id, reason, .. }
             )) if id == failed.to_string()
                 && reason == v1::CredentialBridgeFailureReason::Unavailable as i32
         ));
@@ -2286,7 +2288,7 @@ pub(crate) mod tests {
         assert!(matches!(
             output_rx.recv().await,
             Some(v1::credential_bridge_host_message::Payload::ResponseFailure(
-                v1::CredentialBridgeResponseFailure { request_id: id, reason }
+                v1::CredentialBridgeResponseFailure { request_id: id, reason, .. }
             )) if id == request_id.to_string()
                 && reason == v1::CredentialBridgeFailureReason::ResponseTooLarge as i32
         ));
@@ -2322,7 +2324,7 @@ pub(crate) mod tests {
         assert!(matches!(
             output_rx.recv().await,
             Some(v1::credential_bridge_host_message::Payload::ResponseFailure(
-                v1::CredentialBridgeResponseFailure { request_id: id, reason }
+                v1::CredentialBridgeResponseFailure { request_id: id, reason, .. }
             )) if id == excess.to_string()
                 && reason == v1::CredentialBridgeFailureReason::Unavailable as i32
         ));
