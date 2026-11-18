@@ -27,11 +27,14 @@ ORCHESTRATION_PORT = "8088"
 # network policy"); the broker it runs refuses them for sandboxes as well.
 PRIVATE_V4 = (
     "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
-    "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15",
+    "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
 )
-# IPv4-mapped, NAT64 and 6to4 addresses reach IPv4, private ranges and
-# metadata included (cw-security on #5344).
-PRIVATE_V6 = ("::1/128", "::ffff:0:0/96", "64:ff9b::/96", "64:ff9b:1::/48", "2002::/16", "fc00::/7", "fe80::/10")
+# IPv4-mapped, NAT64, Teredo and 6to4 addresses reach IPv4, private ranges
+# and metadata included (cw-security on #5344).
+PRIVATE_V6 = (
+    "::1/128", "::ffff:0:0/96", "64:ff9b::/96", "64:ff9b:1::/48", "2001::/32", "2002::/16",
+    "fc00::/7", "fe80::/10", "ff00::/8",
+)
 NAME = "codewire-egress"
 DRAIN_SETTING = "CODEWIRE_EGRESS_DRAIN_SECONDS"
 # What cw-egress needs after the deadline to flush records and exit.
@@ -255,6 +258,8 @@ GOOD_POLICY = """spec:
               - 192.0.0.0/24
               - 192.168.0.0/16
               - 198.18.0.0/15
+              - 224.0.0.0/4
+              - 240.0.0.0/4
         - ipBlock:
             cidr: ::/0
             except:
@@ -262,9 +267,11 @@ GOOD_POLICY = """spec:
               - ::ffff:0:0/96
               - 64:ff9b::/96
               - 64:ff9b:1::/48
+              - 2001::/32
               - 2002::/16
               - fc00::/7
               - fe80::/10
+              - ff00::/8
 """
 GOOD_COMPONENT = """apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
@@ -334,6 +341,8 @@ def self_test() -> list[str]:
             "NAT64 opened": ("              - 64:ff9b::/96\n", ""),
             "IPv4-mapped opened": ("              - ::ffff:0:0/96\n", ""),
             "6to4 opened": ("              - 2002::/16\n", ""),
+            "Teredo opened": ("              - 2001::/32\n", ""),
+            "IPv6 multicast opened": ("              - ff00::/8\n", ""),
         }),
         (component_failures, GOOD_COMPONENT, {
             "a plain kustomization": ("kind: Component", "kind: Kustomization"),

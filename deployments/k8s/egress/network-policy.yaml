@@ -65,15 +65,19 @@ spec:
               - 192.0.0.0/24
               - 192.168.0.0/16
               - 198.18.0.0/15
+              - 224.0.0.0/4
+              - 240.0.0.0/4
         - ipBlock:
             cidr: ::/0
             except:
               - ::1/128
-              # IPv4-mapped, NAT64 and 6to4 addresses reach IPv4, private
-              # ranges and metadata included.
+              # IPv4-mapped, NAT64, Teredo and 6to4 addresses reach IPv4,
+              # private ranges and metadata included.
               - ::ffff:0:0/96
               - 64:ff9b::/96
               - 64:ff9b:1::/48
+              - 2001::/32
               - 2002::/16
               - fc00::/7
               - fe80::/10
+              - ff00::/8
