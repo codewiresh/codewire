@@ -17,7 +17,9 @@ API_VERSION = "deploy.codewire.sh/v1alpha1"
 KIND = "ImageBundle"
 SOURCE_REPOSITORY = "codewire/codewire"
 FAMILIES = ("dashboard", "derp", "daemon", "services", "mesh")
-PUBLICATION_FAMILIES = FAMILIES + ("base", "workspace", "confidential-probe")
+# Published by digest but never part of the runtime bundle: cw-egress is
+# built and signed by Dev delivery and pinned by its own component (#4000).
+PUBLICATION_FAMILIES = FAMILIES + ("base", "workspace", "confidential-probe", "egress")
 ENVIRONMENTS = ("dev", "prod")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")

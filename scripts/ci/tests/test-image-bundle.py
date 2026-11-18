@@ -203,6 +203,38 @@ class ImageBundleTests(unittest.TestCase):
                 ),
             )
 
+    def test_buildx_metadata_emits_egress_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            metadata = Path(directory) / "metadata.json"
+            digest = "sha256:" + "e" * 64
+            metadata.write_text(
+                json.dumps({"containerimage.digest": digest}),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                image_bundle._candidate_from_metadata(
+                    "egress",
+                    SOURCE_SHA,
+                    "registry.example.invalid/codewire",
+                    metadata,
+                ),
+                (
+                    "egress",
+                    SOURCE_SHA,
+                    "registry.example.invalid/codewire/egress@" + digest,
+                ),
+            )
+
+    def test_egress_does_not_expand_runtime_bundle(self) -> None:
+        values = candidates()
+        values[-1] = [
+            "egress",
+            SOURCE_SHA,
+            "registry.example.invalid/codewire/egress@sha256:" + "e" * 64,
+        ]
+        with self.assertRaises(image_bundle.BundleError):
+            image_bundle._create_bundle(SOURCE_SHA, values)
+
     def test_support_images_do_not_expand_runtime_bundle(self) -> None:
         values = candidates()
         values[-1] = [
