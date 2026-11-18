@@ -95,6 +95,15 @@ class WorkflowContractTests(unittest.TestCase):
         cls.workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
         cls.jobs = cls.workflow["jobs"]
 
+    def test_database_coverage_reads_the_lanes_own_checkout(self) -> None:
+        # The lanes are this checkout's run-integration-verification.sh, so
+        # the coverage check must scan this checkout's database tests, never
+        # the merged source with suites main added later (#5294, codewire#5311).
+        steps = [step for job in self.workflow["jobs"].values() for step in job.get("steps", [])
+                 if step.get("name") == "Run Database"]
+        self.assertEqual(len(steps), 1, steps)
+        self.assertEqual(steps[0].get("env", {}).get("DATABASE_TEST_SOURCE_ROOT"), "${{ github.workspace }}")
+
     def test_every_job_verifies_the_commit_selection_chose(self) -> None:
         # Selection chooses the commit from main's own full checkout before
         # anything else runs (dispatch-source.sh): its own, or the earlier

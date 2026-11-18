@@ -1540,6 +1540,12 @@ jobs:
         env:
           RUST_DATABASE_ARCHIVES: ${{ steps.database-archives.outputs.ready == 'true' && format('{0}/database-archives', runner.temp) || '' }}
           RUST_TEST_NEXTEST: ${{ runner.temp }}/nextest/cargo-nextest
+          # The coverage check reads the database tests of this checkout, the
+          # tree whose run-integration-verification.sh defines the lanes. The
+          # merged source (BUILD_SOURCE_DIR) also holds suites main added after
+          # this head, which no lane here runs, so scanning it failed every
+          # older pull request that selects Database (#5294; codewire#5311).
+          DATABASE_TEST_SOURCE_ROOT: ${{ github.workspace }}
         run: scripts/ci/verify/run-integration-verification.sh database
 
       - name: Stop integration Postgres
