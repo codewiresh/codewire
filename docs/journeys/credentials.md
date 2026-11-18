@@ -9,7 +9,7 @@ surface proves nothing about another. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-17. Every step not listed as observed is **not yet
+Updated 2026-11-18. Every step not listed as observed is **not yet
 observed**.
 
 | ID | Linux local VM | Mac local VM | Hosted Sandbox (Dev) |
@@ -24,7 +24,7 @@ observed**.
 | `cred-sign-in-screen` | partly observed, #4885 at aea6abdb8, 2026-11-16 (steps 1 and 2 for Claude and Codex at a pty; GitHub, `cw login`, piped, `TERM=dumb` and SSH not yet observed) | not yet observed | not yet observed |
 | `profile-default` | not yet observed | not yet observed | not yet observed |
 | `cred-delivery-diagnosis` | not yet observed | not yet observed | local VMs only |
-| `cred-provider-unresolved` | not yet observed (#5286): failure observed with v0.4.22, 2026-11-18 | not yet observed | local VMs only |
+| `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, and the early replacements on that build plus their change, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | not yet observed | local VMs only |
 
 ## Before the walk
 
@@ -582,3 +582,28 @@ hosted Sandbox's broker is the platform's.
     5.02 s after its start, and `brokers.log` read `broker_not_ready
     reason=lease_closed_before_ready … error=-`. With the lookup answered,
     the same create started and `broker_ready` came after 0.2 s.
+  - Linux, a static `cw` built from #5295 at bdcb89c00, 2026-11-18, in the
+    smoke library's private store with made-up keys, the host's firewall
+    dropping this `cw`'s broker lookups of `api.anthropic.com` and
+    `api.openai.com`. Step 2 succeeded; `broker_ready` came after 5.07 s
+    with `unresolved=api.anthropic.com/api.openai.com`. Both routes answered
+    502 `Codewire: PROVIDER couldn't be reached; try again.`, and `ssh-add
+    -l` in the VM listed the profile's key. With `api.openai.com` answered
+    again, the regular replacement 510 seconds after the broker's start came
+    up with `unresolved=api.anthropic.com`, and OpenAI answered the made-up
+    key itself (401) with no restart. Step 5: the start took 15 s, with the
+    same `unresolved=` and the same two answers. With every name answered,
+    the same `cw` had `unresolved=-` after 0.3 s and both providers' own
+    401s.
+  - Linux, the early replacements (bdcb89c00 plus their change), 2026-11-18,
+    same setup with
+    only `api.anthropic.com` dropped. Early brokers started 5, 10, 20 and
+    40 seconds apart (`broker_spawned`), each ending after its 5-second
+    lookup while the name stayed dropped. The name was answered again 13
+    seconds before the fourth, which came up in 0.08 s with `unresolved=-`:
+    Anthropic then answered the made-up key itself (401), with no restart.
+  - Not walked: a name that resolves only to an address Codewire will not
+    dial, and a sign-in whose token host is unresolvable. Unit tests cover
+    both (`resolution_for_a_start_leaves_a_failed_host_unresolved_and_serves_the_rest`,
+    `a_forced_refresh_is_not_begun_toward_a_provider_with_no_address`,
+    `a_github_app_refresh_is_not_begun_toward_an_endpoint_with_no_address`).

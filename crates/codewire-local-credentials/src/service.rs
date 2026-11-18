@@ -30,7 +30,6 @@ use crate::broker_channel::{
     MAX_BROKER_LEASE_AUDIT_LIST_LIMIT,
 };
 use crate::broker_log::BrokerLog;
-use crate::broker_process::ProviderLookup;
 use crate::control::v1::local_credential_authority_service_server::{
     LocalCredentialAuthorityService, LocalCredentialAuthorityServiceServer,
 };
@@ -62,22 +61,11 @@ const BROKER_READY_STABILITY: std::time::Duration = std::time::Duration::from_mi
 const BROKER_RESTART_MIN_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const BROKER_RESTART_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 const BROKER_STABLE_RUNTIME: std::time::Duration = std::time::Duration::from_secs(30);
-/// How long one broker child takes new work, from its spawn. A child resolves
-/// provider addresses and opens its authority channel once, at its start, so
-/// this bounds their age. It also ends no later than an owner-local platform
-/// delegation, which the platform admits for at most 600 seconds.
-const BROKER_EPOCH_LIFETIME: Duration = Duration::from_secs(600);
-/// Its successor is spawned this long before that lifetime ends. Once the
-/// successor runs, the daemon sends it all new work, and the predecessor only
-/// finishes the requests already sent to it until its lifetime ends.
-const BROKER_SUCCESSOR_LEAD: Duration = Duration::from_secs(90);
-/// Between successor attempts while the predecessor still serves: 3 seconds,
-/// doubling to at most 15.
-const BROKER_SUCCESSOR_RETRY_FIRST: Duration = Duration::from_secs(3);
-const BROKER_SUCCESSOR_RETRY_MAX: Duration = Duration::from_secs(15);
 const REPOSITORY_STREAM_CHUNK_BYTES: usize = 48 * 1024;
 
 mod broker_child;
+mod renewal;
+use renewal::BrokerRenewal;
 mod grants;
 mod placeholders;
 mod profiles;
@@ -452,21 +440,6 @@ mod renewal_tests;
 enum BrokerProcessState {
     Starting,
     Running,
-}
-
-/// When a broker child is replaced: [`BROKER_EPOCH_LIFETIME`] and
-/// [`BROKER_SUCCESSOR_LEAD`], shortened only by tests.
-#[derive(Clone, Copy, Debug)]
-struct BrokerRenewal {
-    lifetime: Duration,
-    lead: Duration,
-}
-
-impl BrokerRenewal {
-    const PRODUCTION: Self = Self {
-        lifetime: BROKER_EPOCH_LIFETIME,
-        lead: BROKER_SUCCESSOR_LEAD,
-    };
 }
 
 struct BrokerProcessManager<S: ProtectedStore> {
@@ -887,23 +860,37 @@ async fn run_broker_lifecycle<S: ProtectedStore + 'static>(
                             child.stop().await;
                             break;
                         }
-                        successor_at = Some(
-                            child.ends_at.checked_sub(launch.renewal.lead).unwrap_or(now),
-                        );
+                        successor_at = Some(launch.renewal.next_replacement(
+                            &child.unresolved,
+                            child.ends_at,
+                            now,
+                            0,
+                        ));
                         successor_failures = 0;
                         serving_since.get_or_insert(now);
                         // Its Ready means the daemon already sends all new
                         // work to it; the predecessor drains.
-                        if let Some(predecessor) = current.replace(child)
-                            && let Some(older) = retiring.replace(predecessor)
-                        {
-                            older.stop().await;
+                        if let Some(mut predecessor) = current.replace(child) {
+                            // An early replacement leaves it most of its
+                            // lifetime: it drains no longer than a regular one.
+                            predecessor.ends_at =
+                                predecessor.ends_at.min(now + launch.renewal.lead);
+                            if let Some(older) = retiring.replace(predecessor) {
+                                older.stop().await;
+                            }
                         }
                     }
                     Err(BrokerAttempt::Stopped) => break,
                     Err(BrokerAttempt::Failed) if current.is_some() => {
-                        successor_at = Some(now + successor_backoff(successor_failures));
                         successor_failures = successor_failures.saturating_add(1);
+                        successor_at = current.as_ref().map(|serving| {
+                            launch.renewal.next_replacement(
+                                &serving.unresolved,
+                                serving.ends_at,
+                                now,
+                                successor_failures,
+                            )
+                        });
                     }
                     Err(BrokerAttempt::Failed) => {
                         restart_delay = restart_delay
@@ -965,9 +952,12 @@ async fn run_broker_lifecycle<S: ProtectedStore + 'static>(
                 }
             }
             () = sleep_until_some(next_start) => {
-                // With a child serving, its replacement may leave unresolved
-                // only what that child does (#5286).
-                let lookup = ProviderLookup::beside(current.as_ref().map(|child| &child.unresolved));
+                let serving = current
+                    .as_ref()
+                    .map(|child| (&child.unresolved, child.ends_at));
+                let lookup = launch
+                    .renewal
+                    .lookup_beside(serving, tokio::time::Instant::now());
                 starting = Some(Box::pin(start_broker(Arc::clone(&launch), lookup, shutdown.clone())));
             }
         }
@@ -1033,15 +1023,6 @@ fn next_restart_delay(previous: Duration, running_for: Duration) -> Duration {
     } else {
         previous.saturating_mul(2).min(BROKER_RESTART_MAX_DELAY)
     }
-}
-
-/// After `failures` earlier failed successors of the current child.
-fn successor_backoff(failures: u32) -> Duration {
-    BROKER_SUCCESSOR_RETRY_FIRST
-        .checked_mul(2_u32.saturating_pow(failures.min(8)))
-        .map_or(BROKER_SUCCESSOR_RETRY_MAX, |delay| {
-            delay.min(BROKER_SUCCESSOR_RETRY_MAX)
-        })
 }
 
 async fn stop_broker_entry(

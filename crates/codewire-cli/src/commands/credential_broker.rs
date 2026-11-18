@@ -183,6 +183,10 @@ pub(crate) struct LocalCredentialBrokerArgs {
     /// it replaces does not serve it either. Every other host must resolve.
     #[arg(long)]
     pub(crate) may_not_resolve: Vec<String>,
+    /// An early replacement, started to get a provider back: at least one
+    /// of the hosts it may leave unresolved must resolve.
+    #[arg(long, requires = "may_not_resolve")]
+    pub(crate) must_resolve_more: bool,
     /// The authority's store: macOS brokers read the selected backend.
     #[cfg(target_os = "macos")]
     #[command(flatten)]
@@ -235,10 +239,13 @@ async fn resolve_providers(
 /// Whether this broker may start with `unresolved` provider hosts, by the
 /// rule its authority started it with.
 fn lookup_allows(args: &LocalCredentialBrokerArgs, unresolved: &BTreeSet<&'static str>) -> bool {
-    args.start_whatever_resolves
-        || unresolved
-            .iter()
-            .all(|host| args.may_not_resolve.iter().any(|allowed| allowed == host))
+    if args.start_whatever_resolves {
+        return true;
+    }
+    unresolved
+        .iter()
+        .all(|host| args.may_not_resolve.iter().any(|allowed| allowed == host))
+        && !(args.must_resolve_more && unresolved.len() >= args.may_not_resolve.len())
 }
 
 async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> anyhow::Result<()> {
@@ -844,5 +851,19 @@ mod lookup_tests {
         let strict = replacing(&[]);
         assert!(lookup_allows(&strict, &hosts(&[])));
         assert!(!lookup_allows(&strict, &hosts(&["api.anthropic.com"])));
+
+        // An early replacement must get at least one host back.
+        let early = started_with(&ProviderLookup::FewerThan(
+            ["api.anthropic.com", "github.com"]
+                .map(str::to_owned)
+                .into(),
+        ));
+        assert!(lookup_allows(&early, &hosts(&[])));
+        assert!(lookup_allows(&early, &hosts(&["github.com"])));
+        assert!(!lookup_allows(
+            &early,
+            &hosts(&["api.anthropic.com", "github.com"])
+        ));
+        assert!(!lookup_allows(&early, &hosts(&["api.openai.com"])));
     }
 }

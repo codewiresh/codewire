@@ -1540,7 +1540,9 @@ profile boots offline as one without does.
   only if it resolves every name the serving broker has and at least one
   more; otherwise it ends before it opens the guest's bridge, and the
   serving broker goes on. So the provider's requests work again within
-  about a minute of its name resolving, with no restart of the VM.
+  about a minute of its name resolving, with no restart of the VM. The
+  broker it replaces finishes the requests already sent to it for at most
+  90 seconds, as after a regular replacement.
 - **The regular replacement** every 600 seconds takes over only if it
   resolves every name the serving broker has. When it cannot, the serving
   broker goes on to the end of its lifetime, as before, and a new broker
@@ -1548,18 +1550,15 @@ profile boots offline as one without does.
 - **What is recorded.** The credential service's broker log names the
   unresolved hosts on a broker's `broker_ready` line (`unresolved=`, the
   hosts joined by `/`, or `-` when every one resolved), and again when a
-  replacement has them back.
+  replacement has them back. Each `broker_spawned` line says which start it
+  was (`lookup=first`, `regular` or `early`). An `early` broker that got no
+  host back ends without becoming ready: its `broker_not_ready` line is
+  expected, not a fault.
 
-**Built in part** (#5286). Built: a broker starts whatever resolves, an
-unserved provider's requests are refused and no refresh is begun for it, the
-regular replacement takes over only when it loses no name, and the broker log
-names the unresolved hosts. Not yet built: the earlier replacements of "It
-mends by itself". Until they are, a provider whose name resolves again is
-served from the serving broker's regular replacement, so within its
-600-second lifetime. Released v0.4.22 and earlier fail the VM's create or
-start instead, with `create_failed` or `start_guest_start_failed` and no
-cause, each broker ending `CW_BROKER_EXIT stage=provider.resolve`. The
-journey step is `cred-provider-unresolved` in `docs/journeys/credentials.md`.
+Released v0.4.22 and earlier fail the VM's create or start instead, with
+`create_failed` or `start_guest_start_failed` and no cause, each broker
+ending `CW_BROKER_EXIT stage=provider.resolve` (#5286). The journey step is
+`cred-provider-unresolved` in `docs/journeys/credentials.md`.
 
 ### Diagnosing delivery in a local VM (in progress, #4882)
 

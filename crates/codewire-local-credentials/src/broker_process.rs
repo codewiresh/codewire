@@ -64,24 +64,37 @@ pub enum ProviderLookup {
     /// unresolved. It starts only if every other host resolves, so it never
     /// takes over serving fewer providers than the child it replaces.
     NoFewerThan(BTreeSet<String>),
+    /// An early replacement for a serving child that left exactly these
+    /// hosts unresolved, started to get one back. It starts only if every
+    /// other host resolves and at least one of these does: otherwise it
+    /// would replace a working child for nothing.
+    FewerThan(BTreeSet<String>),
 }
 
 impl ProviderLookup {
-    /// The rule for a child started beside `serving`, what the child now
-    /// taking new work left unresolved, or with none serving.
-    pub(crate) fn beside(serving: Option<&BTreeSet<String>>) -> Self {
-        serving.map_or(Self::Available, |unresolved| {
-            Self::NoFewerThan(unresolved.clone())
-        })
+    /// The rule's name on a `broker_spawned` line of the broker log. A child
+    /// started as `early` that never becomes ready got no host back, which
+    /// is not a fault.
+    pub(crate) fn log_name(&self) -> &'static str {
+        match self {
+            Self::Available => "first",
+            Self::NoFewerThan(_) => "regular",
+            Self::FewerThan(_) => "early",
+        }
     }
 
     /// The broker command's arguments that carry this rule.
     pub fn arguments(&self) -> Vec<String> {
-        match self {
-            Self::Available => vec!["--start-whatever-resolves".to_owned()],
-            Self::NoFewerThan(unresolved) => unresolved
+        fn may_not_resolve(unresolved: &BTreeSet<String>) -> impl Iterator<Item = String> + '_ {
+            unresolved
                 .iter()
                 .map(|host| format!("--may-not-resolve={host}"))
+        }
+        match self {
+            Self::Available => vec!["--start-whatever-resolves".to_owned()],
+            Self::NoFewerThan(unresolved) => may_not_resolve(unresolved).collect(),
+            Self::FewerThan(unresolved) => may_not_resolve(unresolved)
+                .chain(["--must-resolve-more".to_owned()])
                 .collect(),
         }
     }

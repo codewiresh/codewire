@@ -13,11 +13,15 @@ use codewire_protected_store::{
 use tokio::net::UnixStream;
 
 use super::*;
-use crate::{BrokerLeaseChannelError, LocalBrokerSpawnError, LocalCredentialBrokerLeaseClient};
+use crate::{
+    BrokerLeaseChannelError, LocalBrokerSpawnError, LocalCredentialBrokerLeaseClient,
+    ProviderLookup,
+};
 
 const RENEWAL: BrokerRenewal = BrokerRenewal {
     lifetime: Duration::from_millis(1600),
     lead: Duration::from_millis(600),
+    ..BrokerRenewal::PRODUCTION
 };
 /// For the overlap test: a successor has the whole lead to spawn and answer
 /// before its predecessor's lifetime ends, and a slow CI slot can stall the
@@ -28,6 +32,7 @@ const RENEWAL: BrokerRenewal = BrokerRenewal {
 const SLOW_SLOT_RENEWAL: BrokerRenewal = BrokerRenewal {
     lifetime: Duration::from_millis(8000),
     lead: Duration::from_millis(6000),
+    ..BrokerRenewal::PRODUCTION
 };
 const PROBE_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -87,6 +92,11 @@ struct RenewalSpawner {
     /// The provider hosts each child, by index, reports it has no address
     /// for; a child past the end reports none.
     unresolved: Vec<Vec<&'static str>>,
+    /// An early replacement, told to get a host back, never starts: as a
+    /// real child ends itself when no host it lacks resolves.
+    no_host_comes_back: bool,
+    /// What every attempt was told about hosts that do not resolve.
+    lookups: StdMutex<Vec<ProviderLookup>>,
     attempts: StdMutex<usize>,
     children: Arc<StdMutex<Vec<ChildRecord>>>,
     tasks: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -103,6 +113,8 @@ impl RenewalSpawner {
             store: SharedStore::default(),
             failing,
             unresolved,
+            no_host_comes_back: false,
+            lookups: StdMutex::new(Vec::new()),
             attempts: StdMutex::new(0),
             children: Arc::new(StdMutex::new(Vec::new())),
             tasks: StdMutex::new(Vec::new()),
@@ -148,7 +160,10 @@ impl LocalBrokerProcessSpawner for RenewalSpawner {
             *attempts += 1;
             *attempts - 1
         };
-        if self.failing.contains(&attempt) {
+        self.lookups.lock().unwrap().push(lookup.clone());
+        if self.failing.contains(&attempt)
+            || (self.no_host_comes_back && matches!(lookup, ProviderLookup::FewerThan(_)))
+        {
             return Err(LocalBrokerSpawnError::Spawn);
         }
         // The lifecycle counts a child's lifetime from just before it calls
@@ -344,6 +359,20 @@ impl Lifecycle {
         })
         .await
         .expect("broker lifecycle state")
+    }
+
+    /// Which start the lifecycle recorded for each spawned child, in order.
+    fn spawned_as(&self) -> Vec<String> {
+        let log = std::fs::read_to_string(self.directory.path().join("logs/brokers.log"))
+            .unwrap_or_default();
+        log.lines()
+            .filter(|line| line.contains(" event=broker_spawned "))
+            .filter_map(|line| {
+                line.split(' ')
+                    .find_map(|field| field.strip_prefix("lookup="))
+                    .map(str::to_owned)
+            })
+            .collect()
     }
 
     /// What the lifecycle recorded each ready child left unresolved, in order.
@@ -594,5 +623,102 @@ async fn a_replacement_may_leave_unresolved_only_what_the_serving_child_does() {
     assert_eq!(
         recorded[..3],
         ["api.anthropic.com/platform.claude.com", "-", "-"]
+    );
+}
+
+/// For the early replacements: they come after 100 ms and then at doubling
+/// intervals up to 400 ms, long before the regular replacement.
+const EARLY_RENEWAL: BrokerRenewal = BrokerRenewal {
+    lifetime: Duration::from_secs(30),
+    lead: Duration::from_secs(2),
+    recovery_first: Duration::from_millis(100),
+    recovery_max: Duration::from_millis(400),
+};
+
+fn left(hosts: &[&str]) -> BTreeSet<String> {
+    hosts.iter().map(|host| (*host).to_owned()).collect()
+}
+
+/// A child that left a provider unresolved is replaced early, without
+/// waiting for its regular replacement (#5286). Each early replacement is
+/// told to get a host back; two that cannot start change nothing, and the
+/// third, which resolves it, takes over. The child it replaced then drains
+/// no longer than after a regular replacement, not to the end of the
+/// lifetime it had left.
+#[tokio::test]
+async fn a_child_with_an_unserved_provider_is_replaced_early_by_one_that_serves_it() {
+    let spawner = RenewalSpawner::leaving(
+        BTreeSet::from([1, 2]),
+        vec![vec!["api.anthropic.com"], vec![]],
+    );
+    let lifecycle = Lifecycle::start_with(Arc::clone(&spawner), EARLY_RENEWAL);
+    lifecycle.until(|spawner| spawner.ready_count() >= 2).await;
+    lifecycle.until(|spawner| spawner.closed(0)).await;
+    let lookups = spawner.lookups.lock().unwrap().clone();
+    let spawned_as = lifecycle.spawned_as();
+    let (children, _) = lifecycle.stop().await;
+
+    let early = ProviderLookup::FewerThan(left(&["api.anthropic.com"]));
+    assert_eq!(
+        lookups[..4],
+        [
+            ProviderLookup::Available,
+            early.clone(),
+            early.clone(),
+            early
+        ]
+    );
+    // The two that could not start left no `broker_spawned` line.
+    assert_eq!(spawned_as[..2], ["first", "early"]);
+    let regular = EARLY_RENEWAL.lifetime - EARLY_RENEWAL.lead;
+    let took_over = children[1].ready.unwrap();
+    assert!(took_over < regular / 2, "{took_over:?}");
+    let drained = children[0].closed.unwrap();
+    assert!(drained < regular / 2, "{drained:?}");
+}
+
+/// Early replacements that get no host back never take over, and the
+/// regular replacement still comes: it may leave what the serving child
+/// left, so the child is renewed with the same providers.
+#[tokio::test]
+async fn early_replacements_that_get_nothing_back_leave_the_regular_replacement_to_come() {
+    let unresolved = vec!["api.anthropic.com"];
+    let spawner = Arc::new(RenewalSpawner {
+        no_host_comes_back: true,
+        ..Arc::into_inner(RenewalSpawner::leaving(
+            BTreeSet::new(),
+            vec![unresolved.clone(), unresolved],
+        ))
+        .unwrap()
+    });
+    let renewal = BrokerRenewal {
+        lifetime: Duration::from_millis(3000),
+        lead: Duration::from_millis(2000),
+        ..EARLY_RENEWAL
+    };
+    let lifecycle = Lifecycle::start_with(Arc::clone(&spawner), renewal);
+    lifecycle.until(|spawner| spawner.ready_count() >= 2).await;
+    let lookups = spawner.lookups.lock().unwrap().clone();
+    let spawned_as = lifecycle.spawned_as();
+    let (children, _) = lifecycle.stop().await;
+
+    let hosts = left(&["api.anthropic.com"]);
+    assert_eq!(
+        children[1].lookup,
+        Some(ProviderLookup::NoFewerThan(hosts.clone()))
+    );
+    // The broker log says which kind of start each spawned child was.
+    assert_eq!(spawned_as[..2], ["first", "regular"]);
+    let before_regular: Vec<_> = lookups
+        .iter()
+        .skip(1)
+        .take_while(|lookup| **lookup != ProviderLookup::NoFewerThan(hosts.clone()))
+        .collect();
+    assert!(!before_regular.is_empty(), "{lookups:?}");
+    assert!(
+        before_regular
+            .iter()
+            .all(|lookup| **lookup == ProviderLookup::FewerThan(hosts.clone())),
+        "{lookups:?}"
     );
 }

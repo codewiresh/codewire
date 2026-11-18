@@ -166,6 +166,7 @@ pub(super) async fn start_broker<S: ProtectedStore + 'static>(
                 "pid",
                 &pid.map_or_else(|| "none".to_owned(), |pid| pid.to_string()),
             ),
+            ("lookup", &lookup.log_name()),
         ],
     );
     let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
