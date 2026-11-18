@@ -171,6 +171,26 @@ async fn transfer_mesh_ingress_connection(
     .map_err(|_| RunnerError::IngressControl)
 }
 
+pub(super) fn take_mesh_ingress_receiver_exit(
+    receiver: &mut Option<JoinHandle<Result<(), MeshTransportError>>>,
+) -> bool {
+    let outcome = {
+        let Some(receiver) = receiver.as_mut() else {
+            return true;
+        };
+        if !receiver.is_finished() {
+            return false;
+        }
+        (&mut *receiver).now_or_never()
+    };
+    if outcome.is_some() {
+        let _ = receiver.take();
+        true
+    } else {
+        false
+    }
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use std::os::unix::net::UnixStream as StdUnixStream;

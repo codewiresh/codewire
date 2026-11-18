@@ -148,9 +148,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     ///
     /// Loads the placeholder key, creating it on first use, and fails with
     /// the store's error when it cannot. That can wait on the protected store
-    /// (an unlock, a slow keyring), so call it on a blocking thread. Nothing
-    /// in production calls this yet: it is for writing an environment's
-    /// login files (#3999).
+    /// (an unlock, a slow keyring), so call it on a blocking thread.
     pub fn environment_credential_placeholder(
         &self,
         environment_id: &EnvironmentId,
@@ -225,6 +223,23 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             placeholders.push((slot.clone(), placeholder));
         }
         Ok(placeholders)
+    }
+
+    /// Load this root's placeholder key now, creating it on first use, so
+    /// that every lease admitted from here on carries its placeholder
+    /// (#3999). The broker of a boot that intercepts its agent hosts needs
+    /// that from its first lease, and nothing else is sure to load the key:
+    /// a sign-in's placeholder travels in its login, so its boot asks
+    /// [`Self::environment_slot_placeholders`] for none, and after this
+    /// authority restarts no boot has asked yet. Fails with the store's error
+    /// when the key cannot be loaded. Call it on a blocking thread.
+    pub(crate) fn load_root_placeholder_key(&self) -> Result<(), LocalCredentialError> {
+        // The database is released before loading, as for a placeholder.
+        let entry = {
+            let connection = self.connection()?;
+            placeholder_key_entry(&connection)?
+        };
+        self.load_placeholder_key(&entry).map(drop)
     }
 
     /// [`Self::admit_environment_credential_operation`] and the admitted
@@ -329,6 +344,36 @@ pub(crate) fn lease_response_placeholder(
     response: &v1::BrokerLeaseResponse,
 ) -> Option<CredentialPlaceholder> {
     CredentialPlaceholder::parse(&response.placeholder).ok()
+}
+
+/// How long an intercepting boot's ensure waits for the placeholder key: the
+/// protected store may wait on an unlock or a slow keyring, and this stays
+/// well inside the 90 s a renewal's successor has to start.
+const PLACEHOLDER_KEY_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Load the authority's placeholder key for a boot that has `boot_secrets`,
+/// which only a boot that intercepts its agent hosts has: its broker's leases
+/// carry placeholders only from a key this process has loaded (#3999). The
+/// ensure calls it before its entries lock, so a slow store holds no other
+/// environment's ensure. Past [`PLACEHOLDER_KEY_LOAD_TIMEOUT`] the ensure
+/// fails with a named reason, and so does the start, rather than hanging; the
+/// load goes on in its thread, and a later ensure finds the key loaded.
+pub(crate) async fn load_key_for_boot<S: ProtectedStore + 'static>(
+    authority: &std::sync::Arc<LocalCredentialAuthority<S>>,
+    boot_secrets: &crate::BrokerBootSecrets,
+) -> Result<(), tonic::Status> {
+    if boot_secrets.is_empty() {
+        return Ok(());
+    }
+    let authority = std::sync::Arc::clone(authority);
+    tokio::time::timeout(
+        PLACEHOLDER_KEY_LOAD_TIMEOUT,
+        crate::service::run_blocking(move || authority.load_root_placeholder_key()),
+    )
+    .await
+    .map_err(|_| {
+        tonic::Status::deadline_exceeded("the placeholder key could not be loaded in time")
+    })?
 }
 
 #[cfg(test)]

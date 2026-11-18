@@ -86,3 +86,7 @@ pub(super) fn environment_binding_to_proto(
         updated_at_unix_ms: record.updated_at_unix_ms,
     }
 }
+
+pub(super) fn profile_id(value: String) -> Result<AccessProfileId, Status> {
+    AccessProfileId::parse(value).map_err(status_for_access_error)
+}

@@ -880,6 +880,7 @@ fn only_a_hosted_daemon_with_the_sign_in_form_runs_the_writer() {
     use crate::{Config, CredentialBridgeConfig, CredentialBridgeTransport, DaemonAuthToken};
     let config = |transport: Option<CredentialBridgeTransport>,
                   clients: ManagedCredentialClients| Config {
+        interception: None,
         host: None,
         listen_addr: "127.0.0.1:0".into(),
         workspace_root: "/workspace".into(),

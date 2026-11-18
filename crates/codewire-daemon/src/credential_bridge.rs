@@ -800,6 +800,7 @@ mod tests {
             let environment_id = uuid::Uuid::new_v4();
             let generation = 7;
             let config = Config {
+                interception: None,
                 listen_addr: "injected:credential-bridge".to_owned(),
                 workspace_root,
                 home_root,

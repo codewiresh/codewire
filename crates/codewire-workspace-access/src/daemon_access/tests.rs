@@ -170,6 +170,7 @@ async fn spawn_daemon_ssh_with_access(ready: bool) -> DaemonSsh {
     fs::create_dir_all(&workspace_root).unwrap();
     fs::create_dir_all(&home_root).unwrap();
     let config = Config {
+        interception: None,
         listen_addr: "in-process".into(),
         workspace_root: workspace_root.clone(),
         home_root,

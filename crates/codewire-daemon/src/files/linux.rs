@@ -867,6 +867,7 @@ mod tests {
         fs::create_dir(&workspace).expect("workspace");
         fs::create_dir(&home).expect("home");
         let config = Config {
+            interception: None,
             listen_addr: "127.0.0.1:0".into(),
             workspace_root: workspace.clone(),
             home_root: home,

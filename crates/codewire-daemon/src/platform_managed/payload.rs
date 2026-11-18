@@ -350,6 +350,7 @@ mod tests {
 
     fn config(home_root: PathBuf) -> Config {
         Config {
+            interception: None,
             listen_addr: "127.0.0.1:0".into(),
             workspace_root: PathBuf::from("/workspace"),
             home_root,

@@ -98,6 +98,7 @@ mod generation_access;
 use generation_access::{GenerationAccessCell, GenerationAccessGuard, validate_generation_access};
 mod stage_log;
 mod start_error;
+use start_error::guest_failure_detail;
 mod start_request;
 
 use exit_cause::runner_exit_error_code;
@@ -1089,6 +1090,11 @@ impl EnvironmentRunnerService for RunnerRpc {
                 cw_runtime_moved_from_generation,
                 network_policy,
                 intercepts: crate::runner::boot_intercepts(request.intercept),
+                credential_placeholders: crate::runner::boot_placeholders(
+                    request.intercept,
+                    request.credential_placeholders,
+                )
+                .map_err(|_| Status::invalid_argument("invalid credential placeholders"))?,
                 #[cfg(target_os = "linux")]
                 checkpoint,
             })
@@ -1984,14 +1990,6 @@ async fn wait_for_guest_daemon(
         guest_stage,
         daemon_ready,
     })
-}
-
-fn guest_failure_detail(stage: GuestBootStage) -> &'static str {
-    match stage {
-        GuestBootStage::SetupFailed => GUEST_SETUP_FAILED,
-        GuestBootStage::DockerToolingMissing => GUEST_DOCKER_TOOLING_MISSING,
-        _ => GUEST_WORKSPACE_FAILED,
-    }
 }
 
 #[cfg(target_os = "linux")]

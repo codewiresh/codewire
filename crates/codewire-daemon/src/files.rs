@@ -482,6 +482,7 @@ mod tests {
 
     fn config(workspace_root: PathBuf, home_root: PathBuf) -> Config {
         Config {
+            interception: None,
             listen_addr: "127.0.0.1:0".into(),
             workspace_root,
             home_root,

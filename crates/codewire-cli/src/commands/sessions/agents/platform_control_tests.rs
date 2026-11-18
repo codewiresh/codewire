@@ -323,6 +323,7 @@ fn session_config(
     transport: codewire_daemon::CredentialBridgeTransport,
 ) -> codewire_daemon::Config {
     codewire_daemon::Config {
+        interception: None,
         listen_addr: "unused:0".into(),
         workspace_root: "/workspace".into(),
         home_root: home.to_owned(),

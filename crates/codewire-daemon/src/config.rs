@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use codewire_access::ManagedCredentialClients;
+use codewire_access::{Interception, ManagedCredentialClients};
 use codewire_daemon_proto::DaemonAuthToken;
 pub use codewire_daemon_proto::{
     HOSTED_DAEMON_ACCESS_READY_FILE, HOSTED_DAEMON_CREDENTIAL_FILE, HOSTED_DAEMON_READY_FILE,
@@ -59,6 +59,10 @@ pub struct Config {
     /// Exact stock-client selection captured from the bound profile revision.
     /// This contains no credential, endpoint supplied by a user, or grant.
     pub managed_credential_clients: ManagedCredentialClients,
+    /// Set when this boot's agent hosts go through the TLS front door
+    /// (#3999): the selected Anthropic form's placeholder, from the seed.
+    /// `None` everywhere else, which leaves every projection as it was.
+    pub interception: Option<Interception>,
     /// Exact source selection for one-launch application values, never values.
     pub launch_projection: Option<LaunchProjectionConfig>,
     /// Explicit trusted-host placement. Guest defaults always leave this None.
@@ -307,6 +311,7 @@ impl HostedPlacement {
 
     fn into_config(self, auth_token: DaemonAuthToken) -> Config {
         Config {
+            interception: None,
             listen_addr: self.listen_addr,
             session_working_dir: Some(self.workspace_root.clone()),
             sandbox_server_url: None,
@@ -834,6 +839,7 @@ mod tests {
 
     fn fixture() -> Config {
         Config {
+            interception: None,
             listen_addr: DEFAULT_LISTEN_ADDR.into(),
             workspace_root: DEFAULT_WORKSPACE_ROOT.into(),
             home_root: DEFAULT_HOME_ROOT.into(),
@@ -1731,6 +1737,7 @@ mod tests {
     fn config_debug_redacts_daemon_credential() {
         let marker = "daemon-config-secret-marker";
         let config = Config {
+            interception: None,
             listen_addr: DEFAULT_LISTEN_ADDR.into(),
             workspace_root: DEFAULT_WORKSPACE_ROOT.into(),
             home_root: DEFAULT_HOME_ROOT.into(),

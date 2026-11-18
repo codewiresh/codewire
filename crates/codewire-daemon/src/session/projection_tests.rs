@@ -150,6 +150,7 @@ async fn eof_during_actual_pending_projection_reaps_launcher_before_terminal_exi
     std::fs::write(&helper, b"#!/bin/sh\nexport CW_TEST_PTY_LAUNCH_SOCKET=\"$3\"\nexec \"$CW_TEST_PTY_BINARY\" --exact \"$CW_TEST_PTY_CASE\" --nocapture\n").unwrap();
     std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = Config {
+        interception: None,
         listen_addr: "unused:0".into(),
         workspace_root: temp.path().into(),
         home_root: temp.path().into(),

@@ -1295,6 +1295,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
         let addr = listener.local_addr().expect("addr");
         let config = Config {
+            interception: None,
             listen_addr: addr.to_string(),
             workspace_root,
             home_root,
@@ -1861,6 +1862,7 @@ mod tests {
         std::fs::create_dir_all(&workspace_root).unwrap();
         std::fs::create_dir_all(&home_root).unwrap();
         let config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root,
             home_root,
@@ -1894,6 +1896,7 @@ mod tests {
     async fn the_defaults_report_reaches_health_and_never_changes_the_daemons_state() {
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root: temp.path().to_path_buf(),
             home_root: temp.path().to_path_buf(),
@@ -1945,6 +1948,7 @@ mod tests {
     {
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root: temp.path().to_path_buf(),
             home_root: temp.path().to_path_buf(),
@@ -2016,6 +2020,7 @@ mod tests {
     async fn app_ports_are_replaced_only_by_an_authenticated_bound_caller() {
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root: temp.path().to_path_buf(),
             home_root: temp.path().to_path_buf(),
@@ -2842,6 +2847,7 @@ mod tests {
         }
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root: temp.path().join("workspace"),
             home_root: temp.path().join("home"),
@@ -3021,6 +3027,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
         let addr = listener.local_addr().expect("addr");
         let config = Config {
+            interception: None,
             listen_addr: addr.to_string(),
             workspace_root,
             home_root,

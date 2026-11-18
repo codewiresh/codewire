@@ -525,6 +525,7 @@ mod tests {
     fn platform_managed_selection_requires_typed_proxy_slot_before_image_io() {
         let environment = uuid::Uuid::new_v4();
         let mut config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root: "/workspace".into(),
             home_root: HOME.into(),
@@ -621,6 +622,7 @@ mod tests {
             })
         };
         let mut config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root: "/workspace".into(),
             home_root: HOME.into(),

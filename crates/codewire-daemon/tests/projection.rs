@@ -99,6 +99,7 @@ fn projection_daemon_child() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let config = Config {
+            interception: None,
             listen_addr: endpoint.clone(),
             workspace_root: root.join("workspace"),
             home_root: root.join("home"),

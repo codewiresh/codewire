@@ -63,7 +63,9 @@ use codewire_network_session::{
 };
 
 mod bootstrap;
+use bootstrap::with_boot_selection;
 mod egress_trust;
+mod interception;
 mod network_status;
 mod oci_config;
 mod shutdown;
@@ -255,15 +257,6 @@ struct LinuxCapabilityData {
 
 #[path = "checkpoint.rs"]
 mod checkpoint;
-
-/// The sealed plan as this boot runs it: its selected client configuration,
-/// and the egress CA its agents trust when the seed carries one (#3999).
-fn with_boot_selection(plan: WorkspacePlan, seed: &Seed) -> Result<WorkspacePlan> {
-    let plan = plan
-        .with_managed_credential_clients(seed.managed_credential_clients())
-        .context("apply this boot's selected client configuration")?;
-    egress_trust::with_trust_environment(plan, seed.egress_ca())
-}
 
 pub fn run_init() -> Result<()> {
     // Keep the startup capability in the actual sealed guest ELF. Host
@@ -557,6 +550,7 @@ pub async fn run_daemon() -> Result<()> {
         auth_token: codewire_daemon::DaemonAuthToken::new(seed.auth_token())
             .context("validate guest daemon auth token")?,
         managed_credential_clients: seed.managed_credential_clients(),
+        interception: interception::from_seed(&seed),
         process_execution: codewire_daemon::execution::ProcessExecution::Runc(
             codewire_daemon::execution::RuncExecution {
                 helper_path: PathBuf::from(INIT_PATH),
@@ -6816,6 +6810,68 @@ mod tests {
         assert!(!valid_workspace_owner_marker(
             b"codewire-workspace-owner-v1\n"
         ));
+    }
+
+    /// With interception, the workload's own environment holds the selected
+    /// Anthropic form's placeholder and no base URL, even where the image set
+    /// one, so its processes reach the real host through the front door with
+    /// the same value the daemon's sessions hold (#3999). Without it, the
+    /// plan is the plain projection, base URL included.
+    #[test]
+    fn an_intercepted_workload_plan_holds_the_placeholder_and_no_base_url() {
+        use codewire_access::{
+            CapabilitySlot, CredentialId, CredentialPlaceholder, EnvironmentId, Interception,
+            ManagedCredentialClients, PLACEHOLDER_KEY_BYTES, PlaceholderKey,
+        };
+        let placeholder = CredentialPlaceholder::derive(
+            &PlaceholderKey::from_slice(&[7; PLACEHOLDER_KEY_BYTES]).unwrap(),
+            &EnvironmentId::parse("environment-a").unwrap(),
+            1,
+            &CapabilitySlot::parse("anthropic").unwrap(),
+            &CredentialId::parse("anthropic-key").unwrap(),
+        );
+        let interception = Interception::new(Some(placeholder.clone()));
+        let mut image = test_workspace_plan();
+        image
+            .environment
+            .push("ANTHROPIC_BASE_URL=https://image.example".to_owned());
+        let anthropic = ManagedCredentialClients::from_profile_slots(["anthropic"]).unwrap();
+        for (clients, variable) in [
+            (anthropic, "ANTHROPIC_AUTH_TOKEN"),
+            (
+                anthropic.with_anthropic_subscription_token().unwrap(),
+                "CLAUDE_CODE_OAUTH_TOKEN",
+            ),
+        ] {
+            let named = |plan: &WorkspacePlan, name: &str| {
+                plan.environment
+                    .iter()
+                    .filter_map(|entry| entry.split_once('='))
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_owned())
+            };
+            let intercepted = image
+                .clone()
+                .with_intercepted_managed_credential_clients(clients, Some(&interception))
+                .unwrap();
+            assert_eq!(
+                named(&intercepted, variable).as_deref(),
+                Some(placeholder.as_str())
+            );
+            for absent in ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"] {
+                assert_eq!(named(&intercepted, absent), None, "{variable}: {absent}");
+            }
+
+            let plain = image
+                .clone()
+                .with_managed_credential_clients(clients)
+                .unwrap();
+            assert!(named(&plain, "ANTHROPIC_BASE_URL").is_some());
+            assert_ne!(
+                named(&plain, variable).as_deref(),
+                Some(placeholder.as_str())
+            );
+        }
     }
 
     #[test]

@@ -5220,6 +5220,7 @@ mod tests {
     async fn cancellation_engine() -> (tempfile::TempDir, SessionEngine) {
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root: temp.path().to_owned(),
             home_root: temp.path().to_owned(),
@@ -5246,6 +5247,7 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("home")).unwrap();
         std::fs::create_dir_all(temp.path().join("workspace")).unwrap();
         let config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root: temp.path().join("workspace"),
             home_root: temp.path().join("home"),
@@ -5291,6 +5293,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
         let config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root: temp.path().to_owned(),
             home_root: temp.path().to_owned(),
@@ -5872,6 +5875,7 @@ mod tests {
         tokio::fs::create_dir(&workspace).await.unwrap();
         let marker = temp.path().join("must-not-spawn");
         let config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root: workspace.clone(),
             home_root: home,
@@ -6041,6 +6045,7 @@ mod tests {
 
     pub(super) fn test_engine(root: &Path) -> SessionEngine {
         let config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root: root.join("workspace"),
             home_root: root.join("home"),

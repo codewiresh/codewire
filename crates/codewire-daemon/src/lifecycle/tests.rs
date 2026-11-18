@@ -12,6 +12,7 @@ const FIXTURE_ARG: &str = "codewire-lifecycle-fixture=";
 
 fn config() -> Config {
     Config {
+        interception: None,
         listen_addr: "unused".into(),
         workspace_root: "/workspace".into(),
         home_root: "/home/codewire".into(),

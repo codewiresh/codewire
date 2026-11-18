@@ -1977,6 +1977,103 @@ async fn losing_launcher_waits_for_the_admitted_authority() {
     assert!(!config.socket().exists());
 }
 
+/// A fresh authority asked for no placeholder still loads its key for an
+/// intercepting boot's broker, which a boot whose only agent credential is a
+/// sign-in needs (#3999): an ensure that carries boot secrets creates the key
+/// before the broker starts; one that carries none leaves the store alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_intercepting_boots_broker_loads_the_placeholder_key_first() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = runtime_config(&temp);
+    let store = TestProtectedStore::default();
+    let (material_tx, _material_rx) = tokio::sync::mpsc::unbounded_channel();
+    let spawner = Arc::new(TestBrokerSpawner {
+        store: store.clone(),
+        launches: Arc::new(Mutex::new(Vec::new())),
+        child_pids: Arc::new(Mutex::new(Vec::new())),
+        tasks: Arc::new(Mutex::new(Vec::new())),
+        leased_material: material_tx,
+    });
+    let (shutdown, server) = start_server_with_spawner(
+        config.clone(),
+        store.clone(),
+        spawner as Arc<dyn LocalBrokerProcessSpawner>,
+    )
+    .await;
+    let mut owner = connect_when_ready(&config).await;
+    let credential = owner
+        .add_credential(
+            NewCredential {
+                provider: provider("openai"),
+                authentication_kind: CredentialAuthKind::OAuth,
+                display_name: "synthetic-sign-in".into(),
+                account_hint: None,
+                expires_at_unix: None,
+            },
+            ProtectedValue::from_slice(FIRST_MATERIAL).unwrap(),
+        )
+        .await
+        .unwrap();
+    let profile = owner
+        .create_profile(
+            &AccessProfileName::parse("sign-in").unwrap(),
+            &BTreeMap::from([(CapabilitySlot::codex(), credential.metadata.id.clone())]),
+        )
+        .await
+        .unwrap();
+    let key_stored = || {
+        store
+            .entries
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|entry| entry.ends_with("/placeholder-key-v1"))
+    };
+    let mut control = LocalCredentialControlClient::connect(&config)
+        .await
+        .unwrap();
+    for (generation, boot_secrets) in [
+        (3, crate::BrokerBootSecrets::default()),
+        (
+            4,
+            crate::BrokerBootSecrets::new([(
+                crate::BootSecretPurpose::FrontDoorPairing,
+                vec![0x2c; crate::BOOT_SECRET_BYTES],
+            )])
+            .unwrap(),
+        ),
+    ] {
+        let environment_id = EnvironmentId::parse(uuid::Uuid::new_v4().to_string()).unwrap();
+        let selected = EnvironmentAccessBinding {
+            environment_id: environment_id.clone(),
+            profile_id: profile.profile.id.clone(),
+            profile_revision: profile.profile.revision,
+        };
+        owner
+            .create_environment_access_binding(&selected)
+            .await
+            .unwrap();
+        let intercepting = !boot_secrets.is_empty();
+        control
+            .ensure_environment_broker(
+                &environment_id,
+                generation,
+                "dev",
+                &temp.path().join(format!("runtime/{environment_id}.sock")),
+                EnvironmentBrokerSelection {
+                    local_profile: Some(selected),
+                    boot_secrets,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(key_stored(), intercepting, "generation {generation}");
+    }
+    shutdown.send(()).unwrap();
+    server.await.unwrap().unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn authority_launches_one_generation_bound_broker_and_stops_it_exactly() {
     let temp = tempfile::tempdir().unwrap();

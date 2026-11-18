@@ -1319,8 +1319,13 @@ is exactly as described above. What exists today:
 
 When a local VM's agent hosts go through the TLS front door, which is off by
 default, the guest holds a per-environment placeholder for each credential in
-place of the fixed `codewire-managed`. Nothing delivers one to a guest yet;
-these pieces are in place for the boot seed that will:
+place of the fixed `codewire-managed`. Before such a boot starts, the
+supervisor asks the authority for the placeholder of the selected Anthropic
+form (an API key or a subscription token; the sign-in form's comes with its
+login), and the runner carries it to the guest in the seed beside the CA. Guest
+init gives it to the workspace's own processes and to the guest daemon, which
+projects it to every session and managed agent. A boot without interception,
+or one whose credentials come from the platform, carries none.
 
 - **The value.** `cwp1_` and 43 base64url characters, an HMAC over the
   environment, the selected binding's profile revision, the slot and the
@@ -1339,8 +1344,9 @@ these pieces are in place for the boot seed that will:
   slot the environment's selected binding grants, the placeholder that
   generation's leases carry. It returns none for an ungranted slot, refuses a
   binding that is no longer the environment's, and logs nothing. It is served
-  on the authority's owner-only socket, for the local supervisor.
-- **What the guest will get.** With interception on, the Anthropic projection
+  on the authority's owner-only socket, and the local supervisor is its
+  caller.
+- **What the guest gets.** With interception on, the Anthropic projection
   carries no `ANTHROPIC_BASE_URL`, so Claude Code talks to the real
   `api.anthropic.com` through the front door. `ANTHROPIC_AUTH_TOKEN` (API key)
   or `CLAUDE_CODE_OAUTH_TOKEN` (subscription token) carries the placeholder;

@@ -835,6 +835,7 @@ fn codex_not_selected_removes_only_codewires_files() {
 fn a_daemon_with_a_bridge_and_codex_selected_runs_the_writer_for_its_own_placement() {
     use crate::{Config, CredentialBridgeConfig, CredentialBridgeTransport, DaemonAuthToken};
     let config = |transport: Option<CredentialBridgeTransport>, slots: &[&str]| Config {
+        interception: None,
         host: None,
         listen_addr: "127.0.0.1:0".into(),
         workspace_root: "/workspace".into(),

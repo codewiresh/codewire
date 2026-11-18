@@ -49,3 +49,11 @@ pub(super) fn network_start_error_code(error: &RunnerError) -> &'static str {
         _ => "network_stack_failed",
     }
 }
+
+pub(super) fn guest_failure_detail(stage: GuestBootStage) -> &'static str {
+    match stage {
+        GuestBootStage::SetupFailed => GUEST_SETUP_FAILED,
+        GuestBootStage::DockerToolingMissing => GUEST_DOCKER_TOOLING_MISSING,
+        _ => GUEST_WORKSPACE_FAILED,
+    }
+}

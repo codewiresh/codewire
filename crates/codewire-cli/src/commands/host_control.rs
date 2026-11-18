@@ -406,6 +406,7 @@ mod tests {
         write_private_json(&root.join("host.json"), &environment).unwrap();
         write_private_json(&root.join("daemon-token.json"), &token).unwrap();
         let config = codewire_daemon::Config {
+            interception: None,
             listen_addr: String::new(),
             workspace_root: workspace,
             home_root: home,
@@ -535,6 +536,7 @@ mod tests {
         assert!(!root.join("daemon.log").exists());
         assert!(!root.join("lifecycle.lock").exists());
         let config = codewire_daemon::Config {
+            interception: None,
             listen_addr: String::new(),
             workspace_root: workspace,
             home_root: home,

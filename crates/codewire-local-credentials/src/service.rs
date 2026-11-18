@@ -82,6 +82,7 @@ const SSH_ENROLLMENT_DEADLINE: Duration = Duration::from_secs(30);
 mod grants;
 mod placeholders;
 mod profiles;
+use profiles::profile_id;
 mod repository;
 mod store_status;
 mod workload_secrets;
@@ -639,6 +640,7 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
         &self,
         mut request: BrokerEnsureRequest,
     ) -> Result<EnvironmentBrokerRuntime, Status> {
+        crate::placeholder::load_key_for_boot(&self.authority, &request.boot_secrets).await?;
         // Serialize grant evaluation with entry insertion/removal. Binding
         // mutation commits before calling `stop`, so either this evaluation
         // observes the new binding or that stop observes the inserted entry.
@@ -2216,7 +2218,7 @@ async fn write_prepared_repository(
     }
 }
 
-async fn run_blocking<T, F>(operation: F) -> Result<T, Status>
+pub(crate) async fn run_blocking<T, F>(operation: F) -> Result<T, Status>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, LocalCredentialError> + Send + 'static,
@@ -2269,10 +2271,6 @@ fn status_for_ssh_material_error(error: SshMaterialError) -> Status {
 
 fn credential_id(value: String) -> Result<CredentialId, Status> {
     CredentialId::parse(value).map_err(status_for_access_error)
-}
-
-fn profile_id(value: String) -> Result<AccessProfileId, Status> {
-    AccessProfileId::parse(value).map_err(status_for_access_error)
 }
 
 fn environment_id(value: String) -> Result<EnvironmentId, Status> {

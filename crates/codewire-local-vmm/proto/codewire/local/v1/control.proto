@@ -1173,6 +1173,19 @@ message StartVmRequest {
   // protocol 13), sent only with a staged catalog: the guest rebuilds a
   // runtime cache bound to exactly this one. Empty for every other boot.
   string cw_runtime_moved_from_generation = 27;
+
+  // With intercept, this environment's placeholder for each Anthropic form
+  // its binding grants (#3999), which the seed carries beside the CA. Empty
+  // otherwise. Not a credential: it only names one to the environment's own
+  // broker.
+  repeated SeedCredentialPlaceholder credential_placeholders = 28;
+}
+
+message SeedCredentialPlaceholder {
+  // 1: the Anthropic API key (ANTHROPIC_AUTH_TOKEN); 2: the Claude
+  // subscription token (CLAUDE_CODE_OAUTH_TOKEN).
+  uint32 slot = 1;
+  string placeholder = 2;
 }
 
 message CheckpointBoot {

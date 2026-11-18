@@ -400,6 +400,31 @@ fn a_lease_carries_the_unleased_placeholder_once_the_key_is_loaded() {
     );
 }
 
+/// A fresh authority loads its key for an intercepting boot without being
+/// asked for any placeholder, as for a boot whose only agent credential is a
+/// sign-in: from then on every lease carries the placeholder an asked-for
+/// one would have been (#3999).
+#[test]
+fn loading_the_root_key_gives_every_later_lease_its_placeholder() {
+    let fixture = fixture();
+    assert!(
+        fixture
+            .lease(&fixture.environment, 7, codex())
+            .placeholder()
+            .is_none()
+    );
+    fixture.authority.load_root_placeholder_key().unwrap();
+    let leased = fixture.leased(&fixture.environment, 7, codex());
+    let unleased = fixture
+        .unleased(&fixture.environment, 7, &codex(), &fixture.first)
+        .unwrap();
+    assert!(leased.ct_eq(&unleased));
+    // Loading again reads nothing more.
+    let reads = fixture.store.key_entry(|key| key.reads);
+    fixture.authority.load_root_placeholder_key().unwrap();
+    assert_eq!(fixture.store.key_entry(|key| key.reads), reads);
+}
+
 /// A placeholder follows the environment's binding, not its VM generation
 /// (#3999): a VM checkpoint restored in place boots a new generation with the
 /// same binding and keeps it. Another slot, another environment, a profile

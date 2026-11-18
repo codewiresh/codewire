@@ -855,6 +855,7 @@ fn host_daemon_config(
     token: String,
 ) -> anyhow::Result<codewire_daemon::Config> {
     Ok(codewire_daemon::Config {
+        interception: None,
         listen_addr: String::new(),
         workspace_root: environment.path.clone(),
         home_root: env::var_os("HOME")

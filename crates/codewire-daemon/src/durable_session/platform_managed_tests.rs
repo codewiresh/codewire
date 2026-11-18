@@ -50,6 +50,7 @@ impl Fixture {
     async fn spawn() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root: temp.path().to_owned(),
             home_root: temp.path().to_owned(),
@@ -311,6 +312,7 @@ async fn platform_managed_driver_is_prepared_through_the_launch_projection_like_
         codewire_access::ManagedCredentialClients::from_profile_slots(["codex", "github", "ssh"])
             .unwrap();
     let mut config = Config {
+        interception: None,
         listen_addr: "unused:0".into(),
         workspace_root: temp.path().to_owned(),
         home_root: temp.path().to_owned(),
@@ -605,6 +607,7 @@ async fn platform_managed_shutdown_closes_effect_admission_without_running_it() 
 
 fn retained_config(root: &Path) -> Config {
     Config {
+        interception: None,
         listen_addr: "unused:0".into(),
         workspace_root: root.to_owned(),
         home_root: root.to_owned(),

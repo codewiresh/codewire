@@ -19,6 +19,7 @@ pub(crate) async fn in_process_daemon(temp: &Path) -> DaemonSessionClient {
     std::fs::create_dir_all(&workspace_root).unwrap();
     std::fs::create_dir_all(&home_root).unwrap();
     let config = Config {
+        interception: None,
         listen_addr: "in-process".into(),
         workspace_root,
         home_root,

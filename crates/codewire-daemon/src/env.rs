@@ -110,7 +110,9 @@ fn build_managed_process_env_from(
         Some(CredentialBridgeTransport::Hosted) => ManagedCredentialClientPlacement::Platform,
         Some(CredentialBridgeTransport::Local) | None => ManagedCredentialClientPlacement::Native,
     };
-    let managed = config.managed_credential_clients.for_placement(placement);
+    let managed = config
+        .managed_credential_clients
+        .for_placement_intercepted(placement, config.interception.as_ref());
     let managed_names = managed.environment.keys().cloned().collect::<BTreeSet<_>>();
     let selected_reserved = config
         .managed_credential_clients
@@ -407,11 +409,61 @@ mod tests {
             process_execution: crate::execution::ProcessExecution::Native,
             credential_bridge: None,
             managed_credential_clients: Default::default(),
+            interception: None,
             host: None,
             launch_projection: None,
             session_working_dir: None,
             sandbox_server_url: None,
         }
+    }
+
+    /// The managed environment of one command with no declared values.
+    fn managed_entries(config: &Config) -> Vec<String> {
+        build_managed_process_env_from(config, Vec::new(), &[], "", Vec::new(), "/bin/sh")
+            .unwrap()
+            .entries
+    }
+
+    /// Off (#3999), every managed value is exactly the plain projection's;
+    /// on, the Anthropic base is gone and the bearer is the placeholder, and
+    /// nothing else changes.
+    #[test]
+    fn an_intercepted_boot_changes_only_the_anthropic_names() {
+        let config = selected_config(
+            PathBuf::from("/home/codewire"),
+            &["codex", "openai", "anthropic", "ssh"],
+            CredentialBridgeTransport::Local,
+        );
+        let off = managed_entries(&config);
+        for (name, value) in config
+            .managed_credential_clients
+            .for_placement(ManagedCredentialClientPlacement::Native)
+            .environment
+        {
+            assert!(off.contains(&format!("{name}={value}")), "{name}");
+        }
+
+        let placeholder =
+            codewire_access::CredentialPlaceholder::parse(&format!("cwp1_{}A", "C".repeat(42)))
+                .unwrap();
+        let mut intercepted = config.clone();
+        intercepted.interception = Some(codewire_access::Interception::new(Some(
+            placeholder.clone(),
+        )));
+        let on = managed_entries(&intercepted);
+        assert!(
+            !on.iter()
+                .any(|entry| entry.starts_with("ANTHROPIC_BASE_URL="))
+        );
+        assert!(on.contains(&format!("ANTHROPIC_AUTH_TOKEN={}", placeholder.as_str())));
+        let others = |entries: &[String]| {
+            entries
+                .iter()
+                .filter(|entry| !entry.starts_with("ANTHROPIC_"))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(others(&on), others(&off));
     }
 
     fn selected_config(

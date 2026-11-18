@@ -3,6 +3,7 @@ use crate::{CredentialBridgeConfig, DaemonAuthToken, LaunchProjectionConfig};
 
 fn config(directory: &Path) -> Config {
     Config {
+        interception: None,
         listen_addr: "unused:0".into(),
         workspace_root: "/workspace".into(),
         home_root: "/home/codewire".into(),

@@ -12,6 +12,7 @@ pub(crate) fn config(root: &Path) -> crate::Config {
             .unwrap();
     }
     crate::Config {
+        interception: None,
         listen_addr: String::new(),
         workspace_root: root.join("workspace"),
         home_root: root.join("home"),

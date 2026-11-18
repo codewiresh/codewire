@@ -8,6 +8,7 @@ const BOOTSTRAP_HEADER_BYTES: usize = LAUNCH_CONTEXT_BYTES + 4;
 
 fn config(directory: &Path) -> Config {
     Config {
+        interception: None,
         listen_addr: "unused:0".into(),
         workspace_root: "/workspace".into(),
         home_root: "/home/codewire".into(),

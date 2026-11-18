@@ -323,6 +323,7 @@ impl DaemonHarness {
             listener.local_addr().expect("listener address")
         );
         let config = Config {
+            interception: None,
             listen_addr: endpoint.clone(),
             workspace_root: workspace_root.clone(),
             home_root,
@@ -372,6 +373,7 @@ impl DaemonHarness {
             listener.local_addr().expect("gated listener address")
         );
         let config = Config {
+            interception: None,
             listen_addr: endpoint.clone(),
             workspace_root: workspace_root.clone(),
             home_root,

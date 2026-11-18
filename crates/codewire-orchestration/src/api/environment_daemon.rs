@@ -1676,6 +1676,7 @@ mod tests {
                 .expect("daemon proxy listener");
             let address = listener.local_addr().expect("daemon proxy address");
             let config = Config {
+                interception: None,
                 listen_addr: address.to_string(),
                 workspace_root,
                 home_root,
@@ -1729,6 +1730,7 @@ mod tests {
     ) -> (Channel, TempDir) {
         let temp = tempfile::tempdir().expect("app ports daemon tempdir");
         let config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root: temp.path().to_path_buf(),
             home_root: temp.path().to_path_buf(),

@@ -520,6 +520,33 @@ pub(in crate::supervisor) mod linux;
 #[cfg(target_os = "linux")]
 use linux::{capture, delete, get, list};
 
+/// The closed cause class of a failed lifecycle effect (#2595). Like
+/// [`create_failure_code`], it names the error, never its Display, Debug or
+/// source chain, so no path, upstream text or secret value reaches the journal
+/// or the log. Every cause is a `[a-z_]` token of at most
+/// [`MAXIMUM_LIFECYCLE_CAUSE_BYTES`], so `<operation prefix>_<cause>` stays a
+/// valid journal error code. The match is exhaustive: a new error variant must
+/// be named here.
+/// A Stop payload is exactly `{"name"}`, or `{"name", "discard_for_checkpoint"}`
+/// for one the checkpoint service admitted for a restore (#3046): `Some` with
+/// whether the guest's state is discarded, `None` for any other shape.
+pub(super) fn stop_payload_checkpoint(payload: &serde_json::Value, name: &str) -> Option<bool> {
+    let fields = payload.as_object()?;
+    if fields.get("name").and_then(serde_json::Value::as_str) != Some(name) {
+        return None;
+    }
+    match fields.len() {
+        1 => Some(false),
+        2 => fields
+            .get("discard_for_checkpoint")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .filter(|id| !id.is_nil())
+            .map(|_| true),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod name_tests {
     use super::*;

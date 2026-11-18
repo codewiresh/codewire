@@ -109,13 +109,14 @@ use mesh_processes::{spawn_mesh_enrollment_process, spawn_mesh_transport_process
 
 pub use intercept::FrontDoorFailure;
 pub use intercept::InterceptRefusal;
-pub(crate) use intercept::boot_intercepts;
 pub(crate) use intercept::{BOOT_SECRET_BYTES, BootSecrets};
+pub(crate) use intercept::{boot_intercepts, boot_placeholders};
 #[cfg(target_os = "linux")]
 mod cw_runtime_disk;
 mod egress_spawn;
 mod host_port_forward;
 mod mesh_ingress_pass;
+use mesh_ingress_pass::take_mesh_ingress_receiver_exit;
 mod stage_times;
 mod worker_descriptors;
 mod worker_frames;
@@ -189,6 +190,8 @@ pub struct CreateVmRequest {
     /// The names this boot intercepts through its TLS front door (#3999);
     /// empty, the default, intercepts nothing.
     pub intercepts: InterceptSet,
+    /// With `intercepts`, the seed's placeholders beside the front door's CA (#3999).
+    pub credential_placeholders: codewire_vmm_guest_probe::SeedPlaceholders,
     /// Restore this boot from the VM checkpoint placed in
     /// `checkpoints/in` instead of booting it (#3046 R4).
     #[cfg(target_os = "linux")]
@@ -336,7 +339,7 @@ impl CloudHypervisorRunner {
             egress_ca,
             // The front door's spawn supplies these with its CA (#3999,
             // change 12); none until then.
-            codewire_vmm_guest_probe::SeedPlaceholders::default(),
+            request.credential_placeholders.clone(),
         )?;
         publish_seed(&paths.seed_disk, &seed.encode())?;
         paths.prepare_diagnostics()?;
@@ -2219,26 +2222,6 @@ fn take_ingress_forwarder_failure(
     };
     let _ = forwarder.take();
     !matches!(outcome, Ok(Ok(())))
-}
-
-fn take_mesh_ingress_receiver_exit(
-    receiver: &mut Option<JoinHandle<Result<(), MeshTransportError>>>,
-) -> bool {
-    let outcome = {
-        let Some(receiver) = receiver.as_mut() else {
-            return true;
-        };
-        if !receiver.is_finished() {
-            return false;
-        }
-        (&mut *receiver).now_or_never()
-    };
-    if outcome.is_some() {
-        let _ = receiver.take();
-        true
-    } else {
-        false
-    }
 }
 
 struct NetworkWorkerStartup {
@@ -5249,6 +5232,7 @@ mod tests {
             checkpoint: None,
             network_policy: CompiledPolicy::developer_baseline(),
             intercepts: InterceptSet::default(),
+            credential_placeholders: Default::default(),
             vm_id: Uuid::new_v4(),
             generation: 1,
             vsock_cid: 7,

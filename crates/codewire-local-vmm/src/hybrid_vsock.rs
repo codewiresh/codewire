@@ -379,6 +379,7 @@ mod tests {
             });
             serve_grpc_with_incoming(
                 Config {
+                    interception: None,
                     // The injected transport entrypoint must never parse or
                     // bind this deliberately invalid host-TCP address. Its successful Unix
                     // readiness below proves that the caller-owned hybrid
@@ -473,6 +474,7 @@ mod tests {
             stream.write_all(b"OK 49152\n").await.unwrap();
             serve_grpc_with_incoming(
                 Config {
+                    interception: None,
                     listen_addr: "vsock:7777".into(),
                     workspace_root: workspace,
                     home_root: home,

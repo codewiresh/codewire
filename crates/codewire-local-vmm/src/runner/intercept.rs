@@ -6,9 +6,10 @@
 //! the boot's CA in its own memory, constrained to those names, and only the
 //! certificate reaches the guest, in the seed.
 
+use codewire_access::CredentialPlaceholder;
 use codewire_egress_front_door_bridge::RouteTable;
 use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
-use codewire_vmm_guest_probe::EgressCaCertificate;
+use codewire_vmm_guest_probe::{EgressCaCertificate, PlaceholderSlot, SeedPlaceholders};
 
 use super::RunnerError;
 #[cfg(target_os = "linux")]
@@ -228,6 +229,32 @@ pub(super) fn boot_egress_ca(
     Err(InterceptRefusal::FrontDoorUnavailable.into())
 }
 
+/// The seed's placeholders, from the supervisor's request: none unless the
+/// boot intercepts, and then each a known Anthropic form at most once with a
+/// well-formed placeholder. Anything else is refused.
+pub(crate) fn boot_placeholders(
+    intercept: bool,
+    entries: Vec<crate::control::v1::SeedCredentialPlaceholder>,
+) -> Result<SeedPlaceholders, RunnerError> {
+    if !intercept && !entries.is_empty() {
+        return Err(RunnerError::InvalidRequest);
+    }
+    let entries = entries
+        .into_iter()
+        .map(|entry| {
+            let slot = match entry.slot {
+                1 => PlaceholderSlot::AnthropicApiKey,
+                2 => PlaceholderSlot::AnthropicSubscriptionToken,
+                _ => return Err(RunnerError::InvalidRequest),
+            };
+            let placeholder = CredentialPlaceholder::parse(&entry.placeholder)
+                .map_err(|_| RunnerError::InvalidRequest)?;
+            Ok((slot, placeholder))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    SeedPlaceholders::new(entries).map_err(|_| RunnerError::InvalidRequest)
+}
+
 /// A restore across a change of the switch is refused: the restored
 /// workload runs with or without `NODE_EXTRA_CA_CERTS` as its captured boot
 /// did, so the switch applies on a stop and start. With the switch on at
@@ -324,6 +351,47 @@ mod tests {
                 .contains("cannot start the TLS front door on macOS yet"),
             "{error}"
         );
+    }
+
+    fn entry(slot: u32, placeholder: &str) -> crate::control::v1::SeedCredentialPlaceholder {
+        crate::control::v1::SeedCredentialPlaceholder {
+            slot,
+            placeholder: placeholder.into(),
+        }
+    }
+
+    fn placeholder() -> String {
+        format!("cwp1_{}A", "D".repeat(42))
+    }
+
+    /// The seed's placeholders come only with interception, each a known
+    /// Anthropic form at most once with a well-formed value.
+    #[test]
+    fn boot_placeholders_are_refused_unless_well_formed_and_intercepted() {
+        let decoded = boot_placeholders(true, vec![entry(1, &placeholder())]).unwrap();
+        let [(slot, value)] = decoded.entries() else {
+            panic!("one placeholder");
+        };
+        assert_eq!(*slot, PlaceholderSlot::AnthropicApiKey);
+        assert_eq!(value.as_str(), placeholder());
+        assert!(boot_placeholders(false, Vec::new()).unwrap().is_empty());
+        for (intercept, entries) in [
+            (false, vec![entry(1, &placeholder())]),
+            (true, vec![entry(3, &placeholder())]),
+            (true, vec![entry(1, "codewire-managed")]),
+            (
+                true,
+                vec![entry(1, &placeholder()), entry(1, &placeholder())],
+            ),
+        ] {
+            assert!(
+                matches!(
+                    boot_placeholders(intercept, entries),
+                    Err(RunnerError::InvalidRequest)
+                ),
+                "{intercept}"
+            );
+        }
     }
 
     /// Off, the default: no front door is started and the seed carries no

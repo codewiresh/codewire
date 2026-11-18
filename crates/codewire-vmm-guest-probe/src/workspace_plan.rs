@@ -225,9 +225,21 @@ impl WorkspacePlan {
 
     /// Overlay only this boot's selected client routes on the active copy.
     /// The durable image/project plan remains unchanged for update and clear.
+    #[cfg(test)]
     pub(crate) fn with_managed_credential_clients(
+        self,
+        clients: codewire_access::ManagedCredentialClients,
+    ) -> Result<Self, WorkspacePlanError> {
+        self.with_intercepted_managed_credential_clients(clients, None)
+    }
+
+    /// [`Self::with_managed_credential_clients`] for a boot whose agent hosts
+    /// the TLS front door intercepts (#3999), so the workload's own processes
+    /// hold the same placeholder the daemon's sessions do.
+    pub(crate) fn with_intercepted_managed_credential_clients(
         mut self,
         clients: codewire_access::ManagedCredentialClients,
+        interception: Option<&codewire_access::Interception>,
     ) -> Result<Self, WorkspacePlanError> {
         self.require_ordinary()?;
         if self
@@ -241,8 +253,10 @@ impl WorkspacePlan {
             .check_collisions(self.explicit_environment_keys.iter().map(String::as_str))
             .map_err(|_| WorkspacePlanError::Plan)?;
         let installation_plan_sha256 = Sha256Value::calculate(&self.encode()?).to_string();
-        let projection =
-            clients.for_placement(codewire_access::ManagedCredentialClientPlacement::Native);
+        let projection = clients.for_placement_intercepted(
+            codewire_access::ManagedCredentialClientPlacement::Native,
+            interception,
+        );
         let mut environment: BTreeMap<String, String> = self
             .environment
             .iter()

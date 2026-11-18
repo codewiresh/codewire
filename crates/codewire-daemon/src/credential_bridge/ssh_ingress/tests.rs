@@ -36,6 +36,7 @@ fn config(path: PathBuf, transport: CredentialBridgeTransport) -> CredentialBrid
 
 fn daemon_config(root: &Path) -> Config {
     Config {
+        interception: None,
         listen_addr: "127.0.0.1:0".into(),
         workspace_root: root.into(),
         home_root: root.into(),

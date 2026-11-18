@@ -1223,6 +1223,7 @@ mod linux {
             cw_runtime_moved_from_generation: None,
             network_policy: codewire_egress_policy::CompiledPolicy::developer_baseline(),
             intercepts: codewire_egress_policy::intercept::InterceptSet::default(),
+            credential_placeholders: Default::default(),
             checkpoint: None,
             vm_id: arguments.vm_id,
             generation,

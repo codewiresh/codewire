@@ -727,6 +727,7 @@ mod tests {
         assert!(saved.cleanup_for(&wrong).is_err());
         let root = tempfile::tempdir().unwrap();
         let config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root: root.path().into(),
             home_root: root.path().into(),
@@ -890,6 +891,7 @@ mod tests {
         mark_unknown(&mut saved);
         let root = tempfile::tempdir().unwrap();
         let config = Config {
+            interception: None,
             listen_addr: "unused:0".into(),
             workspace_root: root.path().into(),
             home_root: root.path().into(),

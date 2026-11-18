@@ -157,6 +157,7 @@ impl DaemonHarness {
                 let listener = UnixListener::bind(&socket_path).expect("bind daemon Unix listener");
                 let endpoint = format!("unix:{}", socket_path.display());
                 let config = Config {
+                    interception: None,
                     listen_addr: endpoint.clone(),
                     workspace_root: workspace_root.clone(),
                     home_root: home_root.clone(),
@@ -198,6 +199,7 @@ impl DaemonHarness {
                 let addr = listener.local_addr().expect("daemon harness address");
                 let endpoint = format!("http://{addr}");
                 let config = Config {
+                    interception: None,
                     listen_addr: addr.to_string(),
                     workspace_root: workspace_root.clone(),
                     home_root: home_root.clone(),
@@ -237,6 +239,7 @@ impl DaemonHarness {
             let addr = listener.local_addr().expect("daemon harness address");
             let endpoint = format!("http://{addr}");
             let config = Config {
+                interception: None,
                 listen_addr: addr.to_string(),
                 workspace_root: workspace_root.clone(),
                 home_root: home_root.clone(),

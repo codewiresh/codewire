@@ -10,6 +10,7 @@ use broker_ensure::ensure_credential_broker;
 mod bootstrap;
 mod cached_image;
 mod checkpoints;
+use checkpoints::stop_payload_checkpoint;
 mod collection_roots;
 mod egress_intercept;
 mod local_https;
@@ -20,6 +21,7 @@ mod retained_images;
 mod runner_report;
 mod runtime;
 mod runtime_move;
+mod seed_placeholders;
 mod snapshots;
 mod sources;
 mod ssh;
@@ -4521,9 +4523,18 @@ impl Supervisor {
                 String::new()
             };
         let egress = self.boot_egress(environment.id, &broker_request).await?;
+        let credential_placeholders = self
+            .seed_placeholders(
+                egress.intercept,
+                &projection_environment,
+                generation,
+                managed_credential_clients,
+            )
+            .await?;
         let start_request = v1::StartVmRequest {
             network_policy_document: egress.network_policy_document,
             intercept: egress.intercept,
+            credential_placeholders,
             cw_runtime_catalog_generation: expected_cw_runtime_generation.clone(),
             cw_runtime_moved_from_generation: self.cw_runtime_moved_from(&environment),
             environment_id: environment.id.to_string(),
@@ -10238,33 +10249,6 @@ fn create_failure_code(error: &SupervisorError) -> &'static str {
             "create_nested_repository_tracked"
         }
         _ => "create_failed",
-    }
-}
-
-/// The closed cause class of a failed lifecycle effect (#2595). Like
-/// [`create_failure_code`], it names the error, never its Display, Debug or
-/// source chain, so no path, upstream text or secret value reaches the journal
-/// or the log. Every cause is a `[a-z_]` token of at most
-/// [`MAXIMUM_LIFECYCLE_CAUSE_BYTES`], so `<operation prefix>_<cause>` stays a
-/// valid journal error code. The match is exhaustive: a new error variant must
-/// be named here.
-/// A Stop payload is exactly `{"name"}`, or `{"name", "discard_for_checkpoint"}`
-/// for one the checkpoint service admitted for a restore (#3046): `Some` with
-/// whether the guest's state is discarded, `None` for any other shape.
-fn stop_payload_checkpoint(payload: &serde_json::Value, name: &str) -> Option<bool> {
-    let fields = payload.as_object()?;
-    if fields.get("name").and_then(serde_json::Value::as_str) != Some(name) {
-        return None;
-    }
-    match fields.len() {
-        1 => Some(false),
-        2 => fields
-            .get("discard_for_checkpoint")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|id| Uuid::parse_str(id).ok())
-            .filter(|id| !id.is_nil())
-            .map(|_| true),
-        _ => None,
     }
 }
 

@@ -673,6 +673,56 @@ pub struct ManagedCredentialClientProjection {
     pub gh: Option<GhConfigProjection>,
 }
 
+/// An environment whose agent hosts the TLS front door intercepts (#3999),
+/// with the placeholder of its selected Anthropic form, if that form takes
+/// one: the API-key and subscription-token forms do; the sign-in form's
+/// placeholder travels in its delivered login instead.
+#[derive(Clone, Debug)]
+pub struct Interception {
+    anthropic: Option<CredentialPlaceholder>,
+}
+
+impl Interception {
+    pub fn new(anthropic: Option<CredentialPlaceholder>) -> Self {
+        Self { anthropic }
+    }
+
+    pub fn anthropic(&self) -> Option<&CredentialPlaceholder> {
+        self.anthropic.as_ref()
+    }
+}
+
+/// Placeholders compare in constant time, never with `==` on their text.
+impl PartialEq for Interception {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.anthropic, &other.anthropic) {
+            (None, None) => true,
+            (Some(left), Some(right)) => left.ct_eq(right),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Interception {}
+
+impl ManagedCredentialClients {
+    /// [`Self::for_placement`], then, for an environment whose agent hosts
+    /// are intercepted, [`ManagedCredentialClientProjection::intercepted`].
+    /// Without an interception the projection is exactly
+    /// [`Self::for_placement`]'s.
+    pub fn for_placement_intercepted(
+        self,
+        placement: ManagedCredentialClientPlacement,
+        interception: Option<&Interception>,
+    ) -> ManagedCredentialClientProjection {
+        let projection = self.for_placement(placement);
+        match interception {
+            Some(interception) => projection.intercepted(self, interception.anthropic()),
+            None => projection,
+        }
+    }
+}
+
 impl ManagedCredentialClientProjection {
     /// This projection for an environment whose agent hosts the TLS front
     /// door intercepts (#3999), where `clients` is the selection it was made

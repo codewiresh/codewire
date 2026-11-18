@@ -170,6 +170,7 @@ mod tests {
 
     fn config(home_root: std::path::PathBuf) -> Config {
         Config {
+            interception: None,
             listen_addr: "127.0.0.1:0".into(),
             workspace_root: home_root.clone(),
             home_root,

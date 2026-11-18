@@ -336,5 +336,17 @@ pub(super) fn wait_exec_status(
     result
 }
 
+/// The sealed plan as this boot runs it: its selected client configuration,
+/// and the egress CA its agents trust when the seed carries one (#3999).
+pub(super) fn with_boot_selection(plan: WorkspacePlan, seed: &Seed) -> Result<WorkspacePlan> {
+    let plan = plan
+        .with_intercepted_managed_credential_clients(
+            seed.managed_credential_clients(),
+            interception::from_seed(seed).as_ref(),
+        )
+        .context("apply this boot's selected client configuration")?;
+    egress_trust::with_trust_environment(plan, seed.egress_ca())
+}
+
 #[cfg(test)]
 mod tests;
