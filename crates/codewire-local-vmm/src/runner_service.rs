@@ -95,7 +95,9 @@ mod checkpoint;
 mod egress_status;
 mod exit_cause;
 mod generation_access;
+mod guest_start;
 use generation_access::{GenerationAccessCell, GenerationAccessGuard, validate_generation_access};
+use guest_start::{GuestStartFailure, wait_for_guest_daemon};
 mod stage_log;
 mod start_error;
 use start_error::guest_failure_detail;
@@ -1274,20 +1276,20 @@ impl EnvironmentRunnerService for RunnerRpc {
             self.log_start_failure(
                 environment_id,
                 request.generation,
-                "guest_start_failed",
+                failure.error_code,
                 Some(&failure),
                 started,
             );
             generation_access.revoke();
             let _ = running.stop().await;
             state.state = v1::EnvironmentState::Error;
-            state.error_code = Some("guest_start_failed");
+            state.error_code = Some(failure.error_code);
             self.events.publish(
                 v1::EnvironmentState::Error,
                 request.generation,
                 v1::RunnerStage::Error,
                 None,
-                Some("guest_start_failed"),
+                Some(failure.error_code),
                 state.cw_runtime_catalog_generation(),
             )?;
             return Err(failure.status);
@@ -1831,163 +1833,6 @@ enum GuestProgressStreamError {
     Flood,
 }
 
-/// Why a started guest never became ready. `detail` and `guest_stage` are
-/// closed names for the runner log (#2595); the status keeps its existing text.
-struct GuestStartFailure {
-    status: Status,
-    detail: &'static str,
-    guest_stage: Option<GuestBootStage>,
-    daemon_ready: bool,
-}
-
-async fn wait_for_guest_daemon(
-    running: &mut RunningVm,
-    timeout: std::time::Duration,
-    events: &RunnerEvents,
-) -> Result<(), GuestStartFailure> {
-    let target = GuestProgressTarget::from_running(running);
-    let generation = running.generation();
-    let (progress_tx, mut progress_rx) = mpsc::channel(RUNNER_WATCH_BUFFER);
-    let mut progress_task = tokio::spawn(stream_guest_progress(target, progress_tx));
-    let mut progress_joined = false;
-    let mut guest_stage = None;
-    let mut daemon_ready = false;
-    let result = tokio::time::timeout(timeout, async {
-        let mut progress_open = true;
-        let mut progress_ready = false;
-        loop {
-            tokio::select! {
-                progress = progress_rx.recv(), if progress_open => match progress {
-                    Some(progress) => {
-                        events.publish(
-                            v1::EnvironmentState::Starting,
-                            generation,
-                            v1::RunnerStage::GuestInit,
-                            Some(progress),
-                            None,
-                        running.cw_runtime_catalog_generation(),
-                        ).map_err(|status| ("event_publish", status))?;
-                        guest_stage = Some(progress.stage);
-                        running.stage_times_mut().record(progress.stage);
-                        if progress.stage.is_failure() {
-                            return Err((
-                                guest_failure_detail(progress.stage),
-                                Status::failed_precondition(
-                                    "authenticated guest initialization failed",
-                                ),
-                            ));
-                        }
-                        progress_ready |= progress.stage == GuestBootStage::DaemonStarted;
-                    }
-                    None => {
-                        progress_open = false;
-                        progress_joined = true;
-                        match (&mut progress_task).await {
-                            Ok(Ok(())) if progress_ready => {}
-                            Ok(Ok(())) => {
-                                return Err((
-                                    "guest_progress_ended",
-                                    Status::unavailable(
-                                        "guest progress ended before daemon startup",
-                                    ),
-                                ));
-                            }
-                            Ok(Err(_)) | Err(_) => {
-                                return Err((
-                                    "guest_progress_invalid",
-                                    Status::failed_precondition("guest progress validation failed"),
-                                ));
-                            }
-                        }
-                    }
-                },
-                _ = tokio::time::sleep(DAEMON_RETRY_DELAY) => {
-                    match running
-                        .observe_exit()
-                        .await
-                        .map_err(|error| ("vm_observe_failed", Status::internal(error.to_string())))?
-                    {
-                        ExitClass::StillRunning => {}
-                        ExitClass::GuestShutdown => {
-                            return Err((
-                                "guest_shutdown",
-                                Status::unavailable("guest shut down before daemon readiness"),
-                            ));
-                        }
-                        ExitClass::VmmFailure(code) => {
-                            return Err(("vmm_exited", Status::unavailable(format!(
-                                "Cloud Hypervisor exited before guest daemon readiness with status {code:?}"
-                            ))));
-                        }
-                        ExitClass::DirectShareFailure(code) => {
-                            return Err(("direct_share_exited", Status::unavailable(format!(
-                                "isolated direct-share server exited before guest daemon readiness with status {code:?}"
-                            ))));
-                        }
-                        ExitClass::NetworkWorkerFailure(code) => {
-                            return Err(("network_worker_exited", Status::unavailable(format!(
-                                "isolated network worker exited before guest daemon readiness with status {code:?}"
-                            ))));
-                        }
-                        ExitClass::EgressBrokerFailure(code) => {
-                            return Err(("egress_broker_exited", Status::unavailable(format!(
-                                "isolated egress broker exited before guest daemon readiness with status {code:?}"
-                            ))));
-                        }
-                        ExitClass::IngressForwarderFailure => {
-                            return Err((
-                                "ingress_forwarder_exited",
-                                Status::unavailable(
-                                    "ingress forwarder exited before guest daemon readiness",
-                                ),
-                            ));
-                        }
-                        ExitClass::MeshTransportFailure(code) => {
-                            return Err(("mesh_transport_exited", Status::unavailable(format!(
-                                "isolated Mesh transport exited before guest daemon readiness with status {code:?}"
-                            ))));
-                        }
-                        ExitClass::MeshIngressReceiverFailure => {
-                            return Err((
-                                "mesh_ingress_receiver_exited",
-                                Status::unavailable(
-                                    "Mesh ingress receiver exited before guest daemon readiness",
-                                ),
-                            ));
-                        }
-                    }
-                    if !daemon_ready
-                        && let Ok(client) = running.daemon_client().await
-                        && client.require_ready().await.is_ok()
-                    {
-                        daemon_ready = true;
-                    }
-                }
-            }
-            if daemon_ready && progress_ready {
-                return Ok(());
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        Err((
-            "readiness_timeout",
-            Status::unavailable("guest daemon readiness timed out"),
-        ))
-    });
-    if !progress_joined {
-        progress_task.abort();
-        let _ = progress_task.await;
-    }
-    result.map_err(|(detail, status)| GuestStartFailure {
-        status,
-        detail,
-        guest_stage,
-        daemon_ready,
-    })
-}
-
 #[cfg(target_os = "linux")]
 fn clear_parent_death_signal() -> Result<(), Status> {
     // SAFETY: PR_SET_PDEATHSIG with zero only clears the calling process's
@@ -2189,6 +2034,7 @@ mod tests {
         ];
         for (detail, guest_stage) in failures {
             let failure = GuestStartFailure {
+                error_code: "guest_start_failed",
                 status: Status::unavailable(CANARY),
                 detail,
                 guest_stage,

@@ -21,9 +21,9 @@ use codewire_egress_policy::handoff::{
 use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
 use codewire_local_vmm::broker_control::encode_intercept_frame;
 use codewire_local_vmm::front_door::{
-    FRONT_DOOR_CONTROL_FD, FRONT_DOOR_CREDENTIAL_TAG, FRONT_DOOR_CREDENTIALS_MESSAGE,
-    FRONT_DOOR_READY_MESSAGE, FRONT_DOOR_SOCKETS_MESSAGE, HANDOFF_ROLE_TAG,
-    front_door_serving_message,
+    DroppedSocket, FRONT_DOOR_CONTROL_FD, FRONT_DOOR_CREDENTIAL_TAG,
+    FRONT_DOOR_CREDENTIALS_MESSAGE, FRONT_DOOR_READY_MESSAGE, FRONT_DOOR_SOCKETS_MESSAGE,
+    HANDOFF_ROLE_TAG, front_door_dropped_message, front_door_serving_message,
 };
 use rustix::net::{AddressFamily, SocketFlags, SocketType, socketpair};
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -399,9 +399,12 @@ async fn the_front_door_process_reports_its_ca_and_serves_a_handed_over_stream()
         ready.unwrap().unwrap().payload,
         Some(GuestPayload::Ready(_))
     ));
-    // Its word for the successor it took, the generation's third pairing
-    // frame. The one it dropped got none: this is the first frame since the
-    // first pairing's, and it skips the dropped pairing's number.
+    // Its word for the silent one, whose tag never came, and then for the
+    // successor it took, the generation's third pairing frame.
+    assert_eq!(
+        receive_message(&runner),
+        front_door_dropped_message(2, DroppedSocket::RoleTag)
+    );
     assert_eq!(receive_message(&runner), front_door_serving_message(3));
     drop(host);
     tls.write_all(

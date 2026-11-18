@@ -15,7 +15,7 @@ use codewire_egress_policy::handoff::stream_pair;
 use codewire_egress_policy::intercept::InterceptSet;
 use uuid::Uuid;
 
-use super::intercept::BootSecrets;
+use super::intercept::{BootSecrets, FrontDoorStop};
 use super::{
     EgressBrokerProcess, FrontDoorFailure, NetworkWorkerProcess, RunnerError, SIGNAL_STOP_TIMEOUT,
     duplicate_inherited_descriptor, prepare_isolated_child, raise_open_file_limit,
@@ -23,9 +23,9 @@ use super::{
 use crate::broker_control::encode_intercept_frame;
 use crate::diagnostic_log::{DiagnosticLog, LogField, record};
 use crate::front_door::{
-    ControlChannel, FRONT_DOOR_CONTROL_FD, FRONT_DOOR_CREDENTIALS_MESSAGE,
+    ControlChannel, DroppedSocket, FRONT_DOOR_CONTROL_FD, FRONT_DOOR_CREDENTIALS_MESSAGE,
     FRONT_DOOR_FAILED_PREFIX, FRONT_DOOR_READY_MESSAGE, FRONT_DOOR_SOCKETS_MESSAGE,
-    ROLE_TAG_TIMEOUT, front_door_serving_pairing,
+    ROLE_TAG_TIMEOUT, front_door_dropped_pairing, front_door_serving_pairing,
 };
 
 /// How long the front door has to confine itself and make its CA.
@@ -165,6 +165,7 @@ impl FrontDoorProcess {
 /// exists before the generation's access names it. The egress broker's
 /// hand-off end follows once that broker is up.
 pub(crate) struct RunningFrontDoor {
+    stopped: StopRecord,
     watch: FrontDoorWatch,
     socket: std::path::PathBuf,
     handoff: Option<tokio::sync::oneshot::Sender<OwnedFd>>,
@@ -202,14 +203,17 @@ impl RunningFrontDoor {
         log: Option<std::sync::Arc<DiagnosticLog>>,
     ) -> Result<Self, RunnerError> {
         let control = process.control.take().ok_or(FrontDoorFailure::Sockets)?;
+        let stopped = StopRecord::default();
         let (handoff, pairing) = FrontDoorPairing::listen(
             socket,
             control,
             zeroize::Zeroizing::new(secrets.pairing().to_vec()),
             log.clone(),
+            stopped.clone(),
         )?;
         Ok(Self {
-            watch: FrontDoorWatch::start(process, log),
+            watch: FrontDoorWatch::start(process, log, stopped.clone()),
+            stopped,
             socket: socket.to_owned(),
             handoff: Some(handoff),
             _pairing: pairing,
@@ -220,6 +224,11 @@ impl RunningFrontDoor {
     /// Stop the front door and reap it.
     pub(crate) async fn stop(&mut self) -> Result<(), RunnerError> {
         self.watch.stop().await
+    }
+
+    /// Where the front door stopped, if it has and nobody asked it to.
+    pub(crate) fn stopped(&self) -> Option<FrontDoorStop> {
+        self.stopped.get()
     }
 
     /// The boot's secrets, for `GetBootSecrets`.
@@ -272,6 +281,31 @@ impl super::RunningVm {
     }
 }
 
+/// Where a generation's front door stopped, as its pairing and its watch
+/// learn it, for a start that fails because of it. What the front door said
+/// of itself is kept over the closed channel or the exit that follows.
+#[derive(Clone, Default)]
+pub(crate) struct StopRecord(std::sync::Arc<std::sync::Mutex<Option<FrontDoorStop>>>);
+
+impl StopRecord {
+    fn note(&self, stop: FrontDoorStop) {
+        let mut recorded = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if recorded.is_none_or(|earlier| !earlier.named() && stop.named()) {
+            *recorded = Some(stop);
+        }
+    }
+
+    fn get(&self) -> Option<FrontDoorStop> {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// Watches a generation's front door from the moment its socket is bound.
 /// An exit nobody asked for is recorded in the runner's log with its status:
 /// from then on the egress broker's hand-off end is closed, so every
@@ -291,7 +325,11 @@ impl Drop for FrontDoorWatch {
 }
 
 impl FrontDoorWatch {
-    fn start(mut process: FrontDoorProcess, log: Option<std::sync::Arc<DiagnosticLog>>) -> Self {
+    fn start(
+        mut process: FrontDoorProcess,
+        log: Option<std::sync::Arc<DiagnosticLog>>,
+        cause: StopRecord,
+    ) -> Self {
         let pid = process.child.id();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
@@ -302,6 +340,7 @@ impl FrontDoorWatch {
                 // report.
                 _ = stopped => process.stop().await,
                 exited = process.child.wait() => {
+                    cause.note(FrontDoorStop::Exited);
                     record(log.as_deref(), "front_door_exited", &exit_fields(exited.ok()));
                     Ok(())
                 }
@@ -346,6 +385,9 @@ fn exit_fields(status: Option<std::process::ExitStatus>) -> Vec<(&'static str, L
 enum Acknowledgement {
     /// It serves the pairing it numbers.
     Serving(u64),
+    /// It did not take the socket of the pairing it numbers, says why, and
+    /// goes on to the next pairing.
+    Dropped(u64, DroppedSocket),
     /// It refused them and named the stage that failed, or said something
     /// that is not this protocol.
     Refused(Vec<u8>),
@@ -355,24 +397,49 @@ enum Acknowledgement {
 
 impl Acknowledgement {
     fn of(reply: std::io::Result<(Vec<u8>, Vec<OwnedFd>)>) -> Self {
-        match reply {
-            Err(_) => Self::Gone,
-            Ok((message, _)) => match front_door_serving_pairing(&message) {
-                Some(pairing) => Self::Serving(pairing),
-                None => Self::Refused(message),
-            },
+        let Ok((message, _)) = reply else {
+            return Self::Gone;
+        };
+        if let Some(pairing) = front_door_serving_pairing(&message) {
+            Self::Serving(pairing)
+        } else if let Some((pairing, why)) = front_door_dropped_pairing(&message) {
+            Self::Dropped(pairing, why)
+        } else {
+            Self::Refused(message)
         }
     }
 
-    /// A serving word for a pairing the runner has not sent.
+    /// The pairing a word names.
+    fn pairing(&self) -> Option<u64> {
+        match self {
+            Self::Serving(pairing) | Self::Dropped(pairing, _) => Some(*pairing),
+            Self::Refused(_) | Self::Gone | Self::Silent => None,
+        }
+    }
+
+    /// A word for a pairing the runner has not sent.
     fn not_this_protocol() -> Self {
         Self::Refused(Vec::new())
     }
 
-    /// Whether the front door is still there to pair with.
-    fn front_door_stays(&self) -> bool {
-        matches!(self, Self::Serving(_) | Self::Silent)
+    /// Where the front door stopped, when this says it has.
+    fn stop(&self) -> Option<FrontDoorStop> {
+        match self {
+            Self::Refused(message) => Some(FrontDoorStop::at_stage(failed_stage(message))),
+            Self::Gone => Some(FrontDoorStop::Gone),
+            Self::Serving(_) | Self::Dropped(..) | Self::Silent => None,
+        }
     }
+}
+
+/// The stage a front door's failure line names; `invalid` for anything that
+/// is not one.
+fn failed_stage(message: &[u8]) -> &str {
+    message
+        .strip_prefix(FRONT_DOOR_FAILED_PREFIX)
+        .and_then(|stage| stage.strip_suffix(b"\n"))
+        .and_then(|stage| std::str::from_utf8(stage).ok())
+        .unwrap_or("invalid")
 }
 
 /// The pairings the front door has not answered for. Its word names its
@@ -390,13 +457,18 @@ impl Unanswered {
         self.0.push_back(pairing);
     }
 
-    /// Records the front door's word for an earlier pairing: `paired` if that
-    /// pairing was waiting for it, `unexpected_serving` otherwise.
-    fn late(&mut self, log: Option<&DiagnosticLog>, pairing: u64) {
+    /// Records the front door's word `said` for the earlier pairing it
+    /// names: as that pairing's outcome if it was waiting for one, and as an
+    /// unexpected word otherwise.
+    fn late(&mut self, log: Option<&DiagnosticLog>, said: &Acknowledgement, pairing: u64) {
         let waiting = self.0.iter().position(|unanswered| *unanswered == pairing);
-        let outcome = match waiting.and_then(|index| self.0.remove(index)) {
-            Some(_) => "paired",
-            None => "unexpected_serving",
+        if waiting.and_then(|index| self.0.remove(index)).is_some() {
+            record_pairing(log, said, pairing);
+            return;
+        }
+        let outcome = match said {
+            Acknowledgement::Dropped(..) => "unexpected_dropped",
+            _ => "unexpected_serving",
         };
         record(
             log,
@@ -421,13 +493,13 @@ async fn acknowledgement(
     let limit = tokio::time::Instant::now() + SERVING_TIMEOUT;
     loop {
         let reply = tokio::time::timeout_at(limit, control.receive(MAX_READY_MESSAGE, 0)).await;
-        match reply.map(Acknowledgement::of) {
-            Err(_) => return Acknowledgement::Silent,
-            Ok(Acknowledgement::Serving(said)) if said < pairing => unanswered.late(log, said),
-            Ok(Acknowledgement::Serving(said)) if said > pairing => {
-                return Acknowledgement::not_this_protocol();
-            }
-            Ok(said) => return said,
+        let Ok(said) = reply.map(Acknowledgement::of) else {
+            return Acknowledgement::Silent;
+        };
+        match said.pairing() {
+            Some(earlier) if earlier < pairing => unanswered.late(log, &said, earlier),
+            Some(later) if later > pairing => return Acknowledgement::not_this_protocol(),
+            _ => return said,
         }
     }
 }
@@ -435,22 +507,19 @@ async fn acknowledgement(
 /// Records how the generation's `pairing`th pairing ended. `paired` means
 /// the front door said it serves, never only that the sockets were sent.
 fn record_pairing(log: Option<&DiagnosticLog>, acknowledgement: &Acknowledgement, pairing: u64) {
-    let stage;
     let pairing = ("pairing", LogField::Count(pairing));
     let fields: &[(&'static str, LogField<'_>)] = match acknowledgement {
         Acknowledgement::Serving(_) => &[("outcome", LogField::Name("paired")), pairing],
-        Acknowledgement::Refused(message) => {
-            stage = message
-                .strip_prefix(FRONT_DOOR_FAILED_PREFIX)
-                .and_then(|stage| stage.strip_suffix(b"\n"))
-                .and_then(|stage| std::str::from_utf8(stage).ok())
-                .unwrap_or("invalid");
-            &[
-                ("outcome", LogField::Name("front_door_refused")),
-                ("stage", LogField::Code(stage)),
-                pairing,
-            ]
-        }
+        Acknowledgement::Dropped(_, why) => &[
+            ("outcome", LogField::Name("front_door_dropped")),
+            ("stage", LogField::Name(why.stage())),
+            pairing,
+        ],
+        Acknowledgement::Refused(message) => &[
+            ("outcome", LogField::Name("front_door_refused")),
+            ("stage", LogField::Code(failed_stage(message))),
+            pairing,
+        ],
         Acknowledgement::Gone => &[("outcome", LogField::Name("front_door_gone")), pairing],
         Acknowledgement::Silent => &[("outcome", LogField::Name("unacknowledged")), pairing],
     };
@@ -490,6 +559,7 @@ impl FrontDoorPairing {
         mut control: ControlChannel,
         capability: zeroize::Zeroizing<Vec<u8>>,
         log: Option<std::sync::Arc<DiagnosticLog>>,
+        stopped: StopRecord,
     ) -> Result<(tokio::sync::oneshot::Sender<OwnedFd>, Self), RunnerError> {
         let (mut listener, identity) =
             crate::uds::bind_owner_only_listener(socket).map_err(|_| FrontDoorFailure::Sockets)?;
@@ -500,6 +570,7 @@ impl FrontDoorPairing {
             let mut handoff = tokio::select! {
                 handoff = handoff_receiver => handoff.ok(),
                 _ = control.receive(MAX_READY_MESSAGE, 0) => {
+                    stopped.note(FrontDoorStop::Gone);
                     record(
                         log.as_deref(),
                         "front_door_pairing",
@@ -522,14 +593,16 @@ impl FrontDoorPairing {
                     // pairing it was slow to check serves after all, or that
                     // it has failed.
                     reply = control.receive(MAX_READY_MESSAGE, 0) => {
-                        let failed = match Acknowledgement::of(reply) {
-                            Acknowledgement::Serving(said) if said <= pairings => {
-                                unanswered.late(log.as_deref(), said);
+                        let said = Acknowledgement::of(reply);
+                        let failed = match said.pairing() {
+                            Some(earlier) if earlier <= pairings => {
+                                unanswered.late(log.as_deref(), &said, earlier);
                                 continue;
                             }
-                            Acknowledgement::Serving(_) => Acknowledgement::not_this_protocol(),
-                            failed => failed,
+                            Some(_) => Acknowledgement::not_this_protocol(),
+                            None => said,
                         };
+                        stopped.note(failed.stop().unwrap_or(FrontDoorStop::Failed));
                         record_pairing(log.as_deref(), &failed, pairings);
                         drop(handoff.take());
                         break;
@@ -586,9 +659,9 @@ impl FrontDoorPairing {
                 }
                 pairings += 1;
                 // The front door checks each socket before it serves it; only
-                // its own word says the pairing took. It drops a later
-                // broker's socket that fails its checks without a word, and
-                // the next broker pairs.
+                // its own word says the pairing took. For a later broker's
+                // socket it does not take, it says so and why, and the next
+                // broker pairs.
                 let said =
                     acknowledgement(&mut control, log.as_deref(), pairings, &mut unanswered).await;
                 // After its word or the limit the runner keeps no copy of any
@@ -598,8 +671,12 @@ impl FrontDoorPairing {
                 if matches!(said, Acknowledgement::Silent) {
                     unanswered.add(pairings);
                 }
+                let stop = said.stop();
+                if let Some(stop) = stop {
+                    stopped.note(stop);
+                }
                 record_pairing(log.as_deref(), &said, pairings);
-                if !said.front_door_stays() {
+                if stop.is_some() {
                     break;
                 }
             }

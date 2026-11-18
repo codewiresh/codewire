@@ -1157,7 +1157,20 @@ Issues: #3999, #4001.
     deliver a login rather than hand the VM the real one;
   - an environment whose front door cannot start does not start with
     interception half on: it reports the failure, and a stop and start
-    restores it.
+    restores it;
+  - **a start that fails because the front door stopped says so** (#3999,
+    #4916). When the front door ends, or refuses the sockets it was sent,
+    before the VM reports started, the start's error reads "The
+    environment's interception front door stopped while it started
+    (STAGE)" and says to start the environment again; the environment's
+    error code is `front_door_STAGE`, and the start fails as soon as the
+    front door has stopped. It is not reported as the guest shutting down,
+    which only follows from it. `received_dead` is the stage
+    for a socket that reached the front door already at end of file: on
+    macOS a socket can die in flight under load. The runner's log has the
+    same stage on its `front_door_pairing` line, and for a later credential
+    broker's socket the front door does not take, `outcome=front_door_dropped`
+    with the stage, after which the next broker pairs.
 - **Gotchas:** a request that hangs is a failure of this step, even though
   nothing leaked.
 - **Observed:** not yet observed.

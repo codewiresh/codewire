@@ -22,9 +22,13 @@
 //!    pairing on the front door's own word. The word carries the frame's
 //!    number in the generation, counted from 1 over every frame of steps 3
 //!    and 4, so a word that arrives late is never taken for a later
-//!    pairing's. It says nothing for a later broker's socket it drops, whose
-//!    number is then never said, and a failure line if the first pairing's
-//!    sockets fail.
+//!    pairing's. For a later broker's socket it does not take it says
+//!    [`front_door_dropped_message`] instead, with the same number and why,
+//!    and goes on to the next pairing; if the first pairing's sockets fail it
+//!    ends with a failure line. A socket that reads end of file before any
+//!    byte is named `received_dead` in both, apart from one whose role tag
+//!    is wrong or late: on macOS a socket can die in flight (#4916), and the
+//!    name is what tells that from a peer that misbehaved.
 //!
 //! Each of those sockets first carries a role tag from its peer, which
 //! the front door checks before it serves anything, so a swapped pair is
@@ -51,7 +55,7 @@ use std::os::fd::{FromRawFd as _, OwnedFd, RawFd};
 use std::time::Duration;
 
 use codewire_egress_front_door_bridge::{Ended, EnvironmentFrontDoor};
-use codewire_egress_policy::handoff::HandoffReceiver;
+use codewire_egress_policy::handoff::{HandoffError, HandoffReceiver};
 use codewire_egress_policy::intercept::InterceptSet;
 use rustix::net::SocketType;
 use uuid::Uuid;
@@ -84,12 +88,19 @@ pub fn front_door_serving_message(pairing: u64) -> Vec<u8> {
 }
 
 /// The pairing a serving word names. None for anything but the prefix, a
-/// decimal number from 1 that fits a `u64`, with no sign and no leading
-/// zero, and one line feed: a word is matched to its pairing, never guessed.
+/// pairing number and one line feed: a word is matched to its pairing, never
+/// guessed.
 pub fn front_door_serving_pairing(message: &[u8]) -> Option<u64> {
-    let digits = message
-        .strip_prefix(FRONT_DOOR_SERVING_PREFIX)?
-        .strip_suffix(b"\n")?;
+    pairing_number(
+        message
+            .strip_prefix(FRONT_DOOR_SERVING_PREFIX)?
+            .strip_suffix(b"\n")?,
+    )
+}
+
+/// A pairing number as the front door writes it: decimal, from 1, fitting a
+/// `u64`, with no sign and no leading zero.
+fn pairing_number(digits: &[u8]) -> Option<u64> {
     if digits.first().is_none_or(|first| *first == b'0')
         || digits.len() > 20
         || !digits.iter().all(u8::is_ascii_digit)
@@ -97,6 +108,53 @@ pub fn front_door_serving_pairing(message: &[u8]) -> Option<u64> {
         return None;
     }
     std::str::from_utf8(digits).ok()?.parse().ok()
+}
+
+/// The front door's word that it did not take a later pairing's socket: this
+/// prefix, the pairing's number, a space, why, and a line feed. It goes on to
+/// the next pairing.
+pub const FRONT_DOOR_DROPPED_PREFIX: &[u8] = b"CWFD1 dropped ";
+
+/// Why the front door did not take a socket it received.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DroppedSocket {
+    /// It read end of file before any byte: it arrived dead.
+    ReceivedDead,
+    /// Anything else: it is not a connected Unix stream, or its role tag was
+    /// wrong or late.
+    RoleTag,
+}
+
+impl DroppedSocket {
+    pub fn stage(self) -> &'static str {
+        match self {
+            Self::ReceivedDead => "received_dead",
+            Self::RoleTag => "role_tag",
+        }
+    }
+}
+
+/// The dropped word for the generation's `pairing`th pairing frame.
+pub fn front_door_dropped_message(pairing: u64, why: DroppedSocket) -> Vec<u8> {
+    let mut message = FRONT_DOOR_DROPPED_PREFIX.to_vec();
+    message.extend_from_slice(pairing.to_string().as_bytes());
+    message.push(b' ');
+    message.extend_from_slice(why.stage().as_bytes());
+    message.push(b'\n');
+    message
+}
+
+/// The pairing a dropped word names, and why. None for anything but the
+/// prefix, a pairing number, one space, a known stage and one line feed.
+pub fn front_door_dropped_pairing(message: &[u8]) -> Option<(u64, DroppedSocket)> {
+    let word = message
+        .strip_prefix(FRONT_DOOR_DROPPED_PREFIX)?
+        .strip_suffix(b"\n")?;
+    let space = word.iter().position(|byte| *byte == b' ')?;
+    let why = [DroppedSocket::ReceivedDead, DroppedSocket::RoleTag]
+        .into_iter()
+        .find(|why| why.stage().as_bytes() == &word[space + 1..])?;
+    Some((pairing_number(&word[..space])?, why))
 }
 /// The egress broker's first frame on the hand-off socket (#3999).
 pub use codewire_egress_policy::handoff::HANDOFF_ROLE_TAG;
@@ -157,6 +215,8 @@ pub enum FrontDoorProcessError {
     Start,
     #[error("front door sockets are missing or invalid")]
     Sockets,
+    #[error("a front door socket arrived dead")]
+    ReceivedDead,
     #[error("front door stopped: {0}")]
     Ended(#[source] Ended),
 }
@@ -170,6 +230,7 @@ impl FrontDoorProcessError {
             Self::Confinement => "confinement",
             Self::Start => "start",
             Self::Sockets => "sockets",
+            Self::ReceivedDead => DroppedSocket::ReceivedDead.stage(),
             Self::Ended(_) => "ended",
         }
     }
@@ -264,15 +325,20 @@ async fn receive_credentials(
             return None;
         }
         *pairing = pairing.checked_add(1)?;
-        // One broker's failed checks drop only its socket, without a word;
-        // the runner records that pairing as unacknowledged, and the next
-        // broker pairs.
-        if let Some(credentials) = admitted_credentials(credentials).await {
-            control
-                .send(&front_door_serving_message(*pairing), &[])
+        // One broker's failed checks drop only its socket. The front door
+        // says which pairing and why, and the next broker pairs.
+        match admitted_credentials(credentials).await {
+            Ok(credentials) => {
+                control
+                    .send(&front_door_serving_message(*pairing), &[])
+                    .await
+                    .ok()?;
+                return Some(credentials);
+            }
+            Err(why) => control
+                .send(&front_door_dropped_message(*pairing, why), &[])
                 .await
-                .ok()?;
-            return Some(credentials);
+                .ok()?,
         }
     }
 }
@@ -304,58 +370,75 @@ async fn receive_sockets(
     let Ok([handoff, credentials]) = <[OwnedFd; 2]>::try_from(descriptors) else {
         return Err(FrontDoorProcessError::Sockets);
     };
-    if message != FRONT_DOOR_SOCKETS_MESSAGE
-        || !admitted_socket(&handoff, SocketType::STREAM)
-        || !handoff_role_tagged(&handoff)
-    {
+    if message != FRONT_DOOR_SOCKETS_MESSAGE || !admitted_socket(&handoff, SocketType::STREAM) {
         return Err(FrontDoorProcessError::Sockets);
     }
+    let first_pairing = |why| match why {
+        DroppedSocket::ReceivedDead => FrontDoorProcessError::ReceivedDead,
+        DroppedSocket::RoleTag => FrontDoorProcessError::Sockets,
+    };
+    handoff_role_tagged(&handoff).map_err(first_pairing)?;
     let credentials = admitted_credentials(credentials)
         .await
-        .ok_or(FrontDoorProcessError::Sockets)?;
+        .map_err(first_pairing)?;
     Ok((handoff, credentials))
 }
 
 /// A credential broker's session, when it is a connected Unix stream that
 /// closes on exec and its first byte is the broker's role tag.
-async fn admitted_credentials(credentials: OwnedFd) -> Option<tokio::net::UnixStream> {
+async fn admitted_credentials(
+    credentials: OwnedFd,
+) -> Result<tokio::net::UnixStream, DroppedSocket> {
     if !admitted_socket(&credentials, SocketType::STREAM) {
-        return None;
+        return Err(DroppedSocket::RoleTag);
     }
     let credentials = std::os::unix::net::UnixStream::from(credentials);
-    credentials.set_nonblocking(true).ok()?;
-    let mut credentials = tokio::net::UnixStream::from_std(credentials).ok()?;
+    credentials
+        .set_nonblocking(true)
+        .map_err(|_| DroppedSocket::RoleTag)?;
+    let mut credentials =
+        tokio::net::UnixStream::from_std(credentials).map_err(|_| DroppedSocket::RoleTag)?;
     let deadline = tokio::time::Instant::now() + ROLE_TAG_TIMEOUT;
-    credential_role_tagged(&mut credentials, deadline)
-        .await
-        .then_some(credentials)
+    credential_role_tagged(&mut credentials, deadline).await?;
+    Ok(credentials)
 }
 
-/// Whether the hand-off end's first frame is the egress broker's role tag.
-/// Read blocking, within [`ROLE_TAG_TIMEOUT`], before anything is served.
-fn handoff_role_tagged(handoff: &OwnedFd) -> bool {
+/// Checks that the hand-off end's first frame is the egress broker's role
+/// tag. Read blocking, within [`ROLE_TAG_TIMEOUT`], before anything is
+/// served.
+fn handoff_role_tagged(handoff: &OwnedFd) -> Result<(), DroppedSocket> {
     // The receiver that reads the tag is dropped after it; the front door's
     // own receiver starts at the first intercepted stream.
-    rustix::io::fcntl_dupfd_cloexec(handoff, 0)
+    let mut receiver = rustix::io::fcntl_dupfd_cloexec(handoff, 0)
         .ok()
         .and_then(|duplicate| HandoffReceiver::new(duplicate).ok())
-        .is_some_and(|mut receiver| receiver.expect_role_tag(ROLE_TAG_TIMEOUT).is_ok())
+        .ok_or(DroppedSocket::RoleTag)?;
+    receiver
+        .expect_role_tag(ROLE_TAG_TIMEOUT)
+        .map_err(|error| match error {
+            HandoffError::Closed => DroppedSocket::ReceivedDead,
+            _ => DroppedSocket::RoleTag,
+        })
 }
 
-/// Whether the credential end's first byte is the credential broker's role
-/// tag, read by `deadline` before the bridge Open. It waits without blocking
-/// the process: a successor broker pairs while earlier sessions serve, and a
-/// late tag must stall none of them.
+/// Checks that the credential end's first byte is the credential broker's
+/// role tag, read by `deadline` before the bridge Open. It waits without
+/// blocking the process: a successor broker pairs while earlier sessions
+/// serve, and a late tag must stall none of them.
 async fn credential_role_tagged(
     credentials: &mut tokio::net::UnixStream,
     deadline: tokio::time::Instant,
-) -> bool {
+) -> Result<(), DroppedSocket> {
     use tokio::io::AsyncReadExt as _;
     let mut tag = [0_u8; 1];
-    matches!(
-        tokio::time::timeout_at(deadline, credentials.read_exact(&mut tag)).await,
-        Ok(Ok(_))
-    ) && tag[0] == FRONT_DOOR_CREDENTIAL_TAG
+    match tokio::time::timeout_at(deadline, credentials.read_exact(&mut tag)).await {
+        Ok(Ok(_)) if tag[0] == FRONT_DOOR_CREDENTIAL_TAG => Ok(()),
+        // One byte is asked for, so an early end of file is before any byte.
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+            Err(DroppedSocket::ReceivedDead)
+        }
+        _ => Err(DroppedSocket::RoleTag),
+    }
 }
 
 /// The inherited control descriptor, admitted only as a connected Unix
@@ -412,17 +495,80 @@ mod tests {
             broker
         });
         let deadline = tokio::time::Instant::now() + ROLE_TAG_TIMEOUT;
-        assert!(credential_role_tagged(&mut front_door, deadline).await);
+        assert_eq!(
+            credential_role_tagged(&mut front_door, deadline).await,
+            Ok(())
+        );
         drop(late.await.unwrap());
 
         let (mut front_door, mut broker) = tokio::net::UnixStream::pair().unwrap();
         broker.write_all(b"H").await.unwrap();
         let deadline = tokio::time::Instant::now() + ROLE_TAG_TIMEOUT;
-        assert!(!credential_role_tagged(&mut front_door, deadline).await);
+        assert_eq!(
+            credential_role_tagged(&mut front_door, deadline).await,
+            Err(DroppedSocket::RoleTag)
+        );
 
         // Silence until a deadline already past: refused at once.
         let (mut front_door, _broker) = tokio::net::UnixStream::pair().unwrap();
-        assert!(!credential_role_tagged(&mut front_door, tokio::time::Instant::now()).await);
+        assert_eq!(
+            credential_role_tagged(&mut front_door, tokio::time::Instant::now()).await,
+            Err(DroppedSocket::RoleTag)
+        );
+    }
+
+    /// A socket whose peer is gone before it wrote anything reads end of
+    /// file before any byte: it arrived dead, which is not a peer with the
+    /// wrong tag. Both of a pairing's sockets say which.
+    #[tokio::test]
+    async fn a_socket_at_end_of_file_before_any_byte_arrived_dead() {
+        let (front_door, broker) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(broker);
+        assert_eq!(
+            admitted_credentials(OwnedFd::from(front_door))
+                .await
+                .map(|_| ()),
+            Err(DroppedSocket::ReceivedDead)
+        );
+
+        let (front_door, egress_broker) = codewire_egress_policy::handoff::stream_pair().unwrap();
+        drop(egress_broker);
+        assert_eq!(
+            handoff_role_tagged(&front_door),
+            Err(DroppedSocket::ReceivedDead)
+        );
+    }
+
+    #[test]
+    fn a_dropped_word_is_read_strictly() {
+        for why in [DroppedSocket::ReceivedDead, DroppedSocket::RoleTag] {
+            assert_eq!(
+                front_door_dropped_pairing(&front_door_dropped_message(7, why)),
+                Some((7, why))
+            );
+        }
+        assert_eq!(
+            front_door_dropped_message(2, DroppedSocket::ReceivedDead),
+            b"CWFD1 dropped 2 received_dead\n"
+        );
+        for malformed in [
+            &b"CWFD1 dropped 2\n"[..],
+            b"CWFD1 dropped 2 \n",
+            b"CWFD1 dropped  received_dead\n",
+            b"CWFD1 dropped 0 received_dead\n",
+            b"CWFD1 dropped 02 received_dead\n",
+            b"CWFD1 dropped 2 sockets\n",
+            b"CWFD1 dropped 2 received_dead",
+            b"CWFD1 dropped 2 received_dead \n",
+            b"CWFD1 dropped 2  received_dead\n",
+            b"CWFD1 serving 2\n",
+        ] {
+            assert_eq!(front_door_dropped_pairing(malformed), None, "{malformed:?}");
+        }
+        assert_eq!(
+            front_door_serving_pairing(b"CWFD1 dropped 2 role_tag\n"),
+            None
+        );
     }
 
     #[test]

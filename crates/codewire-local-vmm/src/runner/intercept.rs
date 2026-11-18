@@ -15,8 +15,96 @@ use super::RunnerError;
 #[cfg(target_os = "linux")]
 use super::front_door::{FrontDoorProcess, RunningFrontDoor};
 
-/// A boot the egress-intercept switch refuses (#3999). Each is fixed with the
-/// switch file, so each has its own code for the user's message.
+/// Where an intercepting boot's front door stopped before its VM reported
+/// started (#3999, #4916). The names are closed: each is part of a runner
+/// error code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrontDoorStop {
+    /// A socket reached it already at end of file.
+    ReceivedDead,
+    /// It refused the sockets it was sent for another reason.
+    Sockets,
+    /// It failed at another stage, or said something that is not its
+    /// protocol.
+    Failed,
+    /// It closed its control channel without a word.
+    Gone,
+    /// Its process exited.
+    Exited,
+}
+
+impl FrontDoorStop {
+    const ALL: [Self; 5] = [
+        Self::ReceivedDead,
+        Self::Sockets,
+        Self::Failed,
+        Self::Gone,
+        Self::Exited,
+    ];
+
+    /// The stop a front door's failure line names by its `stage`.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "only a Linux boot starts a front door to stop (#3999)"
+        )
+    )]
+    pub(crate) fn at_stage(stage: &str) -> Self {
+        match stage {
+            "received_dead" => Self::ReceivedDead,
+            "sockets" => Self::Sockets,
+            _ => Self::Failed,
+        }
+    }
+
+    /// Whether the front door itself said where it stopped. Its word is kept
+    /// over the exit or the closed channel that follows it.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "only a Linux boot starts a front door to stop (#3999)"
+        )
+    )]
+    pub(crate) fn named(self) -> bool {
+        matches!(self, Self::ReceivedDead | Self::Sockets | Self::Failed)
+    }
+
+    pub fn stage(self) -> &'static str {
+        match self {
+            Self::ReceivedDead => "received_dead",
+            Self::Sockets => "sockets",
+            Self::Failed => "failed",
+            Self::Gone => "gone",
+            Self::Exited => "exited",
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::ReceivedDead => "front_door_received_dead",
+            Self::Sockets => "front_door_sockets",
+            Self::Failed => "front_door_failed",
+            Self::Gone => "front_door_gone",
+            Self::Exited => "front_door_exited",
+        }
+    }
+
+    fn create_code(self) -> &'static str {
+        match self {
+            Self::ReceivedDead => "create_front_door_received_dead",
+            Self::Sockets => "create_front_door_sockets",
+            Self::Failed => "create_front_door_failed",
+            Self::Gone => "create_front_door_gone",
+            Self::Exited => "create_front_door_exited",
+        }
+    }
+}
+
+/// A boot that agent interception refuses or fails (#3999). Each has its own
+/// code for the user's message: the switch's refusals are fixed with the
+/// switch file, a front door that stopped by starting the environment again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum InterceptRefusal {
     #[error(
@@ -31,14 +119,24 @@ pub enum InterceptRefusal {
         "this VM checkpoint was taken with agent interception switched on and the switch is now off; the switch applies on a stop and start, not a restore"
     )]
     RestoreSwitchedOff,
+    #[error(
+        "the environment's interception front door stopped while it started ({}); start the environment again",
+        .0.stage()
+    )]
+    FrontDoorStopped(FrontDoorStop),
 }
 
 impl InterceptRefusal {
-    const ALL: [Self; 3] = [
-        Self::FrontDoorUnavailable,
-        Self::RestoreSwitchedOn,
-        Self::RestoreSwitchedOff,
-    ];
+    /// Every refusal, for the round trip through its code.
+    fn all() -> impl Iterator<Item = Self> {
+        [
+            Self::FrontDoorUnavailable,
+            Self::RestoreSwitchedOn,
+            Self::RestoreSwitchedOff,
+        ]
+        .into_iter()
+        .chain(FrontDoorStop::ALL.into_iter().map(Self::FrontDoorStopped))
+    }
 
     /// The runner error code, one per fix.
     pub fn code(self) -> &'static str {
@@ -46,12 +144,13 @@ impl InterceptRefusal {
             Self::FrontDoorUnavailable => "intercept_unavailable",
             Self::RestoreSwitchedOn => "restore_interception_switched_on",
             Self::RestoreSwitchedOff => "restore_interception_switched_off",
+            Self::FrontDoorStopped(stop) => stop.code(),
         }
     }
 
     /// The refusal a runner error code names, for the supervisor.
     pub fn from_code(code: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|refusal| refusal.code() == code)
+        Self::all().find(|refusal| refusal.code() == code)
     }
 
     /// The code of a create that failed with this refusal.
@@ -60,7 +159,20 @@ impl InterceptRefusal {
             Self::FrontDoorUnavailable => "create_intercept_unavailable",
             Self::RestoreSwitchedOn => "create_restore_interception_switched_on",
             Self::RestoreSwitchedOff => "create_restore_interception_switched_off",
+            Self::FrontDoorStopped(stop) => stop.create_code(),
         }
+    }
+}
+
+impl super::RunningVm {
+    /// Why a start is failing, when the boot's front door has stopped: the
+    /// guest shutting down, a moment later, only follows from it.
+    pub(crate) fn front_door_stopped(&self) -> Option<InterceptRefusal> {
+        #[cfg(target_os = "linux")]
+        let stopped = self.front_door.as_ref().and_then(RunningFrontDoor::stopped);
+        #[cfg(not(target_os = "linux"))]
+        let stopped = None::<FrontDoorStop>;
+        stopped.map(InterceptRefusal::FrontDoorStopped)
     }
 }
 
@@ -303,8 +415,13 @@ mod tests {
 
     #[test]
     fn each_refusal_round_trips_through_its_code() {
-        for refusal in InterceptRefusal::ALL {
+        assert_eq!(InterceptRefusal::all().count(), 8);
+        for refusal in InterceptRefusal::all() {
             assert_eq!(InterceptRefusal::from_code(refusal.code()), Some(refusal));
+            assert_eq!(refusal.create_code(), format!("create_{}", refusal.code()));
+            assert!(crate::supervisor_metadata::runner_event_error_code_valid(
+                refusal.create_code()
+            ));
             assert_eq!(refusal.create_code(), format!("create_{}", refusal.code()));
         }
         assert_eq!(InterceptRefusal::from_code("prepare_failed"), None);
