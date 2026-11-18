@@ -257,10 +257,60 @@ class Namespace(unittest.TestCase):
         script = (self.variables() + 'bash --norc --noprofile -c "$SMOKE_SELF_CHECK" check '
                   f'{os.getuid() + 1} {os.getgid()} "{self.proc}/self/status" '
                   '"$SMOKE_HOST_RUNTIME" "$SMOKE_RUNTIME" '
-                  '"$SMOKE_DBUS_ADDRESS" "$SMOKE_HOST_HOME" --environment PATH=/usr/bin:/bin -- /usr/bin/echo ran')
+                  '"$SMOKE_DBUS_ADDRESS" "$SMOKE_HOST_HOME" "" /etc/resolv.conf '
+                  '--environment PATH=/usr/bin:/bin -- /usr/bin/echo ran')
         result = bash(script)
         self.assertEqual((result.returncode, result.stdout), (125, ""))
         self.assertIn("not the invoking user", result.stderr)
+
+    def resolver(self, target_is_the_smokes):
+        """The variables for a smoke that chose a resolver file, and that file.
+        The namespace's own configuration is a link, as a host's often is; the
+        fake mount binds nothing, so the test says whether the link already
+        leads to the smoke's file."""
+        resolver = self.root / "resolv.conf"
+        resolver.write_text("nameserver 192.0.2.1\n")
+        hosts = self.root / "host-resolv.conf"
+        hosts.write_text("nameserver 127.0.0.53\n")
+        link = self.root / "etc-resolv.conf"
+        link.unlink(missing_ok=True)
+        link.symlink_to(resolver if target_is_the_smokes else hosts)
+        return (f'SMOKE_ROOT="{self.root}"\nSMOKE_RESOLVER="{resolver}"\n'
+                f'SMOKE_RESOLVER_TARGET="{link}"\n'), resolver, hosts
+
+    def test_a_chosen_resolver_is_bound_over_the_namespaces_own_and_checked(self):
+        variables, resolver, hosts = self.resolver(target_is_the_smokes=False)
+        self.log.unlink(missing_ok=True)
+        result = bash(self.variables() + variables + "smoke_cw /usr/bin/echo ran",
+                      env={**os.environ, "LOG": str(self.log)})
+        # Root binds the file over what the link leads to, after the masks.
+        calls = self.log.read_text().splitlines()
+        self.assertEqual(calls[-2], f"mount --bind {resolver} {hosts}")
+        # The fake bound nothing, so the command must not run on the host's resolver.
+        self.assertEqual((result.returncode, result.stdout), (125, ""))
+        self.assertIn("the resolver is not the smoke's own", result.stderr)
+        variables, _, _ = self.resolver(target_is_the_smokes=True)
+        result = bash(self.variables() + variables + "smoke_cw /usr/bin/echo ran",
+                      env={**os.environ, "LOG": str(self.log)})
+        self.assertEqual((result.returncode, result.stdout), (0, "ran\n"), result.stderr)
+
+    def test_a_resolver_outside_the_smoke_root_or_a_link_is_refused_before_root(self):
+        variables, resolver, hosts = self.resolver(target_is_the_smokes=True)
+        elsewhere = tempfile.TemporaryDirectory(prefix="smk-")
+        self.addCleanup(elsewhere.cleanup)
+        outside = Path(elsewhere.name)
+        (outside / "resolv.conf").write_text("nameserver 192.0.2.1\n")
+        link = self.root / "linked-resolv.conf"
+        link.symlink_to(resolver)
+        for chosen in (outside / "resolv.conf", link, self.root / "missing"):
+            with self.subTest(chosen=chosen):
+                self.log.unlink(missing_ok=True)
+                result = bash(self.variables() + variables + f'SMOKE_RESOLVER="{chosen}"\n'
+                              "smoke_cw /usr/bin/echo ran",
+                              env={**os.environ, "LOG": str(self.log)})
+                self.assertEqual((result.returncode, result.stdout), (3, ""))
+                self.assertIn("SMOKE_RESOLVER must be a regular file in the smoke root", result.stderr)
+                self.assertFalse(self.log.exists(), "nothing ran as root")
 
     def test_the_library_never_calls_the_host_secret_service(self):
         source = LIBRARY.read_text()

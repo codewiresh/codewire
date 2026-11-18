@@ -25,6 +25,7 @@ observed**.
 | `smoke-attach-restart` | not yet observed | no command yet (#5220) |
 | `smoke-upgrade` | not yet observed | no command yet (#5220) |
 | `smoke-proxy-down` | not yet observed | no command yet (#5220) |
+| `smoke-provider-unresolved` | observed, `main` at 4cae0f601, 2026-11-18 (by hand) | `scripts/ci/verify/smoke-local-credentials.sh` |
 
 ## Before the walk
 
@@ -187,3 +188,49 @@ same (#5238).
   connection from the guest to a provider's address, around the proxy, is
   refused.
 - **Observed:** not yet observed.
+
+## 6. `smoke-provider-unresolved`: a provider's name doesn't resolve when the VM starts
+
+The automated form of `cred-provider-unresolved` in
+[credentials.md](credentials.md) (#5286): the owner's failure on v0.4.22,
+where one provider's lookup getting no answer failed the whole create.
+
+- **Entry points:** `cw credentials --local add`, `cw create --local
+  --profile`, `cw exec`, `cw stop` and `cw start`.
+- **States to exercise:** every provider name in the profile unanswered for
+  the credential service when the VM is created and when it starts again;
+  the names resolving again while it runs.
+- **Driving it:** two made-up API keys, Anthropic and OpenAI, in one profile.
+  The credential service is started by the first `cw credentials` command in
+  a mount namespace whose resolver configuration names an address nothing
+  listens on (the isolation library's `SMOKE_RESOLVER`), and its brokers
+  keep that resolver. `cw create` and the VM's image pull use the host's.
+  Later the same file is rewritten in place with the host's configuration.
+  Nothing is changed on the host, and no firewall rule is involved.
+- **Proof:**
+  - the create succeeds, and the credential service's broker log has
+    `broker_ready` with `unresolved=api.anthropic.com/api.openai.com`;
+  - a request on each provider's route from the guest gets 502 with
+    `Codewire: PROVIDER couldn't be reached; try again.`;
+  - `cw stop` and `cw start` bring the VM back running;
+  - within two minutes of the file being rewritten, a later `broker_ready`
+    has `unresolved=-`, with no restart.
+- **Not in this step:** no request is made once the names resolve, so no
+  provider is contacted; the guest disk search of
+  [Every step's checks](#every-steps-checks) is not done here yet.
+- **Gotchas:**
+  - it needs a `cw` that resolves from `/etc/resolv.conf`, as the static
+    `cw` a release ships does. A `cw` built against the system C library may
+    ask the system's resolver service instead; the step then fails and says
+    so;
+  - it runs first, because the credential service keeps the resolver it was
+    started with;
+  - a host firewall must answer the broker's own lookups for the last proof.
+- **Observed:** `main` at 4cae0f601, 2026-11-18, by hand on a Linux host, with
+  a static `cw` and the local VM runtime both built from that commit:
+  `scripts/ci/verify/smoke-local-credentials.sh --cw <cw> --runtime-from
+  <runtime> --scratch <dir>` printed `ok smoke-provider-unresolved` and then
+  `ok smoke-profile-after-create`, and left nothing on the host. The same
+  command with the released v0.4.22 fails this step at the create, in
+  `cw`'s words: `create_failed`, "the local VM runtime gave no cause". That
+  is the failure #5286 fixed. Not yet run in CI (#5220).

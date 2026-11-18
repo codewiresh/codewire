@@ -24,7 +24,7 @@ observed**.
 | `cred-sign-in-screen` | partly observed, #4885 at aea6abdb8, 2026-11-16 (steps 1 and 2 for Claude and Codex at a pty; GitHub, `cw login`, piped, `TERM=dumb` and SSH not yet observed) | not yet observed | not yet observed |
 | `profile-default` | not yet observed | not yet observed | not yet observed |
 | `cred-delivery-diagnosis` | not yet observed | not yet observed | local VMs only |
-| `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, and the early replacements on that build plus their change, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | observed, #5286: main's tree at 57b68c6be (#5295 and #5312), 2026-11-18, with a name resolving only to private addresses; the provider came back at the regular replacement, not the early ones (a sign-in's token host not walked) | local VMs only |
+| `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, the early replacements on that build plus their change, and `main` at 4cae0f601 through the smoke, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | observed, #5286: main's tree at 57b68c6be (#5295 and #5312), 2026-11-18, with a name resolving only to private addresses; the provider came back at the regular replacement, not the early ones (a sign-in's token host not walked) | local VMs only |
 | `cred-file-store` | not yet built (#5255) | the macOS file store; not part of this check | local stores only |
 
 ## Before the walk
@@ -546,7 +546,12 @@ hosted Sandbox's broker is the platform's.
   - the host offline altogether.
 - **Driving it:** with the throwaway `HOME` and private store of
   [Before the walk](#before-the-walk), synthetic keys, and the name made
-  unresolvable for the host's `cw` (a resolver that does not answer for it):
+  unresolvable for the host's `cw` (a resolver that does not answer for it).
+  `scripts/ci/verify/smoke-local-credentials.sh` runs the core of it as
+  `smoke-provider-unresolved`
+  ([local-vm-credentials-smoke.md](local-vm-credentials-smoke.md)): steps 1,
+  2 and 5, the refusals of step 3, and the broker's recovery of step 4. By
+  hand:
   1. `cw credentials --local add anthropic --name unres-anthropic` and
      `add openai --name unres-openai`, keys from stdin; `set` both in
      profile `unres`, with an SSH key.
@@ -607,6 +612,13 @@ hosted Sandbox's broker is the platform's.
     lookup while the name stayed dropped. The name was answered again 13
     seconds before the fourth, which came up in 0.08 s with `unresolved=-`:
     Anthropic then answered the made-up key itself (401), with no restart.
+  - Linux, `main` at 4cae0f601 (a static `cw` and the runtime from that
+    commit), 2026-11-18, through `smoke-provider-unresolved`: with both
+    names unanswered for the credential service inside the smoke's own
+    namespace, the create succeeded, both routes answered 502 in Codewire's
+    words, a stop and start came back running, and a broker served both
+    providers again within two minutes of the names resolving. Released
+    v0.4.22 fails the same step at the create.
   - macOS 27.2.1, a development build of main's tree at 57b68c6be (#5295
     with #5312's compile fix), 2026-11-18, by cw-mac, in a scratch `HOME`
     with a throwaway keychain (`CODEWIRE_LOCAL_CREDENTIAL_KEYCHAIN`),

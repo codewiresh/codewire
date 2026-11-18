@@ -16,6 +16,12 @@
 #   service and local VM supervisor (parent 1); they stay in the scope's
 #   cgroup, so stopping the scope ends them, and the scope's own process list
 #   names them exactly, never a command-line match;
+# - a resolver of the smoke's choosing, when it sets SMOKE_RESOLVER to a file
+#   in its root before a smoke_cw: that command, and any service cw detaches
+#   from it, see the file as /etc/resolv.conf for as long as they live. A
+#   smoke that needs a name not to resolve for one service starts that
+#   service this way and changes nothing on the host; rewriting the file in
+#   place changes what the service's next lookup reads;
 # - no call to the host's Secret Service, ever. A loop of short-lived D-Bus
 #   reads to it crashed a host gnome-keyring-daemon (#5250, #5256); the
 #   namespace makes the host keyring unreachable instead.
@@ -47,6 +53,9 @@ SMOKE_DBUS_ADDRESS=''
 SMOKE_DBUS_PID=''
 SMOKE_KEYRING_PID=''
 SMOKE_KEYRING_CONTROL=''
+# Empty, or the file the next smoke_cw shows its command as the resolver
+# configuration: a regular file in the smoke's root.
+SMOKE_RESOLVER=''
 # Overridden only by the library's own tests.
 SMOKE_PROC_ROOT=/proc
 SMOKE_CGROUP_ROOT=/sys/fs/cgroup
@@ -57,6 +66,7 @@ SMOKE_SUDO=/usr/bin/sudo
 SMOKE_UNSHARE=/usr/bin/unshare
 SMOKE_MOUNT=/usr/bin/mount
 SMOKE_SETPRIV=/usr/bin/setpriv
+SMOKE_RESOLVER_TARGET=/etc/resolv.conf
 SMOKE_HOST_RUNTIME="/run/user/$(id -u)"
 # The account's home from passwd, not $HOME: anything that resolves the home
 # through getpwuid finds these paths masked too.
@@ -196,7 +206,8 @@ smoke_refuse_host_leaks() {
 SMOKE_NAMESPACE_SETUP='
 set -eu
 mount="$1" setpriv="$2" uid="$3" gid="$4" host_runtime="$5" runtime="$6" home="$7" workspace="$8"
-shift 8
+resolver="$9" resolver_target="${10}"
+shift 10
 masks=()
 while [[ "$1" != --run ]]; do masks+=("$1"); shift; done
 shift
@@ -209,17 +220,22 @@ for relative in "${masks[@]}"; do
     "$mount" -t tmpfs -o "mode=0700,uid=$uid,gid=$gid" tmpfs "$home/$relative"
   fi
 done
+if [[ -n "$resolver" ]]; then
+  "$mount" --bind "$resolver" "$(readlink -f -- "$resolver_target")"
+fi
 cd "$workspace"
 exec "$setpriv" --reuid="$uid" --regid="$gid" --init-groups --inh-caps=-all --bounding-set=-all -- "$@"
 '
 
 # Run inside the namespace before cw, with stat alone: the host's bus socket
-# is absent, each masked directory is empty, and the bus cw is given is the
-# smoke's own. Then the command runs with only the smoke's environment.
+# is absent, each masked directory is empty, the bus cw is given is the
+# smoke's own, and so is the resolver configuration when the smoke chose one.
+# Then the command runs with only the smoke's environment.
 # shellcheck disable=SC2016
 SMOKE_SELF_CHECK='
 uid="$1" gid="$2" status="$3" host_runtime="$4" runtime="$5" address="$6" home="$7"
-shift 7
+resolver="$8" resolver_target="$9"
+shift 9
 masks=()
 while [[ "$1" != --environment ]]; do masks+=("$1"); shift; done
 shift
@@ -234,6 +250,7 @@ for relative in "${masks[@]}"; do
   [[ ! -d "$home/$relative" || -z "$(ls -A -- "$home/$relative")" ]] || fail "$relative is not masked"
 done
 [[ "$address" == "unix:path=$runtime/bus" && -S "$runtime/bus" ]] || fail "the bus is not the smoke'"'"'s own"
+[[ -z "$resolver" || "$resolver" -ef "$resolver_target" ]] || fail "the resolver is not the smoke'"'"'s own"
 exec env -i "${environment[@]}" "$@"
 '
 
@@ -244,15 +261,19 @@ exec env -i "${environment[@]}" "$@"
 smoke_cw() {
   local -a environment
   mapfile -d '' -t environment < <(smoke_environment)
+  [[ -z "$SMOKE_RESOLVER" ]] ||
+    [[ "$SMOKE_RESOLVER" == "$SMOKE_ROOT"/* && -f "$SMOKE_RESOLVER" && ! -L "$SMOKE_RESOLVER" ]] ||
+    die 'SMOKE_RESOLVER must be a regular file in the smoke root'
   # Both shells start with no environment and read no startup file: root
   # must not run root's, nor the user's, and sudo hands over root's HOME.
   "$SMOKE_SUDO" -n "$SMOKE_UNSHARE" --mount --propagation private -- \
     /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/bash --norc --noprofile -c "$SMOKE_NAMESPACE_SETUP" smoke-namespace \
     "$SMOKE_MOUNT" "$SMOKE_SETPRIV" "$(id -u)" "$(id -g)" "$SMOKE_HOST_RUNTIME" "$SMOKE_RUNTIME" \
-    "$SMOKE_HOST_HOME" "$SMOKE_WORKSPACE" "${SMOKE_HOST_MASKS[@]}" --run \
+    "$SMOKE_HOST_HOME" "$SMOKE_WORKSPACE" "$SMOKE_RESOLVER" "$SMOKE_RESOLVER_TARGET" \
+    "${SMOKE_HOST_MASKS[@]}" --run \
     /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/bash --norc --noprofile -c "$SMOKE_SELF_CHECK" smoke-self-check \
     "$(id -u)" "$(id -g)" "$SMOKE_PROC_ROOT/self/status" "$SMOKE_HOST_RUNTIME" "$SMOKE_RUNTIME" \
-    "$SMOKE_DBUS_ADDRESS" "$SMOKE_HOST_HOME" \
+    "$SMOKE_DBUS_ADDRESS" "$SMOKE_HOST_HOME" "$SMOKE_RESOLVER" "$SMOKE_RESOLVER_TARGET" \
     "${SMOKE_HOST_MASKS[@]}" --environment "${environment[@]}" -- "$@"
 }
 
