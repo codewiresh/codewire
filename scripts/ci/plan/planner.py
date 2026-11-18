@@ -169,10 +169,11 @@ def safe_extract_tar(stream: Any, destination: Path) -> None:
             target.chmod(member.mode & 0o777)
 
 
-def export_git_tree(repository: Path, commit: str, destination: Path) -> None:
+def export_git_tree(repository: Path, commit: str, destination: Path, paths: list[str] | None = None) -> None:
+    """Extract `commit`'s tree, or only `paths` of it, into `destination`."""
     try:
         process = subprocess.Popen(
-            ["git", "archive", "--format=tar", commit],
+            ["git", "archive", "--format=tar", commit, *(["--", *paths] if paths else [])],
             cwd=repository,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -194,6 +195,25 @@ def export_git_tree(repository: Path, commit: str, destination: Path) -> None:
     if process.returncode != 0:
         raise PlannerError(f"git archive failed: {stderr.decode('utf-8', 'replace')[:2000]}")
     validate_exported_tree(destination)
+
+
+POLICY_GRAPH = "scripts/ci/plan/artifact-graph.json"
+POLICY_TOOLCHAIN = "rust-toolchain.toml"
+
+
+def export_policy_tree(repository: Path, commit: str, destination: Path) -> None:
+    """Extract only what the trusted policy is read for: its artifact graph, the
+    graph's policy files and the toolchain pin. The whole tree cost a third of
+    the planner's time (codewire#5311). A listed file that is absent or not a
+    regular file is still refused, by policy_hash."""
+    try:
+        graph = json.loads(_run(["git", "show", f"{commit}:{POLICY_GRAPH}"], cwd=repository))
+    except (PlannerError, json.JSONDecodeError) as exc:
+        raise PlannerError(f"trusted artifact graph could not be read: {exc}") from exc
+    listed = graph.get("policy_files", []) if isinstance(graph, dict) else []
+    wanted = sorted({POLICY_GRAPH, POLICY_TOOLCHAIN, *(p for p in listed if isinstance(p, str))})
+    present = _run(["git", "ls-tree", "-r", "--name-only", commit, "--", *wanted], cwd=repository)
+    export_git_tree(repository, commit, destination, present.decode().splitlines())
 
 
 def validate_exported_tree(root: Path) -> None:
@@ -1694,7 +1714,7 @@ def plan(
         baseline_tree = temp / "baseline"
         head_tree = temp / "head"
         try:
-            export_git_tree(repository, trusted_policy, policy_tree)
+            export_policy_tree(repository, trusted_policy, policy_tree)
             graph_path = policy_tree / "scripts/ci/plan/artifact-graph.json"
             graph = json.loads(graph_path.read_text())
             if graph.get("schema") != "codewire.ci-artifact-graph/v1":

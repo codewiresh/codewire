@@ -907,6 +907,25 @@ class PlannerFixtureTests(unittest.TestCase):
     def dev_release_state(self, document: dict) -> str:
         return document["artifacts"]["dev_release_tree"]["state"]
 
+    def test_the_policy_export_holds_only_the_graph_its_files_and_the_toolchain(self) -> None:
+        # The trusted policy is read for its graph, the graph's policy files and
+        # the toolchain pin; exporting the whole tree cost a third of the
+        # planner's time (codewire#5311).
+        destination = Path(self.temporary.name) / "policy-export"
+        planner.export_policy_tree(self.repo.root, self.repo.base, destination)
+        exported = sorted(str(p.relative_to(destination)) for p in destination.rglob("*") if p.is_file())
+        graph = json.loads((self.repo.root / planner.POLICY_GRAPH).read_text())
+        wanted = {planner.POLICY_GRAPH, *graph["policy_files"]}
+        if (self.repo.root / planner.POLICY_TOOLCHAIN).exists():
+            wanted.add(planner.POLICY_TOOLCHAIN)
+        self.assertEqual(exported, sorted(wanted))
+        self.assertNotIn("Cargo.toml", exported)
+        # A listed file the commit lacks is still refused, by policy_hash.
+        listed = json.loads((destination / planner.POLICY_GRAPH).read_text())
+        listed["policy_files"].append("scripts/ci/plan/not-there.py")
+        with self.assertRaisesRegex(planner.PlannerError, "missing or not regular: scripts/ci/plan/not-there.py"):
+            planner.policy_hash(destination, listed)
+
     def test_fixture_metadata_matches_real_cargo_for_each_artifact_root(self) -> None:
         for manifest in ("Cargo.toml", "desktop/Cargo.toml"):
             with self.subTest(manifest=manifest):
