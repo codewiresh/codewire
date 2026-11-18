@@ -47,6 +47,31 @@ with ICU collation and60 mixed-case/punctuation IDs across the50-row boundary;
 public/migrated tables are unchanged. Its old query fails byte-order equality,
 and the explicit C-collation query preserves both ordering and cursor progress.
 
+## Signing in for a native app
+
+A native app that signs in through the browser, the desktop app or the iOS
+app, gets its code from the redirect at the end of the IdP's resume: the
+sign-in page's form, the two-factor page's form, or the two-factor setup
+page's form or its "Set up later", answers 303 to `/api/oidc/callback`, which
+answers 302 to the app's registered redirect. Browsers check every redirect
+after a form submission against the submitting page's `form-action`, so with
+`'self'` alone that last hop is blocked: in Chromium the browser stays on the
+form page while the IdP has already issued the code and consumed the request
+(#5364).
+
+Those three pages therefore add the native clients' registered redirects to
+`form-action`, and only while they carry a sign-in request: the sign-in and
+two-factor pages with an `authRequestID`, the setup page with a `return_to`
+whose path is exactly `/api/oidc/callback`. They add the iOS app's scheme,
+`sh.codewire.ios:`, and the desktop app's exact callback,
+`http://localhost:9876/callback` (codewire-idp `ensure_ios_client` and
+`ensure_desktop_client`). No other loopback address, port or scheme is added,
+and every other page, error pages included, keeps `form-action 'self'`. The
+IdP, not the page, decides where a code goes: it sends one only to the
+redirect registered for the request's client. `cw login` uses the device
+grant, whose browser part ends on the same-origin `/device` page, and needs
+none of this.
+
 ## Sign in with GitHub or Google
 
 The sign-in and sign-up pages ask the IdP's `GET /api/auth/oauth/providers`

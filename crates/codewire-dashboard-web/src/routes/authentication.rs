@@ -62,17 +62,20 @@ const LINK_CONFIRM_TTL_SECONDS: u32 = 30 * 60;
 /// the orchestration handoff (`AUTHORIZE_PATH`) with one sealed, URL-safe
 /// base64 `challenge` (crates/codewire-orchestration/src/api/preview).
 const PREVIEW_HANDOFF_CONTINUATION: &str = "/api/v1/preview-auth/authorize?challenge=";
-/// Sign-in can finish in the iOS app: a form's POST then redirects through
-/// `/api/oidc/callback` to the app's registered callback,
-/// `sh.codewire.ios:/oauth/callback` (codewire-idp `ensure_ios_client`).
-/// Browsers apply the submitting page's form-action to that redirect chain
-/// too, so without this the last hop is silently blocked and the app never
-/// gets its code (#3825). Only the three pages whose POST can end in the
-/// callback add the scheme, and only while they carry a sign-in request:
-/// sign-in and two-factor (`completion_target`), and two-factor setup and
-/// its skip, which continue to `return_to` (that exact path). Sign-up completion continues to
-/// setup first; every other page keeps form-action 'self'.
-const NATIVE_APP_FORM_ACTION: &str = "sh.codewire.ios:";
+/// Sign-in can finish in a native app: a form's POST then redirects through
+/// `/api/oidc/callback` to the app's registered callback, the iOS app's
+/// `sh.codewire.ios:/oauth/callback` or the desktop app's
+/// `http://localhost:9876/callback` (codewire-idp `ensure_ios_client` and
+/// `ensure_desktop_client`). Browsers apply the submitting page's form-action
+/// to that redirect chain too, so without this the last hop is silently
+/// blocked and the app never gets its code (#3825, #5364). Only the three
+/// pages whose POST can end in the callback add these, and only while they
+/// carry a sign-in request: sign-in and two-factor (`completion_target`), and
+/// two-factor setup and its skip, which continue to `return_to` (that exact
+/// path). Sign-up completion continues to setup first; every other page keeps
+/// form-action 'self' (BROWSER-ACCOUNT-SESSIONS, "Signing in for a native
+/// app").
+const NATIVE_APP_FORM_ACTION: &str = "sh.codewire.ios: http://localhost:9876/callback";
 /// Where a sign-in request resumes; see `completion_target`.
 const OIDC_CALLBACK_PATH: &str = "/api/oidc/callback";
 const TURNSTILE_CSP: &str = "default-src 'self'; base-uri 'none'; connect-src 'self' https://challenges.cloudflare.com; form-action 'self'; frame-ancestors 'none'; frame-src https://challenges.cloudflare.com; img-src 'self' data:; object-src 'none'; script-src 'self' https://challenges.cloudflare.com; style-src 'self'";
@@ -1225,7 +1228,7 @@ fn auth_form_response(
     response
 }
 
-/// Add the iOS app's callback scheme to this page's form-action
+/// Add the native apps' registered callbacks to this page's form-action
 /// (`NATIVE_APP_FORM_ACTION`). Error pages keep the default policy.
 fn allow_native_app_callback(mut response: Response, status: StatusCode) -> Response {
     if response.status() != status {

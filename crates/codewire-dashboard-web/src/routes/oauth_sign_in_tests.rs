@@ -308,12 +308,13 @@ async fn provider_buttons_follow_the_providers_the_identity_service_names() {
 }
 
 #[tokio::test]
-async fn only_pages_that_finish_a_sign_in_let_the_ios_app_receive_its_code() {
-    // Signing in from the iOS app ends in a redirect to its registered
-    // callback, sh.codewire.ios:/oauth/callback. Browsers check that hop
-    // against the submitting page's form-action, so the pages whose POST can
-    // end there allow the app's scheme while they carry a sign-in request,
-    // and every other page these renderers serve keeps 'self' (#3825).
+async fn only_pages_that_finish_a_sign_in_let_the_native_apps_receive_their_code() {
+    // Signing in from a native app ends in a redirect to its registered
+    // callback: sh.codewire.ios:/oauth/callback, or the desktop app's
+    // http://localhost:9876/callback. Browsers check that hop against the
+    // submitting page's form-action, so the pages whose POST can end there
+    // allow exactly those while they carry a sign-in request, and every other
+    // page these renderers serve keeps 'self' (#3825, #5364).
     let (idp, _) = identity(Some(&[]), StatusCode::OK).await;
     let server = dashboard(&idp.origin, "").await;
     let turnstile = dashboard(&idp.origin, "site-key-marker").await;
@@ -328,7 +329,7 @@ async fn only_pages_that_finish_a_sign_in_let_the_ios_app_receive_its_code() {
     let signup = format!("{}={HANDLE}", crate::security::OAUTH_SIGNUP_COOKIE);
     let link = format!("{}={HANDLE}", crate::security::OAUTH_LINK_COOKIE);
     let reset = format!("{}=reset-marker", crate::security::PASSWORD_RESET_COOKIE);
-    let widened = "form-action 'self' sh.codewire.ios:;";
+    let widened = "form-action 'self' sh.codewire.ios: http://localhost:9876/callback;";
     let default = "form-action 'self';";
     for (server, path, cookie, expected) in [
         (&server, "/login?authRequestID=oidc-request", None, widened),
