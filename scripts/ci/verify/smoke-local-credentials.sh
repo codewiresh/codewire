@@ -26,6 +26,7 @@ usage: smoke-local-credentials.sh --cw ABSOLUTE_PATH [--cw-sha256 HEX]
 Runs the journey steps that need only the cw under test:
   smoke-provider-unresolved
   smoke-profile-after-create
+  smoke-attach-restart
 --cw-sha256 checks a downloaded release before it runs. --runtime-from
 installs the local VM runtime from a release directory (for a cw built from
 source, which pins none); without it, the first create downloads the runtime
@@ -41,6 +42,8 @@ SCRATCH=''
 SMOKE_DIR=''
 LOG=''
 VMS=()
+# The fingerprint of the SSH key smoke-profile-after-create generates.
+GENERATED_FINGERPRINT=''
 
 # Remove the smoke's VMs and private root whatever happened. The root holds
 # the private keyring and cw's credential store, the generated private key
@@ -98,12 +101,93 @@ step_profile_after_create() {
   step_cw "$step" credentials --local generate ssh --name "$key"
   fingerprint="$(grep -o 'SHA256:[A-Za-z0-9+/]*' "$LOG" | tail -n 1)"
   [[ -n "$fingerprint" ]] || step_fail "$step" 'the generated key printed no fingerprint'
+  GENERATED_FINGERPRINT="$fingerprint"
   step_cw "$step" credentials --local --profile "$name" set ssh "$key"
   step_cw "$step" update --local "$name" --profile "local:$name" --yes
   state="$(vm_state "$name")"
   [[ "$state" == running ]] || step_fail "$step" "after the update the VM is ${state:-missing}, not running"
   step_cw "$step" exec --in "$name" -- ssh-add -l
   grep -qF "$fingerprint" "$LOG" || step_fail "$step" "the guest's agent does not hold $fingerprint"
+  printf 'ok %s\n' "$step"
+}
+
+# Attach through a terminal as a person does: wait for cw's detach hint, type
+# TEXT, wait until MARKER is printed, then detach with Ctrl-B d. Prints what
+# the terminal showed; fails unless the marker came and cw said it detached.
+# argv: TEXT MARKER CW_ARGS...
+# shellcheck disable=SC2016 # Python, not shell.
+PTY_ATTACH='
+import os, pty, re, select, sys, time
+text, marker, command = sys.argv[1].encode(), sys.argv[2].encode(), sys.argv[3:]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(command[0], command)
+out, typed, detaching = b"", False, False
+deadline = time.time() + float(os.environ.get("SMOKE_ATTACH_SECONDS", "90"))
+while time.time() < deadline:
+    ready, _, _ = select.select([fd], [], [], 0.25)
+    if ready:
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+    if not typed and b"Detach: Ctrl-B" in out:
+        os.write(fd, text + b"\r")
+        typed = True
+    if typed and not detaching and marker in out:
+        os.write(fd, b"\x02")
+        time.sleep(0.3)
+        os.write(fd, b"d")
+        detaching = True
+else:
+    os.kill(pid, 9)
+_, status = os.waitpid(pid, 0)
+shown = re.sub(r"\x1b\[[0-9;?<>]*[A-Za-z]|\x1b[()>=][A-Z0-9]?|\r", "", out.decode("utf-8", "replace"))
+print(shown)
+if os.waitstatus_to_exitcode(status) != 0 or marker not in out or b"Detached from" not in out:
+    sys.exit(1)
+'
+
+# Attach to SESSION in VM for STEP, where the session signs with the profile's
+# key through its agent; fail unless that attach ran it and detached.
+attach_and_sign() {
+  local step="$1" vm="$2" session="$3" a="$RANDOM" b="$RANDOM" marker
+  # The marker is the sum, which only a live shell prints: replayed output
+  # from before a restart holds another one.
+  marker="signed-$((a + b))"
+  printf '$ cw --local attach %s --session %s\n' "$vm" "$session" >>"$LOG"
+  smoke_cw /usr/bin/python3 -I -c "$PTY_ATTACH" \
+    "ssh-add -l; ssh-add -L >/tmp/smoke-agent.pub && echo smoke | ssh-keygen -Y sign -n smoke -f /tmp/smoke-agent.pub >/dev/null && echo signed-\$(($a + $b))" \
+    "$marker" "$CW" --local attach "$vm" --session "$session" >>"$LOG" 2>&1 ||
+    step_fail "$step" "attaching to $vm/$session did not sign with the profile's key and detach"
+}
+
+# A session attached and detached in a VM with a profile; after `cw stop` and
+# `cw start`, a session in the restarted VM is attached and signs with the
+# profile's key through its agent.
+step_attach_restart() {
+  local step=smoke-attach-restart name=smoke-a key=smoke-n-key fingerprint state
+  VMS+=("$name")
+  fingerprint="$GENERATED_FINGERPRINT"
+  [[ -n "$fingerprint" ]] || step_fail "$step" 'smoke-profile-after-create recorded no generated key'
+  step_cw "$step" credentials --local --profile "$name" set ssh "$key"
+  step_cw "$step" create --local --name "$name" --no-file --profile "local:$name" --yes
+  step_cw "$step" run --in "$name" --name before --detach --tty -- bash
+  attach_and_sign "$step" "$name" before
+  step_cw "$step" stop --local "$name"
+  step_cw "$step" start --local "$name"
+  state="$(vm_state "$name")"
+  [[ "$state" == running ]] || step_fail "$step" "after the restart the VM is ${state:-missing}, not running"
+  step_cw "$step" ls --local "$name"
+  step_cw "$step" run --in "$name" --name after --detach --tty -- bash
+  local mark
+  mark="$(wc -l <"$LOG")"
+  attach_and_sign "$step" "$name" after
+  log_since "$mark" | grep -qF "$fingerprint" ||
+    step_fail "$step" "the restarted VM's agent does not hold $fingerprint"
   printf 'ok %s\n' "$step"
 }
 
@@ -223,6 +307,7 @@ main() {
   # First: it decides the resolver the credential service starts with.
   step_provider_unresolved
   step_profile_after_create
+  step_attach_restart
 }
 
 # Sourced by its tests, run otherwise.

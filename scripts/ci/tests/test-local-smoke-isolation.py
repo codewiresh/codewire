@@ -412,5 +412,51 @@ class Runner(unittest.TestCase):
         self.assertEqual(list(scratch.iterdir()), [])
 
 
+FAKE_ATTACH = """#!/usr/bin/python3 -I
+import os, subprocess, tty
+print("Detach: Ctrl-B, then d", flush=True)
+tty.setraw(0)
+line = b""
+while not line.endswith(b"\\r"):
+    line += os.read(0, 1)
+if os.environ["FAKE_SHELL"] == "live":
+    shown = subprocess.run(["bash", "-c", line[:-1].decode()], capture_output=True).stdout
+    os.write(1, shown.replace(b"\\n", b"\\r\\n"))
+keys = b""
+while not keys.endswith(b"\\x02d"):
+    keys += os.read(0, 1)
+os.write(1, b"Detached from vm/s; it keeps running.\\r\\n")
+"""
+
+
+class Attach(unittest.TestCase):
+    """The runner attaches through a terminal: it types once cw shows how to
+    detach, and passes only when a live shell printed the marker and cw
+    detached."""
+
+    def attach(self, shell):
+        scratch = scratch_directory(self, "smoke-attach-")
+        fake = scratch / "cw"
+        fake.write_text(FAKE_ATTACH)
+        fake.chmod(0o755)
+        code = subprocess.run(["bash", "-c", 'source "$1"; printf %s "$PTY_ATTACH"', "test", str(Runner.RUNNER)],
+                              capture_output=True, text=True, check=True, timeout=30).stdout
+        return subprocess.run(["python3", "-I", "-c", code, "echo signed-$((2 + 3))", "signed-5",
+                               str(fake), "--local", "attach", "vm", "--session", "s"],
+                              capture_output=True, text=True, timeout=60,
+                              env={**os.environ, "FAKE_SHELL": shell, "SMOKE_ATTACH_SECONDS": "5"})
+
+    def test_a_live_shell_that_prints_the_marker_passes_and_detaches(self):
+        result = self.attach("live")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("signed-5", result.stdout)
+        self.assertIn("Detached from vm/s", result.stdout)
+
+    def test_a_shell_that_never_answers_fails_at_the_deadline(self):
+        result = self.attach("dead")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("signed-5", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

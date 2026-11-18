@@ -22,7 +22,7 @@ observed**.
 | `smoke-credential-github` | not yet observed | no command yet (#5220) |
 | `smoke-credential-claude` | not yet observed | no command yet (#5220) |
 | `smoke-credential-codex` | not yet observed | no command yet (#5220) |
-| `smoke-attach-restart` | not yet observed | no command yet (#5220) |
+| `smoke-attach-restart` | observed, v0.4.22, 2026-11-18 (by hand) | `scripts/ci/verify/smoke-local-credentials.sh` |
 | `smoke-upgrade` | not yet observed | no command yet (#5220) |
 | `smoke-proxy-down` | not yet observed | no command yet (#5220) |
 | `smoke-provider-unresolved` | observed, `main` at 4cae0f601, 2026-11-18 (by hand) | `scripts/ci/verify/smoke-local-credentials.sh` |
@@ -113,11 +113,19 @@ and Codex sign-ins are synthetic, served by synthetic providers on loopback.
 ## 3. `smoke-attach-restart`: attach across a restart
 
 - **Entry points:** `cw attach`, `cw stop`, `cw start`.
-- **Driving it:** `cw attach` to a session in a VM with a profile, detach,
-  `cw stop` and `cw start`, then `cw attach` again.
-- **Proof:** the second attach reaches a live session in the restarted VM,
-  and a credentialed request from it works.
-- **Observed:** not yet observed.
+- **Driving it:** `cw run --detach --tty` a shell in a VM with a profile,
+  `cw attach` to it through a terminal, sign with the profile's key through
+  the guest's agent, and detach with Ctrl-B then d. Then `cw stop` and
+  `cw start`, and attach to a new session the same way. A session running at
+  the stop is shown `Interrupted` after the start; attaching to it replays its
+  saved output and says the session exited.
+- **Proof:** each attach reaches a live shell, which prints a value only a
+  running shell can compute, and the shell signs with the profile's key
+  through its agent (`ssh-keygen -Y sign`). After the restart, the agent
+  still holds the generated key's fingerprint.
+- **Observed:** v0.4.22, 2026-11-18, by hand on a Linux host: the same run
+  as step 1 printed `ok smoke-attach-restart`, and nothing was left on the
+  host. Not yet run in CI (#5220).
 
 ## 4. `smoke-upgrade`: the previous release left things in place
 
