@@ -1,7 +1,7 @@
 ---
 title: Images and presets
 description: Save an image, install and startup commands, resources and a lifetime once in the organization, and create hosted sandboxes from it.
-updated: 2026-11-08
+updated: 2026-11-17
 weight: 4
 aliases: ["/guides/presets"]
 ---
@@ -59,9 +59,11 @@ Memory:   16384MB
 Disk:     --GB
 ```
 
-The preset pins the image to its digest when you create it, so every
-sandbox starts from the same bytes until you change the preset. A `--`
-means the default. `cw preset list` lists the organization's presets.
+The preset pins its image to a digest when you create it. Another image
+then starts every sandbox from the same bytes until you change the preset.
+The Codewire workspace image is the exception: a sandbox from the preset
+starts on the current workspace image, so it gets each new release's tools
+and `cw`. A `--` means the default. `cw preset list` lists the organization's presets.
 
 ## Create a sandbox from it
 
@@ -92,3 +94,72 @@ A `codewire.yaml` in the repository does the same job as a preset and
 travels with the code; see [`codewire.yaml`](@/environments/codewire-yaml.md).
 Presets are for hosted sandboxes; a local VM reads only `codewire.yaml` and
 flags.
+
+## A preset for Amp's self-hosted orbs
+
+Amp's self-hosted orbs run on an image with glibc, git 2.34 or later,
+`/usr/local/bin/amp`, and a `user` account whose home is `/home/user` and who
+has passwordless sudo. The workspace image has all but the account and the
+`amp` path: it ships `amp`, and its own `codewire` user already has
+passwordless sudo. A startup script adds the rest:
+
+```sh
+cat > amp-orb-startup.sh <<'SCRIPT'
+set -eu
+kept=/workspace/.amp-orb
+for path in "$kept" "$kept/home"; do
+  if [ -L "$path" ]; then echo "amp-orb: $path is a link; refusing" >&2; exit 1; fi
+done
+sudo mkdir -p "$kept/home"
+for path in "$kept" "$kept/home"; do
+  if [ -L "$path" ]; then echo "amp-orb: $path is a link; refusing" >&2; exit 1; fi
+done
+getent group user >/dev/null || sudo groupadd --gid 1100 user
+id -u user >/dev/null 2>&1 || sudo useradd --uid 1100 --gid 1100 \
+  --no-create-home --home-dir /home/user --shell /bin/bash user
+sudo chown -h user:user "$kept/home"
+sudo find "$kept/home" -maxdepth 0 -type d -exec chmod 0700 {} +
+sudo ln -sfn "$kept/home" /home/user
+staged=$(sudo mktemp /etc/sudoers.d/.amp-orb.XXXXXX)
+printf 'user ALL=(ALL) NOPASSWD:ALL\n' | sudo tee "$staged" >/dev/null
+sudo chown root:root "$staged"
+sudo chmod 0440 "$staged"
+sudo visudo -cf "$staged" >/dev/null || { sudo rm -f "$staged"; exit 1; }
+sudo mv -f "$staged" /etc/sudoers.d/90-amp-orb
+sudo ln -sfn /opt/codewire/agents/npm/bin/amp /usr/local/bin/amp
+SCRIPT
+cw preset create amp-orb --name 'Amp orb' --image workspace \
+  --startup "$(cat amp-orb-startup.sh)" --description "Meets Amp's orb image contract"
+```
+
+Why each step is there:
+
+- **It's a startup script, not an install command.** Only the workspace
+  storage, `/workspace` and `/home/codewire`, is kept when a sandbox stops.
+  The account, the sudoers file and the links are on the image's own
+  filesystem, so they're made again on every start. Each command checks
+  first or replaces what it makes, so running it again changes nothing.
+- **`/home/user` points into `/workspace`.** Amp pauses an orb with
+  `cw stop` and resumes it with `cw start`, and expects its home to be
+  kept, so the home lives in the kept storage.
+- **A fixed uid and gid, 1100.** The account made on each start owns the
+  same files in that kept home.
+- **Passwordless sudo for `user`** gives it exactly what `codewire` already
+  has. A sandbox's network policy and credential broker are enforced
+  outside it, so root inside it changes neither.
+- **No links are followed in the kept storage.** Anything in the sandbox can
+  write `/workspace`, and the script runs as root there, so it refuses a
+  link where it expects a folder and changes the owner of the folder
+  itself (`chown -h`, and `chmod` only through `find -type d`, which never
+  matches a link).
+- **The sudoers file is checked, then put in place in one step.** `visudo`
+  checks a staged copy, owned by root with mode 0440, and only a valid one
+  replaces `90-amp-orb`. sudo ignores a name with a dot, such as the staged
+  copy.
+- **`/usr/local/bin/amp`** is the image's `amp`.
+
+The orb's home is part of the kept storage, so it's in every snapshot of
+the sandbox and in every sandbox forked from one. Amp's per-thread
+`ORB_TOKEN` reaches an orb only in the environment of the run that starts
+it. Never write it into the preset, a startup script or a file in the
+sandbox.

@@ -31,6 +31,7 @@ Updated 2026-11-17.
 | `sandbox-cp-download` | cw-workspace-mount | observed 2026-11-13 (#4394) | not yet observed |
 | `sandbox-rollout` | cw-rollout | observed 2026-11-13 (#4426) | not yet observed |
 | `sandbox-amp` | cw-integrations | not yet observed | not yet observed |
+| `sandbox-amp-orb` | cw-integrations | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -887,5 +888,57 @@ Issue: #5049.
 - **Gotchas:** a home install without the wrapper (`npm install --global
   @sourcegraph/amp`) skips `@ampcode/cli`'s postinstall and leaves a stub
   that prints "Amp native binary not installed".
+- **Observed:** not yet observed.
+
+## `sandbox-amp-orb`: a preset that meets Amp's orb image contract
+
+Issue: #5045. The recipe is "A preset for Amp's self-hosted orbs" in
+`apps/docs/zola/content/environments/presets.md`.
+
+- **Entry points:** `cw preset create amp-orb` with that startup script, then
+  `cw create --preset amp-orb`, `cw stop` and `cw start`, as Amp's dispatch
+  program drives them.
+- **States to exercise:**
+  - a fresh sandbox from the preset;
+  - the same sandbox after `cw stop` and `cw start`, with a file in
+    `user`'s home from before;
+  - the startup script run a second time by hand, which changes nothing.
+- **Driving it:** create the preset as the recipe says, then:
+
+  ```sh
+  cw create --name orb-walk --preset amp-orb -y
+  cat > orb-check.sh <<'CHECK'
+  set -eu
+  getent passwd user | cut -d: -f1,3,4,6,7
+  readlink -f /home/user
+  sudo -u user sudo -n true && echo sudo-ok
+  stat -c '%U:%G %a' /etc/sudoers.d/90-amp-orb
+  sudo -u user /usr/local/bin/amp --version
+  git --version
+  ldd --version | head -n 1
+  CHECK
+  cw cp orb-check.sh orb-walk:/workspace/orb-check.sh
+  cw run --in orb-walk --no-tty -- sh /workspace/orb-check.sh
+  cw run --in orb-walk --no-tty -- sudo -u user sh -c 'echo kept > /home/user/kept'
+  cw stop orb-walk && cw start orb-walk
+  cw run --in orb-walk --no-tty -- sh /workspace/orb-check.sh
+  cw run --in orb-walk --no-tty -- sudo -u user cat /home/user/kept
+  ```
+
+  Then run the preset's startup script once more inside the sandbox, run
+  the check again, and remove the sandbox with `cw rm --yes orb-walk`.
+- **Proof**, on each check, item by item against Amp's contract:
+  - `user:1100:1100:/home/user:/bin/bash`, and `/home/user` resolves to
+    `/workspace/.amp-orb/home`;
+  - `sudo-ok`, and the sudoers file reads `root:root 440`;
+  - `amp --version` prints the version pinned in
+    `images/workspace/agents/package.json`;
+  - git 2.34 or later;
+  - glibc;
+  - after the stop and start, `kept` is still there, owned by `user`;
+  - the startup script's second run exits 0, and the check reads the same.
+- **Gotchas:** a preset made with `--install` instead of `--startup` meets
+  the contract until the first stop. The account is on the image's
+  filesystem, which a start replaces.
 - **Observed:** not yet observed.
 
