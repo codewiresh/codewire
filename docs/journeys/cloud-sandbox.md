@@ -20,12 +20,12 @@ Updated 2026-11-17.
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-cw-knows-its-server` | cw-identity | partly observed 2026-11-17 (#5202) | not yet observed |
-| `sandbox-attach-stays` | cw-direct-udp | not yet observed | not yet observed |
+| `sandbox-attach-stays` | cw-direct-udp | observed 2026-11-18 (#5120) | not yet observed |
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
 | `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
 | `sandbox-setup-retry` | cw-snapshots | observed in part 2026-11-16 (CLI only) | not yet observed |
-| `sandbox-attach-repaint` | cw-direct-udp | not yet observed | not yet observed |
+| `sandbox-attach-repaint` | cw-direct-udp | partly observed 2026-11-18 (#5120) | not yet observed |
 | `sandbox-cp-upload` | cw-workspace-mount | observed 2026-11-14 (#4460) | not yet observed |
 | `sandbox-cp-resume` | cw-workspace-mount | observed 2026-11-13 (#4373) | not yet observed; v0.4.17 lacks it |
 | `sandbox-cp-download` | cw-workspace-mount | observed 2026-11-13 (#4394) | not yet observed |
@@ -339,9 +339,10 @@ server it belongs to and says what it can do, instead of asking for a URL.
 - **States to exercise:**
   - an attachment left open for 30 minutes with a key every 10 seconds and
     mouse reports every minute;
-  - the client's coordinator session reconnecting during it (it does so
-    every few minutes, #5120);
-  - a real cut, such as a Wi-Fi change, which may reconnect once;
+  - a real cut, such as a Wi-Fi change, which may reconnect once. Before
+    #5120 the client's coordinator session also reconnected every few
+    minutes on its own; in the 2026-11-18 walk it did not in 30 minutes, so
+    the cut is what makes a reconnect;
   - after a reconnect, the coordinator ending the client's older session
     within about 45 seconds (or at once, when the new session takes the key
     over), so the daemon is told to remove it.
@@ -354,24 +355,37 @@ server it belongs to and says what it can do, instead of asking for a URL.
   CW_DEBUG_TAILNET=1 script -qec 'cw attach walk --session soak' /dev/null
   ```
 
-  Keep the daemon's log for the same window (`kubectl logs` on the
-  sandbox's Pod, read-only).
+  Keep the coordinator's and the daemon's logs for the same window
+  (`kubectl logs` on the coordinator and on the sandbox's Pod, read-only).
+  For the cut, leave the attachment up for at least 40 s first, so its
+  session has pinged, then cut for about 60 s and stay attached 2 minutes
+  after the network returns.
 - **Proof:**
   - no `[cw] connection lost` line in 30 minutes without a real cut;
   - the daemon logs no `rust tailnet refused peer addresses` line for the
     client;
-  - the coordinator log shows the client's session reconnecting at least
-    once in the window;
-  - after each reconnect, the coordinator log shows the older session
-    ended, and the daemon's log shows its `PeerRemove`, within about
-    45 seconds.
+  - after the cut, the coordinator log shows the older session ended
+    (`ended=Some(Silent)`, or at once when the new session takes the key
+    over) within about 45 seconds of its last ping, with `coordinator
+    peer_remove sent` to the sandbox's daemon, and one client session left
+    after the reconnect.
 - **Gotchas:**
-  - The client's coordinator session reconnects on its own schedule. Check
-    the coordinator log for a second `coordinator peer connected` from the
-    client before calling a window proof.
+  - A cut in the first 15 s of an attachment proves nothing about the
+    45 s limit: a session that has not pinged yet keeps the older
+    behaviour and is not ended for silence.
+  - The daemon does not log the `PeerRemove` it receives at its default
+    level; the coordinator's `peer_remove sent` line is the record.
   - Before the fix, a drop came about 60 seconds after each coordinator
     reconnect, when SSH keepalive gave up.
-- **Observed:** not yet observed.
+- **Observed:**
+  - Dev, 2026-11-18 (cw-direct-udp): source a44ac15fc, rollout finished,
+    `cw` built from main b26ed65a9, as the Dev smoke identity; evidence on
+    #5120. `cw attach` (keys and mouse reports) and `cw shell` side by side
+    for 30 minutes: no connection-lost line, no refused peer addresses, and
+    neither client's coordinator session reconnected on its own. A 60 s cut
+    of the attach: one connection-lost line and one path line; the older
+    session ended `Silent` about 45 s after its last ping, with
+    `peer_remove` sent at once, and one session remained.
 
 ## `sandbox-stop-start`: stop a sandbox and start it again
 
@@ -560,8 +574,9 @@ Issue: #5090 (text left in an attached agent's screen after a drop).
   - the mouse moved and keys typed during the drop;
   - a reattach that takes a different path, which prints its path line again.
 - **Driving it:** a terminal, a running sandbox `walk`, and a way to cut the
-  workstation's network for about 20 s (Wi-Fi off and on, or `nmcli
-  networking off` and `on`). Record the terminal with `script`:
+  network of `cw` for about 20 s (Wi-Fi off and on, or `nmcli networking
+  off` and `on`; on a shared machine, `IPAddressDeny=any` on the systemd
+  scope `cw` runs in cuts only that). Record the terminal with `script`:
 
   ```sh
   cw --cloud run --in walk --name tui --tty --detach -- vim -c 'set mouse=a'
@@ -595,7 +610,19 @@ Issue: #5090 (text left in an attached agent's screen after a drop).
     lost, the lost count is in bytes and can include those reports.
   - Without `set mouse=a`, vim asks for no mouse reports and the mouse half
     of the walk proves nothing.
-- **Observed:** not yet observed.
+  - Start the detached vim from a shell that has `TERM` set. Started
+    without one, the session's `TERM` is empty and that vim ignores resizes,
+    so no repaint can clean its screen (#5306).
+  - Keys typed during the drop are echoed by the local terminal until the
+    reattach (#5305); on the alternate screen the repaint wipes them.
+- **Observed:**
+  - Dev, 2026-11-18 (cw-direct-udp): surface and client as for
+    `sandbox-attach-stays`; evidence on #5120. Both `cw attach --session`
+    and `cw shell --durable`, at 120x40 with vim and `set mouse=a`: after
+    the reattach the screen was vim's frame with `hello` in the buffer and
+    no `[cw]` or `via` line in it; `[cw]` lines were only the connection-lost
+    line and, after `:q!`, "session exited"; no lost or resent line, and one
+    `  via ` line. A reattach over a different path was not exercised.
 
 ## `sandbox-cp-upload`: copy a file into a sandbox
 
