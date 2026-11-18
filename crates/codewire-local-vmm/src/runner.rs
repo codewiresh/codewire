@@ -1845,11 +1845,10 @@ impl RunningVm {
     async fn stop_with(&mut self, discard_guest_state: bool) -> Result<ExitClass, RunnerError> {
         let vmm = self.stop_vmm(discard_guest_state).await;
         let worker = self.stop_network_worker().await;
+        #[cfg(target_os = "linux")]
+        let worker = worker.and(self.stop_front_door().await);
         let shares = self.stop_direct_shares().await;
-        match (vmm, worker, shares) {
-            (Ok(exit), Ok(()), Ok(())) => Ok(exit),
-            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
-        }
+        vmm.and_then(|exit| worker.and(shares).map(|()| exit))
     }
 
     async fn stop_vmm(&mut self, discard_guest_state: bool) -> Result<ExitClass, RunnerError> {

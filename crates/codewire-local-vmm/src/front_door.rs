@@ -15,7 +15,16 @@
 //!    credential authority replaces the broker every few minutes, and each
 //!    successor pairs again. [`FRONT_DOOR_CREDENTIALS_MESSAGE`] carries
 //!    exactly one descriptor, its session, which takes all new work while the
-//!    one it replaces drains (`EnvironmentFrontDoor::serve`).
+//!    one it replaces drains (`EnvironmentFrontDoor::serve`);
+//! 5. front door, after each of those frames: its serving word
+//!    ([`front_door_serving_message`]) once it has checked the frame's
+//!    sockets and their role tags and takes them, so the runner records a
+//!    pairing on the front door's own word. The word carries the frame's
+//!    number in the generation, counted from 1 over every frame of steps 3
+//!    and 4, so a word that arrives late is never taken for a later
+//!    pairing's. It says nothing for a later broker's socket it drops, whose
+//!    number is then never said, and a failure line if the first pairing's
+//!    sockets fail.
 //!
 //! Each of those sockets first carries a role tag from its peer, which
 //! the front door checks before it serves anything, so a swapped pair is
@@ -62,6 +71,33 @@ pub const FRONT_DOOR_READY_MESSAGE: &[u8] = b"CWFD1 ready\n";
 pub const FRONT_DOOR_SOCKETS_MESSAGE: &[u8] = b"CWFD1 sockets\n";
 /// A later credential broker's session, for its renewal.
 pub const FRONT_DOOR_CREDENTIALS_MESSAGE: &[u8] = b"CWFD1 credentials\n";
+/// The front door's word that it checked a pairing's sockets and serves
+/// them: this prefix, the pairing's number in decimal, and a line feed.
+pub const FRONT_DOOR_SERVING_PREFIX: &[u8] = b"CWFD1 serving ";
+
+/// The serving word for the generation's `pairing`th pairing frame.
+pub fn front_door_serving_message(pairing: u64) -> Vec<u8> {
+    let mut message = FRONT_DOOR_SERVING_PREFIX.to_vec();
+    message.extend_from_slice(pairing.to_string().as_bytes());
+    message.push(b'\n');
+    message
+}
+
+/// The pairing a serving word names. None for anything but the prefix, a
+/// decimal number from 1 that fits a `u64`, with no sign and no leading
+/// zero, and one line feed: a word is matched to its pairing, never guessed.
+pub fn front_door_serving_pairing(message: &[u8]) -> Option<u64> {
+    let digits = message
+        .strip_prefix(FRONT_DOOR_SERVING_PREFIX)?
+        .strip_suffix(b"\n")?;
+    if digits.first().is_none_or(|first| *first == b'0')
+        || digits.len() > 20
+        || !digits.iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+    std::str::from_utf8(digits).ok()?.parse().ok()
+}
 /// The egress broker's first frame on the hand-off socket (#3999).
 pub use codewire_egress_policy::handoff::HANDOFF_ROLE_TAG;
 /// The credential broker's first byte on the front-door session socket.
@@ -69,7 +105,7 @@ pub const FRONT_DOOR_CREDENTIAL_TAG: u8 =
     codewire_egress_front_door_bridge::FRONT_DOOR_SESSION_ROLE_TAG;
 /// How long each peer's role tag may take to arrive.
 pub const ROLE_TAG_TIMEOUT: Duration = Duration::from_secs(2);
-const FRONT_DOOR_FAILED_PREFIX: &[u8] = b"CWFD1 failed ";
+pub(crate) const FRONT_DOOR_FAILED_PREFIX: &[u8] = b"CWFD1 failed ";
 /// The largest message the runner sends: an interception frame of 32
 /// bindings, each at most 255 bytes of name.
 const MAX_CONTROL_MESSAGE: usize = 6 + 32 * (1 + 255 + 2);
@@ -186,13 +222,19 @@ async fn start_and_serve(
         .await
         .map_err(|_| FrontDoorProcessError::Control)?;
     let (handoff, credentials) = receive_sockets(control).await?;
+    control
+        .send(&front_door_serving_message(1), &[])
+        .await
+        .map_err(|_| FrontDoorProcessError::Control)?;
     let (successors, later) = tokio::sync::mpsc::channel(1);
     let serve = door.serve(handoff, credentials, later);
     tokio::pin!(serve);
     // Once the control channel closes or misbehaves, no successor can pair:
     // dropping the sender lets the front door end.
     let feed = async move {
-        while let Some(credentials) = receive_credentials(control).await {
+        // The sockets frame was the generation's first pairing frame.
+        let mut pairing = 1_u64;
+        while let Some(credentials) = receive_credentials(control, &mut pairing).await {
             if successors.send(credentials).await.is_err() {
                 break;
             }
@@ -207,7 +249,12 @@ async fn start_and_serve(
 
 /// The next later credential broker's admitted session; none once the
 /// control channel closes or carries anything but a credentials frame.
-async fn receive_credentials(control: &mut ControlChannel) -> Option<tokio::net::UnixStream> {
+/// `pairing` counts the generation's pairing frames, each credentials frame
+/// received among them.
+async fn receive_credentials(
+    control: &mut ControlChannel,
+    pairing: &mut u64,
+) -> Option<tokio::net::UnixStream> {
     loop {
         let (message, descriptors) = control.receive(MAX_CONTROL_MESSAGE, 1).await.ok()?;
         let Ok([credentials]) = <[OwnedFd; 1]>::try_from(descriptors) else {
@@ -216,9 +263,15 @@ async fn receive_credentials(control: &mut ControlChannel) -> Option<tokio::net:
         if message != FRONT_DOOR_CREDENTIALS_MESSAGE {
             return None;
         }
-        // One broker's failed checks drop only its socket; the runner logs
-        // the pairing, and the next broker pairs.
+        *pairing = pairing.checked_add(1)?;
+        // One broker's failed checks drop only its socket, without a word;
+        // the runner records that pairing as unacknowledged, and the next
+        // broker pairs.
         if let Some(credentials) = admitted_credentials(credentials).await {
+            control
+                .send(&front_door_serving_message(*pairing), &[])
+                .await
+                .ok()?;
             return Some(credentials);
         }
     }

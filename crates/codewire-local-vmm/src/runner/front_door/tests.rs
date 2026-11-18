@@ -2,6 +2,7 @@ use codewire_egress_policy::handoff::{HandoffReceiver, HandoffSender};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::*;
+use crate::front_door::front_door_serving_message;
 
 /// Generous, so a loaded CI host fails only a missing frame.
 const WAIT: Duration = Duration::from_secs(30);
@@ -232,14 +233,15 @@ async fn only_the_boots_pairing_secret_pairs_never_the_daemon_token() {
 /// capability is still refused between them.
 #[tokio::test(flavor = "multi_thread")]
 async fn each_renewed_broker_pairs_again_with_its_own_session() {
-    let mut pairing = pairing();
+    let (mut pairing, log) = recording_pairing();
     let _first = connect_presenting(&pairing.socket, &pairing.capability).await;
     let (message, descriptors) = pairing.front_door.received();
     assert_eq!(message, FRONT_DOOR_SOCKETS_MESSAGE);
     assert_eq!(descriptors.len(), 2);
+    pairing.front_door.reply(&front_door_serving_message(1));
 
     refused(connect_presenting(&pairing.socket, b"a-previous-generation-capability").await).await;
-    for _renewal in 0..2 {
+    for renewal in 2..=3 {
         let mut successor = connect_presenting(&pairing.socket, &pairing.capability).await;
         let (message, descriptors) = pairing.front_door.received();
         assert_eq!(message, FRONT_DOOR_CREDENTIALS_MESSAGE);
@@ -248,8 +250,218 @@ async fn each_renewed_broker_pairs_again_with_its_own_session() {
         let mut received = [0_u8; 4];
         rustix::io::read(&credentials, &mut received).unwrap();
         assert_eq!(&received, b"open");
+        // Each pairing is recorded on the front door's word for it.
+        pairing
+            .front_door
+            .reply(&front_door_serving_message(renewal));
+        let paired = format!("outcome=paired pairing={renewal}");
+        let lines = recorded(&log, "front_door_pairing", &paired).await;
+        assert_eq!(
+            lines.iter().filter(|line| line.ends_with(&paired)).count(),
+            1
+        );
     }
     assert!(pairing.socket.exists());
+}
+
+/// The runner keeps its copy of each end it sends until the front door says
+/// it serves them, and none after: a socket whose only reference is in flight
+/// can arrive dead on macOS once its sender has closed its last copy (#4916).
+/// Here the front door closes what it received, so each peer sees the end of
+/// its stream exactly when the runner lets go.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_runner_holds_the_ends_it_sent_until_the_front_door_answers() {
+    let mut pairing = pairing();
+    let mut broker = connect_presenting(&pairing.socket, &pairing.capability).await;
+    let (message, descriptors) = pairing.front_door.received();
+    assert_eq!(message, FRONT_DOOR_SOCKETS_MESSAGE);
+    drop(descriptors);
+
+    let mut byte = [0_u8; 1];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), broker.read(&mut byte))
+            .await
+            .is_err(),
+        "the runner still holds the credential end"
+    );
+    rustix::net::sockopt::set_socket_timeout(
+        &pairing.handoff,
+        rustix::net::sockopt::Timeout::Recv,
+        Some(Duration::from_millis(300)),
+    )
+    .unwrap();
+    assert_eq!(
+        tokio::task::block_in_place(|| rustix::io::read(&pairing.handoff, &mut byte)),
+        Err(rustix::io::Errno::AGAIN),
+        "the runner still holds the hand-off end"
+    );
+
+    pairing.front_door.reply(&front_door_serving_message(1));
+    assert_eq!(
+        tokio::time::timeout(WAIT, broker.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0,
+        "the runner released the credential end"
+    );
+    rustix::net::sockopt::set_socket_timeout(
+        &pairing.handoff,
+        rustix::net::sockopt::Timeout::Recv,
+        Some(WAIT),
+    )
+    .unwrap();
+    assert_eq!(
+        tokio::task::block_in_place(|| rustix::io::read(&pairing.handoff, &mut byte)),
+        Ok(0),
+        "the runner released the hand-off end"
+    );
+}
+
+/// The front door drops a later broker's socket that fails its checks
+/// without a word. That pairing is recorded as unacknowledged at the limit,
+/// never as paired; the front door's word, when it comes late, is recorded
+/// then; and the next broker still pairs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_pairing_the_front_door_says_nothing_about_is_unacknowledged() {
+    let (mut pairing, log) = recording_pairing();
+    let _first = connect_presenting(&pairing.socket, &pairing.capability).await;
+    pairing.front_door.received();
+    pairing.front_door.reply(&front_door_serving_message(1));
+
+    let mut second = connect_presenting(&pairing.socket, &pairing.capability).await;
+    let (message, descriptors) = pairing.front_door.received();
+    assert_eq!(message, FRONT_DOOR_CREDENTIALS_MESSAGE);
+    // The front door drops this socket; the runner's copy goes at the limit.
+    drop(descriptors);
+    let lines = recorded(
+        &log,
+        "front_door_pairing",
+        "outcome=unacknowledged pairing=2",
+    )
+    .await;
+    assert_eq!(
+        tokio::time::timeout(WAIT, second.read(&mut [0_u8; 1]))
+            .await
+            .unwrap()
+            .unwrap(),
+        0,
+        "the runner released its copy of the dropped broker's end"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.ends_with("outcome=paired pairing=2")),
+        "{lines:?}"
+    );
+
+    pairing.front_door.reply(&front_door_serving_message(2));
+    recorded(&log, "front_door_pairing", "outcome=paired pairing=2").await;
+
+    let _third = connect_presenting(&pairing.socket, &pairing.capability).await;
+    let (message, _descriptors) = pairing.front_door.received();
+    assert_eq!(message, FRONT_DOOR_CREDENTIALS_MESSAGE);
+    pairing.front_door.reply(&front_door_serving_message(3));
+    recorded(&log, "front_door_pairing", "outcome=paired pairing=3").await;
+}
+
+/// The front door's word names its pairing, so one that arrives late is
+/// never taken for the next pairing's. Here pairing 2 goes unanswered, and
+/// its word comes while the runner waits for pairing 3: it is recorded for
+/// pairing 2, and the runner still holds pairing 3's end, whose copy at the
+/// front door is already closed, until pairing 3's own word. A word said
+/// twice changes nothing, and a number not yet sent is not this protocol.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_word_is_recorded_for_its_own_pairing_and_releases_no_other() {
+    let (mut pairing, log) = recording_pairing();
+    let _first = connect_presenting(&pairing.socket, &pairing.capability).await;
+    pairing.front_door.received();
+    pairing.front_door.reply(&front_door_serving_message(1));
+
+    let _second = connect_presenting(&pairing.socket, &pairing.capability).await;
+    let (_message, _slow) = pairing.front_door.received();
+    recorded(
+        &log,
+        "front_door_pairing",
+        "outcome=unacknowledged pairing=2",
+    )
+    .await;
+
+    let mut third = connect_presenting(&pairing.socket, &pairing.capability).await;
+    let (message, descriptors) = pairing.front_door.received();
+    assert_eq!(message, FRONT_DOOR_CREDENTIALS_MESSAGE);
+    drop(descriptors);
+    pairing.front_door.reply(&front_door_serving_message(2));
+    recorded(&log, "front_door_pairing", "outcome=paired pairing=2").await;
+    // Read from the socket itself: the runtime's own readiness can lag it.
+    assert_eq!(
+        rustix::io::read(&third, &mut [0_u8; 1]),
+        Err(rustix::io::Errno::AGAIN),
+        "the runner still holds pairing 3's end after pairing 2's late word"
+    );
+    assert!(
+        events(&log, "front_door_pairing")
+            .iter()
+            .all(|line| !line.ends_with("pairing=3"))
+    );
+
+    pairing.front_door.reply(&front_door_serving_message(3));
+    recorded(&log, "front_door_pairing", "outcome=paired pairing=3").await;
+    assert_eq!(
+        tokio::time::timeout(WAIT, third.read(&mut [0_u8; 1]))
+            .await
+            .unwrap()
+            .unwrap(),
+        0,
+        "the runner released pairing 3's end on its own word"
+    );
+
+    pairing.front_door.reply(&front_door_serving_message(2));
+    recorded(
+        &log,
+        "front_door_pairing",
+        "outcome=unexpected_serving pairing=2",
+    )
+    .await;
+    pairing.front_door.reply(&front_door_serving_message(9));
+    let lines = recorded(
+        &log,
+        "front_door_pairing",
+        "outcome=front_door_refused stage=invalid",
+    )
+    .await;
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("outcome=paired"))
+            .count(),
+        3,
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_serving_word_is_read_strictly() {
+    assert_eq!(front_door_serving_pairing(b"CWFD1 serving 1\n"), Some(1));
+    assert_eq!(
+        front_door_serving_pairing(&front_door_serving_message(u64::MAX)),
+        Some(u64::MAX)
+    );
+    for malformed in [
+        &b"CWFD1 serving\n"[..],
+        b"CWFD1 serving \n",
+        b"CWFD1 serving 0\n",
+        b"CWFD1 serving 01\n",
+        b"CWFD1 serving +1\n",
+        b"CWFD1 serving 1",
+        b"CWFD1 serving 1\n\n",
+        b"CWFD1 serving 1 \n",
+        b"CWFD1 serving 18446744073709551616\n",
+        b"CWFD1 serving 111111111111111111111\n",
+        b"CWFD1 failed sockets\n",
+    ] {
+        assert_eq!(front_door_serving_pairing(malformed), None, "{malformed:?}");
+    }
 }
 
 #[test]
@@ -333,4 +545,173 @@ async fn a_front_door_that_dies_before_pairing_closes_its_handoff_end() {
         assert!(tokio::time::Instant::now() < deadline, "the socket stays");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// A private log the runner records in, and where to read it back.
+fn recording() -> (std::sync::Arc<DiagnosticLog>, tempfile::NamedTempFile) {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let log = DiagnosticLog::adopt(file.reopen().unwrap()).unwrap();
+    (std::sync::Arc::new(log), file)
+}
+
+/// The log's lines for `event`, once one holding `needle` is there.
+async fn recorded(log: &tempfile::NamedTempFile, event: &str, needle: &str) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let lines = events(log, event);
+        if lines.iter().any(|line| line.contains(needle)) {
+            return lines;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no {event} line with {needle}: {lines:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn events(log: &tempfile::NamedTempFile, event: &str) -> Vec<String> {
+    std::fs::read_to_string(log.path())
+        .unwrap()
+        .lines()
+        .filter(|line| {
+            line.contains(&format!(" event={event} ")) || line.ends_with(&format!(" event={event}"))
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A pairing, with the egress broker's hand-off end, that records in a log
+/// the test reads.
+fn recording_pairing() -> (Pairing, tempfile::NamedTempFile) {
+    let directory = tempfile::Builder::new()
+        .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let socket = directory.path().join("credentials.sock");
+    let (process, front_door) = stand_in();
+    let (handoff, front_door_handoff) = stream_pair().unwrap();
+    let (log, file) = recording();
+    let secrets = BootSecrets::mint();
+    let capability = secrets.pairing().to_vec();
+    let running = RunningFrontDoor::listen_recording(process, &socket, secrets, Some(log)).unwrap();
+    let mut pairing = Pairing {
+        _directory: directory,
+        socket,
+        capability,
+        front_door,
+        handoff,
+        front_door_handoff: Some(front_door_handoff),
+        running,
+    };
+    pairing.hand_off().unwrap();
+    (pairing, file)
+}
+
+/// The pairing is recorded, once, when the front door says it serves. That
+/// it is not recorded on the send alone is what the two tests below show: a
+/// front door that refuses or goes is never recorded as paired.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pairing_is_recorded_once_the_front_door_says_it_serves() {
+    let (mut pairing, log) = recording_pairing();
+    let _broker = connect_presenting(&pairing.socket, &pairing.capability).await;
+    let (message, _descriptors) = pairing.front_door.received();
+    assert_eq!(message, FRONT_DOOR_SOCKETS_MESSAGE);
+
+    pairing.front_door.reply(&front_door_serving_message(1));
+    let lines = recorded(&log, "front_door_pairing", "outcome=paired").await;
+    assert_eq!(lines.len(), 1, "{lines:?}");
+}
+
+/// A front door that refuses the sockets it was sent is recorded as refusing
+/// them, with the stage it named, and never as paired.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_front_door_that_refuses_its_sockets_is_recorded_with_its_stage() {
+    let (mut pairing, log) = recording_pairing();
+    let _broker = connect_presenting(&pairing.socket, &pairing.capability).await;
+    pairing.front_door.received();
+    pairing.front_door.reply(b"CWFD1 failed sockets\n");
+    let lines = recorded(&log, "front_door_pairing", "outcome=front_door_refused").await;
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].ends_with("outcome=front_door_refused stage=sockets pairing=1"),
+        "{lines:?}"
+    );
+}
+
+/// A front door that takes the sockets and goes without a word is recorded
+/// as gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_front_door_that_goes_after_taking_its_sockets_is_recorded_as_gone() {
+    let (mut pairing, log) = recording_pairing();
+    let _broker = connect_presenting(&pairing.socket, &pairing.capability).await;
+    pairing.front_door.received();
+    drop(pairing.front_door);
+    let lines = recorded(&log, "front_door_pairing", "outcome=front_door_gone").await;
+    assert_eq!(lines.len(), 1, "{lines:?}");
+}
+
+/// A front door that takes the sockets, stays and says nothing is not
+/// waited for past the limit, and is never read as serving.
+#[tokio::test(start_paused = true)]
+async fn a_front_door_that_says_nothing_is_unacknowledged_at_the_limit() {
+    let (runner_end, _front_door_end) = stream_pair().unwrap();
+    let mut control = ControlChannel::new(runner_end).unwrap();
+    let asked = tokio::time::Instant::now();
+    assert!(matches!(
+        acknowledgement(&mut control, None, 1, &mut Unanswered::default()).await,
+        Acknowledgement::Silent
+    ));
+    assert_eq!(asked.elapsed(), SERVING_TIMEOUT);
+}
+
+/// A front-door process that exits by itself, with `status`.
+fn exiting(status: &str) -> FrontDoorProcess {
+    let child = tokio::process::Command::new("sh")
+        .args(["-c", status])
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    FrontDoorProcess {
+        child,
+        control: None,
+        ca_der: Vec::new(),
+    }
+}
+
+/// An exit nobody asked for is recorded with how the process ended.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_front_door_that_exits_is_recorded_with_its_status() {
+    let (log, file) = recording();
+    let _watch = FrontDoorWatch::start(exiting("exit 3"), Some(log.clone()));
+    let lines = recorded(&file, "front_door_exited", "exit_code=3").await;
+    assert_eq!(lines.len(), 1, "{lines:?}");
+
+    let (log, file) = recording();
+    let _watch = FrontDoorWatch::start(exiting("kill -TERM $$"), Some(log));
+    let lines = recorded(&file, "front_door_exited", "signal=15").await;
+    assert_eq!(lines.len(), 1, "{lines:?}");
+}
+
+/// Stopping kills the front door and reaps it, and records no exit: it was
+/// asked for. Stopping again, or after the process went by itself, is fine.
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_reaps_the_front_door_and_records_no_exit() {
+    let (log, file) = recording();
+    let (process, _front_door) = stand_in();
+    let mut watch = FrontDoorWatch::start(process, Some(log.clone()));
+    let pid = rustix::process::Pid::from_raw(i32::try_from(watch.pid.unwrap()).unwrap()).unwrap();
+    assert!(rustix::process::test_kill_process(pid).is_ok(), "it runs");
+
+    watch.stop().await.unwrap();
+    assert!(
+        rustix::process::test_kill_process(pid).is_err(),
+        "it was reaped"
+    );
+    assert_eq!(events(&file, "front_door_exited"), Vec::<String>::new());
+    watch.stop().await.unwrap();
+
+    let mut gone = FrontDoorWatch::start(exiting("exit 0"), Some(log));
+    recorded(&file, "front_door_exited", "exit_code=0").await;
+    gone.stop().await.unwrap();
 }

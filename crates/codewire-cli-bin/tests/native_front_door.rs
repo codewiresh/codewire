@@ -23,6 +23,7 @@ use codewire_local_vmm::broker_control::encode_intercept_frame;
 use codewire_local_vmm::front_door::{
     FRONT_DOOR_CONTROL_FD, FRONT_DOOR_CREDENTIAL_TAG, FRONT_DOOR_CREDENTIALS_MESSAGE,
     FRONT_DOOR_READY_MESSAGE, FRONT_DOOR_SOCKETS_MESSAGE, HANDOFF_ROLE_TAG,
+    front_door_serving_message,
 };
 use rustix::net::{AddressFamily, SocketFlags, SocketType, socketpair};
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -230,6 +231,8 @@ async fn the_front_door_process_reports_its_ca_and_serves_a_handed_over_stream()
     // in flight whose sender has closed its last copy can lose its buffered
     // data and read end of file under load before the receiver takes it
     // (#4916).
+    // It has checked both role tags, and says so before it serves.
+    assert_eq!(receive_message(&runner), front_door_serving_message(1));
     credentials.set_nonblocking(true).unwrap();
     let credentials = tokio::net::UnixStream::from_std(credentials).unwrap();
     let identity = BridgeIdentity {
@@ -396,6 +399,10 @@ async fn the_front_door_process_reports_its_ca_and_serves_a_handed_over_stream()
         ready.unwrap().unwrap().payload,
         Some(GuestPayload::Ready(_))
     ));
+    // Its word for the successor it took, the generation's third pairing
+    // frame. The one it dropped got none: this is the first frame since the
+    // first pairing's, and it skips the dropped pairing's number.
+    assert_eq!(receive_message(&runner), front_door_serving_message(3));
     drop(host);
     tls.write_all(
         b"POST /v1/responses HTTP/1.1\r\nhost: api.openai.com\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}",
