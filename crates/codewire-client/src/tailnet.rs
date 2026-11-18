@@ -274,6 +274,27 @@ struct TailnetSession {
     direct_udp: Option<direct_udp::Handle>,
 }
 
+/// One connection's own tailnet identity. Every connection makes a new one
+/// and none is stored: the coordinator binds a node key to the principal and
+/// environment that announced it for seven days (#5120), so a key carried past
+/// a sign-out or an account switch would be refused to the next account.
+struct LocalNode {
+    id: Uuid,
+    secret: StaticSecret,
+    key: NodePublic,
+}
+
+impl LocalNode {
+    fn fresh() -> Self {
+        let secret = StaticSecret::random_from_rng(OsRng);
+        Self {
+            id: Uuid::new_v4(),
+            key: NodePublic::from_raw(PublicKey::from(&secret).to_bytes()),
+            secret,
+        }
+    }
+}
+
 async fn connect_tailnet_session(
     client: &CodewireClient,
     org_id: &str,
@@ -303,10 +324,12 @@ async fn connect_tailnet_session(
     let suppress_peer_direct_udp = suppress_peer_direct_udp_from_env(force_derp);
     debug_phase("stun_resolve", phase);
 
-    let client_id = Uuid::new_v4();
+    let LocalNode {
+        id: client_id,
+        secret,
+        key: local_node_key,
+    } = LocalNode::fresh();
     let client_addr = prefix_from_uuid(&client_id);
-    let secret = StaticSecret::random_from_rng(OsRng);
-    let local_node_key = NodePublic::from_raw(PublicKey::from(&secret).to_bytes());
     let disco_private = DiscoPrivate::generate(&mut OsRng);
     let phase = Instant::now();
     let fallback_transport = connect_derp_relay(&derp_target, &secret, peer_timeout).await?;
@@ -1438,6 +1461,17 @@ pub fn humantime(duration: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn two_connections_never_share_a_node_key() {
+        let first = super::LocalNode::fresh();
+        let second = super::LocalNode::fresh();
+        assert_ne!(
+            first.key, second.key,
+            "a stored key would be refused to the next account"
+        );
+        assert_ne!(first.id, second.id);
+    }
+
     use super::*;
     use serde_json::json;
 

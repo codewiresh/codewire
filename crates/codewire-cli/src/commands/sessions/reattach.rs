@@ -21,9 +21,9 @@ impl AttachExit {
 
 /// Sends keys to the attachment. A connection that dropped under them is
 /// left to the output side: the attachment's driver reports the same error
-/// there, which ends the attachment as interrupted, so it is reattached and
-/// the input stream resends the keys (#5120). Any other failure ends the
-/// command.
+/// there, or ends its output when the attachment closed cleanly, and either
+/// ends the attachment so it is reattached and the input stream resends the
+/// keys (#5120). Any other failure ends the command.
 pub(super) async fn send_keys(
     input: &codewire_client::EnvironmentSessionAttachmentInput,
     request: codewire_client::AttachSessionRequest,
