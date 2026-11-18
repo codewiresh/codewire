@@ -134,7 +134,6 @@ pub async fn run_inherited_worker(vm_id: Uuid, generation: u64) -> Result<(), Ne
         if ambient_environment_present() {
             return Err(NetworkWorkerError::AmbientEnvironment);
         }
-        require_single_threaded_process()?;
         let mut bytes = Zeroizing::new([0_u8; PRODUCT_BOOTSTRAP_LEN]);
         bootstrap
             .read_exact(bytes.as_mut())
@@ -148,10 +147,7 @@ pub async fn run_inherited_worker(vm_id: Uuid, generation: u64) -> Result<(), Ne
             return Err(error);
         }
     };
-    let confinement = drop_process_privileges()
-        .and_then(|()| install_deny_all_filesystem_domain())
-        .and_then(|()| install_network_worker_seccomp());
-    if let Err(error) = confinement {
+    if let Err(error) = confine_network_worker() {
         let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
         return Err(error);
     }

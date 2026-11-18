@@ -481,22 +481,27 @@ pub fn receive_worker_descriptor(bootstrap: RawFd, expected_marker: u8) -> io::R
         }
         let count = payload / std::mem::size_of::<RawFd>();
         // Read no descriptor past the control bytes the kernel reported, even
-        // when a truncated record's own length claims more (#4000).
+        // when a truncated record's own length claims more (#4000). Those
+        // within them are still taken, so they close when the message is
+        // refused.
         let received_control =
             decode_control_length(message.msg_controllen).min(WORKER_CONTROL_BYTES);
-        let payload_end = (header as usize)
+        let within = (header as usize)
             .checked_sub(message.msg_control as usize)
             .and_then(|offset| offset.checked_add(minimum))
-            .and_then(|start| start.checked_add(payload));
-        if payload_end.is_none_or(|end| end > received_control) {
+            .map_or(0, |start| {
+                received_control.saturating_sub(start) / std::mem::size_of::<RawFd>()
+            });
+        let readable = count.min(within);
+        let overlong = readable < count;
+        if overlong {
             valid_control = false;
-            break;
         }
         // SAFETY: CMSG_DATA only computes the payload's address within `header`.
         let data = unsafe { libc::CMSG_DATA(header).cast::<RawFd>() };
-        for index in 0..count {
-            // SAFETY: `count` descriptors fit within the control bytes the kernel
-            // reported, checked above against `received_control`, and RawFd
+        for index in 0..readable {
+            // SAFETY: `readable` descriptors fit within the control bytes the
+            // kernel reported, bounded above by `received_control`, and RawFd
             // payloads are aligned by CMSG_DATA, so each read is in bounds.
             let descriptor = unsafe { *data.add(index) };
             if descriptor < 0 {
@@ -513,6 +518,10 @@ pub fn receive_worker_descriptor(bootstrap: RawFd, expected_marker: u8) -> io::R
             if unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
                 valid_control = false;
             }
+        }
+        if overlong {
+            // The record runs past the reported bytes, so none follows it.
+            break;
         }
         // SAFETY: CMSG_NXTHDR reads only `header`'s length and returns the next header
         // within `message`'s control length, or null.
@@ -706,7 +715,6 @@ pub async fn run_inherited_worker_with_broker<B: EgressBroker>(
         if ambient_environment_present() {
             return Err(NetworkWorkerError::AmbientEnvironment);
         }
-        require_single_threaded_process()?;
         let mut bytes = Zeroizing::new([0_u8; BOOTSTRAP_LEN]);
         bootstrap
             .read_exact(bytes.as_mut())
@@ -721,10 +729,7 @@ pub async fn run_inherited_worker_with_broker<B: EgressBroker>(
             return Err(error);
         }
     };
-    let confinement = drop_process_privileges()
-        .and_then(|()| install_deny_all_filesystem_domain())
-        .and_then(|()| install_network_worker_seccomp());
-    if let Err(error) = confinement {
+    if let Err(error) = confine_network_worker() {
         let _ = write_worker_control_message(&bootstrap, error.startup_failure().message());
         return Err(error);
     }
@@ -997,13 +1002,27 @@ pub fn send_worker_bytes(descriptor: RawFd, buffer: &[u8]) -> io::Result<usize> 
     }
 }
 
+/// Confines the calling network worker: refuses a second thread, drops its
+/// privileges, then installs the deny-all filesystem domain and the syscall
+/// filter. Every worker, the local VM's and cw-egress's, confines itself
+/// through this one function, because the order matters: on Linux each layer
+/// binds only the calling thread, and the privilege lock sets
+/// `no_new_privs`, without which an unprivileged process may install neither
+/// the filesystem domain nor the syscall filter.
+pub fn confine_network_worker() -> Result<(), NetworkWorkerError> {
+    require_single_threaded_process()?;
+    drop_process_privileges()?;
+    install_deny_all_filesystem_domain()?;
+    install_network_worker_seccomp()
+}
+
 #[cfg(target_os = "linux")]
-pub fn require_single_threaded_process() -> Result<(), NetworkWorkerError> {
+fn require_single_threaded_process() -> Result<(), NetworkWorkerError> {
     require_single_thread().map_err(|_| NetworkWorkerError::ThreadConfinement)
 }
 
 #[cfg(target_os = "linux")]
-pub fn install_deny_all_filesystem_domain() -> Result<(), NetworkWorkerError> {
+fn install_deny_all_filesystem_domain() -> Result<(), NetworkWorkerError> {
     restrict_filesystem().map_err(|_| NetworkWorkerError::FilesystemConfinement)
 }
 
@@ -1012,18 +1031,18 @@ pub fn install_deny_all_filesystem_domain() -> Result<(), NetworkWorkerError> {
 /// inheritable capability of the launching process. The worker stays
 /// inspectable by its parent, which admits its executable.
 #[cfg(target_os = "linux")]
-pub fn drop_process_privileges() -> Result<(), NetworkWorkerError> {
+fn drop_process_privileges() -> Result<(), NetworkWorkerError> {
     lock_exec_process_privileges().map_err(|_| NetworkWorkerError::PrivilegeConfinement)
 }
 
 /// Darwin has no capability sets to drop.
 #[cfg(target_os = "macos")]
-pub fn drop_process_privileges() -> Result<(), NetworkWorkerError> {
+fn drop_process_privileges() -> Result<(), NetworkWorkerError> {
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
-pub fn require_single_threaded_process() -> Result<(), NetworkWorkerError> {
+fn require_single_threaded_process() -> Result<(), NetworkWorkerError> {
     codewire_confinement::darwin::require_single_thread()
         .map_err(|_| NetworkWorkerError::ThreadConfinement)
 }
@@ -1031,7 +1050,7 @@ pub fn require_single_threaded_process() -> Result<(), NetworkWorkerError> {
 /// Darwin replaces Landlock with a deny-all Seatbelt profile: the worker
 /// keeps only the descriptors it already holds or later receives.
 #[cfg(target_os = "macos")]
-pub fn install_deny_all_filesystem_domain() -> Result<(), NetworkWorkerError> {
+fn install_deny_all_filesystem_domain() -> Result<(), NetworkWorkerError> {
     codewire_confinement::darwin::deny_all().map_err(|_| NetworkWorkerError::FilesystemConfinement)
 }
 
@@ -1040,7 +1059,7 @@ pub fn install_deny_all_filesystem_domain() -> Result<(), NetworkWorkerError> {
 /// leaves only unnamed socketpairs, which reach nothing. There is no separate
 /// layer to install.
 #[cfg(target_os = "macos")]
-pub fn install_network_worker_seccomp() -> Result<(), NetworkWorkerError> {
+fn install_network_worker_seccomp() -> Result<(), NetworkWorkerError> {
     Ok(())
 }
 
@@ -1101,7 +1120,7 @@ const NETWORK_WORKER_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[];
 /// single-threaded Tokio runtime has created its private internal wakeup
 /// descriptor. No guest-controlled byte is read before this filter is active.
 #[cfg(target_os = "linux")]
-pub fn install_network_worker_seccomp() -> Result<(), NetworkWorkerError> {
+fn install_network_worker_seccomp() -> Result<(), NetworkWorkerError> {
     install_denied_syscalls(
         NETWORK_WORKER_DENIED_SYSCALLS,
         NETWORK_WORKER_ARCH_DENIED_SYSCALLS,
@@ -2097,6 +2116,41 @@ mod tests {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("worker::tests::seatbelt_confined_worker_uses_a_received_tcp_stream")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_worker_with_a_second_thread_is_refused_before_any_layer_is_installed() {
+        const CHILD_MARKER: &str = "CODEWIRE_TEST_NETWORK_WORKER_CONFINE_ORDER";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let (park, parked) = std::sync::mpsc::channel::<()>();
+            let second = std::thread::spawn(move || parked.recv());
+            assert!(matches!(
+                confine_network_worker(),
+                Err(NetworkWorkerError::ThreadConfinement)
+            ));
+            // Nothing was installed: the thread still opens paths, makes
+            // sockets and may gain privileges.
+            std::fs::File::open("/etc/passwd").unwrap();
+            StdUnixStream::pair().unwrap();
+            assert_eq!(
+                // SAFETY: the call takes integer arguments and no pointer, so it cannot touch this
+                // process's memory.
+                unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) },
+                0
+            );
+            drop(park);
+            assert!(second.join().unwrap().is_err());
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("worker::tests::a_worker_with_a_second_thread_is_refused_before_any_layer_is_installed")
             .arg("--nocapture")
             .env(CHILD_MARKER, "1")
             .status()
