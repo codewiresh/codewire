@@ -237,7 +237,8 @@ trip; the configuration is in [../CONFIGURATION.md](../CONFIGURATION.md).
 
 On every server, a sign-up that presents an organization invitation's link
 token in `invitation_token` is admitted at exactly the invited address, at
-once and without Turnstile (#4121). `auth_session/sign_up_invitation.rs`
+once and without Turnstile (owner, 2026-11-13, #4121).
+`auth_session/sign_up_invitation.rs`
 reads the invitation in the sign-up's transaction, `FOR SHARE`. It must be
 pending, unexpired and addressed to the sign-up's address, compared with
 `lower()`. Anything else gets one answer, `403 invitation_invalid` ("This
