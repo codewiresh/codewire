@@ -590,19 +590,21 @@ async fn handle_invoice_payment_failed(
 
     if state.email.is_configured()
         && let Some(org_email) = org_owner_email_by_customer(pool, inv).await
-        && let Err(e) = state
+    {
+        let organization = organization_for_email(pool, &org_id, "payment failed").await;
+        if let Err(e) = state
             .email
             .send_payment_failed(
                 &org_email,
-                org_slug_for_email(pool, &org_id, "payment failed")
-                    .await
-                    .as_deref(),
+                organization.slug.as_deref(),
+                organization.name.as_deref(),
                 inv.amount_due,
                 &inv.currency.to_string(),
             )
             .await
-    {
-        tracing::error!(error = ?e, "billing: failed to send payment failed email");
+        {
+            tracing::error!(error = ?e, "billing: failed to send payment failed email");
+        }
     }
 
     Ok(())
@@ -737,23 +739,31 @@ pub(crate) async fn org_owner_email_by_id(pool: &PgPool, org_id: &str) -> Option
     .flatten()
 }
 
-/// The organization's slug, for a billing email's link to its Billing page
-/// (#4553). Without one the email still goes, linking to the dashboard: a
-/// missed "payment failed" is worse than a missing link. The warning names
-/// the organization and the notice, never an address.
-pub(crate) async fn org_slug_for_email(
+/// The organization a billing email is about: its slug, for the link to its
+/// Billing page (#4553), and its name, for the subject and the text (#5298).
+/// Without them the email still goes, linking to the dashboard and in general
+/// words: a missed "payment failed" is worse than a missing link or name.
+/// The warning names the organization and the notice, never an address.
+#[derive(Debug, Default)]
+pub(crate) struct EmailOrganization {
+    pub(crate) slug: Option<String>,
+    pub(crate) name: Option<String>,
+}
+
+pub(crate) async fn organization_for_email(
     pool: &PgPool,
     org_id: &str,
     notice: &str,
-) -> Option<String> {
-    let slug: Option<String> =
-        sqlx::query_scalar(r#"SELECT slug FROM organizations WHERE id = $1"#)
+) -> EmailOrganization {
+    let (slug, name): (String, String) =
+        sqlx::query_as(r#"SELECT slug, name FROM organizations WHERE id = $1"#)
             .bind(org_id)
             .fetch_optional(pool)
             .await
             .ok()
             .flatten()
-            .filter(|slug: &String| !slug.is_empty());
+            .unwrap_or_default();
+    let slug = Some(slug).filter(|slug| !slug.is_empty());
     if slug.is_none() {
         tracing::warn!(
             org_id,
@@ -761,7 +771,10 @@ pub(crate) async fn org_slug_for_email(
             "billing: the organization's slug was not found; the email links to the dashboard"
         );
     }
-    slug
+    EmailOrganization {
+        slug,
+        name: Some(name).filter(|name| !name.is_empty()),
+    }
 }
 
 /// Mirrors `LogBillingEvent` (fire-and-forget; resource columns were

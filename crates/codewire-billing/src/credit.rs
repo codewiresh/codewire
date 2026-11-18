@@ -593,6 +593,9 @@ pub enum CreditNotice {
     Low {
         organization_id: String,
         balance_nano_eur: i64,
+        /// What automatic top-up charges at €0, in euro cents, when it is on
+        /// and the organization has a Stripe customer; `None` otherwise.
+        top_up_cents: Option<i32>,
     },
     Exhausted {
         organization_id: String,
@@ -600,9 +603,9 @@ pub enum CreditNotice {
 }
 
 /// Who is due a notice. Each is sent once per spell: running out once since
-/// `credit_exhausted_at`, and running low once since credit last came in. An
-/// organization with automatic top-up and a Stripe customer needs no low
-/// notice: if the charge fails, it hears that it ran out.
+/// `credit_exhausted_at`, and running low once since credit last came in,
+/// whether or not automatic top-up is on (#4754): with it, the notice says
+/// what top-up charges at €0, and a failed charge still says it ran out.
 ///
 /// After the nth failed send in a spell, the notice waits 2^(n-1) minutes,
 /// at most a day, so an address the mail service always rejects costs about
@@ -628,12 +631,14 @@ pub async fn credit_notices_due(pool: &PgPool) -> anyhow::Result<Vec<CreditNotic
     .bind(NOTICE_FAILED)
     .fetch_all(pool)
     .await?;
-    let low: Vec<(String, i64)> = sqlx::query_as(
-        r#"SELECT o.id, b.balance_nano_eur FROM billing_credit_balances b
+    let low: Vec<(String, i64, Option<i32>)> = sqlx::query_as(
+        r#"SELECT o.id, b.balance_nano_eur,
+                  CASE WHEN o.auto_top_up_enabled AND o.stripe_customer_id IS NOT NULL
+                       THEN o.auto_top_up_cents END
+           FROM billing_credit_balances b
            JOIN organizations o ON o.id = b.organization_id
            WHERE b.balance_nano_eur > 0 AND b.balance_nano_eur < $1
              AND o.rate_card <> 'unlimited' AND o.credit_exhausted_at IS NULL
-             AND NOT (o.auto_top_up_enabled AND o.stripe_customer_id IS NOT NULL)
              AND NOT EXISTS (
                  SELECT 1 FROM billing_events e
                  WHERE e.org_id = o.id AND e.event_type = $2
@@ -663,10 +668,13 @@ pub async fn credit_notices_due(pool: &PgPool) -> anyhow::Result<Vec<CreditNotic
         .map(|organization_id| CreditNotice::Exhausted { organization_id })
         .chain(
             low.into_iter()
-                .map(|(organization_id, balance_nano_eur)| CreditNotice::Low {
-                    organization_id,
-                    balance_nano_eur,
-                }),
+                .map(
+                    |(organization_id, balance_nano_eur, top_up_cents)| CreditNotice::Low {
+                        organization_id,
+                        balance_nano_eur,
+                        top_up_cents,
+                    },
+                ),
         )
         .collect())
 }
@@ -723,23 +731,31 @@ pub async fn send_credit_notices(
             );
             continue;
         };
-        let org_slug =
-            crate::webhook::org_slug_for_email(pool, organization_id, "credit notice").await;
+        let organization =
+            crate::webhook::organization_for_email(pool, organization_id, "credit notice").await;
         let result = match &notice {
             CreditNotice::Low {
-                balance_nano_eur, ..
+                balance_nano_eur,
+                top_up_cents,
+                ..
             } => {
                 email
                     .send_credit_low(
                         &owner,
-                        org_slug.as_deref(),
+                        organization.slug.as_deref(),
+                        organization.name.as_deref(),
                         balance_nano_eur / NANO_EUR_PER_CENT,
+                        top_up_cents.map(i64::from),
                     )
                     .await
             }
             CreditNotice::Exhausted { .. } => {
                 email
-                    .send_credit_exhausted(&owner, org_slug.as_deref())
+                    .send_credit_exhausted(
+                        &owner,
+                        organization.slug.as_deref(),
+                        organization.name.as_deref(),
+                    )
                     .await
             }
         };
@@ -1310,7 +1326,8 @@ mod tests {
         };
         assert!(due().await.is_empty(), "no credit yet means nothing is low");
 
-        // Plenty, then low with top-up on and a customer: not due.
+        // Plenty, then low with top-up on and a customer: due, saying what
+        // top-up charges at €0 (#4754).
         adjust("plenty", 6 * NANO_EUR_PER_EURO).await;
         assert!(due().await.is_empty());
         adjust("spend", -2 * NANO_EUR_PER_EURO).await;
@@ -1321,7 +1338,14 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        assert!(due().await.is_empty());
+        assert_eq!(
+            due().await,
+            [CreditNotice::Low {
+                organization_id: organization_id.clone(),
+                balance_nano_eur: 4 * NANO_EUR_PER_EURO,
+                top_up_cents: Some(2_000),
+            }]
+        );
 
         // Top-up off: due once, whatever the balance does next.
         sqlx::query("UPDATE organizations SET auto_top_up_enabled = false WHERE id = $1")
@@ -1332,6 +1356,7 @@ mod tests {
         let low = CreditNotice::Low {
             organization_id: organization_id.clone(),
             balance_nano_eur: 4 * NANO_EUR_PER_EURO,
+            top_up_cents: None,
         };
         assert_eq!(due().await, [low]);
         record_notice(&pool, &organization_id, LOW_NOTICE)

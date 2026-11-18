@@ -1162,7 +1162,9 @@ impl StripeHandle {
             .auto_advance(false)
             .collection_method(stripe_shared::InvoiceCollectionMethod::ChargeAutomatically)
             .pending_invoice_items_behavior(CreateInvoicePendingInvoiceItemsBehavior::Exclude)
-            .description("Codewire compute credit top-up")
+            // Both receipts show why the card was charged (#4754). The words
+            // name no balance, so a retried charge sends the same request.
+            .description("Codewire automatic top-up: compute credit reached €0")
             .metadata(metadata)
             .customize()
             .request_strategy(RequestStrategy::Idempotent(
@@ -1180,7 +1182,7 @@ impl StripeHandle {
             .invoice(invoice_id.clone())
             .amount(amount_cents)
             .currency(BILLING_CURRENCY)
-            .description("Compute credit")
+            .description("Compute credit, added by automatic top-up when the balance reached €0")
             .customize()
             .request_strategy(RequestStrategy::Idempotent(
                 key("item").map_err(stripe_err)?,

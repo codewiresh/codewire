@@ -93,27 +93,34 @@ impl EmailClient {
         &self,
         to: &str,
         org_slug: Option<&str>,
+        org_name: Option<&str>,
         amount_due: i64,
         currency: &str,
     ) -> anyhow::Result<()> {
         let billing_url = self.billing_url(org_slug);
         self.send(
             to,
-            &payment_failed_email(amount_due, currency, &billing_url),
+            &payment_failed_email(amount_due, currency, org_name, &billing_url),
         )
         .await
     }
 
-    /// Compute credit is below the low-balance mark and nothing will top it up.
+    /// Compute credit is below the low-balance mark. `top_up_cents` is what
+    /// automatic top-up charges at €0, when it is on.
     pub async fn send_credit_low(
         &self,
         to: &str,
         org_slug: Option<&str>,
+        org_name: Option<&str>,
         balance_cents: i64,
+        top_up_cents: Option<i64>,
     ) -> anyhow::Result<()> {
         let billing_url = self.billing_url(org_slug);
-        self.send(to, &credit_low_email(balance_cents, &billing_url))
-            .await
+        self.send(
+            to,
+            &credit_low_email(balance_cents, top_up_cents, org_name, &billing_url),
+        )
+        .await
     }
 
     /// Compute credit ran out with no way to get more.
@@ -121,9 +128,11 @@ impl EmailClient {
         &self,
         to: &str,
         org_slug: Option<&str>,
+        org_name: Option<&str>,
     ) -> anyhow::Result<()> {
         let billing_url = self.billing_url(org_slug);
-        self.send(to, &credit_exhausted_email(&billing_url)).await
+        self.send(to, &credit_exhausted_email(org_name, &billing_url))
+            .await
     }
 
     /// The confirmation that an account was deleted (#3679).
@@ -180,46 +189,120 @@ fn payment_receipt_email(data: &ReceiptData) -> Email {
 /// Why an organization's owner gets its billing emails.
 const OWNER_BILLING_REASON: &str = "You got this email because you own an organization on Codewire and receive its billing emails.";
 
-fn payment_failed_email(amount_due: i64, currency: &str, billing_url: &str) -> Email {
+/// The longest organization name an email carries. A longer one is cut with
+/// "…", so the subject stays well within what mail services accept.
+const NAME_CHARS: usize = 100;
+
+/// The organization's name as a billing email shows it (#5298): one line,
+/// without control characters, which the mail service refuses in a subject,
+/// and at most [`NAME_CHARS`]. `None` when nothing is left; the email then
+/// uses its general words. The layout escapes it in the HTML part.
+fn organization_name(raw: Option<&str>) -> Option<String> {
+    let name: String = raw?
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        return None;
+    }
+    if name.chars().count() <= NAME_CHARS {
+        return Some(name);
+    }
+    let cut: String = name.chars().take(NAME_CHARS).collect();
+    Some(format!("{}…", cut.trim_end()))
+}
+
+fn payment_failed_email(
+    amount_due: i64,
+    currency: &str,
+    org_name: Option<&str>,
+    billing_url: &str,
+) -> Email {
     let amount_str = format_cents(amount_due, currency);
-    Email::new("Payment Failed — Codewire", "Payment Failed")
+    let email = match organization_name(org_name) {
+        Some(name) => Email::new(
+            format!("Payment failed for {name} — Codewire"),
+            format!("Payment failed for {name}"),
+        )
         .paragraph(format!(
+            "We were unable to process the payment of {amount_str} for {name}."
+        )),
+        None => Email::new("Payment Failed — Codewire", "Payment Failed").paragraph(format!(
             "We were unable to process your payment of {amount_str}."
-        ))
+        )),
+    };
+    email
         .paragraph("Please update your payment method to avoid service interruption.")
         .button("Update payment method", billing_url)
         .note("If you believe this is an error, please contact support.")
         .reason(OWNER_BILLING_REASON)
 }
 
-fn credit_low_email(balance_cents: i64, billing_url: &str) -> Email {
+fn credit_low_email(
+    balance_cents: i64,
+    top_up_cents: Option<i64>,
+    org_name: Option<&str>,
+    billing_url: &str,
+) -> Email {
     let balance = format_cents(balance_cents, "eur");
-    Email::new(
-        "Your compute credit is running low — Codewire",
-        "Your compute credit is running low",
-    )
-    .paragraph(format!(
-        "This organization has {balance} of compute credit left, and automatic top-up won't add more."
-    ))
-    .paragraph(
-        "When it runs out, new Sandboxes and starts are refused, and running Sandboxes stop 24 hours later. Their storage is kept.",
-    )
-    .paragraph(
-        "Add a payment method or turn on automatic top-up on the organization's Billing page to keep running.",
-    )
-    .button("Add credit", billing_url)
-    .reason(OWNER_BILLING_REASON)
+    let name = organization_name(org_name);
+    let email = match &name {
+        Some(name) => Email::new(
+            format!("{name}'s compute credit is running low — Codewire"),
+            format!("{name}'s compute credit is running low"),
+        ),
+        None => Email::new(
+            "Your compute credit is running low — Codewire",
+            "Your compute credit is running low",
+        ),
+    };
+    let organization = name.as_deref().unwrap_or("This organization");
+    let email = match top_up_cents {
+        Some(top_up) => email.paragraph(format!(
+            "{organization} has {balance} of compute credit left. Automatic top-up charges {} to the saved card when it reaches €0.",
+            format_cents(top_up, "eur")
+        )),
+        None => email
+            .paragraph(format!(
+                "{organization} has {balance} of compute credit left, and automatic top-up won't add more."
+            ))
+            .paragraph(
+                "When it runs out, new Sandboxes and starts are refused, and running Sandboxes stop 24 hours later. Their storage is kept.",
+            )
+            .paragraph(
+                "Add a payment method or turn on automatic top-up on the organization's Billing page to keep running.",
+            ),
+    };
+    email
+        .button("Add credit", billing_url)
+        .reason(OWNER_BILLING_REASON)
 }
 
-fn credit_exhausted_email(billing_url: &str) -> Email {
-    Email::new(
-        "Your compute credit has run out — Codewire",
-        "Your compute credit has run out",
-    )
-    .paragraph(
-        "New Sandboxes and starts are refused from now on, and running Sandboxes stop in 24 hours. Their storage is kept.",
-    )
-    .paragraph(
+fn credit_exhausted_email(org_name: Option<&str>, billing_url: &str) -> Email {
+    let email = match organization_name(org_name) {
+        Some(name) => Email::new(
+            format!("{name} has run out of compute credit — Codewire"),
+            format!("{name} has run out of compute credit"),
+        )
+        .paragraph(format!(
+            "New Sandboxes and starts in {name} are refused from now on, and its running Sandboxes stop in 24 hours. Their storage is kept."
+        )),
+        None => Email::new(
+            "Your compute credit has run out — Codewire",
+            "Your compute credit has run out",
+        )
+        .paragraph(
+            "New Sandboxes and starts are refused from now on, and running Sandboxes stop in 24 hours. Their storage is kept.",
+        ),
+    };
+    email.paragraph(
         "Add a payment method or update your card on the organization's Billing page to continue.",
     )
     .button("Add credit", billing_url)
@@ -383,9 +466,9 @@ mod tests {
         let dashboard = client.billing_url(None);
         assert_eq!(dashboard, format!("{TEST_ORIGIN}/dashboard/"));
         for email in [
-            payment_failed_email(1250, "eur", &dashboard),
-            credit_low_email(250, &dashboard),
-            credit_exhausted_email(&dashboard),
+            payment_failed_email(1250, "eur", None, &dashboard),
+            credit_low_email(250, None, None, &dashboard),
+            credit_exhausted_email(None, &dashboard),
         ] {
             let urls: Vec<_> = email
                 .blocks
@@ -408,11 +491,14 @@ mod tests {
         assert_eq!(billing_url, format!("{TEST_ORIGIN}/acme/billing/"));
         for (email, label) in [
             (
-                payment_failed_email(1250, "eur", &billing_url),
+                payment_failed_email(1250, "eur", None, &billing_url),
                 "Update payment method",
             ),
-            (credit_low_email(250, &billing_url), "Add credit"),
-            (credit_exhausted_email(&billing_url), "Add credit"),
+            (
+                credit_low_email(250, None, None, &billing_url),
+                "Add credit",
+            ),
+            (credit_exhausted_email(None, &billing_url), "Add credit"),
         ] {
             let buttons: Vec<_> = email
                 .blocks
@@ -458,15 +544,222 @@ mod tests {
             ("billing-receipt", payment_receipt_email(&sample_receipt())),
             (
                 "billing-payment-failed",
-                payment_failed_email(1250, "eur", &billing),
+                payment_failed_email(1250, "eur", Some("Acme"), &billing),
             ),
-            ("billing-credit-low", credit_low_email(250, &billing)),
-            ("billing-credit-exhausted", credit_exhausted_email(&billing)),
+            (
+                "billing-credit-low",
+                credit_low_email(250, None, Some("Acme"), &billing),
+            ),
+            (
+                "billing-credit-low-top-up",
+                credit_low_email(320, Some(2000), Some("Acme"), &billing),
+            ),
+            (
+                "billing-receipt-top-up",
+                payment_receipt_email(&top_up_receipt()),
+            ),
+            (
+                "billing-credit-exhausted",
+                credit_exhausted_email(Some("Acme"), &billing),
+            ),
+            (
+                "billing-credit-exhausted-unnamed",
+                credit_exhausted_email(None, &billing),
+            ),
             ("billing-account-deleted", account_deleted_email()),
         ] {
             std::fs::write(dir.join(format!("{name}.html")), email.html()).unwrap();
             std::fs::write(dir.join(format!("{name}.txt")), email.text()).unwrap();
         }
+    }
+
+    /// An automatic top-up's receipt, as billing builds it from the invoice
+    /// Stripe paid: the line says why the card was charged (#4754).
+    fn top_up_receipt() -> ReceiptData {
+        ReceiptData {
+            invoice_number: "INV-0043".into(),
+            date: "November 17, 2026".into(),
+            amount_paid: 2000,
+            subtotal: 2000,
+            net_amount_due: 2000,
+            currency: "eur".into(),
+            charge_reasons: vec![
+                "Compute credit, added by automatic top-up when the balance reached €0".into(),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn low_credit_says_what_automatic_top_up_charges_when_it_is_on() {
+        let billing = FrontendOrigin::parse("https://codewire.sh")
+            .unwrap()
+            .billing_url(Some("acme"));
+        let on = credit_low_email(320, Some(2000), None, &billing).text();
+        assert!(
+            on.contains("This organization has €3.20 of compute credit left. Automatic top-up charges €20.00 to the saved card when it reaches €0."),
+            "{on}"
+        );
+        assert!(!on.contains("won't add more"), "{on}");
+        assert!(on.contains("Add credit"), "{on}");
+        let off = credit_low_email(320, None, None, &billing).text();
+        assert!(
+            off.contains("€3.20 of compute credit left, and automatic top-up won't add more."),
+            "{off}"
+        );
+        let receipt = payment_receipt_email(&top_up_receipt()).text();
+        assert!(
+            receipt.contains("added by automatic top-up when the balance reached €0"),
+            "{receipt}"
+        );
+    }
+
+    /// The first paragraph: what the email says before anything else.
+    fn first_sentence(email: &Email) -> &str {
+        email
+            .blocks
+            .iter()
+            .find_map(|block| match block {
+                codewire_email::Block::Paragraph(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("a paragraph")
+    }
+
+    /// Each email names the organization in the subject, the heading and the
+    /// first sentence, so an owner of two organizations knows which (#5298).
+    #[test]
+    fn credit_and_payment_emails_name_the_organization() {
+        let billing = FrontendOrigin::parse("https://codewire.sh")
+            .unwrap()
+            .billing_url(Some("acme"));
+        let exhausted = credit_exhausted_email(Some("Acme"), &billing);
+        assert_eq!(
+            exhausted.subject,
+            "Acme has run out of compute credit — Codewire"
+        );
+        assert_eq!(exhausted.heading, "Acme has run out of compute credit");
+        assert_eq!(
+            first_sentence(&exhausted),
+            "New Sandboxes and starts in Acme are refused from now on, and its running Sandboxes stop in 24 hours. Their storage is kept."
+        );
+
+        let low = credit_low_email(140, None, Some("Acme"), &billing);
+        assert_eq!(
+            low.subject,
+            "Acme's compute credit is running low — Codewire"
+        );
+        assert_eq!(low.heading, "Acme's compute credit is running low");
+        assert_eq!(
+            first_sentence(&low),
+            "Acme has €1.40 of compute credit left, and automatic top-up won't add more."
+        );
+        let low_top_up = credit_low_email(320, Some(2000), Some("Acme"), &billing);
+        assert_eq!(
+            first_sentence(&low_top_up),
+            "Acme has €3.20 of compute credit left. Automatic top-up charges €20.00 to the saved card when it reaches €0."
+        );
+
+        let failed = payment_failed_email(1250, "eur", Some("Acme"), &billing);
+        assert_eq!(failed.subject, "Payment failed for Acme — Codewire");
+        assert_eq!(failed.heading, "Payment failed for Acme");
+        assert_eq!(
+            first_sentence(&failed),
+            "We were unable to process the payment of €12.50 for Acme."
+        );
+    }
+
+    /// An organization whose name can't be read, or is only blank, gets
+    /// today's general words, and the email is still built (#5298).
+    #[test]
+    fn an_unknown_name_keeps_the_general_words() {
+        let billing = FrontendOrigin::parse("https://codewire.sh")
+            .unwrap()
+            .billing_url(Some("acme"));
+        for name in [None, Some(""), Some(" \n\t ")] {
+            let exhausted = credit_exhausted_email(name, &billing);
+            assert_eq!(
+                exhausted.subject,
+                "Your compute credit has run out — Codewire"
+            );
+            assert_eq!(
+                first_sentence(&exhausted),
+                "New Sandboxes and starts are refused from now on, and running Sandboxes stop in 24 hours. Their storage is kept."
+            );
+            let low = credit_low_email(140, None, name, &billing);
+            assert_eq!(low.subject, "Your compute credit is running low — Codewire");
+            assert!(
+                first_sentence(&low).starts_with("This organization has €1.40"),
+                "{name:?}"
+            );
+            let failed = payment_failed_email(1250, "eur", name, &billing);
+            assert_eq!(failed.subject, "Payment Failed — Codewire");
+            assert_eq!(
+                first_sentence(&failed),
+                "We were unable to process your payment of €12.50."
+            );
+        }
+    }
+
+    /// A name with a line break or another control character reads as one
+    /// line: the mail service refuses a subject with a control character, so
+    /// left in, it would stop the email (#5298).
+    #[test]
+    fn a_name_with_a_line_break_reads_as_one_line() {
+        let billing = FrontendOrigin::parse("https://codewire.sh")
+            .unwrap()
+            .billing_url(Some("acme"));
+        let email = credit_exhausted_email(Some("Acme\r\nBcc: someone\u{7}  Labs"), &billing);
+        assert_eq!(
+            email.subject,
+            "Acme Bcc: someone Labs has run out of compute credit — Codewire"
+        );
+        for email in [
+            email,
+            credit_low_email(140, None, Some("Acme\nLabs"), &billing),
+            payment_failed_email(1250, "eur", Some("Acme\nLabs"), &billing),
+        ] {
+            assert!(
+                !email.subject.chars().any(char::is_control),
+                "{}",
+                email.subject
+            );
+            assert!(
+                !email.heading.chars().any(char::is_control),
+                "{}",
+                email.heading
+            );
+        }
+    }
+
+    /// A name is text, never markup: the HTML part escapes it (#5298).
+    #[test]
+    fn a_name_with_html_is_escaped() {
+        let billing = FrontendOrigin::parse("https://codewire.sh")
+            .unwrap()
+            .billing_url(Some("acme"));
+        for email in [
+            credit_exhausted_email(Some("<b>Acme</b> & Co"), &billing),
+            credit_low_email(140, None, Some("<b>Acme</b> & Co"), &billing),
+            payment_failed_email(1250, "eur", Some("<b>Acme</b> & Co"), &billing),
+        ] {
+            let html = email.html();
+            assert!(html.contains("&lt;b&gt;Acme&lt;/b&gt; &amp; Co"), "{html}");
+            assert!(!html.contains("<b>Acme"), "{html}");
+        }
+    }
+
+    /// A very long name is cut with "…", so the subject stays short.
+    #[test]
+    fn a_long_name_is_cut() {
+        let long = "A".repeat(150);
+        let name = organization_name(Some(&long)).unwrap();
+        assert_eq!(name.chars().count(), NAME_CHARS + 1);
+        assert!(name.ends_with('…'));
+        assert_eq!(
+            organization_name(Some(&"A".repeat(NAME_CHARS))).unwrap(),
+            "A".repeat(NAME_CHARS)
+        );
     }
 
     #[tokio::test]

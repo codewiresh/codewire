@@ -162,7 +162,9 @@ the first Production release after codewire/deploy#245.
   that fails, which makes billing fail the webhook so Stripe delivers it
   again.
 - **Proof:** the email arrives once per invoice, and its amount and invoice
-  number match **Invoices**.
+  number match **Invoices**. An automatic top-up's receipt says why the card
+  was charged: "Compute credit, added by automatic top-up when the balance
+  reached €0" (#4754), whether billing or Stripe sends it.
 - **Gotchas:** Dev's SES delivers only to addresses it is allowed to send
   to, so most Dev owners never see the email. Production email is #2053.
 - **Observed:** not yet observed.
@@ -222,12 +224,21 @@ the first Production release after codewire/deploy#245.
 ## 7. `billing-notice`: the low and out-of-credit emails
 
 - **Entry points:** the organization owner's inbox.
-- **States to exercise:** running low with top-up off; running out; a send
-  the mail service rejects.
+- **States to exercise:** running low with top-up off, and with top-up on
+  and a card (#4754); running out; a send the mail service rejects; an owner
+  who owns a second organization (#5298).
 - **Proof:** each notice is sent once per spell (once per running-out, once
   per running-low since credit last came in). A rejected send is retried
   after 1, 2, 4 … minutes, at most a day apart, and is logged once per
-  attempt (#4087).
+  attempt (#4087). Running low with top-up on says what top-up charges to
+  the saved card at €0, and still offers Add credit.
+- **Which organization** (#5298): the low, out-of-credit and payment-failed
+  emails name the organization in the subject, the heading and the first
+  sentence, for example "Acme has run out of compute credit". An owner of
+  two organizations can tell which one it is without opening the link. A
+  name with a line break reads as one line; a name that can't be read keeps
+  the general words ("Your compute credit has run out"), and the email is
+  still sent.
 - **Observed:**
   - Dev, `e0841e760`, 2026-11-13 (#4087): marked out of credit at
     12:56:10.556Z, one notice sent at 12:56:10.812Z, none again through
