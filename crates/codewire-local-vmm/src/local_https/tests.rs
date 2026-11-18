@@ -384,6 +384,19 @@ async fn dropping_the_router_closes_its_port() {
     let harness = harness().await;
     let port = harness.router.port();
     drop(harness.router);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
+    // Binding the port proves the router released it. A connect can't: once
+    // the port is free, another test in this binary may take it and accept.
+    // A bind fails while anything listens, so it retries until the router's
+    // close lands, or another holder lets go.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match TcpListener::bind(("127.0.0.1", port)).await {
+            Ok(_) => break,
+            Err(error) if tokio::time::Instant::now() < deadline => {
+                assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse, "{error}");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("the router's port {port} is still held: {error}"),
+        }
+    }
 }
