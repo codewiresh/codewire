@@ -46,10 +46,11 @@ git -C "$work" commit -q --allow-empty -m release
 COMMIT="$(git -C "$work" rev-parse HEAD)"
 readonly COMMIT
 git -C "$work" push -q origin main
-now="$(date +%s)"
 # tag NAME AGE_SECONDS: an annotated tag signed AGE_SECONDS ago, on origin.
+# The age counts from when the tag is made, not from the test's start, so a
+# slow run doesn't age a tag past the window.
 tag() {
-  GIT_COMMITTER_DATE="@$((now - $2)) +0000" git -C "$work" tag -a -m "$1" "$1" "$COMMIT"
+  GIT_COMMITTER_DATE="@$(($(date +%s) - $2)) +0000" git -C "$work" tag -a -m "$1" "$1" "$COMMIT"
   git -C "$work" push -q origin "refs/tags/$1"
 }
 untag() {
@@ -303,10 +304,11 @@ for fact in FIXTURE_UNVERIFIED FIXTURE_RENAMED FIXTURE_REOBJECTED; do
     fail "$fact: the tag was not ignored: $(cat "$fixture/$fact.out")"
 done
 untag v0.4.2
-# The window is 24 hours from the tagger's signing: just inside is picked up,
-# just outside is left to the owner's dispatch. A tagger clock ahead only
+# The window is 24 hours from the tagger's signing: inside is picked up,
+# outside is left to the owner's dispatch. Each side is ten minutes from the
+# edge, so a slow run can't carry a tag across it. A tagger clock ahead only
 # lengthens it, and only the tagger can sign such a tag.
-for case in 'inside 86340 v0.4.2' 'outside 86460 ' 'future -3600 v0.4.2'; do
+for case in 'inside 85800 v0.4.2' 'outside 87000 ' 'future -3600 v0.4.2'; do
   read -r name age expected <<<"$case"
   tag v0.4.2 "$age"
   find_release "window-$name" deploy-prod schedule || fail "window $name: $(cat "$fixture/window-$name.out")"
