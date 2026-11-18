@@ -24,6 +24,10 @@ pub(super) enum BrokerAttempt {
     Failed,
 }
 
+/// How long a child whose lease channel has closed has to end before its end
+/// is recorded.
+const ENDING_GRACE: Duration = Duration::from_millis(250);
+
 /// One admitted broker child and its lease channel. Its owner ends it with
 /// [`Self::stop`].
 pub(super) struct BrokerChild<S: ProtectedStore> {
@@ -69,7 +73,17 @@ impl<S: ProtectedStore> BrokerChild<S> {
 
     /// The child's exit status and the lease channel's outcome so far, for
     /// the broker log. Call before [`Self::stop`], which kills the child.
-    fn outcome(&mut self) -> (String, &'static str) {
+    ///
+    /// A child whose lease channel has closed is given [`ENDING_GRACE`] to
+    /// end first. The channel closes as the child exits, and it is usually
+    /// noticed before the exit is: reading the status at once recorded
+    /// `status=running` and no last word for a broker that had ended at its
+    /// first step (#5238).
+    async fn outcome(&mut self) -> (String, &'static str) {
+        if self.channel_ended || self.lease_task.is_finished() {
+            // A child still running after the grace is recorded as running.
+            let _ = tokio::time::timeout(ENDING_GRACE, self.child.wait()).await;
+        }
         let status = exit_status(self.child.try_wait().ok().flatten());
         let lease = if self.channel_ended {
             self.lease_outcome.unwrap_or("ended")
@@ -299,7 +313,7 @@ pub(super) async fn record_broker_end<S: ProtectedStore>(
     ran: Duration,
     restart_in: Option<Duration>,
 ) {
-    let (status, lease) = broker.outcome();
+    let (status, lease) = broker.outcome().await;
     let exited = status != "running";
     let error = match &mut broker.stderr {
         Some(tail) => tail.exit_line(exited).await,

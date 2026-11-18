@@ -97,6 +97,10 @@ struct RenewalSpawner {
     no_host_comes_back: bool,
     /// What every attempt was told about hosts that do not resolve.
     lookups: StdMutex<Vec<ProviderLookup>>,
+    /// Every child ends at its first step, as a broker whose runner speaks
+    /// another protocol does: its lease channel closes at once, and a tenth
+    /// of a second later it says why on stderr and exits 3.
+    ends_at_its_first_step: bool,
     attempts: StdMutex<usize>,
     children: Arc<StdMutex<Vec<ChildRecord>>>,
     tasks: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -115,6 +119,7 @@ impl RenewalSpawner {
             unresolved,
             no_host_comes_back: false,
             lookups: StdMutex::new(Vec::new()),
+            ends_at_its_first_step: false,
             attempts: StdMutex::new(0),
             children: Arc::new(StdMutex::new(Vec::new())),
             tasks: StdMutex::new(Vec::new()),
@@ -165,6 +170,18 @@ impl LocalBrokerProcessSpawner for RenewalSpawner {
             || (self.no_host_comes_back && matches!(lookup, ProviderLookup::FewerThan(_)))
         {
             return Err(LocalBrokerSpawnError::Spawn);
+        }
+        if self.ends_at_its_first_step {
+            drop(authority_peer);
+            return tokio::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("sleep 0.1; echo '{LAST_WORD}' >&2; exit 3"))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(|_| LocalBrokerSpawnError::Spawn);
         }
         // The lifecycle counts a child's lifetime from just before it calls
         // the spawner, so the spawn time is taken before the process starts:
@@ -623,6 +640,47 @@ async fn a_replacement_may_leave_unresolved_only_what_the_serving_child_does() {
     assert_eq!(
         recorded[..3],
         ["api.anthropic.com/platform.claude.com", "-", "-"]
+    );
+}
+
+/// What a broker whose runner speaks another protocol says as it ends.
+const LAST_WORD: &str =
+    "CW_BROKER_EXIT stage=runner.connect kind=runner.protocol_mismatch broker=14 runner=13";
+
+/// A broker that ends at its first step closes its lease channel before its
+/// exit can be seen. Its `broker_not_ready` line still carries its exit
+/// status and its own last word, with both protocol numbers, never
+/// `status=running` with no error (#5238).
+#[tokio::test]
+async fn a_broker_that_ended_at_its_first_step_is_recorded_with_its_exit_and_its_word() {
+    let spawner = Arc::new(RenewalSpawner {
+        ends_at_its_first_step: true,
+        ..Arc::into_inner(RenewalSpawner::new(BTreeSet::new())).unwrap()
+    });
+    let lifecycle = Lifecycle::start(Arc::clone(&spawner));
+    let log = lifecycle.directory.path().join("logs/brokers.log");
+    let not_ready = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let lines = std::fs::read_to_string(&log).unwrap_or_default();
+            if let Some(line) = lines
+                .lines()
+                .find(|line| line.contains(" event=broker_not_ready "))
+            {
+                return line.to_owned();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the first attempt is recorded");
+    lifecycle.stop().await;
+
+    assert!(not_ready.contains(" status=exit:3 "), "{not_ready}");
+    assert!(
+        not_ready.ends_with(
+            " error=stage_runner.connect_kind_runner.protocol_mismatch_broker_14_runner_13"
+        ),
+        "{not_ready}"
     );
 }
 

@@ -527,8 +527,10 @@ a VM that this cw starts its credentials.
     broker has ended: the service waits up to a quarter of a second for a
     broker whose channel closed to end, instead of recording
     `status=running` with no error. A broker that refuses its runner's
-    protocol says `kind=runner_protocol_mismatch` with both numbers
-    (`broker=14 runner=13`).
+    protocol says `kind=runner.protocol_mismatch` with both numbers
+    (`broker=14 runner=13`), and one whose runner never said its protocol
+    says `kind=runner.no_protocol`. The log replaces every space and `=`
+    of that word with `_`, as it does in any value.
   - **After a failed create.** The VM is removed, and the runner's log of
     the failed start is kept as `logs/runner-failed-create-NAME.log`, moved
     there by a rename. The next failed create of that name replaces it, and
@@ -547,16 +549,15 @@ v0.4.21 share while their runner protocols differ: with v0.4.21 a service
 left running by v0.4.15 is never replaced, not even with every VM stopped,
 and from v0.4.22 only because that number happened to move.
 
-**Not yet built:** what the logs say, and the restart that is not refused.
-Today a start that fails after a helper process ended records
-`detail=egress_broker_exited` or the like with no exit status, and that
-helper is usually not the cause: the egress broker never waits for the
-credential broker, and ends only as the guest goes down. A broker that ended
-at its first step reads `broker_not_ready … status=running … error=-`. A
-runner protocol mismatch reads `kind=other`. A failed create removes the
-runner's log with the VM. `cw --local restart` of the only VM that keeps the
-other cw's service is refused and told to stop that same VM; `cw --local
-stop NAME` then `cw --local start NAME` works. The journey step is
+**Built of this:** the broker's own word. **Not yet built:** the runner's
+side, the kept log, and the restart that is not refused. Today a start that
+fails after a helper process ended records `detail=egress_broker_exited` or
+the like with no exit status, and that helper is usually not the cause: the
+egress broker never waits for the credential broker, and ends only as the
+guest goes down. A failed create removes the runner's log with the VM.
+`cw --local restart` of the only VM that keeps the other cw's service is
+refused and told to stop that same VM; `cw --local stop NAME` then
+`cw --local start NAME` works. The journey step is
 `local-vm-upgrade-credentials` in `docs/journeys/local-vm-upgrade.md`.
 
 A VM keeps the guest kernel and root it was created with, so neither an upgrade

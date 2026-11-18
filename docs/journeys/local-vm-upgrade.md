@@ -308,7 +308,7 @@ Issue: #5238. The spec is "Credentials after an upgrade" in
     ended; the broker log's `broker_not_ready` line carries the broker's
     exit status and its `stage` and `kind`, never `status=running …
     error=-`. For a broker of another runner protocol the kind is
-    `runner_protocol_mismatch` with both numbers;
+    `runner.protocol_mismatch` with both numbers;
   - step 9: the VM is gone and `logs/runner-failed-create-up-fail.log` holds
     the failed start's lines;
   - step 10: the start fails as `vmm_exited`, with `helper_exit=` naming the

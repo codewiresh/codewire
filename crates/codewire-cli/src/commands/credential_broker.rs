@@ -76,13 +76,38 @@ pub(crate) async fn run_local_credential_broker(
     });
     let result = run_broker(args, &stage).await;
     if let Err(error) = &result {
-        eprintln!(
-            "{BROKER_EXIT_MARKER} stage={} kind={}",
-            stage.get(),
-            exit_kind(error)
-        );
+        eprintln!("{}", exit_line(stage.get(), error));
     }
     result
+}
+
+/// The broker's last line on stderr, which the authority keeps in its broker
+/// log: the stage it had reached and [`exit_word`].
+fn exit_line(stage: &str, error: &anyhow::Error) -> String {
+    format!(
+        "{BROKER_EXIT_MARKER} stage={stage} kind={}",
+        exit_word(error)
+    )
+}
+
+/// What the broker says of `error` as it ends: [`exit_kind`], and for a
+/// runner that speaks another protocol the two numbers, which are the whole
+/// cause (#5238). The authority keeps the line in its broker log, where a run
+/// of 20 or more token characters is redacted, so each word stays shorter.
+fn exit_word(error: &anyhow::Error) -> String {
+    use codewire_local_vmm::runner_service::RunnerServiceError;
+    for cause in error.chain() {
+        match cause.downcast_ref::<RunnerServiceError>() {
+            Some(RunnerServiceError::RunnerProtocolMismatch { expected, actual }) => {
+                return format!("runner.protocol_mismatch broker={expected} runner={actual}");
+            }
+            Some(RunnerServiceError::RunnerProtocolInfoUnavailable) => {
+                return "runner.no_protocol".to_owned();
+            }
+            _ => {}
+        }
+    }
+    exit_kind(error).to_owned()
 }
 
 /// A fixed name for the first typed error in the chain; never its message.
@@ -769,6 +794,41 @@ mod tests {
 #[cfg(test)]
 mod exit_tests {
     use super::*;
+
+    /// A broker whose runner speaks another protocol says so as it ends,
+    /// with both numbers, in words the authority's log keeps whole (#5238);
+    /// a runner that never said its protocol has its own word.
+    #[test]
+    fn the_exit_word_names_a_runner_protocol_mismatch_with_both_numbers() {
+        use codewire_local_vmm::runner_service::RunnerServiceError;
+        let mismatch = anyhow::Error::new(RunnerServiceError::RunnerProtocolMismatch {
+            expected: 14,
+            actual: 13,
+        })
+        .context("connect broker to private runner");
+        assert_eq!(
+            exit_line("runner.connect", &mismatch),
+            format!(
+                "{BROKER_EXIT_MARKER} stage=runner.connect kind=runner.protocol_mismatch broker=14 runner=13"
+            )
+        );
+        let silent = anyhow::Error::new(RunnerServiceError::RunnerProtocolInfoUnavailable)
+            .context("connect broker to private runner");
+        assert_eq!(exit_word(&silent), "runner.no_protocol");
+        let other = anyhow::Error::new(BrokerBridgeError::Unavailable).context("bridge");
+        assert_eq!(exit_word(&other), exit_kind(&other));
+        // No word is long enough for the log to take it for a token.
+        for word in [exit_word(&mismatch), exit_word(&silent)] {
+            let longest = word
+                .split(|character: char| {
+                    !(character.is_ascii_alphanumeric() || "_-".contains(character))
+                })
+                .map(str::len)
+                .max()
+                .unwrap_or(0);
+            assert!(longest < 20, "{word}");
+        }
+    }
 
     /// The exit line names the first typed error in the chain by a fixed
     /// name, never its message or any context text.
