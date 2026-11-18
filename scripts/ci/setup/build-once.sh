@@ -850,6 +850,16 @@ run_one_leg() {
     echo "$name" >> "$logs/failed"
     return 1
   fi
+  # The leg's outputs go to the archive store now; the publish step uploads
+  # whatever this missed.
+  if [ -n "${ARCHIVE_STORE_URL:-}" ]; then
+    local file
+    for file in "$out/$name".*; do
+      [ -f "$file" ] || continue
+      upload_output "$file" ||
+        echo "::warning::build-once: ${file##*/} was not uploaded as its leg finished; the publish step uploads it"
+    done
+  fi
 }
 
 # The settings select-untrusted-rust-cache.sh writes for its shared level,
@@ -1073,9 +1083,33 @@ build() {
   return "$status"
 }
 
+# upload_output FILE: one leg output to the archive store under its SHA-256,
+# recorded in OUT/.published as "FILE DIGEST BYTES". publish hashes every
+# output again and trusts a record only for that exact digest, so an output
+# rewritten after its upload is uploaded again. A leg uploads its own
+# outputs as it finishes, while other legs and the checks still run: one
+# after another after every leg and check had ended, the uploads took 21 s of
+# pull request run 60663's build job (codewire#5311).
+upload_output() {
+  local file="$1" name digest bytes started
+  name="${file##*/}"
+  name="${name%%.*}"
+  [[ "$name" =~ ^[a-z0-9_]+$ ]] || die "invalid leg output name: ${file##*/}"
+  digest="$(sha256sum "$file" | cut -d' ' -f1)"
+  bytes="$(stat -c %s "$file")"
+  started=$SECONDS
+  curl -fsS --retry 3 --retry-connrefused --connect-timeout 10 -o /dev/null \
+    -T "$file" "$ARCHIVE_STORE_URL/v1/archives/$digest" || return 1
+  echo "build-once: published $name $digest ($bytes bytes) in $((SECONDS - started)) s"
+  printf '%s %s %s\n' "${file##*/}" "$digest" "$bytes" >> "${file%/*}/.published"
+}
+
 publish() {
   # Every leg output in OUT, by its SHA-256, as the job output <leg>_sha256.
-  local out="$1" file name digest bytes started
+  # Each output is hashed again here: one whose digest its leg already
+  # recorded is reported without a second upload; any other, missing or
+  # rewritten since, even at the same size, is uploaded (cw-security, #5329).
+  local out="$1" file name digest recorded
   : "${ARCHIVE_STORE_URL:?ARCHIVE_STORE_URL is required}"
   for file in "$out"/*; do
     [ -f "$file" ] || continue
@@ -1083,11 +1117,13 @@ publish() {
     name="${name%%.*}"
     [[ "$name" =~ ^[a-z0-9_]+$ ]] || die "invalid leg output name: ${file##*/}"
     digest="$(sha256sum "$file" | cut -d' ' -f1)"
-    bytes="$(stat -c %s "$file")"
-    started=$SECONDS
-    curl -fsS --retry 3 --retry-connrefused --connect-timeout 10 -o /dev/null \
-      -T "$file" "$ARCHIVE_STORE_URL/v1/archives/$digest"
-    echo "build-once: published $name $digest ($bytes bytes) in $((SECONDS - started)) s"
+    recorded="$(awk -v f="${file##*/}" -v d="$digest" '$1 == f && $2 == d { print "yes"; exit }' \
+      "$out/.published" 2>/dev/null || true)"
+    if [ "$recorded" = yes ]; then
+      echo "build-once: $name $digest was published as its leg finished"
+    else
+      upload_output "$file" || die "could not upload ${file##*/}"
+    fi
     if [ -n "${GITHUB_OUTPUT:-}" ]; then
       echo "${name}_sha256=$digest" >> "$GITHUB_OUTPUT"
     fi

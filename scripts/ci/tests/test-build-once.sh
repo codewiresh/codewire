@@ -854,6 +854,17 @@ grep -q '^::error::the Rust checks failed$' "$work/legs-checks.log" || fail 'the
 legs_build ok || fail "a build without the Rust checks failed: $(cat "$work/legs.log")"
 [ ! -s "$work/legs-state/checks" ] || fail 'a build without BUILD_ONCE_CHECKS ran the Rust checks'
 
+# With an archive store, each leg uploads its outputs as it finishes and
+# records them, so the publish step has nothing left to upload.
+rm -rf "$work/store3"; mkdir -p "$work/store3/v1/archives"
+ARCHIVE_STORE_URL="file://$work/store3" LEGS_SELECTION='|rust|' LEGS_BESIDE=features legs_build ok ||
+  fail "a build with an archive store failed: $(cat "$work/legs.log")"
+early_digest="$(sha256sum "$work/legs-out/archive.tar.zst" | cut -d' ' -f1)"
+grep -q "^archive.tar.zst $early_digest " "$work/legs-out/.published" || fail 'the archive leg did not record its upload'
+cmp -s "$work/legs-out/archive.tar.zst" "$work/store3/v1/archives/$early_digest" ||
+  fail 'the archive leg did not upload its output as it finished'
+grep -q "^build-once: published archive $early_digest " "$work/legs.log" || fail 'the early upload was not reported'
+
 # publish uploads every leg output and names its job output after the leg.
 mkdir -p "$work/out" "$work/store/v1/archives"
 printf 'one' > "$work/out/archive.tar.zst"
@@ -864,6 +875,29 @@ for leg in archive:one database:two; do
   grep -qx "${leg%%:*}_sha256=$digest" "$work/outputs" || fail "no ${leg%%:*}_sha256 output"
   [ "$(cat "$work/store/v1/archives/$digest")" = "${leg#*:}" ] || fail "${leg%%:*} was not uploaded"
 done
+# An output its leg uploaded as it finished is reported, not uploaded again;
+# one rewritten since is uploaded again, even at the same size (codewire#5311,
+# cw-security on #5329).
+rm -rf "$work/store2" "$work/out2"; mkdir -p "$work/out2" "$work/store2/v1/archives"
+printf 'three' > "$work/out2/features.tar.zst"
+printf 'four' > "$work/out2/services_runtime.tar.zst"
+printf 'sixx' > "$work/out2/database.tar.zst"
+early="$(printf 'three' | sha256sum | cut -d' ' -f1)"
+stale="$(printf 'five' | sha256sum | cut -d' ' -f1)"
+printf 'features.tar.zst %s 5\n' "$early" > "$work/out2/.published"
+printf 'services_runtime.tar.zst %s 99\n' "$early" >> "$work/out2/.published"
+printf 'database.tar.zst %s 4\n' "$stale" >> "$work/out2/.published"
+: > "$work/outputs2"
+GITHUB_OUTPUT="$work/outputs2" ARCHIVE_STORE_URL="file://$work/store2" "$SCRIPT" publish "$work/out2" > "$work/publish2.log"
+grep -qx "features_sha256=$early" "$work/outputs2" || fail 'an early-published output lost its job output'
+[ ! -e "$work/store2/v1/archives/$early" ] || fail 'an early-published output was uploaded again'
+four="$(printf 'four' | sha256sum | cut -d' ' -f1)"
+grep -qx "services_runtime_sha256=$four" "$work/outputs2" || fail 'a changed output kept its stale digest'
+[ "$(cat "$work/store2/v1/archives/$four")" = four ] || fail 'a changed output was not uploaded again'
+sixx="$(printf 'sixx' | sha256sum | cut -d' ' -f1)"
+grep -qx "database_sha256=$sixx" "$work/outputs2" || fail 'a same-size rewrite kept its stale digest'
+[ "$(cat "$work/store2/v1/archives/$sixx")" = sixx ] || fail 'a same-size rewrite was not uploaded again'
+! grep -q "database_sha256=$stale" "$work/outputs2" || fail 'publish reported a stale digest'
 printf 'x' > "$work/out/Bad-Name.tar.zst"
 if ARCHIVE_STORE_URL="file://$work/store" "$SCRIPT" publish "$work/out" >/dev/null 2>&1; then
   fail 'publish accepted an invalid leg output name'
