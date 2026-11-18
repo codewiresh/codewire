@@ -493,7 +493,8 @@ test.describe("managed provider credential browser journey", () => {
       await expect(credentialRows.filter({ hasText: name })).toHaveCount(1);
       await expect(permissions).toHaveCount(0);
 
-      // Delete removes the connection directly and leaves every profile as it
+      // Disconnect revokes the connection, which asks GitHub to revoke its
+      // access token, then deletes it (#4717), and leaves every profile as it
       // was: profiles show GitHub as missing, Create cannot browse.
       await page.goto("/settings/credentials/");
       row = credentialRows.filter({ hasText: name });
@@ -501,7 +502,8 @@ test.describe("managed provider credential browser journey", () => {
       await row.getByRole("button", { name: "Disconnect GitHub", exact: true }).click();
       await page.getByRole("dialog", { name: "Disconnect GitHub?", exact: true })
         .getByRole("button", { name: "Disconnect GitHub", exact: true }).click();
-      await expect(page).toHaveURL(/\/settings\/credentials\/\?(?:.*&)?message=credential-deleted/);
+      await expect(page).toHaveURL(/\/settings\/credentials\/\?(?:.*&)?message=github-disconnected(?:-confirmed)?(?:&|$)/);
+      await expect(page.locator(".cw-alert--success")).toContainText("https://github.com/settings/installations");
       await expect(credentialRows.filter({ hasText: name })).toHaveCount(0);
       expect(await githubConnectionMetadata(owner)).toEqual([]);
       profileRow = page.locator(".cw-profile-row", { hasText: profileName });

@@ -453,13 +453,14 @@ test("reconnect consent and destructive confirms preserve exact authority and ne
   await expect(consent).not.toBeChecked();
   await expect(reconnect.locator('[name="expected_revocation_generation"]')).toHaveValue("1");
   await action(reconnect, "Cancel").click();
-  // GitHub has no revoke step: one confirmed Disconnect removes the connection.
+  // GitHub has no separate revoke step: one confirmed Disconnect revokes and removes the connection.
   await expect(action(github, "Revoke")).toHaveCount(0);
   await action(github, "Disconnect GitHub").click();
   const removal = dialog(page, "Disconnect GitHub?");
   await footer(removal, "Disconnect GitHub");
   await expect(action(removal, "Cancel")).toBeFocused();
-  await expect(removal).toContainText("Profiles show GitHub as missing until you connect again");
+  await expect(removal).toContainText("You won't be able to browse your GitHub repositories in Codewire, or clone private ones into your sandboxes, until you connect GitHub again.");
+  await expect(removal).toContainText("The Codewire app stays installed on GitHub. To remove it, uninstall it under Applications in your GitHub settings.");
   await artifactScreenshot(page, "github-delete-confirmation.png");
   await fits(page, removal);
   expect(posts).toEqual([]);

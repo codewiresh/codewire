@@ -43,6 +43,9 @@ use crate::{
     },
 };
 
+mod lifecycle;
+pub(super) use lifecycle::{delete_credential_action, revoke_credential_action};
+
 const PATH: &str = "/settings/credentials/";
 pub(super) const GITHUB_APP_CALLBACK_PATH: &str = "/api/v1/github/oauth/callback";
 
@@ -739,24 +742,6 @@ pub(super) async fn rotate_api_key_action(
     }
 }
 
-pub(super) async fn revoke_credential_action(
-    State(state): State<AppState>,
-    CredentialQuery(query): CredentialQuery,
-    headers: HeaderMap,
-    Form(form): Form<CredentialRevisionSubmission>,
-) -> Response {
-    credential_revision_action(state, query, headers, form, false).await
-}
-
-pub(super) async fn delete_credential_action(
-    State(state): State<AppState>,
-    CredentialQuery(query): CredentialQuery,
-    headers: HeaderMap,
-    Form(form): Form<CredentialRevisionSubmission>,
-) -> Response {
-    credential_revision_action(state, query, headers, form, true).await
-}
-
 /// Start browser-only GitHub App authorization, not the device-code flow used
 /// by `cw`. An explicit configured callback selects this dashboard even when
 /// the App registration has several callbacks for local and hosted instances.
@@ -1296,59 +1281,6 @@ fn escape_html(value: &str) -> String {
     escaped
 }
 
-async fn credential_revision_action(
-    state: AppState,
-    query: QueryParameters,
-    headers: HeaderMap,
-    form: CredentialRevisionSubmission,
-    delete: bool,
-) -> Response {
-    let dialog = row_action_dialog(
-        "credential",
-        &form.credential_id,
-        if delete { "delete" } else { "revoke" },
-    );
-    let cookie = match mutation_cookie(&state, &headers, &form.csrf, &query).await {
-        Ok(cookie) => cookie,
-        Err(response) => return response,
-    };
-    if exact_id(&form.credential_id).is_err()
-        || !valid_generation(form.expected_revocation_generation, !delete)
-    {
-        return page_error_redirect("credential-invalid", &dialog, &query, &headers);
-    }
-    let result = if delete {
-        credentials_connect::delete_credential(
-            &state,
-            cookie,
-            form.credential_id,
-            form.expected_revocation_generation,
-        )
-        .await
-    } else {
-        credentials_connect::revoke_credential(
-            &state,
-            cookie,
-            form.credential_id,
-            form.expected_revocation_generation,
-        )
-        .await
-    };
-    match result {
-        Ok(()) => page_redirect(
-            if delete {
-                "credential-deleted"
-            } else {
-                "credential-revoked"
-            },
-            false,
-            &query,
-            &headers,
-        ),
-        Err(error) => credential_mutation_error(error.code, delete, &dialog, &query, &headers),
-    }
-}
-
 #[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 async fn mutation_cookie(
     state: &AppState,
@@ -1645,6 +1577,12 @@ fn approved_message(code: &str) -> &'static str {
         "claude-token-replaced" => "Claude subscription token replaced.",
         "credential-revoked" => "Credential revoked.",
         "credential-deleted" => "Credential deleted.",
+        "github-disconnected" => {
+            "GitHub disconnected. The Codewire app stays installed on GitHub; to remove it, uninstall it at https://github.com/settings/installations."
+        }
+        "github-disconnected-confirmed" => {
+            "GitHub disconnected, and GitHub confirmed Codewire's access is revoked. The Codewire app stays installed on GitHub; to remove it, uninstall it at https://github.com/settings/installations."
+        }
         "credential-connected" => "Credential connected.",
         "github-app-connected" => "GitHub connected through the GitHub App.",
         "github-permissions-updated" => "GitHub permissions updated.",

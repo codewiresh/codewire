@@ -155,6 +155,12 @@ only what differs.
   - Locally, `cw` can't ask (it needs the GitHub App's secret).
   - Either way, GitHub keeps your authorization of Codewire until you revoke
     it at github.com/settings/apps/authorizations, and `cw` names that page.
+  - In the dashboard, Settings › Credentials › **Disconnect GitHub** does the
+    same: it revokes the connection first, which asks GitHub to revoke its
+    access token, then removes it, and says whether GitHub confirmed. It says
+    the Codewire app stays installed on GitHub and names
+    github.com/settings/installations to uninstall it. If the revoke fails,
+    nothing is removed. Not yet observed.
 
 ## 2. `cred-codex-sign-in`: connect Codex with ChatGPT
 

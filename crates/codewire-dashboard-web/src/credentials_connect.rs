@@ -14,13 +14,13 @@ use codewire_proto::codewire::v1::{
     AddClaudeSubscriptionTokenCredentialRequest, AddSshCredentialRequest,
     CompleteGithubAppAuthorizationRequest, CreateAccessProfileRequest, Credential,
     CredentialAuthenticationKind, CredentialMutationServiceClient, CredentialServiceClient,
-    CredentialStatus, DeleteAccessProfileRequest, DeleteCredentialRequest, EnrollCodexRequest,
-    EnrollCodexResponse, GenerateSshCredentialRequest, GetAccessProfileRequest,
-    GetCredentialRequest, GithubAppAccountKind, GithubAppPendingPermissions,
-    GithubRepositoryServiceClient, ListAccessProfilesRequest, ListCredentialsRequest,
-    ListGithubPendingPermissionsRequest, RenameAccessProfileRequest, RenameCredentialRequest,
-    RevokeCredentialRequest, RotateApiKeyCredentialRequest, UpdateAccessProfileRequest,
-    enroll_codex_response, get_access_profile_request, get_credential_request,
+    CredentialStatus, DeleteAccessProfileRequest, EnrollCodexRequest, EnrollCodexResponse,
+    GenerateSshCredentialRequest, GetAccessProfileRequest, GetCredentialRequest,
+    GithubAppAccountKind, GithubAppPendingPermissions, GithubRepositoryServiceClient,
+    ListAccessProfilesRequest, ListCredentialsRequest, ListGithubPendingPermissionsRequest,
+    RenameAccessProfileRequest, RenameCredentialRequest, RotateApiKeyCredentialRequest,
+    UpdateAccessProfileRequest, enroll_codex_response, get_access_profile_request,
+    get_credential_request,
 };
 use connectrpc::{
     ConnectError, ErrorCode,
@@ -35,6 +35,9 @@ use crate::view::{
     CredentialChoiceView, CredentialChoicesView, CredentialProfileEntryView,
     CredentialProfileRowView, CredentialRowView,
 };
+
+mod lifecycle;
+pub(crate) use lifecycle::{GitHubAnswer, delete_credential, revoke_credential};
 
 const PAGE_SIZE: i32 = 100;
 const MAX_PAGES: usize = 10;
@@ -866,63 +869,6 @@ pub(crate) async fn rotate_api_key(
         .await?
         .into_owned();
     validate_exact_credential_ack(response.credential.into_option(), &expected)
-}
-
-pub(crate) async fn revoke_credential(
-    state: &AppState,
-    cookie: HeaderValue,
-    credential_id: String,
-    expected_generation: u64,
-) -> Result<(), ConnectError> {
-    let current = get_exact_credential(state, cookie.clone(), &credential_id).await?;
-    if current.revocation_generation != expected_generation || is_github_connection(&current) {
-        // GitHub has no user-visible revoke step; Delete replaces it.
-        return Err(ConnectError::aborted("credential metadata changed"));
-    }
-    let mut expected = current;
-    expected.status = CredentialStatus::Revoked.into();
-    expected.revocation_generation = expected_generation
-        .checked_add(1)
-        .filter(|generation| *generation <= i64::MAX as u64)
-        .ok_or_else(invalid_metadata)?;
-    let response = mutation_client(state, cookie)
-        .revoke_credential(RevokeCredentialRequest {
-            credential_id,
-            expected_revocation_generation: expected_generation,
-            ..Default::default()
-        })
-        .await?
-        .into_owned();
-    validate_exact_credential_ack(response.credential.into_option(), &expected)
-}
-
-pub(crate) async fn delete_credential(
-    state: &AppState,
-    cookie: HeaderValue,
-    credential_id: String,
-    expected_generation: u64,
-) -> Result<(), ConnectError> {
-    let current = get_exact_credential(state, cookie.clone(), &credential_id).await?;
-    // GitHub is the account's one connection and is deleted directly; the
-    // service revokes and forgets it in one fenced mutation.
-    if current.revocation_generation != expected_generation
-        || current.status != CredentialStatus::Revoked && !is_github_connection(&current)
-    {
-        return Err(ConnectError::aborted("credential metadata changed"));
-    }
-    mutation_client(state, cookie)
-        .delete_credential(DeleteCredentialRequest {
-            credential_id,
-            expected_revocation_generation: expected_generation,
-            ..Default::default()
-        })
-        .await?;
-    Ok(())
-}
-
-fn is_github_connection(credential: &Credential) -> bool {
-    credential.provider == "github"
-        && credential.authentication_kind == CredentialAuthenticationKind::Oauth
 }
 
 async fn get_exact_credential(
