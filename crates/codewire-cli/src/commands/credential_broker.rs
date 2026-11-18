@@ -24,8 +24,6 @@ use codewire_local_credentials::{
 };
 use codewire_local_vmm::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
 use codewire_local_vmm::runner_service::RunnerClient;
-#[cfg(target_os = "linux")]
-use codewire_protected_store::ConnectedOsProtectedStore;
 use futures::StreamExt as _;
 use uuid::Uuid;
 
@@ -212,10 +210,9 @@ pub(crate) struct LocalCredentialBrokerArgs {
     /// of the hosts it may leave unresolved must resolve.
     #[arg(long, requires = "may_not_resolve")]
     pub(crate) must_resolve_more: bool,
-    /// The authority's store: macOS brokers read the selected backend.
-    #[cfg(target_os = "macos")]
+    /// The authority's store: brokers read the selected backend.
     #[command(flatten)]
-    pub(crate) store: super::credential_darwin::ChildStoreArgs,
+    pub(crate) store: super::credential_child_store::ChildStoreArgs,
 }
 
 /// The broker's provider transport, its GitHub App refresh owner when GitHub
@@ -283,8 +280,7 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
     };
     stage.set("arguments.parse");
     // Validate the store selection before any channel or provider effect.
-    #[cfg(target_os = "macos")]
-    let store = super::credential_darwin::ChildStore::from_args(&args.store)?;
+    let store = super::credential_child_store::ChildStore::from_args(&args.store)?;
     anyhow::ensure!(args.authority_fd == 3, "invalid broker authority channel");
     let environment_id = EnvironmentId::parse(args.environment_id.clone())
         .map_err(|_| anyhow::anyhow!("invalid broker environment identity"))?;
@@ -451,7 +447,7 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
         // no provider DNS, protected-store connection, or raw lease provider.
         // The only authority endpoint is the parent's inherited FD3 channel.
         #[cfg(target_os = "linux")]
-        apply_broker_landlock_confinement().context("confine platform credential relay")?;
+        apply_broker_landlock_confinement(None).context("confine platform credential relay")?;
         // One deny-all Seatbelt profile replaces Landlock and seccomp: the
         // relay keeps only the bridge and authority descriptors it holds.
         #[cfg(target_os = "macos")]
@@ -497,10 +493,13 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
         .context("run platform credential relay");
     }
     stage.set("broker.confine");
+    // Landlock first: it admits reads of a file store's directory only, and
+    // Secret Service is connected once afterwards over the session bus.
     #[cfg(target_os = "linux")]
     let protected_store = {
-        apply_broker_landlock_confinement().context("confine credential broker filesystem")?;
-        ConnectedOsProtectedStore::connect().context("connect broker protected store")?
+        apply_broker_landlock_confinement(store.file_directory())
+            .context("confine credential broker filesystem")?;
+        store.open().context("open broker protected store")?
     };
     // One Seatbelt profile replaces Landlock and seccomp: provider HTTPS to
     // the addresses resolved above, and reads of exactly the selected store.
@@ -510,8 +509,12 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
     #[cfg(target_os = "macos")]
     let protected_store = {
         let protected_store = store.open().context("open broker protected store")?;
-        darwin::confine(&store, &protected_store, !http_providers.is_empty())
-            .context("confine credential broker")?;
+        darwin::confine(
+            &store,
+            protected_store.selected(),
+            !http_providers.is_empty(),
+        )
+        .context("confine credential broker")?;
         protected_store
     };
     stage.set("lease.connect");
@@ -872,6 +875,8 @@ mod lookup_tests {
             "--environment-generation=1",
             "--environment-name=name",
             "--runner-socket=/runner.sock",
+            "--protected-store=file",
+            "--protected-store-directory=/root/protected-v1",
         ]
         .map(str::to_owned)
         .into();

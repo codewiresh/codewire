@@ -60,6 +60,8 @@ pub(crate) use credential_broker::*;
 mod credential_broker_confinement;
 #[cfg(target_os = "linux")]
 pub(crate) use credential_broker_confinement::run_local_credential_broker_confinement_probe;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod credential_child_store;
 #[cfg(target_os = "macos")]
 mod credential_darwin;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -365,11 +367,9 @@ pub(crate) struct LocalGitRepositoryExecutorArgs {
     #[cfg(target_os = "macos")]
     #[arg(long, requires = "runtime_artifact_root")]
     pub(crate) runtime_artifact_lock: Option<PathBuf>,
-    /// The authority's store: a macOS GitHub executor reads the selected
-    /// backend, as a Linux one reads Secret Service.
-    #[cfg(target_os = "macos")]
+    /// The authority's store: a GitHub executor reads the selected backend.
     #[command(flatten)]
-    pub(crate) store: credential_darwin::ChildStoreArgs,
+    pub(crate) store: credential_child_store::ChildStoreArgs,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

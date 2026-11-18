@@ -28,8 +28,9 @@ use codewire_protected_store::SelectedProtectedStore;
 
 use anyhow::Context as _;
 
+use super::super::credential_child_store::{ChildStore, plain_path};
 use super::super::credential_darwin::{
-    ChildStore, bind_to_parent_and_deny_attachment, isolated_session_and_environment, plain_path,
+    bind_to_parent_and_deny_attachment, isolated_session_and_environment,
     unprivileged_without_core_files,
 };
 

@@ -16,16 +16,17 @@ use codewire_local_credentials::{
 use codewire_protected_store::MAX_PROTECTED_VALUE_BYTES;
 #[cfg(test)]
 use codewire_protected_store::ProtectedStorePersistence;
-use codewire_protected_store::ProtectedValue;
+use codewire_protected_store::{ProtectedStoreBackend, ProtectedValue};
+
+use crate::config::OsEnv;
 
 pub(in crate::commands) mod confirm;
 mod delete;
 pub(in crate::commands) mod output;
+mod store_notice;
 mod store_wait;
 
 use output::save_refusal::{Answer, Kind, Save, save_error};
-
-use crate::config::OsEnv;
 
 #[cfg(test)]
 use super::CredentialsArgs;
@@ -87,6 +88,10 @@ async fn handle_local_with_receipt(
     {
         drop(client);
         client = super::connect_local_credential_authority_preferring(store_probe).await?;
+    }
+    #[cfg(target_os = "linux")]
+    if store_notice::writes_material(&operation) {
+        store_notice::warn_before_keyring_write(&client);
     }
     let command = match operation {
         CredentialOperation::Profile(command) => {
@@ -1447,7 +1452,7 @@ fn manually_supplied_credential_kind(value: CredentialAuthKind) -> bool {
 
 /// Print local credentials, as a command's result.
 fn print_credentials(records: &[CredentialRecord], output: OutputFormat) -> anyhow::Result<()> {
-    output::print_local_credentials(records, None, output)
+    output::print_local_credentials(records, None, None, output)
 }
 
 /// Print a listing of local credentials, with the profiles that use them.
@@ -1460,7 +1465,15 @@ async fn print_listing(
         .list_profiles()
         .await
         .context("list local credential profiles")?;
-    output::print_local_credentials(records, Some(&output::local_uses(&profiles)), output)
+    let store = client.info().protected_store.map(|store| store.backend);
+    output::print_local_credentials(records, store, Some(&output::local_uses(&profiles)), output)?;
+    if store == Some(ProtectedStoreBackend::File)
+        && matches!(output, OutputFormat::Text)
+        && let Ok(root) = super::local_credential_root(&OsEnv)
+    {
+        eprintln!("{}", store_notice::file_store_line(&root));
+    }
+    Ok(())
 }
 
 /// Print local profiles with their credentials by name.
@@ -2727,6 +2740,18 @@ mod tests {
         for kind in [CredentialAuthKind::ApiKey, CredentialAuthKind::AccessToken] {
             assert!(manually_supplied_credential_kind(kind));
         }
+    }
+
+    #[test]
+    fn a_listing_names_a_file_store_and_omits_an_unknown_one() {
+        let json = |store| {
+            serde_json::to_value(output::local_views(&[credential()], store, None)).unwrap()
+        };
+        assert_eq!(
+            json(Some(ProtectedStoreBackend::File))[0]["protected_store"],
+            "file"
+        );
+        assert!(json(None)[0].get("protected_store").is_none());
     }
 
     #[test]

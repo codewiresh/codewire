@@ -25,19 +25,8 @@ pub(crate) fn state_root(mesh_data_dir: &Path) -> anyhow::Result<PathBuf> {
 }
 
 fn refuse_own_store(root: &Path, account_home: &Path) -> anyhow::Result<()> {
-    let own = account_home.join(".codewire").join("native-v1");
-    // The leaf may not exist yet on a first run: canonicalize what does exist
-    // (the parent) and join the name, so a link to the account's own
-    // `.codewire` is still seen.
-    let same = |path: &Path| {
-        std::fs::canonicalize(path).unwrap_or_else(|_| match (path.parent(), path.file_name()) {
-            (Some(parent), Some(name)) => std::fs::canonicalize(parent)
-                .map_or_else(|_| path.to_owned(), |parent| parent.join(name)),
-            _ => path.to_owned(),
-        })
-    };
     anyhow::ensure!(
-        same(root) != same(&own),
+        !crate::config::account::is_own_codewire_path(root, account_home, "native-v1"),
         "this cw is a development build and would use your own local VM store at {}; \
          run it with its own HOME, or set {NATIVE_STATE_ROOT_ENV} to a scratch root, \
          or to that path to use it on purpose",

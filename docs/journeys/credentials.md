@@ -25,7 +25,7 @@ observed**.
 | `profile-default` | not yet observed | not yet observed | not yet observed |
 | `cred-delivery-diagnosis` | not yet observed | not yet observed | local VMs only |
 | `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, the early replacements on that build plus their change, and `main` at 4cae0f601 through the smoke, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | observed, #5286: main's tree at 57b68c6be (#5295 and #5312), 2026-11-18, with a name resolving only to private addresses; the provider came back at the regular replacement, not the early ones (a sign-in's token host not walked) | local VMs only |
-| `cred-file-store` | not yet built (#5255) | the macOS file store; not part of this check | local stores only |
+| `cred-file-store` | not yet observed (#5255) | the macOS file store; not part of this check | local stores only |
 
 ## Before the walk
 
@@ -655,11 +655,11 @@ hosted Sandbox's broker is the platform's.
 
 ## 12. `cred-file-store`: a Linux root that keeps its credentials inside itself
 
-Not yet built (#5255). The spec is
-[Linux file store](../dev/SECRETS-AND-CREDENTIALS.md#linux-file-store-not-yet-built-5255).
+The spec is
+[Linux file store](../dev/SECRETS-AND-CREDENTIALS.md#linux-file-store-5255).
 
 - **Entry points:** `local_credential_store = "file"` in the root's
-  `config.toml`, `cw credentials --local list`, and `cw doctor`.
+  `config.toml`, and `cw credentials --local list`.
 - **States to exercise:**
   - a new root with `file` set: credentials go to `ROOT/protected-v1` and
     nowhere else;
@@ -682,12 +682,12 @@ Not yet built (#5255). The spec is
   printf '%s' "$SYNTHETIC_KEY" | cw credentials --local add anthropic --name parity-file-key
   cw credentials --local list
   ls -l "$HOME/.codewire/credentials-v1/protected-v1"
-  cw doctor
   ```
 - **Proof:**
-  - `list` and `doctor` say `Store: files in ROOT/protected-v1, not
+  - `list` says on stderr `Store: files in ROOT/protected-v1, not
     encrypted by cw (protected by file permissions and your disk
-    encryption)`, and `list --output json` carries `"store": "file"`.
+    encryption)`, and `list --output json` gives each credential
+    `"protected_store": "file"`.
   - `protected-v1` is 0700 and each entry 0600, all owned by the user.
   - With no session bus, the add succeeds and nothing asks for a keyring.
   - The upgraded Secret Service root lists the same store before and after

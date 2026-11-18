@@ -208,12 +208,13 @@ impl ProtectedStoreBackend {
         }
     }
 
-    /// Linux brokers and repository executors read Secret Service directly,
-    /// so Linux offers no other backend.
+    /// The file backend is offered wherever a broker can be confined to
+    /// read only its directory (#5255).
     pub const fn supported(self) -> bool {
         match self {
             Self::SecretService => cfg!(target_os = "linux"),
-            Self::Keychain | Self::File => cfg!(target_os = "macos"),
+            Self::Keychain => cfg!(target_os = "macos"),
+            Self::File => cfg!(any(target_os = "linux", target_os = "macos")),
         }
     }
 }
@@ -361,7 +362,6 @@ pub enum SelectedProtectedStore {
     SecretService,
     #[cfg(target_os = "macos")]
     Keychain(KeychainProtectedStore),
-    #[cfg(target_os = "macos")]
     File(FileProtectedStore),
 }
 
@@ -389,7 +389,6 @@ impl SelectedProtectedStore {
                 Some(path) => KeychainProtectedStore::with_keychain(path.to_owned())?,
                 None => KeychainProtectedStore::login()?,
             })),
-            #[cfg(target_os = "macos")]
             ProtectedStoreBackend::File => {
                 let _ = keychain;
                 FileProtectedStore::new(file_directory.to_owned()).map(Self::File)
@@ -404,7 +403,6 @@ impl SelectedProtectedStore {
             Self::SecretService => &OsProtectedStore,
             #[cfg(target_os = "macos")]
             Self::Keychain(store) => store,
-            #[cfg(target_os = "macos")]
             Self::File(store) => store,
         }
     }
@@ -425,7 +423,6 @@ impl SelectedProtectedStore {
             Self::SecretService => ProtectedStoreBackend::SecretService,
             #[cfg(target_os = "macos")]
             Self::Keychain(_) => ProtectedStoreBackend::Keychain,
-            #[cfg(target_os = "macos")]
             Self::File(_) => ProtectedStoreBackend::File,
         }
     }
@@ -893,10 +890,17 @@ mod tests {
             );
             assert!(ProtectedStoreBackend::SecretService.supported());
             assert!(!ProtectedStoreBackend::Keychain.supported());
-            assert!(!ProtectedStoreBackend::File.supported());
+            assert!(ProtectedStoreBackend::File.supported());
             let directory = Path::new("/synthetic/protected-v1");
             assert_eq!(
-                SelectedProtectedStore::open(ProtectedStoreBackend::File, directory, None).err(),
+                SelectedProtectedStore::open(ProtectedStoreBackend::File, directory, None)
+                    .unwrap()
+                    .backend(),
+                ProtectedStoreBackend::File
+            );
+            assert_eq!(
+                SelectedProtectedStore::open(ProtectedStoreBackend::Keychain, directory, None)
+                    .err(),
                 Some(ProtectedStoreError::UnsupportedPlatform)
             );
             assert_eq!(

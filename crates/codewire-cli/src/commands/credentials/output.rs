@@ -11,7 +11,7 @@ use codewire_client as rpc;
 use codewire_local_credentials::{
     AccessProfileRecord, AccessProfileRevisionRecord, CredentialRecord,
 };
-use codewire_protected_store::ProtectedStorePersistence;
+use codewire_protected_store::{ProtectedStoreBackend, ProtectedStorePersistence};
 use serde::Serialize;
 
 use super::super::OutputFormat;
@@ -36,6 +36,10 @@ pub(in crate::commands) struct CredentialView {
     profiles: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     protected_store_persistence: Option<&'static str>,
+    /// The local store's backend, where the listing knows it: `file` is not
+    /// encrypted by cw (#5255).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protected_store: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cleanup_pending: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,6 +64,7 @@ impl From<&CredentialRecord> for CredentialView {
             revocation_generation: record.metadata.revocation_generation,
             profiles: Vec::new(),
             protected_store_persistence: Some(persistence_label(record.persistence)),
+            protected_store: None,
             cleanup_pending: Some(record.protected_store_cleanup_pending),
             created_at_unix_ms: Some(record.created_at_unix_ms),
             updated_at_unix_ms: Some(record.updated_at_unix_ms),
@@ -106,6 +111,7 @@ impl CredentialView {
             revocation_generation: credential.revocation_generation,
             profiles: Vec::new(),
             protected_store_persistence: None,
+            protected_store: None,
             cleanup_pending: None,
             created_at_unix_ms: None,
             updated_at_unix_ms: None,
@@ -517,15 +523,28 @@ pub(in crate::commands) fn print_credentials(
 
 pub(in crate::commands) fn print_local_credentials(
     records: &[CredentialRecord],
+    store: Option<ProtectedStoreBackend>,
     uses: Option<&Uses>,
     output: OutputFormat,
 ) -> anyhow::Result<()> {
+    print_credentials(&local_views(records, store, uses), uses.is_some(), output)
+}
+
+/// Local records as listed, each naming its store's backend where the
+/// listing knows it.
+pub(in crate::commands) fn local_views(
+    records: &[CredentialRecord],
+    store: Option<ProtectedStoreBackend>,
+    uses: Option<&Uses>,
+) -> Vec<CredentialView> {
     let empty = Uses::new();
-    let views = records
+    records
         .iter()
-        .map(|record| CredentialView::from(record).using(uses.unwrap_or(&empty)))
-        .collect::<Vec<_>>();
-    print_credentials(&views, uses.is_some(), output)
+        .map(|record| CredentialView {
+            protected_store: store.map(ProtectedStoreBackend::as_str),
+            ..CredentialView::from(record).using(uses.unwrap_or(&empty))
+        })
+        .collect()
 }
 
 pub(in crate::commands) fn print_cloud_credentials(

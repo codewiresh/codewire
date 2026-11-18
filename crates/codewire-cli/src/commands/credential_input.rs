@@ -1257,9 +1257,13 @@ mod tests {
         }
         #[cfg(target_os = "linux")]
         {
-            let error = resolve_local_credential_store(Some("file")).unwrap_err();
+            assert_eq!(
+                resolve_local_credential_store(Some("file")).unwrap(),
+                ProtectedStoreBackend::File
+            );
+            let error = resolve_local_credential_store(Some("keychain")).unwrap_err();
             assert!(
-                error.to_string().contains("use \"secret-service\""),
+                error.to_string().contains("\"secret-service\" or \"file\""),
                 "{error}"
             );
         }

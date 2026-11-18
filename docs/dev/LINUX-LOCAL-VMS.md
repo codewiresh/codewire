@@ -93,8 +93,9 @@ Local VMs need an x86_64 Linux host with:
   distribution's `e2fsprogs` package provides them.
 - **git** at `/usr/bin/git`, only for cloning a repository into a VM.
 - **A Secret Service**, such as GNOME Keyring or KWallet, running and unlocked
-  on your session bus, for local credentials and application secrets. On Linux
-  they are stored only there.
+  on your session bus, for local credentials and application secrets, unless
+  the credential root uses the file store (`local_credential_store = "file"`,
+  below).
 - Your own user. `cw` refuses to run local VMs as root.
 
 `cw setup --local`, `cw create --local` and `cw start --local` check
@@ -600,7 +601,12 @@ any process in your session can read it. Deleting the scratch root leaves
 those entries behind: run `cw credentials --local delete NAME` for each
 credential first, and the few entries the store keeps for itself still stay.
 Every entry is named by a fresh random ID, so two roots never overwrite each
-other. To keep a test or a walk out of your keyring, run it in a
+other. To keep a test or a walk out of your keyring, give its root
+the file store: `local_credential_store = "file"` in that root's
+`config.toml` keeps every credential in `protected-v1` inside the credential
+root, so deleting the root deletes them, and needs no session bus. Those
+files are not encrypted by `cw`: they are protected by their permissions and
+your disk encryption, so use synthetic credentials there. Or run it in a
 private session bus and keyring, as
 `scripts/ci/verify/lib/local-smoke-isolation.sh` sets one up for the local
 VM credentials smoke (#5220). Never script or loop calls to your own Secret

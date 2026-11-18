@@ -682,7 +682,8 @@ pub struct MeshConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_identity: Option<LocalMeshIdentity>,
     /// Where `--local` secrets and credentials are stored: "keychain"
-    /// (default) or "file" on macOS, "secret-service" on Linux.
+    /// (default) or "file" on macOS, "secret-service" (default) or "file" on
+    /// Linux.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_credential_store: Option<String>,
 }

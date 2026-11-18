@@ -15,12 +15,9 @@ use codewire_local_credentials::{
     LocalProviderRevocation, LocalProviderRevocationFailure, LocalProviderRevocationOutcome,
     LocalRevocationLeaseClient, run_revocation_executor,
 };
-#[cfg(target_os = "linux")]
-use codewire_protected_store::ConnectedOsProtectedStore;
 use uuid::Uuid;
 
-#[cfg(target_os = "macos")]
-use super::super::credential_darwin::ChildStore;
+use super::super::credential_child_store::{ChildStore, ChildStoreArgs};
 use super::verify_repository_executor_confinement;
 
 #[derive(Debug, clap::Args)]
@@ -29,18 +26,15 @@ pub(crate) struct LocalProviderRevocationExecutorArgs {
     pub(crate) authority_fd: i32,
     #[arg(long)]
     pub(crate) request_id: String,
-    /// The authority's store: a macOS executor reads the selected backend,
-    /// as a Linux one reads Secret Service.
-    #[cfg(target_os = "macos")]
+    /// The authority's store: the executor reads the selected backend.
     #[command(flatten)]
-    pub(crate) store: super::super::credential_darwin::ChildStoreArgs,
+    pub(crate) store: ChildStoreArgs,
 }
 
 pub(crate) async fn run_local_provider_revocation_executor(
     args: LocalProviderRevocationExecutorArgs,
 ) -> anyhow::Result<()> {
     verify_repository_executor_confinement()?;
-    #[cfg(target_os = "macos")]
     let store = ChildStore::from_args(&args.store)?;
     let request_id = executor_request_id(args.authority_fd, &args.request_id)?;
     // SAFETY: FD 3 is created by the authority immediately before exec and is
@@ -58,9 +52,6 @@ pub(crate) async fn run_local_provider_revocation_executor(
     let mut client = LocalRevocationLeaseClient::connect(authority_stream, request_id)
         .await
         .context("connect revocation lease channel")?;
-    #[cfg(target_os = "linux")]
-    let store = ConnectedOsProtectedStore::connect().ok();
-    #[cfg(target_os = "macos")]
     let store = store.open().ok();
     run_revocation_executor(&mut client, store.as_ref(), |material| async move {
         match codex_revocation_transport().await {

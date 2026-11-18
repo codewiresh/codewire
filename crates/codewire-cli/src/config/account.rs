@@ -3,7 +3,7 @@
 
 use std::ffi::{CStr, OsStr};
 use std::os::unix::ffi::OsStrExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// This user's home directory from the user database.
 pub(crate) fn home_directory() -> anyhow::Result<PathBuf> {
@@ -30,4 +30,19 @@ pub(crate) fn home_directory() -> anyhow::Result<PathBuf> {
     // SAFETY: pw_dir is a NUL-terminated string inside `buffer`.
     let home = unsafe { CStr::from_ptr(entry.pw_dir) };
     Ok(PathBuf::from(OsStr::from_bytes(home.to_bytes())))
+}
+
+/// Whether `path` is the account's own `~/.codewire/LEAF`, whatever `HOME`
+/// says, seen through links. The leaf may not exist yet on a first run: what
+/// does exist (the parent) is resolved and the name joined, so a link to the
+/// account's own `.codewire` is still seen.
+pub(crate) fn is_own_codewire_path(path: &Path, account_home: &Path, leaf: &str) -> bool {
+    let resolved = |path: &Path| {
+        std::fs::canonicalize(path).unwrap_or_else(|_| match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) => std::fs::canonicalize(parent)
+                .map_or_else(|_| path.to_owned(), |parent| parent.join(name)),
+            _ => path.to_owned(),
+        })
+    };
+    resolved(path) == resolved(&account_home.join(".codewire").join(leaf))
 }

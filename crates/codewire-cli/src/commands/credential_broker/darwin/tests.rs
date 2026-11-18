@@ -232,7 +232,7 @@ fn file_store_profile_reads_only_the_entry_directory() {
         };
         // As the broker does: the store is opened, then confined.
         let opened = store.open().unwrap();
-        confine(&store, &opened, network).unwrap();
+        confine(&store, opened.selected(), network).unwrap();
         let value = opened.get(&entry()).unwrap().unwrap();
         assert_eq!(value.expose_secret(), VALUE);
         assert_denied(
@@ -308,7 +308,7 @@ fn keychain_profile_reads_the_selected_keychain_through_security() {
         };
         // As the broker does: the store is opened, then confined.
         let opened = store.open().unwrap();
-        confine(&store, &opened, network).unwrap();
+        confine(&store, opened.selected(), network).unwrap();
         let value = opened.get(&entry()).unwrap().unwrap();
         assert_eq!(value.expose_secret(), VALUE);
         assert_common_denials(network);

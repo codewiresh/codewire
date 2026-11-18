@@ -1,117 +1,14 @@
 //! Darwin primitives shared by the macOS credential children (the broker and
 //! the repository executor and its Git helpers).
 //!
-//! The authority names its own store on each child's command line; a child
-//! that reads material opens exactly that store. Linux children prove
+//! The store a child reads is `credential_child_store`'s. Linux children prove
 //! no-new-privileges, an empty capability set and a non-dumpable state; macOS
 //! has none of those, so a child instead checks what its launcher set up (no
 //! root, no core files, a new session and an empty environment where the
 //! launcher provides them), exits with its parent and refuses debugger
 //! attachment.
 
-use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-
-use anyhow::Context as _;
-use clap::Args;
-use codewire_local_credentials::{AuthorityProtectedStore, FILE_STORE_DIRECTORY};
-use codewire_protected_store::{ProtectedStoreBackend, SelectedProtectedStore};
-
-/// The authority store as a child receives it on its command line.
-#[derive(Debug, Args)]
-pub(crate) struct ChildStoreArgs {
-    /// The authority's store: macOS children read the selected backend, not a
-    /// platform default.
-    #[arg(long)]
-    pub(crate) protected_store: String,
-    /// The file backend's entry directory inside the authority root.
-    #[arg(long)]
-    pub(crate) protected_store_directory: Option<PathBuf>,
-    /// Test-only explicit keychain file for the keychain backend.
-    #[arg(long)]
-    pub(crate) keychain: Option<PathBuf>,
-}
-
-/// The authority's store arguments for a child it launches.
-pub(crate) fn child_store_arguments(
-    store: &AuthorityProtectedStore,
-    authority_root: &Path,
-) -> Option<Vec<OsString>> {
-    let mut arguments = vec![
-        OsString::from("--protected-store"),
-        store.backend.as_str().into(),
-    ];
-    match (store.backend, &store.keychain) {
-        (ProtectedStoreBackend::Keychain, keychain) => {
-            if let Some(keychain) = keychain {
-                arguments.push("--keychain".into());
-                arguments.push(keychain.clone().into_os_string());
-            }
-        }
-        (ProtectedStoreBackend::File, None) => {
-            arguments.push("--protected-store-directory".into());
-            arguments.push(authority_root.join(FILE_STORE_DIRECTORY).into_os_string());
-        }
-        _ => return None,
-    }
-    Some(arguments)
-}
-
-/// The authority store a child reads, validated before any effect.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ChildStore {
-    /// One owner-only file per entry in this directory.
-    File { directory: PathBuf },
-    /// The login keychain, or an explicit test keychain file.
-    Keychain { keychain: Option<PathBuf> },
-}
-
-impl ChildStore {
-    pub(crate) fn from_args(args: &ChildStoreArgs) -> anyhow::Result<Self> {
-        let backend = ProtectedStoreBackend::parse(&args.protected_store)
-            .filter(|backend| backend.supported())
-            .context("invalid child protected store")?;
-        match (backend, &args.protected_store_directory, &args.keychain) {
-            (ProtectedStoreBackend::File, Some(directory), None) => {
-                anyhow::ensure!(
-                    directory.is_absolute()
-                        && directory.file_name() == Some(OsStr::new(FILE_STORE_DIRECTORY))
-                        && plain_path(directory).is_some(),
-                    "invalid child protected store"
-                );
-                Ok(Self::File {
-                    directory: directory.clone(),
-                })
-            }
-            (ProtectedStoreBackend::Keychain, None, keychain) => {
-                if let Some(keychain) = keychain {
-                    anyhow::ensure!(
-                        keychain.is_absolute() && plain_path(keychain).is_some(),
-                        "invalid child protected store"
-                    );
-                }
-                Ok(Self::Keychain {
-                    keychain: keychain.clone(),
-                })
-            }
-            _ => anyhow::bail!("invalid child protected store"),
-        }
-    }
-
-    pub(crate) fn open(&self) -> anyhow::Result<SelectedProtectedStore> {
-        let store = match self {
-            Self::File { directory } => {
-                SelectedProtectedStore::open(ProtectedStoreBackend::File, directory, None)
-            }
-            Self::Keychain { keychain } => SelectedProtectedStore::open(
-                ProtectedStoreBackend::Keychain,
-                Path::new("/"),
-                keychain.as_deref(),
-            ),
-        };
-        store.map_err(|error| anyhow::anyhow!("{error}"))
-    }
-}
 
 /// The local VM runtime's git and helper directory, admitted from the
 /// installed runtime against its lock at this moment.
@@ -120,19 +17,6 @@ pub(crate) fn admit_runtime_git(root: &Path, lock: &Path) -> Option<(PathBuf, Pa
         .ok()?
         .admit_runtime_git(root)
         .ok()
-}
-
-/// An absolute path made only of characters that need no quoting in a
-/// Seatbelt string, without `.` or `..` components.
-pub(crate) fn plain_path(path: &Path) -> Option<&str> {
-    let text = path.to_str()?;
-    let plain = path.is_absolute()
-        && text.len() <= 512
-        && text.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-' | b'+' | b'@')
-        })
-        && text.split('/').all(|part| !matches!(part, "." | ".."));
-    plain.then_some(text)
 }
 
 /// No root, and a zero hard core-file limit (set by the launcher before exec

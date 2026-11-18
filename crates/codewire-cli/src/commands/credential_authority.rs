@@ -30,6 +30,8 @@ use codewire_local_credentials::{
 };
 use codewire_protected_store::{ProtectedStoreBackend, ProtectedStoreError};
 
+#[cfg(target_os = "linux")]
+use super::credential_child_store::child_store_arguments;
 use super::{
     LocalCredentialAuthorityArgs, LocalCredentialAuthorityProbeArgs, local_credential_root,
 };
@@ -82,6 +84,7 @@ pub(crate) async fn run_local_credential_authority(
     let spawner = Arc::new(CwLocalCredentialProcessSpawner {
         executable: config.executable.clone(),
         authority_root: config.root.clone(),
+        store: store.clone(),
     });
     #[cfg(target_os = "macos")]
     let spawner = Arc::new(darwin::CwLocalCredentialProcessSpawner {
@@ -156,8 +159,9 @@ pub(crate) async fn admit_existing_local_credential_authority() -> anyhow::Resul
     let env = OsEnv;
     let root = local_credential_root(&env)?;
     let config = authority_config(root)?;
-    let store = AuthorityProtectedStore::platform_default()
-        .context("local protected storage is unavailable on this platform")?;
+    // A replacement opens the configured store, as `connect` does: never the
+    // platform default over a root that keeps its credentials in files.
+    let store = configured_authority_store(&env)?;
     drop(
         LocalCredentialClient::admit_existing_or_replace_with(&config, |config| {
             spawn_authority(config, &store)
@@ -532,6 +536,26 @@ fn spawn_authority(
 struct CwLocalCredentialProcessSpawner {
     executable: PathBuf,
     authority_root: PathBuf,
+    store: AuthorityProtectedStore,
+}
+
+#[cfg(target_os = "linux")]
+impl CwLocalCredentialProcessSpawner {
+    /// The authority's environment, without the session bus address for a
+    /// file store, whose children read no Secret Service (#5255).
+    fn child_environment(
+        &self,
+        read: impl Fn(&str) -> Option<OsString>,
+    ) -> Vec<(OsString, OsString)> {
+        let file_store = self.store.backend == ProtectedStoreBackend::File;
+        authority_environment(|name| {
+            if file_store && name == "DBUS_SESSION_BUS_ADDRESS" {
+                None
+            } else {
+                read(name)
+            }
+        })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -555,8 +579,10 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
         }
         let boot_secrets = boot_secret_descriptor(boot_secrets)?;
         let secrets_fd = boot_secrets.as_ref().map(|secrets| secrets.as_raw_fd());
+        let store_arguments = child_store_arguments(&self.store, &self.authority_root)
+            .ok_or(LocalBrokerSpawnError::InvalidConfiguration)?;
         let parent_pid = unsafe { libc::getpid() };
-        let allowed_environment = authority_environment(|name| env::var_os(name));
+        let allowed_environment = self.child_environment(|name| env::var_os(name));
         let mut command = tokio::process::Command::new(&self.executable);
         command
             .arg("__local-credential-broker")
@@ -570,6 +596,7 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
             .arg(&config.environment_name)
             .arg("--runner-socket")
             .arg(&config.runner_socket)
+            .args(store_arguments)
             .env_clear()
             .envs(allowed_environment)
             .current_dir(&self.authority_root)
@@ -681,6 +708,8 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
         if authority_fd < 3 {
             return Err(LocalRepositorySpawnError::InvalidConfiguration);
         }
+        let store_arguments = child_store_arguments(&self.store, &self.authority_root)
+            .ok_or(LocalRepositorySpawnError::InvalidConfiguration)?;
         let parent_pid = unsafe { libc::getpid() };
         // SSH uses the inherited signing channel and explicit public runtime
         // path only. Do not give its executor the Secret Service bus context.
@@ -699,7 +728,7 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
                 })
             }
             codewire_local_credentials::LocalRepositoryTransport::GitHubOAuth => {
-                authority_environment(|name| env::var_os(name))
+                self.child_environment(|name| env::var_os(name))
             }
             codewire_local_credentials::LocalRepositoryTransport::Ssh => Vec::new(),
         };
@@ -717,6 +746,7 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
             .arg(config.request_id.to_string())
             .arg("--staging-directory")
             .arg(&config.staging_directory)
+            .args(store_arguments)
             .env_clear()
             .envs(allowed_environment)
             .current_dir(&config.staging_directory)
@@ -745,7 +775,7 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
 }
 
 /// The one-shot provider revocation executor (#4717): the local GitHub
-/// executor's environment (the child reads the OS store) and confinement.
+/// executor's store, environment and confinement.
 #[cfg(target_os = "linux")]
 impl LocalRevocationProcessSpawner for CwLocalCredentialProcessSpawner {
     fn spawn(
@@ -757,6 +787,8 @@ impl LocalRevocationProcessSpawner for CwLocalCredentialProcessSpawner {
         if authority_fd < 3 {
             return Err(LocalRevocationSpawnError::InvalidConfiguration);
         }
+        let store_arguments = child_store_arguments(&self.store, &self.authority_root)
+            .ok_or(LocalRevocationSpawnError::InvalidConfiguration)?;
         let parent_pid = unsafe { libc::getpid() };
         let mut command = tokio::process::Command::new(&self.executable);
         command
@@ -765,8 +797,9 @@ impl LocalRevocationProcessSpawner for CwLocalCredentialProcessSpawner {
             .arg("3")
             .arg("--request-id")
             .arg(config.request_id.to_string())
+            .args(store_arguments)
             .env_clear()
-            .envs(authority_environment(|name| env::var_os(name)))
+            .envs(self.child_environment(|name| env::var_os(name)))
             .current_dir("/")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1074,11 +1107,15 @@ mod tests {
                 configured_authority_store(&env).unwrap().backend,
                 ProtectedStoreBackend::SecretService
             );
-            for value in ["file", "keychain"] {
-                write(value);
-                let error = configured_authority_store(&env).unwrap_err();
-                assert!(error.to_string().contains("secret-service"), "{error}");
-            }
+            // The file store is a Linux choice too (#5255); the keychain isn't.
+            write("file");
+            assert_eq!(
+                configured_authority_store(&env).unwrap().backend,
+                ProtectedStoreBackend::File
+            );
+            write("keychain");
+            let error = configured_authority_store(&env).unwrap_err();
+            assert!(error.to_string().contains("secret-service"), "{error}");
         }
     }
 
@@ -1107,6 +1144,43 @@ mod tests {
                     OsString::from(authority_xdg_runtime_env),
                     OsString::from("/run/user/1000"),
                 ),
+            ]
+        );
+    }
+
+    /// #5255: a file store's broker and repository executor read no Secret
+    /// Service, so they get no session bus; a Secret Service root's keep it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_store_child_gets_no_session_bus() {
+        let ambient = BTreeMap::from([
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+        ]);
+        let spawner = |backend| CwLocalCredentialProcessSpawner {
+            executable: "/synthetic/bin/cw".into(),
+            authority_root: "/synthetic/home/.codewire/credentials-v1".into(),
+            store: AuthorityProtectedStore {
+                backend,
+                keychain: None,
+            },
+        };
+        let names = |backend| {
+            spawner(backend)
+                .child_environment(|name| ambient.get(name).map(OsString::from))
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(ProtectedStoreBackend::File),
+            vec![OsString::from("XDG_RUNTIME_DIR")]
+        );
+        assert_eq!(
+            names(ProtectedStoreBackend::SecretService),
+            vec![
+                OsString::from("DBUS_SESSION_BUS_ADDRESS"),
+                OsString::from("XDG_RUNTIME_DIR")
             ]
         );
     }

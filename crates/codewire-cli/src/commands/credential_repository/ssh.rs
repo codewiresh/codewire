@@ -463,11 +463,11 @@ mod tests {
     fn repository_transport_is_required_and_closed_in_the_private_cli() {
         use clap::Parser as _;
         let request = uuid::Uuid::new_v4().to_string();
-        // A macOS executor also names its authority's store.
+        // An executor also names its authority's store (#5255).
         let store: &[&str] = if cfg!(target_os = "macos") {
             &["--protected-store", "keychain"]
         } else {
-            &[]
+            &["--protected-store", "secret-service"]
         };
         let base = [
             "cw",

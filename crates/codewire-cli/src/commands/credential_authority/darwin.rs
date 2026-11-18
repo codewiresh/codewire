@@ -31,7 +31,8 @@ use codewire_local_credentials::{
     LocalRevocationProcessSpawner, LocalRevocationSpawnError, ProviderLookup, SpawnedAuthority,
 };
 
-use super::super::credential_darwin::{admit_runtime_git, child_store_arguments};
+use super::super::credential_child_store::child_store_arguments;
+use super::super::credential_darwin::admit_runtime_git;
 
 /// `<sys/spawn.h>`; the libc crate does not define it.
 const POSIX_SPAWN_SETSID: libc::c_int = 0x0400;

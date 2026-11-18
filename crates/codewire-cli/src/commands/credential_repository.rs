@@ -12,14 +12,13 @@ use codewire_local_credentials::{
     run_local_repository_executor, run_local_ssh_repository_executor,
     run_platform_repository_executor,
 };
-#[cfg(target_os = "linux")]
-use codewire_protected_store::ConnectedOsProtectedStore;
 use uuid::Uuid;
 
+use super::credential_child_store::ChildStore;
 #[cfg(target_os = "macos")]
 use super::credential_darwin::{
-    ChildStore, admit_runtime_git, bind_to_parent_and_deny_attachment,
-    isolated_session_and_environment, unprivileged_without_core_files,
+    admit_runtime_git, bind_to_parent_and_deny_attachment, isolated_session_and_environment,
+    unprivileged_without_core_files,
 };
 use super::{LocalGitCredentialHelperArgs, LocalGitRepositoryExecutorArgs};
 
@@ -123,7 +122,6 @@ pub(crate) async fn run_local_git_repository_executor(
 ) -> anyhow::Result<()> {
     verify_repository_executor_confinement()?;
     // Validate the store selection before any channel or Git effect.
-    #[cfg(target_os = "macos")]
     let store = ChildStore::from_args(&args.store)?;
     anyhow::ensure!(args.authority_fd == 3, "invalid repository lease channel");
     let request_id = Uuid::parse_str(&args.request_id)
@@ -213,10 +211,6 @@ pub(crate) async fn run_local_git_repository_executor(
                 .await
                 .context("prepare platform repository");
             }
-            #[cfg(target_os = "linux")]
-            let store = ConnectedOsProtectedStore::connect()
-                .context("connect repository executor protected store")?;
-            #[cfg(target_os = "macos")]
             let store = store
                 .open()
                 .context("open repository executor protected store")?;

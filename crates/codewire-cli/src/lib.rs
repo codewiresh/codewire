@@ -592,7 +592,12 @@ enum Command {
     EnvironmentLaunch(EnvironmentLaunchArgs),
     #[cfg(target_os = "linux")]
     #[command(name = "__local-credential-broker-confinement-probe", hide = true)]
-    LocalCredentialBrokerConfinementProbe,
+    LocalCredentialBrokerConfinementProbe {
+        /// A file store's directory: the probe must read an entry in it and
+        /// nothing beside it.
+        #[arg(long)]
+        file_store: Option<std::path::PathBuf>,
+    },
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__local-git-repository-executor", hide = true)]
     LocalGitRepositoryExecutor(LocalGitRepositoryExecutorArgs),
@@ -1057,8 +1062,8 @@ where
         )
         .map_err(|_| anyhow::anyhow!("environment launch failed")),
         #[cfg(target_os = "linux")]
-        Command::LocalCredentialBrokerConfinementProbe => {
-            run_local_credential_broker_confinement_probe().await
+        Command::LocalCredentialBrokerConfinementProbe { file_store } => {
+            run_local_credential_broker_confinement_probe(file_store.as_deref()).await
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::LocalGitRepositoryExecutor(args) => run_local_git_repository_executor(args).await,

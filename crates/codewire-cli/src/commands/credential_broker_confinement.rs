@@ -1,10 +1,17 @@
 use std::io;
 use std::net::{TcpListener, TcpStream, UdpSocket};
-use std::os::fd::{FromRawFd as _, OwnedFd};
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+use std::os::unix::fs::OpenOptionsExt as _;
+use std::path::Path;
+
+use anyhow::Context as _;
 
 const MINIMUM_BROKER_LANDLOCK_ABI: i32 = 4;
 const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;
+const LANDLOCK_RULE_PATH_BENEATH: libc::c_int = 1;
 const LANDLOCK_RULE_NET_PORT: libc::c_int = 2;
+const LANDLOCK_ACCESS_FS_READ_FILE: u64 = 1 << 2;
+const LANDLOCK_ACCESS_FS_READ_DIR: u64 = 1 << 3;
 const LANDLOCK_ACCESS_NET_CONNECT_TCP: u64 = 1 << 1;
 const LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1 << 0;
 const LANDLOCK_SCOPE_SIGNAL: u64 = 1 << 1;
@@ -36,6 +43,12 @@ struct LandlockRulesetAttr {
     scoped: u64,
 }
 
+#[repr(C, packed)]
+struct LandlockPathBeneathAttr {
+    allowed_access: u64,
+    parent_fd: i32,
+}
+
 #[repr(C)]
 struct LandlockNetPortAttr {
     allowed_access: u64,
@@ -62,16 +75,31 @@ struct SocketFilterProgram {
 /// remain usable; future filesystem opens, TCP destinations other than port
 /// 443, datagram/raw sockets, listeners, process execution, and high-risk
 /// process-control syscalls fail closed.
-pub(super) fn apply_broker_runtime_confinement() -> io::Result<()> {
-    apply_broker_landlock_confinement()?;
+pub(super) fn apply_broker_runtime_confinement(file_store: Option<&Path>) -> io::Result<()> {
+    apply_broker_landlock_confinement(file_store)?;
     apply_broker_seccomp_confinement()
 }
 
 /// Enter the filesystem, remote-port, and signal Landlock domain before
-/// establishing the broker's one encrypted Secret Service connection.
-pub(super) fn apply_broker_landlock_confinement() -> io::Result<()> {
+/// opening the broker's store: the broker's one encrypted Secret Service
+/// connection, or a file store, the only path whose files and listing it may
+/// then read (#5255). A file store's directory that doesn't exist yet holds
+/// no entry, so it gets no rule.
+pub(super) fn apply_broker_landlock_confinement(file_store: Option<&Path>) -> io::Result<()> {
     verify_single_threaded()?;
-    apply_landlock()
+    let file_store = match file_store {
+        Some(directory) => match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(directory)
+        {
+            Ok(directory) => Some(OwnedFd::from(directory)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        },
+        None => None,
+    };
+    apply_landlock(file_store.as_ref())
 }
 
 /// Seal syscall and socket creation after every required Unix connection is
@@ -82,7 +110,9 @@ pub(super) fn apply_broker_seccomp_confinement() -> io::Result<()> {
 
 /// Checked-in host verification entrypoint for the exact broker process
 /// sandbox. It never opens credential storage or performs network I/O.
-pub(crate) async fn run_local_credential_broker_confinement_probe() -> anyhow::Result<()> {
+pub(crate) async fn run_local_credential_broker_confinement_probe(
+    file_store: Option<&Path>,
+) -> anyhow::Result<()> {
     // SAFETY: this scalar prctl affects only this dedicated disposable process.
     anyhow::ensure!(
         unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == 0,
@@ -93,11 +123,14 @@ pub(crate) async fn run_local_credential_broker_confinement_probe() -> anyhow::R
         unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) } == 0,
         "broker probe became dumpable after exec"
     );
-    apply_broker_runtime_confinement()?;
+    apply_broker_runtime_confinement(file_store)?;
     anyhow::ensure!(
         std::fs::File::open("/etc/passwd").is_err(),
         "broker filesystem confinement did not deny a new read"
     );
+    if let Some(directory) = file_store {
+        verify_file_store_reads_only(directory)?;
+    }
     anyhow::ensure!(
         UdpSocket::bind("127.0.0.1:0").is_err(),
         "broker socket confinement did not deny UDP"
@@ -166,6 +199,46 @@ pub(crate) async fn run_local_credential_broker_confinement_probe() -> anyhow::R
     Ok(())
 }
 
+/// The probe's file store holds an entry `probe-entry`, and its parent a
+/// file `probe-sibling`: the entry and the listing are readable, and nothing
+/// else is, the store's directory included for writing.
+fn verify_file_store_reads_only(directory: &Path) -> anyhow::Result<()> {
+    let denied = |result: io::Result<()>| matches!(result, Err(error) if error.raw_os_error() == Some(libc::EACCES));
+    anyhow::ensure!(
+        std::fs::read(directory.join("probe-entry")).is_ok_and(|value| !value.is_empty()),
+        "broker filesystem confinement denied its file store"
+    );
+    anyhow::ensure!(
+        std::fs::read_dir(directory).is_ok(),
+        "broker filesystem confinement denied listing its file store"
+    );
+    let parent = directory
+        .parent()
+        .context("broker probe file store has no parent")?;
+    anyhow::ensure!(
+        denied(std::fs::read(parent.join("probe-sibling")).map(drop)),
+        "broker filesystem confinement admitted a file beside its store"
+    );
+    anyhow::ensure!(
+        denied(std::fs::read_dir(parent).map(drop)),
+        "broker filesystem confinement admitted listing beside its store"
+    );
+    anyhow::ensure!(
+        denied(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(directory.join("probe-entry"))
+                .map(drop)
+        ),
+        "broker filesystem confinement admitted writing its file store"
+    );
+    anyhow::ensure!(
+        denied(std::fs::write(directory.join("probe-new"), b"x")),
+        "broker filesystem confinement admitted creating in its file store"
+    );
+    Ok(())
+}
+
 fn verify_single_threaded() -> io::Result<()> {
     let mut tasks = std::fs::read_dir("/proc/self/task")?;
     if tasks.next().transpose()?.is_none() || tasks.next().transpose()?.is_some() {
@@ -176,7 +249,7 @@ fn verify_single_threaded() -> io::Result<()> {
     Ok(())
 }
 
-fn apply_landlock() -> io::Result<()> {
+fn apply_landlock(file_store: Option<&OwnedFd>) -> io::Result<()> {
     let abi = landlock_abi()?;
     if abi < MINIMUM_BROKER_LANDLOCK_ABI {
         return Err(io::Error::other(format!(
@@ -203,6 +276,26 @@ fn apply_landlock() -> io::Result<()> {
     }
     // SAFETY: ownership of the newly returned descriptor is transferred once.
     let ruleset_fd = unsafe { OwnedFd::from_raw_fd(ruleset_fd as libc::c_int) };
+    if let Some(directory) = file_store {
+        let beneath = LandlockPathBeneathAttr {
+            allowed_access: LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR,
+            parent_fd: directory.as_raw_fd(),
+        };
+        // SAFETY: the ruleset and directory descriptors and the packed
+        // attribute remain valid for the duration of the syscall.
+        if unsafe {
+            libc::syscall(
+                libc::SYS_landlock_add_rule,
+                ruleset_fd.as_raw_fd(),
+                LANDLOCK_RULE_PATH_BENEATH,
+                std::ptr::addr_of!(beneath),
+                0_u32,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
     let port = LandlockNetPortAttr {
         allowed_access: LANDLOCK_ACCESS_NET_CONNECT_TCP,
         port: 443,
