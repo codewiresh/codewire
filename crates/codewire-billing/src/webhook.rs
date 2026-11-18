@@ -864,8 +864,15 @@ mod tests {
 
     fn state(stripe: StripeHandle) -> BillingState {
         BillingState {
-            // Never connected: every case below answers before any query.
-            pool: PgPool::connect_lazy("postgres://codewire@127.0.0.1:1/codewire").unwrap(),
+            // Never connected: every case below answers before any query, or
+            // expects the query to fail. Port 1 refuses every connection, and
+            // the pool retries a refused one until its acquire timeout, 30 s
+            // by default. A short one brings the same error sooner; it can
+            // never let a query through (#5311).
+            pool: sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(std::time::Duration::from_millis(100))
+                .connect_lazy("postgres://codewire@127.0.0.1:1/codewire")
+                .unwrap(),
             stripe,
             email: EmailClient::disabled(),
             credit_enforcement: Default::default(),
