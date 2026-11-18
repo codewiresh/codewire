@@ -836,6 +836,76 @@ fn rename_aside_restores_a_concurrent_login_and_never_deletes_one() {
     assert_eq!(fs::read(fixture.config().join(aside)).unwrap(), users);
 }
 
+fn placeholder_access() -> codewire_access::CredentialPlaceholder {
+    codewire_access::CredentialPlaceholder::derive(
+        &codewire_access::PlaceholderKey::from_slice(&[9; codewire_access::PLACEHOLDER_KEY_BYTES])
+            .unwrap(),
+        &codewire_access::EnvironmentId::parse("environment-a").unwrap(),
+        GENERATION,
+        &codewire_access::CapabilitySlot::parse("anthropic").unwrap(),
+        &codewire_access::CredentialId::parse(CREDENTIAL).unwrap(),
+    )
+}
+
+/// Beside the front door only a placeholder access token is written. A real
+/// one is refused, and the login a boot without interception left behind is
+/// removed with it; the user's own login is never touched (#3999).
+#[test]
+fn an_intercepting_writer_writes_only_a_placeholder_access_token() {
+    let fixture = Fixture::new();
+    fixture.store(&unrelated());
+    // A boot without interception wrote the real login.
+    fixture.writer().apply(first(), T0).unwrap();
+    assert_eq!(fixture.json()[CLAUDE_LOGIN_KEY]["accessToken"], ACCESS);
+
+    let mut writer = fixture.writer().intercepting();
+    assert_eq!(
+        writer.apply(first(), T0).unwrap(),
+        ClaudeLoginSync::NotPlaceholder
+    );
+    assert_eq!(fixture.json(), unrelated());
+
+    let placeholder = placeholder_access();
+    assert_eq!(
+        writer
+            .apply(delivery(CREDENTIAL, 2, placeholder.as_str(), EXPIRES), T0)
+            .unwrap(),
+        ClaudeLoginSync::Written
+    );
+    assert_eq!(
+        fixture.json()[CLAUDE_LOGIN_KEY]["accessToken"],
+        placeholder.as_str()
+    );
+
+    fixture.store(&json!({ "claudeAiOauth": users_login() }));
+    assert_eq!(
+        writer.apply(first(), T0).unwrap(),
+        ClaudeLoginSync::NotPlaceholder
+    );
+    assert_eq!(fixture.json(), json!({ "claudeAiOauth": users_login() }));
+}
+
+/// A boot that intercepts clears Codewire's login before any workload
+/// starts, even in the sign-in form, so a real token from a boot without
+/// interception never stays on the disk beside the front door (#3999).
+#[test]
+fn an_intercepting_boot_clears_codewires_login_before_the_workload() {
+    let sign_in = ManagedCredentialClients::from_profile_slots(["anthropic"])
+        .unwrap()
+        .with_anthropic_sign_in()
+        .unwrap();
+    let fixture = Fixture::new();
+    fixture.store(&unrelated());
+    fixture.writer().apply(first(), T0).unwrap();
+    let home = ClaudeHome::new(fixture.home(), Path::new("/workspace"));
+    home.prepare(sign_in, true);
+    assert_eq!(fixture.json(), unrelated());
+    // The user's own login stays.
+    fixture.store(&json!({ "claudeAiOauth": users_login() }));
+    home.prepare(sign_in, true);
+    assert_eq!(fixture.json(), json!({ "claudeAiOauth": users_login() }));
+}
+
 #[test]
 fn deselection_removes_only_codewires_login() {
     let clients = |slots: &[&str]| {
@@ -846,28 +916,32 @@ fn deselection_removes_only_codewires_login() {
     fixture.writer().apply(first(), T0).unwrap();
     let home = ClaudeHome::new(fixture.home(), Path::new("/workspace"));
     // Selected in its sign-in form: kept.
-    home.prepare(clients(&["anthropic"]).with_anthropic_sign_in().unwrap());
+    home.prepare(
+        clients(&["anthropic"]).with_anthropic_sign_in().unwrap(),
+        false,
+    );
     assert_eq!(fixture.json()[CLAUDE_LOGIN_KEY]["accessToken"], ACCESS);
     // Any other form, or not selected: Codewire's login goes, the rest stays.
     home.prepare(
         clients(&["anthropic"])
             .with_anthropic_subscription_token()
             .unwrap(),
+        false,
     );
     assert_eq!(fixture.json(), unrelated());
     fixture
         .writer_for(&fixture.root.path().join("other-tmp"), 8)
         .apply(first(), T0)
         .unwrap();
-    home.prepare(clients(&["codex"]));
+    home.prepare(clients(&["codex"]), false);
     assert_eq!(fixture.json(), unrelated());
     // The user's own login is never removed.
     fixture.store(&json!({ "claudeAiOauth": users_login() }));
-    home.prepare(clients(&[]));
+    home.prepare(clients(&[]), false);
     assert_eq!(fixture.json(), json!({ "claudeAiOauth": users_login() }));
     // An absent `~/.claude` is not created.
     let empty = Fixture::new();
-    ClaudeHome::new(empty.home(), Path::new("/workspace")).prepare(clients(&[]));
+    ClaudeHome::new(empty.home(), Path::new("/workspace")).prepare(clients(&[]), false);
     assert!(!empty.config().exists());
     assert_eq!(
         ClaudeHome::new(empty.home(), Path::new("/workspace")).credentials_path(),

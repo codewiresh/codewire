@@ -96,6 +96,10 @@ pub enum ClaudeLoginSync {
     LowerGeneration,
     /// The delivered access token had already expired. Nothing was written.
     Invalid,
+    /// This boot intercepts its agent hosts and the delivered access token is
+    /// not a placeholder (#3999). Codewire's login is removed and nothing is
+    /// written, so no real token reaches the disk beside the front door.
+    NotPlaceholder,
     /// The broker denied delivery: Codewire's `claudeAiOauth` is removed.
     Denied,
     /// No delivery this time (no epoch, or the broker was unavailable).
@@ -143,6 +147,9 @@ pub struct ClaudeLoginWriter {
     /// Unix seconds since when no login has been delivered; `None` right
     /// after a delivery or a denial.
     failing_since: Option<u64>,
+    /// The boot intercepts its agent hosts: only a placeholder access token
+    /// is ever written (#3999).
+    intercepting: bool,
 }
 
 impl ClaudeLoginWriter {
@@ -160,7 +167,16 @@ impl ClaudeLoginWriter {
             owner: None,
             state: LoginState::load(state_directory.into(), generation, "claude"),
             failing_since: Some(now_unix),
+            intercepting: false,
         }
+    }
+
+    /// This writer, for a boot whose agent hosts the front door intercepts:
+    /// it writes a delivered login only when its access token is a
+    /// placeholder, and otherwise removes Codewire's login (#3999).
+    pub fn intercepting(mut self) -> Self {
+        self.intercepting = true;
+        self
     }
 
     /// This writer, keeping `~/.claude` on `owner`'s behalf: a local VM's
@@ -234,6 +250,16 @@ impl ClaudeLoginWriter {
             return Ok(ClaudeLoginSync::Invalid);
         }
         self.failing_since = None;
+        if self.intercepting
+            && !codewire_access::CredentialPlaceholder::looks_like(login.access_token())
+        {
+            if let Some(config) = open_config(&self.home, false, self.owner)?
+                && remove(&config, |_| true)? == Removal::Removed
+            {
+                self.state.forget_written();
+            }
+            return Ok(ClaudeLoginSync::NotPlaceholder);
+        }
         if self.state.is_logged_out(&binding.credential_id) {
             return Ok(ClaudeLoginSync::LoggedOut);
         }
@@ -635,6 +661,9 @@ pub(crate) fn login_writer(
     );
     if let Some(owner) = owner {
         writer = writer.for_owner(owner);
+    }
+    if config.interception.is_some() {
+        writer = writer.intercepting();
     }
     if let Err(error) = writer.remove_leftovers() {
         tracing::warn!(error_kind = ?error.kind(), "Claude login leftovers could not be removed");

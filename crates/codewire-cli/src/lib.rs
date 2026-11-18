@@ -3,6 +3,7 @@
 
 mod build_record;
 mod command_line;
+use command_line::requested_json_output;
 pub mod config;
 mod console_client;
 mod credit_refusal;
@@ -1118,19 +1119,6 @@ where
     update::notice::report(&command, &matches, result, json)
 }
 
-/// Whether the invoked command, at any depth, asked for `--output json`.
-fn requested_json_output(matches: &clap::ArgMatches) -> bool {
-    std::iter::successors(Some(matches), |matches| {
-        matches.subcommand().map(|(_, matches)| matches)
-    })
-    .any(|matches| {
-        matches!(
-            matches.try_get_one::<OutputFormat>("output"),
-            Ok(Some(OutputFormat::Json))
-        )
-    })
-}
-
 /// `--local` / `--cloud` reach every command through the one global pair.
 /// A command that does not read a placement refuses it before any effect,
 /// so an explicit placement is never ignored or reinterpreted.
@@ -1426,7 +1414,10 @@ async fn serve_hosted_daemon(
     // Sandbox.
     #[cfg(target_os = "linux")]
     codewire_daemon::claude_home::ClaudeHome::new(&config.home_root, &config.workspace_root)
-        .prepare(config.managed_credential_clients);
+        .prepare(
+            config.managed_credential_clients,
+            config.interception.is_some(),
+        );
     // Stock `gh` reaches the GitHub API route only through this daemon's Unix
     // ingress socket. While the GitHub client is selected, sessions are given
     // Codewire's own `gh` configuration directory; its one file is written

@@ -619,7 +619,6 @@ pub(crate) mod tests {
         "scopes_outside_sign_in",
         "front_door_not_paired",
         "no_placeholder_beside_front_door",
-        "no_placeholder_form_beside_front_door",
         "hit",
         "miss",
         "bypass",

@@ -131,10 +131,9 @@ pub const AGENT_LOGIN_REFUSAL_REASONS: &[&str] = &[
     "deadline_passed_before_seal",
     "scopes_outside_sign_in",
     // Beside an environment's front door (#3999): it is not paired, or the
-    // agent's login has no placeholder form to deliver.
+    // agent's login has no placeholder to deliver.
     "front_door_not_paired",
     "no_placeholder_beside_front_door",
-    "no_placeholder_form_beside_front_door",
 ];
 /// One line per reason and child at most this often: the guest asks for a
 /// login every two minutes, so a lasting refusal would otherwise repeat.
@@ -442,7 +441,7 @@ mod tests {
         for (agent, reason) in [
             ("codex", "front_door_not_paired"),
             ("codex", "no_placeholder_beside_front_door"),
-            ("claude", "no_placeholder_form_beside_front_door"),
+            ("claude", "no_placeholder_beside_front_door"),
         ] {
             assert_eq!(
                 line(&format!(

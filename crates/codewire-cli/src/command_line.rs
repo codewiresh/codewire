@@ -17,6 +17,7 @@
 use std::ffi::OsString;
 use std::sync::{Mutex, PoisonError};
 
+use crate::OutputFormat;
 use clap::CommandFactory as _;
 
 /// Subcommands whose first plain word starts the command.
@@ -278,6 +279,19 @@ impl Options {
             .find(|(short, _)| *short == name)
             .map(|(_, takes)| *takes)
     }
+}
+
+/// Whether the invoked command, at any depth, asked for `--output json`.
+pub(super) fn requested_json_output(matches: &clap::ArgMatches) -> bool {
+    std::iter::successors(Some(matches), |matches| {
+        matches.subcommand().map(|(_, matches)| matches)
+    })
+    .any(|matches| {
+        matches!(
+            matches.try_get_one::<OutputFormat>("output"),
+            Ok(Some(OutputFormat::Json))
+        )
+    })
 }
 
 #[cfg(test)]

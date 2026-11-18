@@ -206,9 +206,10 @@ impl RouteTable {
     /// With an API key, a subscription token or no Anthropic client, Claude's
     /// token host is never bound, and without a GitHub connection neither
     /// GitHub host is, so the environment reaches them exactly as it would
-    /// without a front door. A boot binds these hosts and no others once the
-    /// boot chain calls this (#4809); until then neither the token host nor
-    /// a GitHub host is ever bound (#3999).
+    /// without a front door. A local boot binds these hosts and no others,
+    /// without GitHub's until a placeholder outside GitHub's route is refused
+    /// there (#5087), so a local boot binds the token host for a Claude
+    /// sign-in and never a GitHub host yet (#3999).
     pub fn for_clients(clients: ManagedCredentialClients) -> Self {
         Self::with_optional_hosts(
             clients.anthropic_sign_in(),

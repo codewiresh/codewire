@@ -31,6 +31,27 @@ pub fn clear_codex_login(home: &CodexHome) -> io::Result<()> {
     }
 }
 
+/// On a boot that intercepts its agent hosts, remove Codewire's Codex login
+/// before any writer or workload starts: one kept from a boot without
+/// interception may hold the real tokens, and beside the front door only a
+/// placeholder may be on the disk (#3999). Claude's goes in
+/// [`ClaudeHome::prepare`]. A failure is an error under a fixed name, since
+/// the login left behind may hold the real token; the writer refuses any real
+/// login, and its next placeholder delivery replaces it if it can write there.
+pub fn clear_codex_login_when_intercepting(home: &CodexHome, intercepted: bool) {
+    if !intercepted {
+        return;
+    }
+    if let Err(error) = clear_codex_login(home) {
+        tracing::error!(
+            error_kind = ?error.kind(),
+            outcome = "intercepted_login_not_cleared",
+            agent = "codex",
+            "Codex login could not be cleared on an intercepting boot"
+        );
+    }
+}
+
 /// Remove Codewire's Claude Code login from `home`. A failure is logged and
 /// returned.
 pub fn clear_claude_login(home: &ClaudeHome) -> io::Result<()> {

@@ -200,11 +200,14 @@ impl ClaudeHome {
         })
     }
 
-    /// [`Self::sync`] before the daemon listens, and, unless the sign-in
-    /// form is selected, removal of Codewire's Claude login. A failure is
-    /// logged and never stops the daemon: without the keys Claude Code only
-    /// shows its login picker once.
-    pub fn prepare(&self, clients: ManagedCredentialClients) {
+    /// [`Self::sync`] before the daemon listens, and removal of Codewire's
+    /// Claude login unless the sign-in form is selected, or always when the
+    /// boot `intercepted` its agent hosts: a login kept from a boot without
+    /// interception may hold the real access token, and nothing but a
+    /// placeholder may stay on the disk beside the front door until the
+    /// writer delivers one (#3999). A failure is logged and never stops the
+    /// daemon: without the keys Claude Code only shows its login picker once.
+    pub fn prepare(&self, clients: ManagedCredentialClients, intercepted: bool) {
         match self.sync(clients) {
             Ok(outcome) => {
                 tracing::info!(claude_onboarding = ?outcome, "Claude Code onboarding prepared");
@@ -214,11 +217,21 @@ impl ClaudeHome {
                 "Claude Code home unavailable; onboarding was not marked"
             ),
         }
-        if !clients.anthropic_sign_in() {
+        if !clients.anthropic_sign_in() || intercepted {
             match self.remove_codewire_login() {
                 Ok(removal) => {
                     tracing::info!(claude_login = ?removal, "Claude login cleared");
                 }
+                // Beside the front door the login it failed to remove may hold
+                // the real token, so that is an error under a fixed name; the
+                // writer's next placeholder delivery replaces it if it can
+                // write there (#3999).
+                Err(error) if intercepted => tracing::error!(
+                    error_kind = ?error.kind(),
+                    outcome = "intercepted_login_not_cleared",
+                    agent = "claude",
+                    "Claude login could not be cleared on an intercepting boot"
+                ),
                 Err(error) => tracing::warn!(
                     error_kind = ?error.kind(),
                     "Claude login could not be cleared"
@@ -930,6 +943,6 @@ mod tests {
         );
         assert!(!home.root().exists(), "the home is never created");
         // The daemon logs it and keeps starting.
-        home.prepare(clients(&["anthropic"]));
+        home.prepare(clients(&["anthropic"]), false);
     }
 }

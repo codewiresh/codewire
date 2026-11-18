@@ -100,6 +100,7 @@ mod stage_log;
 mod start_error;
 use start_error::guest_failure_detail;
 mod start_request;
+use start_request::daemon_ready_timeout;
 
 use exit_cause::runner_exit_error_code;
 use stage_log::guest_stage_name;
@@ -1089,7 +1090,10 @@ impl EnvironmentRunnerService for RunnerRpc {
                 cw_runtime_catalog_generation,
                 cw_runtime_moved_from_generation,
                 network_policy,
-                intercepts: crate::runner::boot_intercepts(request.intercept),
+                intercepts: crate::runner::boot_intercepts(
+                    request.intercept,
+                    managed_credential_clients,
+                ),
                 credential_placeholders: crate::runner::boot_placeholders(
                     request.intercept,
                     request.credential_placeholders,
@@ -1693,14 +1697,6 @@ fn map_grow_error(error: RunnerError) -> Status {
             Status::invalid_argument(error.to_string())
         }
         _ => Status::failed_precondition(error.to_string()),
-    }
-}
-
-fn daemon_ready_timeout(has_setup: bool) -> std::time::Duration {
-    if has_setup {
-        SETUP_DAEMON_READY_TIMEOUT
-    } else {
-        DAEMON_READY_TIMEOUT
     }
 }
 

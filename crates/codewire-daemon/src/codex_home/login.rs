@@ -92,6 +92,10 @@ pub enum CodexLoginSync {
     LowerGeneration,
     /// The delivered ID token is not a JWT Codex can read. Nothing was written.
     Invalid,
+    /// This boot intercepts its agent hosts and the delivered access token is
+    /// not a placeholder (#3999). Codewire's `auth.json` is removed and its
+    /// proxy `config.toml` is back, as on a denial; nothing is written.
+    NotPlaceholder,
     /// The broker denied delivery: Codewire's `auth.json` is removed and its
     /// proxy `config.toml` is back.
     Denied,
@@ -139,9 +143,20 @@ pub struct CodexLoginWriter {
     /// Unix seconds since when no login has been delivered; `None` right
     /// after a delivery or a denial.
     failing_since: Option<u64>,
+    /// The boot intercepts its agent hosts: only a placeholder access token
+    /// is ever written (#3999).
+    intercepting: bool,
 }
 
 impl CodexLoginWriter {
+    /// This writer, for a boot whose agent hosts the front door intercepts:
+    /// it writes a delivered login only when its access token is a
+    /// placeholder, and otherwise withdraws Codewire's login (#3999).
+    pub fn intercepting(mut self) -> Self {
+        self.intercepting = true;
+        self
+    }
+
     /// A writer for `home` that keeps `config`'s `config.toml` there: its
     /// proxy configuration whenever no login is delivered, its provider-free
     /// one while a login is. Its logout and last-write records live in
@@ -160,6 +175,7 @@ impl CodexLoginWriter {
             proxy_config: config.into_config_toml(),
             state: LoginState::load(state_directory.into(), generation, "codex"),
             failing_since: Some(now_unix),
+            intercepting: false,
         }
     }
 
@@ -187,6 +203,12 @@ impl CodexLoginWriter {
             return Ok(CodexLoginSync::Invalid);
         }
         self.failing_since = None;
+        if self.intercepting
+            && !codewire_access::CredentialPlaceholder::looks_like(login.access_token())
+        {
+            self.withdraw()?;
+            return Ok(CodexLoginSync::NotPlaceholder);
+        }
         let Some(home) = self.home.open_for_login(true)? else {
             return Ok(CodexLoginSync::UserOwned);
         };
@@ -645,13 +667,16 @@ pub(crate) fn login_writer(config: &crate::Config, home: CodexHome) -> Option<Co
         .managed_credential_clients
         .for_placement(placement)
         .codex?;
-    let writer = CodexLoginWriter::new(
+    let mut writer = CodexLoginWriter::new(
         home,
         projection,
         CODEX_LOGIN_STATE_DIRECTORY,
         bridge.environment_generation,
         unix_now(),
     );
+    if config.interception.is_some() {
+        writer = writer.intercepting();
+    }
     if let Err(error) = writer.remove_leftovers() {
         tracing::warn!(error_kind = ?error.kind(), "hosted Codex login leftovers could not be removed");
     }

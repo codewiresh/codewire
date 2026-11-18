@@ -250,6 +250,14 @@ pub(super) fn parse_managed_credential_clients(
         .map_err(|_| Status::invalid_argument("invalid managed credential client selection"))
 }
 
+pub(super) fn daemon_ready_timeout(has_setup: bool) -> std::time::Duration {
+    if has_setup {
+        SETUP_DAEMON_READY_TIMEOUT
+    } else {
+        DAEMON_READY_TIMEOUT
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

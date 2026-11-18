@@ -176,6 +176,9 @@ struct Recorded {
     codex_sign_in: bool,
     /// The environment whose Codex login the authority delivers, if any.
     codex_login_environment: Option<Uuid>,
+    /// The environment whose Claude sign-in login the authority delivers, if
+    /// any.
+    claude_login_environment: Option<Uuid>,
     /// Counts the leases asked for a sealed agent login.
     login_leases: Arc<AtomicUsize>,
     /// The provider's ends of the sockets its WebSocket handshakes opened.
@@ -217,6 +220,7 @@ impl Recorded {
                 refreshes: self.refreshes.clone(),
                 plan: Arc::clone(&self.plan),
                 codex_login_environment: self.codex_login_environment,
+                claude_login_environment: self.claude_login_environment,
                 login_leases: Arc::clone(&self.login_leases),
             },
             Upstream {
@@ -251,6 +255,7 @@ struct Authority {
     refreshes: Option<Arc<AtomicUsize>>,
     plan: Arc<Mutex<std::collections::VecDeque<LeasePlan>>>,
     codex_login_environment: Option<Uuid>,
+    claude_login_environment: Option<Uuid>,
     login_leases: Arc<AtomicUsize>,
 }
 
@@ -335,9 +340,28 @@ impl BrokerLeaseProvider for Authority {
         Ok(lease)
     }
 
+    /// The anthropic slot's Claude sign-in for `claude_login_environment`,
+    /// when set.
     async fn lease_claude_login(&self, _id: Uuid) -> Result<Lease, BrokerLeaseError> {
         self.login_leases.fetch_add(1, Ordering::Relaxed);
-        Err(BrokerLeaseError::Denied)
+        let Some(environment_id) = self.claude_login_environment else {
+            return Err(BrokerLeaseError::Denied);
+        };
+        let permission = codewire_access::claude_login_permission();
+        let mut lease = Lease::new(
+            "anthropic",
+            CredentialAuthKind::ClaudeSignIn,
+            "anthropic",
+            permission.operation.as_str(),
+            permission.route.as_str(),
+        );
+        lease.grant.environment_id =
+            codewire_access::EnvironmentId::parse(environment_id.to_string()).unwrap();
+        lease.material = claude_sign_in();
+        lease.placeholder = self
+            .placeholder
+            .map(|value| codewire_access::CredentialPlaceholder::parse(value).unwrap());
+        Ok(lease)
     }
 
     async fn begin_credential_refresh(
@@ -1544,6 +1568,31 @@ fn sign_in_access_token() -> String {
     jwt(serde_json::json!({ "exp": in_a_day }))
 }
 
+/// The Claude sign-in's access token, which must never leave the broker
+/// beside the front door.
+const CLAUDE_SIGN_IN_ACCESS_TOKEN: &str = "sk-ant-oat01-synthetic-sign-in-access";
+
+fn claude_sign_in() -> zeroize::Zeroizing<Vec<u8>> {
+    let imported = crate::claude_oauth::import_claude_tokens(
+        crate::claude_oauth::ClaudeIssuedTokens {
+            access_token: zeroize::Zeroizing::new(CLAUDE_SIGN_IN_ACCESS_TOKEN.to_owned()),
+            refresh_token: Some(zeroize::Zeroizing::new(
+                "sk-ant-ort01-synthetic-refresh".to_owned(),
+            )),
+            expires_in: 8 * 60 * 60,
+            refresh_token_expires_in: None,
+            scope: Some("user:inference user:profile".to_owned()),
+        },
+        crate::claude_oauth::ClaudeProfile {
+            email: Some("developer@example.test".to_owned()),
+            subscription_type: Some(crate::claude_oauth::ClaudeSubscriptionType::Max),
+            rate_limit_tier: Some("default_claude_max_20x".to_owned()),
+        },
+    )
+    .unwrap();
+    zeroize::Zeroizing::new(imported.into_parts().0.as_bytes().to_vec())
+}
+
 /// The sign-in, last refreshed eleven minutes ago, so a 401 may force a
 /// refresh of it (#4974).
 fn codex_sign_in() -> zeroize::Zeroizing<Vec<u8>> {
@@ -2022,29 +2071,67 @@ async fn a_broker_whose_front_door_is_gone_refuses_every_agent_login() {
     assert_eq!(recorded.leases(), 0);
 }
 
-/// Beside the front door the Claude login has no placeholder form until #3999
-/// change 12c, so the paired broker refuses it before any lease rather than
-/// seal the owner's real Claude sign-in.
+fn claude_login_request(
+    recipient: &codewire_workload_secrets::ProjectionRecipient,
+) -> v1::ClaudeLoginRequest {
+    v1::ClaudeLoginRequest {
+        request_id: Uuid::new_v4().to_string(),
+        recipient_public_key: recipient.public_key().to_vec(),
+        deadline_unix_ms: crate::runtime::current_unix_time_ms().unwrap()
+            + codewire_workload_secrets::MAX_CODEX_LOGIN_LIFETIME_MS,
+    }
+}
+
+/// Beside the front door the Claude login's access token is this
+/// environment's placeholder, never the sign-in's (#3999); the rest is the
+/// sign-in's own, so Claude Code shows its plan and refreshes at its expiry.
 #[tokio::test]
-async fn a_broker_beside_a_front_door_refuses_the_claude_login_before_any_lease() {
+async fn beside_the_front_door_the_claude_login_carries_the_placeholder() {
+    let environment_id = Uuid::new_v4();
     let recorded = Recorded {
         placeholder: Some(OURS),
+        claude_login_environment: Some(environment_id),
+        ..Recorded::default()
+    };
+    let broker = recorded.broker().paired_with_front_door();
+    let recipient = codewire_workload_secrets::ProjectionRecipient::new();
+    let request = claude_login_request(&recipient);
+    let sealed = broker.claude_login(request.clone()).await.unwrap();
+    let context = codewire_workload_secrets::CodexLoginContext {
+        environment_id: *environment_id.as_bytes(),
+        environment_generation: GENERATION,
+        request_id: *Uuid::parse_str(&request.request_id).unwrap().as_bytes(),
+        deadline_unix_ms: request.deadline_unix_ms,
+    };
+    let opened = recipient
+        .open_claude_login(
+            &sealed,
+            &context,
+            crate::runtime::current_unix_time_ms().unwrap(),
+        )
+        .unwrap();
+    let login = &opened.login;
+    assert_eq!(login.access_token(), OURS);
+    assert_eq!(login.subscription_type(), Some("max"));
+    assert_eq!(login.rate_limit_tier(), Some("default_claude_max_20x"));
+    assert!(login.expires_at_unix_ms() > crate::runtime::current_unix_time_ms().unwrap());
+    assert!(!login.access_token().contains(CLAUDE_SIGN_IN_ACCESS_TOKEN));
+}
+
+/// Beside the front door, a lease without a placeholder delivers no Claude
+/// login at all: never the sign-in's token in its place.
+#[tokio::test]
+async fn beside_the_front_door_a_claude_lease_without_a_placeholder_delivers_nothing() {
+    let recorded = Recorded {
+        claude_login_environment: Some(Uuid::new_v4()),
         ..Recorded::default()
     };
     let broker = recorded.broker().paired_with_front_door();
     let recipient = codewire_workload_secrets::ProjectionRecipient::new();
     assert!(matches!(
-        broker
-            .claude_login(v1::ClaudeLoginRequest {
-                request_id: Uuid::new_v4().to_string(),
-                recipient_public_key: recipient.public_key().to_vec(),
-                deadline_unix_ms: crate::runtime::current_unix_time_ms().unwrap()
-                    + codewire_workload_secrets::MAX_CODEX_LOGIN_LIFETIME_MS,
-            })
-            .await,
+        broker.claude_login(claude_login_request(&recipient)).await,
         Err(BrokerRequestError::Denied)
     ));
-    assert_eq!(recorded.login_leases.load(Ordering::Relaxed), 0);
 }
 
 mod github;

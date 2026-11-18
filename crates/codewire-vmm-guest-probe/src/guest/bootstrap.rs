@@ -348,5 +348,20 @@ pub(super) fn with_boot_selection(plan: WorkspacePlan, seed: &Seed) -> Result<Wo
     egress_trust::with_trust_environment(plan, seed.egress_ca())
 }
 
+pub(super) fn runtime_path_environment(environment: &[String], enabled: bool) -> Vec<String> {
+    let mut environment = environment.to_vec();
+    if enabled {
+        if let Some(path) = environment
+            .iter_mut()
+            .find(|value| value.starts_with("PATH="))
+        {
+            *path = format!("PATH={CW_RUNTIME_ROOT}:{}", &path[5..]);
+        } else {
+            environment.push(format!("PATH={CW_RUNTIME_ROOT}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"));
+        }
+    }
+    environment
+}
+
 #[cfg(test)]
 mod tests;

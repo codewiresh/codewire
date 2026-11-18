@@ -1136,7 +1136,7 @@ def contract_tests(producer=None, image=None):
 
     class Contracts(unittest.TestCase):
         def test_same_shell_runtime_alias_and_exact_versions_across_update(self):
-            guest = (ROOT / "crates/codewire-vmm-guest-probe/src/guest.rs").read_text()
+            guest = (ROOT / "crates/codewire-vmm-guest-probe/src/guest/bootstrap.rs").read_text()
             self.assertIn('format!("PATH={CW_RUNTIME_ROOT}:{}", &path[5..])', guest)
             for stage, version in (("a-before", "1.0.0"), ("b", "1.0.1"), ("a-after", "1.0.0")):
                 with self.subTest(stage=stage):

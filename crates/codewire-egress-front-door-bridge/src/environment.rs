@@ -95,9 +95,10 @@ impl EnvironmentFrontDoor {
         names.dedup();
         let ca = EnvironmentCa::generate(names)?;
         // Claude's token host is bound only for a Claude sign-in and
-        // GitHub's hosts only with a GitHub connection, once the boot chain
-        // builds its intercepts from `RouteTable::for_clients` (#4809); each
-        // route follows its binding. GitHub's two are bound together.
+        // GitHub's hosts only with a GitHub connection, as the boot chain
+        // builds its intercepts from `RouteTable::for_clients`; a local boot
+        // leaves GitHub's out for now (#5087). Each route follows its
+        // binding, and GitHub's two are bound together.
         let routes = RouteTable::with_optional_hosts(
             intercepts.binds(CLAUDE_TOKEN_HOST, INTERCEPT_PORT),
             GITHUB_HOSTS

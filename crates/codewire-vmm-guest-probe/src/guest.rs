@@ -63,6 +63,7 @@ use codewire_network_session::{
 };
 
 mod bootstrap;
+use bootstrap::runtime_path_environment;
 use bootstrap::with_boot_selection;
 mod egress_trust;
 mod interception;
@@ -612,9 +613,17 @@ pub async fn run_daemon() -> Result<()> {
     // As a hosted daemon does before it listens: while the Anthropic client is
     // selected, Claude Code's onboarding is marked complete and the workspace
     // trusted, so it starts on the managed credential without its login
-    // picker; unless the sign-in form is selected, Codewire's Claude login is
-    // removed. Here for the workload user.
-    claude_home.prepare(config.managed_credential_clients);
+    // picker; unless the sign-in form is selected, or whenever this boot
+    // intercepts, Codewire's Claude login is removed before the workload
+    // starts. Here for the workload user.
+    claude_home.prepare(
+        config.managed_credential_clients,
+        config.interception.is_some(),
+    );
+    codewire_daemon::login_cleanup::clear_codex_login_when_intercepting(
+        &codex_home,
+        config.interception.is_some(),
+    );
     let publisher = publisher.map(|cache| Arc::new(std::sync::Mutex::new(cache)));
     // PID 1 signals a resume from a VM checkpoint once it has reseeded and
     // the runner has written the restored boot's seed.
@@ -723,21 +732,6 @@ fn initialize_live_cw_runtime(
         moved_from.as_deref(),
     )
     .map(Some)
-}
-
-fn runtime_path_environment(environment: &[String], enabled: bool) -> Vec<String> {
-    let mut environment = environment.to_vec();
-    if enabled {
-        if let Some(path) = environment
-            .iter_mut()
-            .find(|value| value.starts_with("PATH="))
-        {
-            *path = format!("PATH={CW_RUNTIME_ROOT}:{}", &path[5..]);
-        } else {
-            environment.push(format!("PATH={CW_RUNTIME_ROOT}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"));
-        }
-    }
-    environment
 }
 
 /// Trusted guest-side end of the raw-IP seam. This process is created by PID

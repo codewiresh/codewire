@@ -318,7 +318,8 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
     // the platform broker does not serve it yet; the supervisor does not
     // intercept such a boot.
     stage.set("front_door.pair");
-    let front_door = if access.front_door_socket.is_empty() || args.platform_delegated {
+    let intercepted = !access.front_door_socket.is_empty() && !args.platform_delegated;
+    let front_door = if !intercepted {
         None
     } else {
         // Only the boot's own pairing secret pairs; never the daemon token,
@@ -435,6 +436,11 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
         Some(owner) => broker.with_github_app_authorization_owner(owner),
         None => broker,
     };
+    let broker = if refuses_agent_logins(intercepted, front_door.is_some()) {
+        broker.with_agent_logins_refused()
+    } else {
+        broker
+    };
     stage.set("bridge.run");
     match front_door {
         Some(front_door) => run_admitted_credential_bridges(broker, bridge, front_door)
@@ -444,6 +450,13 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
             .await
             .context("run guest credential bridge"),
     }
+}
+
+/// Whether a broker seals no agent login: one started with a front door it
+/// could not pair with. The guest's seed says intercepted, so the sign-in's
+/// tokens would reach agents that expect only placeholders (#3999).
+fn refuses_agent_logins(intercepted: bool, paired: bool) -> bool {
+    intercepted && !paired
 }
 
 /// A boot's secrets from the descriptor the authority passed (#3999). It is
@@ -616,6 +629,16 @@ mod tests {
         drop(writer);
         assert!(read_boot_secret_descriptor(&OwnedFd::from(reader)).is_err());
         assert!(read_boot_secrets(5).is_err());
+    }
+
+    /// Only a broker that intercepts but could not pair refuses agent logins;
+    /// paired, its logins carry placeholders, and without interception they
+    /// are delivered as before.
+    #[test]
+    fn a_broker_that_intercepts_unpaired_refuses_agent_logins() {
+        assert!(refuses_agent_logins(true, false));
+        assert!(!refuses_agent_logins(true, true));
+        assert!(!refuses_agent_logins(false, false));
     }
 
     /// A broker that finds this generation's pairing socket gone, its runner

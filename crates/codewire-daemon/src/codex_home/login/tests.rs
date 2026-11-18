@@ -558,6 +558,88 @@ fn a_logout_while_the_daemon_was_down_stays_logged_out() {
     assert!(!fixture.auth().exists());
 }
 
+/// Beside the front door only a placeholder access token is written. A real
+/// one is refused, and the login a boot without interception left behind is
+/// withdrawn with it, the proxy restored; the user's own login is never
+/// touched (#3999).
+#[test]
+fn an_intercepting_writer_writes_only_a_placeholder_access_token() {
+    let fixture = Fixture::new();
+    // A boot without interception wrote the real login.
+    fixture
+        .writer()
+        .apply(delivery(CREDENTIAL, 1, T0 + 86_400), T0)
+        .unwrap();
+    assert!(fixture.auth().exists());
+
+    let mut writer = fixture.writer().intercepting();
+    assert_eq!(
+        writer
+            .apply(delivery(CREDENTIAL, 1, T0 + 86_400), T0)
+            .unwrap(),
+        CodexLoginSync::NotPlaceholder
+    );
+    assert!(!fixture.auth().exists());
+    assert_eq!(fixture.config(), Some(proxy_config()));
+
+    let placeholder = codewire_access::CredentialPlaceholder::derive(
+        &codewire_access::PlaceholderKey::from_slice(&[9; codewire_access::PLACEHOLDER_KEY_BYTES])
+            .unwrap(),
+        &codewire_access::EnvironmentId::parse("environment-a").unwrap(),
+        GENERATION,
+        &codewire_access::CapabilitySlot::parse("codex").unwrap(),
+        &codewire_access::CredentialId::parse(CREDENTIAL).unwrap(),
+    );
+    let mut placeholder_login = opened(CREDENTIAL, 2, T0 + 86_400);
+    placeholder_login.login = CodexLogin::new(
+        Zeroizing::new(placeholder.as_str().to_owned()),
+        Zeroizing::new(placeholder_login.login.id_token().to_owned()),
+        ACCOUNT.to_owned(),
+        T0 - 60,
+    )
+    .unwrap();
+    assert_eq!(
+        writer
+            .apply(CodexLoginDelivery::Delivered(placeholder_login), T0)
+            .unwrap(),
+        CodexLoginSync::Written
+    );
+    assert_eq!(
+        fixture.auth_json()["tokens"]["access_token"],
+        placeholder.as_str()
+    );
+
+    fs::write(fixture.auth(), users_login()).unwrap();
+    assert_eq!(
+        writer
+            .apply(delivery(CREDENTIAL, 3, T0 + 86_400), T0)
+            .unwrap(),
+        CodexLoginSync::NotPlaceholder
+    );
+    assert_eq!(fs::read(fixture.auth()).unwrap(), users_login());
+}
+
+/// A boot that intercepts clears Codewire's Codex login before any writer or
+/// workload starts; one that doesn't keeps it for its writer. The user's own
+/// login is never touched (#3999).
+#[test]
+fn an_intercepting_boot_clears_codewires_codex_login_before_the_workload() {
+    use crate::login_cleanup::clear_codex_login_when_intercepting;
+    let fixture = Fixture::new();
+    fixture
+        .writer()
+        .apply(delivery(CREDENTIAL, 1, T0 + 86_400), T0)
+        .unwrap();
+    clear_codex_login_when_intercepting(&fixture.home(), false);
+    assert!(fixture.auth().exists());
+    clear_codex_login_when_intercepting(&fixture.home(), true);
+    assert!(!fixture.auth().exists());
+
+    fs::write(fixture.auth(), users_login()).unwrap();
+    clear_codex_login_when_intercepting(&fixture.home(), true);
+    assert_eq!(fs::read(fixture.auth()).unwrap(), users_login());
+}
+
 #[test]
 fn only_an_explicit_denial_removes_codewires_login_and_restores_the_proxy() {
     let fixture = Fixture::new();
