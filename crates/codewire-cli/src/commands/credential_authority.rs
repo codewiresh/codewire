@@ -241,6 +241,46 @@ pub(crate) async fn connect_local_credential_authority_preferring(
     connect_local_credential_authority().await
 }
 
+/// The local credential authority, for a command that starts a VM which
+/// needs one. An authority that is another cw's keeps serving while a local
+/// VM may run, and its brokers cannot serve a VM this cw starts: the command
+/// stops here, before it changes anything, and names the VMs to stop
+/// (`docs/dev/LINUX-LOCAL-VMS.md`, "Credentials after an upgrade"). A boot
+/// command has already replaced such an authority when no VM may run.
+pub(crate) async fn connect_local_credential_authority_for_boot()
+-> anyhow::Result<LocalCredentialClient> {
+    let client = connect_local_credential_authority().await?;
+    if !client.is_another_cws(codewire_local_vmm::runner_service::NATIVE_RUNNER_PROTOCOL_VERSION) {
+        return Ok(client);
+    }
+    drop(client);
+    let config = super::native_runtime_config()?;
+    let mut supervisor =
+        codewire_local_vmm::supervisor::NativeSupervisorClient::connect_or_start(&config)
+            .await
+            .context("ask the local VM supervisor which VMs run")?;
+    let running = codewire_local_vmm::supervisor_upgrade::vms_that_may_run(&mut supervisor)
+        .await
+        .map_err(anyhow::Error::from)?;
+    Err(another_cws_authority_refusal(&running))
+}
+
+/// What a user reads when a VM would start with credentials that another
+/// cw's credential authority keeps: which VMs keep it serving, and the
+/// command that stops one.
+fn another_cws_authority_refusal(running: &[String]) -> anyhow::Error {
+    if running.is_empty() {
+        // The VM that kept it serving stopped between the two looks.
+        return anyhow::anyhow!(
+            "your local credentials are still kept by the cw you updated from, which can't give a VM started by this cw its credentials; no local VM runs any more, so run this again"
+        );
+    }
+    anyhow::anyhow!(
+        "your local VMs {} keep your local credentials with the cw you updated from, which can't give a VM started by this cw its credentials; it switches to this cw once they stop (`cw --local stop NAME`)",
+        running.join(", ")
+    )
+}
+
 /// Replace a running authority that is another cw's, so the VM a boot command
 /// starts gets this cw's: an older one (#2850's platform GitHub question
 /// needs protocol 16), or one whose brokers accept another runner protocol
@@ -805,6 +845,22 @@ mod tests {
 
     use super::super::LOCAL_CREDENTIAL_ROOT_ENV;
     use super::*;
+
+    /// The words of `docs/dev/LINUX-LOCAL-VMS.md`, "Credentials after an
+    /// upgrade": the VMs that keep another cw's credential service serving,
+    /// and a stop command that runs (`cw stop` takes one name).
+    #[test]
+    fn a_boot_another_cws_credential_service_cannot_serve_names_the_vms_to_stop() {
+        let refusal =
+            another_cws_authority_refusal(&["dev".to_owned(), "web".to_owned()]).to_string();
+        assert_eq!(
+            refusal,
+            "your local VMs dev, web keep your local credentials with the cw you updated from, which can't give a VM started by this cw its credentials; it switches to this cw once they stop (`cw --local stop NAME`)"
+        );
+        let raced = another_cws_authority_refusal(&[]).to_string();
+        assert!(raced.ends_with("run this again"), "{raced}");
+        assert!(!raced.contains("cw --local stop"), "{raced}");
+    }
 
     fn runtime_config() -> AuthorityRuntimeConfig {
         AuthorityRuntimeConfig {

@@ -623,7 +623,7 @@ pub(crate) async fn create_native_environment(
     )?;
     let mut credentials = connect_native_credential_authority_if_required(
         native_project_requires_credential_authority(&project.spec),
-        connect_local_credential_authority,
+        connect_local_credential_authority_for_boot,
     )
     .await?;
     let selected = sources::resolve_requested_sources(
@@ -870,7 +870,7 @@ async fn create_from_snapshot(globals: &Globals, args: EnvCreateArgs) -> anyhow:
     // only names, resolved here under this host's current sign-ins.
     let mut credentials = connect_native_credential_authority_if_required(
         native_project_requires_credential_authority(&spec),
-        connect_local_credential_authority,
+        connect_local_credential_authority_for_boot,
     )
     .await?;
     let selected = sources::resolve_requested_sources(
@@ -1592,7 +1592,7 @@ pub(crate) async fn handle_native_environment_update(
     let mut credentials = connect_native_credential_authority_if_required(
         native_project_requires_credential_authority(&current)
             || native_project_requires_credential_authority(&target),
-        connect_local_credential_authority,
+        connect_local_credential_authority_for_boot,
     )
     .await?;
     let env = OsEnv;
@@ -1894,7 +1894,7 @@ async fn prepare_native_start(
     name: &str,
 ) -> anyhow::Result<v1::Environment> {
     ensure_pinned_runtime().await?;
-    get_native_environment_with_required_authority(client, name).await
+    lifecycle::environment_for_boot(client, name).await
 }
 
 /// Starts a local VM again after `cw upgrade` moved it to this cw.
@@ -1917,7 +1917,7 @@ pub(crate) async fn refresh_native_environment_skills(
     name: &str,
 ) -> anyhow::Result<v1::Environment> {
     let mut client = native_boot_client().await?;
-    get_native_environment_with_required_authority(&mut client, name).await?;
+    lifecycle::environment_for_boot(&mut client, name).await?;
     client.refresh_skills(name).await.map_err(native_status)
 }
 
@@ -1928,7 +1928,7 @@ pub(crate) async fn resize_native_environment(
     disk_bytes: u64,
 ) -> anyhow::Result<v1::Environment> {
     let mut client = native_boot_client().await?;
-    get_native_environment_with_required_authority(&mut client, name).await?;
+    lifecycle::environment_for_boot(&mut client, name).await?;
     client
         .resize(name, vcpus, memory_mib, disk_bytes)
         .await

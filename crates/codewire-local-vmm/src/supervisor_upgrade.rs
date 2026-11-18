@@ -425,6 +425,17 @@ pub async fn release_for_older_cw(
     Ok(OlderCwRelease::Nothing)
 }
 
+/// The VMs `client`'s supervisor lists that may still run. Each keeps the
+/// credential authority that started its broker serving, so they are the ones
+/// to stop before another cw's authority can be replaced.
+pub async fn vms_that_may_run(
+    client: &mut NativeSupervisorClient,
+) -> Result<Vec<String>, TakeoverError> {
+    running_vms(client)
+        .await
+        .map_err(|reason| failed(client, reason))
+}
+
 async fn running_vms(client: &mut NativeSupervisorClient) -> Result<Vec<String>, String> {
     let environments = tokio::time::timeout(LIST_DEADLINE, client.list())
         .await

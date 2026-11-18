@@ -267,6 +267,21 @@ fn with_state(head: &str, error: &anyhow::Error, after: &str) -> anyhow::Error {
     }
 }
 
+/// The environment `name`, for a command that boots it. Where it has a
+/// credential profile or secrets, the credential authority must be one whose
+/// brokers serve a VM this cw starts: the command is refused here, before it
+/// stops or starts anything, while another cw's must keep serving (#5238).
+pub(super) async fn environment_for_boot(
+    client: &mut NativeSupervisorClient,
+    name: &str,
+) -> anyhow::Result<v1::Environment> {
+    let environment = get_native_environment_with_required_authority(client, name).await?;
+    if environment.requires_credential_authority {
+        drop(connect_local_credential_authority_for_boot().await?);
+    }
+    Ok(environment)
+}
+
 /// `cw start` on a local environment.
 pub(crate) async fn start_native_environment(
     globals: &Globals,
@@ -427,7 +442,7 @@ pub(crate) async fn restart_native_environment(
     let caps = crate::commands::lifecycle_output::capabilities(output);
     let mut client = native_boot_client().await?;
     ensure_pinned_runtime().await?;
-    let environment = get_native_environment_with_required_authority(&mut client, name).await?;
+    let environment = environment_for_boot(&mut client, name).await?;
     let secrets = if caps.is_machine() {
         SourceRef::None
     } else {

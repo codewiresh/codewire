@@ -79,7 +79,7 @@ installed runtime (orchestrator, 2026-11-15, recorded on #4980).
   - a restart whose move can't be staged leaves the VM `running`;
   - while an environment still runs on the earlier `cw`, `cw --local
     checkpoint restore` is refused with the line a start gets, and nothing
-    is stopped or booted. Not yet observed (#5243);
+    is stopped or booted (#5243);
   - in the moved VM, `cw` is the installed runtime's (`cw run --in up-walk
     --no-tty -- cw --version`): its runtime cache was rebuilt from the
     installed bootstrap. Not yet observed;
@@ -213,6 +213,16 @@ installed runtime (orchestrator, 2026-11-15, recorded on #4980).
     disk snapshots need a Linux host for now"); v0.4.22's of a moved VM
     worked ([snapshots-and-forks.md](snapshots-and-forks.md)). Observed
     working; commands and outputs on #4370, comment 112323.
+  - Linux, released v0.4.21 to a build of `main` at 7fd4e58ee (#5258),
+    2026-11-17, in a scratch `HOME`, with no credentials. Under v0.4.21,
+    up-walk was given a VM checkpoint `before` and stopped, and up-run was
+    left running. With the build of `main`: `cw checkpoint ls` listed
+    `before`; `cw --local start up-walk` and `cw checkpoint restore before
+    --yes` were both refused with "Your local VMs up-run still run on the cw
+    you updated from; this cw starts and changes local VMs once they stop
+    (`cw --local stop NAME`)", the restore with exit status 1; up-walk was
+    still `stopped` at generation 1 and up-run `running`. Observed working
+    for the restore's refusal (#5243).
 
 ## 2. `local-vm-upgrade-credentials`: credentials across an upgrade
 
@@ -267,8 +277,9 @@ Issue: #5238. The spec is "Credentials after an upgrade" in
     VM to stop. Where the release under test also has a newer supervisor
     protocol than v0.4.21's, the supervisor's own refusal ("still run on the
     cw you updated from") comes first and names the same stop; the proof of
-    the credential check is then the code's own test of it, cited here when
-    it lands;
+    the credential check's own words is then the test
+    `a_boot_another_cws_credential_service_cannot_serve_names_the_vms_to_stop`
+    in `crates/codewire-cli/src/commands/credential_authority.rs`;
   - no start fails in the guest start for want of a credential broker. Where
     one does fail for another reason, the runner's log line carries the exit
     status of the helper that ended.
