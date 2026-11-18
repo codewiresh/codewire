@@ -297,6 +297,48 @@ a URL. `POST /api/auth/resend-verification` claims the token and sends a new
 writes `user.verification.resent` to the audit log. Nobody can ask for a link
 by typing an email address.
 
+## The operator's sign-up notice (not yet built, #5358)
+
+A server with mail can tell its operator about each new person, so an access
+request in review mode never waits unannounced (owner, 2026-11-18, #5358:
+"Yes, I would like an email notice."). `CODEWIRE_OPERATOR_EMAIL` names one
+address. Unset or empty, the default for a self-hosted server, sends nothing.
+A value that isn't one email address stops the IdP at startup, as
+`CODEWIRE_SUPPORT_EMAIL` does for the dashboard.
+
+- **When.** Once per person, at the moment the account first becomes real:
+  - an email sign-up, when its address is verified for the first time. In
+    review mode with no code, that is an access request waiting for review;
+    otherwise the account can now sign in. Before verification nothing is
+    sent, so an address nobody owns, which the purge deletes after 7 days,
+    never reaches the operator.
+  - a GitHub or Google sign-up, when the account is created (the provider
+    verified the address): an access request in review mode, otherwise a
+    sign-up that has signed in.
+
+  Nothing is sent for an account setup or an admin creates, a vouched
+  account that verifies later (#4121), a second verification of an address
+  already verified, or an admin enabling an account.
+- **What.** The subject is "Codewire: access request from <address>" or
+  "Codewire: new sign-up, <address>". The body gives the address, how the
+  person signed up (email, GitHub or Google), the time in UTC, whether they
+  wait for review, and a link to Admin → Manage account access
+  (`<frontend>/admin/accounts/`). Nothing else: not the reason, the name or
+  the client address, which the person wrote or the operator doesn't need
+  in an inbox, and no token of any kind. The address is escaped in the HTML
+  body, and a subject is cut at its first control character.
+- **How many.** The notices share one site-wide limit, `operator_notice`,
+  10 an hour, counted in the shared `rate_limit` table like the sign-up
+  limits, so every IdP replica counts against the same 10. The 11th in an
+  hour sends one notice instead, "Codewire: more people are waiting". It gives
+  the number of accounts waiting for review at that moment, when notices
+  start again, and the same link. Past the 11th, nothing is sent until the
+  hour ends. An admin can change the count like the other limits.
+- **Never in the way.** The notice is sent after the sign-up or the
+  verification has committed and its response is decided, in its own task.
+  A failed send, a full limit or a database error is logged and changes
+  nothing for the person signing up.
+
 ## Account deletion by an admin or the purge
 
 An account is deleted only through the account deletion that Settings

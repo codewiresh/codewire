@@ -81,27 +81,44 @@ Issue: #4481.
 ## `signup-email-review`: email and password, waiting for review
 
 Issue: #4481, and #3297 item 8 (the access review is Production's gate).
+The operator's notice is #5358, not yet built; its rules are in AUTH-POLICY's
+"The operator's sign-up notice".
 
 - **Entry points:** the sign-up page; the sign-in page; the admin accounts
-  page, where an admin enables an account.
+  page, where an admin enables an account; the operator's inbox.
 - **States to exercise:**
   - no invite code, or a wrong one: the sign-up is an access request and asks
     what the person wants to build;
   - sign-in before verification, after verification but before review, and
-    after an admin enables the account.
+    after an admin enables the account;
+  - `CODEWIRE_OPERATOR_EMAIL` set to an inbox the walker reads, and unset;
+  - more than 10 access requests in an hour: the 11th sends one "more people
+    are waiting" notice, and the rest send none.
 - **Driving it:**
   1. Sign up with no invite code. The page reads **Verify your email**: once
      verified, the person is on the list.
   2. Sign in before opening the link: "Check your email to verify your
      address." with the resend button.
-  3. Open the link. The page reads **You're on the list**.
+  3. Open the link. The page reads **You're on the list**. The operator's
+     inbox gets "Codewire: access request from <address>".
   4. Sign in: "You're on the list." and no session.
   5. An admin enables the account on the admin accounts page. Sign in: it
      continues to two-factor setup.
-- **Proof:** no session cookie until step 5.
-- **Gotchas:** sign-in checks the password first, so only the right password
-  learns why it was refused; a wrong one gets the same answer as an unknown
-  address.
+- **Proof:**
+  - no session cookie until step 5;
+  - with the operator address set, exactly one notice arrives, after step 3
+    and not after step 1. It names the address, "email", the time and that
+    the person waits for review, and links to Admin → Manage account access.
+    It holds no reason, name, client address or token. Step 5 sends no
+    second notice. With the address unset, nothing is sent and the sign-up
+    reads the same.
+- **Gotchas:**
+  - sign-in checks the password first, so only the right password learns why
+    it was refused; a wrong one gets the same answer as an unknown address;
+  - a GitHub or Google access request notifies at sign-up, not at a
+    verification, because the provider verified the address;
+  - the notice limit is site-wide, so other sign-ups in the same hour count
+    against the walker's.
 - **Observed:** not yet observed.
 
 ## `signup-unverified-stranger`: a sign-up at someone else's address
