@@ -59,7 +59,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         )
 
     cargo_declarations = {
-        "crates/codewire/Cargo.toml": "workspace",
+        "crates/codewire/Cargo.toml": "MIT",
         "crates/codewire-access/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-admin-proto/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-billing/Cargo.toml": "AGPL-3.0-only",

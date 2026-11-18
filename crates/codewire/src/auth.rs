@@ -40,13 +40,6 @@ impl BearerToken {
         &self.0
     }
 
-    /// Takes the raw token back out, for `codewire-client`'s OAuth token
-    /// set, which stores validated tokens as plain strings.
-    #[doc(hidden)]
-    pub fn into_secret(self) -> String {
-        self.0
-    }
-
     pub(crate) fn authorization_header(&self) -> String {
         format!("Bearer {}", self.0)
     }

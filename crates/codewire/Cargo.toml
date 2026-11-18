@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-license.workspace = true
+license = "MIT"
 description = "The Codewire Rust SDK: an ergonomic client for the public codewire.v1 API over Codewire's generated Connect-RPC stubs."
 # Publishing, the MIT license and the crate's own version come with the
 # release job (codewire#3511, private-docs: designs/2026-11-16-rust-sdk.md).

@@ -289,8 +289,8 @@ impl OAuthCredentials {
                 "OAuth client id must not be empty",
             ));
         }
-        let access_token = BearerToken::new(access_token)?.into_secret();
-        let refresh_token = BearerToken::new(refresh_token)?.into_secret();
+        let access_token = BearerToken::new(access_token)?.expose_secret().to_owned();
+        let refresh_token = BearerToken::new(refresh_token)?.expose_secret().to_owned();
         Ok(Self {
             issuer,
             client_id,
@@ -313,7 +313,9 @@ impl OAuthCredentials {
                 "OAuth token response did not use Bearer authentication",
             ));
         }
-        let access_token = BearerToken::new(response.access_token)?.into_secret();
+        let access_token = BearerToken::new(response.access_token)?
+            .expose_secret()
+            .to_owned();
         let refresh_token = response
             .refresh_token
             .or_else(|| previous_refresh_token.map(ToOwned::to_owned))

@@ -1,11 +1,33 @@
 //! The Codewire Rust SDK: an ergonomic client over Codewire's generated
 //! Connect-RPC stubs for the public `codewire.v1` API (codewire#3511).
 //!
-//! This crate owns connection configuration, bearer-token provisioning, and
-//! typed error decoding. Product consumers use it instead of constructing raw
-//! generated clients or formatting platform route strings themselves. The
-//! CLI's own layer (sign-in, tailnet, hosted shell) is `codewire-client`,
-//! which builds on this crate.
+//! ```no_run
+//! use codewire::{Codewire, CreateEnvironmentRequest, ExecRequest};
+//!
+//! # async fn quickstart() -> Result<(), codewire::ClientError> {
+//! // CODEWIRE_API_KEY and CODEWIRE_ORG_ID
+//! let codewire = Codewire::from_env()?;
+//! let mut environment = codewire
+//!     .create_environment(CreateEnvironmentRequest::default())
+//!     .await?;
+//! environment.wait_ready().await?;
+//! let output = environment
+//!     .exec(ExecRequest {
+//!         command: vec!["uname".into(), "-a".into()],
+//!         ..Default::default()
+//!     })
+//!     .await?;
+//! print!("{}", String::from_utf8_lossy(&output.stdout));
+//! environment.delete().await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! [`Codewire`] and [`EnvironmentHandle`] fill in the organization and
+//! environment IDs; [`CodewireClient`] has every `codewire.v1` call, taking
+//! and returning the generated messages. This crate owns connection
+//! configuration, bearer tokens and typed errors. The CLI's own layer
+//! (sign-in, tailnet, hosted shell) is `codewire-client`, which builds on it.
 
 mod access_profiles;
 mod auth;
@@ -18,6 +40,7 @@ pub mod hosts;
 mod mesh;
 mod network_policies;
 pub mod platform_agents;
+mod sdk;
 mod transport_error;
 
 use std::sync::Arc;
@@ -177,6 +200,7 @@ pub use error::{ClientError, ErrorInfo, ValidationError};
 pub use feedback::{
     FeedbackClient, FeedbackPlacement, SubmitFeedbackRequest, SubmitFeedbackResponse,
 };
+pub use sdk::{CODEWIRE_API_KEY_ENV, CODEWIRE_ORG_ID_ENV, Codewire, EnvironmentHandle};
 /// The one Rust client core consumed by the CLI and future native bindings.
 #[derive(Clone)]
 pub struct CodewireClient {
