@@ -3,9 +3,11 @@
 //! table.
 
 use crate::control::v1;
+use crate::diagnostic_log::LogField;
 use crate::egress_broker::EgressBrokerStartupFailure;
 use crate::mesh_process::MeshTransportStartupFailure;
 use crate::network_worker::NetworkWorkerStartupFailure;
+use crate::process_end::ProcessEnd;
 use crate::runner::ExitClass;
 
 /// The error code an exit puts the runner in.
@@ -23,35 +25,35 @@ pub(super) fn runner_exit_error_code(exit: ExitClass) -> Option<&'static str> {
     }
 }
 
-/// A process exit that put the runner in error: the code it gave, its exit
-/// status (`None` when a signal ended it) and that status's name.
+/// A process exit that put the runner in error: the code it gave, how the
+/// process ended and its exit status's name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ObservedExit {
     pub(super) code: &'static str,
-    status: Option<i32>,
+    end: ProcessEnd,
     reason: Option<&'static str>,
 }
 
 /// The exit `exit` reports, when it is a process that ended with a status.
 pub(super) fn observed_exit(exit: ExitClass) -> Option<ObservedExit> {
     let code = runner_exit_error_code(exit)?;
-    let (status, reason) = match exit {
-        ExitClass::VmmFailure(status) | ExitClass::DirectShareFailure(status) => (status, None),
-        ExitClass::NetworkWorkerFailure(status) => (
-            status,
-            status
+    let (end, reason) = match exit {
+        ExitClass::VmmFailure(end) | ExitClass::DirectShareFailure(end) => (end, None),
+        ExitClass::NetworkWorkerFailure(end) => (
+            end,
+            end.code()
                 .and_then(NetworkWorkerStartupFailure::from_exit_code)
                 .map(NetworkWorkerStartupFailure::runner_error_code),
         ),
-        ExitClass::EgressBrokerFailure(status) => (
-            status,
-            status
+        ExitClass::EgressBrokerFailure(end) => (
+            end,
+            end.code()
                 .and_then(EgressBrokerStartupFailure::from_exit_code)
                 .map(EgressBrokerStartupFailure::runner_error_code),
         ),
-        ExitClass::MeshTransportFailure(status) => (
-            status,
-            status
+        ExitClass::MeshTransportFailure(end) => (
+            end,
+            end.code()
                 .and_then(MeshTransportStartupFailure::from_exit_code)
                 .map(MeshTransportStartupFailure::runner_error_code),
         ),
@@ -60,11 +62,7 @@ pub(super) fn observed_exit(exit: ExitClass) -> Option<ObservedExit> {
         | ExitClass::IngressForwarderFailure
         | ExitClass::MeshIngressReceiverFailure => return None,
     };
-    Some(ObservedExit {
-        code,
-        status,
-        reason,
-    })
+    Some(ObservedExit { code, end, reason })
 }
 
 impl super::RunnerState {
@@ -80,9 +78,15 @@ impl ObservedExit {
     /// As `RunnerInfo` carries it, while the runner's error code is `code`.
     pub(super) fn reported_for(self, code: Option<&'static str>) -> Option<v1::RunnerExit> {
         (code == Some(self.code)).then(|| v1::RunnerExit {
-            status: self.status,
+            status: self.end.code(),
             reason: self.reason.unwrap_or_default().to_owned(),
         })
+    }
+
+    /// As the runner's log names it: `code_72_egress_broker_protocol`,
+    /// `code_1`, `signal_9`.
+    pub(super) fn log_field(self) -> LogField<'static> {
+        LogField::Exit(self.end, self.reason)
     }
 }
 
@@ -92,7 +96,7 @@ mod tests {
 
     #[test]
     fn a_sidecar_exit_is_named_from_its_own_exit_code_table() {
-        let exit = observed_exit(ExitClass::EgressBrokerFailure(Some(72))).unwrap();
+        let exit = observed_exit(ExitClass::EgressBrokerFailure(ProcessEnd::Code(72))).unwrap();
         assert_eq!(
             exit.reported_for(Some("egress_broker_exit")),
             Some(v1::RunnerExit {
@@ -104,7 +108,8 @@ mod tests {
 
     #[test]
     fn an_unknown_status_or_a_signal_keeps_what_is_known() {
-        let unknown = observed_exit(ExitClass::NetworkWorkerFailure(Some(250))).unwrap();
+        let unknown =
+            observed_exit(ExitClass::NetworkWorkerFailure(ProcessEnd::Code(250))).unwrap();
         assert_eq!(
             unknown.reported_for(Some("network_worker_exit")).unwrap(),
             v1::RunnerExit {
@@ -112,7 +117,7 @@ mod tests {
                 reason: String::new(),
             }
         );
-        let signalled = observed_exit(ExitClass::VmmFailure(None)).unwrap();
+        let signalled = observed_exit(ExitClass::VmmFailure(ProcessEnd::Signal(9))).unwrap();
         assert_eq!(
             signalled.reported_for(Some("vmm_exit")).unwrap(),
             v1::RunnerExit {
@@ -129,7 +134,7 @@ mod tests {
         assert_eq!(observed_exit(ExitClass::StillRunning), None);
         assert_eq!(observed_exit(ExitClass::GuestShutdown), None);
         assert_eq!(observed_exit(ExitClass::IngressForwarderFailure), None);
-        let exit = observed_exit(ExitClass::MeshTransportFailure(Some(1))).unwrap();
+        let exit = observed_exit(ExitClass::MeshTransportFailure(ProcessEnd::Code(1))).unwrap();
         assert_eq!(exit.reported_for(None), None);
         assert_eq!(exit.reported_for(Some("vmm_start_failed")), None);
     }

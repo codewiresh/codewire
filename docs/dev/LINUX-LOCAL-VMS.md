@@ -500,6 +500,10 @@ a VM that this cw starts its credentials.
     the start, the runner's `vm_start_failed` line carries `helper_exit=`:
     the exit code (`code_72`) or the signal (`signal_9`), and after it the
     runner's name for a code it knows (`code_72_egress_broker_protocol`).
+    A VMM that goes takes the guest's progress stream with it, and the
+    runner usually notices the stream first: it then waits a quarter of a
+    second for the exit and reports the exit (`detail=vmm_exited`), not the
+    broken stream.
   - **Whether the broker came.** The runner records when the VM's
     credential broker connects for the generation, and every
     `vm_start_failed` line says `broker=connected`, `broker=never`, or
@@ -549,10 +553,11 @@ v0.4.21 share while their runner protocols differ: with v0.4.21 a service
 left running by v0.4.15 is never replaced, not even with every VM stopped,
 and from v0.4.22 only because that number happened to move.
 
-**Built of this:** the broker's own word. **Not yet built:** the runner's
-side, the kept log, and the restart that is not refused. Today a start that
-fails after a helper process ended records `detail=egress_broker_exited` or
-the like with no exit status, and that helper is usually not the cause: the
+**Built of this:** the broker's own word, and the helper that ended.
+**Not yet built:** whether the broker came, the cause, a helper before the
+front door, the kept log, and the restart that is not refused. Today a start
+that fails after a helper process ended records `detail=egress_broker_exited`
+or the like as its cause, and that helper is usually not the cause: the
 egress broker never waits for the credential broker, and ends only as the
 guest goes down. A failed create removes the runner's log with the VM.
 `cw --local restart` of the only VM that keeps the other cw's service is

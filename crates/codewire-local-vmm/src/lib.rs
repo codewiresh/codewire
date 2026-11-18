@@ -73,6 +73,8 @@ mod non_shipping_synthetic_oci_input_smoke;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod process_birth;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod process_end;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod process_peer;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod supervisor_client;

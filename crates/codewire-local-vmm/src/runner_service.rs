@@ -871,15 +871,7 @@ impl RunnerRpc {
             fields.push(("detail", LogField::Name(runner_error)));
         }
         if let Some(guest) = guest {
-            fields.push(("detail", LogField::Name(guest.detail)));
-            fields.push((
-                "guest_stage",
-                LogField::Name(guest.guest_stage.map_or("none", guest_stage_name)),
-            ));
-            fields.push((
-                "daemon_ready",
-                LogField::Count(u64::from(guest.daemon_ready)),
-            ));
+            guest.log_fields(&mut fields);
         }
         fields.push(("elapsed_ms", LogField::Count(elapsed_ms(started))));
         diagnostic_log::record(self.log.as_deref(), "vm_start_failed", &fields);
@@ -2020,25 +2012,46 @@ mod tests {
 
         // Install (setup) and startup (workspace) failures are guest stages;
         // readiness is the bounded wait. Each is its own closed cause.
+        use crate::process_end::ProcessEnd;
+        let ended = exit_cause::observed_exit;
         let failures = [
             (
                 guest_failure_detail(GuestBootStage::SetupFailed),
                 Some(GuestBootStage::SetupFailed),
+                None,
             ),
             (
                 guest_failure_detail(GuestBootStage::WorkspaceFailed),
                 Some(GuestBootStage::WorkspaceFailed),
+                None,
             ),
-            ("readiness_timeout", Some(GuestBootStage::RuncRunning)),
-            ("vmm_exited", None),
+            ("readiness_timeout", Some(GuestBootStage::RuncRunning), None),
+            // A process that ended is named with how it ended: by a signal,
+            // with a code its own table names, with one it does not.
+            (
+                "vmm_exited",
+                None,
+                ended(ExitClass::VmmFailure(ProcessEnd::Signal(9))),
+            ),
+            (
+                "egress_broker_exited",
+                Some(GuestBootStage::DaemonStarted),
+                ended(ExitClass::EgressBrokerFailure(ProcessEnd::Code(72))),
+            ),
+            (
+                "network_worker_exited",
+                None,
+                ended(ExitClass::NetworkWorkerFailure(ProcessEnd::Code(250))),
+            ),
         ];
-        for (detail, guest_stage) in failures {
+        for (detail, guest_stage, helper_exit) in failures {
             let failure = GuestStartFailure {
                 error_code: "guest_start_failed",
                 status: Status::unavailable(CANARY),
                 detail,
                 guest_stage,
                 daemon_ready: false,
+                helper_exit,
             };
             rpc.log_start_failure(
                 environment_id,
@@ -2062,7 +2075,10 @@ mod tests {
             "detail=guest_setup_failed guest_stage=setup_failed daemon_ready=0",
             "detail=guest_workspace_failed guest_stage=workspace_failed daemon_ready=0",
             "detail=readiness_timeout guest_stage=runc_running daemon_ready=0",
-            "detail=vmm_exited guest_stage=none daemon_ready=0",
+            "detail=vmm_exited guest_stage=none daemon_ready=0 helper_exit=signal_9",
+            "detail=egress_broker_exited guest_stage=daemon_started daemon_ready=0 \
+             helper_exit=code_72_egress_broker_protocol",
+            "detail=network_worker_exited guest_stage=none daemon_ready=0 helper_exit=code_250",
         ];
         assert_eq!(lines.len(), expected.len() + 1, "{log}");
         for (line, detail) in lines.iter().zip(expected) {
@@ -2075,12 +2091,12 @@ mod tests {
             );
         }
         assert!(
-            lines[4].contains(&format!(
+            lines[6].contains(&format!(
                 " event=vm_start_failed environment={environment_id} generation=4 \
                  error_code=vmm_start_failed elapsed_ms="
             )),
             "{}",
-            lines[4]
+            lines[6]
         );
         assert!(!log.contains(CANARY));
     }
@@ -2762,12 +2778,22 @@ mod tests {
         }
         for exit in [
             Ok(ExitClass::GuestShutdown),
-            Ok(ExitClass::VmmFailure(Some(1))),
-            Ok(ExitClass::DirectShareFailure(Some(1))),
-            Ok(ExitClass::NetworkWorkerFailure(Some(1))),
-            Ok(ExitClass::EgressBrokerFailure(Some(1))),
+            Ok(ExitClass::VmmFailure(crate::process_end::ProcessEnd::Code(
+                1,
+            ))),
+            Ok(ExitClass::DirectShareFailure(
+                crate::process_end::ProcessEnd::Code(1),
+            )),
+            Ok(ExitClass::NetworkWorkerFailure(
+                crate::process_end::ProcessEnd::Code(1),
+            )),
+            Ok(ExitClass::EgressBrokerFailure(
+                crate::process_end::ProcessEnd::Code(1),
+            )),
             Ok(ExitClass::IngressForwarderFailure),
-            Ok(ExitClass::MeshTransportFailure(Some(1))),
+            Ok(ExitClass::MeshTransportFailure(
+                crate::process_end::ProcessEnd::Code(1),
+            )),
             Ok(ExitClass::MeshIngressReceiverFailure),
             Err(RunnerError::Wait),
         ] {
@@ -3373,19 +3399,27 @@ mod tests {
             Some("guest_shutdown")
         );
         assert_eq!(
-            runner_exit_error_code(ExitClass::VmmFailure(Some(1))),
+            runner_exit_error_code(ExitClass::VmmFailure(crate::process_end::ProcessEnd::Code(
+                1
+            ))),
             Some("vmm_exit")
         );
         assert_eq!(
-            runner_exit_error_code(ExitClass::DirectShareFailure(Some(7))),
+            runner_exit_error_code(ExitClass::DirectShareFailure(
+                crate::process_end::ProcessEnd::Code(7)
+            )),
             Some("direct_share_exit")
         );
         assert_eq!(
-            runner_exit_error_code(ExitClass::NetworkWorkerFailure(Some(2))),
+            runner_exit_error_code(ExitClass::NetworkWorkerFailure(
+                crate::process_end::ProcessEnd::Code(2)
+            )),
             Some("network_worker_exit")
         );
         assert_eq!(
-            runner_exit_error_code(ExitClass::EgressBrokerFailure(Some(3))),
+            runner_exit_error_code(ExitClass::EgressBrokerFailure(
+                crate::process_end::ProcessEnd::Code(3)
+            )),
             Some("egress_broker_exit")
         );
         assert_eq!(
@@ -3393,7 +3427,9 @@ mod tests {
             Some("ingress_forwarder_exit")
         );
         assert_eq!(
-            runner_exit_error_code(ExitClass::MeshTransportFailure(Some(4))),
+            runner_exit_error_code(ExitClass::MeshTransportFailure(
+                crate::process_end::ProcessEnd::Code(4)
+            )),
             Some("mesh_transport_exit")
         );
         assert_eq!(

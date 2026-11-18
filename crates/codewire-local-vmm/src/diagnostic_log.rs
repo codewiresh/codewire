@@ -53,6 +53,9 @@ pub(crate) enum LogField<'a> {
     /// A SHA-256 digest as 64 lowercase hex digits. Anything else is written
     /// as `invalid`.
     Digest(&'a str),
+    /// How a process ended, and its exit code's name where this binary has
+    /// one: `code_72_egress_broker_protocol`, `code_1`, `signal_9`.
+    Exit(crate::process_end::ProcessEnd, Option<&'static str>),
 }
 
 /// Opens (creating 0600) the named log for a child about to be spawned, after
@@ -178,6 +181,7 @@ fn event_line(
                 (*digest).to_owned()
             }
             LogField::Digest(_) => "invalid".to_owned(),
+            LogField::Exit(end, name) => exit_token(*end, *name),
         };
         line.push_str(&format!(" {}={value}", token(key)));
     }
@@ -192,6 +196,16 @@ fn token(name: &'static str) -> &'static str {
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
     if valid { name } else { "invalid" }
+}
+
+fn exit_token(end: crate::process_end::ProcessEnd, name: Option<&'static str>) -> String {
+    use crate::process_end::ProcessEnd;
+    match (end, name) {
+        (ProcessEnd::Code(code), Some(name)) => format!("code_{code}_{}", token(name)),
+        (ProcessEnd::Code(code), None) => format!("code_{code}"),
+        (ProcessEnd::Signal(signal), _) => format!("signal_{signal}"),
+        (ProcessEnd::Unknown, _) => "unknown".to_owned(),
+    }
 }
 
 fn valid_code(code: &str) -> bool {

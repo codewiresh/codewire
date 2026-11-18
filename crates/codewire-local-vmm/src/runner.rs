@@ -1733,7 +1733,7 @@ impl RunningVm {
     pub fn try_exit(&mut self) -> Result<ExitClass, RunnerError> {
         let vmm = match self.child.try_wait() {
             Ok(Some(status)) if status.success() => Ok(ExitClass::GuestShutdown),
-            Ok(Some(status)) => Ok(ExitClass::VmmFailure(status.code())),
+            Ok(Some(status)) => Ok(ExitClass::VmmFailure(status.into())),
             Ok(None) => Ok(ExitClass::StillRunning),
             Err(_) => Err(RunnerError::Wait),
         }?;
@@ -1743,7 +1743,7 @@ impl RunningVm {
         #[cfg(target_os = "linux")]
         for share in &mut self.direct_shares {
             match share.child.try_wait() {
-                Ok(Some(status)) => return Ok(ExitClass::DirectShareFailure(status.code())),
+                Ok(Some(status)) => return Ok(ExitClass::DirectShareFailure(status.into())),
                 Ok(None) => {}
                 Err(_) => return Err(RunnerError::VirtiofsdWait),
             }
@@ -1752,14 +1752,14 @@ impl RunningVm {
             return Ok(ExitClass::StillRunning);
         };
         match worker.child.try_wait() {
-            Ok(Some(status)) => return Ok(ExitClass::NetworkWorkerFailure(status.code())),
+            Ok(Some(status)) => return Ok(ExitClass::NetworkWorkerFailure(status.into())),
             Ok(None) => {}
             Err(_) => return Err(RunnerError::NetworkWorkerWait),
         }
         if let Some(broker) = worker.broker.as_mut() {
             match broker.child.try_wait() {
                 Ok(Some(status)) => {
-                    return Ok(ExitClass::EgressBrokerFailure(status.code()));
+                    return Ok(ExitClass::EgressBrokerFailure(status.into()));
                 }
                 Ok(None) => {}
                 Err(_) => return Err(RunnerError::EgressBrokerWait),
@@ -1768,7 +1768,7 @@ impl RunningVm {
         if let Some(mesh) = worker.mesh_transport.as_mut() {
             match mesh.child.try_wait() {
                 Ok(Some(status)) => {
-                    return Ok(ExitClass::MeshTransportFailure(status.code()));
+                    return Ok(ExitClass::MeshTransportFailure(status.into()));
                 }
                 Ok(None) => {}
                 Err(_) => return Err(RunnerError::MeshProcessWait),
@@ -1805,7 +1805,7 @@ impl RunningVm {
     pub async fn wait_for_exit(&mut self, timeout: Duration) -> Result<ExitClass, RunnerError> {
         let exit = match tokio::time::timeout(timeout, self.child.wait()).await {
             Ok(Ok(status)) if status.success() => Ok(ExitClass::GuestShutdown),
-            Ok(Ok(status)) => Ok(ExitClass::VmmFailure(status.code())),
+            Ok(Ok(status)) => Ok(ExitClass::VmmFailure(status.into())),
             Ok(Err(_)) => Err(RunnerError::Wait),
             Err(_) => self.try_exit(),
         }?;
@@ -3823,12 +3823,12 @@ where
 pub enum ExitClass {
     StillRunning,
     GuestShutdown,
-    VmmFailure(Option<i32>),
-    DirectShareFailure(Option<i32>),
-    NetworkWorkerFailure(Option<i32>),
-    EgressBrokerFailure(Option<i32>),
+    VmmFailure(crate::process_end::ProcessEnd),
+    DirectShareFailure(crate::process_end::ProcessEnd),
+    NetworkWorkerFailure(crate::process_end::ProcessEnd),
+    EgressBrokerFailure(crate::process_end::ProcessEnd),
     IngressForwarderFailure,
-    MeshTransportFailure(Option<i32>),
+    MeshTransportFailure(crate::process_end::ProcessEnd),
     MeshIngressReceiverFailure,
 }
 
@@ -3852,7 +3852,7 @@ async fn wait_reaped_child(child: &mut tokio::process::Child) -> Result<ExitClas
     if status.success() {
         Ok(ExitClass::GuestShutdown)
     } else {
-        Ok(ExitClass::VmmFailure(status.code()))
+        Ok(ExitClass::VmmFailure(status.into()))
     }
 }
 

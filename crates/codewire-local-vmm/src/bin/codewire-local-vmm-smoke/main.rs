@@ -2127,29 +2127,20 @@ mod linux {
             };
             match exit {
                 ExitClass::StillRunning => {}
-                ExitClass::NetworkWorkerFailure(code) => {
-                    observation(
-                        "network_worker.unexpected_exit",
-                        code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
-                    );
+                ExitClass::NetworkWorkerFailure(end) => {
+                    observation("network_worker.unexpected_exit", end.code_or_signal());
                     return Err(failure(
                         "network worker exited before guest daemon readiness",
                     ));
                 }
-                ExitClass::DirectShareFailure(code) => {
-                    observation(
-                        "direct_share.unexpected_exit",
-                        code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
-                    );
+                ExitClass::DirectShareFailure(end) => {
+                    observation("direct_share.unexpected_exit", end.code_or_signal());
                     return Err(failure(
                         "direct-share server exited before guest daemon readiness",
                     ));
                 }
-                ExitClass::EgressBrokerFailure(code) => {
-                    observation(
-                        "egress_broker.unexpected_exit",
-                        code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
-                    );
+                ExitClass::EgressBrokerFailure(end) => {
+                    observation("egress_broker.unexpected_exit", end.code_or_signal());
                     return Err(failure(
                         "egress broker exited before guest daemon readiness",
                     ));
@@ -2159,11 +2150,8 @@ mod linux {
                         "host-port forwarder exited before guest daemon readiness",
                     ));
                 }
-                ExitClass::MeshTransportFailure(code) => {
-                    observation(
-                        "mesh_transport.unexpected_exit",
-                        code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
-                    );
+                ExitClass::MeshTransportFailure(end) => {
+                    observation("mesh_transport.unexpected_exit", end.code_or_signal());
                     return Err(failure(
                         "Mesh transport exited before guest daemon readiness",
                     ));
@@ -2177,11 +2165,8 @@ mod linux {
                     observation("vmm.unexpected_exit", "guest-shutdown");
                     return Err(failure("VMM exited before guest daemon readiness"));
                 }
-                ExitClass::VmmFailure(code) => {
-                    observation(
-                        "vmm.unexpected_exit",
-                        code.map_or_else(|| "signal".to_owned(), |code| code.to_string()),
-                    );
+                ExitClass::VmmFailure(end) => {
+                    observation("vmm.unexpected_exit", end.code_or_signal());
                     return Err(failure("VMM exited before guest daemon readiness"));
                 }
             }

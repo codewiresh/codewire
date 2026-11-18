@@ -12,6 +12,47 @@ pub(super) struct GuestStartFailure {
     pub(super) detail: &'static str,
     pub(super) guest_stage: Option<GuestBootStage>,
     pub(super) daemon_ready: bool,
+    /// The VMM or helper process whose exit ended the wait.
+    pub(super) helper_exit: Option<exit_cause::ObservedExit>,
+}
+
+impl GuestStartFailure {
+    /// What the runner's `vm_start_failed` line says of the guest's start.
+    pub(super) fn log_fields(&self, fields: &mut Vec<(&'static str, LogField<'_>)>) {
+        fields.push(("detail", LogField::Name(self.detail)));
+        fields.push((
+            "guest_stage",
+            LogField::Name(self.guest_stage.map_or("none", guest_stage_name)),
+        ));
+        fields.push((
+            "daemon_ready",
+            LogField::Count(u64::from(self.daemon_ready)),
+        ));
+        if let Some(exit) = self.helper_exit {
+            fields.push(("helper_exit", exit.log_field()));
+        }
+    }
+}
+
+/// How long a start whose guest progress stopped waits for the VMM's exit.
+/// The stream breaks as the process carrying it goes, a moment before that
+/// process's exit can be read, and the exit is what the start reports.
+const PROGRESS_STOP_EXIT_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// What ended the wait: its closed name, the status `cw` shows, and the
+/// process whose exit it was.
+struct Seen {
+    detail: &'static str,
+    status: Status,
+    helper_exit: Option<exit_cause::ObservedExit>,
+}
+
+fn seen(detail: &'static str, status: Status) -> Seen {
+    Seen {
+        detail,
+        status,
+        helper_exit: None,
+    }
 }
 
 pub(super) async fn wait_for_guest_daemon(
@@ -40,11 +81,11 @@ pub(super) async fn wait_for_guest_daemon(
                             Some(progress),
                             None,
                         running.cw_runtime_catalog_generation(),
-                        ).map_err(|status| ("event_publish", status))?;
+                        ).map_err(|status| seen("event_publish", status))?;
                         guest_stage = Some(progress.stage);
                         running.stage_times_mut().record(progress.stage);
                         if progress.stage.is_failure() {
-                            return Err((
+                            return Err(seen(
                                 guest_failure_detail(progress.stage),
                                 Status::failed_precondition(
                                     "authenticated guest initialization failed",
@@ -58,19 +99,12 @@ pub(super) async fn wait_for_guest_daemon(
                         progress_joined = true;
                         match (&mut progress_task).await {
                             Ok(Ok(())) if progress_ready => {}
-                            Ok(Ok(())) => {
-                                return Err((
-                                    "guest_progress_ended",
-                                    Status::unavailable(
-                                        "guest progress ended before daemon startup",
-                                    ),
-                                ));
-                            }
-                            Ok(Err(_)) | Err(_) => {
-                                return Err((
-                                    "guest_progress_invalid",
-                                    Status::failed_precondition("guest progress validation failed"),
-                                ));
+                            stopped => {
+                                let exit = running
+                                    .wait_for_exit(PROGRESS_STOP_EXIT_WAIT)
+                                    .await
+                                    .map_err(|error| seen("vm_observe_failed", Status::internal(error.to_string())))?;
+                                return Err(progress_stopped(exit, matches!(stopped, Ok(Ok(())))));
                             }
                         }
                     }
@@ -80,64 +114,17 @@ pub(super) async fn wait_for_guest_daemon(
                     // guest's own exit, which follows when its broker cannot
                     // pair, comes tens of seconds later.
                     if running.front_door_stopped().is_some() {
-                        return Err((
+                        return Err(seen(
                             "front_door_stopped",
                             Status::unavailable("front door stopped before daemon readiness"),
                         ));
                     }
-                    match running
+                    let exit = running
                         .observe_exit()
                         .await
-                        .map_err(|error| ("vm_observe_failed", Status::internal(error.to_string())))?
-                    {
-                        ExitClass::StillRunning => {}
-                        ExitClass::GuestShutdown => {
-                            return Err((
-                                "guest_shutdown",
-                                Status::unavailable("guest shut down before daemon readiness"),
-                            ));
-                        }
-                        ExitClass::VmmFailure(code) => {
-                            return Err(("vmm_exited", Status::unavailable(format!(
-                                "Cloud Hypervisor exited before guest daemon readiness with status {code:?}"
-                            ))));
-                        }
-                        ExitClass::DirectShareFailure(code) => {
-                            return Err(("direct_share_exited", Status::unavailable(format!(
-                                "isolated direct-share server exited before guest daemon readiness with status {code:?}"
-                            ))));
-                        }
-                        ExitClass::NetworkWorkerFailure(code) => {
-                            return Err(("network_worker_exited", Status::unavailable(format!(
-                                "isolated network worker exited before guest daemon readiness with status {code:?}"
-                            ))));
-                        }
-                        ExitClass::EgressBrokerFailure(code) => {
-                            return Err(("egress_broker_exited", Status::unavailable(format!(
-                                "isolated egress broker exited before guest daemon readiness with status {code:?}"
-                            ))));
-                        }
-                        ExitClass::IngressForwarderFailure => {
-                            return Err((
-                                "ingress_forwarder_exited",
-                                Status::unavailable(
-                                    "ingress forwarder exited before guest daemon readiness",
-                                ),
-                            ));
-                        }
-                        ExitClass::MeshTransportFailure(code) => {
-                            return Err(("mesh_transport_exited", Status::unavailable(format!(
-                                "isolated Mesh transport exited before guest daemon readiness with status {code:?}"
-                            ))));
-                        }
-                        ExitClass::MeshIngressReceiverFailure => {
-                            return Err((
-                                "mesh_ingress_receiver_exited",
-                                Status::unavailable(
-                                    "Mesh ingress receiver exited before guest daemon readiness",
-                                ),
-                            ));
-                        }
+                        .map_err(|error| seen("vm_observe_failed", Status::internal(error.to_string())))?;
+                    if let Some(ended) = ended_before_readiness(exit) {
+                        return Err(ended);
                     }
                     if !daemon_ready
                         && let Ok(client) = running.daemon_client().await
@@ -154,7 +141,7 @@ pub(super) async fn wait_for_guest_daemon(
     })
     .await
     .unwrap_or_else(|_| {
-        Err((
+        Err(seen(
             "readiness_timeout",
             Status::unavailable("guest daemon readiness timed out"),
         ))
@@ -164,15 +151,81 @@ pub(super) async fn wait_for_guest_daemon(
         let _ = progress_task.await;
     }
     let stopped = running.front_door_stopped();
-    result.map_err(|(detail, status)| {
-        let (error_code, status) = start_failure(stopped, detail, status);
+    result.map_err(|seen| {
+        let (error_code, status) = start_failure(stopped, seen.detail, seen.status);
         GuestStartFailure {
             error_code,
             status,
-            detail,
+            detail: seen.detail,
             guest_stage,
             daemon_ready,
+            helper_exit: seen.helper_exit,
         }
+    })
+}
+
+/// What a start saw when the guest's progress stopped short of its daemon:
+/// the exit of the process that took it down, when one had ended.
+fn progress_stopped(exit: ExitClass, ended_cleanly: bool) -> Seen {
+    ended_before_readiness(exit).unwrap_or_else(|| {
+        if ended_cleanly {
+            seen(
+                "guest_progress_ended",
+                Status::unavailable("guest progress ended before daemon startup"),
+            )
+        } else {
+            seen(
+                "guest_progress_invalid",
+                Status::failed_precondition("guest progress validation failed"),
+            )
+        }
+    })
+}
+
+/// What a start saw when the guest or one of its processes ended before the
+/// guest's daemon was ready; `None` while they all run.
+fn ended_before_readiness(exit: ExitClass) -> Option<Seen> {
+    let helper = |detail, name: &str, end: crate::process_end::ProcessEnd| {
+        let status = end.code();
+        (
+            detail,
+            Status::unavailable(format!(
+                "{name} exited before guest daemon readiness with status {status:?}"
+            )),
+        )
+    };
+    let (detail, status) = match exit {
+        ExitClass::StillRunning => return None,
+        ExitClass::GuestShutdown => (
+            "guest_shutdown",
+            Status::unavailable("guest shut down before daemon readiness"),
+        ),
+        ExitClass::VmmFailure(end) => helper("vmm_exited", "Cloud Hypervisor", end),
+        ExitClass::DirectShareFailure(end) => {
+            helper("direct_share_exited", "isolated direct-share server", end)
+        }
+        ExitClass::NetworkWorkerFailure(end) => {
+            helper("network_worker_exited", "isolated network worker", end)
+        }
+        ExitClass::EgressBrokerFailure(end) => {
+            helper("egress_broker_exited", "isolated egress broker", end)
+        }
+        ExitClass::IngressForwarderFailure => (
+            "ingress_forwarder_exited",
+            Status::unavailable("ingress forwarder exited before guest daemon readiness"),
+        ),
+        ExitClass::MeshTransportFailure(end) => {
+            helper("mesh_transport_exited", "isolated Mesh transport", end)
+        }
+        ExitClass::MeshIngressReceiverFailure => (
+            "mesh_ingress_receiver_exited",
+            Status::unavailable("Mesh ingress receiver exited before guest daemon readiness"),
+        ),
+    };
+    Some(Seen {
+        detail,
+        status,
+        helper_exit: exit_cause::observed_exit(exit),
     })
 }
 
@@ -203,6 +256,102 @@ fn start_failure(
 mod tests {
     use super::*;
     use crate::runner::{FrontDoorStop, InterceptRefusal};
+
+    /// Each process that can end a start keeps its own detail, the words
+    /// `cw` shows and how it ended, and a start whose processes all run is
+    /// not ended.
+    #[test]
+    fn a_process_that_ended_before_readiness_is_named() {
+        use crate::process_end::ProcessEnd;
+        assert!(ended_before_readiness(ExitClass::StillRunning).is_none());
+        for (exit, detail, message) in [
+            (
+                ExitClass::GuestShutdown,
+                "guest_shutdown",
+                "guest shut down before daemon readiness",
+            ),
+            (
+                ExitClass::VmmFailure(ProcessEnd::Code(1)),
+                "vmm_exited",
+                "Cloud Hypervisor exited before guest daemon readiness with status Some(1)",
+            ),
+            (
+                ExitClass::EgressBrokerFailure(ProcessEnd::Code(72)),
+                "egress_broker_exited",
+                "isolated egress broker exited before guest daemon readiness with status Some(72)",
+            ),
+            (
+                ExitClass::NetworkWorkerFailure(ProcessEnd::Signal(9)),
+                "network_worker_exited",
+                "isolated network worker exited before guest daemon readiness with status None",
+            ),
+            (
+                ExitClass::DirectShareFailure(ProcessEnd::Code(2)),
+                "direct_share_exited",
+                "isolated direct-share server exited before guest daemon readiness with status Some(2)",
+            ),
+            (
+                ExitClass::MeshTransportFailure(ProcessEnd::Code(3)),
+                "mesh_transport_exited",
+                "isolated Mesh transport exited before guest daemon readiness with status Some(3)",
+            ),
+            (
+                ExitClass::IngressForwarderFailure,
+                "ingress_forwarder_exited",
+                "ingress forwarder exited before guest daemon readiness",
+            ),
+            (
+                ExitClass::MeshIngressReceiverFailure,
+                "mesh_ingress_receiver_exited",
+                "Mesh ingress receiver exited before guest daemon readiness",
+            ),
+        ] {
+            let seen = ended_before_readiness(exit).unwrap();
+            assert_eq!((seen.detail, seen.status.message()), (detail, message));
+            // The process that ended travels with what was seen.
+            assert_eq!(seen.helper_exit, exit_cause::observed_exit(exit));
+        }
+    }
+
+    /// A VMM that is killed breaks the guest's progress stream first; the
+    /// start reports the VMM's exit, not the broken stream.
+    #[test]
+    fn progress_that_stopped_because_a_process_went_is_that_process_exit() {
+        use crate::process_end::ProcessEnd;
+        let killed = ExitClass::VmmFailure(ProcessEnd::Signal(9));
+        for ended_cleanly in [true, false] {
+            let seen = progress_stopped(killed, ended_cleanly);
+            assert_eq!(seen.detail, "vmm_exited");
+            assert_eq!(seen.helper_exit, exit_cause::observed_exit(killed));
+        }
+        assert_eq!(
+            progress_stopped(ExitClass::GuestShutdown, true).detail,
+            "guest_shutdown"
+        );
+        // With every process still running, the stream is what was seen.
+        let ended = progress_stopped(ExitClass::StillRunning, true);
+        assert_eq!(
+            (ended.detail, ended.status.message(), ended.helper_exit),
+            (
+                "guest_progress_ended",
+                "guest progress ended before daemon startup",
+                None
+            )
+        );
+        let invalid = progress_stopped(ExitClass::StillRunning, false);
+        assert_eq!(
+            (
+                invalid.detail,
+                invalid.status.message(),
+                invalid.helper_exit
+            ),
+            (
+                "guest_progress_invalid",
+                "guest progress validation failed",
+                None
+            )
+        );
+    }
 
     #[test]
     fn a_front_door_that_stopped_is_the_cause_of_what_followed_it() {
