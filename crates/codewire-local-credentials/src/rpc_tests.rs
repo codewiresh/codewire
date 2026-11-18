@@ -2650,3 +2650,5 @@ async fn an_authority_reports_the_runner_protocol_its_brokers_accept() {
     shutdown.send(()).unwrap();
     server.await.unwrap().unwrap();
 }
+
+mod store_refusal;

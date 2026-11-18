@@ -88,6 +88,16 @@ only what differs.
    or unanswering local store as a warning with the same next step. Walk it only inside a private D-Bus
    session (`scripts/ci/verify/lib/local-smoke-isolation.sh`) with its keyring
    stopped, never the host's keyring (#5271). Not yet observed.
+   A save refused after the provider step says why in fixed words and that
+   nothing was saved, with one `→` command, the same in both placements:
+   the name is in use, the credential was deleted or changed during the
+   sign-in, GitHub is already connected, or (on this computer) the keychain
+   is locked or missing, naming the file `CODEWIRE_LOCAL_CREDENTIAL_KEYCHAIN`
+   sets. Any other refusal says only that the store refused it and nothing
+   was saved. Only a lost connection or a timeout leaves the outcome
+   unknown ("may or may not be saved", `→ cw credentials --local list`). No
+   RPC code, internal name or store or service text is shown (#4826). Not
+   yet observed.
 2. **List:** `cw credentials --local|--cloud list` and `list --output json`.
    Expect the credential with its provider, kind, status `active` and, where
    the provider gives one, an account hint.

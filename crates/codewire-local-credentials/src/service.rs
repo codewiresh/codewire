@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use codewire_access::{
-    AccessError, AccessProfileId, AccessProfileName, AccessProfileReference, CapabilitySlot,
-    CredentialAuthKind, CredentialId, CredentialStatus, DerivedGrant, EnvironmentAccessBinding,
-    EnvironmentId, ProviderCatalog, ProviderId, builtin_provider_catalog,
+    AccessProfileId, AccessProfileName, AccessProfileReference, CapabilitySlot, CredentialAuthKind,
+    CredentialId, CredentialStatus, DerivedGrant, EnvironmentAccessBinding, EnvironmentId,
+    ProviderCatalog, ProviderId, builtin_provider_catalog,
 };
 use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, ProtectedStore, ProtectedStorePersistence, ProtectedValue,
@@ -83,6 +83,7 @@ mod profiles;
 use profiles::profile_id;
 mod repository;
 mod ssh_enrollment;
+mod status;
 mod store_status;
 mod workload_secrets;
 
@@ -98,6 +99,7 @@ use ssh_enrollment::{
     SSH_ENROLLMENT_DEADLINE, SshEnrollmentWorkers, ssh_enrollment_check,
     status_for_ssh_material_error, validate_ssh_expiry,
 };
+use status::{status_for_access_error, status_for_error};
 use workload_secrets::{
     resolved_secret_to_proto, secret_project_to_proto, workload_secret_selection_from_proto,
     workload_secret_to_proto,
@@ -2305,129 +2307,6 @@ pub(crate) fn derived_grant_to_proto(grant: DerivedGrant) -> v1::DerivedGrant {
                 route: permission.route.to_string(),
             })
             .collect(),
-    }
-}
-
-fn status_for_access_error(_error: AccessError) -> Status {
-    Status::invalid_argument("invalid local credential request")
-}
-
-fn status_for_error(error: LocalCredentialError) -> Status {
-    match error {
-        LocalCredentialError::StaleCredentialRevision => Status::failed_precondition(
-            "local credential revision changed; inspect before retrying",
-        ),
-        LocalCredentialError::AlreadyExists => {
-            Status::already_exists("local credential record already exists")
-        }
-        LocalCredentialError::EnvironmentBindingAlreadyExists => {
-            Status::already_exists("local environment access binding already exists")
-        }
-        LocalCredentialError::GitHubAlreadyConnected => Status::already_exists(
-            "a local GitHub connection already exists; reconnect or delete it",
-        ),
-        LocalCredentialError::AmbiguousGitHubConnections => Status::failed_precondition(
-            "local credential metadata has more than one active GitHub connection",
-        ),
-        LocalCredentialError::CredentialNotFound
-        | LocalCredentialError::ProfileNotFound
-        | LocalCredentialError::ProfileRevisionNotFound
-        | LocalCredentialError::SecretProjectNotFound
-        | LocalCredentialError::WorkloadSecretNotFound => {
-            Status::not_found("local credential record was not found")
-        }
-        LocalCredentialError::EnvironmentBindingNotFound => {
-            Status::not_found("local environment access binding was not found")
-        }
-        LocalCredentialError::CredentialUnavailable
-        | LocalCredentialError::CredentialInactive
-        | LocalCredentialError::CredentialMaterialMissing
-        | LocalCredentialError::WorkloadSecretMaterialMissing
-        | LocalCredentialError::CredentialOperationLeaseDenied
-        | LocalCredentialError::CredentialRefreshInProgress
-        | LocalCredentialError::StaleCredentialRefresh
-        | LocalCredentialError::StaleProfileRevision
-        | LocalCredentialError::StaleEnvironmentBinding
-        | LocalCredentialError::ProtectedEntryCollision
-        | LocalCredentialError::OwnerMismatch
-        | LocalCredentialError::ProtectedStoreMismatch
-        | LocalCredentialError::UnsupportedSchema
-        | LocalCredentialError::InvalidDatabase
-        | LocalCredentialError::CorruptMetadata => {
-            Status::failed_precondition("local credential operation cannot be applied")
-        }
-        // Both are the user's to resolve, so say what holds the record.
-        LocalCredentialError::CredentialInUse => Status::failed_precondition(
-            "local credential is selected by an access profile or environment; unset it from the profile (cw credentials --local --profile NAME unset PROVIDER) or remove the environment first",
-        ),
-        LocalCredentialError::ProfileInUse => Status::failed_precondition(
-            "local access profile is selected by an environment; remove the environment first",
-        ),
-        LocalCredentialError::ProfileIsDefault => Status::failed_precondition(
-            "local access profile is your default credential profile and cannot be deleted; make another profile the default first: cw credentials --local profiles default NAME",
-        ),
-        LocalCredentialError::SshCredentialRequiresEnrollment => Status::failed_precondition(
-            "SSH credentials require the dedicated enrollment operation",
-        ),
-        LocalCredentialError::SshEnrollmentClosed => {
-            Status::unavailable("local SSH credential enrollment is stopping")
-        }
-        LocalCredentialError::SshEnrollmentDeadlineElapsed => {
-            Status::deadline_exceeded("local SSH credential enrollment timed out")
-        }
-        // AccessError is deliberately material-free and carries the stable
-        // provider/profile diagnostic needed to repair a rejected selection.
-        LocalCredentialError::Access(error) => Status::failed_precondition(error.to_string()),
-        LocalCredentialError::ProtectedStore(error) => store_status::status(error),
-        LocalCredentialError::DatabaseUnavailable
-        | LocalCredentialError::ProtectedStoreSwitch(_) => {
-            Status::unavailable("local credential authority storage is unavailable")
-        }
-        LocalCredentialError::AlreadyRunning => {
-            Status::already_exists("local credential authority is already running")
-        }
-        LocalCredentialError::UnsupportedPlatform => {
-            Status::unimplemented("local credential authority is unsupported")
-        }
-        LocalCredentialError::OrganizationSecretsUnsupported => {
-            Status::unimplemented("organization workload secrets are unsupported locally")
-        }
-        LocalCredentialError::InvalidWorkloadSecret => {
-            Status::invalid_argument("invalid local workload-secret request")
-        }
-        LocalCredentialError::InvalidDatabasePath | LocalCredentialError::InvalidTime => {
-            Status::internal("local credential authority state is invalid")
-        }
-    }
-}
-
-#[cfg(test)]
-mod status_tests {
-    use super::*;
-
-    #[test]
-    fn a_record_in_use_says_what_holds_it() {
-        let credential = status_for_error(LocalCredentialError::CredentialInUse);
-        assert_eq!(credential.code(), tonic::Code::FailedPrecondition);
-        assert!(
-            credential
-                .message()
-                .contains("selected by an access profile or environment")
-        );
-        assert!(
-            credential
-                .message()
-                .contains("--profile NAME unset PROVIDER")
-        );
-        let profile = status_for_error(LocalCredentialError::ProfileInUse);
-        assert_eq!(profile.code(), tonic::Code::FailedPrecondition);
-        assert!(profile.message().contains("selected by an environment"));
-        // Internal states stay undisclosed.
-        let corrupt = status_for_error(LocalCredentialError::CorruptMetadata);
-        assert_eq!(
-            corrupt.message(),
-            "local credential operation cannot be applied"
-        );
     }
 }
 

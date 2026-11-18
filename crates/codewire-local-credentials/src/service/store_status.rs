@@ -1,11 +1,14 @@
 //! What the authority answers when its protected store refuses an operation.
 //! A locked or missing store is a definite refusal (FailedPrecondition): the
-//! authority answers only once the operation is undone. A timeout or other
-//! storage fault stays Unavailable, which callers report as an unknown
-//! outcome.
+//! authority answers only once the operation is undone, and names the cause
+//! as a [`crate::StoreRefusal`] its caller words; the message is for the log.
+//! A timeout or other storage fault stays Unavailable, which callers report
+//! as an unknown outcome.
 
 use codewire_protected_store::ProtectedStoreError;
 use tonic::Status;
+
+use crate::StoreRefusal;
 
 /// A locked store: on macOS the login keychain, which a remote (SSH) session
 /// does not unlock (#4864).
@@ -16,14 +19,18 @@ const LOCKED: &str = "local protected storage is locked or inaccessible; unlock 
 
 pub(super) fn status(error: ProtectedStoreError) -> Status {
     match error {
-        ProtectedStoreError::AccessDenied => Status::failed_precondition(LOCKED),
+        ProtectedStoreError::AccessDenied => {
+            StoreRefusal::KeychainLocked.attach(Status::failed_precondition(LOCKED))
+        }
         ProtectedStoreError::TimedOut => {
             Status::unavailable("local protected storage did not respond in time")
         }
         // The login keychain, or the file CODEWIRE_LOCAL_CREDENTIAL_KEYCHAIN
         // names, is absent (#4864).
-        ProtectedStoreError::KeychainMissing => Status::failed_precondition(
-            "the keychain that holds local credentials doesn't exist: create the login keychain in Keychain Access, or unset CODEWIRE_LOCAL_CREDENTIAL_KEYCHAIN if it names a missing file, then run this again",
+        ProtectedStoreError::KeychainMissing => StoreRefusal::KeychainMissing.attach(
+            Status::failed_precondition(
+                "the keychain that holds local credentials doesn't exist: create the login keychain in Keychain Access, or unset CODEWIRE_LOCAL_CREDENTIAL_KEYCHAIN if it names a missing file, then run this again",
+            ),
         ),
         ProtectedStoreError::InvalidEntryId
         | ProtectedStoreError::EmptyValue
@@ -51,8 +58,21 @@ mod tests {
                 .message()
                 .contains("CODEWIRE_LOCAL_CREDENTIAL_KEYCHAIN")
         );
+        assert_eq!(
+            crate::store_refusal_reason(&missing),
+            Some("LOCAL_KEYCHAIN_MISSING")
+        );
         let locked = status(ProtectedStoreError::AccessDenied);
         assert_eq!(locked.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            crate::store_refusal_reason(&locked),
+            Some("LOCAL_KEYCHAIN_LOCKED")
+        );
+        // A storage fault is no refusal, so it names no reason.
+        assert_eq!(
+            crate::store_refusal_reason(&status(ProtectedStoreError::TimedOut)),
+            None
+        );
         assert_eq!(locked.message(), LOCKED);
         #[cfg(target_os = "macos")]
         assert!(LOCKED.contains("`security unlock-keychain`"));

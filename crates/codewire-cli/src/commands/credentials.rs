@@ -22,6 +22,10 @@ pub(in crate::commands) mod confirm;
 mod delete;
 pub(in crate::commands) mod output;
 
+use output::save_refusal::{Answer, Save, save_error};
+
+use crate::config::OsEnv;
+
 #[cfg(test)]
 use super::CredentialsArgs;
 #[cfg(test)]
@@ -413,6 +417,7 @@ impl ConnectStore for LocalConnectStore<'_> {
         let revocable = matches!(connecting, CredentialConnectProviderArg::Codex)
             .then(|| ProtectedValue::from_slice(approval.material.expose_secret()).ok())
             .flatten();
+        let name = target.name.clone();
         let saved = publish_oauth_connection(
             self.client,
             OAuthConnectionTarget {
@@ -434,7 +439,11 @@ impl ConnectStore for LocalConnectStore<'_> {
                     say_discarded(connecting, revoke_unsaved(connecting, revocable).await);
                 }
                 return Err(local_connect_publish_error(
-                    connected_noun(target.provider),
+                    Save {
+                        placement: "local",
+                        provider: connecting,
+                        name: &name,
+                    },
                     &status,
                 ));
             }
@@ -622,29 +631,31 @@ fn connected_kind(provider: CredentialConnectProviderArg) -> CredentialAuthKind 
     }
 }
 
-/// What a local connect says when the store answers its save (#4826): a
-/// refusal is definite and saved nothing; only a failure after the request may
-/// have reached the store leaves the outcome unknown. The store's RPC code and
-/// framing never reach the person.
-fn local_connect_publish_error(what: &str, status: &tonic::Status) -> anyhow::Error {
+/// What a local connect says when the store answers its save (#4826): the
+/// cause in the words both placements share, told by the status code and the
+/// store's closed reason. The store's own message goes only to the log.
+fn local_connect_publish_error(save: Save<'_>, status: &tonic::Status) -> anyhow::Error {
     use tonic::Code;
-    let next = "cw credentials --local list";
-    let error = match status.code() {
-        _ if !definitely_not_saved(status) => anyhow::anyhow!(
-            "the local credential store didn't confirm saving your {what}, so it may or may not be saved; check the list before connecting again"
-        ),
-        Code::AlreadyExists => anyhow::anyhow!(
-            "a local credential with that name already exists, so your {what} wasn't saved; choose another --name"
-        ),
-        Code::NotFound => anyhow::anyhow!(
-            "the local credential to reconnect is gone, so your {what} wasn't saved; connect it again under a new name"
-        ),
-        _ => anyhow::anyhow!(
-            "the local credential store refused your {what}, so nothing was saved: {}",
-            status.message()
-        ),
+    tracing::debug!(
+        code = ?status.code(),
+        message = status.message(),
+        "the local credential store did not save a connect"
+    );
+    let answer = match status.code() {
+        _ if !definitely_not_saved(status) => Answer::Uncertain,
+        Code::AlreadyExists => Answer::AlreadyExists,
+        Code::NotFound => Answer::NotFound,
+        _ => Answer::Refused,
     };
-    crate::error_report::with_next_step(error, next)
+    let keychain = super::credential_authority::configured_authority_store(&OsEnv)
+        .ok()
+        .and_then(|store| store.keychain);
+    save_error(
+        save,
+        answer,
+        codewire_local_credentials::store_refusal_reason(status),
+        keychain.as_deref(),
+    )
 }
 
 /// Whether the store's answer to a save is a definite refusal. A failure
@@ -1633,40 +1644,35 @@ mod tests {
     }
 
     #[test]
-    fn a_local_connect_refusal_says_nothing_was_saved_without_rpc_text() {
-        let refused = local_connect_publish_error(
-            "Claude sign-in",
-            &tonic::Status::failed_precondition("the store cannot hold this credential"),
+    fn a_local_connect_refusal_says_nothing_was_saved_without_store_text() {
+        let save = Save {
+            placement: "local",
+            provider: CredentialConnectProviderArg::Claude,
+            name: "work",
+        };
+        let store_text = "the store cannot hold this credential";
+        let refused =
+            local_connect_publish_error(save, &tonic::Status::failed_precondition(store_text));
+        assert_eq!(
+            crate::error_report::sentence(&refused),
+            "the local credential store refused your Claude sign-in, so nothing was saved"
         );
-        let text = format!("{refused:#}");
+        // A refusal the store names is worded here, never by the store.
+        let mut locked = tonic::Status::failed_precondition(store_text);
+        locked.metadata_mut().insert(
+            codewire_local_credentials::STORE_REFUSAL_KEY,
+            codewire_local_credentials::StoreRefusal::KeychainLocked
+                .reason()
+                .parse()
+                .unwrap(),
+        );
+        let text = format!("{:#}", local_connect_publish_error(save, &locked));
+        assert!(text.contains("locked"), "{text}");
         assert!(
-            text.contains("refused your Claude sign-in, so nothing was saved"),
+            text.contains("so your Claude sign-in wasn't saved"),
             "{text}"
         );
-        assert!(
-            text.contains("the store cannot hold this credential"),
-            "{text}"
-        );
-        assert!(
-            !text.contains("code:") && !text.contains("unknown"),
-            "{text}"
-        );
-        // A locked keychain is the authority's own, definite refusal.
-        let locked = local_connect_publish_error(
-            "Claude sign-in",
-            &tonic::Status::failed_precondition(
-                "local protected storage is locked or inaccessible; unlock it and retry",
-            ),
-        );
-        let text = format!("{locked:#}");
-        assert!(
-            text.contains("refused your Claude sign-in, so nothing was saved"),
-            "{text}"
-        );
-        assert!(
-            text.contains("locked or inaccessible; unlock it and retry"),
-            "{text}"
-        );
+        assert!(!text.contains(store_text), "{text}");
         // Unavailable is never definite: a timeout, a storage fault after the
         // commit, or a lost connection may each follow a save that landed.
         let mut refused_connection = tonic::Status::unavailable("gone");
@@ -1680,19 +1686,13 @@ mod tests {
             tonic::Status::deadline_exceeded("deadline"),
             tonic::Status::cancelled("cancelled"),
         ] {
-            let text = format!(
-                "{:#}",
-                local_connect_publish_error("Codex sign-in", &status)
-            );
-            assert!(text.contains("may or may not be saved"), "{text}");
-            assert!(
-                !text.contains("code:") && !text.contains("nothing was saved"),
-                "{text}"
+            assert_eq!(
+                crate::error_report::sentence(&local_connect_publish_error(save, &status)),
+                "the local credential store didn't confirm saving your Claude sign-in, so it may or may not be saved; check the list before connecting again"
             );
         }
-        let uncertain =
-            local_connect_publish_error("Codex sign-in", &tonic::Status::deadline_exceeded("x"));
-        for error in [refused, locked, uncertain] {
+        let uncertain = local_connect_publish_error(save, &tonic::Status::deadline_exceeded("x"));
+        for error in [refused, uncertain] {
             assert_eq!(
                 error
                     .downcast_ref::<crate::error_report::NextStep>()

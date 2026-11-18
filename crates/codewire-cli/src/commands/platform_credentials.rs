@@ -10,6 +10,7 @@ use super::credential_input::{
     ParsedCredentialSelector, SSH_PUBLIC_KEY_GITHUB_HINT, parse_credential_selector,
     prompt_credential_material, read_ssh_import, validate_ssh_generation, validate_ssh_import,
 };
+use super::credentials::output::save_refusal::{Answer, Save, save_error};
 use super::login_screen;
 use super::*;
 
@@ -510,7 +511,16 @@ impl ConnectStore for CloudConnectStore<'_> {
             }
         };
         let enrolled = tokio::select! {
-            result = enrollment => result.context("enroll platform OAuth credential"),
+            result = enrollment => result.map_err(|error| {
+                cloud_save_error(
+                    Save {
+                        placement: "cloud",
+                        provider: target.provider,
+                        name: &target.name,
+                    },
+                    error,
+                )
+            }),
             () = keys.pressed() => Err(anyhow::anyhow!(
                 "enrollment cancelled; inspect the credential by name before retrying because storage acknowledgement may be unknown"
             )),
@@ -945,6 +955,42 @@ fn provider_answer(
             Because::Unreachable
         },
     )
+}
+
+/// What a cloud connect says when the service doesn't save a Claude sign-in
+/// or token: the words a local connect uses for the same cause (#4826), told
+/// by the code and the service's closed reason, never its message. Codex and
+/// GitHub keep the fixed words the client gives their enrollment streams.
+fn cloud_save_error(save: Save<'_>, error: rpc::ClientError) -> anyhow::Error {
+    use rpc::ErrorCode;
+    if !matches!(
+        save.provider,
+        CredentialConnectProviderArg::Claude | CredentialConnectProviderArg::ClaudeToken
+    ) {
+        return anyhow::Error::new(error).context("enroll platform OAuth credential");
+    }
+    tracing::debug!(
+        code = ?error.code(),
+        message = error.message(),
+        "the credential service did not save a connect"
+    );
+    let answer = match error.code() {
+        ErrorCode::AlreadyExists => Answer::AlreadyExists,
+        ErrorCode::NotFound => Answer::NotFound,
+        ErrorCode::Unavailable
+        | ErrorCode::DeadlineExceeded
+        | ErrorCode::Canceled
+        | ErrorCode::Unknown
+        | ErrorCode::Internal
+        | ErrorCode::Aborted
+        | ErrorCode::DataLoss => Answer::Uncertain,
+        _ => Answer::Refused,
+    };
+    let reason = error
+        .error_info()
+        .filter(|info| info.domain() == "codewire.sh")
+        .map(rpc::ErrorInfo::reason);
+    save_error(save, answer, reason, None)
 }
 
 #[cfg(test)]

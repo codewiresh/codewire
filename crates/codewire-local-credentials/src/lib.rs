@@ -30,6 +30,7 @@ mod repository;
 mod service;
 mod store_backend;
 mod store_probe;
+mod store_refusal;
 mod transport;
 mod workload_secret;
 
@@ -83,6 +84,7 @@ pub use repository::{
 pub use service::serve_local_credential_authority;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use service::serve_os_local_credential_authority_with_process_spawners;
+pub use store_refusal::{STORE_REFUSAL_KEY, StoreRefusal, store_refusal_reason};
 pub use transport::{
     AuthorityFeature, AuthorityRuntimeConfig, AuthorityRuntimeError, MAXIMUM_SOCKET_PATH_BYTES,
     authority_exit_code, check_socket_path,
