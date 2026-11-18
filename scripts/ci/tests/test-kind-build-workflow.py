@@ -966,8 +966,9 @@ class MainPushDeferralContractTests(unittest.TestCase):
             for event in self.EVENTS
         }
         self.assertEqual(rendered, {
-            # Each main commit's run finishes in a group of its own.
-            "push": (f"ci-CI-refs/heads/main-push-{self.SHA}", False),
+            # Every push to main shares one group and none is cancelled, so
+            # main runs start one at a time, oldest first.
+            "push": ("ci-CI-refs/heads/main-push", False),
             # A newer pull-request push supersedes its older run.
             "pull_request": ("ci-CI-refs/pull/7/head", True),
             # A newer schedule supersedes an older scheduled run only.
@@ -980,20 +981,21 @@ class MainPushDeferralContractTests(unittest.TestCase):
         on_main = [rendered[event][0] for event in ("push", "schedule", "workflow_dispatch")]
         self.assertEqual(len(set(on_main)), 3, on_main)
 
-    def test_main_runs_of_different_commits_never_wait_for_each_other(self) -> None:
+    def test_a_newer_main_commit_waits_for_the_main_run_in_flight(self) -> None:
         concurrency = self.workflow["concurrency"]
         newer = "2" * 40
         older_group = actions_value(concurrency["group"], self.context("push"))
         newer_group = actions_value(concurrency["group"], self.context("push", newer))
-        # A newer main commit starts beside the older run instead of queueing
-        # behind it; neither cancels the other.
-        self.assertNotEqual(older_group, newer_group)
-        self.assertTrue(newer_group.endswith(newer), newer_group)
+        # Main coalesces (owner, 2026-11-14, codewire#3013): a newer main
+        # commit queues behind the run in flight, in the same group, and
+        # neither cancels the other. The commits between end at selection as
+        # superseded (test-select-verification.sh runs that step).
+        self.assertEqual(older_group, newer_group)
+        self.assertNotIn(newer, newer_group)
         self.assertIs(actions_value(concurrency["cancel-in-progress"], self.context("push", newer)), False)
-        # Only a rerun of the same commit shares its group.
-        self.assertEqual(older_group, actions_value(concurrency["group"], self.context("push")))
-        # The commit never reaches the other events' groups: a pull request's
-        # newer push still supersedes its older run.
+        self.assertIs(actions_value(concurrency["cancel-in-progress"], self.context("push")), False)
+        # The commit never reaches the other events' groups either: a pull
+        # request's newer push still supersedes its older run.
         for event in ("pull_request", "schedule", "workflow_dispatch"):
             self.assertEqual(actions_value(concurrency["group"], self.context(event)),
                              actions_value(concurrency["group"], self.context(event, newer)), event)
