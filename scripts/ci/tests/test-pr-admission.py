@@ -146,6 +146,21 @@ class PrAdmission(unittest.TestCase):
 
     SHAPE = "job"
 
+    def setUp(self) -> None:
+        # The cases were written for six admitted runs at once, and read the
+        # algorithm at that limit; test_the_limit_is_one reads the shipped one.
+        patcher = mock.patch.object(gate, "ADMITTED_LIMIT", 6)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_limit_is_one(self) -> None:
+        # Owner, 2026-11-18: "The admitted limit for PRs should be one."
+        mock.patch.stopall()
+        self.assertEqual(gate.ADMITTED_LIMIT, 1)
+        self.assertEqual(self.decide({10: "waiting"}, 10)[0], gate.ADMITTED)
+        self.assertEqual(self.decide({1: "admitted", 10: "waiting"}, 10)[0], gate.WAIT)
+        self.assertEqual(self.decide({1: "admitted", 9: "waiting", 10: "waiting"}, 9)[0], gate.WAIT)
+
     def decide(self, state: dict, own: int, *, blocked=(), unreadable=(), **options):
         return gate.decide(FakeForgejo([state], blocked=blocked, unreadable=unreadable, shape=self.SHAPE),
                            own, **options)

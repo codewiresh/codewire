@@ -65,7 +65,9 @@ SELECTION_JOB = "Verification selection"
 GATE_STEP = "Wait for this run's admission"
 # Not "blocked": a run awaiting approval holds no slot until it is approved.
 UNFINISHED_RUN_STATES = ("waiting", "running", "unknown")
-ADMITTED_LIMIT = 6
+# One at a time, so every pull request run is a clean run (owner, 2026-11-18:
+# "The admitted limit for PRs should be one."; codewire#5311).
+ADMITTED_LIMIT = 1
 # Waiting gates hold light runner slots. The light runner takes 24 jobs
 # (owner, 2026-11-14: faster jobs, not more of them; infra#2471), so at most 2
 # wait and at least 22 slots stay for every repository's real light jobs. At 6,
@@ -174,7 +176,7 @@ class CountedReads:
         return self.api.get_json(path)
 
 
-def decide(api, own_run_id: int, *, limit: int = ADMITTED_LIMIT,
+def decide(api, own_run_id: int, *, limit: int | None = None,
            waiting_limit: int | None = None, deadline: float | None = None,
            clock: Callable[[], float] = time.monotonic,
            admitted_runs: set[int] | None = None) -> tuple[str, str]:
@@ -182,7 +184,8 @@ def decide(api, own_run_id: int, *, limit: int = ADMITTED_LIMIT,
 
     Only the run list itself unreadable raises Unproven; past the deadline,
     before any request, it raises DeadlineReached."""
-    # Read at call time, so the module's limit is the one that applies.
+    # Read at call time, so the module's limits are the ones that apply.
+    limit = ADMITTED_LIMIT if limit is None else limit
     waiting_limit = WAITING_LIMIT if waiting_limit is None else waiting_limit
     admitted_runs = set() if admitted_runs is None else admitted_runs
     def in_time() -> None:
