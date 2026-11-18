@@ -2094,6 +2094,9 @@ run_paths_case sdk_ts_packager pull_request refs/pull/3512/head false \
 run_paths_case sdk_python_packager pull_request refs/pull/3512/head false \
   'policy sdk_python security security_js' \
   scripts/ci/release/package-sdk-python.sh
+run_paths_case sdk_rust_packager pull_request refs/pull/3511/head false \
+  'policy rust rust_pkg_codewire rust_pkg_codewire_proto security security_js' \
+  scripts/ci/release/package-sdk-rust.sh
 # The per-platform support build selects the release proofs, like the build helper.
 run_paths_case support_pair_platform_build pull_request refs/pull/2255/head false \
   'go_consumer_interop go_support policy release confidential_script_tests security security_js' \

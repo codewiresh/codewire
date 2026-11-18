@@ -263,6 +263,18 @@ async fn a_download_shorter_than_its_size_is_data_loss() {
 }
 
 #[tokio::test]
+async fn a_download_longer_than_its_size_is_data_loss() {
+    let error = download(&[info(5), chunk(b"hello, "), chunk(b"world")])
+        .await
+        .expect_err("long");
+    assert_eq!(error.code(), ErrorCode::DataLoss);
+    assert!(
+        error.to_string().contains("more than the 5 bytes"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
 async fn a_download_without_file_information_is_refused() {
     let error = download(&[chunk(b"hello")]).await.expect_err("no info");
     assert_eq!(error.code(), ErrorCode::Internal);

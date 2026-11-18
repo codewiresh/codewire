@@ -59,8 +59,12 @@ fn main() {
     // The encoder matters: the typed descriptor form drops options it does
     // not know, `debug_redact` among them, and the generated `Debug` would
     // then print the fields it marks.
+    //
+    // `proto` here is a link to the repository's `proto/`; `cargo package`
+    // copies the files it reaches, so a crate from crates.io compiles the same
+    // sources from its own copy (#3511).
     let mut compiler =
-        protox::Compiler::new([manifest_dir.join("../../proto")]).expect("open the proto root");
+        protox::Compiler::new([manifest_dir.join("proto")]).expect("open the proto root");
     compiler.include_source_info(true).include_imports(true);
     compiler
         .open_files(protos)

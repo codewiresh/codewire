@@ -100,7 +100,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "crates/codewire-project/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-prost-debug-redact/Cargo.toml": "workspace",
         "crates/codewire-protected-store/Cargo.toml": "AGPL-3.0-only",
-        "crates/codewire-proto/Cargo.toml": "AGPL-3.0-only",
+        "crates/codewire-proto/Cargo.toml": "MIT AND Apache-2.0",
         "crates/codewire-server-core/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-tailnet/Cargo.toml": "BSD-3-Clause",
         "crates/codewire-tls/Cargo.toml": "AGPL-3.0-only",
@@ -135,8 +135,42 @@ def check_license_map(_args: argparse.Namespace) -> int:
         if effective == "MIT OR Apache-2.0":
             check_copy((crate_dir / "LICENSE-MIT").as_posix(), "MIT")
             check_copy((crate_dir / "LICENSE-APACHE").as_posix(), "Apache-2.0")
+        elif effective == "MIT AND Apache-2.0":
+            # Published to crates.io with third-party Apache-2.0 files, so its
+            # Apache text is the plain license, the appendix unfilled (#3511).
+            check_copy((crate_dir / "LICENSE").as_posix(), "MIT")
+            plain_apache = (ROOT / canonical_licenses["Apache-2.0"][0]).read_text().replace(
+                "   Copyright 2026 Codewire\n", "   Copyright [yyyy] [name of copyright owner]\n"
+            )
+            rel_apache = (crate_dir / "LICENSE-APACHE").as_posix()
+            if not (ROOT / rel_apache).is_file() or (ROOT / rel_apache).read_text() != plain_apache:
+                failures.append(f"{rel_apache}: not the plain Apache-2.0 text")
         else:
             check_copy((crate_dir / "LICENSE").as_posix(), effective)
+
+    # The crates .github/workflows/sdk-release.yml publishes to crates.io
+    # (#3511). Each is built from the workspace crates it depends on, so a
+    # permissive one may depend on no AGPL crate: crates.io would otherwise
+    # carry an MIT crate that needs an AGPL one. Dev-dependencies only build
+    # its tests and are not checked.
+    published_crates = {"crates/codewire/Cargo.toml", "crates/codewire-proto/Cargo.toml"}
+    effective_licenses = {
+        toml(rel)["package"]["name"]: "AGPL-3.0-only" if declaration == "workspace" else declaration
+        for rel, declaration in cargo_declarations.items()
+    }
+    for rel in sorted(published_crates):
+        manifest = toml(rel)
+        name = manifest["package"]["name"]
+        if effective_licenses[name] == "AGPL-3.0-only":
+            continue
+        for table in ("dependencies", "build-dependencies"):
+            for dependency, spec in manifest.get(table, {}).items():
+                package_name = spec.get("package", dependency) if isinstance(spec, dict) else dependency
+                if effective_licenses.get(package_name) == "AGPL-3.0-only":
+                    failures.append(
+                        f"{rel}: {name} is {effective_licenses[name]} but its {table} "
+                        f"include {package_name}, which is AGPL-3.0-only"
+                    )
 
     docker_workspace_licenses = {
         "deployments/docker/derp.Cargo.toml": "BSD-3-Clause",
@@ -247,7 +281,6 @@ def check_license_map(_args: argparse.Namespace) -> int:
 
     apache_copies = [
         "crates/codewire-admin-proto/LICENSE-APACHE",
-        "crates/codewire-proto/LICENSE-APACHE",
         "libs/gen-go/LICENSE-APACHE",
         "libs/gen-python/LICENSE-APACHE",
         "libs/sdk-python/LICENSE-APACHE",
@@ -264,8 +297,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         ],
         "crates/README.md": [
             "The root workspace default is **AGPL-3.0-only**.",
-            "a combined distribution must therefore satisfy the",
-            "AGPL-3.0-only obligations for the combined work.",
+            "A package's permissive metadata does not relicense its",
         ],
         "apps/cli/nfpm.yaml": ["license: AGPL-3.0-only"],
     }

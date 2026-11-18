@@ -35,10 +35,11 @@ A `(bin)` marker means the crate produces a service/app binary.
 | Crate                   | Role                                                            | License  |
 | ----------------------- | -------------------------------------------------------------- | -------- |
 | `codewire-types`        | Desktop-local status, diff, chat primitives, and pure git parsers. | MIT          |
-| `codewire-client`       | Shared ergonomic Rust client over generated Connect-RPC stubs. | AGPL-3.0-only   |
+| `codewire`              | The Rust SDK: configuration, transport, typed errors and every public `codewire.v1` call. | MIT |
+| `codewire-client`       | The CLI's client layer over `codewire`: sign-in, tailnet and the hosted shell. | AGPL-3.0-only   |
 | `codewire-project`      | I/O-free versioned project parsing, validation, and normalization. | AGPL-3.0-only |
 | `codewire-project-proto` | Lossless adapters between project intent and the public protobuf contract. | AGPL-3.0-only |
-| `codewire-proto`        | Generated Connect-RPC contract types for the control-plane API. | AGPL-3.0-only   |
+| `codewire-proto`        | Generated Connect-RPC contract types for the control-plane API. | MIT AND Apache-2.0 (the shipped protos) |
 | `codewire-daemon-proto`| Generated protobuf types for the daemon and broker boundary.   | AGPL-3.0-only   |
 | `codewire-vmm-guest-probe` | Static guest init and daemon probe (bin) for the local microVM boundary. | AGPL-3.0-only |
 
@@ -68,11 +69,13 @@ The root workspace default is **AGPL-3.0-only**. `codewire-cli`,
 Every permissive crate declares an explicit override, and every crate directory carries the
 applicable license text.
 
-`codewire-tailnet` and `codewire-derp` remain BSD-3-Clause as standalone
-crates. Their current dependency graph includes the AGPL-3.0-only
-`codewire-proto`; a combined distribution must therefore satisfy the
-AGPL-3.0-only obligations for the combined work. A package's permissive
-metadata does not relicense its dependencies.
+`codewire` and `codewire-proto` are published to crates.io as the Rust SDK
+(#3511). A crate that depends on an AGPL-3.0-only crate is distributed under
+the AGPL's terms for the combined work, so neither depends on one; when a
+permissive crate needs an AGPL one, that crate is relicensed (owner,
+2026-11-17, codewire#3511). `scripts/checks/repo_policy/licensing.py` checks
+the published pair. A package's permissive metadata does not relicense its
+dependencies.
 
 ## Adding a server crate
 

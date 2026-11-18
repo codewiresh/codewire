@@ -4,8 +4,26 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-license = "AGPL-3.0-only"
+# The crate's own sources are MIT. The protos it ships under proto/ are
+# Apache-2.0 (LICENSE-APACHE), Google's vendored google/rpc ones among them
+# with their own headers (proto/README.md).
+license = "MIT AND Apache-2.0"
 description = "Generated Connect-RPC contract types for the client-facing Codewire control-plane API."
+repository = "https://github.com/codewiresh/codewire"
+# What crates.io receives: the sources and the protos build.rs compiles,
+# never the global-administrator contracts, which codewire-admin-proto owns.
+include = [
+    "/build.rs",
+    "/src/**/*.rs",
+    "/LICENSE",
+    "/LICENSE-APACHE",
+    "/proto/codewire/bridge/**/*.proto",
+    "/proto/codewire/console/**/*.proto",
+    "/proto/codewire/internal/**/*.proto",
+    "/proto/codewire/testing/**/*.proto",
+    "/proto/codewire/v1/**/*.proto",
+    "/proto/google/rpc/*.proto",
+]
 
 [lib]
 # The crate is 100% generated code whose doc examples are all `rust,ignore`
@@ -22,9 +40,11 @@ default = ["client"]
 client = ["connectrpc/client"]
 
 [dependencies]
-connectrpc = { workspace = true }
-buffa = { workspace = true }
-buffa-types = { workspace = true }
+# Published with codewire, so each version is a floor rather than the
+# workspace's exact pin; the lock still decides what CI builds (codewire#3511).
+connectrpc = { version = "0.9.1", default-features = false, features = ["gzip", "json"] }
+buffa = { version = "0.9.1", features = ["json"] }
+buffa-types = { version = "0.9.1", features = ["json"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

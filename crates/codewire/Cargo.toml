@@ -6,31 +6,35 @@ rust-version.workspace = true
 authors.workspace = true
 license = "MIT"
 description = "The Codewire Rust SDK: an ergonomic client for the public codewire.v1 API over Codewire's generated Connect-RPC stubs."
-# Publishing, the MIT license and the crate's own version come with the
-# release job (codewire#3511, private-docs: designs/2026-11-16-rust-sdk.md).
-publish = false
+repository = "https://github.com/codewiresh/codewire"
+keywords = ["codewire", "sandbox", "sdk", "connect-rpc"]
+categories = ["api-bindings", "development-tools"]
 
 [dependencies]
 async-trait = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
-buffa = { workspace = true }
-buffa-types = { workspace = true }
+# Published, so each version is a floor rather than the workspace's exact
+# pin; the lock still decides what CI builds (codewire#3511).
+buffa = { version = "0.9.1", features = ["json"] }
+buffa-types = { version = "0.9.1", features = ["json"] }
 codewire-proto = { workspace = true, features = ["client"] }
-connectrpc = { workspace = true, features = ["client"] }
+connectrpc = { version = "0.9.1", default-features = false, features = ["client", "gzip", "json"] }
 futures-util = "0.3"
 http = { workspace = true }
 http-body-util = { workspace = true }
 reqwest = { workspace = true }
-rustls = { version = "=0.23.46", default-features = false, features = ["ring"] }
+# RUSTSEC-2026-0346 to 0349.
+rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
 url = { workspace = true }
 uuid = { workspace = true }
-webpki-roots = "=1.0.10"
+# RUSTSEC-2026-0381.
+webpki-roots = "1.0.10"
 x509-parser = { workspace = true }
 
 [dev-dependencies]

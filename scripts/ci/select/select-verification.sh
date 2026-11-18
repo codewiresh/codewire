@@ -1350,6 +1350,13 @@ if [ "$event_selected" = false ]; then
         select_token sdk_python
         recognized=true
         ;;
+      scripts/ci/release/package-sdk-rust.sh)
+        # The Rust SDK's packager runs with the crates it packages (#3511).
+        select_token rust
+        select_token rust_pkg_codewire
+        select_token rust_pkg_codewire_proto
+        recognized=true
+        ;;
       .github/workflows/sdk-release.yml|scripts/ci/tests/test-sdk-release-workflow.py|\
       .github/workflows/scorecard.yml|scripts/ci/tests/test-scorecard-workflow.py|\
       .github/workflows/fuzz.yml|scripts/ci/tests/test-fuzz-workflow.py|fuzz/*|\

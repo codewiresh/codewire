@@ -297,6 +297,15 @@ impl EnvironmentHandle {
                         }
                         Some(download_file_response::Payload::Chunk(chunk)) if size.is_some() => {
                             contents.extend_from_slice(&chunk);
+                            if Some(contents.len() as u64) > size {
+                                return Err(ClientError::new(
+                                    ErrorCode::DataLoss,
+                                    format!(
+                                        "the download sent more than the {} bytes it announced",
+                                        size.unwrap_or_default()
+                                    ),
+                                ));
+                            }
                         }
                         _ => {
                             return Err(ClientError::new(

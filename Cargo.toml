@@ -81,7 +81,7 @@ codewire-daemon-proto = { path = "crates/codewire-daemon-proto" }
 # default-features = false so server crates can consume the generated
 # message/service types without the Connect HTTP client stack; test/client
 # consumers opt back in with `features = ["client"]`.
-codewire-proto = { path = "crates/codewire-proto", default-features = false }
+codewire-proto = { path = "crates/codewire-proto", version = "0.1.0", default-features = false }
 # Global-administrator contracts have their own descriptor and generated-code
 # crate. Customer clients must not pull billing/admin surfaces into their
 # dependency graph.

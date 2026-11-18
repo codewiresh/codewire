@@ -1,8 +1,9 @@
 name: Release an SDK
 
 # The owner dispatches this on main to publish one version of the TypeScript
-# SDK to npm (@codewire/sdk) or the Python SDK to PyPI (codewire), by trusted
-# publishing (codewire#3512). Neither registry trusts Forgejo, so this runs on
+# SDK to npm (@codewire/sdk), the Python SDK to PyPI (codewire), or the Rust SDK
+# to crates.io (codewire-proto, then codewire), by trusted publishing
+# (codewire#3512, codewire#3511). Neither registry trusts Forgejo, so this runs on
 # GitHub's mirror of main, which Forgejo ignores: it reads only .gitea/workflows.
 # Each registry trusts exactly this workflow file in its own environment, and
 # each environment admits only main. npm only stages a version; it goes live
@@ -20,6 +21,7 @@ on:
         options:
           - typescript
           - python
+          - rust
       version:
         description: The version to publish; it must be the package's own version
         required: true
@@ -60,6 +62,9 @@ jobs:
           case "$SDK" in
             typescript) package_version="$(jq -er .version libs/sdk-ts/package.json)" ;;
             python) package_version="$(python3 -c 'import tomllib; print(tomllib.load(open("libs/sdk-python/pyproject.toml", "rb"))["project"]["version"])')" ;;
+            # The two crates release together, at one version.
+            rust) package_version="$(cargo metadata --locked --no-deps --format-version 1 |
+              jq -r '[.packages[] | select(.name == "codewire" or .name == "codewire-proto") | .version] | unique | join(" ")')" ;;
             *) echo "::error::unknown SDK $SDK"; exit 1 ;;
           esac
           [[ "$REQUESTED_VERSION" == "$package_version" ]] || {
@@ -78,6 +83,7 @@ jobs:
           case "$SDK" in
             typescript) scripts/ci/release/package-sdk-ts.sh "$RUNNER_TEMP/sdk-dist" ;;
             python) scripts/ci/release/package-sdk-python.sh "$RUNNER_TEMP/sdk-dist" ;;
+            rust) scripts/ci/release/package-sdk-rust.sh "$RUNNER_TEMP/sdk-dist" ;;
           esac
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -155,3 +161,52 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: ${{ runner.temp }}/sdk-dist
+
+  crates-io:
+    name: Publish codewire-proto and codewire to crates.io
+    needs: build
+    if: ${{ inputs.sdk == 'rust' && inputs.publish }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # crates.io trades this workflow's OIDC token for a publish token that
+      # lasts 30 minutes, and this job revokes it when it ends. The exchange is
+      # two documented HTTP calls, so no third-party action holds the token.
+      - name: Get a short-lived crates.io token
+        id: token
+        run: |
+          oidc="$(printf 'Authorization: bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" |
+            curl -fsS -H @- "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=crates.io" | jq -er .value)"
+          token="$(jq -n --arg jwt "$oidc" '{jwt: $jwt}' |
+            curl -fsS -X POST -H 'Content-Type: application/json' --data @- \
+              https://crates.io/api/v1/trusted_publishing/tokens | jq -er .token)"
+          echo "::add-mask::$token"
+          echo "token=$token" >>"$GITHUB_OUTPUT"
+
+      # codewire depends on codewire-proto at the same version, so one
+      # command publishes both, in that order, each built from its packaged
+      # sources first.
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.token.outputs.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          cargo publish --locked -p codewire-proto -p codewire
+          echo "codewire-proto and codewire $VERSION are on crates.io." >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Revoke the token
+        if: ${{ always() && steps.token.outputs.token != '' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.token.outputs.token }}
+        # The header goes on stdin, so the token is never in curl's argv.
+        run: |
+          printf 'Authorization: Bearer %s\n' "$CARGO_REGISTRY_TOKEN" |
+            curl -fsS -X DELETE -H @- https://crates.io/api/v1/trusted_publishing/tokens
