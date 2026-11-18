@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::Router;
-use codewire_server_core::http::AppBuilder;
+use codewire_server_core::http::{AppBuilder, never_shared_cached};
 use tokio::net::TcpListener;
 
 use crate::Config;
@@ -160,17 +160,116 @@ pub fn router_with_store_offline_after(
     router_from_state(state)
 }
 
+/// Every Mesh response is `Cache-Control: no-store, private` with no
+/// validators (`docs/dev/AUTH-POLICY.md`, #5054). The Connect services
+/// authenticate in their handlers, so their idempotent GETs get no `private`
+/// from a server-core auth layer; health and metrics are marked too, which
+/// costs nothing.
 pub(crate) fn router_from_state(state: AppState) -> Router {
     let draining = state.draining.clone();
-    AppBuilder::new("mesh")
-        .with_health_probe(move || {
-            let ready = !draining.load(Ordering::Acquire);
-            async move { ready }
-        })
-        .with_connect_routes(crate::connect::router(state.clone()))
-        .with_connect_routes_and_protocol_policy(
-            crate::mesh_coordinate::router(state),
-            codewire_server_core::connect::ProtocolPolicy::ConnectAndGrpc,
+    never_shared_cached(
+        AppBuilder::new("mesh")
+            .with_health_probe(move || {
+                let ready = !draining.load(Ordering::Acquire);
+                async move { ready }
+            })
+            .with_connect_routes(crate::connect::router(state.clone()))
+            .with_connect_routes_and_protocol_policy(
+                crate::mesh_coordinate::router(state),
+                codewire_server_core::connect::ProtocolPolicy::ConnectAndGrpc,
+            )
+            .into_router(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use axum::response::Response;
+    use codewire_server_core::auth::hash_api_key;
+    use tower::ServiceExt;
+
+    use super::{AppState, router_from_state};
+    use crate::Config;
+    use crate::config::LocalMeshAuthorizationConfig;
+    use crate::store::MemoryStore;
+
+    const ORG: &str = "org-mesh-no-store";
+    const API_KEY: &str = "cw_mesh-no-store";
+
+    fn config() -> Config {
+        Config {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            base_url: "https://mesh.codewire.sh".to_string(),
+            derp_url: None,
+            stun_servers: Vec::new(),
+            database_url: None,
+            mesh_authorization: None,
+            derp_verify_addr: None,
+            local_authorization: Some(LocalMeshAuthorizationConfig {
+                organization_id: ORG.to_string(),
+                api_key_hash: hash_api_key(API_KEY),
+            }),
+            nats: None,
+        }
+    }
+
+    async fn get(path: &str, api_key: Option<&str>) -> Response {
+        let mut request = Request::get(path);
+        if let Some(api_key) = api_key {
+            request = request.header(header::AUTHORIZATION, format!("Bearer {api_key}"));
+        }
+        router_from_state(AppState::new(config(), Arc::new(MemoryStore::new())))
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    /// `ListMeshNetworks` as a Connect GET (an idempotent method) for `org`.
+    fn list_networks_get(org: &str) -> String {
+        format!(
+            "/codewire.v1.MeshNetworkService/ListMeshNetworks?connect=v1&encoding=json&message=%7B%22orgId%22%3A%22{org}%22%7D"
         )
-        .into_router()
+    }
+
+    fn assert_never_shared_cached(response: &Response) {
+        let headers = response.headers();
+        assert_eq!(
+            headers.get(header::CACHE_CONTROL).unwrap(),
+            "no-store, private"
+        );
+        assert!(headers.get(header::ETAG).is_none());
+        assert!(headers.get(header::LAST_MODIFIED).is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_get_answers_are_never_shared_cached() {
+        for (path, api_key, status) in [
+            (list_networks_get(ORG), Some(API_KEY), StatusCode::OK),
+            (list_networks_get(ORG), None, StatusCode::UNAUTHORIZED),
+            (
+                list_networks_get("foreign-org"),
+                Some(API_KEY),
+                StatusCode::FORBIDDEN,
+            ),
+        ] {
+            let response = get(&path, api_key).await;
+            assert_eq!(response.status(), status, "{path} {api_key:?}");
+            assert_never_shared_cached(&response);
+        }
+    }
+
+    #[tokio::test]
+    async fn readiness_and_unknown_paths_are_never_shared_cached() {
+        let ready = get("/readyz", None).await;
+        assert_eq!(ready.status(), StatusCode::OK);
+        assert_never_shared_cached(&ready);
+
+        let missing = get("/no-such-route", None).await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_never_shared_cached(&missing);
+    }
 }

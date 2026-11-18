@@ -1,5 +1,37 @@
 use super::*;
 
+/// A trigger whose every Temporal call fails without touching the network,
+/// for tests that need an `ApiState` but never start a workflow.
+pub(crate) async fn offline_trigger() -> TemporalTrigger {
+    use temporalio_client::callback_based::CallbackBasedGrpcService;
+    use temporalio_client::tonic::Status;
+
+    let service = CallbackBasedGrpcService {
+        // Connecting asks for the server's capabilities; "unknown method"
+        // is how an older server says it has none, so the connect succeeds.
+        callback: Arc::new(|_request| {
+            Box::pin(async {
+                Err(Status::unimplemented(
+                    "unknown method: no Temporal in tests",
+                ))
+            })
+        }),
+    };
+    let options = ConnectionOptions::new(url::Url::parse("http://temporal.invalid:7233").unwrap())
+        .dns_load_balancing(None)
+        .service_override(service)
+        .build();
+    let connection = Connection::connect(options).await.unwrap();
+    TemporalTrigger {
+        client: Client::new(
+            connection,
+            ClientOptions::new("default".to_string()).build(),
+        )
+        .unwrap(),
+        task_queue: "offline".to_string(),
+    }
+}
+
 #[test]
 fn workflow_id_is_stable() {
     assert_eq!(environment_workflow_id("env-1"), "environment/env-1");

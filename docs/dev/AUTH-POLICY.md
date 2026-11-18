@@ -38,6 +38,15 @@ workspace daemon uses to fetch its binding.
   store. `TokenProvider` supplies the current access token; a
   `CredentialStore` persists the access/refresh pair atomically and saves a
   refreshed pair as one unit.
+- Mesh's Connect API and orchestration's raw browser routes answer every
+  request with `Cache-Control: no-store, private` and no `ETag` or
+  `Last-Modified`, errors included, so no shared cache stores one caller's
+  answer for another. For Mesh this is every method, including the
+  idempotent GETs, which are mounted without the auth layer that adds
+  `private`. For orchestration it is
+  `GET /api/v1/organizations/{org}/environments/{env}/ssh-proxy/check`, the
+  terminal and SSH-proxy upgrades, and the preview authorization page
+  (#5054).
 - An OAuth credential without exact `codewire.api` may use the identity
   endpoints its scopes permit, but product calls fail with REST `403` /
   Connect `permission_denied`.

@@ -8,6 +8,8 @@ pub(crate) mod account;
 pub mod admin;
 pub mod api_keys;
 pub mod assignments;
+#[cfg(test)]
+mod browser_router_tests;
 pub mod create;
 pub mod cw_runtime;
 pub mod env_access;
@@ -48,6 +50,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::routing::get;
 use codewire_server_core::auth::AuthState;
+use codewire_server_core::http::never_shared_cached;
 use sqlx::PgPool;
 
 use crate::confidential_storage::FeatureFlags;
@@ -116,9 +119,11 @@ pub struct ApiState {
 /// The deliberately permanent browser-facing routes.
 ///
 /// Connect-RPC owns control-plane procedures. Browser terminal/SSH transports
-/// and the session-owned preview handoff remain raw by design.
+/// and the session-owned preview handoff remain raw by design. Every answer
+/// here depends on the caller, so none may be stored by a shared cache
+/// (`docs/dev/AUTH-POLICY.md`, #5054).
 pub fn router(state: ApiState, _auth: AuthState) -> Router {
-    Router::new()
+    let routes = Router::new()
         // Deliberately raw browser authorization transport, not a general
         // credential API. Session authority stays on FRONTEND_URL's host.
         .route(
@@ -139,5 +144,6 @@ pub fn router(state: ApiState, _auth: AuthState) -> Router {
             "/api/v1/organizations/{org_id}/environments/{env_id}/ssh-proxy/check",
             get(ssh_proxy::ssh_proxy_check),
         )
-        .with_state(state)
+        .with_state(state);
+    never_shared_cached(routes)
 }

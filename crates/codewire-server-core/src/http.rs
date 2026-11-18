@@ -384,6 +384,40 @@ async fn set_service_header(
     resp
 }
 
+/// Keeps every answer of `router` out of shared caches: each response,
+/// including errors, redirects and the 404 fallback, carries
+/// `Cache-Control: no-store, private`, replacing any directive a handler
+/// set, and no `ETag` or `Last-Modified`.
+///
+/// For a router whose answers depend on the caller, where a shared cache
+/// that stored one would serve it to the next caller (#5054; the rule is in
+/// `docs/dev/AUTH-POLICY.md`, "Credential rules"). It does not look at the
+/// path, so health and metrics routes in the same router are marked too,
+/// which costs nothing. Apply it after the last `merge`: routes merged in
+/// later are not covered, and once this router is merged into another, only
+/// its own routes keep the layer.
+pub fn never_shared_cached(router: Router) -> Router {
+    router.layer(axum::middleware::from_fn(mark_never_shared_cached))
+}
+
+async fn mark_never_shared_cached(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    headers.insert(
+        http::header::CACHE_CONTROL,
+        http::HeaderValue::from_static("no-store, private"),
+    );
+    headers.remove(http::header::ETAG);
+    headers.remove(http::header::LAST_MODIFIED);
+    resp
+}
+
+#[cfg(test)]
+mod tests;
+
 #[cfg(test)]
 mod cors_origin_tests {
     use super::parse_cors_allowed_origins;
