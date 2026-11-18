@@ -18,6 +18,7 @@ members = [
     "crates/codewire-egress-front-door-bridge",
     "crates/codewire-egress-node",
     "crates/codewire-egress-policy",
+    "crates/codewire-egress-worker",
     "crates/codewire-ext4-scrub",
     "crates/codewire-email",
     "crates/codewire-daemon-proto",
@@ -111,6 +112,7 @@ codewire-credential-broker = { path = "crates/codewire-credential-broker" }
 codewire-credential-bridge = { path = "crates/codewire-credential-bridge" }
 codewire-credential-service = { path = "crates/codewire-credential-service" }
 codewire-cw-release = { path = "crates/codewire-cw-release" }
+codewire-egress-worker = { path = "crates/codewire-egress-worker" }
 codewire-local-credentials = { path = "crates/codewire-local-credentials" }
 codewire-platform-credentials = { path = "crates/codewire-platform-credentials" }
 codewire-workload-secrets = { path = "crates/codewire-workload-secrets" }

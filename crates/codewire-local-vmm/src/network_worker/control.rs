@@ -4,6 +4,10 @@
 //! [`LATE_STATUS_FRAME_LEN`] bytes, written whole by this one task, which
 //! the runner tells apart by its magic.
 
+use std::time::Duration;
+
+use codewire_egress_broker::ipc::LateAnswerStatus;
+
 use super::*;
 use crate::mesh_ingress_ack::mesh_ingress_ack;
 

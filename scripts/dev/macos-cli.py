@@ -397,7 +397,7 @@ def worker(root, run):
                              "--skip", "compiled_trust_is_an_exact_producer_and_artifact_graph_input"],
                             keep_going=True)
                     command(["cargo", "test", *native, "--no-fail-fast", "-p", "codewire-local-vmm",
-                             "-p", "codewire-confinement", "--lib"],
+                             "-p", "codewire-confinement", "-p", "codewire-egress-worker", "--lib"],
                             keep_going=True)
                     command(["cargo", "test", *native, "--no-fail-fast", *CREDENTIAL_CRATES, "--lib"],
                             keep_going=True)
@@ -407,7 +407,7 @@ def worker(root, run):
                     command(["cargo", "clippy", *native, "-p", "codewire-cli", "-p", "codewire-cli-bin",
                              "--all-targets", "--", "-D", "warnings"])
                     # --tests lints macOS-only test code, which no Linux lint compiles.
-                    command(["cargo", "clippy", *native, "-p", "codewire-local-vmm", "-p", "codewire-confinement",
+                    command(["cargo", "clippy", *native, "-p", "codewire-local-vmm", "-p", "codewire-confinement", "-p", "codewire-egress-worker",
                              "--lib", "--tests",
                              "--", "-D", "warnings"])
                     command(["cargo", "clippy", *native, *CREDENTIAL_CRATES, "--all-targets",
@@ -418,7 +418,7 @@ def worker(root, run):
                     # Link native primitives too: unused FFI can disappear from
                     # the CLI binary. Never execute this Intel test binary.
                     command(["cargo", "test", *common, "--target", "x86_64-apple-darwin",
-                             "-p", "codewire-local-vmm", "-p", "codewire-confinement", "--lib", "--no-run"])
+                             "-p", "codewire-local-vmm", "-p", "codewire-confinement", "-p", "codewire-egress-worker", "--lib", "--no-run"])
                     shutil.copy2(root / "target/x86_64-apple-darwin/debug/cw",
                                  run / "artifacts/cw-x86_64-apple-darwin")
             elif component in SWIFT_COMPONENTS:

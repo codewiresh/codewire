@@ -289,10 +289,10 @@ assert sum(r['tool'] == 'package-codewire-desktop.sh' for r in records) == 1
 assert sum(r['tool'] == 'build-local-vmm-initramfs.sh' for r in records) == 1
 assert sum(r['tool'] == 'test_static_contract.py' for r in records) == 1
 darwin_check = ['clippy', '--locked', '-p', 'codewire-local-vmm',
-                '-p', 'codewire-vmm-guest-probe', '-p', 'codewire-confinement',
+                '-p', 'codewire-vmm-guest-probe', '-p', 'codewire-confinement', '-p', 'codewire-egress-worker',
                 '--target', 'aarch64-apple-darwin', '--', '-D', 'warnings']
 # Then the local VMM's macOS unit tests, which nothing else compiles (#3810).
-darwin_tests = ['clippy', '--locked', '-p', 'codewire-local-vmm', '-p', 'codewire-confinement',
+darwin_tests = ['clippy', '--locked', '-p', 'codewire-local-vmm', '-p', 'codewire-confinement', '-p', 'codewire-egress-worker',
                 '--lib', '--tests', '--target', 'aarch64-apple-darwin', '--', '-D', 'warnings']
 for darwin_tool in ('cargo', 'cargo-zigbuild'):
     assert [r['args'] for r in records

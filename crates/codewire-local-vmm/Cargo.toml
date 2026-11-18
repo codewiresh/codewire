@@ -43,6 +43,7 @@ codewire-egress-broker = { workspace = true }
 codewire-egress-front-door = { workspace = true }
 codewire-egress-front-door-bridge = { workspace = true }
 codewire-egress-policy = { workspace = true }
+codewire-egress-worker = { workspace = true }
 codewire-ext4-scrub = { workspace = true }
 codewire-netstack = { workspace = true }
 codewire-network-session = { workspace = true }

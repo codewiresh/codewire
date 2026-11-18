@@ -88,7 +88,7 @@ where
 #[cfg(target_os = "linux")]
 pub(super) fn install_broker_syscalls(handing_off: bool) -> std::io::Result<()> {
     use super::{BROKER_ARCH_DENIED_SYSCALLS, BROKER_DENIED_SYSCALLS};
-    use crate::linux::confinement::{
+    use codewire_confinement::linux::{
         install_inet_and_unix_stream_pair_syscalls, install_inet_socket_only_syscalls,
     };
     if handing_off {

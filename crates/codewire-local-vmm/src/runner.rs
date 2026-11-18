@@ -17,6 +17,7 @@ use codewire_confinement::spawn::prepare_isolated_child;
 use codewire_confinement::spawn::{duplicate_inherited_descriptor, raise_open_file_limit};
 use codewire_daemon::client::SessionClient;
 use codewire_egress_broker::ipc::{BROKER_IPC_KEY_LEN, BROKER_IPC_SESSIONS};
+use codewire_egress_worker::parent::{self, StartError, fresh_egress_broker_key};
 use codewire_vmm_guest_probe::{
     DirectSharePlan, GUEST_NETWORK_VSOCK_PORT, GUEST_PROGRESS_VSOCK_PORT, GuestBootStage,
     NetworkKey, PROGRESS_CHALLENGE_LEN, PROGRESS_FRAME_LEN, ProgressFrame, ProgressRequest, Seed,
@@ -3639,72 +3640,38 @@ async fn transfer_worker_descriptor(
     deadline: tokio::time::Instant,
     transfer: fn(RawFd, RawFd) -> io::Result<()>,
 ) -> Result<(), RunnerError> {
-    tokio::time::timeout_at(deadline, async {
-        loop {
-            bootstrap.writable().await?;
-            match transfer(bootstrap.as_raw_fd(), descriptor) {
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
-                result => return result,
-            }
-        }
+    parent::transfer_descriptor(bootstrap, deadline, |bootstrap| {
+        transfer(bootstrap, descriptor)
     })
     .await
-    .map_err(|_| RunnerError::NetworkWorkerStartTimeout)?
-    .map_err(|_| RunnerError::NetworkWorkerBootstrap)
+    .map_err(|error| match error {
+        StartError::Timeout => RunnerError::NetworkWorkerStartTimeout,
+        StartError::Bootstrap => RunnerError::NetworkWorkerBootstrap,
+    })
 }
 
 async fn read_worker_status_frame(
     stream: &mut tokio::net::UnixStream,
     deadline: tokio::time::Instant,
 ) -> Result<Vec<u8>, RunnerError> {
-    let mut frame = Vec::with_capacity(WORKER_STATUS_MAX_BYTES);
-    loop {
-        if frame.len() == WORKER_STATUS_MAX_BYTES {
-            return Err(RunnerError::NetworkWorkerBootstrap);
-        }
-        let mut byte = [0_u8; 1];
-        let read = tokio::time::timeout_at(deadline, stream.read(&mut byte))
-            .await
-            .map_err(|_| RunnerError::NetworkWorkerStartTimeout)?
-            .map_err(|_| RunnerError::NetworkWorkerBootstrap)?;
-        if read == 0 {
-            return Err(RunnerError::NetworkWorkerBootstrap);
-        }
-        frame.push(byte[0]);
-        if byte[0] == b'\n' {
-            return Ok(frame);
-        }
-        if byte[0] == b'\r' || !byte[0].is_ascii() {
-            return Err(RunnerError::NetworkWorkerBootstrap);
-        }
-    }
+    parent::read_status_frame(stream, WORKER_STATUS_MAX_BYTES, deadline)
+        .await
+        .map_err(|error| match error {
+            StartError::Timeout => RunnerError::NetworkWorkerStartTimeout,
+            StartError::Bootstrap => RunnerError::NetworkWorkerBootstrap,
+        })
 }
 
 async fn read_egress_broker_status_frame(
     stream: &mut tokio::net::UnixStream,
     deadline: tokio::time::Instant,
 ) -> Result<Vec<u8>, RunnerError> {
-    let mut frame = Vec::with_capacity(EGRESS_BROKER_STATUS_MAX_BYTES);
-    loop {
-        if frame.len() == EGRESS_BROKER_STATUS_MAX_BYTES {
-            return Err(RunnerError::EgressBrokerBootstrap);
-        }
-        let mut byte = [0_u8; 1];
-        let read = tokio::time::timeout_at(deadline, stream.read(&mut byte))
-            .await
-            .map_err(|_| RunnerError::EgressBrokerStartTimeout)?
-            .map_err(|_| RunnerError::EgressBrokerBootstrap)?;
-        if read == 0 {
-            return Err(RunnerError::EgressBrokerBootstrap);
-        }
-        frame.push(byte[0]);
-        if byte[0] == b'\n' {
-            return Ok(frame);
-        }
-        if byte[0] == b'\r' || !byte[0].is_ascii() {
-            return Err(RunnerError::EgressBrokerBootstrap);
-        }
-    }
+    parent::read_status_frame(stream, EGRESS_BROKER_STATUS_MAX_BYTES, deadline)
+        .await
+        .map_err(|error| match error {
+            StartError::Timeout => RunnerError::EgressBrokerStartTimeout,
+            StartError::Bootstrap => RunnerError::EgressBrokerBootstrap,
+        })
 }
 
 async fn classify_network_worker_startup_error(
@@ -4266,16 +4233,6 @@ fn root_disk_path(paths: &VmPaths, generation: &str) -> Result<PathBuf, RunnerEr
         return Err(RunnerError::InvalidRequest);
     }
     Ok(paths.generations_dir.join(generation).join("root.raw"))
-}
-
-fn fresh_egress_broker_key() -> Zeroizing<[u8; BROKER_IPC_KEY_LEN]> {
-    loop {
-        let mut key = Zeroizing::new([0_u8; BROKER_IPC_KEY_LEN]);
-        OsRng.fill_bytes(key.as_mut());
-        if key.iter().any(|byte| *byte != 0) {
-            return key;
-        }
-    }
 }
 
 fn fresh_mesh_ingress_control_key() -> Zeroizing<[u8; MESH_INGRESS_CONTROL_KEY_LEN]> {

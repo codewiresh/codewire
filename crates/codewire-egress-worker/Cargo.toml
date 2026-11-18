@@ -1,0 +1,32 @@
+[package]
+name = "codewire-egress-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "AGPL-3.0-only"
+authors.workspace = true
+description = "Codewire's confined host egress processes: the network worker, its session driver and the egress broker"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+async-trait = { workspace = true }
+codewire-confinement = { workspace = true }
+codewire-egress-broker = { workspace = true }
+codewire-egress-policy = { workspace = true }
+codewire-netstack = { workspace = true }
+codewire-network-session = { workspace = true }
+codewire-vmm-guest-probe = { workspace = true }
+libc = "0.2"
+rand = { workspace = true }
+rustix = { workspace = true, features = ["net"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+codewire-workspace-hack.workspace = true
+
+[lints]
+workspace = true

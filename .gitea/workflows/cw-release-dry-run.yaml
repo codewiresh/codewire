@@ -62,6 +62,7 @@ on:
       - 'crates/codewire-egress-front-door/**'
       - 'crates/codewire-egress-front-door-bridge/**'
       - 'crates/codewire-egress-policy/**'
+      - 'crates/codewire-egress-worker/**'
       - 'crates/codewire-ext4-scrub/**'
       - 'crates/codewire-local-credentials/**'
       - 'crates/codewire-local-vmm/**'

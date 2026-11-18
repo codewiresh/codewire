@@ -9,20 +9,6 @@ use std::io;
 pub(crate) use codewire_confinement::darwin::require_single_thread;
 pub use codewire_confinement::darwin::{apply_profile, deny_all};
 
-/// The general egress broker's profile: everything is denied except dialing
-/// TCP to any address and the broker's own DNS. Hickory binds its own UDP
-/// port, sends each query to port 53 and receives the reply unconnected, so
-/// it needs a UDP bind and inbound UDP; Seatbelt matches inbound datagrams
-/// only by their local address. TCP to port 53 (the truncation fallback) is
-/// ordinary outbound TCP. Files, processes, signals, Mach services, Unix
-/// sockets, TCP listeners and UDP to any other port are refused. The egress
-/// policy, not this profile, decides which destinations the broker dials.
-const EGRESS_BROKER_PROFILE: &CStr = c"(version 1)(deny default)\
-(allow network-outbound (remote tcp \"*:*\"))\
-(allow network-outbound (remote udp \"*:53\"))\
-(allow network-bind (local udp \"*:*\"))\
-(allow network-inbound (local udp \"*:*\"))";
-
 /// The Mesh transport's profile. After confinement it dials TCP to its DERP
 /// relay (reconnecting as needed) and runs direct UDP: one bound socket that
 /// sends STUN probes and WireGuard/disco datagrams to any peer address and
@@ -36,11 +22,6 @@ const MESH_TRANSPORT_PROFILE: &CStr = c"(version 1)(deny default)\
 (allow network-outbound (remote udp \"*:*\"))\
 (allow network-bind (local udp \"*:*\"))\
 (allow network-inbound (local udp \"*:*\"))";
-
-/// Irreversibly confine the egress broker to outbound TCP and its own DNS.
-pub(crate) fn confine_egress_broker() -> io::Result<()> {
-    apply_profile(EGRESS_BROKER_PROFILE)
-}
 
 /// Irreversibly confine the Mesh transport to TCP dials and direct UDP.
 pub(crate) fn confine_mesh_transport() -> io::Result<()> {
@@ -71,6 +52,16 @@ mod tests {
 
     use super::*;
 
+    // The broker's profile is `codewire-egress-worker`'s; its tests run here,
+    // beside the close-on-exec sweep and UDP probe their children need.
+    use codewire_egress_worker::darwin::confine_egress_broker;
+
+    /// #3999: the broker profile admits the front-door hand-off as the broker
+    /// makes it after confinement. A new socketpair's end goes to the front
+    /// door with its length-prefixed header over the held hand-off socket and
+    /// carries bytes both ways, and the front door's acknowledgement wakes a
+    /// reader on the broker's runtime. Named Unix sockets, TCP listeners and
+    /// files stay refused.
     /// The broker profile admits exactly what the broker does after
     /// confinement: dial TCP, hand the connected stream on over a held Unix
     /// socket, and run hickory's DNS exchange (UDP bind, send to port 53,
@@ -85,9 +76,12 @@ mod tests {
             confine_egress_broker().unwrap();
 
             let dialed = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            crate::network_worker::send_connected_stream_for_test(
+            // The hand-off's sendmsg with one descriptor; which marker byte
+            // rides with it does not matter to the profile.
+            crate::network_worker::send_worker_descriptor(
                 held.as_raw_fd(),
                 dialed.as_raw_fd(),
+                crate::network_worker::WORKER_NETWORK_DESCRIPTOR_MARKER,
             )
             .unwrap();
             let mut marker = [0_u8; 1];

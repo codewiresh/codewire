@@ -2043,6 +2043,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire-egress-worker"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "codewire-confinement",
+ "codewire-egress-broker",
+ "codewire-egress-policy",
+ "codewire-netstack",
+ "codewire-network-session",
+ "codewire-vmm-guest-probe",
+ "codewire-workspace-hack",
+ "libc",
+ "rand 0.8.6",
+ "rustix",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "codewire-email"
 version = "0.1.0"
 dependencies = [
@@ -2163,6 +2186,7 @@ dependencies = [
  "codewire-egress-front-door",
  "codewire-egress-front-door-bridge",
  "codewire-egress-policy",
+ "codewire-egress-worker",
  "codewire-ext4-scrub",
  "codewire-local-credentials",
  "codewire-netstack",
