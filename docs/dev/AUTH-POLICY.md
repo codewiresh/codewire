@@ -233,6 +233,37 @@ trip; the configuration is in [../CONFIGURATION.md](../CONFIGURATION.md).
   sessions stay, and the account's address is told. Changing an existing
   password stays the reset flow.
 
+## Sign-up by invitation link
+
+On every server, a sign-up that presents an organization invitation's link
+token in `invitation_token` is admitted at exactly the invited address, at
+once and without Turnstile (#4121). `auth_session/sign_up_invitation.rs`
+reads the invitation in the sign-up's transaction, `FOR SHARE`. It must be
+pending, unexpired and addressed to the sign-up's address, compared with
+`lower()`. Anything else gets one answer, `403 invitation_invalid` ("This
+invitation is no longer valid. Ask for a new one."), or `403 invite_only` on
+an invite-only server. The link carries one of two tokens:
+
+- **The CreateInvitation token**, the one-time link an admin copies. Only
+  its SHA-256 is stored, in `org_invitations.token_hash`.
+- **The invitation email's token** (`invitation_link`, #3840). The
+  invitation sender mints it when it sends the email
+  (`invitation_link::mint_invitation_link`). Only its purpose-bound hash is
+  stored, in `verifications` with the invitation id as its identifier.
+  - There is one live token per invitation: a new email replaces it, so an
+    older forwarded email stops working. It expires with the invitation, and
+    migration 0036's trigger deletes it when the invitation is accepted,
+    revoked, expired or deleted.
+  - The invitation page resolves it again after the sign-up, so the sign-up
+    does not consume it.
+  - It admits one account: once that account exists, a second sign-up at the
+    address is refused as taken.
+
+Neither token accepts the invitation, signs anyone in or links a provider.
+With mail the new account is unverified until its owner opens the
+verification email. Accepting still needs a signed-in session whose verified
+address matches, and provider auto-linking still needs a verified address.
+
 ## Invite-only sign-up
 
 Email sign-up is one path for every `IDP_SIGNUP` mode

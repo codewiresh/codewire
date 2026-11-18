@@ -1548,6 +1548,108 @@ async fn an_unverified_codewire_email_is_never_linked() {
     cleanup(&h.pool, &[email], &[github_id.subject()]).await;
 }
 
+/// An invitation link admits a sign-up but proves no mailbox (#4121, #3840):
+/// the account it makes is unverified until its owner opens the emailed
+/// link, so a provider that owns the address is never linked to it.
+#[tokio::test]
+async fn an_account_signed_up_by_invitation_link_is_never_linked_by_a_provider() {
+    let Some(h) = Harness::new(SignupInvitePolicy::default()).await else {
+        return;
+    };
+    let email = "oauth-invitation-link@example.test";
+    let inviter = "oauth-invitation-link-inviter";
+    let github_id = GitHubId::new();
+    let forget = || async {
+        for statement in [
+            "DELETE FROM org_invitations WHERE id = 'inv_oauth_link'",
+            "DELETE FROM organizations WHERE id = 'org_oauth_link'",
+            "DELETE FROM verifications WHERE identifier = 'oauth-invitation-link@example.test'",
+        ] {
+            sqlx::query(statement).execute(&h.pool).await.unwrap();
+        }
+        cleanup(
+            &h.pool,
+            &[email, "oauth-invitation-link-inviter@example.test"],
+            &[github_id.subject()],
+        )
+        .await;
+    };
+    forget().await;
+    insert_user(
+        &h.pool,
+        inviter,
+        "oauth-invitation-link-inviter@example.test",
+        true,
+        true,
+    )
+    .await;
+    for statement in [
+        "INSERT INTO organizations (id, name, slug, created_by) VALUES ('org_oauth_link', 'OAuth Link', 'oauth-link-org', 'oauth-invitation-link-inviter')",
+        "INSERT INTO org_invitations (id, org_id, email, role, invited_by, status, expires_at, token_hash) \
+         VALUES ('inv_oauth_link', 'org_oauth_link', 'oauth-invitation-link@example.test', 'member', \
+                 'oauth-invitation-link-inviter', 'pending', NOW() + interval '7 days', \
+                 encode(sha256('oauth-link-copy-token'::bytea), 'hex'))",
+    ] {
+        sqlx::query(statement).execute(&h.pool).await.unwrap();
+    }
+    let mut tx = h.pool.begin().await.unwrap();
+    let link = codewire_idp::invitation_link::mint_invitation_link(&mut tx, "inv_oauth_link")
+        .await
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let sign_up = codewire_idp::auth_session::router_with_email(
+        h.pool.clone(),
+        true,
+        SignupInvitePolicy::default(),
+        ORIGIN.into(),
+        codewire_email::EmailClient::recording().0,
+    );
+    let response = sign_up
+        .oneshot(
+            Request::post("/api/auth/sign-up")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "email": email,
+                        "password": "Sup3rStrong!Pass",
+                        "invitation_token": link,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let user: String = sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
+        .bind(email)
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+
+    let started = h.start("github", "").await;
+    h.answer(
+        &started,
+        "invitation-link-code",
+        github(github_id, email, true),
+    );
+    h.callback("github", &started, "invitation-link-code")
+        .await
+        .assert_refused("link_required");
+    let provider_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM accounts WHERE user_id = $1 AND provider_id = 'github'",
+    )
+    .bind(&user)
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(provider_rows, 0);
+    assert_eq!(sessions(&h.pool, &user).await, 0);
+    forget().await;
+}
+
 #[tokio::test]
 async fn two_factor_is_still_asked_after_a_provider_sign_in() {
     let Some(h) = Harness::new(SignupInvitePolicy::open()).await else {

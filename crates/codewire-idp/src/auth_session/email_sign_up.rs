@@ -7,9 +7,13 @@
 //! - `invite-only`, self-hosted (#4121): an organization invitation for the
 //!   address admits; anyone else waits for the admin, saying why when
 //!   `IDP_SIGNUP_REASON=required`. Nothing is taken before setup has made the
-//!   admin. Turnstile only when its keys are set, and never for an invite
-//!   link. Without mail the admin vouches for the address (`email_vouched_by`)
-//!   and an admitted account signs in at once.
+//!   admin. Turnstile only when its keys are set. Without mail the admin
+//!   vouches for the address (`email_vouched_by`) and an admitted account
+//!   signs in at once.
+//!
+//! On every server an invitation link admits a sign-up at exactly its
+//! address, with no code, review or reason, and skips Turnstile (#4121: "the
+//! private invite is enough").
 //!
 //! With mail every address is verified by email before it signs in, and
 //! sign-up issues no session (#4481).
@@ -19,10 +23,9 @@ use super::sign_up_invitation::{
 };
 use super::*;
 
-/// Whether a sign-up from an invite link also passes Turnstile when an
-/// invite-only server has its keys. Decided no (#4121, cw-pm for the owner):
-/// a per-address, one-time link skips the challenge; every other sign-up
-/// passes it.
+/// Whether a sign-up from an invitation link also passes Turnstile. Decided
+/// no, on every server (#4121, cw-pm for the owner): a per-address link
+/// skips the challenge; every other sign-up passes it.
 const TURNSTILE_FOR_INVITED: bool = false;
 
 /// What admitted a sign-up, or that nothing did.
@@ -30,7 +33,7 @@ enum Admission {
     /// Decided before anything is written: an invite code in review mode, or
     /// everyone in open mode.
     AtOnce,
-    /// An organization invitation, by id (invite-only).
+    /// An organization invitation, by id.
     Invitation(String),
     /// Nothing: the account waits for review or for the admin.
     Waiting,
@@ -63,9 +66,10 @@ fn reason_missing() -> AppError {
 
 /// The checks a sign-up passes before it writes anything: the email and
 /// password, Turnstile, the reason, and mail to verify with. Review and open
-/// decide admission here; an invite-only server reads its invitation in the
-/// sign-up's transaction, so its admission is `None` until then. A refusal
-/// counts in `codewire_idp_sign_up_refusals_total` (#3297).
+/// decide admission here; an invitation, and any sign-up on an invite-only
+/// server, is read in the sign-up's transaction, so its admission is `None`
+/// until then. A refusal counts in `codewire_idp_sign_up_refusals_total`
+/// (#3297).
 async fn admit(
     state: &SessionAuthState,
     req: &SignUpRequest,
@@ -93,22 +97,19 @@ async fn admit_checks(
     let mode = policy.mode();
     let mail = state.email.is_configured();
     let turnstile_configured = !matches!(state.human_verification, HumanVerification::Unavailable);
-    let human_verification = match mode {
-        SignupMode::Review | SignupMode::Open => true,
-        SignupMode::InviteOnly if !turnstile_configured => false,
-        SignupMode::InviteOnly if TURNSTILE_FOR_INVITED => true,
-        // Only a token that names a live invitation for this address skips
-        // the challenge; a missing or wrong one gets it, so the parameter is
-        // never a way around it.
-        SignupMode::InviteOnly => {
-            !invitation_is_live(&state.pool, &req.invitation_token, &req.email, mail).await?
-        }
-    };
+    // An invite-only server without Turnstile's keys asks no one. Otherwise
+    // only a token that names a live invitation for this address skips the
+    // challenge; a missing or wrong one gets it, so the parameter is never a
+    // way around it.
+    let human_verification = (mode != SignupMode::InviteOnly || turnstile_configured)
+        && (TURNSTILE_FOR_INVITED
+            || !invitation_is_live(&state.pool, &req.invitation_token, &req.email, mail).await?);
     if human_verification {
         validate_turnstile(state, &req.email, &req.turnstile_token).await?;
     }
 
     let decided = match mode {
+        _ if !req.invitation_token.is_empty() => None,
         SignupMode::InviteOnly => None,
         _ if policy.admits_at_once(&req.invite_code) => Some(Admission::AtOnce),
         _ => Some(Admission::Waiting),
@@ -282,7 +283,7 @@ async fn create_account(
     })?;
     let admission = match decided {
         Some(admission) => admission,
-        None => invite_only_admission(state, &mut tx, req).await?,
+        None => invitation_admission(state, &mut tx, req).await?,
     };
     let reason = req.reason.trim();
     if admission.reason_is_missing(&state.signup_invite_policy, reason) {
@@ -367,22 +368,25 @@ async fn create_account(
     })
 }
 
-/// Admission on an invite-only server, in the sign-up's transaction: nothing
-/// before setup has made the admin; one sign-up per address at a time,
-/// whatever its case; then an organization invitation, or nothing; and never
-/// an address that already has an account.
-async fn invite_only_admission(
+/// Admission by invitation, and any admission on an invite-only server, in
+/// the sign-up's transaction: on an invite-only server nothing before setup
+/// has made the admin; one sign-up per address at a time, whatever its case;
+/// then an organization invitation, or on an invite-only server nothing; and
+/// never an address that already has an account.
+async fn invitation_admission(
     state: &SessionAuthState,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     req: &SignUpRequest,
 ) -> Result<Admission, AppError> {
     let failed = |error: sqlx::Error| {
-        tracing::error!(%error, "failed to admit an invite-only sign-up");
+        tracing::error!(%error, "failed to admit a sign-up by invitation");
         AppError::InternalMsg("Failed to create account".into())
     };
-    if !crate::admin_bootstrap::admin_exists(&mut **tx)
-        .await
-        .map_err(failed)?
+    let invite_only = state.signup_invite_policy.mode() == SignupMode::InviteOnly;
+    if invite_only
+        && !crate::admin_bootstrap::admin_exists(&mut **tx)
+            .await
+            .map_err(failed)?
     {
         return Err(AppError::ServiceUnavailable(
             "This server is still being set up; its admin comes first".into(),
@@ -398,7 +402,8 @@ async fn invite_only_admission(
     } else {
         let mail = state.email.is_configured();
         let invitation =
-            invitation_for_sign_up(tx, &req.invitation_token, &req.email, mail).await?;
+            invitation_for_sign_up(tx, &req.invitation_token, &req.email, mail, invite_only)
+                .await?;
         Admission::Invitation(invitation.id)
     };
     if address_taken(tx, &req.email).await? {

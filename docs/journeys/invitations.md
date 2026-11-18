@@ -10,7 +10,7 @@ feature on Production. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-15. Invite, email, accept and remove are observed on Dev
+Updated 2026-11-18. Invite, email, accept and remove are observed on Dev
 (source 6c3651dcf), and leaving from `cw` on Dev (source 20f2f4b0a). On
 Production (v0.4.18, source a9dd8b270), the invitation and its email's send
 are observed; the email's arrival is observed on Dev only. The account's
@@ -28,6 +28,7 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
 | `org-leave` | the CLI observed 2026-11-15 on 20f2f4b0a (#4519); the account page not yet observed | not yet observed |
 | `invite-limits` | the account's hourly limit observed 2026-11-14 on 09c05f268; the organization's limit and the dashboard refusal observed 2026-11-15 on e8e593b86 (#4457); the pending cap observed on Kind only, 2026-11-15 on 35bacfcbb (#4457) | the account's hourly limit observed 2026-11-14 on 92672c5c4 (#4457); the rest not yet observed |
 | `invite-unverified` | observed on Kind only, 2026-11-15 on 35bacfcbb (#4457) | not yet observed |
+| `invite-signup` | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -109,7 +110,9 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
     email;
   - the email's button opens the invitation at `/accept-invite#t=<token>`
     (#3840, decided 2026-11-13). The page is built for the copied link
-    (`invite-accept`); the email's own token is not built yet (#4624);
+    (`invite-accept`). The email's own token and its sign-up admission
+    exist (#4624); the page doesn't resolve it yet, and the email doesn't
+    carry it yet (#3840);
   - the email uses the plain shared layout with a text part, from "Codewire
     <hello@codewire.sh>" (#4553). Not on main yet.
 - **Driving it:** invite an address a person reads, and read the email
@@ -165,14 +168,14 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
       each;
     - an old `?token=` link: the out-of-date page;
     - the link never signs anyone in by itself;
-  - the same page from the email's button, by the email's own token: not
-    built yet (#4624);
+  - the same page from the email's button, by the email's own token: the
+    token exists (#4624), but the page doesn't resolve it yet (#3840);
   - a new invitee who signs up from the link: on an invite-only server it is
     admitted with no invite code, reason, challenge or access review, at the
     invited address only. The page shows the address masked as a hint, and
     the invitee types it (#4121, #3840). It still verifies its email before
-    it can sign in, unless the server has no mail (#4481). On a hosted
-    server, admission by invitation is not built yet (#4624);
+    it can sign in, unless the server has no mail (#4481). A hosted server
+    admits it the same way (#4624, `invite-signup`), not yet observed;
 - **Driving it:** as the invitee:
 
   ```sh
@@ -190,11 +193,11 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
     "You're not in an organization yet; create one with `cw org create
     NAME`, or accept an invitation with `cw org invitations`." (#4530, from
     v0.4.19; before it, `cw login` exited 1 here).
-  - An organization invitation is not a sign-up invite code. On hosted, a
-    new account waits for an admin to enable it unless its sign-up gave a
-    sign-up invite code; the organization invitation does not enable it. A
-    walk with an invitee who has no account records which of the two it
-    used. Verification is needed either way (owner, 2026-11-13, on #4481).
+  - An invitee with no account signs up through the invitation's link
+    (`invite-signup`). It is admitted at once at the invited address, with no
+    sign-up invite code or review (#4121), and still verifies its address
+    first (owner, 2026-11-13, on #4481). A sign-up without the link, even at
+    the invited address, goes through the server's normal sign-up.
 - **Observed:** Dev, 2026-11-13, source 6c3651dcf, `cw` built from 27707e6c2:
   `cw login`, then `cw org invitations` listing the organization, then `cw org
   accept` joining as member, by `invitations-journey.sh` (#3840). With `cw`
@@ -206,6 +209,33 @@ unverified-inviter refusal are observed on Kind (source 35bacfcbb).
   invitation page is covered on Kind by
   `apps/dashboard/e2e/ssr-dashboard.governance.ssr.ts`. The one-time link's
   page and sign-up from it are not yet observed on Dev (#3840).
+
+## `invite-signup`: an invitee with no account signs up by the link
+
+Issues: #4121 (an invitation link admits a sign-up on every server) and #3840
+(the invitation email's link).
+
+- **Entry points:** the invitation's link, copied by the inviter or, once the
+  invitation email carries it, in the email. It opens `/accept-invite`, which
+  offers sign-up with the address filled in.
+- **States to exercise:**
+  - a sign-up at the invited address, admitted at once with no code, review
+    or reason, then email verification, sign-in and Accept;
+  - the same link at another address, refused with "This invitation is no
+    longer valid. Ask for a new one.";
+  - a resent invitation email's older link, refused the same way;
+  - a link whose invitation was revoked, refused the same way;
+  - a second sign-up at the address after the first, refused as taken.
+- **Driving it:** with a fresh mail provider simulator address for each
+  walk, since an address that already has an account can't sign up again.
+  It needs the dashboard to carry the link's token to sign-up (#4121's
+  dashboard page, and the `/accept-invite` page's sign-up branch).
+- **Proof:** the invitee's account is enabled but unverified until the
+  verification email is opened. `cw org members` lists it only after Accept.
+- **Gotchas:** the link never signs anyone in or accepts anything. Signing up
+  by it and then signing in with GitHub or Google at the same address links
+  nothing until the address is verified.
+- **Observed:** not yet observed.
 
 ## `invite-remove`: an owner or admin removes the member
 

@@ -75,7 +75,7 @@ mod email_sign_up;
 mod sign_up_invitation;
 pub mod signup_policy;
 
-pub use sign_up_invitation::INVITE_ONLY_REFUSAL;
+pub use sign_up_invitation::{INVITATION_REFUSAL, INVITE_ONLY_REFUSAL};
 use signup_policy::SignInRefusal;
 pub use signup_policy::{SignupInvitePolicy, SignupMode};
 

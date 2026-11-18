@@ -64,6 +64,7 @@ mod tests {
     mod hosted_snapshots;
     mod hosts;
     mod interception_cas;
+    mod invitation_link;
     mod invite_only_sign_up;
     mod network_policies;
     mod oauth_sign_in;
@@ -94,9 +95,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced), 0002 to 0035.
+    // (which equals the 41-migration history it replaced), 0002 to 0036.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "fa44df1734e35fc8da68372c6e4d0140b86e68d5b34f25bf857ece3d114d74b3";
+        "b67e9bcba26d813e5a7aded610951e096994b03574e6d840854a080af2e108d2";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -188,6 +189,8 @@ mod tests {
     const APPLIED_OIDC_AUTH_REQUEST_PROMPT_MAX_AGE_CHECKSUM: &str = "634f3efb309564b4f3f34f18e804a1fb0d037196a2d625b10ad1960f3854607362275bac5f23c776dc6942651c726454";
     // SHA-384 of 0035_credential_revocations.sql (#3586).
     const APPLIED_CREDENTIAL_REVOCATIONS_CHECKSUM: &str = "91390548640b9552e06867a6ea6491d28e42bce354d902a12ea004bfb0c8655dee1cb8f7bc255a6dfd06c9fad0106623";
+    // SHA-384 of 0036_invitation_link.sql (#4121, #3840).
+    const APPLIED_INVITATION_LINK_CHECKSUM: &str = "7b1bc9aba94635635c654a3874c2eb56841c1e626c49c7cfd014844b3671cd437645239286cc3242bf280f337ba1f2be";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1304,6 +1307,7 @@ mod tests {
             (33, APPLIED_EGRESS_LOCKDOWN_REFUSAL_CHECKSUM),
             (34, APPLIED_OIDC_AUTH_REQUEST_PROMPT_MAX_AGE_CHECKSUM),
             (35, APPLIED_CREDENTIAL_REVOCATIONS_CHECKSUM),
+            (36, APPLIED_INVITATION_LINK_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1334,10 +1338,10 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 35
+                first.len() == 36
                     && first.iter().map(|migration| migration.0).eq([
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-                        22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35
+                        22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36
                     ])
                     && first.iter().all(|migration| migration.2)
             );

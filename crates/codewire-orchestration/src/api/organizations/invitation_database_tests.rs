@@ -261,6 +261,50 @@ async fn db_id_acceptance_requires_a_verified_matching_email() {
     .await;
 }
 
+/// An invitation email's link (#4121, #3840) admits a sign-up and never
+/// accepts by itself: with only that token nobody joins, neither the
+/// unverified account the link just made nor a verified account at another
+/// address, and the invitation stays pending.
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_an_invitation_link_never_accepts_by_itself() {
+    let fixture = LeaseFixture::seed("synthetic-invitation-link").await;
+    let mut t = Invitations::new(&fixture);
+    let email = t.email("linked");
+    let signed_up = t.user("linked", &email, false).await;
+    let stranger_email = t.email("stranger");
+    let stranger = t.user("stranger", &stranger_email, true).await;
+    let (invitation, _) = t.invite("linked", &email, "pending", "7 days").await;
+    let link = format!("synthetic-invitation-link-{invitation}");
+    sqlx::query(
+        "INSERT INTO verifications (id, identifier, purpose, token_hash, expires_at) \
+         VALUES ($1, $2, 'invitation_link', $3, NOW() + interval '7 days')",
+    )
+    .bind(format!("{invitation}-link"))
+    .bind(&invitation)
+    .bind(codewire_server_core::auth::verification_token_hash(
+        "invitation_link",
+        &link,
+    ))
+    .execute(t.pool())
+    .await
+    .unwrap();
+
+    for user in [&signed_up, &stranger] {
+        assert!(
+            t.accept(user, AcceptInvitationBy::Token(link.clone()))
+                .await
+                .is_err(),
+            "{user} joined by the link alone"
+        );
+        assert!(!t.is_member(user).await);
+    }
+    assert_eq!(t.status(&invitation).await, "pending");
+
+    t.cleanup().await;
+    fixture.cleanup().await;
+}
+
 /// On a server with no mail the admin vouches for an address (#4121): a
 /// vouched account accepts an invitation only by its own token and within a
 /// day of its issue, never by id, and ListMyInvitations shows it nothing.

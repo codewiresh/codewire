@@ -634,6 +634,19 @@ pub fn hash_session_token(raw: &str) -> String {
     sha256_hex(raw)
 }
 
+/// The at-rest representation of a `verifications` token: a SHA-256 digest
+/// domain-separated by its purpose, so a token minted for one purpose never
+/// matches a row of another. The IdP mints and claims these tokens, and
+/// orchestration resolves an invitation link by the same digest (#4121).
+pub fn verification_token_hash(purpose: &str, token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"codewire/idp/verification/v1\0");
+    hasher.update(purpose.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(token.as_bytes());
+    hex_lower(&hasher.finalize())
+}
+
 fn sha256_hex(raw: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(raw.as_bytes());

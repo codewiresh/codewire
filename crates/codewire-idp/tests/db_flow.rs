@@ -4334,6 +4334,170 @@ async fn a_server_that_adds_mail_has_its_vouched_admin_verify_against_postgres()
 }
 
 #[tokio::test]
+async fn an_invitation_link_admits_one_sign_up_at_its_address_on_every_server_against_postgres() {
+    use codewire_idp::auth_session::{INVITATION_REFUSAL, SignupInvitePolicy, SignupMode};
+    let Some((admin, pool, db_name)) = isolated_database("invitation_link").await else {
+        return;
+    };
+    for statement in [
+        "INSERT INTO users (id, email, name, email_verified, is_admin, enabled) VALUES ('u_owner', 'owner@example.test', 'Owner', true, true, true)",
+        "INSERT INTO organizations (id, name, slug, created_by) VALUES ('org_link', 'Link Org', 'link-org', 'u_owner')",
+        "INSERT INTO org_invitations (id, org_id, email, role, invited_by, status, expires_at, token_hash) \
+         VALUES ('inv_ida', 'org_link', 'Ida@Example.test', 'member', 'u_owner', 'pending', NOW() + interval '7 days', \
+                 encode(sha256('copy-token'::bytea), 'hex'))",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let mint = || async {
+        let mut tx = pool.begin().await.unwrap();
+        let token = codewire_idp::invitation_link::mint_invitation_link(&mut tx, "inv_ida")
+            .await
+            .unwrap()
+            .expect("a pending invitation gets a link");
+        tx.commit().await.unwrap();
+        token
+    };
+    let links = || async {
+        sqlx::query_as::<_, (i64, bool)>(
+            "SELECT count(*), COALESCE(bool_and(v.expires_at = i.expires_at), true) FROM verifications v \
+               JOIN org_invitations i ON i.id = v.identifier \
+              WHERE v.purpose = 'invitation_link' AND v.identifier = 'inv_ida'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let is_member = |user: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM org_members WHERE org_id = 'org_link' AND user_id = $1)",
+            )
+            .bind(user)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    // A second email replaces the first link; the one left expires with the
+    // invitation.
+    let replaced = mint().await;
+    let link = mint().await;
+    assert_eq!(links().await, (1, true));
+
+    let frontend = "https://app.codewire.test";
+    let review = SignupInvitePolicy::default().with_mode(SignupMode::Review);
+    let (mail, outbox) = codewire_email::EmailClient::recording();
+    let challenged = codewire_idp::auth_session::router_with_signup_delivery(
+        pool.clone(),
+        false,
+        review.clone(),
+        frontend.to_owned(),
+        mail.clone(),
+        "synthetic-turnstile-secret".to_owned(),
+        String::new(),
+        "synthetic-client-address-key".to_owned(),
+    );
+    let trusted = codewire_idp::auth_session::router_with_email(
+        pool.clone(),
+        false,
+        review,
+        frontend.to_owned(),
+        mail,
+    );
+    let token = |token: &str| format!(r#","invitation_token":"{token}""#);
+    let unknown = "0".repeat(64);
+
+    // A replaced link, another address or an unknown token never skips the
+    // challenge, and past it each gets the same answer.
+    for (email, link) in [
+        ("ida@example.test", replaced.as_str()),
+        ("someone@example.test", link.as_str()),
+        ("ida@example.test", unknown.as_str()),
+    ] {
+        let (st, body, _) = invite_only_sign_up(&challenged, email, &token(link)).await;
+        assert_eq!(st, 400, "{email}: {body}");
+        assert_eq!(body["detail"], "Complete the human verification challenge");
+        let (st, body, cookie) = invite_only_sign_up(&trusted, email, &token(link)).await;
+        assert_eq!(st, 403, "{email}: {body}");
+        assert_eq!(body["code"], "invitation_invalid");
+        assert_eq!(body["detail"], INVITATION_REFUSAL);
+        assert!(cookie.is_none());
+    }
+    assert!(outbox.sent().is_empty());
+
+    // The live link, at the invited address in any case: no code, review,
+    // reason or challenge. The address is still verified by email first, and
+    // the sign-up accepts nothing.
+    let (st, body, cookie) =
+        invite_only_sign_up(&challenged, "ida@example.test", &token(&link)).await;
+    assert_eq!(st, 202, "invited: {body}");
+    assert_eq!(body["verificationPending"], true);
+    assert!(body.get("accessPending").is_none());
+    assert!(cookie.is_none());
+    let (ida, enabled, verified, vouched, _) = account_state(&pool, "ida@example.test").await;
+    assert!(enabled && !verified);
+    assert!(vouched.is_none(), "with mail nothing is vouched");
+    assert_eq!(outbox.sent().len(), 1);
+    assert!(!is_member(ida.clone()).await);
+    let sign_in = r#"{"email":"ida@example.test","password":"Sup3rStrong!Pass"}"#;
+    let (st, body, cookie) = sess_req(&trusted, "POST", "/api/auth/sign-in", None, sign_in).await;
+    assert_eq!(st, 403);
+    assert_eq!(body["code"], "email_unverified");
+    assert!(cookie.is_none());
+    // The invitation page resolves the link again on the way back.
+    assert_eq!(links().await, (1, true));
+
+    // The link admits one account at its address: another sign-up makes none.
+    let _ = invite_only_sign_up(&trusted, "ida@example.test", &token(&link)).await;
+    let accounts: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM users WHERE lower(email) = 'ida@example.test'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(accounts, std::slice::from_ref(&ida));
+
+    // An account deleted before it accepts leaves nothing behind for the
+    // link: signing up again makes a new, unverified account that is not a
+    // member, as account deletion's last step (`DELETE FROM users`) leaves it.
+    for statement in [
+        "DELETE FROM accounts WHERE user_id = $1",
+        "DELETE FROM sessions WHERE user_id = $1",
+        "DELETE FROM users WHERE id = $1",
+    ] {
+        sqlx::query(statement)
+            .bind(&ida)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let (st, body, _) = invite_only_sign_up(&trusted, "ida@example.test", &token(&link)).await;
+    assert_eq!(st, 202, "after deletion: {body}");
+    let (again, enabled, verified, vouched, _) = account_state(&pool, "ida@example.test").await;
+    assert_ne!(again, ida);
+    assert!(enabled && !verified && vouched.is_none());
+    assert!(!is_member(again).await);
+
+    // Once the invitation is closed its link is gone and admits nothing.
+    sqlx::query("UPDATE org_invitations SET status = 'revoked' WHERE id = 'inv_ida'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(links().await.0, 0);
+    let mut tx = pool.begin().await.unwrap();
+    assert!(
+        codewire_idp::invitation_link::mint_invitation_link(&mut tx, "inv_ida")
+            .await
+            .unwrap()
+            .is_none(),
+        "a closed invitation gets no link"
+    );
+    tx.rollback().await.unwrap();
+
+    drop_isolated(admin, pool, &db_name).await;
+}
+
+#[tokio::test]
 async fn get_session_accepts_codewire_api_key_against_postgres() {
     let Ok(url) = std::env::var("DATABASE_URL") else {
         eprintln!("DATABASE_URL unset — skipping idp api-key get-session e2e");

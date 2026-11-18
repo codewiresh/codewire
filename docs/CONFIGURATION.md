@@ -137,6 +137,12 @@ email before it can sign in (#4481).
   included, verifies its address by email at its next sign-in. Sign-up with
   GitHub or Google is refused; connect them in Settings after signing up.
 
+On every server, an organization invitation's link admits a sign-up at
+exactly the invited address at once, with no code, review or reason, and
+without the Turnstile challenge. The link is an admin's copied link or the
+invitation email's link. With mail the address is still verified by email
+before it signs in, and the invitee then accepts the invitation signed in.
+
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
 | `IDP_SIGNUP` | No | `review` (the default), `open` or `invite-only`. Any other value stops the IdP from starting. | `invite-only` |

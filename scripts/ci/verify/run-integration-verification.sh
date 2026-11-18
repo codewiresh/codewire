@@ -1829,7 +1829,7 @@ run_idp_flow() {
     echo "::error::idp db_flow skipped"
     return 1
   fi
-  assert_passed_count "idp db_flow" "$logfile" 25
+  assert_passed_count "idp db_flow" "$logfile" 26
 }
 
 run_idp_session_inventory() {
@@ -1878,7 +1878,7 @@ run_idp_oauth_sign_in() {
     echo "::error::idp OAuth sign-in DB tests skipped"
     return 1
   fi
-  assert_passed_count "idp OAuth sign-in" "$logfile" 31
+  assert_passed_count "idp OAuth sign-in" "$logfile" 32
 }
 
 # The organization invitation email sender (#3847), with a recording mailer.

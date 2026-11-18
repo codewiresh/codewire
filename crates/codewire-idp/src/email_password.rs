@@ -17,11 +17,10 @@ use crate::mail_limit::{self, Mail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::auth_session::{
-    hash_password, hex_id, hex_lower, hex_token, log_audit, request_info, validate_password,
+    hash_password, hex_id, hex_token, log_audit, request_info, validate_password,
 };
 use crate::oauth::Provider;
 
@@ -100,6 +99,10 @@ pub(crate) enum VerificationPurpose {
     /// Lets an account that can't sign in until it verifies its email ask
     /// for a new link. Its identifier is the user id, not the email.
     ResendVerification,
+    /// An invitation email's link (#4121, #3840): it names the invitation
+    /// and admits one sign-up at its address, and never accepts or signs
+    /// anyone in. Its identifier is the invitation id.
+    InvitationLink,
 }
 
 impl VerificationPurpose {
@@ -108,6 +111,7 @@ impl VerificationPurpose {
             Self::EmailVerification => "email_verification",
             Self::PasswordReset => "password_reset",
             Self::ResendVerification => "resend_verification",
+            Self::InvitationLink => "invitation_link",
         }
     }
 }
@@ -193,12 +197,7 @@ pub(crate) async fn create_verification_in_transaction(
 }
 
 fn verification_token_hash(purpose: VerificationPurpose, token: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"codewire/idp/verification/v1\0");
-    digest.update(purpose.as_str().as_bytes());
-    digest.update(b"\0");
-    digest.update(token.as_bytes());
-    hex_lower(&digest.finalize())
+    codewire_server_core::auth::verification_token_hash(purpose.as_str(), token)
 }
 
 async fn claim_verification(
