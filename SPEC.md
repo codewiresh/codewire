@@ -314,6 +314,13 @@ alike. The Claude Code build an environment runs is fetched from its vendor at
 first use and updates itself, and is not covered by Codewire's lockfile,
 licence or advisory checks.
 
+Target, not shipped (#3223): the workspace image carries a graphical desktop
+as an inert layer: an X server that is also a VNC server (`Xvnc`), an XFCE
+session, `xdotool` and `scrot`, and the launcher that starts them, from the
+same dated package snapshot as the rest of the image. Nothing in the layer
+runs or listens until an environment's desktop is started
+([Desktop](#desktop)).
+
 ## 4. Hosted sandboxes
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the Kubernetes shape in
@@ -715,9 +722,21 @@ OpenSSH `ProxyCommand`, it opens an SSH stream to the supervisor over the
 owner-only socket (`OpenEnvironmentSshStream`), and the supervisor runs the
 session through the environment's guest daemon over vsock, so nothing listens
 for SSH anywhere (`crates/codewire-local-vmm/src/supervisor/ssh.rs`). Host
-keys live under the supervisor root. `cw setup ssh` writes cloud aliases only;
-`cw-local-*` is reserved and refused for now, and `cw ssh known-hosts` refuses
-local VMs.
+keys live under the supervisor root. `cw setup ssh` writes both alias
+families, `cw-cloud-*` and `cw-local-*`, and `cw ssh known-hosts` answers for a
+local VM with the key its supervisor holds.
+
+### Port forwarding over SSH
+
+A local forward (`ssh -L`, or a port an editor forwards) through either alias
+reaches only the environment's own loopback: the target is `localhost` or a
+literal loopback address, never a name to resolve, and a port the platform
+holds there is refused by name (the daemon's SSH server, the credential
+bridge and, in a hosted Sandbox, the daemon itself). A hosted Sandbox's SSH
+server dials the workload's loopback; a local VM's supervisor opens the guest
+daemon's `ForwardTcp`, which applies the same rule again, and refuses every
+forward when the VM's runtime predates it. The server refuses remote
+forwards, and the managed block turns agent and X11 forwarding off.
 
 ### Terminal
 
@@ -759,6 +778,45 @@ environment.
 
 `scp`, `sftp` and `rsync` over the SSH path; `cw cp` through the daemon's
 file RPCs, which are confined to `/workspace` and `/home/codewire`.
+
+### Desktop
+
+Target, not shipped (#3223). The contract is
+[docs/dev/SANDBOX-DESKTOP.md](docs/dev/SANDBOX-DESKTOP.md) and the acceptance
+journey is [docs/journeys/desktop.md](docs/journeys/desktop.md).
+
+An environment has at most one graphical desktop, started on request and
+shared by everyone who may open a terminal there. The daemon starts it
+(`StartDesktop`, capability `desktop.vnc.v1`) as the durable session
+`codewire-desktop`: display `:1`, with its VNC listener on the workload's
+`127.0.0.1:5901` and nowhere else. Guest port 5901 is reserved: it can never
+be published, previewed or served to a Mesh Network. The desktop outlives
+every viewer and ends with a stop of the desktop or of the environment.
+While it runs, every command,
+shell and session started in the environment gets `DISPLAY=:1`, so an agent
+started there draws on the desktop and can drive and read it. An environment
+whose image predates the desktop layer reports it unavailable.
+
+Nothing new listens outside the environment. There are two ways in, and both
+already admit a user:
+
+```text
+cw vnc [ENV]
+  -> ssh -N -L 127.0.0.1:PORT:127.0.0.1:5901 through the managed alias
+  -> the system's VNC viewer on vnc://127.0.0.1:PORT
+
+dashboard, a hosted Sandbox's page
+  -> WebSocket codewire.desktop-stream.v1, admitted as the terminal's is
+  -> orchestration -> the daemon's ForwardTcp to 127.0.0.1:5901
+```
+
+`cw vnc` works the same with `--local` and `--cloud`; `--status` and `--stop`
+report and end the desktop. `codewire.v1.EnvironmentDesktopService` starts,
+reads and stops a hosted Sandbox's desktop for a caller with operator access;
+the supervisor's control protocol does the same for a local VM's owner. The
+dashboard viewer is for hosted Sandboxes only. A desktop is a shared screen
+inside the workload: anything running there can watch it and read what is
+typed into it, as with a terminal.
 
 ## 8. Security model
 

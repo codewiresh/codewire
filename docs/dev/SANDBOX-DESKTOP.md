@@ -1,0 +1,270 @@
+# Environment desktop
+
+Target, not shipped (#3223). This page is written before the code, as the
+contract the code must make true; nothing here exists on `main` except what
+"Already shipped" lists. The acceptance journey is
+[../journeys/desktop.md](../journeys/desktop.md), and `SPEC.md` "7. Access
+paths" has the summary.
+
+An environment's desktop is a graphical session inside the workload that a
+person watches and controls over VNC, and that an agent in the same
+environment draws on and drives. It is for running a GUI test, an app with a
+window or a headed browser where someone can see it.
+
+## Rules
+
+- One desktop per environment, shared by everyone who may open a terminal
+  there. It is a shared screen, not a private one.
+- Nothing runs or listens until it is started. An environment that never
+  starts a desktop behaves exactly as before.
+- The VNC listener is on the workload's `127.0.0.1:5901` only. No Pod port,
+  preview URL, published port or Mesh port ever serves it: guest port 5901
+  is reserved against publishing ("The reserved port").
+- A viewer reaches it only through a path that already admitted them: an SSH
+  local forward, or orchestration's desktop stream. Neither adds a credential.
+- The desktop delivers nothing to the workload. Provider credentials,
+  application secrets and egress are what they were
+  ([SECRETS-AND-CREDENTIALS.md](SECRETS-AND-CREDENTIALS.md)).
+- A local VM accepts exactly what a hosted Sandbox accepts: the same image
+  layer, the same daemon contract and the same loopback-only forward.
+
+## Already shipped
+
+The desktop is built on these, which are on `main`:
+
+- SSH local forwards to the workload's loopback on both placements, with the
+  platform's own listeners refused (`SPEC.md` "Port forwarding over SSH").
+- The daemon's `ForwardTcp` (capability `forward.workload_loopback.v1`),
+  which reaches only loopback and refuses the SSH server, the credential
+  bridge and, on a hosted daemon, the daemon's own port.
+- Durable sessions, which outlive their clients and are marked interrupted,
+  never restarted, when the daemon restarts.
+- The dashboard terminal's WebSocket admission
+  ([BROWSER-TERMINALS.md](BROWSER-TERMINALS.md)) and the revocation fence
+  that ends an admitted stream ([AUTH-POLICY.md](AUTH-POLICY.md)).
+
+## In the image
+
+The workspace image carries one more package layer, from the image's dated
+Ubuntu snapshot: TigerVNC's `Xvnc` (one process that is both the X server and
+the VNC server), an XFCE session (window manager, panel, desktop, settings,
+file manager and terminal), `xdotool` to send input, `scrot` to capture the
+screen, a font and an icon theme. A launcher under `/opt/codewire/desktop/`
+starts them. The VNC server and the session package are pinned to exact
+versions, as the image's SSH server is.
+
+The image has no browser. A browser is the user's or the agent's own install,
+as any other tool is.
+
+The layer adds no service and no start-up hook. The built-image contract
+checks that a container started from the image has no `Xvnc` or XFCE process
+and nothing listening on 5901 or on an X display.
+
+Every placement is headless and renders in software: there is no GPU.
+
+## What the daemon does
+
+The capability is `desktop.vnc.v1`. A daemon that has these three RPCs
+advertises it, whatever image the environment runs. A host daemon never does:
+a desktop belongs to an environment.
+
+| RPC | Result |
+| --- | --- |
+| `StartDesktop` | Starts the desktop and answers once its VNC listener accepts a connection, within 10 seconds; a desktop that is already running is returned, never restarted. |
+| `GetDesktop` | The state: `unavailable`, `stopped`, `starting` or `running`. `running` carries the display (`:1`), the port (5901) and when it started. |
+| `StopDesktop` | Ends the desktop's whole process group. Stopping a desktop that is not running succeeds. |
+
+- `unavailable` means this environment's image has no desktop: `Xvnc` or the
+  launcher is missing from the workload's filesystem. The state says which.
+  It is a state and not a missing capability, so a client can tell "this
+  image has no desktop" from "this runtime is too old to start one".
+- The desktop is the non-PTY durable session `codewire-desktop`, run as the
+  workload user with the environment a session gets. `cw ls ENV` lists it and
+  `cw logs ENV --session codewire-desktop` shows what `Xvnc` and the session
+  printed.
+- That name is reserved. Launching a session called `codewire-desktop`
+  through the session API is refused; stopping it there stops the desktop.
+- The X server runs with `-localhost -nolisten tcp`, at 1600 by 1000 and 24
+  bits, and lets a viewer resize it.
+- Lifetime: the desktop belongs to one run of the environment. It survives
+  every viewer leaving, so an agent keeps working unobserved. It ends when it
+  is stopped or the environment stops. After a daemon restart it reads as
+  interrupted and is started again only by `StartDesktop`.
+- While the desktop runs, every process the daemon starts (a command, a
+  shell, a durable session, an SSH session) gets `DISPLAY=:1`, unless its
+  request sets `DISPLAY` itself. Processes already running are not changed,
+  and nothing else is added to a process's environment. After a stop, new
+  processes get no `DISPLAY`.
+
+The VNC server asks for no password: the transport that reaches it has
+already admitted the viewer, and every process in the workload is the same
+user and can reach the X server anyway. Open until measured on a Mac
+(#3223): whether macOS's built-in viewer connects to a server with no
+password. If it does not, the desktop takes a random password at each start,
+`GetDesktop` returns it and both viewers send it; it would authenticate
+nothing, and this page changes before `cw vnc` ships.
+
+## The reserved port
+
+The VNC listener has no password, so the only ways to it must be the two
+that admit a viewer. Guest port 5901 is therefore reserved on every
+placement, whether or not a desktop runs:
+
+- **Hosted.** The port API refuses to publish 5901 with `port_reserved`, as
+  it refuses the daemon's SSH port, so no preview URL and no Mesh port can
+  name it. A project file that lists it is refused the same way at create.
+- **Local.** A host-port binding and a Mesh ingress refuse guest port 5901,
+  as they refuse the daemon's port, so `cw ports ENV --publish 5901` and a
+  local HTTPS hostname cannot name it.
+- **At use, not only at publication.** The preview proxy, the host-port
+  forward and Mesh ingress refuse to open a connection to guest port 5901,
+  so a port published before this rule existed is not served either.
+- `cw` and the dashboard show the server's refusal, which names `cw vnc`.
+
+SSH local forwards and orchestration's desktop stream are the two paths
+that still reach it. A program a user runs inside the workload to relay the
+desktop to another port is their own choice, as a web server they start is;
+what they publish then is that program's port and its protection.
+
+## Starting and stopping
+
+**Hosted.** `codewire.v1.EnvironmentDesktopService` has `StartDesktop`,
+`GetDesktop` and `StopDesktop`, each naming an organization and an
+environment. A caller needs operator access to the environment (its creator,
+an organization owner or admin, or a member granted operator), as launching a
+terminal does, and the Sandbox must be running, current and claimed.
+Orchestration calls the daemon with the bound Pod's credential. The service
+ships with its generated clients and the TypeScript, Go and Python SDK
+wrappers.
+
+**Local.** The supervisor's control protocol carries the same three
+operations for the VM's owner, over the owner-only socket, and calls the
+guest daemon. A VM whose runtime predates the capability is refused with the
+command that moves it onto the installed runtime.
+
+## `cw vnc`
+
+```text
+cw vnc [ENV]             start the desktop if needed, forward it, open a viewer
+cw vnc [ENV] --no-open   the same, printing the address only
+cw vnc [ENV] --status    say whether the desktop is running
+cw vnc [ENV] --stop      stop the desktop
+```
+
+`ENV` and `--in ENV` select the environment as on every flat command, and
+`--local` and `--cloud` choose the placement.
+
+`cw vnc` starts the desktop, brings the managed OpenSSH block up to date as
+`cw vscode` does, picks a free port on the computer's loopback and runs
+OpenSSH with one local forward from that port to `127.0.0.1:5901` through
+the environment's managed alias. It prints `vnc://127.0.0.1:PORT`, opens
+that address in the system's viewer where one is registered, and holds the
+forward until Ctrl-C. Leaving `cw vnc` closes the forward and leaves the
+desktop running.
+
+When the forward ends by itself, `cw vnc` asks the control plane why and
+says "the environment stopped" or "the desktop ended", never OpenSSH's exit
+status alone. Each refusal names its repair: an image with no desktop
+(recreate the environment on the current image), a stopped environment
+(`cw start`), a runtime too old for the capability (the update command for
+that placement), and no `ssh` on the computer.
+
+Someone who prefers their own viewer needs only the alias:
+`ssh -L 5901:127.0.0.1:5901 cw-cloud-ID`, after a start.
+
+## The dashboard viewer
+
+A hosted Sandbox's page has a Desktop panel: Start, the viewer, Stop, and
+the states unavailable (with the recreate hint and no Start), stopped,
+starting, running, disconnected (Reconnect) and ended. Paste and copy are
+explicit buttons, "Paste to desktop" and "Copy from desktop"; the clipboard
+never syncs by itself in either direction. "Release keyboard" returns the
+keyboard to the page. Start and Stop pass the checks the terminal's New and
+Close pass: CSRF, the exact dashboard origin and two-factor eligibility.
+
+The panel reads the desktop's state when the page loads, after its own Start
+and Stop, and from the reason a stream closed with. It polls nothing. Losing
+Sandbox readiness pauses the viewer as it pauses the terminals.
+
+The viewer is noVNC, vendored and served from the dashboard's own origin as
+the terminal renderer is: an exact version, every file's size and digest in
+the vendor manifest, its licence beside it, loaded with integrity
+attributes. No CDN, no worker, no `blob:` source; the page's content
+security policy changes only by the terminal page's existing `connect-src`
+entry for the WebSocket origin.
+
+### The desktop stream
+
+`GET /api/v1/organizations/{org}/environments/{env}/desktop-stream`, with
+the one subprotocol `codewire.desktop-stream.v1`. Binary frames carry the VNC
+(RFB) bytes unchanged in each direction; there are no text frames.
+
+Admission is the durable terminal's, in the same order and inside the same
+15 second budget: no `Authorization` header; exactly one `Origin`, equal to
+the dashboard's; exactly one session cookie; the account in the request
+equal to the cookie's; two-factor eligibility; operator access to a running,
+current Sandbox; the claim ready. A request that fails any of them is
+refused before the upgrade, and nothing is dialed.
+
+Orchestration then opens the daemon's `ForwardTcp` to `127.0.0.1:5901` with
+the bound Pod's credential. It never connects to the Pod's address.
+
+| Bound | Value |
+| --- | --- |
+| WebSocket message | 64 KiB at most; a larger one ends the stream |
+| Chunk towards the browser | 32 KiB at most |
+| Queues | bounded in both directions; a full queue waits, it never grows |
+| Stall | 5 seconds without progress on a write, either way, ends the stream |
+| Viewers | 4 streams per environment in one orchestration process; the next is refused and the page names the limit |
+
+An open stream ends when:
+
+- its user is disabled or the browser session that admitted it is deleted,
+  within 30 seconds, through the revocation fence that ends an attach stream;
+- the desktop stops, or the Sandbox stops or is replaced;
+- orchestration drains for a rollout (the viewer reconnects).
+
+It closes with 1000 when the viewer left, 1012 on a drain and 1008
+otherwise, and writes the `stream.revoked` audit event when the fence ended
+it. Removing a member from an organization does not end an open stream yet,
+on this surface or any other ([AUTH-POLICY.md](AUTH-POLICY.md)); the next
+admission refuses them.
+
+## What this does not protect
+
+- **The workload sees the desktop.** Every process in an environment is the
+  same user as the X server. It can watch the screen, read what is typed or
+  pasted, and draw a window that looks like something else. This is the
+  terminal's posture. Do not type or paste a secret into an environment's
+  desktop that you would not put in its terminal.
+- **Signing in inside the desktop leaves that sign-in in the environment.** A
+  browser a user runs there keeps its cookies in the workload's files, as a
+  provider's own login command run in a terminal would. It uses the
+  environment's egress policy and no other.
+- **Whoever may open a terminal may watch.** An organization owner or admin
+  can open a Sandbox's desktop and sees what its creator sees.
+
+- **A relay the user runs is theirs.** Publishing a port that a program in
+  the workload bridges to the desktop exposes the desktop to whoever may
+  reach that port. Codewire reserves 5901; it does not inspect what other
+  ports carry.
+
+What a viewer's computer receives is the picture and, only on an explicit
+copy, text from the desktop's clipboard. VNC here has no file transfer,
+audio, printing or device redirection.
+
+## Placements
+
+| Placement | Desktop | `cw vnc` | Dashboard |
+| --- | --- | --- | --- |
+| Hosted Sandbox | In the workspace container, as the workspace user | Forward through `cw-cloud-ID` | Desktop panel |
+| Hosted confidential Sandbox | The same image and daemon | The same | The same; not in the first journey |
+| Linux local VM | In the workload container | Forward through `cw-local-ID` | None: local VMs are not in the dashboard |
+| macOS local VM | The same guest; the VM stays headless | The same; the address opens in the system viewer | None |
+
+A local VM's supervisor admits 8 SSH streams per environment; a `cw vnc`
+forward is one of them.
+
+A headed browser built on Chromium needs more shared memory than a hosted
+Sandbox or a local VM gives `/dev/shm`; start it with
+`--disable-dev-shm-usage`.

@@ -34,6 +34,8 @@ directory each.
   secrets, provider credentials and credential profiles.
 - [dev/AUTH-POLICY.md](dev/AUTH-POLICY.md): authentication credential flavors.
 - [dev/SANDBOX-PREVIEWS.md](dev/SANDBOX-PREVIEWS.md): preview URLs.
+- [dev/SANDBOX-DESKTOP.md](dev/SANDBOX-DESKTOP.md): an environment's
+  graphical desktop over VNC, written before the code (#3223).
 
 ## Using `cw`
 
