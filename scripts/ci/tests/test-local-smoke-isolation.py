@@ -310,5 +310,57 @@ class RunInScope(unittest.TestCase):
         self.assertFalse(self.log.exists())
 
 
+class Runner(unittest.TestCase):
+    """The Part A runner's arguments are closed before anything is made."""
+
+    RUNNER = ROOT / "scripts/ci/verify/smoke-local-credentials.sh"
+
+    def test_bad_arguments_are_refused_before_a_scope_or_root(self):
+        scratch = scratch_directory(self, "smoke-runner-")
+        for argv, status in (([], 1), (["--cw"], 2), (["--unknown"], 2),
+                             (["--cw", "relative/cw", "--scratch", str(scratch)], 1),
+                             (["--cw", "/usr/bin/true", "--scratch", "relative"], 1),
+                             (["--cw", "/usr/bin/true", "--cw", "/usr/bin/true"], 2),
+                             (["--cw", "/usr/bin/true", "--cw-sha256", "0" * 64,
+                               "--scratch", str(scratch)], 1)):
+            with self.subTest(argv=argv):
+                result = subprocess.run([str(self.RUNNER), *argv], capture_output=True, text=True,
+                                        timeout=30, env={**os.environ, "CODEWIRE_SMOKE_SCOPE": ""})
+                self.assertEqual(result.returncode, status, result.stderr)
+        self.assertEqual(list(scratch.iterdir()), [])
+
+    def failed_run(self, status):
+        """A run that ends with STATUS, its private root holding a home, a
+        keyring and a credential store."""
+        scratch = scratch_directory(self, "smoke-runner-")
+        root = scratch / "smoke-local-credentials.test"
+        for store in ("home/.local/share/keyrings", "home/.codewire/credentials-v1"):
+            (root / store).mkdir(parents=True)
+        (root / "home/.local/share/keyrings/login.keyring").write_text("synthetic-private-keyring")
+        (root / "home/.codewire/credentials-v1/key").write_text("synthetic-private-key")
+        (root / "cw.log").write_text("$ cw create\nsynthetic cw output\n")
+        script = (f'source "{self.RUNNER}"\n'
+                  'smoke_isolation_end() { return 0; }\nsmoke_cw() { return 0; }\n'
+                  f'SCRATCH="{scratch}"\nSMOKE_DIR="{root}"\nLOG="{root}/cw.log"\nCW=/usr/bin/true\n'
+                  f'trap cleanup EXIT\nexit {status}\n')
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        return scratch, result
+
+    def test_a_failed_run_keeps_only_its_log_and_never_the_private_root(self):
+        scratch, result = self.failed_run(1)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        kept = list(scratch.iterdir())
+        self.assertEqual(len(kept), 1, kept)
+        self.assertTrue(kept[0].name.endswith(".log"))
+        self.assertEqual(kept[0].stat().st_mode & 0o777, 0o600)
+        self.assertEqual(kept[0].read_text(), "$ cw create\nsynthetic cw output\n")
+        self.assertIn(str(kept[0]), result.stderr)
+
+    def test_a_passing_run_keeps_nothing(self):
+        scratch, result = self.failed_run(0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(scratch.iterdir()), [])
+
+
 if __name__ == "__main__":
     unittest.main()

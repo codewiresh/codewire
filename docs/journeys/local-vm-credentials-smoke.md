@@ -12,12 +12,12 @@ person walks are in [credentials.md](credentials.md). The format is in
 
 ## Where it stands
 
-Updated 2026-11-17. Every step not listed as observed is **not yet
+Updated 2026-11-18. Every step not listed as observed is **not yet
 observed**.
 
 | ID | Linux local VM | Run by |
 | --- | --- | --- |
-| `smoke-profile-after-create` | not yet observed | no command yet (#5220) |
+| `smoke-profile-after-create` | observed, v0.4.22, 2026-11-18 (by hand) | `scripts/ci/verify/smoke-local-credentials.sh` |
 | `smoke-credential-ssh` | not yet observed | no command yet (#5220) |
 | `smoke-credential-github` | not yet observed | no command yet (#5220) |
 | `smoke-credential-claude` | not yet observed | no command yet (#5220) |
@@ -77,7 +77,11 @@ authority running is the owner's failure on v0.4.21, in step 4.
     it on 2026-11-17 (#5256);
   - on v0.4.21 a first VM start could spend two to three minutes in its
     network step; on v0.4.22 it took 0.3 s (hand runs on #5220).
-- **Observed:** not yet observed.
+- **Observed:** v0.4.22, 2026-11-18, by hand on a Linux host:
+  `scripts/ci/verify/smoke-local-credentials.sh --cw <installed v0.4.22>
+  --scratch <dir>` printed `ok smoke-profile-after-create`. The update's
+  managed restart came back running and the guest's agent held the key's
+  fingerprint; nothing was left on the host. Not yet run in CI (#5220).
 
 ## 2. `smoke-credential-<kind>`: each credential type end to end
 

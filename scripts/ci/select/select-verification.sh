@@ -846,6 +846,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/verify/scan-credential-canaries.py|\
       scripts/ci/tests/test-scan-credential-canaries.py|\
       scripts/ci/verify/lib/local-smoke-isolation.sh|\
+      scripts/ci/verify/smoke-local-credentials.sh|\
       scripts/ci/tests/test-local-smoke-isolation.py|\
       scripts/ci/verify/check-github-app-permissions.py|\
       scripts/ci/tests/test-check-github-app-permissions.py|\
