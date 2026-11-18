@@ -342,7 +342,20 @@ impl LocalCredentialClient {
     }
 
     pub async fn connect(config: &AuthorityRuntimeConfig) -> Result<Self, AuthorityRuntimeError> {
-        let channel = connect_owner_only(config).await?;
+        Self::over(connect_owner_only(config).await?).await
+    }
+
+    /// A client whose control calls each run for at most `deadline`, so a
+    /// test can pass the control deadline without waiting out the real one.
+    #[cfg(test)]
+    pub(crate) async fn connect_with_request_deadline(
+        config: &AuthorityRuntimeConfig,
+        deadline: std::time::Duration,
+    ) -> Result<Self, AuthorityRuntimeError> {
+        Self::over(connect_owner_only_with_timeout(config, deadline).await?).await
+    }
+
+    async fn over(channel: tonic::transport::Channel) -> Result<Self, AuthorityRuntimeError> {
         let mut inner = LocalCredentialAuthorityServiceClient::new(channel)
             .max_decoding_message_size(MAX_RPC_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_RPC_MESSAGE_BYTES);
@@ -800,12 +813,30 @@ impl LocalCredentialClient {
 
 impl LocalCredentialControlClient {
     pub async fn connect(config: &AuthorityRuntimeConfig) -> Result<Self, AuthorityRuntimeError> {
-        let client = LocalCredentialClient::connect(config).await?;
-        Ok(Self {
+        Ok(Self::from_client(
+            LocalCredentialClient::connect(config).await?,
+            config,
+        ))
+    }
+
+    /// See [`LocalCredentialClient::connect_with_request_deadline`].
+    #[cfg(test)]
+    pub(crate) async fn connect_with_request_deadline(
+        config: &AuthorityRuntimeConfig,
+        deadline: std::time::Duration,
+    ) -> Result<Self, AuthorityRuntimeError> {
+        Ok(Self::from_client(
+            LocalCredentialClient::connect_with_request_deadline(config, deadline).await?,
+            config,
+        ))
+    }
+
+    fn from_client(client: LocalCredentialClient, config: &AuthorityRuntimeConfig) -> Self {
+        Self {
             inner: client.inner,
             info: client.info,
             config: config.clone(),
-        })
+        }
     }
 
     pub fn info(&self) -> AuthorityInfo {

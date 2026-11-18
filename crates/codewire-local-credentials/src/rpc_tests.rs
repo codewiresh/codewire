@@ -1120,17 +1120,20 @@ async fn owner_only_rpc_keeps_material_out_of_metadata_and_recovers_process_loss
 
 #[tokio::test(flavor = "multi_thread")]
 async fn owner_rpc_streams_only_public_output_from_one_github_executor_lease() {
-    prepare_github_repository_taking(0).await;
+    prepare_github_repository_taking(0, None).await;
 }
 
-/// A fetch that outlasts the 30 s control deadline still completes: the
-/// preparation call has its own, longer deadline (#2499).
+/// A fetch that outlasts the control deadline still completes: the
+/// preparation call has its own, longer deadline (#2499). The control client
+/// here has a 5 s deadline, so the 6 s fetch passes it without waiting out
+/// the real one (#5311); 5 s also leaves its handshake room on a loaded
+/// machine.
 #[tokio::test(flavor = "multi_thread")]
 async fn repository_preparation_outlasts_the_control_request_deadline() {
-    prepare_github_repository_taking(32).await;
+    prepare_github_repository_taking(6, Some(Duration::from_secs(5))).await;
 }
 
-async fn prepare_github_repository_taking(work_seconds: u32) {
+async fn prepare_github_repository_taking(work_seconds: u32, control_deadline: Option<Duration>) {
     let temp = tempfile::tempdir().unwrap();
     let config = runtime_config(&temp);
     let store = TestProtectedStore::default();
@@ -1166,9 +1169,13 @@ async fn prepare_github_repository_taking(work_seconds: u32) {
         )
         .await
         .unwrap();
-    let mut control = LocalCredentialControlClient::connect(&config)
-        .await
-        .unwrap();
+    let mut control = match control_deadline {
+        Some(deadline) => {
+            LocalCredentialControlClient::connect_with_request_deadline(&config, deadline).await
+        }
+        None => LocalCredentialControlClient::connect(&config).await,
+    }
+    .unwrap();
     let mut prepared = control
         .prepare_git_repository(
             Uuid::new_v4(),
