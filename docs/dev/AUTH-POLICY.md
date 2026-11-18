@@ -41,6 +41,13 @@ workspace daemon uses to fetch its binding.
 - An OAuth credential without exact `codewire.api` may use the identity
   endpoints its scopes permit, but product calls fail with REST `403` /
   Connect `permission_denied`.
+- An OIDC authorization request with `prompt=login`, or with a `max_age`
+  shorter than the age of the browser session's sign-in, gets a code only
+  after a fresh sign-in (OIDC Core, "Authentication Request"). The provider
+  sends the user to sign in and keeps both values on the stored request
+  through that round trip, so the resumed request accepts only a session
+  signed in to after it (or within `max_age`), never an older one presented
+  at the callback (pentest#13 T14, #4785).
 - A `cw_` API key is authorized only inside its one bound organization. It
   cannot inherit its owner's global-admin authority or perform account-global
   operations.

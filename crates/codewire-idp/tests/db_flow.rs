@@ -7419,3 +7419,128 @@ async fn api_responses_are_never_stored_by_a_shared_cache_in_its_database(pool: 
         );
     }
 }
+
+/// `prompt=login` and `max_age` hold through the sign-in round trip: the
+/// resume at `/api/oidc/callback` accepts only a session signed in to after
+/// the original request (or within `max_age` of it). An older session
+/// presented there without signing in is sent to sign in again, never given a
+/// code (#4785, pentest#13 T14).
+#[tokio::test]
+async fn prompt_login_and_max_age_need_a_fresh_sign_in_through_the_round_trip() {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL unset — skipping prompt and max_age test");
+        return;
+    };
+    in_own_database(&url, "cw_idp_prompt_max_age", prompt_and_max_age).await;
+}
+
+async fn prompt_and_max_age(pool: PgPool) {
+    use tower::ServiceExt as _;
+
+    const OLD: &str = "codewire.session_token=sess_tok_e2e";
+    const FRESH: &str = "codewire.session_token=sess_tok_fresh";
+    const SIGN_IN: &str = "https://app.codewire.test/login?authRequestID=";
+
+    seed(&pool).await;
+    // The seeded session is two hours old.
+    sqlx::query("UPDATE sessions SET created_at = NOW()::timestamp - interval '2 hours' WHERE id = 's_idp_e2e'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let cfg = IdpConfig {
+        issuer: "https://idp.codewire.test".into(),
+        frontend_url: "https://app.codewire.test".into(),
+        turnstile_secret_key: String::new(),
+        turnstile_bypass_email: String::new(),
+        signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
+        revoke_reused_refresh_tokens: false,
+        scopes_supported: vec!["openid".into()],
+    };
+    let provider = build_provider(
+        pool.clone(),
+        &cfg,
+        test_signing_keyring(),
+        TEST_CAPABILITY_HMAC_SECRET,
+    )
+    .await
+    .unwrap();
+    let app = codewire_idp::service::router(provider.clone());
+
+    // Where `/authorize` sends the browser.
+    let authorize = |cookie: &'static str, prompt: Option<&str>, max_age: Option<u64>| {
+        let provider = provider.clone();
+        let params = RawAuthorizeParams {
+            client_id: Some(CLIENT.into()),
+            redirect_uri: Some(REDIRECT.into()),
+            response_type: Some("code".into()),
+            scope: Some("openid".into()),
+            code_challenge: Some(CHALLENGE.into()),
+            code_challenge_method: Some("S256".into()),
+            prompt: prompt.map(str::to_string),
+            max_age,
+            ..Default::default()
+        };
+        async move {
+            let ctx = RequestContext {
+                cookie: Some(cookie.into()),
+            };
+            match provider.authorize(&ctx, params).await.unwrap() {
+                AuthorizeOutcome::Redirect(url) | AuthorizeOutcome::RedirectToLogin(url) => url,
+                other => panic!("expected a redirect, got {other:?}"),
+            }
+        }
+    };
+    // Where the resume after a sign-in sends the browser, for the request a
+    // sign-in URL names.
+    let callback = |sign_in: String, cookie: &'static str| {
+        let app = app.clone();
+        async move {
+            let id = sign_in
+                .strip_prefix(SIGN_IN)
+                .unwrap_or_else(|| panic!("expected a sign-in URL, got {sign_in}"));
+            let response = app
+                .oneshot(
+                    axum::http::Request::get(format!("/api/oidc/callback?id={id}"))
+                        .header(axum::http::header::COOKIE, cookie)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::FOUND);
+            response.headers()[axum::http::header::LOCATION]
+                .to_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    let code = |url: &str| url.starts_with(REDIRECT) && url.contains("code=");
+
+    // Neither value: the old session gets a code at once.
+    let plain = authorize(OLD, None, None).await;
+    assert!(code(&plain), "got {plain}");
+    // prompt=login, and a max_age shorter than the session's age: sign in.
+    let login = authorize(OLD, Some("login"), None).await;
+    assert!(login.starts_with(SIGN_IN), "got {login}");
+    let bounded = authorize(OLD, None, Some(60)).await;
+    assert!(bounded.starts_with(SIGN_IN), "got {bounded}");
+
+    // The old session presented at the resume without signing in: sent to
+    // sign in again, with no code.
+    let login = callback(login, OLD).await;
+    assert!(login.starts_with(SIGN_IN), "prompt=login resumed: {login}");
+    let bounded = callback(bounded, OLD).await;
+    assert!(bounded.starts_with(SIGN_IN), "max_age resumed: {bounded}");
+
+    // A sign-in after the request satisfies both.
+    sqlx::query("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES ('s_prompt_fresh', $1, $2, NOW() + interval '1 hour')")
+        .bind(USER)
+        .bind(hash_session_token("sess_tok_fresh"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let login = callback(login, FRESH).await;
+    assert!(code(&login), "prompt=login after a sign-in: {login}");
+    let bounded = callback(bounded, FRESH).await;
+    assert!(code(&bounded), "max_age after a sign-in: {bounded}");
+}

@@ -25,6 +25,7 @@ Updated 2026-11-18.
 | `account-admin-delete` | not yet observed | not yet observed |
 | `signup-unverified-purge` | observed 2026-11-15 at b183980df, a seeded account and a one-hour lifetime | enforce passes observed 2026-11-18 at v0.4.22, nothing old enough yet; the first deletion is due after 2026-11-20 18:05Z |
 | `account-receipt-email` | not yet observed | not yet observed |
+| `account-fresh-sign-in` | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -337,6 +338,32 @@ session; until it merges, leave that state out.
     signed out (#4528). Walk this step with a password account;
   - each request sends an email; the throttle on account mail is #3297's.
 - **Observed:** not yet observed.
+
+## `account-fresh-sign-in`: a client asks for a fresh sign-in
+
+Issue: #4785 (pentest#13 T14). The rule is in
+[`docs/dev/AUTH-POLICY.md`](../dev/AUTH-POLICY.md), "Credential rules".
+
+- **Entry points:** an OIDC client's authorization request,
+  `/api/oauth/authorize`, with `prompt=login` or `max_age`.
+- **States to exercise:**
+  - a browser already signed in, with `prompt=login`;
+  - a browser signed in more than `max_age` seconds ago;
+  - the same request with neither value, for comparison;
+  - the browser's old session presented at the resumed request directly,
+    without signing in again.
+- **Driving it:**
+  1. Sign in to the walk account in a browser.
+  2. In that browser, open the authorization URL of a registered client
+     (`response_type=code`, `scope=openid`, its redirect URI) with
+     `prompt=login`. The sign-in page appears although the browser is
+     signed in. Sign in: the client's redirect URI receives a code.
+  3. Open it again without `prompt`, and with `max_age=1` after waiting a
+     few seconds. Without either value the code comes back at once; with
+     `max_age=1` the sign-in page appears first.
+- **Proof:** a code only after the fresh sign-in in steps 2 and 3, and the
+  database flow test `prompt_login_and_max_age_need_a_fresh_sign_in_through_the_round_trip`
+  for the old session refused at the resumed request.
 
 ## `account-admin-delete`: an admin deletes someone else's account
 

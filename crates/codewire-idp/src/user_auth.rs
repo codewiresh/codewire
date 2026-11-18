@@ -48,13 +48,28 @@ impl UserAuthenticator for PgUserAuthenticator {
         ctx: &RequestContext,
         request: &StoredAuthRequest,
     ) -> StoreResult<AuthOutcome> {
-        let Some(token) = ctx
+        // OIDC Core, "Authentication Request": `prompt=login` asks for a
+        // fresh sign-in whatever session exists. The resumed request carries
+        // that as a `max_age` bound instead (`auth_requests`), so the sign-in
+        // it sends the user to is what satisfies it.
+        let forced_login = request
+            .request
+            .prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.split_whitespace().any(|value| value == "login"));
+        let token = ctx
             .cookie
             .as_deref()
-            .and_then(|c| cookie_value(c, SESSION_COOKIE))
-        else {
+            .and_then(|c| cookie_value(c, SESSION_COOKIE));
+        let (false, Some(token)) = (forced_login, token) else {
             return Ok(AuthOutcome::NeedsLogin(self.login_url(&request.id.0)));
         };
+        // `max_age`: a session signed in longer ago than that sends the user
+        // to sign in again. Compared in the database, whose clock wrote it.
+        let max_age = request
+            .request
+            .max_age
+            .map(|seconds| i64::try_from(seconds).unwrap_or(i64::MAX));
 
         // Resolve a live session -> (user_id, login time).
         let token_hash = hash_session_token(&token);
@@ -66,9 +81,12 @@ impl UserAuthenticator for PgUserAuthenticator {
             WHERE s.token_hash = $1
               AND s.expires_at > NOW()
               AND u.enabled
+              AND ($2::bigint IS NULL
+                   OR s.created_at >= (NOW() - make_interval(secs => $2))::timestamp)
             "#,
         )
         .bind(&token_hash)
+        .bind(max_age)
         .fetch_optional(&self.pool)
         .await
         .map_err(StoreError::new)?;

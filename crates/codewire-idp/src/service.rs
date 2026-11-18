@@ -233,8 +233,11 @@ async fn callback(
         nonce: req.nonce.clone(),
         code_challenge: req.code_challenge.clone(),
         code_challenge_method: req.code_challenge_method.clone(),
-        prompt: None,
-        max_age: None,
+        // `get` returns `prompt=login` and `max_age` as one bound on the
+        // sign-in, counted from now (`auth_requests`). Re-driving with it
+        // sends a session older than the original request to sign in again.
+        prompt: req.prompt.clone(),
+        max_age: req.max_age,
     };
     // The resumed authorize() creates its own request row; drop the original.
     let _ = p.auth_requests().delete(&stored.id).await;
