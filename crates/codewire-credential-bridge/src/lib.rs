@@ -145,6 +145,8 @@ struct BridgeState {
     logins: BTreeMap<String, PendingLogin>,
     /// Accepted WebSocket upgrades, apart from the requests in flight.
     sockets: upgrade::Sockets,
+    /// The response bytes accepted for a request whose body did not stream.
+    whole_body_response_limit: usize,
 }
 
 impl BridgeState {
@@ -357,9 +359,19 @@ impl CredentialBridge {
                 ssh: BTreeMap::new(),
                 logins: BTreeMap::new(),
                 sockets: upgrade::Sockets::default(),
+                whole_body_response_limit: CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES,
             })),
             host_admitted: Arc::new(Notify::new()),
         })
+    }
+
+    /// Lower the response limit of requests whose body does not stream, for
+    /// a test that has to cross it: crossing the real one moves a quarter of
+    /// a gigabyte (#5311). It can only lower the limit.
+    #[doc(hidden)]
+    pub async fn lower_whole_body_response_limit(&self, bytes: usize) {
+        let mut state = self.inner.lock().await;
+        state.whole_body_response_limit = state.whole_body_response_limit.min(bytes);
     }
 
     /// The environment and generation this bridge serves now.
@@ -672,6 +684,7 @@ impl CredentialBridge {
             }
             let epoch = active.epoch;
             let output = active.output.clone();
+            let whole_body_response_limit = state.whole_body_response_limit;
             state.pending.insert(
                 request_id.clone(),
                 PendingResponse {
@@ -681,7 +694,7 @@ impl CredentialBridge {
                     response_limit: if streamed {
                         usize::MAX
                     } else {
-                        CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES
+                        whole_body_response_limit
                     },
                     credit: credit.clone(),
                     switched: None,

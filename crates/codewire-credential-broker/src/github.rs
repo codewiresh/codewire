@@ -43,7 +43,13 @@ pub mod repositories;
 const TOKEN: &str = "GITHUB_OAUTH_TOKEN";
 pub(crate) const API_VERSION: &str = "2022-11-28";
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+/// The limit of a response to a request whose body did not stream. Tests
+/// cross one megabyte instead: crossing the real limit took each of two
+/// tests 92 seconds (#5311).
+#[cfg(not(test))]
 const MAX_RESPONSE_BYTES: usize = 256 * 1024 * 1024;
+#[cfg(test)]
+pub(crate) const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const REQUEST_HEADERS: &[&str] = &[
     "accept",
     "content-type",

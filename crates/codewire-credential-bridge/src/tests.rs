@@ -597,6 +597,36 @@ async fn response_chunk_and_cumulative_limits_are_enforced() {
     }
 }
 
+/// The hook a test in another crate uses to cross the whole-body response
+/// limit cheaply (#5311): it can only lower the limit, and the lowered limit
+/// is the one a response is held to.
+#[tokio::test]
+async fn the_whole_body_response_limit_can_be_lowered_and_never_raised() {
+    let mut harness = Harness::new().await;
+    assert_eq!(
+        harness.bridge.inner.lock().await.whole_body_response_limit,
+        CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES
+    );
+    harness.bridge.lower_whole_body_response_limit(1024).await;
+    harness
+        .bridge
+        .lower_whole_body_response_limit(usize::MAX)
+        .await;
+    assert_eq!(
+        harness.bridge.inner.lock().await.whole_body_response_limit,
+        1024
+    );
+    let (task, request) = harness.submit().await;
+    harness.send(start(&request.request_id)).await;
+    let response = bounded(task).await.unwrap();
+    harness
+        .send(body(&request.request_id, &vec![b'x'; 1025]))
+        .await;
+    harness.terminal(tonic::Code::ResourceExhausted).await;
+    assert!(bounded(to_bytes(response.into_body(), 2048)).await.is_err());
+    harness.stop().await;
+}
+
 /// Queue host frames from a separate task: a reader that has not caught up
 /// holds the host stream back, so these sends wait rather than fail.
 fn stream_body(harness: &Harness, request_id: &str, chunks: usize) -> tokio::task::JoinHandle<()> {

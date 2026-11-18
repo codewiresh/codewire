@@ -13,8 +13,7 @@ use codewire_credential_bridge::{CredentialBridge, CredentialBridgeOutput};
 use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM, CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES,
-    CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES, CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES,
-    CREDENTIAL_BRIDGE_REQUEST_BODY_WINDOW_FRAMES,
+    CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES, CREDENTIAL_BRIDGE_REQUEST_BODY_WINDOW_FRAMES,
 };
 use futures::StreamExt as _;
 use http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
@@ -31,6 +30,11 @@ use crate::{
     BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport,
     OpenAiBroker,
 };
+
+/// The response limit both ends enforce in these tests for a request whose
+/// body did not stream: the broker's GitHub route under test, and the guest
+/// bridge lowered to it. The real one is 256 MiB at both.
+const RESPONSE_LIMIT: usize = crate::github::MAX_RESPONSE_BYTES;
 
 const PUSH: &str = "/_codewire/github/owner/repo.git/git-receive-pack";
 const FETCH: &str = "/_codewire/github/owner/repo.git/git-upload-pack";
@@ -188,6 +192,7 @@ impl Fixture {
     async fn new(streams: bool, response_bytes: usize) -> Self {
         let environment = Uuid::new_v4();
         let guest = CredentialBridge::new(environment, 1).unwrap();
+        guest.lower_whole_body_response_limit(RESPONSE_LIMIT).await;
         let (prepared, output) = guest.prepare_connection().unwrap();
         let (host, frames) = mpsc::channel(32);
         let capabilities = if streams {
@@ -278,8 +283,7 @@ async fn a_push_over_the_old_request_limit_streams_whole_with_one_window_in_flig
 
 #[tokio::test]
 async fn a_fetch_response_over_the_old_response_limit_streams_through() {
-    let response_bytes =
-        CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES + 3 * CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES;
+    let response_bytes = RESPONSE_LIMIT + 3 * CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES;
     let fixture = Fixture::new(true, response_bytes).await;
     let (status, length, head) = fixture.post(FETCH, b"0032want 0000".to_vec()).await;
     assert_eq!(status, StatusCode::OK);
@@ -306,7 +310,7 @@ async fn an_older_host_gets_whole_bodies_with_the_old_limits() {
 
 #[tokio::test]
 async fn an_older_host_keeps_the_response_limit() {
-    let fixture = Fixture::new(false, CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES + 1).await;
+    let fixture = Fixture::new(false, RESPONSE_LIMIT + 1).await;
     let request = Request::builder()
         .method(Method::POST)
         .uri(FETCH)
@@ -326,5 +330,5 @@ async fn an_older_host_keeps_the_response_limit() {
     };
     // The whole-body request's response stops at the old limit, as an error.
     assert!(failed);
-    assert!(length <= CREDENTIAL_BRIDGE_MAX_RESPONSE_BYTES);
+    assert!(length <= RESPONSE_LIMIT);
 }
