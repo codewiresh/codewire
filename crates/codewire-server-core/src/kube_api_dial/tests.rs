@@ -175,14 +175,18 @@ mod tls {
             .await
     }
 
-    /// `GET /version` through `dialer`, trusting `trusted`'s CA, with the
-    /// Service named on `port`.
+    /// `GET /version` through `dialer`, trusting `trusted`'s CA. The Service
+    /// is the loopback server on `port`, verified as the Service's name: a
+    /// fallback past every preferred server then fails on the same TLS check
+    /// at once, rather than waiting out kube's 30 s connect timeout on a name
+    /// no test resolves.
     async fn version_via(
         dialer: &PreferredDialer,
         port: u16,
         trusted: &SyntheticPki,
     ) -> kube::Result<String> {
-        let mut config = kube::Config::new(format!("https://{SERVICE}:{port}").parse().unwrap());
+        let mut config = kube::Config::new(format!("https://127.0.0.1:{port}").parse().unwrap());
+        config.tls_server_name = Some(SERVICE.to_owned());
         config.root_cert = Some(der_roots(trusted));
         let client = crate::span_free::kube_client_dialing(config, dialer.clone())?;
         client
