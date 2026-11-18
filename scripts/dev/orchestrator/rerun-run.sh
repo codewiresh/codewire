@@ -11,8 +11,15 @@
 # Refuses, naming them, while any job of the run is running, waiting or
 # blocked, or any task of it among the newest ORCHESTRATOR_TASK_PAGES pages of
 # `fj actions tasks` (default 15, 20 tasks a page) is running or waiting.
-# Exits 0 when it reran the run, 1 when something of it is still alive, 2 when
-# it cannot tell or Forgejo refused.
+#
+# A cancelled run also waits RERUN_AFTER_CANCEL_SECONDS (60) from its stop.
+# Forgejo 17.0.0 can lose a cancel: the task reads cancelled while its
+# container still runs on a warm VM, which the task list cannot see, until
+# infra's cancel reaper stops it (about 50 s after the cancel, infra#2650).
+# A rerun inside that window attaches the job's new attempt to the old task,
+# and the reaper's stop then records that attempt as failure.
+# Exits 0 when it reran the run, 1 when something of it is still alive or its
+# cancel is too recent, 2 when it cannot tell or Forgejo refused.
 set -uo pipefail
 
 usage() {
@@ -27,6 +34,7 @@ fi
 [[ $# -eq 1 && "$1" =~ ^[1-9][0-9]*$ ]] || usage
 run="$1"
 pages="${ORCHESTRATOR_TASK_PAGES:-15}"
+RERUN_AFTER_CANCEL_SECONDS=60
 [[ "$pages" =~ ^[1-9][0-9]*$ ]] || usage
 unknown() { printf 'unknown: %s\n' "$*"; exit 2; }
 
@@ -46,6 +54,16 @@ for ((page = 1; page <= pages; page++)); do
   (($(grep -c '^#' <<<"$tasks") >= 20)) || break
 done
 alive="$(sed '/^$/d' <<<"$alive")"
+
+if [[ "$(jq -r '.run.status' <<<"$view")" == cancelled ]]; then
+  stopped="$(jq -er '.run.stopped_at' <<<"$view" 2>/dev/null)" || unknown "cancelled run $run has no stop time"
+  stopped_epoch="$(date -u -d "$stopped" +%s 2>/dev/null)" || unknown "cancelled run $run has an unreadable stop time"
+  age=$(( $(date -u +%s) - stopped_epoch ))
+  if (( age < RERUN_AFTER_CANCEL_SECONDS )); then
+    alive+=$'\n'"run was cancelled ${age}s ago (at $stopped); a cancelled task may still run until the cancel reaper stops it, so rerun after $((RERUN_AFTER_CANCEL_SECONDS - age))s"
+    alive="$(sed '/^$/d' <<<"$alive")"
+  fi
+fi
 
 if [[ -n "$alive" ]]; then
   printf 'not rerun: run %s (#%s) is still alive; rerun it once all of these have ended:\n%s\n' \

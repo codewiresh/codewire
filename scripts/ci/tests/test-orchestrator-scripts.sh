@@ -452,7 +452,7 @@ filler() { # N tasks of other runs
   for ((i = 0; i < $1; i++)); do printf '#9%03d (1111111111) success Policy verification 1m (push): other\n' "$i"; done
 }
 reset_fake
-jq -n '{run: {id: 42471, number: 27221, status: "cancelled"},
+jq -n '{run: {id: 42471, number: 27221, status: "cancelled", stopped_at: "2026-10-25T10:00:00Z"},
   jobs: [{id: 1, name: "Build test archives", status: "running"}, {id: 2, name: "Rust / transport packages", status: "cancelled"}]}' \
   >"$FAKE/run-42471.json"
 task_page 1 '#27221 (a054388b61) success Verification selection 36s (pull_request): t'
@@ -471,6 +471,22 @@ task_page 2 '#27221 (a054388b61) success Build test archives 18m42s (pull_reques
 rerun_run 42471 || fail "rerun-run refused a run with nothing alive: $(cat "$work/out")"
 [[ "$(cat "$FAKE/reruns")" == 42471 ]] || fail 'rerun-run did not rerun the run by its ID'
 grep -q '^reran run 42471 (#27221)' "$work/out" || fail 'rerun-run did not report the rerun'
+# A run cancelled under 60 s ago waits: its task may still run on a warm VM
+# until the cancel reaper stops it, and a rerun would attach to it.
+rm -f "$FAKE/reruns"
+jq --arg at "$(date -u -d '-10 seconds' +%Y-%m-%dT%H:%M:%SZ)" '.run.stopped_at = $at' "$FAKE/run-42471.json" \
+  >"$FAKE/run.tmp" && mv "$FAKE/run.tmp" "$FAKE/run-42471.json"
+rerun_run 42471 && fail 'rerun-run reran a run cancelled 10 s ago'
+grep -q '^run was cancelled [0-9]*s ago (at .*); .*cancel reaper .*rerun after [0-9]*s$' "$work/out" ||
+  fail "rerun-run did not name the recent cancel: $(cat "$work/out")"
+[[ ! -e "$FAKE/reruns" ]] || fail 'rerun-run reran a run inside the cancel window'
+# A cancelled run without a readable stop time can't be judged.
+jq 'del(.run.stopped_at)' "$FAKE/run-42471.json" >"$FAKE/run.tmp" && mv "$FAKE/run.tmp" "$FAKE/run-42471.json"
+status=0
+rerun_run 42471 || status=$?
+[[ "$status" -eq 2 ]] || fail "rerun-run judged a cancelled run with no stop time (exit $status)"
+grep -q '^unknown: cancelled run 42471 has no stop time' "$work/out" || fail 'rerun-run gave no reason for a missing stop time'
+[[ ! -e "$FAKE/reruns" ]] || fail 'rerun-run reran a run with no stop time'
 rm -f "$FAKE/run-42471.json" "$FAKE/reruns"
 status=0
 rerun_run 42471 || status=$?
