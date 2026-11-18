@@ -37,6 +37,12 @@ done
 source "$ROOT/scripts/ci/setup/merge-identity.sh"
 ci_merge_commit_env "$HEAD_SHA" "$MERGE_ONTO"
 git -C "$dir" init -q
+# No background maintenance: committing the whole tree leaves thousands of
+# loose objects, and an automatic gc then packed and deleted them while the
+# test runner copied this folder to the build path ("cannot stat
+# .git/objects/..", run 59463), as with #4029.
+git -C "$dir" config maintenance.auto false
+git -C "$dir" config gc.auto 0
 # --force: the archive holds only tracked files, some of which .gitignore
 # names (a tracked file stays tracked whatever .gitignore says).
 git -C "$dir" add --all --force

@@ -57,6 +57,8 @@ grep -qx "BUILD_SOURCE_DIR=$work/placed" "$work/env" || fail 'BUILD_SOURCE_DIR w
 # A checkout's modes: nothing the archive gave is group- or world-writable,
 # which the platform runtime's tests refuse (run 58615).
 writable="$(find "$work/placed" -path "$work/placed/.git" -prune -o -perm /022 -print)"
+[ "$(git -C "$work/placed" config maintenance.auto)" = false ] && [ "$(git -C "$work/placed" config gc.auto)" = 0 ] ||
+  fail 'the placed repository can start a background gc that races the copy to the build path'
 [ -z "$writable" ] || fail "the placed source is group- or world-writable: $writable"
 # The same inputs give the same commit wherever they are placed.
 place "$digest" "$work/again" "$tree" || fail "a second placement failed: $(cat "$work/log")"
