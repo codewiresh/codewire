@@ -111,7 +111,7 @@ impl Routes for Fake {
 /// name and the request's head, or, for a WebSocket opening, switches
 /// protocols and echoes what it receives.
 async fn guest_server(name: &'static str) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = unreserved_listener().await;
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
         loop {
@@ -120,6 +120,38 @@ async fn guest_server(name: &'static str) -> u16 {
         }
     });
     port
+}
+
+/// A loopback listener on a port the OS picks, never one of the platform's
+/// own listeners: the front door refuses those by design (#5278), so a test
+/// that drew one would see that refusal instead of the case it tests.
+async fn unreserved_listener() -> TcpListener {
+    // A refused one is held until the loop returns, so the OS can't hand it
+    // straight back.
+    let mut refused = Vec::new();
+    loop {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        if !is_platform_port(port) {
+            return listener;
+        }
+        refused.push(listener);
+    }
+}
+
+fn is_platform_port(port: u16) -> bool {
+    codewire_daemon_proto::platform_listeners(None).contains_key(&port)
+}
+
+#[test]
+fn a_platform_port_is_never_handed_to_a_test_server() {
+    for port in codewire_daemon_proto::platform_listeners(None).into_keys() {
+        assert!(is_platform_port(port), "{port}");
+    }
+    assert!(is_platform_port(
+        codewire_daemon_proto::CREDENTIAL_BRIDGE_LOOPBACK_PORT
+    ));
+    assert!(!is_platform_port(8080));
 }
 
 async fn answer(mut stream: TcpStream, name: &'static str) {
@@ -300,7 +332,7 @@ async fn a_request_whose_host_names_another_environment_is_misdirected() {
 #[tokio::test]
 async fn a_port_with_nothing_listening_answers_502_naming_it() {
     let harness = harness().await;
-    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let closed = unreserved_listener().await;
     let port = closed.local_addr().unwrap().port();
     drop(closed);
     let host = harness.routes.serve("shop-a", "web", port);
