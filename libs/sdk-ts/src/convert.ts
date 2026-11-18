@@ -1211,7 +1211,7 @@ export function assertRuntimeConverterCoverage(): void {
     [1, "target"], [2, "ports"],
   ]));
   assertDescriptorCoverage("environment network policy", EnvironmentNetworkPolicySchema.fields, new Map([
-    [1, "reference"], [2, "name"], [3, "revision"], [4, "digest"], [5, "enforcement"], [6, "enforced_revision"], [7, "enforced_digest"], [8, "enforced_at"],
+    [1, "reference"], [2, "name"], [3, "revision"], [4, "digest"], [5, "enforcement"], [6, "enforced_revision"], [7, "enforced_digest"], [8, "enforced_at"], [9, "failure_code"],
   ]));
   assertDescriptorCoverage("environment source selection", EnvironmentSourceSelectionSchema.fields, new Map([
     [1, "secrets"], [2, "credentials"], [3, "profile_revision"],

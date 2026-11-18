@@ -51,6 +51,9 @@ class EnvironmentNetworkPolicy(TypedDict):
     enforced_digest: str
     # RFC 3339, or None while nothing enforces the selection.
     enforced_at: str | None
+    # Why it failed closed, while enforcement is "failed_closed": one of
+    # "self_check_failed", "policy_digest_mismatch" or "lockdown_not_applied".
+    failure_code: str | None
 
 
 _ENFORCEMENT: dict[int, EnforcementState] = {
@@ -98,6 +101,7 @@ def environment_network_policy(value: pb.EnvironmentNetworkPolicy) -> Environmen
         "enforced_revision": value.enforced_revision,
         "enforced_digest": value.enforced_digest,
         "enforced_at": value.enforced_at.ToJsonString() if value.HasField("enforced_at") else None,
+        "failure_code": value.failure_code or None,
     }
 
 

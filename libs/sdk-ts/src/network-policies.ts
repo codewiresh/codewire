@@ -41,6 +41,9 @@ export interface EnvironmentNetworkPolicy {
   enforced_revision: number;
   enforced_digest: string;
   enforced_at?: Date;
+  /** Why it failed closed, while `enforcement` is `failed_closed`:
+   * `self_check_failed`, `policy_digest_mismatch` or `lockdown_not_applied`. */
+  failure_code?: string;
 }
 
 /** A policy by name, or by `{ id }`. */
@@ -92,6 +95,7 @@ export function fromEnvironmentNetworkPolicy(policy: ProtoEnvironmentNetworkPoli
     enforced_revision: policy.enforcedRevision,
     enforced_digest: policy.enforcedDigest,
     enforced_at: policy.enforcedAt ? new Date(Number(policy.enforcedAt.seconds) * 1000) : undefined,
+    failure_code: policy.failureCode || undefined,
   };
 }
 

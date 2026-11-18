@@ -26,6 +26,9 @@ export async function runNetworkPolicyTests(): Promise<void> {
       if (method === "UpdateEnvironmentNetworkPolicy" && body.environmentId === "future") {
         return response({ networkPolicy: { reference: "hosted-default", name: "hosted-default", digest: "cd".repeat(32), enforcement: 99 } });
       }
+      if (method === "UpdateEnvironmentNetworkPolicy" && body.environmentId === "blocked") {
+        return response({ networkPolicy: { reference: "hosted-default", name: "hosted-default", digest: "cd".repeat(32), enforcement: "NETWORK_POLICY_ENFORCEMENT_FAILED_CLOSED", failureCode: "lockdown_not_applied" } });
+      }
       if (method === "UpdateEnvironmentNetworkPolicy") {
         return response({ networkPolicy: { reference: "hosted-default", name: "hosted-default", digest: "cd".repeat(32), enforcement: "NETWORK_POLICY_ENFORCEMENT_NOT_ENFORCED" } });
       }
@@ -57,7 +60,12 @@ export async function runNetworkPolicyTests(): Promise<void> {
   const selected = await cw.networkPolicies.select("environment-one", "hosted-default");
   assert.equal(selected.enforcement, "not_enforced");
   assert.equal(selected.revision, 0);
+  assert.equal(selected.failure_code, undefined);
   assert.equal(calls.at(-1)!.body.networkPolicy, "hosted-default");
+
+  // A Sandbox failed closed says why (#5068).
+  const blocked = await cw.networkPolicies.select("blocked", "hosted-default");
+  assert.deepEqual([blocked.enforcement, blocked.failure_code], ["failed_closed", "lockdown_not_applied"]);
 
   // A state this SDK does not know yet never fails the read.
   assert.equal((await cw.networkPolicies.select("future", "hosted-default")).enforcement, "unknown");

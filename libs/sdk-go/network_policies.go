@@ -42,6 +42,10 @@ type EnvironmentNetworkPolicy struct {
 	EnforcedDigest   string `json:"enforced_digest"`
 	// EnforcedAt is RFC 3339, or nil while nothing enforces the selection.
 	EnforcedAt *string `json:"enforced_at,omitempty"`
+	// FailureCode says why it failed closed, while Enforcement is
+	// "failed_closed": "self_check_failed", "policy_digest_mismatch" or
+	// "lockdown_not_applied". Empty otherwise.
+	FailureCode string `json:"failure_code,omitempty"`
 }
 
 // NetworkPolicySelector names a policy by Name or by ID; set exactly one.
@@ -109,7 +113,7 @@ func fromProtoEnvironmentNetworkPolicy(policy *codewirev1.EnvironmentNetworkPoli
 	return &EnvironmentNetworkPolicy{Reference: policy.GetReference(), Name: policy.GetName(),
 		Revision: policy.GetRevision(), Digest: policy.GetDigest(), Enforcement: enforcement,
 		EnforcedRevision: policy.GetEnforcedRevision(), EnforcedDigest: policy.GetEnforcedDigest(),
-		EnforcedAt: enforcedAt}, nil
+		EnforcedAt: enforcedAt, FailureCode: policy.GetFailureCode()}, nil
 }
 
 // Create stores a policy at revision 1: from's current rules, or none, plus allow.

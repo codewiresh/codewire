@@ -52,6 +52,10 @@ class NetworkPolicyFixture:
 
     def update_environment_network_policy(self, request, ctx):
         self.record("UpdateEnvironmentNetworkPolicy", request)
+        if request.environment_id == "blocked":
+            return pb.UpdateEnvironmentNetworkPolicyResponse(network_policy=pb.EnvironmentNetworkPolicy(
+                reference="hosted-default", name="hosted-default", digest="cd" * 32,
+                enforcement=pb.NETWORK_POLICY_ENFORCEMENT_FAILED_CLOSED, failure_code="lockdown_not_applied"))
         if request.environment_id == "future":
             return pb.UpdateEnvironmentNetworkPolicyResponse(network_policy=pb.EnvironmentNetworkPolicy(
                 reference="hosted-default", name="hosted-default", digest="cd" * 32, enforcement=99))
@@ -94,8 +98,13 @@ class NetworkPoliciesTestCase(unittest.TestCase):
         self.cw.network_policies.delete("web")
         selected = self.cw.network_policies.select("environment-one", "hosted-default")
         self.assertEqual(selected["enforcement"], "not_enforced")
+        self.assertIsNone(selected["failure_code"])
         self.assertEqual(self.fixture.calls[-1][1].network_policy, "hosted-default")
         self.assertTrue(all(request.org_id == "org-one" for _, request in self.fixture.calls))
+
+    def test_a_sandbox_failed_closed_says_why(self):
+        blocked = self.cw.network_policies.select("blocked", "hosted-default")
+        self.assertEqual((blocked["enforcement"], blocked["failure_code"]), ("failed_closed", "lockdown_not_applied"))
 
     def test_an_unknown_enforcement_state_never_fails_a_read(self):
         selected = self.cw.network_policies.select("future", "hosted-default")

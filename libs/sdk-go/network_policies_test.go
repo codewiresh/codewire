@@ -70,6 +70,12 @@ func (f *networkPolicyFixture) DeleteNetworkPolicy(_ context.Context, request *c
 
 func (f *networkPolicyFixture) UpdateEnvironmentNetworkPolicy(_ context.Context, request *connect.Request[codewirev1.UpdateEnvironmentNetworkPolicyRequest]) (*connect.Response[codewirev1.UpdateEnvironmentNetworkPolicyResponse], error) {
 	f.record(request.Msg)
+	if request.Msg.GetEnvironmentId() == "blocked" {
+		return connect.NewResponse(&codewirev1.UpdateEnvironmentNetworkPolicyResponse{NetworkPolicy: &codewirev1.EnvironmentNetworkPolicy{
+			Reference: "hosted-default", Name: "hosted-default", Digest: strings.Repeat("cd", 32),
+			Enforcement: codewirev1.NetworkPolicyEnforcement_NETWORK_POLICY_ENFORCEMENT_FAILED_CLOSED,
+			FailureCode: "lockdown_not_applied"}}), nil
+	}
 	if request.Msg.GetEnvironmentId() == "future" {
 		return connect.NewResponse(&codewirev1.UpdateEnvironmentNetworkPolicyResponse{NetworkPolicy: &codewirev1.EnvironmentNetworkPolicy{
 			Reference: "hosted-default", Name: "hosted-default", Digest: strings.Repeat("cd", 32),
@@ -119,8 +125,13 @@ func TestNetworkPoliciesNameTheOrganizationAndPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	selected, err := client.NetworkPolicies.Select(ctx, "environment-one", "hosted-default")
-	if err != nil || selected.Enforcement != "not_enforced" || selected.Revision != 0 {
+	if err != nil || selected.Enforcement != "not_enforced" || selected.Revision != 0 || selected.FailureCode != "" {
 		t.Fatalf("select: %v %v", selected, err)
+	}
+	// A Sandbox failed closed says why (#5068).
+	blocked, err := client.NetworkPolicies.Select(ctx, "blocked", "hosted-default")
+	if err != nil || blocked.Enforcement != "failed_closed" || blocked.FailureCode != "lockdown_not_applied" {
+		t.Fatalf("failed closed: %v %v", blocked, err)
 	}
 	// A state this SDK does not know yet never fails the read.
 	future, err := client.NetworkPolicies.Select(ctx, "future", "hosted-default")
