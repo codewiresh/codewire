@@ -1709,13 +1709,29 @@ session crosses the delegation instead, and these rules hold:
   same broker as the loopback session: one lease set, one refresh, the swap
   rule (#4722). The relay adds no engine, lease, decision or material of its
   own.
-- **The relay holds the local session for the boot's life.** The front door
-  can never dial (its seccomp floor denies `socket` and `connect`), so ending
-  its session would end interception for the boot. The relay reopens the
-  upstream after an idle end and moves new requests to the successor
-  delegation at rotation. Each upstream stream still ends with its epoch, so
-  the 60-second authority and 2-minute material limits hold, and no cache
-  outlives an epoch.
+- **One session per relay process.** A delegated relay is one delegation
+  epoch: the authority replaces it with an overlapping successor before 600
+  seconds, as it replaces a local broker. Each relay pairs with the front
+  door when it starts, writing the credential role tag before its bridge
+  Open. The front door gives all new work to the newest session, and the one
+  it replaces finishes only the requests already sent on it (#4884). A relay
+  never moves a request to another epoch, and once replaced it opens no new
+  upstream stream.
+- **Within its epoch** the relay keeps at most one upstream stream. It reopens
+  it on demand after an idle end. When an upstream ends with requests open,
+  one still waiting for its response gets the bridge's error response, and a
+  response already streaming ends early. Every upstream ends with its
+  epoch, so the 60-second authority and 2-minute material limits hold, and
+  no cache outlives an epoch.
+- **Rotation fails closed, and its drain is bounded.** The authority pairs
+  the successor before it ends the predecessor, and a predecessor runs until
+  its open requests have answered or its epoch expires. Nothing is queued
+  between sessions: with no session paired, a request fails closed at the
+  front door. The front door keeps at most two sessions, so a third pairing
+  ends the oldest. A request that outlives two rotations, or its own epoch,
+  is cut: one still waiting for its response gets the error response, and a
+  response already streaming ends early. A long streamed response is the case
+  this reaches.
 - **Logins follow the session.** The relay reports a placeholder login only
   once a front-door session is attached. Before that, an intercepted boot's
   logins are refused, never real.
@@ -1726,8 +1742,10 @@ session crosses the delegation instead, and these rules hold:
   today: base-URL routes through the relay.
 
 **The relay's router (both carriers, agreed with cw-security on #4909 and
-#4001, 2026-11-15 and 2026-11-16).** A local relay, and the hosted relay once
-it routes, carry one front-door session across upstream changes as follows:
+#4001, 2026-11-15 and 2026-11-16).** The relay routes each request to the
+upstream it opened on: the local relay within its own delegation epoch (an
+idle reopen, or an upstream that ended), and the hosted relay, once it
+routes, across epochs as well. It does so as follows:
 
 - **It reads one field.** Each guest frame's request id, only after the
   frame's length is bounded. It never decodes a payload, and nothing from a

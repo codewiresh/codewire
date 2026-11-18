@@ -722,8 +722,9 @@ session through a relay".
   - a token forced to expire mid-session;
   - the platform credential revoked, then selected again;
   - a front door from another boot or VM asking for this VM's tokens;
-  - a delegation epoch rotating while an agent session runs, with a request
-    in flight;
+  - the relay replaced by its successor (a new delegation epoch) while an
+    agent session runs, with a request in flight and a long streamed
+    response;
   - the front door killed while an agent runs;
   - the switch off.
 - **Driving it:** no command yet (#4909). On a Linux host with a built
@@ -743,10 +744,12 @@ session through a relay".
     again it recovers;
   - a front door from another boot or VM is refused this VM's tokens, and
     the refusal is shown;
-  - **across a delegation rotation** a request in flight on the old epoch
-    completes there, a request started after the successor's admission is
-    served by the successor, and the front door's session never ends; a
-    WebSocket resets at most once;
+  - **across a relay rotation** the successor pairs before the old relay
+    ends: a request in flight on the old relay completes there, a request
+    started after the successor paired is served by the successor, and no
+    request fails in between. A streamed response long enough to span the
+    successor's pairing, but shorter than the old relay's epoch, completes on
+    the old relay unbroken. A WebSocket resets at most once;
   - **with the front door gone,** a request to an intercepted host is
     refused by the egress broker and counted, and nothing is dialled
     directly;
