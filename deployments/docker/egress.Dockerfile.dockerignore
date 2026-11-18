@@ -9,4 +9,6 @@
 !crates/**
 !proto
 !proto/**
+!libs/daemon-proto
+!libs/daemon-proto/**
 crates/**/target

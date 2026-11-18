@@ -11,6 +11,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY third_party/sqlx-sqlite-unused ./third_party/sqlx-sqlite-unused
 COPY crates ./crates
 COPY proto ./proto
+# codewire-daemon-proto, which cw-egress links, compiles these at build.
+COPY libs/daemon-proto ./libs/daemon-proto
 ARG CODEWIRE_SCCACHE_MODE=disabled
 ARG SCCACHE_BUCKET
 ARG SCCACHE_ENDPOINT
@@ -23,7 +25,7 @@ RUN --mount=type=cache,id=codewire-egress-cargo-registry,target=/usr/local/cargo
     --mount=type=cache,id=codewire-egress-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=codewire-sccache-v2,target=/var/cache/sccache,sharing=shared \
     --mount=type=secret,id=aws_shared_credentials \
-    find Cargo.toml Cargo.lock crates proto -type f -exec touch {} + && \
+    find Cargo.toml Cargo.lock crates proto libs/daemon-proto -type f -exec touch {} + && \
     codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" -p codewire-egress-node --bin cw-egress \
     && mkdir -p /out \
     && cp "target/$CODEWIRE_RUST_PROFILE/cw-egress" /out/cw-egress

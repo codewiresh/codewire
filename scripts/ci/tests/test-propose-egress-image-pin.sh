@@ -94,6 +94,27 @@ case "$url" in
 esac
 MOCK
 chmod 0755 "$work/bin/curl"
+# The fixture origin is a local path that needs no credential, so a fake git
+# stands for the forge: it refuses a fetch or push unless the bot's header is
+# wired for the server, as the job's credential-less checkout would.
+real_git="$(command -v git)"
+cat >"$work/bin/git" <<MOCK
+#!/usr/bin/env bash
+set -euo pipefail
+for arg in "\$@"; do
+  case "\$arg" in
+    fetch|push|ls-remote)
+      [[ "\${GIT_CONFIG_KEY_0:-}" == "http.https://forgejo.invalid/.extraheader" &&
+        "\${GIT_CONFIG_VALUE_0:-}" == "AUTHORIZATION: basic "* ]] || {
+        echo "fatal: could not read Username for 'https://forgejo.invalid'" >&2
+        exit 128
+      }
+      break ;;
+  esac
+done
+exec "$real_git" "\$@"
+MOCK
+chmod 0755 "$work/bin/git"
 
 export FAKE_FINGERPRINTS="$work/fingerprints"
 export FAKE_CURL_CALLS="$work/curl.calls"

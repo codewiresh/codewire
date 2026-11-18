@@ -316,6 +316,7 @@
         "deployments/docker/egress.Dockerfile.dockerignore",
         "deployments/docker/rust-base.Dockerfile",
         "docker-bake.hcl",
+        "libs/daemon-proto/**",
         "proto/**",
         "third_party/sqlx-sqlite-unused/**"
       ]

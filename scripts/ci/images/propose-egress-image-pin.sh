@@ -54,6 +54,29 @@ token_file="${WORKSPACE_PIN_BOT_TOKEN_FILE:?the workspace-pin bot token file is 
 
 pin() { python3 "$TOOL" "$@"; }
 
+# The checkout keeps no credential, so git and the API both carry the bot's
+# from here on, before the first fetch, as the workspace pin proposer does.
+token="$(<"$token_file")"
+[[ "$token" =~ ^[A-Za-z0-9_-]{20,255}$ ]] || {
+  token=''
+  die 'the workspace-pin bot token is malformed'
+}
+umask 077
+work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/egress-image-pin.XXXXXX")"
+cleanup() {
+  find "$work" -type f -exec shred -u {} + 2>/dev/null || true
+  rm -rf "$work"
+}
+trap cleanup EXIT
+# Git reads the credential from its environment configuration, never argv.
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader"
+GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$token" | base64 -w0)"
+export GIT_CONFIG_VALUE_0
+printf 'header = "Authorization: token %s"\nsilent\nshow-error\nfail\n' "$token" >"$work/api.curl"
+token=''
+api="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}"
+
 cd "$ROOT"
 git fetch -q origin main
 main_sha="$(git rev-parse --verify origin/main)"
@@ -91,26 +114,6 @@ done <<<"$sources"
 [[ -n "$accepted" ]] ||
   die "no verified signature of $reference names a source on main with fingerprint $fingerprint"
 
-token="$(<"$token_file")"
-[[ "$token" =~ ^[A-Za-z0-9_-]{20,255}$ ]] || {
-  token=''
-  die 'the workspace-pin bot token is malformed'
-}
-umask 077
-work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/egress-image-pin.XXXXXX")"
-cleanup() {
-  find "$work" -type f -exec shred -u {} + 2>/dev/null || true
-  rm -rf "$work"
-}
-trap cleanup EXIT
-# Git reads the credential from its environment configuration, never argv.
-export GIT_CONFIG_COUNT=1
-export GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader"
-GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$token" | base64 -w0)"
-export GIT_CONFIG_VALUE_0
-printf 'header = "Authorization: token %s"\nsilent\nshow-error\nfail\n' "$token" >"$work/api.curl"
-token=''
-api="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}"
 
 curl --config "$work/api.curl" "${CURL_BOUNDS[@]}" --output "$work/open.json" \
   "${api}/pulls?state=open&page=1&limit=50"
