@@ -81,9 +81,9 @@ async fn serve(store: Store) -> (Authority, LocalCredentialClient) {
     )
 }
 
-/// A locked store answers the local connect's readiness check with its own
-/// sentence, so the connect stops before the sign-in starts; a store that
-/// accepts the write answers it and keeps nothing.
+/// A locked store refuses the local connect's readiness check, which says so
+/// in a save's words, so the connect stops before the sign-in starts; a
+/// store that accepts the write answers it and keeps nothing.
 #[tokio::test]
 async fn a_store_that_refuses_a_write_is_not_ready_for_a_sign_in() {
     let store = Store::default();
@@ -92,15 +92,15 @@ async fn a_store_that_refuses_a_write_is_not_ready_for_a_sign_in() {
     let error = LocalConnectStore {
         client: &mut client,
     }
-    .ready(CredentialConnectProviderArg::Claude)
+    .ready(CredentialConnectProviderArg::Claude, "work")
     .await
     .unwrap_err();
     let text = format!("{error:#}");
     assert!(
-        text.contains("can't save a Claude sign-in now, so nothing was saved"),
+        text.contains("is locked") && text.contains("so your Claude sign-in wasn't saved"),
         "{text}"
     );
-    assert!(text.contains("locked or inaccessible"), "{text}");
+    assert!(!text.contains("locked or inaccessible"), "{text}");
     assert!(!text.contains("code:"), "{text}");
     assert!(client.list_credentials().await.unwrap().is_empty());
 
@@ -108,24 +108,24 @@ async fn a_store_that_refuses_a_write_is_not_ready_for_a_sign_in() {
     LocalConnectStore {
         client: &mut client,
     }
-    .ready(CredentialConnectProviderArg::Claude)
+    .ready(CredentialConnectProviderArg::Claude, "work")
     .await
     .unwrap();
     assert!(client.list_credentials().await.unwrap().is_empty());
 }
 
-/// A store that times out or is unavailable stops the connect with the
-/// authority's own words for it, and nothing is saved.
+/// A store that times out or is unavailable stops the connect in a save's
+/// words, never the store's (#5271), and nothing is saved.
 #[tokio::test]
 async fn a_store_that_times_out_or_is_unavailable_is_not_ready() {
     for (error, words) in [
         (
             ProtectedStoreError::TimedOut,
-            "local protected storage did not respond in time",
+            "didn't answer within 2 minutes, so your Codex sign-in wasn't saved",
         ),
         (
             ProtectedStoreError::Unavailable,
-            "local credential authority storage is unavailable",
+            "the local credential store refused your Codex sign-in, so nothing was saved",
         ),
     ] {
         let store = Store::default();
@@ -136,15 +136,14 @@ async fn a_store_that_times_out_or_is_unavailable_is_not_ready() {
             LocalConnectStore {
                 client: &mut client,
             }
-            .ready(CredentialConnectProviderArg::Codex)
+            .ready(CredentialConnectProviderArg::Codex, "work")
             .await
             .unwrap_err()
         );
-        assert!(
-            text.contains("can't save a Codex sign-in now, so nothing was saved"),
-            "{text}"
-        );
         assert!(text.contains(words), "{text}");
+        // The store's own message is for the log, never the person.
+        assert!(!text.contains("protected storage"), "{text}");
+        assert!(!text.contains("code:"), "{text}");
         assert!(client.list_credentials().await.unwrap().is_empty());
     }
 }

@@ -22,6 +22,10 @@ pub enum StoreRefusal {
     KeychainLocked,
     /// The keychain that holds local credentials does not exist.
     KeychainMissing,
+    /// The protected store didn't answer within its bound. A write that
+    /// timed out was never made ready, so nothing lists or leases it
+    /// (#5271).
+    KeyringTimedOut,
 }
 
 impl StoreRefusal {
@@ -34,6 +38,7 @@ impl StoreRefusal {
             Self::GithubAlreadyConnected => "CREDENTIAL_GITHUB_ALREADY_CONNECTED",
             Self::KeychainLocked => "LOCAL_KEYCHAIN_LOCKED",
             Self::KeychainMissing => "LOCAL_KEYCHAIN_MISSING",
+            Self::KeyringTimedOut => "LOCAL_KEYRING_TIMED_OUT",
         }
     }
 

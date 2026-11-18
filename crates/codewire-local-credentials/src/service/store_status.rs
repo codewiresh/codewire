@@ -2,8 +2,10 @@
 //! A locked or missing store is a definite refusal (FailedPrecondition): the
 //! authority answers only once the operation is undone, and names the cause
 //! as a [`crate::StoreRefusal`] its caller words; the message is for the log.
-//! A timeout or other storage fault stays Unavailable, which callers report
-//! as an unknown outcome.
+//! A timeout is definite too (#5271): a write that timed out is never made
+//! ready, and recovery deletes it, never completes it, so a stray value the
+//! store may still hold is never used. Any other storage fault stays
+//! Unavailable, which callers report as an unknown outcome.
 
 use codewire_protected_store::ProtectedStoreError;
 use tonic::Status;
@@ -22,9 +24,9 @@ pub(super) fn status(error: ProtectedStoreError) -> Status {
         ProtectedStoreError::AccessDenied => {
             StoreRefusal::KeychainLocked.attach(Status::failed_precondition(LOCKED))
         }
-        ProtectedStoreError::TimedOut => {
-            Status::unavailable("local protected storage did not respond in time")
-        }
+        ProtectedStoreError::TimedOut => StoreRefusal::KeyringTimedOut.attach(
+            Status::failed_precondition("local protected storage did not respond in time"),
+        ),
         // The login keychain, or the file CODEWIRE_LOCAL_CREDENTIAL_KEYCHAIN
         // names, is absent (#4864).
         ProtectedStoreError::KeychainMissing => StoreRefusal::KeychainMissing.attach(
@@ -68,11 +70,17 @@ mod tests {
             crate::store_refusal_reason(&locked),
             Some("LOCAL_KEYCHAIN_LOCKED")
         );
-        // A storage fault is no refusal, so it names no reason.
+        // A timeout is a definite refusal (#5271); any other storage fault is
+        // no refusal, so it names no reason.
+        let timed_out = status(ProtectedStoreError::TimedOut);
+        assert_eq!(timed_out.code(), tonic::Code::FailedPrecondition);
         assert_eq!(
-            crate::store_refusal_reason(&status(ProtectedStoreError::TimedOut)),
-            None
+            crate::store_refusal_reason(&timed_out),
+            Some("LOCAL_KEYRING_TIMED_OUT")
         );
+        let fault = status(ProtectedStoreError::Unavailable);
+        assert_eq!(fault.code(), tonic::Code::Unavailable);
+        assert_eq!(crate::store_refusal_reason(&fault), None);
         assert_eq!(locked.message(), LOCKED);
         #[cfg(target_os = "macos")]
         assert!(LOCKED.contains("`security unlock-keychain`"));

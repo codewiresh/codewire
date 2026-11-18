@@ -30,6 +30,8 @@ struct StoreState {
     get_fault: Fault,
     put_fault: Fault,
     delete_fault: Fault,
+    /// A put lands its value, then answers that the store timed out.
+    put_times_out: bool,
     get_calls: usize,
     put_calls: usize,
     delete_calls: usize,
@@ -57,6 +59,10 @@ impl TestProtectedStore {
         self.state.lock().expect("store lock").put_fault = fault;
     }
 
+    fn set_put_times_out(&self) {
+        self.state.lock().expect("store lock").put_times_out = true;
+    }
+
     fn set_get_fault(&self, fault: Fault) {
         self.state.lock().expect("store lock").get_fault = fault;
     }
@@ -70,6 +76,7 @@ impl TestProtectedStore {
         state.get_fault = Fault::None;
         state.put_fault = Fault::None;
         state.delete_fault = Fault::None;
+        state.put_times_out = false;
     }
 
     fn entry_count(&self) -> usize {
@@ -140,6 +147,9 @@ impl ProtectedStore for TestProtectedStore {
         );
         if state.put_fault == Fault::AfterEffect {
             return Err(ProtectedStoreError::Unavailable);
+        }
+        if state.put_times_out {
+            return Err(ProtectedStoreError::TimedOut);
         }
         Ok(())
     }
@@ -2610,6 +2620,35 @@ fn recovery_rolls_back_an_interrupted_protected_write() {
             .expect("list credentials")
             .is_empty()
     );
+    assert_eq!(store.entry_count(), 0);
+}
+
+/// #5271: a write the store answered with a timeout is never made ready,
+/// even though its value reached the store, and recovery deletes it rather
+/// than completing it. That is what lets the timeout read as "not saved".
+#[test]
+fn a_timed_out_write_is_never_promoted() {
+    let temp = TempDir::new().expect("temporary directory");
+    let root = authority_root(&temp);
+    let store = TestProtectedStore::new(ProtectedStorePersistence::OperatingSystem);
+    let authority =
+        LocalCredentialAuthority::open(&root, store.clone(), catalog()).expect("open authority");
+    store.set_put_times_out();
+    store.set_delete_fault(Fault::BeforeEffect);
+    assert_eq!(
+        authority.add_credential(new_credential("work"), material(b"timed-out-token")),
+        Err(LocalCredentialError::ProtectedStore(
+            ProtectedStoreError::TimedOut
+        ))
+    );
+    assert_eq!(store.entry_values(), vec![b"timed-out-token".to_vec()]);
+    assert!(authority.list_credentials().expect("list").is_empty());
+    drop(authority);
+
+    store.clear_faults();
+    let recovered =
+        LocalCredentialAuthority::open(&root, store.clone(), catalog()).expect("recover authority");
+    assert!(recovered.list_credentials().expect("list").is_empty());
     assert_eq!(store.entry_count(), 0);
 }
 

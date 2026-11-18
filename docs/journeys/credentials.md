@@ -84,13 +84,19 @@ only what differs.
    daemon) is shown within a second, on stderr: `Waiting for your keyring
    (Secret Service) to answer · unlock it if it asks`, or `your login
    keychain` on macOS. When it gives up (the keyring's bound is 2 minutes, so a
-   person can still answer a prompt), the command says the keyring didn't
-   answer and gives the next step: unlock it, or restart it, then run the
-   command again, or keep the credential on the platform. It shows no gRPC or
-   transport text and exits non-zero. `cw doctor` reports a missing, locked
-   or unanswering local store as a warning with the same next step. Walk it only inside a private D-Bus
-   session (`scripts/ci/verify/lib/local-smoke-isolation.sh`) with its keyring
-   stopped, never the host's keyring (#5271). Not yet observed.
+   person can still answer a prompt), every local connect, add, generate and
+   rotate says `your keyring (Secret Service) didn't answer within 2 minutes,
+   so your WHAT wasn't saved; unlock it, or restart it, then run this again`,
+   with `→ systemctl --user restart gnome-keyring-daemon` (on macOS, the login
+   keychain and `→ security unlock-keychain`). It shows no gRPC or transport
+   text and exits non-zero. The authority never made that write ready, so
+   nothing lists or uses it; a stray value can stay in the keyring until the
+   pending row's cleanup removes it, and is never used (cw-network,
+   2026-11-18, #5271). `cw doctor` reports a missing, locked or unanswering
+   local store as a warning with the same next step. The waiting line and
+   `cw doctor` come in #5271's second change. Walk it only inside a private
+   D-Bus session (`scripts/ci/verify/lib/local-smoke-isolation.sh`) with its
+   keyring stopped, never the host's keyring (#5271). Not yet observed.
    A save refused after the provider step says why in fixed words and that
    nothing was saved, with one `→` command, the same in both placements:
    the name is in use, the credential was deleted or changed during the
@@ -301,8 +307,8 @@ Issues: #4714 (local), #2559 (cloud).
     first: it's still the one the cw you updated from started, while local
     VMs run.` before the link;
   - with no local VM running: the store is replaced before the link, and the
-    check runs; with the login keychain locked, the connect stops there with
-    the store's own sentence, before any link.
+    check runs; with the login keychain locked, the connect stops there,
+    saying the keychain is locked and how to unlock it, before any link.
 
   Not yet observed.
 - **Stopped mid-refresh:** a local store whose authority stopped during the

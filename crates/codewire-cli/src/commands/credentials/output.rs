@@ -67,6 +67,22 @@ impl From<&CredentialRecord> for CredentialView {
     }
 }
 
+/// What kind of credential a provider and authentication kind make, as a
+/// person names it: the two Claude forms, Codex, GitHub, an SSH key or a
+/// provider's API key.
+pub(in crate::commands) fn kind_label(provider: &str, authentication_kind: &str) -> String {
+    match (provider, authentication_kind) {
+        ("anthropic", "claude_sign_in") => "Claude (sign-in)".to_owned(),
+        ("anthropic", "oauth") => "Claude (token)".to_owned(),
+        ("anthropic", "api_key") => "Anthropic API key".to_owned(),
+        ("openai", "api_key") => "OpenAI API key".to_owned(),
+        ("openai" | "codex", "oauth") => "Codex".to_owned(),
+        ("github", _) => "GitHub".to_owned(),
+        (_, "ssh_key") => "SSH key".to_owned(),
+        (provider, kind) => format!("{provider} {}", kind.replace('_', " ")),
+    }
+}
+
 impl CredentialView {
     /// A cloud credential, refused when the service sent a kind or status
     /// this cw doesn't know.
@@ -96,19 +112,9 @@ impl CredentialView {
         })
     }
 
-    /// What kind of credential it is, as a person names it: the two Claude
-    /// forms, Codex, GitHub, an SSH key or a provider's API key.
+    /// What kind of credential it is, as a person names it.
     fn kind_label(&self) -> String {
-        match (self.provider.as_str(), self.authentication_kind) {
-            ("anthropic", "claude_sign_in") => "Claude (sign-in)".to_owned(),
-            ("anthropic", "oauth") => "Claude (token)".to_owned(),
-            ("anthropic", "api_key") => "Anthropic API key".to_owned(),
-            ("openai", "api_key") => "OpenAI API key".to_owned(),
-            ("openai" | "codex", "oauth") => "Codex".to_owned(),
-            ("github", _) => "GitHub".to_owned(),
-            (_, "ssh_key") => "SSH key".to_owned(),
-            (provider, kind) => format!("{provider} {}", kind.replace('_', " ")),
-        }
+        kind_label(&self.provider, self.authentication_kind)
     }
 
     /// The profiles that select it, from `uses`.

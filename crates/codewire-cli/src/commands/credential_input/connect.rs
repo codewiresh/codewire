@@ -253,7 +253,11 @@ pub(in crate::commands) trait ConnectStore {
     /// provider step so a sign-in is never spent on a store that would refuse
     /// it (#4826). The cloud asks nothing here: its service runs the provider
     /// step and the save together.
-    async fn ready(&mut self, provider: CredentialConnectProviderArg) -> anyhow::Result<()>;
+    async fn ready(
+        &mut self,
+        provider: CredentialConnectProviderArg,
+        name: &str,
+    ) -> anyhow::Result<()>;
 
     /// The provider step. Where this process waits for the provider it ends
     /// at the first Ctrl-C through `interrupt`.
@@ -336,7 +340,7 @@ async fn connect_with<S: ConnectStore>(
         existing,
         output: args.output,
     };
-    store.ready(provider).await?;
+    store.ready(provider, &target.name).await?;
     let mut interrupt = Interrupt::default();
     let approval = store.approve(&target, &mut interrupt).await?;
     // A Ctrl-C while the provider answered, or since, is a cancellation

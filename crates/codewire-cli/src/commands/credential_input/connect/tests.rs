@@ -74,7 +74,7 @@ impl ConnectStore for Fake {
         })
     }
 
-    async fn ready(&mut self, _: CredentialConnectProviderArg) -> anyhow::Result<()> {
+    async fn ready(&mut self, _: CredentialConnectProviderArg, _: &str) -> anyhow::Result<()> {
         self.readiness_checks += 1;
         match self.not_ready {
             Some(refusal) => anyhow::bail!(refusal),

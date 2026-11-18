@@ -37,8 +37,8 @@ use crate::repository::{MAX_GIT_BUNDLE_BYTES, valid_git_selector};
 use crate::service::{REPOSITORY_PREPARATION_TIMEOUT, auth_kind_to_proto};
 use crate::transport::{
     AUTHORITY_PROTOCOL_VERSION, AuthorityRuntimeConfig, AuthorityRuntimeError,
-    MINIMUM_AUTHORITY_PROTOCOL_VERSION, connect_owner_only, connect_owner_only_with_timeout,
-    store_error_from_exit_status,
+    INFO_REQUEST_TIMEOUT, MINIMUM_AUTHORITY_PROTOCOL_VERSION, connect_owner_only,
+    connect_owner_only_with_timeout, store_error_from_exit_status,
 };
 use crate::{
     AccessProfileRecord, AccessProfileRevisionRecord, AuthorityProtectedStore,
@@ -359,11 +359,14 @@ impl LocalCredentialClient {
         let mut inner = LocalCredentialAuthorityServiceClient::new(channel)
             .max_decoding_message_size(MAX_RPC_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_RPC_MESSAGE_BYTES);
-        let response = inner
-            .get_authority_info(v1::GetAuthorityInfoRequest {})
-            .await
-            .map_err(|_| AuthorityRuntimeError::Connect)?
-            .into_inner();
+        let response = tokio::time::timeout(
+            INFO_REQUEST_TIMEOUT,
+            inner.get_authority_info(v1::GetAuthorityInfoRequest {}),
+        )
+        .await
+        .map_err(|_| AuthorityRuntimeError::Connect)?
+        .map_err(|_| AuthorityRuntimeError::Connect)?
+        .into_inner();
         // An authority in the supported range keeps serving after an update.
         if !(MINIMUM_AUTHORITY_PROTOCOL_VERSION..=AUTHORITY_PROTOCOL_VERSION)
             .contains(&response.protocol_version)

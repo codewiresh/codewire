@@ -142,7 +142,14 @@ impl AuthorityFeature {
 }
 const AUTHORITY_SOCKET_FILE: &str = "authority.sock";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// A call that may reach the protected store waits past the store's own
+/// bound (120 s for Secret Service, twice for a timed-out write and its
+/// rollback), so the authority's definite answer always arrives first
+/// (#5271).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(255);
+/// The authority's info, which every client asks for first, so a hung
+/// authority is caught at once rather than after a store bound.
+pub(crate) const INFO_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The longest Unix socket path the kernel accepts, excluding the NUL.
 #[cfg(target_os = "macos")]
@@ -367,7 +374,8 @@ pub(crate) async fn connect_owner_only(
 }
 
 /// A channel whose calls may each run for `timeout`. Control calls use the
-/// 30 s default; repository preparation runs git first and needs longer.
+/// store-bounded default; repository preparation runs git first and needs
+/// longer.
 pub(crate) async fn connect_owner_only_with_timeout(
     config: &AuthorityRuntimeConfig,
     timeout: Duration,

@@ -10,7 +10,7 @@ use super::credential_input::{
     ParsedCredentialSelector, SSH_PUBLIC_KEY_GITHUB_HINT, parse_credential_selector,
     prompt_credential_material, read_ssh_import, validate_ssh_generation, validate_ssh_import,
 };
-use super::credentials::output::save_refusal::{Answer, Save, save_error};
+use super::credentials::output::save_refusal::{Answer, Kind, Save, save_error};
 use super::login_screen;
 use super::*;
 
@@ -365,7 +365,7 @@ impl ConnectStore for CloudConnectStore<'_> {
         })
     }
 
-    async fn ready(&mut self, _: CredentialConnectProviderArg) -> anyhow::Result<()> {
+    async fn ready(&mut self, _: CredentialConnectProviderArg, _: &str) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -515,7 +515,7 @@ impl ConnectStore for CloudConnectStore<'_> {
                 cloud_save_error(
                     Save {
                         placement: "cloud",
-                        provider: target.provider,
+                        kind: Kind::Connect(target.provider),
                         name: &target.name,
                     },
                     error,
@@ -964,8 +964,10 @@ fn provider_answer(
 fn cloud_save_error(save: Save<'_>, error: rpc::ClientError) -> anyhow::Error {
     use rpc::ErrorCode;
     if !matches!(
-        save.provider,
-        CredentialConnectProviderArg::Claude | CredentialConnectProviderArg::ClaudeToken
+        save.kind,
+        Kind::Connect(
+            CredentialConnectProviderArg::Claude | CredentialConnectProviderArg::ClaudeToken
+        )
     ) {
         return anyhow::Error::new(error).context("enroll platform OAuth credential");
     }
@@ -1143,7 +1145,7 @@ mod tests {
             CredentialConnectProviderArg::Github,
         ] {
             CloudConnectStore { client: &client }
-                .ready(provider)
+                .ready(provider, "work")
                 .await
                 .unwrap();
         }

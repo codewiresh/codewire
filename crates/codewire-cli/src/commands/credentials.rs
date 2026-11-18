@@ -22,7 +22,7 @@ pub(in crate::commands) mod confirm;
 mod delete;
 pub(in crate::commands) mod output;
 
-use output::save_refusal::{Answer, Save, save_error};
+use output::save_refusal::{Answer, Kind, Save, save_error};
 
 use crate::config::OsEnv;
 
@@ -188,11 +188,14 @@ async fn connect_credential(
 }
 
 /// The store must accept a write before any provider step (#4826): a refusal
-/// stops here with the store's own sentence, and no sign-in is started.
-async fn probe_local_store(client: &mut LocalCredentialClient, what: &str) -> anyhow::Result<()> {
+/// stops here in the words a save's refusal uses, and no sign-in is started.
+async fn probe_local_store(
+    client: &mut LocalCredentialClient,
+    save: Save<'_>,
+) -> anyhow::Result<()> {
     match client.probe_protected_store().await {
         Ok(()) => Ok(()),
-        Err(status) => match probe_refusal(what, &status) {
+        Err(status) => match probe_refusal(save, &status) {
             Some(refusal) => Err(refusal),
             None => {
                 print_store_check_skipped();
@@ -204,19 +207,33 @@ async fn probe_local_store(client: &mut LocalCredentialClient, what: &str) -> an
 
 /// What a failed probe means: `None` for an authority without the call, which
 /// the connect goes on without; otherwise why it stops, before any sign-in.
-fn probe_refusal(what: &str, status: &tonic::Status) -> Option<anyhow::Error> {
+/// A probe saves nothing, so every answer is definite, and the store's own
+/// message goes only to the log.
+fn probe_refusal(save: Save<'_>, status: &tonic::Status) -> Option<anyhow::Error> {
     use std::error::Error as _;
     if status.code() == tonic::Code::Unimplemented {
         return None;
     }
-    Some(if status.source().is_some() {
-        anyhow::anyhow!("couldn't reach the local credential store, so your {what} wasn't saved")
-    } else {
-        anyhow::anyhow!(
-            "the local credential store can't save a {what} now, so nothing was saved: {}",
-            status.message()
-        )
-    })
+    tracing::debug!(
+        code = ?status.code(),
+        message = status.message(),
+        "the local credential store refused its probe"
+    );
+    if status.source().is_some() {
+        let what = match save.kind {
+            Kind::Connect(provider) => connected_noun(provider),
+            Kind::Write { what, .. } | Kind::Rotate { what } => what,
+        };
+        return Some(anyhow::anyhow!(
+            "couldn't reach the local credential store, so your {what} wasn't saved"
+        ));
+    }
+    Some(save_error(
+        save,
+        Answer::Refused,
+        codewire_local_credentials::store_refusal_reason(status),
+        configured_keychain().as_deref(),
+    ))
 }
 
 /// Said once when a connect goes on without checking the store first.
@@ -296,11 +313,20 @@ impl ConnectStore for LocalConnectStore<'_> {
         })
     }
 
-    async fn ready(&mut self, provider: CredentialConnectProviderArg) -> anyhow::Result<()> {
+    async fn ready(
+        &mut self,
+        provider: CredentialConnectProviderArg,
+        name: &str,
+    ) -> anyhow::Result<()> {
         if codewire_local_credentials::AuthorityFeature::StoreProbe
             .served_by(self.client.info().protocol_version)
         {
-            probe_local_store(self.client, connected_noun(provider)).await
+            let save = Save {
+                placement: "local",
+                kind: Kind::Connect(provider),
+                name,
+            };
+            probe_local_store(self.client, save).await
         } else {
             print_store_check_skipped();
             Ok(())
@@ -438,10 +464,10 @@ impl ConnectStore for LocalConnectStore<'_> {
                 if definitely_not_saved(&status) {
                     say_discarded(connecting, revoke_unsaved(connecting, revocable).await);
                 }
-                return Err(local_connect_publish_error(
+                return Err(local_save_error(
                     Save {
                         placement: "local",
-                        provider: connecting,
+                        kind: Kind::Connect(connecting),
                         name: &name,
                     },
                     &status,
@@ -631,10 +657,11 @@ fn connected_kind(provider: CredentialConnectProviderArg) -> CredentialAuthKind 
     }
 }
 
-/// What a local connect says when the store answers its save (#4826): the
-/// cause in the words both placements share, told by the status code and the
-/// store's closed reason. The store's own message goes only to the log.
-fn local_connect_publish_error(save: Save<'_>, status: &tonic::Status) -> anyhow::Error {
+/// What a local connect or credential write says when the store answers its
+/// save (#4826, #5271): the cause in the words both placements share, told by
+/// the status code and the store's closed reason. The store's own message
+/// goes only to the log.
+fn local_save_error(save: Save<'_>, status: &tonic::Status) -> anyhow::Error {
     use tonic::Code;
     tracing::debug!(
         code = ?status.code(),
@@ -647,15 +674,19 @@ fn local_connect_publish_error(save: Save<'_>, status: &tonic::Status) -> anyhow
         Code::NotFound => Answer::NotFound,
         _ => Answer::Refused,
     };
-    let keychain = super::credential_authority::configured_authority_store(&OsEnv)
-        .ok()
-        .and_then(|store| store.keychain);
     save_error(
         save,
         answer,
         codewire_local_credentials::store_refusal_reason(status),
-        keychain.as_deref(),
+        configured_keychain().as_deref(),
     )
+}
+
+/// The keychain file `CODEWIRE_LOCAL_CREDENTIAL_KEYCHAIN` names, if set.
+fn configured_keychain() -> Option<std::path::PathBuf> {
+    super::credential_authority::configured_authority_store(&OsEnv)
+        .ok()
+        .and_then(|store| store.keychain)
 }
 
 /// Whether the store's answer to a save is a definite refusal. A failure
@@ -784,8 +815,23 @@ async fn add_credential(
             output::refusal::name_in_use("local", &name)
         );
         let input = read_ssh_import(&args)?;
-        let record = client.add_ssh_credential(name, input.private_key, input.passphrase, args.expires_at).await
-            .context("import local SSH identity; inspect by name before retrying an uncertain acknowledgement")?;
+        let save = Save {
+            placement: "local",
+            kind: Kind::Write {
+                command: "add ssh",
+                what: "SSH key",
+            },
+            name: &name,
+        };
+        let record = client
+            .add_ssh_credential(
+                name.clone(),
+                input.private_key,
+                input.passphrase,
+                args.expires_at,
+            )
+            .await
+            .map_err(|status| local_save_error(save, &status))?;
         remember_local(&record, execution);
         return print_credentials(&[record], OutputFormat::Text);
     }
@@ -836,10 +882,26 @@ async fn add_credential(
         expires_at_unix: args.expires_at,
     };
     let material = prompt_credential_material(input.provider.as_str(), input.authentication_kind)?;
+    let (command, what, name) = (
+        format!("add {}", input.provider),
+        output::kind_label(
+            input.provider.as_str(),
+            authentication_kind_label(input.authentication_kind),
+        ),
+        input.display_name.clone(),
+    );
+    let save = Save {
+        placement: "local",
+        kind: Kind::Write {
+            command: &command,
+            what: &what,
+        },
+        name: &name,
+    };
     let record = client
         .add_credential(input, material)
         .await
-        .context("add local credential")?;
+        .map_err(|status| local_save_error(save, &status))?;
     remember_local(&record, execution);
     print_credentials(&[record], OutputFormat::Text)
 }
@@ -907,6 +969,15 @@ async fn rotate_credential(
         record.metadata.provider.as_str(),
         record.metadata.authentication_kind,
     )?;
+    let what = output::kind_label(
+        record.metadata.provider.as_str(),
+        authentication_kind_label(record.metadata.authentication_kind),
+    );
+    let save = Save {
+        placement: "local",
+        kind: Kind::Rotate { what: &what },
+        name: &record.metadata.display_name,
+    };
     let rotated = client
         .rotate_credential_material(
             &record.metadata.id,
@@ -916,7 +987,7 @@ async fn rotate_credential(
             record.metadata.account_hint.clone(),
         )
         .await
-        .context("rotate local credential")?;
+        .map_err(|status| local_save_error(save, &status))?;
     print_credentials(&[rotated], OutputFormat::Text)
 }
 
@@ -971,8 +1042,18 @@ async fn generate_local_ssh(
     args: &super::CredentialGenerateArgs,
 ) -> anyhow::Result<CredentialRecord> {
     let name = validate_ssh_generation(args)?;
-    let record = client.generate_ssh_credential(name, args.expires_at).await
-        .context("generate local SSH identity; inspect by name before retrying an uncertain acknowledgement")?;
+    let save = Save {
+        placement: "local",
+        kind: Kind::Write {
+            command: "generate ssh",
+            what: "SSH key",
+        },
+        name: &name,
+    };
+    let record = client
+        .generate_ssh_credential(name.clone(), args.expires_at)
+        .await
+        .map_err(|status| local_save_error(save, &status))?;
     print_credentials(std::slice::from_ref(&record), OutputFormat::Text)?;
     eprintln!("{SSH_PUBLIC_KEY_GITHUB_HINT}");
     Ok(record)
@@ -1625,24 +1706,25 @@ mod tests {
     /// refusal and a lost connection stop it, each in its own words.
     #[test]
     fn a_failed_probe_stops_the_connect_unless_the_authority_lacks_the_call() {
-        assert!(
-            probe_refusal(
-                "Claude sign-in",
-                &tonic::Status::unimplemented("no such method")
-            )
-            .is_none()
-        );
-        let refused = probe_refusal(
-            "Claude sign-in",
-            &tonic::Status::unavailable("local protected storage did not respond in time"),
-        )
-        .expect("a refusal stops the connect");
+        let save = |provider| Save {
+            placement: "local",
+            kind: Kind::Connect(provider),
+            name: "work",
+        };
+        let claude = save(CredentialConnectProviderArg::Claude);
+        assert!(probe_refusal(claude, &tonic::Status::unimplemented("no such method")).is_none());
+        // A probe saves nothing, so even an unavailable store is a definite
+        // refusal, in the save's words and without the store's text.
+        let store_text = "local credential authority storage is unavailable";
+        let refused = probe_refusal(claude, &tonic::Status::unavailable(store_text))
+            .expect("a refusal stops the connect");
         assert_eq!(
-            refused.to_string(),
-            "the local credential store can't save a Claude sign-in now, so nothing was saved: local protected storage did not respond in time"
+            crate::error_report::sentence(&refused),
+            "the local credential store refused your Claude sign-in, so nothing was saved"
         );
+        assert!(!format!("{refused:#}").contains(store_text));
         let lost = probe_refusal(
-            "Codex sign-in",
+            save(CredentialConnectProviderArg::Codex),
             &tonic::Status::from_error(Box::new(std::io::Error::other("connection reset"))),
         )
         .expect("a lost connection stops the connect");
@@ -1656,12 +1738,11 @@ mod tests {
     fn a_local_connect_refusal_says_nothing_was_saved_without_store_text() {
         let save = Save {
             placement: "local",
-            provider: CredentialConnectProviderArg::Claude,
+            kind: Kind::Connect(CredentialConnectProviderArg::Claude),
             name: "work",
         };
         let store_text = "the store cannot hold this credential";
-        let refused =
-            local_connect_publish_error(save, &tonic::Status::failed_precondition(store_text));
+        let refused = local_save_error(save, &tonic::Status::failed_precondition(store_text));
         assert_eq!(
             crate::error_report::sentence(&refused),
             "the local credential store refused your Claude sign-in, so nothing was saved"
@@ -1675,7 +1756,7 @@ mod tests {
                 .parse()
                 .unwrap(),
         );
-        let text = format!("{:#}", local_connect_publish_error(save, &locked));
+        let text = format!("{:#}", local_save_error(save, &locked));
         assert!(text.contains("locked"), "{text}");
         assert!(
             text.contains("so your Claude sign-in wasn't saved"),
@@ -1696,11 +1777,11 @@ mod tests {
             tonic::Status::cancelled("cancelled"),
         ] {
             assert_eq!(
-                crate::error_report::sentence(&local_connect_publish_error(save, &status)),
+                crate::error_report::sentence(&local_save_error(save, &status)),
                 "the local credential store didn't confirm saving your Claude sign-in, so it may or may not be saved; check the list before connecting again"
             );
         }
-        let uncertain = local_connect_publish_error(save, &tonic::Status::deadline_exceeded("x"));
+        let uncertain = local_save_error(save, &tonic::Status::deadline_exceeded("x"));
         for error in [refused, uncertain] {
             assert_eq!(
                 error

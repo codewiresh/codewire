@@ -1,6 +1,6 @@
-//! What a connect says when its store answers the save with anything but
-//! the credential, in the same words in both placements (#4826; #4717 C2 and
-//! C4). Neither the store's nor the service's own message reaches the
+//! What a connect or another credential write says when its store answers
+//! with anything but the credential, in the same words in both placements
+//! (#4826, #5271; #4717 C2 and C4). Neither the store's nor the service's own message reaches the
 //! person: a cause is told only by its code and a closed reason.
 
 use std::path::Path;
@@ -28,13 +28,30 @@ pub(in crate::commands) enum Answer {
     Uncertain,
 }
 
-/// The save a connect asked for.
+/// The save a command asked for.
 #[derive(Clone, Copy)]
 pub(in crate::commands) struct Save<'a> {
     /// `local` or `cloud`, as the flag spells it.
     pub(in crate::commands) placement: &'static str,
-    pub(in crate::commands) provider: CredentialConnectProviderArg,
+    pub(in crate::commands) kind: Kind<'a>,
     pub(in crate::commands) name: &'a str,
+}
+
+/// The command that saved: its words name what it saves and how to run it
+/// again.
+#[derive(Clone, Copy)]
+pub(in crate::commands) enum Kind<'a> {
+    Connect(CredentialConnectProviderArg),
+    /// `add PROVIDER` or `generate ssh`, by the command to run again (after
+    /// `cw credentials --PLACEMENT`, before `--name`) and what it saves.
+    Write {
+        command: &'a str,
+        what: &'a str,
+    },
+    /// `rotate NAME`, and what the credential is.
+    Rotate {
+        what: &'a str,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +64,7 @@ enum Outcome {
     ClaudeSignInExpired,
     KeychainLocked,
     KeychainMissing,
+    KeyringTimedOut,
     Refused,
     Unknown,
 }
@@ -71,6 +89,8 @@ fn classify(answer: Answer, reason: Option<&str>) -> Outcome {
         Outcome::KeychainLocked
     } else if is(StoreRefusal::KeychainMissing) {
         Outcome::KeychainMissing
+    } else if is(StoreRefusal::KeyringTimedOut) {
+        Outcome::KeyringTimedOut
     } else if reason == Some(CLAUDE_CODE_INVALID_REASON) {
         Outcome::ClaudeCodeInvalid
     } else if reason == Some(CLAUDE_SIGN_IN_EXPIRED_REASON) {
@@ -103,17 +123,37 @@ pub(in crate::commands) fn save_error(
 fn words(save: Save<'_>, outcome: Outcome, keychain: Option<&Path>) -> (String, Option<String>) {
     let Save {
         placement,
-        provider,
+        kind,
         name,
     } = save;
-    let what = connected_noun(provider);
-    let word = provider
-        .to_possible_value()
-        .map_or_else(String::new, |value| value.get_name().to_owned());
-    let connect = format!(
-        "cw credentials --{placement} connect {word} --name {}",
-        shell_word(name)
-    );
+    let named =
+        |command: &str, name: &str| format!("cw credentials --{placement} {command} --name {name}");
+    // What it saves, the command that runs it again, and the same command
+    // for another name.
+    let (what, connect, renamed) = match kind {
+        Kind::Connect(provider) => {
+            let command = format!(
+                "connect {}",
+                provider
+                    .to_possible_value()
+                    .map_or_else(String::new, |value| value.get_name().to_owned())
+            );
+            (
+                connected_noun(provider),
+                named(&command, &shell_word(name)),
+                named(&command, "NAME"),
+            )
+        }
+        Kind::Write { command, what } => (
+            what,
+            named(command, &shell_word(name)),
+            named(command, "NAME"),
+        ),
+        Kind::Rotate { what } => {
+            let again = format!("cw credentials --{placement} rotate {}", shell_word(name));
+            (what, again.clone(), again)
+        }
+    };
     let list = format!("cw credentials --{placement} list");
     let (store, place) = if placement == "local" {
         ("the local credential store", "on this computer")
@@ -125,9 +165,7 @@ fn words(save: Save<'_>, outcome: Outcome, keychain: Option<&Path>) -> (String, 
             format!(
                 "a {placement} credential is already named {name:?}, so your {what} wasn't saved"
             ),
-            Some(format!(
-                "cw credentials --{placement} connect {word} --name NAME"
-            )),
+            Some(renamed),
         ),
         Outcome::Deleted => (
             format!(
@@ -148,6 +186,7 @@ fn words(save: Save<'_>, outcome: Outcome, keychain: Option<&Path>) -> (String, 
         Outcome::ClaudeCodeInvalid => (CLAUDE_SIGN_IN_CODE_INVALID.to_owned(), Some(connect)),
         Outcome::ClaudeSignInExpired => (CLAUDE_SIGN_IN_EXPIRED.to_owned(), Some(connect)),
         Outcome::KeychainLocked => keychain_locked(what, keychain, connect),
+        Outcome::KeyringTimedOut => keyring_timed_out(what),
         Outcome::KeychainMissing => match keychain {
             Some(path) => (
                 format!(
@@ -173,6 +212,27 @@ fn words(save: Save<'_>, outcome: Outcome, keychain: Option<&Path>) -> (String, 
             ),
             Some(list),
         ),
+    }
+}
+
+/// The store didn't answer within its bound (#5271). The authority never made
+/// the value ready, so nothing was saved; the person unlocks or restarts the
+/// store and runs the command again.
+fn keyring_timed_out(what: &str) -> (String, Option<String>) {
+    if cfg!(target_os = "macos") {
+        (
+            format!(
+                "your login keychain didn't answer within 2 minutes, so your {what} wasn't saved; unlock it, then run this again"
+            ),
+            Some("security unlock-keychain".to_owned()),
+        )
+    } else {
+        (
+            format!(
+                "your keyring (Secret Service) didn't answer within 2 minutes, so your {what} wasn't saved; unlock it, or restart it, then run this again"
+            ),
+            Some("systemctl --user restart gnome-keyring-daemon".to_owned()),
+        )
     }
 }
 
@@ -223,7 +283,7 @@ mod tests {
         let error = save_error(
             Save {
                 placement,
-                provider: CredentialConnectProviderArg::Github,
+                kind: Kind::Connect(CredentialConnectProviderArg::Github),
                 name: "work",
             },
             answer,
@@ -303,12 +363,51 @@ mod tests {
         assert_eq!(next.as_deref(), Some("cw credentials --local list"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_keyring_that_timed_out_saved_nothing_and_says_what_to_do() {
+        let (text, next) = said("local", Answer::Refused, Some("LOCAL_KEYRING_TIMED_OUT"));
+        assert_eq!(
+            text,
+            "your keyring (Secret Service) didn't answer within 2 minutes, so your GitHub sign-in wasn't saved; unlock it, or restart it, then run this again"
+        );
+        assert_eq!(
+            next.as_deref(),
+            Some("systemctl --user restart gnome-keyring-daemon")
+        );
+    }
+
+    #[test]
+    fn another_write_is_worded_by_its_own_command() {
+        let error = save_error(
+            Save {
+                placement: "local",
+                kind: Kind::Write {
+                    command: "add anthropic",
+                    what: "Anthropic API key",
+                },
+                name: "work key",
+            },
+            Answer::AlreadyExists,
+            None,
+            None,
+        );
+        assert_eq!(
+            crate::error_report::sentence(&error),
+            "a local credential is already named \"work key\", so your Anthropic API key wasn't saved"
+        );
+        assert_eq!(
+            crate::error_report::next_step(&error).as_deref(),
+            Some("cw credentials --local add anthropic --name NAME")
+        );
+    }
+
     #[test]
     fn a_missing_keychain_names_the_file_the_variable_sets() {
         let error = save_error(
             Save {
                 placement: "local",
-                provider: CredentialConnectProviderArg::Claude,
+                kind: Kind::Connect(CredentialConnectProviderArg::Claude),
                 name: "work",
             },
             Answer::Refused,
