@@ -421,8 +421,12 @@ jobs:
       # workspace's own `cw` is not under test. The exact-source workspace
       # image is verified where it is built: in support-images, which runs the
       # workspace contract on the image it publishes from main (#3119 A12).
+      # Every reader of its output is a Kind job, which runs only when Kind is
+      # selected; choosing the source otherwise cost 12 s of each selection
+      # (codewire#5311).
       - name: Choose the Kind workspace image source
         id: kind-workspace
+        if: ${{ contains(steps.select.outputs.selection, '|kind|') }}
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
