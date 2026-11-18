@@ -360,8 +360,6 @@ impl ConnectStore for CloudConnectStore<'_> {
             .as_secs();
         Ok(Reconnecting {
             name: record.name.clone(),
-            id: record.id.clone(),
-            revision: record.revocation_generation,
             status: super::credentials::output::CredentialView::cloud(record)?.status_at(now),
         })
     }
@@ -418,6 +416,7 @@ impl ConnectStore for CloudConnectStore<'_> {
         interrupt: &mut Interrupt,
         execution: &mut super::credential_input::CredentialExecution,
     ) -> anyhow::Result<()> {
+        let format = target.output;
         let screen =
             login_screen::SignInScreen::cloud(provider_label(target.provider), &target.name);
         let request = oauth_connection_request(
@@ -531,12 +530,19 @@ impl ConnectStore for CloudConnectStore<'_> {
                 None,
             ),
         };
-        let style = crate::output::Capabilities::from_process(crate::output::OutputMode::Text)
-            .stderr_style();
-        eprint!(
-            "\n{}",
-            login_screen::connected_line(screen, who, expires, style)
-        );
+        match format {
+            OutputFormat::Json => super::credentials::output::print_cloud_credentials(
+                std::slice::from_ref(&credential),
+                None,
+                format,
+            )?,
+            OutputFormat::Text => {
+                eprintln!();
+                super::credentials::output::print_done(&login_screen::connected_result(
+                    screen, who, expires,
+                ));
+            }
+        }
         remember_platform(&credential, execution);
         super::credentials::report_github_pending(github_pending(&pending));
         Ok(())
@@ -1671,6 +1677,7 @@ mod tests {
                 provider: Some(CredentialConnectProviderArg::Github),
                 name: Some("other".into()),
                 yes: true,
+                output: crate::commands::OutputFormat::Text,
                 guided: false,
             }),
         )

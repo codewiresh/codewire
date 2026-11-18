@@ -64,6 +64,15 @@ only what differs.
    a title line `Connect PROVIDER as NAME, on this computer` (or `in your
    Codewire account`), the step, then one result line
    `✓ PROVIDER connected as ACCOUNT`. Each section shows its screen.
+   The result line is on stdout and the screen on stderr. With
+   `--output json`, stdout holds only the credential, in `list --output
+   json`'s shape. Connecting a name that already exists asks once, the same
+   in both placements (#4717, C2), naming no ID or revision:
+   `Reconnect Codex "NAME" on this computer? It stays in its profiles and
+   becomes active; its expiry is kept.` A status other than active follows
+   the name (`"NAME" (expired)`), and a Claude token's question ends `its
+   one-year expiry restarts`. `--yes` answers it; with no terminal and no
+   `--yes`, `connect` stops at once and names `--yes`. Not yet observed.
    Locally, a `connect` checks that the store accepts a write before the
    provider step: an older store with a local VM running, or a missing or
    locked keychain, stops `cw` before any code or link appears, saying what
@@ -396,11 +405,14 @@ Issues: #4850, #4717 (C2). The screens are the approved screens 3 and 4.
   cw credentials --PLACEMENT --profile parity-default-b set codex parity-default-b
   cw credentials --PLACEMENT profiles default parity-default-b
   cw credentials --PLACEMENT --profile parity-default-b delete
-  cw --PLACEMENT create parity-default-env
-  cw --PLACEMENT create parity-default-bare --no-profile
+  cw --PLACEMENT create --name parity-default-env
+  cw --PLACEMENT create --name parity-default-bare --no-profile
   ```
 
-  Then delete the environments, make `parity-default-a` the default, and
+  A bare word after `create` is read as a repository, so the name takes
+  `--name`. Locally without a terminal, `create` also needs `--yes` to
+  confirm its source selection (found in #5237's walk). Then delete the
+  environments, make `parity-default-a` the default, and
   delete both profiles' credentials and `parity-default-b`.
 - **Proof:**
   - `profiles list` lists `parity-default-a` first, marked default.

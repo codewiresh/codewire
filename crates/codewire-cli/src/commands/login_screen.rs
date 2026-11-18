@@ -159,22 +159,17 @@ pub(super) fn device_code_lines(code: &str, style: Style) -> String {
 
 /// The one result line once a credential is saved: who signed in (or, for a
 /// token, its name), and a token's expiry date.
-pub(super) fn connected_line(
+pub(super) fn connected_result(
     sign_in: SignInScreen<'_>,
     who: &str,
     expires_at_unix: Option<u64>,
-    style: Style,
 ) -> String {
     let expires = expires_at_unix
         .and_then(|at| i64::try_from(at).ok())
         .and_then(|at| chrono::DateTime::<chrono::Utc>::from_timestamp(at, 0))
         .map(|at| format!(" · expires {}", at.format("%-d %b %Y")))
         .unwrap_or_default();
-    format!(
-        "{} {} connected as {who}{expires}\n",
-        style.status(Status::Done),
-        sign_in.provider
-    )
+    format!("{} connected as {who}{expires}", sign_in.provider)
 }
 
 /// The account a result line names: the credential's account hint (an email
@@ -420,23 +415,21 @@ mod tests {
     #[test]
     fn the_result_line_names_who_connected_and_a_tokens_expiry() {
         assert_eq!(
-            connected_line(
+            connected_result(
                 SignInScreen::local("Claude (sign-in)", "n@example.com"),
                 "n@example.com",
                 None,
-                PLAIN
             ),
-            "✓ Claude (sign-in) connected as n@example.com\n"
+            "Claude (sign-in) connected as n@example.com"
         );
         // 2027-11-15 00:00 UTC.
         assert_eq!(
-            connected_line(
+            connected_result(
                 SignInScreen::local("Claude (token)", "ci"),
                 "ci",
-                Some(1_826_236_800),
-                PLAIN
+                Some(1_826_236_800)
             ),
-            "✓ Claude (token) connected as ci · expires 15 Nov 2027\n"
+            "Claude (token) connected as ci · expires 15 Nov 2027"
         );
     }
 

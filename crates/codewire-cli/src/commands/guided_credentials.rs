@@ -320,6 +320,7 @@ async fn enroll_for_profile(
                     provider: Some(CredentialConnectProviderArg::Codex),
                     name: None,
                     yes: false,
+                    output: crate::commands::OutputFormat::Text,
                     guided: false,
                 })
             } else {
@@ -381,6 +382,7 @@ async fn enroll_for_profile(
                     provider: Some(provider),
                     name: None,
                     yes: false,
+                    output: crate::commands::OutputFormat::Text,
                     guided: false,
                 }),
                 (None, provider) => CredentialsCommand::Add(CredentialAddArgs {

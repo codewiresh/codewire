@@ -12,7 +12,7 @@ use clap::{Args, ValueEnum};
 use codewire_credential_broker::provider_oauth::{ProviderRevocation, RevocationFailure};
 
 use super::CredentialExecution;
-use crate::commands::prompt_confirm_default_no;
+use crate::commands::{OutputFormat, prompt_confirm_default_no};
 
 /// `cw credentials connect`'s arguments.
 #[derive(Debug, Args)]
@@ -27,6 +27,8 @@ pub(crate) struct CredentialConnectArgs {
         help = "Confirm reconnecting an existing named credential"
     )]
     pub(crate) yes: bool,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
     #[arg(skip)]
     pub(crate) guided: bool,
 }
@@ -74,6 +76,7 @@ pub(in crate::commands) fn claude_token_from_alias(
         provider: Some(CredentialConnectProviderArg::ClaudeToken),
         name: args.name.clone(),
         yes: false,
+        output: crate::commands::OutputFormat::Text,
         guided: args.guided,
     })
 }
@@ -205,8 +208,6 @@ pub(in crate::commands) fn provider_label(provider: CredentialConnectProviderArg
 /// Metadata only.
 pub(in crate::commands) struct Reconnecting {
     pub(in crate::commands) name: String,
-    pub(in crate::commands) id: String,
-    pub(in crate::commands) revision: u64,
     pub(in crate::commands) status: &'static str,
 }
 
@@ -216,6 +217,9 @@ pub(in crate::commands) struct ConnectTarget<R> {
     pub(in crate::commands) provider: CredentialConnectProviderArg,
     pub(in crate::commands) name: String,
     pub(in crate::commands) existing: Option<R>,
+    /// How the result prints: the one result line, or the credential as
+    /// `list --output json` shows it.
+    pub(in crate::commands) output: OutputFormat,
 }
 
 /// One store's side of a connect.
@@ -330,6 +334,7 @@ async fn connect_with<S: ConnectStore>(
         provider,
         name,
         existing,
+        output: args.output,
     };
     store.ready(provider).await?;
     let mut interrupt = Interrupt::default();
@@ -384,26 +389,34 @@ fn confirm_reconnect_with(
     prompt: impl FnOnce(&str) -> anyhow::Result<bool>,
 ) -> anyhow::Result<bool> {
     let label = provider_label(provider);
-    let message = format!(
-        "Reconnect {placement} {label} credential {:?} ({}, revision {}, status {})? Its identity and profile bindings will be kept; it will become active and {}.",
-        existing.name,
-        existing.id,
-        existing.revision,
-        existing.status,
-        match provider {
-            CredentialConnectProviderArg::ClaudeToken => "its one-year expiry will restart",
-            _ => "its hard expiry will be preserved",
-        },
-    );
+    let place = if placement == "cloud" {
+        "in your Codewire account"
+    } else {
+        "on this computer"
+    };
+    let status = match existing.status {
+        "active" => String::new(),
+        other => format!(" ({other})"),
+    };
+    let expiry = match provider {
+        CredentialConnectProviderArg::ClaudeToken => "its one-year expiry restarts",
+        _ => "its expiry is kept",
+    };
+    let credential = format!("{label} {:?}{status} {place}", existing.name);
     if yes {
-        eprintln!("{message}");
+        eprintln!(
+            "Reconnecting {credential}: it stays in its profiles and becomes active; {expiry}."
+        );
         return Ok(true);
     }
     anyhow::ensure!(
         is_terminal,
-        "reconnecting an existing {placement} {label} credential requires terminal confirmation or --yes"
+        "{label} {:?} is already connected {place}; pass --yes to reconnect it without a terminal",
+        existing.name
     );
-    prompt(&message)
+    prompt(&format!(
+        "Reconnect {credential}? It stays in its profiles and becomes active; {expiry}."
+    ))
 }
 
 /// Ctrl-C during a connect, from when this process first waits for the

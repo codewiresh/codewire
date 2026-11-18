@@ -70,8 +70,6 @@ impl ConnectStore for Fake {
     fn describe(record: &FakeRecord) -> anyhow::Result<Reconnecting> {
         Ok(Reconnecting {
             name: record.name.clone(),
-            id: "11111111-1111-4111-8111-111111111111".into(),
-            revision: 7,
             status: "active",
         })
     }
@@ -128,6 +126,7 @@ fn args(provider: CredentialConnectProviderArg, name: &str, yes: bool) -> Creden
         provider: Some(provider),
         name: Some(name.into()),
         yes,
+        output: crate::commands::OutputFormat::Text,
         guided: false,
     }
 }
@@ -382,8 +381,6 @@ async fn a_declined_reconnect_changes_nothing() {
 fn oauth_reconnect_requires_yes_or_a_positive_terminal_confirmation() {
     let record = Reconnecting {
         name: "work-openai".into(),
-        id: "11111111-1111-4111-8111-111111111111".into(),
-        revision: 7,
         status: "revoked",
     };
     let codex = CredentialConnectProviderArg::Codex;
@@ -401,11 +398,10 @@ fn oauth_reconnect_requires_yes_or_a_positive_terminal_confirmation() {
     for answer in [false, true] {
         assert_eq!(
             confirm_reconnect_with("local", codex, &record, false, true, |message| {
-                assert!(message.contains(&record.id));
-                assert!(message.contains("revision 7"));
-                assert!(message.contains("revoked"));
-                assert!(message.contains("profile bindings will be kept"));
-                assert!(message.contains("hard expiry will be preserved"));
+                assert_eq!(
+                    message,
+                    "Reconnect Codex \"work-openai\" (revoked) on this computer? It stays in its profiles and becomes active; its expiry is kept."
+                );
                 Ok(answer)
             })
             .unwrap(),
@@ -424,8 +420,6 @@ fn oauth_reconnect_requires_yes_or_a_positive_terminal_confirmation() {
 fn both_placements_ask_the_same_reconnect_question() {
     let record = Reconnecting {
         name: "work".into(),
-        id: "fdd5612f-12ca-4a21-9557-dc4875f9c1f6".into(),
-        revision: 9,
         status: "active",
     };
     let asked = |placement| {
@@ -444,11 +438,16 @@ fn both_placements_ask_the_same_reconnect_question() {
         .unwrap();
         asked
     };
+    // No ID or revision, and an active status goes unsaid; only the place
+    // differs between the placements.
     assert_eq!(
         asked("cloud"),
-        "Reconnect cloud GitHub credential \"work\" (fdd5612f-12ca-4a21-9557-dc4875f9c1f6, revision 9, status active)? Its identity and profile bindings will be kept; it will become active and its hard expiry will be preserved."
+        "Reconnect GitHub \"work\" in your Codewire account? It stays in its profiles and becomes active; its expiry is kept."
     );
-    assert_eq!(asked("local"), asked("cloud").replacen("cloud", "local", 1));
+    assert_eq!(
+        asked("local"),
+        asked("cloud").replacen("in your Codewire account", "on this computer", 1)
+    );
     let refusal = |placement| {
         confirm_reconnect_with(
             placement,
@@ -463,11 +462,11 @@ fn both_placements_ask_the_same_reconnect_question() {
     };
     assert_eq!(
         refusal("cloud"),
-        "reconnecting an existing cloud GitHub credential requires terminal confirmation or --yes"
+        "GitHub \"work\" is already connected in your Codewire account; pass --yes to reconnect it without a terminal"
     );
     assert_eq!(
         refusal("local"),
-        refusal("cloud").replacen("cloud", "local", 1)
+        refusal("cloud").replacen("in your Codewire account", "on this computer", 1)
     );
 }
 
@@ -528,8 +527,6 @@ async fn a_ctrl_c_while_nothing_waits_for_it_is_still_seen() {
 fn a_token_reconnect_says_its_year_restarts() {
     let record = Reconnecting {
         name: "claude".into(),
-        id: "fdd5612f-12ca-4a21-9557-dc4875f9c1f6".into(),
-        revision: 2,
         status: "active",
     };
     let mut asked = String::new();
@@ -545,13 +542,9 @@ fn a_token_reconnect_says_its_year_restarts() {
         },
     )
     .unwrap();
-    assert!(
-        asked.starts_with("Reconnect local Claude (token) credential \"claude\""),
-        "{asked}"
-    );
-    assert!(
-        asked.ends_with("it will become active and its one-year expiry will restart."),
-        "{asked}"
+    assert_eq!(
+        asked,
+        "Reconnect Claude (token) \"claude\" on this computer? It stays in its profiles and becomes active; its one-year expiry restarts."
     );
 }
 

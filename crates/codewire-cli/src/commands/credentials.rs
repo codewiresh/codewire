@@ -288,8 +288,6 @@ impl ConnectStore for LocalConnectStore<'_> {
     fn describe(record: &CredentialRecord) -> anyhow::Result<Reconnecting> {
         Ok(Reconnecting {
             name: record.metadata.display_name.clone(),
-            id: record.metadata.id.to_string(),
-            revision: record.metadata.revocation_generation,
             status: status_label(record.metadata.status),
         })
     }
@@ -408,6 +406,7 @@ impl ConnectStore for LocalConnectStore<'_> {
     ) -> anyhow::Result<()> {
         let label = provider_label(target.provider);
         let connecting = target.provider;
+        let format = target.output;
         let provider = ProviderId::parse(provider_id(target.provider))?;
         let authentication_kind = connected_kind(target.provider);
         // A copy to revoke if the store definitely refuses the save.
@@ -454,17 +453,17 @@ impl ConnectStore for LocalConnectStore<'_> {
                 None,
             ),
         };
-        let style = crate::output::Capabilities::from_process(crate::output::OutputMode::Text)
-            .stderr_style();
-        eprint!(
-            "\n{}",
-            super::login_screen::connected_line(
-                super::login_screen::SignInScreen::local(label, &metadata.display_name),
-                who,
-                expires,
-                style,
-            )
-        );
+        match format {
+            OutputFormat::Json => print_credentials(std::slice::from_ref(&record), format)?,
+            OutputFormat::Text => {
+                eprintln!();
+                output::print_done(&super::login_screen::connected_result(
+                    super::login_screen::SignInScreen::local(label, &metadata.display_name),
+                    who,
+                    expires,
+                ));
+            }
+        }
         if matches!(target.provider, CredentialConnectProviderArg::Github) {
             eprintln!("{}", github_reach_summary(&approval.reach));
             report_github_pending(approval.reach.iter().filter_map(|installation| {
@@ -1587,6 +1586,7 @@ mod tests {
                 provider: Some(provider),
                 name: Some("work".into()),
                 yes: false,
+                output: crate::commands::OutputFormat::Text,
                 guided: false,
             }))
         };
@@ -1935,6 +1935,7 @@ mod tests {
                 provider: Some(CredentialConnectProviderArg::Github),
                 name: Some("other".into()),
                 yes: true,
+                output: crate::commands::OutputFormat::Text,
                 guided: false,
             },
             &mut execution,
@@ -2281,6 +2282,7 @@ mod tests {
                 provider: Some(CredentialConnectProviderArg::ClaudeToken),
                 name: Some("claude".into()),
                 yes: false,
+                output: crate::commands::OutputFormat::Text,
                 guided: false,
             }));
         let (feature, _) = authority_feature_needed(&token).expect("a token needs its feature");
