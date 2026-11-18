@@ -89,7 +89,11 @@ pub async fn stripe_webhook(
             return err_response(StatusCode::BAD_REQUEST, "invalid signature");
         }
         Err(e) => {
-            tracing::warn!(error = ?e, "billing: webhook signature verification failed");
+            if is_forged_probe(payload) {
+                tracing::info!("billing: refused the delivery check's forged event, as it must");
+            } else {
+                tracing::warn!(error = ?e, "billing: webhook signature verification failed");
+            }
             return err_response(StatusCode::BAD_REQUEST, "invalid signature");
         }
     };
@@ -103,6 +107,20 @@ pub async fn stripe_webhook(
     }
 
     ok_response()
+}
+
+/// Whether an unverified body names the delivery check's forged event
+/// ([`crate::stripe_delivery_check::FORGED_EVENT_ID`]). It is refused like any
+/// bad signature, and logged apart, so the signature-failure alert counts only
+/// real failures (#4862). A genuine Stripe delivery never carries that id, and
+/// a forger who copies it is refused all the same.
+fn is_forged_probe(payload: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        id: String,
+    }
+    serde_json::from_str::<Envelope>(payload)
+        .is_ok_and(|envelope| envelope.id == crate::stripe_delivery_check::FORGED_EVENT_ID)
 }
 
 fn ok_response() -> Response {
@@ -923,6 +941,42 @@ mod tests {
         let (status, body) = deliver(stripe, "").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "invalid signature");
+    }
+
+    /// The delivery check's forged event is refused like any bad signature,
+    /// and only it is told apart from a real signature failure (#4862).
+    #[tokio::test]
+    async fn the_delivery_checks_forged_event_is_refused_and_told_apart() {
+        use crate::stripe_delivery_check::{FORGED_EVENT_ID, forged_event_body};
+
+        let body = forged_event_body(chrono::Utc::now().timestamp());
+        assert!(is_forged_probe(&body));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Stripe-Signature",
+            Webhook::generate_test_header(&body, "whsec_wrong", None)
+                .parse()
+                .unwrap(),
+        );
+        let response = stripe_webhook(
+            State(signed_state()),
+            headers,
+            axum::body::Bytes::from(body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Any other id, or a body that isn't an event, is a real failure.
+        assert!(!is_forged_probe(&unparsable(
+            "evt_other",
+            "customer.updated"
+        )));
+        assert!(!is_forged_probe(&unparsable(
+            &format!("{FORGED_EVENT_ID}x"),
+            "customer.updated"
+        )));
+        assert!(!is_forged_probe("not json"));
+        assert!(!is_forged_probe(r#"{"object":"event"}"#));
     }
 
     /// A signed `event_type` event whose object the Stripe SDK cannot parse.

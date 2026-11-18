@@ -42,6 +42,10 @@ pub const FIRST_RUN_AFTER: Duration = Duration::from_secs(10 * 60);
 /// How long Stripe has to deliver the sentinel's event.
 pub const DELIVERY_WAIT: Duration = Duration::from_secs(10 * 60);
 const POLL: Duration = Duration::from_secs(15);
+/// The id of the forged event step 4 posts. Billing's webhook logs its
+/// refusal apart from other signature failures, so the alert on those counts
+/// only real ones (#4862).
+pub const FORGED_EVENT_ID: &str = "evt_codewire_forged_probe";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -158,12 +162,17 @@ pub async fn post_forged_event(webhook_url: &str) -> Result<u16, reqwest::Error>
             "stripe-signature",
             format!("t={timestamp},v1={}", "0".repeat(64)),
         )
-        .body(format!(
-            r#"{{"id":"evt_codewire_forged_probe","object":"event","type":"{DELIVERY_SENTINEL_EVENT}","created":{timestamp},"data":{{"object":{{}}}}}}"#
-        ))
+        .body(forged_event_body(timestamp))
         .send()
         .await?;
     Ok(response.status().as_u16())
+}
+
+/// The body of the forged event, created at `timestamp`.
+pub fn forged_event_body(timestamp: i64) -> String {
+    format!(
+        r#"{{"id":"{FORGED_EVENT_ID}","object":"event","type":"{DELIVERY_SENTINEL_EVENT}","created":{timestamp},"data":{{"object":{{}}}}}}"#
+    )
 }
 
 /// Runs the check once, records it and returns the report.
