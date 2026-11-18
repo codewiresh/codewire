@@ -34,8 +34,9 @@ macOS masks that bit. ECHO, ICANON and every other terminal attribute remain exa
 
 [groups.vm-backend]
 reason = """The local VM backend and host facts: Cloud Hypervisor and /proc on Linux; \
-Virtualization.framework and sysctl on macOS. The environment's TLS front door runs on \
-Linux only until its macOS confinement lands (#3999); a Mac refuses a boot that intercepts."""
+Virtualization.framework and sysctl on macOS. The environment's TLS front door confines \
+itself with no-new-privileges, Landlock and seccomp on Linux and with Seatbelt on macOS \
+(#3999), and its test checks each platform's own mechanism."""
 
 [groups.local-https]
 reason = """HTTPS hostnames for local VMs (#4316): Linux lets only root listen below \
@@ -94,7 +95,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli-bin/tests/local_credential_authority.rs" = { group = "credentials", count = 1 }
 "crates/codewire-cli-bin/tests/local_git_credential_helper.rs" = { group = "credentials", count = 7 }
 "crates/codewire-cli-bin/tests/native_egress_broker.rs" = { group = "vm-backend", count = 1 }
-"crates/codewire-cli-bin/tests/native_front_door.rs" = { group = "vm-backend", count = 1 }
+"crates/codewire-cli-bin/tests/native_front_door.rs" = { group = "vm-backend", count = 9 }
 "crates/codewire-cli-bin/tests/native_mesh_enrollment.rs" = { group = "vm-backend", count = 1 }
 "crates/codewire-cli-bin/tests/native_mesh_transport.rs" = { group = "vm-backend", count = 1 }
 "crates/codewire-cli-bin/tests/native_network_confinement.rs" = { group = "vm-backend", count = 1 }
@@ -107,7 +108,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/build_record.rs" = { group = "executable", count = 1 }
 "crates/codewire-cli/src/commands/checkpoint.rs" = { group = "snapshots", count = 5 }
 "crates/codewire-cli/src/commands/collaboration.rs" = { group = "member", count = 1 }
-"crates/codewire-cli/src/commands/credential_authority.rs" = { group = "credentials", count = 38 }
+"crates/codewire-cli/src/commands/credential_authority.rs" = { group = "credentials", count = 36 }
 "crates/codewire-cli/src/commands/credential_authority/ssh.rs" = { group = "credentials", count = 17 }
 "crates/codewire-cli/src/commands/credential_broker.rs" = { group = "credentials", count = 17 }
 "crates/codewire-cli/src/commands/credential_input.rs" = { group = "credentials", count = 4 }
@@ -123,7 +124,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/commands/login_screen.rs" = { group = "credentials", count = 1 }
 "crates/codewire-cli/src/commands/mesh_commands/owner.rs" = { group = "mesh", count = 1 }
 "crates/codewire-cli/src/commands/mesh_commands/retained.rs" = { group = "member", count = 2 }
-"crates/codewire-cli/src/commands/mod.rs" = { group = "dispatch", count = 16 }
+"crates/codewire-cli/src/commands/mod.rs" = { group = "dispatch", count = 14 }
 "crates/codewire-cli/src/commands/native.rs" = { group = "vm-backend", count = 12 }
 "crates/codewire-cli/src/commands/native/host_support.rs" = { group = "vm-backend", count = 7 }
 "crates/codewire-cli/src/commands/native/local_https.rs" = { group = "local-https", count = 10 }
@@ -143,7 +144,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/commands/tests/sessions.rs" = { group = "linux-tests", count = 5 }
 "crates/codewire-cli/src/hosted_binding.rs" = { group = "hosted", count = 6 }
 "crates/codewire-cli/src/hosted_binding/tests.rs" = { group = "hosted", count = 3 }
-"crates/codewire-cli/src/lib.rs" = { group = "dispatch", count = 48 }
+"crates/codewire-cli/src/lib.rs" = { group = "dispatch", count = 46 }
 "crates/codewire-cli/src/public_fetch.rs" = { group = "linux-tests", count = 1 }
 "crates/codewire-cli/src/public_fetch/http.rs" = { group = "linux-tests", count = 1 }
 "crates/codewire-cli/src/public_fetch/scratch.rs" = { group = "linux-tests", count = 1 }

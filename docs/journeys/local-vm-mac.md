@@ -8,7 +8,7 @@ walk observed on macOS 27 and on macOS 26. The format is in
 
 ## Where it stands
 
-Updated 2026-11-17.
+Updated 2026-11-18.
 
 | ID | macOS 27 | macOS 26 |
 | --- | --- | --- |
@@ -16,6 +16,7 @@ Updated 2026-11-17.
 | `mac-vm-refused-start` | refused create observed on a development build | not yet observed |
 | `mac-vm-cached-image` | observed on a development build of #5036 (e42e2f457) | not yet observed |
 | `mac-vm-mesh-ingress` | not yet observed | not yet observed |
+| `mac-vm-intercept` | boots observed on #4916 on #5124 (268f2709e), 5 of 5; serving partly observed on a scratch merge with the placeholder seed (245992e87) | not yet observed |
 
 ## Before the walk
 
@@ -224,3 +225,94 @@ Issue: #5084.
 - **Observed:** not yet observed. The loss itself is measured outside the
   product (`docs/dev/MACOS-CLI.md`). The hold is built and unit-tested on
   Linux (#5084); its walk on a Mac is not done.
+
+## 5. `mac-vm-intercept`: a VM boots with agent interception switched on
+
+Issues: #3999, #4916.
+
+- **Entry points:** the file `egress-intercept` in the local VM state root
+  (`~/.codewire/native-v1` by default) with the content `on`, then
+  `cw create --local --profile local:P` or `cw --local start` of a VM bound
+  to a local profile.
+- **States to exercise:** a boot with the switch on, and the same VM stopped
+  and started after the file is removed.
+- **Driving it:** write `on` to the file, create a VM bound to a local
+  profile, find its front-door process (`cw __native-front-door`), and in the
+  VM read the CA that `NODE_EXTRA_CA_CERTS` names. A VM with no profile has no
+  local credential broker, so it boots without interception, and the
+  supervisor's log records `egress_intercept switch=on
+  skipped=no_credential_broker`. Any credential works for the walk. A
+  generated SSH key (`cw credentials --local generate ssh`) needs no sign-in.
+- **Proof:** the boot succeeds. The front-door process runs under a Seatbelt
+  profile: `sandbox_check(pid, NULL, 0)` is 1, as the `native_front_door`
+  test checks. The guest trusts the boot's CA, and an intercepted HTTPS
+  request reaches the credential broker with its bound host.
+- **Gotchas:**
+  - The CA is made inside the confined process for each boot, so a stop and
+    start brings a new CA.
+  - A runtime packed from released parts around a newer guest `cw` is
+    refused at "Checking the VM runtime" (`SupervisorError::Artifact`), with
+    interception on or off. Use a runtime built from the same tree.
+- **Observed:**
+  - Partly observed: the front door serving a request, on macOS 27.2.1,
+    2026-11-16. The tree was a scratch merge, 245992e87: #4916 at 1eeee1872
+    with the head that carries the placeholder seed and login (5820971c7),
+    which #4916 does not yet have under it. The `cw` was built with
+    `local-broker-synthetic-smoke`, whose credential broker answers the
+    provider itself, and the profile held a made-up Anthropic API key:
+    - The guest's `ANTHROPIC_AUTH_TOKEN` was a `cwp1_` placeholder, and
+      `ANTHROPIC_BASE_URL` was unset.
+    - A request to `api.anthropic.com/v1/messages/count_tokens` carrying the
+      placeholder was served with the stored key (200,
+      `{"input_tokens":42}`). The two headers that echo the key arrived
+      redacted, and the key never reached the guest. The placeholder beside
+      another credential was refused (400, `credential_conflict`).
+    - After the first credential broker renewal, about 10 minutes in, the
+      successor logged `front_door_pairing outcome=paired pairing=2`, and the
+      request was served again.
+    - With the front door killed, the request ended in 7 ms
+      (`ECONNREFUSED`), and the VM kept running. After a stop and start the
+      placeholder was the same, and the request was served.
+  - Five VM boots on macOS 27.2.1, with a development build of #4916 rebased
+    onto #5124 and #4914 (268f2709e), 2026-11-16. The runner holds the ends
+    it sends until the front door answers. Each VM was bound to a profile
+    holding a generated SSH key and created from the cached image:
+    - All five came up. In each, the credential broker had
+      `--boot-secrets-fd 4`, and the runner logged
+      `front_door_pairing outcome=paired`.
+    - In each, `curl --cacert` to `https://api.anthropic.com/v1/models` was
+      answered by "Codewire environment egress CA" with status 403, three
+      times.
+    - Right after each `cw --local stop`, no front-door process ran.
+    - On the first boot, the guest's first lookup of `api.anthropic.com` got
+      no answer in 11 s, and every later lookup answered at once. A lookup
+      goes through the egress broker, not the front door; the cause is not
+      known.
+    - `native_front_door`, confined, passed 5 of 5 runs of its whole suite.
+      Before #4914 the same runs failed 3 of 3.
+  - Five VM boots on macOS 27.2.1 at d246247f6 (#4916 with the boot secret
+    at FD 4, on #4884's 07a35b9fc, plus #5036), 2026-11-16: three came up
+    and were intercepted as above. Two failed at the front door's pairing:
+    the runner logged `outcome=paired`, then `front_door_gone` in the same
+    millisecond, then `guest_start_failed detail=guest_shutdown` at about
+    50 s. That runner dropped the ends it sent as soon as it had sent them,
+    and macOS can discard a socket in flight once its sender has closed it
+    (the sender audit on #4916). #4914 is the fix.
+  - The VM boot, on macOS 27.2.1 with a development build of #4916 at
+    e75051ae5, 2026-11-16, with a VM bound to a profile holding a generated SSH
+    key:
+    - The supervisor logged `egress_intercept switch=on`. The front-door
+      process ran under Seatbelt (`sandbox_check` = 1).
+    - The guest's `NODE_EXTRA_CA_CERTS` named the boot's CA. Requests to
+      `https://api.anthropic.com/v1/models` with that CA, from `curl --cacert`
+      and from Node, were answered by "Codewire environment egress CA" with
+      status 403. The profile held no Anthropic credential.
+    - With the file removed, after a stop and start the log read
+      `switch=off`, no front door ran, and the guest had no
+      `NODE_EXTRA_CA_CERTS`.
+    - The same build with no profile logged `skipped=no_credential_broker`
+      and reached the provider directly.
+  - The confined process alone, on macOS 27.2.1 with a development build of
+    #4916, 2026-11-15: `native_front_door` passed. The real process ran
+    under Seatbelt (`sandbox_check` = 1), reported its CA, and terminated
+    TLS for a handed-over stream.

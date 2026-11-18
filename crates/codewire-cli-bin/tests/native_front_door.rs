@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 // A test reports failure by panicking, so it may unwrap.
 #![allow(clippy::unwrap_used)]
 //! The real `cw __native-front-door` process, confined, driven as the runner
@@ -69,8 +69,37 @@ impl Drop for FrontDoorChild {
 }
 
 fn pair(kind: SocketType) -> (OwnedFd, OwnedFd) {
-    socketpair(AddressFamily::UNIX, kind, SocketFlags::CLOEXEC, None).unwrap()
+    let (one, two) = socketpair(AddressFamily::UNIX, kind, CLOEXEC, None).unwrap();
+    close_on_exec(&one);
+    close_on_exec(&two);
+    (one, two)
 }
+
+/// An unconnected Unix stream socket.
+fn unconnected_unix_stream() -> OwnedFd {
+    let socket =
+        rustix::net::socket_with(AddressFamily::UNIX, SocketType::STREAM, CLOEXEC, None).unwrap();
+    close_on_exec(&socket);
+    socket
+}
+
+#[cfg(target_os = "linux")]
+const CLOEXEC: SocketFlags = SocketFlags::CLOEXEC;
+// macOS has no SOCK_CLOEXEC: the ends are marked right after they are made,
+// and each child sweeps what it inherited before exec.
+#[cfg(target_os = "macos")]
+const CLOEXEC: SocketFlags = SocketFlags::empty();
+
+fn close_on_exec(socket: &OwnedFd) {
+    rustix::io::fcntl_setfd(socket, rustix::io::FdFlags::CLOEXEC).unwrap();
+}
+
+/// A socket of the wrong kind for a control socket. macOS has no Unix
+/// `SOCK_SEQPACKET`.
+#[cfg(target_os = "linux")]
+const WRONG_KIND: SocketType = SocketType::SEQPACKET;
+#[cfg(target_os = "macos")]
+const WRONG_KIND: SocketType = SocketType::DGRAM;
 
 /// The process, with the runner's end of its control socket.
 fn spawn(environment_id: Uuid) -> (OwnedFd, FrontDoorChild) {
@@ -96,9 +125,13 @@ fn spawn_with(environment_id: &str, control: OwnedFd) -> FrontDoorChild {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // SAFETY: only async-signal-safe calls, placing the control socket at
-    // its fixed descriptor without close-on-exec.
+    // its fixed descriptor without close-on-exec. On macOS the sweep, only
+    // getdtablesize and fcntl, first closes on exec whatever another test's
+    // socket left open in the fork.
     unsafe {
         command.pre_exec(move || {
+            #[cfg(target_os = "macos")]
+            codewire_local_vmm::darwin::process::mark_inherited_descriptors_close_on_exec();
             if libc::dup2(source, FRONT_DOOR_CONTROL_FD) == -1
                 || libc::fcntl(FRONT_DOOR_CONTROL_FD, libc::F_SETFD, 0) == -1
             {
@@ -185,6 +218,7 @@ async fn read_response(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> Vec<
     response
 }
 
+#[cfg(target_os = "linux")]
 fn status_field(pid: u32, field: &str) -> String {
     std::fs::read_to_string(format!("/proc/{pid}/status"))
         .unwrap()
@@ -193,6 +227,24 @@ fn status_field(pid: u32, field: &str) -> String {
         .unwrap()
         .trim()
         .to_owned()
+}
+
+/// Whether `pid` runs under a Seatbelt profile: `sandbox_check` with no
+/// operation reports exactly that.
+#[cfg(target_os = "macos")]
+fn sandboxed(pid: u32) -> bool {
+    unsafe extern "C" {
+        fn sandbox_check(
+            pid: libc::pid_t,
+            operation: *const std::ffi::c_char,
+            filter: std::ffi::c_int,
+            ...
+        ) -> std::ffi::c_int;
+    }
+    let pid = libc::pid_t::try_from(pid).unwrap();
+    // SAFETY: with no operation and no filter, the call reads no further
+    // arguments.
+    unsafe { sandbox_check(pid, std::ptr::null(), 0) == 1 }
 }
 
 /// Driven as the runner drives it, the confined process reports a CA, then
@@ -211,10 +263,17 @@ async fn the_front_door_process_reports_its_ca_and_serves_a_handed_over_stream()
         .to_vec();
 
     // Confined before it had a CA: no new privileges, a syscall filter.
-    assert_eq!(status_field(child.pid(), "NoNewPrivs"), "1");
-    assert_eq!(status_field(child.pid(), "Seccomp"), "2");
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(status_field(child.pid(), "NoNewPrivs"), "1");
+        assert_eq!(status_field(child.pid(), "Seccomp"), "2");
+    }
+    // Confined before it had a CA: under a Seatbelt profile.
+    #[cfg(target_os = "macos")]
+    assert!(sandboxed(child.pid()));
 
     let (handoff, handoff_door_end) = stream_pair().unwrap();
+    let acknowledgements = rustix::io::fcntl_dupfd_cloexec(&handoff, 0).unwrap();
     let mut handoff = HandoffSender::new(handoff).unwrap();
     // Each peer's role tag comes first, as the brokers send them.
     handoff.send_frame(HANDOFF_ROLE_TAG, &[]).unwrap();
@@ -268,6 +327,20 @@ async fn the_front_door_process_reports_its_ca_and_serves_a_handed_over_stream()
     handoff
         .send_intercepted_stream(&header, handed.as_fd())
         .unwrap();
+    // As the broker does, hold the stream until the front door acknowledges
+    // it: macOS can dispose of a socket whose last reference is in flight.
+    rustix::net::sockopt::set_socket_timeout(
+        &acknowledgements,
+        rustix::net::sockopt::Timeout::Recv,
+        Some(WAIT),
+    )
+    .unwrap();
+    let (acknowledged, descriptors) = HandoffReceiver::new(acknowledgements)
+        .unwrap()
+        .recv_frame(8, 0)
+        .unwrap();
+    assert_eq!(acknowledged, header.stream_id.to_le_bytes());
+    assert!(descriptors.is_empty());
     drop(handed);
     guest.set_nonblocking(true).unwrap();
     let guest = tokio::net::UnixStream::from_std(guest).unwrap();
@@ -480,15 +553,8 @@ fn a_front_door_given_the_wrong_sockets_reports_the_stage_and_exits() {
 /// to start on anything else.
 #[test]
 fn a_front_door_refuses_a_control_socket_of_the_wrong_kind() {
-    let (_peer, seqpacket) = pair(SocketType::SEQPACKET);
-    let unconnected = rustix::net::socket_with(
-        AddressFamily::UNIX,
-        SocketType::STREAM,
-        SocketFlags::CLOEXEC,
-        None,
-    )
-    .unwrap();
-    for control in [seqpacket, unconnected] {
+    let (_peer, wrong_kind) = pair(WRONG_KIND);
+    for control in [wrong_kind, unconnected_unix_stream()] {
         let mut child = spawn_with(&Uuid::new_v4().to_string(), control);
         assert!(!child.exited().success());
     }
@@ -523,13 +589,7 @@ fn a_front_door_refuses_an_unconnected_credential_socket() {
     send_message(&runner, &bindings(&[BOUND]), &[]);
     assert!(receive_message(&runner).starts_with(FRONT_DOOR_READY_MESSAGE));
     let (_handoff, handoff_door_end) = stream_pair().unwrap();
-    let unconnected = rustix::net::socket_with(
-        AddressFamily::UNIX,
-        SocketType::STREAM,
-        SocketFlags::CLOEXEC,
-        None,
-    )
-    .unwrap();
+    let unconnected = unconnected_unix_stream();
     send_message(
         &runner,
         FRONT_DOOR_SOCKETS_MESSAGE,

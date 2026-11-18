@@ -137,6 +137,7 @@ impl CloudHypervisorRunner {
             network_worker: None,
             host_port_listeners: prepared.host_port_listeners,
             stage_times: GuestStageTimes::default(),
+            front_door: prepared.front_door,
             _control: control,
             _lock: prepared.lock,
         })

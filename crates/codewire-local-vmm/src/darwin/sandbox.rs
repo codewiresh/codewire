@@ -1,5 +1,5 @@
 //! The local runtime's Seatbelt profiles: the egress broker's, the Mesh
-//! transport's and the Mesh enrollment issuer's. The Seatbelt core, the
+//! transport's, the Mesh enrollment issuer's and the TLS front door's. The Seatbelt core, the
 //! deny-all profile and the single-thread check are `codewire-confinement`'s.
 
 use std::ffi::{CStr, CString};
@@ -41,6 +41,13 @@ pub(crate) fn confine_mesh_enrollment(origin_port: u16) -> io::Result<()> {
     ))
     .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     apply_profile(&profile)
+}
+
+/// Irreversibly confine the TLS front door (#3999) to the descriptors it
+/// holds and the ones it receives over them: it opens nothing, dials
+/// nothing and starts nothing, so it takes the deny-all profile.
+pub(crate) fn confine_front_door() -> io::Result<()> {
+    deny_all()
 }
 
 #[cfg(test)]
@@ -347,5 +354,113 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    /// `bootstrap_look_up`'s status for `service`: 0 when it resolves.
+    fn bootstrap_look_up_status(service: &std::ffi::CStr) -> i32 {
+        unsafe extern "C" {
+            static bootstrap_port: u32;
+            fn bootstrap_look_up(
+                bootstrap: u32,
+                service: *const std::ffi::c_char,
+                port: *mut u32,
+            ) -> i32;
+        }
+        let mut port = 0_u32;
+        // SAFETY: a NUL-terminated name and an out-pointer to a local; a
+        // right it returns is this test child's and ends with it.
+        unsafe { bootstrap_look_up(bootstrap_port, service.as_ptr(), &mut port) }
+    }
+
+    /// #3999: what the front door does after confinement still works: it
+    /// makes its CA, takes a stream passed over a socket it holds, and
+    /// carries bytes on it. Every file, named or network endpoint, listener,
+    /// process, signal to another process and Mach service lookup is refused.
+    #[test]
+    fn front_door_profile_keeps_received_streams_and_refuses_new_authority() {
+        use std::os::fd::AsFd as _;
+
+        use codewire_egress_policy::handoff::{HandoffReceiver, HandoffSender, stream_pair};
+        use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
+
+        const CHILD_MARKER: &str = "CODEWIRE_TEST_DARWIN_FRONT_DOOR";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let (broker_end, front_door_end) = stream_pair().unwrap();
+            let mut sender = HandoffSender::new(broker_end).unwrap();
+            let mut receiver = HandoffReceiver::new(front_door_end).unwrap();
+            // Before confinement the parent takes a signal check and a Mach
+            // service resolves, so their refusals below are the profile's.
+            // SAFETY: getppid has no preconditions; signal 0 sends nothing.
+            assert_eq!(unsafe { libc::kill(libc::getppid(), 0) }, 0);
+            assert_eq!(
+                bootstrap_look_up_status(c"com.apple.system.notification_center"),
+                0
+            );
+            confine_front_door().unwrap();
+            // SAFETY: as above.
+            assert_eq!(unsafe { libc::kill(libc::getppid(), 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EPERM)
+            );
+            assert_ne!(
+                bootstrap_look_up_status(c"com.apple.system.notification_center"),
+                0
+            );
+
+            let intercepts =
+                InterceptSet::new([InterceptBinding::new("api.openai.com", 443).unwrap()]).unwrap();
+            let door = codewire_egress_front_door_bridge::EnvironmentFrontDoor::start(
+                uuid::Uuid::new_v4(),
+                2,
+                intercepts,
+            )
+            .unwrap();
+            assert!(!door.ca_certificate_der().is_empty());
+
+            let (worker, passed) = stream_pair().unwrap();
+            sender.send_frame(b"s", &[passed.as_fd()]).unwrap();
+            let (_, mut descriptors) = receiver.recv_frame(1, 1).unwrap();
+            drop(passed);
+            let (mut worker, mut received) = (
+                UnixStream::from(worker),
+                UnixStream::from(descriptors.pop().unwrap()),
+            );
+            let mut byte = [0_u8; 1];
+            worker.write_all(b"w").unwrap();
+            received.read_exact(&mut byte).unwrap();
+            assert_eq!(&byte, b"w");
+            received.write_all(b"f").unwrap();
+            worker.read_exact(&mut byte).unwrap();
+            assert_eq!(&byte, b"f");
+
+            let error = std::fs::File::open("/etc/hosts").unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+            assert!(std::fs::File::create("/private/tmp/codewire-front-door-probe").is_err());
+            assert!(UnixStream::connect("/var/run/mDNSResponder").is_err());
+            assert!(std::net::TcpStream::connect("127.0.0.1:9").is_err());
+            assert!(std::net::TcpListener::bind("127.0.0.1:0").is_err());
+            assert!(
+                std::net::UdpSocket::bind("127.0.0.1:0")
+                    .and_then(|socket| socket.send_to(b"x", "127.0.0.1:9"))
+                    .is_err()
+            );
+            assert!(
+                std::process::Command::new("/usr/bin/true")
+                    .status()
+                    .is_err()
+            );
+            return;
+        }
+        let status = crate::test_child(&mut std::process::Command::new(
+            std::env::current_exe().unwrap(),
+        ))
+        .arg("--exact")
+        .arg("darwin::sandbox::tests::front_door_profile_keeps_received_streams_and_refuses_new_authority")
+        .arg("--nocapture")
+        .env(CHILD_MARKER, "1")
+        .status()
+        .unwrap();
+        assert!(status.success());
     }
 }

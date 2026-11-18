@@ -19,13 +19,13 @@ use anyhow::Context as _;
 #[cfg(target_os = "linux")]
 use codewire_local_credentials::{
     AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, LocalBrokerProcessConfig, LocalBrokerProcessSpawner,
-    LocalBrokerSpawnError, LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner,
-    LocalRepositorySpawnError, LocalRevocationProcessConfig, LocalRevocationProcessSpawner,
-    LocalRevocationSpawnError, ProviderLookup,
+    LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner, LocalRepositorySpawnError,
+    LocalRevocationProcessConfig, LocalRevocationProcessSpawner, LocalRevocationSpawnError,
+    ProviderLookup,
 };
 use codewire_local_credentials::{
     AuthorityFeature, AuthorityProtectedStore, AuthorityRuntimeConfig, AuthorityRuntimeError,
-    LocalCredentialClient, LocalCredentialError,
+    LocalBrokerSpawnError, LocalCredentialClient, LocalCredentialError,
     serve_os_local_credential_authority_with_process_spawners,
 };
 use codewire_protected_store::{ProtectedStoreBackend, ProtectedStoreError};
@@ -639,13 +639,11 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
 }
 
 /// The descriptor a broker child inherits a boot's secrets at (#3999).
-#[cfg(target_os = "linux")]
 pub(super) const BOOT_SECRETS_FD: i32 = 4;
 
 /// A boot's secrets as the read end of a socket pair whose write end is
 /// already closed, placed above every descriptor the spawn moves, or none
 /// for a boot without secrets. The records never touch a file.
-#[cfg(target_os = "linux")]
 fn boot_secret_descriptor(
     secrets: &codewire_local_credentials::BrokerBootSecrets,
 ) -> Result<Option<std::os::fd::OwnedFd>, LocalBrokerSpawnError> {

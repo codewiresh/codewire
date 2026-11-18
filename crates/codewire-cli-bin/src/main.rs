@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod front_door_role;
 #[cfg(target_os = "linux")]
 mod hosted_egress_tun;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -99,6 +101,16 @@ fn main() {
         }
         return;
     }
+    // The front door holds nothing from the CLI when it confines itself
+    // (front_door_role), so it starts before anything else runs.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == front_door_role::ROLE)
+    {
+        let arguments: Vec<_> = std::env::args_os().skip(2).collect();
+        std::process::exit(front_door_role::run(&arguments));
+    }
     // Helper roles must not resolve ordinary CLI settings, credentials or the
     // mutable managed entry. The parent already selected this exact executable.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -167,10 +179,6 @@ fn main() {
     let egress_broker = std::env::args_os()
         .nth(1)
         .is_some_and(|argument| argument == "__native-egress-broker");
-    // The front door's syscall filter refuses thread creation.
-    let front_door = std::env::args_os()
-        .nth(1)
-        .is_some_and(|argument| argument == "__native-front-door");
     let mesh_transport = std::env::args_os()
         .nth(1)
         .is_some_and(|argument| argument == "__native-mesh-transport");
@@ -212,12 +220,8 @@ fn main() {
         std::process::exit(1);
     }
 
-    let isolated_process = network_worker
-        || egress_broker
-        || front_door
-        || mesh_transport
-        || mesh_enrollment_broker
-        || broker;
+    let isolated_process =
+        network_worker || egress_broker || mesh_transport || mesh_enrollment_broker || broker;
     let mut runtime = if isolated_process {
         tokio::runtime::Builder::new_current_thread()
     } else {

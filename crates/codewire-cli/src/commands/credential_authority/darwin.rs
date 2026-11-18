@@ -230,7 +230,14 @@ pub(super) struct CwLocalCredentialProcessSpawner {
 /// another thread is creating could otherwise reach the child), then the
 /// authority channel moved to fixed descriptor 3, core files disabled and
 /// umask 077.
-fn bind_child_to_authority(command: &mut tokio::process::Command, authority_fd: RawFd) {
+/// Bind the child's FD 3 to `authority_fd`, and its FD 4 to a boot's secrets
+/// when `secrets_fd` is given (#3999); every other descriptor is closed on
+/// exec.
+fn bind_child_to_authority(
+    command: &mut tokio::process::Command,
+    authority_fd: RawFd,
+    secrets_fd: Option<RawFd>,
+) {
     // SAFETY: getpid has no preconditions.
     let parent_pid = unsafe { libc::getpid() };
     // SAFETY: this post-fork hook uses async-signal-safe system calls only.
@@ -248,6 +255,13 @@ fn bind_child_to_authority(command: &mut tokio::process::Command, authority_fd: 
                     return Err(io::Error::last_os_error());
                 }
             } else if libc::dup2(authority_fd, 3) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // After FD 3: the secrets' descriptor is above FD 4, so the move
+            // to 3 never overwrites it, and dup2 leaves FD 4 inheritable.
+            if let Some(secrets_fd) = secrets_fd
+                && libc::dup2(secrets_fd, super::BOOT_SECRETS_FD) < 0
+            {
                 return Err(io::Error::last_os_error());
             }
             let no_core = libc::rlimit {
@@ -277,14 +291,13 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
         authority_peer: std::os::unix::net::UnixStream,
         boot_secrets: &codewire_local_credentials::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
-        // A Mac starts no front door yet, so a boot there has no secrets.
-        if !boot_secrets.is_empty() {
-            return Err(LocalBrokerSpawnError::InvalidConfiguration);
-        }
         let authority_fd = authority_peer.as_raw_fd();
         if authority_fd < 3 {
             return Err(LocalBrokerSpawnError::InvalidConfiguration);
         }
+        // An intercepting boot's pairing secret, for its front door (#3999).
+        let boot_secrets = super::boot_secret_descriptor(boot_secrets)?;
+        let secrets_fd = boot_secrets.as_ref().map(|secrets| secrets.as_raw_fd());
         let store_arguments = child_store_arguments(&self.store, &self.authority_root)
             .ok_or(LocalBrokerSpawnError::InvalidConfiguration)?;
         let mut command = tokio::process::Command::new(&self.executable);
@@ -318,8 +331,16 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
             command.arg("--network-policy-allows-github");
         }
         command.args(lookup.arguments());
-        bind_child_to_authority(&mut command, authority_fd);
-        command.spawn().map_err(|_| LocalBrokerSpawnError::Spawn)
+        if secrets_fd.is_some() {
+            command
+                .arg("--boot-secrets-fd")
+                .arg(super::BOOT_SECRETS_FD.to_string());
+        }
+        bind_child_to_authority(&mut command, authority_fd, secrets_fd);
+        let child = command.spawn().map_err(|_| LocalBrokerSpawnError::Spawn);
+        // The authority keeps no open end once the child has its own.
+        drop(boot_secrets);
+        child
     }
 }
 
@@ -391,7 +412,7 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
                 .ok_or(LocalRepositorySpawnError::InvalidConfiguration)?;
             command.arg("--ssh-runtime-directory").arg(runtime);
         }
-        bind_child_to_authority(&mut command, authority_fd);
+        bind_child_to_authority(&mut command, authority_fd, None);
         command
             .spawn()
             .map_err(|_| LocalRepositorySpawnError::Spawn)
@@ -427,7 +448,7 @@ impl LocalRevocationProcessSpawner for CwLocalCredentialProcessSpawner {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        bind_child_to_authority(&mut command, authority_fd);
+        bind_child_to_authority(&mut command, authority_fd, None);
         command
             .spawn()
             .map_err(|_| LocalRevocationSpawnError::Spawn)

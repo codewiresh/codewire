@@ -12,7 +12,6 @@ use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
 use codewire_vmm_guest_probe::{EgressCaCertificate, PlaceholderSlot, SeedPlaceholders};
 
 use super::RunnerError;
-#[cfg(target_os = "linux")]
 use super::front_door::{FrontDoorProcess, RunningFrontDoor};
 
 /// Where an intercepting boot's front door stopped before its VM reported
@@ -43,13 +42,6 @@ impl FrontDoorStop {
     ];
 
     /// The stop a front door's failure line names by its `stage`.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "only a Linux boot starts a front door to stop (#3999)"
-        )
-    )]
     pub(crate) fn at_stage(stage: &str) -> Self {
         match stage {
             "received_dead" => Self::ReceivedDead,
@@ -60,13 +52,6 @@ impl FrontDoorStop {
 
     /// Whether the front door itself said where it stopped. Its word is kept
     /// over the exit or the closed channel that follows it.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "only a Linux boot starts a front door to stop (#3999)"
-        )
-    )]
     pub(crate) fn named(self) -> bool {
         matches!(self, Self::ReceivedDead | Self::Sockets | Self::Failed)
     }
@@ -168,11 +153,10 @@ impl super::RunningVm {
     /// Why a start is failing, when the boot's front door has stopped: the
     /// guest shutting down, a moment later, only follows from it.
     pub(crate) fn front_door_stopped(&self) -> Option<InterceptRefusal> {
-        #[cfg(target_os = "linux")]
-        let stopped = self.front_door.as_ref().and_then(RunningFrontDoor::stopped);
-        #[cfg(not(target_os = "linux"))]
-        let stopped = None::<FrontDoorStop>;
-        stopped.map(InterceptRefusal::FrontDoorStopped)
+        self.front_door
+            .as_ref()
+            .and_then(RunningFrontDoor::stopped)
+            .map(InterceptRefusal::FrontDoorStopped)
     }
 }
 
@@ -192,13 +176,6 @@ pub(crate) struct BootSecrets {
 }
 
 impl BootSecrets {
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "only a Linux boot starts a front door to pair with (#3999)"
-        )
-    )]
     pub(crate) fn mint() -> Self {
         use rand::RngCore as _;
         let mut pairing = zeroize::Zeroizing::new([0_u8; BOOT_SECRET_BYTES]);
@@ -206,13 +183,6 @@ impl BootSecrets {
         Self { pairing }
     }
 
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "only a Linux boot starts a front door to pair with (#3999)"
-        )
-    )]
     pub(crate) fn pairing(&self) -> &[u8] {
         self.pairing.as_ref()
     }
@@ -235,10 +205,7 @@ impl std::fmt::Debug for BootSecrets {
 impl super::RunningVm {
     /// The boot's secrets when it intercepts; none otherwise.
     pub(crate) fn boot_secrets(&self) -> Option<&BootSecrets> {
-        #[cfg(target_os = "linux")]
-        return self.front_door.as_ref().map(RunningFrontDoor::secrets);
-        #[cfg(not(target_os = "linux"))]
-        None
+        self.front_door.as_ref().map(RunningFrontDoor::secrets)
     }
 }
 
@@ -309,7 +276,6 @@ pub(crate) fn boot_intercepts(
 /// neither when it intercepts nothing. The front door starts here, before
 /// the seed is written, because the certificate goes into the seed; any
 /// failure fails the boot, so no guest boots without the CA its agents need.
-#[cfg(target_os = "linux")]
 pub(super) async fn boot_front_door(
     request: &super::CreateVmRequest,
     paths: &crate::state::VmPaths,
@@ -334,18 +300,6 @@ pub(super) async fn boot_front_door(
     let front_door =
         RunningFrontDoor::listen(process, &paths.front_door_socket, BootSecrets::mint())?;
     Ok(Some((front_door, certificate)))
-}
-
-/// Darwin has no front door yet, so a boot that intercepts is refused rather
-/// than started without the CA its agents would need.
-#[cfg(not(target_os = "linux"))]
-pub(super) fn boot_egress_ca(
-    intercepts: &InterceptSet,
-) -> Result<Option<EgressCaCertificate>, RunnerError> {
-    if intercepts.is_empty() {
-        return Ok(None);
-    }
-    Err(InterceptRefusal::FrontDoorUnavailable.into())
 }
 
 /// The seed's placeholders, from the supervisor's request: none unless the
@@ -399,7 +353,6 @@ mod tests {
     use super::*;
 
     /// A VM's layout under a private state root, as `prepare()` makes it.
-    #[cfg(target_os = "linux")]
     fn vm_paths(
         request: &super::super::CreateVmRequest,
     ) -> (tempfile::TempDir, crate::state::VmPaths) {
@@ -483,22 +436,6 @@ mod tests {
         ));
     }
 
-    #[cfg(not(target_os = "linux"))]
-    #[test]
-    fn switched_on_without_a_front_door_the_boot_is_refused() {
-        let error = boot_egress_ca(&boot_intercepts(true, clients(&[]))).unwrap_err();
-        assert!(matches!(
-            error,
-            RunnerError::Interception(InterceptRefusal::FrontDoorUnavailable)
-        ));
-        assert!(
-            error
-                .to_string()
-                .contains("cannot start the TLS front door on macOS yet"),
-            "{error}"
-        );
-    }
-
     fn entry(slot: u32, placeholder: &str) -> crate::control::v1::SeedCredentialPlaceholder {
         crate::control::v1::SeedCredentialPlaceholder {
             slot,
@@ -542,7 +479,6 @@ mod tests {
 
     /// Off, the default: no front door is started and the seed carries no
     /// CA.
-    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_boot_that_intercepts_nothing_starts_no_front_door() {
         let request = super::super::tests::request(2, 1024);
@@ -553,7 +489,6 @@ mod tests {
 
     /// A front door that does not start fails the boot: the test binary is
     /// not `cw`, so it never answers as a front door.
-    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_front_door_that_does_not_start_fails_the_boot() {
         let mut request = super::super::tests::request(2, 1024);

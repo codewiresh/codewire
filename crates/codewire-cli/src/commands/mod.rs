@@ -44,10 +44,6 @@ pub(crate) use native::*;
 mod native_args;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use native_args::*;
-#[cfg(target_os = "linux")]
-mod native_front_door;
-#[cfg(target_os = "linux")]
-pub(crate) use native_front_door::*;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credential_authority;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

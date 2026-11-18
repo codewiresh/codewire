@@ -269,6 +269,31 @@ probing HTTPS once a second:
 - In both cases, from the second of the kill on, every probe fails, and no
   process of the environment holds an internet socket.
 
+The TLS front door (#3999) runs for a boot with agent interception switched
+on, as on Linux. It is `cw __native-front-door`, and `main` starts it before
+the CLI parses arguments, reads settings or resolves paths, so nothing the CLI
+would open is held when it confines itself.
+
+- **What it holds:** its cleared environment, standard I/O on `/dev/null`,
+  the control socket it inherits at descriptor 4, and its one-thread runtime's
+  kqueue. Its Mach rights are only those every process starts with, its task
+  port and the bootstrap port, and it looks up no service before confining,
+  so nothing it holds reaches a Mach service the profile would refuse.
+- **When it confines:** it reads the intercept bindings, then installs
+  Seatbelt's deny-all profile (`confine_front_door`), at the point where Linux
+  installs no-new-privileges, Landlock and its syscall floor. Only then does it
+  make the boot's CA, so the CA key exists only inside the confined process.
+- **What it receives after:** the two sockets the runner passes, the hand-off
+  and the credential session. They are the only descriptors it gains.
+- **What it refuses:** files, named and network endpoints, listeners,
+  processes, signals to other processes and Mach service lookups
+  (`front_door_profile_keeps_received_streams_and_refuses_new_authority`).
+
+The `native_front_door` test drives the real process. It checks that the
+process runs under a Seatbelt profile (`sandbox_check`), reports its CA, and
+terminates TLS for a handed-over stream. The VM boot with the switch on is
+`mac-vm-intercept` in [the Mac journey](../journeys/local-vm-mac.md).
+
 Host ports from `codewire.yaml` (`host_port`/`guest_port`), and those published
 on a running environment with `cw --local ports ENV --publish PORT`, work as on
 Linux: the runner listens on 127.0.0.1 only, so the LAN address is refused, a

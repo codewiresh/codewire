@@ -102,7 +102,6 @@ mod boot_seed;
 #[cfg(target_os = "linux")]
 mod checkpoint;
 mod egress_status;
-#[cfg(target_os = "linux")]
 mod front_door;
 mod intercept;
 mod mesh_processes;
@@ -323,13 +322,10 @@ impl CloudHypervisorRunner {
             .map_err(|_| RunnerError::InvalidRequest)?;
 
         let token = Zeroizing::new(boot_seed::generate_auth_token());
-        #[cfg(target_os = "linux")]
         let (front_door, egress_ca) = match intercept::boot_front_door(&request, &paths).await? {
             Some((front_door, certificate)) => (Some(front_door), Some(certificate)),
             None => (None, None),
         };
-        #[cfg(not(target_os = "linux"))]
-        let egress_ca = intercept::boot_egress_ca(&request.intercepts)?;
         let seed = boot_seed::boot_seed(
             &request,
             &token,
@@ -414,7 +410,6 @@ impl CloudHypervisorRunner {
             #[cfg(target_os = "linux")]
             restore_admit,
             host_port_listeners,
-            #[cfg(target_os = "linux")]
             front_door,
             lock,
         })
@@ -639,7 +634,6 @@ impl CloudHypervisorRunner {
         let (child, process) = startup.disarm();
 
         Ok(RunningVm {
-            #[cfg(target_os = "linux")]
             front_door: prepared.front_door,
             stage_times: GuestStageTimes::default(),
             // Evaluated before the request moves.
@@ -1112,7 +1106,6 @@ pub struct PreparedVm {
     restore_admit: Option<Duration>,
     host_port_listeners: Vec<ReservedHostPort>,
     /// The boot's front door, started before the seed (#3999).
-    #[cfg(target_os = "linux")]
     front_door: Option<front_door::RunningFrontDoor>,
     lock: VmLock,
 }
@@ -1202,7 +1195,6 @@ pub struct RunningVm {
     restored: Option<RestoreReport>,
     /// The environment's front door and its pairing socket (#3999), when
     /// the boot binds interception.
-    #[cfg(target_os = "linux")]
     front_door: Option<front_door::RunningFrontDoor>,
     /// When the host first received each guest boot stage (#4242).
     stage_times: GuestStageTimes,
@@ -1392,13 +1384,9 @@ impl RunningVm {
     /// The socket this generation's credential broker pairs with the front
     /// door through, when the environment has one.
     pub(crate) fn front_door_socket(&self) -> Option<&Path> {
-        #[cfg(target_os = "linux")]
-        return self
-            .front_door
+        self.front_door
             .as_ref()
-            .map(front_door::RunningFrontDoor::socket);
-        #[cfg(not(target_os = "linux"))]
-        None
+            .map(front_door::RunningFrontDoor::socket)
     }
 
     pub(crate) fn daemon_access_parts(&self) -> (&Path, u32, &str) {
@@ -1610,7 +1598,6 @@ impl RunningVm {
                                 }
                             }
                         }
-                        #[cfg(target_os = "linux")]
                         if let Err(error) = self.pair_front_door(&mut worker) {
                             let _ = stop_network_worker_process(&mut worker).await;
                             if let Some(broker) = worker.broker.as_mut() {
@@ -1844,7 +1831,6 @@ impl RunningVm {
     async fn stop_with(&mut self, discard_guest_state: bool) -> Result<ExitClass, RunnerError> {
         let vmm = self.stop_vmm(discard_guest_state).await;
         let worker = self.stop_network_worker().await;
-        #[cfg(target_os = "linux")]
         let worker = worker.and(self.stop_front_door().await);
         let shares = self.stop_direct_shares().await;
         vmm.and_then(|exit| worker.and(shares).map(|()| exit))

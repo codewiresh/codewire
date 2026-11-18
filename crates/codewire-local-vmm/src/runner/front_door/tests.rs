@@ -296,6 +296,15 @@ async fn the_runner_holds_the_ends_it_sent_until_the_front_door_answers() {
         "the runner still holds the hand-off end"
     );
 
+    // Set before the end is released: macOS refuses socket options on a
+    // socket whose peer has gone (EINVAL).
+    rustix::net::sockopt::set_socket_timeout(
+        &pairing.handoff,
+        rustix::net::sockopt::Timeout::Recv,
+        Some(WAIT),
+    )
+    .unwrap();
+
     pairing.front_door.reply(&front_door_serving_message(1));
     assert_eq!(
         tokio::time::timeout(WAIT, broker.read(&mut byte))
@@ -305,12 +314,6 @@ async fn the_runner_holds_the_ends_it_sent_until_the_front_door_answers() {
         0,
         "the runner released the credential end"
     );
-    rustix::net::sockopt::set_socket_timeout(
-        &pairing.handoff,
-        rustix::net::sockopt::Timeout::Recv,
-        Some(WAIT),
-    )
-    .unwrap();
     assert_eq!(
         tokio::task::block_in_place(|| rustix::io::read(&pairing.handoff, &mut byte)),
         Ok(0),

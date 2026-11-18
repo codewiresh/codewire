@@ -43,13 +43,14 @@
 //! Each is read within [`ROLE_TAG_TIMEOUT`]; both peers are up by then.
 //!
 //! It confines itself before generating the CA, so the CA key only ever
-//! exists inside the confined process. It then serves until the hand-off
-//! ends or the control channel closes, and exits; the runner treats that exit
-//! as the front door dying, which fails closed. A credential session ending
-//! ends nothing: the next broker to pair serves. A later frame that is not
-//! a well-formed credentials frame ends the front door; a socket in one that
-//! fails its checks is dropped and the next pairing awaited. Linux only until
-//! its macOS confinement lands.
+//! exists inside the confined process: on Linux with no new privileges,
+//! Landlock and a syscall filter, on macOS with Seatbelt's deny-all profile
+//! ([`confine`]). It then serves until the hand-off ends or the control
+//! channel closes, and exits; the runner treats that exit as the front door
+//! dying, which fails closed. A credential session ending ends nothing: the
+//! next broker to pair serves. A later frame that is not a well-formed
+//! credentials frame ends the front door; a socket in one that fails its
+//! checks is dropped and the next pairing awaited.
 
 use std::os::fd::{FromRawFd as _, OwnedFd, RawFd};
 use std::time::Duration;
@@ -64,9 +65,11 @@ use crate::broker_control::{ControlFrame, read_control_frame};
 pub(crate) use control::ControlChannel;
 mod control;
 
+#[cfg(target_os = "linux")]
 use crate::linux::confinement::{
     install_denied_syscalls, install_deny_all_filesystem_domain, lock_process_privileges,
 };
+#[cfg(target_os = "linux")]
 use crate::linux::syscall_floor::DENIED_SYSCALL_FLOOR;
 
 /// The control socket's descriptor in the front-door process.
@@ -172,6 +175,7 @@ const BINDINGS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What a local front door refuses after it starts, beyond the shared
 /// floor. The process makes no connection, opens no file and starts nothing.
+#[cfg(target_os = "linux")]
 const FRONT_DOOR_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_socket,
     libc::SYS_connect,
@@ -189,12 +193,13 @@ const FRONT_DOOR_DENIED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_setfsgid,
     libc::SYS_setgroups,
 ];
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const FRONT_DOOR_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[libc::SYS_fork, libc::SYS_vfork];
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const FRONT_DOOR_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[];
 
 /// The shared floor and the front door's own denials.
+#[cfg(target_os = "linux")]
 fn front_door_denied_syscalls() -> Vec<libc::c_long> {
     [DENIED_SYSCALL_FLOOR, FRONT_DOOR_DENIED_SYSCALLS].concat()
 }
@@ -265,15 +270,7 @@ async fn start_and_serve(
     generation: u64,
 ) -> Result<(), FrontDoorProcessError> {
     let intercepts = receive_bindings(control).await?;
-    lock_process_privileges()
-        .and_then(|()| install_deny_all_filesystem_domain())
-        .and_then(|()| {
-            install_denied_syscalls(
-                &front_door_denied_syscalls(),
-                FRONT_DOOR_ARCH_DENIED_SYSCALLS,
-            )
-        })
-        .map_err(|_| FrontDoorProcessError::Confinement)?;
+    confine().map_err(|_| FrontDoorProcessError::Confinement)?;
     let door = EnvironmentFrontDoor::start(environment_id, generation, intercepts)
         .map_err(|_| FrontDoorProcessError::Start)?;
     let mut ready = FRONT_DOOR_READY_MESSAGE.to_vec();
@@ -341,6 +338,31 @@ async fn receive_credentials(
                 .ok()?,
         }
     }
+}
+
+/// Confine the process for good: no new privileges, no filesystem, and a
+/// syscall filter that refuses new sockets, connections, processes and
+/// signals.
+#[cfg(target_os = "linux")]
+fn confine() -> std::io::Result<()> {
+    lock_process_privileges()
+        .and_then(|()| install_deny_all_filesystem_domain())
+        .and_then(|()| {
+            install_denied_syscalls(
+                &front_door_denied_syscalls(),
+                FRONT_DOOR_ARCH_DENIED_SYSCALLS,
+            )
+        })
+}
+
+/// Confine the process for good with Seatbelt's deny-all profile: no file,
+/// no named or network endpoint, no process, signal or Mach service, so it
+/// works only with the descriptors it already holds and those passed to it.
+/// Darwin has no no-new-privileges switch; nothing can execute once the
+/// profile refuses process creation.
+#[cfg(target_os = "macos")]
+fn confine() -> std::io::Result<()> {
+    crate::host::sandbox::confine_front_door()
 }
 
 async fn receive_bindings(
@@ -458,9 +480,12 @@ fn inherited_control(descriptor: RawFd) -> Result<OwnedFd, FrontDoorProcessError
 
 /// Whether `descriptor` is a connected Unix socket of the `expected` type
 /// that closes on exec: the checks the egress broker runs on its own
-/// inherited ends. The peer is only required to exist, never read.
+/// inherited ends. The peer is only required to exist, never read. The
+/// family comes from the socket's own address, as
+/// `codewire_egress_policy::handoff` reads it: macOS has no `SO_DOMAIN`.
 fn admitted_socket(descriptor: &OwnedFd, expected: SocketType) -> bool {
-    rustix::net::sockopt::socket_domain(descriptor) == Ok(rustix::net::AddressFamily::UNIX)
+    rustix::net::getsockname(descriptor)
+        .is_ok_and(|address| address.address_family() == rustix::net::AddressFamily::UNIX)
         && rustix::net::sockopt::socket_type(descriptor) == Ok(expected)
         && rustix::io::fcntl_getfd(descriptor)
             .is_ok_and(|flags| flags.contains(rustix::io::FdFlags::CLOEXEC))
@@ -476,7 +501,7 @@ fn canonical_environment_id(environment_id: &str) -> Result<Uuid, FrontDoorProce
         .ok_or(FrontDoorProcessError::Identity)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
