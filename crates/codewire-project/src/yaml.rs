@@ -7,8 +7,9 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crate::{
-    AgentsSpec, CredentialBinding, LocalMountMode, LocalProjectIntent, ProjectDocument,
-    ProjectError, ProjectSpec, RepositorySpec, SecretBindings, SkillSource, WorkspacePathMode,
+    AgentsSpec, CredentialBinding, LocalMountMode, LocalProjectIntent, NetworkBinding,
+    ProjectDocument, ProjectError, ProjectSpec, RepositorySpec, SecretBindings, SkillSource,
+    WorkspacePathMode,
 };
 
 impl ProjectDocument {
@@ -106,6 +107,7 @@ impl ProjectDocument {
             memory: spec.resources.memory_mib.map(memory_quantity),
             disk: spec.resources.disk_gib.map(|value| format!("{value}Gi")),
             credentials: spec.credentials.as_ref(),
+            network: spec.network.as_ref(),
             mounts: local
                 .mounts
                 .iter()
@@ -190,6 +192,8 @@ struct YamlProject<'a> {
     disk: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     credentials: Option<&'a CredentialBinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network: Option<&'a NetworkBinding>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     mounts: Vec<YamlMount<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]

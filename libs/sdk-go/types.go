@@ -58,6 +58,12 @@ type ProjectCredentialBinding struct {
 	Profile string `json:"profile"`
 }
 
+// ProjectNetworkBinding selects one named network policy by reference. It
+// names a policy and never defines rules.
+type ProjectNetworkBinding struct {
+	Policy string `json:"policy"`
+}
+
 // ProjectSpec is the versioned placement-neutral codewire.yaml model.
 type ProjectSpec struct {
 	SchemaVersion    uint32                    `json:"schema_version"`
@@ -74,6 +80,7 @@ type ProjectSpec struct {
 	Resources        *ProjectResources         `json:"resources,omitempty"`
 	Secrets          *ProjectSecretBindings    `json:"secrets,omitempty"`
 	Credentials      *ProjectCredentialBinding `json:"credentials,omitempty"`
+	Network          *ProjectNetworkBinding    `json:"network,omitempty"`
 }
 
 // EnvironmentSourceSelection is the complete value-free source selection.

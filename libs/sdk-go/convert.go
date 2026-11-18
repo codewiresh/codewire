@@ -442,6 +442,9 @@ func fromProtoProjectSpec(value *codewirev1.ProjectSpec) (*ProjectSpec, error) {
 	if credentials := value.GetCredentials(); credentials != nil {
 		result.Credentials = &ProjectCredentialBinding{Profile: credentials.GetProfile()}
 	}
+	if network := value.GetNetwork(); network != nil {
+		result.Network = &ProjectNetworkBinding{Policy: network.GetPolicy()}
+	}
 	return result, nil
 }
 
@@ -496,6 +499,9 @@ func toProtoProjectSpec(value *ProjectSpec) (*codewirev1.ProjectSpec, error) {
 	}
 	if value.Credentials != nil {
 		result.Credentials = &codewirev1.ProjectCredentialBinding{Profile: value.Credentials.Profile}
+	}
+	if value.Network != nil {
+		result.Network = &codewirev1.ProjectNetworkBinding{Policy: value.Network.Policy}
 	}
 	return result, nil
 }
@@ -1163,8 +1169,9 @@ func ensureProjectSpecConverterCoverage() error {
 		"ProjectResources":         {1: "cpu_millicores", 2: "memory_mib", 3: "disk_gib"},
 		"ProjectSecretBindings":    {1: "project", 4: "organization", 6: "user"},
 		"ProjectCredentialBinding": {1: "profile"},
+		"ProjectNetworkBinding":    {1: "policy"},
 		"ProjectSpec": {
-			1: "schema_version", 2: "preset", 3: "image", 4: "repositories", 5: "working_directory", 6: "install_command", 7: "startup_script", 8: "environment", 9: "agents", 11: "skills", 12: "application_ports", 13: "resources", 14: "secrets", 18: "credentials",
+			1: "schema_version", 2: "preset", 3: "image", 4: "repositories", 5: "working_directory", 6: "install_command", 7: "startup_script", 8: "environment", 9: "agents", 11: "skills", 12: "application_ports", 13: "resources", 14: "secrets", 18: "credentials", 19: "network",
 		},
 	} {
 		if err := ensureDescriptorCoverage("project "+name, messages.ByName(protoreflect.Name(name)), fields); err != nil {

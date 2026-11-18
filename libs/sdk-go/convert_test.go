@@ -84,6 +84,7 @@ func TestFromProtoPresetGolden(t *testing.T) {
 		ApplicationPorts: []*codewirev1.ApplicationPort{{Port: 3000, Label: "web", Access: "public"}},
 		Secrets:          &codewirev1.ProjectSecretBindings{Project: "development", Organization: true, User: &platform},
 		Credentials:      &codewirev1.ProjectCredentialBinding{Profile: "platform:id:profile-one"},
+		Network:          &codewirev1.ProjectNetworkBinding{Policy: "platform:work"},
 	}
 	got, err := fromProtoPreset(&codewirev1.Preset{
 		Id: "preset_1", OrgId: testStringPointer("org_1"), Name: "Node", Slug: testStringPointer("node"),
@@ -109,6 +110,7 @@ func TestFromProtoPresetGolden(t *testing.T) {
 			ApplicationPorts: []ApplicationPort{{Port: 3000, Label: "web", Access: testStringPointer("public")}},
 			Secrets:          &ProjectSecretBindings{Project: "development", Organization: true, User: projectStoragePlacementPointer(ProjectStoragePlacementPlatform)},
 			Credentials:      &ProjectCredentialBinding{Profile: "platform:id:profile-one"},
+			Network:          &ProjectNetworkBinding{Policy: "platform:work"},
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -359,6 +361,7 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 			ApplicationPorts: []ApplicationPort{{Port: 3000, Label: "web", Access: &empty}},
 			Secrets:          &ProjectSecretBindings{User: &platform},
 			Credentials:      &ProjectCredentialBinding{Profile: "platform:id:profile-one"},
+			Network:          &ProjectNetworkBinding{Policy: "platform:work"},
 		},
 	})
 	if err != nil {
@@ -378,6 +381,9 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	}
 	if request.GetExpectedProfileRevision() != profileRevision || !request.GetConfirmPersonalCredentials() || !request.GetConfirmPersonalSecrets() || request.GetProjectSpec().GetSecrets().GetUser() != codewirev1.ProjectStoragePlacement_PROJECT_STORAGE_PLACEMENT_PLATFORM || request.GetProjectSpec().GetCredentials().GetProfile() != "platform:id:profile-one" {
 		t.Errorf("request changed source selection: %#v", request)
+	}
+	if request.GetProjectSpec().GetNetwork().GetPolicy() != "platform:work" {
+		t.Errorf("request changed the project's network policy: %#v", request)
 	}
 	invalidIsolation := "container"
 	if _, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{IsolationTier: &invalidIsolation}); err == nil {
@@ -406,6 +412,7 @@ func TestProjectSpecRoundTripPreservesOpaquePortableIntent(t *testing.T) {
 		Resources:        &ProjectResources{CpuMillicores: &cpu, MemoryMib: &memory, DiskGib: &disk},
 		Secrets:          &ProjectSecretBindings{Project: "development", User: &local},
 		Credentials:      &ProjectCredentialBinding{Profile: "local:id:profile-one"},
+		Network:          &ProjectNetworkBinding{Policy: "local:work"},
 	}
 	protoProject, err := toProtoProjectSpec(project)
 	if err != nil {
@@ -420,8 +427,9 @@ func TestProjectSpecRoundTripPreservesOpaquePortableIntent(t *testing.T) {
 	}
 	project.Environment["RUST_LOG"] = "changed"
 	project.Credentials.Profile = "local:id:changed"
+	project.Network.Policy = "local:changed"
 	project.Repositories[0].KnownHosts[0] = "changed"
-	if protoProject.GetEnvironment()["RUST_LOG"] != "info" || protoProject.GetCredentials().GetProfile() != "local:id:profile-one" || protoProject.GetRepositories()[0].GetKnownHosts()[0] != "example.test ssh-ed25519 AAAA" {
+	if protoProject.GetEnvironment()["RUST_LOG"] != "info" || protoProject.GetCredentials().GetProfile() != "local:id:profile-one" || protoProject.GetNetwork().GetPolicy() != "local:work" || protoProject.GetRepositories()[0].GetKnownHosts()[0] != "example.test ssh-ed25519 AAAA" {
 		t.Errorf("protobuf request aliases caller-owned project values: %#v", protoProject)
 	}
 }

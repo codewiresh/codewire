@@ -168,6 +168,8 @@ pub struct ProjectSpec {
     pub secrets: SecretBindings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials: Option<CredentialBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkBinding>,
 }
 
 impl Default for ProjectSpec {
@@ -187,6 +189,7 @@ impl Default for ProjectSpec {
             resources: ResourceSpec::default(),
             secrets: SecretBindings::default(),
             credentials: None,
+            network: None,
         }
     }
 }
@@ -213,6 +216,13 @@ impl ProjectSpec {
         {
             return Err(ProjectError::PlatformUnsupported {
                 field: "credentials.profile",
+            });
+        }
+        // Hosted Sandboxes cannot select a policy from the project file yet
+        // (#4000); refusing it is never a silent fallback to `hosted-default`.
+        if self.network.is_some() {
+            return Err(ProjectError::PlatformUnsupported {
+                field: "network.policy",
             });
         }
         Ok(())
@@ -343,6 +353,29 @@ impl CredentialBinding {
     }
 }
 
+/// Selects one named network policy by reference (#2537). The project file
+/// only names a policy and never defines rules, so a cloned repository cannot
+/// widen its own egress.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkBinding {
+    pub policy: String,
+}
+
+impl NetworkBinding {
+    /// Parse the requested policy without resolving it.
+    pub fn reference(
+        &self,
+    ) -> Result<codewire_egress_policy::reference::PolicyReference, ProjectError> {
+        codewire_egress_policy::reference::PolicyReference::parse(&self.policy).map_err(|error| {
+            ProjectError::InvalidField {
+                field: "network.policy",
+                detail: error.to_string(),
+            }
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LocalProjectIntent {
     pub mounts: Vec<LocalMountIntent>,
@@ -457,6 +490,8 @@ struct RawProject {
     secrets: Option<RawSecretsBlock>,
     #[serde(default)]
     credentials: Option<CredentialBinding>,
+    #[serde(default)]
+    network: Option<NetworkBinding>,
     #[serde(default)]
     mounts: Vec<RawMountBlock>,
     #[serde(default)]

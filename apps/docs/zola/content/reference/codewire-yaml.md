@@ -1,7 +1,7 @@
 ---
 title: codewire.yaml keys
 description: Every key codewire.yaml accepts, with its type and limits.
-updated: 2026-11-14
+updated: 2026-11-15
 weight: 2
 ---
 
@@ -23,6 +23,7 @@ in every file merged with repeated `--file`; see
 | `environment` | map | plain variables, up to 256; never secret values |
 | `secrets` | object | `organization: true`, `user: local|platform`, `project: NAME` |
 | `credentials` | object | `profile: NAME`, `local:NAME` or `platform:NAME` |
+| `network` | object | local VMs only: `policy: NAME`, the [network policy](@/networking/egress.md) to select at create: `open`, `locked` or a policy from `cw policy`; `--policy` overrides it. It names a policy and never holds rules |
 | `ports` | list | `port` with `label` and `access` for a preview; `host_port` and `guest_port` for a local VM port; on a local VM a `label` also serves the port at `https://{label}-{env}.cw.localhost` when the two form one DNS label |
 | `cpu`, `memory`, `disk` | quoted strings | `100m` to `256` CPUs; `128Mi` to `1Ti`; whole GiB from `1Gi` to `16384Gi` |
 | `agents` | object | `install: bool` and `tools: [ids]`; `claude-code` and `codex` are the agents Codewire manages |
@@ -46,4 +47,4 @@ Merge keys (`<<`), a key written twice, and tags such as `!include` are
 refused.
 
 Keep secret values, key file paths and store references out of this file:
-`secrets` and `credentials` select sources by name only.
+`secrets`, `credentials` and `network` select by name only.

@@ -653,6 +653,7 @@ pub(crate) async fn create_native_environment(
     let NativeProjectPlan {
         spec, local_mounts, ..
     } = project;
+    let (policy, spec) = lifecycle::CreatePolicy::take(args.policy.as_deref(), spec);
     let context = lifecycle::CreateContext {
         credentials: crate::commands::lifecycle_output::credential_ref(
             spec.credentials
@@ -668,6 +669,7 @@ pub(crate) async fn create_native_environment(
             selected.project_name.as_deref(),
         ),
         network: lifecycle::network_ref(mesh.as_ref()),
+        policy: policy.clone(),
     };
     let image = create_hint::CreateImage::of(&spec.image);
     let (project_spec_json, project_spec_sha256) =
@@ -704,14 +706,10 @@ pub(crate) async fn create_native_environment(
         platform_source_authority: selected.platform,
         local_mounts,
         implicit_vm_only,
-        network_policy: args.policy.clone().map(String::from).unwrap_or_default(),
+        network_policy: policy.reference(),
         snapshot: None,
     };
-    if !request.network_policy.is_empty() {
-        client
-            .require_network_policy_selection()
-            .map_err(|status| anyhow::anyhow!("{}", status.message()))?;
-    }
+    lifecycle::require_policy_selection(&client, &request.network_policy)?;
     crate::commands::lifecycle_output::print_context(
         &context.summary(&request.name, vcpus, memory_mib, disk_bytes),
         caps,
@@ -1369,7 +1367,9 @@ fn native_create_summary(
         ),
         format!(
             "  Policy       {}",
-            progress::terminal_text(args.policy.as_deref().unwrap_or("open"))
+            progress::terminal_text(
+                &lifecycle::CreatePolicy::resolve(args.policy.as_deref(), &project.spec).text()
+            )
         ),
         format!("  Ports        {ports}"),
     ]);
@@ -6018,6 +6018,24 @@ working_directory: /workspace/github
             summary.contains(
                 "  Config       flags only, no codewire.yaml found; default workspace image\n"
             ),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn native_review_shows_the_policy_the_create_selects_and_its_source() {
+        let (_temp, root) = checkout("version: 1\nimage: workspace\nnetwork:\n  policy: work\n");
+        let mut args = local_create_args(&["--path", root.to_str().unwrap()]);
+        args.name = Some("app".to_owned());
+        let summary = native_create_summary(&args, &sources::LocalDefault::NoProfiles).unwrap();
+        assert!(
+            summary.contains("  Policy       work (codewire.yaml)\n"),
+            "{summary}"
+        );
+        args.policy = Some("locked".parse().unwrap());
+        let summary = native_create_summary(&args, &sources::LocalDefault::NoProfiles).unwrap();
+        assert!(
+            summary.contains("  Policy       locked (--policy)\n"),
             "{summary}"
         );
     }

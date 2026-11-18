@@ -1,7 +1,7 @@
 ---
 title: Egress policies
 description: Decide what an environment may reach on the Internet; the built-in open and locked policies, your own policies, and what egress does not protect.
-updated: 2026-11-16
+updated: 2026-11-18
 weight: 3
 ---
 
@@ -48,7 +48,11 @@ Created network policy web-only · rev 1
 Refused: api.github.com:443 by web-only rev 1 (name not allowed)
 ```
 
-Choose it when you create the VM with `cw create --local --policy web-only`.
+Choose it when you create the VM with `cw create --local --policy web-only`,
+or name it in the project's `codewire.yaml` as `network: {policy: web-only}`.
+An explicit `--policy` wins over the file. The file only names a policy, so a
+cloned repository cannot widen its own egress; a hosted create refuses a file
+that names one until hosted sandboxes can select a policy.
 `cw policy allow` and `cw policy rm` change a policy, and `cw policy delete`
 removes one no environment selects. If the worker or the broker stops, the
 environment fails closed (`error`) until you stop and start it.

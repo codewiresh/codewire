@@ -70,6 +70,7 @@ pub(crate) fn cloud_summary(
         credentials,
         secrets,
         network,
+        policy: None,
         next: Some(next),
     }
 }

@@ -14,6 +14,7 @@ import {
   ApplicationPortSchema,
   ProjectAgentsSchema,
   ProjectCredentialBindingSchema,
+  ProjectNetworkBindingSchema,
   ProjectResourcesSchema,
   ProjectSecretBindingsSchema,
   ProjectSkillSelectionSchema,
@@ -478,6 +479,7 @@ function fromProtoProjectSpec(value: ProtoProjectSpec | undefined): ProjectSpec 
         }
       : undefined,
     credentials: value.credentials ? { profile: value.credentials.profile } : undefined,
+    network: value.network ? { policy: value.network.policy } : undefined,
   };
 }
 
@@ -529,6 +531,7 @@ function toProtoProjectSpec(value: ProjectSpec | undefined) {
         }
       : undefined,
     credentials: value.credentials ? { profile: value.credentials.profile } : undefined,
+    network: value.network ? { policy: value.network.policy } : undefined,
   };
 }
 
@@ -1192,8 +1195,11 @@ export function assertRuntimeConverterCoverage(): void {
   assertDescriptorCoverage("project credentials", ProjectCredentialBindingSchema.fields, new Map([
     [1, "profile"],
   ]));
+  assertDescriptorCoverage("project network", ProjectNetworkBindingSchema.fields, new Map([
+    [1, "policy"],
+  ]));
   assertDescriptorCoverage("project spec", ProjectSpecSchema.fields, new Map([
-    [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [18, "credentials"],
+    [1, "schema_version"], [2, "preset"], [3, "image"], [4, "repositories"], [5, "working_directory"], [6, "install_command"], [7, "startup_script"], [8, "environment"], [9, "agents"], [11, "skills"], [12, "application_ports"], [13, "resources"], [14, "secrets"], [18, "credentials"], [19, "network"],
   ]));
   assertDescriptorCoverage("environment", EnvironmentSchema.fields, new Map([
     [1, "id"], [2, "org_id"], [3, "created_by"], [4, "preset_id"], [5, "type"], [6, "name"], [7, "state"], [8, "desired_state"], [9, "error_reason"], [10, "recoverable"], [11, "state_changed_at"], [12, "retry_count"], [13, "setup_phase"], [14, "setup_complete"], [15, "setup_error"], [16, "ttl_seconds"], [17, "shutdown_at"], [18, "cpu_millicores"], [19, "memory_mb"], [20, "disk_gb"], [21, "total_running_seconds"], [22, "created_at"], [23, "started_at"], [24, "stopped_at"], [25, "destroyed_at"], [26, "protected"], [27, "deletion_requested_at"], [28, "deletion_grace_until"], [29, "preset_name"], [30, "network"], [31, "ports"], [32, "isolation_tier"], [33, "operation_generation"], [34, "source_selection"], [35, "network_state"], [36, "network_failure"], [37, "error_code"], [38, "network_policy"],

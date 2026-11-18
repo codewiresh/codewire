@@ -24,6 +24,12 @@ pub fn from_proto(
             .map(|credentials| project::CredentialBinding {
                 profile: credentials.profile,
             });
+    let network = value
+        .network
+        .into_option()
+        .map(|network| project::NetworkBinding {
+            policy: network.policy,
+        });
     let user = secrets
         .user
         .map(|placement| match placement.as_known() {
@@ -98,6 +104,7 @@ pub fn from_proto(
             user,
         },
         credentials,
+        network,
     };
     spec.validate()?;
     Ok(spec)
@@ -130,6 +137,10 @@ pub fn to_proto(value: project::ProjectSpec) -> proto::ProjectSpec {
             profile: credentials.profile,
             ..Default::default()
         });
+    let network = value.network.map(|network| proto::ProjectNetworkBinding {
+        policy: network.policy,
+        ..Default::default()
+    });
     proto::ProjectSpec {
         schema_version: value.schema_version,
         preset: value.preset,
@@ -179,6 +190,7 @@ pub fn to_proto(value: project::ProjectSpec) -> proto::ProjectSpec {
         resources: resources.into(),
         secrets: secrets.into(),
         credentials: credentials.into(),
+        network: network.into(),
         ..Default::default()
     }
 }
@@ -218,6 +230,7 @@ memory: "16Gi"
 disk: "40Gi"
 secrets: {project: platform:dev, organization: false, user: local}
 credentials: {profile: platform:work}
+network: {policy: local:work}
 "#,
         )
         .unwrap()
@@ -229,6 +242,7 @@ credentials: {profile: platform:work}
         );
         assert_eq!(encoded.repositories[0].destination, "/workspace/app");
         assert_eq!(encoded.application_ports[0].port, 8080);
+        assert_eq!(encoded.network.policy, "local:work");
         let decoded = from_proto(encoded).unwrap();
         assert_eq!(decoded, original);
         assert_eq!(
@@ -244,6 +258,18 @@ credentials: {profile: platform:work}
             working_directory: "/workspace".to_string(),
             credentials: Some(proto::ProjectCredentialBinding {
                 profile: "unknown:work".to_string(),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        };
+        assert!(from_proto(proto).is_err());
+
+        let proto = proto::ProjectSpec {
+            schema_version: project::PROJECT_SCHEMA_VERSION,
+            working_directory: "/workspace".to_string(),
+            network: Some(proto::ProjectNetworkBinding {
+                policy: "local:open".to_string(),
                 ..Default::default()
             })
             .into(),

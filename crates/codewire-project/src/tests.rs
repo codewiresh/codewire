@@ -1015,3 +1015,67 @@ fn environment_values_are_the_text_written_and_yaml_1_1_forms_fail_closed() {
         );
     }
 }
+
+#[test]
+fn network_policy_names_a_policy_and_never_defines_rules() {
+    for policy in ["open", "locked", "work", "local:work", "platform:team.dev"] {
+        let document = parse_project_yaml(&format!("network: {{policy: \"{policy}\"}}\n")).unwrap();
+        assert_eq!(document.spec.network.as_ref().unwrap().policy, policy);
+        assert!(document.spec.network.as_ref().unwrap().reference().is_ok());
+    }
+    let exact = "local:id:6bf8d155-e84c-4fc5-b479-b17022fe41dd";
+    let document = parse_project_yaml(&format!("network: {{policy: {exact}}}\n")).unwrap();
+    assert_eq!(document.spec.network.unwrap().policy, exact);
+
+    // Rules, or any key but `policy`, are refused: a cloned repository can
+    // only name a policy the owner already has.
+    for yaml in [
+        "network: {policy: work, allow: [example.org]}\n",
+        "network: {allow: [example.org]}\n",
+        "network: {}\n",
+    ] {
+        assert!(parse_project_yaml(yaml).is_err(), "{yaml}");
+    }
+}
+
+#[test]
+fn an_invalid_network_policy_is_refused() {
+    for policy in [
+        "",
+        " work",
+        "Work",
+        "local:open",
+        "local:",
+        "a/b",
+        "local:id:nope",
+    ] {
+        let yaml = format!("network: {{policy: \"{policy}\"}}\n");
+        assert!(
+            matches!(
+                parse_project_yaml(&yaml),
+                Err(ProjectError::InvalidField {
+                    field: "network.policy",
+                    ..
+                }) | Err(ProjectError::Yaml(_))
+            ),
+            "{policy:?}"
+        );
+    }
+}
+
+#[test]
+fn a_hosted_placement_refuses_a_network_policy_rather_than_dropping_it() {
+    let document = parse_project_yaml("network: {policy: platform:work}\n").unwrap();
+    assert!(matches!(
+        document.ensure_platform_compatible(),
+        Err(ProjectError::PlatformUnsupported {
+            field: "network.policy"
+        })
+    ));
+    assert!(
+        parse_project_yaml("version: 1\n")
+            .unwrap()
+            .ensure_platform_compatible()
+            .is_ok()
+    );
+}

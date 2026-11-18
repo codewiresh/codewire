@@ -91,6 +91,7 @@ pub(super) fn local_summary(
         credentials: environment_credentials(environment, spec.as_ref()),
         secrets,
         network: network_ref(environment.mesh.as_ref()),
+        policy: None,
         next: Some(next_shell_command(VmLocation::Local, &environment.name)),
     }
 }
@@ -795,6 +796,7 @@ pub(super) struct CreateContext {
     pub(super) credentials: SourceRef,
     pub(super) secrets: SourceRef,
     pub(super) network: NetworkRef,
+    pub(super) policy: CreatePolicy,
 }
 
 impl CreateContext {
@@ -813,6 +815,7 @@ impl CreateContext {
             credentials: self.credentials.clone(),
             secrets: self.secrets.clone(),
             network: self.network.clone(),
+            policy: Some(self.policy.text()),
             next: Some(next_shell_command(VmLocation::Local, name)),
         }
     }
@@ -852,6 +855,78 @@ pub(crate) struct NativeCreated {
     pub(crate) secrets: SourceRef,
     /// Where its configuration came from, for the JSON result.
     pub(crate) configuration: crate::commands::project_file::Provenance,
+}
+
+/// Where a local create's network policy came from (#2537).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PolicySource {
+    Flag,
+    ProjectFile,
+    Default,
+}
+
+/// The network policy a local create selects: an explicit `--policy`, else
+/// the project file's `network.policy`, else none, which is `open`. The review
+/// and the create both use it, so what is shown is what is selected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct CreatePolicy {
+    reference: String,
+    source: PolicySource,
+}
+
+impl CreatePolicy {
+    pub(super) fn resolve(flag: Option<&str>, spec: &ProjectSpec) -> Self {
+        match (flag, spec.network.as_ref()) {
+            (Some(flag), _) => Self {
+                reference: flag.to_owned(),
+                source: PolicySource::Flag,
+            },
+            (None, Some(binding)) => Self {
+                reference: binding.policy.clone(),
+                source: PolicySource::ProjectFile,
+            },
+            (None, None) => Self {
+                reference: String::new(),
+                source: PolicySource::Default,
+            },
+        }
+    }
+
+    /// Resolves the policy and takes the file's value out of the spec, so
+    /// the VM's selection stays its one record.
+    pub(super) fn take(flag: Option<&str>, mut spec: ProjectSpec) -> (Self, ProjectSpec) {
+        let policy = Self::resolve(flag, &spec);
+        spec.network = None;
+        (policy, spec)
+    }
+
+    /// The selection the create requests: empty for the default.
+    pub(super) fn reference(&self) -> String {
+        self.reference.clone()
+    }
+
+    /// `work (--policy)`, `work (codewire.yaml)`, or `open`.
+    pub(super) fn text(&self) -> String {
+        match self.source {
+            PolicySource::Flag => format!("{} (--policy)", self.reference),
+            PolicySource::ProjectFile => format!("{} (codewire.yaml)", self.reference),
+            PolicySource::Default => "open".to_owned(),
+        }
+    }
+}
+
+/// Refuses a policy selection before contacting a supervisor too old to
+/// enforce one.
+pub(super) fn require_policy_selection(
+    client: &NativeSupervisorClient,
+    policy: &str,
+) -> anyhow::Result<()> {
+    if policy.is_empty() {
+        return Ok(());
+    }
+    client
+        .require_network_policy_selection()
+        .map_err(|status| anyhow::anyhow!("{}", status.message()))
 }
 
 #[cfg(test)]
@@ -976,6 +1051,35 @@ mod tests {
     }
 
     const PLAIN: Style = Style::new(false, Charset::Unicode);
+
+    #[test]
+    fn an_explicit_policy_overrides_the_project_file_and_the_file_never_persists() {
+        let file = |policy: &str| ProjectSpec {
+            network: Some(codewire_project::NetworkBinding {
+                policy: policy.to_owned(),
+            }),
+            ..Default::default()
+        };
+        let (policy, spec) = CreatePolicy::take(None, file("work"));
+        assert_eq!(
+            (policy.reference(), policy.text()),
+            ("work".to_owned(), "work (codewire.yaml)".to_owned())
+        );
+        assert!(spec.network.is_none());
+
+        let (policy, spec) = CreatePolicy::take(Some("locked"), file("work"));
+        assert_eq!(
+            (policy.reference(), policy.text()),
+            ("locked".to_owned(), "locked (--policy)".to_owned())
+        );
+        assert!(spec.network.is_none());
+
+        let (policy, _) = CreatePolicy::take(None, ProjectSpec::default());
+        assert_eq!(
+            (policy.reference(), policy.text()),
+            (String::new(), "open".to_owned())
+        );
+    }
     const PROFILE_ID: &str = "856b6b9e-a520-48c7-aab1-8ac915465f28";
 
     fn environment() -> v1::Environment {

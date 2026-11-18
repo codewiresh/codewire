@@ -79,11 +79,13 @@ _PROJECT_DESCRIPTOR_FIELDS = {
     "ProjectResources": {1: "cpu_millicores", 2: "memory_mib", 3: "disk_gib"},
     "ProjectSecretBindings": {1: "project", 4: "organization", 6: "user"},
     "ProjectCredentialBinding": {1: "profile"},
+    "ProjectNetworkBinding": {1: "policy"},
     "ProjectSpec": {
         1: "schema_version", 2: "preset", 3: "image", 4: "repositories",
         5: "working_directory", 6: "install_command", 7: "startup_script",
         8: "environment", 9: "agents", 11: "skills",
         12: "application_ports", 13: "resources", 14: "secrets", 18: "credentials",
+        19: "network",
     },
 }
 

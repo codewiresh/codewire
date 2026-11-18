@@ -813,6 +813,7 @@ async function runTests() {
       resources: { cpu_millicores: 2000, memory_mib: 16384n, disk_gib: 40n },
       secrets: { project: "platform:id:project-one", organization: false, user: "platform" },
       credentials: { profile: "platform:id:profile-one" },
+      network: { policy: "platform:work" },
     },
   });
   assert(createEnvironment.isolationTier === IsolationTier.CONFIDENTIAL, "create environment preserves confidential isolation");
@@ -821,6 +822,7 @@ async function runTests() {
   assert(createEnvironment.projectSpec?.resources?.memoryMib === 16384n, "create environment preserves project resource units");
   assert(createEnvironment.projectSpec?.repositories[0]?.knownHosts[0]?.includes("AAAASynthetic") === true, "create environment preserves direct repository host trust");
   assert(createEnvironment.projectSpec?.credentials?.profile === "platform:id:profile-one", "create environment preserves credential profile references");
+  assert(createEnvironment.projectSpec?.network?.policy === "platform:work", "create environment preserves the project's network policy reference");
   assert(createEnvironment.projectSpec?.secrets?.user === 2, "create environment preserves the personal-secret platform origin");
   assert(createEnvironment.expectedProfileRevision === 9_007_199_254_741_009n, "create environment preserves profile revision losslessly");
   assert(createEnvironment.confirmPersonalCredentials && createEnvironment.confirmPersonalSecrets, "create environment preserves explicit personal-source confirmations");
@@ -982,6 +984,7 @@ async function runTests() {
         user: ProjectStoragePlacement.PLATFORM,
       },
       credentials: { profile: "platform:id:profile-preset" },
+      network: { policy: "platform:preset" },
     },
   }));
   assert(convertedPreset.project_spec.resources?.cpu_millicores === 4000, "preset project resources keep SDK values");
@@ -994,6 +997,7 @@ async function runTests() {
   assert(convertedPreset.project_spec.resources?.disk_gib === 9_007_199_254_741_011n, "preset project disk remains lossless above the safe integer range");
   assert(convertedPreset.project_spec.secrets?.user === "platform", "preset personal-secret origin remains typed");
   assert(convertedPreset.project_spec.credentials?.profile === "platform:id:profile-preset", "preset credential profiles are retained");
+  assert(convertedPreset.project_spec.network?.policy === "platform:preset", "preset network policy references are retained");
 
   const convertedSecretMetadata = fromProtoSecretMetadata(create(SecretMetadataSchema, {
     key: "DB_URL",
@@ -1557,7 +1561,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 180;
+  const expectedAssertions = 182;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

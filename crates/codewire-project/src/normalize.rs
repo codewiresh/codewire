@@ -35,6 +35,7 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
     };
     let secrets = normalize_secrets(raw.secrets)?;
     let credentials = raw.credentials;
+    let network = raw.network;
     validate_workspace_input_destinations(&repositories, &mounts)?;
     let environment = normalize_environment("environment", present_values(raw.environment)?)?;
 
@@ -54,6 +55,7 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
             resources,
             secrets,
             credentials,
+            network,
         },
         local: LocalProjectIntent {
             mounts,
@@ -167,6 +169,9 @@ pub(super) fn validate_project_spec(spec: &ProjectSpec) -> Result<(), ProjectErr
     }
     if let Some(credentials) = &spec.credentials {
         credentials.reference()?;
+    }
+    if let Some(network) = &spec.network {
+        network.reference()?;
     }
     Ok(())
 }

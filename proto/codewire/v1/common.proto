@@ -80,6 +80,14 @@ message ProjectCredentialBinding {
   string profile = 1;
 }
 
+// Selects one named network policy by reference (#2537): `open`, `locked`,
+// NAME, `local:` or `platform:` NAME, or an exact `local:id:` or
+// `platform:id:` UUID. The project file only names a policy and never defines
+// rules. Hosted placements refuse it until they can select one (#4000).
+message ProjectNetworkBinding {
+  string policy = 1;
+}
+
 // ProjectSpec is the deterministic, placement-neutral codewire.yaml model.
 // It contains guest/workspace intent and opaque bindings only. Resolved host
 // paths, secret values, provider tokens, platform credentials, VMM state, and
@@ -102,4 +110,5 @@ message ProjectSpec {
   ProjectResources resources = 13;
   ProjectSecretBindings secrets = 14;
   ProjectCredentialBinding credentials = 18;
+  ProjectNetworkBinding network = 19;
 }

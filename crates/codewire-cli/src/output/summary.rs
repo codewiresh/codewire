@@ -336,6 +336,9 @@ pub(crate) struct LifecycleSummary {
     pub(crate) credentials: SourceRef,
     pub(crate) secrets: SourceRef,
     pub(crate) network: NetworkRef,
+    /// The network policy a local create selects and where the choice came
+    /// from, such as `work (codewire.yaml)`; none for other results.
+    pub(crate) policy: Option<String>,
     /// The next useful command, such as `cw --local run claude --in app`.
     pub(crate) next: Option<String>,
 }
@@ -416,6 +419,9 @@ impl LifecycleSummary {
         for (label, value) in rows {
             out.push_str(&format!("  {label:<13}{value}\n"));
         }
+        if let Some(policy) = &self.policy {
+            out.push_str(&format!("  {:<13}{}\n", "Policy:", terminal_text(policy)));
+        }
     }
 }
 
@@ -491,6 +497,7 @@ mod tests {
                 mesh: MeshPlacement::Cloud,
                 network: "work".to_owned(),
             },
+            policy: None,
             next: Some("cw --local run claude --in app".to_owned()),
         }
     }
@@ -573,6 +580,7 @@ mod tests {
             credentials: SourceRef::None,
             secrets: SourceRef::None,
             network: NetworkRef::NotAttached,
+            policy: None,
             next: None,
             ..summary()
         };
@@ -646,6 +654,7 @@ mod tests {
                 mesh: MeshPlacement::Cloud,
                 network: "lab\u{9b}31m".to_owned(),
             },
+            policy: None,
             next: Some("cw run\x1b[A claude".to_owned()),
             ..summary()
         };
@@ -700,6 +709,7 @@ mod tests {
         let summary = LifecycleSummary {
             outcome: Outcome::Creating,
             location: VmLocation::Cloud,
+            policy: None,
             next: Some("cw --cloud info app".to_owned()),
             ..summary()
         };

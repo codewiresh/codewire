@@ -48,6 +48,12 @@ export interface ProjectCredentialBinding {
   profile: string;
 }
 
+/** Selects one named network policy by reference. It names a policy and never
+ * defines rules. */
+export interface ProjectNetworkBinding {
+  policy: string;
+}
+
 export interface ProjectSpec {
   schema_version: number;
   preset?: string;
@@ -63,6 +69,7 @@ export interface ProjectSpec {
   resources?: ProjectResources;
   secrets?: ProjectSecretBindings;
   credentials?: ProjectCredentialBinding;
+  network?: ProjectNetworkBinding;
 }
 
 /** Exact source selection. An empty object means no application-secret source

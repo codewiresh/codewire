@@ -2454,6 +2454,7 @@ name = "codewire-project"
 version = "0.1.0"
 dependencies = [
  "codewire-access",
+ "codewire-egress-policy",
  "codewire-workload-secrets",
  "codewire-workspace-hack",
  "serde",

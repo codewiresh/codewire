@@ -107,6 +107,7 @@ class EnvironmentSourcesTestCase(unittest.TestCase):
             }],
             "secrets": deepcopy(SELECTION["secrets"]),
             "credentials": deepcopy(SELECTION["credentials"]),
+            "network": {"policy": "platform:work"},
         }
         original = deepcopy(project)
         encoded = _convert.project_spec_from_dict(project)
@@ -114,6 +115,7 @@ class EnvironmentSourcesTestCase(unittest.TestCase):
         self.assertEqual(project, original)
         self.assertEqual(decoded["secrets"], project["secrets"])
         self.assertEqual(decoded["credentials"], project["credentials"])
+        self.assertEqual(decoded["network"], project["network"])
         self.assertEqual(decoded["repositories"][0]["known_hosts"], project["repositories"][0]["known_hosts"])
         self.assertNotIn("access", decoded)
         for placement in ("local", "platform"):

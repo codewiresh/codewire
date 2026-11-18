@@ -37,6 +37,7 @@ memory: "4Gi"
 disk: "40Gi"
 secrets: {{project: local:app-dev, organization: true, user: platform}}
 credentials: {{profile: local:user/work}}
+network: {{policy: local:work}}
 mounts:
   - {{source: ../shared, destination: /workspace/shared, mode: direct, read_only: true}}
   - {{source: ./fixtures, destination: /workspace/fixtures, mode: copy}}
@@ -95,6 +96,7 @@ fn keys_follow_the_schema_order_and_omit_empty_values() {
             "memory",
             "disk",
             "credentials",
+            "network",
             "mounts",
             "workspace",
         ]

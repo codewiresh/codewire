@@ -116,6 +116,7 @@ export type {
   ProjectStoragePlacement,
   ProjectSecretBindings,
   ProjectCredentialBinding,
+  ProjectNetworkBinding,
   ProjectSpec,
   EnvironmentData,
   EnvironmentSourceSelection,
