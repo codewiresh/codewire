@@ -20,7 +20,7 @@ use anyhow::Context as _;
 use codewire_local_credentials::{
     AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES, LocalBrokerProcessConfig, LocalBrokerProcessSpawner,
     LocalBrokerSpawnError, LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner,
-    LocalRepositorySpawnError,
+    LocalRepositorySpawnError, ProviderLookup,
 };
 use codewire_local_credentials::{
     AuthorityFeature, AuthorityProtectedStore, AuthorityRuntimeConfig, AuthorityRuntimeError,
@@ -536,6 +536,7 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,
+        lookup: &ProviderLookup,
         authority_peer: std::os::unix::net::UnixStream,
         boot_secrets: &codewire_local_credentials::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
@@ -577,6 +578,7 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
         if config.network_policy_allows_github {
             command.arg("--network-policy-allows-github");
         }
+        command.args(lookup.arguments());
         if secrets_fd.is_some() {
             command
                 .arg("--boot-secrets-fd")

@@ -28,6 +28,7 @@ impl LocalBrokerProcessSpawner for NeverSpawn {
     fn spawn(
         &self,
         _: &LocalBrokerProcessConfig,
+        _: &crate::ProviderLookup,
         _: std::os::unix::net::UnixStream,
         _boot_secrets: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, crate::LocalBrokerSpawnError> {
@@ -181,6 +182,7 @@ impl LocalBrokerProcessSpawner for RefusedSpawns {
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,
+        _: &crate::ProviderLookup,
         _: std::os::unix::net::UnixStream,
         _: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, crate::LocalBrokerSpawnError> {

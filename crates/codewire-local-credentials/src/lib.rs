@@ -58,7 +58,7 @@ pub use broker_log::{
 };
 pub use broker_process::{
     EnvironmentBrokerRuntime, EnvironmentBrokerSelection, LocalBrokerProcessConfig,
-    LocalBrokerProcessSpawner, LocalBrokerSpawnError,
+    LocalBrokerProcessSpawner, LocalBrokerSpawnError, ProviderLookup,
 };
 pub use client::{
     AuthorityInfo, EnvironmentGrants, LocalCredentialClient, LocalCredentialControlClient,

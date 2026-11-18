@@ -832,8 +832,10 @@ fn only_the_long_lived_broker_upstream_pools_provider_connections() {
         service.matches("ProviderHttpsTransport::resolve(").count(),
         4
     );
-    assert!(local.contains("ProviderHttpsTransport::resolve(&http_providers)"));
-    assert!(!local.contains("resolve_pooled"));
+    // The local broker builds its transports from one lookup of every host
+    // (#5286); `available` gives each one connection per request.
+    assert!(local.contains("ProviderHttpsTransport::available(http_providers, &looked_up)"));
+    assert!(!local.contains("ProviderHttpsTransport::resolve"));
 }
 
 async fn database_backend(pool: &PgPool) -> Result<i32> {

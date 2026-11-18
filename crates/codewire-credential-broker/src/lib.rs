@@ -55,7 +55,7 @@ pub use github_app::{
     GitHubAppPendingPermissions, GitHubAppRefreshError, GitHubAppStatusError,
     GitHubAppUserOAuthBundle, github_access_token,
 };
-pub use network::ProviderHttpsTransport;
+pub use network::{LookedUpHosts, ProviderHttpsTransport};
 pub use openai::{
     OpenAiApiKeyAdapter, OpenAiStreamingResponse, PreparedOpenAiRequest, PreparedOpenAiResponse,
     ValidatedOpenAiRequest,

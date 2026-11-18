@@ -246,7 +246,7 @@ impl Stream for HoldingOutput {
 struct Fixture {
     _temp: tempfile::TempDir,
     client: LocalCredentialDelegationClient,
-    manager_ready: oneshot::Receiver<()>,
+    manager_ready: oneshot::Receiver<crate::broker_channel::BrokerReady>,
     shutdown: watch::Sender<bool>,
     server: tokio::task::JoinHandle<Result<(), BrokerLeaseChannelError>>,
     connector_started: Arc<Notify>,

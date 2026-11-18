@@ -1546,16 +1546,20 @@ profile boots offline as one without does.
   broker goes on to the end of its lifetime, as before, and a new broker
   then starts with whatever resolves.
 - **What is recorded.** The credential service's broker log names the
-  unresolved hosts on a broker's `broker_ready` line (`unresolved=`), and
-  again when a replacement has them back.
+  unresolved hosts on a broker's `broker_ready` line (`unresolved=`, the
+  hosts joined by `/`, or `-` when every one resolved), and again when a
+  replacement has them back.
 
-**Not yet built** (#5286). Today a broker whose lookup fails exits at its
-start (`CW_BROKER_EXIT stage=provider.resolve`), the lookups run one after
-another, the credential service starts the broker again with the same
-result, and the VM's create or start fails with `create_failed` or
-`start_guest_start_failed` and no cause. Seen with released v0.4.22 on a
-host whose firewall dropped the broker's lookup, 2026-11-18. The journey
-step is `cred-provider-unresolved` in `docs/journeys/credentials.md`.
+**Built in part** (#5286). Built: a broker starts whatever resolves, an
+unserved provider's requests are refused and no refresh is begun for it, the
+regular replacement takes over only when it loses no name, and the broker log
+names the unresolved hosts. Not yet built: the earlier replacements of "It
+mends by itself". Until they are, a provider whose name resolves again is
+served from the serving broker's regular replacement, so within its
+600-second lifetime. Released v0.4.22 and earlier fail the VM's create or
+start instead, with `create_failed` or `start_guest_start_failed` and no
+cause, each broker ending `CW_BROKER_EXIT stage=provider.resolve`. The
+journey step is `cred-provider-unresolved` in `docs/journeys/credentials.md`.
 
 ### Diagnosing delivery in a local VM (in progress, #4882)
 

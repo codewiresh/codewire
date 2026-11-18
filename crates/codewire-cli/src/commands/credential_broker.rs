@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::os::fd::{FromRawFd as _, OwnedFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use codewire_access::{EnvironmentId, HttpProvider};
@@ -29,7 +29,6 @@ use codewire_protected_store::ConnectedOsProtectedStore;
 use futures::StreamExt as _;
 use uuid::Uuid;
 
-use super::LocalCredentialBrokerArgs;
 #[cfg(target_os = "linux")]
 use super::credential_broker_confinement::{
     apply_broker_landlock_confinement, apply_broker_seccomp_confinement,
@@ -151,6 +150,97 @@ fn status_kind(code: tonic::Code) -> &'static str {
     }
 }
 
+/// What the local credential authority starts each broker child with.
+#[derive(Debug, clap::Args)]
+pub(crate) struct LocalCredentialBrokerArgs {
+    #[arg(long)]
+    pub(crate) authority_fd: i32,
+    #[arg(long)]
+    pub(crate) environment_id: String,
+    #[arg(long)]
+    pub(crate) environment_generation: u64,
+    #[arg(long)]
+    pub(crate) environment_name: String,
+    #[arg(long)]
+    pub(crate) runner_socket: PathBuf,
+    #[arg(long = "http-provider")]
+    pub(crate) http_providers: Vec<String>,
+    #[arg(long)]
+    pub(crate) platform_delegated: bool,
+    /// The inherited descriptor carrying the boot's secrets (#3999), only
+    /// for a boot that has any.
+    #[arg(long)]
+    pub(crate) boot_secrets_fd: Option<i32>,
+    /// The environment's network policy allows GitHub's hosts by rule, so
+    /// the managed GitHub credential is served (#4926). Absent, it is not.
+    #[arg(long)]
+    pub(crate) network_policy_allows_github: bool,
+    /// No broker serves this generation: start whatever resolves, leaving a
+    /// provider host with no address unserved (#5286).
+    #[arg(long, conflicts_with = "may_not_resolve")]
+    pub(crate) start_whatever_resolves: bool,
+    /// A provider host this broker may leave unresolved, because the broker
+    /// it replaces does not serve it either. Every other host must resolve.
+    #[arg(long)]
+    pub(crate) may_not_resolve: Vec<String>,
+    /// The authority's store: macOS brokers read the selected backend.
+    #[cfg(target_os = "macos")]
+    #[command(flatten)]
+    pub(crate) store: super::credential_darwin::ChildStoreArgs,
+}
+
+/// The broker's provider transport, its GitHub App refresh owner when GitHub
+/// is selected, and the hosts left unresolved. A selected GitHub connection
+/// may be an expiring App login, whose refresh uses the App's own family
+/// with the public client ID only. Both transports are built from one
+/// lookup of every host, so a start waits one resolver timeout at most.
+#[cfg(not(feature = "local-broker-synthetic-smoke"))]
+async fn resolve_providers(
+    http_providers: &BTreeSet<HttpProvider>,
+) -> anyhow::Result<(
+    Option<ProviderHttpsTransport>,
+    Option<std::sync::Arc<codewire_credential_broker::GitHubAppAuthorizationOwner>>,
+    BTreeSet<&'static str>,
+)> {
+    if http_providers.is_empty() {
+        return Ok((None, None, BTreeSet::new()));
+    }
+    let app_refresh = BTreeSet::from([HttpProvider::GitHubAppAuthorization]);
+    let mut selections = vec![http_providers];
+    if http_providers.contains(&HttpProvider::GitHubOAuth) {
+        selections.push(&app_refresh);
+    }
+    let looked_up = ProviderHttpsTransport::look_up(&selections)
+        .await
+        .context("resolve credential broker provider endpoint")?;
+    let upstream = ProviderHttpsTransport::available(http_providers, &looked_up)
+        .context("resolve credential broker provider endpoint")?;
+    let mut unresolved: BTreeSet<&'static str> = upstream.unresolved_hosts().collect();
+    let github_app = if selections.len() > 1 {
+        let refresh = ProviderHttpsTransport::available(&app_refresh, &looked_up)
+            .context("resolve the GitHub App refresh endpoint")?;
+        unresolved.extend(refresh.unresolved_hosts());
+        Some(std::sync::Arc::new(
+            codewire_credential_broker::GitHubAppAuthorizationOwner::public_client(
+                codewire_credential_broker::provider_oauth::github::codewire_github_app(),
+                std::sync::Arc::new(refresh),
+            ),
+        ))
+    } else {
+        None
+    };
+    Ok((Some(upstream), github_app, unresolved))
+}
+
+/// Whether this broker may start with `unresolved` provider hosts, by the
+/// rule its authority started it with.
+fn lookup_allows(args: &LocalCredentialBrokerArgs, unresolved: &BTreeSet<&'static str>) -> bool {
+    args.start_whatever_resolves
+        || unresolved
+            .iter()
+            .all(|host| args.may_not_resolve.iter().any(|allowed| allowed == host))
+}
+
 async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> anyhow::Result<()> {
     verify_broker_process_confinement()?;
     // Before anything else, so nothing this broker starts inherits them.
@@ -209,43 +299,24 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
         .context("admit broker authority channel")?;
     stage.set("provider.resolve");
     // Provider addresses are resolved once, here, before confinement and
-    // before the guest bridge opens: a successor that cannot resolve them
-    // never takes new work from the epoch it would replace. The authority
-    // replaces this child with an overlapping successor before it has run
-    // 600 seconds, and that successor resolves them again. A platform relay
-    // selects no provider and resolves nothing.
+    // before the guest bridge opens. A host with no address is left unserved
+    // (#5286) when the authority's rule allows it: any host for a generation
+    // with no broker serving, and for a successor only a host the broker it
+    // replaces does not serve either, so a successor that resolves fewer
+    // never takes new work from that epoch. The authority replaces this
+    // child with an overlapping successor before it has run 600 seconds, and
+    // that successor resolves them again. A platform relay selects no
+    // provider and resolves nothing.
     #[cfg(not(feature = "local-broker-synthetic-smoke"))]
-    let upstream = if http_providers.is_empty() {
-        None
-    } else {
-        Some(
-            ProviderHttpsTransport::resolve(&http_providers)
-                .await
-                .context("resolve credential broker provider endpoint")?,
-        )
-    };
+    let (upstream, github_app, unresolved) = resolve_providers(&http_providers).await?;
+    #[cfg(feature = "local-broker-synthetic-smoke")]
+    let unresolved = BTreeSet::<&'static str>::new();
     #[cfg(feature = "local-broker-synthetic-smoke")]
     let upstream = (!http_providers.is_empty()).then_some(SyntheticOpenAiSmokeTransport);
-    // A selected GitHub connection may be an expiring App login. Its refresh
-    // uses the App's own family with the public client ID only; resolve it
-    // with the other provider addresses, before confinement.
-    #[cfg(not(feature = "local-broker-synthetic-smoke"))]
-    let github_app = if http_providers.contains(&HttpProvider::GitHubOAuth) {
-        Some(std::sync::Arc::new(
-            codewire_credential_broker::GitHubAppAuthorizationOwner::public_client(
-                codewire_credential_broker::provider_oauth::github::codewire_github_app(),
-                std::sync::Arc::new(
-                    ProviderHttpsTransport::resolve(&BTreeSet::from([
-                        HttpProvider::GitHubAppAuthorization,
-                    ]))
-                    .await
-                    .context("resolve the GitHub App refresh endpoint")?,
-                ),
-            ),
-        ))
-    } else {
-        None
-    };
+    anyhow::ensure!(
+        lookup_allows(&args, &unresolved),
+        "resolve credential broker provider endpoint"
+    );
     stage.set("runner.connect");
     let mut runner = RunnerClient::connect(&args.runner_socket)
         .await
@@ -424,7 +495,10 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
     apply_broker_seccomp_confinement().context("seal credential broker runtime")?;
     stage.set("lease.ready");
     leases
-        .report_ready(bridge.ready().clone())
+        .report_ready(
+            bridge.ready().clone(),
+            unresolved.iter().map(|host| (*host).to_owned()).collect(),
+        )
         .await
         .context("complete broker launch handshake")?;
     stage.set("provider.policy");
@@ -706,5 +780,69 @@ mod exit_tests {
             .context("complete broker launch handshake");
         assert_eq!(exit_kind(&lease), "lease.denied");
         assert_eq!(exit_kind(&anyhow::anyhow!("sk-0123456789abcdef")), "other");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod lookup_tests {
+    use codewire_local_credentials::ProviderLookup;
+
+    use super::*;
+
+    #[derive(clap::Parser)]
+    struct Broker {
+        #[command(flatten)]
+        args: LocalCredentialBrokerArgs,
+    }
+
+    /// A broker's arguments as the authority's spawner writes them for
+    /// `lookup`.
+    fn started_with(lookup: &ProviderLookup) -> LocalCredentialBrokerArgs {
+        let mut line: Vec<String> = [
+            "broker",
+            "--authority-fd=3",
+            "--environment-id=environment",
+            "--environment-generation=1",
+            "--environment-name=name",
+            "--runner-socket=/runner.sock",
+        ]
+        .map(str::to_owned)
+        .into();
+        line.extend(lookup.arguments());
+        <Broker as clap::Parser>::try_parse_from(line).unwrap().args
+    }
+
+    /// The authority's rule, as the broker it starts reads it (#5286): with
+    /// no broker serving, any host may stay unresolved; a replacement may
+    /// leave only what the serving broker left, and with nothing left it
+    /// must resolve every host, as every broker had to before.
+    #[test]
+    fn a_broker_may_leave_unresolved_exactly_what_its_authority_allows() {
+        let hosts = |hosts: &[&'static str]| hosts.iter().copied().collect::<BTreeSet<_>>();
+        let replacing = |left: &[&str]| {
+            started_with(&ProviderLookup::NoFewerThan(
+                left.iter().map(|host| (*host).to_owned()).collect(),
+            ))
+        };
+
+        let fresh = started_with(&ProviderLookup::Available);
+        assert!(lookup_allows(&fresh, &hosts(&[])));
+        assert!(lookup_allows(
+            &fresh,
+            &hosts(&["api.anthropic.com", "github.com"])
+        ));
+
+        let beside = replacing(&["api.anthropic.com"]);
+        assert!(lookup_allows(&beside, &hosts(&[])));
+        assert!(lookup_allows(&beside, &hosts(&["api.anthropic.com"])));
+        assert!(!lookup_allows(&beside, &hosts(&["github.com"])));
+        assert!(!lookup_allows(
+            &beside,
+            &hosts(&["api.anthropic.com", "github.com"])
+        ));
+
+        let strict = replacing(&[]);
+        assert!(lookup_allows(&strict, &hosts(&[])));
+        assert!(!lookup_allows(&strict, &hosts(&["api.anthropic.com"])));
     }
 }

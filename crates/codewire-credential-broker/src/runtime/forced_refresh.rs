@@ -135,6 +135,28 @@ pub(super) enum RetryFailure {
     Request(BrokerRequestError),
 }
 
+/// Refuses to begin a refresh at a provider the transport cannot reach
+/// (#5286). A refresh that fails in transport is recorded as an attempt of
+/// unknown outcome, which is terminal for a sign-in, so one toward a host
+/// with no address must never be begun: nothing was asked of the provider,
+/// and the sign-in stays as it was.
+pub(super) fn refresh_reachable(unserved: bool) -> Result<(), RetryFailure> {
+    if unserved {
+        return Err(BrokerRequestError::UpstreamFailed.into());
+    }
+    Ok(())
+}
+
+impl super::OAuthRefreshMaterial {
+    /// The slot whose provider this refresh asks.
+    pub(super) fn slot(&self) -> &'static str {
+        match self {
+            Self::Codex(_) => "codex",
+            Self::Claude(_) => "anthropic",
+        }
+    }
+}
+
 impl From<BrokerRequestError> for RetryFailure {
     fn from(error: BrokerRequestError) -> Self {
         Self::Request(error)

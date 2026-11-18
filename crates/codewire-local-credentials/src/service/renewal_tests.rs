@@ -10,6 +10,7 @@ use codewire_daemon_proto::codewire::bridge::v1::CredentialBridgeReady;
 use codewire_protected_store::{
     EphemeralProtectedStore, ProtectedEntryId, ProtectedStoreError, ProtectedStorePersistence,
 };
+use tokio::net::UnixStream;
 
 use super::*;
 use crate::{BrokerLeaseChannelError, LocalBrokerSpawnError, LocalCredentialBrokerLeaseClient};
@@ -71,6 +72,8 @@ struct ChildRecord {
     predecessors_alive: Option<usize>,
     /// The boot secrets it was started with.
     boot_secrets: Option<crate::BrokerBootSecrets>,
+    /// What it was told about provider hosts that do not resolve.
+    lookup: Option<ProviderLookup>,
 }
 
 /// Each spawn stands in for a broker child: a real process the authority
@@ -81,6 +84,9 @@ struct RenewalSpawner {
     store: SharedStore,
     /// Spawn attempts, by index, that fail.
     failing: BTreeSet<usize>,
+    /// The provider hosts each child, by index, reports it has no address
+    /// for; a child past the end reports none.
+    unresolved: Vec<Vec<&'static str>>,
     attempts: StdMutex<usize>,
     children: Arc<StdMutex<Vec<ChildRecord>>>,
     tasks: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -88,10 +94,15 @@ struct RenewalSpawner {
 
 impl RenewalSpawner {
     fn new(failing: BTreeSet<usize>) -> Arc<Self> {
+        Self::leaving(failing, Vec::new())
+    }
+
+    fn leaving(failing: BTreeSet<usize>, unresolved: Vec<Vec<&'static str>>) -> Arc<Self> {
         Arc::new(Self {
             started: std::time::Instant::now(),
             store: SharedStore::default(),
             failing,
+            unresolved,
             attempts: StdMutex::new(0),
             children: Arc::new(StdMutex::new(Vec::new())),
             tasks: StdMutex::new(Vec::new()),
@@ -128,6 +139,7 @@ impl LocalBrokerProcessSpawner for RenewalSpawner {
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,
+        lookup: &ProviderLookup,
         authority_peer: std::os::unix::net::UnixStream,
         boot_secrets: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
@@ -168,10 +180,16 @@ impl LocalBrokerProcessSpawner for RenewalSpawner {
                 spawned: Some(spawned),
                 predecessors_alive: Some(predecessors_alive),
                 boot_secrets: Some(boot_secrets.clone()),
+                lookup: Some(lookup.clone()),
                 ..Default::default()
             });
             children.len() - 1
         };
+        let unresolved: Vec<String> = self
+            .unresolved
+            .get(index)
+            .map(|hosts| hosts.iter().map(|host| (*host).to_owned()).collect())
+            .unwrap_or_default();
         let children = Arc::clone(&self.children);
         let started = self.started;
         let store = self.store.clone();
@@ -196,7 +214,7 @@ impl LocalBrokerProcessSpawner for RenewalSpawner {
             else {
                 return;
             };
-            if client.report_ready(ready).await.is_err() {
+            if client.report_ready(ready, unresolved).await.is_err() {
                 return;
             }
             record(&|child, at| child.ready = Some(at));
@@ -326,6 +344,20 @@ impl Lifecycle {
         })
         .await
         .expect("broker lifecycle state")
+    }
+
+    /// What the lifecycle recorded each ready child left unresolved, in order.
+    fn ready_unresolved(&self) -> Vec<String> {
+        let log = std::fs::read_to_string(self.directory.path().join("logs/brokers.log"))
+            .unwrap_or_default();
+        log.lines()
+            .filter(|line| line.contains(" event=broker_ready "))
+            .filter_map(|line| {
+                line.split(' ')
+                    .find_map(|field| field.strip_prefix("unresolved="))
+                    .map(str::to_owned)
+            })
+            .collect()
     }
 
     /// The reason the lifecycle recorded for ending the child `pid`.
@@ -525,5 +557,42 @@ async fn a_broker_whose_successor_cannot_start_still_stops_when_its_lifetime_end
             BrokerProcessState::Running,
         ],
         "every state reported: {reported:?}"
+    );
+}
+
+/// A generation's first child starts whatever resolves, and each replacement
+/// is told exactly what the child it replaces left unresolved, so it can take
+/// over with more providers and never with fewer (#5286). The broker log
+/// says what each ready child left.
+#[tokio::test]
+async fn a_replacement_may_leave_unresolved_only_what_the_serving_child_does() {
+    let spawner = RenewalSpawner::leaving(
+        BTreeSet::new(),
+        vec![vec!["platform.claude.com", "api.anthropic.com"], vec![]],
+    );
+    let lifecycle = Lifecycle::start_with(Arc::clone(&spawner), SLOW_SLOT_RENEWAL);
+    lifecycle.until(|spawner| spawner.ready_count() >= 3).await;
+    let recorded = lifecycle.ready_unresolved();
+    let (children, _) = lifecycle.stop().await;
+
+    let lookups: Vec<_> = children
+        .iter()
+        .take(3)
+        .map(|child| child.lookup.clone().unwrap())
+        .collect();
+    let left = |hosts: &[&str]| {
+        ProviderLookup::NoFewerThan(hosts.iter().map(|host| (*host).to_owned()).collect())
+    };
+    assert_eq!(
+        lookups,
+        [
+            ProviderLookup::Available,
+            left(&["api.anthropic.com", "platform.claude.com"]),
+            left(&[]),
+        ]
+    );
+    assert_eq!(
+        recorded[..3],
+        ["api.anthropic.com/platform.claude.com", "-", "-"]
     );
 }

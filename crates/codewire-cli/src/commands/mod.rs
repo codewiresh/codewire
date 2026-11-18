@@ -332,37 +332,6 @@ pub(crate) struct LocalCredentialAuthorityProbeArgs {
     pub(crate) shutdown: bool,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Debug, Args)]
-pub(crate) struct LocalCredentialBrokerArgs {
-    #[arg(long)]
-    pub(crate) authority_fd: i32,
-    #[arg(long)]
-    pub(crate) environment_id: String,
-    #[arg(long)]
-    pub(crate) environment_generation: u64,
-    #[arg(long)]
-    pub(crate) environment_name: String,
-    #[arg(long)]
-    pub(crate) runner_socket: PathBuf,
-    #[arg(long = "http-provider")]
-    pub(crate) http_providers: Vec<String>,
-    #[arg(long)]
-    pub(crate) platform_delegated: bool,
-    /// The inherited descriptor carrying the boot's secrets (#3999), only
-    /// for a boot that has any.
-    #[arg(long)]
-    pub(crate) boot_secrets_fd: Option<i32>,
-    /// The environment's network policy allows GitHub's hosts by rule, so
-    /// the managed GitHub credential is served (#4926). Absent, it is not.
-    #[arg(long)]
-    pub(crate) network_policy_allows_github: bool,
-    /// The authority's store: macOS brokers read the selected backend.
-    #[cfg(target_os = "macos")]
-    #[command(flatten)]
-    pub(crate) store: credential_darwin::ChildStoreArgs,
-}
-
 #[cfg(target_os = "linux")]
 #[derive(Debug, Args)]
 pub(crate) struct EnvironmentLaunchArgs {

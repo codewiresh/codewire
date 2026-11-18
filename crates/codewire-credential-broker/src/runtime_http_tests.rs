@@ -665,6 +665,8 @@ struct AppAuthorizationUpstream {
     initial_access_lifetime: u64,
     /// The refresh exchange fails in transport, after it may have been sent.
     refresh_unreachable: AtomicBool,
+    /// The refresh endpoint has no address (#5286).
+    refresh_unresolved: AtomicBool,
 }
 
 impl AppAuthorizationUpstream {
@@ -674,12 +676,17 @@ impl AppAuthorizationUpstream {
             refreshes: AtomicUsize::new(0),
             initial_access_lifetime,
             refresh_unreachable: AtomicBool::new(false),
+            refresh_unresolved: AtomicBool::new(false),
         }
     }
 }
 
 #[async_trait]
 impl BrokerUpstreamTransport for AppAuthorizationUpstream {
+    fn slot_unserved(&self, slot: &str) -> bool {
+        slot == "github" && self.refresh_unresolved.load(Ordering::SeqCst)
+    }
+
     async fn execute(
         &self,
         request: BrokerUpstreamRequest,
@@ -1373,6 +1380,37 @@ async fn a_failed_github_app_refresh_answers_only_its_request_and_the_epoch_keep
         Answer::Failure(v1::CredentialBridgeFailureReason::Denied)
     );
     assert_eq!(upstream.refreshes.load(Ordering::SeqCst), 1);
+    epoch.close().await;
+}
+
+/// No refresh is begun while the App's refresh endpoint has no address
+/// (#5286): the request fails as an upstream failure, nothing is recorded
+/// against the sign-in, and the same sign-in refreshes once the endpoint
+/// has an address. A refresh that failed in transport would have ended it.
+#[tokio::test]
+async fn a_github_app_refresh_is_not_begun_toward_an_endpoint_with_no_address() {
+    use crate::bridge::tests::{Answer, TestEpoch};
+    let upstream = Arc::new(AppAuthorizationUpstream::new(60));
+    let (broker, failures, commits) = due_github_app_broker(upstream.clone(), false).await;
+    upstream.refresh_unresolved.store(true, Ordering::SeqCst);
+    let mut epoch = TestEpoch::start(Arc::new(broker)).await;
+    for _ in 0..2 {
+        assert_eq!(
+            epoch.answer(github_user_request()).await,
+            Answer::Failure(v1::CredentialBridgeFailureReason::UpstreamFailed)
+        );
+    }
+    assert_eq!(upstream.refreshes.load(Ordering::SeqCst), 0);
+    assert_eq!(failures.load(Ordering::SeqCst), 0);
+
+    upstream.refresh_unresolved.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        epoch.answer(github_user_request()).await,
+        Answer::Response { status: 200, .. }
+    ));
+    assert_eq!(upstream.refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(commits.load(Ordering::SeqCst), 1);
+    assert_eq!(failures.load(Ordering::SeqCst), 0);
     epoch.close().await;
 }
 

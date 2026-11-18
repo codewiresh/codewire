@@ -275,6 +275,47 @@ async fn a_401_whose_sign_in_cannot_be_refreshed_opens_no_socket() {
     assert_eq!(recorded.outbound().len(), 1);
 }
 
+/// A handshake to a provider the transport has no address for is refused
+/// as an upstream failure before any lease, and nothing is sent (#5286).
+#[tokio::test]
+async fn a_handshake_to_a_provider_with_no_address_takes_no_lease_and_opens_no_socket() {
+    let recorded = Recorded {
+        unserved_slot: Some("codex"),
+        ..signed_in()
+    };
+    let outcome = recorded
+        .broker()
+        .execute_front_door_upgrade(handshake(MODEL_CALL, Some(format!("Bearer {OURS}"))))
+        .await;
+    assert!(matches!(outcome, Err(BrokerRequestError::UpstreamFailed)));
+    assert_eq!(recorded.leases(), 0);
+    assert!(recorded.outbound().is_empty());
+}
+
+/// A refresh has its own check, behind the entry's: no refresh is begun
+/// toward a provider with no address (#5286). Here the entry's check is
+/// passed once, the provider answers the handshake 401, and the refresh that
+/// 401 forces is not begun: the handshake fails as an upstream failure and
+/// the sign-in is as it was.
+#[tokio::test]
+async fn a_forced_refresh_is_not_begun_toward_a_provider_with_no_address() {
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let recorded = Recorded {
+        unauthorized_upgrades: Arc::new(AtomicUsize::new(1)),
+        refreshes: Some(Arc::clone(&refreshes)),
+        unserved_slot: Some("codex"),
+        served_asks: Arc::new(AtomicUsize::new(1)),
+        ..signed_in()
+    };
+    let outcome = recorded
+        .broker()
+        .execute_front_door_upgrade(handshake(MODEL_CALL, Some(format!("Bearer {OURS}"))))
+        .await;
+    assert!(matches!(outcome, Err(BrokerRequestError::UpstreamFailed)));
+    assert_eq!(refreshes.load(Ordering::Relaxed), 0);
+    assert_eq!(recorded.outbound().len(), 1, "no second handshake");
+}
+
 /// A socket's grant holds only while the same credential leases with the
 /// same revocation generation.
 #[tokio::test]

@@ -53,6 +53,40 @@ impl LocalBrokerProcessConfig {
     }
 }
 
+/// What a broker child is told about provider hosts that do not resolve at
+/// its start (#5286; `docs/dev/SECRETS-AND-CREDENTIALS.md`, "A provider that
+/// can't be looked up when a local VM starts").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderLookup {
+    /// No child serves this generation: start whatever resolves.
+    Available,
+    /// A replacement for a serving child that left exactly these hosts
+    /// unresolved. It starts only if every other host resolves, so it never
+    /// takes over serving fewer providers than the child it replaces.
+    NoFewerThan(BTreeSet<String>),
+}
+
+impl ProviderLookup {
+    /// The rule for a child started beside `serving`, what the child now
+    /// taking new work left unresolved, or with none serving.
+    pub(crate) fn beside(serving: Option<&BTreeSet<String>>) -> Self {
+        serving.map_or(Self::Available, |unresolved| {
+            Self::NoFewerThan(unresolved.clone())
+        })
+    }
+
+    /// The broker command's arguments that carry this rule.
+    pub fn arguments(&self) -> Vec<String> {
+        match self {
+            Self::Available => vec!["--start-whatever-resolves".to_owned()],
+            Self::NoFewerThan(unresolved) => unresolved
+                .iter()
+                .map(|host| format!("--may-not-resolve={host}"))
+                .collect(),
+        }
+    }
+}
+
 fn valid_environment_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     !bytes.is_empty()
@@ -93,6 +127,7 @@ pub trait LocalBrokerProcessSpawner: Send + Sync + 'static {
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,
+        lookup: &ProviderLookup,
         authority_peer: std::os::unix::net::UnixStream,
         boot_secrets: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError>;

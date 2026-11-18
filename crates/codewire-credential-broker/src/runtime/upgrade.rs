@@ -140,6 +140,10 @@ where
             },
             false,
         )?;
+        // As for a request: a provider with no address is not asked (#5286).
+        if self.upstream.slot_unserved(request.slot.as_str()) {
+            return Err(BrokerRequestError::UpstreamFailed);
+        }
         let handshake = take_handshake(&mut request.headers)?;
         let presented = match Presented::of(&request.headers) {
             Presented::Conflict => {

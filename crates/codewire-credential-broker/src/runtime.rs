@@ -86,6 +86,7 @@ mod openai_serve;
 mod swap;
 pub(crate) mod upgrade;
 mod upstream;
+use upstream::map_upstream_error;
 pub use upstream::{
     BrokerUpgradedIo, BrokerUpgradedStream, BrokerUpstreamTransport, BrokerUpstreamUpgrade,
 };
@@ -1841,6 +1842,7 @@ where
         credential: OAuthRefreshMaterial,
         refresh_request: BrokerCredentialRefreshRequest,
     ) -> Result<Option<()>, RetryFailure> {
+        forced_refresh::refresh_reachable(self.upstream.slot_unserved(credential.slot()))?;
         let refreshed_at_unix = current_unix_time()?;
         let permit = match self.leases.begin_credential_refresh(refresh_request).await {
             Ok(BrokerRefreshAdmission::Reserved(reservation)) => reservation,
@@ -2064,6 +2066,7 @@ where
         refresh_request: BrokerCredentialRefreshRequest,
         owner: Arc<GitHubAppAuthorizationOwner>,
     ) -> Result<Option<()>, RetryFailure> {
+        forced_refresh::refresh_reachable(owner.unserved())?;
         let permit = match self.leases.begin_credential_refresh(refresh_request).await {
             Ok(BrokerRefreshAdmission::Reserved(reservation)) => reservation,
             Ok(BrokerRefreshAdmission::Recovered) => return Ok(Some(())),
@@ -2571,16 +2574,6 @@ fn map_adapter_error(error: CredentialBrokerError) -> BrokerRequestError {
         | CredentialBrokerError::InvalidCredentialMaterial => BrokerRequestError::Denied,
         CredentialBrokerError::ResponseTooLarge => BrokerRequestError::ResponseTooLarge,
         CredentialBrokerError::InvalidProviderPolicy | CredentialBrokerError::ResponseDenied => {
-            BrokerRequestError::UpstreamFailed
-        }
-    }
-}
-
-fn map_upstream_error(error: BrokerUpstreamError) -> BrokerRequestError {
-    match error {
-        BrokerUpstreamError::DestinationDenied => BrokerRequestError::Denied,
-        BrokerUpstreamError::ResourceLimit => BrokerRequestError::ResponseTooLarge,
-        BrokerUpstreamError::Connect | BrokerUpstreamError::Protocol => {
             BrokerRequestError::UpstreamFailed
         }
     }

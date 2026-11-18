@@ -192,6 +192,12 @@ struct Recorded {
     /// How many of `outbound` went by the transport's forward path, which
     /// holds no request to its route's grammar.
     forwarded: Arc<AtomicUsize>,
+    /// A slot whose provider the transport has no address for (#5286).
+    unserved_slot: Option<&'static str>,
+    /// How many times the transport first answers that the slot is served.
+    /// A real transport's answer never changes; a test sets this only to
+    /// reach a check that stands behind an earlier one.
+    served_asks: Arc<AtomicUsize>,
 }
 
 /// One planned lease.
@@ -229,6 +235,8 @@ impl Recorded {
                 sockets: Arc::clone(&self.sockets),
                 unauthorized_upgrades: Arc::clone(&self.unauthorized_upgrades),
                 forwarded: Arc::clone(&self.forwarded),
+                unserved_slot: self.unserved_slot,
+                served_asks: Arc::clone(&self.served_asks),
             },
         )
         .unwrap()
@@ -406,10 +414,22 @@ struct Upstream {
     sockets: Arc<Mutex<Vec<tokio::io::DuplexStream>>>,
     unauthorized_upgrades: Arc<AtomicUsize>,
     forwarded: Arc<AtomicUsize>,
+    unserved_slot: Option<&'static str>,
+    served_asks: Arc<AtomicUsize>,
 }
 
 #[async_trait]
 impl BrokerUpstreamTransport for Upstream {
+    fn slot_unserved(&self, slot: &str) -> bool {
+        self.unserved_slot == Some(slot)
+            && self
+                .served_asks
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                    left.checked_sub(1)
+                })
+                .is_err()
+    }
+
     async fn execute(
         &self,
         mut request: BrokerUpstreamRequest,
@@ -699,6 +719,48 @@ async fn a_denied_lease_sends_nothing_upstream() {
     }
     assert_eq!(recorded.leases(), 1);
     assert!(recorded.outbound().is_empty());
+}
+
+/// A request to a provider the transport has no address for is refused as
+/// an upstream failure before any lease, and nothing is sent (#5286).
+/// Another slot's request is served as ever.
+#[tokio::test]
+async fn a_request_to_a_provider_with_no_address_takes_no_lease_and_sends_nothing() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        unserved_slot: Some("anthropic"),
+        ..Recorded::default()
+    };
+    let broker = recorded.broker();
+    let refused = broker
+        .execute_front_door(anthropic(
+            "api.anthropic.com",
+            &[("x-api-key", OURS.to_owned())],
+        ))
+        .await;
+    assert!(
+        matches!(refused, Err(BrokerRequestError::UpstreamFailed)),
+        "{:?}",
+        refused.err()
+    );
+    assert_eq!(recorded.leases(), 0);
+    assert!(recorded.outbound().is_empty());
+
+    let served = Recorded {
+        placeholder: Some(OURS),
+        unserved_slot: Some("github"),
+        ..Recorded::default()
+    };
+    let response = served
+        .broker()
+        .execute_front_door(anthropic(
+            "api.anthropic.com",
+            &[("x-api-key", OURS.to_owned())],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(collect(response).await.0, StatusCode::OK);
+    assert_eq!(served.leases(), 1);
 }
 
 /// A user's own key takes no lease and reaches the provider as it was sent;

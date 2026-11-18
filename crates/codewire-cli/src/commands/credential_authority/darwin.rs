@@ -27,7 +27,7 @@ use std::process::{ExitStatus, Stdio};
 use codewire_local_credentials::{
     AuthorityProtectedStore, LocalBrokerProcessConfig, LocalBrokerProcessSpawner,
     LocalBrokerSpawnError, LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner,
-    LocalRepositorySpawnError, LocalRepositoryTransport, SpawnedAuthority,
+    LocalRepositorySpawnError, LocalRepositoryTransport, ProviderLookup, SpawnedAuthority,
 };
 
 use super::super::credential_darwin::{admit_runtime_git, child_store_arguments};
@@ -272,6 +272,7 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,
+        lookup: &ProviderLookup,
         authority_peer: std::os::unix::net::UnixStream,
         boot_secrets: &codewire_local_credentials::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
@@ -315,6 +316,7 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
         if config.network_policy_allows_github {
             command.arg("--network-policy-allows-github");
         }
+        command.args(lookup.arguments());
         bind_child_to_authority(&mut command, authority_fd);
         command.spawn().map_err(|_| LocalBrokerSpawnError::Spawn)
     }
@@ -528,8 +530,14 @@ mod tests {
             network_policy_allows_github: false,
         };
         let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();
-        let mut child =
-            LocalBrokerProcessSpawner::spawn(&spawner, &config, peer, &Default::default()).unwrap();
+        let mut child = LocalBrokerProcessSpawner::spawn(
+            &spawner,
+            &config,
+            &ProviderLookup::Available,
+            peer,
+            &Default::default(),
+        )
+        .unwrap();
         assert!(child.wait().await.unwrap().success());
         let lines = observed(&root);
         assert_eq!(lines[0], lines[1], "setsid makes the broker a group leader");
@@ -550,11 +558,12 @@ mod tests {
             "__local-credential-broker --authority-fd 3 --environment-id {environment} "
         )));
         assert!(lines[8].ends_with(&format!(
-            "--protected-store file --protected-store-directory {}/protected-v1 --http-provider openai-api-key",
+            "--protected-store file --protected-store-directory {}/protected-v1 --http-provider openai-api-key --start-whatever-resolves",
             root.display()
         )));
 
-        // A platform relay names no provider and is marked as a relay.
+        // A platform relay names no provider and is marked as a relay. A
+        // replacement is told each host it may leave unresolved, here none.
         let platform = LocalBrokerProcessConfig {
             http_providers: Default::default(),
             platform_delegated: true,
@@ -562,9 +571,14 @@ mod tests {
             ..config
         };
         let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();
-        let mut child =
-            LocalBrokerProcessSpawner::spawn(&spawner, &platform, peer, &Default::default())
-                .unwrap();
+        let mut child = LocalBrokerProcessSpawner::spawn(
+            &spawner,
+            &platform,
+            &ProviderLookup::NoFewerThan(Default::default()),
+            peer,
+            &Default::default(),
+        )
+        .unwrap();
         assert!(child.wait().await.unwrap().success());
         let lines = observed(&root);
         assert!(lines[8].ends_with(&format!(

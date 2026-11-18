@@ -121,6 +121,7 @@ async fn sources_only_profile_change_during_platform_admission_never_reports_rea
             rpc.report_broker_ready(Request::new(v1::BrokerReadyRequest {
                 protocol_version: BROKER_LEASE_PROTOCOL_VERSION,
                 guest_ready: Some(guest_ready),
+                unresolved_provider_hosts: Vec::new(),
             }))
             .await
         });

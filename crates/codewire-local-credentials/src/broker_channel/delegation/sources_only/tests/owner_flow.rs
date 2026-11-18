@@ -27,6 +27,7 @@ impl LocalBrokerProcessSpawner for BrokerPeer {
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,
+        _: &crate::ProviderLookup,
         peer: std::os::unix::net::UnixStream,
         _boot_secrets: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
@@ -61,7 +62,7 @@ impl LocalBrokerProcessSpawner for BrokerPeer {
             )
             .await
             .unwrap();
-            client.report_ready(ready).await.unwrap();
+            client.report_ready(ready, Vec::new()).await.unwrap();
             let lease = client
                 .inner
                 .clone()

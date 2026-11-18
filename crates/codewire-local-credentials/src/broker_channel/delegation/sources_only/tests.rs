@@ -196,7 +196,7 @@ struct Fixture {
     rpc: Arc<BrokerLeaseRpc<EphemeralProtectedStore>>,
     context: ProjectionContext,
     observation: Arc<Observation>,
-    manager_ready: oneshot::Receiver<()>,
+    manager_ready: oneshot::Receiver<crate::broker_channel::BrokerReady>,
 }
 
 fn fixture(mode: Mode, mixed: bool) -> Fixture {
@@ -299,6 +299,7 @@ async fn admit(f: &Fixture) -> Result<Response<v1::BrokerReadyResponse>, Status>
         .report_broker_ready(Request::new(v1::BrokerReadyRequest {
             protocol_version: BROKER_LEASE_PROTOCOL_VERSION,
             guest_ready: Some(ready(f)),
+            unresolved_provider_hosts: Vec::new(),
         }))
         .await
 }
@@ -316,7 +317,7 @@ async fn sources_only_ready_is_exact_once_only_and_keeps_local_provider_mode() {
     );
     assert_eq!(f.observation.admissions.load(Ordering::Relaxed), 0);
     admit(&f).await.unwrap();
-    assert_eq!(f.manager_ready.try_recv(), Ok(()));
+    assert_eq!(f.manager_ready.try_recv(), Ok(Default::default()));
     assert!(admit(&f).await.is_err());
     assert_eq!(f.observation.admissions.load(Ordering::Relaxed), 1);
 
@@ -328,6 +329,7 @@ async fn sources_only_ready_is_exact_once_only_and_keeps_local_provider_mode() {
             .report_broker_ready(Request::new(v1::BrokerReadyRequest {
                 protocol_version: BROKER_LEASE_PROTOCOL_VERSION,
                 guest_ready: Some(wrong),
+                unresolved_provider_hosts: Vec::new(),
             }))
             .await
             .is_err()
@@ -462,7 +464,7 @@ async fn inherited_source_rpc_uses_actual_ready_and_epoch_close_stops_server_wit
     )
     .await
     .unwrap();
-    client.report_ready(ready(&f)).await.unwrap();
+    client.report_ready(ready(&f), Vec::new()).await.unwrap();
     ready_rx.await.unwrap();
     let recipient = ProjectionRecipient::new();
     let sealed = client

@@ -254,6 +254,7 @@ impl LocalBrokerProcessSpawner for TestBrokerSpawner {
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,
+        _: &crate::ProviderLookup,
         authority_peer: std::os::unix::net::UnixStream,
         _boot_secrets: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
@@ -286,7 +287,7 @@ impl LocalBrokerProcessSpawner for TestBrokerSpawner {
             else {
                 return;
             };
-            if client.report_ready(ready).await.is_err() {
+            if client.report_ready(ready, Vec::new()).await.is_err() {
                 return;
             }
             let Ok(lease) = client
@@ -2250,6 +2251,7 @@ impl LocalBrokerProcessSpawner for RunnerGoneBrokerSpawner {
     fn spawn(
         &self,
         config: &LocalBrokerProcessConfig,
+        _: &crate::ProviderLookup,
         authority_peer: std::os::unix::net::UnixStream,
         _boot_secrets: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, LocalBrokerSpawnError> {
@@ -2294,7 +2296,7 @@ impl LocalBrokerProcessSpawner for RunnerGoneBrokerSpawner {
             else {
                 return;
             };
-            if client.report_ready(ready).await.is_err() {
+            if client.report_ready(ready, Vec::new()).await.is_err() {
                 return;
             }
             std::future::pending::<()>().await;

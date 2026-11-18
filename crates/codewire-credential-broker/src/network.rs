@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs as _};
 use std::time::Duration;
 
@@ -80,15 +80,25 @@ pub struct ProviderHttpsTransport {
     /// for a front door's WebSocket upgrade (#3999); pinned like `client`.
     upgrade_client: reqwest::Client,
     selected: BTreeSet<HttpProvider>,
+    /// Selected hosts with no pinned address: their lookup failed, or gave
+    /// addresses this transport does not admit. Only a transport from
+    /// [`Self::available`] has any. A request to one is never sent,
+    /// and never looked up again.
+    unresolved: BTreeSet<&'static str>,
     resolved_address_count: usize,
     reuse: ConnectionReuse,
 }
+
+/// What one broker start's lookups found: each host's admitted addresses, or
+/// none for a host left unresolved. Made by [`ProviderHttpsTransport::look_up`].
+pub struct LookedUpHosts(BTreeMap<&'static str, Option<Vec<SocketAddr>>>);
 
 impl std::fmt::Debug for ProviderHttpsTransport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ProviderHttpsTransport")
             .field("selected", &self.selected)
+            .field("unresolved", &self.unresolved)
             .field("resolved_address_count", &self.resolved_address_count)
             .field("reuse", &self.reuse)
             .finish_non_exhaustive()
@@ -130,6 +140,81 @@ impl ProviderHttpsTransport {
         Self::resolve_with(selected, ConnectionReuse::Pooled, system_lookup)
     }
 
+    /// Looks up every host `selections` name, each once and all at the same
+    /// time, for a broker that starts whatever resolves (#5286,
+    /// `docs/dev/SECRETS-AND-CREDENTIALS.md`, "A provider that can't be
+    /// looked up when a local VM starts"). A broker's transports are all
+    /// built from this one answer with [`Self::available`], so its start
+    /// waits one resolver timeout at most, whatever the number of hosts and
+    /// of transports that share them.
+    pub async fn look_up(
+        selections: &[&BTreeSet<HttpProvider>],
+    ) -> Result<LookedUpHosts, BrokerUpstreamError> {
+        Self::look_up_with(selections, system_lookup)
+    }
+
+    fn look_up_with(
+        selections: &[&BTreeSet<HttpProvider>],
+        lookup: impl Fn(&str, u16) -> std::io::Result<Vec<SocketAddr>> + Sync,
+    ) -> Result<LookedUpHosts, BrokerUpstreamError> {
+        let mut hosts = BTreeSet::new();
+        for selected in selections {
+            hosts.extend(selected_hosts(selected)?);
+        }
+        // One thread a host, all ended when the scope returns: none outlives
+        // this call, so none is left outside the confinement the broker
+        // applies afterwards.
+        let looked_up: Vec<_> = std::thread::scope(|scope| {
+            let lookups: Vec<_> = hosts
+                .iter()
+                .map(|host| scope.spawn(|| lookup(host, OPENAI_PORT)))
+                .collect();
+            lookups.into_iter().map(|lookup| lookup.join()).collect()
+        });
+        Ok(LookedUpHosts(
+            hosts
+                .into_iter()
+                .zip(looked_up)
+                .map(|(host, looked_up)| {
+                    let admitted = match looked_up {
+                        Ok(Ok(addresses)) => admit_resolved_addresses(addresses).ok(),
+                        Ok(Err(_)) | Err(_) => None,
+                    };
+                    (host, admitted)
+                })
+                .collect(),
+        ))
+    }
+
+    /// The transport for `selected` from one start's lookups. A host whose
+    /// lookup failed, or gave addresses this transport does not admit, is
+    /// left unresolved instead of failing the transport:
+    /// [`Self::unresolved_hosts`] names them, and a request to one fails as a
+    /// connection failure without being sent. A selection `looked_up` does
+    /// not cover is refused.
+    pub fn available(
+        selected: &BTreeSet<HttpProvider>,
+        looked_up: &LookedUpHosts,
+    ) -> Result<Self, BrokerUpstreamError> {
+        let mut pinned = Vec::new();
+        let mut unresolved = BTreeSet::new();
+        for host in selected_hosts(selected)? {
+            match looked_up.0.get(host) {
+                Some(Some(addresses)) => pinned.push((host, addresses.clone())),
+                Some(None) => {
+                    unresolved.insert(host);
+                }
+                None => return Err(BrokerUpstreamError::DestinationDenied),
+            }
+        }
+        Self::pinned(selected, ConnectionReuse::PerRequest, &pinned, unresolved)
+    }
+
+    /// The selected hosts this transport has no address for.
+    pub fn unresolved_hosts(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.unresolved.iter().copied()
+    }
+
     fn resolve_with(
         selected: &BTreeSet<HttpProvider>,
         reuse: ConnectionReuse,
@@ -140,20 +225,28 @@ impl ProviderHttpsTransport {
         // readiness timeout, and retaining a resolver worker here would leave
         // an already-running thread outside older Landlock thread domains.
         let hosts = selected_hosts(selected)?;
-        let mut resolved_address_count = 0_usize;
         let mut pinned = Vec::with_capacity(hosts.len());
         for host in &hosts {
             let addresses = lookup(host, OPENAI_PORT).map_err(|_| BrokerUpstreamError::Connect)?;
-            let addresses = admit_resolved_addresses(addresses)?;
-            resolved_address_count = resolved_address_count
-                .checked_add(addresses.len())
-                .filter(|count| *count <= MAX_RESOLVED_ADDRESSES.saturating_mul(hosts.len()))
-                .ok_or(BrokerUpstreamError::ResourceLimit)?;
-            pinned.push((host, addresses));
+            pinned.push((*host, admit_resolved_addresses(addresses)?));
         }
+        Self::pinned(selected, reuse, &pinned, BTreeSet::new())
+    }
+
+    /// The transport for `pinned` hosts and their admitted addresses.
+    fn pinned(
+        selected: &BTreeSet<HttpProvider>,
+        reuse: ConnectionReuse,
+        pinned: &[(&'static str, Vec<SocketAddr>)],
+        unresolved: BTreeSet<&'static str>,
+    ) -> Result<Self, BrokerUpstreamError> {
+        let resolved_address_count = pinned
+            .iter()
+            .map(|(_, addresses)| addresses.len())
+            .sum::<usize>();
         // Both clients take the one pinned list, so they cannot differ.
         let pin = |mut builder: reqwest::ClientBuilder| {
-            for (host, addresses) in &pinned {
+            for (host, addresses) in pinned {
                 builder = builder.resolve_to_addrs(host, addresses);
             }
             builder.build().map_err(|_| BrokerUpstreamError::Protocol)
@@ -164,9 +257,35 @@ impl ProviderHttpsTransport {
             client,
             upgrade_client,
             selected: selected.clone(),
+            unresolved,
             resolved_address_count,
             reuse,
         })
+    }
+
+    /// Refuses a request to a host this transport has no address for. The
+    /// HTTP client would otherwise look the name up itself, after the
+    /// broker's one lookup and outside its pinning.
+    fn refuse_unresolved(&self, target: &url::Url) -> Result<(), BrokerUpstreamError> {
+        match target.host_str() {
+            Some(host) if self.unresolved.contains(host) => Err(BrokerUpstreamError::Connect),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// The hosts a slot's requests and refreshes may go to, whichever kind of
+/// credential the slot holds: a transport knows the providers selected, not
+/// which slot each is in, so a Codex sign-in is also unserved while
+/// `api.openai.com`, which only an API key in that slot uses, is selected
+/// and unresolved.
+fn slot_hosts(slot: &str) -> &'static [&'static str] {
+    match slot {
+        "openai" => &[OPENAI_HOST],
+        "codex" => &[CHATGPT_HOST, OPENAI_AUTH_HOST, OPENAI_HOST],
+        "anthropic" => &[ANTHROPIC_HOST, CLAUDE_TOKEN_HOST],
+        "github" => &[GITHUB_API_HOST, GITHUB_GIT_HOST],
+        _ => &[],
     }
 }
 
@@ -215,6 +334,12 @@ fn upgrade_client_builder() -> reqwest::ClientBuilder {
 
 #[async_trait]
 impl BrokerUpstreamTransport for ProviderHttpsTransport {
+    fn slot_unserved(&self, slot: &str) -> bool {
+        slot_hosts(slot)
+            .iter()
+            .any(|host| self.unresolved.contains(host))
+    }
+
     async fn execute(
         &self,
         mut request: BrokerUpstreamRequest,
@@ -222,6 +347,7 @@ impl BrokerUpstreamTransport for ProviderHttpsTransport {
         let body_stream = request.take_body_stream();
         let (method, target, headers, body) = request.into_parts();
         validate_target(&target, &method, &self.selected)?;
+        self.refuse_unresolved(&target)?;
         let is_refresh = (target.host_str() == Some(OPENAI_AUTH_HOST)
             && target.path() == OPENAI_TOKEN_PATH)
             || (target.host_str() == Some(CLAUDE_TOKEN_HOST) && target.path() == CLAUDE_TOKEN_PATH);
@@ -250,6 +376,7 @@ impl BrokerUpstreamTransport for ProviderHttpsTransport {
         let body_stream = request.take_body_stream();
         let (method, target, headers, body) = request.into_parts();
         validate_github_forward_target(&target, &method, &self.selected)?;
+        self.refuse_unresolved(&target)?;
         let provider_host = provider_host(&target);
         let request = self
             .client
@@ -278,6 +405,7 @@ impl BrokerUpstreamTransport for ProviderHttpsTransport {
         }
         let (method, target, headers, body) = request.into_parts();
         validate_target(&target, &method, &self.selected)?;
+        self.refuse_unresolved(&target)?;
         if method != Method::GET {
             return Err(BrokerUpstreamError::DestinationDenied);
         }
@@ -1613,6 +1741,122 @@ mod tests {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, last)), OPENAI_PORT)
     }
 
+    /// A broker starts whatever resolves (#5286): a host whose lookup fails,
+    /// or gives an address this transport will not dial, is left unresolved
+    /// and the others are pinned. Its slot is unserved, and a request to it
+    /// is refused as a connection failure before the HTTP client, which
+    /// would look the name up itself, sees it.
+    #[tokio::test]
+    async fn resolution_for_a_start_leaves_a_failed_host_unresolved_and_serves_the_rest() {
+        let selected = BTreeSet::from([
+            HttpProvider::OpenAiApiKey,
+            HttpProvider::AnthropicApiKey,
+            HttpProvider::GitHubOAuth,
+        ]);
+        let looked_up = ProviderHttpsTransport::look_up_with(&[&selected], |host, _| match host {
+            ANTHROPIC_HOST => Err(std::io::ErrorKind::TimedOut.into()),
+            GITHUB_GIT_HOST => Ok(vec![SocketAddr::from(([10, 0, 0, 1], OPENAI_PORT))]),
+            _ => Ok(vec![public(1)]),
+        })
+        .unwrap();
+        let transport = ProviderHttpsTransport::available(&selected, &looked_up).unwrap();
+        assert_eq!(
+            transport.unresolved_hosts().collect::<Vec<_>>(),
+            [ANTHROPIC_HOST, GITHUB_GIT_HOST]
+        );
+        assert_eq!(transport.resolved_address_count, 2);
+        assert_eq!(transport.reuse, ConnectionReuse::PerRequest);
+        assert!(transport.slot_unserved("anthropic"));
+        assert!(transport.slot_unserved("github"));
+        assert!(!transport.slot_unserved("openai"));
+        assert!(!transport.slot_unserved("ssh"));
+
+        // Refused at once: sending it would mean a lookup by the HTTP client.
+        let refused = tokio::time::timeout(
+            Duration::from_secs(1),
+            transport.execute(BrokerUpstreamRequest::new(
+                Method::POST,
+                url::Url::parse("https://api.anthropic.com/v1/messages").unwrap(),
+                HeaderMap::new(),
+                Vec::new(),
+            )),
+        )
+        .await
+        .expect("refused without a lookup");
+        assert_eq!(refused.err(), Some(BrokerUpstreamError::Connect));
+
+        // Every host resolving leaves none, as the strict resolution does.
+        let all = ProviderHttpsTransport::available(
+            &selected,
+            &ProviderHttpsTransport::look_up_with(&[&selected], |_, _| Ok(vec![public(1)]))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(all.unresolved_hosts().count(), 0);
+        assert!(!all.slot_unserved("anthropic"));
+        // The strict resolution, which sign-in commands and the hosted
+        // credential service use, still fails on the first host that does
+        // not resolve.
+        assert_eq!(
+            ProviderHttpsTransport::resolve_with(&selected, ConnectionReuse::PerRequest, |_, _| {
+                Err(std::io::ErrorKind::TimedOut.into())
+            })
+            .err(),
+            Some(BrokerUpstreamError::Connect)
+        );
+    }
+
+    /// A broker with GitHub selected builds two transports that share
+    /// GitHub's hosts, its own and the App's refresh. One start looks each
+    /// host up once for both, all at the same time: with every lookup timing
+    /// out, as on a host that is offline altogether, the start waits one
+    /// timeout, not one a host or one a transport.
+    #[test]
+    fn one_start_looks_each_host_up_once_and_all_at_once_for_every_transport() {
+        let main = BTreeSet::from([
+            HttpProvider::GitHubOAuth,
+            HttpProvider::AnthropicClaudeSignIn,
+        ]);
+        let app = BTreeSet::from([HttpProvider::GitHubAppAuthorization]);
+        let asked = std::sync::Mutex::new(Vec::new());
+        let began = std::time::Instant::now();
+        let looked_up = ProviderHttpsTransport::look_up_with(&[&main, &app], |host, _| {
+            asked.lock().unwrap().push(host.to_owned());
+            std::thread::sleep(Duration::from_millis(300));
+            Err(std::io::ErrorKind::TimedOut.into())
+        })
+        .unwrap();
+        assert!(
+            began.elapsed() < Duration::from_millis(600),
+            "{:?}",
+            began.elapsed()
+        );
+        let mut asked = asked.into_inner().unwrap();
+        asked.sort();
+        let mut hosts = [
+            ANTHROPIC_HOST,
+            CLAUDE_TOKEN_HOST,
+            GITHUB_API_HOST,
+            GITHUB_GIT_HOST,
+        ];
+        hosts.sort();
+        assert_eq!(asked, hosts);
+        for selected in [&main, &app] {
+            let transport = ProviderHttpsTransport::available(selected, &looked_up).unwrap();
+            assert!(transport.slot_unserved("github"));
+            assert_eq!(transport.resolved_address_count, 0);
+        }
+        // A selection these lookups did not cover builds no transport.
+        assert_eq!(
+            ProviderHttpsTransport::available(
+                &BTreeSet::from([HttpProvider::OpenAiApiKey]),
+                &looked_up
+            )
+            .err(),
+            Some(BrokerUpstreamError::DestinationDenied)
+        );
+    }
+
     #[test]
     fn pooled_resolution_admits_and_pins_exactly_like_per_request_resolution() {
         let openai = BTreeSet::from([HttpProvider::OpenAiApiKey]);
@@ -1858,6 +2102,7 @@ mod tests {
             client: provider.client(ConnectionReuse::Pooled),
             upgrade_client: upgrade_client_builder().build().unwrap(),
             selected: BTreeSet::from([HttpProvider::OpenAiApiKey]),
+            unresolved: BTreeSet::new(),
             resolved_address_count: 1,
             reuse: ConnectionReuse::Pooled,
         };

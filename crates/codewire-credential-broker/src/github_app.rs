@@ -511,6 +511,14 @@ pub struct GitHubAppAuthorizationOwner {
     upstream: Arc<dyn BrokerUpstreamTransport>,
 }
 
+impl GitHubAppAuthorizationOwner {
+    /// Whether the App's refresh endpoint has no address here (#5286): a
+    /// refresh is then not begun.
+    pub(crate) fn unserved(&self) -> bool {
+        self.upstream.slot_unserved("github")
+    }
+}
+
 /// Credential-service holds the App's client secret and exchanges browser
 /// callback codes. A local `cw` is a public client: it only rotates tokens
 /// from the App's device login, which GitHub accepts with the client ID alone.

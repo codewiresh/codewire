@@ -5,7 +5,9 @@
 use async_trait::async_trait;
 use http::HeaderMap;
 
-use super::{BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse};
+use super::{
+    BrokerRequestError, BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse,
+};
 
 /// Broker-owned transport for exactly one already-authorized upstream request.
 /// Implementations own DNS resolution, socket creation, TLS, redirects, and
@@ -13,6 +15,18 @@ use super::{BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse};
 /// of the broker.
 #[async_trait]
 pub trait BrokerUpstreamTransport: Send + Sync {
+    /// Whether this transport cannot reach `slot`'s provider at all: a host
+    /// the slot's requests or refreshes go to has no address here (#5286).
+    /// The broker then refuses the slot's requests before any lease and
+    /// begins no refresh for it, so a sign-in is never spent on a provider
+    /// that was not asked.
+    /// A transport that wraps another must pass the question on: the
+    /// default answers for a transport that resolves nothing by itself.
+    fn slot_unserved(&self, slot: &str) -> bool {
+        let _ = slot;
+        false
+    }
+
     async fn execute(
         &self,
         request: BrokerUpstreamRequest,
@@ -51,6 +65,11 @@ pub trait BrokerUpstreamTransport: Send + Sync {
 /// A runtime with application sources only has no provider DNS/socket setup.
 #[async_trait]
 impl<T: BrokerUpstreamTransport> BrokerUpstreamTransport for Option<T> {
+    fn slot_unserved(&self, slot: &str) -> bool {
+        self.as_ref()
+            .is_some_and(|transport| transport.slot_unserved(slot))
+    }
+
     async fn execute(
         &self,
         request: BrokerUpstreamRequest,
@@ -114,5 +133,16 @@ impl BrokerUpstreamRequest {
     pub(crate) fn with_body_stream(mut self, stream: super::BrokerRequestBodyStream) -> Self {
         self.body_stream = Some(stream);
         self
+    }
+}
+
+/// What a guest's request gets for a transport failure.
+pub(super) fn map_upstream_error(error: BrokerUpstreamError) -> BrokerRequestError {
+    match error {
+        BrokerUpstreamError::DestinationDenied => BrokerRequestError::Denied,
+        BrokerUpstreamError::ResourceLimit => BrokerRequestError::ResponseTooLarge,
+        BrokerUpstreamError::Connect | BrokerUpstreamError::Protocol => {
+            BrokerRequestError::UpstreamFailed
+        }
     }
 }

@@ -135,6 +135,7 @@ impl LocalCredentialDelegationClient {
             .report_broker_ready(v1::BrokerReadyRequest {
                 protocol_version: BROKER_LEASE_PROTOCOL_VERSION,
                 guest_ready: None,
+                unresolved_provider_hosts: Vec::new(),
             })
             .await
             .map_err(map_client_status)?;

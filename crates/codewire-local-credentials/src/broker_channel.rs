@@ -46,6 +46,8 @@ use crate::{
 mod delegation;
 mod login;
 mod projection;
+mod ready;
+pub(crate) use ready::BrokerReady;
 mod ssh;
 
 use login::local_login_refused;
@@ -655,25 +657,6 @@ where
         drop(operation_barrier);
         Ok(())
     }
-
-    /// Complete the authority-owned launch handshake only after the broker has
-    /// authenticated and opened the matching guest-daemon bridge.
-    pub async fn report_ready(
-        &mut self,
-        ready: codewire_daemon_proto::codewire::bridge::v1::CredentialBridgeReady,
-    ) -> Result<(), BrokerLeaseChannelError> {
-        if !delegation::ready_matches(&self.environment_id, self.environment_generation, &ready) {
-            return Err(BrokerLeaseChannelError::InvalidRequest);
-        }
-        self.inner
-            .report_broker_ready(v1::BrokerReadyRequest {
-                protocol_version: BROKER_LEASE_PROTOCOL_VERSION,
-                guest_ready: Some(ready),
-            })
-            .await
-            .map_err(map_client_status)?;
-        Ok(())
-    }
 }
 
 /// Serve one preconnected broker peer, bound to exactly one environment
@@ -707,7 +690,7 @@ where
 #[derive(Default)]
 pub(crate) struct BrokerLeaseChannelControl {
     pub local_profile: Option<EnvironmentAccessBinding>,
-    pub ready: Option<oneshot::Sender<()>>,
+    pub ready: Option<oneshot::Sender<BrokerReady>>,
     pub shutdown: Option<watch::Receiver<bool>>,
     pub platform: Option<(
         PlatformCredentialBinding,
@@ -1016,7 +999,7 @@ struct BrokerLeaseRpc<S: ProtectedStore> {
     environment_id: EnvironmentId,
     environment_generation: u64,
     audit: Arc<BrokerLeaseAuditLog>,
-    ready: Mutex<Option<oneshot::Sender<()>>>,
+    ready: Mutex<Option<oneshot::Sender<BrokerReady>>>,
     projection: Option<LocalEnvironmentProjectionBinding>,
     projection_operations: Arc<Semaphore>,
     platform: Mutex<
@@ -1100,6 +1083,7 @@ where
                 "platform credential delegation is not admitted",
             ));
         }
+        let reported = BrokerReady::admit(request.unresolved_provider_hosts)?;
         let ready = self
             .ready
             .lock()
@@ -1142,7 +1126,7 @@ where
             return Err(error);
         }
         ready
-            .send(())
+            .send(reported)
             .map_err(|_| Status::unavailable("credential broker launch was cancelled"))?;
         Ok(Response::new(v1::BrokerReadyResponse {}))
     }

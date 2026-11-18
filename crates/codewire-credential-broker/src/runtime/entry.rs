@@ -62,6 +62,11 @@ where
                 request.route.as_str(),
             ));
         }
+        // A provider this broker has no address for is not asked, and no
+        // credential is leased for it (#5286).
+        if self.upstream.slot_unserved(slot.as_str()) {
+            return Err(BrokerRequestError::UpstreamFailed);
+        }
         let result = match body {
             body if request.intercepted_host.is_some() => {
                 self.execute_intercepted(request, body).await
