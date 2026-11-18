@@ -44,6 +44,17 @@ pub trait ExecBackend: Clone + Send + Sync + 'static {
 
     fn authorize(&self, ctx: &RequestContext) -> Result<(), connectrpc::ConnectError>;
 
+    /// Admits a stream to this server's revocation fence (#3586): the end it
+    /// takes when the authority that admitted it is lost. `None`, the
+    /// default, for a server without one, as the local supervisor.
+    async fn admit_stream(
+        &self,
+        _ctx: &RequestContext,
+        _environment_id: &str,
+    ) -> Result<Option<crate::drain::EndSignal>, connectrpc::ConnectError> {
+        Ok(None)
+    }
+
     fn validation_error(
         &self,
         violations: Vec<FieldViolation>,
@@ -191,6 +202,10 @@ where
                 .backend
                 .validation_error(violations, request_id.as_deref()));
         }
+        let revoked = self
+            .backend
+            .admit_stream(&ctx, &request.environment_id)
+            .await?;
         let daemon = self
             .backend
             .daemon(&ctx, &request.org_id, &request.environment_id)
@@ -219,10 +234,14 @@ where
             request_id,
             tx,
         ));
-        connectrpc::Response::stream_ok(crate::drain::end_at(
+        connectrpc::Response::stream_ok(crate::drain::end_on(
             receiver_stream(rx),
-            self.backend.server_restart(Restart::Deadline),
-            COMMAND_RESTARTED,
+            crate::drain::restart_end(
+                self.backend.server_restart(Restart::Deadline),
+                COMMAND_RESTARTED,
+            )
+            .into_iter()
+            .chain(revoked),
         ))
     }
 
@@ -275,6 +294,10 @@ where
             self.backend
                 .validation_error(violations, request_id.as_deref())
         })?;
+        let revoked = self
+            .backend
+            .admit_stream(&ctx, &start.environment_id)
+            .await?;
         let daemon = self
             .backend
             .daemon(&ctx, &start.org_id, &start.environment_id)
@@ -301,10 +324,14 @@ where
             request_id,
             tx,
         ));
-        connectrpc::Response::stream_ok(crate::drain::end_at(
+        connectrpc::Response::stream_ok(crate::drain::end_on(
             receiver_stream(rx),
-            self.backend.server_restart(Restart::Deadline),
-            COMMAND_RESTARTED,
+            crate::drain::restart_end(
+                self.backend.server_restart(Restart::Deadline),
+                COMMAND_RESTARTED,
+            )
+            .into_iter()
+            .chain(revoked),
         ))
     }
 }
@@ -606,6 +633,8 @@ mod tests {
     struct TestBackend {
         daemon: DaemonClient,
         deny_authorization: bool,
+        /// When set, streams are admitted to a fence this revokes.
+        revoke: Option<std::sync::Arc<tokio::sync::Notify>>,
     }
 
     #[async_trait::async_trait]
@@ -655,6 +684,22 @@ mod tests {
             _environment_id: &str,
         ) -> Result<DaemonClient, connectrpc::ConnectError> {
             Ok(self.daemon.clone())
+        }
+
+        async fn admit_stream(
+            &self,
+            _ctx: &RequestContext,
+            _environment_id: &str,
+        ) -> Result<Option<crate::drain::EndSignal>, connectrpc::ConnectError> {
+            Ok(self
+                .revoke
+                .clone()
+                .map(|revoke| -> crate::drain::EndSignal {
+                    Box::pin(async move {
+                        revoke.notified().await;
+                        connectrpc::ConnectError::permission_denied("access revoked")
+                    })
+                }))
         }
     }
 
@@ -726,6 +771,7 @@ mod tests {
         let bridge = ExecBridge::new(TestBackend {
             daemon: harness.client().await,
             deny_authorization: true,
+            revoke: None,
         });
         let message = proto::ExecRequest::default();
         let body = bytes::Bytes::from(message.encode_to_vec());
@@ -747,6 +793,7 @@ mod tests {
         let bridge = ExecBridge::new(TestBackend {
             daemon: harness.client().await,
             deny_authorization: false,
+            revoke: None,
         });
         let requests = [
             proto::RunRequest {
@@ -813,6 +860,7 @@ mod tests {
         let bridge = ExecBridge::new(TestBackend {
             daemon: harness.client().await,
             deny_authorization: false,
+            revoke: None,
         });
         let pid_file = harness.workspace_root().join("quiet.pid");
         let requests = [proto::RunRequest {
@@ -868,6 +916,85 @@ mod tests {
         })
         .await
         .expect("the quiet command ended after its client went away");
+        harness.shutdown().await;
+    }
+
+    /// A stream admitted to a fence ends with `permission_denied` when its
+    /// admission is revoked, and ending it stops the command (#3586).
+    #[tokio::test]
+    async fn stream_exec_ends_and_stops_its_command_when_its_admission_is_revoked() {
+        let harness = DaemonHarness::spawn().await;
+        let revoke = std::sync::Arc::new(tokio::sync::Notify::new());
+        let bridge = ExecBridge::new(TestBackend {
+            daemon: harness.client().await,
+            deny_authorization: false,
+            revoke: Some(revoke.clone()),
+        });
+        let pid_file = harness.workspace_root().join("revoked.pid");
+        let message = proto::StreamExecRequest {
+            org_id: "local".into(),
+            environment_id: "environment".into(),
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "echo $$ > revoked.pid; exec sleep 300".into(),
+            ],
+            working_dir: harness.workspace_root().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let body = bytes::Bytes::from(message.encode_to_vec());
+        let view = proto::StreamExecRequest::decode_view(&body).expect("decode stream exec view");
+        let mut stream = proto::ExecService::stream_exec(
+            &bridge,
+            RequestContext::default(),
+            ServiceRequest::from_parts(&view, &body),
+        )
+        .await
+        .expect("open public stream exec")
+        .body;
+        let pid = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&pid_file)
+                    && let Ok(pid) = pid.trim().parse::<u32>()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the command started");
+        let alive = |pid: u32| {
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        assert!(alive(pid));
+
+        revoke.notify_one();
+        let ended = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match stream.next().await {
+                    Some(Ok(_)) => continue,
+                    Some(Err(error)) => break Some(error),
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .expect("the stream ended")
+        .expect("with an error");
+        assert_eq!(ended.code, connectrpc::ErrorCode::PermissionDenied);
+        assert_eq!(ended.message.as_deref(), Some("access revoked"));
+        assert!(stream.next().await.is_none());
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while alive(pid) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the command stopped when its stream was revoked");
         harness.shutdown().await;
     }
 }

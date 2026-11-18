@@ -6781,6 +6781,17 @@ async fn refresh_reuse(pool: PgPool) {
             .unwrap()
             .is_some()
     );
+    // The desktop grant is logged as revoked, so its streams end (#3586);
+    // the iOS grant is not.
+    let grants: Vec<String> = sqlx::query_scalar(
+        "SELECT credential_id FROM credential_revocations \
+         WHERE kind = 'oauth_grant' AND user_id = $1 ORDER BY credential_id",
+    )
+    .bind(USER)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(grants, vec![CLIENT.to_owned()]);
 
     // An expired token is refused, and revokes nothing.
     tokens

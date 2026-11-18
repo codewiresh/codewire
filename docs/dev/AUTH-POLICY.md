@@ -376,11 +376,54 @@ token store. Relying parties that need live account status must use token
 introspection instead of offline ID-token validation.
 
 Disablement is checked when Codewire authenticates a new request or begins a
-new stream. This migration does not forcibly terminate an already admitted
-terminal, exec, file, or other long-lived stream; that residual authority lasts
-only until the stream's existing closure or reauthorization boundary. A future
-active-stream revocation feature must explicitly close those connections rather
-than claiming that database token revocation does so.
+new stream. A stream already admitted ends when the authority that admitted it
+is lost (#3586). An exec, file, attach or log-follow stream ends in four
+cases:
+
+- its user is disabled, which covers suspension and account deletion;
+- the browser session that admitted it is deleted before it expired: a
+  sign-out, signing out one session, a password reset or a 2FA replacement;
+- the OAuth access token that admitted it is deleted before it expired, by
+  revocation or a password reset, or refresh-token reuse revokes its grant
+  (the user and the client);
+- the API key that admitted it is disabled or deleted.
+
+Such a stream ends within seconds normally, and within 30 seconds at most.
+Expiry never ends a stream (#3827): one whose credential expired runs on until
+one of the four cases applies to its user, grant or key. A sign-out ends only
+the streams its own session admitted, so another machine's stream keeps
+running.
+
+The database records each loss in `credential_revocations`:
+- **Writers:** only database code. Triggers on `users`, `sessions`,
+  `oidc_access_tokens` and `api_keys` write it, and the refresh-token reuse
+  path calls `codewire_revoke_oauth_grant` inside its own transaction. A
+  repository policy check refuses service code that inserts, updates or
+  deletes log rows. A new way of ending a credential adds its trigger, or
+  calls the log's function, in the same change.
+- **Contents:** a row holds ids and token hashes, never a credential. The
+  writing function removes rows older than an hour.
+- **Threat:** a forged row can only end streams, never grant access. Whoever
+  holds the services' database role can already delete sessions or disable
+  users, so the check guards against a bug in service code, not against
+  that role. The services run as the database owner (#5166).
+- **Delivery:** each row wakes every service process. Each process also reads
+  the log by its sequence every 30 seconds, so a missed wake-up costs at most
+  that.
+- **Admission:** a stream registers first, then re-reads the same check that
+  admitted it, so a revocation and a new admission can't race. A revocation
+  committed before the re-read refuses the stream, and one after it ends the
+  stream. A row the re-read already saw never ends the stream, so an account
+  disabled and enabled again, or signed in again after a revoked grant, opens
+  streams at once. A re-read that fails refuses the stream with
+  `unavailable`.
+
+A revoked Connect stream ends with `permission_denied`, "access revoked". A
+WebSocket closes with code 1008. Each writes a `stream.revoked` audit event
+naming the user, the kind of loss, the surface and the environment, never a
+credential or the stream's contents. The terminal and SSH-proxy WebSockets,
+the coordinator's and Mesh sessions, and removal from an organization don't
+end a stream yet.
 
 ## Account suspension
 

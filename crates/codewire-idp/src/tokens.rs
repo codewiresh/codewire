@@ -308,9 +308,13 @@ impl TokenStore for PgTokenStore {
         .map_err(StoreError::new)?;
         let replayed_client = if let Some((client_id, user_id, rotated_secs_ago)) = rotated {
             if self.revoke_reused {
+                // The grant's own revocation ends streams its access tokens
+                // admitted even where those tokens have since expired
+                // (AUTH-POLICY "Account access revocation", #3586).
                 for statement in [
                     "DELETE FROM oidc_refresh_tokens WHERE user_id = $1 AND client_id = $2",
                     "DELETE FROM oidc_access_tokens WHERE user_id = $1 AND client_id = $2",
+                    "SELECT codewire_revoke_oauth_grant($1, $2)",
                 ] {
                     sqlx::query(statement)
                         .bind(&user_id)

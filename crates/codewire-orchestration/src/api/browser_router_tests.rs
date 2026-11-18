@@ -55,6 +55,7 @@ async fn state() -> ApiState {
         network_policy_flags: Default::default(),
         environment_logs: super::log_notifications::EnvironmentLogNotifications::new(1),
         drain: Default::default(),
+        revocation: codewire_server_core::revocation::Fence::new(),
     }
 }
 

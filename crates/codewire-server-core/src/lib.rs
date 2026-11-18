@@ -58,6 +58,7 @@ pub mod peer_token;
 #[cfg(feature = "kubernetes-identity")]
 pub mod pod_identity;
 pub mod rate_limit;
+pub mod revocation;
 pub mod runtime_images;
 pub mod span_free;
 pub mod validation;

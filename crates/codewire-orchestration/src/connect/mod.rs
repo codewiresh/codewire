@@ -34,6 +34,26 @@ pub mod snapshots;
 /// Shared D12 renderer for sandbox-gated RPCs. ExecService and FileService
 /// both call the same target gate, so state/access/upstream failures must keep
 /// one canonical Connect meaning.
+/// Admits a stream on `surface` to this process's revocation fence (#3586),
+/// with the end it takes when the authority that admitted it is lost.
+pub(crate) async fn fenced_stream(
+    state: &crate::api::ApiState,
+    ctx: &RequestContext,
+    surface: &'static str,
+    environment_id: &str,
+) -> Result<codewire_daemon_bridge::drain::EndSignal, connectrpc::ConnectError> {
+    let (admitted, watch) =
+        codewire_server_core::connect::admit_stream(ctx, &state.revocation).await?;
+    Ok(watch.into_connect_end(
+        state.pool.clone(),
+        admitted,
+        codewire_server_core::revocation::StreamSite {
+            surface,
+            environment_id: Some(environment_id.to_owned()),
+        },
+    ))
+}
+
 pub(crate) fn rendered_workspace_error(
     error: &AppError,
     request_id: Option<&str>,

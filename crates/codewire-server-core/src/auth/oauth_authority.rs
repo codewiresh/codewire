@@ -79,6 +79,16 @@ impl OAuthBearerAuthority {
         &self.user_id
     }
 
+    /// The token's stored digest, which the revocation log names it by
+    /// ([`crate::revocation`]). Never the token.
+    pub(crate) fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub(crate) fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
     /// Remaining original authority lifetime, bounded by both clocks.
     ///
     /// A long-running caller may derive its initial wait deadline from this

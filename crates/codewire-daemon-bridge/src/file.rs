@@ -86,6 +86,17 @@ pub trait FileBackend: Clone + Send + Sync + 'static {
 
     fn authorize(&self, ctx: &RequestContext) -> Result<(), connectrpc::ConnectError>;
 
+    /// Admits a stream to this server's revocation fence (#3586): the end it
+    /// takes when the authority that admitted it is lost. `None`, the
+    /// default, for a server without one, as the local supervisor.
+    async fn admit_stream(
+        &self,
+        _ctx: &RequestContext,
+        _environment_id: &str,
+    ) -> Result<Option<crate::drain::EndSignal>, connectrpc::ConnectError> {
+        Ok(None)
+    }
+
     fn validation_error(
         &self,
         violations: Vec<FieldViolation>,
@@ -200,6 +211,10 @@ where
                 .backend
                 .validation_error(violations, request_id.as_deref()));
         }
+        let revoked = self
+            .backend
+            .admit_stream(&ctx, &request.environment_id)
+            .await?;
         let daemon = self
             .backend
             .daemon(&ctx, &request.org_id, &request.environment_id)
@@ -228,10 +243,14 @@ where
         ));
         // File bytes are often incompressible. Gzip made each chunk larger and
         // cost the server and the client a pass over it, so send them as is.
-        Ok(connectrpc::Response::stream(crate::drain::end_at(
+        Ok(connectrpc::Response::stream(crate::drain::end_on(
             receiver_stream(rx),
-            self.backend.server_restart(Restart::Deadline),
-            DOWNLOAD_RESTARTED,
+            crate::drain::restart_end(
+                self.backend.server_restart(Restart::Deadline),
+                DOWNLOAD_RESTARTED,
+            )
+            .into_iter()
+            .chain(revoked),
         ))
         .compress(false))
     }
@@ -286,6 +305,10 @@ where
             self.backend
                 .validation_error(vec![violation], request_id.as_deref())
         })?;
+        let revoked = self
+            .backend
+            .admit_stream(&ctx, &header.environment_id)
+            .await?;
         let daemon = self
             .backend
             .daemon(&ctx, &header.org_id, &header.environment_id)
@@ -313,12 +336,7 @@ where
             .await;
             let _ = response_tx.send(result);
         });
-        response_rx.await.unwrap_or_else(|_| {
-            Err(connectrpc::ConnectError::new(
-                connectrpc::ErrorCode::Internal,
-                "upload worker stopped",
-            ))
-        })
+        worker_reply(response_rx, revoked).await
     }
 
     async fn upload_file_part(
@@ -381,6 +399,10 @@ where
             self.backend
                 .validation_error(vec![violation], request_id.as_deref())
         })?;
+        let revoked = self
+            .backend
+            .admit_stream(&ctx, &header.environment_id)
+            .await?;
         let daemon = self
             .backend
             .daemon(&ctx, &header.org_id, &header.environment_id)
@@ -413,12 +435,7 @@ where
             .await;
             let _ = response_tx.send(result);
         });
-        response_rx.await.unwrap_or_else(|_| {
-            Err(connectrpc::ConnectError::new(
-                connectrpc::ErrorCode::Internal,
-                "upload worker stopped",
-            ))
-        })
+        worker_reply(response_rx, revoked).await
     }
 }
 
@@ -770,6 +787,26 @@ fn restart_deadline<B: FileBackend>(backend: &B) -> RestartSignal {
     backend
         .server_restart(Restart::Deadline)
         .unwrap_or_else(|| Box::pin(std::future::pending()))
+}
+
+/// The upload worker's reply, or the revocation's error if it comes first.
+/// Returning first drops the reply channel, which the worker treats as the
+/// request canceled: a whole file removes its staging file, and a part keeps
+/// what it wrote.
+async fn worker_reply<T>(
+    reply: tokio::sync::oneshot::Receiver<ServiceResult<T>>,
+    revoked: Option<crate::drain::EndSignal>,
+) -> ServiceResult<T> {
+    let revoked = revoked.unwrap_or_else(|| Box::pin(std::future::pending()));
+    tokio::select! {
+        result = reply => result.unwrap_or_else(|_| {
+            Err(connectrpc::ConnectError::new(
+                connectrpc::ErrorCode::Internal,
+                "upload worker stopped",
+            ))
+        }),
+        error = revoked => Err(error),
+    }
 }
 
 fn upload_canceled() -> connectrpc::ConnectError {

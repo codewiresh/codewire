@@ -34,6 +34,7 @@ from repo_policy.webpki_roots_floor import check_webpki_roots_floor
 from repo_policy.cargo_lock_integrity import check_cargo_lock_integrity
 from repo_policy.chart_deletion_guard import check_chart_deletion_guard
 from repo_policy.sqlx_sqlite_unused import check_sqlx_sqlite_unused
+from repo_policy.revocation_log_writers import check_revocation_log_writers
 from repo_policy.image_patch_paths import check_image_patch_paths
 from repo_policy.workspace_image_pin import check_workspace_image_pin
 from repo_policy.workspace_lints import check_workspace_lints
@@ -136,6 +137,9 @@ def main(argv: list[str] | None = None) -> int:
     sqlx_sqlite_parser = subparsers.add_parser("sqlx-sqlite-unused")
     sqlx_sqlite_parser.add_argument("--self-test", action="store_true")
     sqlx_sqlite_parser.set_defaults(func=check_sqlx_sqlite_unused)
+    revocation_log_parser = subparsers.add_parser("revocation-log-writers")
+    revocation_log_parser.add_argument("--self-test", action="store_true")
+    revocation_log_parser.set_defaults(func=check_revocation_log_writers)
     workspace_lints_parser = subparsers.add_parser("workspace-lints")
     workspace_lints_parser.add_argument("--self-test", action="store_true")
     workspace_lints_parser.set_defaults(func=check_workspace_lints)

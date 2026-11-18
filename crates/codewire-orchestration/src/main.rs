@@ -760,6 +760,9 @@ async fn main() -> anyhow::Result<()> {
         pool.clone(),
         host_operation_signals.clone(),
     );
+    // One LISTEN connection serves every fenced stream in this process.
+    let revocation = codewire_server_core::revocation::Fence::new();
+    revocation.spawn_listener(pool.clone());
     let api_state = codewire_orchestration::api::ApiState {
         credit_enforcement,
         pool: pool.clone(),
@@ -797,6 +800,7 @@ async fn main() -> anyhow::Result<()> {
         network_policy_flags,
         environment_logs,
         drain: drain.clone(),
+        revocation,
     };
 
     let connect_auth = codewire_server_core::connect::ConnectAuthLayer::authenticated(auth.clone())

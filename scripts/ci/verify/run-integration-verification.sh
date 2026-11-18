@@ -874,6 +874,12 @@ database_lane_core() {
   counted_suite "server-core pool health matrix" server-core-pool-health \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-server-core --lib db:: -- --ignored --nocapture --test-threads=1
+
+  # One thread: the race test times a wake-up on the shared channel.
+  counted_suite "server-core revocation fence matrix" server-core-revocation \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-server-core --lib revocation::database_tests:: \
+      -- --ignored --nocapture --test-threads=1
 }
 
 database_lane_credential_mutations() {

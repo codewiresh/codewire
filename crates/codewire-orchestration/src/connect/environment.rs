@@ -11,7 +11,7 @@ use std::time::Duration as StdDuration;
 use buffa::EnumValue;
 use buffa_types::{Duration, Struct, Timestamp};
 use chrono::{DateTime, NaiveDateTime};
-use codewire_daemon_bridge::drain::{Restart, end_at};
+use codewire_daemon_bridge::drain::{Restart, end_at, end_on, restart_end};
 use codewire_proto::codewire::v1 as proto;
 use codewire_server_core::connect::{auth_user, wire_error};
 use codewire_server_core::connect_error::ConnectError as RenderedConnectError;
@@ -710,6 +710,15 @@ impl proto::EnvironmentService for EnvironmentConnectService {
     ) -> ServiceResult<ServiceStream<proto::StreamLogsResponse>> {
         let user = auth_user(&ctx)?.clone();
         let request = request.to_owned_message();
+        // A follow lasts; a read of what is there ends by itself.
+        let revoked = if request.follow {
+            Some(
+                crate::connect::fenced_stream(&self.state, &ctx, "logs", &request.environment_id)
+                    .await?,
+            )
+        } else {
+            None
+        };
         let events = open_environment_log_stream(
             &self.state,
             &user,
@@ -733,10 +742,14 @@ impl proto::EnvironmentService for EnvironmentConnectService {
                 Some((message, events))
             }
         });
-        connectrpc::Response::stream_ok(end_at(
+        connectrpc::Response::stream_ok(end_on(
             stream,
-            Some(self.state.drain.signal(Restart::Deadline)),
-            WATCH_RESTARTED,
+            restart_end(
+                Some(self.state.drain.signal(Restart::Deadline)),
+                WATCH_RESTARTED,
+            )
+            .into_iter()
+            .chain(revoked),
         ))
     }
 }

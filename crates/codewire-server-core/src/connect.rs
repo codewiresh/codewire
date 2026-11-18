@@ -1099,6 +1099,10 @@ fn normalize_method_path(path: String) -> String {
     }
 }
 
+mod admission;
+
+pub use admission::{AdmissionRecheck, admit_stream};
+
 async fn enforce_connect_auth(layer: Arc<ConnectAuthLayer>, req: Request, next: Next) -> Response {
     crate::connect_cache_policy::forbid_storage(authorize_and_dispatch(layer, req, next).await)
 }
@@ -1125,76 +1129,36 @@ async fn authorize_and_dispatch(
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
     let request_headers = req.headers().clone();
-    let auth_timeout = connect_auth_resolution_timeout(req.headers());
-    let resolved = match bounded_authentication(
-        async {
-            match layer.credential_policy {
-                ConnectCredentialPolicy::Product => resolve_authentication(
-                    &layer.state,
-                    session_cookie(&request_headers),
-                    bearer_token(&request_headers),
-                )
-                .await
-                .map(|auth| (auth, None)),
-                ConnectCredentialPolicy::OAuthBearerOnly => {
-                    resolve_oauth_bearer_authentication(&layer.state, &request_headers)
-                        .await
-                        .map(|auth| (auth, None))
-                }
-                ConnectCredentialPolicy::CredentialMutation => {
-                    let origin = layer
-                        .session_origin
-                        .as_ref()
-                        .expect("credential mutation policy has a session origin");
-                    resolve_credential_mutation_authentication(
-                        &layer.state,
-                        &request_headers,
-                        origin,
-                    )
-                    .await
-                    .map(|(auth, authority)| (auth, Some(authority)))
-                }
-            }
-        },
-        auth_timeout,
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(failure) => {
+    let path = req.uri().path().to_owned();
+    let (auth, mutation_authority) = match admission::admit(&layer, &request_headers, &path).await {
+        Ok(admitted) => admitted,
+        Err(admission::Refusal::Unresolved { failure, timeout }) => {
             return connect_auth_failure_response(
                 failure,
-                auth_timeout,
+                timeout,
                 request_id.as_deref(),
                 &request_headers,
             );
         }
+        Err(admission::Refusal::Unauthorized { error, auth }) => {
+            let mut resp = rejection_response(&error, request_id.as_deref(), &request_headers);
+            // Authentication succeeded even though authorization failed, so
+            // the event retains the validated credential and principal
+            // evidence.
+            resp.extensions_mut()
+                .insert(RpcCredentialKind(auth.credential.kind().as_str()));
+            resp.extensions_mut()
+                .insert(RpcPrincipalEvidence::authenticated(
+                    &auth.user.user_id,
+                    &layer.synthetic_user_ids,
+                ));
+            return resp;
+        }
     };
-    let (auth, mutation_authority) = resolved;
 
     let credential = RpcCredentialKind(auth.credential.kind().as_str());
     let principal_evidence =
         RpcPrincipalEvidence::authenticated(&auth.user.user_id, &layer.synthetic_user_ids);
-
-    if let Err(err) = require_product_access(&auth) {
-        let mut resp = rejection_response(&err, request_id.as_deref(), &request_headers);
-        // Authentication succeeded even though authorization failed, so the
-        // event retains the validated credential and principal evidence.
-        resp.extensions_mut().insert(credential);
-        resp.extensions_mut().insert(principal_evidence);
-        return resp;
-    }
-
-    if (layer.admin_mount || layer.admin_methods.contains(req.uri().path()))
-        && let Err(err) = auth.user.require_global_admin()
-    {
-        let mut resp = rejection_response(&err, request_id.as_deref(), &request_headers);
-        // Authentication succeeded even though authorization failed, so the
-        // event retains the validated principal classification.
-        resp.extensions_mut().insert(credential);
-        resp.extensions_mut().insert(principal_evidence);
-        return resp;
-    }
 
     if let Some(authority) = auth.oauth_bearer_authority {
         req.extensions_mut().insert(authority);
@@ -1204,6 +1168,12 @@ async fn authorize_and_dispatch(
     }
     req.extensions_mut().insert(auth.credential);
     req.extensions_mut().insert(auth.user);
+    req.extensions_mut()
+        .insert(admission::AdmissionRecheck::new(
+            Arc::clone(&layer),
+            request_headers,
+            path,
+        ));
     let mut resp = next.run(req).await;
     resp.extensions_mut().insert(credential);
     resp.extensions_mut().insert(principal_evidence);

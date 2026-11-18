@@ -37,6 +37,16 @@ impl FileBackend for PlatformFileBackend {
         auth_user(ctx).map(|_| ())
     }
 
+    async fn admit_stream(
+        &self,
+        ctx: &RequestContext,
+        environment_id: &str,
+    ) -> Result<Option<codewire_daemon_bridge::drain::EndSignal>, connectrpc::ConnectError> {
+        crate::connect::fenced_stream(&self.state, ctx, "file", environment_id)
+            .await
+            .map(Some)
+    }
+
     fn validation_error(
         &self,
         violations: Vec<FieldViolation>,

@@ -58,6 +58,17 @@ pub trait EnvironmentSessionBackend: Clone + Send + Sync + 'static {
 
     fn authorize(&self, ctx: &RequestContext) -> Result<(), connectrpc::ConnectError>;
 
+    /// Admits a stream to this server's revocation fence (#3586): the end it
+    /// takes when the authority that admitted it is lost. `None`, the
+    /// default, for a server without one, as the local supervisor.
+    async fn admit_stream(
+        &self,
+        _ctx: &RequestContext,
+        _environment_id: &str,
+    ) -> Result<Option<crate::drain::EndSignal>, connectrpc::ConnectError> {
+        Ok(None)
+    }
+
     fn validation_error(
         &self,
         violations: Vec<FieldViolation>,
@@ -422,6 +433,10 @@ where
                 .backend
                 .validation_error(violations, request_id.as_deref()));
         }
+        let revoked = self
+            .backend
+            .admit_stream(&ctx, &open.environment_id)
+            .await?;
         let attachment = self
             .backend
             .attach(
@@ -442,12 +457,16 @@ where
         ));
         // A durable session outlives its attachment: the client re-attaches
         // to the next replica as soon as this one begins draining.
-        connectrpc::Response::stream_ok(crate::drain::end_at(
+        connectrpc::Response::stream_ok(crate::drain::end_on(
             futures::stream::unfold(rx, |mut rx| async move {
                 rx.recv().await.map(|item| (item, rx))
             }),
-            self.backend.server_restart(Restart::Begins),
-            SESSION_RESTARTED,
+            crate::drain::restart_end(
+                self.backend.server_restart(Restart::Begins),
+                SESSION_RESTARTED,
+            )
+            .into_iter()
+            .chain(revoked),
         ))
     }
 }
