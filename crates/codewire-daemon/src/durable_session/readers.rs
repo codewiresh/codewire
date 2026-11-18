@@ -141,6 +141,19 @@ impl SessionEngine {
     pub(crate) fn reader(&self, session_id: &str, cursor: u64) -> Option<Reader> {
         Some(Reader::on(self.handle(session_id).ok()?, cursor))
     }
+
+    /// Test-only: `session_id`'s readers hold its command back for `stall`
+    /// instead of [`READER_STALL`], so a test of a reader that stops reading
+    /// need not wait the product's bound.
+    #[cfg(test)]
+    pub(crate) fn set_test_reader_stall(
+        &self,
+        session_id: &str,
+        stall: Duration,
+    ) -> Result<(), super::SessionError> {
+        lock(&self.handle(session_id)?.readers).stall = stall;
+        Ok(())
+    }
 }
 
 /// Waits until recording `length` more bytes leaves every reader's unread

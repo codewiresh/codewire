@@ -2538,6 +2538,12 @@ mod tests {
             ..Default::default()
         }).await.unwrap();
         wait_attach_fixture_ready(&temp, &engine, &session.session_id).await;
+        // The blocked attachment below holds capture back until its stall
+        // runs out; a short one keeps the release, the compaction and the
+        // gap, without waiting the product's 30 s.
+        engine
+            .set_test_reader_stall(&session.session_id, Duration::from_secs(1))
+            .unwrap();
         tokio::time::timeout(
             TRANSCRIPT_HANG,
             engine.append_test_output(&session.session_id, &vec![0; 262144]),

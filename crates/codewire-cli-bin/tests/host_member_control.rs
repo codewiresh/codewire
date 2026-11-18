@@ -1829,123 +1829,130 @@ fn journey_root() -> PathBuf {
     }
 }
 
+// The two transports are separate tests so they run side by side; each
+// journey is about half of the whole and shares nothing with the other: its
+// own root, binaries, services and isolated child process.
 #[test]
-fn host_members_two_real_endpoints_direct_and_tls_derp() {
+fn host_members_two_real_endpoints_direct() {
+    isolated_member_journey("direct");
+}
+
+#[test]
+fn host_members_two_real_endpoints_tls_derp() {
+    isolated_member_journey("derp");
+}
+
+fn isolated_member_journey(transport: &str) {
     // Each journey owns a separate subreaper process, rather than changing the
     // Cargo test parent's process-wide custody while other tests may execute.
-    for transport in ["direct", "derp"] {
-        let root = journey_root();
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        // Cargo runs an integration test in its package directory. Stage
-        // executable payloads under the repository's owned .tmp, not /tmp
-        // (which may be noexec), and never rely on a precreated package .tmp.
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap();
-        let artifact_parent = repository.join(".tmp");
-        match fs::create_dir(&artifact_parent) {
-            Ok(()) => {
-                fs::set_permissions(&artifact_parent, fs::Permissions::from_mode(0o700)).unwrap()
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => panic!("owned artifact parent: {error}"),
-        }
-        let metadata = fs::symlink_metadata(&artifact_parent).unwrap();
-        assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
-        assert_eq!(metadata.uid(), effective_uid());
-        assert_eq!(metadata.mode() & 0o022, 0);
-        let artifacts = tempfile::Builder::new()
-            .prefix("host-member-binaries-")
-            .permissions(fs::Permissions::from_mode(0o700))
-            .tempdir_in(&artifact_parent)
-            .unwrap()
-            .keep();
-        for label in ["target", "caller"] {
-            let path = artifacts.join(format!("{label}-cw"));
-            cw_fixture::prepare(&path);
-            assert_eq!(fs::symlink_metadata(&path).unwrap().nlink(), 1);
-        }
-        let stdout = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(root.join("child.stdout"))
-            .unwrap();
-        let stderr = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(root.join("child.stderr"))
-            .unwrap();
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--ignored",
-                "--exact",
-                "host_member_isolated_kernel_journey",
-                "--nocapture",
-            ])
-            .env_clear()
-            .env("CW_MEMBER_CASE_ROOT", &root)
-            .env("CW_MEMBER_CASE_BINARIES", &artifacts)
-            .env("CW_MEMBER_CASE_TRANSPORT", transport)
-            .env("PATH", "/usr/bin:/bin")
-            .current_dir(std::env::current_dir().unwrap())
-            .stdin(Stdio::null())
-            .stdout(stdout)
-            .stderr(stderr)
-            .spawn()
-            .unwrap();
-        let handle =
-            OwnedChild::capture(child.id(), Some(&std::env::current_exe().unwrap())).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(280);
-        while child.try_wait().unwrap().is_none() {
-            if Instant::now() >= deadline {
-                // The isolated fixture handles TERM by failing its journey
-                // and closing only its adopted owned families. Timeout never
-                // grants authority over another process or a cleanup success.
-                handle.signal(libc::SIGTERM).unwrap();
-                let grace = Instant::now() + Duration::from_secs(20);
-                while child.try_wait().unwrap().is_none() && Instant::now() < grace {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                assert!(
-                    child.try_wait().unwrap().is_some(),
-                    "isolated custody did not return; exact roots and process retained {} {}",
-                    root.display(),
-                    artifacts.display()
-                );
-                panic!(
-                    "isolated member journey exceeded bound; roots retained {} {}",
-                    root.display(),
-                    artifacts.display()
-                );
-            }
-            std::thread::sleep(Duration::from_millis(30));
-        }
-        let status = child.wait().unwrap();
-        let stdout = bounded_read(&root.join("child.stdout"));
-        let stderr = bounded_read(&root.join("child.stderr"));
-        assert!(
-            status.success(),
-            "{}\n{}\nretained roots {} {}",
-            String::from_utf8_lossy(&stdout),
-            String::from_utf8_lossy(&stderr),
-            root.display(),
-            artifacts.display()
-        );
-        let report: Value =
-            serde_json::from_slice(&fs::read(root.join("report.json")).unwrap()).unwrap();
-        assert_eq!(report["kernel_echild"], true);
-        assert_eq!(report["cleanup_salvage"], false);
-        println!(
-            "observed host member {transport}: {}",
-            serde_json::to_string(&report).unwrap()
-        );
-        fs::remove_dir_all(&root).unwrap();
-        fs::remove_dir_all(&artifacts).unwrap();
+    let root = journey_root();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    // Cargo runs an integration test in its package directory. Stage
+    // executable payloads under the repository's owned .tmp, not /tmp
+    // (which may be noexec), and never rely on a precreated package .tmp.
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let artifact_parent = repository.join(".tmp");
+    match fs::create_dir(&artifact_parent) {
+        Ok(()) => fs::set_permissions(&artifact_parent, fs::Permissions::from_mode(0o700)).unwrap(),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => panic!("owned artifact parent: {error}"),
     }
+    let metadata = fs::symlink_metadata(&artifact_parent).unwrap();
+    assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+    assert_eq!(metadata.uid(), effective_uid());
+    assert_eq!(metadata.mode() & 0o022, 0);
+    let artifacts = tempfile::Builder::new()
+        .prefix("host-member-binaries-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir_in(&artifact_parent)
+        .unwrap()
+        .keep();
+    for label in ["target", "caller"] {
+        let path = artifacts.join(format!("{label}-cw"));
+        cw_fixture::prepare(&path);
+        assert_eq!(fs::symlink_metadata(&path).unwrap().nlink(), 1);
+    }
+    let stdout = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.join("child.stdout"))
+        .unwrap();
+    let stderr = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.join("child.stderr"))
+        .unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "host_member_isolated_kernel_journey",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env("CW_MEMBER_CASE_ROOT", &root)
+        .env("CW_MEMBER_CASE_BINARIES", &artifacts)
+        .env("CW_MEMBER_CASE_TRANSPORT", transport)
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir(std::env::current_dir().unwrap())
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
+        .unwrap();
+    let handle = OwnedChild::capture(child.id(), Some(&std::env::current_exe().unwrap())).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(280);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            // The isolated fixture handles TERM by failing its journey
+            // and closing only its adopted owned families. Timeout never
+            // grants authority over another process or a cleanup success.
+            handle.signal(libc::SIGTERM).unwrap();
+            let grace = Instant::now() + Duration::from_secs(20);
+            while child.try_wait().unwrap().is_none() && Instant::now() < grace {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                child.try_wait().unwrap().is_some(),
+                "isolated custody did not return; exact roots and process retained {} {}",
+                root.display(),
+                artifacts.display()
+            );
+            panic!(
+                "isolated member journey exceeded bound; roots retained {} {}",
+                root.display(),
+                artifacts.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    let status = child.wait().unwrap();
+    let stdout = bounded_read(&root.join("child.stdout"));
+    let stderr = bounded_read(&root.join("child.stderr"));
+    assert!(
+        status.success(),
+        "{}\n{}\nretained roots {} {}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr),
+        root.display(),
+        artifacts.display()
+    );
+    let report: Value =
+        serde_json::from_slice(&fs::read(root.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["kernel_echild"], true);
+    assert_eq!(report["cleanup_salvage"], false);
+    println!(
+        "observed host member {transport}: {}",
+        serde_json::to_string(&report).unwrap()
+    );
+    fs::remove_dir_all(&root).unwrap();
+    fs::remove_dir_all(&artifacts).unwrap();
 }
 
 #[test]
