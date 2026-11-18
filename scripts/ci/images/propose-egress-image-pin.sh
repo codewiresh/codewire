@@ -68,17 +68,20 @@ cleanup() {
   rm -rf "$work"
 }
 trap cleanup EXIT
-# Git reads the credential from its environment configuration, never argv.
-export GIT_CONFIG_COUNT=1
-export GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader"
-GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$token" | base64 -w0)"
-export GIT_CONFIG_VALUE_0
+# Git reads the credential from its environment configuration, never argv,
+# and only the forge calls get it: the planner, tag script and verifier run
+# without it.
+git_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$token" | base64 -w0)"
+forge_git() {
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
+    GIT_CONFIG_VALUE_0="$git_header" git "$@"
+}
 printf 'header = "Authorization: token %s"\nsilent\nshow-error\nfail\n' "$token" >"$work/api.curl"
 token=''
 api="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}"
 
 cd "$ROOT"
-git fetch -q origin main
+forge_git fetch -q origin main
 main_sha="$(git rev-parse --verify origin/main)"
 # Only main's newest commit proposes: a newer commit may carry other inputs.
 if [[ "$main_sha" != "$GITHUB_SHA" ]]; then
@@ -114,14 +117,13 @@ done <<<"$sources"
 [[ -n "$accepted" ]] ||
   die "no verified signature of $reference names a source on main with fingerprint $fingerprint"
 
-
 curl --config "$work/api.curl" "${CURL_BOUNDS[@]}" --output "$work/open.json" \
   "${api}/pulls?state=open&page=1&limit=50"
 proposal_open=false
 if jq -e --arg branch "$BRANCH" 'any(.[]; .head.ref == $branch)' "$work/open.json" >/dev/null; then
   proposal_open=true
 fi
-if [[ "$proposal_open" == true ]] && git fetch -q origin "refs/heads/${BRANCH}" 2>/dev/null &&
+if [[ "$proposal_open" == true ]] && forge_git fetch -q origin "refs/heads/${BRANCH}" 2>/dev/null &&
     [[ "$(pin show --commit "$(git rev-parse FETCH_HEAD)")" == "$digest" ]]; then
   say "the open proposal already pins $digest; its CI runs on"
   exit 0
@@ -137,7 +139,7 @@ GIT_AUTHOR_NAME="$BOT_NAME" GIT_AUTHOR_EMAIL="$BOT_EMAIL" \
   git -c commit.gpgsign=false commit -q \
   -m "chore(egress): pin the cw-egress image signed from ${accepted:0:12}" \
   -m "Dev delivery signed ${digest} (main-CI verified) from ${accepted}, whose egress inputs are main's (fingerprint ${fingerprint})."
-git push -q --force origin "HEAD:refs/heads/${BRANCH}"
+forge_git push -q --force origin "HEAD:refs/heads/${BRANCH}"
 
 if [[ "$proposal_open" == true ]]; then
   say "updated the open proposal on ${BRANCH} to ${digest}"

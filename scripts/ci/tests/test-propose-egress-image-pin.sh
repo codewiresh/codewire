@@ -40,6 +40,7 @@ printf 'synthetic public key\n' >"$repo/scripts/ci/trust/codewire-runtime-signin
 # The planner reads each commit's fingerprint from a map the test writes.
 cat >"$repo/scripts/ci/plan/planner.py" <<'PY'
 import json, os, sys
+assert not os.environ.get("GIT_CONFIG_VALUE_0"), "the planner inherited the bot header"
 args = sys.argv[1:]
 head = args[args.index("--head") + 1]
 output = args[args.index("--output") + 1]
@@ -50,6 +51,7 @@ cat >"$repo/scripts/ci/images/egress-image-tag.sh" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$1" == fp-digest ]] || exit 64
+[[ -z "${GIT_CONFIG_VALUE_0:-}" ]] || { echo 'the tag script inherited the bot header' >&2; exit 97; }
 [[ -n "${FAKE_FP_DIGEST:-}" ]] || exit 3
 printf '%s\n' "$FAKE_FP_DIGEST"
 MOCK
@@ -57,6 +59,7 @@ cat >"$repo/scripts/ci/images/verify-runtime-image-signatures.sh" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$1" == --egress ]] || exit 64
+[[ -z "${GIT_CONFIG_VALUE_0:-}" ]] || { echo 'the verifier inherited the bot header' >&2; exit 97; }
 printf '%s\n' "$2" >>"${FAKE_VERIFY_CALLS:?}"
 [[ -n "${FAKE_SIGNED_SOURCES:-}" ]] || { echo 'no valid signature' >&2; exit 1; }
 printf '%s\n' $FAKE_SIGNED_SOURCES
