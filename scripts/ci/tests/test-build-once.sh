@@ -681,6 +681,8 @@ legs_build() {
   rm -rf "$work/legs-out" "$work/legs-state"; mkdir -p "$work/legs-out" "$work/legs-state"
   # The shared cache's credential file, as the selector leaves it in RUNNER_TEMP.
   [ -z "${LEGS_CREDENTIAL:-}" ] || install -m 0600 /dev/null "$work/legs-state/codewire-sccache-r2.aws"
+  # A cache socket something already holds, as a leftover or another server.
+  [ -z "${LEGS_HELD_SOCKET:-}" ] || : > "$work/legs-state/$LEGS_HELD_SOCKET"
   mkdir -p "$work/legs-root/build/targets/archive/debug/deps"
   printf 'half' > "$work/legs-root/build/targets/archive/debug/deps/libbroken.rlib"
   PATH="$work/legs-bin:$PATH" BUILD_ONCE_ROOT="$work/legs-root" BUILD_ONCE_SRC="$legs_src" \
@@ -890,7 +892,8 @@ if sys.argv[1:] == ["--stats-format", "json"]:
 else:
     print("Cache hits                            3")
     print("Cache location                  " + location)
-    for index, level in enumerate((levels or "").split("|") if levels else []):
+    # A pull request read-only server lists no level (the build of #5281).
+    for index, level in enumerate((levels or "").split("|") if levels and not os.environ.get("FAKE_SCCACHE_HIDE_LEVELS") else []):
         kind, where = level.split("=", 1)
         print("  L%d (%s)                     %s" % (index, kind, where))
     print("Version (client)                0.17.0")
@@ -951,6 +954,21 @@ for stray in SCCACHE_REDIS AWS_ACCESS_KEY_ID; do
 done
 grep -q '^\[build-once\] leg archive: sccache hits=3 misses=1 hit_rate=75.0 .* location=Multi-level (2 levels)' "$work/legs.log" ||
   fail "the leg did not log its cache's location: $(cat "$work/legs.log")"
+# A server that lists no level, as a pull request's read-only one does, keeps
+# its two levels when the settings were the job's own; three are refused.
+FAKE_SCCACHE_HIDE_LEVELS=1 FAKE_SCCACHE_LEVELS="$shared_levels" shared_legs_build ||
+  fail "a build with an unlisted two-level cache failed: $(cat "$work/legs.log")"
+! grep -q "compiler cache is not this build folder's" "$work/legs.log" ||
+  fail "a leg refused a two-level cache whose server lists no level: $(cat "$work/legs.log")"
+FAKE_SCCACHE_HIDE_LEVELS=1 FAKE_SCCACHE_LEVELS="$shared_levels|redis=Redis" shared_legs_build ||
+  fail "a build with an unlisted three-level cache failed: $(cat "$work/legs.log")"
+grep -q "the archive leg's compiler cache is not this build folder's.*Multi-level (3 levels)" "$work/legs.log" ||
+  fail "an unlisted three-level cache was not refused with its reason: $(cat "$work/legs.log")"
+# A socket something already holds is refused before any server starts.
+LEGS_HELD_SOCKET=build-once-sccache-archive.sock FAKE_SCCACHE_LEVELS="$shared_levels" shared_legs_build ||
+  fail "a build with a held socket failed: $(cat "$work/legs.log")"
+grep -q "the archive leg's compiler cache is not this build folder's.*(a server already held $work/legs-state/build-once-sccache-archive.sock)" "$work/legs.log" ||
+  fail "a socket something already held was not refused: $(cat "$work/legs.log")"
 # A server whose levels are not exactly this folder's disk and the job's
 # bucket leaves its leg uncached.
 for levels in "disk=Local disk: \"/elsewhere\"|s3=s3, name: protected-bucket, prefix: /protected/codewire/v1/" \

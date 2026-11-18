@@ -820,8 +820,21 @@ run_one_leg() {
     # Each leg has its own server on the one cache folder, so its hit rate is
     # its own.
     export SCCACHE_SERVER_UDS="${RUNNER_TEMP:-/tmp}/build-once-sccache-$name.sock"
-    if ! "$sccache_bin" --start-server >/dev/null 2>&1 || ! sccache_is_selected; then
-      echo "::warning::build-once: the $name leg's compiler cache is not this build folder's, or the shared one the job selected; it compiles without it"
+    local start_output reason=''
+    # The leg starts its own server on a socket nothing else holds, so the
+    # server that answers is the one started with this leg's settings.
+    if [ -e "$SCCACHE_SERVER_UDS" ]; then
+      reason="a server already held $SCCACHE_SERVER_UDS"
+    elif ! start_output="$("$sccache_bin" --start-server 2>&1)"; then
+      reason="its server did not start: $(printf '%s' "$start_output" | tail -n 1 | tr -d '\r' | cut -c1-200)"
+    elif ! sccache_is_selected; then
+      # What the server says it caches in: folder, bucket name and prefix,
+      # never a credential.
+      reason="its server reports: $("$sccache_bin" --show-stats 2>/dev/null |
+        sed -n '/^Cache location/,/^[A-Z]/p' | sed '$d' | tr -s ' ' | tr '\n' ';' | cut -c1-300)"
+    fi
+    if [ -n "$reason" ]; then
+      echo "::warning::build-once: the $name leg's compiler cache is not this build folder's, or the shared one the job selected; it compiles without it ($reason)"
       "$sccache_bin" --stop-server >/dev/null 2>&1 || true
       export BUILD_ONCE_NO_CACHE=1
     fi
@@ -921,8 +934,9 @@ sys.exit(0 if location == f"Local disk: \"{sys.argv[1]}\"" else 1)
   # A multi-level server's JSON names no level: sccache 0.17 reports only
   # "Multi-level (2 levels)", which refused every leg's cache on every build
   # VM (runs 59311, 59332). Its text report lists each level under "Cache
-  # location"; exactly two must be there, this folder's disk and the job's
-  # bucket under the protected prefix.
+  # location" on a main build; when it lists them, they must be exactly this
+  # folder's disk and the job's bucket under the protected prefix. A pull
+  # request's lists none, and two levels are then the settings' own.
   "$sccache_bin" --show-stats 2>/dev/null | python3 -c '
 import re, sys
 directory, bucket = sys.argv[1], sys.argv[2]
@@ -938,7 +952,10 @@ for line in lines[start + 1:]:
     levels.append(match.groups())
 expected = [("0", "disk", f"Local disk: \"{directory}\""),
             ("1", "s3", f"s3, name: {bucket}, prefix: /protected/codewire/v1/")]
-sys.exit(0 if levels == expected else 1)
+# A pull request read-only server lists no level (the build of #5281); its
+# two levels are then the ones sccache_shared checked in the settings the leg
+# started it with, on a socket nothing else held (run_one_leg).
+sys.exit(0 if levels == expected or not levels else 1)
 ' "$sccache_dir" "$bucket"
 }
 
