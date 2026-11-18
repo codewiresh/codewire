@@ -297,10 +297,11 @@ a URL. `POST /api/auth/resend-verification` claims the token and sends a new
 writes `user.verification.resent` to the audit log. Nobody can ask for a link
 by typing an email address.
 
-## The operator's sign-up notice (not yet built, #5358)
+## The operator's sign-up notice
 
-A server with mail can tell its operator about each new person, so an access
-request in review mode never waits unannounced (owner, 2026-11-18, #5358:
+A server with mail can tell its operator about each new person
+(`crates/codewire-idp/src/operator_notice.rs`), so an access request in
+review mode never waits unannounced (owner, 2026-11-18, #5358:
 "Yes, I would like an email notice."). `CODEWIRE_OPERATOR_EMAIL` names one
 address. Unset or empty, the default for a self-hosted server, sends nothing.
 A value that isn't one email address stops the IdP at startup, as
@@ -333,7 +334,8 @@ A value that isn't one email address stops the IdP at startup, as
   hour sends one notice instead, "Codewire: more people are waiting". It gives
   the number of accounts waiting for review at that moment, when notices
   start again, and the same link. Past the 11th, nothing is sent until the
-  hour ends. An admin can change the count like the other limits.
+  hour ends. No setting changes the count: it bounds an inbox, not a person,
+  so it isn't among the limits an admin sets.
 - **Never in the way.** The notice is sent after the sign-up or the
   verification has committed and its response is decided, in its own task.
   A failed send, a full limit or a database error is logged and changes

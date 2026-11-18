@@ -174,6 +174,17 @@ pub const INVITATION_LOOKUP: Limit = Limit {
     per_user: false,
 };
 
+/// The operator's sign-up notices (#5358), counted site-wide under one
+/// subject at this fixed count, which no setting raises: it bounds an inbox,
+/// not a person, so it is not among [`LIMITS`].
+pub const OPERATOR_NOTICE: Limit = Limit {
+    name: "operator_notice",
+    key_prefix: "operator_notice",
+    window_secs: 3_600,
+    default_max: 10,
+    per_user: false,
+};
+
 /// Every named limit, in the order an admin sees them.
 pub const LIMITS: &[Limit] = &[
     SANDBOX_CREATE,
@@ -192,6 +203,8 @@ pub const LIMITS: &[Limit] = &[
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Decision {
     pub allowed: bool,
+    /// The requests counted in this window, this one included.
+    pub count: i32,
     /// The count in force.
     pub max: i32,
     /// When the current window ends and the count starts again.
@@ -266,6 +279,7 @@ pub async fn consume(
         .unwrap_or(now);
     Ok(Decision {
         allowed: count <= max,
+        count,
         max,
         resets_at,
     })
@@ -415,6 +429,7 @@ mod tests {
         };
         let decision = |allowed| Decision {
             allowed,
+            count: 1,
             max: 1,
             resets_at: Utc::now(),
         };
@@ -435,6 +450,7 @@ mod tests {
     fn a_refusal_names_the_limit_and_when_it_resets() {
         let decision = Decision {
             allowed: false,
+            count: 11,
             max: 10,
             resets_at: DateTime::parse_from_rfc3339("2026-11-13T14:05:30Z")
                 .unwrap()
@@ -484,6 +500,7 @@ mod tests {
         let at = |time: &str| DateTime::parse_from_rfc3339(time).unwrap().to_utc();
         let decision = Decision {
             allowed: false,
+            count: 101,
             max: 100,
             resets_at: at("2026-11-13T15:00:00Z"),
         };

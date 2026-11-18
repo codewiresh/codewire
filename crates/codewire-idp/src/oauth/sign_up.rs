@@ -292,6 +292,20 @@ async fn complete_signup(
     .await?;
     tx.commit().await?;
 
+    // The provider verified the address, so the account is real now.
+    crate::operator_notice::notify(
+        &session.pool,
+        &session.email,
+        &session.frontend_url,
+        session.operator_email.as_deref(),
+        crate::operator_notice::SignUp {
+            address: identity.email.clone(),
+            method: crate::operator_notice::Method::Provider(provider),
+            waiting: !enabled,
+            at: created_at.and_utc(),
+        },
+    );
+
     let user = UserResponse {
         id: user_id.clone(),
         email: identity.email.clone(),

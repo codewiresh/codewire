@@ -30,6 +30,8 @@ pub struct EmailPasswordState {
     pool: PgPool,
     frontend_url: String,
     email: EmailClient,
+    /// Where the operator's sign-up notice goes (#5358); `None` sends none.
+    operator_email: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -505,11 +507,18 @@ async fn verify_email(
 
     // The mailbox proof replaces a vouch (#4121): a server that adds mail
     // later asks its vouched accounts, the setup admin included, to verify,
-    // and the two are never set together.
-    let access_pending: bool = sqlx::query_scalar(
-        "UPDATE users SET email_verified = true, email_vouched_by = NULL, updated_at = NOW() \
-         WHERE email = $1 \
-         RETURNING NOT enabled AND access_reason IS NOT NULL",
+    // and the two are never set together. The first verification of an
+    // account nobody vouched for and that isn't the admin is an email
+    // sign-up becoming real, which the operator hears about (#5358).
+    let (access_pending, signed_up): (bool, bool) = sqlx::query_as(
+        "WITH before AS ( \
+             SELECT id, email_verified, email_vouched_by FROM users WHERE email = $1 FOR UPDATE \
+         ) \
+         UPDATE users SET email_verified = true, email_vouched_by = NULL, updated_at = NOW() \
+           FROM before WHERE users.id = before.id \
+         RETURNING NOT users.enabled AND users.access_reason IS NOT NULL, \
+                   NOT before.email_verified AND before.email_vouched_by IS NULL \
+                   AND NOT users.is_admin",
     )
     .bind(&row.identifier)
     .fetch_optional(&mut *tx)
@@ -529,6 +538,20 @@ async fn verify_email(
         && let Err(error) = send_access_request_received_email(&state.email, &row.identifier).await
     {
         tracing::error!(%error, "failed to send access request receipt");
+    }
+    if signed_up {
+        crate::operator_notice::notify(
+            &state.pool,
+            &state.email,
+            &state.frontend_url,
+            state.operator_email.as_deref(),
+            crate::operator_notice::SignUp {
+                address: row.identifier.clone(),
+                method: crate::operator_notice::Method::Email,
+                waiting: access_pending,
+                at: Utc::now(),
+            },
+        );
     }
 
     Ok(Json(VerifyEmailResponse {
@@ -873,11 +896,18 @@ async fn send_verification(
     }))
 }
 
-pub fn router(pool: PgPool, frontend_url: String, email: EmailClient, auth: AuthState) -> Router {
+pub fn router(
+    pool: PgPool,
+    frontend_url: String,
+    email: EmailClient,
+    auth: AuthState,
+    operator_email: Option<String>,
+) -> Router {
     let state = EmailPasswordState {
         pool,
         frontend_url,
         email,
+        operator_email,
     };
 
     let required = Router::new()

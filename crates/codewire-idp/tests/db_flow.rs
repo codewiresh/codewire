@@ -339,6 +339,7 @@ async fn native_clients_full_flow(pool: PgPool) {
         turnstile_bypass_email: String::new(),
         signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
         revoke_reused_refresh_tokens: false,
+        operator_email: None,
         scopes_supported: vec![
             "openid".into(),
             "profile".into(),
@@ -786,6 +787,7 @@ async fn oidc_access_token_authenticates_product_api(pool: PgPool) {
         turnstile_bypass_email: String::new(),
         signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
         revoke_reused_refresh_tokens: false,
+        operator_email: None,
         scopes_supported: vec![
             "openid".into(),
             "profile".into(),
@@ -1121,6 +1123,7 @@ async fn provider_startup_publishes_jwks_before_token_issuance() {
             turnstile_bypass_email: String::new(),
             signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
             revoke_reused_refresh_tokens: false,
+            operator_email: None,
             scopes_supported: vec!["openid".into()],
         };
 
@@ -1734,6 +1737,7 @@ async fn jwk_final_schema_uses_only_envelopes_and_fails_closed() {
             turnstile_bypass_email: String::new(),
             signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
             revoke_reused_refresh_tokens: false,
+            operator_email: None,
             scopes_supported: vec!["openid".into()],
         };
         let error = build_provider(
@@ -1936,6 +1940,7 @@ async fn standard_cli_device_grant_uses_browser_approval(pool: PgPool) {
         turnstile_bypass_email: String::new(),
         signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
         revoke_reused_refresh_tokens: false,
+        operator_email: None,
         scopes_supported: vec![
             "openid".into(),
             "profile".into(),
@@ -3069,6 +3074,7 @@ async fn a_stranger_who_signed_up_at_another_address_holds_nothing_that_signs_in
         "https://app.codewire.test".to_string(),
         resend_mail,
         AuthState { pool: pool.clone() },
+        None,
     );
     let state = || async {
         sqlx::query_as::<_, (bool, bool, i64)>(
@@ -3237,6 +3243,7 @@ async fn session_auth_flow(pool: PgPool) {
         "https://app.codewire.test".to_string(),
         codewire_email::EmailClient::disabled(),
         AuthState { pool: pool.clone() },
+        None,
     );
 
     // 1. A wrong configured invite enters review and fails closed when review
@@ -3472,6 +3479,7 @@ async fn session_auth_flow(pool: PgPool) {
         "https://app.codewire.test".to_string(),
         codewire_email::EmailClient::disabled(),
         AuthState { pool: pool.clone() },
+        None,
     );
     let resend = |token: String| {
         let mail = mail.clone();
@@ -3959,6 +3967,7 @@ async fn invite_only_sign_up_without_mail_vouches_by_invitation_against_postgres
         "https://app.codewire.test".to_string(),
         codewire_email::EmailClient::disabled(),
         AuthState { pool: pool.clone() },
+        None,
     );
     let (st, _, _) = sess_req(
         &mail,
@@ -4288,6 +4297,7 @@ async fn a_server_that_adds_mail_has_its_vouched_admin_verify_against_postgres()
         frontend.to_owned(),
         mail,
         AuthState { pool: pool.clone() },
+        None,
     );
     let (st, body, _) = sess_req(
         &mail_routes,
@@ -4581,6 +4591,7 @@ async fn email_password_flow(pool: PgPool, url: String) {
         "https://app.codewire.test".to_string(),
         codewire_email::EmailClient::disabled(),
         AuthState { pool: pool.clone() },
+        None,
     );
 
     // 1. Authenticated send-verification-email creates a 24h token but
@@ -5050,6 +5061,7 @@ async fn email_password_flow(pool: PgPool, url: String) {
         "https://app.codewire.test".to_string(),
         mail,
         AuthState { pool: pool.clone() },
+        None,
     );
     let (st, body, _) = sess_req(
         &provider_app,
@@ -5147,6 +5159,7 @@ async fn email_password_flow(pool: PgPool, url: String) {
         "https://app.codewire.test".to_string(),
         codewire_email::EmailClient::disabled(),
         AuthState { pool: pool.clone() },
+        None,
     );
     {
         let _logging = tracing::subscriber::set_default(subscriber);
@@ -6864,6 +6877,7 @@ fn refresh_config(revoke_reused_refresh_tokens: bool) -> IdpConfig {
         turnstile_bypass_email: String::new(),
         signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
         revoke_reused_refresh_tokens,
+        operator_email: None,
         scopes_supported: vec!["openid".into()],
     }
 }
@@ -7071,6 +7085,7 @@ async fn mail_to_one_address_stops_after_three_an_hour_and_the_audit_log_says_so
         "https://app.codewire.test".to_string(),
         mail,
         AuthState { pool: pool.clone() },
+        None,
     );
     for _ in 0..4 {
         let (st, body, _) = sess_req(
@@ -7159,6 +7174,7 @@ async fn mail_to_one_address_stops_after_three_an_hour_and_the_audit_log_says_so
         "https://app.codewire.test".to_string(),
         mail,
         AuthState { pool: pool.clone() },
+        None,
     );
     for n in 0..4 {
         let (st, body, _) = sess_req(
@@ -7265,6 +7281,7 @@ async fn api_responses_are_never_stored_by_a_shared_cache_in_its_database(pool: 
         turnstile_bypass_email: String::new(),
         signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
         revoke_reused_refresh_tokens: false,
+        operator_email: None,
         scopes_supported: vec!["openid".into(), "profile".into(), "email".into()],
     };
     let provider = build_provider(
@@ -7465,6 +7482,7 @@ async fn prompt_and_max_age(pool: PgPool) {
         turnstile_bypass_email: String::new(),
         signup_invite_policy: codewire_idp::auth_session::SignupInvitePolicy::open(),
         revoke_reused_refresh_tokens: false,
+        operator_email: None,
         scopes_supported: vec!["openid".into()],
     };
     let provider = build_provider(

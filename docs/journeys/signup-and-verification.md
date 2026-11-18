@@ -81,8 +81,8 @@ Issue: #4481.
 ## `signup-email-review`: email and password, waiting for review
 
 Issue: #4481, and #3297 item 8 (the access review is Production's gate).
-The operator's notice is #5358, not yet built; its rules are in AUTH-POLICY's
-"The operator's sign-up notice".
+The operator's notice is #5358; its rules are in AUTH-POLICY's "The
+operator's sign-up notice".
 
 - **Entry points:** the sign-up page; the sign-in page; the admin accounts
   page, where an admin enables an account; the operator's inbox.

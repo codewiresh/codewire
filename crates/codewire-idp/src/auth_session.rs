@@ -119,6 +119,8 @@ pub struct SessionAuthState {
     /// ([`crate::client_address`]).
     pub(crate) client_address_key: std::sync::Arc<str>,
     http: reqwest::Client,
+    /// Where the operator's sign-up notice goes (#5358); `None` sends none.
+    pub(crate) operator_email: Option<String>,
 }
 
 impl FromRef<SessionAuthState> for PgPool {
@@ -1430,7 +1432,14 @@ impl SessionAuthState {
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
                 .expect("static signup HTTP client configuration"),
+            operator_email: None,
         }
+    }
+
+    /// This state, sending the operator's sign-up notice to `operator_email`.
+    pub(crate) fn with_operator_email(mut self, operator_email: Option<String>) -> Self {
+        self.operator_email = operator_email;
+        self
     }
 
     /// The trusted in-process test state: no Turnstile, no email delivery.
@@ -1573,6 +1582,7 @@ mod tests {
             turnstile_bypass_email: "codewire-e2e@example.test".into(),
             client_address_key: "synthetic-client-address-key".into(),
             http: reqwest::Client::new(),
+            operator_email: None,
         };
 
         assert!(
@@ -1807,6 +1817,7 @@ mod tests {
             turnstile_bypass_email: String::new(),
             client_address_key: "synthetic-client-address-key".into(),
             http: reqwest::Client::new(),
+            operator_email: None,
         };
         let mut headers = HeaderMap::new();
         headers.insert(

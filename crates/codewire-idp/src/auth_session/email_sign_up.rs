@@ -428,6 +428,7 @@ mod tests {
             turnstile_bypass_email: String::new(),
             client_address_key: "synthetic-client-address-key".into(),
             http: reqwest::Client::new(),
+            operator_email: None,
         };
         let user = UserResponse {
             id: "synthetic-user".into(),

@@ -52,6 +52,9 @@ pub struct IdpConfig {
     /// and logged, and revocation is turned on once clients coordinate
     /// refreshes across processes (`IDP_REFRESH_REUSE_REVOKES=true`).
     pub revoke_reused_refresh_tokens: bool,
+    /// `CODEWIRE_OPERATOR_EMAIL`: where the operator's sign-up notice goes
+    /// (#5358). `None` sends none.
+    pub operator_email: Option<String>,
 }
 
 impl fmt::Debug for IdpConfig {
@@ -74,6 +77,7 @@ impl fmt::Debug for IdpConfig {
                 "revoke_reused_refresh_tokens",
                 &self.revoke_reused_refresh_tokens,
             )
+            .field("operator_email", &self.operator_email)
             .finish()
     }
 }
@@ -126,6 +130,9 @@ impl IdpConfig {
                 Some("true") => true,
                 Some(_) => anyhow::bail!("IDP_REFRESH_REUSE_REVOKES must be true or false"),
             };
+        let operator_email = crate::operator_notice::parse_operator_email(
+            value(crate::operator_notice::OPERATOR_EMAIL_ENV).as_deref(),
+        )?;
         Ok(Self {
             issuer,
             frontend_url,
@@ -133,6 +140,7 @@ impl IdpConfig {
             turnstile_bypass_email,
             signup_invite_policy,
             revoke_reused_refresh_tokens,
+            operator_email,
             scopes_supported: vec![
                 "openid".into(),
                 "profile".into(),
@@ -300,6 +308,7 @@ mod tests {
             signup_invite_policy: SignupInvitePolicy::open(),
             scopes_supported: vec!["openid".into()],
             revoke_reused_refresh_tokens: false,
+            operator_email: None,
         };
 
         let diagnostic = format!("{cfg:?}");

@@ -368,6 +368,20 @@ The dashboard's public `/updates` page lists the posts of one site in a Liminal 
 | `LIMINAL_API_KEY` | No | The site-scoped read key from the site's API keys screen. A secret: deliver it from a Secret, never a ConfigMap. The manifests read it from the `codewire-dashboard-liminal` Secret and `LIMINAL_ORIGIN` from the `codewire-dashboard-public-config` ConfigMap, both optional. | |
 | `LIMINAL_MEDIA_ORIGIN` | No | The origin the CMS serves post images from, `https://` with no path (plain `http://` only on loopback). Image URLs elsewhere lose their `src`. Needs the two values above; from the same ConfigMap. | `https://media.example.com` |
 
+## Operator notices
+
+The IdP emails the operator once per new person: when an email sign-up's
+address is first verified, or when a GitHub or Google sign-up is made. It
+names the address, how they signed up, when, and whether they wait for
+review, and links to Admin → Manage account access. At most 10 an hour; the
+11th sends one "more people are waiting" notice instead. It needs mail
+(SES) and never delays or fails a sign-up. The rules are in
+[AUTH-POLICY](dev/AUTH-POLICY.md#the-operators-sign-up-notice).
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `CODEWIRE_OPERATOR_EMAIL` | No | Where the IdP sends the operator's sign-up notice. Unset or empty sends none, the default. Any value that is not one email address stops the IdP at startup. | `operator@example.com` |
+
 ## Browser origins
 
 Every Codewire service the browser calls is served from the dashboard's own origin, so by default no service answers cross-origin (CORS) requests at all.

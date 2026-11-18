@@ -103,6 +103,7 @@ async fn reset_password_missing_token_uses_rust_validation_envelope() {
         "https://app.codewire.test".to_string(),
         codewire_email::EmailClient::disabled(),
         AuthState { pool },
+        None,
     );
 
     let (status, body) = post_json(

@@ -217,12 +217,14 @@ async fn serve() -> anyhow::Result<()> {
         oauth_providers,
         client_address_key,
         oauth_state_key,
+        idp_cfg.operator_email.clone(),
     );
     let email_password = codewire_idp::email_password::router(
         pool.clone(),
         idp_cfg.frontend_url.clone(),
         email.clone(),
         auth_state.clone(),
+        idp_cfg.operator_email.clone(),
     );
     let access_admin = codewire_idp::access_admin::router(
         pool.clone(),

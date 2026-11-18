@@ -34,6 +34,7 @@ pub mod jwk_envelope;
 pub mod keys;
 mod mail_limit;
 pub mod oauth;
+pub mod operator_notice;
 pub mod password_add;
 pub mod private_api;
 pub mod provisioning;

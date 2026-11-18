@@ -459,6 +459,248 @@ async fn provider_sign_ups_count_against_their_address(pool: &PgPool, nonce: u12
     reset(pool, &prefix).await;
 }
 
+const OPERATOR: &str = "operator@example.test";
+const FRONTEND: &str = "https://app.codewire.test";
+
+/// The operator's notices in `outbox`, once at least `count` have been sent
+/// or two seconds have passed: each is sent in its own task.
+async fn operator_notices(
+    outbox: &codewire_email::Outbox,
+    count: usize,
+) -> Vec<codewire_email::SentEmail> {
+    let notices = || {
+        outbox
+            .sent()
+            .into_iter()
+            .filter(|mail| mail.to == OPERATOR)
+            .collect::<Vec<_>>()
+    };
+    for _ in 0..20 {
+        if notices().len() >= count {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    notices()
+}
+
+/// A verification link for `email`, stored as the IdP stores one.
+async fn seed_verification(pool: &PgPool, id: &str, email: &str, token: &str) {
+    use sha2::{Digest as _, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"codewire/idp/verification/v1\0email_verification\0");
+    digest.update(token.as_bytes());
+    let token_hash: String = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    sqlx::query(
+        "INSERT INTO verifications (id, identifier, purpose, token_hash, expires_at, created_at, updated_at) \
+         VALUES ($1, $2, 'email_verification', $3, NOW() + interval '1 hour', NOW(), NOW())",
+    )
+    .bind(id)
+    .bind(email)
+    .bind(token_hash)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// The token in the verification link of the last email to `email`.
+fn emailed_token(outbox: &codewire_email::Outbox, email: &str) -> String {
+    let sent = outbox.sent();
+    let html = &sent
+        .iter()
+        .rev()
+        .find(|mail| mail.to == email)
+        .unwrap()
+        .html;
+    let start = html.find("/verify-email?token=").unwrap() + "/verify-email?token=".len();
+    html[start..]
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect()
+}
+
+async fn verify(app: &Router, token: &str) -> StatusCode {
+    let request = Request::get(format!("/api/auth/verify-email?token={token}"))
+        .body(Body::empty())
+        .unwrap();
+    app.clone().oneshot(request).await.unwrap().status()
+}
+
+/// The operator hears once per new person (#5358): an email access request
+/// when its address is first verified, a provider sign-up when it is made,
+/// at most ten an hour and then one "more people are waiting", and nothing
+/// for a second verification, the admin, or a server with no operator.
+async fn the_operator_hears_once_per_new_person(pool: &PgPool, nonce: u128) {
+    let prefix = format!("signup-limit-operator-{nonce:x}-");
+    let forget_notices = || async {
+        sqlx::query("DELETE FROM rate_limit WHERE key = 'operator_notice:all'")
+            .execute(pool)
+            .await
+            .unwrap();
+    };
+    reset(pool, &prefix).await;
+    forget_notices().await;
+
+    let (user_mail, user_box) = codewire_email::EmailClient::recording();
+    let sign_ups = codewire_idp::auth_session::router_with_email(
+        pool.clone(),
+        false,
+        codewire_idp::auth_session::SignupInvitePolicy::default(),
+        FRONTEND.to_owned(),
+        user_mail,
+    );
+    let (mail, outbox) = codewire_email::EmailClient::recording();
+    let links = codewire_idp::email_password::router(
+        pool.clone(),
+        FRONTEND.to_owned(),
+        mail,
+        codewire_server_core::auth::AuthState { pool: pool.clone() },
+        Some(OPERATOR.to_owned()),
+    );
+
+    // An access request: nothing until its address is verified, then one
+    // notice naming who, how, that they wait, and the review page.
+    let requester = format!("{prefix}request@example.test");
+    let mut body = valid(&requester);
+    body["reason"] = "Synthetic reason the operator never reads here".into();
+    assert_eq!(sign_up(&sign_ups, body).await.status, StatusCode::ACCEPTED);
+    assert!(operator_notices(&outbox, 1).await.is_empty());
+    let token = emailed_token(&user_box, &requester);
+    assert_eq!(verify(&links, &token).await, StatusCode::OK);
+    let notices = operator_notices(&outbox, 1).await;
+    assert_eq!(notices.len(), 1);
+    assert_eq!(
+        notices[0].subject,
+        format!("Codewire: access request from {requester}")
+    );
+    for line in [
+        "Signed up with: email",
+        "They wait for an admin to enable their account.",
+        "https://app.codewire.test/admin/accounts/",
+    ] {
+        assert!(
+            notices[0].text.contains(line),
+            "{line}: {}",
+            notices[0].text
+        );
+    }
+    assert!(!notices[0].text.contains("Synthetic reason"));
+
+    // A second verification of the same address is not a new person.
+    seed_verification(pool, &format!("{prefix}again"), &requester, "again").await;
+    assert_eq!(verify(&links, "again").await, StatusCode::OK);
+    // The admin's own verification is not a sign-up either.
+    let admin = format!("{prefix}admin@example.test");
+    sqlx::query(
+        "INSERT INTO users (id, email, email_verified, enabled, is_admin) VALUES ($1, $2, false, true, true)",
+    )
+    .bind(format!("{prefix}admin"))
+    .bind(&admin)
+    .execute(pool)
+    .await
+    .unwrap();
+    seed_verification(pool, &format!("{prefix}admin"), &admin, "admin").await;
+    assert_eq!(verify(&links, "admin").await, StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert_eq!(operator_notices(&outbox, 2).await.len(), 1);
+
+    // With no operator address, a verified sign-up sends the operator nothing.
+    let (unset_mail, unset_box) = codewire_email::EmailClient::recording();
+    let unset = codewire_idp::email_password::router(
+        pool.clone(),
+        FRONTEND.to_owned(),
+        unset_mail,
+        codewire_server_core::auth::AuthState { pool: pool.clone() },
+        None,
+    );
+    let quiet = format!("{prefix}quiet@example.test");
+    let mut body = valid(&quiet);
+    body["reason"] = "Synthetic".into();
+    assert_eq!(sign_up(&sign_ups, body).await.status, StatusCode::ACCEPTED);
+    let token = emailed_token(&user_box, &quiet);
+    assert_eq!(verify(&unset, &token).await, StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert!(operator_notices(&unset_box, 1).await.is_empty());
+
+    // A provider sign-up is told at once; past ten in the hour one notice
+    // says more are waiting, and the next says nothing.
+    let (provider_mail, provider_box) = codewire_email::EmailClient::recording();
+    let providers = codewire_idp::oauth::trusted_test_router_with_operator(
+        pool.clone(),
+        false,
+        codewire_idp::auth_session::SignupInvitePolicy::default()
+            .with_mode(codewire_idp::auth_session::SignupMode::Open),
+        FRONTEND.to_owned(),
+        codewire_idp::oauth::OAuthProviders::disabled(),
+        std::sync::Arc::new(NoLinkConfirmations),
+        provider_mail,
+        OPERATOR.to_owned(),
+    );
+    let complete = |handle: String| {
+        let request = Request::post("/api/auth/oauth/signup/complete")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "token": handle }).to_string(),
+            ))
+            .unwrap();
+        providers.clone().oneshot(request)
+    };
+    let provider_sign_up = |n: u128| {
+        let handle = format!("{:064x}", nonce % 1_000_000 + 100 + n);
+        let email = format!("{prefix}provider{n}@example.test");
+        let subject = format!("{nonce:x}operator{n}");
+        async move {
+            pending_provider_sign_up(pool, &handle, &subject, &email).await;
+            assert_eq!(complete(handle).await.unwrap().status(), StatusCode::OK);
+            email
+        }
+    };
+    let first = provider_sign_up(0).await;
+    let notices = operator_notices(&provider_box, 1).await;
+    assert_eq!(notices.len(), 1);
+    assert_eq!(
+        notices[0].subject,
+        format!("Codewire: new sign-up, {first}")
+    );
+    assert!(notices[0].text.contains("Signed up with: GitHub"));
+    assert!(notices[0].text.contains("They can sign in now."));
+
+    sqlx::query("UPDATE rate_limit SET count = 10 WHERE key = 'operator_notice:all'")
+        .execute(pool)
+        .await
+        .unwrap();
+    provider_sign_up(1).await;
+    let notices = operator_notices(&provider_box, 2).await;
+    assert_eq!(notices.len(), 2);
+    assert_eq!(notices[1].subject, "Codewire: more people are waiting");
+    assert!(
+        notices[1].text.contains("wait for review now")
+            || notices[1].text.contains("waits for review now"),
+        "{}",
+        notices[1].text
+    );
+    provider_sign_up(2).await;
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert_eq!(operator_notices(&provider_box, 3).await.len(), 2);
+
+    sqlx::query("DELETE FROM oauth_states WHERE id LIKE $1")
+        .bind(format!("signup-limit-{nonce:x}operator%"))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM verifications WHERE identifier LIKE $1")
+        .bind(format!("{prefix}%"))
+        .execute(pool)
+        .await
+        .unwrap();
+    forget_notices().await;
+    reset(pool, &prefix).await;
+}
+
 /// One test, so the scenarios that own the sign-up counters run one after
 /// the other.
 #[tokio::test]
@@ -472,4 +714,5 @@ async fn the_sign_up_limits_refuse_past_their_counts_and_never_lock_invitees_out
     invitees_are_never_locked_out(&pool, nonce).await;
     one_address_is_refused_past_its_count(&pool, nonce).await;
     provider_sign_ups_count_against_their_address(&pool, nonce).await;
+    the_operator_hears_once_per_new_person(&pool, nonce).await;
 }

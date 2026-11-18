@@ -320,6 +320,7 @@ pub fn router(
     providers: OAuthProviders,
     client_address_key: String,
     state_key: StateCookieKey,
+    operator_email: Option<String>,
 ) -> Router {
     let human_verification = configured_human_verification(&frontend_url, turnstile_secret_key);
     let mailer = Arc::new(EmailLinkMailer(email.clone()));
@@ -333,7 +334,8 @@ pub fn router(
             human_verification,
             turnstile_bypass_email,
             client_address_key,
-        ),
+        )
+        .with_operator_email(operator_email),
         providers,
         mailer,
         state_key,
@@ -352,6 +354,32 @@ pub fn trusted_test_router(
 ) -> Router {
     router_with_state(OAuthState {
         session: SessionAuthState::trusted_test(pool, secure, signup_invite_policy, frontend_url),
+        providers,
+        mailer,
+        state_key: StateCookieKey::derive("synthetic-oauth-state-secret")
+            .expect("the synthetic secret is not empty"),
+    })
+}
+
+/// [`trusted_test_router`] whose sign-ups send the operator's notice to
+/// `operator_email` through `email` (#5358).
+#[allow(clippy::too_many_arguments)]
+pub fn trusted_test_router_with_operator(
+    pool: PgPool,
+    secure: bool,
+    signup_invite_policy: SignupInvitePolicy,
+    frontend_url: String,
+    providers: OAuthProviders,
+    mailer: Arc<dyn LinkConfirmationMailer>,
+    email: EmailClient,
+    operator_email: String,
+) -> Router {
+    let mut session =
+        SessionAuthState::trusted_test(pool, secure, signup_invite_policy, frontend_url)
+            .with_operator_email(Some(operator_email));
+    session.email = email;
+    router_with_state(OAuthState {
+        session,
         providers,
         mailer,
         state_key: StateCookieKey::derive("synthetic-oauth-state-secret")
