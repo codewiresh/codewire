@@ -126,11 +126,25 @@ Sandbox (#5471, #5472).
   ID through pidfds. It never signals by name, never process group or session
   0 or 1, and never its own group or session.
 - **A stop ends them within a bound.** `cw stop ENV --session NAME` sends TERM
-  to the session's processes and KILL 2 s later in a guest (250 ms on a
+  once to each of the session's processes, the leader first, and KILL 2 s
+  later in a guest (250 ms on a
   trusted host, `host_process::TERM_GRACE`), and settles within 4 s of the
   stop, inside the 5 s a stop is given. The session then ends `Stopped`. If a
-  process has not gone by the bound, it still ends `Stopped`, with cleanup
-  unknown, and says which. A session never stays `Stopping`.
+  process has not gone by the bound, it ends `Interrupted` with cleanup
+  unknown, as a trusted host's always has, and says its processes may still
+  be running. A session never stays `Stopping`.
+- **A session ends when its command exits.** When the leader exits, the
+  session ends with its exit status, and the processes it left running in
+  the session are ended as a stop ends them, `nohup` and `disown` jobs
+  included. That end records one line, in the session's status and as the
+  last line of its output: "Ended 1 process left running after the command
+  exited (pid 42 `sleep`). To keep a server running, run it in its own
+  named session, or start it with setsid; nohup alone is not enough." A
+  server meant to keep running runs in its own session
+  (`cw run --name dev --detach -- npm run dev`) or starts its own Unix
+  session (`setsid`). On a terminal, the leader's exit already hangs up its
+  foreground job, which ends there unless it ignores the hangup (owner
+  decision relayed by the orchestrator, 2026-11-19, #5472).
 - **A lost reply names a real command.** When a stop's reply is lost, the
   answer is "the session's outcome is unknown; run `cw ls ENV` to see how it
   ended, then try again". There is no "refresh" step.

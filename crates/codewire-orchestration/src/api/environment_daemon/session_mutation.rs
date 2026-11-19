@@ -161,7 +161,8 @@ fn uncertain_outcome() -> AppError {
     // Not Upstream: the shared Connect renderer adds retry advice to Upstream.
     // Launch/Restart are not idempotent. List/Get must reconcile a lost reply.
     AppError::Precondition(
-        "environment session outcome is unknown; refresh sessions before trying again".into(),
+        "the session's outcome is unknown; run `cw ls ENV` to see how it ended, then try again"
+            .into(),
     )
 }
 

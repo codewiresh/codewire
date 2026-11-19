@@ -1547,7 +1547,9 @@ async fn daemon_restart_marks_unrecoverable_live_session_interrupted() {
     assert_eq!(completed.output_end_offset, 8);
 
     drop(first_client);
-    first.shutdown().await;
+    // Only the daemon ends, in the same boot: a graceful shutdown would be
+    // the environment's stop, which records its sessions stopped (#5471).
+    first.crash().await;
 
     let second = DaemonHarness::spawn_at(workspace_root, home_root).await;
     let mut second_client = second.client().await;

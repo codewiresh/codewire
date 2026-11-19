@@ -1,7 +1,7 @@
 ---
 title: Terminal sessions
 description: Run commands that outlive your terminal, read their output later, type into them, wait for them in a script, and stop or restart them.
-updated: 2026-11-14
+updated: 2026-11-19
 weight: 1
 aliases: ["/guides/sessions"]
 ---
@@ -130,8 +130,28 @@ dev   Running  normal  -       session-5c7443a7-2a7e-409f-b684-bd74c8b580b5  pyt
 
 The session keeps its ID and saved output across a restart, and its
 siblings keep running. `cw stop app` without `--session` stops the whole
-environment, which ends every session; start them again after
-`cw start app`.
+environment, which stops every session and keeps its name, its ID and its
+saved output. Start each one again after `cw start app`:
+
+```sh
+cw stop app
+cw start app
+cw restart app --session dev
+```
+
+A stop ends everything the session started: its command, and every
+process that command started, background jobs included. It asks them to
+exit, waits 2 seconds, then ends whatever is left.
+
+A session also ends when its command exits. Processes the command left
+running end with it, even under `nohup` or `disown`, and the session's last
+line of output names them. To keep a server running, run it in its own
+session, or start it with `setsid`, which gives it a session of its own:
+
+```sh
+cw run --in app --name dev --detach -- npm run dev
+cw exec --in app sh -c 'setsid my-server > /tmp/my-server.log 2>&1 < /dev/null &'
+```
 
 ## Select an environment once
 

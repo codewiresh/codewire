@@ -167,7 +167,12 @@ async fn an_attachment_holds_the_session_and_each_last_detach_starts_a_whole_gra
     let lost = Instant::now();
     let ended = wait_ended(&engine, id).await;
     assert!(lost.elapsed() >= GRACE, "{:?}", lost.elapsed());
-    assert_eq!(ended.state, v1::SessionLifecycleState::Stopped as i32);
+    assert_eq!(
+        ended.state,
+        v1::SessionLifecycleState::Stopped as i32,
+        "{}",
+        ended.status_message
+    );
     assert_eq!(ended.status_message, "ended: no client for 2 seconds");
 }
 

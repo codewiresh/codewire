@@ -54,6 +54,15 @@ pub(crate) fn launch_failure_status(committed: bool) -> &'static str {
 }
 const LAUNCH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const LAUNCH_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+/// What a guest session records when its environment's stop ends it (#5471).
+const ENVIRONMENT_STOPPED: &str = "stopped with the environment";
+/// What a session live under an earlier kernel boot records (#5471).
+const MACHINE_STOPPED: &str = "ended when the environment's machine stopped";
+/// What a platform-managed guest's session records when only its daemon
+/// restarted: its processes may have outlived the daemon (#5471).
+const DAEMON_RESTARTED_UNKNOWN: &str = "session interrupted because the environment daemon \
+     restarted; its processes may still be running until the environment is stopped and \
+     started";
 /// How long a host-control RPC waits for its request's outcome
 /// ([`HostBounds::rpc_join`]). Host control is Linux only.
 #[cfg(target_os = "linux")]
@@ -160,6 +169,8 @@ struct SessionEngineInner {
     /// Host sessions' wall-clock bounds: [`HostBounds::PRODUCT`] in the
     /// product.
     host_bounds: HostBounds,
+    /// The kernel boot ID this daemon runs under, read once ([`current_boot_id`]).
+    boot_id: Option<String>,
     /// How many stops and restarts asked the record helper about an active
     /// run to interrupt first.
     #[cfg(all(test, target_os = "linux"))]
@@ -461,6 +472,11 @@ struct PersistedSession {
     // Zero, and every record written before it existed, never ends.
     #[serde(default)]
     end_after_detached_seconds: u32,
+    // The kernel boot ID its latest launch ran under (#5471). A record live
+    // under another boot has no process left; a record without one, from
+    // before it existed, proves nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch_boot_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -603,6 +619,36 @@ impl SessionEngine {
         Self::with_host_bounds(config, credential_bridge, HostBounds::PRODUCT)
     }
 
+    /// Whether this daemon's sessions own their Unix session: a trusted
+    /// host's always have, and a guest's do when it runs them natively
+    /// (#5472). A runc helper and a platform-managed driver keep their own
+    /// lifecycles.
+    #[cfg(unix)]
+    fn owns_session_processes(&self) -> bool {
+        self.inner.config.host.is_some()
+            || matches!(
+                self.inner.config.process_execution,
+                crate::execution::ProcessExecution::Native
+            )
+    }
+
+    /// An owned session group's TERM grace and its cleanup budget after it.
+    #[cfg(unix)]
+    fn owned_group(&self, pid: u32) -> std::io::Result<crate::host_process::OwnedProcessGroup> {
+        let (grace, cleanup) = if self.inner.config.host.is_some() {
+            (
+                crate::host_process::TERM_GRACE,
+                self.inner.host_bounds.cleanup,
+            )
+        } else {
+            (
+                crate::host_process::GUEST_TERM_GRACE,
+                crate::host_process::GUEST_CLEANUP_BUDGET,
+            )
+        };
+        crate::host_process::OwnedProcessGroup::new(pid, grace, cleanup)
+    }
+
     /// [`Self::new`] with `bounds` in place of host sessions' product bounds.
     /// A test whose subject is none of them lengthens them into a hang guard
     /// ([`HostBounds::all`]), so a stalled CI slot cannot spend one and turn
@@ -629,6 +675,7 @@ impl SessionEngine {
                 shutdown: CancellationToken::new(),
                 store_refusal: Mutex::new(None),
                 host_bounds: bounds,
+                boot_id: current_boot_id(),
                 #[cfg(all(test, target_os = "linux"))]
                 stop_interrupt_checks: std::sync::atomic::AtomicUsize::new(0),
                 #[cfg(all(test, target_os = "linux"))]
@@ -714,6 +761,24 @@ impl SessionEngine {
                 result.map_err(|_| {
                     SessionError::Internal("host session shutdown task failed".into())
                 })??;
+            }
+        }
+        // A guest's daemon shuts down as its environment stops: it ends its
+        // ordinary sessions and records them stopped with it (#5471).
+        #[cfg(unix)]
+        if self.inner.config.host.is_none() && self.owns_session_processes() {
+            let ids = lock(&self.inner.active).keys().cloned().collect::<Vec<_>>();
+            let mut stops = tokio::task::JoinSet::new();
+            for id in ids {
+                let engine = self.clone();
+                stops.spawn(async move { engine.stop_with_environment(&id).await });
+            }
+            while let Some(result) = tokio::time::timeout_at(deadline, stops.join_next())
+                .await
+                .map_err(|_| SessionError::Internal("session shutdown did not settle".into()))?
+            {
+                result
+                    .map_err(|_| SessionError::Internal("session shutdown task failed".into()))??;
             }
         }
         let handles = lock(&self.inner.sessions)
@@ -875,6 +940,7 @@ impl SessionEngine {
             cleanup_unknown: true,
             status_message: "session starting".into(),
             end_after_detached_seconds: request.end_after_detached_seconds,
+            launch_boot_id: self.inner.boot_id.clone(),
         };
         let handle = SessionHandle::new(persisted, Vec::new());
         let _operation = handle.operation.lock().await;
@@ -1072,6 +1138,28 @@ impl SessionEngine {
     /// [`Self::shutdown`] has by then paused each managed conversation's run
     /// that its agent can resume; see
     /// [`Self::pause_active_run_before_shutdown`].
+    /// Stops an ordinary guest session as its environment stops, recording
+    /// [`ENVIRONMENT_STOPPED`]. A platform-managed or host-control session
+    /// keeps its own custody and is left as before.
+    #[cfg(unix)]
+    async fn stop_with_environment(&self, session_id: &str) -> Result<(), SessionError> {
+        let handle = self.admit_stop(session_id).await?;
+        {
+            let metadata = handle.metadata.lock().await;
+            #[cfg(target_os = "linux")]
+            if metadata.platform_managed_origin.is_some() || metadata.control_origin.is_some() {
+                return Ok(());
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = &metadata;
+        }
+        handle.launch_cancellation.send_replace(true);
+        let _operation = handle.operation.lock().await;
+        self.stop_active_because(session_id, &handle, Some(ENVIRONMENT_STOPPED.into()))
+            .await
+            .map(|_| ())
+    }
+
     async fn stop_for_shutdown(&self, session_id: &str) -> Result<v1::SessionRecord, SessionError> {
         let handle = self.admit_stop(session_id).await?;
         handle.launch_cancellation.send_replace(true);
@@ -1528,6 +1616,7 @@ impl SessionEngine {
             metadata.status_message = "session restarting".into();
             metadata.cleanup_unknown = true;
             metadata.cleanup_confirmed = false;
+            metadata.launch_boot_id = self.inner.boot_id.clone();
             persist_metadata(&self.inner.root, &metadata).await?;
         }
         drop(admission);
@@ -2029,6 +2118,7 @@ impl SessionEngine {
                 cleanup_unknown: true,
                 status_message: "session starting".into(),
                 end_after_detached_seconds: 0,
+                launch_boot_id: None,
             },
             Vec::new(),
         );
@@ -2703,8 +2793,12 @@ impl SessionEngine {
                 });
             }
         }
+        #[cfg(target_os = "linux")]
+        let owned = self.owns_session_processes() && platform_image.is_none();
+        #[cfg(all(unix, not(target_os = "linux")))]
+        let owned = self.owns_session_processes();
         #[cfg(unix)]
-        if self.inner.config.host.is_some() {
+        if owned {
             // SAFETY: prepare_host_child makes only async-signal-safe calls
             // and does not touch allocator state after fork.
             unsafe {
@@ -2728,11 +2822,8 @@ impl SessionEngine {
             }
         };
         #[cfg(unix)]
-        let mut host_group = if self.inner.config.host.is_some() {
-            match child.id().and_then(|pid| {
-                crate::host_process::OwnedProcessGroup::new(pid, self.inner.host_bounds.cleanup)
-                    .ok()
-            }) {
+        let mut host_group = if owned {
+            match child.id().and_then(|pid| self.owned_group(pid).ok()) {
                 Some(group) => Some(group),
                 None => {
                     let _ = terminate_native_launch(&mut child).await;
@@ -2740,7 +2831,7 @@ impl SessionEngine {
                         .record_launch_cleanup(
                             handle,
                             false,
-                            "host process ownership could not be established".into(),
+                            "session process ownership could not be established".into(),
                         )
                         .await;
                 }
@@ -2953,11 +3044,11 @@ impl SessionEngine {
 
         let mut child = crate::execution::PtyLaunchGuard::new(child);
         #[cfg(unix)]
-        let mut host_group = if self.inner.config.host.is_some() {
-            match child.process_id().and_then(|pid| {
-                crate::host_process::OwnedProcessGroup::new(pid, self.inner.host_bounds.cleanup)
-                    .ok()
-            }) {
+        let mut host_group = if self.owns_session_processes() {
+            match child
+                .process_id()
+                .and_then(|pid| self.owned_group(pid).ok())
+            {
                 Some(group) => Some(group),
                 None => {
                     let _ = child.terminate_confirmed(LAUNCH_CLEANUP_TIMEOUT).await;
@@ -2965,7 +3056,7 @@ impl SessionEngine {
                         .record_launch_cleanup(
                             handle,
                             false,
-                            "host PTY ownership could not be established".into(),
+                            "session PTY ownership could not be established".into(),
                         )
                         .await;
                 }
@@ -3187,6 +3278,7 @@ impl SessionEngine {
         metadata.finished_at = None;
         metadata.exit_code = None;
         metadata.status_message = "session running".into();
+        metadata.launch_boot_id = self.inner.boot_id.clone();
         persist_metadata(&self.inner.root, &metadata).await?;
         Ok(metadata.to_record())
     }
@@ -3489,13 +3581,30 @@ impl SessionEngineInner {
                 metadata.state = v1::SessionLifecycleState::Interrupted as i32;
                 metadata.finished_at = Some(PersistedTimestamp::now());
                 metadata.exit_code = None;
-                metadata.status_message =
-                    "session interrupted because the environment daemon restarted".into();
-                if self.config.host.is_some() || platform_tree.is_some() {
+                #[cfg(target_os = "linux")]
+                let ordinary =
+                    metadata.platform_managed_origin.is_none() && metadata.control_origin.is_none();
+                #[cfg(not(target_os = "linux"))]
+                let ordinary = true;
+                if ordinary
+                    && another_boot(metadata.launch_boot_id.as_deref(), self.boot_id.as_deref())
+                {
+                    // A new boot proves none of its processes remain (#5471).
+                    metadata.status_message = MACHINE_STOPPED.into();
+                    metadata.cleanup_unknown = false;
+                    metadata.cleanup_confirmed = true;
+                } else if self.config.host.is_some() {
                     // Persisted PIDs can never establish ownership after restart.
                     metadata.cleanup_unknown = true;
                     metadata.cleanup_confirmed = false;
                     metadata.status_message = "host session interrupted; process cleanup is unknown; restart is unavailable".into();
+                } else if platform_tree.is_some() {
+                    metadata.cleanup_unknown = true;
+                    metadata.cleanup_confirmed = false;
+                    metadata.status_message = DAEMON_RESTARTED_UNKNOWN.into();
+                } else {
+                    metadata.status_message =
+                        "session interrupted because the environment daemon restarted".into();
                 }
                 metadata_changed = true;
             }
@@ -3799,7 +3908,7 @@ async fn terminate_session_launch(
         let reaped =
             crate::confirm::await_spending(group.cleanup(), &mut std::pin::pin!(child.wait()))
                 .await;
-        return signals.is_ok() && matches!(reaped, Some(Ok(_)));
+        return cleanup_confirmed(&signals, matches!(reaped, Some(Ok(_))));
     }
     terminate_native_launch(child).await
 }
@@ -3813,7 +3922,8 @@ async fn terminate_session_pty_launch(
     #[cfg(unix)]
     if let Some(group) = group {
         let signals = group.terminate().await;
-        return child.terminate_confirmed_spending(group.cleanup()).await && signals.is_ok();
+        let reaped = child.terminate_confirmed_spending(group.cleanup()).await;
+        return cleanup_confirmed(&signals, reaped);
     }
     child.terminate_confirmed(LAUNCH_CLEANUP_TIMEOUT).await
 }
@@ -3887,7 +3997,16 @@ async fn monitor_process(monitor: ProcessMonitor) {
     };
 
     let output_error = join_output_tasks(stdout_task, stderr_task).await;
-    finish_process(inner, session_id, token, handle, completion, output_error).await;
+    finish_process(
+        inner,
+        session_id,
+        token,
+        handle,
+        completion,
+        output_error,
+        OwnedEnd::default(),
+    )
+    .await;
 }
 
 async fn write_session_input(stdin: &mut ChildStdin, data: &[u8]) -> Result<(), String> {
@@ -3918,40 +4037,53 @@ async fn monitor_host_process(monitor: ProcessMonitor) {
         stderr_task,
     } = monitor;
     // Declare the group after Child: cancellation signals while Child is owned.
-    let mut group = host_group.expect("host process group is owned");
+    let mut group = host_group.expect("session process group is owned");
+    let host = inner
+        .upgrade()
+        .is_some_and(|inner| inner.config.host.is_some());
+    let mut ended = Vec::new();
     let completion = loop {
         tokio::select! {
             result = group.wait_for_exit() => {
                 let signals = group.terminate().await;
                 let status = crate::confirm::await_spending(group.cleanup(), &mut std::pin::pin!(child.wait())).await;
+                let signals = signals.map(|members| ended = members);
                 break ProcessCompletion::Exited(result.map(|_| ()).and(signals)
-                    .and_then(|()| status.ok_or_else(|| std::io::Error::other("host child reap timed out"))?)
+                    .and_then(|()| status.ok_or_else(|| std::io::Error::other("session child reap timed out"))?)
                     .map(|status| status.code().unwrap_or(1)).map_err(|error| error.to_string()));
             }
             command = control.recv() => match command {
                 Some(SessionControl::Stop { reply, reason }) => {
                     let result = terminate_session_launch(&mut child, Some(&mut group)).await;
-                    break ProcessCompletion::Stopped { result: if result { Ok(()) } else { Err("host process cleanup could not be confirmed".into()) }, reply, reason };
+                    break ProcessCompletion::Stopped { result: if result { Ok(()) } else { Err(owned_cleanup_unconfirmed(host, false)) }, reply, reason };
                 }
                 Some(SessionControl::Input { data, reply }) => {
                     if reply.is_closed() { continue; }
                     let result = match stdin.as_mut() { Some(stdin) => write_session_input(stdin, &data).await,
-                        None => Err("host session stdin is closed".into()) };
+                        None => Err("session stdin is closed".into()) };
                     let _ = reply.send(result);
                 }
                 Some(SessionControl::Resize { reply, .. }) => { let _ = reply.send(Err("session is not a PTY session".into())); }
                 None => {
                     let confirmed = terminate_session_launch(&mut child, Some(&mut group)).await;
-                    break ProcessCompletion::Exited(if confirmed { Ok(1) } else { Err("host process cleanup could not be confirmed".into()) });
+                    break ProcessCompletion::Exited(if confirmed { Ok(1) } else { Err(owned_cleanup_unconfirmed(host, false)) });
                 }
             }
         }
     };
     drop(stdin);
     let (stdout, stderr) = tokio::join!(
-        bounded_output_join(stdout_task, group.cleanup()),
-        bounded_output_join(stderr_task, group.cleanup())
+        bounded_output_join(stdout_task, group.cleanup(), host),
+        bounded_output_join(stderr_task, group.cleanup(), host)
     );
+    let note = ended_note(&ended);
+    record_ended_note(
+        &inner,
+        &handle,
+        note.as_deref(),
+        v1::SessionOutputStream::Stderr,
+    )
+    .await;
     finish_process(
         inner,
         session_id,
@@ -3959,6 +4091,7 @@ async fn monitor_host_process(monitor: ProcessMonitor) {
         handle,
         completion,
         stdout.or(stderr),
+        OwnedEnd { owned: true, note },
     )
     .await;
 }
@@ -3967,16 +4100,110 @@ async fn monitor_host_process(monitor: ProcessMonitor) {
 async fn bounded_output_join(
     mut task: JoinHandle<Result<(), SessionError>>,
     budget: &crate::confirm::CheckBudget,
+    host: bool,
 ) -> Option<String> {
+    let owner = if host { "host" } else { "session" };
     match crate::confirm::await_spending(budget, &mut task).await {
         Some(Ok(Ok(()))) => None,
         Some(Ok(Err(error))) => Some(error.to_string()),
-        Some(Err(error)) => Some(format!("host output task failed: {error}")),
+        Some(Err(error)) => Some(format!("{owner} output task failed: {error}")),
         None => {
             task.abort();
             let _ = task.await;
-            Some("host output drain timed out; cleanup is unknown".into())
+            Some(format!(
+                "{owner} output drain timed out; cleanup is unknown"
+            ))
         }
+    }
+}
+
+/// Whether an owned group's TERM, KILL and leader reap are confirmed. The
+/// step that is not is named in the daemon's log, since the session's record
+/// keeps one closed message.
+#[cfg(unix)]
+fn cleanup_confirmed<T>(signals: &std::io::Result<T>, reaped: bool) -> bool {
+    if let Err(error) = signals {
+        tracing::warn!(%error, "a session's TERM or KILL could not be confirmed");
+    }
+    if !reaped {
+        tracing::warn!("a session leader's reap could not be confirmed");
+    }
+    signals.is_ok() && reaped
+}
+
+/// The status an owned session records when its cleanup is not confirmed.
+/// A trusted host keeps its closed set of host messages.
+#[cfg(unix)]
+fn owned_cleanup_unconfirmed(host: bool, pty: bool) -> String {
+    match (host, pty) {
+        (true, false) => "host process cleanup could not be confirmed",
+        (true, true) => "host PTY cleanup could not be confirmed",
+        (false, false) => "session process cleanup could not be confirmed",
+        (false, true) => "session PTY cleanup could not be confirmed",
+    }
+    .into()
+}
+
+/// The line an owned session's end records when it ended processes its
+/// command left running (#5472): up to three of them by PID and kernel
+/// command name, and how to keep a server on purpose.
+#[cfg(unix)]
+fn ended_note(ended: &[crate::host_process::EndedProcess]) -> Option<String> {
+    if ended.is_empty() {
+        return None;
+    }
+    let listed = ended
+        .iter()
+        .take(3)
+        .map(|process| {
+            let name: String = process
+                .name
+                .chars()
+                .filter(|c| c.is_ascii_graphic() && *c != '`')
+                .collect();
+            if name.is_empty() {
+                format!("pid {}", process.pid)
+            } else {
+                format!("pid {} `{name}`", process.pid)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = match ended.len() {
+        0..=3 => String::new(),
+        count => format!(" and {} more", count - 3),
+    };
+    let count = match ended.len() {
+        1 => "1 process".to_owned(),
+        count => format!("{count} processes"),
+    };
+    Some(format!(
+        "Ended {count} left running after the command exited ({listed}{more}). \
+         To keep a server running, run it in its own named session, or start it \
+         with setsid; nohup alone is not enough."
+    ))
+}
+
+/// Writes an owned session's ended-processes line into its output, after
+/// every reader has finished, so `cw run`, `cw logs` and `cw wait` show it.
+#[cfg(unix)]
+async fn record_ended_note(
+    inner: &Weak<SessionEngineInner>,
+    handle: &SessionHandle,
+    note: Option<&str>,
+    stream: v1::SessionOutputStream,
+) {
+    let (Some(note), Some(inner)) = (note, inner.upgrade()) else {
+        return;
+    };
+    let newline = if stream == v1::SessionOutputStream::Pty {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let line = format!("[cw] {note}{newline}");
+    if let Err(error) = append_output(&inner.root, handle, stream, line.as_bytes()).await {
+        tracing::warn!(%error, "could not record the ended-processes line in session output");
     }
 }
 
@@ -4067,7 +4294,16 @@ async fn monitor_pty_process(monitor: PtyProcessMonitor) {
         Ok(Err(error)) => Some(error.to_string()),
         Err(error) => Some(format!("join session PTY output task: {error}")),
     };
-    finish_process(inner, session_id, token, handle, completion, output_error).await;
+    finish_process(
+        inner,
+        session_id,
+        token,
+        handle,
+        completion,
+        output_error,
+        OwnedEnd::default(),
+    )
+    .await;
 }
 
 #[cfg(unix)]
@@ -4088,20 +4324,27 @@ async fn monitor_host_pty_process(monitor: HostPtyProcessMonitor) {
     } = monitor;
     // Keep the guard live until group signaling completes; never wait/reap first.
     let mut group = group;
+    let host = inner
+        .upgrade()
+        .is_some_and(|inner| inner.config.host.is_some());
+    let mut ended = Vec::new();
     let completion = loop {
         tokio::select! {
             result = group.wait_for_exit() => {
                 let signals = group.terminate().await;
                 // WNOWAIT proved exit and kept identity reserved through signals.
                 let status = child.terminate_confirmed_spending(group.cleanup()).await;
-                break ProcessCompletion::Exited(if signals.is_ok() && status { result.map_err(|error| error.to_string()) }
-                    else { Err("host PTY cleanup could not be confirmed".into()) });
+                let signals = signals.map(|members| ended = members);
+                break ProcessCompletion::Exited(if cleanup_confirmed(&signals, status) { result.map_err(|error| error.to_string()) }
+                    else { Err(owned_cleanup_unconfirmed(host, true)) });
             }
             command = control.recv() => match command {
                 Some(SessionControl::Stop { reply, reason }) => {
-                    io_cancel.store(true, Ordering::Release);
+                    // The terminal stays open until the signals are sent:
+                    // closing it first would hang up the foreground job, so
+                    // its processes would get SIGHUP instead of their TERM.
                     let confirmed = terminate_session_pty_launch(&mut child, Some(&mut group)).await;
-                    break ProcessCompletion::Stopped { result: if confirmed { Ok(()) } else { Err("host PTY cleanup could not be confirmed".into()) }, reply, reason };
+                    break ProcessCompletion::Stopped { result: if confirmed { Ok(()) } else { Err(owned_cleanup_unconfirmed(host, true)) }, reply, reason };
                 }
                 Some(SessionControl::Input { data, reply }) => {
                     if reply.is_closed() { continue; }
@@ -4113,9 +4356,8 @@ async fn monitor_host_pty_process(monitor: HostPtyProcessMonitor) {
                         && let PtyRuntimeControl::Resize { reply, .. } = error.0 { let _ = reply.send(Err("host PTY control is closed".into())); }
                 }
                 None => {
-                    io_cancel.store(true, Ordering::Release);
                     let confirmed = terminate_session_pty_launch(&mut child, Some(&mut group)).await;
-                    break ProcessCompletion::Exited(if confirmed { Ok(1) } else { Err("host PTY cleanup could not be confirmed".into()) });
+                    break ProcessCompletion::Exited(if confirmed { Ok(1) } else { Err(owned_cleanup_unconfirmed(host, true)) });
                 }
             }
         }
@@ -4125,9 +4367,18 @@ async fn monitor_host_pty_process(monitor: HostPtyProcessMonitor) {
     let mut join = tokio::task::spawn_blocking(move || control_thread.join());
     let control_error = match crate::confirm::await_spending(group.cleanup(), &mut join).await {
         Some(Ok(Ok(()))) => None,
-        _ => Some("host PTY control join could not be confirmed".into()),
+        _ if host => Some("host PTY control join could not be confirmed".into()),
+        _ => Some("session PTY control join could not be confirmed".into()),
     };
-    let output_error = bounded_output_join(output_task, group.cleanup()).await;
+    let output_error = bounded_output_join(output_task, group.cleanup(), host).await;
+    let note = ended_note(&ended);
+    record_ended_note(
+        &inner,
+        &handle,
+        note.as_deref(),
+        v1::SessionOutputStream::Pty,
+    )
+    .await;
     finish_process(
         inner,
         session_id,
@@ -4135,6 +4386,7 @@ async fn monitor_host_pty_process(monitor: HostPtyProcessMonitor) {
         handle,
         completion,
         control_error.or(output_error),
+        OwnedEnd { owned: true, note },
     )
     .await;
 }
@@ -4238,6 +4490,15 @@ fn host_pty_control_loop(
     }
 }
 
+/// How an owned session ended beyond its completion: whether its group was
+/// owned, so its cleanup is recorded, and the line saying which processes
+/// its command left running were ended.
+#[derive(Default)]
+struct OwnedEnd {
+    owned: bool,
+    note: Option<String>,
+}
+
 async fn finish_process(
     inner: Weak<SessionEngineInner>,
     session_id: String,
@@ -4245,12 +4506,13 @@ async fn finish_process(
     handle: Arc<SessionHandle>,
     completion: ProcessCompletion,
     output_error: Option<String>,
+    end: OwnedEnd,
 ) {
     if let Some(inner) = inner.upgrade() {
         {
             let mut metadata = handle.metadata.lock().await;
             metadata.finished_at = Some(PersistedTimestamp::now());
-            if inner.config.host.is_some() {
+            if end.owned {
                 metadata.cleanup_unknown =
                     completion_result(&completion).is_err() || output_error.is_some();
                 metadata.cleanup_confirmed = !metadata.cleanup_unknown;
@@ -4268,7 +4530,10 @@ async fn finish_process(
                 (Ok(ProcessResult::Exited(code)), None) => {
                     metadata.state = v1::SessionLifecycleState::Exited as i32;
                     metadata.exit_code = Some(code);
-                    metadata.status_message = format!("session exited with status {code}");
+                    metadata.status_message = match &end.note {
+                        Some(note) => format!("session exited with status {code}. {note}"),
+                        None => format!("session exited with status {code}"),
+                    };
                 }
                 (Ok(ProcessResult::Stopped), None) => {
                     metadata.state = v1::SessionLifecycleState::Stopped as i32;
@@ -4282,10 +4547,21 @@ async fn finish_process(
                     metadata.status_message = error;
                 }
             }
-            if inner.config.host.is_some() && metadata.cleanup_unknown {
+            if end.owned && metadata.cleanup_unknown {
+                // The record keeps one closed message; the log names the step.
+                tracing::warn!(
+                    session_id,
+                    cause = %metadata.status_message,
+                    "session cleanup could not be confirmed"
+                );
                 metadata.state = v1::SessionLifecycleState::Interrupted as i32;
-                metadata.status_message =
-                    "host process cleanup could not be confirmed; restart is unavailable".into();
+                metadata.status_message = if inner.config.host.is_some() {
+                    "host process cleanup could not be confirmed; restart is unavailable".into()
+                } else {
+                    "session cleanup could not be confirmed: some of its processes may still \
+                     be running until the environment stops"
+                        .into()
+                };
             }
             let _ = persist_metadata(&inner.root, &metadata).await;
         }
@@ -5166,6 +5442,33 @@ pub fn status_from_session_error(error: SessionError) -> Status {
     }
 }
 
+/// The kernel's boot ID, when it reads as a UUID (#5471). Anything else
+/// counts as the current boot, so it never proves a session's cleanup.
+fn current_boot_id() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    return std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .and_then(|value| boot_id(value.trim()));
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
+fn boot_id(value: &str) -> Option<String> {
+    (value.len() == 36)
+        .then(|| Uuid::parse_str(value).ok())
+        .flatten()
+        .map(|id| id.hyphenated().to_string())
+}
+
+/// Whether a record's launch ran under a boot other than the daemon's: only
+/// when both read as boot IDs and differ.
+fn another_boot(recorded: Option<&str>, current: Option<&str>) -> bool {
+    match (recorded.and_then(boot_id), current.and_then(boot_id)) {
+        (Some(recorded), Some(current)) => recorded != current,
+        _ => false,
+    }
+}
+
 /// Prepare a host launch between fork and exec: it owns a fresh session and
 /// group, and on Darwin inherits no descriptor beyond stdio.
 #[cfg(unix)]
@@ -5452,6 +5755,7 @@ mod tests {
             status_message: "session starting".into(),
             cleanup_unknown: true,
             end_after_detached_seconds: 0,
+            launch_boot_id: None,
         };
         persist_metadata(&engine.inner.root, &metadata)
             .await
@@ -6024,6 +6328,7 @@ mod tests {
             cleanup_unknown: false,
             status_message: "session running".into(),
             end_after_detached_seconds: 0,
+            launch_boot_id: None,
         };
         persist_metadata(root, &metadata).await.unwrap();
         SessionHandle {
@@ -6063,7 +6368,7 @@ mod tests {
         SessionEngine::new(&config, CredentialBridge::new(None))
     }
 
-    async fn record_fixture(
+    pub(super) async fn record_fixture(
         engine: &SessionEngine,
         number: u128,
         state: v1::SessionLifecycleState,
@@ -6693,6 +6998,7 @@ mod tests {
             cleanup_unknown: false,
             status_message: "session exited with status 0".into(),
             end_after_detached_seconds: 0,
+            launch_boot_id: None,
         };
 
         let (changed, index) = reconcile_output_cursor(root, &mut metadata)

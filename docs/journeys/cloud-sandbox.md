@@ -465,6 +465,11 @@ Issue: #5472.
   - a session that ignores TERM (`sh -c 'trap "" TERM; sleep 86400'`);
   - an interactive shell with a background job: `cw shell walk --name sh`,
     then `sleep 86400 &` in it, then the stop from another terminal;
+  - a command that starts a child and exits:
+    `cw run --in walk --name bg --detach -- sh -c 'sleep 86400 & echo started'`,
+    and the same with `nohup sleep 86400 &`;
+  - a child started with `setsid`, which is not the session's:
+    `sh -c 'setsid sleep 86400 >/dev/null 2>&1 < /dev/null & exit 0'`;
   - another session in the same Sandbox, still `Running` after each stop.
 - **Driving it:**
 
@@ -478,6 +483,10 @@ Issue: #5472.
 - **Proof:**
   - each stop returns within 5 s, and `cw ls walk` shows the session
     `Stopped`, never `Stopping`;
+  - `bg` ends `Exited` with status 0 as soon as `sh` exits, with and without
+    `nohup`, and its last output line is "[cw] Ended 1 process left running
+    after the command exited (pid N `sleep`) …"; the `setsid` child is still
+    running afterwards, and its session's end names nothing;
   - `ps` shows no `sleep 86400` left from the stopped session, the background
     job's included, and the other session's process and the daemon are
     untouched;
@@ -492,7 +501,8 @@ Issue: #5472.
     TERM-ignoring sessions answered "Environment session outcome is unknown;
     refresh sessions before trying again" after 7 s and stayed `Stopping`
     for over 3 minutes. Their `sleep` was re-parented to PID 1 and still
-    running.
+    running. `sh -c 'sleep 86400 & echo started'` stayed `Running` after
+    `sh` exited, its `sleep` re-parented to PID 1.
   - With the fix: not yet observed.
 
 ## `sandbox-start-list`: a starting sandbox's page shows one list of steps

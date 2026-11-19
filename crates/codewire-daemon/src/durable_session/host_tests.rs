@@ -1222,6 +1222,51 @@ fn host_engine(root: &Path) -> SessionEngine {
     host_test_engine(&config)
 }
 
+/// A guest daemon's engine: no host owner, sessions run natively, so they
+/// own their Unix session with the guest bounds (#5472).
+fn guest_engine(root: &Path) -> SessionEngine {
+    let engine = host_test_engine(&tests::test_engine(root).inner.config);
+    assert!(engine.inner.config.host.is_none());
+    engine
+}
+
+type EngineFor = fn(&Path) -> SessionEngine;
+
+/// Both owners of a session's processes: a trusted host and a guest.
+const OWNERS: [(&str, EngineFor); 2] = [("host", host_engine), ("guest", guest_engine)];
+
+async fn session_output(engine: &SessionEngine, session_id: &str) -> String {
+    let output = engine
+        .read_output(v1::ReadSessionOutputRequest {
+            session_id: session_id.to_owned(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    String::from_utf8_lossy(
+        &output
+            .chunks
+            .into_iter()
+            .flat_map(|chunk| chunk.data)
+            .collect::<Vec<_>>(),
+    )
+    .into_owned()
+}
+
+async fn ended(engine: &SessionEngine, session_id: &str) -> v1::SessionRecord {
+    tokio::time::timeout(HANG, async {
+        loop {
+            let record = engine.get(session_id).await.unwrap();
+            if !is_live_state(record.state) {
+                break record;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
 fn request(command: &str, pty: bool) -> v1::LaunchSessionRequest {
     v1::LaunchSessionRequest {
         command: vec!["/bin/sh".into(), "-c".into(), command.into()],
@@ -1566,6 +1611,16 @@ fn a_stop_cleanup_fits_inside_the_time_a_stop_is_given() {
         crate::host_process::TERM_GRACE + crate::host_process::CLEANUP_BUDGET
             < codewire_daemon_proto::SESSION_INPUT_TIMEOUT
     );
+    // A guest gives a database or dev server 2 s before KILL, and still ends
+    // 4 s after the stop (#5472).
+    assert_eq!(
+        crate::host_process::GUEST_TERM_GRACE,
+        Duration::from_secs(2)
+    );
+    assert!(
+        crate::host_process::GUEST_TERM_GRACE + crate::host_process::GUEST_CLEANUP_BUDGET
+            < codewire_daemon_proto::SESSION_INPUT_TIMEOUT
+    );
 }
 
 /// A drain that never settles still leaves the stop's cleanup unknown, once
@@ -1625,9 +1680,12 @@ async fn host_stop_owns_shell_descendants_for_pipe_and_pty_preserving_unrelated_
     {
         return;
     }
-    for pty in [false, true] {
+    for ((owner, engine_for), pty) in OWNERS
+        .into_iter()
+        .flat_map(|owner| [(owner, false), (owner, true)])
+    {
         let temp = tempfile::tempdir().unwrap();
-        let engine = host_engine(temp.path());
+        let engine = engine_for(temp.path());
         let mut unrelated = unrelated_sleep();
         let unrelated_pid = unrelated.id().unwrap();
         let descendant = temp.path().join("descendant.pid");
@@ -1654,12 +1712,15 @@ async fn host_stop_owns_shell_descendants_for_pipe_and_pty_preserving_unrelated_
         assert!(!stopped.cleanup_unknown);
         assert!(
             !alive(descendant_pid),
-            "ordinary descendant survived host Stop (pty={pty})"
+            "ordinary descendant survived a {owner} Stop (pty={pty})"
         );
         #[cfg(target_os = "linux")]
         descendant.reap();
         assert!(alive(unrelated_pid), "unrelated process was signaled");
-        assert!(!temp.path().join("home/.codewire").exists());
+        if owner == "host" {
+            // A host keeps its sessions in its state root, never the home.
+            assert!(!temp.path().join("home/.codewire").exists());
+        }
         engine.shutdown().await.unwrap();
         unrelated.kill().await.unwrap();
     }
@@ -1678,37 +1739,39 @@ async fn host_stop_reaches_job_control_groups_in_the_owned_session() {
     {
         return;
     }
-    let temp = tempfile::tempdir().unwrap();
-    let engine = host_engine(temp.path());
-    let descendant = temp.path().join("descendant.pid");
-    let script = format!(
-        "set -m; trap '' TERM; sleep 60 & echo $! > '{}'; wait",
-        descendant.display()
-    );
-    let record = engine.launch(request(&script, true)).await.unwrap();
-    let pid: u32 = wait_file(&descendant).await.trim().parse().unwrap();
-    #[cfg(target_os = "linux")]
-    let fixture = FixtureDescendant::capture(pid);
-    assert_eq!(
-        unsafe { libc::getpgid(pid as i32) },
-        pid as i32,
-        "job control did not give the background job its own group"
-    );
-    let stopped = tokio::time::timeout(HANG, engine.stop(&record.session_id))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        stopped.state,
-        v1::SessionLifecycleState::Stopped as i32,
-        "{}",
-        stopped.status_message
-    );
-    assert!(!stopped.cleanup_unknown);
-    assert!(!alive(pid), "job-control group survived host Stop");
-    #[cfg(target_os = "linux")]
-    fixture.reap();
-    engine.shutdown().await.unwrap();
+    for (owner, engine_for) in OWNERS {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = engine_for(temp.path());
+        let descendant = temp.path().join("descendant.pid");
+        let script = format!(
+            "set -m; trap '' TERM; sleep 60 & echo $! > '{}'; wait",
+            descendant.display()
+        );
+        let record = engine.launch(request(&script, true)).await.unwrap();
+        let pid: u32 = wait_file(&descendant).await.trim().parse().unwrap();
+        #[cfg(target_os = "linux")]
+        let fixture = FixtureDescendant::capture(pid);
+        assert_eq!(
+            unsafe { libc::getpgid(pid as i32) },
+            pid as i32,
+            "job control did not give the background job its own group"
+        );
+        let stopped = tokio::time::timeout(HANG, engine.stop(&record.session_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stopped.state,
+            v1::SessionLifecycleState::Stopped as i32,
+            "{}",
+            stopped.status_message
+        );
+        assert!(!stopped.cleanup_unknown);
+        assert!(!alive(pid), "job-control group survived a {owner} Stop");
+        #[cfg(target_os = "linux")]
+        fixture.reap();
+        engine.shutdown().await.unwrap();
+    }
     #[cfg(target_os = "linux")]
     assert_no_fixture_children();
 }
@@ -1723,9 +1786,12 @@ async fn host_exit_cleans_remaining_descendants_before_reaping_group_leader() {
     {
         return;
     }
-    for pty in [false, true] {
+    for ((owner, engine_for), pty) in OWNERS
+        .into_iter()
+        .flat_map(|owner| [(owner, false), (owner, true)])
+    {
         let temp = tempfile::tempdir().unwrap();
-        let engine = host_engine(temp.path());
+        let engine = engine_for(temp.path());
         let descendant = temp.path().join("descendant.pid");
         let script = format!(
             "trap '' TERM; sleep 60 & echo $! > '{}'; exit 7",
@@ -1735,17 +1801,7 @@ async fn host_exit_cleans_remaining_descendants_before_reaping_group_leader() {
         let pid: u32 = wait_file(&descendant).await.trim().parse().unwrap();
         #[cfg(target_os = "linux")]
         let descendant = FixtureDescendant::capture(pid);
-        let ended = tokio::time::timeout(HANG, async {
-            loop {
-                let record = engine.get(&record.session_id).await.unwrap();
-                if !is_live_state(record.state) {
-                    break record;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
+        let ended = ended(&engine, &record.session_id).await;
         assert_eq!(
             ended.state,
             v1::SessionLifecycleState::Exited as i32,
@@ -1754,7 +1810,32 @@ async fn host_exit_cleans_remaining_descendants_before_reaping_group_leader() {
         );
         assert_eq!(ended.exit_code, Some(7));
         assert!(!ended.cleanup_unknown);
-        assert!(!alive(pid));
+        assert!(
+            !alive(pid),
+            "a {owner} exit left its descendant (pty={pty})"
+        );
+        // The end says what it ended, in the record and in the output
+        // (#5472). A terminal session's leader hangs up its foreground job
+        // as it exits, so there the kernel may end the child first.
+        if !pty {
+            let line = format!("Ended 1 process left running after the command exited (pid {pid}");
+            assert!(
+                ended
+                    .status_message
+                    .starts_with("session exited with status 7. ")
+                    && ended.status_message.contains(&line),
+                "{}",
+                ended.status_message
+            );
+            #[cfg(target_os = "linux")]
+            assert!(
+                ended
+                    .status_message
+                    .contains(&format!("(pid {pid} `sleep`)"))
+            );
+            let output = session_output(&engine, &record.session_id).await;
+            assert!(output.contains(&format!("[cw] {line}")), "{output:?}");
+        }
         #[cfg(target_os = "linux")]
         descendant.reap();
         engine.shutdown().await.unwrap();
@@ -1847,6 +1928,7 @@ async fn recovered_host_live_records_are_fenced_without_signaling_persisted_pid(
             cleanup_unknown: false,
             status_message: String::new(),
             end_after_detached_seconds: 0,
+            launch_boot_id: None,
         };
         let mut old = serde_json::to_value(&metadata).unwrap();
         old.as_object_mut().unwrap().remove("name");
@@ -2738,4 +2820,374 @@ fn unrelated_sleep() -> tokio::process::Child {
         });
     }
     command.arg("60").kill_on_drop(true).spawn().unwrap()
+}
+
+/// A guest session whose command forks and exits, as `pnpm dev &` does, used
+/// to stay Running for as long as the child held its output (#5472). It ends
+/// with the command's status, its child is ended, and the end says so; a
+/// child started with `nohup` alone is ended too.
+#[tokio::test]
+async fn a_guest_session_ends_when_its_command_exits_and_ends_what_it_left() {
+    #[cfg(target_os = "linux")]
+    if isolated_descendant_fixture(
+        "a_guest_session_ends_when_its_command_exits_and_ends_what_it_left",
+    )
+    .await
+    {
+        return;
+    }
+    // On a terminal the child ignores the leader's hangup only under nohup.
+    let nohup = "nohup sleep 60 >/dev/null 2>&1";
+    for (spawn, pty) in [("sleep 60", false), (nohup, false), (nohup, true)] {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = guest_engine(temp.path());
+        let child = temp.path().join("child.pid");
+        // The command exits only once its child is `sleep` itself, so on a
+        // terminal nohup has already ignored the hangup the exit sends.
+        let script = format!(
+            "{spawn} & child=$!; until [ \"$(ps -o comm= -p $child)\" = sleep ]; do sleep 0.01; done; \
+             echo $child > '{}'; echo started",
+            child.display()
+        );
+        let record = engine.launch(request(&script, pty)).await.unwrap();
+        let pid: u32 = wait_file(&child).await.trim().parse().unwrap();
+        #[cfg(target_os = "linux")]
+        let fixture = FixtureDescendant::capture(pid);
+        let ended = ended(&engine, &record.session_id).await;
+        assert_eq!(
+            ended.state,
+            v1::SessionLifecycleState::Exited as i32,
+            "{spawn}: {}",
+            ended.status_message
+        );
+        assert_eq!(ended.exit_code, Some(0));
+        assert!(!ended.cleanup_unknown);
+        assert!(!alive(pid), "{spawn} outlived its session");
+        assert!(
+            ended
+                .status_message
+                .contains("start it with setsid; nohup alone is not enough"),
+            "{spawn} (pty={pty}): {}",
+            ended.status_message
+        );
+        #[cfg(target_os = "linux")]
+        fixture.reap();
+        engine.shutdown().await.unwrap();
+    }
+    #[cfg(target_os = "linux")]
+    assert_no_fixture_children();
+}
+
+/// A process the command moves into its own Unix session on purpose is not
+/// the session's: the session's end leaves it running and mentions nothing.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_guest_session_leaves_a_process_started_with_setsid() {
+    if isolated_descendant_fixture("a_guest_session_leaves_a_process_started_with_setsid").await {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let engine = guest_engine(temp.path());
+    let kept = temp.path().join("kept.pid");
+    let script = format!(
+        "setsid sh -c 'echo $$ > \"{}\"; exec sleep 60' >/dev/null 2>&1 </dev/null & exit 0",
+        kept.display()
+    );
+    let record = engine.launch(request(&script, false)).await.unwrap();
+    let pid: u32 = wait_file(&kept).await.trim().parse().unwrap();
+    let kept = FixtureDescendant::capture(pid);
+    let ended = ended(&engine, &record.session_id).await;
+    assert_eq!(ended.state, v1::SessionLifecycleState::Exited as i32);
+    assert_eq!(ended.status_message, "session exited with status 0");
+    assert!(alive(pid), "a process in its own session was ended");
+    kept.kill_and_reap();
+    engine.shutdown().await.unwrap();
+    assert_no_fixture_children();
+}
+
+/// A stop of one guest session ends only that session's processes: another
+/// session keeps running, and the daemon is untouched.
+#[tokio::test]
+async fn a_guest_stop_ends_only_its_own_session() {
+    #[cfg(target_os = "linux")]
+    if isolated_descendant_fixture("a_guest_stop_ends_only_its_own_session").await {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let engine = guest_engine(temp.path());
+    let other = engine
+        .launch(request("exec sleep 60", false))
+        .await
+        .unwrap();
+    let child = temp.path().join("child.pid");
+    let script = format!("sleep 60 & echo $! > '{}'; wait; true", child.display());
+    let stopped = engine.launch(request(&script, false)).await.unwrap();
+    let pid: u32 = wait_file(&child).await.trim().parse().unwrap();
+    #[cfg(target_os = "linux")]
+    let fixture = FixtureDescendant::capture(pid);
+    let started = std::time::Instant::now();
+    let stopped = tokio::time::timeout(HANG, engine.stop(&stopped.session_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stopped.state,
+        v1::SessionLifecycleState::Stopped as i32,
+        "{}",
+        stopped.status_message
+    );
+    assert!(!stopped.cleanup_unknown);
+    assert!(
+        started.elapsed() < codewire_daemon_proto::SESSION_INPUT_TIMEOUT,
+        "the stop took {:?}",
+        started.elapsed()
+    );
+    assert!(!alive(pid), "the stopped session's child survived");
+    #[cfg(target_os = "linux")]
+    fixture.reap();
+    let other = engine.get(&other.session_id).await.unwrap();
+    assert_eq!(other.state, v1::SessionLifecycleState::Running as i32);
+    engine.shutdown().await.unwrap();
+    #[cfg(target_os = "linux")]
+    assert_no_fixture_children();
+}
+
+/// A guest daemon's shutdown, which its environment's stop sends, ends its
+/// sessions and records them stopped with the environment, so they restart
+/// by name after the start (#5471).
+#[tokio::test]
+async fn a_guest_shutdown_records_its_sessions_stopped_with_the_environment() {
+    #[cfg(target_os = "linux")]
+    if isolated_descendant_fixture(
+        "a_guest_shutdown_records_its_sessions_stopped_with_the_environment",
+    )
+    .await
+    {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let engine = guest_engine(temp.path());
+    let child = temp.path().join("child.pid");
+    let script = format!("sleep 60 & echo $! > '{}'; wait", child.display());
+    let forking = engine.launch(request(&script, false)).await.unwrap();
+    let terminal = engine.launch(request("exec sleep 60", true)).await.unwrap();
+    let pid: u32 = wait_file(&child).await.trim().parse().unwrap();
+    #[cfg(target_os = "linux")]
+    let fixture = FixtureDescendant::capture(pid);
+    tokio::time::timeout(HANG, engine.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    for id in [&forking.session_id, &terminal.session_id] {
+        let record = engine.get(id).await.unwrap();
+        assert_eq!(
+            record.state,
+            v1::SessionLifecycleState::Stopped as i32,
+            "{}",
+            record.status_message
+        );
+        assert_eq!(record.status_message, ENVIRONMENT_STOPPED);
+        assert!(!record.cleanup_unknown);
+    }
+    assert!(
+        !alive(pid),
+        "a session's child outlived its environment's stop"
+    );
+    #[cfg(target_os = "linux")]
+    fixture.reap();
+    #[cfg(target_os = "linux")]
+    assert_no_fixture_children();
+}
+
+/// A session recorded live under another kernel boot ended with its machine:
+/// its cleanup is confirmed and it restarts by name. The current boot, a
+/// boot ID that does not read as one, or none proves nothing, and each
+/// owner keeps its rule (#5471).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_session_live_under_another_boot_ended_with_its_machine() {
+    let current = current_boot_id().expect("this Linux kernel has a boot ID");
+    let other = "00000000-0000-4000-8000-000000000001";
+    assert_ne!(current, other);
+    for (owner, engine_for) in OWNERS {
+        for (number, recorded, machine_stopped) in [
+            (1u128, Some(other), true),
+            (2, Some(current.as_str()), false),
+            (3, Some("not-a-boot-id"), false),
+            (4, None, false),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let engine = engine_for(temp.path());
+            engine.ensure_initialized().await.unwrap();
+            let id =
+                tests::record_fixture(&engine, number, v1::SessionLifecycleState::Running).await;
+            {
+                let handle = engine.handle(&id).unwrap();
+                let mut metadata = handle.metadata.lock().await;
+                metadata.launch_boot_id = recorded.map(str::to_owned);
+                metadata.finished_at = None;
+                persist_metadata(&engine.inner.root, &metadata)
+                    .await
+                    .unwrap();
+            }
+            let config = engine.inner.config.clone();
+            drop(engine);
+            let recovered = host_test_engine(&config);
+            let record = recovered.get(&id).await.unwrap();
+            let case = format!("{owner}, {recorded:?}: {}", record.status_message);
+            assert_eq!(
+                record.state,
+                v1::SessionLifecycleState::Interrupted as i32,
+                "{case}"
+            );
+            if machine_stopped {
+                assert_eq!(record.status_message, MACHINE_STOPPED, "{case}");
+                assert!(!record.cleanup_unknown, "{case}");
+                let metadata = recovered.handle(&id).unwrap().metadata.lock().await.clone();
+                assert!(metadata.cleanup_confirmed, "{case}");
+            } else if owner == "host" {
+                assert!(record.cleanup_unknown, "{case}");
+            } else {
+                assert!(!record.cleanup_unknown, "{case}");
+                assert!(record.status_message.contains("daemon restarted"), "{case}");
+            }
+        }
+    }
+}
+
+#[test]
+fn only_two_readable_and_different_boot_ids_are_another_boot() {
+    let a = "8a0fca4e-980a-4fb7-b178-942e1717f3b6";
+    let b = "09aca1bd-4764-4673-8a1b-0129d0bd00b6";
+    assert!(another_boot(Some(a), Some(b)));
+    assert!(!another_boot(Some(a), Some(a)));
+    assert!(
+        !another_boot(Some(&a.to_uppercase()), Some(a)),
+        "case is not another boot"
+    );
+    assert!(!another_boot(Some("not-a-boot-id"), Some(b)));
+    assert!(!another_boot(Some(a), Some("")));
+    assert!(!another_boot(None, Some(b)));
+    assert!(!another_boot(Some(a), None));
+    assert!(
+        !another_boot(Some(&a.replace('-', "")), Some(b)),
+        "a UUID without hyphens"
+    );
+}
+
+/// A stop sends each of the session's processes one TERM, and KILL only
+/// after the grace. A leader and a server that both trap TERM, as a server
+/// finishing a write does, each note one TERM and keep running until KILL.
+/// A second TERM is what many servers take as "quit now" (#5472).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_server_that_traps_term_gets_one_term_and_kill_only_after_the_grace() {
+    for ((owner, engine_for), pty) in OWNERS
+        .into_iter()
+        .flat_map(|owner| [(owner, false), (owner, true)])
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = engine_for(temp.path());
+        let grace = if owner == "host" {
+            crate::host_process::TERM_GRACE
+        } else {
+            crate::host_process::GUEST_TERM_GRACE
+        };
+        let trapping = temp.path().join("trapping.sh");
+        std::fs::write(
+            &trapping,
+            "trap 'echo \"$1\" >> \"$2\"' TERM\necho $$ > \"$3\"\n\
+             while :; do sleep 60 & wait $!; done\n",
+        )
+        .unwrap();
+        let terms = temp.path().join("terms");
+        let (leader, server) = (
+            temp.path().join("leader.pid"),
+            temp.path().join("server.pid"),
+        );
+        let script = format!(
+            "sh '{trapping}' server '{terms}' '{server}' & exec sh '{trapping}' leader '{terms}' '{leader}'",
+            trapping = trapping.display(),
+            terms = terms.display(),
+            server = server.display(),
+            leader = leader.display(),
+        );
+        let record = engine.launch(request(&script, pty)).await.unwrap();
+        wait_file(&leader).await;
+        let server_pid: u32 = wait_file(&server).await.trim().parse().unwrap();
+
+        let started = std::time::Instant::now();
+        let stop = tokio::spawn({
+            let (engine, id) = (engine.clone(), record.session_id.clone());
+            async move { engine.stop(&id).await }
+        });
+        if owner == "guest" {
+            tokio::time::timeout(HANG, async {
+                while std::fs::read_to_string(&terms)
+                    .unwrap_or_default()
+                    .lines()
+                    .count()
+                    < 2
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{owner} (pty={pty}): both noted their TERM: {:?}",
+                    std::fs::read_to_string(&terms)
+                )
+            });
+            // KILL is sent no sooner than the grace after the stop began.
+            if started.elapsed() < grace {
+                assert!(
+                    alive(server_pid),
+                    "{owner} (pty={pty}): KILL before the grace"
+                );
+            }
+        }
+        let stopped = tokio::time::timeout(HANG, stop)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            started.elapsed() >= grace,
+            "{owner} (pty={pty}): {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            stopped.state,
+            v1::SessionLifecycleState::Stopped as i32,
+            "{owner} (pty={pty}): {}",
+            stopped.status_message
+        );
+        assert!(
+            !alive(server_pid),
+            "{owner} (pty={pty}): the server outlived KILL"
+        );
+        let mut noted = std::fs::read_to_string(&terms)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        noted.sort();
+        if owner == "guest" {
+            assert_eq!(noted, ["leader", "server"], "{owner} (pty={pty})");
+        } else {
+            // On a starved host a trap may not run inside the 250 ms grace
+            // (#4233); it never runs twice.
+            noted.dedup();
+            assert_eq!(
+                noted.len(),
+                std::fs::read_to_string(&terms)
+                    .unwrap_or_default()
+                    .lines()
+                    .count(),
+                "{owner} (pty={pty}): a process noted a second TERM"
+            );
+        }
+        engine.shutdown().await.unwrap();
+    }
 }

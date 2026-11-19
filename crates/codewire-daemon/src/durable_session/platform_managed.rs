@@ -278,6 +278,7 @@ impl SessionEngine {
                 cleanup_unknown: true,
                 status_message: "platform managed session starting".into(),
                 end_after_detached_seconds: 0,
+                launch_boot_id: None,
             },
             Vec::new(),
         );

@@ -1,6 +1,7 @@
-//! Ownership of ordinary trusted-host descendants, not sandbox containment.
-//! Keep the exact leader unreaped until the last group signal. A persisted PID
-//! never enters this API; deliberately escaped user processes are not adopted.
+//! Ownership of a session's processes: a trusted host's, and a guest's run
+//! natively (#5472). This is not sandbox containment. Keep the exact leader
+//! unreaped until the last group signal. A persisted PID never enters this
+//! API; deliberately escaped user processes are not adopted.
 use std::io;
 use std::time::Duration;
 
@@ -14,22 +15,45 @@ pub(crate) const TERM_GRACE: Duration = Duration::from_millis(250);
 /// settled by then is unknown. One bound per step (1 s) let an ordinary slow
 /// step report unknown (#3777).
 pub(crate) const CLEANUP_BUDGET: Duration = Duration::from_millis(3_750);
+/// A guest session's TERM grace: long enough for a database or dev server to
+/// finish a write before KILL (#5472).
+pub(crate) const GUEST_TERM_GRACE: Duration = Duration::from_secs(2);
+/// A guest group's whole cleanup after [`GUEST_TERM_GRACE`], which with it
+/// also ends 4 s after a stop.
+pub(crate) const GUEST_CLEANUP_BUDGET: Duration = Duration::from_secs(2);
+
+/// A process a group signal reached besides the leader: what a session's
+/// end says it ended. `name` is the kernel's short command name, empty
+/// where the platform gives none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EndedProcess {
+    pub(crate) pid: libc::pid_t,
+    pub(crate) name: String,
+}
 
 pub(crate) struct OwnedProcessGroup {
     pid: libc::pid_t,
     armed: bool,
+    term_grace: Duration,
     cleanup: CheckBudget,
 }
 
 impl OwnedProcessGroup {
-    /// Owns `pid`'s group; `cleanup_budget` bounds its whole cleanup, which
-    /// is [`CLEANUP_BUDGET`] in the product.
-    pub(crate) fn new(pid: u32, cleanup_budget: Duration) -> io::Result<Self> {
+    /// Owns `pid`'s group; KILL follows TERM after `term_grace`, and
+    /// `cleanup_budget` bounds the whole cleanup after it: [`TERM_GRACE`] and
+    /// [`CLEANUP_BUDGET`] on a trusted host, [`GUEST_TERM_GRACE`] and
+    /// [`GUEST_CLEANUP_BUDGET`] in a guest.
+    pub(crate) fn new(
+        pid: u32,
+        term_grace: Duration,
+        cleanup_budget: Duration,
+    ) -> io::Result<Self> {
         let pid = libc::pid_t::try_from(pid)
-            .map_err(|_| io::Error::other("host leader PID is invalid"))?;
+            .map_err(|_| io::Error::other("session leader PID is invalid"))?;
         let group = Self {
             pid,
             armed: true,
+            term_grace,
             cleanup: CheckBudget::new(cleanup_budget),
         };
         // The caller retains the Child. waitid checks ownership without reaping.
@@ -88,20 +112,50 @@ impl OwnedProcessGroup {
         Ok(())
     }
 
-    pub(crate) async fn terminate(&mut self) -> io::Result<()> {
-        let term = self.signal(libc::SIGTERM);
-        let term = term.and(
-            scan_session_members(self.pid, libc::SIGTERM)
-                .await
-                .map(|_| ()),
-        );
-        tokio::time::sleep(TERM_GRACE).await;
+    /// Signals only the exact leader, which its owner keeps unreaped.
+    fn signal_leader(&self, signal: libc::c_int) -> io::Result<()> {
+        if self.exited()? {
+            return Ok(());
+        }
+        // SAFETY: the caller still owns the unreaped leader, so its PID is not reused.
+        if unsafe { libc::kill(self.pid, signal) } == -1 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// One TERM to the leader and to every member of the session, KILL to
+    /// the group and the session after the grace. Returns the members
+    /// besides the leader that TERM reached.
+    pub(crate) async fn terminate(&mut self) -> io::Result<Vec<EndedProcess>> {
+        // The leader first, so a live leader's own TERM handler runs before
+        // its children's exit can wake it. Then the session's members, each
+        // listed as it is signalled; the leader's group is part of the
+        // session. No group TERM follows: it would reach every one of them a
+        // second time, and many servers take a second TERM as "quit now"
+        // and skip their graceful shutdown.
+        let term = self.signal_leader(libc::SIGTERM);
+        let (term, members) = match scan_session_members(self.pid, libc::SIGTERM).await {
+            Ok(members) => (term, members),
+            Err(error) => (term.and(Err(error)), Vec::new()),
+        };
+        tokio::time::sleep(self.term_grace).await;
         // Always send KILL before reaping, even if TERM already ended the
         // leader: shell children may still hold stdin/stdout or ignore TERM.
+        // The leader first: a live one, such as a shell that trapped TERM,
+        // would start a new child for each one the member scan ends, and the
+        // scan would never settle.
+        let leader = self.signal_leader(libc::SIGKILL);
         let descendants = self.terminate_session_members().await;
         let kill = self.signal(libc::SIGKILL);
         self.armed = false;
-        kill.and(descendants).and(term)
+        kill.and(leader)
+            .and(descendants)
+            .and(term)
+            .map(|()| members)
     }
     /// PTY job control can create additional process groups without escaping the
     /// owned session. Linux pidfds signal those exact processes, never bare PIDs.
@@ -109,7 +163,7 @@ impl OwnedProcessGroup {
         let leader = self.pid;
         crate::confirm::check_spending_async(&self.cleanup, || async move {
             match scan_session_members(leader, libc::SIGKILL).await {
-                Ok(0) => Some(Ok(())),
+                Ok(members) if members.is_empty() => Some(Ok(())),
                 Ok(_) => None,
                 Err(error) => Some(Err(error)),
             }
@@ -156,7 +210,10 @@ fn leader_exit_status(pid: libc::pid_t) -> io::Result<Option<i32>> {
 ///
 /// The group's owner keeps the leader unreaped while this runs, so the
 /// session ID stays reserved.
-async fn scan_session_members(leader: libc::pid_t, signal: libc::c_int) -> io::Result<usize> {
+async fn scan_session_members(
+    leader: libc::pid_t,
+    signal: libc::c_int,
+) -> io::Result<Vec<EndedProcess>> {
     tokio::task::spawn_blocking(move || signal_session_members(leader, signal))
         .await
         .map_err(|_| io::Error::other("host session member scan did not finish"))?
@@ -168,16 +225,22 @@ async fn scan_session_members(leader: libc::pid_t, signal: libc::c_int) -> io::R
 /// this session itself. The remaining window between that check and the
 /// signal is a PID reuse in microseconds, by a process of this same user.
 #[cfg(target_os = "macos")]
-fn signal_session_members(leader: libc::pid_t, signal: libc::c_int) -> io::Result<usize> {
+fn signal_session_members(
+    leader: libc::pid_t,
+    signal: libc::c_int,
+) -> io::Result<Vec<EndedProcess>> {
     leader_exit_status(leader)?; // The exact leader continues reserving the session ID.
-    let mut live = 0;
+    let mut members = Vec::new();
     for pid in listed_pids(PROC_ALL_PIDS, 0)? {
         // Darwin's getsid fails with ESRCH for a zombie, so this also
         // skips members that have exited but are not yet reaped.
         if pid <= 0 || pid == leader || unsafe { libc::getsid(pid) } != leader {
             continue;
         }
-        live += 1;
+        members.push(EndedProcess {
+            pid,
+            name: String::new(),
+        });
         // SAFETY: plain kill of a just-rechecked member of the owned session.
         if unsafe { libc::kill(pid, signal) } == -1 {
             let error = io::Error::last_os_error();
@@ -186,11 +249,14 @@ fn signal_session_members(leader: libc::pid_t, signal: libc::c_int) -> io::Resul
             }
         }
     }
-    Ok(live)
+    Ok(members)
 }
 
 #[cfg(target_os = "linux")]
-fn signal_session_members(leader: libc::pid_t, signal: libc::c_int) -> io::Result<usize> {
+fn signal_session_members(
+    leader: libc::pid_t,
+    signal: libc::c_int,
+) -> io::Result<Vec<EndedProcess>> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     fn member(stat: &str, session_id: i32) -> bool {
         let Some((_, fields)) = stat.rsplit_once(") ") else {
@@ -204,7 +270,7 @@ fn signal_session_members(leader: libc::pid_t, signal: libc::c_int) -> io::Resul
         session == Some(session_id) && !matches!(state, Some("Z" | "X"))
     }
     leader_exit_status(leader)?; // The exact leader continues reserving the session ID.
-    let mut live = 0;
+    let mut members = Vec::new();
     for entry in std::fs::read_dir("/proc")? {
         let entry = entry?;
         let Some(pid) = entry
@@ -242,7 +308,15 @@ fn signal_session_members(leader: libc::pid_t, signal: libc::c_int) -> io::Resul
         if !member(&stat, leader) {
             continue;
         }
-        live += 1;
+        let name = stat
+            .split_once(" (")
+            .and_then(|(_, rest)| rest.rsplit_once(") "))
+            .map(|(name, _)| name.to_owned())
+            .unwrap_or_default();
+        members.push(EndedProcess {
+            pid: pid as libc::pid_t,
+            name,
+        });
         let result = unsafe {
             libc::syscall(
                 libc::SYS_pidfd_send_signal,
@@ -259,7 +333,7 @@ fn signal_session_members(leader: libc::pid_t, signal: libc::c_int) -> io::Resul
             }
         }
     }
-    Ok(live)
+    Ok(members)
 }
 
 // <libproc.h> selectors; the libc crate does not export them.

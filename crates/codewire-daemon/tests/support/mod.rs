@@ -338,6 +338,18 @@ impl DaemonHarness {
         }
     }
 
+    /// Ends the daemon as a crash does: it never sees a shutdown, so its
+    /// sessions stay as recorded, live ones included. A shutdown is an
+    /// environment's stop, which stops its sessions (#5471).
+    pub async fn crash(mut self) {
+        let shutdown = self.shutdown.take();
+        if let Some(server) = self.server.take() {
+            server.abort();
+            let _ = server.await;
+        }
+        drop(shutdown);
+    }
+
     pub async fn persisted_output(&self, session_id: &str) -> Vec<PersistedOutputFrame> {
         read_persisted_output(&self.home_root, session_id).await
     }
