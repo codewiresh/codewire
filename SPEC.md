@@ -956,6 +956,24 @@ replaces nothing. The journey is
 `hosted-enforcement` in `docs/journeys/network-and-egress.md`, not yet
 observed.
 
+Target, not shipped (#4001): with hosted interception on and recorded on a
+Sandbox's binding, cw-egress runs one TLS front door for that Sandbox, a
+child of its supervisor confined as the local one is (no filesystem, no new
+sockets, no process creation, only the descriptors it inherits). The Sandbox's
+broker hands each connection to a bound agent host on 443 to it instead of
+dialling. The front door makes its own P-256 key; only the public key leaves
+it, to the credential service's signer through orchestration, which returns
+leaves of the Pod's interception CA for the binding's own hosts, each for at
+most an hour and renewed at half-life. No CA key and no credential is ever on
+the node. The guest's trust frame carries that CA's certificate, the same for
+the Pod's life; with interception on, a stream whose CA cannot be had is
+refused rather than started with an empty frame, and the guest redials. The
+front door's requests go to the credential service over the
+`EgressService.FrontDoorSession` cw-egress opens for that Pod alone, reopened
+when it ends. Without a signed leaf, or without a session, intercepted hosts
+fail closed and other egress carries on. The journey is `agent-hosted` in
+`docs/journeys/network-and-egress.md`, not yet observed.
+
 Hosted enforcement status (#4000;
 `crates/codewire-orchestration/src/api/network_policies.rs`,
 `crates/codewire-orchestration/src/egress/reports.rs`): an environment's

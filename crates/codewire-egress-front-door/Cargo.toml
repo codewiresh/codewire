@@ -25,6 +25,8 @@ tokio = { workspace = true }
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+# Reads a signed leaf's key, names and end (`SignedLeaves`).
+x509-parser = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]

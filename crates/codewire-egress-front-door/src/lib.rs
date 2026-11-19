@@ -22,6 +22,7 @@
 mod ca;
 mod hello;
 mod serve;
+mod signed;
 mod splice;
 
 use std::future::Future;
@@ -44,6 +45,7 @@ use tokio_util::sync::CancellationToken;
 pub use ca::{BACKDATE, CA_VALIDITY, CaError, EnvironmentCa, LEAF_VALIDITY, MAX_BOUND_HOSTS};
 pub use hyper::body::Incoming;
 pub use rustls::sign::CertifiedKey;
+pub use signed::SignedLeaves;
 
 /// The most bytes read while looking for a ClientHello. A real one is a few
 /// hundred bytes to a few KiB, even with post-quantum key shares.

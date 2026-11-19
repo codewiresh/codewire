@@ -41,6 +41,10 @@ pub enum CaError {
     Expired,
     #[error("certificate generation failed")]
     Generate,
+    #[error("a signed leaf is unreadable, not for this key or names no host")]
+    InvalidLeaf,
+    #[error("a signed leaf starts later than this node's clock allows")]
+    NotYetValid,
 }
 
 /// An environment's own CA. Its certificate may sign only for the bound

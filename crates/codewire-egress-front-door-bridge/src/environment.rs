@@ -18,6 +18,7 @@ use codewire_credential_bridge::{
 };
 use codewire_egress_front_door::{
     Accepted, CaError, EnvironmentCa, FrontDoor, FrontDoorConfig, FrontDoorError, HandBackReason,
+    LeafSource,
 };
 use codewire_egress_policy::intercept::InterceptSet;
 use tokio::net::UnixStream;
@@ -58,12 +59,14 @@ pub enum Ended {
     SessionsClosed,
 }
 
-/// One environment's front door. See the module documentation.
-pub struct EnvironmentFrontDoor {
+/// One environment's front door. See the module documentation. Its leaves
+/// come from its own CA on a local VM, and from the credential service's
+/// signer on hosted ([`codewire_egress_front_door::SignedLeaves`], #4001).
+pub struct EnvironmentFrontDoor<L = EnvironmentCa> {
     environment_id: String,
     intercepts: InterceptSet,
     bridge: CredentialBridge,
-    door: Arc<FrontDoor<CredentialRouteBackend>>,
+    door: Arc<FrontDoor<CredentialRouteBackend, L>>,
 }
 
 impl EnvironmentFrontDoor {
@@ -74,18 +77,7 @@ impl EnvironmentFrontDoor {
         environment_generation: u64,
         intercepts: InterceptSet,
     ) -> Result<Self, StartError> {
-        if intercepts.is_empty() {
-            return Err(StartError::NoBindings);
-        }
-        if intercepts
-            .bindings()
-            .iter()
-            .any(|binding| binding.port() != INTERCEPT_PORT)
-        {
-            return Err(StartError::Port);
-        }
-        let bridge = CredentialBridge::new(environment_id, environment_generation)
-            .map_err(|_| StartError::Identity)?;
+        check_intercepts(&intercepts)?;
         // Bindings are sorted by name, so each name is listed once.
         let mut names: Vec<&str> = intercepts
             .bindings()
@@ -94,6 +86,43 @@ impl EnvironmentFrontDoor {
             .collect();
         names.dedup();
         let ca = EnvironmentCa::generate(names)?;
+        Self::with_leaves(environment_id, environment_generation, intercepts, ca)
+    }
+
+    /// The CA certificate the guest trusts, in DER: all the supervisor gets.
+    pub fn ca_certificate_der(&self) -> &[u8] {
+        self.door.ca().certificate_der().as_ref()
+    }
+}
+
+/// The bindings a front door may serve: at least one, each on 443.
+fn check_intercepts(intercepts: &InterceptSet) -> Result<(), StartError> {
+    if intercepts.is_empty() {
+        return Err(StartError::NoBindings);
+    }
+    if intercepts
+        .bindings()
+        .iter()
+        .any(|binding| binding.port() != INTERCEPT_PORT)
+    {
+        return Err(StartError::Port);
+    }
+    Ok(())
+}
+
+impl<L: LeafSource> EnvironmentFrontDoor<L> {
+    /// A front door serving `intercepts` with `leaves`. A host `leaves` holds
+    /// no current leaf for fails closed at its handshake. Nothing is served
+    /// until [`Self::serve`].
+    pub fn with_leaves(
+        environment_id: Uuid,
+        environment_generation: u64,
+        intercepts: InterceptSet,
+        leaves: L,
+    ) -> Result<Self, StartError> {
+        check_intercepts(&intercepts)?;
+        let bridge = CredentialBridge::new(environment_id, environment_generation)
+            .map_err(|_| StartError::Identity)?;
         // Claude's token host is bound only for a Claude sign-in and
         // GitHub's hosts only with a GitHub connection, as the boot chain
         // builds its intercepts from `RouteTable::for_clients`; a local boot
@@ -106,18 +135,13 @@ impl EnvironmentFrontDoor {
                 .all(|host| intercepts.binds(host, INTERCEPT_PORT)),
         );
         let backend = CredentialRouteBackend::new(routes, bridge.clone());
-        let door = FrontDoor::new(ca, backend, FrontDoorConfig::default());
+        let door = FrontDoor::new(leaves, backend, FrontDoorConfig::default());
         Ok(Self {
             environment_id: environment_id.to_string(),
             intercepts,
             bridge,
             door: Arc::new(door),
         })
-    }
-
-    /// The CA certificate the guest trusts, in DER: all the supervisor gets.
-    pub fn ca_certificate_der(&self) -> &[u8] {
-        self.door.ca().certificate_der().as_ref()
     }
 
     /// Serve until the egress broker closes the hand-off socket or `later`
