@@ -104,6 +104,16 @@ done
   fail 'a request lacks the reviewed network deadline'
 pass
 
+# The merge queue's bot pushes main (infra#2599): its run, with its own token,
+# reads the bot token too.
+: >"$FAKE_EVENTS"
+FAKE_FORGEJO_JWT="$(jwt "$(jq -c '.actor = "codewire-merge-queue-bot"' <<<"$GOOD_CLAIMS")")" \
+  fetch "$work/output/queue-token" env GITHUB_ACTOR=codewire-merge-queue-bot >"$work/queue.out" 2>&1 ||
+  fail "$(cat "$work/queue.out")"
+cmp -s "$work/output/queue-token" <(printf '%s' "$FAKE_BOT_TOKEN") || fail 'the queue run read no token'
+[[ "$(cat "$FAKE_EVENTS")" == $'login\nread' ]] || fail 'the queue run did not log in once and read once'
+pass
+
 # Wrong actor, ref, event or repository is refused before any request.
 for override in GITHUB_ACTOR=mallory GITHUB_ACTOR=codewire-workspace-pin-bot \
     GITHUB_REF=refs/heads/automation/workspace-image-pin GITHUB_REF=refs/tags/v0.4.2 \
@@ -129,7 +139,7 @@ for ambient in GITEA_TOKEN=ambient WORKSPACE_PIN_BOT_TOKEN=ambient BAO_TOKEN=amb
 done
 
 # A token whose own claims are not this exact run never reaches OpenBao.
-for claim in '.actor = "mallory"' '.workflow_ref = "codewire/codewire/.gitea/workflows/ci.yaml@refs/heads/main"' \
+for claim in '.actor = "mallory"' '.actor = "codewire-workspace-pin-bot"' '.workflow_ref = "codewire/codewire/.gitea/workflows/ci.yaml@refs/heads/main"' \
     '.workflow_ref = "codewire/codewire/.gitea/workflows/support-images.yaml@refs/heads/automation/workspace-image-pin"' \
     '.ref = "refs/heads/feature"' '.event_name = "workflow_dispatch"' \
     '.aud = "openbao-codewire-source-support-publisher"' \

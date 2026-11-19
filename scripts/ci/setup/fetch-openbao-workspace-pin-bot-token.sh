@@ -34,9 +34,10 @@ readonly -a curl_bounds=(--connect-timeout 10 --max-time 30)
 
 : "${ACTIONS_ID_TOKEN_REQUEST_URL:?Forgejo OIDC request URL is required}"
 : "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?Forgejo OIDC request token is required}"
-[[ "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}|${GITHUB_ACTOR:-}|${GITHUB_REPOSITORY:-}" == \
-  "push|refs/heads/main|noel|$repository" ]] ||
-  fail 'only the protected-main support-image push run by noel may read the workspace-pin bot token'
+# The owner or the merge queue's bot pushes main (infra#2599).
+[[ "${GITHUB_EVENT_NAME:-}|${GITHUB_REF:-}|${GITHUB_REPOSITORY:-}" == "push|refs/heads/main|$repository" &&
+   ( "${GITHUB_ACTOR:-}" == noel || "${GITHUB_ACTOR:-}" == codewire-merge-queue-bot ) ]] ||
+  fail 'only the protected-main support-image push may read the workspace-pin bot token'
 for name in GITEA_TOKEN WORKSPACE_PIN_BOT_TOKEN BAO_TOKEN VAULT_TOKEN; do
   [[ -z "${!name:-}" ]] || fail "ambient $name is set; refusing a cached or ambient credential"
 done
@@ -88,7 +89,8 @@ payload=''
 jq -e --arg aud "$openbao_audience" --arg sub "$subject" --arg repository "$repository" \
   --arg workflow_ref "$workflow_ref" '
     (.aud == $aud or (.aud | type == "array" and . == [$aud])) and .sub == $sub and
-    .repository == $repository and .actor == "noel" and .workflow_ref == $workflow_ref and
+    .repository == $repository and (.actor == "noel" or .actor == "codewire-merge-queue-bot") and
+    .workflow_ref == $workflow_ref and
     .ref == "refs/heads/main" and .event_name == "push"
   ' "$work/claims.json" >/dev/null 2>&1 ||
   fail 'OIDC token claims are not the protected support-image workflow'
