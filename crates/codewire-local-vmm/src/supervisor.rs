@@ -25,6 +25,7 @@ mod seed_placeholders;
 mod snapshots;
 mod sources;
 mod ssh;
+mod start_failure;
 mod start_state;
 #[cfg(test)]
 pub(crate) use crate::supervisor_metadata::SUPERVISOR_STATE_SCHEMA;
@@ -3697,6 +3698,9 @@ impl SupervisorCore {
         if let SupervisorError::UnsafeRuntimeArtifactStore { location } = error {
             fields.push(("location", LogField::Name(location)));
         }
+        if let SupervisorError::CredentialBrokerUnavailable { observed } = error {
+            fields.push(("observed", LogField::Code(observed)));
+        }
         fields.push(("error_code", LogField::Code(error_code)));
         log.record("operation_failed", &fields);
     }
@@ -4535,6 +4539,7 @@ impl Supervisor {
             network_policy_document: egress.network_policy_document,
             intercept: egress.intercept,
             credential_placeholders,
+            credential_broker: broker_request.enabled,
             cw_runtime_catalog_generation: expected_cw_runtime_generation.clone(),
             cw_runtime_moved_from_generation: self.cw_runtime_moved_from(&environment),
             environment_id: environment.id.to_string(),
@@ -4628,8 +4633,8 @@ impl Supervisor {
                 Err(SupervisorError::InvalidRunnerResponse)
             }
         };
-        let runner_error_code = match relay_result {
-            Ok(error_code) => error_code,
+        let runner_failure = match relay_result {
+            Ok(failure) => failure,
             Err(error) => {
                 if start.is_ok() {
                     let _ = client.stop().await;
@@ -4637,30 +4642,12 @@ impl Supervisor {
                 return Err(error);
             }
         };
-        let info = match (start, runner_error_code) {
+        let info = match (start, runner_failure) {
             (Ok(info), None) => info,
-            (Err(status), Some(error_code)) => {
-                self.core().record_runner_start_failure(name, &error_code)?;
-                if error_code == crate::runner_service::GUEST_DOCKER_TOOLING_MISSING {
-                    return Err(SupervisorError::GuestDockerToolingMissing);
-                }
-                if error_code == crate::runner_service::GUEST_SETUP_FAILED {
-                    return Err(SupervisorError::GuestSetupFailed);
-                }
-                if error_code == crate::runner_service::GUEST_WORKSPACE_FAILED {
-                    return Err(SupervisorError::GuestWorkspaceFailed);
-                }
-                if error_code == crate::runner_service::HOST_PORT_UNAVAILABLE {
-                    return Err(SupervisorError::HostPortUnavailable);
-                }
-                if let Some(refusal) = crate::runner::InterceptRefusal::from_code(&error_code) {
-                    return Err(SupervisorError::Interception(refusal));
-                }
-                #[cfg(target_os = "macos")]
-                if error_code == crate::runner_service::VM_START_REFUSED {
-                    return Err(SupervisorError::VmStartRefused);
-                }
-                return Err(SupervisorError::VmStart(status.message().to_owned()));
+            (Err(status), Some(failure)) => {
+                self.core()
+                    .record_runner_start_failure(name, &failure.error_code)?;
+                return Err(start_failure::runner_start_error(&failure, &status));
             }
             (Ok(_), Some(_)) | (Err(_), None) => {
                 let _ = client.stop().await;
@@ -7516,7 +7503,7 @@ struct RunnerStartRelayContext {
 async fn relay_runner_start_events(
     mut events: tonic::Streaming<v1::RunnerEvent>,
     context: RunnerStartRelayContext,
-) -> Result<Option<String>, SupervisorError> {
+) -> Result<Option<start_failure::RunnerStartFailure>, SupervisorError> {
     let mut sequence = 0_u64;
     let mut guest_sequence = 0_u64;
     let mut guest_stage = None;
@@ -7612,14 +7599,14 @@ async fn relay_runner_start_events(
             return Err(SupervisorError::InvalidRunnerResponse);
         }
         let terminal = matches!(stage, v1::RunnerStage::DaemonReady | v1::RunnerStage::Error);
-        let terminal_error_code =
-            (stage == v1::RunnerStage::Error).then(|| event.error_code.clone());
+        let terminal_failure = (stage == v1::RunnerStage::Error)
+            .then(|| start_failure::RunnerStartFailure::of(&event));
         let _ = context.progress.send(OperationProgress {
             operation_id: context.operation_id,
             event,
         });
         if terminal {
-            return Ok(terminal_error_code);
+            return Ok(terminal_failure);
         }
     }
     Err(SupervisorError::InvalidRunnerResponse)
@@ -9927,6 +9914,7 @@ impl From<SupervisorError> for Status {
             | SupervisorError::GuestSetupFailed
             | SupervisorError::GuestWorkspaceFailed
             | SupervisorError::HostPortUnavailable
+            | SupervisorError::CredentialBrokerUnavailable { .. }
             | SupervisorError::Interception(_)
             | SupervisorError::VmStop
             | SupervisorError::VmResize
@@ -10090,6 +10078,10 @@ pub enum SupervisorError {
         "a host port this environment publishes on 127.0.0.1 is in use by another program or local environment; stop it, or publish a different host port"
     )]
     HostPortUnavailable,
+    #[error(
+        "the VM's credentials could not be served: its credential broker never connected (the VM's runner saw {observed})"
+    )]
+    CredentialBrokerUnavailable { observed: String },
     #[error(transparent)]
     Interception(crate::runner::InterceptRefusal),
     #[cfg(target_os = "macos")]
@@ -10187,6 +10179,9 @@ fn create_failure_code(error: &SupervisorError) -> &'static str {
         SupervisorError::GuestSetupFailed => "create_guest_setup_failed",
         SupervisorError::GuestWorkspaceFailed => "create_guest_workspace_failed",
         SupervisorError::HostPortUnavailable => "create_host_port_unavailable",
+        SupervisorError::CredentialBrokerUnavailable { .. } => {
+            "create_credential_broker_unavailable"
+        }
         SupervisorError::Interception(refusal) => refusal.create_code(),
         #[cfg(target_os = "macos")]
         SupervisorError::VmStartRefused => "create_vm_start_refused",
@@ -10333,6 +10328,7 @@ fn lifecycle_failure_cause(error: &SupervisorError) -> &'static str {
         SupervisorError::GuestSetupFailed => "guest_setup_failed",
         SupervisorError::GuestWorkspaceFailed => "guest_workspace_failed",
         SupervisorError::HostPortUnavailable => "host_port_unavailable",
+        SupervisorError::CredentialBrokerUnavailable { .. } => "credential_broker_unavailable",
         SupervisorError::Interception(refusal) => refusal.code(),
         #[cfg(target_os = "macos")]
         SupervisorError::VmStartRefused => "vm_start_refused",

@@ -93,10 +93,15 @@ pub struct RunnerEntrypointConfig {
 #[cfg(target_os = "linux")]
 mod checkpoint;
 mod egress_status;
+mod events;
+use events::RunnerEvents;
 mod exit_cause;
 mod generation_access;
 mod guest_start;
-use generation_access::{GenerationAccessCell, GenerationAccessGuard, validate_generation_access};
+use generation_access::{
+    BrokerSeen, GenerationAccessCell, GenerationAccessGuard, validate_generation_access,
+};
+pub(crate) use guest_start::CREDENTIAL_BROKER_UNAVAILABLE;
 use guest_start::{GuestStartFailure, wait_for_guest_daemon};
 mod stage_log;
 mod start_error;
@@ -371,124 +376,6 @@ pub(crate) fn admit_runner_protocol_info(
         });
     }
     Ok(())
-}
-
-struct RunnerEvents {
-    environment_id: Uuid,
-    artifact_generation: String,
-    sequence: AtomicU64,
-    sender: watch::Sender<v1::RunnerEvent>,
-}
-
-impl RunnerEvents {
-    fn new(environment_id: Uuid, artifact_generation: String, generation: u64) -> Self {
-        let runner = v1::RunnerInfo {
-            environment_id: environment_id.to_string(),
-            state: v1::EnvironmentState::Stopped as i32,
-            generation,
-            artifact_generation: artifact_generation.clone(),
-            error_code: String::new(),
-            cw_runtime_catalog_generation: String::new(),
-            ..Default::default()
-        };
-        let initial = v1::RunnerEvent {
-            sequence: 1,
-            runner: Some(runner),
-            stage: v1::RunnerStage::WaitingAdoption as i32,
-            guest_sequence: 0,
-            guest_stage: v1::GuestBootStage::Unspecified as i32,
-            error_code: String::new(),
-        };
-        Self {
-            environment_id,
-            artifact_generation,
-            sequence: AtomicU64::new(1),
-            sender: watch::channel(initial).0,
-        }
-    }
-
-    fn publish(
-        &self,
-        state: v1::EnvironmentState,
-        generation: u64,
-        stage: v1::RunnerStage,
-        guest: Option<GuestProgressUpdate>,
-        error_code: Option<&str>,
-        cw_runtime_catalog_generation: Option<&str>,
-    ) -> Result<v1::RunnerEvent, Status> {
-        if cw_runtime_catalog_generation
-            .is_some_and(|generation| !crate::state::valid_root_generation(generation))
-        {
-            return Err(Status::internal("runner runtime attachment is invalid"));
-        }
-        if error_code.is_some_and(|code| {
-            code.is_empty()
-                || code.len() > 64
-                || !code
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-        }) {
-            return Err(Status::internal("runner event error code is invalid"));
-        }
-        let sequence = self
-            .sequence
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |sequence| {
-                sequence.checked_add(1)
-            })
-            .map_err(|_| Status::internal("runner event sequence overflow"))?
-            + 1;
-        let event = v1::RunnerEvent {
-            sequence,
-            runner: Some(v1::RunnerInfo {
-                environment_id: self.environment_id.to_string(),
-                state: state as i32,
-                generation,
-                artifact_generation: self.artifact_generation.clone(),
-                error_code: error_code.unwrap_or_default().to_owned(),
-                cw_runtime_catalog_generation: cw_runtime_catalog_generation
-                    .unwrap_or_default()
-                    .to_owned(),
-                ..Default::default()
-            }),
-            stage: stage as i32,
-            guest_sequence: guest.map_or(0, |update| update.sequence),
-            guest_stage: guest
-                .map(|update| guest_boot_stage_proto(update.stage) as i32)
-                .unwrap_or(v1::GuestBootStage::Unspecified as i32),
-            error_code: error_code.unwrap_or_default().to_owned(),
-        };
-        self.sender.send_replace(event.clone());
-        Ok(event)
-    }
-
-    fn subscribe(&self) -> watch::Receiver<v1::RunnerEvent> {
-        self.sender.subscribe()
-    }
-}
-
-fn guest_boot_stage_proto(stage: GuestBootStage) -> v1::GuestBootStage {
-    match stage {
-        GuestBootStage::StateMounted => v1::GuestBootStage::StateMounted,
-        GuestBootStage::CgroupsReady => v1::GuestBootStage::CgroupsReady,
-        GuestBootStage::DisksAdmitted => v1::GuestBootStage::DisksAdmitted,
-        GuestBootStage::RootMounted => v1::GuestBootStage::RootMounted,
-        GuestBootStage::SetupHeaderReady => v1::GuestBootStage::SetupHeaderReady,
-        GuestBootStage::SetupContentReady => v1::GuestBootStage::SetupContentReady,
-        GuestBootStage::RootLayersReady => v1::GuestBootStage::RootLayersReady,
-        GuestBootStage::WorkspacePlanReady => v1::GuestBootStage::WorkspacePlanReady,
-        GuestBootStage::OwnershipReady => v1::GuestBootStage::OwnershipReady,
-        GuestBootStage::ContainerControlReady => v1::GuestBootStage::ContainerControlReady,
-        GuestBootStage::RootGenerationReady => v1::GuestBootStage::RootGenerationReady,
-        GuestBootStage::PersistentLayoutReady => v1::GuestBootStage::PersistentLayoutReady,
-        GuestBootStage::RuncLaunching => v1::GuestBootStage::RuncLaunching,
-        GuestBootStage::RuncRunning => v1::GuestBootStage::RuncRunning,
-        GuestBootStage::WorkspaceRunning => v1::GuestBootStage::WorkspaceRunning,
-        GuestBootStage::DaemonStarted => v1::GuestBootStage::DaemonStarted,
-        GuestBootStage::SetupFailed => v1::GuestBootStage::SetupFailed,
-        GuestBootStage::WorkspaceFailed | GuestBootStage::DockerToolingMissing => {
-            v1::GuestBootStage::WorkspaceFailed
-        }
-    }
 }
 
 pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerServiceError> {
@@ -873,6 +760,8 @@ impl RunnerRpc {
         if let Some(guest) = guest {
             guest.log_fields(&mut fields);
         }
+        let broker = self.generation_access.broker_seen(generation);
+        fields.push(("broker", LogField::Name(broker.name())));
         fields.push(("elapsed_ms", LogField::Count(elapsed_ms(started))));
         diagnostic_log::record(self.log.as_deref(), "vm_start_failed", &fields);
     }
@@ -1051,6 +940,8 @@ impl EnvironmentRunnerService for RunnerRpc {
         }
         state.state = v1::EnvironmentState::Starting;
         state.error_code = None;
+        self.generation_access
+            .await_broker(request.generation, request.credential_broker);
         self.events.publish(
             v1::EnvironmentState::Starting,
             request.generation,
@@ -1262,8 +1153,13 @@ impl EnvironmentRunnerService for RunnerRpc {
         )?;
         let (guest_boot_ms, network_ms) = stage_log::network_wait(network_started, &running);
         let guest_started = std::time::Instant::now();
-        if let Err(failure) =
-            wait_for_guest_daemon(&mut running, daemon_ready_timeout, &self.events).await
+        if let Err(failure) = wait_for_guest_daemon(
+            &mut running,
+            daemon_ready_timeout,
+            &self.events,
+            &self.generation_access,
+        )
+        .await
         {
             self.log_start_failure(
                 environment_id,
@@ -1276,12 +1172,9 @@ impl EnvironmentRunnerService for RunnerRpc {
             let _ = running.stop().await;
             state.state = v1::EnvironmentState::Error;
             state.error_code = Some(failure.error_code);
-            self.events.publish(
-                v1::EnvironmentState::Error,
+            self.events.publish_start_failure(
                 request.generation,
-                v1::RunnerStage::Error,
-                None,
-                Some(failure.error_code),
+                &failure,
                 state.cw_runtime_catalog_generation(),
             )?;
             return Err(failure.status);
@@ -2061,6 +1954,8 @@ mod tests {
                 std::time::Instant::now(),
             );
         }
+        // Every line says whether the broker started for its generation came.
+        rpc.generation_access.await_broker(4, true);
         rpc.log_start_failure(
             environment_id,
             4,
@@ -2085,7 +1980,7 @@ mod tests {
             assert!(
                 line.contains(&format!(
                     " event=vm_start_failed environment={environment_id} generation=3 \
-                     error_code=guest_start_failed {detail} elapsed_ms="
+                     error_code=guest_start_failed {detail} broker=none elapsed_ms="
                 )),
                 "{line}"
             );
@@ -2093,7 +1988,7 @@ mod tests {
         assert!(
             lines[6].contains(&format!(
                 " event=vm_start_failed environment={environment_id} generation=4 \
-                 error_code=vmm_start_failed elapsed_ms="
+                 error_code=vmm_start_failed broker=never elapsed_ms="
             )),
             "{}",
             lines[6]
@@ -2149,7 +2044,7 @@ mod tests {
             assert!(
                 line.contains(&format!(
                     " event=vm_start_failed environment={environment_id} generation=2 \
-                     error_code=vmm_start_failed detail={detail} elapsed_ms="
+                     error_code=vmm_start_failed detail={detail} broker=none elapsed_ms="
                 )),
                 "{line}"
             );
@@ -2182,6 +2077,47 @@ mod tests {
         assert!(cell.get(environment_id, 1).is_err());
         drop(second);
         assert!(cell.get(environment_id, 2).is_err());
+    }
+
+    /// The broker started for a generation counts as come once that
+    /// generation's daemon access is taken, and stays so after the access
+    /// is gone with its VMM.
+    #[test]
+    fn the_awaited_broker_is_seen_when_the_generations_daemon_access_is_taken() {
+        let (_parent, _listener, access) = bootstrap_access();
+        let environment_id = Uuid::new_v4();
+        let cell = GenerationAccessCell::new(environment_id);
+        // No broker is started for this generation.
+        cell.await_broker(1, false);
+        let first = cell
+            .install(1, access.clone(), current_process_liveness())
+            .unwrap();
+        cell.get(environment_id, 1).unwrap();
+        assert_eq!(cell.broker_seen(1), BrokerSeen::None);
+        // One is started for the next, and has not come: the access still
+        // published is the earlier generation's, and taking it is not that.
+        cell.await_broker(2, true);
+        cell.get(environment_id, 1).unwrap();
+        assert_eq!(cell.broker_seen(2), BrokerSeen::Never);
+        drop(first);
+        let second = cell.install(2, access, current_process_liveness()).unwrap();
+        // A request the runner refused is not a broker that came.
+        assert!(cell.get(environment_id, 1).is_err());
+        assert!(cell.get(Uuid::new_v4(), 2).is_err());
+        assert_eq!(cell.broker_seen(2), BrokerSeen::Never);
+        cell.get(environment_id, 2).unwrap();
+        assert_eq!(cell.broker_seen(2), BrokerSeen::Connected);
+        drop(second);
+        assert_eq!(cell.broker_seen(2), BrokerSeen::Connected);
+        // Another generation's broker is its own.
+        assert_eq!(cell.broker_seen(3), BrokerSeen::None);
+        cell.await_broker(3, true);
+        assert_eq!(cell.broker_seen(3), BrokerSeen::Never);
+        assert_eq!(cell.broker_seen(2), BrokerSeen::None);
+        assert_eq!(
+            [BrokerSeen::None, BrokerSeen::Never, BrokerSeen::Connected].map(BrokerSeen::name),
+            ["none", "never", "connected"]
+        );
     }
 
     /// Only the current generation of an intercepting boot has boot secrets,

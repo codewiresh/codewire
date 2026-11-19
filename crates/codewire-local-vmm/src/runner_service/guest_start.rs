@@ -2,11 +2,15 @@
 
 use super::*;
 
+/// The error code of a start that failed because the credential broker
+/// started for its generation never came (#5238).
+pub(crate) const CREDENTIAL_BROKER_UNAVAILABLE: &str = "credential_broker_unavailable";
+
 /// Why a started guest never became ready. `detail` and `guest_stage` are
 /// closed names for the runner log (#2595); the status keeps its existing text.
 pub(super) struct GuestStartFailure {
-    /// The start's error code: `guest_start_failed`, or the front door's own
-    /// when it stopped first.
+    /// The start's error code: `guest_start_failed`, the front door's own
+    /// when it stopped first, or `credential_broker_unavailable`.
     pub(super) error_code: &'static str,
     pub(super) status: Status,
     pub(super) detail: &'static str,
@@ -31,6 +35,12 @@ impl GuestStartFailure {
         if let Some(exit) = self.helper_exit {
             fields.push(("helper_exit", exit.log_field()));
         }
+    }
+
+    /// What the runner saw, when the error code names a cause it inferred
+    /// from that and not the thing itself.
+    pub(super) fn observed(&self) -> Option<&'static str> {
+        (self.error_code == CREDENTIAL_BROKER_UNAVAILABLE).then_some(self.detail)
     }
 }
 
@@ -59,6 +69,7 @@ pub(super) async fn wait_for_guest_daemon(
     running: &mut RunningVm,
     timeout: std::time::Duration,
     events: &RunnerEvents,
+    access: &GenerationAccessCell,
 ) -> Result<(), GuestStartFailure> {
     let target = GuestProgressTarget::from_running(running);
     let generation = running.generation();
@@ -152,7 +163,8 @@ pub(super) async fn wait_for_guest_daemon(
     }
     let stopped = running.front_door_stopped();
     result.map_err(|seen| {
-        let (error_code, status) = start_failure(stopped, seen.detail, seen.status);
+        let waited = (daemon_ready, access.broker_seen(generation));
+        let (error_code, status) = start_failure(stopped, waited, seen.detail, seen.status);
         GuestStartFailure {
             error_code,
             status,
@@ -232,9 +244,13 @@ fn ended_before_readiness(exit: ExitClass) -> Option<Seen> {
 /// The error code and the status a failed start reports. A front door that
 /// stopped is the cause of whatever the start then saw (the guest shutting
 /// down, its progress ending, the wait running out), however it was seen.
-/// Only a failure the guest reported itself stays the guest's.
+/// So is a credential broker that never came once the guest's daemon had
+/// answered (`waited`), which is where the guest starts waiting for it: the guest gives
+/// up, and the other processes end as it goes down. Only a failure the guest
+/// reported itself stays the guest's.
 fn start_failure(
     stopped: Option<crate::runner::InterceptRefusal>,
+    waited: (bool, BrokerSeen),
     detail: &'static str,
     status: Status,
 ) -> (&'static str, Status) {
@@ -248,6 +264,9 @@ fn start_failure(
         Some(stopped) if !guest_reported => {
             (stopped.code(), Status::unavailable(stopped.to_string()))
         }
+        None if waited == (true, BrokerSeen::Never) && !guest_reported => {
+            (CREDENTIAL_BROKER_UNAVAILABLE, status)
+        }
         _ => ("guest_start_failed", status),
     }
 }
@@ -256,6 +275,9 @@ fn start_failure(
 mod tests {
     use super::*;
     use crate::runner::{FrontDoorStop, InterceptRefusal};
+
+    /// The guest's daemon answered and the broker started for it never came.
+    const NEVER_CAME: (bool, BrokerSeen) = (true, BrokerSeen::Never);
 
     /// Each process that can end a start keeps its own detail, the words
     /// `cw` shows and how it ended, and a start whose processes all run is
@@ -362,8 +384,10 @@ mod tests {
             "readiness_timeout",
             "front_door_stopped",
         ] {
+            // The front door's stop comes before a broker that never came.
             let (error_code, status) = start_failure(
                 Some(stopped),
+                NEVER_CAME,
                 followed,
                 Status::unavailable("what followed"),
             );
@@ -376,6 +400,7 @@ mod tests {
         // What the guest reported of itself is not the front door's doing.
         let (error_code, status) = start_failure(
             Some(stopped),
+            (false, BrokerSeen::None),
             GUEST_SETUP_FAILED,
             Status::failed_precondition("the guest's own"),
         );
@@ -384,11 +409,60 @@ mod tests {
             ("guest_start_failed", "the guest's own")
         );
         // With no front door stopped, a failure is as it was.
-        let (error_code, status) =
-            start_failure(None, "guest_shutdown", Status::unavailable("as before"));
+        let (error_code, status) = start_failure(
+            None,
+            (false, BrokerSeen::None),
+            "guest_shutdown",
+            Status::unavailable("as before"),
+        );
         assert_eq!(
             (error_code, status.message()),
             ("guest_start_failed", "as before")
         );
+    }
+
+    /// A broker that never came is the cause of what the start then saw,
+    /// which keeps its words; what the guest reported of itself is not.
+    #[test]
+    fn a_broker_that_never_came_is_the_cause_of_what_followed_it() {
+        for followed in [
+            "egress_broker_exited",
+            "guest_shutdown",
+            "readiness_timeout",
+        ] {
+            let (error_code, status) = start_failure(
+                None,
+                NEVER_CAME,
+                followed,
+                Status::unavailable("what was seen"),
+            );
+            assert_eq!(error_code, CREDENTIAL_BROKER_UNAVAILABLE, "{followed}");
+            assert_eq!(status.message(), "what was seen");
+            // Before the guest's daemon answered, the guest was not yet
+            // waiting for a broker; a broker that came, or none to come,
+            // is no cause either.
+            for waited in [
+                (false, BrokerSeen::Never),
+                (true, BrokerSeen::Connected),
+                (true, BrokerSeen::None),
+            ] {
+                let (error_code, _) =
+                    start_failure(None, waited, followed, Status::unavailable("what was seen"));
+                assert_eq!(error_code, "guest_start_failed", "{followed} {waited:?}");
+            }
+        }
+        for reported in [
+            GUEST_SETUP_FAILED,
+            GUEST_DOCKER_TOOLING_MISSING,
+            GUEST_WORKSPACE_FAILED,
+        ] {
+            let (error_code, _) = start_failure(
+                None,
+                NEVER_CAME,
+                reported,
+                Status::unavailable("the guest's own"),
+            );
+            assert_eq!(error_code, "guest_start_failed", "{reported}");
+        }
     }
 }

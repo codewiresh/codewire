@@ -505,10 +505,12 @@ a VM that this cw starts its credentials.
     runner usually notices the stream first: it then waits a quarter of a
     second for the exit and reports the exit (`detail=vmm_exited`), not the
     broken stream.
-  - **Whether the broker came.** The runner records when the VM's
-    credential broker connects for the generation, and every
-    `vm_start_failed` line says `broker=connected`, `broker=never`, or
-    `broker=none` for a VM with no credential profile.
+  - **Whether the broker came.** The supervisor tells the runner when it
+    starts a credential broker for the generation, and the runner records
+    that broker coming: it is the only one that takes a starting
+    generation's daemon access from the runner. Every `vm_start_failed`
+    line says `broker=connected`, `broker=never`, or `broker=none` for a
+    VM no broker is started for, which is one with no credential profile.
   - **The cause, when the evidence is there.** A failed start is reported
     as `credential_broker_unavailable`, in `cw`'s error and the
     supervisor's line for the operation, only when all of this holds for the
@@ -516,11 +518,14 @@ a VM that this cw starts its credentials.
     answered, which is where the guest starts waiting for its broker; no
     broker had connected; and what the runner saw is not a failure the guest
     reported about itself (its setup, its workspace, missing Docker
-    tooling). What the runner saw stays beside it as `observed=`, for
-    example `observed=egress_broker_exited`: the guest gives up when its
-    broker never comes, and the other helpers end as it goes down. `cw`
-    then says that the VM's credentials could not be served and names the
-    broker log. Any earlier failure keeps its own code whatever the profile:
+    tooling). What the runner saw stays beside it, as `detail=` on the
+    runner's line and as `observed=` on the supervisor's
+    `operation_failed` line, for example `observed=egress_broker_exited`:
+    the guest gives up when its broker never comes, and the other helpers
+    end as it goes down. `cw` then fails with
+    `start_credential_broker_unavailable` (`create_…` for a create), says
+    that the VM's credentials could not be served, and names the broker
+    log. Any earlier failure keeps its own code whatever the profile:
     the VMM ending at boot, a helper ending before the guest's daemon
     answers, a guest that shuts down on a bad image. A broker that connected
     and then ended is not covered by this rule.
@@ -554,13 +559,10 @@ v0.4.21 share while their runner protocols differ: with v0.4.21 a service
 left running by v0.4.15 is never replaced, not even with every VM stopped,
 and from v0.4.22 only because that number happened to move.
 
-**Built of this:** the broker's own word, and the helper that ended.
-**Not yet built:** whether the broker came, the cause, a helper before the
-front door, the kept log, and the restart that is not refused. Today a start
-that fails after a helper process ended records `detail=egress_broker_exited`
-or the like as its cause, and that helper is usually not the cause: the
-egress broker never waits for the credential broker, and ends only as the
-guest goes down. A failed create removes the runner's log with the VM.
+**Built of this:** the broker's own word, the helper that ended, whether
+the broker came, and the cause. **Not yet built:** a helper before the
+front door, the kept log, and the restart that is not refused. A failed
+create removes the runner's log with the VM.
 `cw --local restart` of the only VM that keeps the other cw's service is
 refused and told to stop that same VM; `cw --local stop NAME` then
 `cw --local start NAME` works. The journey step is

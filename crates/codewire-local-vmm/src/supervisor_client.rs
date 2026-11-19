@@ -1197,6 +1197,9 @@ fn operation_error_hint(error_code: &str) -> &'static str {
             " (the VM could not install the workspace image; try another image or a current release of it)"
         }
         "create_guest_workspace_failed" => " (the workspace could not start inside the VM)",
+        "create_credential_broker_unavailable" | "start_credential_broker_unavailable" => {
+            " (the VM's credentials could not be served: its credential broker never connected; the broker log, logs/brokers.log in your local credential state, says why)"
+        }
         "create_nested_repository_tracked" => {
             " (a repository's destination is a path that the repository it sits inside tracks, or lies under one of that repository's files; choose a destination the outer repository does not track)"
         }

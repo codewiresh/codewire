@@ -54,6 +54,30 @@ pub(super) struct GenerationAccessCell {
 pub(super) struct GenerationAccessState {
     pub(super) retiring: bool,
     pub(super) access: Option<PublishedGenerationAccess>,
+    /// The generation a credential broker is awaited for, and whether one
+    /// has taken its daemon access. Kept beside `access`, which a VMM that
+    /// went takes with it.
+    broker: Option<(u64, bool)>,
+}
+
+/// Whether the credential broker the supervisor starts for a generation came
+/// for that generation's daemon access.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BrokerSeen {
+    /// No broker is started for the generation.
+    None,
+    Never,
+    Connected,
+}
+
+impl BrokerSeen {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Never => "never",
+            Self::Connected => "connected",
+        }
+    }
 }
 
 pub(super) struct PublishedGenerationAccess {
@@ -190,12 +214,45 @@ impl GenerationAccessCell {
         environment_id: Uuid,
         generation: u64,
     ) -> Result<v1::DaemonAccess, Status> {
-        self.with_live(environment_id, generation, |access| v1::DaemonAccess {
+        let access = self.with_live(environment_id, generation, |access| v1::DaemonAccess {
             hybrid_socket: access.socket.clone(),
             guest_port: access.port,
             generation_capability: access.token.to_string(),
             front_door_socket: access.front_door_socket.clone(),
-        })
+        })?;
+        let mut current = self
+            .current
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((awaited, connected)) = &mut current.broker
+            && *awaited == generation
+        {
+            *connected = true;
+        }
+        Ok(access)
+    }
+
+    /// Starts `generation` with or without a credential broker to come.
+    pub(super) fn await_broker(&self, generation: u64, awaited: bool) {
+        self.current
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .broker = awaited.then_some((generation, false));
+    }
+
+    /// Whether the broker awaited for `generation` took its daemon access.
+    /// While a generation starts, only its broker asks for it: the supervisor
+    /// asks only of a runner that already reports the generation running.
+    pub(super) fn broker_seen(&self, generation: u64) -> BrokerSeen {
+        let current = self
+            .current
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match current.broker {
+            Some((awaited, true)) if awaited == generation => BrokerSeen::Connected,
+            Some((awaited, false)) if awaited == generation => BrokerSeen::Never,
+            _ => BrokerSeen::None,
+        }
     }
 
     /// The current generation's boot secrets, only for an intercepting boot.

@@ -301,11 +301,13 @@ Issue: #5238. The spec is "Credentials after an upgrade" in
     status of the helper that ended;
   - step 7 leaves the VM running on the release under test's service, with
     no refusal;
-  - step 8: `cw` says the VM's credentials could not be served and names the
-    broker log, with `credential_broker_unavailable` and `observed=` naming
-    what the runner saw; the runner's `vm_start_failed` line reads
-    `broker=never`, and `helper_exit=` names the exit of any helper that
-    ended; the broker log's `broker_not_ready` line carries the broker's
+  - step 8: `cw` fails with `start_credential_broker_unavailable`, says the
+    VM's credentials could not be served and names the broker log; the
+    supervisor's `operation_failed` line carries `observed=` naming what
+    the runner saw; the runner's `vm_start_failed` line reads
+    `error_code=credential_broker_unavailable` and `broker=never`, and
+    `helper_exit=` names the exit of any helper that ended; the broker
+    log's `broker_not_ready` line carries the broker's
     exit status and its `stage` and `kind`, never `status=running …
     error=-`. For a broker of another runner protocol the kind is
     `runner.protocol_mismatch` with both numbers;
@@ -344,4 +346,16 @@ Issue: #5238. The spec is "Credentials after an upgrade" in
     replaced the credential service with v0.4.22's and the VM ran with its
     profile. Observed working for that pair of releases; the steps as
     written, and the logs' lines, are not yet observed (#5238).
-  - Steps 7 to 10 and their proofs: not yet observed (#5238 part 3).
+  - Step 8's lines, by another road, Linux, 2026-11-18, a `cw` built from
+    the change that adds them (recorded on #5238): the credential service
+    was started from one copy of `cw`, that copy was removed, and a VM with
+    a profile was started with an identical copy at another path, so the
+    service could start no broker. `cw start` failed after 40 s with
+    `start_credential_broker_unavailable` and the words naming the broker
+    log. The runner's line read `error_code=credential_broker_unavailable
+    detail=network_worker_exited guest_stage=runc_running daemon_ready=1
+    helper_exit=code_37_network_worker_frame_io broker=never`, the
+    supervisor's `observed=network_worker_exited`, and the broker log
+    `broker_spawn_failed`. With the copy put back, the next start ran.
+  - Steps 7 to 10 as written, an upgrade between two releases, and their
+    proofs: not yet observed (#5238 part 3).

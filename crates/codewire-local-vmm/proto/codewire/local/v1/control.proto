@@ -1106,6 +1106,10 @@ message RunnerEvent {
   uint64 guest_sequence = 4;
   GuestBootStage guest_stage = 5;
   string error_code = 6;
+  // With error_code credential_broker_unavailable, a cause the runner
+  // inferred: the closed name of what it saw, in the error_code vocabulary.
+  // Empty with every other error code.
+  string error_observed = 7;
 }
 
 message StartVmRequest {
@@ -1179,6 +1183,11 @@ message StartVmRequest {
   // otherwise. Not a credential: it only names one to the environment's own
   // broker.
   repeated SeedCredentialPlaceholder credential_placeholders = 28;
+
+  // The supervisor starts a credential broker for this generation. The
+  // runner uses it only to say, when the start fails, whether that broker
+  // ever came for the generation's daemon access.
+  bool credential_broker = 29;
 }
 
 message SeedCredentialPlaceholder {

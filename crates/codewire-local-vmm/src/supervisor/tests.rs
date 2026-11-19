@@ -8402,6 +8402,7 @@ async fn operation_watch_starts_from_durable_state_and_ends_at_terminal_state() 
                     guest_sequence: 3,
                     guest_stage: v1::GuestBootStage::WorkspacePlanReady as i32,
                     error_code: String::new(),
+                    error_observed: String::new(),
                 },
             })
             .is_ok()
@@ -9312,6 +9313,34 @@ async fn operation_failure_log_names_effect_and_cause_but_never_error_text() {
     );
     assert_eq!(log.lines().count(), 1);
     assert!(!log.contains(CANARY));
+
+    // A start whose credential broker never came says what the runner saw.
+    let error = SupervisorError::CredentialBrokerUnavailable {
+        observed: "egress_broker_exited".to_owned(),
+    };
+    let code = lifecycle_failure_code("start", &error, core.recorded_runner_error_code("dev"));
+    assert_eq!(code, "start_credential_broker_unavailable");
+    assert_eq!(
+        create_failure_code(&error),
+        "create_credential_broker_unavailable"
+    );
+    core.log_operation_failure(&operation, "dev", &error, &code);
+    let log = fs::read_to_string(
+        core.root
+            .path()
+            .join(diagnostic_log::LOG_DIRECTORY)
+            .join(diagnostic_log::SUPERVISOR_LOG),
+    )
+    .unwrap();
+    let line = log.lines().nth(1).unwrap();
+    assert!(
+        line.ends_with(&format!(
+            " cause=credential_broker_unavailable environment={environment_id} \
+             runner_error=guest_start_failed observed=egress_broker_exited \
+             error_code=start_credential_broker_unavailable"
+        )),
+        "{line}"
+    );
 }
 
 #[tokio::test]
