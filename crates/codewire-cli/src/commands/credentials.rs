@@ -37,10 +37,12 @@ use super::credential_input::connect::{
     claude_token_from_alias, claude_token_rotate_refusal, connected_noun, provider_id,
     provider_label, read_claude_token,
 };
+#[cfg(test)]
+use super::credential_input::supported_profile_slot;
 use super::credential_input::{
     CredentialOperation, GITHUB_ALWAYS_INCLUDED, ParsedCredentialSelector, ParsedProfileSelector,
     SSH_PUBLIC_KEY_GITHUB_HINT, parse_credential_selector, parse_profile_selector,
-    profile_set_credential, prompt_credential_material, read_ssh_import, supported_profile_slot,
+    profile_set_credential, profile_slot_for, prompt_credential_material, read_ssh_import,
     validate_ssh_generation, validate_ssh_import,
 };
 #[cfg(test)]
@@ -167,9 +169,7 @@ fn authority_feature_needed(
 /// What `profiles default` says once the local default is set: the cloud's
 /// sentence with the placement word changed.
 fn default_set_message(name: &str) -> String {
-    format!(
-        "Default credential profile: {name:?}. A local `cw create` uses it when you name no profile."
-    )
+    format!("Default profile: {name:?}. A local `cw create` uses it when you name no profile.")
 }
 
 fn remember_local(
@@ -1173,7 +1173,7 @@ async fn profile_command(
             let records = client
                 .list_profiles()
                 .await
-                .context("list local access profiles")?;
+                .context("list the profiles on this computer")?;
             print_profiles(client, &records, args.output).await
         }
         CredentialProfileCommand::Get(args) => {
@@ -1198,7 +1198,7 @@ async fn profile_command(
             let revisions = client
                 .list_profile_revisions(&profile.profile.id)
                 .await
-                .context("list local access profile revisions")?;
+                .context("list the revisions of the profile on this computer")?;
             print_profile_revisions(client, &revisions, args.output).await
         }
         CredentialProfileCommand::Delete(args) => delete_profile(client, args).await,
@@ -1207,10 +1207,10 @@ async fn profile_command(
             let selected = client
                 .set_default_profile(&record.profile.id)
                 .await
-                .context("set the local default credential profile")?;
+                .context("set the default profile on this computer")?;
             anyhow::ensure!(
                 selected.profile.id == record.profile.id && selected.is_default,
-                "local credential authority returned a different default profile"
+                "the store on this computer returned a different default profile"
             );
             eprintln!(
                 "{}",
@@ -1227,7 +1227,8 @@ async fn set_profile_entry(
 ) -> anyhow::Result<()> {
     let selector = profile_set_credential(&args)?;
     let credential = resolve_credential(client, selector).await?;
-    let slot = supported_profile_slot(
+    let slot = profile_slot_for(
+        &credential.metadata.display_name,
         args.slot.as_deref().context("a provider is required")?,
         &credential.metadata.provider,
         credential.metadata.authentication_kind,
@@ -1244,7 +1245,7 @@ async fn set_profile_entry(
     let updated = match existing {
         Some(profile) => client
             .update_profile(&profile.profile.id, profile.profile.revision, &entries)
-            .await.context("update exact local access profile revision")?,
+            .await.context("update the exact revision of the profile on this computer")?,
         None => client.create_profile(&name.context("new profiles require a name")?, &entries)
             .await.context("create local profile with its first selection; inspect before retrying an uncertain result")?,
     };
@@ -1265,7 +1266,7 @@ async fn set_profile_entry(
 /// its default (#4717).
 fn now_default_message(name: &str) -> String {
     format!(
-        "{name:?} is now your default credential profile: a local `cw create` uses it when you name no profile."
+        "{name:?} is now your default profile: a local `cw create` uses it when you name no profile."
     )
 }
 
@@ -1315,7 +1316,7 @@ async fn unset_profile_entry(
     let updated = client
         .update_profile(&profile.profile.id, profile.profile.revision, &entries)
         .await
-        .context("update local access profile")?;
+        .context("update the profile on this computer")?;
     output::print_done(&output::profile_removed(
         &updated.profile.name.to_string(),
         slot.as_str(),
@@ -1346,7 +1347,7 @@ async fn delete_profile(
     client
         .delete_profile(&record.profile.id)
         .await
-        .context("delete local access profile")?;
+        .context("delete the profile on this computer")?;
     output::print_done(&output::profile_deleted("local", &name));
     Ok(())
 }
@@ -1378,16 +1379,16 @@ async fn resolve_profile(
         ParsedProfileSelector::Id(id) => client
             .get_profile(&id)
             .await
-            .with_context(|| format!("get local access profile by ID {id}")),
+            .with_context(|| format!("get the profile on this computer by ID {id}")),
         ParsedProfileSelector::Reference(reference) => client
             .resolve_profile(&reference)
             .await
-            .with_context(|| format!("resolve local access profile {reference}")),
+            .with_context(|| format!("find the profile {reference} on this computer")),
         ParsedProfileSelector::Name(name) => {
             let records = client
                 .list_profiles()
                 .await
-                .context("list local access profiles")?;
+                .context("list the profiles on this computer")?;
             select_profile_by_name(&records, name.as_str())
         }
     }
@@ -1427,7 +1428,7 @@ fn optional_profile_by_name<'a>(
         .filter(|record| record.profile.name.as_str().eq_ignore_ascii_case(name));
     let record = matches.next();
     if matches.next().is_some() {
-        anyhow::bail!("local access profile name {name:?} is ambiguous");
+        anyhow::bail!("more than one profile on this computer is named {name:?}");
     }
     Ok(record)
 }
@@ -1436,7 +1437,7 @@ fn api_key_enrollment_kind(provider: &str) -> anyhow::Result<CredentialAuthKind>
     match provider {
         "openai" | "anthropic" => Ok(CredentialAuthKind::ApiKey),
         "claude-subscription" => {
-            anyhow::bail!("use connect claude-token --name NAME for a Claude token")
+            anyhow::bail!("use `connect claude-token --name NAME` for a Claude (token)")
         }
         _ => anyhow::bail!(output::refusal::add_unsupported(provider)),
     }
@@ -1463,7 +1464,7 @@ async fn print_listing(
     let profiles = client
         .list_profiles()
         .await
-        .context("list local credential profiles")?;
+        .context("list the profiles on this computer")?;
     let store = client.info().protected_store.map(|store| store.backend);
     output::print_local_credentials(records, store, Some(&output::local_uses(&profiles)), output)?;
     if store == Some(ProtectedStoreBackend::File)
@@ -2264,7 +2265,11 @@ mod tests {
             profile_with("22222222-2222-4222-8222-222222222222", "work"),
         ];
         let error = select_profile_by_name(&records, "work").unwrap_err();
-        assert!(error.to_string().contains("ambiguous"));
+        assert!(
+            error
+                .to_string()
+                .contains("more than one profile on this computer is named \"work\"")
+        );
     }
 
     #[test]
@@ -2852,15 +2857,15 @@ mod tests {
         use codewire_local_credentials::AuthorityFeature;
         assert_eq!(
             now_default_message("work"),
-            "\"work\" is now your default credential profile: a local `cw create` uses it when you name no profile."
+            "\"work\" is now your default profile: a local `cw create` uses it when you name no profile."
         );
         assert_eq!(
             default_set_message("work"),
-            "Default credential profile: \"work\". A local `cw create` uses it when you name no profile."
+            "Default profile: \"work\". A local `cw create` uses it when you name no profile."
         );
         assert_eq!(
             super::super::platform_profiles::default_delete_refusal("work", "--local"),
-            "\"work\" is your default credential profile and cannot be deleted; make another profile the default first: cw credentials --local profiles default NAME"
+            "\"work\" is your default profile and can't be deleted; make another profile the default first: cw credentials --local profiles default NAME"
         );
         let operation = CredentialOperation::Profile(CredentialProfileCommand::Default(
             super::super::CredentialProfileDefaultArgs {

@@ -3844,7 +3844,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   # longer selects it, so each entry is unset first, and the store keeps its
   # empty default profile.
   run_cw_expect_failure credentials --local --profile "$CREDENTIAL_PROFILE_NAME" delete --yes
-  rg -qF 'is your default credential profile and cannot be deleted' "$LAST_STDERR" ||
+  rg -qF "is your default profile and can't be deleted" "$LAST_STDERR" ||
     die 'deleting the default profile was not refused with its guidance'
   run_cw credentials --local --profile "$CREDENTIAL_PROFILE_NAME" get --output json
   mapfile -t profile_entries < <(jq -r '.[0].entries | keys[]' "$LAST_STDOUT")

@@ -75,6 +75,8 @@ use runtime_arg_parsers::{
     parse_runtime_sha256,
 };
 mod credential_input;
+mod credential_profile_args;
+pub(crate) use credential_profile_args::*;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod credentials;
 pub(crate) mod guided;
@@ -389,7 +391,7 @@ pub(crate) struct CredentialsArgs {
     #[arg(
         long,
         value_name = "PROFILE",
-        help = "Select a named credential profile; accepts user/NAME and storage-qualified references"
+        help = "Select a profile by name; accepts user/NAME and storage-qualified references"
     )]
     pub(crate) profile: Option<String>,
     #[command(subcommand)]
@@ -398,9 +400,9 @@ pub(crate) struct CredentialsArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum CredentialsCommand {
-    #[command(about = "Connect a provider identity; missing choices are prompted at a terminal")]
+    #[command(about = "Connect a provider by signing in; asks for anything missing at a terminal")]
     Connect(CredentialConnectArgs),
-    #[command(about = "Add a protected credential; missing choices are prompted at a terminal")]
+    #[command(about = "Add an API key, token or SSH key; asks for anything missing at a terminal")]
     Add(CredentialAddArgs),
     #[command(about = "Generate a protected SSH identity; asks for a missing name at a terminal")]
     Generate(CredentialGenerateArgs),
@@ -416,13 +418,13 @@ pub(crate) enum CredentialsCommand {
     Revoke(credentials::confirm::CredentialRevokeArgs),
     #[command(about = "Delete a credential, or the explicitly selected profile")]
     Delete(CredentialDeleteArgs),
-    #[command(about = "Set one provider identity in --profile; creates the profile on first set")]
+    #[command(about = "Put one credential in --profile; creates the profile on first set")]
     Set(CredentialProfileSetArgs),
-    #[command(about = "Remove one provider identity from --profile")]
+    #[command(about = "Take one provider's credential out of --profile")]
     Unset(CredentialProfileSlotArgs),
     #[command(about = "List immutable revisions of --profile (local storage)")]
     Revisions(CredentialListArgs),
-    #[command(about = "List credential profiles")]
+    #[command(about = "List profiles")]
     Profiles {
         #[command(subcommand)]
         command: CredentialProfilesCommand,
@@ -435,14 +437,14 @@ pub(crate) use credential_input::connect::{CredentialConnectArgs, CredentialConn
 pub(crate) struct CredentialAddArgs {
     #[arg(
         value_name = "PROVIDER",
-        help = "openai or anthropic (API key read from stdin), or ssh; a Claude token is `connect claude-token`"
+        help = "openai or anthropic (API key read from stdin), or ssh; a Claude (token) is `connect claude-token`"
     )]
     pub(crate) provider: Option<String>,
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", help = NAME_HELP)]
     pub(crate) name: Option<String>,
     #[arg(long, value_name = "HINT", hide = true)]
     pub(crate) account_hint: Option<String>,
-    #[arg(long, value_name = "UNIX_SECONDS")]
+    #[arg(long, value_name = "DATE", value_parser = expiry_arg, help = EXPIRES_AT_HELP)]
     pub(crate) expires_at: Option<u64>,
     #[arg(
         long,
@@ -456,11 +458,11 @@ pub(crate) struct CredentialAddArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct CredentialGenerateArgs {
-    #[arg(value_name = "PROVIDER", value_parser = ["ssh"])]
+    #[arg(value_name = "PROVIDER", value_parser = ["ssh"], help = "ssh: a new SSH key")]
     pub(crate) provider: Option<String>,
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", help = NAME_HELP)]
     pub(crate) name: Option<String>,
-    #[arg(long, value_name = "UNIX_SECONDS")]
+    #[arg(long, value_name = "DATE", value_parser = expiry_arg, help = EXPIRES_AT_HELP)]
     pub(crate) expires_at: Option<u64>,
     #[arg(skip)]
     pub(crate) guided: bool,
@@ -468,130 +470,61 @@ pub(crate) struct CredentialGenerateArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct CredentialListArgs {
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     pub(crate) output: OutputFormat,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct CredentialGetArgs {
     #[arg(
-        value_name = "CREDENTIAL_SELECTOR",
-        help = "Credential name or id:UUID; omit when --profile is selected"
+        value_name = "CREDENTIAL",
+        help = "Credential name or id:UUID; omit it with --profile"
     )]
     pub(crate) credential: Option<String>,
     #[arg(long, help = "Inspect one exact immutable profile revision")]
     pub(crate) revision: Option<u64>,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     pub(crate) output: OutputFormat,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct CredentialSelectorArgs {
-    #[arg(
-        value_name = "CREDENTIAL_SELECTOR",
-        help = "Credential name, name:<name>, or id:<canonical-uuid>"
-    )]
+    #[arg(value_name = "CREDENTIAL", help = SELECTOR_HELP)]
     pub(crate) credential: String,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     pub(crate) output: OutputFormat,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct CredentialRenameArgs {
-    #[arg(
-        value_name = "CREDENTIAL_SELECTOR",
-        help = "Credential name, name:<name>, or id:<canonical-uuid>"
-    )]
+    #[arg(value_name = "CREDENTIAL", help = SELECTOR_HELP)]
     pub(crate) credential: String,
-    #[arg(value_name = "NEW_NAME")]
+    #[arg(value_name = "NEW_NAME", help = NAME_HELP)]
     pub(crate) name: String,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct CredentialRotateArgs {
-    #[arg(
-        value_name = "CREDENTIAL_SELECTOR",
-        help = "Credential name, name:<name>, or id:<canonical-uuid>"
-    )]
+    #[arg(value_name = "CREDENTIAL", help = SELECTOR_HELP)]
     pub(crate) credential: String,
     #[arg(
         long,
-        value_name = "UNIX_SECONDS",
-        help = "New hard expiry; omission clears it. Explicit API-key rotation sets status Active, including if revoked"
+        value_name = "DATE",
+        value_parser = expiry_arg,
+        help = "New expiry date (YYYY-MM-DD or Unix seconds); leave it out to clear it. Replacing an API key makes it active, even if revoked"
     )]
     pub(crate) expires_at: Option<u64>,
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct CredentialDeleteArgs {
-    #[arg(
-        value_name = "CREDENTIAL_SELECTOR",
-        help = "Credential name, name:<name>, or id:<canonical-uuid>"
-    )]
+    #[arg(value_name = "CREDENTIAL", help = SELECTOR_HELP)]
     pub(crate) credential: Option<String>,
-    #[arg(short, long, help = "Delete without asking; needed without a terminal")]
-    pub(crate) yes: bool,
-}
-
-#[derive(Debug)]
-pub(crate) enum CredentialProfileCommand {
-    List(CredentialListArgs),
-    Get(CredentialProfileSelectorArgs),
-    Set(CredentialProfileSetArgs),
-    Unset(CredentialProfileSlotArgs),
-    Revisions(CredentialProfileSelectorArgs),
-    Delete(CredentialProfileDeleteArgs),
-    Default(CredentialProfileDefaultArgs),
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum CredentialProfilesCommand {
-    #[command(visible_alias = "ls", about = "List credential profile metadata")]
-    List(CredentialListArgs),
-    #[command(
-        about = "Make a cloud credential profile your default",
-        long_about = "Make a cloud credential profile your default. A cloud `cw create` uses it when you name no profile, the dashboard preselects it, and lists show it first. Your first profile becomes your default, and the default cannot be deleted: make another profile the default first."
-    )]
-    Default(CredentialProfileDefaultArgs),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct CredentialProfileDefaultArgs {
-    #[arg(value_name = "PROFILE", help = "Profile name or id:<canonical-uuid>")]
-    pub(crate) profile: String,
-}
-
-#[derive(Debug)]
-pub(crate) struct CredentialProfileSelectorArgs {
-    pub(crate) profile: String,
-    pub(crate) revision: Option<u64>,
-    pub(crate) output: OutputFormat,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct CredentialProfileSetArgs {
-    #[arg(skip)]
-    pub(crate) profile: String,
-    #[arg(value_name = "PROVIDER", value_parser = ["codex", "openai", "github", "anthropic", "ssh"])]
-    pub(crate) slot: Option<String>,
     #[arg(
-        value_name = "CREDENTIAL_SELECTOR",
-        help = "Credential name, name:<name>, or id:<canonical-uuid>"
+        short,
+        long,
+        help = "Delete without asking; needed where no terminal can ask"
     )]
-    pub(crate) credential: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct CredentialProfileSlotArgs {
-    #[arg(skip)]
-    pub(crate) profile: String,
-    #[arg(value_name = "PROVIDER", value_parser = ["codex", "openai", "github", "anthropic", "ssh"])]
-    pub(crate) slot: String,
-}
-
-#[derive(Debug)]
-pub(crate) struct CredentialProfileDeleteArgs {
-    pub(crate) profile: String,
     pub(crate) yes: bool,
 }
 

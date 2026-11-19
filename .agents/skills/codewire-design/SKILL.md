@@ -209,6 +209,9 @@ simple." Don't over-tune: no optical offsets for text.
   - primitives missing from the gallery.
   Policy: `scripts/checks/contracts/design-token-policy.json`.
 
+Credentials and profiles on screen use the words in `docs/GLOSSARY.md`,
+"Words users see: credentials".
+
 ## 7. Semantics
 
 The semantic HTML rule at the top of this skill, in short:

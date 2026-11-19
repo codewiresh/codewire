@@ -17,9 +17,13 @@ use crate::commands::{OutputFormat, prompt_confirm_default_no};
 /// `cw credentials connect`'s arguments.
 #[derive(Debug, Args)]
 pub(crate) struct CredentialConnectArgs {
-    #[arg(value_enum, value_name = "PROVIDER")]
+    #[arg(
+        value_enum,
+        value_name = "PROVIDER",
+        help = "codex, github, claude or claude-token"
+    )]
     pub(crate) provider: Option<CredentialConnectProviderArg>,
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", help = super::NAME_HELP)]
     pub(crate) name: Option<String>,
     #[arg(
         short,
@@ -27,7 +31,7 @@ pub(crate) struct CredentialConnectArgs {
         help = "Confirm reconnecting an existing named credential"
     )]
     pub(crate) yes: bool,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     pub(crate) output: OutputFormat,
     #[arg(skip)]
     pub(crate) guided: bool,

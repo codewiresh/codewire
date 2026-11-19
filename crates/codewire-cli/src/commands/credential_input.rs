@@ -247,7 +247,7 @@ fn credential_dispatch(
         StoragePlacement::Platform => Ok(CredentialDispatch::Platform),
         StoragePlacement::Local if local_supported => Ok(CredentialDispatch::Local),
         StoragePlacement::Local => anyhow::bail!(
-            "local protected credential storage is available only on Linux and macOS; use --cloud explicitly for cloud storage"
+            "credentials on this computer work only on Linux and macOS; use --cloud to keep them in your Codewire account"
         ),
     }
 }
@@ -300,7 +300,7 @@ pub(super) fn resolve_credential_operation(
     if let ParsedProfileSelector::Reference(reference) = parsed {
         anyhow::ensure!(
             reference.scope() == codewire_access::AccessProfileScope::User,
-            "organization credential profiles are not supported by this storage adapter yet"
+            "an organization's profiles can't be stored on this computer yet"
         );
     }
     let command = match command {
@@ -418,7 +418,7 @@ pub(super) fn parse_profile_selector(selector: &str) -> anyhow::Result<ParsedPro
     if let Some(id) = selector.strip_prefix("id:") {
         let id = canonical_selector_id(id, "access profile")?;
         return Ok(ParsedProfileSelector::Id(
-            AccessProfileId::parse(id).context("invalid access profile ID")?,
+            AccessProfileId::parse(id).context("invalid profile ID")?,
         ));
     }
     reject_unknown_selector_prefix(selector, "access profile")?;
@@ -426,11 +426,11 @@ pub(super) fn parse_profile_selector(selector: &str) -> anyhow::Result<ParsedPro
         return Ok(ParsedProfileSelector::Reference(
             selector
                 .parse::<AccessProfileReference>()
-                .context("invalid access profile reference")?,
+                .context("invalid profile reference")?,
         ));
     }
     Ok(ParsedProfileSelector::Name(
-        AccessProfileName::parse(selector).context("invalid access profile name")?,
+        AccessProfileName::parse(selector).context("invalid profile name")?,
     ))
 }
 
@@ -512,12 +512,92 @@ pub(super) fn supported_profile_slot(
     let policy = catalog
         .get(provider)
         .and_then(|definition| definition.capabilities.get(&slot))
-        .context("this provider identity/capability has no supported runtime adapter")?;
+        .context("this credential can't serve that provider")?;
     anyhow::ensure!(
         policy.authentication_kinds.contains(&kind),
         "credential authentication kind is unsupported for this capability"
     );
     Ok(slot)
+}
+
+/// The slot `value` names in a profile, for the credential `name`; a
+/// credential of a kind the slot doesn't take is refused in one sentence
+/// that names the kinds it does take (#4938).
+pub(super) fn profile_slot_for(
+    name: &str,
+    value: &str,
+    provider: &ProviderId,
+    kind: CredentialAuthKind,
+) -> anyhow::Result<CapabilitySlot> {
+    supported_profile_slot(value, provider, kind).map_err(|error| {
+        match CapabilitySlot::parse(value) {
+            Ok(slot) if PROFILE_SLOTS.contains(&value) => {
+                let label = super::credentials::output::authentication_kind_label;
+                let kind = super::credentials::output::kind_label(provider.as_str(), label(kind));
+                anyhow::anyhow!(super::credentials::output::refusal::wrong_kind(
+                    name,
+                    &kind,
+                    value,
+                    &slot_takes(&slot),
+                ))
+            }
+            _ => error,
+        }
+    })
+}
+
+/// The rule for a credential's name, at its prompt and in its flag's help.
+pub(super) const NAME_HELP: &str = "Its name, up to 256 bytes; spaces at either end are dropped";
+
+/// What `--expires-at` takes (#4938).
+pub(super) const EXPIRES_AT_HELP: &str =
+    "When it stops working: a date (YYYY-MM-DD, the start of that day in UTC) or Unix seconds";
+
+/// `--expires-at`: a date (YYYY-MM-DD), meaning the start of that day in
+/// UTC, or Unix seconds as before.
+pub(super) fn expiry_arg(value: &str) -> Result<u64, String> {
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Ok(seconds);
+    }
+    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .and_then(|at| u64::try_from(at.and_utc().timestamp()).ok())
+        .ok_or_else(|| format!("{value:?} isn't a date; use YYYY-MM-DD, such as 2027-11-15"))
+}
+
+/// The slots a profile has.
+pub(super) const PROFILE_SLOTS: [&str; 5] = ["codex", "openai", "github", "anthropic", "ssh"];
+
+/// How a credentials command names one credential.
+pub(super) const SELECTOR_HELP: &str = "Credential name, name:NAME or id:UUID";
+
+/// A profile slot, in `set` and `unset`.
+pub(super) const SLOT_HELP: &str = "Which of the profile's providers";
+
+/// The providers whose credentials a profile may hold.
+const PROFILE_PROVIDERS: [&str; 4] = ["openai", "anthropic", "github", "ssh"];
+
+/// The kinds a profile's `slot` takes, by name, from the provider catalog.
+fn slot_takes(slot: &CapabilitySlot) -> Vec<String> {
+    let catalog = builtin_provider_catalog();
+    let mut takes = Vec::new();
+    for provider in PROFILE_PROVIDERS {
+        let Ok(id) = ProviderId::parse(provider) else {
+            continue;
+        };
+        let Some(policy) = catalog
+            .get(&id)
+            .and_then(|definition| definition.capabilities.get(slot))
+        else {
+            continue;
+        };
+        for kind in &policy.authentication_kinds {
+            let label = super::credentials::output::authentication_kind_label(*kind);
+            takes.push(super::credentials::output::kind_label(provider, label));
+        }
+    }
+    takes
 }
 
 /// Asks for the value of a credential of `kind` for `provider`, in plain
@@ -906,6 +986,10 @@ pub(super) fn read_protected_value<R: std::io::BufRead>(
             bytes.pop();
         }
     }
+    anyhow::ensure!(
+        !bytes.is_empty(),
+        super::credentials::output::refusal::NOTHING_ENTERED
+    );
     ProtectedValue::new(std::mem::take(&mut *bytes)).context("the pasted value isn't valid")
 }
 
@@ -1487,6 +1571,68 @@ mod tests {
         let mut oversized = vec![b'x'; MAX_PROTECTED_VALUE_BYTES];
         oversized.extend_from_slice(b"\r\nx");
         assert!(read_protected_value(oversized.as_slice(), false).is_err());
+        // Nothing piped is refused in the one sentence for it (#4938).
+        let empty = read_protected_value(b"\n".as_slice(), false).unwrap_err();
+        assert_eq!(empty.to_string(), "nothing was entered; nothing was saved");
+    }
+
+    #[test]
+    fn expires_at_takes_a_date_or_unix_seconds() {
+        assert_eq!(expiry_arg("2027-11-15"), Ok(1_826_236_800));
+        assert_eq!(expiry_arg("1826236800"), Ok(1_826_236_800));
+        let refused = expiry_arg("next year").unwrap_err();
+        assert!(refused.contains("use YYYY-MM-DD"), "{refused}");
+    }
+
+    /// Every option and argument of `cw credentials` says what it is (#4938).
+    #[test]
+    fn every_credentials_option_has_a_help_line() {
+        fn walk(command: &clap::Command, path: &str, missing: &mut Vec<String>) {
+            for arg in command.get_arguments() {
+                let id = arg.get_id().as_str();
+                if arg.is_hide_set() || matches!(id, "help" | "version") {
+                    continue;
+                }
+                if arg.get_help().is_none() && arg.get_long_help().is_none() {
+                    missing.push(format!("{path} {id}"));
+                }
+            }
+            for sub in command.get_subcommands() {
+                walk(sub, &format!("{path} {}", sub.get_name()), missing);
+            }
+        }
+        let cli = <crate::Cli as clap::CommandFactory>::command();
+        let credentials = cli.find_subcommand("credentials").expect("cw credentials");
+        let mut missing = Vec::new();
+        walk(credentials, "credentials", &mut missing);
+        assert!(missing.is_empty(), "no help line: {missing:?}");
+    }
+
+    #[test]
+    fn a_slot_given_the_wrong_kind_names_the_kinds_it_takes() {
+        let openai = ProviderId::parse("openai").unwrap();
+        let error =
+            profile_slot_for("work", "anthropic", &openai, CredentialAuthKind::ApiKey).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.starts_with("\"work\" is an OpenAI API key; a profile's anthropic slot takes "),
+            "{message}"
+        );
+        for kind in [
+            "an Anthropic API key",
+            "a Claude (token) credential",
+            "a Claude (sign-in) credential",
+        ] {
+            assert!(message.contains(kind), "{message}");
+        }
+        assert!(profile_slot_for("work", "openai", &openai, CredentialAuthKind::ApiKey).is_ok());
+        // A slot that isn't one keeps its own refusal.
+        let unknown =
+            profile_slot_for("work", "gitlab", &openai, CredentialAuthKind::ApiKey).unwrap_err();
+        assert!(
+            unknown.to_string().contains("use codex, openai"),
+            "{unknown}"
+        );
     }
 
     #[test]

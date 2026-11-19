@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from repo_policy.shared import ROOT, argparse
+from repo_policy.credential_words import check_credential_words
 from repo_policy.design_tokens import check_design_tokens
 from repo_policy.edge_routing import check_connect_edge_routing
 from repo_policy.egress_manifests import check_egress_manifests
@@ -108,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     design_parser.add_argument("--self-test", action="store_true")
     design_parser.add_argument("--root", default=str(ROOT))
     design_parser.set_defaults(func=check_design_tokens)
+    credential_words_parser = subparsers.add_parser("credential-words")
+    credential_words_parser.add_argument("--self-test", action="store_true")
+    credential_words_parser.set_defaults(func=check_credential_words)
     live_state_parser = subparsers.add_parser("live-state")
     live_state_parser.add_argument("--self-test", action="store_true")
     live_state_parser.set_defaults(func=check_live_state)

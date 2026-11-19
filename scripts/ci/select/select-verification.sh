@@ -1182,6 +1182,11 @@ if [ "$event_selected" = false ]; then
         # Policy; product paths in the same change keep their own classifiers.
         recognized=true
         ;;
+      scripts/checks/contracts/credential-words.json)
+        # The credential words guard reads only this list and runs in Policy;
+        # product paths in the same change keep their own classifiers.
+        recognized=true
+        ;;
       scripts/checks/contracts/live-state-allowlist.json)
         # The live-state polling guard reads only this list and runs in
         # Policy; product paths in the same change keep their own classifiers.

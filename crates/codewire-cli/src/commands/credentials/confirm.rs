@@ -13,10 +13,7 @@ use super::output::{self, refusal};
 /// `cw credentials revoke`: the selector, `--yes`, and the output format.
 #[derive(Debug, clap::Args)]
 pub(crate) struct CredentialRevokeArgs {
-    #[arg(
-        value_name = "CREDENTIAL_SELECTOR",
-        help = "Credential name, name:<name>, or id:<canonical-uuid>"
-    )]
+    #[arg(value_name = "CREDENTIAL", help = crate::commands::credential_input::SELECTOR_HELP)]
     pub(crate) credential: String,
     #[arg(
         short,
@@ -24,7 +21,7 @@ pub(crate) struct CredentialRevokeArgs {
         help = "Revoke without asking; needed without a terminal or with --output json"
     )]
     pub(crate) yes: bool,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
     pub(crate) output: OutputFormat,
 }
 

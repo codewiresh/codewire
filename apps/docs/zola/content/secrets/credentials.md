@@ -36,7 +36,7 @@ one.
 ```sh
 printf '%s' "$OPENAI_API_KEY" | cw credentials --cloud add openai --name work-openai
 printf '%s' "$ANTHROPIC_API_KEY" | cw credentials --cloud add anthropic --name work-anthropic
-cw credentials --cloud rotate work-openai        # replace the key; clears a hard expiry unless --expires-at
+cw credentials --cloud rotate work-openai        # replace the key; clears its expiry date unless --expires-at
 ```
 
 ## Claude subscription: sign-in or token

@@ -1632,6 +1632,8 @@ run_paths_case permanent_raw_policy_guard pull_request refs/pull/117/head false 
   'policy security security_js' scripts/checks/contracts/permanent-raw-surface-policy.json
 run_present_paths_case design_token_policy pull_request refs/pull/2203/head false \
   'policy security security_js' scripts/checks/contracts/design-token-policy.json
+run_present_paths_case credential_words_policy pull_request refs/pull/4938/head false \
+  'policy security security_js' scripts/checks/contracts/credential-words.json
 run_present_paths_case design_token_guard_module pull_request refs/pull/22032/head false \
   'contracts contracts_proto deploy go_consumer_interop go_support policy release confidential_script_tests security security_idp_kek security_js' \
   scripts/checks/repo_policy/design_tokens.py

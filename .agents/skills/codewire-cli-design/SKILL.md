@@ -206,6 +206,8 @@ The spec and journey are `docs/journeys/cli-completion.md` (#5108; owner,
 
 ## Words
 
+- Credentials and profiles use the words in `docs/GLOSSARY.md`, "Words users
+  see: credentials", which `scripts/ci/verify/check-credential-words.py` checks.
 - Product terms come from `docs/GLOSSARY.md`. Commands in messages are in
   backticks (`cw login`), never single quotes. Messages are sentences, and
   hints are commands. Use `…`, not `...`.

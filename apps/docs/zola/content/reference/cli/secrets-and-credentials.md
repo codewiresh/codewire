@@ -94,9 +94,9 @@ cw credentials --local|--cloud [--profile NAME] SUBCOMMAND
 
 ```sh
 cw credentials --cloud connect codex|github|claude|claude-token --name NAME [-y]
-cw credentials --cloud add openai|anthropic --name NAME [--expires-at UNIX_SECONDS]
+cw credentials --cloud add openai|anthropic --name NAME [--expires-at DATE]
 cw credentials --cloud add ssh --name NAME --key-file PATH
-cw credentials --cloud generate ssh --name NAME [--expires-at UNIX_SECONDS]
+cw credentials --cloud generate ssh --name NAME [--expires-at DATE]
 ```
 
 | Provider | How |
@@ -123,7 +123,7 @@ Declining the reconnect stops the walkthrough without changing a profile.
 cw credentials --cloud list [--output json]            # alias: ls
 cw credentials --cloud get NAME|id:UUID
 cw credentials --cloud rename NAME NEW_NAME
-cw credentials --cloud rotate NAME [--expires-at UNIX_SECONDS]   # replace an API key or token; sets it Active
+cw credentials --cloud rotate NAME [--expires-at DATE]   # replace an API key or token; sets it Active
 cw credentials --cloud revoke NAME [-y]               # asks first at a terminal
 cw credentials --cloud delete NAME [-y]               # revokes an active credential first
 ```
@@ -135,6 +135,9 @@ given: a script that revokes or deletes a credential passes `--yes`. A
 credential a profile selects isn't deleted; `cw` prints the `unset` that frees
 it. Afterwards `cw` says what the provider still holds, and gives the link to
 revoke it there where Codewire can't.
+
+`--expires-at` takes a date, `YYYY-MM-DD` (the start of that day in UTC), or
+Unix seconds.
 
 ### Profiles
 

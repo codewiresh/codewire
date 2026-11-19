@@ -27,6 +27,7 @@ observed**.
 | `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, the early replacements on that build plus their change, and `main` at 4cae0f601 through the smoke, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | observed, #5286: main's tree at 57b68c6be (#5295 and #5312), 2026-11-18, with a name resolving only to private addresses; the provider came back at the regular replacement, not the early ones (a sign-in's token host not walked) | local VMs only |
 | `cred-file-store` | not yet observed (#5255) | the macOS file store; not part of this check | local stores only |
 | `cred-same-name` | not yet observed (#4928) | not yet observed (#4928) | not yet observed (#4928) |
+| `cred-wording` | not yet observed | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -453,11 +454,11 @@ Issues: #4850, #4717 (C2). The screens are the approved screens 3 and 4.
   delete both profiles' credentials and `parity-default-b`.
 - **Proof:**
   - `profiles list` lists `parity-default-a` first, marked default.
-  - After `profiles default`, both placements print `Default credential
-    profile: "parity-default-b".` with their own placement word.
+  - After `profiles default`, both placements print `Default profile:
+    "parity-default-b".` with their own placement word.
   - The delete exits non-zero with `"parity-default-b" is your default
-    credential profile and cannot be deleted; make another profile the
-    default first: cw credentials --PLACEMENT profiles default NAME`.
+    profile and can't be deleted; make another profile the default first:
+    cw credentials --PLACEMENT profiles default NAME`.
   - The first create prints `Credential profile: parity-default-b (your
     default; --no-profile creates without one)`, and its environment
     selects that profile. The second selects none.
@@ -542,7 +543,6 @@ lines are in its Pod log.
   - Lease decisions live in the authority's memory: after it restarts the
     part is empty until the VM asks again.
   - A VM started before the update keeps its older guest until it restarts.
-- **Observed:** not yet observed.
 
 ## 11. `cred-provider-unresolved`: a provider's name doesn't resolve when a local VM starts
 
@@ -758,4 +758,26 @@ sign-in and a Codex sign-in both named after their email address.
     same name twice, is refused by the store rather than given one of them.
   - Names are case-insensitive: `Walk` and `walk` are the same name in one
     provider.
+
+## 14. `cred-wording`: the words every step shows
+
+Issue: #4938. The words are in `docs/GLOSSARY.md`, "Words users see:
+credentials", from the approved credentials screens; cw-web walks the
+dashboard's half.
+
+- **Entry points:** every step above, CLI and dashboard; `cw credentials
+  --help` and each subcommand's `--help`.
+- **States to exercise:** each refusal C4 lists, a cancelled prompt, nothing
+  entered, a profile slot given the wrong kind, and `--expires-at` with a
+  date.
+- **Driving it:** walk steps 1 to 9 again in both placements, reading every
+  line for wording rather than behaviour; run
+  `python3 scripts/checks/repo_checks.py credential-words`.
+- **Proof:** no line on screen uses a word from the glossary's "Never on
+  screen" column; the check passes; every option's `--help` line says what
+  it takes; a cancelled prompt reads "Cancelled; nothing was changed."
+- **Gotchas:** the check reads only the files its contract lists
+  (`scripts/checks/contracts/credential-words.json`) and skips the
+  exceptions it names; a word outside those files is caught only by the
+  walk.
 - **Observed:** not yet observed.

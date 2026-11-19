@@ -369,7 +369,7 @@ pub(in crate::commands) fn after_deleted(
 /// placements.
 pub(in crate::commands) fn profile_deleted(placement: &str, name: &str) -> String {
     let placement = capitalised(placement);
-    format!("{placement} credential profile {name:?} deleted.")
+    format!("{placement} profile {name:?} deleted.")
 }
 
 fn capitalised(word: &str) -> String {
@@ -390,8 +390,8 @@ pub(in crate::commands) fn rotation_notice(
     expiry: Option<u64>,
 ) -> String {
     let deadline = expiry.map_or_else(
-        || "clears the hard expiry".to_owned(),
-        |expiry| format!("sets the hard expiry to {}", expiry_date(expiry)),
+        || "clears the expiry date".to_owned(),
+        |expiry| format!("sets the expiry date to {}", expiry_date(expiry)),
     );
     format!(
         "Rotating {placement} API key {name:?} ({id}, revision {revision}) sets its status to Active (including if revoked) and {deadline}. Enter the replacement key to proceed."
@@ -403,6 +403,45 @@ pub(in crate::commands) mod save_refusal;
 /// The refusals both placements share (#4717 C4): one sentence each, with
 /// the placement word the only difference, and the command that helps.
 pub(in crate::commands) mod refusal {
+    /// The person stopped: one sentence wherever a credentials command is
+    /// cancelled (#4938).
+    pub(in crate::commands) const CANCELLED: &str = "Cancelled; nothing was changed.";
+
+    /// A prompt answered with nothing.
+    pub(in crate::commands) const NOTHING_ENTERED: &str = "nothing was entered; nothing was saved";
+
+    /// A profile slot given a credential of a kind it doesn't take.
+    pub(in crate::commands) fn wrong_kind(
+        name: &str,
+        kind: &str,
+        slot: &str,
+        takes: &[String],
+    ) -> String {
+        let takes = takes.iter().map(|kind| a_kind(kind)).collect::<Vec<_>>();
+        let takes = match takes.split_last() {
+            Some((last, [])) => last.clone(),
+            Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+            None => "no credential".to_owned(),
+        };
+        format!(
+            "{name:?} is {}; a profile's {slot} slot takes {takes}",
+            a_kind(kind)
+        )
+    }
+
+    /// A kind with its article: "an OpenAI API key", "a Codex credential".
+    fn a_kind(kind: &str) -> String {
+        if !kind.ends_with("key") {
+            return format!("a {kind} credential");
+        }
+        let article = if kind.starts_with(['A', 'E', 'I', 'O', 'U', 'S']) {
+            "an"
+        } else {
+            "a"
+        };
+        format!("{article} {kind}")
+    }
+
     /// No credential by that name.
     pub(in crate::commands) fn not_found(placement: &str, name: &str) -> String {
         format!(
@@ -413,7 +452,7 @@ pub(in crate::commands) mod refusal {
     /// No profile by that name.
     pub(in crate::commands) fn profile_not_found(placement: &str, name: &str) -> String {
         format!(
-            "no {placement} credential profile is named {name:?}; `cw credentials --{placement} profiles list` shows them"
+            "no {placement} profile is named {name:?}; `cw credentials --{placement} profiles list` shows them"
         )
     }
 
@@ -425,7 +464,7 @@ pub(in crate::commands) mod refusal {
     /// `add` takes this provider's key from neither placement.
     pub(in crate::commands) fn add_unsupported(provider: &str) -> String {
         format!(
-            "{provider} has no key to add; `add` takes an openai or anthropic API key, or an SSH key with `add ssh --key-file PATH`. Use `connect` for Codex, GitHub, a Claude sign-in or a Claude token (`connect claude-token`)"
+            "{provider} has no key to add; `add` takes an openai or anthropic API key, or an SSH key with `add ssh --key-file PATH`. Use `connect` for Codex, GitHub, Claude (sign-in) or Claude (token) (`connect claude-token`)"
         )
     }
 
@@ -433,7 +472,7 @@ pub(in crate::commands) mod refusal {
     pub(in crate::commands) const ACCOUNT_HINT: &str = "`add` doesn't take --account-hint; a credential's account comes from its provider when you `connect`";
 
     /// `rotate` on an SSH key.
-    pub(in crate::commands) const ROTATE_SSH: &str = "an SSH key isn't rotated in place; make a new one with `cw credentials generate ssh` or `add ssh`, then select it in the credential profile";
+    pub(in crate::commands) const ROTATE_SSH: &str = "an SSH key isn't rotated in place; make a new one with `cw credentials generate ssh` or `add ssh`, then put it in the profile";
 
     /// `rotate` on a credential that comes from a provider sign-in.
     pub(in crate::commands) const ROTATE_CONNECTED: &str = "this credential comes from a provider sign-in, so it isn't pasted; reconnect it with `cw credentials connect` and its --name";
@@ -486,7 +525,7 @@ pub(in crate::commands) mod refusal {
         profile: &str,
         slot: &str,
     ) -> String {
-        format!("{placement} credential profile {profile:?} has no {slot} credential to unset")
+        format!("{placement} profile {profile:?} has no {slot} credential to unset")
     }
 }
 
@@ -1124,6 +1163,24 @@ mod tests {
         assert_eq!(
             format_profiles_text(&[], &names),
             "No profiles yet.\n→ cw credentials --profile NAME set PROVIDER CREDENTIAL\n"
+        );
+    }
+
+    #[test]
+    fn the_shared_sentences_read_as_the_glossary_says() {
+        assert_eq!(refusal::CANCELLED, "Cancelled; nothing was changed.");
+        assert_eq!(
+            refusal::wrong_kind("ci", "Claude (token)", "ssh", &["SSH key".to_owned()]),
+            "\"ci\" is a Claude (token) credential; a profile's ssh slot takes an SSH key"
+        );
+        assert_eq!(
+            refusal::wrong_kind(
+                "k",
+                "SSH key",
+                "codex",
+                &["Codex".to_owned(), "OpenAI API key".to_owned()]
+            ),
+            "\"k\" is an SSH key; a profile's codex slot takes a Codex credential or an OpenAI API key"
         );
     }
 

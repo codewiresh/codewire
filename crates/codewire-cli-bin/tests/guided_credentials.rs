@@ -350,7 +350,7 @@ async fn successful_addition_binds_the_saved_id_after_unicode_correction() {
         process.send(b"\x7fx\r");
         process.expect("Use this credential in a profile?");
         process.send(b"\r");
-        process.expect("Choose a credential profile");
+        process.expect("Choose a profile");
         process.send(b"\r");
         process.expect("New profile name");
         process.send(b"work\r");

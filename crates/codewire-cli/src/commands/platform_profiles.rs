@@ -7,7 +7,7 @@ use codewire_client::{self as rpc, CodewireClient};
 
 use super::credential_input::{
     CredentialOperation, GITHUB_ALWAYS_INCLUDED, ParsedProfileSelector, parse_profile_selector,
-    profile_set_credential, supported_profile_slot,
+    profile_set_credential, profile_slot_for,
 };
 use super::*;
 
@@ -72,7 +72,8 @@ async fn handle_profile(
             let selector = profile_set_credential(&args)?;
             let credential = super::platform_credentials::resolve(client, selector).await?;
             let kind = platform_authentication_kind(&credential)?;
-            let slot = supported_profile_slot(
+            let slot = profile_slot_for(
+                &credential.name,
                 args.slot.as_deref().context("a provider is required")?,
                 &ProviderId::parse(&credential.provider)?,
                 kind,
@@ -99,11 +100,11 @@ async fn handle_profile(
                     name: name.context("new profiles require a name")?,
                     entries: vec![entry],
                     ..Default::default()
-                }).await.context("create platform profile with its first selection; inspect before retrying an uncertain result")?;
+                }).await.context("create the cloud profile with its first credential; inspect before retrying an uncertain result")?;
                 let created = response
                     .access_profile
                     .into_option()
-                    .context("platform returned no profile")?;
+                    .context("Codewire returned no profile")?;
                 super::credentials::output::print_done(
                     &super::credentials::output::profile_created(&created.name, &held),
                 );
@@ -169,13 +170,13 @@ async fn handle_profile(
                 .await?
                 .access_profile
                 .into_option()
-                .context("platform returned no profile")?;
+                .context("Codewire returned no profile")?;
             anyhow::ensure!(
                 selected.id == profile.id && selected.is_default,
-                "platform returned a different default profile"
+                "Codewire returned a different default profile"
             );
             eprintln!(
-                "Default credential profile: {:?}. A cloud `cw create` uses it when you name no profile.",
+                "Default profile: {:?}. A cloud `cw create` uses it when you name no profile.",
                 selected.name
             );
             Ok(())
@@ -183,7 +184,7 @@ async fn handle_profile(
         CredentialProfileCommand::Revisions(args) => {
             let _ = args;
             anyhow::bail!(
-                "platform history listing is not supported; use --profile=NAME get --revision REVISION"
+                "cloud profiles have no revision list yet; use --profile=NAME get --revision REVISION"
             )
         }
     }
@@ -206,7 +207,7 @@ pub(super) fn platform_authentication_kind(
     } else if credential.authentication_kind == Kind::ClaudeSignIn {
         Ok(CredentialAuthKind::ClaudeSignIn)
     } else {
-        anyhow::bail!("platform returned an unsupported credential authentication kind")
+        anyhow::bail!("Codewire returned a credential kind this cw doesn't know; upgrade cw")
     }
 }
 
@@ -230,7 +231,7 @@ pub(super) async fn list_profiles(
         }
         anyhow::ensure!(
             cursors.insert(page.next_page_token.clone()),
-            "platform returned a repeated profile cursor"
+            "Codewire returned a repeated profile cursor"
         );
         page_token = page.next_page_token;
     }
@@ -244,7 +245,7 @@ fn profile_selector(selector: &str) -> anyhow::Result<rpc::get_access_profile_re
         ParsedProfileSelector::Reference(reference) => {
             anyhow::ensure!(
                 reference.scope() == AccessProfileScope::User,
-                "organization platform profiles are not supported by the metadata API yet"
+                "organization profiles in your Codewire account aren't supported yet"
             );
             Selector::Name(reference.name().to_string())
         }
@@ -261,7 +262,7 @@ fn optional_profile_by_name<'a>(
     let found = matches.next();
     anyhow::ensure!(
         matches.next().is_none(),
-        "platform profile name is ambiguous; select an exact id"
+        "more than one cloud profile has that name; select it by ID"
     );
     Ok(found)
 }
@@ -323,12 +324,12 @@ async fn get_exact_profile(
         .await?
         .access_profile
         .into_option()
-        .context("platform returned no profile")?;
+        .context("Codewire returned no profile")?;
     anyhow::ensure!(
         profile.id == id
             && profile.revision > 0
             && revision.is_none_or(|revision| revision == profile.revision),
-        "platform returned a different profile or revision"
+        "Codewire returned a different profile or revision"
     );
     Ok(profile)
 }
@@ -351,7 +352,7 @@ async fn update_profile(
     response
         .access_profile
         .into_option()
-        .context("platform returned no profile")?;
+        .context("Codewire returned no profile")?;
     super::credentials::output::print_done(done);
     Ok(())
 }
@@ -366,7 +367,7 @@ pub(super) fn default_first(mut profiles: Vec<rpc::AccessProfile>) -> Vec<rpc::A
 /// `--local`), so the two say the same (#4717).
 pub(super) fn default_delete_refusal(name: &str, placement: &str) -> String {
     format!(
-        "{name:?} is your default credential profile and cannot be deleted; make another profile the default first: cw credentials {placement} profiles default NAME"
+        "{name:?} is your default profile and can't be deleted; make another profile the default first: cw credentials {placement} profiles default NAME"
     )
 }
 

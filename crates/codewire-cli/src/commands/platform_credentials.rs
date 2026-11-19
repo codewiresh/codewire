@@ -119,13 +119,13 @@ async fn handle_with_receipt(
                     passphrase: input.passphrase.as_mut().map(|value| std::mem::take(&mut **value)),
                     expires_at_unix: args.expires_at,
                     ..Default::default()
-                }).await.context("import platform SSH identity; inspect by name before retrying an uncertain acknowledgement")?;
+                }).await.context("import the cloud SSH key; inspect by name before retrying an uncertain acknowledgement")?;
                 return print(
                     &[response
                         .credential
                         .into_option()
                         .inspect(|record| remember_platform(record, execution))
-                        .context("platform omitted SSH metadata")?],
+                        .context("Codewire omitted the SSH key's details")?],
                     OutputFormat::Text,
                 );
             }
@@ -148,13 +148,13 @@ async fn handle_with_receipt(
                 value: material.expose_secret().to_vec(),
                 expires_at_unix: args.expires_at,
                 ..Default::default()
-            }).await.context("add platform API key; inspect by name before retrying an uncertain acknowledgement")?;
+            }).await.context("add the cloud API key; inspect by name before retrying an uncertain acknowledgement")?;
             print(
                 &[response
                     .credential
                     .into_option()
                     .inspect(|record| remember_platform(record, execution))
-                    .context("platform omitted credential metadata")?],
+                    .context("Codewire omitted the credential's details")?],
                 OutputFormat::Text,
             )
         }
@@ -165,11 +165,11 @@ async fn handle_with_receipt(
                 credential_id: current.id.clone(),
                 expected_revocation_generation: current.revocation_generation,
                 expected_name: current.name.clone(), name: name.clone(), ..Default::default()
-            }).await.context("rename exact platform credential; inspect metadata before retrying an uncertain result")?;
+            }).await.context("rename the exact cloud credential; inspect metadata before retrying an uncertain result")?;
             let renamed = response
                 .credential
                 .into_option()
-                .context("platform omitted renamed metadata")?;
+                .context("Codewire omitted the renamed credential's details")?;
             let mut expected = current;
             expected.name = name;
             validate_update_ack(&expected, &renamed)?;
@@ -191,11 +191,11 @@ async fn handle_with_receipt(
                 expected_revocation_generation: current.revocation_generation,
                 value: material.expose_secret().to_vec(), expires_at_unix: args.expires_at,
                 ..Default::default()
-            }).await.context("rotate exact platform API key; inspect metadata before retrying an uncertain result")?;
+            }).await.context("replace the exact cloud API key; inspect metadata before retrying an uncertain result")?;
             let rotated = response
                 .credential
                 .into_option()
-                .context("platform omitted rotated metadata")?;
+                .context("Codewire omitted the replaced credential's details")?;
             validate_update_ack(&expected, &rotated)?;
             print(&[rotated], OutputFormat::Text)
         }
@@ -235,7 +235,7 @@ fn rotation_metadata(
     );
     anyhow::ensure!(
         current.revocation_generation > 0 && current.revocation_generation < i64::MAX as u64,
-        "platform returned an invalid credential revision"
+        "Codewire returned an invalid credential revision"
     );
     let mut expected = current.clone();
     expected.status = rpc::CredentialStatus::Active.into();
@@ -257,7 +257,7 @@ fn rotation_notice(current: &rpc::Credential, expiry: Option<u64>) -> String {
 fn validate_update_ack(expected: &rpc::Credential, actual: &rpc::Credential) -> anyhow::Result<()> {
     anyhow::ensure!(
         expected == actual,
-        "platform returned unexpected credential metadata; inspect the identity before retrying the uncertain result"
+        "Codewire returned unexpected credential details; check the credential before retrying the uncertain result"
     );
     Ok(())
 }
@@ -280,7 +280,7 @@ pub(super) async fn list_all(client: &CodewireClient) -> anyhow::Result<Vec<rpc:
             return Ok(credentials);
         }
         if !cursors.insert(page.next_page_token.clone()) {
-            anyhow::bail!("platform returned a repeated credential cursor");
+            anyhow::bail!("Codewire returned a repeated credential cursor");
         }
         page_token = page.next_page_token;
     }
@@ -574,7 +574,7 @@ async fn find_named(
             response
                 .credential
                 .into_option()
-                .context("platform omitted credential metadata")?,
+                .context("Codewire omitted the credential's details")?,
         )),
         Err(error) if error.code() == rpc::ErrorCode::NotFound => Ok(None),
         Err(error) => Err(error).context("inspect existing platform credential before enrollment"),
@@ -710,7 +710,7 @@ pub(super) async fn resolve(
         })?
         .credential
         .into_option()
-        .context("platform omitted credential metadata")
+        .context("Codewire omitted the credential's details")
 }
 
 /// The service's pending entries as the notice takes them; an unknown kind
@@ -781,12 +781,12 @@ fn validate_ssh_metadata(credentials: &[rpc::Credential]) -> anyhow::Result<()> 
                 credential.provider == "ssh"
                     && credential.authentication_kind == rpc::CredentialAuthenticationKind::SshKey
                     && credential.account_hint.is_none(),
-                "platform returned inconsistent SSH metadata"
+                "Codewire returned inconsistent SSH key details"
             );
             let key = credential
                 .ssh_public_key
                 .as_option()
-                .context("platform omitted SSH public key")?;
+                .context("Codewire omitted the SSH public key")?;
             codewire_access::SshPublicKeyMetadata {
                 openssh: key.openssh.clone(),
                 fingerprint: key.fingerprint.clone(),
@@ -969,7 +969,7 @@ fn cloud_save_error(save: Save<'_>, error: rpc::ClientError) -> anyhow::Error {
             CredentialConnectProviderArg::Claude | CredentialConnectProviderArg::ClaudeToken
         )
     ) {
-        return anyhow::Error::new(error).context("enroll platform OAuth credential");
+        return anyhow::Error::new(error).context("save the sign-in in your Codewire account");
     }
     tracing::debug!(
         code = ?error.code(),
@@ -1066,7 +1066,7 @@ mod tests {
             assert!(rotation_metadata(&current, Some(expiry)).is_err());
         }
         assert!(rotation_notice(&current, None).contains("including if revoked"));
-        assert!(rotation_notice(&current, None).contains("clears the hard expiry"));
+        assert!(rotation_notice(&current, None).contains("clears the expiry date"));
         assert!(rotation_notice(&current, Some(4_000_000_000)).contains("2096-10-02 07:06 UTC"));
         let mut wrong = expected.clone();
         wrong.id = "different-identity".into();

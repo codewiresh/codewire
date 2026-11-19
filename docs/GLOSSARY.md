@@ -166,3 +166,32 @@ Official client libraries for the Codewire API, in this repository under
 - TypeScript: `@codewire/sdk` (`libs/sdk-ts`)
 - Go: `codewire.sh/sdk-go` (`libs/sdk-go`)
 - Python: `codewire` (`libs/sdk-python`)
+
+## Words users see: credentials
+
+The words the CLI, the dashboard and the docs use for credentials and
+profiles (#4938), from the approved credentials screens. Internal names in
+code and in these docs above may differ; what reaches the screen uses the
+"Use" column, and `scripts/ci/verify/check-credential-words.py` fails on the
+"Never on screen" column in the credential files it lists. Command and flag
+names don't change: `profiles`, `rotate` and `--cloud` stay.
+
+| Use | Means | Never on screen |
+| --- | --- | --- |
+| credential | a sign-in or a key for a provider | identity, provider identity, protected credential, protected value |
+| profile | the set of credentials a sandbox or VM may use, one per provider | access profile, credential profile, profile members |
+| on this computer | where a local VM's credentials are kept | local store, local authority, credential authority |
+| in your Codewire account | where a cloud Sandbox's credentials are kept | platform, cloud store |
+| sign-in, sign in | the browser flow for Codex, GitHub and Claude (sign-in) | OAuth, enrollment |
+| API key | an Anthropic or OpenAI key | raw key |
+| token | Claude (token), from `claude setup-token` | subscription token |
+| SSH key | a key for SSH and Git | |
+| revoke | stop a credential working and keep its name | disable |
+| replace | put a new key under the same name (the command stays `rotate`) | raw rotation |
+| expiry date, expires | when a credential stops working | hard expiry |
+| cancelled | stopped by the person, nothing changed: "Cancelled; nothing was changed." | canceled |
+
+The kinds, in lists and messages: `Claude (sign-in)`, `Claude (token)`,
+`Anthropic API key`, `OpenAI API key`, `Codex`, `GitHub` and `SSH key`.
+GitHub's account connection, which every cloud profile includes, is the one
+place "connection" names a credential.

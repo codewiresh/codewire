@@ -139,14 +139,18 @@ pub(super) async fn complete(
 
 fn fill_name(name: &mut Option<String>) -> anyhow::Result<()> {
     if name.is_none() {
-        *name = Some(guided::text("Credential name", None, |value| {
-            guided::required(value)?;
-            if value.len() > 256 || value.chars().any(char::is_control) {
-                Err("Use at most 256 bytes without control characters".into())
-            } else {
-                Ok(())
-            }
-        })?);
+        *name = Some(guided::text(
+            "Credential name (up to 256 bytes)",
+            None,
+            |value| {
+                guided::required(value)?;
+                if value.len() > 256 || value.chars().any(char::is_control) {
+                    Err("A credential name is up to 256 bytes, with no control characters".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )?);
     }
     Ok(())
 }
@@ -160,7 +164,7 @@ fn choose_profile(profiles: &[(String, String)]) -> anyhow::Result<String> {
         "Create a profile",
         "Its first credential is saved with it",
     ));
-    let index = guided::choose("Choose a credential profile", &choices)?;
+    let index = guided::choose("Choose a profile", &choices)?;
     if let Some((_, selector)) = profiles.get(index) {
         return Ok(selector.clone());
     }
@@ -292,7 +296,7 @@ async fn platform_credentials(client: &CodewireClient) -> anyhow::Result<Vec<rpc
         }
         anyhow::ensure!(
             cursors.insert(page.next_page_token.clone()),
-            "platform returned a repeated credential cursor"
+            "Codewire returned a repeated credential cursor"
         );
         page_token = page.next_page_token;
     }
@@ -304,7 +308,7 @@ async fn enroll_for_profile(
     slot: &str,
 ) -> anyhow::Result<String> {
     if !guided::confirm("No compatible credentials. Set one up now?")? {
-        anyhow::bail!("canceled; no profile was changed");
+        anyhow::bail!(super::credentials::output::refusal::CANCELLED);
     }
     let command = match slot {
         "codex" => {
@@ -416,7 +420,7 @@ async fn enroll_for_profile(
             Ok(format!("id:{}", saved.id))
         }
         super::credential_input::CredentialExecution::Unchanged => {
-            anyhow::bail!("canceled; no profile was changed")
+            anyhow::bail!(super::credentials::output::refusal::CANCELLED)
         }
     }
 }
@@ -520,13 +524,13 @@ pub(super) async fn choose_profile_reference(
     let profiles = profile_choices(globals, placement).await?;
     let mut choices = profiles
         .iter()
-        .map(|(name, _)| Choice::new(name, "Credential profile"))
+        .map(|(name, _)| Choice::new(name, "Profile"))
         .collect::<Vec<_>>();
     choices.push(Choice::new(
         "Set up a profile",
         "Choose its first provider credential",
     ));
-    let index = guided::choose("Choose a credential profile", &choices)?;
+    let index = guided::choose("Choose a profile", &choices)?;
     let selector = if let Some((_, selector)) = profiles.get(index) {
         selector.clone()
     } else {
@@ -552,8 +556,8 @@ pub(super) async fn choose_profile_reference(
             );
         }
         anyhow::ensure!(
-            guided::confirm("Save this credential profile binding?")?,
-            "canceled; profile binding was not saved"
+            guided::confirm("Put this credential in the profile?")?,
+            super::credentials::output::refusal::CANCELLED
         );
         let operation = resolve_credential_operation(args.profile, args.command, placement)?;
         execute_credential_operation(globals, operation, placement).await?;
