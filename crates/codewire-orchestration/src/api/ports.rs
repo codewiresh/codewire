@@ -19,9 +19,15 @@ use super::environments::{
 };
 use crate::confidential_storage::require_confidential_access;
 
-/// The one port reserved in the workspace Pod: the daemon's SSH server.
+/// The daemon's SSH server, which only orchestration reaches.
 fn is_reserved_port(port: i32) -> bool {
     port == i32::from(codewire_daemon_proto::WORKSPACE_SSH_PORT)
+}
+
+/// Whether `port` is the desktop's, which no preview, published port or Mesh
+/// port may name (`docs/dev/SANDBOX-DESKTOP.md`, "The reserved port").
+pub(crate) fn is_desktop_port(port: i32) -> bool {
+    port == i32::from(codewire_daemon_proto::DESKTOP_VNC_PORT)
 }
 
 pub(crate) fn validate_preview_port(port: i32, label: &str, access: &str) -> AppResult<()> {
@@ -35,6 +41,13 @@ pub(crate) fn validate_preview_port(port: i32, label: &str, access: &str) -> App
             StatusCode::BAD_REQUEST,
             "port_reserved",
             "port is reserved by the agent",
+        ));
+    }
+    if is_desktop_port(port) {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "port_reserved",
+            codewire_daemon_proto::DESKTOP_VNC_PORT_REFUSAL,
         ));
     }
     let bytes = label.as_bytes();
@@ -460,6 +473,35 @@ mod tests {
         assert!(validate_preview_port(3000, &"a".repeat(23), "creator").is_err());
         // Only the daemon's SSH port is reserved; its neighbour is ordinary.
         validate_preview_port(2223, "web", "creator").unwrap();
+    }
+
+    #[test]
+    fn the_desktop_port_is_never_published_and_the_refusal_names_the_way_in() {
+        let refused = validate_preview_port(5901, "desktop", "creator").unwrap_err();
+        let AppError::Coded {
+            status,
+            code,
+            detail,
+        } = refused
+        else {
+            panic!("the desktop port's refusal is coded: {refused:?}");
+        };
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(code, "port_reserved");
+        assert!(detail.contains("SSH local forward"), "{detail}");
+        // The displays beside it are ordinary ports.
+        validate_preview_port(5900, "vnc-a", "creator").unwrap();
+        validate_preview_port(5902, "vnc-b", "creator").unwrap();
+
+        let spec = codewire_project::ProjectSpec {
+            application_ports: vec![codewire_project::ApplicationPort {
+                port: 5901,
+                label: "desktop".into(),
+                access: "creator".into(),
+            }],
+            ..Default::default()
+        };
+        assert!(validate_application_previews(&spec).is_err());
     }
 
     #[test]

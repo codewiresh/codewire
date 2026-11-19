@@ -286,6 +286,9 @@ async fn db_app_ports_follow_expose_and_unexpose() -> Result<()> {
         // Exposed ports are the grant's and the push's set, ascending.
         expose(5173, "vite").await?;
         expose(3000, "web").await?;
+        // A row published before the desktop's port was reserved: the
+        // tailnet and Mesh are never told to serve it.
+        expose(5901, "desktop").await?;
         ensure!(store.app_ports(ENV).await? == vec![3000, 5173]);
         ensure!(exposed_app_ports(&db.pool, ENV).await? == vec![3000, 5173]);
         // An unexposed port leaves the set at once, while its DNS cleanup is

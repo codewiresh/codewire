@@ -1,7 +1,7 @@
 ---
 title: Ports and preview URLs
 description: Publish an application port as an HTTPS preview URL on the platform, or on 127.0.0.1 and an HTTPS hostname for a local VM.
-updated: 2026-11-15
+updated: 2026-11-18
 weight: 5
 aliases: ["/guides/previews", "/concepts/preview-environments"]
 ---
@@ -56,7 +56,9 @@ Publishing needs a running sandbox; a stopped one is refused with the
 `cw start ENV` repair. `--unpublish` names the guest port, with `--label` to
 choose when one port has several previews.
 
-Port 2222 is reserved for the environment's SSH server. The dashboard's
+Ports 2222 and 5901 are reserved and cannot be published: 2222 is the
+environment's SSH server, and 5901 is kept for the environment's own display
+server, which is reached only through an SSH local forward. The dashboard's
 **Ports** dialog on the Sandbox page offers the same fields and shows the
 exact URL with **Open** and **Copy**.
 

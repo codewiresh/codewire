@@ -807,11 +807,19 @@ fn to_setup_inputs_consumes_the_canonical_project_spec() {
             install: Some(true),
             tools: vec!["codex".into()],
         },
-        application_ports: vec![codewire_project::ApplicationPort {
-            port: 8080,
-            label: "api".into(),
-            access: String::new(),
-        }],
+        application_ports: vec![
+            codewire_project::ApplicationPort {
+                port: 8080,
+                label: "api".into(),
+                access: String::new(),
+            },
+            // Saved before the desktop's port was reserved: never registered.
+            codewire_project::ApplicationPort {
+                port: codewire_daemon_proto::DESKTOP_VNC_PORT,
+                label: "desktop".into(),
+                access: String::new(),
+            },
+        ],
         ..Default::default()
     };
     let input = to_setup_inputs(&env, &backend);

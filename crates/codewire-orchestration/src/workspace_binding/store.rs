@@ -407,7 +407,8 @@ impl BindingStore for PgBindingStore {
 
 /// The environment's exposed application ports, ascending and distinct:
 /// the set its daemon serves on its tailnet address. A port whose removal
-/// was requested is no longer exposed.
+/// was requested is no longer exposed, and the desktop's port never is,
+/// even from a row published before it was reserved.
 pub async fn exposed_app_ports(
     pool: &sqlx::PgPool,
     environment_id: &str,
@@ -415,10 +416,11 @@ pub async fn exposed_app_ports(
     sqlx::query_scalar(
         "SELECT DISTINCT port FROM environment_ports \
          WHERE environment_id = $1 AND deletion_requested_at IS NULL \
-           AND port BETWEEN 1 AND 65535 \
+           AND port BETWEEN 1 AND 65535 AND port <> $2 \
          ORDER BY port",
     )
     .bind(environment_id)
+    .bind(i32::from(codewire_daemon_proto::DESKTOP_VNC_PORT))
     .fetch_all(pool)
     .await
 }

@@ -196,8 +196,7 @@ pub(crate) async fn serve(
                 app_ports.clone(),
                 shutdown.clone(),
             ));
-            let reserved_ports: std::collections::BTreeSet<u16> =
-                platform.keys().copied().collect();
+            let reserved_ports = unserved_application_ports(&platform);
             // The environment's node in its hosted Mesh network, when the
             // grant names one (#3350): separate keys, socket and coordinator.
             let (current_membership, membership) = watch::channel(None);
@@ -355,11 +354,38 @@ async fn restate_app_ports(
     }
 }
 
+/// The ports the tailnet and Mesh never serve as application ports, whatever
+/// orchestration names: the platform's own listeners, and the desktop's,
+/// which is not one of those because SSH forwards do reach it.
+fn unserved_application_ports(
+    platform: &codewire_daemon_proto::PlatformListeners,
+) -> std::collections::BTreeSet<u16> {
+    platform
+        .keys()
+        .copied()
+        .chain([codewire_daemon_proto::DESKTOP_VNC_PORT])
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
 
     use super::*;
+
+    #[test]
+    fn the_tailnet_never_serves_the_desktop_port_and_ssh_forwards_still_reach_it() {
+        let platform = codewire_daemon_proto::platform_listeners(Some(7777));
+        let desktop = codewire_daemon_proto::DESKTOP_VNC_PORT;
+        let unserved = unserved_application_ports(&platform);
+        assert!(unserved.contains(&desktop));
+        for port in platform.keys() {
+            assert!(unserved.contains(port), "{port}");
+        }
+        assert!(!unserved.contains(&(desktop + 1)));
+        // Forwarding refuses the platform's listeners only.
+        assert!(!platform.contains_key(&desktop));
+    }
 
     /// Answers the record from a script and logs every call in order.
     struct OrderedPlane {

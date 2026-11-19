@@ -3885,6 +3885,25 @@ fn create_journal_reconstructs_exact_canonical_project_intent() {
         validate_create(&invalid_docker),
         Err(SupervisorError::InvalidRequest)
     ));
+    // A project that lists the desktop's port is refused by name, before
+    // its host ports and Mesh ports are looked at.
+    let mut desktop_project = project.clone();
+    desktop_project
+        .application_ports
+        .push(codewire_project::ApplicationPort {
+            port: codewire_daemon_proto::DESKTOP_VNC_PORT,
+            label: "desktop".to_owned(),
+            access: String::new(),
+        });
+    let mut desktop = request.clone();
+    desktop.project_spec_json = desktop_project.canonical_json().unwrap();
+    desktop.project_spec_sha256 = format!("{:x}", Sha256::digest(&desktop.project_spec_json));
+    let refused = validate_create(&desktop).expect_err("the desktop's port");
+    assert!(matches!(refused, SupervisorError::DesktopPortReserved));
+    assert!(
+        refused.to_string().contains("SSH local forward"),
+        "{refused}"
+    );
     let workspace_plan = WorkspacePlan::local(&crate::workspace::WorkspaceSource {
         vm_only: Vec::new(),
         source_path: PathBuf::from("/workspace/source"),
@@ -3975,6 +3994,23 @@ fn host_port_updates_withdraw_then_publish_into_one_canonical_set() {
         updated_host_ports(&current, &request(&[], &[18_080]))
             .unwrap()
             .is_empty()
+    );
+    // The desktop's port is never published, even while another binding
+    // that predates the rule stays in the set.
+    let refused =
+        updated_host_ports(&current, &request(&[(18_081, 5_901)], &[])).expect_err("5901");
+    assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+    assert!(
+        refused.message().contains("SSH local forward"),
+        "{refused:?}"
+    );
+    let earlier = vec![HostPortBinding::new(18_079, 5_901).unwrap()];
+    assert_eq!(
+        updated_host_ports(&earlier, &request(&[(18_080, 3_000)], &[])).unwrap(),
+        vec![
+            HostPortBinding::new(18_079, 5_901).unwrap(),
+            HostPortBinding::new(18_080, 3_000).unwrap(),
+        ]
     );
     for (add, remove, code) in [
         (&[][..], &[][..], tonic::Code::InvalidArgument),

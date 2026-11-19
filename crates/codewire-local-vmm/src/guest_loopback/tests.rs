@@ -120,6 +120,20 @@ async fn a_platform_listener_is_refused_with_the_daemons_reason() {
     }
 }
 
+/// The refusal is this path's own and comes before any dial: without it the
+/// daemon, which forwards to this port, would answer that nothing listens.
+#[tokio::test]
+async fn the_desktop_port_is_refused_before_the_daemon_is_asked() {
+    let temp = tempfile::tempdir().unwrap();
+    let client = in_process_daemon(temp.path()).await;
+    match open_guest_loopback(&client, codewire_daemon_proto::DESKTOP_VNC_PORT).await {
+        Err(GuestLoopbackError::Refused(reason)) => {
+            assert!(reason.contains("SSH local forward"), "{reason}")
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn a_daemon_without_forwarding_is_refused_rather_than_read_as_nothing_listening() {
     assert_eq!(

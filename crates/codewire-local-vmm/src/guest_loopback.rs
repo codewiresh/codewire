@@ -50,10 +50,18 @@ impl GuestLoopbackError {
 }
 
 /// A stream to `guest_port` on the first workload loopback that accepts it.
+/// Published ports and local HTTPS hostnames come through here, so the
+/// desktop's port is refused: a binding stored before it was reserved is
+/// not served. SSH forwards, which may reach it, dial the daemon themselves.
 pub async fn open_guest_loopback(
     client: &DaemonSessionClient,
     guest_port: u16,
 ) -> Result<DuplexStream, GuestLoopbackError> {
+    if guest_port == codewire_daemon_proto::DESKTOP_VNC_PORT {
+        return Err(GuestLoopbackError::Refused(
+            codewire_daemon_proto::DESKTOP_VNC_PORT_REFUSAL.to_owned(),
+        ));
+    }
     for address in LOOPBACKS {
         match client
             .forward_tcp(SocketAddr::new(address, guest_port))

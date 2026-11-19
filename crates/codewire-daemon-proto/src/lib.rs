@@ -146,6 +146,18 @@ pub const HOSTED_DAEMON_ACCESS_READY_FILE: &str = "/codewire/run/daemon/access-r
 /// The bound daemon's SSH listener in the workspace Pod. Only orchestration
 /// (its SSH proxy and setup health check) may reach it.
 pub const WORKSPACE_SSH_PORT: u16 = 2222;
+/// The environment desktop's VNC listener on the workload's loopback
+/// (`docs/dev/SANDBOX-DESKTOP.md`). It asks for no password, so the only ways
+/// to it are the two that admit a viewer: an SSH local forward and
+/// orchestration's desktop stream, both through `ForwardTcp`. It is therefore
+/// not one of the [`PLATFORM_WORKLOAD_LISTENERS`], which forwarding refuses.
+/// Every path that publishes a guest port, or serves a published one, refuses
+/// this port instead, whether or not a desktop runs.
+pub const DESKTOP_VNC_PORT: u16 = 5901;
+/// What a refusal to publish or serve [`DESKTOP_VNC_PORT`] says. It names the
+/// path that works today; `cw vnc` replaces it here when that command ships.
+pub const DESKTOP_VNC_PORT_REFUSAL: &str = "port 5901 is reserved for this environment's desktop and is never published; \
+     reach it with an SSH local forward";
 
 /// A session's Codewire server inside a hosted sandbox (#5100): the
 /// deployment's public origin from its binding. It names no identity and

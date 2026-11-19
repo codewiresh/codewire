@@ -266,10 +266,11 @@ when both have been observed.
     at all;
   - `cw ports` lists no port for the desktop, and no preview URL serves it;
   - publishing 5901 is refused with one sentence that says the port is the
-    desktop's and names `cw vnc`, with the desktop running and with it
-    stopped, in the cloud and on a local VM; publishing 5902 succeeds, and
-    is removed afterwards; the create from the project file is refused with
-    the same sentence;
+    desktop's and names the way in (`cw vnc`; an SSH local forward until
+    that command ships), with the desktop running and with it stopped, in
+    the cloud and on a local VM; publishing 5902 succeeds, and is removed
+    afterwards; the create from the project file is refused with the same
+    sentence;
   - the connection from another Pod is refused or times out on both ports;
   - on the computer, the only new listener while `cw vnc` runs is
     `127.0.0.1:PORT`, and it is gone after Ctrl-C.

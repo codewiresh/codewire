@@ -456,7 +456,7 @@ once, as before this change.
 - App-preview traffic is separate from daemon traffic: public preview requests
   terminate at ingress/orchestration, then the orchestration preview proxy
   connects to the workspace Pod on the registered TCP app port. Preview ports
-  may be any port except 2222.
+  may be any port except 2222 and 5901.
 - Typed daemon RPCs require the bound Pod's daemon credential via
   `x-codewire-daemon-token`.
 - The API owns user authentication, organization membership, and environment

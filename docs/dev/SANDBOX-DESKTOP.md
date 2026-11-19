@@ -39,6 +39,9 @@ The desktop is built on these, which are on `main`:
   bridge and, on a hosted daemon, the daemon's own port.
 - Durable sessions, which outlive their clients and are marked interrupted,
   never restarted, when the daemon restarts.
+- The reserved port, below, in the port API, the preview proxy, the tailnet
+  and Mesh, and a local VM's published ports. The dashboard's own wording
+  for the refusal comes with its viewer.
 - The dashboard terminal's WebSocket admission
   ([BROWSER-TERMINALS.md](BROWSER-TERMINALS.md)) and the revocation fence
   that ends an admitted stream ([AUTH-POLICY.md](AUTH-POLICY.md)).
@@ -156,6 +159,8 @@ on every placement, whether or not a desktop runs:
   forward and Mesh ingress refuse to open a connection to guest port 5901,
   so a port published before this rule existed is not served either.
 - `cw` and the dashboard show the server's refusal, which names `cw vnc`.
+  Until `cw vnc` ships, the refusal names the path that works: an SSH local
+  forward.
 
 SSH local forwards and orchestration's desktop stream are the two paths
 that still reach it. A program a user runs inside the workload to relay the
