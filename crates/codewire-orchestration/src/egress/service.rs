@@ -12,8 +12,8 @@ use std::time::Duration;
 use codewire_proto::codewire::internal::v1::__buffa::oneof::egress_assignment::Binding;
 use codewire_proto::codewire::internal::v1::{
     AdmitRequest, AdmitResponse, BoundAssignment, EgressAssignment, EgressPolicyRevision,
-    EgressService, FrontDoorSessionRequest, FrontDoorSessionResponse, PlatformAllow,
-    ReportEnforcementRequest, ReportEnforcementResponse, ReportRecordsRequest,
+    EgressService, FrontDoorSessionRequest, FrontDoorSessionResponse, InterceptionBinding,
+    PlatformAllow, ReportEnforcementRequest, ReportEnforcementResponse, ReportRecordsRequest,
     ReportRecordsResponse, WatchAssignmentRequest, WatchAssignmentResponse,
 };
 use codewire_server_core::pod_identity::PodIdentityError;
@@ -25,7 +25,7 @@ use sqlx::PgPool;
 use codewire_egress_node::replacement::StartLimiter;
 
 use super::admission::{self, Reviewed};
-use super::assignment::{AssignedPolicy, environment_policy};
+use super::assignment::{AssignedPolicy, Intercept, environment_policy};
 use super::lockdown;
 use super::reports;
 
@@ -58,6 +58,12 @@ pub struct EgressServiceState {
     pub server_namespace: String,
     pub sandbox_namespace: String,
     pub platform: Vec<PlatformDestination>,
+    /// What a bound sandbox intercepts: the deployment's interception
+    /// bindings, or none when it does not intercept (#4001). An unbound
+    /// warm-pool member never gets them. Only a broker-mode sandbox gets an
+    /// assignment at all (`admission::guest_on_node`), so this is the
+    /// setting AND-ed with broker mode, as the bind response's is.
+    pub intercepts: Vec<Intercept>,
     /// Admissions per caller node and stream peer, counted before the
     /// guest's token is reviewed, so a guest flooding a cw-egress costs
     /// orchestration no review (#4000). cw-egress applies the same limit on
@@ -399,6 +405,17 @@ impl EgressServiceState {
                     ..Default::default()
                 })
                 .into(),
+                interception: !self.intercepts.is_empty(),
+                interception_bindings: self
+                    .intercepts
+                    .iter()
+                    .map(|intercept| InterceptionBinding {
+                        host: intercept.binding.hostname().to_owned(),
+                        port: u32::from(intercept.binding.port()),
+                        suffix: intercept.suffix,
+                        ..Default::default()
+                    })
+                    .collect(),
                 ..Default::default()
             })),
         };

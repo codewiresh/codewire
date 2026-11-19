@@ -330,6 +330,7 @@ fn state(cluster: &Arc<Cluster>, bindings: Arc<dyn BindingStore>) -> EgressServi
             host: "codewire-dev.sh".into(),
             port: 443,
         }],
+        intercepts: Default::default(),
         starts: Default::default(),
     }
 }
@@ -643,6 +644,7 @@ rules:
         server_namespace: SERVER.into(),
         sandbox_namespace: SANDBOXES.into(),
         platform: configured.clone(),
+        intercepts: Default::default(),
         starts: Default::default(),
     };
     let bound = Assignment::Bound {
@@ -667,6 +669,93 @@ rules:
             .map(|destination| (destination.host.clone(), u32::from(destination.port)))
             .collect();
         assert_eq!(sent, expected);
+    }
+}
+
+#[tokio::test]
+async fn interception_reaches_only_a_bound_sandbox_and_only_when_switched_on() {
+    use buffa::Message as _;
+
+    let state = |interception| {
+        let attestation: Arc<dyn RuntimeAttestation> =
+            crate::runtime::kubernetes::KubernetesDriver::shared(
+                Cluster::healthy().client(),
+                Default::default(),
+            );
+        EgressServiceState {
+            attestation,
+            bindings: Arc::new(Unbound),
+            pool: PgPool::connect_lazy("postgres://unused@127.0.0.1:1/unused").unwrap(),
+            server_namespace: SERVER.into(),
+            sandbox_namespace: SANDBOXES.into(),
+            platform: Vec::new(),
+            intercepts: crate::egress::assignment::interception_bindings(interception).unwrap(),
+            starts: Default::default(),
+        }
+    };
+    let bound = Assignment::Bound {
+        environment_id: "env".into(),
+        operation_generation: 7,
+        policy: AssignedPolicy {
+            name: "platform:egress".into(),
+            revision: 3,
+            document: br#"{"rules":[]}"#.to_vec(),
+            digest: [9; 32],
+        },
+    };
+    // The assignment as it was before interception existed.
+    let today = || BoundAssignment {
+        environment_id: "env".into(),
+        operation_generation: 7,
+        policy: Some(EgressPolicyRevision {
+            reference: "platform:egress".into(),
+            revision: 3,
+            document: br#"{"rules":[]}"#.to_vec(),
+            digest: vec![9; 32],
+            ..Default::default()
+        })
+        .into(),
+        ..Default::default()
+    };
+    let encoded = |bound: BoundAssignment| {
+        EgressAssignment {
+            binding: Some(Binding::Bound(Box::new(bound))),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    };
+
+    // Off: byte for byte the assignment a bound sandbox gets today.
+    assert_eq!(state(false).proto(&bound).encode_to_vec(), encoded(today()));
+    // On: today's assignment, the switch, and each front door host with its
+    // port and suffix flag; nothing else, so no credential, key or
+    // placeholder can travel in it.
+    let mut hosts: Vec<(&str, bool)> = codewire_access::FRONT_DOOR_HOSTS
+        .iter()
+        .map(|host| (host.host, host.suffix))
+        .collect();
+    hosts.sort();
+    assert!(!hosts.is_empty());
+    let on = BoundAssignment {
+        interception: true,
+        interception_bindings: hosts
+            .into_iter()
+            .map(|(host, suffix)| InterceptionBinding {
+                host: host.into(),
+                port: 443,
+                suffix,
+                ..Default::default()
+            })
+            .collect(),
+        ..today()
+    };
+    assert_eq!(state(true).proto(&bound).encode_to_vec(), encoded(on));
+    // An unbound warm-pool member gets none either way.
+    for interception in [false, true] {
+        assert!(matches!(
+            state(interception).proto(&Assignment::Unbound).binding,
+            Some(Binding::Unbound(_))
+        ));
     }
 }
 
@@ -708,6 +797,7 @@ fn watch(cluster: &Arc<Cluster>, expires_in: Duration) -> Watch {
             server_namespace: SERVER.into(),
             sandbox_namespace: SANDBOXES.into(),
             platform: Vec::new(),
+            intercepts: Default::default(),
             starts: Default::default(),
         }),
         caller: Caller {

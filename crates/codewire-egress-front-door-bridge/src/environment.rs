@@ -31,7 +31,7 @@ use crate::handoff::{HandoffSocket, Received};
 use crate::{CLAUDE_TOKEN_HOST, CredentialRouteBackend, GITHUB_HOSTS, RouteTable};
 
 /// The only port a binding may name: the front door serves TLS.
-pub const INTERCEPT_PORT: u16 = 443;
+pub const INTERCEPT_PORT: u16 = codewire_access::INTERCEPT_PORT;
 /// How long one acknowledgement may wait for room on the hand-off socket.
 pub const ACKNOWLEDGEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 

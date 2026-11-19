@@ -1,5 +1,6 @@
-//! The deployment settings for hosted egress (#4000). All are read once at
-//! startup; a value that does not parse fails startup.
+//! The deployment settings for hosted egress (#4000) and hosted interception
+//! (#4001). All are read once at startup; a value that does not parse fails
+//! startup.
 
 use std::net::Ipv4Addr;
 
@@ -13,6 +14,11 @@ pub const SWITCH: &str = "CODEWIRE_HOSTED_EGRESS_ENABLED";
 /// enforces an entry yet, so while hosted egress is on a non-empty list stops
 /// startup rather than look configured and do nothing.
 pub const PLATFORM_ALLOWS: &str = "CODEWIRE_EGRESS_PLATFORM_ALLOWS";
+/// Turns on credential interception for broker-mode sandboxes when `true`
+/// (#4001). Off unless a deployment turns it on, and only with hosted egress
+/// on: interception runs in cw-egress's front door. Hosted has no per-host
+/// switch; this is its rollout.
+pub const INTERCEPTION_SWITCH: &str = "CODEWIRE_HOSTED_INTERCEPTION_ENABLED";
 
 /// The public gateway's proxy Pods, as the warm-pool admission policy reads
 /// them from the same ConfigMap.
@@ -163,6 +169,8 @@ fn template_from(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EgressSettings {
     pub enabled: bool,
+    /// Whether a broker-mode sandbox's bind response turns interception on.
+    pub interception: bool,
 }
 
 impl EgressSettings {
@@ -170,11 +178,21 @@ impl EgressSettings {
         Self::from_values(
             crate::confidential_storage::env_setting(SWITCH)?.as_deref(),
             crate::confidential_storage::env_setting(PLATFORM_ALLOWS)?.as_deref(),
+            crate::confidential_storage::env_setting(INTERCEPTION_SWITCH)?.as_deref(),
         )
     }
 
-    fn from_values(enabled: Option<&str>, platform: Option<&str>) -> anyhow::Result<Self> {
+    fn from_values(
+        enabled: Option<&str>,
+        platform: Option<&str>,
+        interception: Option<&str>,
+    ) -> anyhow::Result<Self> {
         let enabled = crate::confidential_storage::parse_bool(SWITCH, enabled, false)?;
+        let interception =
+            crate::confidential_storage::parse_bool(INTERCEPTION_SWITCH, interception, false)?;
+        if interception && !enabled {
+            anyhow::bail!("{INTERCEPTION_SWITCH} is on but {SWITCH} is off");
+        }
         if !enabled {
             // The list is read only where it is used: a deployment with hosted
             // egress off never fails on it.
@@ -189,7 +207,10 @@ impl EgressSettings {
                 "{PLATFORM_ALLOWS} names a destination, but platform allows are not enforced yet; leave it unset"
             );
         }
-        Ok(Self { enabled })
+        Ok(Self {
+            enabled,
+            interception,
+        })
     }
 }
 
@@ -375,17 +396,20 @@ mod tests {
     #[test]
     fn off_by_default_and_on_with_no_platform_allow() {
         assert_eq!(
-            EgressSettings::from_values(None, None).unwrap(),
+            EgressSettings::from_values(None, None, None).unwrap(),
             EgressSettings::default()
         );
         for empty in [None, Some(""), Some(" , ")] {
             assert_eq!(
-                EgressSettings::from_values(Some("true"), empty).unwrap(),
-                EgressSettings { enabled: true },
+                EgressSettings::from_values(Some("true"), empty, None).unwrap(),
+                EgressSettings {
+                    enabled: true,
+                    interception: false,
+                },
                 "{empty:?}"
             );
         }
-        assert!(EgressSettings::from_values(Some("maybe"), None).is_err());
+        assert!(EgressSettings::from_values(Some("maybe"), None, None).is_err());
     }
 
     #[test]
@@ -396,16 +420,34 @@ mod tests {
             "no-port",
         ] {
             assert!(
-                EgressSettings::from_values(Some("true"), Some(named)).is_err(),
+                EgressSettings::from_values(Some("true"), Some(named), None).is_err(),
                 "{named}"
             );
         }
     }
 
     #[test]
+    fn interception_is_off_by_default_and_on_only_with_hosted_egress() {
+        assert!(
+            !EgressSettings::from_values(Some("true"), None, None)
+                .unwrap()
+                .interception
+        );
+        assert!(
+            EgressSettings::from_values(Some("true"), None, Some("true"))
+                .unwrap()
+                .interception
+        );
+        assert!(EgressSettings::from_values(None, None, Some("true")).is_err());
+        assert!(EgressSettings::from_values(Some("false"), None, Some("true")).is_err());
+        assert!(EgressSettings::from_values(Some("true"), None, Some("maybe")).is_err());
+    }
+
+    #[test]
     fn the_list_is_not_read_while_hosted_egress_is_off() {
         assert_eq!(
-            EgressSettings::from_values(Some("false"), Some("control.example.com:443")).unwrap(),
+            EgressSettings::from_values(Some("false"), Some("control.example.com:443"), None)
+                .unwrap(),
             EgressSettings::default()
         );
     }

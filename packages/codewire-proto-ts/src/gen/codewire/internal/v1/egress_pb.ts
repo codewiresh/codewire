@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/internal/v1/egress.proto.
  */
 export const file_codewire_internal_v1_egress: GenFile = /*@__PURE__*/
-  fileDesc("CiFjb2Rld2lyZS9pbnRlcm5hbC92MS9lZ3Jlc3MucHJvdG8SFGNvZGV3aXJlLmludGVybmFsLnYxIjQKDEFkbWl0UmVxdWVzdBITCgtndWVzdF90b2tlbhgBIAEoCRIPCgdwZWVyX2lwGAIgASgJIm4KDUFkbWl0UmVzcG9uc2USDwoHcG9kX3VpZBgBIAEoCRI6Cgphc3NpZ25tZW50GAIgASgLMiYuY29kZXdpcmUuaW50ZXJuYWwudjEuRWdyZXNzQXNzaWdubWVudBIQCghwb2RfbmFtZRgDIAEoCSI7ChZXYXRjaEFzc2lnbm1lbnRSZXF1ZXN0Eg8KB3BvZF91aWQYASABKAkSEAoIcG9kX25hbWUYAiABKAkiVQoXV2F0Y2hBc3NpZ25tZW50UmVzcG9uc2USOgoKYXNzaWdubWVudBgBIAEoCzImLmNvZGV3aXJlLmludGVybmFsLnYxLkVncmVzc0Fzc2lnbm1lbnQizwEKEEVncmVzc0Fzc2lnbm1lbnQSOgoHdW5ib3VuZBgBIAEoCzInLmNvZGV3aXJlLmludGVybmFsLnYxLlVuYm91bmRBc3NpZ25tZW50SAASNgoFYm91bmQYAiABKAsyJS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Cb3VuZEFzc2lnbm1lbnRIABI8Cg9wbGF0Zm9ybV9hbGxvd3MYAyADKAsyIy5jb2Rld2lyZS5pbnRlcm5hbC52MS5QbGF0Zm9ybUFsbG93QgkKB2JpbmRpbmciEwoRVW5ib3VuZEFzc2lnbm1lbnQigwEKD0JvdW5kQXNzaWdubWVudBIWCg5lbnZpcm9ubWVudF9pZBgBIAEoCRIcChRvcGVyYXRpb25fZ2VuZXJhdGlvbhgCIAEoAxI6CgZwb2xpY3kYAyABKAsyKi5jb2Rld2lyZS5pbnRlcm5hbC52MS5FZ3Jlc3NQb2xpY3lSZXZpc2lvbiJdChRFZ3Jlc3NQb2xpY3lSZXZpc2lvbhIRCglyZWZlcmVuY2UYASABKAkSEAoIcmV2aXNpb24YAiABKA0SEAoIZG9jdW1lbnQYAyABKAwSDgoGZGlnZXN0GAQgASgMIisKDVBsYXRmb3JtQWxsb3cSDAoEaG9zdBgBIAEoCRIMCgRwb3J0GAIgASgNIqwBChhSZXBvcnRFbmZvcmNlbWVudFJlcXVlc3QSDwoHcG9kX3VpZBgBIAEoCRIQCghwb2RfbmFtZRgCIAEoCRI7CgVzdGF0ZRgDIAEoDjIsLmNvZGV3aXJlLmludGVybmFsLnYxLkVncmVzc0VuZm9yY2VtZW50U3RhdGUSEAoIcmV2aXNpb24YBCABKA0SDgoGZGlnZXN0GAUgASgMEg4KBmRldGFpbBgGIAEoCSIbChlSZXBvcnRFbmZvcmNlbWVudFJlc3BvbnNlIm4KFFJlcG9ydFJlY29yZHNSZXF1ZXN0Eg8KB3BvZF91aWQYASABKAkSEAoIcG9kX25hbWUYAiABKAkSMwoHcmVjb3JkcxgDIAMoCzIiLmNvZGV3aXJlLmludGVybmFsLnYxLkVncmVzc1JlY29yZCIXChVSZXBvcnRSZWNvcmRzUmVzcG9uc2UivwIKDEVncmVzc1JlY29yZBIOCgRuYW1lGAEgASgJSAASFgoMYWRkcmVzc19vbmx5GAIgASgJSAASDwoHYWRkcmVzcxgDIAEoCRI4Cgl0cmFuc3BvcnQYBCABKA4yJS5jb2Rld2lyZS5pbnRlcm5hbC52MS5FZ3Jlc3NUcmFuc3BvcnQSDAoEcG9ydBgFIAEoDRIPCgdyZWZ1c2FsGAYgASgJEhgKEHBvbGljeV9yZWZlcmVuY2UYByABKAkSFwoPcG9saWN5X3JldmlzaW9uGAggASgNEhUKDXBvbGljeV9kaWdlc3QYCSABKAwSGgoSZmlyc3Rfc2Vlbl91bml4X21zGAogASgEEhkKEWxhc3Rfc2Vlbl91bml4X21zGAsgASgEEg0KBWNvdW50GAwgASgEQg0KC2Rlc3RpbmF0aW9uInAKF0Zyb250RG9vclNlc3Npb25SZXF1ZXN0EjoKBG9wZW4YASABKAsyKi5jb2Rld2lyZS5pbnRlcm5hbC52MS5Gcm9udERvb3JTZXNzaW9uT3BlbkgAEhAKBmJyaWRnZRgCIAEoDEgAQgcKBWZyYW1lIjkKFEZyb250RG9vclNlc3Npb25PcGVuEhAKCHBvZF9uYW1lGAEgASgJEg8KB3BvZF91aWQYAiABKAkieQoYRnJvbnREb29yU2Vzc2lvblJlc3BvbnNlEkIKCGF0dGFjaGVkGAEgASgLMi4uY29kZXdpcmUuaW50ZXJuYWwudjEuRnJvbnREb29yU2Vzc2lvbkF0dGFjaGVkSAASEAoGYnJpZGdlGAIgASgMSABCBwoFZnJhbWUiGgoYRnJvbnREb29yU2Vzc2lvbkF0dGFjaGVkKsABChZFZ3Jlc3NFbmZvcmNlbWVudFN0YXRlEigKJEVHUkVTU19FTkZPUkNFTUVOVF9TVEFURV9VTlNQRUNJRklFRBAAEiUKIUVHUkVTU19FTkZPUkNFTUVOVF9TVEFURV9FTkZPUkNFRBABEioKJkVHUkVTU19FTkZPUkNFTUVOVF9TVEFURV9GQUlMRURfQ0xPU0VEEAISKQolRUdSRVNTX0VORk9SQ0VNRU5UX1NUQVRFX0RJU0NPTk5FQ1RFRBADKoEBCg9FZ3Jlc3NUcmFuc3BvcnQSIAocRUdSRVNTX1RSQU5TUE9SVF9VTlNQRUNJRklFRBAAEhgKFEVHUkVTU19UUkFOU1BPUlRfRE5TEAESGAoURUdSRVNTX1RSQU5TUE9SVF9UQ1AQAhIYChRFR1JFU1NfVFJBTlNQT1JUX1VEUBADMqoECg1FZ3Jlc3NTZXJ2aWNlElAKBUFkbWl0EiIuY29kZXdpcmUuaW50ZXJuYWwudjEuQWRtaXRSZXF1ZXN0GiMuY29kZXdpcmUuaW50ZXJuYWwudjEuQWRtaXRSZXNwb25zZRJwCg9XYXRjaEFzc2lnbm1lbnQSLC5jb2Rld2lyZS5pbnRlcm5hbC52MS5XYXRjaEFzc2lnbm1lbnRSZXF1ZXN0Gi0uY29kZXdpcmUuaW50ZXJuYWwudjEuV2F0Y2hBc3NpZ25tZW50UmVzcG9uc2UwARJ0ChFSZXBvcnRFbmZvcmNlbWVudBIuLmNvZGV3aXJlLmludGVybmFsLnYxLlJlcG9ydEVuZm9yY2VtZW50UmVxdWVzdBovLmNvZGV3aXJlLmludGVybmFsLnYxLlJlcG9ydEVuZm9yY2VtZW50UmVzcG9uc2USaAoNUmVwb3J0UmVjb3JkcxIqLmNvZGV3aXJlLmludGVybmFsLnYxLlJlcG9ydFJlY29yZHNSZXF1ZXN0GisuY29kZXdpcmUuaW50ZXJuYWwudjEuUmVwb3J0UmVjb3Jkc1Jlc3BvbnNlEnUKEEZyb250RG9vclNlc3Npb24SLS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Gcm9udERvb3JTZXNzaW9uUmVxdWVzdBouLmNvZGV3aXJlLmludGVybmFsLnYxLkZyb250RG9vclNlc3Npb25SZXNwb25zZSgBMAFC5QEKGGNvbS5jb2Rld2lyZS5pbnRlcm5hbC52MUILRWdyZXNzUHJvdG9QAVpKZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL2ludGVybmFsL3YxO2ludGVybmFsdjGiAgNDSViqAhRDb2Rld2lyZS5JbnRlcm5hbC5WMcoCFENvZGV3aXJlXEludGVybmFsXFYx4gIgQ29kZXdpcmVcSW50ZXJuYWxcVjFcR1BCTWV0YWRhdGHqAhZDb2Rld2lyZTo6SW50ZXJuYWw6OlYxYgZwcm90bzM");
+  fileDesc("CiFjb2Rld2lyZS9pbnRlcm5hbC92MS9lZ3Jlc3MucHJvdG8SFGNvZGV3aXJlLmludGVybmFsLnYxIjQKDEFkbWl0UmVxdWVzdBITCgtndWVzdF90b2tlbhgBIAEoCRIPCgdwZWVyX2lwGAIgASgJIm4KDUFkbWl0UmVzcG9uc2USDwoHcG9kX3VpZBgBIAEoCRI6Cgphc3NpZ25tZW50GAIgASgLMiYuY29kZXdpcmUuaW50ZXJuYWwudjEuRWdyZXNzQXNzaWdubWVudBIQCghwb2RfbmFtZRgDIAEoCSI7ChZXYXRjaEFzc2lnbm1lbnRSZXF1ZXN0Eg8KB3BvZF91aWQYASABKAkSEAoIcG9kX25hbWUYAiABKAkiVQoXV2F0Y2hBc3NpZ25tZW50UmVzcG9uc2USOgoKYXNzaWdubWVudBgBIAEoCzImLmNvZGV3aXJlLmludGVybmFsLnYxLkVncmVzc0Fzc2lnbm1lbnQizwEKEEVncmVzc0Fzc2lnbm1lbnQSOgoHdW5ib3VuZBgBIAEoCzInLmNvZGV3aXJlLmludGVybmFsLnYxLlVuYm91bmRBc3NpZ25tZW50SAASNgoFYm91bmQYAiABKAsyJS5jb2Rld2lyZS5pbnRlcm5hbC52MS5Cb3VuZEFzc2lnbm1lbnRIABI8Cg9wbGF0Zm9ybV9hbGxvd3MYAyADKAsyIy5jb2Rld2lyZS5pbnRlcm5hbC52MS5QbGF0Zm9ybUFsbG93QgkKB2JpbmRpbmciEwoRVW5ib3VuZEFzc2lnbm1lbnQi4wEKD0JvdW5kQXNzaWdubWVudBIWCg5lbnZpcm9ubWVudF9pZBgBIAEoCRIcChRvcGVyYXRpb25fZ2VuZXJhdGlvbhgCIAEoAxI6CgZwb2xpY3kYAyABKAsyKi5jb2Rld2lyZS5pbnRlcm5hbC52MS5FZ3Jlc3NQb2xpY3lSZXZpc2lvbhIUCgxpbnRlcmNlcHRpb24YBCABKAgSSAoVaW50ZXJjZXB0aW9uX2JpbmRpbmdzGAUgAygLMikuY29kZXdpcmUuaW50ZXJuYWwudjEuSW50ZXJjZXB0aW9uQmluZGluZyJBChNJbnRlcmNlcHRpb25CaW5kaW5nEgwKBGhvc3QYASABKAkSDAoEcG9ydBgCIAEoDRIOCgZzdWZmaXgYAyABKAgiXQoURWdyZXNzUG9saWN5UmV2aXNpb24SEQoJcmVmZXJlbmNlGAEgASgJEhAKCHJldmlzaW9uGAIgASgNEhAKCGRvY3VtZW50GAMgASgMEg4KBmRpZ2VzdBgEIAEoDCIrCg1QbGF0Zm9ybUFsbG93EgwKBGhvc3QYASABKAkSDAoEcG9ydBgCIAEoDSKsAQoYUmVwb3J0RW5mb3JjZW1lbnRSZXF1ZXN0Eg8KB3BvZF91aWQYASABKAkSEAoIcG9kX25hbWUYAiABKAkSOwoFc3RhdGUYAyABKA4yLC5jb2Rld2lyZS5pbnRlcm5hbC52MS5FZ3Jlc3NFbmZvcmNlbWVudFN0YXRlEhAKCHJldmlzaW9uGAQgASgNEg4KBmRpZ2VzdBgFIAEoDBIOCgZkZXRhaWwYBiABKAkiGwoZUmVwb3J0RW5mb3JjZW1lbnRSZXNwb25zZSJuChRSZXBvcnRSZWNvcmRzUmVxdWVzdBIPCgdwb2RfdWlkGAEgASgJEhAKCHBvZF9uYW1lGAIgASgJEjMKB3JlY29yZHMYAyADKAsyIi5jb2Rld2lyZS5pbnRlcm5hbC52MS5FZ3Jlc3NSZWNvcmQiFwoVUmVwb3J0UmVjb3Jkc1Jlc3BvbnNlIr8CCgxFZ3Jlc3NSZWNvcmQSDgoEbmFtZRgBIAEoCUgAEhYKDGFkZHJlc3Nfb25seRgCIAEoCUgAEg8KB2FkZHJlc3MYAyABKAkSOAoJdHJhbnNwb3J0GAQgASgOMiUuY29kZXdpcmUuaW50ZXJuYWwudjEuRWdyZXNzVHJhbnNwb3J0EgwKBHBvcnQYBSABKA0SDwoHcmVmdXNhbBgGIAEoCRIYChBwb2xpY3lfcmVmZXJlbmNlGAcgASgJEhcKD3BvbGljeV9yZXZpc2lvbhgIIAEoDRIVCg1wb2xpY3lfZGlnZXN0GAkgASgMEhoKEmZpcnN0X3NlZW5fdW5peF9tcxgKIAEoBBIZChFsYXN0X3NlZW5fdW5peF9tcxgLIAEoBBINCgVjb3VudBgMIAEoBEINCgtkZXN0aW5hdGlvbiJwChdGcm9udERvb3JTZXNzaW9uUmVxdWVzdBI6CgRvcGVuGAEgASgLMiouY29kZXdpcmUuaW50ZXJuYWwudjEuRnJvbnREb29yU2Vzc2lvbk9wZW5IABIQCgZicmlkZ2UYAiABKAxIAEIHCgVmcmFtZSI5ChRGcm9udERvb3JTZXNzaW9uT3BlbhIQCghwb2RfbmFtZRgBIAEoCRIPCgdwb2RfdWlkGAIgASgJInkKGEZyb250RG9vclNlc3Npb25SZXNwb25zZRJCCghhdHRhY2hlZBgBIAEoCzIuLmNvZGV3aXJlLmludGVybmFsLnYxLkZyb250RG9vclNlc3Npb25BdHRhY2hlZEgAEhAKBmJyaWRnZRgCIAEoDEgAQgcKBWZyYW1lIhoKGEZyb250RG9vclNlc3Npb25BdHRhY2hlZCrAAQoWRWdyZXNzRW5mb3JjZW1lbnRTdGF0ZRIoCiRFR1JFU1NfRU5GT1JDRU1FTlRfU1RBVEVfVU5TUEVDSUZJRUQQABIlCiFFR1JFU1NfRU5GT1JDRU1FTlRfU1RBVEVfRU5GT1JDRUQQARIqCiZFR1JFU1NfRU5GT1JDRU1FTlRfU1RBVEVfRkFJTEVEX0NMT1NFRBACEikKJUVHUkVTU19FTkZPUkNFTUVOVF9TVEFURV9ESVNDT05ORUNURUQQAyqBAQoPRWdyZXNzVHJhbnNwb3J0EiAKHEVHUkVTU19UUkFOU1BPUlRfVU5TUEVDSUZJRUQQABIYChRFR1JFU1NfVFJBTlNQT1JUX0ROUxABEhgKFEVHUkVTU19UUkFOU1BPUlRfVENQEAISGAoURUdSRVNTX1RSQU5TUE9SVF9VRFAQAzKqBAoNRWdyZXNzU2VydmljZRJQCgVBZG1pdBIiLmNvZGV3aXJlLmludGVybmFsLnYxLkFkbWl0UmVxdWVzdBojLmNvZGV3aXJlLmludGVybmFsLnYxLkFkbWl0UmVzcG9uc2UScAoPV2F0Y2hBc3NpZ25tZW50EiwuY29kZXdpcmUuaW50ZXJuYWwudjEuV2F0Y2hBc3NpZ25tZW50UmVxdWVzdBotLmNvZGV3aXJlLmludGVybmFsLnYxLldhdGNoQXNzaWdubWVudFJlc3BvbnNlMAESdAoRUmVwb3J0RW5mb3JjZW1lbnQSLi5jb2Rld2lyZS5pbnRlcm5hbC52MS5SZXBvcnRFbmZvcmNlbWVudFJlcXVlc3QaLy5jb2Rld2lyZS5pbnRlcm5hbC52MS5SZXBvcnRFbmZvcmNlbWVudFJlc3BvbnNlEmgKDVJlcG9ydFJlY29yZHMSKi5jb2Rld2lyZS5pbnRlcm5hbC52MS5SZXBvcnRSZWNvcmRzUmVxdWVzdBorLmNvZGV3aXJlLmludGVybmFsLnYxLlJlcG9ydFJlY29yZHNSZXNwb25zZRJ1ChBGcm9udERvb3JTZXNzaW9uEi0uY29kZXdpcmUuaW50ZXJuYWwudjEuRnJvbnREb29yU2Vzc2lvblJlcXVlc3QaLi5jb2Rld2lyZS5pbnRlcm5hbC52MS5Gcm9udERvb3JTZXNzaW9uUmVzcG9uc2UoATABQuUBChhjb20uY29kZXdpcmUuaW50ZXJuYWwudjFCC0VncmVzc1Byb3RvUAFaSmdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS9pbnRlcm5hbC92MTtpbnRlcm5hbHYxogIDQ0lYqgIUQ29kZXdpcmUuSW50ZXJuYWwuVjHKAhRDb2Rld2lyZVxJbnRlcm5hbFxWMeICIENvZGV3aXJlXEludGVybmFsXFYxXEdQQk1ldGFkYXRh6gIWQ29kZXdpcmU6OkludGVybmFsOjpWMWIGcHJvdG8z");
 
 /**
  * @generated from message codewire.internal.v1.AdmitRequest
@@ -182,6 +182,26 @@ export type BoundAssignment = Message<"codewire.internal.v1.BoundAssignment"> & 
    * @generated from field: codewire.internal.v1.EgressPolicyRevision policy = 3;
    */
   policy?: EgressPolicyRevision | undefined;
+
+  /**
+   * Whether this sandbox's agent hosts are intercepted (#4001): the
+   * deployment's switch; today every bound sandbox gets the default set;
+   * #4001 step K derives it from the binding's profile. Off, the bindings
+   * are empty and the sandbox behaves exactly as without interception.
+   *
+   * @generated from field: bool interception = 4;
+   */
+  interception: boolean;
+
+  /**
+   * Set only when interception is on: the names whose TCP dials cw-egress
+   * hands to the sandbox's front door instead of dialling. A binding names
+   * only where to intercept; what the front door does with a connection is
+   * its own route table.
+   *
+   * @generated from field: repeated codewire.internal.v1.InterceptionBinding interception_bindings = 5;
+   */
+  interceptionBindings: InterceptionBinding[];
 };
 
 /**
@@ -190,6 +210,39 @@ export type BoundAssignment = Message<"codewire.internal.v1.BoundAssignment"> & 
  */
 export const BoundAssignmentSchema: GenMessage<BoundAssignment> = /*@__PURE__*/
   messageDesc(file_codewire_internal_v1_egress, 6);
+
+/**
+ * One canonical hostname and its TCP port (codewire-egress-policy
+ * InterceptBinding).
+ *
+ * @generated from message codewire.internal.v1.InterceptionBinding
+ */
+export type InterceptionBinding = Message<"codewire.internal.v1.InterceptionBinding"> & {
+  /**
+   * @generated from field: string host = 1;
+   */
+  host: string;
+
+  /**
+   * @generated from field: uint32 port = 2;
+   */
+  port: number;
+
+  /**
+   * Set, `host` is a suffix: every name strictly under it that no exact
+   * binding names, never `host` itself, the apex; local's InterceptSuffix.
+   *
+   * @generated from field: bool suffix = 3;
+   */
+  suffix: boolean;
+};
+
+/**
+ * Describes the message codewire.internal.v1.InterceptionBinding.
+ * Use `create(InterceptionBindingSchema)` to create a new message.
+ */
+export const InterceptionBindingSchema: GenMessage<InterceptionBinding> = /*@__PURE__*/
+  messageDesc(file_codewire_internal_v1_egress, 7);
 
 /**
  * @generated from message codewire.internal.v1.EgressPolicyRevision
@@ -232,7 +285,7 @@ export type EgressPolicyRevision = Message<"codewire.internal.v1.EgressPolicyRev
  * Use `create(EgressPolicyRevisionSchema)` to create a new message.
  */
 export const EgressPolicyRevisionSchema: GenMessage<EgressPolicyRevision> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_egress, 7);
+  messageDesc(file_codewire_internal_v1_egress, 8);
 
 /**
  * @generated from message codewire.internal.v1.PlatformAllow
@@ -254,7 +307,7 @@ export type PlatformAllow = Message<"codewire.internal.v1.PlatformAllow"> & {
  * Use `create(PlatformAllowSchema)` to create a new message.
  */
 export const PlatformAllowSchema: GenMessage<PlatformAllow> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_egress, 8);
+  messageDesc(file_codewire_internal_v1_egress, 9);
 
 /**
  * @generated from message codewire.internal.v1.ReportEnforcementRequest
@@ -300,7 +353,7 @@ export type ReportEnforcementRequest = Message<"codewire.internal.v1.ReportEnfor
  * Use `create(ReportEnforcementRequestSchema)` to create a new message.
  */
 export const ReportEnforcementRequestSchema: GenMessage<ReportEnforcementRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_egress, 9);
+  messageDesc(file_codewire_internal_v1_egress, 10);
 
 /**
  * @generated from message codewire.internal.v1.ReportEnforcementResponse
@@ -313,7 +366,7 @@ export type ReportEnforcementResponse = Message<"codewire.internal.v1.ReportEnfo
  * Use `create(ReportEnforcementResponseSchema)` to create a new message.
  */
 export const ReportEnforcementResponseSchema: GenMessage<ReportEnforcementResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_egress, 10);
+  messageDesc(file_codewire_internal_v1_egress, 11);
 
 /**
  * @generated from message codewire.internal.v1.ReportRecordsRequest
@@ -340,7 +393,7 @@ export type ReportRecordsRequest = Message<"codewire.internal.v1.ReportRecordsRe
  * Use `create(ReportRecordsRequestSchema)` to create a new message.
  */
 export const ReportRecordsRequestSchema: GenMessage<ReportRecordsRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_egress, 11);
+  messageDesc(file_codewire_internal_v1_egress, 12);
 
 /**
  * @generated from message codewire.internal.v1.ReportRecordsResponse
@@ -353,7 +406,7 @@ export type ReportRecordsResponse = Message<"codewire.internal.v1.ReportRecordsR
  * Use `create(ReportRecordsResponseSchema)` to create a new message.
  */
 export const ReportRecordsResponseSchema: GenMessage<ReportRecordsResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_egress, 12);
+  messageDesc(file_codewire_internal_v1_egress, 13);
 
 /**
  * One folded egress record (codewire-egress-policy record.rs). The reason is
@@ -443,7 +496,7 @@ export type EgressRecord = Message<"codewire.internal.v1.EgressRecord"> & {
  * Use `create(EgressRecordSchema)` to create a new message.
  */
 export const EgressRecordSchema: GenMessage<EgressRecord> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_egress, 13);
+  messageDesc(file_codewire_internal_v1_egress, 14);
 
 /**
  * @generated from message codewire.internal.v1.FrontDoorSessionRequest
@@ -476,7 +529,7 @@ export type FrontDoorSessionRequest = Message<"codewire.internal.v1.FrontDoorSes
  * Use `create(FrontDoorSessionRequestSchema)` to create a new message.
  */
 export const FrontDoorSessionRequestSchema: GenMessage<FrontDoorSessionRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_egress, 14);
+  messageDesc(file_codewire_internal_v1_egress, 15);
 
 /**
  * @generated from message codewire.internal.v1.FrontDoorSessionOpen
@@ -501,7 +554,7 @@ export type FrontDoorSessionOpen = Message<"codewire.internal.v1.FrontDoorSessio
  * Use `create(FrontDoorSessionOpenSchema)` to create a new message.
  */
 export const FrontDoorSessionOpenSchema: GenMessage<FrontDoorSessionOpen> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_egress, 15);
+  messageDesc(file_codewire_internal_v1_egress, 16);
 
 /**
  * @generated from message codewire.internal.v1.FrontDoorSessionResponse
@@ -534,7 +587,7 @@ export type FrontDoorSessionResponse = Message<"codewire.internal.v1.FrontDoorSe
  * Use `create(FrontDoorSessionResponseSchema)` to create a new message.
  */
 export const FrontDoorSessionResponseSchema: GenMessage<FrontDoorSessionResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_egress, 16);
+  messageDesc(file_codewire_internal_v1_egress, 17);
 
 /**
  * @generated from message codewire.internal.v1.FrontDoorSessionAttached
@@ -547,7 +600,7 @@ export type FrontDoorSessionAttached = Message<"codewire.internal.v1.FrontDoorSe
  * Use `create(FrontDoorSessionAttachedSchema)` to create a new message.
  */
 export const FrontDoorSessionAttachedSchema: GenMessage<FrontDoorSessionAttached> = /*@__PURE__*/
-  messageDesc(file_codewire_internal_v1_egress, 17);
+  messageDesc(file_codewire_internal_v1_egress, 18);
 
 /**
  * @generated from enum codewire.internal.v1.EgressEnforcementState

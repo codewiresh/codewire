@@ -32,8 +32,9 @@ use std::task::{Context, Poll};
 use axum::body::Body;
 use bytes::Bytes;
 use codewire_access::{
-    MANAGED_ANTHROPIC_API_PREFIX, MANAGED_ANTHROPIC_OAUTH_PREFIX, ManagedCredentialClient,
-    ManagedCredentialClients, Refusal, Unforwarded, UpstreamFailure,
+    ANTHROPIC_API_HOST, CHATGPT_HOST, MANAGED_ANTHROPIC_API_PREFIX, MANAGED_ANTHROPIC_OAUTH_PREFIX,
+    ManagedCredentialClient, ManagedCredentialClients, OPENAI_API_HOST, Refusal, Unforwarded,
+    UpstreamFailure,
 };
 use codewire_credential_bridge::{
     CredentialBridge, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX, UpgradeAnswer,
@@ -56,14 +57,12 @@ pub const MAX_ROUTES: usize = 32;
 /// as a literal, so a test feeds it through the classifier to catch drift.
 const CODEX_PREFIX: &str = "/v1";
 
-/// The Anthropic API: the route's base is the origin, so every path maps.
-const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
-/// The OpenAI API: the route's base is `/v1`.
-const OPENAI_API_HOST: &str = "api.openai.com";
+// The default routes' hosts are codewire-access's `FRONT_DOOR_HOSTS`, which
+// hosted interception binds too. Codex on a ChatGPT sign-in maps every path
+// whole, and the broker admits only the ones Codex sends its credential to
+// (#3999).
+/// The OpenAI API route's base.
 const OPENAI_API_PATH: &str = "/v1";
-/// Codex on a ChatGPT sign-in: every path maps whole, and the broker admits
-/// only the ones Codex sends its credential to (#3999).
-const CHATGPT_HOST: &str = "chatgpt.com";
 /// Claude's token host, on every path: the pinned Claude Code refreshes its
 /// sign-in at `/v1/oauth/token`, and the broker forwards every request that
 /// is not a managed refresh untouched. Routed only for an environment whose

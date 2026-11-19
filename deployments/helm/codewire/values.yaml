@@ -91,6 +91,9 @@ config:
   # Organization network policies (#4000). Off until cw-egress enforces them
   # (docs/CONFIGURATION.md).
   CODEWIRE_PLATFORM_NETWORK_POLICIES_ENABLED: "false"
+  # Hosted interception (#4001): off until observed working on Dev; needs hosted
+  # egress, whose switch is in the codewire-hosted-egress ConfigMap.
+  CODEWIRE_HOSTED_INTERCEPTION_ENABLED: "false"
   CONFIDENTIAL_STORAGE_BAO_ADDR: ""
   CONFIDENTIAL_STORAGE_BAO_AUTH_MOUNT: "kubernetes-codewire"
   CONFIDENTIAL_STORAGE_BAO_ROLE: ""

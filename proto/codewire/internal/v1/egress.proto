@@ -106,6 +106,26 @@ message BoundAssignment {
   string environment_id = 1;
   int64 operation_generation = 2;
   EgressPolicyRevision policy = 3;
+  // Whether this sandbox's agent hosts are intercepted (#4001): the
+  // deployment's switch; today every bound sandbox gets the default set;
+  // #4001 step K derives it from the binding's profile. Off, the bindings
+  // are empty and the sandbox behaves exactly as without interception.
+  bool interception = 4;
+  // Set only when interception is on: the names whose TCP dials cw-egress
+  // hands to the sandbox's front door instead of dialling. A binding names
+  // only where to intercept; what the front door does with a connection is
+  // its own route table.
+  repeated InterceptionBinding interception_bindings = 5;
+}
+
+// One canonical hostname and its TCP port (codewire-egress-policy
+// InterceptBinding).
+message InterceptionBinding {
+  string host = 1;
+  uint32 port = 2;
+  // Set, `host` is a suffix: every name strictly under it that no exact
+  // binding names, never `host` itself, the apex; local's InterceptSuffix.
+  bool suffix = 3;
 }
 
 message EgressPolicyRevision {

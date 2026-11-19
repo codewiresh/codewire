@@ -7,6 +7,7 @@
 //! and the derived grants consumed by a placement credential broker.
 
 mod catalog;
+mod front_door;
 mod grant;
 mod id;
 mod managed_refresh;
@@ -18,6 +19,10 @@ mod refusal;
 pub use catalog::{
     CLAUDE_LOGIN_OPERATION, CLAUDE_LOGIN_ROUTE, CODEX_LOGIN_OPERATION, CODEX_LOGIN_ROUTE,
     builtin_provider_catalog, claude_login_permission, codex_login_permission,
+};
+pub use front_door::{
+    ANTHROPIC_API_HOST, CHATGPT_HOST, FRONT_DOOR_HOSTS, FrontDoorHost, INTERCEPT_PORT,
+    OPENAI_API_HOST,
 };
 pub use grant::{
     AvailableGrants, DerivedGrant, GrantContext, GrantPlacement, GrantProfile, UngrantedGitHub,

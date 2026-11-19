@@ -51,6 +51,7 @@ pub fn service_state(
         sandbox_namespace: sandbox_namespace.to_owned(),
         // No deployment sets a platform allow (see `settings::PLATFORM_ALLOWS`).
         platform: Vec::new(),
+        intercepts: assignment::interception_bindings(settings.interception)?,
         starts: Default::default(),
     })))
 }
@@ -126,7 +127,10 @@ mod tests {
 
     #[tokio::test]
     async fn on_without_a_runtime_or_a_namespace_fails_startup() {
-        let on = || settings::EgressSettings { enabled: true };
+        let on = || settings::EgressSettings {
+            enabled: true,
+            interception: false,
+        };
         assert!(service_state(on(), None, "postgres://unused", pool(), "dev", "sb").is_err());
         // Startup builds the state without calling Kubernetes.
         let client = kube::Client::new(
@@ -156,14 +160,29 @@ mod tests {
         assert!(
             service_state(
                 on(),
-                Some(runtime),
+                Some(runtime.clone()),
                 "postgres://unused",
                 pool(),
                 "dev",
                 "sb"
             )
             .unwrap()
-            .is_some()
+            .is_some_and(|state| state.intercepts.is_empty())
         );
+        let intercepting = settings::EgressSettings {
+            enabled: true,
+            interception: true,
+        };
+        let state = service_state(
+            intercepting,
+            Some(runtime),
+            "postgres://unused",
+            pool(),
+            "dev",
+            "sb",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!state.intercepts.is_empty());
     }
 }

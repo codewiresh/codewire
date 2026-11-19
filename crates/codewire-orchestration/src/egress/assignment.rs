@@ -3,6 +3,8 @@
 //! compiles and checks against the digest. An environment that selects
 //! nothing is on `hosted-default` (#3997 D2), and stores no row.
 
+use codewire_access::{FRONT_DOOR_HOSTS, FrontDoorHost, INTERCEPT_PORT};
+use codewire_egress_policy::intercept::{InterceptBinding, MAX_INTERCEPT_BINDINGS};
 use codewire_egress_policy::{
     BuiltinPolicy, CompiledPolicy, HOSTED_DEFAULT_NAME, HOSTED_DEFAULT_YAML, PolicyDocument,
     PolicyError,
@@ -42,6 +44,52 @@ struct SelectionRow {
     revision: Option<i32>,
     document: Option<Vec<u8>>,
     digest: Option<Vec<u8>>,
+}
+
+/// One host a bound sandbox's cw-egress hands to its front door: exactly,
+/// or with `suffix` every name strictly under it that no exact binding names.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Intercept {
+    pub binding: InterceptBinding,
+    pub suffix: bool,
+}
+
+/// What a bound sandbox intercepts when the deployment does (#4001): every
+/// host the front door routes, on its port; nothing when it does not. Today
+/// every bound sandbox gets this default set; #4001 step K derives it from
+/// the binding's profile. A list that does not validate stops startup.
+pub fn interception_bindings(interception: bool) -> anyhow::Result<Vec<Intercept>> {
+    if !interception {
+        return Ok(Vec::new());
+    }
+    intercepts(&FRONT_DOOR_HOSTS)
+}
+
+fn intercepts(hosts: &[FrontDoorHost]) -> anyhow::Result<Vec<Intercept>> {
+    anyhow::ensure!(
+        hosts.len() <= MAX_INTERCEPT_BINDINGS,
+        "the front door's hosts exceed {MAX_INTERCEPT_BINDINGS} interception bindings"
+    );
+    let mut intercepts = hosts
+        .iter()
+        .map(|host| {
+            let binding = InterceptBinding::new(host.host, INTERCEPT_PORT)
+                .map_err(|error| anyhow::anyhow!("front door host {:?}: {error}", host.host))?;
+            // A one-label suffix would intercept a whole top-level domain.
+            anyhow::ensure!(
+                !host.suffix || binding.hostname().contains('.'),
+                "front door suffix {:?} has one label",
+                host.host
+            );
+            Ok(Intercept {
+                binding,
+                suffix: host.suffix,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    intercepts.sort();
+    intercepts.dedup();
+    Ok(intercepts)
 }
 
 /// The current revision of what `environment_id` selects.
@@ -193,5 +241,87 @@ mod tests {
                 Err(AssignmentError::CorruptSelection)
             ));
         }
+    }
+
+    fn host(host: &'static str, suffix: bool) -> FrontDoorHost {
+        FrontDoorHost { host, suffix }
+    }
+
+    #[test]
+    fn interception_binds_each_front_door_host_on_its_port_only_when_on() {
+        assert!(interception_bindings(false).unwrap().is_empty());
+        let on = interception_bindings(true).unwrap();
+        let mut expected: Vec<(&str, u16, bool)> = FRONT_DOOR_HOSTS
+            .iter()
+            .map(|host| (host.host, 443, host.suffix))
+            .collect();
+        expected.sort();
+        let sent: Vec<(&str, u16, bool)> = on
+            .iter()
+            .map(|intercept| {
+                (
+                    intercept.binding.hostname(),
+                    intercept.binding.port(),
+                    intercept.suffix,
+                )
+            })
+            .collect();
+        assert_eq!(sent, expected);
+    }
+
+    #[test]
+    fn the_bindings_are_the_hosts_the_local_front_door_routes() {
+        let exact: Vec<String> = interception_bindings(true)
+            .unwrap()
+            .into_iter()
+            .filter(|intercept| !intercept.suffix)
+            .map(|intercept| intercept.binding.hostname().to_owned())
+            .collect();
+        let mut routed: Vec<String> = codewire_egress_front_door_bridge::RouteTable::defaults()
+            .hosts()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        routed.sort();
+        assert_eq!(exact, routed);
+        assert_eq!(
+            codewire_egress_front_door_bridge::INTERCEPT_PORT,
+            INTERCEPT_PORT
+        );
+    }
+
+    #[test]
+    fn a_suffix_entry_is_carried_as_a_suffix_beside_its_exact_host() {
+        let both = intercepts(&[host("chatgpt.com", true), host("chatgpt.com", false)]).unwrap();
+        assert_eq!(
+            both.iter()
+                .map(|intercept| (intercept.binding.hostname(), intercept.suffix))
+                .collect::<Vec<_>>(),
+            [("chatgpt.com", false), ("chatgpt.com", true)]
+        );
+        // The same entry twice is one binding.
+        assert_eq!(
+            intercepts(&[host("chatgpt.com", true), host("chatgpt.com", true)])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_host_list_that_does_not_validate_stops_startup() {
+        for bad in [
+            host("not a host", false),
+            host("*.example.com", false),
+            host("", false),
+            host("com", true),
+        ] {
+            assert!(intercepts(&[bad]).is_err(), "{bad:?}");
+        }
+        let many: Vec<FrontDoorHost> = (0..=MAX_INTERCEPT_BINDINGS)
+            .map(|n| host(format!("h{n}.example.com").leak(), false))
+            .collect();
+        assert!(intercepts(&many).is_err());
+        assert!(intercepts(&many[..MAX_INTERCEPT_BINDINGS]).is_ok());
     }
 }

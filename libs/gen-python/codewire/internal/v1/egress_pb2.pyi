@@ -76,14 +76,28 @@ class UnboundAssignment(_message.Message):
     def __init__(self) -> None: ...
 
 class BoundAssignment(_message.Message):
-    __slots__ = ("environment_id", "operation_generation", "policy")
+    __slots__ = ("environment_id", "operation_generation", "policy", "interception", "interception_bindings")
     ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
     OPERATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
     POLICY_FIELD_NUMBER: _ClassVar[int]
+    INTERCEPTION_FIELD_NUMBER: _ClassVar[int]
+    INTERCEPTION_BINDINGS_FIELD_NUMBER: _ClassVar[int]
     environment_id: str
     operation_generation: int
     policy: EgressPolicyRevision
-    def __init__(self, environment_id: _Optional[str] = ..., operation_generation: _Optional[int] = ..., policy: _Optional[_Union[EgressPolicyRevision, _Mapping]] = ...) -> None: ...
+    interception: bool
+    interception_bindings: _containers.RepeatedCompositeFieldContainer[InterceptionBinding]
+    def __init__(self, environment_id: _Optional[str] = ..., operation_generation: _Optional[int] = ..., policy: _Optional[_Union[EgressPolicyRevision, _Mapping]] = ..., interception: _Optional[bool] = ..., interception_bindings: _Optional[_Iterable[_Union[InterceptionBinding, _Mapping]]] = ...) -> None: ...
+
+class InterceptionBinding(_message.Message):
+    __slots__ = ("host", "port", "suffix")
+    HOST_FIELD_NUMBER: _ClassVar[int]
+    PORT_FIELD_NUMBER: _ClassVar[int]
+    SUFFIX_FIELD_NUMBER: _ClassVar[int]
+    host: str
+    port: int
+    suffix: bool
+    def __init__(self, host: _Optional[str] = ..., port: _Optional[int] = ..., suffix: _Optional[bool] = ...) -> None: ...
 
 class EgressPolicyRevision(_message.Message):
     __slots__ = ("reference", "revision", "document", "digest")

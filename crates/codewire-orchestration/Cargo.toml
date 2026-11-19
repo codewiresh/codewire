@@ -135,6 +135,9 @@ zeroize = { workspace = true }
 tokio-tungstenite = { version = "=0.28.0", default-features = false, features = ["connect", "handshake"], optional = true }
 
 [dev-dependencies]
+# A test checks the hosted interception bindings against the front door's
+# route table; the binary does not link the front door (#4001).
+codewire-egress-front-door-bridge = { workspace = true }
 serde-saphyr = { workspace = true }
 # The real guest bridge behind a synthetic daemon, for the relay's streamed-body proof.
 codewire-credential-bridge = { workspace = true }

@@ -2387,6 +2387,7 @@ dependencies = [
  "codewire-daemon",
  "codewire-daemon-bridge",
  "codewire-daemon-proto",
+ "codewire-egress-front-door-bridge",
  "codewire-egress-node",
  "codewire-egress-policy",
  "codewire-platform-credentials",
