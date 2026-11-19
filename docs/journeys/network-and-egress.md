@@ -1226,7 +1226,7 @@ Issues: #3999, #4001.
 - **Driving it:** no command yet (#3999, #4001). For the `locked` state:
   `cw --local update NAME --policy locked`, then in the VM
   `claude -p 'Reply with ok.'`,
-  `curl -sS -H 'x-api-key: sk-ant-made-up' https://api.anthropic.com/v1/messages`
+  `curl -sS -H "x-api-key: $OTHER_PROVIDER_KEY" https://api.anthropic.com/v1/messages`
   and `curl -sS https://example.com/`.
 - **Proof:**
   - where the network policy allows the host, the user's own key reaches
