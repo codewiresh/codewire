@@ -148,6 +148,14 @@ it, falling back to DERP on the coordinator's origin.
 
 **Why two nodes?** Tailscale's magicsock selects `preferred_derp` based on STUN latency. If STUN runs on the same node as DERP, STUN latency competes with DERP latency and can steal `preferred_derp` to a non-relay region. Separating them (STUNPort=-1 on relay, STUNOnly on STUN) keeps `preferred_derp=1` stable.
 
+**The relay runs unprivileged.** The `codewire-derp` image runs as user and
+group 65532, and the chart's `codewire-derp` Deployment adds `runAsNonRoot`, a
+read-only root filesystem, no privilege escalation, every capability dropped
+and the runtime's default seccomp profile. Its ports (8080, 8443, 3478/udp) are
+above 1024 and it writes no files, so it needs none of them. A TLS Secret
+mounted into the pod must be group-readable (mode 0440): the pod's `fsGroup`
+65532 gives the root-owned files the relay's group.
+
 ## DERP client admission
 
 The public DERP relay serves only node keys that a coordinator has registered

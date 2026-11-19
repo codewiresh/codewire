@@ -27,6 +27,10 @@ spec:
     spec:
       imagePullSecrets: {{ toYaml (.imagePullSecrets | default $.Values.imagePullSecrets) | nindent 8 }}
       terminationGracePeriodSeconds: 60
+      # A mounted TLS Secret is readable by the image's 65532 group only.
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: derp
           image: {{ include "codewire.image" (dict "family" "derp" "images" $.Values.images) }}
@@ -74,6 +78,19 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            # The relay writes nothing: its settings come from the
+            # environment and its self-signed certificate is made in memory.
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           livenessProbe:
             httpGet:
               path: /healthz

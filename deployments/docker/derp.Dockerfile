@@ -35,4 +35,7 @@ FROM ${DEBIAN_IMAGE}
 COPY --from=rust-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=rust-builder /out/codewire-derp /usr/local/bin/codewire-derp
 EXPOSE 8080 8443 3478/udp
+# The relay is internet-facing, so it runs unprivileged: its ports are above
+# 1024 and it writes no files.
+USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/codewire-derp"]
