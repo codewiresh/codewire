@@ -83,7 +83,11 @@ only what differs.
    Locally, a keyring that doesn't answer (a hidden unlock prompt, a stuck
    daemon) is shown within a second, on stderr: `Waiting for your keyring
    (Secret Service) to answer · unlock it if it asks`, or `your login
-   keychain` on macOS. When it gives up (the keyring's bound is 2 minutes, so a
+   keychain` on macOS. The same line shows while a command waits behind a
+   store call another command left unanswered (a `cw doctor` that gave up,
+   say): the name check before the key is asked for, a rotate's lookup, and
+   a connect's checks before the provider step (#5271; not yet observed).
+   When it gives up (the keyring's bound is 2 minutes, so a
    person can still answer a prompt), every local connect, add, generate and
    rotate says `your keyring (Secret Service) didn't answer within 2 minutes,
    so your WHAT wasn't saved; unlock it, or restart it, then run this again`,

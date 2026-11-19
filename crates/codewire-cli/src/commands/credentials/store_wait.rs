@@ -4,7 +4,7 @@
 //! keyring is visible instead of a silent wait.
 
 use std::future::Future;
-use std::io::Write as _;
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use crate::output::{Capabilities, Charset, OutputMode};
@@ -29,41 +29,58 @@ pub(super) async fn waiting_on_store<T>(json: bool, call: impl Future<Output = T
     if json {
         return call.await;
     }
+    let caps = Capabilities::from_process(OutputMode::Text);
+    let screen = Screen {
+        live: caps.live,
+        ascii: caps.charset == Charset::Ascii,
+    };
+    waiting_on(&mut std::io::stderr(), screen, call).await
+}
+
+/// What the waiting line may draw on.
+#[derive(Clone, Copy)]
+pub(super) struct Screen {
+    pub(super) live: bool,
+    pub(super) ascii: bool,
+}
+
+pub(super) async fn waiting_on<T>(
+    out: &mut (impl Write + Send),
+    screen: Screen,
+    call: impl Future<Output = T>,
+) -> T {
     let started = Instant::now();
     tokio::pin!(call);
     tokio::select! {
         result = &mut call => return result,
         () = tokio::time::sleep(SHOW_AFTER) => {}
     }
-    let caps = Capabilities::from_process(OutputMode::Text);
-    let mut stderr = std::io::stderr();
-    if !caps.live {
+    if !screen.live {
         // A failed write to stderr only leaves the line unsaid.
-        let _ = writeln!(stderr, "{}", plain_line());
+        let _ = writeln!(out, "{}", plain_line());
         return call.await;
     }
-    let ascii = caps.charset == Charset::Ascii;
     let mut redraw = tokio::time::interval(REDRAW_EVERY);
     let mut frame = 0;
     loop {
         tokio::select! {
             result = &mut call => {
                 // As above: a failed write only leaves the line on screen.
-                let _ = write!(stderr, "\r\x1b[K");
-                let _ = stderr.flush();
+                let _ = write!(out, "\r\x1b[K");
+                let _ = out.flush();
                 return result;
             }
             _ = redraw.tick() => {
                 // As above: a failed write only skips one redraw.
-                let _ = write!(stderr, "{}", waiting_line(started.elapsed(), frame, ascii));
-                let _ = stderr.flush();
+                let _ = write!(out, "{}", waiting_line(started.elapsed(), frame, screen.ascii));
+                let _ = out.flush();
                 frame += 1;
             }
         }
     }
 }
 
-fn plain_line() -> String {
+pub(super) fn plain_line() -> String {
     format!("Waiting for {} to answer; unlock it if it asks.", store())
 }
 

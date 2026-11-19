@@ -189,8 +189,9 @@ async fn connect_credential(
     args: CredentialConnectArgs,
     execution: &mut super::credential_input::CredentialExecution,
 ) -> anyhow::Result<()> {
-    super::credential_input::connect::connect(&mut LocalConnectStore { client }, args, execution)
-        .await
+    let json = matches!(args.output, OutputFormat::Json);
+    let mut store = LocalConnectStore { client, json };
+    super::credential_input::connect::connect(&mut store, args, execution).await
 }
 
 /// The store must accept a write before any provider step (#4826): a refusal
@@ -198,8 +199,9 @@ async fn connect_credential(
 async fn probe_local_store(
     client: &mut LocalCredentialClient,
     save: Save<'_>,
+    json: bool,
 ) -> anyhow::Result<()> {
-    match store_wait::waiting_on_store(false, client.probe_protected_store()).await {
+    match store_wait::waiting_on_store(json, client.probe_protected_store()).await {
         Ok(()) => Ok(()),
         Err(status) => match probe_refusal(save, &status) {
             Some(refusal) => Err(refusal),
@@ -258,6 +260,7 @@ fn print_store_check_skipped() {
 /// runs in this process and the result is saved to the authority.
 struct LocalConnectStore<'a> {
     client: &'a mut LocalCredentialClient,
+    json: bool,
 }
 
 /// A provider's answer, held only until it is saved.
@@ -277,9 +280,7 @@ impl ConnectStore for LocalConnectStore<'_> {
         provider: CredentialConnectProviderArg,
         name: &str,
     ) -> anyhow::Result<Option<CredentialRecord>> {
-        let records = self
-            .client
-            .list_credentials()
+        let records = store_wait::waiting_on_store(self.json, self.client.list_credentials())
             .await
             .context("check local credential name before provider login")?;
         Ok(select_oauth_connection_target(records, name, provider)?.existing)
@@ -291,9 +292,7 @@ impl ConnectStore for LocalConnectStore<'_> {
     ) -> anyhow::Result<Vec<CredentialRecord>> {
         let kind = connected_kind(provider);
         let provider = ProviderId::parse(provider_id(provider))?;
-        let records = self
-            .client
-            .list_credentials()
+        let records = store_wait::waiting_on_store(self.json, self.client.list_credentials())
             .await
             .context("check local credentials before provider login")?;
         records
@@ -332,7 +331,7 @@ impl ConnectStore for LocalConnectStore<'_> {
                 kind: Kind::Connect(provider),
                 name,
             };
-            probe_local_store(self.client, save).await
+            probe_local_store(self.client, save, self.json).await
         } else {
             print_store_check_skipped();
             Ok(())
@@ -815,14 +814,7 @@ async fn add_credential(
     }
     if args.provider.as_deref() == Some("ssh") {
         let name = validate_ssh_import(&args)?;
-        anyhow::ensure!(
-            !client
-                .list_credentials()
-                .await?
-                .iter()
-                .any(|record| record.metadata.display_name.eq_ignore_ascii_case(&name)),
-            output::refusal::name_in_use("local", &name)
-        );
+        ensure_name_free(client, &name).await?;
         let input = read_ssh_import(&args)?;
         let save = Save {
             placement: "local",
@@ -877,14 +869,7 @@ async fn add_credential(
         "credential name",
     )?
     .to_owned();
-    // The name is checked before the key is asked for, as in the cloud.
-    anyhow::ensure!(
-        !client.list_credentials().await?.iter().any(|record| record
-            .metadata
-            .display_name
-            .eq_ignore_ascii_case(&display_name)),
-        output::refusal::name_in_use("local", &display_name)
-    );
+    ensure_name_free(client, &display_name).await?;
     let input = NewCredential {
         provider,
         authentication_kind,
@@ -914,6 +899,19 @@ async fn add_credential(
         .map_err(|status| local_save_error(save, &status))?;
     remember_local(&record, execution);
     print_credentials(&[record], OutputFormat::Text)
+}
+
+/// Refuses `name` if a local credential has it, before the key is asked for, as in the cloud.
+/// The listing can wait behind another command's store call, so it shows the waiting line (#5271).
+async fn ensure_name_free(client: &mut LocalCredentialClient, name: &str) -> anyhow::Result<()> {
+    let records = store_wait::waiting_on_store(false, client.list_credentials()).await?;
+    anyhow::ensure!(
+        !records
+            .iter()
+            .any(|record| record.metadata.display_name.eq_ignore_ascii_case(name)),
+        output::refusal::name_in_use("local", name)
+    );
+    Ok(())
 }
 
 async fn list_credentials(
@@ -952,7 +950,8 @@ async fn rotate_credential(
     client: &mut LocalCredentialClient,
     args: CredentialRotateArgs,
 ) -> anyhow::Result<()> {
-    let record = resolve_credential(client, &args.credential).await?;
+    let record =
+        store_wait::waiting_on_store(false, resolve_credential(client, &args.credential)).await?;
     if record.metadata.authentication_kind == CredentialAuthKind::SshKey {
         anyhow::bail!(output::refusal::ROTATE_SSH);
     }
