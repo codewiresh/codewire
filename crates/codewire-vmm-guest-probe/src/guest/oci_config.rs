@@ -5,13 +5,25 @@ use super::*;
 
 #[cfg(test)]
 pub(super) fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
-    workspace_oci_config_with_cw(plan, false)
+    workspace_oci_config_with_cw(plan, false, false)
 }
 
+/// With `workload_may_become_root` (Docker on), the container runs without
+/// no-new-privileges and keeps the OCI default bounding set, so a setuid
+/// `sudo` from the image works; every process it starts inherits that. Its
+/// own init still holds only `CAP_SETUID` and `CAP_SETGID`. Without it, the
+/// container and everything in it keep no-new-privileges
+/// (`docs/dev/LINUX-LOCAL-VMS.md`, "Root and sudo in a VM", #5464).
 pub(super) fn workspace_oci_config_with_cw(
     plan: &WorkspacePlan,
     cw_asset: bool,
+    workload_may_become_root: bool,
 ) -> Result<Vec<u8>> {
+    let bounding: Vec<&str> = if workload_may_become_root {
+        codewire_daemon::execution::WORKLOAD_ROOT_CAPABILITIES.to_vec()
+    } else {
+        vec!["CAP_SETGID", "CAP_SETUID"]
+    };
     let standard_devices = [
         ("/dev/null", 1, 3, 0o666),
         ("/dev/zero", 1, 5, 0o666),
@@ -61,7 +73,7 @@ pub(super) fn workspace_oci_config_with_cw(
             ],
             "cwd": "/",
             "capabilities": {
-                "bounding": ["CAP_SETGID", "CAP_SETUID"],
+                "bounding": bounding,
                 "effective": ["CAP_SETGID", "CAP_SETUID"],
                 "inheritable": [],
                 "permitted": ["CAP_SETGID", "CAP_SETUID"],
@@ -70,7 +82,7 @@ pub(super) fn workspace_oci_config_with_cw(
             "rlimits": [
                 { "type": "RLIMIT_NOFILE", "hard": 1048576, "soft": 1048576 }
             ],
-            "noNewPrivileges": true
+            "noNewPrivileges": !workload_may_become_root
         },
         "root": { "path": "../merged", "readonly": false },
         "hostname": CONTAINER_HOSTNAME,

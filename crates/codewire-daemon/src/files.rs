@@ -501,7 +501,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn runc(config: Config, uid: u32, gid: u32) -> Config {
         Config {
-            process_execution: crate::execution::ProcessExecution::Runc(
+            process_execution: crate::execution::ProcessExecution::Runc(Box::new(
                 crate::execution::RuncExecution {
                     helper_path: PathBuf::from("/init"),
                     process_directory: PathBuf::from("/run/codewire/runc"),
@@ -513,8 +513,9 @@ mod tests {
                     gid,
                     additional_gids: Vec::new(),
                     network_namespace: "/run/codewire/netns/workspace".into(),
+                    workload_may_become_root: false,
                 },
-            ),
+            )),
             ..config
         }
     }

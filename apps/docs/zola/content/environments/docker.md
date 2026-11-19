@@ -1,7 +1,7 @@
 ---
 title: Docker inside an environment
 description: Every hosted sandbox and local VM runs its own Docker daemon, so agents and builds can use containers without touching your machine's Docker.
-updated: 2026-11-16
+updated: 2026-11-19
 weight: 6
 aliases: ["/guides/docker"]
 ---
@@ -45,7 +45,7 @@ On a local VM, Docker's images and volumes live on a separate data disk:
 | Flag on `cw create --local` | Meaning |
 | --- | --- |
 | `--docker-disk SIZE` | the data disk, 8 GiB by default |
-| `--no-docker` | no Docker daemon, for an image without Docker tooling |
+| `--no-docker` | no Docker daemon and no root for the workload, for an image without Docker tooling or a confined workload |
 
 `cw info app` shows the disk as `Docker: 8Gi`. An image without Docker
 tooling fails to create with `create_guest_docker_tooling_missing` until you
@@ -70,12 +70,16 @@ cw run --in app --no-tty -- docker run --rm --privileged --pid=host alpine \
 init
 ```
 
+`sudo` gives the same user root more directly, without a password, as in a
+hosted sandbox: `sudo apt-get install` works.
+
 The VM is still the boundary. Root inside it reaches the VM's own disks and
 the folders shared into it, such as your project folder, which is mounted live
 and can be read and changed; nothing else on your machine. Its network policy is
 enforced outside the VM, by the [egress broker](@/networking/egress.md) on your
 machine. To keep the workload confined inside the VM, create it with
-`--no-docker`; it then has no Docker daemon and no Docker socket.
+`--no-docker`; it then has no Docker daemon, no Docker socket and no root:
+`sudo` refuses with "no new privileges".
 
 ## Ports from containers
 

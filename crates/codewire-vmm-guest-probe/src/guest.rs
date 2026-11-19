@@ -432,7 +432,7 @@ pub fn run_init() -> Result<()> {
             return Err(error);
         }
     };
-    prepare_workspace_generation(&plan)?;
+    prepare_workspace_generation(&plan, seed.docker_data_disk())?;
     egress_trust::publish(seed.egress_ca(), Path::new(ROOT_MERGED_PATH))?;
     // Report an image without Docker tooling before readiness, so the host
     // can name it instead of seeing the guest stop during network attachment.
@@ -552,7 +552,7 @@ pub async fn run_daemon() -> Result<()> {
             .context("validate guest daemon auth token")?,
         managed_credential_clients: seed.managed_credential_clients(),
         interception: interception::from_seed(&seed),
-        process_execution: codewire_daemon::execution::ProcessExecution::Runc(
+        process_execution: codewire_daemon::execution::ProcessExecution::Runc(Box::new(
             codewire_daemon::execution::RuncExecution {
                 helper_path: PathBuf::from(INIT_PATH),
                 process_directory: PathBuf::from(RUNC_PROCESS_PATH),
@@ -564,8 +564,9 @@ pub async fn run_daemon() -> Result<()> {
                 gid: plan.identity.gid,
                 additional_gids: plan.identity.additional_gids.clone(),
                 network_namespace: PathBuf::from(NETWORK_NAMESPACE_PATH),
+                workload_may_become_root: seed.docker_data_disk(),
             },
-        ),
+        )),
         host: None,
         launch_projection: seed.environment_projection_sha256().map(|selection| {
             codewire_daemon::LaunchProjectionConfig {
@@ -2017,10 +2018,10 @@ fn spawn_workspace_process_with_projection(
             {
                 return Err(io::Error::last_os_error());
             }
+            // No-new-privileges is the container's (oci_config.rs): set for
+            // a VM without Docker and inherited here, off with Docker on so
+            // that `sudo` works in an install or startup command (#5464).
             clear_process_capabilities()?;
-            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1 {
-                return Err(io::Error::last_os_error());
-            }
             Ok(())
         });
     }
@@ -4471,7 +4472,10 @@ fn wait_for_network_agent_message(
     bail!("guest network readiness timed out")
 }
 
-fn prepare_workspace_generation(plan: &WorkspacePlan) -> Result<()> {
+fn prepare_workspace_generation(
+    plan: &WorkspacePlan,
+    workload_may_become_root: bool,
+) -> Result<()> {
     for (path, mode) in [
         (ROOT_UPPER_PATH, 0o700),
         (ROOT_WORK_PATH, 0o700),
@@ -4495,7 +4499,7 @@ fn prepare_workspace_generation(plan: &WorkspacePlan) -> Result<()> {
     );
 
     let runtime = validate_cw_runtime_catalog(None)?;
-    let config = workspace_oci_config_with_cw(plan, runtime.is_some())?;
+    let config = workspace_oci_config_with_cw(plan, runtime.is_some(), workload_may_become_root)?;
     ensure_exact_bytes(Path::new(RUNC_CONFIG_PATH), &config, 0o400)?;
     inherit_root_directory_metadata(Path::new(ROOT_LOWER_PATH), Path::new(ROOT_UPPER_PATH))?;
 
@@ -4503,11 +4507,22 @@ fn prepare_workspace_generation(plan: &WorkspacePlan) -> Result<()> {
         "overlay",
         ROOT_MERGED_PATH,
         "overlay",
-        libc::MS_NOSUID | libc::MS_NODEV,
+        root_overlay_flags(workload_may_become_root),
         &format!("lowerdir={ROOT_LOWER_PATH},upperdir={ROOT_UPPER_PATH},workdir={ROOT_WORK_PATH}"),
     )
     .context("mount workspace root overlay")?;
     Ok(())
+}
+
+/// The image's own `sudo` is on its root, so with Docker on the root allows
+/// setuid; only root can make a root-owned setuid file there. The workspace,
+/// home and `/tmp` stay `nosuid` either way (#5464).
+fn root_overlay_flags(workload_may_become_root: bool) -> libc::c_ulong {
+    if workload_may_become_root {
+        libc::MS_NODEV
+    } else {
+        libc::MS_NOSUID | libc::MS_NODEV
+    }
 }
 
 fn inherit_root_directory_metadata(lower: &Path, upper: &Path) -> Result<()> {
@@ -6521,6 +6536,56 @@ mod tests {
     }
 
     #[test]
+    fn the_image_root_allows_setuid_only_with_docker_on() {
+        assert_eq!(root_overlay_flags(true), libc::MS_NODEV);
+        assert_eq!(root_overlay_flags(false), libc::MS_NOSUID | libc::MS_NODEV);
+    }
+
+    /// #5464: with Docker on the workload may become root through the
+    /// image's own `sudo`; without, the container keeps no-new-privileges.
+    /// Init holds only SETUID and SETGID either way, and nothing the workload
+    /// writes can be setuid.
+    #[test]
+    fn the_workspace_container_lets_sudo_raise_root_only_with_docker_on() {
+        let plan = test_workspace_plan();
+        for may_become_root in [true, false] {
+            let config: serde_json::Value = serde_json::from_slice(
+                &workspace_oci_config_with_cw(&plan, false, may_become_root).unwrap(),
+            )
+            .unwrap();
+            let process = &config["process"];
+            assert_eq!(process["noNewPrivileges"], !may_become_root);
+            let bounding = if may_become_root {
+                serde_json::json!(codewire_daemon::execution::WORKLOAD_ROOT_CAPABILITIES)
+            } else {
+                serde_json::json!(["CAP_SETGID", "CAP_SETUID"])
+            };
+            assert_eq!(process["capabilities"]["bounding"], bounding);
+            for held in ["effective", "permitted"] {
+                assert_eq!(
+                    process["capabilities"][held],
+                    serde_json::json!(["CAP_SETGID", "CAP_SETUID"]),
+                    "{held}"
+                );
+            }
+            let mounts = config["mounts"].as_array().unwrap();
+            for writable in [WORKSPACE_PATH, plan.identity.home.as_str(), "/tmp"] {
+                let mount = mounts
+                    .iter()
+                    .find(|mount| mount["destination"] == writable)
+                    .unwrap_or_else(|| panic!("{writable} is mounted"));
+                assert!(
+                    mount["options"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!("nosuid")),
+                    "{writable}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn workspace_init_is_a_read_only_sealed_bind_not_overlay_content() {
         let plan = test_workspace_plan();
         let config: serde_json::Value =
@@ -6646,7 +6711,8 @@ mod tests {
     fn cw_image_mount_is_read_only_outside_workspace_and_home() {
         let plan = test_workspace_plan();
         let config: serde_json::Value =
-            serde_json::from_slice(&workspace_oci_config_with_cw(&plan, true).unwrap()).unwrap();
+            serde_json::from_slice(&workspace_oci_config_with_cw(&plan, true, false).unwrap())
+                .unwrap();
         let mounts = config["mounts"].as_array().unwrap();
         let selected = mounts
             .iter()
@@ -6679,7 +6745,8 @@ mod tests {
         assert!(!crate::cw_runtime_live::LIVE_RUNTIME_LAUNCHER.starts_with(&plan.identity.home));
         assert!(!crate::cw_runtime_live::LIVE_RUNTIME_LAUNCHER.starts_with(WORKSPACE_PATH));
         let legacy: serde_json::Value =
-            serde_json::from_slice(&workspace_oci_config_with_cw(&plan, false).unwrap()).unwrap();
+            serde_json::from_slice(&workspace_oci_config_with_cw(&plan, false, false).unwrap())
+                .unwrap();
         assert!(
             legacy["mounts"]
                 .as_array()

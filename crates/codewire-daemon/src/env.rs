@@ -1119,7 +1119,7 @@ mod tests {
     fn native_runc_protects_fixed_codex_home_without_a_profile_selection() {
         let mut native = test_config(PathBuf::from("/home/codewire"));
         native.process_execution =
-            crate::execution::ProcessExecution::Runc(crate::execution::RuncExecution {
+            crate::execution::ProcessExecution::Runc(Box::new(crate::execution::RuncExecution {
                 helper_path: "/init".into(),
                 process_directory: "/run/codewire/processes".into(),
                 container_id: "workspace".into(),
@@ -1133,7 +1133,8 @@ mod tests {
                 gid: 1000,
                 additional_gids: Vec::new(),
                 network_namespace: "/run/codewire/netns/workspace".into(),
-            });
+                workload_may_become_root: false,
+            }));
         native.credential_bridge = Some(CredentialBridgeConfig {
             transport: CredentialBridgeTransport::Local,
             environment_id: uuid::Uuid::from_u128(30),

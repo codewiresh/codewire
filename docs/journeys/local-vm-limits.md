@@ -3,16 +3,19 @@
 What a local VM does when its workload asks for more than the VM lets it
 have ([LINUX-LOCAL-VMS.md](../dev/LINUX-LOCAL-VMS.md), "Limits inside a VM").
 The first limit is on processes (#5384): a workload that forks without end
-must be refused by the guest, not take the guest down. The format is in
+must be refused by the guest, not take the guest down. The second is root:
+with Docker on, the workload may become root through `sudo`, and with
+`--no-docker` it may not (#5464). The format is in
 [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-18.
+Updated 2026-11-19.
 
 | ID | Linux host | Mac |
 | --- | --- | --- |
 | `local-vm-fork-burst` | not yet observed; failure observed on v0.4.22, 2026-11-18 (#5384) | not yet observed |
+| `local-vm-sudo` | not yet observed; failure reported on v0.4.21 (#5464) | not yet observed |
 
 ## `local-vm-fork-burst`: a fork burst is refused and the VM stays up
 
@@ -78,3 +81,33 @@ Updated 2026-11-18.
     `cw --local restart` recovered it in about 4 seconds and the workspace
     survived.
   - The steps as written: not yet observed (#5384).
+
+## `local-vm-sudo`: passwordless sudo works with Docker on, and not with `--no-docker`
+
+- **Entry points:** `cw create --local`, then `sudo` in `cw exec`, a shell,
+  an `install_command` and a startup script.
+- **States to exercise:** a default VM (Docker on); a VM created with
+  `--no-docker`; a stop and start of each.
+- **Driving it:**
+  1. `cw create --local --name root-walk --no-file --no-profile --yes`.
+  2. `cw exec --in root-walk -- sh -c 'id -un; grep NoNewPrivs /proc/self/status; sudo -n true && echo sudo-ok'`.
+  3. `cw exec --in root-walk -- sh -c 'sudo apt-get update -qq && sudo apt-get install -y -qq cowsay && /usr/games/cowsay ok'`.
+  4. `cw exec --in root-walk -- sh -c 'grep -E "^Cap(Eff|Bnd)" /proc/self/status; sudo grep -E "^Cap(Eff|Bnd)" /proc/self/status'`.
+  5. `cw exec --in root-walk -- sh -c 'cp /usr/bin/sudo /workspace/s && sudo chown root /workspace/s && sudo chmod u+s /workspace/s; /workspace/s -n true'`.
+  6. `cw --local stop root-walk`, `cw --local start root-walk`, and step 2 again.
+  7. The same as steps 1 and 2 with `--no-docker` and an image that has
+     `sudo`, as `confined-walk`.
+- **Proof:**
+  - in the default VM, step 2 prints the workspace user, `NoNewPrivs: 0` and
+    `sudo-ok`; step 3 installs the package and prints its output;
+  - step 4: the session's `CapEff` is all zeros, and under `sudo` it is the
+    default set listed in `LINUX-LOCAL-VMS.md` ("Root and sudo in a VM"),
+    which is also the bounding set; no `CAP_SYS_ADMIN`;
+  - step 5's copy does not run as root: the workspace is `nosuid`;
+  - after the stop and start, step 2 prints the same;
+  - in `confined-walk`, step 2 prints `NoNewPrivs: 1`, and `sudo` refuses
+    with "no new privileges".
+- **Gotchas:** the image's own `sudo` and its sudoers entry give the
+  workspace user passwordless `sudo`; an image without them has no `sudo`
+  either way.
+- **Observed:** not yet observed.

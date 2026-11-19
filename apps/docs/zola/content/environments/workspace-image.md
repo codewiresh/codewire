@@ -1,7 +1,7 @@
 ---
 title: The workspace image
 description: "What the Codewire workspace image holds: Ubuntu, language toolchains, Docker, Git, GitHub CLI and the coding agents, and how to add more."
-updated: 2026-11-16
+updated: 2026-11-19
 weight: 3
 ---
 
@@ -57,7 +57,9 @@ aider | aider 0.86.2
 | Agents | Claude Code (`claude`), Codex (`codex`), Gemini CLI (`gemini`), Amp (`amp`), Aider (`aider`) |
 
 You work as the `codewire` user (UID 1000) in `/workspace`, with
-passwordless `sudo`. The home directory is kept across stops and starts.
+passwordless `sudo`, except in a local VM created with `--no-docker`, which
+keeps the workload from becoming root. The home directory is kept across
+stops and starts.
 
 ## Adding more
 

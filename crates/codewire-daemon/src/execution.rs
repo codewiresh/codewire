@@ -87,7 +87,7 @@ const MAX_PROCESS_SPEC_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProcessExecution {
     Native,
-    Runc(RuncExecution),
+    Runc(Box<RuncExecution>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,7 +104,30 @@ pub struct RuncExecution {
     /// The pinned network namespace the workload container joins, which
     /// `ForwardTcp` connects inside (#3025).
     pub network_namespace: PathBuf,
+    /// The workload may become root through a setuid program such as `sudo`
+    /// (`docs/dev/LINUX-LOCAL-VMS.md`, "Root and sudo in a VM", #5464). A
+    /// process still starts with no capabilities either way.
+    pub workload_may_become_root: bool,
 }
+
+/// The capability bounding set a workload that may become root keeps: the
+/// OCI runtime's default, as a hosted Sandbox's workspace container has.
+pub const WORKLOAD_ROOT_CAPABILITIES: [&str; 14] = [
+    "CAP_AUDIT_WRITE",
+    "CAP_CHOWN",
+    "CAP_DAC_OVERRIDE",
+    "CAP_FOWNER",
+    "CAP_FSETID",
+    "CAP_KILL",
+    "CAP_MKNOD",
+    "CAP_NET_BIND_SERVICE",
+    "CAP_NET_RAW",
+    "CAP_SETFCAP",
+    "CAP_SETGID",
+    "CAP_SETPCAP",
+    "CAP_SETUID",
+    "CAP_SYS_CHROOT",
+];
 
 impl ProcessExecution {
     pub fn default_shell(&self, native: impl FnOnce() -> String) -> String {
@@ -319,8 +342,8 @@ fn prepare_runc(
             .cloned()
             .collect(),
         cwd: working_directory.to_owned(),
-        capabilities: ProcessCapabilities::default(),
-        no_new_privileges: true,
+        capabilities: ProcessCapabilities::for_workload(config.workload_may_become_root),
+        no_new_privileges: !config.workload_may_become_root,
     };
     let bytes = serde_json::to_vec(&process_spec)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -478,6 +501,22 @@ struct ProcessCapabilities {
     ambient: Vec<String>,
 }
 
+impl ProcessCapabilities {
+    /// None held; with `may_become_root`, a setuid exec may raise
+    /// [`WORKLOAD_ROOT_CAPABILITIES`] and nothing else.
+    fn for_workload(may_become_root: bool) -> Self {
+        let bounding = if may_become_root {
+            WORKLOAD_ROOT_CAPABILITIES.map(str::to_owned).to_vec()
+        } else {
+            Vec::new()
+        };
+        Self {
+            bounding,
+            ..Self::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
@@ -595,7 +634,7 @@ mod tests {
     fn runc_process_values_live_only_in_owner_private_tmpfs_spec() {
         let directory = tempfile::tempdir().unwrap();
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let execution = ProcessExecution::Runc(RuncExecution {
+        let execution = ProcessExecution::Runc(Box::new(RuncExecution {
             helper_path: PathBuf::from("/init"),
             process_directory: directory.path().to_owned(),
             container_id: "codewire-workspace".into(),
@@ -606,7 +645,8 @@ mod tests {
             gid: 1000,
             additional_gids: vec![27],
             network_namespace: "/run/codewire/netns/workspace".into(),
-        });
+            workload_may_become_root: false,
+        }));
         let secret = "CW_TEST_SECRET=not-on-helper-command";
         let daemon_auth = format!("{DAEMON_AUTH_TOKEN_ENV}=must-not-enter-child");
         let managed_selection = format!(
@@ -689,7 +729,7 @@ mod tests {
     fn runc_rejects_non_private_process_directories() {
         let directory = tempfile::tempdir().unwrap();
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755)).unwrap();
-        let execution = ProcessExecution::Runc(RuncExecution {
+        let execution = ProcessExecution::Runc(Box::new(RuncExecution {
             helper_path: PathBuf::from("/init"),
             process_directory: directory.path().to_owned(),
             container_id: "codewire-workspace".into(),
@@ -700,10 +740,64 @@ mod tests {
             gid: 0,
             additional_gids: Vec::new(),
             network_namespace: "/run/codewire/netns/workspace".into(),
-        });
+            workload_may_become_root: false,
+        }));
         let error =
             PreparedProcess::prepare(&execution, &["/bin/sh".into()], "/", &[], false, 0, 0)
                 .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    /// #5464: a workload that may become root starts with no capabilities
+    /// and no no-new-privileges, so only a setuid exec such as `sudo` raises
+    /// them, and never past the OCI default set; one that may not keeps
+    /// no-new-privileges and an empty bounding set.
+    #[test]
+    fn a_session_may_become_root_only_through_a_setuid_exec_when_allowed() {
+        for may_become_root in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let execution = ProcessExecution::Runc(Box::new(RuncExecution {
+                helper_path: PathBuf::from("/init"),
+                process_directory: directory.path().to_owned(),
+                container_id: "codewire-workspace".into(),
+                process_wrapper: vec!["/run/codewire-runtime/init".into(), "workspace-exec".into()],
+                default_shell: "/bin/bash".into(),
+                base_environment: Vec::new(),
+                uid: 1000,
+                gid: 1000,
+                additional_gids: Vec::new(),
+                network_namespace: "/run/codewire/netns/workspace".into(),
+                workload_may_become_root: may_become_root,
+            }));
+            let prepared = PreparedProcess::prepare(
+                &execution,
+                &["/bin/sh".into()],
+                "/workspace",
+                &[],
+                false,
+                0,
+                0,
+            )
+            .unwrap();
+            let spec_path = prepared.pending_process_spec.as_ref().unwrap().clone();
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&spec_path).unwrap()).unwrap();
+            assert_eq!(value["noNewPrivileges"], !may_become_root);
+            let expected_bounding: Vec<&str> = if may_become_root {
+                WORKLOAD_ROOT_CAPABILITIES.to_vec()
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                value["capabilities"]["bounding"],
+                serde_json::json!(expected_bounding)
+            );
+            for held in ["effective", "permitted", "inheritable", "ambient"] {
+                assert_eq!(value["capabilities"][held], serde_json::json!([]), "{held}");
+            }
+            assert!(!WORKLOAD_ROOT_CAPABILITIES.contains(&"CAP_SYS_ADMIN"));
+            assert_eq!(value["user"]["uid"], 1000);
+        }
     }
 }

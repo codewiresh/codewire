@@ -5299,7 +5299,7 @@ mod tests {
             home_root: temp.path().to_owned(),
             mount_roots: Vec::new(),
             auth_token: crate::DaemonAuthToken::new("synthetic-runc-spec-test").unwrap(),
-            process_execution: ProcessExecution::Runc(crate::execution::RuncExecution {
+            process_execution: ProcessExecution::Runc(Box::new(crate::execution::RuncExecution {
                 helper_path: helper,
                 process_directory: processes.clone(),
                 container_id: "workspace".into(),
@@ -5310,7 +5310,8 @@ mod tests {
                 gid: rustix::process::getegid().as_raw(),
                 additional_gids: Vec::new(),
                 network_namespace: "/proc/self/ns/net".into(),
-            }),
+                workload_may_become_root: false,
+            })),
             credential_bridge: None,
             managed_credential_clients: Default::default(),
             host: None,

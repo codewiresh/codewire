@@ -18,7 +18,7 @@ fn config() -> Config {
         home_root: "/home/codewire".into(),
         mount_roots: Vec::new(),
         auth_token: DaemonAuthToken::new("synthetic-lifecycle-token").unwrap(),
-        process_execution: ProcessExecution::Runc(RuncExecution {
+        process_execution: ProcessExecution::Runc(Box::new(RuncExecution {
             helper_path: "/init".into(),
             process_directory: "/run/codewire/exec".into(),
             container_id: "codewire-workspace".into(),
@@ -29,7 +29,8 @@ fn config() -> Config {
             gid: 1000,
             additional_gids: Vec::new(),
             network_namespace: "/run/codewire/netns/workspace".into(),
-        }),
+            workload_may_become_root: false,
+        })),
         credential_bridge: Some(CredentialBridgeConfig {
             transport: CredentialBridgeTransport::Local,
             environment_id: uuid::Uuid::from_u128(17),

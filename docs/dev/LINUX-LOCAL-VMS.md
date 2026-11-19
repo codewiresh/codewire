@@ -656,6 +656,46 @@ VM credentials smoke (#5220). Never script or loop calls to your own Secret
 Service: a loop of short D-Bus reads has crashed a desktop keyring daemon
 (#5256).
 
+## Root and sudo in a VM
+
+Inside a local VM the workload may become root; the VM is the boundary
+(cw-security, 2026-11-19, #5464). With Docker on, the default, the workspace
+user's passwordless `sudo` works in a session, an `install_command` and a
+startup script, as in a hosted Sandbox, so `sudo apt-get install` does what
+the workspace image's documentation says:
+
+- **The workspace container** runs without no-new-privileges, and its
+  capability bounding set is the OCI runtime's default: `AUDIT_WRITE`,
+  `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `KILL`, `MKNOD`,
+  `NET_BIND_SERVICE`, `NET_RAW`, `SETFCAP`, `SETGID`, `SETPCAP`, `SETUID`
+  and `SYS_CHROOT`.
+- **A session** still starts as the workspace user with no capabilities.
+  Only a setuid program from the image, such as `sudo`, raises them. The
+  image's root filesystem allows setuid, so the image's `sudo` runs, and
+  only root can make a root-owned setuid file there. The workspace, the home
+  folder and `/tmp` stay mounted `nosuid`, so nothing the workspace user
+  writes there can be setuid.
+- **Why it adds nothing:** the workspace user is in the `docker` group,
+  which already lets it act as root in the VM through a privileged container
+  ("Root inside a local VM" in the Docker guide). The guest holds no
+  credential, CA key or network policy; those stay in processes on your
+  machine.
+- **Unchanged:** the container's namespaces, its masked and read-only paths,
+  and the read-only control and plan mounts. Outside the container, the
+  guest's init and its helpers, the VMM, the runner, the credential brokers
+  and the front door keep no-new-privileges and their own capabilities. No
+  seccomp filter is installed for the workload, so none depends on
+  no-new-privileges.
+
+With `--no-docker` the workload stays confined, as the Docker guide offers:
+no root, the image's root stays `nosuid`, and `sudo` refuses with "no new
+privileges". Create the VM with
+Docker on to use `sudo`.
+
+**Not yet observed** (#5464). Before this change every local VM's workload
+ran with no-new-privileges, and `sudo` refused in it (reported on v0.4.21).
+The journey step is `local-vm-sudo` in `docs/journeys/local-vm-limits.md`.
+
 ## Limits inside a VM
 
 ### Processes
