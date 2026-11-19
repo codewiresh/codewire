@@ -162,6 +162,58 @@ class PrAdmission(unittest.TestCase):
         self.assertEqual(self.decide({1: "admitted", 9: "waiting", 10: "waiting"}, 9)[0], gate.ADMITTED)
         self.assertEqual(self.decide({1: "admitted", 9: "waiting", 10: "waiting"}, 10)[0], gate.WAIT)
 
+    def test_newer_runs_are_not_read_while_they_cannot_overflow(self) -> None:
+        # 2026-11-19: every gate read every unfinished run's jobs each poll.
+        # Admission is oldest first, so a gate reads the newer runs only when
+        # they could make it one of the gates the overflow lets go.
+        mock.patch.stopall()
+        state = {1: "admitted", 2: "admitted"} | {run_id: "waiting" for run_id in range(10, 16)}
+        paths: list[str] = []
+        api = FakeForgejo([state], shape=self.SHAPE, on_request=paths.append)
+        self.assertEqual(gate.decide(api, 10)[0], gate.WAIT)
+        read = {int(path.split("/")[3]) for path in paths if path.startswith("/actions/runs/")}
+        read |= {int(path.rsplit("/", 1)[1]) // 10 for path in paths if path.startswith("/actions/jobs/")}
+        self.assertEqual(read, {1, 2})
+
+    def test_an_admitted_run_is_not_read_again(self) -> None:
+        mock.patch.stopall()
+        polls = [{1: "admitted", 2: "admitted", 10: "waiting"}] * 3 + [{1: "admitted", 10: "waiting"}]
+        paths: list[str] = []
+        api = FakeForgejo(polls, shape=self.SHAPE, on_request=paths.append)
+        clock = iter(range(0, 100_000, 20))
+
+        def sleep(_seconds: float) -> None:
+            api.poll += 1
+
+        result = gate.wait_for_admission(api, 10, sleep=sleep, clock=lambda: next(clock), log=lambda _line: None)
+        self.assertEqual(result, gate.ADMITTED)
+        self.assertEqual(sum(1 for path in paths if path.startswith("/actions/runs/1/")), 1)
+        self.assertEqual(sum(1 for path in paths if path.startswith("/actions/runs/2/")), 1)
+
+    def test_the_line_backs_off_by_its_place(self) -> None:
+        # The oldest waiting gate polls every 45 s; one with k waiting ahead
+        # every 45 s times k + 1, at most POLL_BACKOFF_STEPS times.
+        mock.patch.stopall()
+        for ahead, steps in ((0, 1), (2, 3), (9, gate.POLL_BACKOFF_STEPS)):
+            state = {1: "admitted", 2: "admitted"} | {run_id: "waiting" for run_id in range(20, 20 + ahead)} | {
+                30: "waiting"}
+            api = FakeForgejo([state, {30: "waiting"}], shape=self.SHAPE)
+            sleeps: list[float] = []
+            clock = iter(range(0, 100_000, 1))
+
+            def sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+                api.poll += 1
+
+            gate.wait_for_admission(api, 30, sleep=sleep, clock=lambda: next(clock), log=lambda _line: None)
+            self.assertEqual(sleeps, [gate.POLL_SECONDS * steps], ahead)
+
+    def test_a_newer_run_admitted_by_its_deadline_does_not_hold_back_an_older_one(self) -> None:
+        # The trade for reading only older runs: a newer run let in by its
+        # deadline does not count against an older run's turn.
+        mock.patch.stopall()
+        self.assertEqual(self.decide({11: "admitted", 12: "admitted", 10: "waiting"}, 10)[0], gate.ADMITTED)
+
     def test_the_days_peak_waits_instead_of_overflowing(self) -> None:
         # 2026-11-18: eight pull request runs at once, seven of their gates
         # waiting. At the shipped limits the oldest joins the one running and

@@ -82,6 +82,12 @@ ADMITTED_LIMIT = 2
 # queued behind them (infra#1534).
 WAITING_LIMIT = 12
 POLL_SECONDS = 45
+# A gate polls every POLL_SECONDS times one more than the runs waiting ahead of
+# it, up to this many times: the oldest waiting gate keeps its 45 s, and the
+# rest of the line, which cannot be admitted before it, reads Forgejo less
+# (2026-11-19: about 1,500 job-list and 1,000 job reads per 10 minutes, the
+# Forgejo pod at 2.4 cores, slowing every push and the merge queue).
+POLL_BACKOFF_STEPS = 6
 # Selection's 25 minutes follow the wait inside its job's 235, and the light
 # runner's 240-minute cap.
 WAIT_SECONDS = 205 * 60
@@ -184,8 +190,15 @@ class CountedReads:
 def decide(api, own_run_id: int, *, limit: int | None = None,
            waiting_limit: int | None = None, deadline: float | None = None,
            clock: Callable[[], float] = time.monotonic,
-           admitted_runs: set[int] | None = None) -> tuple[str, str]:
+           admitted_runs: set[int] | None = None, facts: dict | None = None) -> tuple[str, str]:
     """ADMITTED, OVERFLOW or WAIT for this run, with the reason.
+
+    Admission is oldest first, so only the runs older than this one decide it:
+    a newer run's jobs are read only when the waiting gates could fill the
+    light runner (the overflow below). A run once seen admitted is counted
+    without reading it again. A newer run admitted ahead of an older one, which
+    only a deadline admission makes, is therefore not counted against the older
+    one's turn. facts, when given, receives waiting_ahead for the poll loop.
 
     Only the run list itself unreadable raises Unproven; past the deadline,
     before any request, it raises DeadlineReached."""
@@ -198,27 +211,35 @@ def decide(api, own_run_id: int, *, limit: int | None = None,
             raise DeadlineReached
     in_time()
     admitted = waiting_ahead = holding_ahead = holding_behind = unreadable = 0
-    for run in unfinished_pull_request_runs(api):
-        run_id = run["id"]
-        if run_id == own_run_id:
-            continue
+    runs = [run["id"] for run in unfinished_pull_request_runs(api) if run["id"] != own_run_id]
+    older = [run_id for run_id in runs if run_id < own_run_id]
+    newer = [run_id for run_id in runs if run_id > own_run_id]
+
+    def read(run_id: int) -> str | None:
+        nonlocal unreadable
+        if run_id in admitted_runs:
+            return "success"
         in_time()
         try:
             gate = gate_state(api, verdicts.jobs_of(api, run_id), run_id, admitted_runs, in_time)
         except Unproven:
             # Two gates, a run deleted mid-poll, too many jobs: it holds a slot.
             unreadable += 1
-            gate = None
+            return None
+        if gate == "success":
+            # Whichever shape its gate has, an admitted run stays admitted.
+            admitted_runs.add(run_id)
+        return gate
+
+    for run_id in older:
+        gate = read(run_id)
         if gate is None or gate == "success":
             admitted += 1
         elif gate in ("not-started", "running"):
-            if run_id < own_run_id:
-                waiting_ahead += 1
-            if gate == "running":
-                if run_id < own_run_id:
-                    holding_ahead += 1
-                else:
-                    holding_behind += 1
+            waiting_ahead += 1
+            holding_ahead += gate == "running"
+    if facts is not None:
+        facts["waiting_ahead"] = waiting_ahead
     ahead = admitted + waiting_ahead
     if unreadable:
         admitted_text = f"{admitted} pull request runs admitted ({unreadable} unreadable, counted as admitted)"
@@ -229,7 +250,11 @@ def decide(api, own_run_id: int, *, limit: int | None = None,
     # Every gate reads the same line, so each knows whether it is one of the
     # oldest that must go: no gate decides for another, and a gate that never
     # leaves (its runner died) costs one place, not the whole release. This
-    # gate is running, so it holds a slot itself.
+    # gate is running, so it holds a slot itself. The newer runs are read only
+    # when even all of them holding a slot could make this gate one of those.
+    if holding_ahead < holding_ahead + 1 + len(newer) - waiting_limit:
+        for run_id in newer:
+            holding_behind += read(run_id) == "running"
     holding = holding_ahead + 1 + holding_behind
     if holding_ahead < holding - waiting_limit:
         return OVERFLOW, (f"{holding} gates hold a light runner slot and it keeps {waiting_limit} for them beside "
@@ -264,10 +289,11 @@ def poll_for_admission(api, own_run_id: int, *, poll_seconds: float, wait_second
     unreadable = 0
     last_reason = None
     admitted_runs: set[int] = set()
+    facts: dict = {}
     while True:
         try:
             verdict, reason = decide(api, own_run_id, deadline=deadline, clock=clock,
-                                     admitted_runs=admitted_runs)
+                                     admitted_runs=admitted_runs, facts=facts)
             unreadable = 0
         except DeadlineReached:
             verdict, reason = WAIT, "the deadline passed during a poll"
@@ -291,7 +317,8 @@ def poll_for_admission(api, own_run_id: int, *, poll_seconds: float, wait_second
         if reason != last_reason:
             log(f"PR admission: {reason}; waiting")
             last_reason = reason
-        sleep(max(0.0, min(poll_seconds, deadline - clock())))
+        interval = poll_seconds * min(1 + facts.get("waiting_ahead", 0), POLL_BACKOFF_STEPS)
+        sleep(max(0.0, min(interval, deadline - clock())))
 
 
 def say(line: str) -> None:
