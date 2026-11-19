@@ -41,8 +41,9 @@ The desktop is built on these, which are on `main`:
   bridge and, on a hosted daemon, the daemon's own port.
 - Durable sessions, which outlive their clients and are marked interrupted,
   never restarted, when the daemon restarts.
-- Port 5901's reservation ("The reserved ports", below) in the port API, the
-  preview proxy, the tailnet and Mesh, and a local VM's published ports. The dashboard's own wording
+- The reservation of ports 5901 and 9222 ("The reserved ports", below) in the
+  port API, the preview proxy, the tailnet and Mesh, and a local VM's
+  published ports. The dashboard's own wording
   for the refusal comes with its viewer.
 - The dashboard terminal's WebSocket admission
   ([BROWSER-TERMINALS.md](BROWSER-TERMINALS.md)) and the revocation fence
@@ -283,7 +284,7 @@ to relay the desktop or the browser to another port is their own choice, as
 a web server they start is; what they publish then is that program's port
 and its protection.
 
-Port 5901 is reserved on `main`. Port 9222 joins it with the browser.
+Both ports are reserved on `main`.
 
 ## Starting and stopping
 

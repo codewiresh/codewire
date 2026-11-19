@@ -360,7 +360,7 @@ detail; this section states the contract.
 - **Docker** inside a sandbox is a daemon inside the same VM
   (`DOCKER_HOST=unix:///var/run/docker/docker.sock`), never the node's.
 - **Previews** are HTTPS URLs that orchestration forwards to one application
-  port; ports 2222 and 5901 are reserved
+  port; ports 2222, 5901 and 9222 are reserved
   ([docs/dev/SANDBOX-PREVIEWS.md](docs/dev/SANDBOX-PREVIEWS.md)).
 
 ## 5. Local VMs and trusted hosts

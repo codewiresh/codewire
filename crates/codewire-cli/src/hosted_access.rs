@@ -365,15 +365,16 @@ async fn restate_app_ports(
 }
 
 /// The ports the tailnet and Mesh never serve as application ports, whatever
-/// orchestration names: the platform's own listeners, and the desktop's,
-/// which is not one of those because SSH forwards do reach it.
+/// orchestration names: the platform's own listeners, and the desktop's and
+/// the browser's debugging port, which are not among those because SSH
+/// forwards do reach them.
 fn unserved_application_ports(
     platform: &codewire_daemon_proto::PlatformListeners,
 ) -> std::collections::BTreeSet<u16> {
     platform
         .keys()
         .copied()
-        .chain([codewire_daemon_proto::DESKTOP_VNC_PORT])
+        .chain(codewire_daemon_proto::UNPUBLISHED_WORKLOAD_PORTS)
         .collect()
 }
 
@@ -389,6 +390,8 @@ mod tests {
         let desktop = codewire_daemon_proto::DESKTOP_VNC_PORT;
         let unserved = unserved_application_ports(&platform);
         assert!(unserved.contains(&desktop));
+        assert!(unserved.contains(&codewire_daemon_proto::BROWSER_DEBUG_PORT));
+        assert!(!platform.contains_key(&codewire_daemon_proto::BROWSER_DEBUG_PORT));
         for port in platform.keys() {
             assert!(unserved.contains(port), "{port}");
         }

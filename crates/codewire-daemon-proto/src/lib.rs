@@ -180,9 +180,33 @@ pub const WORKSPACE_SSH_PORT: u16 = 2222;
 /// this port instead, whether or not a desktop runs.
 pub const DESKTOP_VNC_PORT: u16 = 5901;
 /// What a refusal to publish or serve [`DESKTOP_VNC_PORT`] says. It names the
-/// path that works today; `cw desktop` replaces it here when that command ships.
+/// path that works today; `cw desktop` replaces it here when that command
+/// ships.
 pub const DESKTOP_VNC_PORT_REFUSAL: &str = "port 5901 is reserved for this environment's desktop and is never published; \
      reach it with an SSH local forward";
+/// The port the image's Chromium listens on, on the workload's loopback, when
+/// a launch turns its remote debugging on (`docs/dev/SANDBOX-DESKTOP.md`,
+/// "The browser"). The debugging protocol has no authentication: whatever
+/// reaches the port drives that browser and reads its sessions. Like
+/// [`DESKTOP_VNC_PORT`] it is no platform listener, so an SSH forward
+/// reaches it, and no path publishes or serves it.
+pub const BROWSER_DEBUG_PORT: u16 = 9222;
+/// What a refusal to publish or serve [`BROWSER_DEBUG_PORT`] says.
+pub const BROWSER_DEBUG_PORT_REFUSAL: &str = "port 9222 is reserved for the browser's remote debugging, which has no authentication, \
+     and is never published; reach it with an SSH local forward";
+/// The guest ports that are never published and never served when published
+/// earlier, ascending.
+pub const UNPUBLISHED_WORKLOAD_PORTS: [u16; 2] = [DESKTOP_VNC_PORT, BROWSER_DEBUG_PORT];
+
+/// What a refusal to publish or serve guest port `port` says, when it is one
+/// of the [`UNPUBLISHED_WORKLOAD_PORTS`]; `None` for every other port.
+pub fn unpublished_port_refusal(port: u16) -> Option<&'static str> {
+    match port {
+        DESKTOP_VNC_PORT => Some(DESKTOP_VNC_PORT_REFUSAL),
+        BROWSER_DEBUG_PORT => Some(BROWSER_DEBUG_PORT_REFUSAL),
+        _ => None,
+    }
+}
 
 /// A session's Codewire server inside a hosted sandbox (#5100): the
 /// deployment's public origin from its binding. It names no identity and
@@ -551,6 +575,25 @@ pub mod broker {
 
 #[cfg(test)]
 mod tests {
+    /// Each unpublished port has a refusal that names it and the way in, its
+    /// neighbours have none, and forwarding still reaches both: neither is a
+    /// platform listener.
+    #[test]
+    fn the_unpublished_ports_are_refused_by_name_and_stay_reachable_by_a_forward() {
+        for port in super::UNPUBLISHED_WORKLOAD_PORTS {
+            let refusal = super::unpublished_port_refusal(port).expect("refused");
+            assert!(refusal.contains(&port.to_string()), "{refusal}");
+            assert!(refusal.contains("SSH local forward"), "{refusal}");
+            assert!(super::unpublished_port_refusal(port - 1).is_none());
+            assert!(super::unpublished_port_refusal(port + 1).is_none());
+            assert!(!super::platform_listeners(Some(7777)).contains_key(&port));
+        }
+        assert_eq!(
+            super::UNPUBLISHED_WORKLOAD_PORTS,
+            [super::DESKTOP_VNC_PORT, super::BROWSER_DEBUG_PORT]
+        );
+    }
+
     use super::*;
 
     #[test]

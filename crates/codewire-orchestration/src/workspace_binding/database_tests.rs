@@ -289,6 +289,7 @@ async fn db_app_ports_follow_expose_and_unexpose() -> Result<()> {
         // A row published before the desktop's port was reserved: the
         // tailnet and Mesh are never told to serve it.
         expose(5901, "desktop").await?;
+        expose(9222, "devtools").await?;
         ensure!(store.app_ports(ENV).await? == vec![3000, 5173]);
         ensure!(exposed_app_ports(&db.pool, ENV).await? == vec![3000, 5173]);
         // An unexposed port leaves the set at once, while its DNS cleanup is

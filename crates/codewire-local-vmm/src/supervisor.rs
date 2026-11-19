@@ -8153,12 +8153,12 @@ fn validate_create(request: &v1::CreateEnvironmentRequest) -> Result<Uuid, Super
     // Refused where a port is published, never where stored state is read
     // back: an environment that listed this port before it was reserved
     // still loads, and the forward refuses it at use.
-    if project
+    if let Some(refusal) = project
         .application_ports
         .iter()
-        .any(|port| port.port == codewire_daemon_proto::DESKTOP_VNC_PORT)
+        .find_map(|port| codewire_daemon_proto::unpublished_port_refusal(port.port))
     {
-        return Err(SupervisorError::DesktopPortReserved);
+        return Err(SupervisorError::ReservedPort(refusal));
     }
     validate_host_ports_for_project(&host_ports_from_proto(&request.host_ports)?, &project)?;
     if let Some(mesh) = mesh_attachment_from_proto(request.mesh.as_ref())?.as_ref() {
@@ -8410,10 +8410,8 @@ fn updated_host_ports(
         ) else {
             return Err(Status::invalid_argument("ports are 1 to 65535"));
         };
-        if guest_port == codewire_daemon_proto::DESKTOP_VNC_PORT {
-            return Err(Status::invalid_argument(
-                codewire_daemon_proto::DESKTOP_VNC_PORT_REFUSAL,
-            ));
+        if let Some(refusal) = codewire_daemon_proto::unpublished_port_refusal(guest_port) {
+            return Err(Status::invalid_argument(refusal));
         }
         if target.iter().any(|current| current.host_port == host_port) {
             return Err(Status::failed_precondition(format!(
@@ -9879,7 +9877,7 @@ fn confine_spawned_process() -> io::Result<()> {
 impl From<SupervisorError> for Status {
     fn from(error: SupervisorError) -> Self {
         match error {
-            SupervisorError::InvalidRequest | SupervisorError::DesktopPortReserved => {
+            SupervisorError::InvalidRequest | SupervisorError::ReservedPort(_) => {
                 Status::invalid_argument(error.to_string())
             }
             SupervisorError::ReplacementPreflight(error) => Status::from(*error),
@@ -10011,8 +10009,10 @@ pub enum SupervisorError {
     VzHelperUnentitled(PathBuf),
     #[error("native environment request is invalid")]
     InvalidRequest,
-    #[error("{}", codewire_daemon_proto::DESKTOP_VNC_PORT_REFUSAL)]
-    DesktopPortReserved,
+    /// A project lists a guest port that is never published; the message is
+    /// that port's own refusal.
+    #[error("{0}")]
+    ReservedPort(&'static str),
     #[error("local environment {0:?} already exists")]
     AlreadyExists(String),
     #[error("native supervisor state is invalid")]
@@ -10301,7 +10301,7 @@ fn lifecycle_failure_cause(error: &SupervisorError) -> &'static str {
         #[cfg(target_os = "macos")]
         SupervisorError::VzHelperUnentitled(_) => "vz_helper_unentitled",
         SupervisorError::InvalidRequest => "invalid_request",
-        SupervisorError::DesktopPortReserved => "desktop_port_reserved",
+        SupervisorError::ReservedPort(_) => "reserved_port",
         SupervisorError::AlreadyExists(_) => "already_exists",
         SupervisorError::InvalidState => "invalid_state",
         SupervisorError::SecretInState => "secret_in_state",

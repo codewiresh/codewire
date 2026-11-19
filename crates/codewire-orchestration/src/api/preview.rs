@@ -486,7 +486,7 @@ async fn proxy_to_preview_target(
     let request_headers = headers::workload_request_headers(&headers, platform_bearer);
     // Through the daemon to the workload's loopback when it can (#4357), so
     // a server bound only to 127.0.0.1 answers; otherwise the Pod's address.
-    let response = if let Some(refusal) = desktop_port_refusal(target.port) {
+    let response = if let Some(refusal) = reserved_port_refusal(target.port) {
         refusal
     } else if !target.namespace.is_empty()
         && state
@@ -672,16 +672,12 @@ fn preview_response_builder(
     builder.header(PREVIEW_SERVICE_HEADER, PREVIEW_SERVICE_NAME)
 }
 
-/// What a request for the desktop's port gets in place of a connection. The
-/// port is refused at use as well as at publication, so a row published
-/// before it was reserved is not served.
-fn desktop_port_refusal(port: i32) -> Option<Response> {
-    super::ports::is_desktop_port(port).then(|| {
-        preview_error(
-            StatusCode::FORBIDDEN,
-            codewire_daemon_proto::DESKTOP_VNC_PORT_REFUSAL,
-        )
-    })
+/// What a request for the desktop's port, or the browser's debugging port,
+/// gets in place of a connection. They are refused at use as well as at
+/// publication, so a row published before they were reserved is not served.
+fn reserved_port_refusal(port: i32) -> Option<Response> {
+    super::ports::unpublished_port_refusal(port)
+        .map(|refusal| preview_error(StatusCode::FORBIDDEN, refusal))
 }
 
 fn preview_error(status: StatusCode, message: &'static str) -> Response {
@@ -745,7 +741,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_published_desktop_port_is_refused_at_use_and_its_neighbours_are_not() {
-        let response = desktop_port_refusal(5901).expect("the desktop's port is refused");
+        let response = reserved_port_refusal(5901).expect("the desktop's port is refused");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             response.headers()[PREVIEW_SERVICE_HEADER],
@@ -756,8 +752,10 @@ mod tests {
             .unwrap();
         let body = std::str::from_utf8(&body).unwrap();
         assert!(body.contains("SSH local forward"), "{body}");
-        for port in [5900, 5902, 3000, 2222] {
-            assert!(desktop_port_refusal(port).is_none(), "{port}");
+        let debugging = reserved_port_refusal(9222).expect("the debugging port is refused");
+        assert_eq!(debugging.status(), StatusCode::FORBIDDEN);
+        for port in [5900, 5902, 9221, 9223, 3000, 2222, -1, 70_000] {
+            assert!(reserved_port_refusal(port).is_none(), "{port}");
         }
     }
 

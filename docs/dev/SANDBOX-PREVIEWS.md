@@ -25,10 +25,10 @@ requires an empty `project_spec.application_ports` list. Prepare preserves it
 in returned drafts. Older clients omit the flag and retain default inheritance.
 The flag controls creation-time defaults, not generic local-VM port bindings.
 
-Internal ports must be distinct, in `1..65535`, and neither of the reserved
-ports: `2222`, the workspace daemon's SSH server, and `5901`, the
-environment desktop's VNC listener ([SANDBOX-DESKTOP.md](SANDBOX-DESKTOP.md),
-"The reserved ports"). Labels must be distinct and contain 2–22 lowercase letters,
+Internal ports must be distinct, in `1..65535`, and none of the reserved
+ports: `2222`, the workspace daemon's SSH server, and `5901` and `9222`, the
+environment desktop's VNC listener and the browser's debugging port
+([SANDBOX-DESKTOP.md](SANDBOX-DESKTOP.md), "The reserved ports"). Labels must be distinct and contain 2–22 lowercase letters,
 digits or hyphens, with a letter or digit at either end. Empty access retains
 the platform's creator-only default. Effective inherited previews are checked
 before platform setup; database uniqueness remains the concurrency safeguard.
@@ -113,7 +113,7 @@ The proxy sends each request through the environment's daemon (#4357).
 - Connections are pooled per environment and port, for 30 seconds and eight at most, so a page's assets reuse them.
 - The daemon channel for a forward has no request deadline; only connecting is bounded.
 - A daemon without `forward.workload_loopback.v1`, in a Pod from before it, is reached at the Pod's own address, as before. The proxy asks each daemon once and reuses the answer for five minutes.
-- Nothing listening on the port is a 502, "preview backend unreachable: nothing in the sandbox listens on this port". The daemon refuses its platform listeners (2222, 38081). A request for a preview of port 5901, published before that port was reserved, is a 403 that says so; nothing is dialed.
+- Nothing listening on the port is a 502, "preview backend unreachable: nothing in the sandbox listens on this port". The daemon refuses its platform listeners (2222, 38081). A request for a preview of port 5901 or 9222, published before those ports were reserved, is a 403 that says so; nothing is dialed.
 - Code: `crates/codewire-orchestration/src/api/preview/upstream.rs`.
 
 Storage is bounded per authenticated user/session and distinct preview scope.

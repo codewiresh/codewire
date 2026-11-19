@@ -773,12 +773,12 @@ pub fn to_setup_inputs(env: &EnvironmentRow, backend: &BackendRow) -> Inputs {
         install_command: spec.install_command.clone(),
         startup_script: spec.startup_script.clone(),
         agents: spec.agents.tools.clone(),
-        // A project saved before the desktop's port was reserved may still
-        // list it. A create refuses it now; setup never registers it.
+        // A project saved before the desktop's ports were reserved may still
+        // list one. A create refuses it now; setup never registers it.
         app_ports: spec
             .application_ports
             .iter()
-            .filter(|port| port.port != codewire_daemon_proto::DESKTOP_VNC_PORT)
+            .filter(|port| codewire_daemon_proto::unpublished_port_refusal(port.port).is_none())
             .map(|port| {
                 (
                     i32::from(port.port),

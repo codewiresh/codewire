@@ -57,9 +57,10 @@ pub struct MeshIngressPublisher {
 impl MeshIngressPublisher {
     pub fn publish(&self, guest_port: u16, stream: StdUnixStream) -> Result<(), MeshIngressError> {
         let binding = MeshIngressBinding::new(guest_port)?;
-        // The desktop's port is denied at use, so an attachment stored
-        // before it was reserved never carries a connection to it.
-        if guest_port == codewire_daemon_proto::DESKTOP_VNC_PORT
+        // The desktop's port and the browser's debugging port are denied at
+        // use, so an attachment stored before they were reserved never
+        // carries a connection to one.
+        if codewire_daemon_proto::unpublished_port_refusal(guest_port).is_some()
             || self.allowed_ports.binary_search(&guest_port).is_err()
         {
             return Err(MeshIngressError::PortDenied);
@@ -591,12 +592,17 @@ mod tests {
     #[test]
     fn publisher_denies_the_desktop_port_even_when_the_attachment_allows_it() {
         let desktop = codewire_daemon_proto::DESKTOP_VNC_PORT;
-        let (publisher, _receiver) = mesh_ingress_channel(&[desktop, desktop + 1]).unwrap();
-        let (stream, _peer) = StdUnixStream::pair().unwrap();
-        assert_eq!(
-            publisher.publish(desktop, stream),
-            Err(MeshIngressError::PortDenied)
-        );
+        let debugging = codewire_daemon_proto::BROWSER_DEBUG_PORT;
+        let (publisher, _receiver) =
+            mesh_ingress_channel(&[desktop, desktop + 1, debugging]).unwrap();
+        for reserved in [desktop, debugging] {
+            let (stream, _peer) = StdUnixStream::pair().unwrap();
+            assert_eq!(
+                publisher.publish(reserved, stream),
+                Err(MeshIngressError::PortDenied),
+                "{reserved}"
+            );
+        }
         let (stream, _peer) = StdUnixStream::pair().unwrap();
         publisher.publish(desktop + 1, stream).unwrap();
     }

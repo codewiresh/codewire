@@ -24,10 +24,13 @@ fn is_reserved_port(port: i32) -> bool {
     port == i32::from(codewire_daemon_proto::WORKSPACE_SSH_PORT)
 }
 
-/// Whether `port` is the desktop's, which no preview, published port or Mesh
-/// port may name (`docs/dev/SANDBOX-DESKTOP.md`, "The reserved ports").
-pub(crate) fn is_desktop_port(port: i32) -> bool {
-    port == i32::from(codewire_daemon_proto::DESKTOP_VNC_PORT)
+/// What refuses `port` as a preview, a published port or a Mesh port: it is
+/// the desktop's or the browser's debugging port
+/// (`docs/dev/SANDBOX-DESKTOP.md`, "The reserved ports").
+pub(crate) fn unpublished_port_refusal(port: i32) -> Option<&'static str> {
+    u16::try_from(port)
+        .ok()
+        .and_then(codewire_daemon_proto::unpublished_port_refusal)
 }
 
 pub(crate) fn validate_preview_port(port: i32, label: &str, access: &str) -> AppResult<()> {
@@ -43,12 +46,8 @@ pub(crate) fn validate_preview_port(port: i32, label: &str, access: &str) -> App
             "port is reserved by the agent",
         ));
     }
-    if is_desktop_port(port) {
-        return Err(coded(
-            StatusCode::BAD_REQUEST,
-            "port_reserved",
-            codewire_daemon_proto::DESKTOP_VNC_PORT_REFUSAL,
-        ));
+    if let Some(refusal) = unpublished_port_refusal(port) {
+        return Err(coded(StatusCode::BAD_REQUEST, "port_reserved", refusal));
     }
     let bytes = label.as_bytes();
     let edge = |byte: &u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
@@ -492,6 +491,18 @@ mod tests {
         // The displays beside it are ordinary ports.
         validate_preview_port(5900, "vnc-a", "creator").unwrap();
         validate_preview_port(5902, "vnc-b", "creator").unwrap();
+
+        // The browser's debugging port is refused the same way, in its own
+        // words, and its neighbours are ordinary too.
+        let refused = validate_preview_port(9222, "devtools", "creator").unwrap_err();
+        let AppError::Coded { code, detail, .. } = refused else {
+            panic!("the debugging port's refusal is coded: {refused:?}");
+        };
+        assert_eq!(code, "port_reserved");
+        assert!(detail.contains("9222"), "{detail}");
+        assert!(detail.contains("no authentication"), "{detail}");
+        validate_preview_port(9221, "debug-a", "creator").unwrap();
+        validate_preview_port(9223, "debug-b", "creator").unwrap();
 
         let spec = codewire_project::ProjectSpec {
             application_ports: vec![codewire_project::ApplicationPort {

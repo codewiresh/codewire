@@ -126,11 +126,14 @@ async fn a_platform_listener_is_refused_with_the_daemons_reason() {
 async fn the_desktop_port_is_refused_before_the_daemon_is_asked() {
     let temp = tempfile::tempdir().unwrap();
     let client = in_process_daemon(temp.path()).await;
-    match open_guest_loopback(&client, codewire_daemon_proto::DESKTOP_VNC_PORT).await {
-        Err(GuestLoopbackError::Refused(reason)) => {
-            assert!(reason.contains("SSH local forward"), "{reason}")
+    for port in codewire_daemon_proto::UNPUBLISHED_WORKLOAD_PORTS {
+        match open_guest_loopback(&client, port).await {
+            Err(GuestLoopbackError::Refused(reason)) => {
+                assert!(reason.contains(&port.to_string()), "{reason}");
+                assert!(reason.contains("SSH local forward"), "{reason}");
+            }
+            other => panic!("{port}: {other:?}"),
         }
-        other => panic!("{other:?}"),
     }
 }
 

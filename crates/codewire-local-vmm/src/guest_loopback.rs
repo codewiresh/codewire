@@ -57,10 +57,8 @@ pub async fn open_guest_loopback(
     client: &DaemonSessionClient,
     guest_port: u16,
 ) -> Result<DuplexStream, GuestLoopbackError> {
-    if guest_port == codewire_daemon_proto::DESKTOP_VNC_PORT {
-        return Err(GuestLoopbackError::Refused(
-            codewire_daemon_proto::DESKTOP_VNC_PORT_REFUSAL.to_owned(),
-        ));
+    if let Some(refusal) = codewire_daemon_proto::unpublished_port_refusal(guest_port) {
+        return Err(GuestLoopbackError::Refused(refusal.to_owned()));
     }
     for address in LOOPBACKS {
         match client

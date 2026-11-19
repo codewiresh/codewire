@@ -813,10 +813,15 @@ fn to_setup_inputs_consumes_the_canonical_project_spec() {
                 label: "api".into(),
                 access: String::new(),
             },
-            // Saved before the desktop's port was reserved: never registered.
+            // Saved before the desktop's ports were reserved: never registered.
             codewire_project::ApplicationPort {
                 port: codewire_daemon_proto::DESKTOP_VNC_PORT,
                 label: "desktop".into(),
+                access: String::new(),
+            },
+            codewire_project::ApplicationPort {
+                port: codewire_daemon_proto::BROWSER_DEBUG_PORT,
+                label: "devtools".into(),
                 access: String::new(),
             },
         ],

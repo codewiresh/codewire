@@ -3899,7 +3899,7 @@ fn create_journal_reconstructs_exact_canonical_project_intent() {
     desktop.project_spec_json = desktop_project.canonical_json().unwrap();
     desktop.project_spec_sha256 = format!("{:x}", Sha256::digest(&desktop.project_spec_json));
     let refused = validate_create(&desktop).expect_err("the desktop's port");
-    assert!(matches!(refused, SupervisorError::DesktopPortReserved));
+    assert!(matches!(refused, SupervisorError::ReservedPort(_)));
     assert!(
         refused.to_string().contains("SSH local forward"),
         "{refused}"
@@ -4004,6 +4004,10 @@ fn host_port_updates_withdraw_then_publish_into_one_canonical_set() {
         refused.message().contains("SSH local forward"),
         "{refused:?}"
     );
+    let debugging =
+        updated_host_ports(&current, &request(&[(18_081, 9_222)], &[])).expect_err("9222");
+    assert_eq!(debugging.code(), tonic::Code::InvalidArgument);
+    assert!(debugging.message().contains("9222"), "{debugging:?}");
     let earlier = vec![HostPortBinding::new(18_079, 5_901).unwrap()];
     assert_eq!(
         updated_host_ports(&earlier, &request(&[(18_080, 3_000)], &[])).unwrap(),
