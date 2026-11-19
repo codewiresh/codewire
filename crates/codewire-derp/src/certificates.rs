@@ -22,6 +22,8 @@ use rustls::sign::CertifiedKey;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
+use zeroize::Zeroizing;
+
 use crate::{Error, Result};
 
 /// How often the public certificate's files are read again.
@@ -85,16 +87,18 @@ impl Certificates {
         let Some(public) = &self.public else {
             return Reload::NotConfigured;
         };
-        let files = match (
+        // The key file's bytes are wiped when this read is done with them.
+        let (cert, key) = match (
             std::fs::read(&public.source.cert_file),
-            std::fs::read(&public.source.key_file),
+            std::fs::read(&public.source.key_file).map(Zeroizing::new),
         ) {
             (Ok(cert), Ok(key)) => (cert, key),
             (Err(err), _) | (_, Err(err)) => return Reload::Failed(err.to_string()),
         };
         let digest = {
             let mut hasher = DefaultHasher::new();
-            files.hash(&mut hasher);
+            cert.hash(&mut hasher);
+            key.as_slice().hash(&mut hasher);
             hasher.finish()
         };
         let current = public
@@ -108,7 +112,7 @@ impl Certificates {
             return Reload::Unchanged;
         }
         drop(current);
-        match certified_key(&files.0, &files.1) {
+        match certified_key(&cert, &key) {
             Ok(key) => {
                 *public
                     .current
