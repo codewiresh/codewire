@@ -157,11 +157,26 @@ pub(crate) enum BindingRoots<'a> {
 impl BindingClient {
     /// HTTPS only, verified against `roots`, and HTTP/1.1 only: the
     /// tenant-reachable listener refuses HTTP/2. Fails without usable roots.
+    /// The daemon calls [`Self::routed`]; tests reach a looked-up origin.
+    #[cfg(test)]
     pub(crate) fn new(
         binding_url: &str,
         roots: BindingRoots<'_>,
         token_path: &Path,
         timing: BindTiming,
+    ) -> anyhow::Result<Self> {
+        Self::routed(binding_url, roots, token_path, timing, None)
+    }
+
+    /// [`Self::new`], reaching the listener at a fixed address through
+    /// `route`'s dial when given: a hosted egress Pod resolves no names and
+    /// leaves by its Pod interface (#4000).
+    pub(crate) fn routed(
+        binding_url: &str,
+        roots: BindingRoots<'_>,
+        token_path: &Path,
+        timing: BindTiming,
+        route: Option<(std::net::SocketAddr, codewire_tls::PeerDial)>,
     ) -> anyhow::Result<Self> {
         let origin = binding_url.trim_end_matches('/');
         let transport = match roots {
@@ -172,6 +187,10 @@ impl BindingClient {
         }
         .map_err(|_| anyhow::anyhow!("workspace binding requires an https origin and roots"))?
         .http1_only();
+        let transport = match route {
+            Some((peer, dial)) => transport.dialing_through(peer, dial),
+            None => transport,
+        };
         let config = ClientConfig::new(origin.parse()?).with_default_timeout(timing.deadline());
         Ok(Self {
             client: WorkspaceBindingServiceClient::new(transport, config),

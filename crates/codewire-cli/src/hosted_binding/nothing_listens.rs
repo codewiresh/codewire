@@ -75,7 +75,7 @@ fn unbound_daemon_process() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(crate::run_bound_hosted_daemon_with(
+        .block_on(crate::hosted_daemon::run_bound_hosted_daemon_with(
             config,
             HostedStatePaths::under(&root),
             child_timing(),

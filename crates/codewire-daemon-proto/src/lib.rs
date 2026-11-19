@@ -48,6 +48,19 @@ pub const EGRESS_TOKEN_AUDIENCE: &str = "codewire.internal.egress.v1";
 pub const EGRESS_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/codewire/egress";
 pub const EGRESS_TOKEN_PATH: &str = "/var/run/secrets/codewire/egress/token";
 pub const EGRESS_TOKEN_EXPIRATION_SECONDS: i64 = 600;
+/// cw-egress's stream address on the Pod's node, as `address:port`. A Pod
+/// without it has no hosted egress, and its daemon opens no stream.
+pub const EGRESS_STREAM_ADDR_ENV: &str = "CODEWIRE_EGRESS_STREAM_ADDR";
+/// The cluster DNS Service's bare IPv4 address, the egress self-check's DNS
+/// target (port 53). Missing or unparsable fails the check closed.
+pub const CLUSTER_DNS_IP_ENV: &str = "CODEWIRE_CLUSTER_DNS_IP";
+/// The binding Service's `address:port` for a hosted egress Pod, which
+/// resolves no names. The binding URL keeps the TLS name.
+pub const WORKSPACE_BINDING_ADDR_ENV: &str = "CODEWIRE_WORKSPACE_BINDING_ADDR";
+/// Where a hosted egress daemon installs the egress trust before it serves:
+/// the interception CA, or a comment-only file for none (#4001). The
+/// broker-mode Pod template points `NODE_EXTRA_CA_CERTS` here.
+pub const HOSTED_EGRESS_TRUST_CA_PATH: &str = "/codewire/run/egress-trust/ca.pem";
 /// Exact projected-token purpose for cw-egress calling orchestration's
 /// `EgressService`. Orchestration accepts it only for
 /// [`EGRESS_NODE_SERVICE_ACCOUNT`] in its own (server) namespace, and reads
@@ -660,6 +673,16 @@ mod tests {
             format!("{COORDINATOR_EXTRA_ROOTS_MOUNT_PATH}/ca.crt")
         );
         assert_eq!(WORKSPACE_POD_UID_ENV, "CODEWIRE_POD_UID");
+        assert_eq!(EGRESS_STREAM_ADDR_ENV, "CODEWIRE_EGRESS_STREAM_ADDR");
+        assert_eq!(CLUSTER_DNS_IP_ENV, "CODEWIRE_CLUSTER_DNS_IP");
+        assert_eq!(
+            WORKSPACE_BINDING_ADDR_ENV,
+            "CODEWIRE_WORKSPACE_BINDING_ADDR"
+        );
+        assert_eq!(
+            HOSTED_EGRESS_TRUST_CA_PATH,
+            "/codewire/run/egress-trust/ca.pem"
+        );
         assert_eq!(HOSTED_DAEMON_STATE_DIRECTORY, "/codewire/run/daemon");
         assert_eq!(
             HOSTED_DAEMON_MESH_SOCKET,

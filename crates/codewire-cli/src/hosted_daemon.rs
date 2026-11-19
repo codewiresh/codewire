@@ -1,0 +1,165 @@
+//! The bound hosted daemon's start: bind, install the binding, then serve.
+
+use anyhow::Context as _;
+
+#[cfg(target_os = "linux")]
+use crate::{hosted_access, hosted_egress};
+use crate::{hosted_binding, serve_hosted_daemon};
+
+/// Identity-free Pod (Program #2238 B2): mark local readiness, bind, install
+/// the bound credential, then prepare Codex's home and listen.
+///
+/// Nothing listens before an accepted binding: no TCP listener (the daemon's
+/// 7777, SSH's 2222, the bridge's loopback 38081) and no UDP socket (the
+/// tailnet's 31000). SSH on 2222 has `none` auth, so its NetworkPolicy is its
+/// only authorization. The warm-pool template's NetworkPolicy admits
+/// orchestration's identity to unbound members on TCP 7777 and 2222 from
+/// birth (#3626). A listener there before the bind would hand a shell to
+/// anyone holding that identity. `hosted_binding`'s `nothing_listens` tests
+/// pin this.
+pub(crate) async fn run_bound_hosted_daemon(
+    config: codewire_daemon::WorkspaceBindingConfig,
+) -> anyhow::Result<()> {
+    run_bound_hosted_daemon_with(
+        config,
+        codewire_daemon::hosted_state::HostedStatePaths::default(),
+        hosted_binding::BindTiming::default(),
+    )
+    .await
+}
+
+/// [`run_bound_hosted_daemon`] with its state paths and binding pacing given,
+/// so a test runs it unprivileged and fast. Production passes the defaults.
+pub(crate) async fn run_bound_hosted_daemon_with(
+    config: codewire_daemon::WorkspaceBindingConfig,
+    paths: codewire_daemon::hosted_state::HostedStatePaths,
+    timing: hosted_binding::BindTiming,
+) -> anyhow::Result<()> {
+    paths
+        .mark_ready()
+        .context("write hosted daemon readiness marker")?;
+    // A confidential workspace (B2c) trusts only its measured roots for the
+    // binding listener, never the host-supplied mounted ones.
+    let roots = match config.measured() {
+        Some(measured) => hosted_binding::BindingRoots::Measured(measured.binding_roots_pem()),
+        None => hosted_binding::BindingRoots::Mounted(config.tls_roots_file()),
+    };
+    tracing::info!(
+        measured = config.measured().is_some(),
+        "hosted environment daemon waiting for its workspace binding"
+    );
+    // A broker-mode Pod's default route is its egress TUN (#4000): it reaches
+    // the binding at its rendered address by the Pod interface, and serves
+    // nothing until its first egress self-check has passed.
+    #[cfg(target_os = "linux")]
+    let egress = hosted_egress::EgressSettings::from_lookup(config.pod_uid(), |name| {
+        std::env::var(name).ok()
+    })?;
+    #[cfg(target_os = "linux")]
+    let route = egress
+        .as_ref()
+        .map(hosted_egress::EgressSettings::binding_route)
+        .transpose()?;
+    #[cfg(not(target_os = "linux"))]
+    let route = None;
+    let client = std::sync::Arc::new(
+        hosted_binding::BindingClient::routed(
+            config.binding_url(),
+            roots,
+            config.token_path(),
+            timing,
+            route,
+        )
+        .context("configure workspace binding client")?,
+    );
+    // Only the Linux access server distinguishes a measured daemon.
+    #[cfg(target_os = "linux")]
+    let measured = config.measured().is_some();
+    let bound = hosted_binding::bind_until_accepted(&client, &config).await;
+    paths
+        .install_binding(&bound.binding)
+        .context("install hosted daemon binding")?;
+    // The binding was accepted for exactly this Pod.
+    let pod_uid = config.pod_uid().to_owned();
+    let daemon_config = config.into_config(&bound.binding);
+    #[cfg(target_os = "linux")]
+    codewire_daemon::login_cleanup::clear_logins_for_bound_environment(
+        &daemon_config,
+        bound.binding.environment_id(),
+    );
+    // The saved project defaults and Git author (#3684), before the access
+    // task can record the host key: orchestration's access proof therefore
+    // comes after this write. No defaults, as from an older server, reports
+    // nothing, and setup writes them itself.
+    let defaults = match &bound.defaults {
+        Some(defaults) => Some(
+            codewire_daemon::workspace_defaults::apply(
+                &daemon_config,
+                bound.binding.operation_generation(),
+                defaults,
+            )
+            .await,
+        ),
+        None => None,
+    };
+    #[cfg(target_os = "linux")]
+    if let Some(egress) = egress {
+        // The egress trust is installed here, before serving (#4001).
+        let _trust = hosted_egress::start(egress).await?;
+    }
+    // Workspace access (#2460): the daemon serves SSH itself, reaching its
+    // own gRPC service in-process, and the environment's application ports
+    // on its tailnet address.
+    let (connector, local) = codewire_daemon::local_transport::local_transport();
+    let (app_ports, _) = tokio::sync::watch::channel(
+        bound
+            .access
+            .as_ref()
+            .map(|grant| grant.app_ports().clone())
+            .unwrap_or_default(),
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let (_access_shutdown, access_shutdown_rx) = tokio::sync::watch::channel(false);
+        let daemon_port = daemon_config
+            .listen_addr
+            .parse::<std::net::SocketAddr>()
+            .map(|address| address.port())
+            .ok();
+        let access = hosted_access::serve(
+            paths.clone(),
+            hosted_access::BoundAccess {
+                environment_id: bound.binding.environment_id(),
+                generation: bound.binding.operation_generation(),
+                daemon_credential: bound.binding.daemon_credential().clone(),
+                grant: bound.access.clone(),
+                daemon_port,
+                exec_shell: codewire_daemon::env::default_shell_for(&daemon_config),
+                measured,
+            },
+            connector,
+            client.clone(),
+            app_ports.clone(),
+            access_shutdown_rx,
+        );
+        tokio::spawn(async move {
+            // The sender lives as long as the access task, which ends with
+            // the daemon process.
+            let _keep = _access_shutdown;
+            if let Err(error) = access.await {
+                tracing::error!(error = %format!("{error:#}"), "workspace access stopped");
+            }
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    drop(connector);
+    serve_hosted_daemon(
+        daemon_config,
+        true,
+        Some(local),
+        Some(app_ports),
+        Some(pod_uid),
+        defaults,
+    )
+    .await
+}

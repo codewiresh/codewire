@@ -258,6 +258,8 @@ async fn write_tun_packet(tun: &AsyncFd<OwnedFd>, packet: &[u8]) -> io::Result<(
     }
 }
 
+#[cfg(feature = "hosted-guest")]
+pub mod hosted;
 pub mod self_check;
 pub use self_check::{InterfaceProbes, PROBE_TIMEOUT, ProbeOutcome, SelfCheckProbes, self_check};
 

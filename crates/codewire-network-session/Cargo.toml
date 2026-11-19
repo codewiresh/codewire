@@ -25,6 +25,9 @@ netlink-packet-route = { workspace = true, optional = true }
 netlink-sys = { workspace = true, optional = true }
 
 [features]
+# A hosted Sandbox's egress loop and its connector to cw-egress (#4000): off
+# by default for the same reason, so the guest init compiles neither.
+hosted-guest = ["rustix/rand", "tokio/fs"]
 hosted-routing = [
     "dep:netlink-packet-core",
     "dep:netlink-packet-route",

@@ -15,9 +15,18 @@
 //! A caller that must not resolve cluster names at all (cw-egress, whose Pod
 //! has no cluster DNS) gives the address to dial instead; the origin's host
 //! is then only the name TLS verifies and the request addresses.
+//!
+//! A hosted Sandbox's daemon also chooses how the socket leaves: every
+//! platform connection goes by the Pod interface (#4000).
+//! [`ConnectOriginTransport::dialing_through`] gives it a fixed peer address
+//! and its own dial, and keeps the origin's names for TLS and HTTP.
 
+use std::future::Future;
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use connectrpc::ConnectError;
@@ -28,11 +37,18 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::connect::dns::{GaiResolver, Name};
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use tokio::net::TcpStream;
 // `tower_service::Service`, the resolver trait hyper-util's connector takes.
 use tonic::codegen::Service;
 
 use crate::{ClientTlsEndpoint, TLS_TIMEOUT, TlsError};
+
+/// Opens the TCP connection to a peer, for a caller that must choose how its
+/// sockets leave the host.
+pub type PeerDial = Arc<
+    dyn Fn(SocketAddr) -> Pin<Box<dyn Future<Output = io::Result<TcpStream>> + Send>> + Send + Sync,
+>;
 
 /// A Connect transport for one cluster-local HTTPS origin.
 #[derive(Clone)]
@@ -41,6 +57,9 @@ pub struct ConnectOriginTransport {
     endpoint: ClientTlsEndpoint,
     http1_only: bool,
     dial: Option<IpAddr>,
+    /// Set by [`Self::dialing_through`]: the origin's fixed address and how
+    /// to reach it. It takes precedence over `dial`.
+    through: Option<(SocketAddr, PeerDial)>,
 }
 
 impl std::fmt::Debug for ConnectOriginTransport {
@@ -80,6 +99,7 @@ impl ConnectOriginTransport {
             endpoint,
             http1_only: false,
             dial: None,
+            through: None,
         })
     }
 
@@ -95,6 +115,13 @@ impl ConnectOriginTransport {
     /// origin's host up.
     pub fn dialing(mut self, address: IpAddr) -> Self {
         self.dial = Some(address);
+        self
+    }
+
+    /// Reach the origin at `peer` through `dial`, looking up no name. The TLS
+    /// server name and the HTTP authority are still the origin's.
+    pub fn dialing_through(mut self, peer: SocketAddr, dial: PeerDial) -> Self {
+        self.through = Some((peer, dial));
         self
     }
 }
@@ -141,30 +168,88 @@ impl ConnectOriginTransport {
         }
         let endpoint = self.endpoint.clone();
         let http1_only = self.http1_only;
+        let through = self.through.clone();
         Box::pin(async move {
             // The error class carries no path, PEM or peer detail.
             let config = endpoint.rustls_config().await.map_err(|error| {
                 ConnectError::unavailable(format!("internal TLS trust unavailable: {error}"))
             })?;
-            let mut http = HttpConnector::new_with_resolver(AbsoluteNames(resolver));
-            http.enforce_http(false);
-            http.set_nodelay(true);
-            http.set_connect_timeout(Some(TLS_TIMEOUT));
-            let https = HttpsConnectorBuilder::new()
-                .with_tls_config(config)
-                .https_only();
-            let https = if http1_only {
-                https.enable_http1().wrap_connector(http)
-            } else {
-                https.enable_all_versions().wrap_connector(http)
-            };
-            Client::builder(TokioExecutor::new())
-                .build(https)
-                .request(request)
+            match through {
+                Some((peer, dial)) => {
+                    request_over(FixedPeer { peer, dial }, config, http1_only, request).await
+                }
+                None => {
+                    let mut http = HttpConnector::new_with_resolver(AbsoluteNames(resolver));
+                    http.enforce_http(false);
+                    http.set_nodelay(true);
+                    http.set_connect_timeout(Some(TLS_TIMEOUT));
+                    request_over(http, config, http1_only, request).await
+                }
+            }
+        })
+    }
+}
+
+/// One request over a verified TLS connection that `connector` opens.
+async fn request_over<C>(
+    connector: C,
+    config: rustls::ClientConfig,
+    http1_only: bool,
+    request: Request<ClientBody>,
+) -> Result<Response<Incoming>, ConnectError>
+where
+    C: Service<http::Uri> + Clone + Send + Sync + 'static,
+    C::Response: hyper_util::client::legacy::connect::Connection
+        + hyper::rt::Read
+        + hyper::rt::Write
+        + Send
+        + Unpin
+        + 'static,
+    C::Future: Send + 'static,
+    C::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let https = HttpsConnectorBuilder::new()
+        .with_tls_config(config)
+        .https_only();
+    let https = if http1_only {
+        https.enable_http1().wrap_connector(connector)
+    } else {
+        https.enable_all_versions().wrap_connector(connector)
+    };
+    Client::builder(TokioExecutor::new())
+        .build(https)
+        .request(request)
+        .await
+        .map_err(|error| ConnectError::unavailable_from_transport("HTTPS request failed", error))
+}
+
+/// Connects every request to one address through the caller's dial, under
+/// the same bound as a looked-up connection.
+#[derive(Clone)]
+struct FixedPeer {
+    peer: SocketAddr,
+    dial: PeerDial,
+}
+
+impl Service<http::Uri> for FixedPeer {
+    type Response = TokioIo<TcpStream>;
+    type Error = io::Error;
+    type Future = Pin<Box<dyn Future<Output = io::Result<TokioIo<TcpStream>>> + Send>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: http::Uri) -> Self::Future {
+        let connect = (self.dial)(self.peer);
+        Box::pin(async move {
+            let stream = tokio::time::timeout(TLS_TIMEOUT, connect)
                 .await
-                .map_err(|error| {
-                    ConnectError::unavailable_from_transport("HTTPS request failed", error)
-                })
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connect timed out"))??;
+            // As the looked-up connector sets it; a refusal leaves a working,
+            // slower connection.
+            let _ = stream.set_nodelay(true);
+            Ok(TokioIo::new(stream))
         })
     }
 }

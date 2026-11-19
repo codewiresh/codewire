@@ -35,5 +35,9 @@ pub const HOSTED_POD_ROUTE_TABLE: u32 = 1_000;
 /// table's (32766): source port 31000, output interface eth0, and eth0's own
 /// address as source.
 pub const HOSTED_POD_RULE_PRIORITIES: [u32; 3] = [1_000, 1_001, 1_002];
+/// The network session generation of every hosted stream: a re-placed
+/// Sandbox is a new Pod with a new UID, which keys the stream, so nothing
+/// counts boots.
+pub const HOSTED_GENERATION: u64 = 1;
 
 const _: () = assert!(HOSTED_TUN_MTU == crate::SessionLimits::HOSTED_MTU);

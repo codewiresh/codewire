@@ -31,6 +31,7 @@ codewire-vmm-guest-probe = { workspace = true }
 thiserror = { workspace = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
+anyhow = { workspace = true }
 axum = { workspace = true }
 buffa = { workspace = true }
 codewire-client = { workspace = true }

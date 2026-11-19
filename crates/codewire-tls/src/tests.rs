@@ -1067,3 +1067,83 @@ async fn an_optional_trust_bundle_is_absent_valid_or_refused() {
 }
 
 mod client_identity;
+
+#[tokio::test]
+async fn a_dialed_origin_is_reached_through_its_dial_and_still_verified_and_addressed_as_configured()
+ {
+    let ca = Ca::new();
+    let files = Files::new(&ca, BINDING_HOST);
+    let socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = socket.local_addr().unwrap();
+    let listener = TlsListener::new(socket, files.identity.clone()).unwrap();
+    let app = Router::new().route(
+        "/",
+        route_get(
+            |axum::extract::ConnectInfo(PresentedNames(sni)): axum::extract::ConnectInfo<
+                PresentedNames,
+            >,
+             headers: http::HeaderMap| async move {
+                format!(
+                    "sni={} host={}",
+                    sni.unwrap_or_default(),
+                    headers
+                        .get(http::header::HOST)
+                        .and_then(|host| host.to_str().ok())
+                        .unwrap_or_default()
+                )
+            },
+        ),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<PresentedNames>(),
+        )
+        .await
+    });
+
+    // The origin names a port nothing listens on: only the dial's address is
+    // reached.
+    let origin = format!("https://{BINDING_HOST}:1");
+    let dialed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let dial: crate::PeerDial = {
+        let dialed = dialed.clone();
+        std::sync::Arc::new(move |address| {
+            dialed.lock().unwrap().push(address);
+            Box::pin(tokio::net::TcpStream::connect(address))
+        })
+    };
+    let transport = ConnectOriginTransport::for_origin(&origin, &files.roots)
+        .unwrap()
+        .http1_only()
+        .dialing_through(peer, dial);
+    let resolver = PodResolver::default();
+    let request = {
+        use http_body_util::BodyExt as _;
+        http::Request::get(format!("{origin}/"))
+            .body(
+                http_body_util::Empty::<bytes::Bytes>::new()
+                    .map_err(|never| match never {})
+                    .boxed(),
+            )
+            .unwrap()
+    };
+    let response = tokio::time::timeout(
+        TEST_TIMEOUT,
+        transport.send_resolving(resolver.clone(), request),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let body = {
+        use http_body_util::BodyExt as _;
+        response.into_body().collect().await.unwrap().to_bytes()
+    };
+    assert_eq!(
+        String::from_utf8(body.to_vec()).unwrap(),
+        format!("sni={BINDING_HOST} host={BINDING_HOST}:1")
+    );
+    assert_eq!(*dialed.lock().unwrap(), [peer]);
+    assert!(resolver.asked().is_empty());
+    server.abort();
+}

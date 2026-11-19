@@ -75,7 +75,10 @@ tempfile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 async-trait = { workspace = true }
+# The hosted daemon's egress loop, its routing readback and its TUN (#4000).
+codewire-network-session = { workspace = true, features = ["hosted-guest", "hosted-routing"] }
 codewire-tailnet = { workspace = true }
+codewire-vmm-guest-probe = { workspace = true }
 codewire-workspace-access = { workspace = true }
 
 [dev-dependencies]

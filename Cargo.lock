@@ -1523,12 +1523,14 @@ dependencies = [
  "codewire-egress-policy",
  "codewire-local-credentials",
  "codewire-local-vmm",
+ "codewire-network-session",
  "codewire-project",
  "codewire-project-proto",
  "codewire-protected-store",
  "codewire-proto",
  "codewire-tailnet",
  "codewire-tls",
+ "codewire-vmm-guest-probe",
  "codewire-workload-secrets",
  "codewire-workspace-access",
  "codewire-workspace-hack",
@@ -1567,6 +1569,7 @@ dependencies = [
 name = "codewire-cli-bin"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "buffa",
  "codewire-cli",
