@@ -386,6 +386,31 @@ review, and links to Admin → Manage account access. At most 10 an hour; the
 (SES) and never delays or fails a sign-up. The rules are in
 [AUTH-POLICY](dev/AUTH-POLICY.md#the-operators-sign-up-notice).
 
+Not yet built (#5466): the IdP also emails the operator each piece of
+feedback sent with `cw feedback`. Orchestration, which stores the feedback,
+holds no mail credential: in the same transaction it writes an outbox row
+naming only the feedback, and the IdP sends it, as it sends organization
+invitations, with up to three attempts. The IdP only reads `feedback` and
+sends and records `feedback_notices`; it writes no feedback. The email is
+plain text, from the fixed sender, with the subject `Codewire feedback
+<id>`. Its body names the sender, with "(verified)" or "(not verified)"
+beside the address, or "Anonymous", their organization, what `cw` attached
+and the time, then the message as sent, without control characters other
+than line breaks and tabs and without Unicode direction overrides and
+isolates, never longer than feedback's stored maximum (10 KB), and links to
+Admin → Feedback on the configured `FRONTEND_URL`. Reply-To is the signed-in
+account's verified email address, only when it is one plain address;
+anonymous feedback, and an account without one, get no Reply-To. An address
+an anonymous sender gave for a reply is shown in the body, marked as not
+verified. Codewire never emails a reply address itself: each piece of
+feedback sends one email, to the operator. Nothing the sender typed, and no
+name, reaches a header. At most 10 an hour, counted apart from the sign-up
+notices; the 11th sends one "More feedback is waiting" email instead,
+holding only how many arrived and the Admin → Feedback link, and every
+message is still stored and on the admin page. A failed send is logged with
+the feedback's ID, a fixed reason and the provider's error code, never the
+message, a name or an address, and never fails the submit.
+
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
 | `CODEWIRE_OPERATOR_EMAIL` | No | Where the IdP sends the operator's sign-up notice. Unset or empty sends none, the default. Any value that is not one email address stops the IdP at startup. | `operator@example.com` |
