@@ -373,6 +373,9 @@ pub struct Conn {
     node_state: Arc<Mutex<NodeState>>,
     /// The pump task handle; aborted on close/drop.
     pump: tokio::task::JoinHandle<()>,
+    /// Closed when the pump task has stopped: its sender lives in the task's
+    /// future, so it drops when the pump returns or its abort lands.
+    pump_stopped: tokio::sync::watch::Receiver<()>,
     /// Optional transport control path for peer metadata.
     transport_peer_updates: Option<mpsc::UnboundedSender<Vec<Node>>>,
     /// Optional transport path observation hook.
@@ -449,14 +452,19 @@ impl Conn {
         } = transport;
 
         let unrouted_dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let pump = tokio::spawn(pump_loop(PumpCtx {
+        let (pump_running, pump_stopped) = tokio::sync::watch::channel(());
+        let pump_ctx = PumpCtx {
             peers: peers.clone(),
             ns_out_rx,
             ns_in_tx,
             to_transport,
             from_transport,
             unrouted_dropped: unrouted_dropped.clone(),
-        }));
+        };
+        let pump = tokio::spawn(async move {
+            let _running = pump_running;
+            pump_loop(pump_ctx).await;
+        });
         let transport_peer_updates = peer_updates;
         let transport_path_probe = path_probe;
         let endpoint_updates_task = local_endpoint_updates.map(|updates| {
@@ -473,6 +481,7 @@ impl Conn {
             peers,
             node_state,
             pump,
+            pump_stopped,
             transport_peer_updates,
             transport_path_probe,
             endpoint_updates_task,
@@ -644,9 +653,24 @@ impl Conn {
         Ok(PeerPath::derp_relay(peer.preferred_derp))
     }
 
+    /// Resolves once the pump task has stopped. [`Conn::close`] only asks the
+    /// pump to stop: a pump in the middle of a poll on another thread may still
+    /// encapsulate packets the netstack produced meanwhile, and hand them to
+    /// the transport. After this resolves nothing more is encapsulated, and
+    /// later writes are dropped. Datagrams already handed to the transport may
+    /// still be sent by it.
+    pub async fn wait_closed(&self) {
+        let mut stopped = self.pump_stopped.clone();
+        while stopped.changed().await.is_ok() {}
+    }
+
     /// Shut down the tunnel: abort the pump task. Idempotent. The netstack is
     /// torn down when this `Conn` drops (its driver task ends when the inbound
     /// sender and command channel are dropped).
+    ///
+    /// Not a send barrier: a write racing `close()` may still be sent. Await
+    /// [`Conn::wait_closed`] when that matters, and never rely on `close()` to
+    /// keep data from a peer.
     pub fn close(&self) {
         if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;

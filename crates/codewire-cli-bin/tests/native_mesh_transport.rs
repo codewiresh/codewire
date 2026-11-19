@@ -778,6 +778,12 @@ async fn assert_peer_transport_loss_fails_closed(
     // packet owner. This distinguishes transport loss from peer revocation.
     dial.conn.close();
     assert!(dial.conn.probe_peer_path(&target).is_err());
+    // close() only asks the pump to stop: a pump mid-poll on the other worker
+    // thread could still encapsulate a write racing it (#5500). Write only
+    // once it has stopped, so the bytes below can't leave the dialer.
+    tokio::time::timeout(Duration::from_secs(30), dial.conn.wait_closed())
+        .await
+        .expect("the dial pump did not stop after close");
     let _ = remote.write_all(b"after-loss").await;
     let mut after = [0_u8; 10];
     match tokio::time::timeout(Duration::from_millis(300), worker.read(&mut after)).await {

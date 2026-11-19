@@ -403,6 +403,35 @@ async fn channel_shim_tunnel_reports_node() {
 }
 
 #[tokio::test]
+async fn wait_closed_resolves_only_once_the_pump_has_stopped() {
+    let secret = StaticSecret::random_from_rng(OsRng);
+    // Both channel ends stay alive, so the pump runs until close().
+    let (out_tx, _out_rx) = mpsc::unbounded_channel::<WgDatagram>();
+    let (_in_tx, in_rx) = mpsc::unbounded_channel::<WgDatagram>();
+    let transport = Transport {
+        to_transport: out_tx,
+        from_transport: in_rx,
+        peer_updates: None,
+        path_probe: None,
+        local_endpoint_updates: None,
+    };
+    let conn = Conn::new(conn_opts(&secret, A_IP), transport).expect("Conn");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), conn.wait_closed())
+            .await
+            .is_err(),
+        "a running pump counted as stopped"
+    );
+    conn.close();
+    tokio::time::timeout(Duration::from_secs(30), conn.wait_closed())
+        .await
+        .expect("the pump did not stop after close");
+    tokio::time::timeout(Duration::from_secs(30), conn.wait_closed())
+        .await
+        .expect("a stopped pump stays stopped");
+}
+
+#[tokio::test]
 async fn transport_local_endpoint_updates_republish_node() {
     let secret = StaticSecret::random_from_rng(OsRng);
     let public = PublicKey::from(&secret);
