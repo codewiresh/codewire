@@ -269,10 +269,11 @@ async fn each_read_records_its_outcome_on_an_exported_span() {
             ),
     )
     .await;
-    let closed = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        format!("http://{}", listener.local_addr().unwrap())
-    };
+    // Bound and never listening: the port stays this test's own, so no test
+    // running beside it can be given it, and every connection is refused.
+    let refusing = tokio::net::TcpSocket::new_v4().unwrap();
+    refusing.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let closed = format!("http://{}", refusing.local_addr().unwrap());
 
     for origin in [
         format!("{}/ok", upstream.origin),
