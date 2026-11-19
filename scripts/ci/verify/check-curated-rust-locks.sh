@@ -47,6 +47,11 @@ check_workspace() {
     } || {
       grep -qF 'failed to download' <<<"$output" \
         && grep -qF 'attempting to make an HTTP request, but --offline was specified' <<<"$output"
+    } || {
+      # A locked version newer than this runner's cached index (heapless 0.9.4,
+      # published the day before the 2026-11-19 lock bump, #5441).
+      grep -qF 'failed to select a version for the requirement' <<<"$output" \
+        && grep -qF 'offline mode' <<<"$output"
     }; then
       printf '[curated-rust-locks] %s: populating exact locked Cargo inputs\n' "$name"
       "$CARGO_BIN" fetch --locked --manifest-path "$stage/Cargo.toml"

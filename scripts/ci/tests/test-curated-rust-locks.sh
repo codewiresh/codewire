@@ -74,6 +74,11 @@ case "${1:-}" in
         printf '%s\n\n%s\n' \
           'error: failed to download `exact-registry-crate v1.2.3`' \
           'Caused by: attempting to make an HTTP request, but --offline was specified' >&2
+      elif [ "${FAKE_CARGO_OFFLINE_ERROR:-git}" = stale-index ]; then
+        printf '%s\n%s\n%s\n' \
+          'error: failed to select a version for the requirement `heapless = "^0.9"` (locked to 0.9.4)' \
+          'candidate versions found which didn'"'"'t match: 0.9.3' \
+          'note: offline mode (via `--offline`) can sometimes cause surprising resolution failures' >&2
       else
         printf '%s\n' \
           "can't checkout from 'https://example.invalid/exact.git': you are in the offline mode (--offline)" >&2
@@ -123,6 +128,23 @@ grep -qF '[curated-rust-locks] cold-registry: populating exact locked Cargo inpu
 grep -qF '[curated-rust-locks] cold-registry: OK' "$cold_registry_log"
 grep -qF 'metadata --locked --offline' "$fake_state.calls"
 grep -qF 'fetch --locked' "$fake_state.calls"
+test "$(grep -cF 'metadata --locked --offline' "$fake_state.calls")" -eq 2
+test "$(grep -cF 'fetch --locked' "$fake_state.calls")" -eq 1
+
+# A locked version newer than the cached index fetches the index, then passes.
+fake_state="$TMP/fake-cargo-stale-index-state"
+stale_index_dir="$TMP/stale-index"
+mkdir -p "$stale_index_dir"
+cp "$ROOT/deployments/docker/derp.Cargo.toml" "$stale_index_dir/stale-index.Cargo.toml"
+cp "$ROOT/deployments/docker/derp.Cargo.lock" "$stale_index_dir/stale-index.Cargo.lock"
+stale_index_log="$TMP/stale-index.log"
+FAKE_CARGO_STATE="$fake_state" \
+  FAKE_CARGO_OFFLINE_ERROR=stale-index \
+  CARGO_BIN="$fake_cargo" \
+  CURATED_RUST_MANIFEST_DIR="$stale_index_dir" \
+  "$GUARD" >"$stale_index_log"
+grep -qF '[curated-rust-locks] stale-index: populating exact locked Cargo inputs' "$stale_index_log"
+grep -qF '[curated-rust-locks] stale-index: OK' "$stale_index_log"
 test "$(grep -cF 'metadata --locked --offline' "$fake_state.calls")" -eq 2
 test "$(grep -cF 'fetch --locked' "$fake_state.calls")" -eq 1
 
