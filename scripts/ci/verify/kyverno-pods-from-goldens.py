@@ -45,7 +45,12 @@ LOCAL_ONLY = ("identity-free-sandboxtemplate-runc",)
 # drift then requires every cluster's policy to admit it. Forgetting is
 # refused: while this names any golden, check-policy-drift.sh fails every tree
 # once codewire/deploy main sets CODEWIRE_HOSTED_EGRESS_ENABLED to true.
-HOSTED_EGRESS = ("warm-pool-broker-sandboxtemplate",)
+HOSTED_EGRESS = (
+    "warm-pool-broker-sandboxtemplate",
+    # A broker-mode per-environment template, standard and confidential (#5002).
+    "environment-broker-sandboxtemplate",
+    "confidential-broker-sandboxtemplate",
+)
 PLACEHOLDER_REGISTRY = "registry.example.invalid/"
 # A host, with an optional port and no scheme or path.
 REGISTRY = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?$")
