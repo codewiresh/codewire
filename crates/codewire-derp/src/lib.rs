@@ -14,6 +14,7 @@
 //! run-product-verification.sh).
 
 mod admission;
+mod certificates;
 mod runner;
 pub use admission::{
     CHECK_NODE_KEY_PATH, HttpKeyVerifier, KeyVerifier, Verdict, check_node_key_body,
@@ -21,6 +22,7 @@ pub use admission::{
 pub use runner::run_from_env;
 
 use admission::ClientAdmission;
+pub use certificates::{Certificates, PublicCertificate, RELOAD_INTERVAL, Reload};
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Error as IoError, ErrorKind};
@@ -633,16 +635,33 @@ async fn connect_mesh_plain(relay: Relay, addr: SocketAddr, host: &str) -> Resul
 }
 
 pub fn self_signed_tls_config(hosts: &[String]) -> Result<ServerConfig> {
+    tls_config(hosts, None).map(|(config, _)| config)
+}
+
+/// The TLS listener's configuration: a self-signed certificate for `hosts`,
+/// made now, and when `public` is given, that certificate for a client asking
+/// for its name (see [`Certificates`]). The returned resolver is the one to
+/// [`Certificates::reload`]; nothing is read from the public files until then.
+pub fn tls_config(
+    hosts: &[String],
+    public: Option<PublicCertificate>,
+) -> Result<(ServerConfig, Arc<Certificates>)> {
     let subject_alt_names = normalized_tls_hosts(hosts);
     let CertifiedKey { cert, key_pair } = rcgen::generate_simple_self_signed(subject_alt_names)
         .map_err(|err| Error::Tls(err.to_string()))?;
-    let certs = vec![cert.der().clone()];
     let key = PrivateKeyDer::try_from(key_pair.serialize_der())
         .map_err(|err| Error::Tls(err.to_string()))?;
-    ServerConfig::builder()
+    let fallback = rustls::sign::CertifiedKey::from_der(
+        vec![cert.der().clone()],
+        key,
+        &rustls::crypto::ring::default_provider(),
+    )
+    .map_err(|err| Error::Tls(err.to_string()))?;
+    let certificates = Arc::new(Certificates::new(Arc::new(fallback), public));
+    let config = ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|err| Error::Tls(err.to_string()))
+        .with_cert_resolver(certificates.clone());
+    Ok((config, certificates))
 }
 
 fn normalized_tls_hosts(hosts: &[String]) -> Vec<String> {

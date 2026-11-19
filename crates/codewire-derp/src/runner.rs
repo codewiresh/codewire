@@ -4,8 +4,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use crate::{
-    HttpKeyVerifier, MeshKey, Relay, self_signed_tls_config, serve_mesh_discovery, serve_plain,
-    serve_stun, serve_tls,
+    Certificates, HttpKeyVerifier, MeshKey, PublicCertificate, RELOAD_INTERVAL, Relay, Reload,
+    serve_mesh_discovery, serve_plain, serve_stun, serve_tls, tls_config,
 };
 use codewire_tailnet::derp::NodePrivate;
 use rand::rngs::OsRng;
@@ -51,7 +51,12 @@ pub async fn run_from_env() -> Result<(), Box<dyn std::error::Error + Send + Syn
 
     if let Some(addr) = tls_addr {
         let listener = TcpListener::bind(addr).await?;
-        let tls_config = self_signed_tls_config(&tls_hosts()?)?;
+        let (tls_config, certificates) = tls_config(&tls_hosts()?, public_certificate()?)?;
+        if let Some(hostname) = certificates.public_hostname() {
+            tracing::info!(%hostname, "codewire derp tls serves a public certificate for its public name");
+            log_reload(&certificates, certificates.reload());
+            tasks.spawn(reload_certificates(certificates.clone()));
+        }
         let relay = relay.clone();
         tracing::info!(listen_addr = %addr, public_key = ?relay.public_key(), "codewire derp tls listener started");
         tasks.spawn(serve_tls(listener, relay, tls_config));
@@ -118,6 +123,52 @@ fn stun_listen_addr() -> Result<Option<SocketAddr>, Box<dyn std::error::Error + 
         return Ok(None);
     }
     Ok(Some(format!("0.0.0.0:{port}").parse()?))
+}
+
+/// The public certificate's three settings, all or none (#4000). None set
+/// leaves the listener exactly as before: self-signed for `TLS_HOSTS` only.
+fn public_certificate()
+-> Result<Option<PublicCertificate>, Box<dyn std::error::Error + Send + Sync>> {
+    public_certificate_from(|name| env::var(name).ok())
+}
+
+fn public_certificate_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> Result<Option<PublicCertificate>, Box<dyn std::error::Error + Send + Sync>> {
+    let setting = |name: &str| get(name).filter(|value| !value.trim().is_empty());
+    match (
+        setting("TLS_PUBLIC_HOSTNAME"),
+        setting("TLS_PUBLIC_CERT_FILE"),
+        setting("TLS_PUBLIC_KEY_FILE"),
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(hostname), Some(cert_file), Some(key_file)) => Ok(Some(PublicCertificate {
+            hostname: hostname.trim().to_owned(),
+            cert_file: cert_file.into(),
+            key_file: key_file.into(),
+        })),
+        _ => Err("TLS_PUBLIC_HOSTNAME, TLS_PUBLIC_CERT_FILE and TLS_PUBLIC_KEY_FILE are set together or not at all".into()),
+    }
+}
+
+/// Reads the public certificate's files again every [`RELOAD_INTERVAL`], so a
+/// renewal is served without a restart.
+async fn reload_certificates(certificates: Arc<Certificates>) -> crate::Result<()> {
+    loop {
+        tokio::time::sleep(RELOAD_INTERVAL).await;
+        log_reload(&certificates, certificates.reload());
+    }
+}
+
+fn log_reload(certificates: &Certificates, outcome: Reload) {
+    let hostname = certificates.public_hostname().unwrap_or_default();
+    match outcome {
+        Reload::Loaded => tracing::info!(%hostname, "codewire derp tls public certificate loaded"),
+        Reload::Failed(error) => {
+            tracing::warn!(%hostname, %error, "codewire derp tls public certificate not loaded; the previous one stays")
+        }
+        Reload::NotConfigured | Reload::Unchanged => {}
+    }
 }
 
 fn tls_hosts() -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
@@ -187,4 +238,64 @@ async fn shutdown_signal() -> std::io::Result<()> {
 #[cfg(not(unix))]
 async fn shutdown_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(values: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let values: Vec<(String, String)> = values
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        move |name| {
+            values
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+        }
+    }
+
+    #[test]
+    fn the_public_certificate_is_configured_by_all_three_settings_or_none() {
+        assert_eq!(public_certificate_from(settings(&[])).unwrap(), None);
+        assert_eq!(
+            public_certificate_from(settings(&[
+                ("TLS_PUBLIC_HOSTNAME", " "),
+                ("TLS_PUBLIC_CERT_FILE", "")
+            ]))
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            public_certificate_from(settings(&[
+                ("TLS_PUBLIC_HOSTNAME", "derp.example.test"),
+                ("TLS_PUBLIC_CERT_FILE", "/tls/tls.crt"),
+                ("TLS_PUBLIC_KEY_FILE", "/tls/tls.key"),
+            ]))
+            .unwrap(),
+            Some(PublicCertificate {
+                hostname: "derp.example.test".to_owned(),
+                cert_file: "/tls/tls.crt".into(),
+                key_file: "/tls/tls.key".into(),
+            })
+        );
+        for partial in [
+            &[("TLS_PUBLIC_HOSTNAME", "derp.example.test")][..],
+            &[
+                ("TLS_PUBLIC_CERT_FILE", "/tls/tls.crt"),
+                ("TLS_PUBLIC_KEY_FILE", "/tls/tls.key"),
+            ][..],
+            &[
+                ("TLS_PUBLIC_HOSTNAME", "derp.example.test"),
+                ("TLS_PUBLIC_KEY_FILE", "/tls/tls.key"),
+            ][..],
+        ] {
+            assert!(
+                public_certificate_from(settings(partial)).is_err(),
+                "{partial:?}"
+            );
+        }
+    }
 }

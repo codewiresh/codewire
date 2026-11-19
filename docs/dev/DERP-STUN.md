@@ -181,6 +181,35 @@ either way; admission stops strangers using the relay as free bandwidth.
 `cargo run -p codewire-derp --example derp_probe -- derp.example.com:443`
 connects with a fresh, unregistered key and reports `admitted` or `refused`.
 
+## The relay's TLS listener
+
+The relay's own TLS listener (`TLS_PORT`, 8443 in the manifests) is separate
+from the public edge, which terminates TLS for the advertised `DERP_HOST` and
+forwards to the relay's plain HTTP port. On Dev and Production nothing in the
+platform dials 8443 today; local and test clients reach it with
+`DERP_INSECURE` and skip the certificate check.
+
+- **The self-signed certificate.** At start the relay makes a self-signed
+  certificate for the names in `TLS_HOSTS`, its in-cluster names, and serves it
+  to every client, as before. Without the three settings below, that is all it
+  does.
+- **The public certificate** (#4000). A broker-mode Sandbox dials the relay
+  inside the cluster but verifies it as `DERP_HOST`, against the public roots,
+  and refuses a relay it can't verify. So a deployment with a public name gives
+  the relay a publicly trusted certificate for that name: `TLS_PUBLIC_HOSTNAME`,
+  and PEM files `TLS_PUBLIC_CERT_FILE` (the chain, end-entity first) and
+  `TLS_PUBLIC_KEY_FILE`, all three or none. A client that asks for that name
+  gets that certificate. A client asking for any other name, or for none, gets
+  the self-signed one, so every caller of today is unchanged.
+- **Renewal.** The relay reads the files again every 60 s and serves a changed
+  certificate from then on, without a restart, which would drop every relayed
+  connection. Its key must match the chain's end-entity certificate.
+- **Failures.** Files that are missing or don't parse never stop the relay. It
+  keeps the last good public certificate, or until there is one the
+  self-signed one, and logs a warning. A broker-mode client asking for the
+  public name then fails its own verification. Setting only one or two of the
+  three stops the relay at start.
+
 ## Coordinator sessions and node keys
 
 A peer's coordinator session names its node by the session, so a peer whose
@@ -374,6 +403,9 @@ already answered rejects it as a replay, so a slow response stays valid.
 | `DERP_INSECURE` | Kind only | `true` | Tells clients to skip the relay's certificate check; never set on a real deployment |
 | `DERP_MESH_KEY` | secret | 64-char hex | Shared key for multi-replica DERP mesh |
 | `DERP_VERIFY_CLIENT_URLS` | DERP deployment | comma-separated `http://host:port` | Coordinator and Mesh node-key lookups; unset serves every client |
+| `TLS_HOSTS` | DERP deployment | comma-separated in-cluster names | Names of the TLS listener's self-signed certificate |
+| `TLS_PUBLIC_HOSTNAME` | DERP deployment | the `DERP_HOST` value | With the two files below: the name the listener serves its public certificate for ("The relay's TLS listener") |
+| `TLS_PUBLIC_CERT_FILE`, `TLS_PUBLIC_KEY_FILE` | DERP deployment | PEM paths, such as a mounted cert-manager Secret's `tls.crt` and `tls.key` | The public certificate and its key, read again every 60 s |
 | `COORDINATOR_DERP_VERIFY_ADDR` | coordinator deployment | `0.0.0.0:8097` | Coordinator's node-key lookup listener |
 | `CODEWIRE_MESH_DERP_VERIFY_ADDR` | Mesh chart (`mesh.derpVerifyPort`) | `0.0.0.0:8097` | Mesh's node-key lookup listener |
 
