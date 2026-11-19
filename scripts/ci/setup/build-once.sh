@@ -638,9 +638,35 @@ LEGS=(
 leg_archive() {
   # The workspace test archive: every package's tests, default features,
   # published as cargo-nextest writes it (no debug information: the header).
+  # Cargo's timings show which crates hold the leg up (codewire#5311).
   local out="$1"
   phase 'test archive' env CARGO_TARGET_DIR="$work/targets/archive" \
-    cargo nextest archive --locked --workspace --all-targets --archive-file "$out/archive.tar.zst"
+    cargo nextest archive --locked --workspace --all-targets --timings --archive-file "$out/archive.tar.zst"
+  timings_summary "$work/targets/archive/cargo-timings/cargo-timing.html" || true
+}
+
+# timings_summary HTML: the units that ran longest and the last to finish, from
+# the data Cargo's --timings report embeds. Measurement only; it never fails
+# a leg.
+timings_summary() {
+  [ -f "$1" ] || return 0
+  python3 -I - "$1" <<'PY'
+import json, re, sys
+html = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+match = re.search(r"const UNIT_DATA = (\[.*?\]);\n", html, re.S)
+if not match:
+    print("[build-once] timings: no unit data in the report")
+    sys.exit(0)
+units = json.loads(match.group(1))
+def label(unit):
+    return f"{unit['name']} {unit.get('target', '').strip()}".strip()
+end = max((u["start"] + u["duration"] for u in units), default=0)
+print(f"[build-once] timings: {len(units)} units, {end:.1f} s from the first to the last")
+for unit in sorted(units, key=lambda u: -u["duration"])[:12]:
+    print(f"[build-once] timings: longest {unit['duration']:6.1f} s at {unit['start']:6.1f} s  {label(unit)}")
+for unit in sorted(units, key=lambda u: -(u["start"] + u["duration"]))[:8]:
+    print(f"[build-once] timings: last    ends {unit['start'] + unit['duration']:6.1f} s ({unit['duration']:5.1f} s)  {label(unit)}")
+PY
 }
 
 # The feature-graph and local-vmm shards (run-product-verification.sh's
