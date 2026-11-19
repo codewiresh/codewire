@@ -13,6 +13,11 @@ readonly SCRIPT_DIRECTORY
 SOURCE_ROOT="$(cd -- "$SCRIPT_DIRECTORY/../../.." && pwd -P)"
 readonly SOURCE_ROOT
 readonly STOCK_SSH_WORKLOAD_SOURCE="$SCRIPT_DIRECTORY/stock-ssh-workload.sh"
+# SMOKE_ROOT and SMOKE_HOME are the library's; the managed mode runs cw
+# through it (#5220).
+# shellcheck source=scripts/ci/verify/lib/local-smoke-isolation.sh
+source "$SCRIPT_DIRECTORY/lib/local-smoke-isolation.sh"
+SMOKE_ARGUMENTS=("$@")
 
 CW_BIN=''
 DATA_PLANE_SMOKE_BIN=''
@@ -26,10 +31,8 @@ ORIGINAL_ARTIFACT_LOCK=''
 ADVANCED_ARTIFACT_ROOT=''
 ADVANCED_ARTIFACT_LOCK=''
 SMOKE_PARENT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-SMOKE_ROOT=''
 CANARY_SPILL=''
 declare -A CANARY_VALUES=()
-SMOKE_HOME=''
 STATE_ROOT=''
 WORKSPACE=''
 MOUNT_SOURCE=''
@@ -114,15 +117,6 @@ APP_SECRET_USER_COLLISION_CANARY=''
 APP_SECRET_USER_PRECEDENCE_CANARY=''
 APP_SECRET_USER_ONLY_SHA=''
 APP_SECRET_USER_COLLISION_SHA=''
-KEYRING_ROOT=''
-KEYRING_RUNTIME=''
-KEYRING_RUNTIME_PARENT=''
-KEYRING_CONFIG=''
-KEYRING_DATA=''
-KEYRING_CONTROL=''
-KEYRING_DBUS_ADDRESS=''
-KEYRING_DBUS_PID=''
-KEYRING_DAEMON_PID=''
 CREATE_ACCESS_ARGS=()
 CREATE_DOCKER_ARGS=()
 DIRECT_SHARE_PIDS=()
@@ -196,7 +190,11 @@ scanner repository, https://github.com/noeljackson/supplychain.
 With --managed-credential-broker, it instead runs the focused protected-store
 product proof. That mode requires a specially featured cw binary named exactly
 cw-local-credential-broker-smoke, an isolated Secret Service implementation,
-and a private tmpfs-backed XDG runtime. It also requires
+a private tmpfs-backed XDG runtime, and passwordless sudo for the mount
+namespace of scripts/ci/verify/lib/local-smoke-isolation.sh, which runs every
+cw it starts in one systemd user scope with a private D-Bus and Secret
+Service, and hides the host's runtime directory, keyrings, SSH keys and
+Codewire state. It also requires
 --workspace-image-import-bin and the exact local image receipt produced by
 verify-workspace-image.sh in this clean source tree. The importer verifies and
 pins that same OCI artifact in the fresh synthetic supervisor; no image override,
@@ -456,6 +454,12 @@ if (( MANAGED_AGENT_UPDATE_RUNTIME_SEEN + MANAGED_AGENT_UPDATE_IMAGE_SEEN + MANA
   MANAGED_AGENT_UPDATE=1
 fi
 
+# The managed mode runs inside one systemd user scope, so stopping it ends
+# every service cw detached, whatever happened.
+if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
+  smoke_run_in_scope native -- "$0" "${SMOKE_ARGUMENTS[@]}"
+fi
+
 # The Forgejo-hosted repository fixture is CODEWIRE_FORGEJO_FIXTURE_REPOSITORY on
 # the forge GITHUB_SERVER_URL names, pinned to GITEA_COMMIT.
 [[ -n "${GITHUB_SERVER_URL:-}" ]] || die 'GITHUB_SERVER_URL: set to the Forgejo base URL'
@@ -576,38 +580,41 @@ SMOKE_ROOT="$(realpath -e -- "$SMOKE_ROOT")"
 # value it copies out is never scanned as if the smoke had left it there.
 CANARY_SPILL="$(mktemp -d "$SMOKE_PARENT/.cwn-spill.XXXXXX")"
 chmod 0700 "$CANARY_SPILL"
-SMOKE_HOME="$SMOKE_ROOT/h"
 STATE_ROOT="$SMOKE_ROOT/s"
-WORKSPACE="$SMOKE_ROOT/w"
 PLATFORM_CONFIG="$SMOKE_ROOT/c"
 TRIPWIRE="$SMOKE_ROOT/fallback-invoked"
 TRANSCRIPT="$SMOKE_ROOT/transcript"
 SOURCE_HOOK_MARKER="$SMOKE_ROOT/source-hook-invoked"
 SOURCE_CREDENTIAL_MARKER="$SMOKE_ROOT/source-credential-helper-invoked"
-CREDENTIAL_ROOT="$SMOKE_HOME/.codewire/credentials-v1"
-KEYRING_ROOT="$SMOKE_ROOT/keyring"
-KEYRING_CONFIG="$KEYRING_ROOT/config"
-KEYRING_DATA="$KEYRING_ROOT/data"
-KEYRING_CONTROL="$KEYRING_ROOT/control"
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
-  KEYRING_RUNTIME_PARENT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-  require_absolute_canonical_dir 'XDG runtime parent' "$KEYRING_RUNTIME_PARENT"
-  [[ "$(stat -c '%u' "$KEYRING_RUNTIME_PARENT")" == "$(id -u)" &&
-     "$(stat -c '%a' "$KEYRING_RUNTIME_PARENT")" == 700 ]] ||
-    die 'XDG runtime parent must be private and owned by the smoke user'
-  [[ "$(findmnt -nro FSTYPE -T "$KEYRING_RUNTIME_PARENT")" == tmpfs ]] ||
-    die 'XDG runtime parent must be backed by tmpfs'
-  # Leave room for the broker-owned provider home and SSH agent socket. The
-  # former descriptive prefix exceeded sockaddr_un even under /run/user/1000.
-  KEYRING_RUNTIME_TEMPLATE="$KEYRING_RUNTIME_PARENT/.cwn-XXXXXX"
-  (( ${#KEYRING_RUNTIME_TEMPLATE} + ${#SSH_AGENT_SOCKET_SUFFIX} < LINUX_SUN_PATH_BYTES )) ||
-    die 'XDG runtime parent is too long for the private SSH agent socket'
-  KEYRING_RUNTIME="$(mktemp -d "$KEYRING_RUNTIME_TEMPLATE")"
-  chmod 0700 "$KEYRING_RUNTIME"
-  KEYRING_RUNTIME="$(realpath -e -- "$KEYRING_RUNTIME")"
-  KEYRING_DBUS_ADDRESS="unix:path=$KEYRING_RUNTIME/bus"
+  # The library makes HOME and the workspace, starts a private D-Bus and
+  # Secret Service, and proves its mount namespace before any cw runs.
+  log 'starting a private D-Bus and Secret Service instance'
+  smoke_isolation_begin "$SMOKE_ROOT"
+  trap smoke_isolation_end EXIT
+  # Leave room for the broker-owned provider home and SSH agent socket.
+  (( ${#SMOKE_RUNTIME} + ${#SSH_AGENT_SOCKET_SUFFIX} < LINUX_SUN_PATH_BYTES )) ||
+    die 'the smoke runtime directory is too long for the private SSH agent socket'
+  WORKSPACE="$SMOKE_WORKSPACE"
+  mkdir -m 0700 "$STATE_ROOT" "$PLATFORM_CONFIG" "$SMOKE_ROOT/bin"
+  # The isolation gives cw only paths in the smoke root, so cw runs a copy of
+  # the caller's artifact set, with the sealed cw runtime beside its lock.
+  mkdir -m 0700 "$SMOKE_ROOT/i"
+  cp -a -- "$ARTIFACT_ROOT" "$SMOKE_ROOT/i/${ARTIFACT_ROOT##*/}"
+  cp -p -- "$ARTIFACT_LOCK" "$SMOKE_ROOT/i/${ARTIFACT_LOCK##*/}"
+  for staged in cw-runtime.lock.json runtime.pack; do
+    [[ ! -e "${ARTIFACT_LOCK%/*}/$staged" ]] || cp -p -- "${ARTIFACT_LOCK%/*}/$staged" "$SMOKE_ROOT/i/$staged"
+  done
+  ARTIFACT_ROOT="$SMOKE_ROOT/i/${ARTIFACT_ROOT##*/}"
+  ARTIFACT_LOCK="$SMOKE_ROOT/i/${ARTIFACT_LOCK##*/}"
+  ORIGINAL_ARTIFACT_ROOT="$ARTIFACT_ROOT"
+  ORIGINAL_ARTIFACT_LOCK="$ARTIFACT_LOCK"
+else
+  SMOKE_HOME="$SMOKE_ROOT/h"
+  WORKSPACE="$SMOKE_ROOT/w"
+  mkdir -m 0700 "$SMOKE_HOME" "$STATE_ROOT" "$WORKSPACE" "$PLATFORM_CONFIG" "$SMOKE_ROOT/bin"
 fi
-mkdir -m 0700 "$SMOKE_HOME" "$STATE_ROOT" "$WORKSPACE" "$PLATFORM_CONFIG" "$SMOKE_ROOT/bin"
+CREDENTIAL_ROOT="$SMOKE_HOME/.codewire/credentials-v1"
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   workspace_input="$(env -i PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" LC_ALL=C \
     PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIRECTORY/workspace-image-artifact.py" \
@@ -850,26 +857,44 @@ ports:
     guest_port: 3000
 EOF
 
+readonly NO_EGRESS_PROXIES=(
+  HTTP_PROXY=http://127.0.0.1:1
+  HTTPS_PROXY=http://127.0.0.1:1
+  ALL_PROXY=http://127.0.0.1:1
+  'NO_PROXY=127.0.0.1,localhost'
+)
+
+# Set the caller's SMOKE_EXTRA_ENVIRONMENT to what the managed mode's cw
+# sees beyond the isolation library's own list, plus "$@".
+managed_cw_environment() {
+  SMOKE_EXTRA_ENVIRONMENT=(
+    LOGNAME="$(id -un)"
+    SHELL=/bin/sh
+    TERM=xterm-256color
+    LC_ALL=C
+    CW_CONFIG_DIR="$PLATFORM_CONFIG"
+    CODEWIRE_NATIVE_STATE_ROOT="$STATE_ROOT"
+    CODEWIRE_NATIVE_ARTIFACT_ROOT="$ARTIFACT_ROOT"
+    CODEWIRE_NATIVE_ARTIFACT_LOCK="$ARTIFACT_LOCK"
+    CODEWIRE_LOCAL_CREDENTIAL_ROOT="$CREDENTIAL_ROOT"
+    CODEWIRE_SERVER_URL=http://127.0.0.1:1
+    CODEWIRE_API_KEY=synthetic-platform-key-must-not-be-used
+    "$@"
+  )
+}
+
 cw_isolated() {
   (
     local -a proxy_environment=()
-    local -a credential_environment=()
     if [[ "$ALLOW_REGISTRY_EGRESS" -eq 0 ]]; then
-      proxy_environment=(
-        HTTP_PROXY=http://127.0.0.1:1
-        HTTPS_PROXY=http://127.0.0.1:1
-        ALL_PROXY=http://127.0.0.1:1
-        'NO_PROXY=127.0.0.1,localhost'
-      )
+      proxy_environment=("${NO_EGRESS_PROXIES[@]}")
     fi
     if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
-      credential_environment=(CODEWIRE_LOCAL_CREDENTIAL_ROOT="$CREDENTIAL_ROOT")
-      if [[ -n "$KEYRING_DBUS_PID" && -n "$KEYRING_DAEMON_PID" ]]; then
-        credential_environment+=(
-          XDG_RUNTIME_DIR="$KEYRING_RUNTIME"
-          DBUS_SESSION_BUS_ADDRESS="$KEYRING_DBUS_ADDRESS"
-        )
-      fi
+      local -a SMOKE_EXTRA_ENVIRONMENT
+      managed_cw_environment PATH="$SMOKE_ROOT/bin:/usr/bin:/bin" "${proxy_environment[@]}"
+      smoke_cw /usr/bin/timeout --foreground --signal=TERM --kill-after=5s \
+        "${CW_COMMAND_TIMEOUT_SECONDS}s" "$CW_BIN" "$@"
+      exit
     fi
     cd "$WORKSPACE"
     env -i \
@@ -886,7 +911,6 @@ cw_isolated() {
       CODEWIRE_NATIVE_ARTIFACT_LOCK="$ARTIFACT_LOCK" \
       CODEWIRE_SERVER_URL='http://127.0.0.1:1' \
       CODEWIRE_API_KEY='synthetic-platform-key-must-not-be-used' \
-      "${credential_environment[@]}" \
       "${proxy_environment[@]}" \
       /usr/bin/timeout --foreground --signal=TERM --kill-after=5s \
       "${CW_COMMAND_TIMEOUT_SECONDS}s" \
@@ -2393,9 +2417,10 @@ EOF
 
 run_application_secret_pty() {
   local expected="$1" personal_expected="$2" collision_expected="$3" phase="$4" pty_log attempt
+  local -a SMOKE_EXTRA_ENVIRONMENT
   pty_log="$SMOKE_ROOT/app-pty-$phase.log"
+  managed_cw_environment PATH="$SMOKE_ROOT/bin:/usr/bin:/bin" "${NO_EGRESS_PROXIES[@]}"
   if ! (
-    cd "$WORKSPACE"
     {
       printf 'test -t 0 && test -t 1 && /bin/sh /workspace/fixtures/app-secrets-check.sh %s %s %s %s && printf "app-secret-pty-ok\\n" || exit 77\nexit\n' \
         "$expected" "$personal_expected" "$collision_expected" "$phase"
@@ -2409,15 +2434,7 @@ run_application_secret_pty() {
         sleep 0.05
       done
       exit 1
-    } | env -i PATH="$SMOKE_ROOT/bin:/usr/bin:/bin" HOME="$SMOKE_HOME" USER="$(id -un)" \
-      LOGNAME="$(id -un)" SHELL='/bin/sh' TERM='xterm-256color' LC_ALL=C \
-      CW_CONFIG_DIR="$PLATFORM_CONFIG" CODEWIRE_NATIVE_STATE_ROOT="$STATE_ROOT" \
-      CODEWIRE_NATIVE_ARTIFACT_ROOT="$ARTIFACT_ROOT" CODEWIRE_NATIVE_ARTIFACT_LOCK="$ARTIFACT_LOCK" \
-      CODEWIRE_LOCAL_CREDENTIAL_ROOT="$CREDENTIAL_ROOT" XDG_RUNTIME_DIR="$KEYRING_RUNTIME" \
-      DBUS_SESSION_BUS_ADDRESS="$KEYRING_DBUS_ADDRESS" CODEWIRE_SERVER_URL='http://127.0.0.1:1' \
-      CODEWIRE_API_KEY='synthetic-platform-key-must-not-be-used' \
-      HTTP_PROXY='http://127.0.0.1:1' HTTPS_PROXY='http://127.0.0.1:1' ALL_PROXY='http://127.0.0.1:1' \
-      NO_PROXY='127.0.0.1,localhost' /usr/bin/timeout --foreground --signal=TERM --kill-after=5s 30s \
+    } | smoke_cw /usr/bin/timeout --foreground --signal=TERM --kill-after=5s 30s \
       /usr/bin/script -qefc "$CW_BIN shell" "$pty_log"
   ) >"$SMOKE_ROOT/app-pty-$phase.stdout" 2>"$SMOKE_ROOT/app-pty-$phase.stderr"; then
     tail -n 80 "$SMOKE_ROOT/app-pty-$phase.stderr" >&2
@@ -2500,7 +2517,7 @@ run_application_secret_smoke() {
   # shellcheck disable=SC2016 # These variables belong to the guest command.
   run_cw run --no-tty --env CW_NATIVE_PRECEDENCE=explicit-command-environment -- /bin/sh -lc \
     'test "$CW_NATIVE_PRECEDENCE" = explicit-command-environment'
-  [[ ! -e "$KEYRING_RUNTIME/codewire/workload-secrets-v1" ]] ||
+  [[ ! -e "$SMOKE_RUNTIME/codewire/workload-secrets-v1" ]] ||
     die 'application source updates created a second durable delivery store'
   if rg -qF "$APP_SECRET_CANARY_A" "$TRANSCRIPT" || rg -qF "$APP_SECRET_CANARY_B" "$TRANSCRIPT"; then
     die 'application smoke accidentally printed a selected value'
@@ -2515,18 +2532,11 @@ run_application_secret_smoke() {
 
 run_managed_credential_broker_smoke() {
   local stdout_file stderr_file
+  local -a SMOKE_EXTRA_ENVIRONMENT=(LOGNAME="$(id -un)" SHELL=/bin/sh TERM=xterm-256color LC_ALL=C)
   COMMAND_INDEX=$((COMMAND_INDEX + 1))
   stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
   stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
-  if ! env -i \
-    PATH='/usr/bin:/bin' \
-    HOME="$SMOKE_HOME" \
-    USER="$(id -un)" \
-    LOGNAME="$(id -un)" \
-    SHELL='/bin/sh' \
-    TERM='xterm-256color' \
-    LC_ALL=C \
-    /usr/bin/timeout --foreground --signal=TERM --kill-after=5s 300s \
+  if ! smoke_cw /usr/bin/timeout --foreground --signal=TERM --kill-after=5s 300s \
     "$CREDENTIAL_BRIDGE_SMOKE_BIN" \
       --state-root "$STATE_ROOT" \
       --artifact-root "$ARTIFACT_ROOT" \
@@ -2553,7 +2563,7 @@ run_managed_credential_broker_smoke() {
 
 run_native_managed_agent_smoke() {
   local stdout_file stderr_file journey expected_harness
-  local -a journey_args
+  local -a journey_args SMOKE_EXTRA_ENVIRONMENT
   journey="$SOURCE_ROOT/scripts/dev/test-cli-native-managed.py"
   expected_harness='scripts/dev/test-cli-native-managed.py'
   journey_args=(--cw "$CW_BIN" --environment "$ENVIRONMENT_ID")
@@ -2572,21 +2582,8 @@ run_native_managed_agent_smoke() {
   COMMAND_INDEX=$((COMMAND_INDEX + 1))
   stdout_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stdout"
   stderr_file="$SMOKE_ROOT/command-$COMMAND_INDEX.stderr"
-  if ! env -i \
-    PATH='/usr/bin:/bin' HOME="$SMOKE_HOME" USER="$(id -un)" LOGNAME="$(id -un)" \
-    SHELL='/bin/sh' TERM='xterm-256color' LC_ALL=C \
-    CW_CONFIG_DIR="$PLATFORM_CONFIG" \
-    CODEWIRE_NATIVE_STATE_ROOT="$STATE_ROOT" \
-    CODEWIRE_NATIVE_ARTIFACT_ROOT="$ARTIFACT_ROOT" \
-    CODEWIRE_NATIVE_ARTIFACT_LOCK="$ARTIFACT_LOCK" \
-    CODEWIRE_LOCAL_CREDENTIAL_ROOT="$CREDENTIAL_ROOT" \
-    XDG_RUNTIME_DIR="$KEYRING_RUNTIME" DBUS_SESSION_BUS_ADDRESS="$KEYRING_DBUS_ADDRESS" \
-    CODEWIRE_SERVER_URL='http://127.0.0.1:1' \
-    CODEWIRE_API_KEY='synthetic-platform-key-must-not-be-used' \
-    HTTP_PROXY='http://127.0.0.1:1' HTTPS_PROXY='http://127.0.0.1:1' \
-    ALL_PROXY='http://127.0.0.1:1' NO_PROXY='127.0.0.1,localhost' \
-    PYTHONDONTWRITEBYTECODE=1 \
-    /usr/bin/timeout --foreground --signal=TERM --kill-after=10s 1220s \
+  managed_cw_environment "${NO_EGRESS_PROXIES[@]}" PYTHONDONTWRITEBYTECODE=1
+  if ! smoke_cw /usr/bin/timeout --foreground --signal=TERM --kill-after=10s 1220s \
     python3 "$journey" "${journey_args[@]}" \
       >"$stdout_file" 2>"$stderr_file"; then
     cat "$stdout_file" "$stderr_file" >>"$TRANSCRIPT"
@@ -2671,91 +2668,11 @@ stop_exact_isolated_process() {
   wait "$pid" 2>/dev/null || true
 }
 
-keyring_service_ready() {
-  /usr/bin/busctl --address="$KEYRING_DBUS_ADDRESS" --no-pager \
-    status org.freedesktop.secrets >/dev/null 2>&1
-}
-
-start_isolated_keyring() {
-  mkdir -m 0700 \
-    "$KEYRING_ROOT" "$KEYRING_CONFIG" "$KEYRING_DATA" "$KEYRING_CONTROL"
-  [[ -d "$KEYRING_RUNTIME" && ! -L "$KEYRING_RUNTIME" &&
-     "$(stat -c '%u' "$KEYRING_RUNTIME")" == "$(id -u)" &&
-     "$(stat -c '%a' "$KEYRING_RUNTIME")" == 700 &&
-     "$(findmnt -nro FSTYPE -T "$KEYRING_RUNTIME")" == tmpfs ]] ||
-    die 'isolated keyring runtime is not a private tmpfs directory'
-  env -i PATH='/usr/bin:/bin' LC_ALL=C XDG_RUNTIME_DIR="$KEYRING_RUNTIME" \
-    /usr/bin/dbus-daemon --session --address="$KEYRING_DBUS_ADDRESS" \
-      --nofork --nopidfile >"$KEYRING_ROOT/dbus.stdout" 2>"$KEYRING_ROOT/dbus.stderr" &
-  KEYRING_DBUS_PID=$!
-  wait_for_exact_isolated_process \
-    "$KEYRING_DBUS_PID" /usr/bin/dbus-daemon "--address=$KEYRING_DBUS_ADDRESS" ||
-    die 'isolated D-Bus process identity drifted'
-  for _attempt in {1..200}; do
-    /usr/bin/busctl --address="$KEYRING_DBUS_ADDRESS" --no-pager \
-      status org.freedesktop.DBus >/dev/null 2>&1 && break
-    [[ -d "/proc/$KEYRING_DBUS_PID" ]] || break
-    sleep 0.05
-  done
-  if ! /usr/bin/busctl --address="$KEYRING_DBUS_ADDRESS" --no-pager \
-    status org.freedesktop.DBus >/dev/null 2>&1; then
-    tail -n 40 "$KEYRING_ROOT/dbus.stderr" >&2
-    die 'isolated D-Bus did not become ready'
-  fi
-
-  printf '%s' 'codewire-local-smoke-keyring-password' | env -i PATH='/usr/bin:/bin' LC_ALL=C \
-    XDG_RUNTIME_DIR="$KEYRING_RUNTIME" \
-    XDG_CONFIG_HOME="$KEYRING_CONFIG" \
-    XDG_DATA_HOME="$KEYRING_DATA" \
-    DBUS_SESSION_BUS_ADDRESS="$KEYRING_DBUS_ADDRESS" \
-    /usr/bin/gnome-keyring-daemon --foreground --unlock --components=secrets \
-      --control-directory="$KEYRING_CONTROL" \
-      >"$KEYRING_ROOT/keyring.stdout" 2>"$KEYRING_ROOT/keyring.stderr" &
-  KEYRING_DAEMON_PID=$!
-  wait_for_exact_isolated_process \
-    "$KEYRING_DAEMON_PID" /usr/bin/gnome-keyring-daemon \
-    "--control-directory=$KEYRING_CONTROL" ||
-    die 'isolated keyring process identity drifted'
-  for _attempt in {1..200}; do
-    keyring_service_ready && break
-    [[ -d "/proc/$KEYRING_DAEMON_PID" ]] || break
-    sleep 0.05
-  done
-  if ! keyring_service_ready; then
-    tail -n 40 "$KEYRING_ROOT/keyring.stderr" >&2
-    die 'isolated Secret Service did not become ready'
-  fi
-}
-
-stop_isolated_keyring() {
-  local failed=0
-  stop_exact_isolated_process \
-    "$KEYRING_DAEMON_PID" /usr/bin/gnome-keyring-daemon \
-    "--control-directory=$KEYRING_CONTROL" || failed=1
-  KEYRING_DAEMON_PID=''
-  stop_exact_isolated_process \
-    "$KEYRING_DBUS_PID" /usr/bin/dbus-daemon "--address=$KEYRING_DBUS_ADDRESS" || failed=1
-  KEYRING_DBUS_PID=''
-  [[ "$failed" -eq 0 ]]
-}
-
-remove_isolated_keyring_runtime() {
-  local expected_prefix
-  [[ -n "$KEYRING_RUNTIME" ]] || return 0
-  expected_prefix="$KEYRING_RUNTIME_PARENT/.cwn-"
-  [[ -n "$KEYRING_RUNTIME_PARENT" && "$KEYRING_RUNTIME" == "$expected_prefix"* &&
-     "${KEYRING_RUNTIME#"$expected_prefix"}" =~ ^[[:alnum:]]{6}$ &&
-     -d "$KEYRING_RUNTIME" && ! -L "$KEYRING_RUNTIME" &&
-     "$(stat -c '%u' "$KEYRING_RUNTIME")" == "$(id -u)" ]] || return 1
-  rm -rf -- "$KEYRING_RUNTIME"
-  KEYRING_RUNTIME=''
-  KEYRING_DBUS_ADDRESS=''
-}
-
+# Reads the smoke's private Secret Service, never the host's.
 secret_tool_isolated() {
   env -i PATH='/usr/bin:/bin' LC_ALL=C \
-    XDG_RUNTIME_DIR="$KEYRING_RUNTIME" \
-    DBUS_SESSION_BUS_ADDRESS="$KEYRING_DBUS_ADDRESS" \
+    XDG_RUNTIME_DIR="$SMOKE_RUNTIME" \
+    DBUS_SESSION_BUS_ADDRESS="$SMOKE_DBUS_ADDRESS" \
     /usr/bin/secret-tool "$@"
 }
 
@@ -3353,10 +3270,7 @@ cleanup() {
   if [[ "$status" -ne 0 ]] && ! terminate_remaining_owned_processes; then
     cleanup_status=1
   fi
-  if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]] && ! stop_isolated_keyring; then
-    cleanup_status=1
-  fi
-  if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]] && ! remove_isolated_keyring_runtime; then
+  if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]] && ! smoke_isolation_end; then
     cleanup_status=1
   fi
   if [[ "$status" -eq 0 && "$cleanup_status" -eq 0 ]]; then
@@ -3442,8 +3356,6 @@ jq -e --arg network "$MESH_NETWORK" --arg mesh_url "http://127.0.0.1:$MESH_PORT"
 ' "$LAST_STDOUT" >/dev/null || die 'standalone Mesh status drifted after default selection'
 
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
-  log 'starting a private D-Bus and Secret Service instance'
-  start_isolated_keyring
   CREDENTIAL_CANARY="$(mint_canary cwlocalbroker)"
   CREDENTIAL_REFRESH_CANARY="$(mint_canary cwlocalrefresh)"
   GITHUB_CREDENTIAL_CANARY="$(mint_canary ghu_cwlocalgithub)"
@@ -3783,7 +3695,7 @@ RUNNER_PID="$(native_database_value runner_pid)"
 [[ -z "$(find "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/generations" -name setup.raw -print -quit)" ]] ||
   die 'credential-free one-boot setup pack remained after readiness'
 if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
-  [[ ! -e "$KEYRING_RUNTIME/codewire/workload-secrets-v1" ]] ||
+  [[ ! -e "$SMOKE_RUNTIME/codewire/workload-secrets-v1" ]] ||
     die 'application selection created a second durable delivery store'
   # shellcheck disable=SC2016 # This variable belongs to the guest environment.
   run_cw run --no-tty -- /bin/sh -lc 'test -z "${CW_NATIVE_SMOKE_SECRET+x}"'
@@ -3965,7 +3877,9 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
     length == 1 and .[0].name == $name and .[0].is_default == true and .[0].entries == {}
   ' "$LAST_STDOUT" >/dev/null ||
     die 'the store did not keep exactly its empty default profile after deletion'
-  keyring_service_ready || die 'isolated Secret Service exited before deletion proof'
+  # The private Secret Service the deletion proof reads must still serve.
+  smoke_wait_ready "$SMOKE_KEYRING_PID" org.freedesktop.secrets ||
+    die 'isolated Secret Service exited before deletion proof'
   if secret_tool_isolated lookup \
     application codewire \
     service sh.codewire.credentials \
@@ -4021,7 +3935,8 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   terminate_exact_supervisor || die 'bounded supervisor teardown failed'
   [[ -z "$(owned_processes)" ]] ||
     die 'a native runtime or credential process remained after bounded teardown'
-  stop_isolated_keyring || die 'bounded isolated keyring teardown failed'
+  # The isolation ends in cleanup, after the Mesh stops through it; a
+  # teardown that fails there fails the smoke.
   log 'PASS (Linux/KVM isolated protected credential-broker product flow)'
   exit 0
 fi

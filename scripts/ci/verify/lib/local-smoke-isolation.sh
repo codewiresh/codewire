@@ -16,6 +16,17 @@
 #   service and local VM supervisor (parent 1); they stay in the scope's
 #   cgroup, so stopping the scope ends them, and the scope's own process list
 #   names them exactly, never a command-line match;
+# - a few more variables of the smoke's choosing, from SMOKE_EXTRA_ENVIRONMENT
+#   (NAME=VALUE entries, usually a local for one call): only the names in
+#   SMOKE_EXTRA_NAMES, a PATH of /usr/bin, /bin and the smoke root's own
+#   directories, configuration, state, artifact and credential paths in the
+#   smoke root,
+#   a platform and proxies on loopback alone, and no value under
+#   the host's runtime directory or a masked directory, checked before root
+#   runs anything. Every variable cw is given travels on the privileged
+#   command line, readable by any process on the host through ps and
+#   /proc/PID/cmdline, so none may be a secret: CODEWIRE_API_KEY must be a
+#   synthetic- placeholder;
 # - a resolver of the smoke's choosing, when it sets SMOKE_RESOLVER to a file
 #   in its root before a smoke_cw: that command, and any service cw detaches
 #   from it, see the file as /etc/resolv.conf for as long as they live. A
@@ -56,6 +67,16 @@ SMOKE_KEYRING_CONTROL=''
 # Empty, or the file the next smoke_cw shows its command as the resolver
 # configuration: a regular file in the smoke's root.
 SMOKE_RESOLVER=''
+# NAME=VALUE entries the next smoke_cw adds to smoke_environment's; a PATH
+# here replaces its PATH.
+SMOKE_EXTRA_ENVIRONMENT=()
+# What the native local environment smoke gives cw beyond the fixed list:
+# its platform configuration and state roots, a synthetic platform on
+# loopback, and proxies that go nowhere.
+SMOKE_EXTRA_NAMES=(PATH LC_ALL TERM SHELL LOGNAME PYTHONDONTWRITEBYTECODE CW_CONFIG_DIR
+  CODEWIRE_NATIVE_STATE_ROOT CODEWIRE_NATIVE_ARTIFACT_ROOT CODEWIRE_NATIVE_ARTIFACT_LOCK
+  CODEWIRE_LOCAL_CREDENTIAL_ROOT CODEWIRE_SERVER_URL CODEWIRE_API_KEY
+  HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY)
 # Overridden only by the library's own tests.
 SMOKE_PROC_ROOT=/proc
 SMOKE_CGROUP_ROOT=/sys/fs/cgroup
@@ -71,7 +92,8 @@ SMOKE_HOST_RUNTIME="/run/user/$(id -u)"
 # The account's home from passwd, not $HOME: anything that resolves the home
 # through getpwuid finds these paths masked too.
 SMOKE_HOST_HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
-SMOKE_HOST_MASKS=(.ssh .config/codewire .codewire .local/share/keyrings)
+# cw's own configuration (.config/cw) holds the platform sign-in.
+SMOKE_HOST_MASKS=(.ssh .config/cw .config/codewire .codewire .local/share/keyrings)
 # cw puts sockets under the runtime directory (#2745) and sockaddr_un bounds a
 # path at 108 bytes, so the directory's own path must stay short.
 SMOKE_RUNTIME_MAX_BYTES=40
@@ -163,8 +185,12 @@ smoke_require_sha256() {
 
 # The whole environment a smoke's cw sees.
 smoke_environment() {
+  local entry path=/usr/bin:/bin
+  for entry in "${SMOKE_EXTRA_ENVIRONMENT[@]}"; do
+    [[ "$entry" != PATH=* ]] || path="${entry#PATH=}"
+  done
   printf '%s\0' \
-    PATH=/usr/bin:/bin \
+    PATH="$path" \
     LANG=C.UTF-8 \
     USER="$(id -un)" \
     HOME="$SMOKE_HOME" \
@@ -175,6 +201,50 @@ smoke_environment() {
     XDG_RUNTIME_DIR="$SMOKE_RUNTIME" \
     DBUS_SESSION_BUS_ADDRESS="$SMOKE_DBUS_ADDRESS" \
     CODEWIRE_SMOKE_SCOPE="${CODEWIRE_SMOKE_SCOPE:-}"
+  for entry in "${SMOKE_EXTRA_ENVIRONMENT[@]}"; do
+    [[ "$entry" == PATH=* ]] || printf '%s\0' "$entry"
+  done
+}
+
+# Fail unless every SMOKE_EXTRA_ENVIRONMENT entry is an allowed name, given
+# once, whose value keeps cw inside the smoke.
+smoke_refuse_extra_environment() {
+  local entry name value directory relative
+  local -a seen=() directories=()
+  for entry in "${SMOKE_EXTRA_ENVIRONMENT[@]}"; do
+    name="${entry%%=*}"
+    value="${entry#*=}"
+    [[ "$entry" == *=* && " ${SMOKE_EXTRA_NAMES[*]} " == *" $name "* ]] ||
+      die "smoke environment may not carry ${name}"
+    [[ " ${seen[*]} " != *" $name "* ]] || die "smoke environment names $name twice"
+    seen+=("$name")
+    case "$name" in
+      PATH)
+        # An empty entry searches the working directory; read drops a last one.
+        [[ "$value" != *: ]] || die 'smoke PATH may not search the working directory'
+        IFS=: read -r -a directories <<<"$value"
+        for directory in "${directories[@]}"; do
+          [[ "$directory" == /usr/bin || "$directory" == /bin ||
+             ( -n "$SMOKE_ROOT" && "$directory" == "$SMOKE_ROOT"/* && "$directory" != *..* ) ]] ||
+            die "smoke PATH may not search $directory"
+        done ;;
+      CODEWIRE_SERVER_URL | HTTP_PROXY | HTTPS_PROXY | ALL_PROXY)
+        [[ "$value" =~ ^http://127\.0\.0\.1:[0-9]{1,5}$ ]] || die "$name must be on loopback" ;;
+      CW_CONFIG_DIR | CODEWIRE_NATIVE_STATE_ROOT | CODEWIRE_NATIVE_ARTIFACT_ROOT | \
+      CODEWIRE_NATIVE_ARTIFACT_LOCK | CODEWIRE_LOCAL_CREDENTIAL_ROOT)
+        [[ -n "$SMOKE_ROOT" && "$value" == "$SMOKE_ROOT"/* && "$value" != *..* ]] ||
+          die "$name must be in the smoke root" ;;
+      # It is on the command line; only a placeholder may be.
+      CODEWIRE_API_KEY)
+        [[ "$value" == synthetic-* ]] || die 'CODEWIRE_API_KEY must be a synthetic- placeholder' ;;
+    esac
+    [[ "$value" != "$SMOKE_HOST_RUNTIME" && "$value" != "$SMOKE_HOST_RUNTIME"/* ]] ||
+      die "smoke environment points at the host: $name"
+    for relative in "${SMOKE_HOST_MASKS[@]}"; do
+      [[ "$value" != "$SMOKE_HOST_HOME/$relative" && "$value" != "$SMOKE_HOST_HOME/$relative"/* ]] ||
+        die "smoke environment points at the host: $name"
+    done
+  done
 }
 
 # Fail if the environment cw would see names the host's home, bus or runtime,
@@ -260,6 +330,7 @@ exec env -i "${environment[@]}" "$@"
 # refuses to share one that holds Codewire state or a keyring, as HOME does.
 smoke_cw() {
   local -a environment
+  smoke_refuse_extra_environment
   mapfile -d '' -t environment < <(smoke_environment)
   [[ -z "$SMOKE_RESOLVER" ]] ||
     [[ "$SMOKE_RESOLVER" == "$SMOKE_ROOT"/* && -f "$SMOKE_RESOLVER" && ! -L "$SMOKE_RESOLVER" ]] ||

@@ -5,6 +5,7 @@ scope: a fake /proc and cgroup tree stand in for the scope's processes."""
 import hashlib
 import os
 from pathlib import Path
+import shlex
 import socket
 import subprocess
 import tempfile
@@ -232,6 +233,51 @@ class Namespace(unittest.TestCase):
         self.assertEqual(seen["PATH"], "/usr/bin:/bin")
         self.assertEqual(self.cw("/bin/pwd").stdout, f"{self.workspace}\n")
 
+    def extra(self, *entries):
+        return (f'SMOKE_ROOT="{self.root}"\n'
+                f"SMOKE_EXTRA_ENVIRONMENT=({' '.join(shlex.quote(e) for e in entries)})\n")
+
+    def test_cw_sees_the_smokes_extra_variables_and_its_own_path(self):
+        self.log.unlink(missing_ok=True)
+        result = bash(self.variables() + self.extra(
+            f"PATH={self.root}/bin:/usr/bin:/bin", f"CW_CONFIG_DIR={self.root}/c",
+            "CODEWIRE_SERVER_URL=http://127.0.0.1:1", "NO_PROXY=127.0.0.1,localhost",
+            "CODEWIRE_API_KEY=synthetic-platform-key") +
+            "smoke_cw /usr/bin/env", env={**os.environ, "LOG": str(self.log)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        seen = [line.split("=", 1) for line in result.stdout.splitlines()]
+        self.assertEqual([value for name, value in seen if name == "PATH"],
+                         [f"{self.root}/bin:/usr/bin:/bin"], "one PATH, the smoke's")
+        seen = dict(seen)
+        self.assertEqual(seen["CW_CONFIG_DIR"], f"{self.root}/c")
+        self.assertEqual(seen["CODEWIRE_SERVER_URL"], "http://127.0.0.1:1")
+        self.assertEqual(seen["NO_PROXY"], "127.0.0.1,localhost")
+        self.assertEqual(seen["HOME"], str(self.home))
+
+    def test_extra_variables_that_leave_the_smoke_are_refused_before_root(self):
+        for entries in (["GITHUB_TOKEN=synthetic"], ["SSH_AUTH_SOCK=/tmp/agent"],
+                        [f"HOME={self.host_home}"], ["XDG_RUNTIME_DIR=/run/user/0"],
+                        ["CW_CONFIG_DIR"], ["TERM=dumb", "TERM=xterm"],
+                        ["PATH=/usr/local/bin:/usr/bin:/bin"], [f"PATH={self.root}/../bin:/usr/bin"],
+                        ["PATH=/usr/bin:"], ["CODEWIRE_SERVER_URL=https://api.example.invalid"],
+                        ["HTTPS_PROXY=http://192.0.2.1:3128"], ["ALL_PROXY=http://127.0.0.1:1/x"],
+                        ["CODEWIRE_API_KEY=cw_live_not_a_placeholder"], ["CODEWIRE_API_KEY="],
+                        [f"CW_CONFIG_DIR={self.host_runtime}/c"],
+                        [f"CW_CONFIG_DIR={self.host_home}/.config/cw"], ["CW_CONFIG_DIR=/var/tmp/c"],
+                        [f"CW_CONFIG_DIR={self.root}/../c"],
+                        ["CODEWIRE_NATIVE_STATE_ROOT=/var/tmp/state"],
+                        [f"CODEWIRE_NATIVE_STATE_ROOT={self.root}/../state"],
+                        ["CODEWIRE_NATIVE_ARTIFACT_ROOT=/var/tmp/artifacts"],
+                        ["CODEWIRE_NATIVE_ARTIFACT_LOCK=/var/tmp/artifacts.lock.json"],
+                        ["CODEWIRE_LOCAL_CREDENTIAL_ROOT=/var/tmp/credentials-v1"],
+                        [f"CODEWIRE_LOCAL_CREDENTIAL_ROOT={self.host_home}/.codewire/credentials-v1"]):
+            with self.subTest(entries=entries):
+                self.log.unlink(missing_ok=True)
+                result = bash(self.variables() + self.extra(*entries) + "smoke_cw /usr/bin/echo ran",
+                              env={**os.environ, "LOG": str(self.log)})
+                self.assertEqual((result.returncode, result.stdout), (3, ""), result.stderr)
+                self.assertFalse(self.log.exists(), "nothing ran as root")
+
     def test_the_self_check_refuses_a_namespace_that_leaves_the_host_reachable(self):
         (self.host_runtime / "bus").write_text("")
         result = self.cw("/usr/bin/echo ran")
@@ -243,6 +289,12 @@ class Namespace(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout), (125, ""))
         self.assertIn(".ssh is not masked", result.stderr)
         (self.host_home / ".ssh" / "id_ed25519").unlink()
+        (self.host_home / ".config" / "cw").mkdir(parents=True)
+        (self.host_home / ".config" / "cw" / "credentials.json").write_text("{}")
+        result = self.cw("/usr/bin/echo ran")
+        self.assertEqual((result.returncode, result.stdout), (125, ""))
+        self.assertIn(".config/cw is not masked", result.stderr)
+        (self.host_home / ".config" / "cw" / "credentials.json").unlink()
         result = self.cw("/usr/bin/echo ran", address=f"unix:path={self.host_runtime}/bus")
         self.assertEqual((result.returncode, result.stdout), (125, ""))
         self.assertIn("not the smoke's own", result.stderr)

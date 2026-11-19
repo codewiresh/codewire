@@ -51,8 +51,6 @@ class Contracts(unittest.TestCase):
             'SMOKE_HOME': str(self.root / 'synthetic-home'), 'STATE_ROOT': '/private/state',
             'SOCKET_DIR': '/tmp/cw-1000/0123456789abcdef',
             'PLATFORM_CONFIG': '/private/config', 'CREDENTIAL_ROOT': '/private/synthetic-credentials',
-            'KEYRING_RUNTIME': '/private/synthetic-runtime',
-            'KEYRING_DBUS_ADDRESS': 'unix:path=/private/synthetic-bus',
             'ARTIFACT_ROOT': '/selected/artifacts', 'ARTIFACT_LOCK': '/selected/artifacts.lock.json',
             'ORIGINAL_ARTIFACT_LOCK': '/original/artifacts.lock.json',
             'MANAGED_AGENT_CW_IMAGE_RECEIPT': '/A image/image.json',
@@ -78,7 +76,18 @@ env() {
   cat "$RESPONSE"
   return "$FIXTURE_EXIT"
 }
+# The managed mode's isolated run; what it adds to cw's environment follows
+# the command.
+smoke_cw() {
+  printf '%s\0' "$@" --extra-environment "${SMOKE_EXTRA_ENVIRONMENT[@]}" >"$CAPTURE"
+  printf 'invoke\n' >>"$CALLS"
+  cat "$RESPONSE"
+  return "$FIXTURE_EXIT"
+}
 '''
+        proxies = re.search(r'^readonly NO_EGRESS_PROXIES=\(\n.*?^\)\n', SOURCE.read_text(),
+                            re.MULTILINE | re.DOTALL)
+        script += proxies[0] + function('managed_cw_environment')
         script += function(name) + name + '\n'
         script += 'printf "after-function\\n"\n'
         if name == 'admit_native_managed_update_assets':
@@ -106,6 +115,10 @@ env() {
         self.assertEqual(args[args.index('--cw-image-receipt') + 1], '/A image/image.json')
         self.assertNotIn('--runtime-b', args)
         self.assertIn('1220s', args)
+        extra = args[args.index('--extra-environment') + 1:]
+        for entry in ('CODEWIRE_LOCAL_CREDENTIAL_ROOT=/private/synthetic-credentials',
+                      'HTTPS_PROXY=http://127.0.0.1:1', 'PYTHONDONTWRITEBYTECODE=1'):
+            self.assertIn(entry, extra)
 
     def test_update_invokes_exact_selected_uuid_once(self):
         result, args = self.shell('run_native_managed_agent_smoke')
