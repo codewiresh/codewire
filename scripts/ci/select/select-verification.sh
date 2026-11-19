@@ -2564,6 +2564,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/images/propose-egress-image-pin.sh|\
       scripts/ci/images/egress-image-pin.py|\
       scripts/ci/tests/test-propose-egress-image-pin.sh|\
+      scripts/ci/tests/test-egress-image-pin-verify.sh|\
       scripts/ci/setup/fetch-openbao-workspace-pin-bot-token.sh|\
       scripts/ci/tests/test-fetch-openbao-workspace-pin-bot-token.sh|\
       scripts/ci/tests/test-workspace-image-verify-workflow.sh|\

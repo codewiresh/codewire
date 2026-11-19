@@ -12,12 +12,22 @@ changes the pin.
   egress-image-pin.py show --commit SHA          the pinned digest at SHA, or nothing
   egress-image-pin.py render --digest DIGEST     write DIGEST as the pin
   egress-image-pin.py check                      the pin's form in the working tree
+  egress-image-pin.py verify --commit SHA --digest DIGEST
+                                                 the trusted pin check before a delivery uses SHA's tree
+
+verify is the design's trusted check ("The pin check, in two parts"): it fails
+closed unless DIGEST is the pin at SHA, exists in the registry
+($CODEWIRE_IMAGE_REGISTRY) with the pipeline identity's main-CI-verified
+signature, and that signature names a source commit SHA contains. A pin whose
+egress inputs have moved on is stale, which a main-only job warns about; it
+does not stop a delivery.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -29,6 +39,9 @@ COMPONENT = "deployments/k8s/egress/kustomization.yaml"
 PLACEHOLDER = "git.example.com/codewire/egress"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
+REGISTRY = re.compile(r"[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?")
+VERIFIER = ROOT / "scripts/ci/images/verify-runtime-image-signatures.sh"
+PUBLIC_KEY = ROOT / "scripts/ci/trust/codewire-runtime-signing.pub"
 HEADER = "images:\n"
 ENTRY = f"  - name: {PLACEHOLDER}\n    digest: {{digest}}\n"
 PIN_BLOCK = re.compile(
@@ -93,6 +106,40 @@ def fingerprint(sha: str) -> str:
     return value
 
 
+def contains(sha: str, source: str) -> bool:
+    """Whether `sha` contains `source`; an unknown commit is not contained."""
+    completed = subprocess.run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor", source, sha],
+                               capture_output=True, text=True, check=False, timeout=120)
+    return completed.returncode == 0
+
+
+def verify(sha: str, digest: str, registry: str) -> str:
+    """The trusted pin check for a delivery of `sha`'s tree; the signed source it accepted."""
+    sha = commit(sha)
+    if not DIGEST.fullmatch(digest):
+        raise PinError(f"not a sha256 digest: {digest!r}")
+    if not REGISTRY.fullmatch(registry):
+        raise PinError(f"not a registry host: {registry!r}")
+    pin = show(sha)
+    if not pin:
+        raise PinError(f"{sha} pins no cw-egress image, but {digest} is delivered")
+    if pin != digest:
+        raise PinError(f"{digest} is delivered, but {sha} pins {pin}")
+    reference = f"{registry}/codewire/egress@{digest}"
+    try:
+        completed = subprocess.run([str(VERIFIER), "--egress", reference, str(PUBLIC_KEY)],
+                                   capture_output=True, text=True, check=False, timeout=600)
+    except subprocess.TimeoutExpired:
+        raise PinError(f"verifying {reference} took over 600 s") from None
+    if completed.returncode != 0:
+        raise PinError(f"{reference} is missing or has no valid main-CI-verified signature: "
+                       f"{completed.stderr.strip()[-400:]}")
+    for source in completed.stdout.split():
+        if COMMIT.fullmatch(source) and contains(sha, source):
+            return source
+    raise PinError(f"no main-CI-verified signature of {reference} names a source that {sha} contains")
+
+
 def render(digest: str) -> None:
     if not DIGEST.fullmatch(digest):
         raise PinError(f"not a sha256 digest: {digest!r}")
@@ -114,6 +161,9 @@ def main(argv: list[str] | None = None) -> int:
         commands.add_parser(name).add_argument("--commit", required=True)
     commands.add_parser("render").add_argument("--digest", required=True)
     commands.add_parser("check")
+    verifying = commands.add_parser("verify")
+    verifying.add_argument("--commit", required=True)
+    verifying.add_argument("--digest", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "fingerprint":
@@ -122,6 +172,10 @@ def main(argv: list[str] | None = None) -> int:
             print(show(args.commit))
         elif args.command == "render":
             render(args.digest)
+        elif args.command == "verify":
+            registry = os.environ.get("CODEWIRE_IMAGE_REGISTRY", "")
+            source = verify(args.commit, args.digest, registry)
+            print(f"egress image pin: {args.digest} is the pin at {args.commit}, signed by main CI from {source}")
         else:
             pinned((ROOT / COMPONENT).read_text())
     except PinError as error:
