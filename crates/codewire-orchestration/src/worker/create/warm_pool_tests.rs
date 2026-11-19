@@ -350,6 +350,7 @@ fn every_warm_pool_runs_only_the_canonical_image_and_the_platform_keepalive() {
 /// Hosted egress as a Dev-shaped deployment sets it (#4000), with neutral
 /// gateway names; the broker golden and the admission proof use these values.
 fn broker_egress() -> crate::sandbox::template::HostedEgressTemplate {
+    crate::egress::gateway_check::assume_verified();
     crate::sandbox::template::HostedEgressTemplate {
         stream_addr: "10.44.0.89:8089".into(),
         binding_addr: "10.44.0.87:8087".into(),

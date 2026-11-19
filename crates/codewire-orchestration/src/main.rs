@@ -612,6 +612,22 @@ async fn main() -> anyhow::Result<()> {
     sandbox_cfg.hosted_egress =
         codewire_orchestration::egress::settings::hosted_egress_template(&sandbox_cfg.derp_host)
             .context("read the hosted egress settings")?;
+    // While hosted egress is on, the gateway address it renders is held to the
+    // gateway Service's ClusterIP; a broker-mode render refuses until it is.
+    if let Some(gateway) = codewire_orchestration::egress::settings::gateway_service()
+        .context("read the hosted egress gateway Service")?
+    {
+        match kube.as_ref() {
+            Some(kube) => {
+                codewire_orchestration::egress::gateway_check::start(kube.clone(), gateway)
+                    .await
+                    .context("start the gateway check")?
+            }
+            None => {
+                tracing::warn!("hosted egress is on without a cluster; broker-mode renders refuse")
+            }
+        }
+    }
     if kube.is_some()
         && let Err(error) = sandbox_cfg.require_workspace_binding_config()
     {

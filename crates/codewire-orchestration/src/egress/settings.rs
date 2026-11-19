@@ -23,6 +23,9 @@ pub const GATEWAY_PORT: &str = "CODEWIRE_HOSTED_EGRESS_GATEWAY_PORT";
 /// The gateway Service's ClusterIP, which deploy pins on the Service and
 /// asserts equal to this value (cw-security, 2026-11-19 on #4000).
 pub const GATEWAY_CLUSTER_IP: &str = "CODEWIRE_HOSTED_EGRESS_GATEWAY_CLUSTER_IP";
+/// The gateway Service orchestration reads to hold that address equal to its
+/// ClusterIP, in the proxies' namespace (`GATEWAY_NAMESPACE`).
+pub const GATEWAY_SERVICE: &str = "CODEWIRE_HOSTED_EGRESS_GATEWAY_SERVICE";
 /// The infra#1822 fence revision the cluster runs.
 pub const FENCE_REVISION: &str = "CODEWIRE_HOSTED_EGRESS_FENCE_REVISION";
 /// The cluster DNS Service's IPv4 address, for the self-check's DNS probe.
@@ -46,6 +49,37 @@ const DERP_LINK: (&str, &str) = ("CODEWIRE_DERP", "HTTPS");
 /// until then new Sandboxes fail closed.
 pub fn hosted_egress_template(derp_host: &str) -> anyhow::Result<Option<HostedEgressTemplate>> {
     template_from(|key| std::env::var(key).ok(), derp_host)
+}
+
+/// The gateway Service and its configured address, which
+/// `egress::gateway_check` holds equal while hosted egress is on; `None`
+/// while it is off.
+pub fn gateway_service() -> anyhow::Result<Option<crate::egress::gateway_check::GatewayService>> {
+    gateway_service_from(|key| std::env::var(key).ok())
+}
+
+fn gateway_service_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<Option<crate::egress::gateway_check::GatewayService>> {
+    let value = |key: &str| {
+        get(key)
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+    };
+    if !crate::confidential_storage::parse_bool(SWITCH, value(SWITCH).as_deref(), false)? {
+        return Ok(None);
+    }
+    let required = |key: &str| {
+        value(key).ok_or_else(|| anyhow::anyhow!("{SWITCH} is on but {key} is not set"))
+    };
+    let address = required(GATEWAY_CLUSTER_IP)?;
+    Ok(Some(crate::egress::gateway_check::GatewayService {
+        namespace: required(GATEWAY_NAMESPACE)?,
+        name: required(GATEWAY_SERVICE)?,
+        cluster_ip: address.parse().map_err(|_| {
+            anyhow::anyhow!("{GATEWAY_CLUSTER_IP} must be a bare IPv4 address, not {address:?}")
+        })?,
+    }))
 }
 
 fn template_from(
@@ -195,6 +229,30 @@ mod tests {
 
     fn read(values: &HashMap<&str, &str>) -> anyhow::Result<Option<HostedEgressTemplate>> {
         template_from(|key| values.get(key).map(|v| (*v).to_owned()), DERP_HOST)
+    }
+
+    #[test]
+    fn the_gateway_service_is_read_with_its_address_and_named_when_missing() {
+        let mut values = on();
+        values.insert(GATEWAY_SERVICE, "envoy-codewire-public");
+        fn get(
+            values: &HashMap<&'static str, &'static str>,
+        ) -> impl Fn(&str) -> Option<String> + use<> {
+            let values = values.clone();
+            move |key: &str| values.get(key).map(|v| (*v).to_owned())
+        }
+        assert_eq!(
+            gateway_service_from(get(&values)).unwrap(),
+            Some(crate::egress::gateway_check::GatewayService {
+                namespace: "gateway-proxies".into(),
+                name: "envoy-codewire-public".into(),
+                cluster_ip: Ipv4Addr::new(10, 44, 0, 43),
+            })
+        );
+        values.remove(GATEWAY_SERVICE);
+        let error = gateway_service_from(get(&values)).unwrap_err().to_string();
+        assert!(error.contains(GATEWAY_SERVICE), "{error}");
+        assert_eq!(gateway_service_from(get(&HashMap::new())).unwrap(), None);
     }
 
     #[test]

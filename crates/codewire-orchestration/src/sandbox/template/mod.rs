@@ -541,6 +541,8 @@ impl TemplateOpts {
                 ),
                 "hosted egress runs only on a VM runtime profile, not {profile:?}"
             );
+            // The gateway Service is where deployment says, read recently.
+            crate::egress::gateway_check::verified()?;
         }
         Ok(())
     }

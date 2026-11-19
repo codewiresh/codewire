@@ -140,6 +140,56 @@ spec:
                 configMapKeyRef:
                   name: codewire-hosted-egress
                   key: CODEWIRE_HOSTED_EGRESS_ENABLED
+            # What a broker-mode render reads while the switch is on (#4000);
+            # optional, so a ConfigMap without them starts with it off.
+            - name: CODEWIRE_HOSTED_EGRESS_GATEWAY_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-hosted-egress
+                  key: CODEWIRE_HOSTED_EGRESS_GATEWAY_NAMESPACE
+                  optional: true
+            - name: CODEWIRE_HOSTED_EGRESS_GATEWAY_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-hosted-egress
+                  key: CODEWIRE_HOSTED_EGRESS_GATEWAY_NAME
+                  optional: true
+            - name: CODEWIRE_HOSTED_EGRESS_GATEWAY_OWNER_NAMESPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-hosted-egress
+                  key: CODEWIRE_HOSTED_EGRESS_GATEWAY_OWNER_NAMESPACE
+                  optional: true
+            - name: CODEWIRE_HOSTED_EGRESS_GATEWAY_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-hosted-egress
+                  key: CODEWIRE_HOSTED_EGRESS_GATEWAY_PORT
+                  optional: true
+            - name: CODEWIRE_HOSTED_EGRESS_GATEWAY_SERVICE
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-hosted-egress
+                  key: CODEWIRE_HOSTED_EGRESS_GATEWAY_SERVICE
+                  optional: true
+            - name: CODEWIRE_HOSTED_EGRESS_GATEWAY_CLUSTER_IP
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-hosted-egress
+                  key: CODEWIRE_HOSTED_EGRESS_GATEWAY_CLUSTER_IP
+                  optional: true
+            - name: CODEWIRE_HOSTED_EGRESS_FENCE_REVISION
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-hosted-egress
+                  key: CODEWIRE_HOSTED_EGRESS_FENCE_REVISION
+                  optional: true
+            - name: CODEWIRE_CLUSTER_DNS_IP
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-hosted-egress
+                  key: CODEWIRE_CLUSTER_DNS_IP
+                  optional: true
           resources:
             requests:
               cpu: 100m

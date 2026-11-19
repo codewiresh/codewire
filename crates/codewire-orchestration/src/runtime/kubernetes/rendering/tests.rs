@@ -128,6 +128,7 @@ fn the_template_policy_the_lockdown_check_expects_is_every_templates() {
 }
 
 fn broker(fence_revision: &str) -> HostedEgressTemplate {
+    crate::egress::gateway_check::assume_verified();
     HostedEgressTemplate {
         stream_addr: "10.44.0.89:8089".into(),
         binding_addr: "10.44.0.87:8087".into(),
