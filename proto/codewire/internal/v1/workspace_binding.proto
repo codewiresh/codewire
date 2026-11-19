@@ -82,6 +82,12 @@ message BindWorkspaceResponse {
   // empty when the deployment has none. Not an identity or a credential. The
   // daemon validates it again before giving it to sessions.
   string server_url = 10;
+  // Whether this sandbox's agents are intercepted (#4001): the deployment's
+  // hosted interception setting is on and the Pod is a broker-mode sandbox.
+  // The daemon carries it on the accepted binding; the placeholder logins
+  // that act on it come later in #4001. Absent from a server that doesn't
+  // send it, which means off.
+  bool interception = 11;
 }
 
 // WorkspaceDefaults is the configuration the bound daemon writes into the

@@ -2,6 +2,7 @@
 //! claim Kubernetes authentication, provider success, or protected-store proof.
 mod budgets;
 mod front_door;
+mod front_door_join;
 mod relay;
 mod ssh_deadlines;
 mod streamed_push;
@@ -27,10 +28,13 @@ use tonic::{Request, Response};
 
 const DAEMON_TOKEN: &str = "synthetic.daemon.capability";
 const WORKSPACE_TOKEN: &str = "Bearer synthetic.workspace.one";
+const SYNTHETIC_POD_UID: &str = "synthetic-pod-uid";
 
 struct DaemonCall {
     input: Streaming<v1::CredentialBridgeHostMessage>,
     output: mpsc::Sender<Result<v1::CredentialBridgeGuestMessage, Status>>,
+    /// What the relay presented the daemon.
+    metadata: tonic::metadata::MetadataMap,
 }
 struct BrokerCall {
     input: Streaming<v1::CredentialBridgeGuestMessage>,
@@ -39,6 +43,19 @@ struct BrokerCall {
     relay: String,
     workspace: Vec<u8>,
     accept: oneshot::Sender<Result<(), Status>>,
+}
+/// One `FrontDoorBridge` the relay opened. `answer` lists the stream's
+/// capabilities, or refuses it.
+struct FrontDoorCall {
+    input: Streaming<v1::CredentialBridgeGuestMessage>,
+    output: mpsc::Sender<Result<v1::CredentialBridgeHostMessage, Status>>,
+    relay: String,
+    workspace: Vec<u8>,
+    handle: Option<Vec<u8>>,
+    /// The Ready the stream opened with, read before answering, as the real
+    /// broker's admission does.
+    ready: v1::CredentialBridgeReady,
+    answer: oneshot::Sender<Result<Vec<&'static str>, Status>>,
 }
 #[derive(Clone)]
 struct SyntheticDaemon {
@@ -53,6 +70,9 @@ struct SyntheticBroker {
     capabilities: Arc<std::sync::Mutex<Vec<&'static str>>>,
     /// Response-header expiry values; empty models an older broker.
     expires_at: Arc<std::sync::Mutex<Vec<String>>>,
+    /// The epoch handle header; absent models an older broker.
+    handle: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    front_door_calls: mpsc::Sender<FrontDoorCall>,
 }
 
 macro_rules! daemon_service {
@@ -66,11 +86,12 @@ macro_rules! daemon_service {
             type CredentialBridgeStream = ReceiverStream<Result<v1::CredentialBridgeGuestMessage, Status>>;
             async fn credential_bridge(&self, request: Request<Streaming<v1::CredentialBridgeHostMessage>>) -> Result<Response<Self::CredentialBridgeStream>, Status> {
                 assert_eq!(request.metadata().get(DAEMON_AUTH_TOKEN_HEADER).unwrap(), DAEMON_TOKEN);
+                let metadata = request.metadata().clone();
                 let (output, receiver) = mpsc::channel(4);
                 output.send(Ok(v1::CredentialBridgeGuestMessage { payload: Some(v1::credential_bridge_guest_message::Payload::Ready(v1::CredentialBridgeReady {
                     protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION, environment_id: self.environment.to_string(), environment_generation: 7,
                 })) })).await.unwrap();
-                self.calls.send(DaemonCall { input: request.into_inner(), output }).await.map_err(|_| Status::cancelled("fixture closed"))?;
+                self.calls.send(DaemonCall { input: request.into_inner(), output, metadata }).await.map_err(|_| Status::cancelled("fixture closed"))?;
                 let mut response = Response::new(ReceiverStream::new(receiver));
                 let mut token = tonic::metadata::MetadataValue::from_bytes(self.workspace_token.lock().await.as_bytes());
                 token.set_sensitive(true);
@@ -114,12 +135,53 @@ impl CredentialBrokerService for SyntheticBroker {
     type CredentialBridgeStream = ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>;
     type FrontDoorBridgeStream = ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>;
 
-    // The relay does not join front-door streams yet (#4001).
     async fn front_door_bridge(
         &self,
-        _request: Request<Streaming<v1::CredentialBridgeGuestMessage>>,
+        request: Request<Streaming<v1::CredentialBridgeGuestMessage>>,
     ) -> Result<Response<Self::FrontDoorBridgeStream>, Status> {
-        Err(Status::unimplemented("not used by these relay tests"))
+        let metadata = request.metadata();
+        let relay = metadata
+            .get("authorization")
+            .map(|value| value.to_str().unwrap().to_owned())
+            .unwrap_or_default();
+        let workspace = metadata
+            .get_bin(codewire_daemon::client::HOSTED_WORKSPACE_AUTHORIZATION)
+            .map(|value| value.to_bytes().unwrap().to_vec())
+            .unwrap_or_default();
+        let handle = metadata
+            .get_bin(codewire_daemon_proto::CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER)
+            .map(|value| value.to_bytes().unwrap().to_vec());
+        let mut input = request.into_inner();
+        let Some(v1::credential_bridge_guest_message::Payload::Ready(ready)) =
+            input.message().await?.unwrap().payload
+        else {
+            panic!("Ready must be first");
+        };
+        let (output, receiver) = mpsc::channel(4);
+        let (answer, answered) = oneshot::channel();
+        self.front_door_calls
+            .send(FrontDoorCall {
+                input,
+                output,
+                relay,
+                workspace,
+                handle,
+                ready,
+                answer,
+            })
+            .await
+            .map_err(|_| Status::cancelled("fixture closed"))?;
+        let capabilities = answered
+            .await
+            .map_err(|_| Status::cancelled("fixture rejected"))??;
+        let mut response = Response::new(ReceiverStream::new(receiver));
+        for capability in capabilities {
+            response.metadata_mut().append(
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
+                tonic::metadata::MetadataValue::from_static(capability),
+            );
+        }
+        Ok(response)
     }
 
     async fn credential_bridge(
@@ -175,6 +237,12 @@ impl CredentialBrokerService for SyntheticBroker {
                 value.parse().unwrap(),
             );
         }
+        if let Some(handle) = self.handle.lock().unwrap().as_deref() {
+            response.metadata_mut().insert_bin(
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER,
+                tonic::metadata::BinaryMetadataValue::from_bytes(handle),
+            );
+        }
         Ok(response)
     }
 }
@@ -187,6 +255,8 @@ struct Fixture {
     workspace_token: Arc<Mutex<String>>,
     broker_capabilities: Arc<std::sync::Mutex<Vec<&'static str>>>,
     broker_expires_at: Arc<std::sync::Mutex<Vec<String>>>,
+    broker_handle: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    front_door_calls: mpsc::Receiver<FrontDoorCall>,
     shutdown: CancellationToken,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -212,10 +282,14 @@ impl Fixture {
         let broker_shutdown = shutdown.clone();
         let broker_capabilities = Arc::new(std::sync::Mutex::new(Vec::new()));
         let broker_expires_at = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let broker_handle = Arc::new(std::sync::Mutex::new(None));
+        let (front_door_tx, front_door_calls) = mpsc::channel(2);
         let synthetic_broker = SyntheticBroker {
             calls: broker_tx,
             capabilities: broker_capabilities.clone(),
             expires_at: broker_expires_at.clone(),
+            handle: broker_handle.clone(),
+            front_door_calls: front_door_tx,
         };
         let synthetic_daemon = SyntheticDaemon {
             environment: environment_id,
@@ -261,12 +335,16 @@ impl Fixture {
                 relay_token,
                 broker: BrokerEndpoint::Preconfigured(channel),
                 budget: EnvironmentBudget::new(limits),
+                pod_uid: SYNTHETIC_POD_UID.into(),
+                front_doors: Some(Arc::default()),
             },
             daemon_calls,
             broker_calls,
             workspace_token,
             broker_capabilities,
             broker_expires_at,
+            broker_handle,
+            front_door_calls,
             shutdown,
             tasks,
         }
@@ -983,6 +1061,8 @@ async fn a_daemon_refusing_the_credential_ends_the_epoch_before_the_broker() {
         relay_token,
         broker: BrokerEndpoint::Preconfigured(broker),
         budget: EnvironmentBudget::new(Limits::DEFAULT),
+        pod_uid: SYNTHETIC_POD_UID.into(),
+        front_doors: Some(Arc::default()),
     };
     let (admitted, never_admitted) = oneshot::channel();
     bounded(run_epoch_with_lifetime(

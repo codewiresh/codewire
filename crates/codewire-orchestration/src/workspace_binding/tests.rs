@@ -857,6 +857,32 @@ async fn a_bound_pod_gets_its_saved_project_defaults_and_git_author() {
     assert!(response.defaults.as_option().is_none());
 }
 
+// Hosted interception (#4001) is sent only for a broker-mode sandbox of a
+// deployment that turned it on: it runs in cw-egress's front door.
+#[tokio::test]
+async fn interception_is_sent_only_for_a_broker_mode_sandbox_with_it_on() {
+    let broker_pod = || {
+        let mut pod = workspace_pod();
+        pod.metadata.labels.as_mut().unwrap().insert(
+            crate::egress::admission::EGRESS_MODE_LABEL.into(),
+            crate::egress::admission::EGRESS_MODE_BROKER.into(),
+        );
+        pod
+    };
+    let cluster = |pod| FakeCluster::new(valid_review(), vec![Some(pod)], vec![Some(sandbox())]);
+    let bound = || FakeStore::bound(WorkspaceCredentialScope::Pod);
+    let off = fixture(cluster(broker_pod()), bound());
+    assert!(!off.bind(20).await.unwrap().interception);
+    let on = fixture_with(cluster(broker_pod()), bound(), |state| {
+        state.with_interception(true)
+    });
+    assert!(on.bind(20).await.unwrap().interception);
+    let direct = fixture_with(cluster(workspace_pod()), bound(), |state| {
+        state.with_interception(true)
+    });
+    assert!(!direct.bind(20).await.unwrap().interception);
+}
+
 #[tokio::test]
 async fn garbage_and_expired_bearers_never_reach_token_review() {
     let fixture = fixture(

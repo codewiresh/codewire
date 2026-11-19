@@ -96,6 +96,7 @@ async fn a_push_larger_than_one_window_streams_through_the_relay() {
     let DaemonCall {
         input: mut host,
         output: daemon_output,
+        ..
     } = daemon;
     let Some(Host::Open(open)) = bounded(host.message()).await.unwrap().unwrap().payload else {
         panic!("Open must come first");

@@ -746,20 +746,25 @@ export const EgressService: GenService<{
   },
   /**
    * The TLS front door's credential session for one admitted Pod on the
-   * caller's node (#4001). The stream carries the credential bridge's
-   * front-door.v1 frames unchanged; orchestration never parses them.
-   * Orchestration takes the environment from the Pod's live workspace binding,
-   * never from a request field, and attaches the session to that
-   * environment's current credential relay epoch. The credential broker
-   * serves it as its front-door entry, with the epoch's leases and refresh.
-   * The session ends with its epoch, and cw-egress opens it again for the
-   * next one. A Pod has at most one session per epoch.
+   * caller's node (#4001). Each `bridge` field is exactly one credential
+   * bridge front-door.v1 frame: a four-byte big-endian length, then that many
+   * protobuf bytes. Orchestration reads only that length and never parses the
+   * message. It takes the environment from the Pod's live workspace binding,
+   * never from a request field, and attaches the session to the current
+   * credential relay epoch of that binding. The credential broker serves it
+   * as its front-door entry, with the epoch's leases and refresh. The session
+   * ends with its epoch, and cw-egress opens it again for the next one. A Pod
+   * has at most one session per epoch. It is served only while hosted
+   * interception is on; otherwise it answers UNIMPLEMENTED to an
+   * authenticated caller.
    *
    * Refusals: PERMISSION_DENIED, with no detail, for a Pod that is not on the
-   * caller's node, is not admitted, has no live binding, or whose UID or
-   * binding generation differs from the epoch's; FAILED_PRECONDITION for a
-   * frame before open or a second open; ALREADY_EXISTS for a second session
-   * in the epoch; UNAVAILABLE while no epoch runs, and cw-egress retries.
+   * caller's node, is not admitted, has another UID or has no live binding;
+   * FAILED_PRECONDITION for a frame before open or a second open;
+   * INVALID_ARGUMENT for a frame whose length is zero, over the maximum or not
+   * its bytes; ALREADY_EXISTS for a second session in the epoch; UNAVAILABLE
+   * while no epoch runs for the Pod's current binding on this replica, and
+   * cw-egress retries with bounded backoff.
    *
    * @generated from rpc codewire.internal.v1.EgressService.FrontDoorSession
    */

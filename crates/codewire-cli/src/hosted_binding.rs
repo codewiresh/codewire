@@ -254,7 +254,9 @@ impl BindingClient {
         if let Some(access) = response.access.as_option_mut() {
             drop(Zeroizing::new(std::mem::take(&mut access.peer_token)));
         }
-        let binding = accepted.map_err(|_| AttemptError::InvalidResponse)?;
+        let binding = accepted
+            .map_err(|_| AttemptError::InvalidResponse)?
+            .with_interception(response.interception);
         // The grant names the environment's current operation generation,
         // which may move on after the binding's.
         Ok(BoundWorkspace {

@@ -17,6 +17,7 @@ pub mod credentials;
 pub mod drain;
 pub mod egress;
 pub mod environment_mesh;
+pub mod front_door;
 pub mod identity;
 pub mod lifecycle;
 pub(crate) mod openbao;

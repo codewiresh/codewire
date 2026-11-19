@@ -681,6 +681,12 @@ async fn main() -> anyhow::Result<()> {
     )?);
     let credit_enforcement =
         codewire_server_core::credit_enforcement::CreditEnforcement::from_env()?;
+    // Read once: the relay and EgressService share one front-door registry,
+    // which exists only while hosted interception is on (#4001).
+    let egress_settings = egress::settings::EgressSettings::from_env()?;
+    let front_doors = egress_settings
+        .interception
+        .then(Arc::<codewire_orchestration::front_door::FrontDoorEpochs>::default);
     let ctx = Arc::new(worker::WorkerContext {
         pool: pool.clone(),
         cloudflare: CloudflareClient::from_env(),
@@ -695,6 +701,7 @@ async fn main() -> anyhow::Result<()> {
         temporal_trigger: temporal_trigger.clone(),
         credit_enforcement,
         unverified_signup_purge: worker::unverified_purge::UnverifiedSignupPurge::from_env()?,
+        front_doors: front_doors.clone(),
     });
 
     // #4426: SIGTERM, which a rollout sends only after the preStop delay has
@@ -873,6 +880,9 @@ async fn main() -> anyhow::Result<()> {
             },
             Arc::new(relay_allocator(|name| std::env::var(name).ok())?),
         )
+        .with_interception(
+            codewire_orchestration::egress::settings::EgressSettings::from_env()?.interception,
+        )
         .with_server_url(&api_state.frontend_url),
     );
     // There is no plaintext form: inside a cluster it serves TLS with the
@@ -901,7 +911,13 @@ async fn main() -> anyhow::Result<()> {
             codewire_orchestration::environment_mesh::environment_mesh_router(pool.clone()),
             codewire_orchestration::environment_mesh::internal_service_layer(&cfg.session_secret)?,
         );
-    let internal_app = egress::mount(internal_app, &api_state, &cfg.database_url)?;
+    let internal_app = egress::mount(
+        internal_app,
+        &api_state,
+        &cfg.database_url,
+        egress_settings,
+        front_doors,
+    )?;
 
     // The Transit canary costs OpenBao round trips, so a background loop
     // verifies it and `/readyz` reads the latest fail-closed verdict (#2430).

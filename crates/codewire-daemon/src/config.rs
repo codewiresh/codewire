@@ -529,6 +529,9 @@ pub struct WorkspaceBinding {
     projection_selection_sha256: Option<[u8; 32]>,
     managed_credential_clients: ManagedCredentialClients,
     working_directory: Option<PathBuf>,
+    /// The deployment's hosted interception for this sandbox (#4001); off
+    /// unless the bind response turns it on.
+    interception: bool,
     server_url: Option<String>,
 }
 
@@ -548,6 +551,7 @@ impl fmt::Debug for WorkspaceBinding {
                 &self.managed_credential_clients.encode(),
             )
             .field("working_directory", &self.working_directory)
+            .field("interception", &self.interception)
             .field("server_url", &self.server_url)
             .finish()
     }
@@ -564,6 +568,19 @@ impl WorkspaceBinding {
 
     pub fn daemon_credential(&self) -> &DaemonAuthToken {
         &self.daemon_credential
+    }
+
+    /// Whether this sandbox's agents are intercepted (#4001): orchestration
+    /// sends it on only for a broker-mode sandbox of a deployment that turned
+    /// hosted interception on.
+    pub fn interception(&self) -> bool {
+        self.interception
+    }
+
+    /// The accepted binding with the response's interception flag.
+    pub fn with_interception(mut self, interception: bool) -> Self {
+        self.interception = interception;
+        self
     }
 }
 
@@ -668,6 +685,7 @@ impl WorkspaceBindingConfig {
             projection_selection_sha256,
             managed_credential_clients,
             working_directory: declared_working_directory(response.working_directory),
+            interception: false,
             server_url: sandbox_server_url(response.server_url),
         })
     }
@@ -1516,6 +1534,23 @@ mod tests {
             ManagedCredentialClients::default()
         );
         assert_eq!(served.process_execution, ProcessExecution::Native);
+    }
+
+    // Hosted interception (#4001) is off unless the bind response turns it
+    // on, and the flag alone changes nothing the daemon serves yet: the
+    // placeholder logins that act on it come later in #4001.
+    #[test]
+    fn interception_is_off_unless_the_response_turns_it_on() {
+        let config = binding_config();
+        let binding = config.validate(&response()).unwrap();
+        assert!(!binding.interception());
+        let intercepted = binding.clone().with_interception(true);
+        assert!(intercepted.interception());
+        assert!(!intercepted.clone().with_interception(false).interception());
+        assert_eq!(
+            config.clone().into_config(&binding),
+            config.into_config(&intercepted)
+        );
     }
 
     #[test]

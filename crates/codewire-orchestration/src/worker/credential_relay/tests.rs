@@ -108,6 +108,7 @@ fn config() -> Arc<RelayConfig> {
             tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy(),
         ),
         limits: Limits::DEFAULT,
+        front_doors: None,
     })
 }
 

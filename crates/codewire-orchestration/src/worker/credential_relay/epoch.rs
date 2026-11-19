@@ -28,6 +28,8 @@ use zeroize::Zeroizing;
 
 use super::budget::{Charge, EnvironmentBudget, Oversized, StreamBudget};
 use super::connection::{self, DaemonTarget};
+use super::front_door::EpochJoins;
+use crate::front_door::{BindingKey, FrontDoorEpochs};
 
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(10);
 const BROKER_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -69,6 +71,10 @@ pub(super) struct EpochConfig {
     pub(super) relay_token: PathBuf,
     pub(super) broker: BrokerEndpoint,
     pub(super) budget: EnvironmentBudget,
+    /// The bound Pod, for the front-door sessions that may join an epoch.
+    pub(super) pod_uid: String,
+    /// `None` while hosted interception is off.
+    pub(super) front_doors: Option<Arc<FrontDoorEpochs>>,
 }
 
 #[derive(Clone)]
@@ -742,6 +748,8 @@ async fn run_epoch_on(
         let (sender, receiver) = mpsc::channel(FRAME_BUFFER);
         let queue = OutgoingQueue::new(receiver);
         // Forward the actual daemon Ready; never synthesize claimed Pod identity.
+        // (A front-door upstream is the stated exception: front_door.rs writes
+        // the authenticated binding's Ready, never one the front door claims.)
         sender
             .try_send(Queued {
                 frame: v1::CredentialBridgeGuestMessage {
@@ -757,6 +765,15 @@ async fn run_epoch_on(
             cancelled: Box::pin(cancellation.clone().cancelled_owned()),
         };
         let mut request = tonic::Request::new(outgoing);
+        // Kept for this epoch's front-door joins, never handed to them.
+        let mut joins = EpochJoins {
+            environment_id: config.environment_id,
+            generation: config.generation,
+            channel: channel.clone(),
+            metadata: metadata.clone(),
+            budget: config.budget.clone(),
+            admission_timeout: BROKER_ADMISSION_TIMEOUT,
+        };
         *request.metadata_mut() = metadata;
         let mut broker = CredentialBrokerServiceClient::new(channel)
             .max_decoding_message_size(CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES)
@@ -786,6 +803,12 @@ async fn run_epoch_on(
             // daemon's Open carries them, so the daemon never sends one that
             // the broker would end the epoch on.
             let capabilities = broker_capabilities(response.metadata());
+            // For the relay alone: the daemon's Open carries only the
+            // capabilities, and no header reaches it.
+            let handle = response
+                .metadata()
+                .get_bin(codewire_daemon_proto::CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER)
+                .cloned();
             let expiry = broker_expiry(response.metadata())
                 .inspect_err(|rejected| {
                     // Without a usable expiry this epoch cannot be succeeded
@@ -824,21 +847,44 @@ async fn run_epoch_on(
                 lifetime_ends,
             });
             let mut responses = response.into_inner();
-            loop {
-                let frame = match responses.message().await {
-                    Ok(Some(frame)) => frame,
-                    _ => break,
-                };
-                // One broker frame is held at a time. A daemon that stops
-                // reading ends the epoch instead of holding it indefinitely.
-                match tokio::time::timeout(stall, forward_host(&sender, frame)).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(_)) => break,
-                    Err(_) => {
-                        Ended::Stalled.log(config.environment_id);
-                        break;
+            let loopback = async {
+                loop {
+                    let frame = match responses.message().await {
+                        Ok(Some(frame)) => frame,
+                        _ => break,
+                    };
+                    // One broker frame is held at a time. A daemon that stops
+                    // reading ends the epoch instead of holding it indefinitely.
+                    match tokio::time::timeout(stall, forward_host(&sender, frame)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => break,
+                        Err(_) => {
+                            Ended::Stalled.log(config.environment_id);
+                            break;
+                        }
                     }
                 }
+            };
+            // A broker that issued no handle takes no front-door session,
+            // and none is taken while hosted interception is off.
+            let front_doors = async {
+                if let (Some(handle), Some(epochs)) = (handle, &config.front_doors) {
+                    joins.metadata.insert_bin(
+                        codewire_daemon_proto::CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER,
+                        handle,
+                    );
+                    let key = BindingKey {
+                        environment_id: config.environment_id,
+                        pod_uid: config.pod_uid.clone(),
+                        generation: config.generation,
+                    };
+                    super::front_door::serve(epochs, key, joins, &cancellation).await;
+                }
+                std::future::pending::<()>().await;
+            };
+            tokio::select! {
+                () = loopback => {}
+                () = front_doors => {}
             }
             Ok::<(), Option<Unadmitted>>(())
         };
@@ -1098,7 +1144,7 @@ async fn forward_host(
 /// The broker's advertised optional operations, bounded and canonical. A
 /// malformed or unknown value is dropped, never forwarded; the daemon client
 /// forwards only names this build knows.
-fn broker_capabilities(metadata: &tonic::metadata::MetadataMap) -> Vec<String> {
+pub(super) fn broker_capabilities(metadata: &tonic::metadata::MetadataMap) -> Vec<String> {
     metadata
         .get_all(codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER)
         .iter()

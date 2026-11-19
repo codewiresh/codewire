@@ -69,13 +69,23 @@ pub struct EgressServiceState {
     /// orchestration no review (#4000). cw-egress applies the same limit on
     /// its side before it calls.
     pub starts: std::sync::Mutex<HashMap<String, StartLimiter>>,
+    /// The credential relay's admitted epochs on this process (#4001).
+    /// `None` while hosted interception is off: `FrontDoorSession` answers
+    /// UNIMPLEMENTED to an authenticated caller.
+    pub front_doors: Option<Arc<crate::front_door::FrontDoorEpochs>>,
 }
 
+mod front_door;
 #[cfg(test)]
 mod tests;
 
 pub fn egress_router(state: Arc<EgressServiceState>) -> connectrpc::Router {
-    connectrpc::Router::new().add_service(Arc::new(EgressConnectService { state }))
+    connectrpc::Router::new()
+        .add_service(Arc::new(EgressConnectService { state }))
+        .with_route_limits(
+            "/codewire.internal.v1.EgressService/FrontDoorSession",
+            connectrpc::Limits::default().with_max_message_size(front_door::MAX_MESSAGE_BYTES),
+        )
 }
 
 struct EgressConnectService {
@@ -735,13 +745,8 @@ impl EgressService for EgressConnectService {
     async fn front_door_session(
         &self,
         ctx: RequestContext,
-        _requests: InboundStream<FrontDoorSessionRequest>,
+        requests: InboundStream<FrontDoorSessionRequest>,
     ) -> ServiceResult<ServiceStream<FrontDoorSessionResponse>> {
-        // Authenticated now, so a caller sees the final answer to the wrong
-        // identity; the session itself is served from a later change (#4001).
-        self.state.caller_node(&ctx).await?;
-        Err(ConnectError::unimplemented(
-            "front-door sessions are served from a later change",
-        ))
+        self.state.front_door_session(&ctx, requests).await
     }
 }

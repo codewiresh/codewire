@@ -30,6 +30,8 @@ use crate::sandbox::{LABEL_ENV_ID, LABEL_TYPE};
 use crate::worker::environment_auth::WorkspaceCredentialScope;
 use crate::workspace_binding::store::{BindingStoreUnavailable, LiveBinding};
 
+mod front_door;
+
 const SERVER: &str = "dev";
 const SANDBOXES: &str = "dev-sandboxes";
 const NODE: &str = "runtime-a";
@@ -316,7 +318,11 @@ fn rendering() -> KubernetesRenderConfig {
     }
 }
 
-fn state(cluster: &Arc<Cluster>, bindings: Arc<dyn BindingStore>) -> EgressServiceState {
+fn state(
+    cluster: &Arc<Cluster>,
+    bindings: Arc<dyn BindingStore>,
+    front_doors: Option<Arc<crate::front_door::FrontDoorEpochs>>,
+) -> EgressServiceState {
     let driver =
         crate::runtime::kubernetes::KubernetesDriver::shared(cluster.client(), rendering());
     let attestation: Arc<dyn RuntimeAttestation> = driver;
@@ -332,15 +338,24 @@ fn state(cluster: &Arc<Cluster>, bindings: Arc<dyn BindingStore>) -> EgressServi
         }],
         intercepts: Default::default(),
         starts: Default::default(),
+        front_doors,
     }
 }
 
 fn app(cluster: &Arc<Cluster>) -> axum::Router {
-    app_with(cluster, Arc::new(Unbound))
+    app_with(cluster, Arc::new(Unbound), None)
 }
 
-fn app_with(cluster: &Arc<Cluster>, bindings: Arc<dyn BindingStore>) -> axum::Router {
-    codewire_server_core::connect::connect_router(egress_router(Arc::new(state(cluster, bindings))))
+fn app_with(
+    cluster: &Arc<Cluster>,
+    bindings: Arc<dyn BindingStore>,
+    front_doors: Option<Arc<crate::front_door::FrontDoorEpochs>>,
+) -> axum::Router {
+    codewire_server_core::connect::connect_router(egress_router(Arc::new(state(
+        cluster,
+        bindings,
+        front_doors,
+    ))))
 }
 
 async fn call(cluster: &Arc<Cluster>, method: &str, body: Value) -> (StatusCode, Value) {
@@ -581,9 +596,8 @@ async fn malformed_reports_are_refused_before_anything_is_stored() {
 }
 
 #[tokio::test]
-async fn a_front_door_session_answers_unimplemented_to_a_valid_caller() {
-    // Until the relay attachment lands (#4001), cw-egress retries as for
-    // UNAVAILABLE.
+async fn a_front_door_session_answers_unimplemented_while_interception_is_off() {
+    // Authenticated first: the wrong caller still sees its own refusal.
     let frame = first_frame_of(
         &Cluster::healthy(),
         "FrontDoorSession",
@@ -646,6 +660,7 @@ rules:
         platform: configured.clone(),
         intercepts: Default::default(),
         starts: Default::default(),
+        front_doors: None,
     };
     let bound = Assignment::Bound {
         environment_id: "env".into(),
@@ -691,6 +706,7 @@ async fn interception_reaches_only_a_bound_sandbox_and_only_when_switched_on() {
             platform: Vec::new(),
             intercepts: crate::egress::assignment::interception_bindings(interception).unwrap(),
             starts: Default::default(),
+            front_doors: None,
         }
     };
     let bound = Assignment::Bound {
@@ -799,6 +815,7 @@ fn watch(cluster: &Arc<Cluster>, expires_in: Duration) -> Watch {
             platform: Vec::new(),
             intercepts: Default::default(),
             starts: Default::default(),
+            front_doors: None,
         }),
         caller: Caller {
             namespace: SERVER.into(),
@@ -1129,7 +1146,7 @@ fn rendered_with(edit: impl FnOnce(&mut Value)) -> Option<Value> {
 /// guest's review and its assignment. Admit itself goes on to read the
 /// environment's policy from the database, which these tests have none of.
 async fn lockdown(cluster: &Arc<Cluster>) -> Result<(), connectrpc::ErrorCode> {
-    let state = state(cluster, Arc::new(Bound));
+    let state = state(cluster, Arc::new(Bound), None);
     let guest = state.named_guest(GUEST, GUEST_UID);
     let facts = state
         .attestation
@@ -1144,7 +1161,12 @@ async fn lockdown(cluster: &Arc<Cluster>) -> Result<(), connectrpc::ErrorCode> {
 }
 
 async fn admit_bound(cluster: &Arc<Cluster>) -> StatusCode {
-    let (status, _) = call_app(app_with(cluster, Arc::new(Bound)), "Admit", admit_body()).await;
+    let (status, _) = call_app(
+        app_with(cluster, Arc::new(Bound), None),
+        "Admit",
+        admit_body(),
+    )
+    .await;
     status
 }
 
@@ -1255,7 +1277,8 @@ async fn admit_refuses_a_guest_whose_lockdown_is_not_applied_whatever_it_reports
     let mut claiming = admit_body();
     claiming["selfCheck"] = json!("PASSED");
     claiming["selfCheckPassed"] = json!(true);
-    let (status, body) = call_app(app_with(&cluster, Arc::new(Bound)), "Admit", claiming).await;
+    let (status, body) =
+        call_app(app_with(&cluster, Arc::new(Bound), None), "Admit", claiming).await;
     assert_ne!(status, StatusCode::OK, "{body}");
     assert!(body.get("assignment").is_none(), "{body}");
 }
@@ -1319,11 +1342,16 @@ fn unreachable_pool() -> PgPool {
 /// A member admitted unbound and its open watch, which has sent "unbound".
 async fn admitted_unbound(cluster: &Arc<Cluster>) -> (Arc<Claimable>, Watch) {
     let member = Arc::new(Claimable::default());
-    let (status, body) = call_app(app_with(cluster, member.clone()), "Admit", admit_body()).await;
+    let (status, body) = call_app(
+        app_with(cluster, member.clone(), None),
+        "Admit",
+        admit_body(),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body["assignment"]["unbound"].is_object(), "{body}");
 
-    let state = state(cluster, member.clone());
+    let state = state(cluster, member.clone(), None);
     let guest = state.named_guest(GUEST, GUEST_UID);
     let first = state.watched_assignment(&guest, None).await.unwrap();
     let mut watch = watch_of(state);
@@ -1442,7 +1470,7 @@ async fn a_member_claimed_under_the_rendered_policy_passes_the_gate() {
     member.claim();
 
     let intact = bound_guest(Some(BOUND_ENVIRONMENT), Some(rendered_policy()));
-    let state_intact = state(&intact, member.clone());
+    let state_intact = state(&intact, member.clone(), None);
     let guest = state_intact.named_guest(GUEST, GUEST_UID);
     // Past the gate, the read of the environment's policy is what fails
     // here, for want of a database: unavailable, never a refusal.
@@ -1453,7 +1481,7 @@ async fn a_member_claimed_under_the_rendered_policy_passes_the_gate() {
     );
 
     let missing = bound_guest(Some(BOUND_ENVIRONMENT), None);
-    let state_missing = state(&missing, member);
+    let state_missing = state(&missing, member, None);
     assert!(matches!(
         state_missing.watched_assignment(&guest, None).await,
         Ok(Watched::Withheld(lockdown::LockdownRefusal::PolicyMissing))
@@ -1474,7 +1502,7 @@ async fn a_member_claimed_under_the_rendered_policy_passes_the_gate() {
 /// guest closed for this reason, so the count is exact.
 #[tokio::test]
 async fn a_sandbox_failed_closed_is_counted_by_its_reason_even_when_it_cannot_be_recorded() {
-    let state = state(&Cluster::healthy(), Arc::new(Unbound));
+    let state = state(&Cluster::healthy(), Arc::new(Unbound), None);
     let guest = state.named_guest(GUEST, GUEST_UID);
     let refusal = lockdown::LockdownRefusal::NotBrokerMode;
     let before = lockdown::failed_closed(&refusal);

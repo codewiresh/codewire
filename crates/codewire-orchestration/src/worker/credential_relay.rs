@@ -47,6 +47,7 @@ use crate::api::log_notifications::ENVIRONMENT_LOGS_CHANNEL;
 mod budget;
 mod connection;
 mod epoch;
+mod front_door;
 
 use budget::{EnvironmentBudget, Limits};
 use connection::DaemonTarget;
@@ -74,6 +75,7 @@ struct RelayConfig {
     relay_token: PathBuf,
     broker: BrokerEndpoint,
     limits: Limits,
+    front_doors: Option<Arc<crate::front_door::FrontDoorEpochs>>,
 }
 
 /// One live binding to relay. Any change is a different relay.
@@ -322,6 +324,8 @@ async fn relay_environment(
         relay_token: config.relay_token.clone(),
         broker: config.broker.clone(),
         budget: EnvironmentBudget::new(config.limits),
+        pod_uid: target.pod_uid.clone(),
+        front_doors: config.front_doors.clone(),
     };
     tracing::info!(
         event = "credential_relay_started",
@@ -391,6 +395,7 @@ pub(crate) async fn credential_relay_loop(ctx: Arc<WorkerContext>, leadership: A
         relay_token: PathBuf::from(CREDENTIAL_RELAY_TOKEN_PATH),
         broker: BrokerEndpoint::Tls(broker),
         limits: Limits::DEFAULT,
+        front_doors: ctx.front_doors.clone(),
     });
     let mut relays = Relays::default();
     let mut _serving: Option<LeaderPass> = None;

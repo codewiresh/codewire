@@ -1720,6 +1720,7 @@ mod enabled {
                 setting: worker::unverified_purge::PurgeSetting::Off,
                 ..Default::default()
             },
+            front_doors: None,
         });
         codewire_orchestration::temporal::run_temporal_worker(
             context,

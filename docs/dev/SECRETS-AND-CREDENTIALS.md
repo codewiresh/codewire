@@ -1232,10 +1232,10 @@ received for 120 seconds (#4963), cleanly, as its front door closing would,
 freeing its slot; cw-egress opens another on demand. Only the broker's runner
 holds every in-flight request and open socket, so only it can tell. A request
 in flight keeps the stream open within the request's own bounds, and an open
-socket for as long as it is open. The
-loopback session never ends for idleness, and neither does a local front door,
-which cannot open another session. The relay does not open
-these yet: serving `EgressService.FrontDoorSession` through them comes next.
+socket for as long as it is open. The loopback session never ends for
+idleness, and neither does a local front door, which cannot open another
+session. The relay opens them for `EgressService.FrontDoorSession`
+("Front-door session through a relay" below).
 
 Native authentication is ready before private checkout and install; the
 environment becomes ready only after setup succeeds. Credential delivery uses
@@ -1756,32 +1756,70 @@ heading line, and a part that cannot be read says why in one line instead.
 A hosted Sandbox's daemon lines are in its Pod log, which `cw daemon logs ENV`
 already prints.
 
-### Front-door session through a relay (not yet served)
+### Front-door session through a relay
 
 A front door reaches the broker that holds an environment's credentials
 through a relay in two placements: a hosted Sandbox, and a local VM on a
 platform profile. Both use one mechanism: a second stream that joins a relay
 epoch already admitted, by that epoch's handle, never a second way in.
 
-**Hosted (#4001).** `EgressService.FrontDoorSession` is specified, but not
-served yet: it answers `UNIMPLEMENTED` until the credential relay attaches it
-(#4001). It is the hosted TLS front door's way into the credential broker,
-beside a Sandbox's loopback ingress, and these rules hold from the start:
+**Hosted (#4001).** `EgressService.FrontDoorSession` is the hosted TLS front
+door's way into the credential broker, beside a Sandbox's loopback ingress.
+It is served only while hosted interception is on
+(`CODEWIRE_HOSTED_INTERCEPTION_ENABLED`, which needs hosted egress on);
+otherwise it answers `UNIMPLEMENTED` to an authenticated caller, and no relay
+epoch takes a session. No `cw-egress` calls it yet, and interception stays
+off until the relay holds one session across epoch renewals:
 
 - **Who opens it:** only `cw-egress`, with its own projected token (audience
   `codewire.internal.egress-node.v1`, its ServiceAccount and namespace), for
   an admitted Pod on its own node. Orchestration reads the node from the
-  caller's live Pod. The Sandbox's workspace binding token cannot open one: a
+  caller's live Pod, and refuses with `PERMISSION_DENIED`, before any relay
+  work, a Pod that is on another node, is not admitted, has another UID or has
+  no live binding. The Sandbox's workspace binding token cannot open one: a
   loopback session never becomes a front-door session.
 - **The environment** comes only from that Pod's live workspace binding, never
   from a request field.
-- **The frames** after the open frame are the credential bridge's
-  `front-door.v1` frames, carried unchanged. Orchestration does not read or
-  keep them. Injection, redaction, refresh and every authority check stay in
-  the broker.
-- **It ends with its credential relay epoch,** so the epoch's reuse limits
-  above bound it. `cw-egress` opens a new session for the next epoch. A Pod
-  has at most one per epoch.
+- **It joins the binding's current relay epoch.** The relay epoch that the
+  broker admitted most recently for that binding (environment, Pod UID and
+  generation) opens the broker's `FrontDoorBridge` with its own relay token,
+  the daemon's workspace authorization and the epoch's handle; none of them
+  reach `EgressService`. During a renewal, a session opened after the
+  successor is admitted joins the successor, never the epoch that is
+  draining. Orchestration answers `attached`, then the host Open, which lists
+  exactly the capabilities the broker listed for that stream.
+- **Ready.** The broker reads a stream's Ready before it answers, and the
+  front door sends its own only after the Open written from that answer. So
+  the relay opens each upstream with the Ready of the binding it
+  authenticated: the protocol version, the environment id and the
+  generation, never anything the front door claims. The front door's own
+  Ready, its first frame, must equal it byte for byte. It is consumed, and a
+  mismatch, any frame before it, or none within 30 seconds ends the session.
+  The broker still checks the Ready against the workspace authorization.
+- **The frames** are carried unchanged: each `bridge` field is exactly one
+  front-door.v1 frame, a four-byte big-endian length and then that many
+  protobuf bytes, at most the bridge's maximum message size. Orchestration
+  reads only that length and refuses a length of zero, over the maximum, or
+  not equal to the bytes that follow, which ends that session. Injection,
+  redaction, refresh and every authority check stay in the broker.
+- **Bounds.** A session's frames toward the broker hold a stream budget of
+  their own inside the environment's. A `cw-egress` that takes no frame for
+  30 seconds ends only its session; one whose socket is out of credit is not
+  stalled, since the broker then sends nothing. The loopback session keeps
+  serving either way.
+- **It ends with its epoch,** or when the token `cw-egress` opened it with
+  expires, so the epoch's reuse limits above bound it. `cw-egress` opens a new
+  session for the next epoch. An epoch serves one session at a time; a second
+  is `ALREADY_EXISTS`.
+- **`UNAVAILABLE` means no epoch is running for the Pod's current binding on
+  this process yet:** the environment is not admitted, a rebind is replacing
+  its relay, or this is not the orchestration replica whose relay holds it.
+  The relay is leader-gated, and orchestration runs one replica; scaling it
+  out needs the session routed to the leader first. `cw-egress` retries
+  `UNAVAILABLE` and `ALREADY_EXISTS` with bounded, capped backoff.
+- **Not yet:** a joined session that is idle holds its epoch's place until the
+  epoch ends; the broker's own idle end (120 seconds with no open request or
+  socket) follows.
 
 **A local VM on a platform profile (not yet served, #4909).** Such a VM has
 no local credential engine: its confined local relay forwards the guest's

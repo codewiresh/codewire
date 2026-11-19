@@ -105,6 +105,10 @@ pub struct WorkerContext {
     pub credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
     /// What the purge of unverified email sign-ups does (#4541).
     pub unverified_signup_purge: unverified_purge::UnverifiedSignupPurge,
+    /// The credential relay's admitted epochs, which `EgressService`'s
+    /// front-door sessions join (#4001). Shared with the API process half.
+    /// `None` while hosted interception is off: no epoch takes a session.
+    pub front_doors: Option<std::sync::Arc<crate::front_door::FrontDoorEpochs>>,
 }
 
 impl WorkerContext {

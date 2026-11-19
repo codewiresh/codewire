@@ -32,6 +32,7 @@ pub fn service_state(
     pool: PgPool,
     server_namespace: &str,
     sandbox_namespace: &str,
+    front_doors: Option<Arc<crate::front_door::FrontDoorEpochs>>,
 ) -> anyhow::Result<Option<Arc<service::EgressServiceState>>> {
     if !settings.enabled {
         return Ok(None);
@@ -53,6 +54,7 @@ pub fn service_state(
         platform: Vec::new(),
         intercepts: assignment::interception_bindings(settings.interception)?,
         starts: Default::default(),
+        front_doors,
     })))
 }
 
@@ -64,14 +66,17 @@ pub fn mount(
     app: codewire_server_core::http::AppBuilder,
     api: &crate::api::ApiState,
     database_url: &str,
+    settings: settings::EgressSettings,
+    front_doors: Option<Arc<crate::front_door::FrontDoorEpochs>>,
 ) -> anyhow::Result<axum::Router> {
     let state = service_state(
-        settings::EgressSettings::from_env()?,
+        settings,
         api.runtime.clone(),
         database_url,
         api.pool.clone(),
         &api.sandbox_cfg.pod_namespace,
         &api.sandbox_cfg.sandbox_namespace,
+        front_doors,
     )?;
     Ok(match state {
         Some(state) => {
@@ -120,6 +125,7 @@ mod tests {
             pool(),
             "",
             "",
+            None,
         )
         .unwrap();
         assert!(state.is_none());
@@ -131,7 +137,7 @@ mod tests {
             enabled: true,
             interception: false,
         };
-        assert!(service_state(on(), None, "postgres://unused", pool(), "dev", "sb").is_err());
+        assert!(service_state(on(), None, "postgres://unused", pool(), "dev", "sb", None).is_err());
         // Startup builds the state without calling Kubernetes.
         let client = kube::Client::new(
             tower::service_fn(|_: axum::http::Request<kube::client::Body>| async {
@@ -153,7 +159,8 @@ mod tests {
                 "postgres://unused",
                 pool(),
                 " ",
-                "sb"
+                "sb",
+                None
             )
             .is_err()
         );
@@ -164,7 +171,8 @@ mod tests {
                 "postgres://unused",
                 pool(),
                 "dev",
-                "sb"
+                "sb",
+                None
             )
             .unwrap()
             .is_some_and(|state| state.intercepts.is_empty())
@@ -180,6 +188,7 @@ mod tests {
             pool(),
             "dev",
             "sb",
+            None,
         )
         .unwrap()
         .unwrap();

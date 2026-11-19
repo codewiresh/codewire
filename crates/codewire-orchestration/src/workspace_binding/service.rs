@@ -122,6 +122,8 @@ pub struct WorkspaceBindingState {
     relay: Arc<dyn RelayAllocator>,
     max_wait: Duration,
     requery_interval: Duration,
+    /// The deployment's hosted interception setting (#4001).
+    interception: bool,
 }
 
 /// A caller authenticated as a live workspace Pod, calling from that Pod's
@@ -159,7 +161,15 @@ impl WorkspaceBindingState {
             relay: Arc::new(HttpRelayAllocator::new()),
             max_wait: MAX_BIND_WAIT,
             requery_interval: BINDING_REQUERY_INTERVAL,
+            interception: false,
         }
+    }
+
+    /// Turns hosted interception on for broker-mode sandboxes (#4001): the
+    /// deployment's `CODEWIRE_HOSTED_INTERCEPTION_ENABLED`.
+    pub fn with_interception(mut self, interception: bool) -> Self {
+        self.interception = interception;
+        self
     }
 
     /// The public endpoints the access grant names and the UDP relay
@@ -368,7 +378,14 @@ impl WorkspaceBindingState {
 
         // §4.7: respond only while the reviewed token is still valid.
         still_valid(&caller.identity)?;
-        let mut response = respond(&self.session_secret, &caller.identity, binding, access)?;
+        let interception = intercepted(self.interception, &member);
+        let mut response = respond(
+            &self.session_secret,
+            &caller.identity,
+            binding,
+            access,
+            interception,
+        )?;
         response.server_url.clone_from(&self.server_url);
         Ok(response)
     }
@@ -684,11 +701,25 @@ fn still_valid(identity: &VerifiedPodIdentity) -> Result<(), BindError> {
     Ok(())
 }
 
+/// Whether this sandbox's agents are intercepted (#4001): the deployment has
+/// it on and the Pod is a broker-mode sandbox. Interception runs in cw-egress's
+/// front door, so a sandbox whose egress does not go through cw-egress never
+/// gets it, whatever the setting says.
+fn intercepted(enabled: bool, member: &MemberFacts) -> bool {
+    enabled
+        && member
+            .labels
+            .get(crate::egress::admission::EGRESS_MODE_LABEL)
+            .map(String::as_str)
+            == Some(crate::egress::admission::EGRESS_MODE_BROKER)
+}
+
 fn respond(
     session_secret: &str,
     identity: &VerifiedPodIdentity,
     binding: LiveBinding,
     access: WorkspaceAccess,
+    interception: bool,
 ) -> Result<BindWorkspaceResponse, BindError> {
     // The lookup keys on the reviewed UID; refuse anything else outright.
     if binding.pod_uid != identity.pod_uid() {
@@ -710,6 +741,7 @@ fn respond(
         access: Some(access).into(),
         working_directory: binding.working_directory,
         defaults: binding.defaults.map(workspace_defaults).into(),
+        interception,
         ..Default::default()
     })
 }

@@ -33,7 +33,7 @@ class BindWorkspaceRequest(_message.Message):
     def __init__(self, wait_seconds: _Optional[int] = ...) -> None: ...
 
 class BindWorkspaceResponse(_message.Message):
-    __slots__ = ("environment_id", "pod_uid", "operation_generation", "daemon_credential", "projection_selection_sha256", "managed_credential_clients", "access", "working_directory", "defaults", "server_url")
+    __slots__ = ("environment_id", "pod_uid", "operation_generation", "daemon_credential", "projection_selection_sha256", "managed_credential_clients", "access", "working_directory", "defaults", "server_url", "interception")
     ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
     POD_UID_FIELD_NUMBER: _ClassVar[int]
     OPERATION_GENERATION_FIELD_NUMBER: _ClassVar[int]
@@ -44,6 +44,7 @@ class BindWorkspaceResponse(_message.Message):
     WORKING_DIRECTORY_FIELD_NUMBER: _ClassVar[int]
     DEFAULTS_FIELD_NUMBER: _ClassVar[int]
     SERVER_URL_FIELD_NUMBER: _ClassVar[int]
+    INTERCEPTION_FIELD_NUMBER: _ClassVar[int]
     environment_id: str
     pod_uid: str
     operation_generation: int
@@ -54,7 +55,8 @@ class BindWorkspaceResponse(_message.Message):
     working_directory: str
     defaults: WorkspaceDefaults
     server_url: str
-    def __init__(self, environment_id: _Optional[str] = ..., pod_uid: _Optional[str] = ..., operation_generation: _Optional[int] = ..., daemon_credential: _Optional[str] = ..., projection_selection_sha256: _Optional[str] = ..., managed_credential_clients: _Optional[str] = ..., access: _Optional[_Union[WorkspaceAccess, _Mapping]] = ..., working_directory: _Optional[str] = ..., defaults: _Optional[_Union[WorkspaceDefaults, _Mapping]] = ..., server_url: _Optional[str] = ...) -> None: ...
+    interception: bool
+    def __init__(self, environment_id: _Optional[str] = ..., pod_uid: _Optional[str] = ..., operation_generation: _Optional[int] = ..., daemon_credential: _Optional[str] = ..., projection_selection_sha256: _Optional[str] = ..., managed_credential_clients: _Optional[str] = ..., access: _Optional[_Union[WorkspaceAccess, _Mapping]] = ..., working_directory: _Optional[str] = ..., defaults: _Optional[_Union[WorkspaceDefaults, _Mapping]] = ..., server_url: _Optional[str] = ..., interception: _Optional[bool] = ...) -> None: ...
 
 class WorkspaceDefaults(_message.Message):
     __slots__ = ("environment", "git")
