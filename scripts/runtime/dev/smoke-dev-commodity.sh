@@ -3223,12 +3223,12 @@ classify_coco_rest_isolation_result() {
   fi
 
   if [[ "$command_exit" != "0" ]] \
-      && grep -Fq 'session exited with code 24' "$stderr_file"; then
+      && grep -Fqi 'session exited with code 24' "$stderr_file"; then
     COCO_REST_ISOLATION_STATUS="listener_present"
     COCO_REST_ISOLATION_CURL_EXIT="0"
     COCO_REST_ISOLATION_EVIDENCE_SOURCE="cli_terminal_status"
   elif [[ "$command_exit" != "0" ]] \
-      && grep -Fq 'session exited with code 25' "$stderr_file"; then
+      && grep -Fqi 'session exited with code 25' "$stderr_file"; then
     COCO_REST_ISOLATION_STATUS="inconclusive_transport"
     COCO_REST_ISOLATION_EVIDENCE_SOURCE="cli_terminal_status"
   elif [[ "$command_exit" == "0" ]]; then
@@ -3317,7 +3317,8 @@ run_environment_session_smoke() {
   fi
   grep -qF 'platform-session-failure' "$failure_out" ||
     die "failed platform session output was not returned"
-  grep -qF 'session exited with code 42' "$failure_err" ||
+  # The CLI starts every error with a capital letter (#4637).
+  grep -qiF 'session exited with code 42' "$failure_err" ||
     die "failed platform session exit status was not propagated"
 
   cw ls "$ENV_ID" --output json >"$sessions_json"

@@ -268,11 +268,11 @@ run_coco_rest_isolation_classifier_cases() {
     inconclusive_transport 28 guest_marker
   run_coco_rest_isolation_classifier_case \
     listener-terminal-status 1 '' \
-    $'Error: session exited with code 24\n' \
+    $'✗ Session exited with code 24\n' \
     listener_present 0 cli_terminal_status
   run_coco_rest_isolation_classifier_case \
     inconclusive-terminal-status 1 '' \
-    $'Error: session exited with code 25\n' \
+    $'✗ Session exited with code 25\n' \
     inconclusive_transport '' cli_terminal_status
   run_coco_rest_isolation_classifier_case \
     output-missing 0 '' \
