@@ -548,7 +548,7 @@ where
     B: CredentialBridgeTransport,
 {
     let broker = Arc::new(broker);
-    run_managed_bridge(broker, bridge.bridge).await
+    run_managed_bridge(broker, bridge.bridge, None).await
 }
 
 #[cfg(test)]
@@ -563,15 +563,22 @@ where
     B: CredentialBridgeTransport,
 {
     let bridge = admit_credential_bridge(bridge, environment_id, environment_generation).await?;
-    run_managed_bridge(broker, bridge.bridge).await
+    run_managed_bridge(broker, bridge.bridge, None).await
 }
 
-async fn run_managed_bridge<E, B>(broker: Arc<E>, bridge: B) -> Result<(), BrokerBridgeError>
+/// `idle` ends the session once nothing is in flight and nothing has arrived
+/// for that long, as its transport closing would. Only a session whose peer
+/// can open another may have one: a joined hosted front door (#4963).
+async fn run_managed_bridge<E, B>(
+    broker: Arc<E>,
+    bridge: B,
+    idle: Option<std::time::Duration>,
+) -> Result<(), BrokerBridgeError>
 where
     E: BrokerRequestExecutor + 'static,
     B: CredentialBridgeTransport,
 {
-    let result = run_admitted_bridge(Arc::clone(&broker), bridge).await;
+    let result = run_admitted_bridge(Arc::clone(&broker), bridge, idle).await;
     // Request futures may be aborted when the whole bridge epoch is lost. Once
     // a refresh permit has been returned, its complete provider exchange and
     // terminal action are tracked independently. Drain that work, then any
@@ -615,7 +622,11 @@ where
     Ok((bridge, ready))
 }
 
-async fn run_admitted_bridge<E, B>(broker: Arc<E>, mut bridge: B) -> Result<(), BrokerBridgeError>
+async fn run_admitted_bridge<E, B>(
+    broker: Arc<E>,
+    mut bridge: B,
+    idle: Option<std::time::Duration>,
+) -> Result<(), BrokerBridgeError>
 where
     E: BrokerRequestExecutor + 'static,
     B: CredentialBridgeTransport,
@@ -628,7 +639,14 @@ where
     // Open sockets run apart from requests; they end with this loop.
     let mut sockets = websocket::SocketRuns::new();
     loop {
+        // Every turn of this loop follows a frame or a completion.
+        let idle_ends = idle.map(|idle| tokio::time::Instant::now() + idle);
         tokio::select! {
+            // Idle only with no request, open socket or pending handshake.
+            () = sleep_until(idle_ends), if active.is_empty() && sockets.in_use() == 0 => {
+                tasks.shutdown().await;
+                return Ok(());
+            }
             () = sockets.step() => {}
             completed = tasks.join_next(), if !tasks.is_empty() => {
                 let Some(completed) = completed else {
@@ -904,6 +922,14 @@ where
                 }
             }
         }
+    }
+}
+
+/// Never, without a deadline.
+async fn sleep_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 

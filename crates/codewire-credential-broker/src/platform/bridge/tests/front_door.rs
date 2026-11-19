@@ -190,3 +190,30 @@ async fn an_epoch_serves_one_front_door_stream_and_takes_the_next_once_it_ends()
     .await
     .expect("the next front-door stream joins once the first has ended");
 }
+
+#[tokio::test]
+async fn an_idle_joined_stream_ends_and_returns_its_slot() {
+    let idle = Duration::from_millis(300);
+    let fixture = Fixture::idling_after(idle).await;
+    let (_epoch_input, epoch) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let handle = handle_of(&epoch.unwrap());
+    let before = fixture.service.streams_in_use();
+    let (_input, joined) = fixture.join(Some("synthetic-allow"), Some(&handle)).await;
+    let mut joined = joined.unwrap();
+    assert_eq!(fixture.service.streams_in_use(), before + 1);
+    // Nothing in flight and nothing sent: it ends on its own, cleanly.
+    let ended = tokio::time::timeout(TEST_TIMEOUT, joined.get_mut().message())
+        .await
+        .expect("the idle stream ended");
+    assert!(matches!(ended, Ok(None)), "{ended:?}");
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while fixture.service.streams_in_use() != before {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("its slot is returned");
+    // And the epoch takes the next stream at once.
+    let (_next_input, next) = fixture.join(Some("synthetic-allow"), Some(&handle)).await;
+    assert!(next.is_ok());
+}

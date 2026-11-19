@@ -1222,7 +1222,15 @@ same stream budget until it ends. The stream runs on the epoch's broker as a
 front-door entry, with that epoch's decision, material cache and single
 refresh, and lists only the `front-door.v1` and `request-body-stream`
 capabilities. It ends with its epoch; when it ends, the loopback session keeps
-serving and the next front-door stream may join. The relay does not open
+serving and the next front-door stream may join. It also ends once it has had
+no request in flight, no open WebSocket or pending handshake, and nothing
+received for 120 seconds (#4963), cleanly, as its front door closing would,
+freeing its slot; cw-egress opens another on demand. Only the broker's runner
+holds every in-flight request and open socket, so only it can tell. A request
+in flight keeps the stream open within the request's own bounds, and an open
+socket for as long as it is open. The
+loopback session never ends for idleness, and neither does a local front door,
+which cannot open another session. The relay does not open
 these yet: serving `EgressService.FrontDoorSession` through them comes next.
 
 Native authentication is ready before private checkout and install; the

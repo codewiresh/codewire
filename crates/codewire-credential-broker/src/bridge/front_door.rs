@@ -135,10 +135,12 @@ where
         .try_send(front_door)
         .map_err(|_| BrokerBridgeError::Unavailable)?;
     drop(joins);
+    // A local front door cannot open another session: it never idles out.
     run_admitted_credential_bridge_with_front_doors(
         broker.paired_with_front_door(),
         loopback,
         joining,
+        None,
     )
     .await
 }
@@ -150,10 +152,13 @@ where
 /// join. When the loopback session ends, the front-door session then serving
 /// is ended and drained, and no other joins. The caller admits at most one
 /// session at a time; a later one waits here until the current one ends.
+/// `idle` ends a front-door session with nothing in flight after that long,
+/// and is only for peers that can open another (#4963).
 pub async fn run_admitted_credential_bridge_with_front_doors<P, U, B, F>(
     broker: OpenAiBroker<P, U>,
     loopback: AdmittedCredentialBridge<B>,
     mut joins: mpsc::Receiver<AdmittedCredentialBridge<F>>,
+    idle: Option<std::time::Duration>,
 ) -> Result<(), BrokerBridgeError>
 where
     P: BrokerLeaseProvider + 'static,
@@ -164,7 +169,7 @@ where
     let broker = Arc::new(broker);
     let ended = CancellationToken::new();
     let loopback = async {
-        let result = run_managed_bridge(Arc::clone(&broker), loopback.bridge).await;
+        let result = run_managed_bridge(Arc::clone(&broker), loopback.bridge, None).await;
         ended.cancel();
         result
     };
@@ -184,6 +189,7 @@ where
             let result = run_admitted_front_door_bridge(
                 Arc::clone(&broker),
                 session.stoppable(stop.clone()),
+                idle,
             )
             .await;
             // A runner reports every end as an error; only an end the
@@ -210,6 +216,7 @@ where
 pub async fn run_admitted_front_door_bridge<P, U, B>(
     broker: Arc<OpenAiBroker<P, U>>,
     bridge: AdmittedCredentialBridge<B>,
+    idle: Option<std::time::Duration>,
 ) -> Result<(), BrokerBridgeError>
 where
     P: BrokerLeaseProvider + 'static,
@@ -217,7 +224,7 @@ where
     B: CredentialBridgeTransport,
 {
     let broker = Arc::new(FrontDoorExecutor(broker));
-    run_managed_bridge(broker, bridge.bridge).await
+    run_managed_bridge(broker, bridge.bridge, idle).await
 }
 
 /// A front-door session's executor: its HTTP requests take the front-door

@@ -105,7 +105,7 @@ fn session(serves: bool) -> Session {
         input: input_rx,
         output: output_tx,
     };
-    let run = tokio::spawn(run_admitted_bridge(Arc::new(executor), bridge));
+    let run = tokio::spawn(run_admitted_bridge(Arc::new(executor), bridge, None));
     Session {
         input,
         output,

@@ -40,6 +40,8 @@ type Outbound = (Method, String, Vec<(String, Vec<u8>)>, Vec<u8>);
 
 const GENERATION: u64 = 3;
 
+mod idle;
+
 /// Every host some route sends to.
 const ROUTE_HOSTS: [&str; 6] = [
     "api.openai.com",
@@ -174,6 +176,10 @@ struct Recorded {
     deny: bool,
     /// The codex slot holds a ChatGPT sign-in instead of an API key.
     codex_sign_in: bool,
+    /// The one slot the authority refuses.
+    denied: Option<&'static str>,
+    /// Holds every upstream request until notified.
+    hold: Option<Arc<tokio::sync::Notify>>,
     /// The environment whose Codex login the authority delivers, if any.
     codex_login_environment: Option<Uuid>,
     /// The environment whose Claude sign-in login the authority delivers, if
@@ -223,6 +229,7 @@ impl Recorded {
                 placeholder: self.placeholder,
                 deny: self.deny,
                 codex_sign_in: self.codex_sign_in,
+                denied: self.denied,
                 refreshes: self.refreshes.clone(),
                 plan: Arc::clone(&self.plan),
                 codex_login_environment: self.codex_login_environment,
@@ -232,6 +239,7 @@ impl Recorded {
             Upstream {
                 outbound: Arc::clone(&self.outbound),
                 echo_credential: self.echo_credential,
+                hold: self.hold.clone(),
                 sockets: Arc::clone(&self.sockets),
                 unauthorized_upgrades: Arc::clone(&self.unauthorized_upgrades),
                 forwarded: Arc::clone(&self.forwarded),
@@ -260,6 +268,7 @@ struct Authority {
     placeholder: Option<&'static str>,
     deny: bool,
     codex_sign_in: bool,
+    denied: Option<&'static str>,
     refreshes: Option<Arc<AtomicUsize>>,
     plan: Arc<Mutex<std::collections::VecDeque<LeasePlan>>>,
     codex_login_environment: Option<Uuid>,
@@ -287,7 +296,7 @@ impl BrokerLeaseProvider for Authority {
             .unwrap()
             .pop_front()
             .unwrap_or(LeasePlan::Ordinary);
-        if self.deny || matches!(planned, LeasePlan::Denied) {
+        if self.deny || self.denied == Some(slot.as_str()) || matches!(planned, LeasePlan::Denied) {
             return Err(BrokerLeaseError::Denied);
         }
         let (provider, kind) = match slot.as_str() {
@@ -411,6 +420,7 @@ impl BrokerLeaseProvider for Authority {
 struct Upstream {
     outbound: Arc<Mutex<Vec<Outbound>>>,
     echo_credential: bool,
+    hold: Option<Arc<tokio::sync::Notify>>,
     sockets: Arc<Mutex<Vec<tokio::io::DuplexStream>>>,
     unauthorized_upgrades: Arc<AtomicUsize>,
     forwarded: Arc<AtomicUsize>,
@@ -434,6 +444,9 @@ impl BrokerUpstreamTransport for Upstream {
         &self,
         mut request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        if let Some(hold) = &self.hold {
+            hold.notified().await;
+        }
         let streamed = request.take_body_stream();
         let (method, target, headers, mut body) = request.into_parts();
         // A streamed body is recorded whole, as the provider would read it.
@@ -1141,7 +1154,7 @@ async fn serve_on(
         match entry {
             BridgeEntry::Loopback => run_admitted_credential_bridge(broker, admitted).await,
             BridgeEntry::FrontDoor => {
-                run_admitted_front_door_bridge(Arc::new(broker), admitted).await
+                run_admitted_front_door_bridge(Arc::new(broker), admitted, None).await
             }
         }
     });
@@ -1553,7 +1566,7 @@ async fn a_front_door_that_ends_is_replaced_by_the_next_one_to_join() {
     let (joins, joining) = mpsc::channel(1);
     let broker = recorded.broker();
     let runner = tokio::spawn(async move {
-        run_admitted_credential_bridge_with_front_doors(broker, loopback, joining).await
+        run_admitted_credential_bridge_with_front_doors(broker, loopback, joining, None).await
     });
 
     let (first, first_task, first_session) = front_door_pair(environment_id).await;
@@ -1588,7 +1601,7 @@ async fn once_the_loopback_session_ends_no_front_door_joins() {
     let (joins, joining) = mpsc::channel(1);
     let broker = recorded.broker();
     let runner = tokio::spawn(async move {
-        run_admitted_credential_bridge_with_front_doors(broker, loopback, joining).await
+        run_admitted_credential_bridge_with_front_doors(broker, loopback, joining, None).await
     });
     let (_first, first_task, first_session) = front_door_pair(environment_id).await;
     joins.send(first_session).await.unwrap();

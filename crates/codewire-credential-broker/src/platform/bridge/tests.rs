@@ -174,6 +174,21 @@ impl Fixture {
     }
 
     async fn with_limits(streams: usize, leases: usize) -> Self {
+        Self::build(streams, leases, FRONT_DOOR_IDLE).await
+    }
+
+    /// The production limits, with joined front-door streams idling out
+    /// after `idle`.
+    async fn idling_after(idle: std::time::Duration) -> Self {
+        Self::build(
+            PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS,
+            PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES,
+            idle,
+        )
+        .await
+    }
+
+    async fn build(streams: usize, leases: usize, idle: std::time::Duration) -> Self {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://synthetic:synthetic@127.0.0.1:1/synthetic")
             .unwrap();
@@ -225,7 +240,8 @@ impl Fixture {
             upstream.clone(),
             streams,
             leases,
-        );
+        )
+        .with_front_door_idle(idle);
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();

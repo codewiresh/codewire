@@ -9,7 +9,7 @@
 //! has no `Debug`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_EPOCH_HANDLE_BYTES, CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER,
@@ -24,8 +24,14 @@ use uuid::Uuid;
 use super::RelayTransport;
 use crate::AdmittedCredentialBridge;
 
-/// One epoch's front-door handle.
+/// One epoch's front-door handle, cleared from memory when dropped.
 pub(super) struct EpochHandle([u8; CREDENTIAL_BRIDGE_EPOCH_HANDLE_BYTES]);
+
+impl Drop for EpochHandle {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
 
 impl EpochHandle {
     fn generate() -> Result<Self, Status> {
@@ -122,9 +128,11 @@ pub(super) struct Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        if let Ok(mut slots) = self.registry.slots.lock() {
-            slots.retain(|slot| !slot.handle.matches(&self.handle));
-        }
+        self.registry
+            .slots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|slot| !slot.handle.matches(&self.handle));
     }
 }
 

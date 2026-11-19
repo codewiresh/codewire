@@ -50,6 +50,10 @@ mod front_door;
 pub use front_door::FrontDoorScope;
 use front_door::{EpochBounds, EpochHandle, Registry as FrontDoorRegistry};
 
+/// A joined front-door stream with nothing in flight ends after this long;
+/// cw-egress opens another on demand (#4963).
+const FRONT_DOOR_IDLE: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// The operations a joined front-door stream serves, listed in its response
 /// headers; the relay copies exactly these into the front door's Open.
 pub const FRONT_DOOR_CAPABILITIES: &[&str] = &[
@@ -142,6 +146,7 @@ struct ServiceState<A, U> {
     shutdown: CancellationToken,
     /// Admitted epochs a front-door stream may join (#4001, #4909).
     front_doors: Arc<FrontDoorRegistry>,
+    front_door_idle: std::time::Duration,
     #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
     ssh: Option<Arc<super::ssh::Service>>,
 }
@@ -205,10 +210,20 @@ where
                 workers: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
                 front_doors: Arc::default(),
+                front_door_idle: FRONT_DOOR_IDLE,
                 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
                 ssh: None,
             }),
         }
+    }
+
+    /// Tests reach the idle end without waiting two minutes.
+    #[cfg(test)]
+    fn with_front_door_idle(mut self, idle: std::time::Duration) -> Self {
+        Arc::get_mut(&mut self.state)
+            .expect("set before cloning or serving")
+            .front_door_idle = idle;
+        self
     }
 
     /// Explicit trusted process composition only, before cloning or serving.
@@ -510,11 +525,17 @@ where
             self.state
                 .front_doors
                 .register(scope, environment_id, generation, bounds, joins)?;
+        let front_door_idle = self.state.front_door_idle;
         self.spawn_worker(permit, async move {
             // The epoch can be joined for exactly as long as this worker runs.
             let _registration = registration;
-            if let Err(error) =
-                run_admitted_credential_bridge_with_front_doors(broker, admitted, joining).await
+            if let Err(error) = run_admitted_credential_bridge_with_front_doors(
+                broker,
+                admitted,
+                joining,
+                Some(front_door_idle),
+            )
+            .await
             {
                 let _ = sink.output.try_send(Err(bridge_status(error)));
             }
