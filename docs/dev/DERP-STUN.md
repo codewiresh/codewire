@@ -406,6 +406,7 @@ already answered rejects it as a replay, so a slow response stays valid.
 | `TLS_HOSTS` | DERP deployment | comma-separated in-cluster names | Names of the TLS listener's self-signed certificate |
 | `TLS_PUBLIC_HOSTNAME` | DERP deployment | the `DERP_HOST` value | With the two files below: the name the listener serves its public certificate for ("The relay's TLS listener") |
 | `TLS_PUBLIC_CERT_FILE`, `TLS_PUBLIC_KEY_FILE` | DERP deployment | PEM paths, such as a mounted cert-manager Secret's `tls.crt` and `tls.key` | The public certificate and its key, read again every 60 s |
+| `RUST_LOG` | DERP and STUN edge deployments | unset (`info`) | The relay's log filter. It logs JSON lines on stdout; the alert on a public certificate that won't load matches its warning |
 | `COORDINATOR_DERP_VERIFY_ADDR` | coordinator deployment | `0.0.0.0:8097` | Coordinator's node-key lookup listener |
 | `CODEWIRE_MESH_DERP_VERIFY_ADDR` | Mesh chart (`mesh.derpVerifyPort`) | `0.0.0.0:8097` | Mesh's node-key lookup listener |
 
