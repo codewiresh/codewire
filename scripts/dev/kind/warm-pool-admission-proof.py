@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Server-side dry runs of the warm-pool template admission policy (#4000).
+"""Server-side dry runs of the template admission policy (#4000, #5002).
 
 Nothing in the repository evaluates the policy's CEL, so this applies the
 rendered policy, its binding and its param to a scratch Kind cluster and has a
 real API server admit or deny each case, as orchestration's service account.
+It matches every SandboxTemplate orchestration writes: the pool's allowlist
+holds cw-pool- templates, and the broker arm holds every template while hosted
+egress is on, so per-environment templates are proved here too. The member
+policy's broker-mode rule is proved on Sandboxes.
 Each case names the outcome it expects and, for a denial, the rule whose
 message must be the one reported: validations run in order and the first that
 fails is reported, so a case denied by another rule first does not count.
@@ -13,9 +17,9 @@ Usage, against a cluster you created for this and nothing else:
   scripts/dev/kind/warm-pool-admission-proof.py --kubeconfig KUBECONFIG
 
 It refuses any context that is not kind-*. It creates the server and sandbox
-namespaces, the SandboxTemplate CRD, a ClusterRole that lets orchestration's
-service account create and update templates, and the param ConfigMap; one
-UPDATE case creates a template, updates it and deletes it.
+namespaces, the SandboxTemplate and Sandbox CRDs, a ClusterRole that lets
+orchestration's service account create and update both, and the param
+ConfigMap; the UPDATE cases create an object, update it and delete it.
 """
 
 from __future__ import annotations
@@ -33,7 +37,9 @@ from typing import Callable
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = ROOT / "crates/codewire-orchestration/tests/fixtures/sandbox"
 CRD = ROOT / "deployments/k8s/agent-sandbox/base/crds/extensions.agents.x-k8s.io_sandboxtemplates.yaml"
+SANDBOX_CRD = ROOT / "deployments/k8s/agent-sandbox/base/crds/agents.x-k8s.io_sandboxes.yaml"
 POLICY = "codewire-orchestration-warm-pool-template"
+MEMBER_POLICY = "codewire-orchestration-warm-pool-member"
 PARAM = "codewire-hosted-egress"
 # The goldens' server and sandbox namespaces.
 SERVER = "dev"
@@ -43,14 +49,15 @@ REPOSITORY = "registry.example.invalid/codewire/daemon"
 OTHER_IMAGE = "registry.example.invalid/other/daemon@sha256:" + "4" * 64
 
 # The first words of each rule's message.
-GATE = "with hosted egress on, every warm-pool template is broker-mode"
+GATE = "with hosted egress on, every template orchestration writes is broker-mode"
 RESOLVER = "with hosted egress on, the netstack resolver"
 ADDRESSES = "with hosted egress on, the workspace container sets the egress stream"
 ENVIRONMENT = "a warm-pool template sets only the identity-free workspace"
-EGRESS = "with hosted egress on, warm-pool egress names only the broker peers"
+EGRESS = "with hosted egress on, a template's egress names only the broker peers"
 PRIVILEGE = "with hosted egress on, the Pod runs as 1000:1000"
 TUN = "hosted-egress-tun runs only as an init container"
 RUNTIME = "warm-pool members run under the commodity runtime"
+KEEPS_BROKER = "orchestration never takes broker mode"
 NO_PARAM = "failed to configure binding: no params found"
 
 OFF: dict[str, str] = {}
@@ -98,8 +105,8 @@ class Cluster:
         return text.split("denied request: ", 1)[-1] if "denied request: " in text else text
 
 
-def rendered_policy() -> list[dict]:
-    """The policy and binding as the orchestration package renders them, with
+def rendered_policy(name: str = POLICY) -> list[dict]:
+    """A policy and binding as the orchestration package renders them, with
     the binding reading its param from the goldens' server namespace, as an
     overlay's namespace pass does."""
     rendered = subprocess.run(["kubectl", "kustomize", str(ROOT / "deployments/k8s/orchestration")],
@@ -107,13 +114,13 @@ def rendered_policy() -> list[dict]:
     import yaml  # PyYAML, as the repo's CI scripts use.
     keep = []
     for document in yaml.safe_load_all(rendered):
-        if document and document.get("metadata", {}).get("name") == POLICY and document["kind"] in (
+        if document and document.get("metadata", {}).get("name") == name and document["kind"] in (
                 "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"):
-            if document["kind"] == "ValidatingAdmissionPolicyBinding":
+            if document["kind"] == "ValidatingAdmissionPolicyBinding" and "paramRef" in document["spec"]:
                 document["spec"]["paramRef"]["namespace"] = SERVER
             keep.append(document)
     if len(keep) != 2:
-        sys.exit(f"expected the template policy and its binding, found {len(keep)}")
+        sys.exit(f"expected {name} and its binding, found {len(keep)}")
     return keep
 
 
@@ -183,6 +190,89 @@ def other_repository(t: dict) -> None:
 def drop_label_add_world(t: dict) -> None:
     del t["spec"]["podTemplate"]["metadata"]["labels"]["codewire.sh/egress"]
     egress(t).append(copy.deepcopy(WORLD))
+
+
+def kbs_rule(t: dict) -> dict:
+    return next(r for r in egress(t) if all("podSelector" not in p for p in r["to"]))
+
+
+def with_kbs(t: dict) -> None:
+    egress(t).append({"ports": [{"port": 8080, "protocol": "TCP"}], "to": [
+        {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "codewire-trustee"}}}]})
+
+
+def pinned(t: dict) -> dict:
+    """The commodity environment goldens render a tagged daemon image (their
+    test options name one). A deployment gives every template the same daemon
+    image, the one the pool policy already holds to a digest, so the proof
+    pins it as a deployment does."""
+    tagged = REPOSITORY + ":golden"
+    digest = REPOSITORY + "@sha256:" + "2" * 64
+    return json.loads(json.dumps(t).replace(json.dumps(tagged), json.dumps(digest)))
+
+
+def environment_cases(env_today: dict, env_broker: dict, conf_today: dict, conf_broker: dict,
+                      broker: dict) -> list[tuple[str, dict | None, str, dict, str | None]]:
+    """Per-environment templates (#5002): the broker arm holds them as it
+    holds the pool, and only a confidential one names its KBS."""
+    return [
+        ("off, environment: today's golden", OFF, "create", env_today, None),
+        ("off, confidential: today's golden", OFF, "create", conf_today, None),
+        ("off, environment: the broker golden", OFF, "create", env_broker, GATE),
+        ("on, environment: the broker golden", ON, "create", env_broker, None),
+        ("on, confidential: the broker golden", ON, "create", conf_broker, None),
+        ("on, environment: today's golden", ON, "create", env_today, GATE),
+        ("on, confidential: today's golden", ON, "create", conf_today, GATE),
+        ("on, environment: the label removed, with world egress", ON, "create",
+         mutate(env_broker, drop_label_add_world), GATE),
+        ("on, environment: the world rule added", ON, "create",
+         mutate(env_broker, lambda t: egress(t).append(copy.deepcopy(WORLD))), EGRESS),
+        ("on, environment: cluster DNS", ON, "create", mutate(
+            env_broker, setting(pod, "dnsPolicy", "ClusterFirst"), lambda t: pod(t).pop("dnsConfig")), RESOLVER),
+        ("on, environment: the broker label under runc", ON, "create",
+         mutate(env_broker, setting(pod, "runtimeClassName", "runc")), TUN),
+        ("on, environment: the KBS rule under commodity", ON, "create", mutate(env_broker, with_kbs), EGRESS),
+        ("on, confidential: the KBS rule under commodity", ON, "create",
+         mutate(conf_broker, setting(pod, "runtimeClassName", "commodity")), EGRESS),
+        ("on, pool: the KBS rule", ON, "create", mutate(broker, with_kbs), EGRESS),
+        ("on, confidential: the KBS in another namespace", ON, "create", mutate(conf_broker, lambda t: kbs_rule(t)[
+            "to"][0]["namespaceSelector"]["matchLabels"].__setitem__("kubernetes.io/metadata.name", "kube-system")),
+         EGRESS),
+        ("on, confidential: the KBS on another port", ON, "create",
+         mutate(conf_broker, lambda t: kbs_rule(t)["ports"][0].__setitem__("port", 443)), EGRESS),
+        ("on, confidential: the KBS on a second port", ON, "create",
+         mutate(conf_broker, lambda t: kbs_rule(t)["ports"].append({"port": 443, "protocol": "TCP"})), EGRESS),
+        ("on, confidential: the KBS narrowed to Pods", ON, "create", mutate(conf_broker, lambda t: kbs_rule(t)[
+            "to"][0].__setitem__("podSelector", {"matchLabels": {"app": "kbs"}})), EGRESS),
+        ("on, confidential: the KBS as an address range", ON, "create", mutate(conf_broker, lambda t: kbs_rule(t)[
+            "to"].__setitem__(0, {"ipBlock": {"cidr": "10.0.0.0/8"}})), EGRESS),
+        ("on, confidential: the TUN init from another image than the daemon init", ON, "create", mutate(
+            conf_broker, lambda t: container(t, "codewire-daemon-init", "initContainers").__setitem__(
+                "image", REPOSITORY + "@sha256:" + "3" * 64)), TUN),
+        ("on, confidential: a second namespace-only peer", ON, "create", mutate(conf_broker, lambda t: egress(t).append(
+            copy.deepcopy(kbs_rule(t)) | {"to": [{"namespaceSelector": {"matchLabels": {
+                "kubernetes.io/metadata.name": "kube-system"}}}]})), EGRESS),
+    ]
+
+
+def sandbox(labels: dict[str, str]) -> dict:
+    return {"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
+            "metadata": {"name": "broker-mode-proof", "namespace": SANDBOXES},
+            "spec": {"podTemplate": {"metadata": {"labels": labels},
+                                     "spec": {"containers": [{"name": "workspace", "image": "busybox"}]}}}}
+
+
+def sandbox_update(cluster: "Cluster", before: dict[str, str], after: dict[str, str]) -> str | None:
+    """Create a Sandbox with `before` as its pod labels, update it to `after`
+    as orchestration, then delete it."""
+    stored = cluster.kubectl("create", f"--as={AS}", "-f", "-", stdin=json.dumps(sandbox(before)))
+    if stored.returncode != 0:
+        return "create failed: " + stored.stderr.strip()
+    live = json.loads(cluster.kubectl("get", "sandbox", "broker-mode-proof", "-n", SANDBOXES, "-o", "json").stdout)
+    live["spec"]["podTemplate"]["metadata"]["labels"] = after
+    denial = cluster.admit("replace", live)
+    cluster.kubectl("delete", "sandbox", "broker-mode-proof", "-n", SANDBOXES, "--wait=true")
+    return denial
 
 
 def cases(today: dict, broker: dict) -> list[tuple[str, dict | None, str, dict, str | None]]:
@@ -308,12 +398,15 @@ def main() -> int:
     cluster = Cluster(args.kubeconfig)
     for namespace in (SERVER, SANDBOXES):
         cluster.kubectl("create", "namespace", namespace)
-    if cluster.kubectl("apply", "--server-side", "-f", str(CRD)).returncode != 0:
-        sys.exit("the SandboxTemplate CRD did not apply")
+    for crd in (CRD, SANDBOX_CRD):
+        if cluster.kubectl("apply", "--server-side", "-f", str(crd)).returncode != 0:
+            sys.exit(f"{crd.name} did not apply")
     cluster.apply({"apiVersion": "v1", "kind": "List", "items": [
         {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
          "metadata": {"name": "warm-pool-admission-proof"},
          "rules": [{"apiGroups": ["extensions.agents.x-k8s.io"], "resources": ["sandboxtemplates"],
+                    "verbs": ["get", "create", "update"]},
+                   {"apiGroups": ["agents.x-k8s.io"], "resources": ["sandboxes"],
                     "verbs": ["get", "create", "update"]}]},
         {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
          "metadata": {"name": "warm-pool-admission-proof"},
@@ -324,13 +417,20 @@ def main() -> int:
     cluster.param(OFF)
     cluster.apply(policy)
     cluster.apply(binding)
+    for document in rendered_policy(MEMBER_POLICY):
+        cluster.apply(document)
     today = load("warm-pool-sandboxtemplate.golden.json")
     broker = load("warm-pool-broker-sandboxtemplate.golden.json")
+    environment = environment_cases(
+        pinned(load("identity-free-sandboxtemplate.golden.json")),
+        pinned(load("environment-broker-sandboxtemplate.golden.json")),
+        load("confidential-sandboxtemplate.golden.json"), load("confidential-broker-sandboxtemplate.golden.json"),
+        broker)
     wait_for(cluster, mutate(today, lambda t: t["spec"]["podTemplate"]["metadata"].setdefault("labels", {})
                              .__setitem__("codewire.sh/egress", "broker")), GATE)
     results = []
     current: object = "unset"
-    for name, param, verb, template, expected in cases(today, broker):
+    for name, param, verb, template, expected in cases(today, broker) + environment:
         if param != current:
             cluster.param(param)
             current = param
@@ -349,6 +449,18 @@ def main() -> int:
         results.append(check("on: an UPDATE adding world egress", cluster.admit("replace", widened), EGRESS))
         cluster.kubectl("delete", "sandboxtemplate", broker["metadata"]["name"], "-n",
                         broker["metadata"]["namespace"])
+
+    # Broker mode never comes off a Sandbox (#5002); a Sandbox made before
+    # hosted egress, without it, updates as before.
+    broker_label = {"codewire.sh/type": "workspace", "codewire.sh/egress": "broker"}
+    plain = {"codewire.sh/type": "workspace"}
+    for name, before, after, expected in [
+        ("Sandbox: the broker label removed", broker_label, plain, KEEPS_BROKER),
+        ("Sandbox: the broker label changed", broker_label, plain | {"codewire.sh/egress": "direct"}, KEEPS_BROKER),
+        ("Sandbox: the broker label kept", broker_label, broker_label | {"x": "y"}, None),
+        ("Sandbox: one without it, updated", plain, plain | {"x": "y"}, None),
+    ]:
+        results.append(check(name, sandbox_update(cluster, before, after), expected))
 
     # Kind overlays widen runtimeClasses with diagnostic runtimes; the TUN
     # rule's own VM check must still refuse them.

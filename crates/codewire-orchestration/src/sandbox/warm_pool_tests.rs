@@ -960,10 +960,21 @@ fn the_admission_policy_admits_every_rendered_egress_rule() {
         ingress_pod_name: ingress_pod_name.into(),
         ..pool_opts()
     };
-    assert!(
-        !policy.contains("codewire-trustee"),
-        "warm-pool egress admits no Trustee peer"
+    // Warm-pool egress admits no Trustee peer. The policy names the KBS once,
+    // in `kbsPeer`, which only a per-environment confidential template's rule
+    // reads (#5002); the Kind proof refuses it on a pool.
+    assert_eq!(
+        policy.matches("codewire-trustee").count(),
+        1,
+        "the Trustee is named only as kbsPeer"
     );
+    assert!(
+        policy.contains("- name: kbsPeer\n      expression: \"['codewire-trustee', 'TCP/8080']\"")
+    );
+    assert!(policy.contains(
+        "(variables.environmentTemplate && has(variables.pod.runtimeClassName) && \
+         variables.pod.runtimeClassName == 'confidential' &&"
+    ));
     for (opts, ingress_source) in [
         (full("", ""), &policy),
         (full("ingress-nginx", "ingress-nginx"), &kind_e2e),

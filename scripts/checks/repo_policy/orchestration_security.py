@@ -303,6 +303,29 @@ HOSTED_EGRESS_BROKER_REQUIRED_ENVIRONMENT = ("CODEWIRE_EGRESS_STREAM_ADDR", "COD
 # adds diagnostic runtimes to runtimeClasses, never to these.
 HOSTED_EGRESS_VM_RUNTIME_CLASSES = ("commodity", "commodity-32g")
 HOSTED_EGRESS_TUN_COMMAND = "['/usr/local/bin/cw', '__hosted-egress-tun', '--owner-uid', '1000']"
+# codewire#5002: a confidential per-environment template's one extra egress
+# rule, the Trustee KBS by namespace on one port, never in a pool.
+ENVIRONMENT_KBS_FRAGMENTS = (
+    "expression: '['codewire-trustee', 'TCP/8080']' name: kbsPeer",
+    "object.spec.networkPolicy.egress.all(r, (variables.environmentTemplate && has(variables.pod.runtimeClassName) && "
+    "variables.pod.runtimeClassName == 'confidential' && dyn(r).all(k, k in ['to', 'ports']) && has(r.to) && size(r.to) == 1 && "
+    "dyn(r.to[0]).all(k, k == 'namespaceSelector') && has(r.to[0].namespaceSelector) && "
+    "dyn(r.to[0].namespaceSelector).all(k, k == 'matchLabels') && has(r.to[0].namespaceSelector.matchLabels) && "
+    "size(r.to[0].namespaceSelector.matchLabels) == 1 && 'kubernetes.io/metadata.name' in r.to[0].namespaceSelector.matchLabels && "
+    "r.to[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name'] == variables.kbsPeer[0] && "
+    "has(r.ports) && size(r.ports) == 1 && dyn(r.ports[0]).all(k, k in ['port', 'protocol']) && "
+    "has(r.ports[0].port) && has(r.ports[0].protocol) && type(r.ports[0].port) == int && "
+    "r.ports[0].protocol + '/' + string(r.ports[0].port) == variables.kbsPeer[1]) || ",
+)
+# codewire#5002: orchestration never takes broker mode off a Sandbox.
+SANDBOX_KEEPS_BROKER_MODE = (
+    "request.operation != 'UPDATE' || !(has(oldObject.spec.podTemplate) && has(oldObject.spec.podTemplate.metadata) && "
+    "has(oldObject.spec.podTemplate.metadata.labels) && 'codewire.sh/egress' in oldObject.spec.podTemplate.metadata.labels && "
+    "oldObject.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker') || "
+    "has(object.spec.podTemplate) && has(object.spec.podTemplate.metadata) && "
+    "has(object.spec.podTemplate.metadata.labels) && 'codewire.sh/egress' in object.spec.podTemplate.metadata.labels && "
+    "object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'"
+)
 HOSTED_EGRESS_FRAGMENTS = [
     "paramKind: apiVersion: v1 kind: ConfigMap",
     f"'{HOSTED_EGRESS_SWITCH}' in params.data && params.data['{HOSTED_EGRESS_SWITCH}'] == 'true'",
@@ -333,13 +356,16 @@ HOSTED_EGRESS_FRAGMENTS = [
     # its command with nothing added, from the deployment's daemon image.
     "variables.pod.containers.all(c, c.name != 'hosted-egress-tun')",
     "(variables.hostedEgress && has(variables.pod.runtimeClassName) && "
-    "variables.pod.runtimeClassName in variables.vmRuntimeClasses && "
+    "(variables.pod.runtimeClassName in variables.vmRuntimeClasses || "
+    "variables.environmentTemplate && variables.pod.runtimeClassName == 'confidential') && "
     f"has(c.command) && c.command == {HOSTED_EGRESS_TUN_COMMAND} && "
     "!has(c.args) && !has(c.env) && !has(c.envFrom) && !has(c.volumeMounts) && !has(c.volumeDevices) && "
     "c.image.matches('^[^@ ]+@sha256:[0-9a-f]{64}$') && "
     "c.image.split('@')[0] in variables.daemonRepositories && "
-    "variables.volumes.exists(v, v.name == 'codewire-bin' && has(v.image) && has(v.image.reference) && "
-    "v.image.reference == c.image))))",
+    "(variables.volumes.exists(v, v.name == 'codewire-bin' && has(v.image) && has(v.image.reference) && "
+    "v.image.reference == c.image) || "
+    "variables.environmentTemplate && variables.pod.runtimeClassName == 'confidential' && "
+    "variables.pod.initContainers.exists(i, i.name == 'codewire-daemon-init' && i.image == c.image)))))",
     # The broker arm's privilege: root only for the TUN init, mount-workspace
     # ordered before it, and dind from the official DinD image; no added
     # capability or escalation anywhere.
@@ -412,8 +438,10 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
         ],
         WARM_POOL_TEMPLATE_POLICY: [
             "operations: - CREATE - UPDATE", "resources: - sandboxtemplates",
-            "expression: request.name.startsWith('cw-pool-')",
-            f"request.name.matches('{WARM_POOL_NAME_PATTERN}')",
+            # Every template is matched (#5002): the pool's allowlist gates on
+            # the name, and the broker arm holds every template.
+            "expression: '!request.name.startsWith('cw-pool-')' name: environmentTemplate",
+            f"variables.environmentTemplate || request.name.matches('{WARM_POOL_NAME_PATTERN}')",
             "!variables.identity.exists(k, k in object.metadata.labels)",
             "!variables.identity.exists(k, k in object.spec.podTemplate.metadata.labels)",
             f"variables.containers.all(c, c.image.matches('{WARM_POOL_DIGEST_PATTERN}') || c.image in variables.localImages)",
@@ -476,6 +504,7 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             "variables.serverNamespace + '|app.kubernetes.io/component=udp-relay|UDP/41641']",
             "'10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16'",
             *HOSTED_EGRESS_FRAGMENTS,
+            *ENVIRONMENT_KBS_FRAGMENTS,
         ],
         WARM_POOL_MEMBER_POLICY: [
             "apiGroups: - agents.x-k8s.io apiVersions: - v1beta1 operations: - CREATE - UPDATE resources: - sandboxes",
@@ -483,6 +512,7 @@ def assert_warm_pool(resources: list[str], target: dict[str, str], label: str, o
             "!(has(object.metadata.ownerReferences) && object.metadata.ownerReferences.exists(o, o.kind == 'SandboxWarmPool'))",
             "request.operation != 'UPDATE' || (!(has(oldObject.metadata.labels) && 'agents.x-k8s.io/warm-pool-sandbox' in oldObject.metadata.labels)",
             "!(has(oldObject.metadata.ownerReferences) && oldObject.metadata.ownerReferences.exists(o, o.kind == 'SandboxWarmPool'))",
+            SANDBOX_KEEPS_BROKER_MODE,
         ],
     }
     for policy_name, required in required_by_policy.items():
@@ -1774,6 +1804,25 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
             (WARM_POOL_MEMBER_POLICY, "'agents.x-k8s.io/warm-pool-sandbox' in oldObject.metadata.labels", "false"),
             (WARM_POOL_MEMBER_POLICY, "request.operation != 'UPDATE' ||", "true ||"),
             (WARM_POOL_MEMBER_POLICY, "- UPDATE\n    resources:", "    resources:"),
+            # codewire#5002: every template is matched and the pool's rules
+            # gate on the name alone; the KBS rule and the confidential TUN
+            # hold only outside pools; broker mode never comes off a Sandbox.
+            (WARM_POOL_TEMPLATE_POLICY, "'!request.name.startsWith(''cw-pool-'')'", "'true'"),
+            (WARM_POOL_TEMPLATE_POLICY, "variables.environmentTemplate ||", "true ||"),
+            (WARM_POOL_TEMPLATE_POLICY, "(variables.environmentTemplate && has(variables.pod.runtimeClassName) &&", "(has(variables.pod.runtimeClassName) &&"),
+            (WARM_POOL_TEMPLATE_POLICY, "runtimeClassName == ''confidential'' && dyn(r)", "runtimeClassName !=  && dyn(r)"),
+            (WARM_POOL_TEMPLATE_POLICY, "dyn(r.to[0]).all(k, k == 'namespaceSelector')", "true"),
+            (WARM_POOL_TEMPLATE_POLICY, "has(r.ports) && size(r.ports) == 1", "has(r.ports)"),
+            (WARM_POOL_TEMPLATE_POLICY, "== variables.kbsPeer[0]", "!= ''"),
+            (WARM_POOL_TEMPLATE_POLICY, "== variables.kbsPeer[1]", "!= ''"),
+            (WARM_POOL_TEMPLATE_POLICY, "'[''codewire-trustee'', ''TCP/8080'']'", "'[''kube-system'', ''TCP/8080'']'"),
+            (WARM_POOL_TEMPLATE_POLICY, "variables.environmentTemplate && variables.pod.runtimeClassName == 'confidential') &&",
+             "variables.pod.runtimeClassName == 'confidential') &&"),
+            (WARM_POOL_TEMPLATE_POLICY, "i.image == c.image)))))", "true)))))"),
+            (WARM_POOL_TEMPLATE_POLICY, "&& variables.pod.initContainers.exists(i, i.name == 'codewire-daemon-init'",
+             "|| variables.pod.initContainers.exists(i, i.name == 'codewire-daemon-init'"),
+            (WARM_POOL_MEMBER_POLICY, "== 'broker') || has(object.spec.podTemplate)", "== 'broker') || true || has(object.spec.podTemplate)"),
+            (WARM_POOL_MEMBER_POLICY, "object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'\n", "true\n"),
         ]:
             image_cache_rejected(f"warm pool {before}", "ValidatingAdmissionPolicy", before, after, policy_name)
         image_cache_rejected("warm pool namespace-label bypass", "ValidatingAdmissionPolicyBinding",

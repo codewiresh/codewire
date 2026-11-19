@@ -3558,6 +3558,50 @@ mod tests {
         }
     }
 
+    /// What a broker-mode per-environment template renders (#4000, #5002):
+    /// the shape the environment template admission policy admits.
+    fn broker_egress() -> HostedEgressTemplate {
+        HostedEgressTemplate {
+            stream_addr: "10.44.0.89:8089".into(),
+            binding_addr: "10.44.0.87:8087".into(),
+            fence_revision: "2".into(),
+            gateway: GatewayPeer {
+                namespace: "gateway-proxies".into(),
+                gateway_name: "public".into(),
+                gateway_namespace: "gateway".into(),
+                port: 10443,
+            },
+            derp_tls_port: 8443,
+            gateway_addr: "10.44.0.43:443".into(),
+            derp_addr: "derp.codewire-dev.sh=10.44.0.84:8443".into(),
+            cluster_dns_ip: "10.44.0.10".into(),
+        }
+    }
+
+    #[test]
+    fn broker_mode_environment_templates_match_their_golden_files() {
+        crate::test_golden::assert_golden(
+            "environment-broker-sandboxtemplate.golden.json",
+            &render_sandbox_template(
+                "dev-sandboxes",
+                &TemplateOpts {
+                    hosted_egress: Some(broker_egress()),
+                    ..identity_free_opts()
+                },
+            ),
+        );
+        crate::test_golden::assert_golden(
+            "confidential-broker-sandboxtemplate.golden.json",
+            &render_sandbox_template(
+                "dev-sandboxes",
+                &TemplateOpts {
+                    hosted_egress: Some(broker_egress()),
+                    ..confidential_golden_opts()
+                },
+            ),
+        );
+    }
+
     #[test]
     fn confidential_template_matches_golden_file() {
         crate::test_golden::assert_golden(

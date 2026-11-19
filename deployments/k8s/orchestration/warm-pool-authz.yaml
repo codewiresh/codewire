@@ -124,8 +124,6 @@ spec:
   matchConditions:
     - name: orchestration-service-account
       expression: request.userInfo.username.matches('^system:serviceaccount:[^:]+:codewire-orchestration$')
-    - name: warm-pool-template
-      expression: request.name.startsWith('cw-pool-')
   variables:
     # Kind overlays replace this first variable with their diagnostic
     # runtimes; keep it first. '' is a Pod without runtimeClassName. Each
@@ -379,8 +377,21 @@ spec:
         [variables.serverNamespace, 'TCP/8443', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=derp'],
         [variables.serverNamespace, 'UDP/41641', 'app.kubernetes.io/name=codewire', 'app.kubernetes.io/component=udp-relay']] +
         variables.gatewayPeers
+    # The Trustee KBS a confidential per-environment workspace attests to,
+    # as namespace and PROTOCOL/port (network.rs, kata_coco_kbs_egress_rule):
+    # a namespace-only peer, never in a pool. An overlay whose KBS lives
+    # elsewhere replaces this variable.
+    - name: kbsPeer
+      expression: "['codewire-trustee', 'TCP/8080']"
+    # codewire#5002: every SandboxTemplate orchestration writes is matched.
+    # The pool's allowlist applies to cw-pool- templates; the broker arm
+    # below applies to every template while hosted egress is on, so a
+    # per-environment template can't drop broker mode either.
+    - name: environmentTemplate
+      expression: "!request.name.startsWith('cw-pool-')"
   validations:
     - expression: >-
+        variables.environmentTemplate ||
         request.name.matches('^cw-pool-[1-9][0-9]{0,9}m-[1-9][0-9]{0,9}mi-[1-9][0-9]{0,9}gi-[0-9a-f]{8}$') &&
         has(object.metadata.labels) &&
         'app.kubernetes.io/managed-by' in object.metadata.labels &&
@@ -393,11 +404,13 @@ spec:
         object.metadata.annotations['codewire.sh/pool-revision'].matches('^[0-9a-f]{64}$')
       message: a warm-pool template keeps its exact cw-pool- shape name, its pool labels and its revision, and carries no environment label
     - expression: >-
+        variables.environmentTemplate ||
         !has(object.spec.podTemplate.metadata) ||
         !has(object.spec.podTemplate.metadata.labels) ||
         !variables.identity.exists(k, k in object.spec.podTemplate.metadata.labels)
       message: warm-pool members carry no environment, organization, generation or tier label until a claim adopts them
     - expression: >-
+        variables.environmentTemplate ||
         variables.containers.all(c, c.image.matches('^[^@ ]+@sha256:[0-9a-f]{64}$') ||
         c.image in variables.localImages) &&
         variables.volumes.all(v, !has(v.image) ||
@@ -406,6 +419,7 @@ spec:
         !has(variables.pod.ephemeralContainers)
       message: a warm-pool template runs and mounts only digest-pinned images (Kind adds its side-loaded daemon image)
     - expression: >-
+        variables.environmentTemplate ||
         variables.containers.all(c, !has(c.envFrom) &&
         (!has(c.env) || c.env.all(e, e.name in variables.environment &&
         dyn(e).all(k, k in ['name', 'value', 'valueFrom']) &&
@@ -418,6 +432,7 @@ spec:
         dyn(e).all(k, k in ['name', 'value']) && has(e.value))))
       message: a warm-pool template sets only the identity-free workspace and DinD variables (and, with hosted egress on, the workspace's broker addresses), takes no environment source and reads only its own Pod UID
     - expression: >-
+        variables.environmentTemplate ||
         variables.pod.containers.exists_one(c, c.name == 'workspace') &&
         variables.pod.containers.all(c, c.name != 'workspace' ||
         (has(c.env) && c.env.exists(e, e.name == 'CODEWIRE_WORKSPACE_BINDING_URL') &&
@@ -426,6 +441,7 @@ spec:
         e.value == object.metadata.annotations['codewire.sh/pool-revision'])))
       message: a warm-pool workspace binds through the workspace binding listener and carries its pool revision in its immutable Pod spec
     - expression: >-
+        variables.environmentTemplate ||
         variables.volumes.all(v, dyn(v).all(k, k in ['name', 'image', 'emptyDir', 'configMap', 'projected']) &&
         (!has(v.configMap) || (has(v.configMap.name) && v.configMap.name in variables.rootsConfigMaps &&
         dyn(v.configMap).all(k, k in ['name', 'items', 'defaultMode']) &&
@@ -439,21 +455,25 @@ spec:
         has(s.serviceAccountToken.audience) && s.serviceAccountToken.audience in variables.brokerAudiences))))
       message: a warm-pool template mounts only images, emptyDirs, the public roots ConfigMaps (only their ca.crt) and workspace-audience projected tokens (and, with hosted egress on, the egress token)
     - expression: >-
+        variables.environmentTemplate ||
         has(variables.pod.serviceAccountName) &&
         variables.pod.serviceAccountName == 'codewire-sandbox' &&
         has(variables.pod.automountServiceAccountToken) &&
         variables.pod.automountServiceAccountToken == false
       message: warm-pool members run as codewire-sandbox without a Kubernetes API token
     - expression: >-
+        variables.environmentTemplate ||
         (has(variables.pod.runtimeClassName) ? variables.pod.runtimeClassName : '') in variables.runtimeClasses
       message: warm-pool members run under the commodity runtime; only Kind overlays add a diagnostic runtime
     - expression: >-
+        variables.environmentTemplate ||
         (!has(variables.pod.hostNetwork) || !variables.pod.hostNetwork) &&
         (!has(variables.pod.hostPID) || !variables.pod.hostPID) &&
         (!has(variables.pod.hostIPC) || !variables.pod.hostIPC) &&
         !has(variables.pod.hostAliases) && !has(variables.pod.nodeName)
       message: warm-pool members share no host namespace, carry no host alias and are never pinned to a node
     - expression: >-
+        variables.environmentTemplate ||
         (!has(variables.pod.runtimeClassName) || variables.pod.runtimeClassName != 'confidential') &&
         (!has(object.spec.podTemplate.metadata) ||
         !has(object.spec.podTemplate.metadata.annotations) ||
@@ -466,6 +486,7 @@ spec:
     # and mounts. Only the one-shot mount-workspace init container ever holds
     # its device: a Kata container with a volumeDevice cannot restart.
     - expression: >-
+        variables.environmentTemplate ||
         variables.pod.containers.all(c, !has(c.volumeDevices)) &&
         (!has(variables.pod.initContainers) ||
         variables.pod.initContainers.all(c, !has(c.volumeDevices) ||
@@ -476,6 +497,7 @@ spec:
     # the volume state as its one argument, from the support image the
     # workspace daemon comes from (codewire#3718).
     - expression: >-
+        variables.environmentTemplate ||
         !has(variables.pod.initContainers) ||
         variables.pod.initContainers.all(c, c.name != 'mount-workspace' ||
         (has(c.command) && size(c.command) == 5 && c.command[0] == 'sh' && c.command[1] == '-c' &&
@@ -498,6 +520,7 @@ spec:
     # admits strictly less. Remove it in #3640 once every pool template
     # carries the rule.
     - expression: >-
+        variables.environmentTemplate ||
         (!has(object.spec.networkPolicyManagement) || object.spec.networkPolicyManagement == 'Managed') &&
         has(object.spec.networkPolicy) &&
         (!has(object.spec.networkPolicy.ingress) || size(object.spec.networkPolicy.ingress) == 0 ||
@@ -526,6 +549,7 @@ spec:
     # peers. Anything else (a bare 0.0.0.0/0, a private range, another
     # Service, a wider port) is refused.
     - expression: >-
+        variables.environmentTemplate ||
         variables.hostedEgress ||
         has(object.spec.networkPolicy) &&
         dyn(object.spec.networkPolicy).all(k, k in ['ingress', 'egress']) &&
@@ -552,7 +576,7 @@ spec:
     # label.
     - expression: >-
         variables.hostedEgress ? variables.broker : !variables.egressLabelled
-      message: with hosted egress on, every warm-pool template is broker-mode (codewire.sh/egress=broker); with it off, none carries the egress label
+      message: with hosted egress on, every template orchestration writes is broker-mode (codewire.sh/egress=broker); with it off, none carries the egress label
     # A broker-mode workspace always has its stream and binding addresses,
     # so its daemon gates serving on the self-check.
     - expression: >-
@@ -570,7 +594,7 @@ spec:
         has(variables.pod.dnsConfig) && dyn(variables.pod.dnsConfig).all(k, k in ['nameservers', 'searches']) &&
         has(variables.pod.dnsConfig.nameservers) && variables.pod.dnsConfig.nameservers == ['192.0.2.1'] &&
         (!has(variables.pod.dnsConfig.searches) || size(variables.pod.dnsConfig.searches) == 0)
-      message: with hosted egress on, the netstack resolver 192.0.2.1 is a warm-pool template's only nameserver, with no search list or options
+      message: with hosted egress on, the netstack resolver 192.0.2.1 is a template's only nameserver, with no search list or options
     # The broker arm's egress: no address range and no world rule. Each peer
     # is exactly one broker peer (one namespace and the whole Pod label map,
     # so neither an extra label nor a missing Pod selector passes) on only
@@ -581,7 +605,17 @@ spec:
         has(object.spec.networkPolicy) &&
         dyn(object.spec.networkPolicy).all(k, k in ['ingress', 'egress']) &&
         has(object.spec.networkPolicy.egress) &&
-        object.spec.networkPolicy.egress.all(r, dyn(r).all(k, k in ['to', 'ports']) &&
+        object.spec.networkPolicy.egress.all(r, (variables.environmentTemplate && has(variables.pod.runtimeClassName) && variables.pod.runtimeClassName == 'confidential' &&
+        dyn(r).all(k, k in ['to', 'ports']) && has(r.to) && size(r.to) == 1 &&
+        dyn(r.to[0]).all(k, k == 'namespaceSelector') && has(r.to[0].namespaceSelector) &&
+        dyn(r.to[0].namespaceSelector).all(k, k == 'matchLabels') && has(r.to[0].namespaceSelector.matchLabels) &&
+        size(r.to[0].namespaceSelector.matchLabels) == 1 &&
+        'kubernetes.io/metadata.name' in r.to[0].namespaceSelector.matchLabels &&
+        r.to[0].namespaceSelector.matchLabels['kubernetes.io/metadata.name'] == variables.kbsPeer[0] &&
+        has(r.ports) && size(r.ports) == 1 && dyn(r.ports[0]).all(k, k in ['port', 'protocol']) &&
+        has(r.ports[0].port) && has(r.ports[0].protocol) && type(r.ports[0].port) == int &&
+        r.ports[0].protocol + '/' + string(r.ports[0].port) == variables.kbsPeer[1]) ||
+        dyn(r).all(k, k in ['to', 'ports']) &&
         has(r.to) && size(r.to) > 0 && has(r.ports) && size(r.ports) > 0 &&
         r.to.all(t, dyn(t).all(k, k in ['namespaceSelector', 'podSelector']) &&
         has(t.namespaceSelector) && dyn(t.namespaceSelector).all(k, k == 'matchLabels') &&
@@ -595,7 +629,7 @@ spec:
         t.podSelector.matchLabels.all(k, (k + '=' + t.podSelector.matchLabels[k]) in b) &&
         r.ports.all(p, dyn(p).all(k, k in ['port', 'protocol']) && has(p.port) && has(p.protocol) &&
         type(p.port) == int && (p.protocol + '/' + string(p.port)) in b[1].split(',')))))
-      message: with hosted egress on, warm-pool egress names only the broker peers, each by its namespace and exact Pod labels on its own ports, with no address range
+      message: with hosted egress on, a template's egress names only the broker peers, each by its namespace and exact Pod labels on its own ports, with no address range; a confidential per-environment template also names its KBS namespace on its one port
     # The broker arm's privilege (cw-network and cw-security, 2026-11-16).
     # The Pod runs as the workspace user and group, with no extra groups or
     # sysctls, so a container that sets no securityContext is never root.
@@ -638,23 +672,29 @@ spec:
     # The privileged TUN init (codewire#4955): never a regular container; an
     # init container only with the switch on, under a VM runtime class, with
     # exactly its command and nothing added, from the daemon image the
-    # deployment names, the same image the codewire-bin volume mounts. Every
-    # broker-mode template has it.
+    # deployment names, the same image the codewire-bin volume mounts. A
+    # confidential per-environment template fills codewire-bin from its
+    # codewire-daemon-init container instead (#5002), so there the TUN image
+    # is that container's. Every broker-mode template has it.
     - expression: >-
         variables.pod.containers.all(c, c.name != 'hosted-egress-tun') &&
         (!has(variables.pod.initContainers) ||
         variables.pod.initContainers.all(c, c.name != 'hosted-egress-tun' ||
         (variables.hostedEgress &&
-        has(variables.pod.runtimeClassName) && variables.pod.runtimeClassName in variables.vmRuntimeClasses &&
+        has(variables.pod.runtimeClassName) &&
+        (variables.pod.runtimeClassName in variables.vmRuntimeClasses ||
+        variables.environmentTemplate && variables.pod.runtimeClassName == 'confidential') &&
         has(c.command) && c.command == ['/usr/local/bin/cw', '__hosted-egress-tun', '--owner-uid', '1000'] &&
         !has(c.args) && !has(c.env) && !has(c.envFrom) && !has(c.volumeMounts) && !has(c.volumeDevices) &&
         c.image.matches('^[^@ ]+@sha256:[0-9a-f]{64}$') &&
         c.image.split('@')[0] in variables.daemonRepositories &&
-        variables.volumes.exists(v, v.name == 'codewire-bin' && has(v.image) &&
-        has(v.image.reference) && v.image.reference == c.image)))) &&
+        (variables.volumes.exists(v, v.name == 'codewire-bin' && has(v.image) &&
+        has(v.image.reference) && v.image.reference == c.image) ||
+        variables.environmentTemplate && variables.pod.runtimeClassName == 'confidential' &&
+        variables.pod.initContainers.exists(i, i.name == 'codewire-daemon-init' && i.image == c.image))))) &&
         (!variables.hostedEgress || has(variables.pod.initContainers) &&
         variables.pod.initContainers.exists(c, c.name == 'hosted-egress-tun'))
-      message: hosted-egress-tun runs only as an init container with hosted egress on, under a VM runtime class, exactly its command with nothing added, from the deployment's daemon image; every broker-mode template has it
+      message: hosted-egress-tun runs only as an init container with hosted egress on, under a VM runtime class (confidential only outside pools), exactly its command with nothing added, from the deployment's daemon image, the one codewire-bin is filled from; every broker-mode template has it
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -712,6 +752,21 @@ spec:
         !(has(oldObject.metadata.ownerReferences) &&
         oldObject.metadata.ownerReferences.exists(o, o.kind == 'SandboxWarmPool')))
       message: orchestration never strips an unclaimed warm-pool member's pool label or owner
+    # codewire#5002: a Sandbox whose pod template is broker-mode stays so. A
+    # Pod without the label escapes the fence, cw-egress and the self-check,
+    # so no update by orchestration may take it off; a Sandbox made before
+    # hosted egress, without it, may be updated as before.
+    - expression: >-
+        request.operation != 'UPDATE' ||
+        !(has(oldObject.spec.podTemplate) && has(oldObject.spec.podTemplate.metadata) &&
+        has(oldObject.spec.podTemplate.metadata.labels) &&
+        'codewire.sh/egress' in oldObject.spec.podTemplate.metadata.labels &&
+        oldObject.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker') ||
+        has(object.spec.podTemplate) && has(object.spec.podTemplate.metadata) &&
+        has(object.spec.podTemplate.metadata.labels) &&
+        'codewire.sh/egress' in object.spec.podTemplate.metadata.labels &&
+        object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'
+      message: orchestration never takes broker mode (codewire.sh/egress=broker) off a Sandbox's pod template
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
