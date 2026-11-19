@@ -319,8 +319,9 @@ void main() {
     const addRequest = () => stack.push({ line: 0, copies: blank.map((copy, i) => halves[i].appendChild(copy.cloneNode(true))) });
     const measure = () => {
       const h = cross.clientHeight, mid = Math.round(h / 2), probe = stack[0].copies[0], height = probe.offsetHeight, token = $('b', probe);
-      // at rest a request sits with the line just above its credential, in the gap between two lines of text
-      const rest = mid - token.offsetTop + Math.round((parseFloat(getComputedStyle(probe).lineHeight) - token.offsetHeight) / 2);
+      // at rest a request sits with the line just above its credential, in the gap between two lines of text.
+      // offsetTop is measured inside the request's border
+      const rest = mid - probe.clientTop - token.offsetTop + Math.round((parseFloat(getComputedStyle(probe).lineHeight) - token.offsetHeight) / 2);
       const gap = Math.max(height + 36, Math.min(height + 120, rest - 8, h - 24 - height - rest));
       cross.style.setProperty('--proxy-mid', mid + 'px');
       while (stack.length < Math.ceil((h + height) / gap) + 1) addRequest();

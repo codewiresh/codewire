@@ -668,7 +668,7 @@ ul.body { margin: 0; padding: 0; list-style: none; row-gap: var(--gap); }
 .cw-cross-half { position: absolute; left: var(--proxy-gutter); right: 0; display: grid; place-items: center; overflow: hidden; }
 .cw-cross-in { top: 0; height: var(--proxy-mid); }
 .cw-cross-out { top: var(--proxy-mid); bottom: 0; }
-.cw-cross-req { width: min(100%, var(--proxy-request)); margin: 0; padding: var(--space-l) var(--space-xl); border: var(--space-hair) solid var(--rule); background: var(--paper); color: var(--grey); font: 400 var(--fs-small)/var(--lh-body) var(--f-mono); overflow-wrap: anywhere; }
+.cw-cross-req { width: min(100%, var(--proxy-request)); margin: 0; padding: var(--space-l) var(--space-xl); border: var(--space-hair) solid var(--rule); background: var(--paper); color: var(--grey); font: 400 var(--fs-small)/var(--lh-body) var(--f-mono); line-height: calc(var(--base) * 3); overflow-wrap: anywhere; }   /* three baseline units a line: room for the boundary between two lines */
 .cw-cross-req span { display: block; }
 .cw-cross-req b { font-weight: 500; color: var(--ink); white-space: nowrap; }
 .cw-cross-req .cw-cross-key { color: var(--signal); }
