@@ -314,6 +314,56 @@ records `local_https_state` with the state and port each time it changes.
 Linux needs `net.ipv4.ip_unprivileged_port_start` at 443 or lower, which
 `sudo cw local-https setup` sets.
 
+## Docker in a VM
+
+A local VM created without `--no-docker` runs its own Docker daemon inside
+the guest, with its data on the VM's Docker disk (`--docker-disk`). Docker
+mode gives the workspace root authority over the guest, by design (#2977):
+the VM is the boundary, and nothing here changes that.
+
+Inside the VM, Docker behaves as Docker does anywhere (#5418):
+
+- `docker run` starts a container in its own root filesystem, with its own
+  process table.
+- `docker exec CONTAINER ...` runs in that container. It sees the files the
+  container's processes wrote, they see what it writes, and its process
+  table is the container's. It does not see the workspace, the guest's own
+  files, or the guest's Codewire services and their sockets
+  (`/run/codewire`, `/dev/vsock`), unless the container was given them (a
+  volume, `--pid=host`).
+- The same holds for a container that comes back with the VM: one started
+  with `--restart=always` keeps its ID and its files across
+  `cw --local stop` and `cw --local start`, and `docker exec` enters it as
+  before.
+
+What a process with the guest's root can reach on the host is the same
+with or without this fault. No host service listens for the guest: on
+Linux and on a Mac, every vsock connection of a local VM is opened from the
+host into the guest, where Codewire's guest services listen (the daemon, the
+network agent, boot progress, the checkpoint hook and the runtime
+publisher), and the native smoke fails a VMM that holds a listener for the
+other direction. A guest-root process can answer on those guest ports in
+place of Codewire's services. The host does not trust what answers: it
+dials only that VM's own socket, and it names the environment, the
+generation and the delegation itself, refusing a guest that names another.
+So everything in the guest, its root included, is served that VM's own
+delegation and nothing more.
+
+**Observed working** on Linux and on a Mac, 2026-11-19 (#5418), with the
+steps the journey records. dockerd runs in its own mount namespace
+whose root is its private root, moved over `/` as `switch_root` does, so
+runc pivots each container into its own root. Before this change (v0.4.22,
+and `main` on 2026-11-19, on Linux), `docker run` was right and `docker exec`
+was not: it ran in the guest's root instead of the container's. In a
+container whose main process writes `/heartbeat` every second, `docker diff`
+listed the file and `docker exec CONTAINER cat /heartbeat` said there was
+none. The command saw `/workspace`, `/state`, `/generation`, `/run/codewire`
+and `/dev/vsock`, a process table of the whole guest with the guest's init as
+PID 1, and what it wrote landed in the guest's root. It stayed inside the VM.
+The fault itself was not checked on a Mac. The journey step is
+`local-vm-docker-exec` in
+`docs/journeys/local-vm-docker.md`.
+
 ## SSH keys in a local VM
 
 A local VM has no SSH key unless its credential profile has one. The key stays

@@ -772,6 +772,8 @@ for attempt in $(seq 1 100); do
   test "$attempt" -lt 100 || exit 91
   sleep 0.05
 done
+# docker exec enters the container's own root, not the guest's (#5418).
+test "$(docker exec codewire-native-smoke-port /init docker-fixture assert-container-root)" = docker-exec-root-ok
 docker pull "$public_image" >/dev/null
 docker image inspect "$public_image" >/dev/null
 docker image rm "$public_image" >/dev/null

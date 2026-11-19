@@ -1527,6 +1527,28 @@ pub fn run_docker_fixture(arguments: Vec<OsString>) -> Result<()> {
             println!("{value}");
             Ok(())
         }
+        // Run through `docker exec`: the scratch image has only `/init`, so
+        // any of the guest's own paths means the exec landed at the guest's
+        // root instead of the container's (#5418).
+        "assert-container-root" => {
+            ensure!(
+                arguments.next().is_none(),
+                "Docker container root check accepts no value"
+            );
+            for guest_path in [
+                STATE_MOUNT_PATH,
+                ROOT_MOUNT_PATH,
+                WORKSPACE_PATH,
+                "/run/codewire",
+            ] {
+                ensure!(
+                    fs::symlink_metadata(guest_path).is_err(),
+                    "docker exec sees the guest's {guest_path}"
+                );
+            }
+            println!("docker-exec-root-ok");
+            Ok(())
+        }
         "write-volume" => {
             let value = arguments
                 .next()
@@ -5321,6 +5343,7 @@ fn spawn_docker_daemon(identity: &WorkspaceIdentity) -> Result<std::process::Chi
     let namespace_fd = namespace.as_raw_fd();
     let docker_root = CString::new(DOCKER_ROOT_PATH).context("encode private Docker root path")?;
     let root = CString::new("/").expect("root path contains no NUL");
+    let here = CString::new(".").expect("path contains no NUL");
     // dockerd joins the workload cgroup before it execs, so containerd, the
     // shims and anything else it starts are frozen with the workload.
     let cgroup = OpenOptions::new()
@@ -5370,7 +5393,31 @@ fn spawn_docker_daemon(identity: &WorkspaceIdentity) -> Result<std::process::Chi
                 || libc::getppid() != 1
                 || libc::write(cgroup_fd, b"0".as_ptr().cast(), 1) != 1
                 || libc::setns(namespace_fd, libc::CLONE_NEWNET) == -1
-                || libc::chroot(docker_root.as_ptr()) == -1
+                // The guest's root is the initramfs, which no mount namespace
+                // can pivot away from. A chroot there leaves dockerd's
+                // namespaces rooted at the guest's root, so a container's own
+                // root is only a chroot, and `docker exec`, which enters by
+                // setns, lands at the guest's root instead (#5418). In its
+                // own mount namespace the private root is moved over `/`, as
+                // switch_root does, so runc pivots each container properly.
+                // Slave: nothing dockerd mounts reaches the guest's table.
+                || libc::unshare(libc::CLONE_NEWNS) == -1
+                || libc::mount(
+                    std::ptr::null(),
+                    root.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_REC | libc::MS_SLAVE,
+                    std::ptr::null(),
+                ) == -1
+                || libc::chdir(docker_root.as_ptr()) == -1
+                || libc::mount(
+                    here.as_ptr(),
+                    root.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_MOVE,
+                    std::ptr::null(),
+                ) == -1
+                || libc::chroot(here.as_ptr()) == -1
                 || libc::chdir(root.as_ptr()) == -1
             {
                 return Err(io::Error::last_os_error());

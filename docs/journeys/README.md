@@ -18,6 +18,7 @@ runs the same commands and holds the result to the same standard.
 | [local-vm-upgrade.md](local-vm-upgrade.md) | Local VMs across an upgrade that changes the guest runtime ABI (#4980): a start moves a stopped environment onto the installed runtime, and old VM checkpoints say why they can't be restored and can be removed |
 | [local-vm-credentials-smoke.md](local-vm-credentials-smoke.md) | The automated local VM credentials and proxy smoke (#5220): a profile added after create, each credential type through the proxy and revoked, attach across a restart, an upgrade with the previous release's authority or VM in place, and the proxy down |
 | [local-vm-limits.md](local-vm-limits.md) | Limits inside a local VM (#5384): a workload that forks without end is refused by the guest, and the VM stays up |
+| [local-vm-docker.md](local-vm-docker.md) | Docker in a local VM (#5418): `docker exec` runs in the container it names, also after the VM is stopped and started |
 | [invitations.md](invitations.md) | Invite a teammate by email, who accepts, is listed and can be removed, within the invitation limits |
 | [self-hosted.md](self-hosted.md) | The self-hosted walk (#4121): install, the first admin, invite links and sign-up without an invite |
 | [node-reboot.md](node-reboot.md) | Production keeps serving through one node's drain or reboot, and a sandbox on that node says why it restarted (#3542, #4461, #3772) |
