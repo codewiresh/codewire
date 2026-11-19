@@ -1,7 +1,7 @@
 ---
 title: Install and sign in
 description: Install cw, sign in, check what your machine needs for local VMs, and uninstall.
-updated: 2026-11-18
+updated: 2026-11-19
 weight: 6
 aliases: ["/guides/update"]
 ---
@@ -29,6 +29,23 @@ Pass options after `sh -s --`:
 curl -fsSL https://get.codewire.sh | sh -s -- --prefix ~/tools   # into ~/tools/bin
 curl -fsSL https://get.codewire.sh | sh -s -- --version v0.4.19  # an exact release
 ```
+
+### Install with Homebrew
+
+Homebrew installs the same released `cw` from the Codewire tap, checked
+against the release's digest. We have tried it on Linux; on macOS it is not
+yet observed working:
+
+```sh
+brew trust codewiresh/codewire                 # once: let Homebrew load the tap
+brew install codewiresh/codewire/codewire
+```
+
+Homebrew 7 loads formulae only from taps you trust, hence `brew trust`. A
+`cw` installed this way is updated by Homebrew, not `cw upgrade`: run
+`brew upgrade codewire`. On a Linux with an older glibc, Homebrew may first
+install its own `glibc` and `gcc`; `cw` doesn't need them, and the installer
+above installs nothing beside `cw`.
 
 ### Install with Nix
 
@@ -114,6 +131,7 @@ own `git` and `e2fsprogs`; nothing else is installed.
 
    ```sh
    rm -f ~/.local/bin/cw                 # or /usr/local/bin/cw, or PREFIX/bin/cw
+   brew uninstall codewire               # instead, if Homebrew installed it
    rm -rf ~/.local/share/codewire ~/.cache/codewire ~/.codewire ~/.config/cw
    ```
 

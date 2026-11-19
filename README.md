@@ -22,8 +22,15 @@ curl -fsSL https://get.codewire.sh | sh
 ```
 
 On Linux and macOS. The installer checks the download against its SHA-256 sum
-and installs `cw`, which `cw upgrade` keeps current. Other options are in
-[Install and sign in](https://codewire.sh/docs/install).
+and installs `cw`, which `cw upgrade` keeps current. With Homebrew:
+
+```sh
+brew trust codewiresh/codewire
+brew install codewiresh/codewire/codewire
+```
+
+Homebrew keeps that one current with `brew upgrade codewire`. Nix and other
+options are in [Install and sign in](https://codewire.sh/docs/install).
 
 ## Five minutes on the platform
 
