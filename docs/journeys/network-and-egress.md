@@ -143,6 +143,8 @@ Issue: #2537. Code: `crates/codewire-egress-policy`,
     outage.
   - A wildcard does not cover its own apex: `*.example.org` allows
     `www.example.org` and refuses `example.org`.
+  - `locked` still lets a selected model credential reach its own provider
+    (#5215); `agent-own-key` walks it.
 - **Observed:** Linux local VM (x86_64, KVM), 2026-11-16, `cw` 0.1.0 built
   from 40a2877e7 with the runtime built from the same commit, in a throwaway
   `HOME`:
@@ -1180,8 +1182,15 @@ Issues: #3999, #4001.
   - each of the first two on a policy that allows the host by rule, and on
     `locked` or another policy that does not;
   - the placeholder on a path the route does not serve, on `locked` and on
-    a policy that allows the host.
-- **Driving it:** no command yet (#3999, #4001).
+    a policy that allows the host;
+  - **an assigned agent under `locked`** (#5215): `claude -p` with the
+    selected credential, and `curl` to the provider's host with another key,
+    and to another host.
+- **Driving it:** no command yet (#3999, #4001). For the `locked` state:
+  `cw --local update NAME --policy locked`, then in the VM
+  `claude -p 'Reply with ok.'`,
+  `curl -sS -H 'x-api-key: sk-ant-made-up' https://api.anthropic.com/v1/messages`
+  and `curl -sS https://example.com/`.
 - **Proof:**
   - where the network policy allows the host, the user's own key reaches
     the provider unchanged, and the assigned credential is not used for
@@ -1197,7 +1206,13 @@ Issues: #3999, #4001.
     any lease, and counted, on `locked` and on every other policy;
   - the placeholder beside another credential header is refused by Codewire
     before it reaches the provider, with an error that says to send one
-    credential.
+    credential;
+  - **under `locked`, the assigned agent answers** (#5215): `claude -p`
+    with the selected credential prints its answer, and `example.com` is
+    refused. `cw --local policy list` says `locked  built-in · nothing,
+    except the model providers of credentials you selected`, and `cw info`
+    says the same under its network policy line. Not yet: that the `curl`
+    with another key is refused (#5215).
 - **Gotchas:**
   - Only a request carrying this environment's placeholder is swapped. The
     reply to any other request is passed back as the provider sent it.

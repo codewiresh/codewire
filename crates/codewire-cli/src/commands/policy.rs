@@ -644,6 +644,25 @@ fn applied_text(policy: &codewire_local_vmm::control::v1::NetworkPolicy) -> Vec<
     lines
 }
 
+/// The built-ins, then each stored policy. `locked` names what it leaves
+/// open: a selected model credential still reaches its own provider (SPEC,
+/// the interception paragraph; #5215).
+fn policies_text(policies: &[impl ShownPolicy]) -> String {
+    let mut text = String::from(
+        "open    built-in · every public destination on TCP 22, 80 and 443\n\
+         locked  built-in · nothing, except the model providers of credentials you selected\n",
+    );
+    for policy in policies {
+        text.push_str(&format!(
+            "{}  rev {} · {}\n",
+            policy.name(),
+            policy.revision(),
+            rules_text(policy)
+        ));
+    }
+    text
+}
+
 fn print_policies(policies: &[impl ShownPolicy], output: OutputFormat) -> anyhow::Result<()> {
     match output {
         OutputFormat::Json => println!(
@@ -652,18 +671,7 @@ fn print_policies(policies: &[impl ShownPolicy], output: OutputFormat) -> anyhow
                 &policies.iter().map(ShownPolicy::json).collect::<Vec<_>>()
             )?
         ),
-        OutputFormat::Text => {
-            println!("open    built-in · every public destination on TCP 22, 80 and 443");
-            println!("locked  built-in · nothing");
-            for policy in policies {
-                println!(
-                    "{}  rev {} · {}",
-                    policy.name(),
-                    policy.revision(),
-                    rules_text(policy)
-                );
-            }
-        }
+        OutputFormat::Text => print!("{}", policies_text(policies)),
     }
     Ok(())
 }
@@ -751,6 +759,19 @@ fn check_networks_text(check: &PolicyCheck) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `locked` names the one thing it leaves open, a selected model
+    /// credential's provider (#5215).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn the_list_says_what_locked_leaves_open() {
+        let none: &[codewire_local_vmm::control::v1::NetworkPolicy] = &[];
+        assert_eq!(
+            policies_text(none),
+            "open    built-in · every public destination on TCP 22, 80 and 443\n\
+             locked  built-in · nothing, except the model providers of credentials you selected\n"
+        );
+    }
 
     #[test]
     fn with_no_location_every_policy_command_uses_this_computers_store() {

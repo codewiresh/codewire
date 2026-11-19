@@ -443,7 +443,10 @@ guest's TCP and DNS and has no dial authority of its own. The egress broker
 (`cw __native-egress-broker`, on `crates/codewire-egress-broker`) dials on the
 guest's behalf under the VM's selected network policy, from
 `crates/codewire-egress-policy`. The default is the built-in `open` (deny
-first; DNS on 53 and TCP to ports 22, 80 and 443 of public addresses).
+first; DNS on 53 and TCP to ports 22, 80 and 443 of public addresses). The
+other built-in, `locked`, allows nothing, except that a selected model
+credential still reaches its provider, as the interception paragraph below
+says (#5215).
 `cw create --local --policy REF` and `cw update ENV --policy REF` select
 another, built-in or named, and an edit to a selected policy applies to the
 running VMs that select it (#3378, #3386). Loopback, private, link-local and

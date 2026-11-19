@@ -1,7 +1,7 @@
 ---
 title: Egress policies
 description: Decide what an environment may reach on the Internet; the built-in open and locked policies, your own policies, and what egress does not protect.
-updated: 2026-11-18
+updated: 2026-11-19
 weight: 3
 ---
 
@@ -17,7 +17,7 @@ cw --local policy list
 
 ```text
 open    built-in · every public destination on TCP 22, 80 and 443
-locked  built-in · nothing
+locked  built-in · nothing, except the model providers of credentials you selected
 ```
 
 `open` is the default. Whatever the policy, loopback, private, link-local and
@@ -67,6 +67,14 @@ allow both hosts:
 ```sh
 cw --local policy allow web-only api.github.com
 ```
+
+`locked` lets nothing in the environment reach the network by itself. A
+model credential you selected for it still reaches its own provider, and only
+that: Codewire sends those requests from outside the environment, with the
+selected credential, on the paths its route serves. The GitHub connection is
+not such a credential: it follows the policy, as above. To stop a provider as
+well, revoke its credential with `cw credentials --local revoke NAME`, which
+stops it at once everywhere that credential is used, not only in this VM.
 
 Right after you update `cw`, VMs that were already running are still served
 by the earlier version's background services. Until you have stopped your

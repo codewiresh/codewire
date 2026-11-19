@@ -153,7 +153,8 @@ and profiles.
 A network policy names the destinations an environment may reach. It is named,
 reusable and stored on this host. Every edit makes a new revision with its own
 digest. Two policies are built in: `open` (every public destination on TCP 22,
-80 and 443, what every local VM uses today) and `locked` (nothing). `cw network`
+80 and 443, what every local VM uses today) and `locked` (nothing, except the
+model providers of the credentials you selected, below). `cw network`
 is something else: it manages Mesh networks.
 
 ```sh
@@ -205,6 +206,20 @@ contacted. To use the connection under your own policy, allow both hosts:
 cw policy --local allow work github.com:443
 cw policy --local allow work api.github.com:443
 ```
+
+A selected model credential is not under this rule (SPEC, the interception
+paragraph; private-docs `designs/2026-11-10-egress-interception-design.md`,
+section 3a). `locked` lets nothing in the environment reach the network by
+itself. A model credential you selected for it still reaches its own
+provider, and only that: Codewire sends those requests from outside the
+environment, with the selected credential, on the paths its route serves.
+That holds with interception on and with it off, on the loopback route. Not
+yet proven by a test: that any other request to the provider's host is
+refused like any other destination (#5215). The GitHub connection is not such
+a credential: it follows the policy (#4926). To stop a provider as well,
+revoke its credential with `cw credentials --local revoke NAME`, which stops
+it at once everywhere that credential is used, not only in this VM. A per-VM
+way, `cw policy --local deny HOST`, is #5456.
 
 A change of policy applies to this at once, as it does to the network: the
 credential broker that served under the earlier answer is stopped before its

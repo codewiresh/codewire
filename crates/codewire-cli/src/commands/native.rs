@@ -2439,6 +2439,12 @@ pub(crate) struct NativeEnvironmentView {
     pub(crate) network: Option<String>,
     /// The `Network policy:` line (#2537); unrelated to the Mesh network.
     pub(crate) network_policy: Option<String>,
+    /// Whether that policy is one that doesn't allow the model providers by
+    /// rule, so a selected model credential is the one thing still reaching
+    /// out (#5215). Whether the profile holds one isn't known here, so the
+    /// note shows for every policy but `open`.
+    #[serde(skip)]
+    pub(crate) policy_leaves_providers_to_credentials: bool,
     #[serde(flatten)]
     pub(crate) error: error_view::ErrorView,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -2499,8 +2505,17 @@ impl TryFrom<&v1::Environment> for NativeEnvironmentView {
             generation: environment.generation,
             source_selection: sources::source_view(environment)?,
             network_policy: environment.network_policy.as_ref().map(network_policy_text),
+            policy_leaves_providers_to_credentials: leaves_providers_to_credentials(
+                environment.network_policy.as_ref(),
+            ),
         })
     }
+}
+
+/// Whether `policy` doesn't allow the model providers by rule: every policy
+/// but the built-in `open`, which allows every public destination on 443.
+fn leaves_providers_to_credentials(policy: Option<&v1::EnvironmentNetworkPolicy>) -> bool {
+    policy.is_some_and(|policy| policy.name != "open")
 }
 
 /// `work · rev 3`, then what a running VM enforces when it could not take
@@ -2612,6 +2627,11 @@ fn format_native_environment(
     }
     if let Some(network_policy) = &view.network_policy {
         output.push_str(&format!("Network policy: {network_policy}\n"));
+        if view.policy_leaves_providers_to_credentials {
+            output.push_str(
+                "                selected model credentials still reach their providers\n",
+            );
+        }
     }
     output.push_str(&view.error.line());
     for row in attention {
@@ -6639,6 +6659,20 @@ working_directory: /workspace/github
         assert!(json.get("docker_disk").is_none());
     }
 
+    /// Under every policy but `open`, `cw info` says what still reaches out:
+    /// the selected model credentials' providers (#5215).
+    #[test]
+    fn every_policy_but_open_says_model_credentials_still_reach_their_providers() {
+        let policy = |name: &str| v1::EnvironmentNetworkPolicy {
+            name: name.to_owned(),
+            ..Default::default()
+        };
+        assert!(leaves_providers_to_credentials(Some(&policy("locked"))));
+        assert!(leaves_providers_to_credentials(Some(&policy("work"))));
+        assert!(!leaves_providers_to_credentials(Some(&policy("open"))));
+        assert!(!leaves_providers_to_credentials(None));
+    }
+
     #[test]
     fn native_environment_text_reports_exact_loopback_mapping() {
         let view = NativeEnvironmentView {
@@ -6663,6 +6697,7 @@ working_directory: /workspace/github
             }],
             network: Some("mesh-dev".to_owned()),
             network_policy: Some("work · rev 3".to_owned()),
+            policy_leaves_providers_to_credentials: true,
             error: Default::default(),
             access_profile: "user/work".to_owned(),
             access_profile_revision: Some(2),
@@ -6673,7 +6708,9 @@ working_directory: /workspace/github
         let output = format_native_environment(&view, None, &[]);
         assert!(output.contains("Port:        127.0.0.1:18080 -> 8080\n"));
         assert!(output.contains("Network:     mesh-dev\n"));
-        assert!(output.contains("Network policy: work · rev 3\n"));
+        assert!(output.contains(
+            "Network policy: work · rev 3\n                selected model credentials still reach their providers\n"
+        ));
         assert!(output.contains("Access:      user/work (revision 2)\n"));
         assert!(output.contains("Docker:      8Gi\n"));
         assert!(!output.contains("Install:"));
