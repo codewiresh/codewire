@@ -237,10 +237,12 @@ impl EgressServiceState {
         )
     }
 
-    /// The out-of-band half of the self-check (#4000 P6): the NetworkPolicy
-    /// the cluster holds for the environment `binding` records is the one
-    /// orchestration renders for it, and selects the guest. `Some` is why it
-    /// is not; an error is a read that could not be made, never a pass.
+    /// The out-of-band half of the self-check (#4000 P6, #4964): the
+    /// NetworkPolicy the cluster holds for the environment `binding` records
+    /// is the one orchestration renders for it and selects the guest, and
+    /// every other policy that selects the guest is its template's as
+    /// orchestration renders it, or allows nothing. `Some` is why it is not;
+    /// an error is a read that could not be made, never a pass.
     /// Nothing the guest reports is read here. A pass clears a refusal stored
     /// for the guest earlier (#5068).
     async fn lockdown_refusal(
@@ -255,19 +257,24 @@ impl EgressServiceState {
             .attestation
             .rendered_workspace_network_policy(&guest.namespace, &binding.environment_id, isolation)
             .map_err(|error| unavailable("render the guest's NetworkPolicy", error))?;
+        let rendered_template = match lockdown::template_ref_hash(facts) {
+            Some(hash) => self
+                .attestation
+                .rendered_template_network_policy(isolation, hash)
+                .map_err(|error| unavailable("render the guest's template NetworkPolicy", error))?,
+            None => None,
+        };
         let live = self
             .attestation
-            .workspace_network_policy(
-                &guest.namespace,
-                &lockdown::policy_name(&binding.environment_id),
-            )
+            .workspace_network_policies(&guest.namespace)
             .await
-            .map_err(|error| unavailable("read the guest's NetworkPolicy", error))?;
+            .map_err(|error| unavailable("read the guest's NetworkPolicies", error))?;
         let refusal = lockdown::lockdown_applied(
             facts,
             &binding.environment_id,
             rendered.as_ref(),
-            live.as_ref(),
+            rendered_template.as_ref(),
+            &live,
         )
         .err();
         if refusal.is_none()
@@ -292,9 +299,15 @@ impl EgressServiceState {
         {
             tracing::warn!(%error, pod = %guest.name, "recording a lockdown refusal failed");
         }
+        let policy = match refusal {
+            lockdown::LockdownRefusal::PolicyDiffers { policy } => Some(policy.as_str()),
+            _ => None,
+        };
         tracing::warn!(
             reason = refusal.reason(),
             pod = %guest.name,
+            namespace = %guest.namespace,
+            policy,
             outcome = "self_check_failed",
             "egress lockdown is not applied; the sandbox fails closed"
         );

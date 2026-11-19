@@ -66,7 +66,7 @@ SANDBOX_ROLE_RULES = (
     '- apiGroups: - "" resources: - persistentvolumeclaims verbs: - get - list - patch - delete '
     '- apiGroups: - snapshot.storage.k8s.io resources: - volumesnapshots verbs: - get - create - delete '
     '- apiGroups: - "" resources: - services verbs: - get - list - create - update - delete '
-    '- apiGroups: - networking.k8s.io resources: - networkpolicies verbs: - get - create - update - delete '
+    '- apiGroups: - networking.k8s.io resources: - networkpolicies verbs: - get - list - create - update - delete '
     '- apiGroups: - agents.x-k8s.io resources: - sandboxes verbs: - get - list - patch - update - delete '
     '- apiGroups: - extensions.agents.x-k8s.io resources: - sandboxclaims verbs: - get - list - watch - create - patch - delete '
     '- apiGroups: - extensions.agents.x-k8s.io resources: - sandboxtemplates verbs: - get - list - create - update - patch - delete '
@@ -1807,6 +1807,8 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
             ("  - sandboxes\n  verbs:\n  - get", "  - sandboxes\n  verbs:\n  - create\n  - get"),
             ("  - pods\n  verbs:\n  - get\n  - list\n  - delete", "  - pods\n  verbs:\n  - get\n  - list\n  - delete\n  - create"),
             ("  - networkpolicies\n  verbs:\n  - get", "  - networkpolicies\n  verbs:\n  - patch\n  - get"),
+            # list for the lockdown check, never watch: it reads once per check (#4964).
+            ("  - networkpolicies\n  verbs:\n  - get\n  - list", "  - networkpolicies\n  verbs:\n  - get\n  - list\n  - watch"),
         ]:
             image_cache_rejected(f"Sandbox Role {after}", "Role", before, after, SANDBOX_ROLE)
         image_cache_rejected("Sandbox Role in orchestration's namespace", "Role",

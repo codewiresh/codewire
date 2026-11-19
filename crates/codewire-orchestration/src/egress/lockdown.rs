@@ -7,9 +7,19 @@
 //! together are what notice.
 //!
 //! What it proves: nobody removed, replaced or widened the environment's
-//! policy, and the Pod carries the labels that policy selects by. Which
-//! environment that is comes from orchestration's live binding, never from
-//! the Pod's labels, so a Pod cannot leave the check by dropping a label.
+//! policy, the Pod carries the labels that policy selects by, and no other
+//! NetworkPolicy in the namespace adds to what the Pod may reach (#4964).
+//! Kubernetes adds together every policy that selects a Pod, so each one that
+//! selects it must be the environment's, the policy the sandbox controller
+//! makes from the Pod's template exactly as orchestration renders that
+//! template, or a policy with no rules at all, which allows nothing. Which
+//! environment the Pod is bound to comes from orchestration's live binding,
+//! never from the Pod's labels, so a Pod cannot leave the check by dropping a
+//! label.
+//!
+//! It reads Kubernetes NetworkPolicies only. A Cilium policy can allow
+//! traffic too and is not seen here; only infra's reviewed GitOps creates
+//! those (infra#1822).
 //!
 //! What it does not prove: that the rendered policy itself confines egress to
 //! the broker. That is the broker-mode policy of #4000 P5, and checking its
@@ -24,22 +34,15 @@
 //! assignment watch before the first bound assignment for a member admitted
 //! unbound, which is how a warm-pool member is claimed. A policy changed
 //! later under an already bound sandbox is not checked again yet.
-//!
-//! Not compared yet: the NetworkPolicy the sandbox controller makes from a
-//! warm pool's template, which selects the same Pod. Policies add up, so a
-//! template made before hosted egress was turned on can stay wider while
-//! this check passes. Its name and spec are the controller's, not rendered
-//! here, so comparing it needs a read and a rendering this check does not
-//! have; warm templates are made again before the flag goes on, and the
-//! comparison of every policy that selects the Pod is #4964.
 
 use std::sync::OnceLock;
 
 use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
 
-use crate::runtime::{MemberFacts, NetworkPolicyFacts};
+use crate::runtime::{MemberFacts, NamedNetworkPolicy, NetworkPolicyFacts};
 use crate::sandbox::LABEL_ENV_ID;
 use crate::sandbox::template::workspace_daemon_network_policy_name;
+use crate::sandbox::warm_pool::TEMPLATE_REF_HASH_LABEL;
 
 use super::admission::{EGRESS_MODE_BROKER, EGRESS_MODE_LABEL};
 
@@ -54,9 +57,15 @@ pub enum LockdownRefusal {
     PolicyUnmanaged,
     /// The environment's NetworkPolicy does not exist.
     PolicyMissing,
-    /// It exists but is not the policy orchestration renders: a rule was
-    /// added, removed or widened, or its selector or types changed.
-    PolicyDiffers,
+    /// A policy that selects the Pod is not one orchestration renders for
+    /// it: the environment's with a rule added, removed or widened, or its
+    /// selector or types changed; a template's that is not the template
+    /// orchestration renders, such as one made before hosted egress; or any
+    /// other policy with a rule. `policy` names it for the operator's log; the
+    /// stored and counted reason is the same for each.
+    PolicyDiffers {
+        policy: String,
+    },
     /// It is the rendered policy but does not select this Pod.
     PolicyDoesNotSelect,
 }
@@ -70,7 +79,7 @@ impl LockdownRefusal {
             Self::NotLabelledForItsBinding => "not_labelled_for_its_binding",
             Self::PolicyUnmanaged => "policy_unmanaged",
             Self::PolicyMissing => "policy_missing",
-            Self::PolicyDiffers => "policy_differs",
+            Self::PolicyDiffers { .. } => "policy_differs",
             Self::PolicyDoesNotSelect => "policy_does_not_select",
         }
     }
@@ -113,15 +122,26 @@ pub fn policy_name(environment_id: &str) -> String {
     workspace_daemon_network_policy_name(environment_id)
 }
 
+/// The template hash the sandbox controller selects `guest` by, if it has
+/// one: the label every Sandbox made from a template carries.
+pub fn template_ref_hash(guest: &MemberFacts) -> Option<&str> {
+    guest
+        .labels
+        .get(TEMPLATE_REF_HASH_LABEL)
+        .map(String::as_str)
+}
+
 /// Whether the lockdown orchestration renders is applied to `guest`, which
 /// the live binding says is bound to `environment_id`. `rendered` is what
-/// orchestration renders for that environment and `live` what the cluster
-/// holds under [`policy_name`].
+/// orchestration renders for that environment, `rendered_template` what the
+/// sandbox controller makes from the guest's template as orchestration
+/// renders it, and `live` every NetworkPolicy in the guest's namespace.
 pub fn lockdown_applied(
     guest: &MemberFacts,
     environment_id: &str,
     rendered: Option<&NetworkPolicyFacts>,
-    live: Option<&NetworkPolicyFacts>,
+    rendered_template: Option<&NetworkPolicyFacts>,
+    live: &[NamedNetworkPolicy],
 ) -> Result<(), LockdownRefusal> {
     if guest.labels.get(EGRESS_MODE_LABEL).map(String::as_str) != Some(EGRESS_MODE_BROKER) {
         return Err(LockdownRefusal::NotBrokerMode);
@@ -130,14 +150,108 @@ pub fn lockdown_applied(
         return Err(LockdownRefusal::NotLabelledForItsBinding);
     }
     let rendered = rendered.ok_or(LockdownRefusal::PolicyUnmanaged)?;
-    let live = live.ok_or(LockdownRefusal::PolicyMissing)?;
-    if live != rendered {
-        return Err(LockdownRefusal::PolicyDiffers);
+    let name = policy_name(environment_id);
+    let own = live
+        .iter()
+        .find(|policy| policy.name == name)
+        .ok_or(LockdownRefusal::PolicyMissing)?;
+    if &own.facts != rendered {
+        return Err(LockdownRefusal::PolicyDiffers { policy: name });
     }
     if !selects(rendered, guest) {
         return Err(LockdownRefusal::PolicyDoesNotSelect);
     }
+    for policy in live.iter().filter(|policy| policy.name != name) {
+        if !may_select(&policy.facts, guest)
+            || allows_nothing(&policy.facts)
+            || is_template_policy(policy, rendered_template)
+        {
+            continue;
+        }
+        return Err(LockdownRefusal::PolicyDiffers {
+            policy: policy.name.clone(),
+        });
+    }
     Ok(())
+}
+
+/// Whether `policy` is the one the sandbox controller makes from the guest's
+/// template, exactly as orchestration renders that template. The controller
+/// names it `<template>-network-policy`.
+fn is_template_policy(policy: &NamedNetworkPolicy, rendered: Option<&NetworkPolicyFacts>) -> bool {
+    policy.name.ends_with("-network-policy") && rendered == Some(&policy.facts)
+}
+
+/// Whether `policy` has no rule in either direction, whatever its types. It
+/// can only isolate: a Pod's allowed traffic is the union of its policies'
+/// rules. A single empty rule (`[{}]`) is a rule that allows everything.
+fn allows_nothing(policy: &NetworkPolicyFacts) -> bool {
+    let empty = |field: &str| {
+        policy
+            .spec
+            .get(field)
+            .is_none_or(|rules| rules.as_array().is_some_and(Vec::is_empty))
+    };
+    empty("ingress") && empty("egress")
+}
+
+/// Whether `policy`'s Pod selector may select `guest`, by the Kubernetes
+/// label-selector rules: every `matchLabels` entry and every
+/// `matchExpressions` requirement holds, and an empty selector selects every
+/// Pod. A selector this cannot read, such as an unknown operator, counts as
+/// selecting, so it is compared rather than skipped.
+fn may_select(policy: &NetworkPolicyFacts, guest: &MemberFacts) -> bool {
+    let Some(selector) = policy.spec.get("podSelector") else {
+        return true;
+    };
+    let labels_hold = selector.get("matchLabels").is_none_or(|labels| {
+        labels.as_object().is_none_or(|labels| {
+            labels.iter().all(|(key, value)| {
+                value
+                    .as_str()
+                    .is_none_or(|value| guest.labels.get(key).map(String::as_str) == Some(value))
+            })
+        })
+    });
+    let expressions_hold = selector.get("matchExpressions").is_none_or(|expressions| {
+        expressions.as_array().is_none_or(|expressions| {
+            expressions
+                .iter()
+                .all(|requirement| requirement_holds(requirement, guest))
+        })
+    });
+    labels_hold && expressions_hold
+}
+
+/// One `matchExpressions` requirement. An operator or form this does not know
+/// holds, so the policy counts as selecting.
+fn requirement_holds(requirement: &serde_json::Value, guest: &MemberFacts) -> bool {
+    let Some(key) = requirement.get("key").and_then(serde_json::Value::as_str) else {
+        return true;
+    };
+    let value = guest.labels.get(key);
+    let values = || {
+        requirement
+            .get("values")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    match requirement
+        .get("operator")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("In") => value.is_some_and(|value| values().contains(&value.as_str())),
+        Some("NotIn") => value.is_none_or(|value| !values().contains(&value.as_str())),
+        Some("Exists") => value.is_some(),
+        Some("DoesNotExist") => value.is_none(),
+        _ => true,
+    }
 }
 
 /// Whether `policy` selects `guest` by labels alone. A selector with no

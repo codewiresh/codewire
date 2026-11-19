@@ -28,12 +28,12 @@ use kube::api::{Api, DynamicObject, LogParams};
 use super::{
     CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
     Incarnation, Isolation, KeptSnapshot, MemberEvidence, MemberFacts, MemberReplacement,
-    NetworkPolicyFacts, Pick, Placement, PoolBornClaim, PoolPass, PoolState, RenderingIntent,
-    ResizeState, RuntimeAccess, RuntimeAttestation, RuntimeClaims, RuntimeDriver, RuntimeExec,
-    RuntimeFacts, RuntimeLifecycle, RuntimeMember, RuntimeObservation, RuntimeObservations,
-    RuntimePools, RuntimeProbe, RuntimeResize, RuntimeSnapshots, RuntimeStorage, RuntimeStream,
-    RuntimeTeardown, SuspendedRuntime, VerifiedChain, VolumeGrowth, VolumeIdentity, VolumeMode,
-    VolumeRef, WantedPool, WantedPools, WorkspaceVolume,
+    NamedNetworkPolicy, NetworkPolicyFacts, Pick, Placement, PoolBornClaim, PoolPass, PoolState,
+    RenderingIntent, ResizeState, RuntimeAccess, RuntimeAttestation, RuntimeClaims, RuntimeDriver,
+    RuntimeExec, RuntimeFacts, RuntimeLifecycle, RuntimeMember, RuntimeObservation,
+    RuntimeObservations, RuntimePools, RuntimeProbe, RuntimeResize, RuntimeSnapshots,
+    RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime, VerifiedChain, VolumeGrowth,
+    VolumeIdentity, VolumeMode, VolumeRef, WantedPool, WantedPools, WorkspaceVolume,
 };
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::HostKeyStore;
@@ -396,12 +396,22 @@ impl RuntimeAttestation for KubernetesDriver {
         attestation::member(&self.client, namespace, name).await
     }
 
-    async fn workspace_network_policy(
+    async fn workspace_network_policies(
         &self,
         namespace: &str,
-        name: &str,
+    ) -> anyhow::Result<Vec<NamedNetworkPolicy>> {
+        attestation::network_policies(&self.client, namespace).await
+    }
+
+    fn rendered_template_network_policy(
+        &self,
+        isolation: Isolation,
+        template_ref_hash: &str,
     ) -> anyhow::Result<Option<NetworkPolicyFacts>> {
-        attestation::network_policy(&self.client, namespace, name).await
+        self.rendering
+            .template_network_policy(isolation, template_ref_hash)
+            .map(attestation::rendered_network_policy)
+            .transpose()
     }
 
     fn rendered_workspace_network_policy(

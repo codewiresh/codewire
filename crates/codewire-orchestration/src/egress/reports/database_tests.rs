@@ -439,7 +439,9 @@ fn every_lockdown_refusal() -> [LockdownRefusal; 6] {
         LockdownRefusal::NotLabelledForItsBinding,
         LockdownRefusal::PolicyUnmanaged,
         LockdownRefusal::PolicyMissing,
-        LockdownRefusal::PolicyDiffers,
+        LockdownRefusal::PolicyDiffers {
+            policy: "extra".to_owned(),
+        },
         LockdownRefusal::PolicyDoesNotSelect,
     ];
     for refusal in &every {
@@ -448,7 +450,7 @@ fn every_lockdown_refusal() -> [LockdownRefusal; 6] {
             | LockdownRefusal::NotLabelledForItsBinding
             | LockdownRefusal::PolicyUnmanaged
             | LockdownRefusal::PolicyMissing
-            | LockdownRefusal::PolicyDiffers
+            | LockdownRefusal::PolicyDiffers { .. }
             | LockdownRefusal::PolicyDoesNotSelect => {}
         }
     }
@@ -515,7 +517,14 @@ async fn db_a_lockdown_refusal_is_the_status_until_the_lockdown_passes_or_the_po
         );
 
         // A bind to another environment clears it.
-        record_lockdown_refusal(&db.pool, POD, &LockdownRefusal::PolicyDiffers).await?;
+        record_lockdown_refusal(
+            &db.pool,
+            POD,
+            &LockdownRefusal::PolicyDiffers {
+                policy: "extra".to_owned(),
+            },
+        )
+        .await?;
         sqlx::query(
             "INSERT INTO environments \
              (id, org_id, created_by, preset_id, type, name, state, desired_state, project_spec) \
@@ -531,7 +540,14 @@ async fn db_a_lockdown_refusal_is_the_status_until_the_lockdown_passes_or_the_po
         anyhow::ensure!(stored_refusal(&db, POD).await?.is_none(), "bound elsewhere");
 
         // The release removes the Pod's row, refusal and all.
-        record_lockdown_refusal(&db.pool, POD, &LockdownRefusal::PolicyDiffers).await?;
+        record_lockdown_refusal(
+            &db.pool,
+            POD,
+            &LockdownRefusal::PolicyDiffers {
+                policy: "extra".to_owned(),
+            },
+        )
+        .await?;
         let mut tx = db.pool.begin().await?;
         release_pod(&mut tx, POD).await?;
         tx.commit().await?;

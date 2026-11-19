@@ -36,8 +36,8 @@ pub use crate::sandbox::snapshots::{ClearingOpts, VolumeMode};
 use crate::sandbox::warm_pool::{ConfiguredShape, shape_label};
 pub use backend::RuntimeBackend;
 pub use observation::{
-    ContainerFact, ControllerFact, EnvFact, MemberFacts, NetworkPolicyFacts, RuntimeFacts,
-    RuntimeObservation, VerifiedChain, VolumeFact,
+    ContainerFact, ControllerFact, EnvFact, MemberFacts, NamedNetworkPolicy, NetworkPolicyFacts,
+    RuntimeFacts, RuntimeObservation, VerifiedChain, VolumeFact,
 };
 pub use rendering::{Isolation, RenderingIdentity, RenderingIntent, WorkspaceShape};
 
@@ -688,16 +688,27 @@ pub trait RuntimeAttestation: Send + Sync {
         name: &str,
     ) -> anyhow::Result<Option<MemberFacts>>;
 
-    /// The NetworkPolicy of this name in `namespace`; `None` when there is
-    /// none (#4000 P6, the egress lockdown's out-of-band check).
-    async fn workspace_network_policy(
+    /// Every NetworkPolicy in `namespace`, with its name (#4000 P6 and #4964,
+    /// the egress lockdown's out-of-band check, which compares each one that
+    /// selects the guest).
+    async fn workspace_network_policies(
         &self,
         namespace: &str,
-        name: &str,
+    ) -> anyhow::Result<Vec<NamedNetworkPolicy>>;
+
+    /// The NetworkPolicy the sandbox controller makes from a workspace
+    /// template of `isolation` for the Sandboxes whose template hash is
+    /// `template_ref_hash`, in the form [`Self::workspace_network_policies`]
+    /// reads it back. `None` when this deployment leaves workspace
+    /// NetworkPolicies to someone else.
+    fn rendered_template_network_policy(
+        &self,
+        isolation: Isolation,
+        template_ref_hash: &str,
     ) -> anyhow::Result<Option<NetworkPolicyFacts>>;
 
     /// The NetworkPolicy this runtime renders for the workspace of
-    /// `environment_id`: what [`Self::workspace_network_policy`] reads back
+    /// `environment_id`: what [`Self::workspace_network_policies`] reads back
     /// while nobody has changed it. `None` when this deployment leaves
     /// workspace NetworkPolicies to someone else, so there is no rendering
     /// to compare with.

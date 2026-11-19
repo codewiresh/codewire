@@ -911,13 +911,16 @@ what orchestration renders, a running sandbox's next admission is refused
 until its policy has been applied again, so a rollout applies the policies
 again before the new orchestration compares them. A deployment that does not
 let orchestration manage the workspace `NetworkPolicy` has no rendering to
-compare, and every bound guest is refused there. One policy is not compared
-yet. Kubernetes adds the policies that select a Pod together, and a Pod that
-came from a warm pool is also selected by the policy the sandbox controller
-makes from its template. The check compares the environment's policy only, so
-a template made before hosted egress was turned on can stay wider while the
-check passes. Warm templates are made again before the flag goes on, and
-comparing every policy that selects the Pod is #4964.
+compare, and every bound guest is refused there. Kubernetes adds together
+every NetworkPolicy that selects a Pod, so the check reads every one in the
+Sandbox's namespace (#4964). Each that selects the Pod must be the
+environment's policy, the policy the sandbox controller makes from the Pod's
+template exactly as orchestration renders that template, or a policy with no
+rule in either direction, which allows nothing. Any other, such as a
+template's made before hosted egress was turned on, refuses the guest as
+`policy_differs`, and the operator log names it. The check reads Kubernetes
+NetworkPolicies only: a Cilium policy can allow traffic too and is not seen,
+and only infra's reviewed GitOps creates those (infra#1822).
 
 Target, not shipped (#4000): with hosted egress on, a Sandbox Pod's own
 egress is only to named peers inside the cluster, each by selector and port,
@@ -972,8 +975,7 @@ Pod's report. The status reads:
   and `policy_digest_mismatch` from cw-egress, and `lockdown_not_applied`
   from orchestration. The public code does not say which lockdown refusal it
   was: each describes the platform's own `NetworkPolicy`, which the
-  environment's owner cannot change, and what the check compares is still
-  moving (#4964). The exact refusal is kept for operators, in orchestration's
+  environment's owner cannot change. The exact refusal is kept for operators, in orchestration's
   stored refusal, its log line and its counter by reason.
   Orchestration records a lockdown refusal only when the refusal ends the
   Sandbox's stream: at once for a bound guest at admission, and after the 30

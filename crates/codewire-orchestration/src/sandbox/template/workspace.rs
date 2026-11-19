@@ -6,7 +6,7 @@ use super::credentials;
 use super::encoding::kata_policy_init_data_annotation;
 use super::hosted_egress;
 use super::naming::{workspace_daemon_service_name, workspace_selector, workspace_template_labels};
-use super::network::{identity_free_workspace_egress_rules, identity_free_workspace_ingress_rules};
+use super::network::template_network_policy;
 use super::runtime_policy::{
     DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, RUNTIME_PROFILE_COMMODITY,
     RUNTIME_PROFILE_CONFIDENTIAL, RuntimeProfileSpec, dind_image, dind_memory_limit_gib,
@@ -361,16 +361,7 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
         );
     }
 
-    let mut network_policy = Map::new();
-    let ingress = identity_free_workspace_ingress_rules(opts);
-    if !ingress.is_empty() {
-        network_policy.insert("ingress".into(), Value::Array(ingress));
-    }
-    network_policy.insert(
-        "egress".into(),
-        Value::Array(identity_free_workspace_egress_rules(opts)),
-    );
-    spec.insert("networkPolicy".into(), Value::Object(network_policy));
+    spec.insert("networkPolicy".into(), template_network_policy(opts));
 
     Value::Object(spec)
 }

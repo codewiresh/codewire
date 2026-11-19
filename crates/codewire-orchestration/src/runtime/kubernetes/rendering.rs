@@ -7,8 +7,8 @@ use crate::sandbox::environment_template_name;
 use crate::sandbox::template::{
     CpuSharingRatio, CredentialRuntimeTemplateConfig, DOCKER_MODE_LOCAL_DIND_DIRECT,
     RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RuntimeProfileSpec, TemplateOpts,
-    WORKSPACE_KEEPALIVE_COMMAND, render_workspace_daemon_network_policy, runtime_profile_spec,
-    validate_managed_runtime_profile,
+    WORKSPACE_KEEPALIVE_COMMAND, render_template_network_policy,
+    render_workspace_daemon_network_policy, runtime_profile_spec, validate_managed_runtime_profile,
 };
 use crate::sandbox::{
     CANONICAL_WORKSPACE_RUNTIME_TEMPLATE_NAME, canonical_workspace_runtime_image,
@@ -216,6 +216,35 @@ impl KubernetesRenderConfig {
                 ..opts
             },
         ))
+    }
+
+    /// The NetworkPolicy the sandbox controller makes from a workspace
+    /// template of `isolation`, selecting the Sandboxes whose template hash is
+    /// `template_ref_hash`, as the egress lockdown check expects to read it
+    /// back (#4964), or `None` when this deployment leaves workspace
+    /// NetworkPolicies to someone else. The template's rules read only this
+    /// configuration and the runtime profile, never a shape or an
+    /// environment, so every template of one isolation has the same policy.
+    pub fn template_network_policy(
+        &self,
+        isolation: Isolation,
+        template_ref_hash: &str,
+    ) -> Option<serde_json::Value> {
+        if !self.network_policy_management.is_empty() && self.network_policy_management != "Managed"
+        {
+            return None;
+        }
+        let shape = WorkspaceShape {
+            cpu_millicores: 0,
+            memory_mib: 0,
+            disk_gib: 0,
+        };
+        let opts = self.shape(
+            canonical_workspace_runtime_image(),
+            &self.runtime_spec(isolation),
+            shape,
+        );
+        Some(render_template_network_policy(&opts, template_ref_hash))
     }
 
     /// The identity-free inputs of one warm-pool shape (Program #2238 C1): the

@@ -245,6 +245,20 @@ impl Cluster {
                         StatusCode::INTERNAL_SERVER_ERROR,
                         json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "code": 500}),
                     )
+                } else if path.ends_with("/networkpolicies") {
+                    let prefix = format!("{path}/");
+                    let items: Vec<Value> = cluster
+                        .policies
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|(key, _)| key.starts_with(&prefix))
+                        .map(|(_, policy)| policy.clone())
+                        .collect();
+                    json_response(
+                        StatusCode::OK,
+                        json!({"kind": "NetworkPolicyList", "apiVersion": "networking.k8s.io/v1", "metadata": {}, "items": items}),
+                    )
                 } else if path.contains("/networkpolicies/") {
                     match cluster.policies.lock().unwrap().get(&path) {
                         Some(policy) => json_response(StatusCode::OK, policy.clone()),
@@ -965,6 +979,56 @@ fn bound_guest(label: Option<&str>, policy: Option<Value>) -> Arc<Cluster> {
     })
 }
 
+/// The guest's template hash, and the policy the sandbox controller makes
+/// from that template (#4964).
+const TEMPLATE_HASH: &str = "2f9c41ab";
+const TEMPLATE_POLICY: &str = "warm-2000m-4096mi-20gi-r7-network-policy";
+
+/// The template policy for the guest, exactly as orchestration renders it.
+fn rendered_template_policy() -> Value {
+    let mut policy = rendering()
+        .template_network_policy(crate::runtime::Isolation::Standard, TEMPLATE_HASH)
+        .expect("the default deployment manages workspace NetworkPolicies");
+    policy["metadata"] = json!({"name": TEMPLATE_POLICY, "namespace": SANDBOXES});
+    policy
+}
+
+/// The controller's default for a template with no `networkPolicy`, which a
+/// template made before hosted egress has: every public address.
+fn wide_template_policy() -> Value {
+    json!({
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {"name": TEMPLATE_POLICY, "namespace": SANDBOXES},
+        "spec": {
+            "podSelector": {"matchLabels": {crate::sandbox::warm_pool::TEMPLATE_REF_HASH_LABEL: TEMPLATE_HASH}},
+            "policyTypes": ["Ingress", "Egress"],
+            "ingress": [{"from": [{"podSelector": {"matchLabels": {"app": "sandbox-router"}}}]}],
+            "egress": [{"to": [
+                {"ipBlock": {"cidr": "0.0.0.0/0", "except": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"]}},
+                {"ipBlock": {"cidr": "::/0", "except": ["fc00::/7", "fe80::/10"]}},
+            ]}],
+        },
+    })
+}
+
+/// `cluster`'s guest made from a template whose controller policy is
+/// `template`.
+fn from_template(cluster: Arc<Cluster>, template: Value) -> Arc<Cluster> {
+    cluster.with(|cluster| {
+        cluster.edit_guest(|pod| {
+            pod.metadata
+                .labels
+                .get_or_insert_with(BTreeMap::new)
+                .insert(crate::sandbox::warm_pool::TEMPLATE_REF_HASH_LABEL.into(), TEMPLATE_HASH.into());
+        });
+        cluster.policies.get_mut().unwrap().insert(
+            format!("/apis/networking.k8s.io/v1/namespaces/{SANDBOXES}/networkpolicies/{TEMPLATE_POLICY}"),
+            template,
+        );
+    })
+}
+
 fn rendered_with(edit: impl FnOnce(&mut Value)) -> Option<Value> {
     let mut policy = rendered_policy();
     edit(&mut policy["spec"]);
@@ -1192,7 +1256,9 @@ async fn a_member_claimed_under_a_widened_policy_never_gets_its_bound_assignment
     let widened = rendered_with(|spec| spec["egress"] = json!([{}]));
     let cluster = bound_guest(Some(BOUND_ENVIRONMENT), widened);
     let (member, watch) = admitted_unbound(&cluster).await;
-    let refusal = lockdown::LockdownRefusal::PolicyDiffers;
+    let refusal = lockdown::LockdownRefusal::PolicyDiffers {
+        policy: lockdown::policy_name(BOUND_ENVIRONMENT),
+    };
     let counted = lockdown::failed_closed(&refusal);
 
     member.claim();
@@ -1206,6 +1272,43 @@ async fn a_member_claimed_under_a_widened_policy_never_gets_its_bound_assignment
     );
     assert!(claimed_at.elapsed() >= LOCKDOWN_BIND_GRACE);
     assert!(claimed_at.elapsed() < LOCKDOWN_BIND_GRACE + 2 * WATCH_INTERVAL);
+    assert!(lockdown::failed_closed(&refusal) > counted);
+    assert!(watch.step().await.is_none(), "the stream ends after it");
+}
+
+#[tokio::test]
+async fn a_guest_under_its_rendered_template_policy_passes_the_lockdown_check() {
+    let cluster = from_template(
+        bound_guest(Some(BOUND_ENVIRONMENT), Some(rendered_policy())),
+        rendered_template_policy(),
+    );
+    assert_eq!(lockdown(&cluster).await, Ok(()));
+}
+
+/// #4964: the environment's policy is exactly the rendered one, but the
+/// template the member came from was made before hosted egress, so the
+/// controller's policy for it adds every public address. The bound
+/// assignment is never sent, and the member fails closed after the grace.
+#[tokio::test(start_paused = true)]
+async fn a_member_from_a_wide_template_never_gets_its_bound_assignment() {
+    let cluster = from_template(
+        bound_guest(Some(BOUND_ENVIRONMENT), Some(rendered_policy())),
+        wide_template_policy(),
+    );
+    let (member, watch) = admitted_unbound(&cluster).await;
+    let refusal = lockdown::LockdownRefusal::PolicyDiffers {
+        policy: TEMPLATE_POLICY.to_owned(),
+    };
+    let counted = lockdown::failed_closed(&refusal);
+
+    member.claim();
+    let claimed_at = tokio::time::Instant::now();
+    let (ended, watch) = watch.step().await.unwrap();
+    assert_eq!(
+        ended.unwrap_err().code,
+        connectrpc::ErrorCode::PermissionDenied
+    );
+    assert!(claimed_at.elapsed() >= LOCKDOWN_BIND_GRACE);
     assert!(lockdown::failed_closed(&refusal) > counted);
     assert!(watch.step().await.is_none(), "the stream ends after it");
 }

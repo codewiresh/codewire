@@ -307,6 +307,42 @@ fn workspace_daemon_ingress_rules(opts: &TemplateOpts) -> Vec<Value> {
     ingress
 }
 
+/// A SandboxTemplate's `spec.networkPolicy`: the rules the sandbox controller
+/// copies into the policy it makes for the template's Sandboxes.
+pub(super) fn template_network_policy(opts: &TemplateOpts) -> Value {
+    let mut network_policy = Map::new();
+    let ingress = identity_free_workspace_ingress_rules(opts);
+    if !ingress.is_empty() {
+        network_policy.insert("ingress".into(), Value::Array(ingress));
+    }
+    network_policy.insert(
+        "egress".into(),
+        Value::Array(identity_free_workspace_egress_rules(opts)),
+    );
+    Value::Object(network_policy)
+}
+
+/// The NetworkPolicy the pinned sandbox controller makes from a template
+/// rendered with `opts` (`sandboxtemplate_controller.go`), as the egress
+/// lockdown check expects to read it back (#4964): it selects the template's
+/// Sandboxes by their template-reference hash, names both policy types, and
+/// copies the template's ingress and egress rules.
+pub fn render_template_network_policy(opts: &TemplateOpts, template_ref_hash: &str) -> Value {
+    let rules = template_network_policy(opts);
+    json!({
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "spec": {
+            "podSelector": {
+                "matchLabels": { crate::sandbox::warm_pool::TEMPLATE_REF_HASH_LABEL: template_ref_hash },
+            },
+            "policyTypes": ["Ingress", "Egress"],
+            "ingress": rules.get("ingress").cloned().unwrap_or_else(|| json!([])),
+            "egress": rules["egress"],
+        },
+    })
+}
+
 pub fn render_workspace_daemon_network_policy(namespace: &str, opts: &TemplateOpts) -> Value {
     json!({
         "apiVersion": "networking.k8s.io/v1",

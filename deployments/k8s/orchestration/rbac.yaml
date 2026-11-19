@@ -129,9 +129,11 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "create", "update", "delete"]
+  # list: the hosted egress lockdown check reads every policy that selects a
+  # Sandbox, not only the environment's (#4964).
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["get", "create", "update", "delete"]
+    verbs: ["get", "list", "create", "update", "delete"]
   # Agent Sandbox objects. Orchestration never creates a Sandbox; the
   # controller does, from a claim and template.
   - apiGroups: ["agents.x-k8s.io"]

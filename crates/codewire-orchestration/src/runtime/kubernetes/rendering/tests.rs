@@ -90,3 +90,39 @@ fn a_deployment_that_does_not_manage_network_policies_renders_none_to_compare() 
         None
     );
 }
+
+/// The template policy the lockdown check expects (#4964) is the one a pool's
+/// or an environment's template makes: its rules read only this configuration
+/// and the runtime profile, never the shape or the environment.
+#[test]
+fn the_template_policy_the_lockdown_check_expects_is_every_templates() {
+    const HASH: &str = "2f9c41ab";
+    let config = config();
+    let pool = config
+        .pool(WorkspaceShape {
+            cpu_millicores: 2000,
+            memory_mib: 4096,
+            disk_gib: 20,
+        })
+        .unwrap();
+    assert_eq!(
+        config.template_network_policy(Isolation::Standard, HASH),
+        Some(render_template_network_policy(&pool, HASH))
+    );
+    for isolation in [Isolation::Standard, Isolation::Confidential] {
+        let environment = config.environment(&intent(isolation)).unwrap();
+        assert_eq!(
+            config.template_network_policy(isolation, HASH),
+            Some(render_template_network_policy(&environment, HASH)),
+            "{isolation:?}"
+        );
+    }
+    let unmanaged = KubernetesRenderConfig {
+        network_policy_management: "Unmanaged".into(),
+        ..config
+    };
+    assert_eq!(
+        unmanaged.template_network_policy(Isolation::Standard, HASH),
+        None
+    );
+}

@@ -37,7 +37,8 @@ pub use naming::{
     workspace_daemon_service_name,
 };
 pub use network::{
-    render_direct_udp_service, render_warm_member_bridge, render_workspace_daemon_network_policy,
+    render_direct_udp_service, render_template_network_policy, render_warm_member_bridge,
+    render_workspace_daemon_network_policy,
 };
 pub use runtime_policy::{
     DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, DOCKER_MODE_NONE,

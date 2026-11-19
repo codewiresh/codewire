@@ -144,6 +144,13 @@ pub struct NetworkPolicyFacts {
     pub spec: Value,
 }
 
+/// A NetworkPolicy read back with its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedNetworkPolicy {
+    pub name: String,
+    pub facts: NetworkPolicyFacts,
+}
+
 impl MemberFacts {
     /// Whether its reported phase is `Running`: the one place the phase
     /// string is compared.

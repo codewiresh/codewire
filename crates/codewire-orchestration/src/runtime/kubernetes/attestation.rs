@@ -9,10 +9,12 @@ use std::net::IpAddr;
 use k8s_openapi::api::core::v1::{Node, Pod, Service};
 use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicySpec};
 use kube::Api;
-use kube::api::{ApiResource, DynamicObject, GroupVersionKind};
+use kube::api::{ApiResource, DynamicObject, GroupVersionKind, ListParams};
 use serde_json::Value;
 
-use super::super::observation::{MemberFacts, NetworkPolicyFacts, RuntimeFacts};
+use super::super::observation::{
+    MemberFacts, NamedNetworkPolicy, NetworkPolicyFacts, RuntimeFacts,
+};
 use super::observation::{member_facts, runtime_facts};
 use crate::runtime_transport::TRANSPORT_ZONE_LABEL;
 use crate::sandbox::{CRD_VERSION, SANDBOX_GROUP};
@@ -30,17 +32,27 @@ pub(super) async fn member(
         .transpose()
 }
 
-pub(super) async fn network_policy(
+/// Every NetworkPolicy in `namespace`. One list read, so the lockdown check
+/// compares the policies as they stood together.
+pub(super) async fn network_policies(
     client: &kube::Client,
     namespace: &str,
-    name: &str,
-) -> anyhow::Result<Option<NetworkPolicyFacts>> {
+) -> anyhow::Result<Vec<NamedNetworkPolicy>> {
     let policies: Api<NetworkPolicy> = Api::namespaced(client.clone(), namespace);
     policies
-        .get_opt(name)
+        .list(&ListParams::default())
         .await?
-        .map(|policy| network_policy_facts(&policy.spec.unwrap_or_default()))
-        .transpose()
+        .items
+        .into_iter()
+        .map(|policy| {
+            let name = policy
+                .metadata
+                .name
+                .ok_or_else(|| anyhow::anyhow!("a NetworkPolicy without a name"))?;
+            let facts = network_policy_facts(&policy.spec.unwrap_or_default())?;
+            Ok(NamedNetworkPolicy { name, facts })
+        })
+        .collect()
 }
 
 /// The policy a rendered manifest applies, in the form one read back has.

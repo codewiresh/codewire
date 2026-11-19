@@ -360,3 +360,38 @@ fn hosted_egress_renders_only_on_a_vm_runtime() {
         );
     }
 }
+
+/// The lockdown check holds a template's controller-made policy to
+/// `render_template_network_policy` (#4964): the controller copies the
+/// template's `networkPolicy` rules under its own selector and both types, so
+/// that rendering must carry exactly the rules the template does, with hosted
+/// egress on or off.
+#[test]
+fn the_template_policy_the_lockdown_check_expects_carries_the_templates_rules() {
+    for (profile, egress) in [
+        (RUNTIME_PROFILE_COMMODITY, None),
+        (RUNTIME_PROFILE_COMMODITY, Some(egress_template())),
+        (RUNTIME_PROFILE_CONFIDENTIAL, Some(egress_template())),
+    ] {
+        let opts = opts(profile, true, egress.clone());
+        let rules = render_sandbox_template(NAMESPACE, &opts)["spec"]["networkPolicy"].clone();
+        let policy = render_template_network_policy(&opts, "2f9c41ab");
+        assert_eq!(
+            policy["spec"]["podSelector"],
+            json!({"matchLabels": {"agents.x-k8s.io/sandbox-template-ref-hash": "2f9c41ab"}})
+        );
+        assert_eq!(policy["spec"]["policyTypes"], json!(["Ingress", "Egress"]));
+        assert_eq!(
+            policy["spec"]["egress"],
+            rules["egress"],
+            "{profile} {}",
+            egress.is_some()
+        );
+        assert_eq!(
+            policy["spec"]["ingress"],
+            rules.get("ingress").cloned().unwrap_or_else(|| json!([])),
+            "{profile} {}",
+            egress.is_some()
+        );
+    }
+}
