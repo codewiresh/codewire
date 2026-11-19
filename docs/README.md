@@ -41,6 +41,8 @@ directory each.
 
 - [dev/CLI-MANAGED-INSTALL.md](dev/CLI-MANAGED-INSTALL.md): installing and
   updating `cw`.
+- [dev/CLI-NIX-INSTALL.md](dev/CLI-NIX-INSTALL.md): installing `cw` with Nix,
+  and how a release moves the flake.
 - [dev/CW-RUNTIME-JOURNAL.md](dev/CW-RUNTIME-JOURNAL.md): updating the `cw`
   a hosted sandbox runs, and how a request whose owner died is settled.
 - [dev/LINUX-LOCAL-VMS.md](dev/LINUX-LOCAL-VMS.md): local VMs on Linux.

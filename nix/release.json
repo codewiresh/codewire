@@ -1,0 +1,26 @@
+{
+  "schema": "codewire.cw.nix/v1",
+  "release_tag": "v0.4.24",
+  "targets": {
+    "aarch64-darwin": {
+      "target": "aarch64-apple-darwin",
+      "sha256": "6873e413ee4bde3f24370596e4bfc3a69353835b0d17778b9a4ea387d3c5f36d",
+      "size": 92595456
+    },
+    "aarch64-linux": {
+      "target": "aarch64-unknown-linux-gnu",
+      "sha256": "3c3a624f622c626632d1c408d4af7b97c8b63c94b94e6d4927b342dcdb4821e6",
+      "size": 107037432
+    },
+    "x86_64-darwin": {
+      "target": "x86_64-apple-darwin",
+      "sha256": "6cf527dc4295b3563c9b2882c494eae138c90ac6fbf93650298b33a858823c85",
+      "size": 101742928
+    },
+    "x86_64-linux": {
+      "target": "x86_64-unknown-linux-musl",
+      "sha256": "f9ee04db706c19fcc750d00842f6b9a939b73b02fec84edc891b9b0d33d15e8d",
+      "size": 119890384
+    }
+  }
+}

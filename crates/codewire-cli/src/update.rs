@@ -1266,21 +1266,64 @@ fn open_store(explicit: Option<&Path>) -> anyhow::Result<Store> {
             .with_context(|| format!("open managed cw store {}", root.display()));
     }
     let executable = std::env::current_exe().and_then(fs::canonicalize).ok();
-    if let Some(root) = executable.as_deref().and_then(Store::locate) {
+    open_running_store(executable.as_deref(), default_store_root)
+}
+
+/// The store of the running cw at `executable`: the one it runs from, else
+/// the default one. A cw installed by Nix is refused before any store is
+/// looked for, so nothing changes.
+fn open_running_store(
+    executable: Option<&Path>,
+    default_root: impl FnOnce() -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<Store> {
+    if let Some(root) = executable.and_then(Store::locate) {
         return Store::open(&root, DEFAULT_LOCK_TIMEOUT)
             .with_context(|| format!("open managed cw store {}", root.display()));
     }
-    let root = default_store_root()?;
+    if let Some(executable) = executable.filter(|path| installed_by_nix(path)) {
+        return Err(nix_installed(executable));
+    }
+    let root = default_root()?;
     match Store::open(&root, DEFAULT_LOCK_TIMEOUT) {
         Ok(store) => Ok(store),
-        Err(StoreError::NotAStore { .. }) => Err(unmanaged(executable.as_deref(), &root)),
+        Err(StoreError::NotAStore { .. }) => Err(unmanaged(executable, &root)),
         Err(StoreError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
-            Err(unmanaged(executable.as_deref(), &root))
+            Err(unmanaged(executable, &root))
         }
         Err(error) => {
             Err(error).with_context(|| format!("open managed cw store {}", root.display()))
         }
     }
+}
+
+/// The command that updates a profile install of the flake
+/// (docs/dev/CLI-NIX-INSTALL.md); `codewire` is the element name Nix gives
+/// github:codewiresh/codewire.
+pub(crate) const NIX_UPGRADE: &str = "nix profile upgrade codewire";
+
+/// Whether the canonical `executable` is in the Nix store. Nix installs a
+/// package's files read-only there, and only Nix replaces them.
+fn installed_by_nix(executable: &Path) -> bool {
+    executable.starts_with("/nix/store")
+}
+
+/// The command that updates this cw: Nix's for a cw installed by Nix,
+/// `cw upgrade` for any other.
+pub(crate) fn upgrade_command() -> &'static str {
+    let by_nix = std::env::current_exe()
+        .and_then(fs::canonicalize)
+        .is_ok_and(|path| installed_by_nix(&path));
+    if by_nix { NIX_UPGRADE } else { "cw upgrade" }
+}
+
+fn nix_installed(executable: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "this cw ({}) is installed by Nix and can't replace itself. Update it with Nix: \
+         `{NIX_UPGRADE}` for a profile install, or update the flake input that names \
+         github:codewiresh/codewire in your NixOS or Home Manager configuration. Local VMs left \
+         on an older cw restart with `cw upgrade --vms`.",
+        executable.display()
+    )
 }
 
 fn unmanaged(executable: Option<&Path>, root: &Path) -> anyhow::Error {
@@ -1370,6 +1413,57 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
+
+    /// A cw in the Nix store is refused before any store is looked for, so
+    /// neither a store nor an entry can change, and the refusal names the Nix
+    /// command (#5399).
+    #[test]
+    fn a_cw_installed_by_nix_is_refused_before_any_store_is_opened() {
+        let executable = Path::new("/nix/store/7vdwzz1jqvbgygc6i2zpjzplin957cs4-cw-0.4.24/bin/cw");
+        let error = open_running_store(Some(executable), || {
+            panic!("the default store was looked for")
+        })
+        .expect_err("a cw installed by Nix is refused");
+        let message = error.to_string();
+        assert!(
+            message.contains(&executable.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains("installed by Nix and can't replace itself"),
+            "{message}"
+        );
+        assert!(
+            message.contains("`nix profile upgrade codewire`"),
+            "{message}"
+        );
+        assert!(message.contains("`cw upgrade --vms`"), "{message}");
+    }
+
+    #[test]
+    fn only_the_nix_store_counts_as_installed_by_nix() {
+        assert!(installed_by_nix(Path::new(
+            "/nix/store/abc-cw-0.4.24/bin/cw"
+        )));
+        assert!(!installed_by_nix(Path::new("/nix/storefront/cw")));
+        assert!(!installed_by_nix(Path::new("/usr/local/bin/cw")));
+        assert!(!installed_by_nix(Path::new(
+            "/home/user/.local/share/codewire/cli/versions/abc/cw"
+        )));
+    }
+
+    /// Any other cw outside a store still falls back to the default store.
+    #[test]
+    fn a_cw_outside_the_nix_store_looks_for_the_default_store() {
+        let scratch = tempfile::tempdir().unwrap();
+        let missing = scratch.path().join("codewire/cli");
+        let error = open_running_store(Some(Path::new("/usr/local/bin/cw")), || Ok(missing))
+            .expect_err("no store exists");
+        assert!(
+            error.to_string().contains("is not a managed installation"),
+            "{error}"
+        );
+    }
 
     /// The wire plays only for a newer release (#4586 review).
     #[test]

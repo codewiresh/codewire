@@ -1,12 +1,15 @@
 ---
 title: Update and roll back
 description: Keep cw current with cw upgrade, roll back to a version you had, and move local VMs onto a new cw.
-updated: 2026-11-14
+updated: 2026-11-18
 weight: 7
 ---
 
 A `cw` installed by the [installer](@/install.md) updates itself from
 signed releases and keeps every version it installed, so rolling back downloads nothing.
+A `cw` [installed with Nix](@/install.md#install-with-nix) is updated by Nix
+instead: `cw upgrade` and `cw upgrade rollback` change nothing and say to run
+`nix profile upgrade codewire`. `cw upgrade --vms` works for either.
 
 ## Update
 

@@ -101,7 +101,7 @@ fn finish(check: Option<NewerReleaseCheck>, result: &anyhow::Result<()>) {
     };
     // Read again: the detached check may have recorded since the start.
     let mut state = read_state(&check.path);
-    if let Some(notice) = due_notice(&state, &check.current, check.now) {
+    if let Some(notice) = due_notice(&state, &check.current, check.now, super::upgrade_command()) {
         // A notice that can't be written to stderr has nowhere else to go.
         let _ = writeln!(std::io::stderr(), "{notice}");
         state.noticed_at = check.now;
@@ -142,17 +142,18 @@ fn check_due(state: &NoticeState, now: u64) -> bool {
 }
 
 /// The notice to give now, if the recorded release is newer than `current`
-/// and none was given in the last day.
-fn due_notice(state: &NoticeState, current: &str, now: u64) -> Option<String> {
+/// and none was given in the last day. `upgrade` is the command that updates
+/// this cw.
+fn due_notice(state: &NoticeState, current: &str, now: u64, upgrade: &str) -> Option<String> {
     let latest = state.latest.as_deref()?;
     let noticed_recently = state.noticed_at <= now && now - state.noticed_at < DAY_SECONDS;
-    (!noticed_recently && super::newer_release(current, latest)).then(|| notice(latest))
+    (!noticed_recently && super::newer_release(current, latest)).then(|| notice(latest, upgrade))
 }
 
 /// The notice, with how to turn it off.
-fn notice(latest: &str) -> String {
+fn notice(latest: &str, upgrade: &str) -> String {
     format!(
-        "a newer release, {latest}, is available: run `cw upgrade` (turn this notice off with CW_NO_UPDATE_CHECK=1)"
+        "a newer release, {latest}, is available: run `{upgrade}` (turn this notice off with CW_NO_UPDATE_CHECK=1)"
     )
 }
 
@@ -249,7 +250,10 @@ mod tests {
         assert!(!check_off(env(&[("CW_NO_UPDATE_CHECK", "0")])));
         assert!(!check_off(env(&[("CW_NO_UPDATE_CHECK", "")])));
         assert!(check_off(env(&[("CI", "true")])));
-        assert!(notice("v0.4.18").ends_with("(turn this notice off with CW_NO_UPDATE_CHECK=1)"));
+        assert!(
+            notice("v0.4.18", "cw upgrade")
+                .ends_with("(turn this notice off with CW_NO_UPDATE_CHECK=1)")
+        );
     }
 
     #[test]
@@ -277,29 +281,50 @@ mod tests {
             noticed_at,
         };
         assert_eq!(
-            due_notice(&state("v0.4.18", 0), "v0.4.17", now),
-            Some(notice("v0.4.18"))
+            due_notice(&state("v0.4.18", 0), "v0.4.17", now, "cw upgrade"),
+            Some(notice("v0.4.18", "cw upgrade"))
         );
         assert_eq!(
-            due_notice(&state("v0.4.18", now - 60), "v0.4.17", now),
+            due_notice(&state("v0.4.18", now - 60), "v0.4.17", now, "cw upgrade"),
             None,
             "already given today"
         );
-        assert!(due_notice(&state("v0.4.18", now - DAY_SECONDS), "v0.4.17", now).is_some());
         assert!(
-            due_notice(&state("v0.4.18", now + 60), "v0.4.17", now).is_some(),
+            due_notice(
+                &state("v0.4.18", now - DAY_SECONDS),
+                "v0.4.17",
+                now,
+                "cw upgrade"
+            )
+            .is_some()
+        );
+        assert!(
+            due_notice(&state("v0.4.18", now + 60), "v0.4.17", now, "cw upgrade").is_some(),
             "a future record is stale"
         );
-        assert_eq!(due_notice(&state("v0.4.17", 0), "v0.4.17", now), None);
         assert_eq!(
-            due_notice(&state("v0.4.16", 0), "v0.4.17", now),
+            due_notice(&state("v0.4.17", 0), "v0.4.17", now, "cw upgrade"),
+            None
+        );
+        assert_eq!(
+            due_notice(&state("v0.4.16", 0), "v0.4.17", now, "cw upgrade"),
             None,
             "an outdated record is never announced"
         );
         assert_eq!(
-            due_notice(&NoticeState::default(), "v0.4.17", now),
+            due_notice(&NoticeState::default(), "v0.4.17", now, "cw upgrade"),
             None,
             "nothing learned yet"
+        );
+    }
+
+    /// A cw installed by Nix is told to update with Nix (#5399).
+    #[test]
+    fn the_notice_names_the_command_that_updates_this_cw() {
+        assert_eq!(
+            notice("v0.4.25", super::super::NIX_UPGRADE),
+            "a newer release, v0.4.25, is available: run `nix profile upgrade codewire` (turn this \
+             notice off with CW_NO_UPDATE_CHECK=1)"
         );
     }
 

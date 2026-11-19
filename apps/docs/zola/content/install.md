@@ -1,7 +1,7 @@
 ---
 title: Install and sign in
 description: Install cw, sign in, check what your machine needs for local VMs, and uninstall.
-updated: 2026-11-17
+updated: 2026-11-18
 weight: 6
 aliases: ["/guides/update"]
 ---
@@ -29,6 +29,22 @@ Pass options after `sh -s --`:
 curl -fsSL https://get.codewire.sh | sh -s -- --prefix ~/tools   # into ~/tools/bin
 curl -fsSL https://get.codewire.sh | sh -s -- --version v0.4.19  # an exact release
 ```
+
+### Install with Nix
+
+With Nix and flakes on, the repository's flake installs the same released
+`cw`, checked against the release's digest:
+
+```sh
+nix run github:codewiresh/codewire -- version     # run it without installing
+nix profile install github:codewiresh/codewire    # put cw on your PATH
+```
+
+It works on Linux x86_64 and arm64, NixOS included, and on macOS Apple Silicon
+and Intel. A reviewed change moves the flake to each new release, so it can
+trail a release until that change lands. A `cw` installed this way is updated
+by Nix, not `cw upgrade`: run `nix profile upgrade codewire`, or update the
+flake input in your NixOS or Home Manager configuration.
 
 ### Shell completion
 
