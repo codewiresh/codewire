@@ -1456,6 +1456,10 @@ Issue: #4000.
   - a workload on `locked` calling the platform's own API;
   - a Sandbox whose configuration lacks one of the daemon's in-cluster
     addresses, or has one that is not an IP address and port;
+  - a deployment whose DERP relay's certificate comes from its own
+    authority, with that authority's bundle mounted into the Sandbox; a
+    Sandbox with no bundle mounted, in which a file has been put at the
+    bundle's path;
   - a Sandbox whose egress routing is changed after it starts: one of its
     rules removed, the default route moved off the egress path, or IPv6
     turned back on by a privileged container;
@@ -1521,6 +1525,17 @@ Issue: #4000.
   - with one of those addresses missing, or not an IP address and port, the
     daemon refuses to start and names the variable. It never resolves the
     URL's host instead;
+  - where the relay's certificate chains to the deployment's own authority,
+    the platform mounts that authority's bundle read-only into the Sandbox
+    and the daemon reaches the relay. Dev and Production mount none, and
+    the relay verifies against the public roots alone;
+  - the daemon reads the bundle only from a read-only mount of its own. A
+    file at the bundle's path in a Sandbox with nothing mounted there is not
+    read, whoever owns it: the daemon's log says it ignored the path, the
+    daemon starts, and a relay that needs the bundle is refused as
+    unverified. A bundle on the platform's mount that is malformed,
+    writable, wrongly owned or reached through a link out of the mount
+    stops the daemon's start (#5523; not yet observed);
   - a user's connection to the Sandbox uses a direct path the client
     starts, through the Sandbox's VIP, or the UDP relay. The Sandbox never
     starts one: its own direct probes are dropped by the lockdown;
