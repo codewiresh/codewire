@@ -160,12 +160,17 @@ async fn reload_certificates(certificates: Arc<Certificates>) -> crate::Result<(
     }
 }
 
+/// The warning a failed read of the public certificate logs. infra's alert
+/// matches this exact text, so a test pins it (#4000).
+const PUBLIC_CERTIFICATE_NOT_LOADED: &str =
+    "codewire derp tls public certificate not loaded; the previous one stays";
+
 fn log_reload(certificates: &Certificates, outcome: Reload) {
     let hostname = certificates.public_hostname().unwrap_or_default();
     match outcome {
         Reload::Loaded => tracing::info!(%hostname, "codewire derp tls public certificate loaded"),
         Reload::Failed(error) => {
-            tracing::warn!(%hostname, %error, "codewire derp tls public certificate not loaded; the previous one stays")
+            tracing::warn!(%hostname, %error, "{PUBLIC_CERTIFICATE_NOT_LOADED}")
         }
         Reload::NotConfigured | Reload::Unchanged => {}
     }
@@ -255,6 +260,14 @@ mod tests {
                 .find(|(k, _)| k == name)
                 .map(|(_, v)| v.clone())
         }
+    }
+
+    #[test]
+    fn the_failed_load_warning_keeps_the_text_infra_alerts_on() {
+        assert_eq!(
+            PUBLIC_CERTIFICATE_NOT_LOADED,
+            "codewire derp tls public certificate not loaded; the previous one stays"
+        );
     }
 
     #[test]

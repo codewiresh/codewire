@@ -12,6 +12,7 @@
 //! client asking for the public name then fails its own verification.
 
 use std::fmt;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
@@ -62,7 +63,9 @@ struct PublicSlot {
 
 struct Loaded {
     key: Arc<CertifiedKey>,
-    files: (Vec<u8>, Vec<u8>),
+    /// A digest of the two files, to see a change without keeping a second
+    /// copy of the private key.
+    files: u64,
 }
 
 impl Certificates {
@@ -89,11 +92,19 @@ impl Certificates {
             (Ok(cert), Ok(key)) => (cert, key),
             (Err(err), _) | (_, Err(err)) => return Reload::Failed(err.to_string()),
         };
+        let digest = {
+            let mut hasher = DefaultHasher::new();
+            files.hash(&mut hasher);
+            hasher.finish()
+        };
         let current = public
             .current
             .read()
             .unwrap_or_else(PoisonError::into_inner);
-        if current.as_ref().is_some_and(|loaded| loaded.files == files) {
+        if current
+            .as_ref()
+            .is_some_and(|loaded| loaded.files == digest)
+        {
             return Reload::Unchanged;
         }
         drop(current);
@@ -102,7 +113,7 @@ impl Certificates {
                 *public
                     .current
                     .write()
-                    .unwrap_or_else(PoisonError::into_inner) = Some(Loaded { key, files });
+                    .unwrap_or_else(PoisonError::into_inner) = Some(Loaded { key, files: digest });
                 Reload::Loaded
             }
             Err(err) => Reload::Failed(err.to_string()),
