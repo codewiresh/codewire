@@ -382,11 +382,34 @@ RUN docker --version
 RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
     apt-get-with-retry update && apt-get-with-retry install -y --no-install-recommends \
       tigervnc-standalone-server=1.13.1+dfsg-2build2 tigervnc-common=1.13.1+dfsg-2build2 \
+      tigervnc-tools=1.13.1+dfsg-2build2 \
       xfce4-session=4.18.3-1build2 \
       xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf thunar xfce4-terminal \
-      adwaita-icon-theme dbus-x11 fonts-dejavu-core scrot x11-xserver-utils xdotool && \
+      adwaita-icon-theme dbus-x11 debian-archive-keyring fonts-dejavu-core librsvg2-common \
+      scrot x11-xserver-utils xdotool && \
     rm -rf /var/lib/apt/lists/*
 COPY --chown=0:0 --chmod=0755 images/workspace/desktop/ /opt/codewire/desktop/
+COPY --chown=0:0 --chmod=0755 images/workspace/desktop-theme/ /usr/share/themes/
+
+# The image's browser: Debian's open-source Chromium, signed by Debian and
+# taken from a dated snapshot. Ubuntu ships only a stub for another packaging
+# system. The Debian source is configured for this step alone, with every
+# package but Chromium and the two libraries Ubuntu lacks pinned out, so
+# nothing else can come from it and the finished image knows only Ubuntu's
+# archive. Its setuid sandbox helper is a separate package and is not
+# installed: Chromium uses the kernel's unprivileged namespaces, or it does
+# not start.
+RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
+    --mount=type=bind,source=images/workspace/chromium,target=/tmp/codewire-chromium,readonly \
+    install -m 0644 /tmp/codewire-chromium/debian.sources /etc/apt/sources.list.d/codewire-chromium.sources && \
+    install -m 0644 /tmp/codewire-chromium/debian.preferences /etc/apt/preferences.d/codewire-chromium && \
+    apt-get-with-retry update && apt-get-with-retry install -y --no-install-recommends \
+      chromium=156.0.8078.79-1~deb12u1 chromium-common=156.0.8078.79-1~deb12u1 \
+      libdav1d6=1.0.0-2+deb12u1 libjpeg62-turbo=1:2.1.5-2 && \
+    install -D -m 0644 /tmp/codewire-chromium/flags /etc/chromium.d/codewire && \
+    rm -f /etc/apt/sources.list.d/codewire-chromium.sources /etc/apt/preferences.d/codewire-chromium && \
+    rm -rf /var/lib/apt/lists/* && \
+    test -z "$(find /usr/lib/chromium -perm /6000 -print -quit)" && chromium --version
 
 # Keep the source-built CLI after the moving developer tools. The final image proves
 # and exposes the exact binary built from this source tree.

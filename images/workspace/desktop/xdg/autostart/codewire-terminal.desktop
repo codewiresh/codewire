@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Exec=xfce4-terminal --geometry=110x30+56+84 --working-directory=/workspace
+OnlyShowIn=XFCE;

@@ -1,0 +1,9 @@
+Explanation: Debian supplies Chromium and the two libraries Ubuntu lacks for
+Explanation: it. Nothing else may ever come from there.
+Package: *
+Pin: origin snapshot.debian.org
+Pin-Priority: -1
+
+Package: chromium chromium-common libdav1d6 libjpeg62-turbo
+Pin: origin snapshot.debian.org
+Pin-Priority: 500

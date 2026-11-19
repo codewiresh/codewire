@@ -1,0 +1,39 @@
+# Codewire's defaults for the image's Chromium, read by its launcher script.
+# A small /dev/shm, no desktop keyring, and no first-run pages. Its sandbox
+# stays on: without one it does not start.
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --disable-dev-shm-usage --password-store=basic --no-first-run --no-default-browser-check"
+
+# The debugging protocol has no authentication, and 9222 is the one guest
+# port reserved against publishing for it, so this launcher opens no other
+# (docs/dev/SANDBOX-DESKTOP.md, "The browser"). Chromium reads a switch with
+# one dash or two, and nothing after a bare "--".
+codewire_only_debugging_port_9222() {
+  for codewire_argument in "$@"; do
+    case "$codewire_argument" in
+      --) break ;;
+      -*) ;;
+      *) continue ;;
+    esac
+    codewire_switch="${codewire_argument#-}"
+    codewire_switch="${codewire_switch#-}"
+    case "$codewire_switch" in
+      remote-debugging-port=9222) ;;
+      remote-debugging-address=127.0.0.1 | remote-debugging-address=localhost) ;;
+      remote-debugging-address=::1 | 'remote-debugging-address=[::1]') ;;
+      remote-debugging-port | remote-debugging-port=* | remote-debugging-address | remote-debugging-address=*)
+        echo "chromium: refused $codewire_argument: this environment opens the browser's debugging port only as --remote-debugging-port=9222 on loopback, because the debugging protocol has no authentication and 9222 is the port that is never published. Use that, or --remote-debugging-pipe." >&2
+        exit 2
+        ;;
+    esac
+  done
+}
+codewire_only_debugging_port_9222 "$@"
+# The launcher this image ships drops a caller's CHROMIUM_FLAGS and never
+# reads CHROMIUM_USER_FLAGS; the built-image contract holds it to that. A
+# launcher that passed either on would split it into words, as here.
+# shellcheck disable=SC2086
+codewire_only_debugging_port_9222 $CHROMIUM_FLAGS
+# shellcheck disable=SC2086
+codewire_only_debugging_port_9222 ${CHROMIUM_USER_FLAGS:-}
+unset -f codewire_only_debugging_port_9222
+unset codewire_argument codewire_switch

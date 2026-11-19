@@ -2,10 +2,11 @@
 # An environment's desktop: the X and VNC server on display :1, a session bus
 # of its own, then an XFCE session on both (docs/dev/SANDBOX-DESKTOP.md).
 #
-# The environment daemon runs this as the durable session `codewire-desktop`
-# and stops it by ending its process group. Nothing in the image runs it by
-# itself. It ends when any of the three ends, so a desktop is never a bare
-# screen with no session, nor a session with no screen.
+# The environment daemon runs this as the durable session `codewire-desktop`,
+# writes the viewer password as one line on standard input, and stops it by
+# killing this process alone. Nothing in the image runs it by itself. It ends
+# when any of the three ends, so a desktop is never a bare screen with no
+# session, nor a session with no screen.
 set -euo pipefail
 
 readonly display=:1
@@ -24,6 +25,32 @@ export XDG_RUNTIME_DIR=$runtime_dir
 # settings service is started by the bus, so this is set before the bus is.
 export XDG_CONFIG_DIRS="$here/xdg:${XDG_CONFIG_DIRS:-/etc/xdg}"
 
+# The password is never an argument or an environment variable, here or in
+# any child, and is never printed. It protects nothing; the built-in macOS
+# viewer will not open a desktop without one.
+password=''
+IFS= read -r -t 10 password || true
+if [[ ! "$password" =~ ^[a-z0-9]{8}$ ]]; then
+  echo 'codewire-desktop: no viewer password arrived on standard input' >&2
+  rmdir "$runtime_dir"
+  exit 1
+fi
+(umask 077 && tigervncpasswd -f <<<"$password" >"$runtime_dir/vnc-password")
+unset password
+
+# Each child gets a parent-death signal: a stop kills only this process, and
+# a child that outlived it would keep the display and its listener.
+readonly with_launcher=(setpriv --pdeathsig TERM)
+
+# This process cannot remove the password file when it is killed outright,
+# so a child that outlives it for a moment does.
+# shellcheck disable=SC2016 # The child shell expands its own argument.
+"${with_launcher[@]}" bash -c '
+  trap "rm -rf -- \"\$1\"; exit 0" TERM
+  setpriv --pdeathsig KILL sleep infinity &
+  wait
+' sweep "$runtime_dir" &
+
 server=''
 bus=''
 session=''
@@ -31,19 +58,22 @@ finish() {
   for pid in $session $bus $server; do
     kill "$pid" 2>/dev/null || true
   done
-  wait 2>/dev/null || true
+  # Not a bare wait: the sweeper lives as long as this process does.
+  for pid in $session $bus $server; do
+    wait "$pid" 2>/dev/null || true
+  done
   rm -rf "$runtime_dir"
 }
 trap finish EXIT
 trap 'exit 143' TERM INT HUP
 
-# Loopback only, and no password: the paths that reach this listener have
-# already admitted the viewer, and guest port 5901 is never published. X
-# clients connect through the socket file alone: no TCP, and no abstract
-# socket, which anything in the network namespace could open.
-Xvnc "$display" \
+# Loopback only: the paths that reach this listener have already admitted
+# the viewer, and guest port 5901 is never published. X clients connect
+# through the socket file alone: no TCP, and no abstract socket, which
+# anything in the network namespace could open.
+"${with_launcher[@]}" Xvnc "$display" \
   -localhost -nolisten tcp -nolisten local -rfbport "$rfb_port" \
-  -SecurityTypes None \
+  -SecurityTypes VncAuth -PasswordFile "$runtime_dir/vnc-password" \
   -geometry 1600x1000 -depth 24 -AcceptSetDesktopSize \
   -AlwaysShared &
 server=$!
@@ -67,11 +97,15 @@ if [[ "$ready" != true ]]; then
   exit 1
 fi
 export DISPLAY=$display
+# The daemon waits for this line: it says this launcher's own server holds
+# the display, which a listener on the port alone would not.
+echo 'codewire-desktop: display ready'
 
 # The bus listens on a socket file in the private runtime directory. The
 # stock session configuration would put it under /tmp, as a socket file or an
 # abstract socket depending on the build.
-dbus-daemon --session --nofork --nopidfile --address="unix:path=$runtime_dir/bus" &
+"${with_launcher[@]}" dbus-daemon --session --nofork --nopidfile \
+  --address="unix:path=$runtime_dir/bus" &
 bus=$!
 for _ in $(seq 50); do
   [[ -S "$runtime_dir/bus" ]] && break
@@ -84,7 +118,7 @@ if [[ ! -S "$runtime_dir/bus" ]]; then
 fi
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
 
-XDG_SESSION_TYPE=x11 startxfce4 &
+XDG_SESSION_TYPE=x11 "${with_launcher[@]}" startxfce4 &
 session=$!
 
 wait -n "$server" "$bus" "$session"

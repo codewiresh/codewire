@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<channel name="xfce4-terminal" version="1.0">
+  <property name="color-foreground" type="string" value="#dbd1ad"/>
+  <property name="color-background" type="string" value="#0a0a0a"/>
+  <property name="color-cursor" type="string" value="#b98bba"/>
+  <property name="color-cursor-use-default" type="bool" value="false"/>
+  <property name="font-use-system" type="bool" value="true"/>
+  <property name="misc-menubar-default" type="bool" value="false"/>
+  <property name="misc-default-geometry" type="string" value="110x30"/>
+  <property name="scrolling-bar" type="string" value="TERMINAL_SCROLLBAR_NONE"/>
+</channel>

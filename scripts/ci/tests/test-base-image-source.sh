@@ -91,6 +91,24 @@ grep -qF '      bubblewrap=0.9.0-1ubuntu0.3 ' "$workspace_dockerfile" ||
 # The desktop's server and session come from the same snapshot, pinned.
 grep -qF '      tigervnc-standalone-server=1.13.1+dfsg-2build2 tigervnc-common=1.13.1+dfsg-2build2 ' \
   "$workspace_dockerfile" || fail 'workspace image does not install the pinned VNC server for the desktop'
+grep -qF '      tigervnc-tools=1.13.1+dfsg-2build2 ' "$workspace_dockerfile" ||
+  fail 'workspace image does not install the pinned tool that writes the VNC password file'
+# The browser is Debian's Chromium, pinned, from a dated snapshot that is a
+# source for that one step, and without its setuid sandbox helper.
+grep -qF '      chromium=156.0.8078.79-1~deb12u1 chromium-common=156.0.8078.79-1~deb12u1 ' "$workspace_dockerfile" ||
+  fail 'workspace image does not install the pinned Chromium'
+grep -qF 'snapshot.debian.org/archive/debian-security/20261118T000000Z/' "$ROOT/images/workspace/chromium/debian.sources" ||
+  fail 'the Chromium source is not a dated Debian security snapshot'
+grep -qF 'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' "$ROOT/images/workspace/chromium/debian.sources" ||
+  fail 'the Chromium source is not verified with the Debian archive key'
+grep -qF 'rm -f /etc/apt/sources.list.d/codewire-chromium.sources /etc/apt/preferences.d/codewire-chromium' \
+  "$workspace_dockerfile" || fail 'the Debian source outlives the step that installs Chromium'
+if grep -qE '(^|[ =])chromium-sandbox' "$workspace_dockerfile"; then
+  fail 'workspace image installs the setuid Chromium sandbox helper'
+fi
+if grep -rqF -- '--no-sandbox' "$ROOT/images/workspace/chromium"; then
+  fail 'the Chromium defaults turn its sandbox off'
+fi
 grep -qF '      xfce4-session=4.18.3-1build2 ' "$workspace_dockerfile" ||
   fail 'workspace image does not install the pinned desktop session'
 grep -qxF 'COPY --chown=0:0 --chmod=0755 images/workspace/desktop/ /opt/codewire/desktop/' \
@@ -158,7 +176,7 @@ for path in sys.argv[1:]:
 print(count)
 PY
 )" || fail 'an APT helper RUN does not keep the apt snapshot cache out of its layer'
-[[ "$apt_runs" == 6 ]] || fail "expected six APT helper RUN steps (base 1, workspace 4, cw-runtime 1), found $apt_runs"
+[[ "$apt_runs" == 7 ]] || fail "expected seven APT helper RUN steps (base 1, workspace 5, cw-runtime 1), found $apt_runs"
 # The cache host is CI configuration; no image input may name it.
 if git -C "$ROOT" grep -nIE 'apt-snapshot-cache|forgejo-runner-control|svc\.cluster\.local' -- \
     images scripts/ci/images "${tracked_dockerfiles[@]}" docker-bake.hcl; then

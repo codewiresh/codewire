@@ -117,6 +117,8 @@ case "$1" in
     expected_uid="${FAKE_SSH_EXPECTED_UID:-$FAKE_FIXTURE_UID}" ;;
   "$FAKE_AGENTS_ROOT") expected_uid="${FAKE_AGENTS_EXPECTED_UID:-$FAKE_FIXTURE_UID}" ;;
   "$FAKE_DESKTOP_ROOT") expected_uid="${FAKE_DESKTOP_EXPECTED_UID:-$FAKE_FIXTURE_UID}" ;;
+  # The setuid search is real: the test makes the helper it looks for.
+  "$FAKE_CHROMIUM_ROOT") exec /usr/bin/find "$@" ;;
   *) exit 99 ;;
 esac
 # Host tests cannot chown files to root. Translate only the expected uid in the
@@ -149,11 +151,21 @@ mkdir -p "$work/desktop/xdg/xfce4/xfconf/xfce-perchannel-xml" "$work/proc/net" "
 touch "$work/desktop/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml"
 cat >"$work/desktop/start" <<'EOF'
 #!/bin/sh
-[ "${FAKE_DESKTOP_START:-runs}" = runs ] || exit 1
-stop() {
+[ "${FAKE_DESKTOP_START:-runs}" != fails ] || exit 1
+IFS= read -r password || true
+if [ "${#password}" -ne 8 ]; then
+  # A launcher that would start anyway reports success here.
+  [ "${FAKE_DESKTOP_START:-runs}" != without-a-password ] || exit 0
+  exit 1
+fi
+[ "${FAKE_DESKTOP_PASSWORD:-quiet}" != printed ] || printf 'the password is %s\n' "$password"
+[ "${FAKE_DESKTOP_START:-runs}" = silent ] || printf 'codewire-desktop: display ready\n'
+runtime="$FAKE_RUNTIME_ROOT/codewire-desktop.AbCdEf"
+clear() {
   case "${FAKE_DESKTOP_LINGERS:-false}" in
-    false) rm -rf "$FAKE_PROC_ROOT/4242" "$FAKE_PROC_ROOT/4243" "$FAKE_PROC_ROOT/4244" ;;
-    child) rm -rf "$FAKE_PROC_ROOT/4242" "$FAKE_PROC_ROOT/4243" ;;
+    false) rm -rf "$FAKE_PROC_ROOT/4242" "$FAKE_PROC_ROOT/4243" "$FAKE_PROC_ROOT/4244" "$runtime" ;;
+    child) rm -rf "$FAKE_PROC_ROOT/4242" "$FAKE_PROC_ROOT/4243" "$runtime" ;;
+    password-file) rm -rf "$FAKE_PROC_ROOT/4242" "$FAKE_PROC_ROOT/4243" "$FAKE_PROC_ROOT/4244" ;;
   esac
   if [ "${FAKE_DESKTOP_LINGERS:-false}" != true ]; then
     rm -rf "$FAKE_X11_ROOT/X1"
@@ -161,25 +173,37 @@ stop() {
     : >"$FAKE_PROC_ROOT/net/udp"
     : >"$FAKE_PROC_ROOT/net/unix"
   fi
-  exit 0
 }
-trap stop TERM
 printf '%s\n' "$$" >"$FAKE_LAUNCHER_PID"
 # The server, the window manager and one more process, all in this launcher's
 # session, which setsid made this process lead.
-/usr/bin/mkdir -p "$FAKE_PROC_ROOT/4242" "$FAKE_PROC_ROOT/4243" "$FAKE_PROC_ROOT/4244"
+/usr/bin/mkdir -p "$FAKE_PROC_ROOT/4242" "$FAKE_PROC_ROOT/4243" "$FAKE_PROC_ROOT/4244" "$runtime"
+chmod 700 "$runtime"
+: >"$runtime/vnc-password"
+chmod "${FAKE_DESKTOP_PASSWORD_MODE:-600}" "$runtime/vnc-password"
 printf '4242 (Xvnc) S 1 %s %s 0\n' "$$" "$$" >"$FAKE_PROC_ROOT/4242/stat"
+printf 'Xvnc\0:1\0-localhost\0-SecurityTypes\0%s\0-PasswordFile\0%s\0' \
+  "${FAKE_DESKTOP_SECURITY:-VncAuth}" "$runtime/vnc-password" >"$FAKE_PROC_ROOT/4242/cmdline"
+printf 'HOME=/home/codewire\0' >"$FAKE_PROC_ROOT/4242/environ"
 printf '4243 (xfwm4) S 1 %s %s 0\n' "$$" "$$" >"$FAKE_PROC_ROOT/4243/stat"
+printf 'xfwm4\0' >"$FAKE_PROC_ROOT/4243/cmdline"
 case "${FAKE_DESKTOP_AGENT_SOCKET:-inherited}" in
   inherited) printf 'HOME=/home/codewire\0SSH_AUTH_SOCK=%s\0' "$SSH_AUTH_SOCK" ;;
   replaced) printf 'SSH_AUTH_SOCK=/tmp/ssh-AbCdEf/agent.39\0' ;;
 esac >"$FAKE_PROC_ROOT/4243/environ"
 printf '4244 (%s) S 1 %s %s 0\n' "${FAKE_DESKTOP_HELPER:-dbus-daemon}" "$$" "$$" >"$FAKE_PROC_ROOT/4244/stat"
+printf 'helper\0' >"$FAKE_PROC_ROOT/4244/cmdline"
+printf 'HOME=/home/codewire\0' >"$FAKE_PROC_ROOT/4244/environ"
+case "${FAKE_DESKTOP_PASSWORD:-quiet}" in
+  in-arguments) printf 'helper\0--password=%s\0' "$password" >"$FAKE_PROC_ROOT/4244/cmdline" ;;
+  in-environment) printf 'VNC_PASSWORD=%s\0' "$password" >"$FAKE_PROC_ROOT/4244/environ" ;;
+esac
 printf '   0: %s 00000000:0000 0A\n' "${FAKE_DESKTOP_LISTEN:-0100007F:170D}" >"$FAKE_PROC_ROOT/net/tcp"
 {
   printf 'Num RefCount Protocol Flags Type St Inode Path\n'
+  printf '0: 00000002 00000000 00010000 0001 01 9 /run/earlier.sock\n'
   printf '0: 00000002 00000000 00010000 0001 01 11 %s/X1\n' "$FAKE_X11_ROOT"
-  printf '0: 00000002 00000000 00010000 0001 01 12 /tmp/codewire-desktop.AbCdEf/bus\n'
+  printf '0: 00000002 00000000 00010000 0001 01 12 %s/bus\n' "$runtime"
   printf '0: 00000002 00000000 00010000 0001 01 13 /tmp/.ICE-unix/4245\n'
   printf '0: 00000002 00000000 00010000 0001 01 14 @/tmp/.ICE-unix/4245\n'
   printf '0: 00000003 00000000 00000000 0001 03 15\n'
@@ -192,6 +216,14 @@ case "${FAKE_DESKTOP_EXTRA:-none}" in
   abstract-bus) printf '0: 00000002 00000000 00010000 0001 01 16 @/tmp/dbus-AbCdEfGhIj\n' >>"$FAKE_PROC_ROOT/net/unix" ;;
 esac
 : >"$FAKE_X11_ROOT/X1"
+# The contract stops the launcher by killing it outright, which no trap
+# sees: a child clears the tables once this process is gone, as the real
+# launcher's children end with it.
+launcher=$$
+(
+  while kill -0 "$launcher" 2>/dev/null; do sleep 0.1; done
+  clear
+) &
 while :; do sleep 0.1; done
 EOF
 cat >"$work/bin/xdotool" <<'EOF'
@@ -203,6 +235,39 @@ case "$*" in
   *) exit 99 ;;
 esac
 EOF
+mkdir -p "$work/desktop/share" "$work/desktop/xdg/xfce4/panel" "$work/desktop/xdg/autostart" \
+  "$work/themes/Codewire/gtk-3.0" "$work/chromium-lib" "$work/apt/sources.list.d"
+touch "$work/desktop/share/wallpaper.svg" "$work/desktop/share/codewire.svg" \
+  "$work/desktop/xdg/xfce4/panel/default.xml" "$work/desktop/xdg/autostart/codewire-terminal.desktop" \
+  "$work/desktop/xdg/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml" \
+  "$work/themes/Codewire/gtk-3.0/gtk.css" "$work/chromium-lib/chromium"
+readonly CHROMIUM_DEFAULTS="$ROOT/images/workspace/chromium/flags"
+cp "$CHROMIUM_DEFAULTS" "$work/chromium-flags"
+printf 'URIs: https://snapshot.ubuntu.com/ubuntu/\n' >"$work/apt/sources.list.d/ubuntu.sources"
+# As the packaged launcher does, the fake runs the defaults file as shell
+# before anything else, so the image's own refusals are what is tested.
+cat >"$work/bin/chromium" <<'EOF'
+#!/bin/sh
+# The packaged launcher starts from no flags of the caller's; one that kept
+# them would hand them to the browser with its own.
+effective="$*"
+case "${FAKE_CHROMIUM_LAUNCHER:-drops-inherited}" in
+  drops-inherited) CHROMIUM_FLAGS='' ;;
+  passes-inherited) effective="${CHROMIUM_FLAGS:-} ${CHROMIUM_USER_FLAGS:-} $*" ;;
+esac
+. "$FAKE_CHROMIUM_FLAGS_FILE"
+case " $effective " in
+  *' --version '*) printf 'Chromium test-version\n'; exit 0 ;;
+esac
+[ "$*" = '--headless=new --dump-dom about:blank' ] || exit 99
+case "${FAKE_CHROMIUM:-starts}" in
+  starts) printf '<html><head></head><body></body></html>\n' ;;
+  refuses) printf 'No usable sandbox! Update your kernel.\n' >&2; exit 1 ;;
+  crashes) printf 'Segmentation fault\n' >&2; exit 139 ;;
+  blank) ;;
+esac
+EOF
+chmod +x "$work/bin/chromium"
 cat >"$work/bin/scrot" <<'EOF'
 #!/bin/sh
 [ "${DISPLAY:-}" = :1 ] && [ "$#" -eq 1 ] || exit 99
@@ -210,7 +275,7 @@ printf 'synthetic picture\n' >"$1"
 EOF
 chmod +x "$work/desktop/start" "$work/bin/xdotool" "$work/bin/scrot"
 chmod -R go-w "$work/desktop"
-for tool in Xvnc dbus-daemon startxfce4 xfce4-session xfce4-terminal xrandr; do
+for tool in Xvnc tigervncpasswd setpriv dbus-daemon startxfce4 xfce4-session xfce4-terminal xrandr; do
   ln -s agent "$work/bin/$tool"
 done
 # Whatever a contract run found, it leaves no launcher running behind it.
@@ -224,8 +289,10 @@ assert_no_launcher() {
   fi
   rm -f "$work/launcher.pid"
 }
+mkdir -p "$work/tmp"
 reset_desktop() {
-  rm -rf "$work/proc/4242" "$work/proc/4243" "$work/proc/4244" "$work/x11/X1"
+  rm -rf "$work/proc/4242" "$work/proc/4243" "$work/proc/4244" "$work/x11/X1" \
+    "$work/tmp/codewire-desktop.AbCdEf"
   : >"$work/proc/net/tcp"
   : >"$work/proc/net/udp"
   # One socket that was there before any desktop: it is never the desktop's.
@@ -249,6 +316,20 @@ run_contract() {
     CODEWIRE_DESKTOP_ROOT="$work/desktop" \
     CODEWIRE_PROC_ROOT="$work/proc" \
     CODEWIRE_X11_SOCKET_ROOT="$work/x11" \
+    CODEWIRE_DESKTOP_RUNTIME_ROOT="$work/tmp" \
+    CODEWIRE_THEMES_ROOT="$work/themes" \
+    CODEWIRE_CHROMIUM_ROOT="$work/chromium-lib" \
+    CODEWIRE_CHROMIUM_FLAGS_FILE="$work/chromium-flags" \
+    FAKE_CHROMIUM_FLAGS_FILE="$work/chromium-flags" \
+    FAKE_CHROMIUM_LAUNCHER="${FAKE_CHROMIUM_LAUNCHER:-drops-inherited}" \
+    CODEWIRE_APT_ROOT="$work/apt" \
+    FAKE_CHROMIUM_ROOT="$work/chromium-lib" \
+    FAKE_CHROMIUM="${FAKE_CHROMIUM:-starts}" \
+    CODEWIRE_DESKTOP_STOP_POLLS=5 \
+    FAKE_RUNTIME_ROOT="$work/tmp" \
+    FAKE_DESKTOP_SECURITY="${FAKE_DESKTOP_SECURITY:-VncAuth}" \
+    FAKE_DESKTOP_PASSWORD="${FAKE_DESKTOP_PASSWORD:-quiet}" \
+    FAKE_DESKTOP_PASSWORD_MODE="${FAKE_DESKTOP_PASSWORD_MODE:-600}" \
     FAKE_DESKTOP_ROOT="$work/desktop" \
     FAKE_DESKTOP_EXPECTED_UID="${FAKE_DESKTOP_EXPECTED_UID:-$fixture_uid}" \
     FAKE_PROC_ROOT="$work/proc" \
@@ -343,7 +424,12 @@ grep -Fxq 'workspace image verification: desktop contract passed' "$work/success
 assert_no_launcher 'a passing run'
 for desktop_failure in missing-launcher missing-defaults writable-launcher wrong-owner missing-tool \
   running-before listening-before display-before start-fails all-interfaces another-listener a-udp-socket \
-  bus-in-tmp abstract-bus ssh-agent gpg-agent agent-replaced lingers leaves-a-child; do
+  bus-in-tmp abstract-bus ssh-agent gpg-agent agent-replaced lingers leaves-a-child \
+  starts-without-a-password server-asks-for-nothing password-file-open password-in-arguments \
+  password-in-environment password-printed leaves-the-password-file never-says-ready \
+  no-wallpaper no-theme chromium-setuid-helper chromium-sandbox-off chromium-any-debugging-port \
+  chromium-refuses-9222 chromium-silent-refusal chromium-passes-inherited-flags debian-source-left \
+  chromium-crashes chromium-renders-nothing; do
   reset_desktop
   (
     case "$desktop_failure" in
@@ -369,6 +455,35 @@ for desktop_failure in missing-launcher missing-defaults writable-launcher wrong
       agent-replaced) FAKE_DESKTOP_AGENT_SOCKET=replaced ;;
       lingers) FAKE_DESKTOP_LINGERS=true ;;
       leaves-a-child) FAKE_DESKTOP_LINGERS=child ;;
+      starts-without-a-password) FAKE_DESKTOP_START=without-a-password ;;
+      server-asks-for-nothing) FAKE_DESKTOP_SECURITY=None ;;
+      password-file-open) FAKE_DESKTOP_PASSWORD_MODE=644 ;;
+      password-in-arguments) FAKE_DESKTOP_PASSWORD=in-arguments ;;
+      password-in-environment) FAKE_DESKTOP_PASSWORD=in-environment ;;
+      password-printed) FAKE_DESKTOP_PASSWORD=printed ;;
+      leaves-the-password-file) FAKE_DESKTOP_LINGERS=password-file ;;
+      never-says-ready) FAKE_DESKTOP_START=silent ;;
+      no-wallpaper) rm "$work/desktop/share/wallpaper.svg" ;;
+      no-theme) rm "$work/themes/Codewire/gtk-3.0/gtk.css" ;;
+      chromium-setuid-helper)
+        touch "$work/chromium-lib/chrome-sandbox"
+        chmod 4755 "$work/chromium-lib/chrome-sandbox" ;;
+      chromium-sandbox-off) printf 'export CHROMIUM_FLAGS="--no-sandbox"\n' >>"$work/chromium-flags" ;;
+      chromium-any-debugging-port) printf 'export CHROMIUM_FLAGS="--no-first-run"\n' >"$work/chromium-flags" ;;
+      chromium-refuses-9222)
+        printf 'case "$*" in *remote-debugging*) echo "use 9222" >&2; exit 2 ;; esac\n' >"$work/chromium-flags" ;;
+      chromium-passes-inherited-flags)
+        # A launcher that keeps the caller's variables, with defaults that
+        # read only the arguments.
+        FAKE_CHROMIUM_LAUNCHER=passes-inherited
+        sed '/^codewire_only_debugging_port_9222 \$/d' "$CHROMIUM_DEFAULTS" >"$work/chromium-flags"
+        ! cmp -s "$CHROMIUM_DEFAULTS" "$work/chromium-flags" || fail 'the fixture did not drop the variable checks' ;;
+      chromium-silent-refusal)
+        printf 'case "$*" in *remote-debugging-port=9222*) ;; *remote-debugging*) exit 2 ;; esac\n' >"$work/chromium-flags" ;;
+      debian-source-left)
+        printf 'URIs: https://snapshot.debian.org/archive/debian/\n' >"$work/apt/sources.list.d/chromium.sources" ;;
+      chromium-crashes) FAKE_CHROMIUM=crashes ;;
+      chromium-renders-nothing) FAKE_CHROMIUM=blank ;;
     esac
     if run_contract >"$work/desktop-failure.out" 2>"$work/desktop-failure.err"; then
       fail "a broken desktop layer was accepted: $desktop_failure"
@@ -379,15 +494,33 @@ for desktop_failure in missing-launcher missing-defaults writable-launcher wrong
   )
   assert_no_launcher "$desktop_failure"
   chmod 0755 "$work/desktop/start"
-  touch "$work/desktop/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml"
+  touch "$work/desktop/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml" \
+    "$work/desktop/share/wallpaper.svg" "$work/themes/Codewire/gtk-3.0/gtk.css"
+  rm -f "$work/chromium-lib/chrome-sandbox" "$work/apt/sources.list.d/chromium.sources"
+  cp "$CHROMIUM_DEFAULTS" "$work/chromium-flags"
   [[ -e "$work/bin/Xvnc" ]] || ln -s agent "$work/bin/Xvnc"
   rm -rf "$work/proc/7"
 done
 reset_desktop
+# A launcher that keeps the caller's flag variables is still held to 9222
+# by the image's defaults, which read those variables too.
+FAKE_CHROMIUM_LAUNCHER=passes-inherited run_contract >"$work/inherits.out" 2>"$work/inherits.err" ||
+  fail 'the defaults did not refuse a debugging port in an inherited flag variable'
+assert_no_launcher 'a launcher that keeps inherited flags'
+# Where Chromium has no sandbox it refuses to start, and that passes.
+reset_desktop
+FAKE_CHROMIUM=refuses run_contract >"$work/refuses.out" 2>"$work/refuses.err" ||
+  fail 'a Chromium that refused to start without a sandbox failed the contract'
+grep -Fxq 'workspace image verification: chromium has no sandbox here and refused to start' "$work/refuses.out" ||
+  fail 'the refusal was not reported'
+reset_desktop
 # A zombie that still names the server is not a running desktop.
 /usr/bin/mkdir "$work/proc/9"
 printf '9 (Xvnc) Z 1 9 9 0\n' >"$work/proc/9/stat"
-run_contract >"$work/zombie.out" 2>"$work/zombie.err" || fail 'a desktop process awaiting its reaper failed the contract'
+if ! run_contract >"$work/zombie.out" 2>"$work/zombie.err"; then
+  cat "$work/zombie.err" >&2
+  fail 'a desktop process awaiting its reaper failed the contract'
+fi
 rm -rf "$work/proc/9"
 
 if FAKE_CODEWIRE_GID=1001 run_contract >"$work/process-gid.out" 2>"$work/process-gid.err"; then

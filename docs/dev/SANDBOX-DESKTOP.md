@@ -90,6 +90,15 @@ agents an XFCE session would start, and the session's programs keep the
 and adds no key store of its own. A user can turn them back on in their own
 session settings.
 
+The contract runs the launcher as the daemon does: the viewer password on
+standard input, and a stop that kills the launcher alone and outright. The
+launcher gives each program it starts a parent-death signal, and one
+short-lived child removes the runtime directory, so nothing outlives it.
+The image fails if the launcher starts without a password, if the server
+does not ask for one, if the password is in any argument, environment or
+printed line, or if the password file is readable by anyone else or is
+still there after the stop.
+
 Every placement is headless and renders in software: there is no GPU.
 
 ## The browser
