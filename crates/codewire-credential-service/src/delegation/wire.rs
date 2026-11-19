@@ -170,6 +170,17 @@ where
             ),
         ))
     }
+
+    async fn front_door_delegation(
+        &self,
+        _ctx: RequestContext,
+        _requests: InboundStream<proto::FrontDoorDelegationRequest>,
+    ) -> ServiceResult<ServiceStream<proto::FrontDoorDelegationResponse>> {
+        // Answered once delegation epochs carry a front-door handle (#4909).
+        Err(connectrpc::ConnectError::unimplemented(
+            "delegated front-door sessions are served from a later change",
+        ))
+    }
 }
 
 fn selection(

@@ -10,7 +10,7 @@ use codewire_access::{
     ProviderId,
 };
 use codewire_daemon_proto::codewire::bridge::v1::{
-    CredentialBridgeGuestMessage, CredentialSshResponse,
+    CredentialBridgeGuestMessage, CredentialBridgeHostMessage, CredentialSshResponse,
 };
 use codewire_protected_store::ProtectedStorePersistence;
 use codewire_protected_store::ssh_material::generate_ed25519;
@@ -1027,14 +1027,24 @@ struct FixedLeaseResponse(v1::BrokerLeaseResponse);
 type NoDelegation =
     Pin<Box<dyn Stream<Item = Result<v1::BrokerDelegationResponse, Status>> + Send>>;
 
+type NoFrontDoor = Pin<Box<dyn Stream<Item = Result<CredentialBridgeHostMessage, Status>> + Send>>;
+
 #[tonic::async_trait]
 impl LocalCredentialBrokerLeaseService for FixedLeaseResponse {
     type DelegateCredentialsStream = NoDelegation;
+    type DelegateFrontDoorStream = NoFrontDoor;
 
     async fn delegate_credentials(
         &self,
         _: Request<Streaming<CredentialBridgeGuestMessage>>,
     ) -> Result<Response<NoDelegation>, Status> {
+        Err(Status::unimplemented("not under test"))
+    }
+
+    async fn delegate_front_door(
+        &self,
+        _: Request<Streaming<CredentialBridgeGuestMessage>>,
+    ) -> Result<Response<NoFrontDoor>, Status> {
         Err(Status::unimplemented("not under test"))
     }
 

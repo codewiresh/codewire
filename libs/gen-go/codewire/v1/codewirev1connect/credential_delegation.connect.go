@@ -37,12 +37,24 @@ const (
 	// CredentialDelegationServiceDelegateCredentialsProcedure is the fully-qualified name of the
 	// CredentialDelegationService's DelegateCredentials RPC.
 	CredentialDelegationServiceDelegateCredentialsProcedure = "/codewire.v1.CredentialDelegationService/DelegateCredentials"
+	// CredentialDelegationServiceFrontDoorDelegationProcedure is the fully-qualified name of the
+	// CredentialDelegationService's FrontDoorDelegation RPC.
+	CredentialDelegationServiceFrontDoorDelegationProcedure = "/codewire.v1.CredentialDelegationService/FrontDoorDelegation"
 )
 
 // CredentialDelegationServiceClient is a client for the codewire.v1.CredentialDelegationService
 // service.
 type CredentialDelegationServiceClient interface {
 	DelegateCredentials(context.Context) *connect.BidiStreamForClient[v1.DelegateCredentialsRequest, v1.DelegateCredentialsResponse]
+	// A local VM's front door joins an admitted delegation epoch (#4909): the
+	// same owner OAuth, and that epoch's `front_door_epoch` handle in the
+	// request header CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER. The platform serves
+	// it as the bridge's front-door entry, decided by this method and never by
+	// a frame, on that epoch's broker, with the environment of the epoch's
+	// admitted selection. An unknown, ended or other owner's handle is
+	// PERMISSION_DENIED, the same for each; a second join of a live epoch is
+	// ALREADY_EXISTS. It ends with its epoch.
+	FrontDoorDelegation(context.Context) *connect.BidiStreamForClient[v1.FrontDoorDelegationRequest, v1.FrontDoorDelegationResponse]
 }
 
 // NewCredentialDelegationServiceClient constructs a client for the
@@ -62,12 +74,19 @@ func NewCredentialDelegationServiceClient(httpClient connect.HTTPClient, baseURL
 			connect.WithSchema(credentialDelegationServiceMethods.ByName("DelegateCredentials")),
 			connect.WithClientOptions(opts...),
 		),
+		frontDoorDelegation: connect.NewClient[v1.FrontDoorDelegationRequest, v1.FrontDoorDelegationResponse](
+			httpClient,
+			baseURL+CredentialDelegationServiceFrontDoorDelegationProcedure,
+			connect.WithSchema(credentialDelegationServiceMethods.ByName("FrontDoorDelegation")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // credentialDelegationServiceClient implements CredentialDelegationServiceClient.
 type credentialDelegationServiceClient struct {
 	delegateCredentials *connect.Client[v1.DelegateCredentialsRequest, v1.DelegateCredentialsResponse]
+	frontDoorDelegation *connect.Client[v1.FrontDoorDelegationRequest, v1.FrontDoorDelegationResponse]
 }
 
 // DelegateCredentials calls codewire.v1.CredentialDelegationService.DelegateCredentials.
@@ -75,10 +94,24 @@ func (c *credentialDelegationServiceClient) DelegateCredentials(ctx context.Cont
 	return c.delegateCredentials.CallBidiStream(ctx)
 }
 
+// FrontDoorDelegation calls codewire.v1.CredentialDelegationService.FrontDoorDelegation.
+func (c *credentialDelegationServiceClient) FrontDoorDelegation(ctx context.Context) *connect.BidiStreamForClient[v1.FrontDoorDelegationRequest, v1.FrontDoorDelegationResponse] {
+	return c.frontDoorDelegation.CallBidiStream(ctx)
+}
+
 // CredentialDelegationServiceHandler is an implementation of the
 // codewire.v1.CredentialDelegationService service.
 type CredentialDelegationServiceHandler interface {
 	DelegateCredentials(context.Context, *connect.BidiStream[v1.DelegateCredentialsRequest, v1.DelegateCredentialsResponse]) error
+	// A local VM's front door joins an admitted delegation epoch (#4909): the
+	// same owner OAuth, and that epoch's `front_door_epoch` handle in the
+	// request header CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER. The platform serves
+	// it as the bridge's front-door entry, decided by this method and never by
+	// a frame, on that epoch's broker, with the environment of the epoch's
+	// admitted selection. An unknown, ended or other owner's handle is
+	// PERMISSION_DENIED, the same for each; a second join of a live epoch is
+	// ALREADY_EXISTS. It ends with its epoch.
+	FrontDoorDelegation(context.Context, *connect.BidiStream[v1.FrontDoorDelegationRequest, v1.FrontDoorDelegationResponse]) error
 }
 
 // NewCredentialDelegationServiceHandler builds an HTTP handler from the service implementation. It
@@ -94,10 +127,18 @@ func NewCredentialDelegationServiceHandler(svc CredentialDelegationServiceHandle
 		connect.WithSchema(credentialDelegationServiceMethods.ByName("DelegateCredentials")),
 		connect.WithHandlerOptions(opts...),
 	)
+	credentialDelegationServiceFrontDoorDelegationHandler := connect.NewBidiStreamHandler(
+		CredentialDelegationServiceFrontDoorDelegationProcedure,
+		svc.FrontDoorDelegation,
+		connect.WithSchema(credentialDelegationServiceMethods.ByName("FrontDoorDelegation")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.v1.CredentialDelegationService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case CredentialDelegationServiceDelegateCredentialsProcedure:
 			credentialDelegationServiceDelegateCredentialsHandler.ServeHTTP(w, r)
+		case CredentialDelegationServiceFrontDoorDelegationProcedure:
+			credentialDelegationServiceFrontDoorDelegationHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -109,4 +150,8 @@ type UnimplementedCredentialDelegationServiceHandler struct{}
 
 func (UnimplementedCredentialDelegationServiceHandler) DelegateCredentials(context.Context, *connect.BidiStream[v1.DelegateCredentialsRequest, v1.DelegateCredentialsResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialDelegationService.DelegateCredentials is not implemented"))
+}
+
+func (UnimplementedCredentialDelegationServiceHandler) FrontDoorDelegation(context.Context, *connect.BidiStream[v1.FrontDoorDelegationRequest, v1.FrontDoorDelegationResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialDelegationService.FrontDoorDelegation is not implemented"))
 }

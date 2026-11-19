@@ -1700,15 +1700,32 @@ session crosses the delegation instead, and these rules hold:
 
 - **Who opens it:** only the boot's own front door, paired with the local
   relay exactly as with a local broker: the boot's pairing secret, then the
-  `C` role tag. The relay opens the upstream stream inside a delegation it
-  already holds, by that epoch's handle. The guest's loopback session can
-  never open a front-door session or name an intercepted host (#4221).
+  `C` role tag. The relay joins `DelegateFrontDoor` on its own inherited
+  channel, which accepts it only for that channel's admitted delegation and
+  only while it lives. The authority keeps the platform's epoch handle (the
+  32 bytes of `front_door_epoch`, never logged; any other length is refused)
+  and joins `CredentialDelegationService.FrontDoorDelegation` with it, so the
+  handle never reaches the relay. An unknown, ended or other owner's handle
+  is refused the same way for each, and counted. The guest's loopback
+  session can never open a front-door session or name an intercepted host
+  (#4221).
 - **The environment** comes from the delegation's admitted selection, never
   from a frame.
 - **The platform's broker serves it** as `BridgeEntry::FrontDoor` on the
   same broker as the loopback session: one lease set, one refresh, the swap
-  rule (#4722). The relay adds no engine, lease, decision or material of its
-  own.
+  rule (#4722). The entry is decided by the method called,
+  `FrontDoorDelegation`, never by a frame. The relay adds no engine, lease,
+  decision or material of its own.
+- **The relay writes the session's Open itself.** It admits its delegation
+  and joins upstream before it pairs, so it writes the role tag at once and
+  the Open, listing exactly the capabilities the join's admission names (the
+  first `FrontDoorDelegation` answer), within the front door's
+  limits (2 seconds for the tag, 10 for the Open). A pairing that misses
+  them is dropped by the front door, which keeps serving the predecessor's
+  session. The relay checks each frame's length against the bridge's limit
+  in both directions.
+- **An older platform** returns no `front_door_epoch`. The relay then has no
+  session to attach, and the boot's logins stay refused: it fails closed.
 - **One session per relay process.** A delegated relay is one delegation
   epoch: the authority replaces it with an overlapping successor before 600
   seconds, as it replaces a local broker. Each relay pairs with the front
@@ -1732,9 +1749,13 @@ session crosses the delegation instead, and these rules hold:
   is cut: one still waiting for its response gets the error response, and a
   response already streaming ends early. A long streamed response is the case
   this reaches.
-- **Logins follow the session.** The relay reports a placeholder login only
-  once a front-door session is attached. Before that, an intercepted boot's
-  logins are refused, never real.
+- **Logins are placeholders from the first request.** The relay of an
+  intercepting boot sets `front_door` in its delegation's Open, which the
+  admission echoes exactly. The platform then seals that epoch's agent
+  logins with placeholders from admission, before any front door joins, and
+  issues the epoch's handle. A front door that never joins leaves the agent
+  with placeholders that work nowhere: it fails closed. Unset, logins are
+  delivered as for a boot without interception, and no front door can join.
 - **Without a front door the boot fails closed:** a request to an
   intercepted host is refused by the egress broker and counted, never dialled
   directly.

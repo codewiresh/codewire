@@ -7,6 +7,26 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
+class FrontDoorDelegationRequest(_message.Message):
+    __slots__ = ("frame",)
+    FRAME_FIELD_NUMBER: _ClassVar[int]
+    frame: _bridge_pb2.CredentialBridgeGuestMessage
+    def __init__(self, frame: _Optional[_Union[_bridge_pb2.CredentialBridgeGuestMessage, _Mapping]] = ...) -> None: ...
+
+class FrontDoorDelegationResponse(_message.Message):
+    __slots__ = ("admitted", "frame")
+    ADMITTED_FIELD_NUMBER: _ClassVar[int]
+    FRAME_FIELD_NUMBER: _ClassVar[int]
+    admitted: FrontDoorDelegationAdmitted
+    frame: _bridge_pb2.CredentialBridgeHostMessage
+    def __init__(self, admitted: _Optional[_Union[FrontDoorDelegationAdmitted, _Mapping]] = ..., frame: _Optional[_Union[_bridge_pb2.CredentialBridgeHostMessage, _Mapping]] = ...) -> None: ...
+
+class FrontDoorDelegationAdmitted(_message.Message):
+    __slots__ = ("capabilities",)
+    CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
+    capabilities: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, capabilities: _Optional[_Iterable[str]] = ...) -> None: ...
+
 class CredentialDelegationProfile(_message.Message):
     __slots__ = ("profile_id", "profile_revision")
     PROFILE_ID_FIELD_NUMBER: _ClassVar[int]
@@ -16,7 +36,7 @@ class CredentialDelegationProfile(_message.Message):
     def __init__(self, profile_id: _Optional[str] = ..., profile_revision: _Optional[int] = ...) -> None: ...
 
 class CredentialDelegationOpen(_message.Message):
-    __slots__ = ("runtime", "org_id", "selection_sha256", "project_id", "user_secrets", "organization_secrets", "profile", "ordinary_environment_keys", "reserved_environment_keys")
+    __slots__ = ("runtime", "org_id", "selection_sha256", "project_id", "user_secrets", "organization_secrets", "profile", "ordinary_environment_keys", "reserved_environment_keys", "front_door")
     RUNTIME_FIELD_NUMBER: _ClassVar[int]
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     SELECTION_SHA256_FIELD_NUMBER: _ClassVar[int]
@@ -26,6 +46,7 @@ class CredentialDelegationOpen(_message.Message):
     PROFILE_FIELD_NUMBER: _ClassVar[int]
     ORDINARY_ENVIRONMENT_KEYS_FIELD_NUMBER: _ClassVar[int]
     RESERVED_ENVIRONMENT_KEYS_FIELD_NUMBER: _ClassVar[int]
+    FRONT_DOOR_FIELD_NUMBER: _ClassVar[int]
     runtime: _bridge_pb2.CredentialBridgeOpen
     org_id: str
     selection_sha256: bytes
@@ -35,7 +56,8 @@ class CredentialDelegationOpen(_message.Message):
     profile: CredentialDelegationProfile
     ordinary_environment_keys: _containers.RepeatedScalarFieldContainer[str]
     reserved_environment_keys: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, runtime: _Optional[_Union[_bridge_pb2.CredentialBridgeOpen, _Mapping]] = ..., org_id: _Optional[str] = ..., selection_sha256: _Optional[bytes] = ..., project_id: _Optional[str] = ..., user_secrets: _Optional[bool] = ..., organization_secrets: _Optional[bool] = ..., profile: _Optional[_Union[CredentialDelegationProfile, _Mapping]] = ..., ordinary_environment_keys: _Optional[_Iterable[str]] = ..., reserved_environment_keys: _Optional[_Iterable[str]] = ...) -> None: ...
+    front_door: bool
+    def __init__(self, runtime: _Optional[_Union[_bridge_pb2.CredentialBridgeOpen, _Mapping]] = ..., org_id: _Optional[str] = ..., selection_sha256: _Optional[bytes] = ..., project_id: _Optional[str] = ..., user_secrets: _Optional[bool] = ..., organization_secrets: _Optional[bool] = ..., profile: _Optional[_Union[CredentialDelegationProfile, _Mapping]] = ..., ordinary_environment_keys: _Optional[_Iterable[str]] = ..., reserved_environment_keys: _Optional[_Iterable[str]] = ..., front_door: _Optional[bool] = ...) -> None: ...
 
 class CredentialDelegationKeepalive(_message.Message):
     __slots__ = ()
@@ -52,13 +74,15 @@ class DelegateCredentialsRequest(_message.Message):
     def __init__(self, open: _Optional[_Union[CredentialDelegationOpen, _Mapping]] = ..., frame: _Optional[_Union[_bridge_pb2.CredentialBridgeGuestMessage, _Mapping]] = ..., keepalive: _Optional[_Union[CredentialDelegationKeepalive, _Mapping]] = ...) -> None: ...
 
 class DelegateCredentialsResponse(_message.Message):
-    __slots__ = ("frame", "admitted", "keepalive", "accepts_keepalive")
+    __slots__ = ("frame", "admitted", "keepalive", "accepts_keepalive", "front_door_epoch")
     FRAME_FIELD_NUMBER: _ClassVar[int]
     ADMITTED_FIELD_NUMBER: _ClassVar[int]
     KEEPALIVE_FIELD_NUMBER: _ClassVar[int]
     ACCEPTS_KEEPALIVE_FIELD_NUMBER: _ClassVar[int]
+    FRONT_DOOR_EPOCH_FIELD_NUMBER: _ClassVar[int]
     frame: _bridge_pb2.CredentialBridgeHostMessage
     admitted: CredentialDelegationOpen
     keepalive: CredentialDelegationKeepalive
     accepts_keepalive: bool
-    def __init__(self, frame: _Optional[_Union[_bridge_pb2.CredentialBridgeHostMessage, _Mapping]] = ..., admitted: _Optional[_Union[CredentialDelegationOpen, _Mapping]] = ..., keepalive: _Optional[_Union[CredentialDelegationKeepalive, _Mapping]] = ..., accepts_keepalive: _Optional[bool] = ...) -> None: ...
+    front_door_epoch: bytes
+    def __init__(self, frame: _Optional[_Union[_bridge_pb2.CredentialBridgeHostMessage, _Mapping]] = ..., admitted: _Optional[_Union[CredentialDelegationOpen, _Mapping]] = ..., keepalive: _Optional[_Union[CredentialDelegationKeepalive, _Mapping]] = ..., accepts_keepalive: _Optional[bool] = ..., front_door_epoch: _Optional[bytes] = ...) -> None: ...

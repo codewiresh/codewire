@@ -195,6 +195,11 @@ impl Stream for LocalCredentialDelegationOutput {
 pub(super) type BrokerDelegationOutput =
     Pin<Box<dyn Stream<Item = Result<v1::BrokerDelegationResponse, Status>> + Send + 'static>>;
 
+/// The boot's front-door session joined to this channel's delegation (#4909).
+pub(super) type FrontDoorDelegationOutput = Pin<
+    Box<dyn Stream<Item = Result<bridge::CredentialBridgeHostMessage, Status>> + Send + 'static>,
+>;
+
 impl<S: ProtectedStore + 'static> BrokerLeaseRpc<S> {
     pub(super) async fn delegate_platform_credentials(
         &self,

@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .credential_delegation_pb2 import DelegateCredentialsRequest, DelegateCredentialsResponse
+from .credential_delegation_pb2 import DelegateCredentialsRequest, DelegateCredentialsResponse, FrontDoorDelegationRequest, FrontDoorDelegationResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -36,6 +36,9 @@ _GZIP_COMPRESSION = GzipCompression()
 
 class CredentialDelegationService(Protocol):
     def delegate_credentials(self, request: AsyncIterator[DelegateCredentialsRequest], ctx: RequestContext[DelegateCredentialsRequest, DelegateCredentialsResponse]) -> AsyncIterator[DelegateCredentialsResponse]:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def front_door_delegation(self, request: AsyncIterator[FrontDoorDelegationRequest], ctx: RequestContext[FrontDoorDelegationRequest, FrontDoorDelegationResponse]) -> AsyncIterator[FrontDoorDelegationResponse]:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -61,6 +64,16 @@ class CredentialDelegationServiceASGIApplication(ConnectASGIApplication[Credenti
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.delegate_credentials,
+                ),
+                "/codewire.v1.CredentialDelegationService/FrontDoorDelegation": Endpoint.bidi_stream(
+                    method=MethodInfo(
+                        name="FrontDoorDelegation",
+                        service_name="codewire.v1.CredentialDelegationService",
+                        input=FrontDoorDelegationRequest,
+                        output=FrontDoorDelegationResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.front_door_delegation,
                 ),
             },
             interceptors=interceptors,
@@ -120,8 +133,31 @@ class CredentialDelegationServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    def front_door_delegation(
+        self,
+        request: AsyncIterator[FrontDoorDelegationRequest],
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> AsyncIterator[FrontDoorDelegationResponse]:
+        return self.execute_bidi_stream(
+            request=request,
+            method=MethodInfo(
+                name="FrontDoorDelegation",
+                service_name="codewire.v1.CredentialDelegationService",
+                input=FrontDoorDelegationRequest,
+                output=FrontDoorDelegationResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class CredentialDelegationServiceSync(Protocol):
     def delegate_credentials(self, request: Iterator[DelegateCredentialsRequest], ctx: RequestContext[DelegateCredentialsRequest, DelegateCredentialsResponse]) -> Iterator[DelegateCredentialsResponse]:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def front_door_delegation(self, request: Iterator[FrontDoorDelegationRequest], ctx: RequestContext[FrontDoorDelegationRequest, FrontDoorDelegationResponse]) -> Iterator[FrontDoorDelegationResponse]:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -145,6 +181,16 @@ class CredentialDelegationServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.delegate_credentials,
+                ),
+                "/codewire.v1.CredentialDelegationService/FrontDoorDelegation": EndpointSync.bidi_stream(
+                    method=MethodInfo(
+                        name="FrontDoorDelegation",
+                        service_name="codewire.v1.CredentialDelegationService",
+                        input=FrontDoorDelegationRequest,
+                        output=FrontDoorDelegationResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.front_door_delegation,
                 ),
             },
             interceptors=interceptors,
@@ -198,6 +244,25 @@ class CredentialDelegationServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.CredentialDelegationService",
                 input=DelegateCredentialsRequest,
                 output=DelegateCredentialsResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def front_door_delegation(
+        self,
+        request: Iterator[FrontDoorDelegationRequest],
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> Iterator[FrontDoorDelegationResponse]:
+        return self.execute_bidi_stream(
+            request=request,
+            method=MethodInfo(
+                name="FrontDoorDelegation",
+                service_name="codewire.v1.CredentialDelegationService",
+                input=FrontDoorDelegationRequest,
+                output=FrontDoorDelegationResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

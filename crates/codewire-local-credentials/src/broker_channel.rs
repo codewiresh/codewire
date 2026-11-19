@@ -8,10 +8,8 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::task::{Context, Poll};
 
 use codewire_access::{
     AccessProfileId, BrokerOperationId, BrokerRouteId,
@@ -21,11 +19,9 @@ use codewire_access::{
 use codewire_protected_store::{ProtectedStore, ProtectedValue};
 use hyper_util::rt::TokioIo;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UnixStream;
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore, oneshot, watch};
 use tokio_stream::{StreamExt as _, once, pending};
-use tonic::transport::server::Connected;
 use tonic::transport::{Channel, Endpoint, Server};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -45,12 +41,14 @@ use crate::{
 
 mod delegation;
 mod login;
+mod observed_stream;
 mod projection;
 mod ready;
 pub(crate) use ready::BrokerReady;
 mod ssh;
 
 use login::local_login_refused;
+use observed_stream::ObservedBrokerStream;
 
 /// Projections run one at a time. A concurrent launch waits for the permit
 /// until its own deadline, which its context already bounds, rather than
@@ -938,59 +936,6 @@ impl<S: ProtectedStore> Drop for BrokerChannelRefreshOperation<S> {
     }
 }
 
-struct ObservedBrokerStream {
-    inner: UnixStream,
-    closed: Option<oneshot::Sender<()>>,
-}
-
-impl Drop for ObservedBrokerStream {
-    fn drop(&mut self) {
-        if let Some(closed) = self.closed.take() {
-            let _ = closed.send(());
-        }
-    }
-}
-
-impl AsyncRead for ObservedBrokerStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffer: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_read(context, buffer)
-    }
-}
-
-impl AsyncWrite for ObservedBrokerStream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffer: &[u8],
-    ) -> Poll<Result<usize, io::Error>> {
-        Pin::new(&mut self.inner).poll_write(context, buffer)
-    }
-
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
-        Pin::new(&mut self.inner).poll_flush(context)
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
-        Pin::new(&mut self.inner).poll_shutdown(context)
-    }
-}
-
-impl Connected for ObservedBrokerStream {
-    type ConnectInfo = ();
-
-    fn connect_info(&self) -> Self::ConnectInfo {}
-}
-
 struct BrokerLeaseRpc<S: ProtectedStore> {
     local_profile: Option<EnvironmentAccessBinding>,
     authority: Arc<LocalCredentialAuthority<S>>,
@@ -1031,6 +976,7 @@ where
     S: ProtectedStore + 'static,
 {
     type DelegateCredentialsStream = delegation::BrokerDelegationOutput;
+    type DelegateFrontDoorStream = delegation::FrontDoorDelegationOutput;
 
     async fn delegate_credentials(
         &self,
@@ -1041,6 +987,17 @@ where
         >,
     ) -> Result<Response<Self::DelegateCredentialsStream>, Status> {
         self.delegate_platform_credentials(request).await
+    }
+
+    async fn delegate_front_door(
+        &self,
+        _request: Request<
+            tonic::Streaming<
+                codewire_daemon_proto::codewire::bridge::v1::CredentialBridgeGuestMessage,
+            >,
+        >,
+    ) -> Result<Response<Self::DelegateFrontDoorStream>, Status> {
+        Err(Status::unimplemented("delegated front door not served yet"))
     }
 
     async fn ssh_operation(

@@ -92,16 +92,17 @@ mod tests {
     use super::codewire::v1::{
         AcceptInvitationRequest, ApiKey, ApplicationPort, CreateApiKeyResponse,
         CreateInvitationResponse, CreateMeshInviteResponse, CreateMeshNodeEnrollmentResponse,
-        CreatePortRequest, GetInvitationByTokenRequest, GetOrganizationResponse, HostTunnelReady,
-        InvitationStatus, JoinMeshNetworkRequest, ListSecretProjectsResponse, ListSecretsResponse,
-        MESH_GROUP_SERVICE_SERVICE_NAME, MESH_INVITE_SERVICE_SERVICE_NAME,
-        MESH_KEY_VALUE_SERVICE_SERVICE_NAME, MESH_NETWORK_SERVICE_SERVICE_NAME,
-        MESH_NODE_SERVICE_SERVICE_NAME, MeshInvite, MeshKeyValue, MeshNetwork, MeshNode,
-        MeshNodeEnrollment, ORGANIZATION_SERVICE_SERVICE_NAME, OrgMember, OrgRole, Organization,
-        OrganizationDeletionState, PORT_SERVICE_SERVICE_NAME, PRESET_SERVICE_SERVICE_NAME, Port,
-        PortAccess, Preset, PreviewWorkloadSecretResolutionResponse, ProjectAgents,
-        ProjectCredentialBinding, ProjectResources, ProjectSecretBindings, ProjectSkillSelection,
-        ProjectSkillSource, ProjectSpec, ProjectStoragePlacement, RedeemMeshNodeEnrollmentRequest,
+        CreatePortRequest, DelegateCredentialsResponse, GetInvitationByTokenRequest,
+        GetOrganizationResponse, HostTunnelReady, InvitationStatus, JoinMeshNetworkRequest,
+        ListSecretProjectsResponse, ListSecretsResponse, MESH_GROUP_SERVICE_SERVICE_NAME,
+        MESH_INVITE_SERVICE_SERVICE_NAME, MESH_KEY_VALUE_SERVICE_SERVICE_NAME,
+        MESH_NETWORK_SERVICE_SERVICE_NAME, MESH_NODE_SERVICE_SERVICE_NAME, MeshInvite,
+        MeshKeyValue, MeshNetwork, MeshNode, MeshNodeEnrollment, ORGANIZATION_SERVICE_SERVICE_NAME,
+        OrgMember, OrgRole, Organization, OrganizationDeletionState, PORT_SERVICE_SERVICE_NAME,
+        PRESET_SERVICE_SERVICE_NAME, Port, PortAccess, Preset,
+        PreviewWorkloadSecretResolutionResponse, ProjectAgents, ProjectCredentialBinding,
+        ProjectResources, ProjectSecretBindings, ProjectSkillSelection, ProjectSkillSource,
+        ProjectSpec, ProjectStoragePlacement, RedeemMeshNodeEnrollmentRequest,
         RedeemMeshNodeEnrollmentResponse, RepositorySpec, ResolvedWorkloadSecretMetadata,
         SECRET_SERVICE_PREVIEW_WORKLOAD_SECRET_RESOLUTION_SPEC, SECRET_SERVICE_SERVICE_NAME,
         SecretMetadata, SetMeshKeyValueRequest, SetProjectSecretRequest, SetSecretRequest,
@@ -173,6 +174,26 @@ mod tests {
             assert!(!debug.contains("synthetic"), "{debug}");
         }
         assert!(format!("{redeemed:?}").contains("network-alpha"));
+    }
+
+    /// A delegation epoch's front-door handle is bearer-like (#4909): its
+    /// bytes never reach a `Debug`, while the response's other fields do.
+    #[test]
+    fn a_delegation_front_door_epoch_handle_is_redacted_from_debug() {
+        let handle = [0x5a_u8; 32];
+        let response = DelegateCredentialsResponse {
+            accepts_keepalive: true,
+            front_door_epoch: handle.to_vec(),
+            ..Default::default()
+        };
+        let debug = format!("{response:?}");
+        assert!(
+            !debug.contains(&format!("{:?}", handle.as_slice())),
+            "{debug}"
+        );
+        assert!(!debug.contains("90, 90"), "{debug}");
+        assert!(!debug.contains("5a5a"), "{debug}");
+        assert!(debug.contains("accepts_keepalive: true"), "{debug}");
     }
 
     #[test]

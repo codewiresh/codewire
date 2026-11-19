@@ -126,6 +126,14 @@ impl CredentialDelegationService for Probe {
             Ok(proto::DelegateCredentialsResponse::default())
         }))
     }
+
+    async fn front_door_delegation(
+        &self,
+        _ctx: RequestContext,
+        _requests: InboundStream<proto::FrontDoorDelegationRequest>,
+    ) -> ServiceResult<ServiceStream<proto::FrontDoorDelegationResponse>> {
+        Err(connectrpc::ConnectError::unimplemented("not under test"))
+    }
 }
 
 impl Probe {
