@@ -214,10 +214,11 @@ def dispatch_errors(jobs):
     # A superseded main commit dispatches nothing: the dispatcher reads it.
     if "steps.superseded.outputs.superseded" not in dump(steps.get("dispatch", {}).get("env") or {}):
         errors.append("the dispatch step does not read whether its main commit was superseded")
-    # Only a push hands the selector the job token; a pull request's code gets none.
+    # Only a push to main hands the selector the job token; a pull request's
+    # code gets none, nor does a merge-queue batch's (an mq/ push).
     token = str((steps.get("select", {}).get("env") or {}).get("GITEA_TOKEN", ""))
-    if token and token != "${{ github.event_name == 'push' && github.token || '' }}":
-        errors.append(f"the selector receives the job token outside a push: {token!r}")
+    if token and token != "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.token || '' }}":
+        errors.append(f"the selector receives the job token outside a push to main: {token!r}")
     for step_id, scripts in TRUSTED_STEPS.items():
         for script in scripts:
             if TRUSTED_POLICY + script not in str(steps.get(step_id, {}).get("run", "")):
@@ -227,7 +228,13 @@ def dispatch_errors(jobs):
         if options.get("path") == TRUSTED_POLICY.rstrip("/"):
             if options.get("persist-credentials") is not False:
                 errors.append("the trusted policy checkout keeps its credentials")
-            if options.get("ref") not in ("${{ github.event.pull_request.base.sha }}", "${{ github.event.before }}"):
+            # A merge-queue batch's base is the main commit it was built on.
+            bases = (
+                "${{ github.event.pull_request.base.sha }}",
+                "${{ github.event.before }}",
+                "${{ steps.batch.outputs.base || github.event.before }}",
+            )
+            if options.get("ref") not in bases:
                 errors.append(f"the trusted policy checkout is not the base: {options.get('ref')!r}")
     return errors
 
@@ -626,8 +633,13 @@ MUTATIONS = {
     "the dispatch ignores a superseded commit": lambda t: in_job(
         t, SELECTION, "          VERIFICATION_SUPERSEDED: ${{ steps.superseded.outputs.superseded }}\n", ""),
     "a pull request's selector gets the job token": lambda t: in_job(
-        t, SELECTION, "GITEA_TOKEN: ${{ github.event_name == 'push' && github.token || '' }}",
+        t, SELECTION,
+        "GITEA_TOKEN: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.token || '' }}",
         "GITEA_TOKEN: ${{ github.token }}"),
+    "a merge-queue batch's selector gets the job token": lambda t: in_job(
+        t, SELECTION,
+        "GITEA_TOKEN: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.token || '' }}",
+        "GITEA_TOKEN: ${{ github.event_name == 'push' && github.token || '' }}"),
     "the dispatcher runs from the candidate": lambda t: t.replace(
         "'.trusted-ci-policy/scripts/ci/select/emit-verification-matrices.sh'",
         "'scripts/ci/select/emit-verification-matrices.sh'", 1),

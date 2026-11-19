@@ -3224,6 +3224,17 @@ assert_tokens main_push_switch_off_docs policy \
   "$(switch_push "$SELECTOR_KIND_OFF" docs/dev/AGENT-WORKFLOW.md)"
 ! grep -Fq 'Kind deferred' "$TMP/switch.stderr" || {
   echo 'a main push without Kind said it deferred Kind' >&2; exit 1; }
+# A merge-queue batch (an mq/ push, infra#2599) runs no Kind under either
+# switch, as its pull requests ran none, and says so in one line.
+for switch_selector in "$SELECTOR_KIND_ON" "$SELECTOR_KIND_OFF"; do
+  printf '%s\n' apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts > "$TMP/switch.paths"
+  output="$(env -u GITHUB_OUTPUT -u GITHUB_EVENT_PATH PATH="$EDGELESS_CARGO:$PATH" \
+    GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/mq/1795037122234 KIND_E2E_OPT_IN=false \
+    "$switch_selector" "$TMP/switch.paths" 2>"$TMP/switch.stderr")"
+  assert_tokens mq_batch_no_kind 'edge_kind kind_tools policy web' "$output"
+  [ "$(grep -Fxc 'merge-queue batch: Kind is not run, as on its pull requests' "$TMP/switch.stderr")" = 1 ] || {
+    echo 'a merge-queue batch ran Kind, or did not say it left Kind out' >&2; exit 1; }
+done
 # The checked-in tree behaves as its own switch says.
 assert_tokens main_push_switch_checked_in "edge_kind ${MAIN_PUSH_KIND} kind_tools policy web" \
   "$(switch_push "$SELECTOR" apps/dashboard/e2e/ssr-dashboard.environments.ssr.ts)"

@@ -3,7 +3,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # mq/ branches are the merge queue's batches (infra#2599): each push runs
+    # this workflow like a pull request of the batch onto main, on untrusted
+    # runners, and delivers nothing. Only a push to main is trusted.
+    branches: [main, 'mq/**']
   # Adding or removing a label (ci-full) starts a fresh run with the
   # new labels; the concurrency group below cancels the superseded one.
   # Closing or merging a pull request starts a run that does nothing, so the
@@ -111,6 +114,9 @@ jobs:
       required_local_mode: ${{ steps.select.outputs.required_local_mode }}
       ci_head_commit: ${{ steps.select.outputs.ci_head_commit }}
       push_verified_base: ${{ steps.select.outputs.push_verified_base }}
+      # What a push is compared with: a merge-queue batch's main commit, or
+      # the commit the push replaced.
+      push_base: ${{ steps.batch.outputs.base || github.event.before }}
       ci_head_tree: ${{ steps.select.outputs.ci_head_tree }}
       cw_package_state: ${{ steps.select.outputs.cw_package_state }}
       cw_package_selected: ${{ steps.select.outputs.cw_package_selected }}
@@ -212,6 +218,20 @@ jobs:
           VERIFICATION_SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
         run: git checkout -q --detach "$VERIFICATION_SOURCE_SHA"
 
+      # A merge-queue batch is a new mq/ branch, so its push names no previous
+      # commit. It is verified against the main commit the queue built it on,
+      # with that commit's trusted policy, as a pull request is against its
+      # base (infra#2599).
+      - name: Find the main commit a merge-queue batch was built on
+        id: batch
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/mq/') }}
+        run: |
+          set -euo pipefail
+          base="$(git merge-base HEAD refs/remotes/origin/main)"
+          [[ "$base" =~ ^[0-9a-f]{40}$ ]]
+          echo "merge-queue batch: built on main commit $base"
+          printf 'base=%s\n' "$base" >> "$GITHUB_OUTPUT"
+
       # A pull request builds and tests its head merged onto its base
       # branch's current tip, so the build runner's warm folder follows the
       # base branch and a build compiles little more than the change itself
@@ -241,9 +261,9 @@ jobs:
           persist-credentials: false
 
       - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        if: ${{ github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' }}
+        if: ${{ github.event_name == 'push' && (steps.batch.outputs.base != '' || github.event.before != '0000000000000000000000000000000000000000') }}
         with:
-          ref: ${{ github.event.before }}
+          ref: ${{ steps.batch.outputs.base || github.event.before }}
           path: .trusted-ci-policy
           fetch-depth: 1
           persist-credentials: false
@@ -264,15 +284,16 @@ jobs:
       - name: Select capabilities and artifact facts
         id: select
         env:
-          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_BEFORE_SHA: ${{ steps.batch.outputs.base || github.event.before }}
           PUSH_AFTER_SHA: ${{ github.sha }}
           SCHEDULE_BASELINE_SHA: ${{ steps.schedule-baseline.outputs.schedule_baseline }}
           VERIFICATION_REQUEST: ${{ github.event.inputs.verification }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           VERIFICATION_SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
           # A push to main reads whether its previous main run verified that
-          # commit (plan-main-push.py); no other event receives the token here.
-          GITEA_TOKEN: ${{ github.event_name == 'push' && github.token || '' }}
+          # commit (plan-main-push.py); no other event receives the token here,
+          # a merge-queue batch's push included, as for a pull request.
+          GITEA_TOKEN: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.token || '' }}
         run: |
           set -euo pipefail
           case "${VERIFICATION_REQUEST:-}" in
@@ -435,7 +456,7 @@ jobs:
         if: ${{ contains(steps.select.outputs.selection, '|kind|') }}
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_BEFORE_SHA: ${{ steps.batch.outputs.base || github.event.before }}
           VERIFICATION_SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
         run: |
           set -euo pipefail
@@ -584,7 +605,7 @@ jobs:
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
           VERIFICATION_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          VERIFICATION_PUSH_BEFORE_SHA: ${{ github.event.before }}
+          VERIFICATION_PUSH_BEFORE_SHA: ${{ needs.verification-selection.outputs.push_base }}
         run: scripts/ci/verify/run-product-verification.sh contracts
 
       - name: Report and clean Rust cache
@@ -678,7 +699,7 @@ jobs:
         env:
           VERIFICATION_SELECTION: ${{ needs.verification-selection.outputs.selection }}
           VERIFICATION_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          VERIFICATION_PUSH_BEFORE_SHA: ${{ github.event.before }}
+          VERIFICATION_PUSH_BEFORE_SHA: ${{ needs.verification-selection.outputs.push_base }}
         run: scripts/ci/verify/run-product-verification.sh standard
 
       - name: Upload design-fixture diagnostics on failure

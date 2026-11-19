@@ -2819,6 +2819,13 @@ if [ "$event" = push ] && [ "${GITHUB_REF:-}" = refs/heads/main ] \
   echo 'main push: Kind deferred to the scheduled or dispatched Kind run (owner decision 2026-10-20)' >&2
 fi
 
+# A merge-queue batch (an mq/ push, infra#2599) runs what its pull requests
+# ran, and a pull request runs Kind only with ci-full (owner, 2026-10-21).
+if [ "$event" = push ] && [[ "${GITHUB_REF:-}" == refs/heads/mq/* ]] && token_selected kind; then
+  unset 'selected[kind]'
+  echo 'merge-queue batch: Kind is not run, as on its pull requests' >&2
+fi
+
 # A scheduled run checks only Kind: the pushes to main ran everything else.
 # It runs Kind when a path changed since the last successful scheduled run
 # would select Kind on a push, or when there is no such run to compare with.

@@ -243,7 +243,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('--head "$VERIFICATION_SOURCE_SHA" --base "$base" --github-output', choose["run"])
         self.assertEqual(choose["env"], {
             "PR_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
-            "PUSH_BEFORE_SHA": "${{ github.event.before }}",
+            "PUSH_BEFORE_SHA": "${{ steps.batch.outputs.base || github.event.before }}",
             "VERIFICATION_SOURCE_SHA": "${{ steps.source.outputs.source_sha }}",
         })
         for event, expected in (("pull_request", "pr-base"), ("push", "push-before"),
@@ -964,7 +964,8 @@ class MainPushDeferralContractTests(unittest.TestCase):
         # Owner, 2026-10-25: the scheduled Kind run is off until revisited.
         triggers = self.workflow.get("on", self.workflow.get(True))
         self.assertNotIn("schedule", triggers)
-        self.assertEqual(triggers["push"], {"branches": ["main"]})
+        # Main, and the merge queue's batches, which run no Kind (infra#2599).
+        self.assertEqual(triggers["push"], {"branches": ["main", "mq/**"]})
         self.assertIn("workflow_dispatch", triggers)
 
     def test_scheduled_and_dispatched_runs_never_cancel_or_wait_for_main(self) -> None:
@@ -1080,7 +1081,7 @@ class MainPushDeferralContractTests(unittest.TestCase):
                          "${{ steps.schedule-baseline.outputs.schedule_baseline }}")
         # The selection step's own token is still a push's alone.
         self.assertEqual(select["env"]["GITEA_TOKEN"],
-                         "${{ github.event_name == 'push' && github.token || '' }}")
+                         "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.token || '' }}")
 
     def test_the_switch_is_one_checked_in_setting(self) -> None:
         switch = ROOT / "scripts/ci/select/main-push-switch.sh"
