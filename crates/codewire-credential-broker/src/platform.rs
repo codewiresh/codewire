@@ -1180,9 +1180,11 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
                 OAuthRefreshState::Staged | OAuthRefreshState::Started => {
                     return Err(BrokerRefreshError::Stale);
                 }
+                // A rate-limit wait still running is refused by the begin below.
                 OAuthRefreshState::Reserved
                 | OAuthRefreshState::Committed
-                | OAuthRefreshState::Cancelled => {}
+                | OAuthRefreshState::Cancelled
+                | OAuthRefreshState::RateLimited => {}
             }
         }
         if admission.record.version != version {
@@ -1677,6 +1679,8 @@ fn refresh_store_error(error: PlatformCredentialError) -> BrokerRefreshError {
         PlatformCredentialError::StaleVersion | PlatformCredentialError::StaleRefresh => {
             BrokerRefreshError::Stale
         }
+        // Never a denial: the sign-in is kept while the provider's wait runs.
+        PlatformCredentialError::RefreshRateLimited { .. } => BrokerRefreshError::Unavailable,
         other => refresh_lease_error(credential_error(other)),
     }
 }

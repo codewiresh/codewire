@@ -338,6 +338,12 @@ Issues: #4714 (local), #2559 (cloud).
   sign-in's refresh (killed, a crash or a power loss) still opens, and
   `cw credentials --local list` shows the sign-in refreshed, as it was, or
   **Reconnect needed** (#5177). Not yet observed.
+- **Rate-limited refresh** (#4975): a refresh the provider answers 429 keeps
+  the sign-in, `cw credentials list` shows it as before, and the next refresh
+  waits for the provider's `Retry-After`; a refusal after that wait reads
+  **Reconnect needed**. The same for Codex and a GitHub App login. Observed
+  through the broker's `refresh_rate_limited` log lines and the outcome after
+  the wait on Dev and Production, never by provoking a 429. Not yet observed.
 - **Remove:** `cw` says the sign-in keeps working at Claude until it expires,
   or until you sign out of other sessions in Claude's settings.
 - **Gotchas:** after a `cw` update, the first local `connect claude` may

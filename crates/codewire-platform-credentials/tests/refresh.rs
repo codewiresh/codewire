@@ -6,6 +6,9 @@
 #[allow(dead_code)]
 mod support;
 
+#[path = "refresh/rate_limited.rs"]
+mod rate_limited;
+
 use std::error::Error as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

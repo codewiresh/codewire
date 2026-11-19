@@ -663,7 +663,10 @@ async fn refresh_github_app_record(context: GitHubAppRefreshContext) -> Result<(
                     return Err(Error::ProviderDenied);
                 }
                 OAuthRefreshState::Unknown => return Err(Error::Unavailable),
-                OAuthRefreshState::Reserved | OAuthRefreshState::Cancelled => {}
+                // A rate-limit wait still running is refused by the begin.
+                OAuthRefreshState::Reserved
+                | OAuthRefreshState::Cancelled
+                | OAuthRefreshState::RateLimited => {}
             }
         }
 
@@ -1023,11 +1026,14 @@ fn same_refreshed_record(before: &CredentialRecord, after: &CredentialRecord) ->
 }
 
 /// The states `begin_oauth_refresh` may replace: no provider request is
-/// outstanding and no result waits to be promoted.
+/// outstanding and no result waits to be promoted. A rate-limited attempt is
+/// replaced only once its wait ends, which the begin itself checks.
 fn finished_attempt(attempt: &OAuthRefreshAttemptInfo) -> bool {
     matches!(
         attempt.state,
-        OAuthRefreshState::Committed | OAuthRefreshState::Cancelled
+        OAuthRefreshState::Committed
+            | OAuthRefreshState::Cancelled
+            | OAuthRefreshState::RateLimited
     ) || (attempt.state == OAuthRefreshState::Reserved && !attempt.reservation_live)
 }
 
@@ -1068,6 +1074,7 @@ fn refresh_error(error: PlatformCredentialError) -> Error {
         PlatformCredentialError::StaleVersion | PlatformCredentialError::StaleRefresh => {
             Error::CredentialChanged
         }
+        PlatformCredentialError::RefreshRateLimited { .. } => Error::RateLimited,
         PlatformCredentialError::RefreshInProgress
         | PlatformCredentialError::RefreshOutcomeUnknown
         | PlatformCredentialError::InvalidInput

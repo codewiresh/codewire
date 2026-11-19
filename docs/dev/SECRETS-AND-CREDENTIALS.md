@@ -361,7 +361,8 @@ result is failed, because the provider may already have rotated the refresh
 token: the credential reads **Reconnect needed**, and the old refresh token is
 never sent again. One whose result was stored is published, as its commit
 would have done. A published refresh whose old material was not yet removed
-removes it.
+removes it. A rate-limited refresh the store stopped before cancelling counts
+as started without a stored result.
 
 OAuth logins are personal. An organization may hold API keys and SSH keys,
 but never an OAuth credential: no Codex (ChatGPT) login, GitHub OAuth
@@ -582,7 +583,10 @@ so is Claude's 401 when the forced refresh fails. A retry Codewire refuses
 to lease again, or whose refresh the authority refuses to begin, is Codewire's
 denial of the request, since Claude never saw that refresh (#4974). A refused
 or uncertain refresh is terminal and the credential reads **Reconnect needed**;
-the old refresh token is never sent again. Idle sign-ins are kept alive (see
+the old refresh token is never sent again. A refresh Claude rate-limited is
+neither
+([A refresh the provider rate-limited](#a-refresh-the-provider-rate-limited)).
+Idle sign-ins are kept alive (see
 [Idle OAuth keep-alive](#idle-oauth-keep-alive)). The plan is read only at
 sign-in and reconnect. Revocation in Codewire applies to the next request.
 
@@ -2386,6 +2390,46 @@ through an admitted GitHub API request. It is accepted so that plain
 The policy entries in the credential-bridge ingress classifier and the
 broker's GitHub grammar cite this section.
 
+### A refresh the provider rate-limited
+
+A refresh the provider answered 429, whose whole response was read within the
+bound, was not processed: the sign-in keeps its refresh token and stays usable
+while its access token lasts, and its next refresh waits for the provider's
+`Retry-After`, at least one minute and at most ten. A refresh refused again
+after such a wait, a 5xx, a timeout, a dropped connection or a response not
+read in full stays uncertain and terminal, and the old refresh token is never
+sent again (owner, 2026-11-18, #4975). This holds for a Codex sign-in, a Claude
+sign-in and a GitHub App login, on demand and in the keep-alive, in both
+placements.
+
+- A 429 means the provider limited the request rather than processing it, and
+  a response read in full rules out the transport doubt that makes the other
+  failures unknown. If a provider did rotate the token and still answered
+  429, the refresh after the wait sends a used refresh token, the provider
+  refuses it, and the sign-in reads **Reconnect needed**: today's outcome, one
+  step later. That is why one wait is allowed and any failure after it is
+  terminal.
+- The started refresh is closed by its exact attempt as rate-limited, with
+  the time its wait ends: in the local authority's refresh journal, and on
+  the platform as a `rate_limited` attempt. That record is the sign-in's, so
+  every broker that serves it, and one that restarted, waits the same, and
+  the refresh after the wait is the one retry: any failure of it, a second
+  429 included, is terminal. A retry cancelled or lapsed before it started
+  leaves the next refresh the retry; so does a revoke that fenced the waiting
+  attempt and did not complete, which ends the wait early.
+- While the sign-in waits, a request whose access token has not expired is
+  sent with that token. One whose token has expired is answered 429 with the
+  time left as `Retry-After`, saying the provider is rate-limiting Codewire's
+  refresh of the sign-in; it is not **Reconnect needed**.
+- No 429 is provoked to test this, since that means flooding a provider's
+  token endpoint with a real sign-in. The broker logs
+  `refresh_rate_limited`, with no value, and the outcome of the refresh after
+  the wait; that record on Dev and Production is how it is observed (owner,
+  2026-11-18, #4975).
+
+**Not yet built** (#4975). Today a 429 is terminal like any other failure
+after the refresh started.
+
 ### Idle OAuth keep-alive
 
 The broker refreshes OAuth material on demand only when a request finds its
@@ -2411,9 +2455,10 @@ A keep-alive refresh is an ordinary durable refresh: the same journal,
 provider exchange, rotated-material validation, publication and closed
 failure logging as on demand. PostgreSQL serializes it with other replicas and
 with on-demand refresh, so a credential is never refreshed twice. Any failure
-after Start is terminal exactly as on demand, and Settings → Credentials then
-shows the credential as **Reconnect needed** with its Reconnect action on the
-row. Shutdown stops new selection and waits for a started refresh to finish.
+after Start is terminal exactly as on demand, except a rate limit, as on
+demand ([A refresh the provider rate-limited](#a-refresh-the-provider-rate-limited)),
+and Settings → Credentials then shows the credential as **Reconnect needed**
+with its Reconnect action on the row. Shutdown stops new selection and waits for a started refresh to finish.
 No material, token or provider response is logged; each sweep that does work
 logs only counts.
 

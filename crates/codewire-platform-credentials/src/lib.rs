@@ -58,7 +58,8 @@ pub use model::{CredentialRecord, CredentialRegistration, CredentialVersion};
 pub use profiles::{PlatformAccessProfileStore, PlatformBindingMetadata, PlatformProfileError};
 pub use refresh::{
     OAuthKeepAliveCandidate, OAuthKeepAliveForm, OAuthRefreshAttemptInfo, OAuthRefreshState,
-    PreparedOAuthRefresh, PreparedOAuthRefreshResult, RevocationFence, StartedOAuthRefresh,
+    PreparedOAuthRefresh, PreparedOAuthRefreshResult, RATE_LIMIT_WAIT_SECONDS, RevocationFence,
+    StartedOAuthRefresh,
 };
 #[cfg(feature = "interception-ca")]
 pub use store::{
@@ -91,6 +92,10 @@ pub enum PlatformCredentialError {
     StaleRefresh,
     #[error("credential refresh outcome is unknown")]
     RefreshOutcomeUnknown,
+    /// The provider rate-limited the last refresh, and no refresh begins for
+    /// this many more seconds (#4975).
+    #[error("credential refresh is rate-limited by the provider")]
+    RefreshRateLimited { retry_after_seconds: u64 },
     #[error("credential is referenced by a current profile or environment binding")]
     CredentialInUse,
     #[error("credential is not active")]

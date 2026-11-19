@@ -39,7 +39,13 @@ pub enum OAuthRefreshState {
     Committed,
     Unknown,
     Cancelled,
+    /// A started attempt the provider rate-limited (#4975): no refresh begins
+    /// before its wait ends, and the next attempt cannot be rate-limited.
+    RateLimited,
 }
+
+/// The bounds of a rate-limit wait, whatever the provider's `Retry-After`.
+pub const RATE_LIMIT_WAIT_SECONDS: std::ops::RangeInclusive<u64> = 60..=600;
 
 /// What a revoke may ask its provider about, from the journal (#4717).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,6 +106,7 @@ impl OAuthRefreshState {
             "committed" => Ok(Self::Committed),
             "unknown" => Ok(Self::Unknown),
             "cancelled" => Ok(Self::Cancelled),
+            "rate_limited" => Ok(Self::RateLimited),
             _ => Err(Error::CorruptRecord),
         }
     }
@@ -209,7 +216,8 @@ impl PlatformCredentialStore {
     /// never selects a Claude subscription token. Results are ordered by ID
     /// after `after`, at most `limit` rows, and never include a credential
     /// with a live reservation or a started, staged or unknown attempt: those
-    /// belong to their current owner or to recovery.
+    /// belong to their current owner or to recovery. Nor one whose
+    /// rate-limit wait has not ended (#4975).
     ///
     /// Only a commit receipt for exactly the current generation dates the
     /// material (its reservation began just after the material's own refresh
@@ -263,7 +271,8 @@ impl PlatformCredentialStore {
                      AND EXISTS (SELECT 1 FROM organizations o \
                                  WHERE o.id = c.organization_id AND o.deletion_state = 'active'))) \
                AND (a.credential_id IS NULL OR a.state IN ('committed', 'cancelled') \
-                    OR (a.state = 'reserved' AND a.reserved_until <= clock_timestamp())) \
+                    OR (a.state = 'reserved' AND a.reserved_until <= clock_timestamp()) \
+                    OR (a.state = 'rate_limited' AND a.rate_limited_until <= clock_timestamp())) \
                AND COALESCE(CASE WHEN a.state = 'committed' \
                                   AND a.expected_revocation_generation + 1 = c.revocation_generation \
                                   AND a.expected_material_generation + 1 = c.material_generation \
@@ -287,6 +296,8 @@ impl PlatformCredentialStore {
     /// Reserve one exact credential version for at most 60 database-clock
     /// seconds before start. Duplicate attempt IDs do not yield another permit.
     /// All OpenBao work completes before reservation locks or provider start.
+    /// While a rate-limit wait runs this refuses with the seconds left; the
+    /// attempt begun after it is marked so it cannot be rate-limited again.
     pub async fn begin_oauth_refresh(
         &self,
         owner: &Owner,
@@ -312,23 +323,38 @@ impl PlatformCredentialStore {
         {
             return Err(Error::CorruptRecord);
         }
+        let mut after_rate_limit = false;
         if let Some(previous) = load_attempt(&mut tx, id).await? {
             if previous.attempt_id == attempt_id {
                 return Err(Error::StaleRefresh);
             }
+            // The mark outlives a retry that never started: only a published
+            // refresh, which changes the generation, clears it.
+            after_rate_limit = previous.after_rate_limit;
             match previous.state()? {
                 OAuthRefreshState::Reserved if !previous.reservation_live => {}
-                OAuthRefreshState::Committed | OAuthRefreshState::Cancelled => {}
+                OAuthRefreshState::Committed => after_rate_limit = false,
+                OAuthRefreshState::Cancelled => {}
+                OAuthRefreshState::RateLimited => match previous.rate_limit_seconds_left {
+                    Some(seconds) if seconds > 0 => {
+                        return Err(Error::RefreshRateLimited {
+                            retry_after_seconds: u64::try_from(seconds)
+                                .map_err(|_| Error::CorruptRecord)?,
+                        });
+                    }
+                    _ => after_rate_limit = true,
+                },
                 OAuthRefreshState::Unknown => return Err(Error::RefreshOutcomeUnknown),
                 _ => return Err(Error::RefreshInProgress),
             }
             delete_refresh_attempt(&mut tx, id).await?;
         }
         sqlx::query("INSERT INTO platform_credential_refresh_attempts \
-            (credential_id,attempt_id,expected_revocation_generation,expected_material_generation,state,reserved_until) \
-            VALUES ($1,$2,$3,$4,'reserved',clock_timestamp()+interval '60 seconds')")
+            (credential_id,attempt_id,expected_revocation_generation,expected_material_generation,state,reserved_until,after_rate_limit) \
+            VALUES ($1,$2,$3,$4,'reserved',clock_timestamp()+interval '60 seconds',$5)")
             .bind(id.as_str()).bind(attempt_id)
             .bind(generation(expected.revocation_generation)?).bind(generation(expected.material_generation)?)
+            .bind(after_rate_limit)
             .execute(&mut *tx).await.map_err(database_error)?;
         sqlx::query("INSERT INTO platform_credential_refresh_material \
             (attempt_id,kek_provider,key_name,key_version,wrapped_dek,wrapped_format) VALUES ($1,$2,$3,$4,$5,$6)")
@@ -595,11 +621,20 @@ impl PlatformCredentialStore {
         let mut tx = self.pool().begin().await.map_err(database_error)?;
         let current = lock_record(self, &mut tx, &identity).await?;
         compare_version(&current, expected)?;
+        // A fence that replaces a rate-limited attempt ends its wait early,
+        // but keeps the mark: the next refresh is still the one retry.
+        let mut after_rate_limit = false;
         if let Some(previous) = load_attempt(&mut tx, id).await? {
+            after_rate_limit = match previous.state()? {
+                OAuthRefreshState::Committed => false,
+                OAuthRefreshState::RateLimited => true,
+                _ => previous.after_rate_limit,
+            };
             match previous.state()? {
                 OAuthRefreshState::Reserved
                 | OAuthRefreshState::Committed
-                | OAuthRefreshState::Cancelled => {}
+                | OAuthRefreshState::Cancelled
+                | OAuthRefreshState::RateLimited => {}
                 OAuthRefreshState::Started
                 | OAuthRefreshState::Staged
                 | OAuthRefreshState::Unknown => {
@@ -610,10 +645,11 @@ impl PlatformCredentialStore {
             delete_refresh_attempt(&mut tx, id).await?;
         }
         sqlx::query("INSERT INTO platform_credential_refresh_attempts \
-            (credential_id,attempt_id,expected_revocation_generation,expected_material_generation,state,reserved_until) \
-            VALUES ($1,$2,$3,$4,'reserved',clock_timestamp()+interval '60 seconds')")
+            (credential_id,attempt_id,expected_revocation_generation,expected_material_generation,state,reserved_until,after_rate_limit) \
+            VALUES ($1,$2,$3,$4,'reserved',clock_timestamp()+interval '60 seconds',$5)")
             .bind(id.as_str()).bind(identity.attempt_id)
             .bind(generation(expected.revocation_generation)?).bind(generation(expected.material_generation)?)
+            .bind(after_rate_limit)
             .execute(&mut *tx).await.map_err(database_error)?;
         tx.commit().await.map_err(database_error)?;
         Ok(RevocationFence::Fenced {
@@ -637,6 +673,46 @@ impl PlatformCredentialStore {
             }
             None => false,
         })
+    }
+
+    /// Close the exact started attempt as rate-limited for `wait_seconds`
+    /// (within [`RATE_LIMIT_WAIT_SECONDS`]) after the provider answered 429
+    /// with its whole response read (#4975). The credential and its material
+    /// stay as they were. An attempt begun after a rate-limit wait is refused
+    /// with `StaleRefresh`, and so is one no longer started: the caller then
+    /// fails the attempt, which is terminal. The permit stays the caller's
+    /// until that answer.
+    pub async fn rate_limit_oauth_refresh(
+        &self,
+        started: &StartedOAuthRefresh,
+        wait_seconds: u64,
+    ) -> Result<(), Error> {
+        if !RATE_LIMIT_WAIT_SECONDS.contains(&wait_seconds) {
+            return Err(Error::InvalidInput);
+        }
+        let identity = &started.0.identity;
+        let mut tx = self.pool().begin().await.map_err(database_error)?;
+        let current = lock_record(self, &mut tx, identity).await?;
+        compare_version(&current, identity.expected)?;
+        let attempt = exact_attempt(&mut tx, identity).await?;
+        if attempt.state()? != OAuthRefreshState::Started
+            || attempt.after_rate_limit
+            || current.metadata.status != CredentialStatus::Active
+        {
+            return Err(Error::StaleRefresh);
+        }
+        let changed = sqlx::query("UPDATE platform_credential_refresh_attempts SET state='rate_limited', \
+            rate_limited_until=clock_timestamp()+($2::bigint * interval '1 second'),updated_at=clock_timestamp() \
+            WHERE credential_id=$1 AND state='started' AND NOT after_rate_limit")
+            .bind(identity.credential_id.as_str())
+            .bind(i64::try_from(wait_seconds).map_err(|_| Error::InvalidInput)?)
+            .execute(&mut *tx).await.map_err(database_error)?.rows_affected();
+        if changed != 1 {
+            return Err(Error::StaleRefresh);
+        }
+        delete_attempt_material(&mut tx, identity.attempt_id).await?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(())
     }
 
     /// Consume the exact process-local send-owner permit after an unsuccessful
@@ -757,6 +833,8 @@ struct AttemptRow {
     state: String,
     reservation_live: bool,
     execution_live: bool,
+    rate_limit_seconds_left: Option<i64>,
+    after_rate_limit: bool,
 }
 
 impl AttemptRow {
@@ -812,7 +890,9 @@ async fn load_attempt(
     sqlx::query_as(
         "SELECT attempt_id,expected_revocation_generation,expected_material_generation,state, \
         state='reserved' AND reserved_until>clock_timestamp() AS reservation_live, \
-        state='started' AND COALESCE(started_until>clock_timestamp(),false) AS execution_live \
+        state='started' AND COALESCE(started_until>clock_timestamp(),false) AS execution_live, \
+        CEIL(EXTRACT(EPOCH FROM rate_limited_until-clock_timestamp()))::bigint AS rate_limit_seconds_left, \
+        after_rate_limit \
         FROM platform_credential_refresh_attempts WHERE credential_id=$1 FOR UPDATE",
     )
     .bind(id.as_str())
@@ -885,6 +965,7 @@ pub(crate) async fn fence_refresh_mutation(
             OAuthRefreshState::Reserved if !attempt.reservation_live => {}
             OAuthRefreshState::Committed
             | OAuthRefreshState::Cancelled
+            | OAuthRefreshState::RateLimited
             | OAuthRefreshState::Unknown => {}
             _ => return Err(Error::RefreshInProgress),
         }
