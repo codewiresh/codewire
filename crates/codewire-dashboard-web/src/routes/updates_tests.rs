@@ -201,3 +201,109 @@ async fn without_a_liminal_site_there_is_no_page() {
         StatusCode::NOT_FOUND
     );
 }
+
+/// The `updates.read` spans a test opened: whether trace export would build
+/// each one, and the fields recorded on it.
+#[derive(Default)]
+struct ReadSpans(std::sync::Mutex<Vec<(bool, std::collections::BTreeMap<&'static str, String>)>>);
+
+struct CaptureReadSpans(Arc<ReadSpans>);
+
+struct Fields<'a>(&'a mut std::collections::BTreeMap<&'static str, String>);
+
+impl tracing::field::Visit for Fields<'_> {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.insert(field.name(), value.to_owned());
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.insert(field.name(), format!("{value:?}"));
+    }
+}
+
+impl tracing::Subscriber for CaptureReadSpans {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.name() == "updates.read"
+    }
+    fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        let mut spans = self.0.0.lock().unwrap();
+        let mut fields = std::collections::BTreeMap::new();
+        attributes.record(&mut Fields(&mut fields));
+        spans.push((
+            codewire_server_core::obs::exports_span(attributes.metadata()),
+            fields,
+        ));
+        tracing::span::Id::from_u64(spans.len() as u64)
+    }
+    fn record(&self, span: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+        let mut spans = self.0.0.lock().unwrap();
+        let index = usize::try_from(span.into_u64()).unwrap() - 1;
+        values.record(&mut Fields(&mut spans[index].1));
+    }
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, _: &tracing::Event<'_>) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[tokio::test]
+async fn each_read_records_its_outcome_on_an_exported_span() {
+    let spans = Arc::new(ReadSpans::default());
+    let _capture = tracing::subscriber::set_default(CaptureReadSpans(spans.clone()));
+    let upstream = serve(
+        Router::new()
+            .route(
+                "/ok/api/v1/posts",
+                get(|| async { Json(serde_json::json!({ "data": [], "next_cursor": null })) }),
+            )
+            .route(
+                "/down/api/v1/posts",
+                get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+            )
+            .route("/garbled/api/v1/posts", get(|| async { "not json" }))
+            .route(
+                "/stalled/api/v1/posts",
+                get(|| async {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    "late"
+                }),
+            ),
+    )
+    .await;
+    let closed = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}", listener.local_addr().unwrap())
+    };
+
+    for origin in [
+        format!("{}/ok", upstream.origin),
+        format!("{}/down", upstream.origin),
+        format!("{}/garbled", upstream.origin),
+        format!("{}/stalled", upstream.origin),
+        closed,
+    ] {
+        let updates = crate::updates_connect::Updates::with_timeout(
+            crate::updates_connect::LiminalSite::new(origin, KEY.to_owned(), None),
+            std::time::Duration::from_millis(300),
+        );
+        let _ = crate::updates_connect::read_traced(&updates).await;
+    }
+
+    let fields = |outcome: &str, status: Option<&str>| {
+        let mut fields = std::collections::BTreeMap::from([("outcome", outcome.to_owned())]);
+        if let Some(status) = status {
+            fields.insert("http.response.status_code", status.to_owned());
+        }
+        (true, fields)
+    };
+    assert_eq!(
+        *spans.0.lock().unwrap(),
+        vec![
+            fields("ok", None),
+            fields("status", Some("503")),
+            fields("parse", None),
+            fields("timeout", None),
+            fields("connect", None),
+        ],
+        "one exported span per read, recording only its outcome and Liminal's status"
+    );
+}

@@ -312,6 +312,20 @@ pub fn inject_http_headers(headers: &mut http::HeaderMap) {
     let _ = headers;
 }
 
+/// Whether trace export, when it is on, exports a span with this metadata.
+/// Always false without the `otel` feature.
+#[cfg(feature = "otel")]
+pub fn exports_span(metadata: &tracing::Metadata<'_>) -> bool {
+    otel::exported_span(metadata)
+}
+
+/// Whether trace export, when it is on, exports a span with this metadata.
+/// Always false without the `otel` feature.
+#[cfg(not(feature = "otel"))]
+pub fn exports_span(_metadata: &tracing::Metadata<'_>) -> bool {
+    false
+}
+
 /// Paths that never start a trace: probes and scrapes would otherwise be most
 /// of every service's traces.
 pub fn untraced_path(path: &str) -> bool {

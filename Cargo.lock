@@ -1947,6 +1947,7 @@ dependencies = [
  "subtle",
  "tokio",
  "tokio-stream",
+ "tracing",
  "url",
  "uuid",
 ]

@@ -8,6 +8,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use tracing::Instrument as _;
 
 use crate::state::AppState;
 
@@ -93,10 +94,14 @@ impl Updates {
     }
 
     pub(crate) fn new(site: LiminalSite) -> Self {
+        Self::with_timeout(site, POSTS_TIMEOUT)
+    }
+
+    pub(crate) fn with_timeout(site: LiminalSite, timeout: Duration) -> Self {
         Self {
             site,
             http: reqwest::Client::builder()
-                .timeout(POSTS_TIMEOUT)
+                .timeout(timeout)
                 // The bearer key goes to the configured origin and nowhere else.
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
@@ -138,7 +143,7 @@ pub(crate) async fn posts(state: &AppState) -> Option<Arc<Vec<UpdatePost>>> {
     if fresh || backing_off {
         return stale;
     }
-    match read_posts(updates).await {
+    match read_traced(updates).await {
         Ok(posts) => {
             let posts = Arc::new(posts);
             *last = LastRead {
@@ -154,7 +159,71 @@ pub(crate) async fn posts(state: &AppState) -> Option<Arc<Vec<UpdatePost>>> {
     }
 }
 
-async fn read_posts(updates: &Updates) -> anyhow::Result<Vec<UpdatePost>> {
+/// Why a read of Liminal failed. It names the kind of failure and Liminal's
+/// HTTP status, never the key, a URL or the body.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReadFailure {
+    Timeout,
+    Connect,
+    Status(u16),
+    TooLarge,
+    Parse,
+    Request,
+}
+
+impl ReadFailure {
+    fn outcome(&self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Connect => "connect",
+            Self::Status(_) => "status",
+            Self::TooLarge => "too_large",
+            Self::Parse => "parse",
+            Self::Request => "request",
+        }
+    }
+}
+
+impl From<reqwest::Error> for ReadFailure {
+    fn from(error: reqwest::Error) -> Self {
+        if error.is_timeout() {
+            Self::Timeout
+        } else if let Some(status) = error.status() {
+            Self::Status(status.as_u16())
+        } else if error.is_connect() {
+            Self::Connect
+        } else {
+            Self::Request
+        }
+    }
+}
+
+/// One read of Liminal inside an `updates.read` span whose `outcome` (and
+/// `http.response.status_code`, for a status failure) says how it went. The
+/// dashboard writes no logs, so this exported span is its only record of a
+/// failed read (codewire-server-core's `obs` exports Codewire DEBUG spans).
+pub(crate) async fn read_traced(updates: &Updates) -> Result<Vec<UpdatePost>, ReadFailure> {
+    let span = tracing::debug_span!(
+        "updates.read",
+        outcome = tracing::field::Empty,
+        http.response.status_code = tracing::field::Empty,
+    );
+    let read = read_posts(updates).instrument(span.clone()).await;
+    match &read {
+        Ok(_) => {
+            span.record("outcome", "ok");
+        }
+        Err(failure) => {
+            span.record("outcome", failure.outcome());
+            if let ReadFailure::Status(status) = failure {
+                span.record("http.response.status_code", status);
+            }
+        }
+    }
+    read
+}
+
+async fn read_posts(updates: &Updates) -> Result<Vec<UpdatePost>, ReadFailure> {
     let mut response = updates
         .http
         .get(updates.site.posts_url())
@@ -165,11 +234,11 @@ async fn read_posts(updates: &Updates) -> anyhow::Result<Vec<UpdatePost>> {
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await? {
         if body.len() + chunk.len() > MAX_BODY_BYTES {
-            anyhow::bail!("Liminal's post list is over {MAX_BODY_BYTES} bytes");
+            return Err(ReadFailure::TooLarge);
         }
         body.extend_from_slice(&chunk);
     }
-    let list: PostList = serde_json::from_slice(&body)?;
+    let list: PostList = serde_json::from_slice(&body).map_err(|_| ReadFailure::Parse)?;
     Ok(update_posts(list.data, updates.site.media_origin()))
 }
 

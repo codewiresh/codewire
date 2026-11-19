@@ -368,6 +368,8 @@ The dashboard header's Support button writes an email to this address with the s
 
 The dashboard's public `/updates` page lists the posts of one site in a Liminal CMS, newest first, and the console sidebar links it above Documentation. The dashboard reads `GET /api/v1/posts` with the site's key at most once every five minutes, keeps the last list it read while the CMS is down, and cleans each post's HTML again before showing it. Images load only from `LIMINAL_MEDIA_ORIGIN`, the one image host the page's Content-Security-Policy admits; without it posts show no images. Without both `LIMINAL_ORIGIN` and `LIMINAL_API_KEY` there is no page and no link.
 
+The dashboard writes no logs. Each read of the CMS is one `updates.read` trace span instead, exported when the dashboard's trace export is on (`OTEL_EXPORTER_OTLP_ENDPOINT`). Its `outcome` is `ok`, `timeout`, `connect`, `status` (with `http.response.status_code`), `too_large`, `parse` or `request`; it never carries the key, a URL or the response.
+
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
 | `LIMINAL_ORIGIN` | No | The CMS origin, `https://` with no path; plain `http://` only on loopback, since the key is sent to it. Set together with `LIMINAL_API_KEY`; one without the other stops the dashboard at startup. | `https://cms.example.com` |
