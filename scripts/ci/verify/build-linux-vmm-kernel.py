@@ -327,8 +327,13 @@ def run_owned(command, cwd, environment, log, deadline, grace=3, cleanup_bound=3
     result = {"command": command, "exit": exit_code, "elapsed_seconds": round(time.monotonic() - began, 3),
               "log": str(log), "log_sha256": digest(log, 256 * 1024 * 1024, allow_empty=True), "timed_out": timed_out,
               "interrupted": interrupted, "unexpected_family": unexpected_family, "cleanup_unknown": False}
-    require(exit_code == 0 and not (timed_out or interrupted or unexpected_family),
-            "kernel command failed after owned-family cleanup: " + json.dumps(result))
+    try:
+        require(exit_code == 0 and not (timed_out or interrupted or unexpected_family),
+                "kernel command failed after owned-family cleanup: " + json.dumps(result))
+    except ValueError as error:
+        # A caller's refusal reads the exit status from here, never the message.
+        error.owned_result = result
+        raise
     return result
 
 

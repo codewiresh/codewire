@@ -1184,6 +1184,93 @@ class FinalizerDiagnostic(unittest.TestCase):
         self.assertNotIn("DIAGNOSTIC_SECRET_CANARY", json.dumps(value))
 
 
+class CompileRefusal(unittest.TestCase):
+    """A compile refusal says why Cargo failed, without a credential (#5421)."""
+
+    KEY_ID = "AKIDCOMPILECANARY01"
+    SECRET = "compile-secret-canary-value-0123456789"
+    TOKEN = "env-token-canary-value-0123"
+
+    def write(self, name, text):
+        path = Path(self.enterContext(tempfile.TemporaryDirectory())) / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def refusal(self, log_text, environ=None, phase="compile", exit_code=101):
+        log = self.write("compile.log", log_text)
+        if environ is None:
+            credentials = self.write("credentials", f"[default]\naws_access_key_id = {self.KEY_ID}\n"
+                                                    f"aws_secret_access_key = {self.SECRET}\n")
+            environ = {"AWS_SHARED_CREDENTIALS_FILE": str(credentials), "CI_RUNNER_TOKEN": self.TOKEN}
+        error = ValueError("kernel command failed")
+        error.owned_result = {"exit": exit_code, "timed_out": False}
+        with mock.patch.dict(finalizer._DIAGNOSTIC, {"phase": phase}):
+            return finalizer.compile_refusal(error, log, environ)
+
+    def test_a_compile_failure_names_cargo_s_exit_and_its_error_lines(self):
+        lines = self.refusal("   Compiling cw v0.1.0\n"
+                             "error[E0425]: cannot find value `x` in this scope\n"
+                             "  --> crates/cw/src/main.rs:3:5\n"
+                             "   |\n"
+                             "error: could not compile `cw` (bin \"cw\") due to 1 previous error\n")
+        self.assertEqual(lines[0], "finalize-cw-runtime-source: compile_exit=101 timed_out=false")
+        self.assertEqual(lines[1:], ["compile| error[E0425]: cannot find value `x` in this scope",
+                                     "compile|   --> crates/cw/src/main.rs:3:5",
+                                     "compile| error: could not compile `cw` (bin \"cw\") due to 1 previous error"])
+
+    def test_a_failed_build_script_shows_its_stderr_bounded(self):
+        stderr = "".join(f"line {n}\n" for n in range(20))
+        lines = self.refusal("error: failed to run custom build command for `codewire-proto`\n"
+                             "--- stderr\n" + stderr + "\nwarning: build failed\n")
+        self.assertIn("compile| --- stderr", lines)
+        self.assertEqual([line for line in lines if line.startswith("compile| line ")],
+                         [f"compile| line {n}" for n in range(finalizer.COMPILE_STDERR_LINES)])
+
+    def test_no_credential_is_printed_even_on_a_marked_line(self):
+        lines = self.refusal(f"error: {self.SECRET}\n"
+                             f"error: key id {self.KEY_ID}\n"
+                             "--- stderr\n"
+                             f"thread 'main' panicked at build.rs:1: {self.TOKEN}\n")
+        text = "\n".join(lines)
+        for canary in (self.SECRET, self.KEY_ID, self.TOKEN):
+            self.assertNotIn(canary, text)
+        self.assertIn("compile| error: [redacted]", lines)
+        self.assertIn("compile| error: key id [redacted]", lines)
+
+    def test_an_unreadable_key_file_shows_no_log_line(self):
+        lines = self.refusal(f"error: {self.SECRET}\n",
+                             environ={"AWS_SHARED_CREDENTIALS_FILE": "/nonexistent/credentials"})
+        self.assertEqual(len(lines), 2)
+        self.assertIn("no compile log line is shown", lines[1])
+        self.assertNotIn(self.SECRET, "\n".join(lines))
+
+    def test_a_line_can_neither_run_a_workflow_command_nor_carry_control_bytes(self):
+        lines = self.refusal("error: ::stop-commands::x\n"
+                             "--- stderr\n"
+                             "::add-mask::nothing\n"
+                             "\x1b[31merror\x1b[0m: colour\n")
+        for line in lines[1:]:
+            self.assertTrue(line.startswith(finalizer.COMPILE_LINE_PREFIX), line)
+            self.assertTrue(all(" " <= character <= "~" for character in line), line)
+        self.assertIn("compile| ?[31merror?[0m: colour", lines)
+
+    def test_lines_are_bounded_in_number_and_length(self):
+        lines = self.refusal("".join(f"error: {'x' * 1000}\n" for _ in range(200)))
+        self.assertEqual(len(lines), 1 + finalizer.COMPILE_LINES)
+        self.assertTrue(all(len(line) <= len(finalizer.COMPILE_LINE_PREFIX) + finalizer.COMPILE_LINE_CHARS
+                            for line in lines))
+
+    def test_any_other_phase_prints_only_the_fixed_diagnostic(self):
+        self.assertEqual(self.refusal("error: anything\n", phase="export"), [])
+
+    def test_run_owned_keeps_its_result_on_the_refusal(self):
+        log = Path(self.enterContext(tempfile.TemporaryDirectory())) / "owned.log"
+        with self.assertRaises(ValueError) as refused:
+            finalizer.owner.run_owned([sys.executable, "-c", "raise SystemExit(7)"], ".", dict(os.environ),
+                                      log, time.monotonic() + 30)
+        self.assertEqual(refused.exception.owned_result["exit"], 7)
+
+
 if __name__ == "__main__":
     if "--legacy-head-witness" in sys.argv:
         LEGACY_HEAD_WITNESS = True

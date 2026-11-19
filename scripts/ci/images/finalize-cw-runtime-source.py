@@ -633,9 +633,99 @@ def main(argv=None):
     return 0
 
 
+# A compile refusal also says why Cargo failed (#5421): its exit status and at
+# most COMPILE_LINES of the lines Cargo marks, from the log's last bytes. Build
+# scripts write to that log, so every line is redacted, cut to printable ASCII
+# and prefixed, and none can begin with "::" to run as a workflow command. The
+# redaction stops an accident, not a build script that wants a key out: the
+# boundary is the key's scope. The compile environment's only secret-bearing
+# input is the compiler cache's key file (AWS_SHARED_CREDENTIALS_FILE), and a
+# pull request's holds only the cache's read-only token
+# (fetch-openbao-sccache-r2-credentials.sh).
+COMPILE_LOG = WORK / "compiler-home" / "compile.log"
+COMPILE_TAIL_BYTES = 2 * 1024 * 1024
+COMPILE_LINES = 40
+COMPILE_LINE_CHARS = 300
+COMPILE_STDERR_LINES = 10
+COMPILE_LINE_PREFIX = "compile| "
+COMPILE_MARKER = re.compile(r"^(error(\[E[0-9]{4}\])?: |\s*--> |.*panicked at |.*process didn't exit successfully)")
+SECRET_NAME_SUFFIXES = ("_SECRET", "_TOKEN", "_KEY", "_PASSWORD")
+SECRET_FILE_KEYS = ("aws_access_key_id", "aws_secret_access_key", "aws_session_token")
+SECRET_MIN_CHARS = 8
+
+
+def compile_secrets(environ):
+    """The values a compile refusal must never print, or None when the cache's
+    key file is named but unreadable, so nothing from the log is printed."""
+    secrets = {value for name, value in environ.items()
+               if name.upper().endswith(SECRET_NAME_SUFFIXES) and len(value) >= SECRET_MIN_CHARS}
+    path = environ.get("AWS_SHARED_CREDENTIALS_FILE")
+    if path:
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        for line in text.splitlines():
+            name, separator, value = line.partition("=")
+            value = value.strip()
+            if separator and name.strip().lower() in SECRET_FILE_KEYS and len(value) >= SECRET_MIN_CHARS:
+                secrets.add(value)
+    return secrets
+
+
+def compile_line(line, secrets):
+    for secret in sorted(secrets, key=len, reverse=True):
+        line = line.replace(secret, "[redacted]")
+    line = "".join(character if " " <= character <= "~" else "?" for character in line)
+    return COMPILE_LINE_PREFIX + line[:COMPILE_LINE_CHARS]
+
+
+def compile_refusal(error, log=COMPILE_LOG, environ=os.environ):
+    """The lines a compile refusal adds after failure_diagnostic; empty in any
+    other phase."""
+    if _DIAGNOSTIC["phase"] != "compile":
+        return []
+    result = getattr(error, "owned_result", None)
+    result = result if isinstance(result, dict) else {}
+    exit_code = result.get("exit")
+    lines = [f"finalize-cw-runtime-source: compile_exit={exit_code if type(exit_code) is int else 'unknown'} "
+             f"timed_out={str(result.get('timed_out') is True).lower()}"]
+    secrets = compile_secrets(environ)
+    if secrets is None:
+        return lines + ["finalize-cw-runtime-source: the compiler cache's key file is unreadable, "
+                        "so no compile log line is shown"]
+    try:
+        with Path(log).open("rb") as handle:
+            handle.seek(max(0, os.fstat(handle.fileno()).st_size - COMPILE_TAIL_BYTES))
+            text = handle.read(COMPILE_TAIL_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return lines + ["finalize-cw-runtime-source: the compile log is unreadable"]
+    chosen, stderr_left = [], 0
+    for line in text.splitlines():
+        if len(chosen) >= COMPILE_LINES:
+            break
+        if line.startswith("--- stderr"):
+            stderr_left = COMPILE_STDERR_LINES
+            chosen.append(line)
+        elif stderr_left and line.strip():
+            stderr_left -= 1
+            chosen.append(line)
+        elif COMPILE_MARKER.match(line):
+            stderr_left = 0
+            chosen.append(line)
+        else:
+            stderr_left = 0 if not line.strip() else stderr_left
+    return lines + [compile_line(line, secrets) for line in chosen]
+
+
 if __name__ == "__main__":
     try:
         sys.exit(main())
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, release.ReleaseError) as error:
         print(failure_diagnostic(error), file=sys.stderr)
+        try:
+            for line in compile_refusal(error):
+                print(line, file=sys.stderr)
+        except Exception:  # noqa: BLE001 - the refusal itself has already been printed
+            print("finalize-cw-runtime-source: the compile summary failed", file=sys.stderr)
         sys.exit(1)
