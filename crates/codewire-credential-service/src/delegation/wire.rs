@@ -8,7 +8,8 @@ use buffa::Message as _;
 use codewire_credential_broker::BrokerUpstreamTransport;
 use codewire_credential_broker::platform::PlatformRuntimeError;
 use codewire_credential_broker::platform::bridge::{
-    PlatformBridgeAuthenticationError, PlatformBridgeAuthenticator, PlatformCredentialBridgeService,
+    FRONT_DOOR_CAPABILITIES, PlatformBridgeAuthenticationError, PlatformBridgeAuthenticator,
+    PlatformCredentialBridgeService,
 };
 use codewire_daemon_proto::codewire::bridge::v1 as bridge;
 use codewire_daemon_proto::{
@@ -91,9 +92,11 @@ where
         let (keepalives, answers) = Keepalives::new();
         let mut admitted = None;
         // The owner-local epoch's expiry needs no early successor here.
-        let (output, _expires_at_unix) = self
+        // The owner whose local front door may join this epoch (#4909).
+        let owner = oauth.user_id().to_owned();
+        let (output, _expires_at_unix, front_door_epoch) = self
             .bridge
-            .serve_authenticated(async {
+            .serve_authenticated_delegation(owner, async {
                 // This future is first polled AFTER the existing shared stream
                 // permit and admission deadline have been acquired.
                 let first = requests
@@ -110,6 +113,7 @@ where
                     return Err(PlatformBridgeAuthenticationError::Denied);
                 };
                 let selection = selection((*open).clone(), oauth.user_id())?;
+                let front_door = open.front_door;
                 admitted = Some(open);
                 let expiry = u64::try_from(oauth.expires_at().timestamp())
                     .map_err(|_| PlatformBridgeAuthenticationError::Denied)?;
@@ -143,7 +147,7 @@ where
                         .transpose(),
                     )
                 });
-                Ok((authority, input))
+                Ok((authority, input, front_door))
             })
             .await
             .map_err(wire_error)?;
@@ -159,6 +163,7 @@ where
                 admitted,
             )),
             accepts_keepalive: true,
+            front_door_epoch,
             ..Default::default()
         };
         // The generated response owns the SAME bounded receiver. Its drop
@@ -173,13 +178,50 @@ where
 
     async fn front_door_delegation(
         &self,
-        _ctx: RequestContext,
-        _requests: InboundStream<proto::FrontDoorDelegationRequest>,
+        ctx: RequestContext,
+        requests: InboundStream<proto::FrontDoorDelegationRequest>,
     ) -> ServiceResult<ServiceStream<proto::FrontDoorDelegationResponse>> {
-        // Answered once delegation epochs carry a front-door handle (#4909).
-        Err(connectrpc::ConnectError::unimplemented(
-            "delegated front-door sessions are served from a later change",
-        ))
+        let owner = oauth_bearer_authority(&ctx)?.user_id().to_owned();
+        let metadata = tonic::metadata::MetadataMap::from_headers(ctx.headers().clone());
+        drop(ctx);
+        let input = requests
+            .map(|item| {
+                let item = item
+                    .map_err(|_| Status::unavailable("front-door delegation input unavailable"))?;
+                if item.bytes().len() > MAX_ENVELOPE_BYTES {
+                    return Err(Status::resource_exhausted(
+                        "front-door delegation frame exceeds limit",
+                    ));
+                }
+                decode_front_door_frame(item.to_owned_message())
+            })
+            .boxed();
+        let output = self
+            .bridge
+            .join_delegated_front_door(owner, &metadata, input)
+            .await
+            .map_err(|status| {
+                front_door_refused(&status);
+                wire_error(status)
+            })?;
+        // Only now, with the epoch claimed and the bridge admitted, does the
+        // caller learn it joined, and what the epoch serves.
+        let admitted = proto::FrontDoorDelegationResponse {
+            output: Some(proto::front_door_delegation_response::Output::Admitted(
+                Box::new(proto::FrontDoorDelegationAdmitted {
+                    capabilities: FRONT_DOOR_CAPABILITIES
+                        .iter()
+                        .map(|capability| (*capability).to_owned())
+                        .collect(),
+                    ..Default::default()
+                }),
+            )),
+            ..Default::default()
+        };
+        connectrpc::Response::stream_ok(
+            futures::stream::once(async { Ok(admitted) })
+                .chain(output.map(|item| encode_front_door_frame(item.map_err(wire_error)?))),
+        )
     }
 }
 
@@ -396,6 +438,65 @@ fn encode_frame(
     })
 }
 
+/// One front-door frame from the local authority, bounded and carried
+/// unparsed: the broker's front-door entry decides what it serves.
+fn decode_front_door_frame(
+    request: proto::FrontDoorDelegationRequest,
+) -> Result<bridge::CredentialBridgeGuestMessage, Status> {
+    let invalid = || Status::permission_denied("front-door delegation frame is invalid");
+    let frame = request.frame.into_option().ok_or_else(invalid)?;
+    if frame.payload.is_none()
+        || frame.encoded_len() as usize > CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES
+    {
+        return Err(invalid());
+    }
+    let bytes = frame.encode_to_vec();
+    bridge::CredentialBridgeGuestMessage::decode(bytes.as_slice()).map_err(|_| invalid())
+}
+
+/// One front-door frame from the broker. Never an Open: the local relay
+/// writes its session's one Open itself.
+fn encode_front_door_frame(
+    frame: bridge::CredentialBridgeHostMessage,
+) -> Result<proto::FrontDoorDelegationResponse, connectrpc::ConnectError> {
+    let invalid =
+        || connectrpc::ConnectError::internal("front-door delegation response is invalid");
+    if frame.encoded_len() > CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES
+        || frame.payload.is_none()
+        || matches!(
+            frame.payload,
+            Some(bridge::credential_bridge_host_message::Payload::Open(_))
+        )
+    {
+        return Err(invalid());
+    }
+    let bytes = frame.encode_to_vec();
+    let frame = <codewire_proto::codewire::bridge::v1::CredentialBridgeHostMessage as buffa::Message>::decode_from_slice(&bytes)
+        .map_err(|_| invalid())?;
+    Ok(proto::FrontDoorDelegationResponse {
+        output: Some(proto::front_door_delegation_response::Output::Frame(
+            Box::new(frame),
+        )),
+        ..Default::default()
+    })
+}
+
+/// Counts a refused front-door join by its code, never its handle: an
+/// unknown, ended and other owner's handle are one refusal to the caller.
+fn front_door_refused(status: &Status) {
+    let reason = match status.code() {
+        tonic::Code::PermissionDenied => "no_live_epoch",
+        tonic::Code::AlreadyExists => "already_joined",
+        tonic::Code::DeadlineExceeded => "admission_timed_out",
+        _ => "unavailable",
+    };
+    tracing::warn!(
+        event = "front_door_join_refused",
+        reason,
+        "front-door delegation join refused"
+    );
+}
+
 fn authority_error(error: PlatformRuntimeError) -> PlatformBridgeAuthenticationError {
     match error {
         PlatformRuntimeError::Denied => PlatformBridgeAuthenticationError::Denied,
@@ -415,6 +516,10 @@ fn wire_error(status: Status) -> connectrpc::ConnectError {
         tonic::Code::ResourceExhausted => {
             connectrpc::ConnectError::resource_exhausted("credential delegation capacity reached")
         }
+        // A second front-door join of a live epoch (#4909).
+        tonic::Code::AlreadyExists => connectrpc::ConnectError::already_exists(
+            "this credential delegation already serves a front door",
+        ),
         tonic::Code::DeadlineExceeded => {
             connectrpc::ConnectError::deadline_exceeded("credential delegation admission expired")
         }

@@ -25,7 +25,7 @@ fn handle_of(response: &Response<Streaming<v1::CredentialBridgeHostMessage>>) ->
 impl Fixture {
     /// A front-door stream presenting `identity` and `handle`, its first
     /// message a Ready for the fixture's binding.
-    async fn join(
+    pub(super) async fn join(
         &self,
         identity: Option<&str>,
         handle: Option<&[u8]>,

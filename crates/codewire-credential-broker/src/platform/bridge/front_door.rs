@@ -54,6 +54,11 @@ impl EpochHandle {
         BinaryMetadataValue::from_bytes(&self.0)
     }
 
+    /// The handle's bytes, for a delegation's admission answer only.
+    pub(super) fn to_vec(&self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+
     /// Constant time: every byte is compared whatever the first difference.
     fn matches(&self, other: &Self) -> bool {
         let difference = self
@@ -65,6 +70,13 @@ impl EpochHandle {
     }
 }
 
+/// The one refusal for any handle that joins nothing: missing, repeated, of
+/// another length, unknown, ended or another scope's. A caller cannot tell
+/// which.
+pub(super) fn handle_refused() -> Status {
+    Status::permission_denied("credential bridge denied")
+}
+
 /// What a joined front-door stream needs of its epoch.
 #[derive(Clone, Copy)]
 pub(super) struct EpochBounds {
@@ -73,12 +85,26 @@ pub(super) struct EpochBounds {
 }
 
 /// The live epochs a front-door stream may join.
+/// Whose epochs a front-door stream may join: a hosted binding's, named by
+/// the workspace authorization, or one owner's delegations, named by the
+/// owner's OAuth identity (#4909). A claim searches only its own scope, so
+/// another scope's valid handle is refused like any unknown one.
+#[derive(Clone, PartialEq, Eq)]
+pub enum FrontDoorScope {
+    Binding {
+        environment_id: Uuid,
+        generation: u64,
+    },
+    Owner(String),
+}
+
 #[derive(Default)]
 pub(super) struct Registry {
     slots: Mutex<Vec<Slot>>,
 }
 
 struct Slot {
+    scope: FrontDoorScope,
     environment_id: Uuid,
     generation: u64,
     handle: EpochHandle,
@@ -108,6 +134,9 @@ pub(super) struct Claim {
     pub(super) joins: mpsc::Sender<AdmittedCredentialBridge<RelayTransport>>,
     pub(super) bounds: EpochBounds,
     pub(super) guard: Occupied,
+    /// The epoch's own environment: a join never names one.
+    pub(super) environment_id: Uuid,
+    pub(super) generation: u64,
 }
 
 /// Holds an epoch's one front-door place, and the stream's admission permit,
@@ -124,17 +153,18 @@ impl Drop for Occupied {
 }
 
 impl Registry {
-    /// Register an admitted epoch; returns its handle for the response
-    /// header, and the registration that removes it on drop.
+    /// Register an admitted epoch in `scope`; returns its handle, and the
+    /// registration that removes it on drop.
     pub(super) fn register(
         self: &Arc<Self>,
+        scope: FrontDoorScope,
         environment_id: Uuid,
         generation: u64,
         bounds: EpochBounds,
         joins: mpsc::Sender<AdmittedCredentialBridge<RelayTransport>>,
-    ) -> Result<(BinaryMetadataValue, Registration), Status> {
+    ) -> Result<(EpochHandle, Registration), Status> {
         let handle = EpochHandle::generate()?;
-        let header = handle.header_value();
+        let returned = EpochHandle(handle.0);
         let registration = Registration {
             registry: Arc::clone(self),
             handle: EpochHandle(handle.0),
@@ -143,6 +173,7 @@ impl Registry {
             .lock()
             .map_err(|_| Status::unavailable("credential broker unavailable"))?
             .push(Slot {
+                scope,
                 environment_id,
                 generation,
                 handle,
@@ -150,17 +181,16 @@ impl Registry {
                 joins,
                 occupied: Arc::new(AtomicBool::new(false)),
             });
-        Ok((header, registration))
+        Ok((returned, registration))
     }
 
-    /// Claim the binding's epoch whose handle is `presented`. Only this
-    /// binding's epochs are searched, so another binding's valid handle is
+    /// Claim the epoch in `scope` whose handle is `presented`. Only that
+    /// scope's epochs are searched, so another scope's valid handle is
     /// refused like any unknown one. A claimed epoch refuses a second claim
     /// until the first stream's guard is dropped.
     pub(super) fn claim(
         &self,
-        environment_id: Uuid,
-        generation: u64,
+        scope: &FrontDoorScope,
         presented: &EpochHandle,
         permit: OwnedSemaphorePermit,
     ) -> Result<Claim, Status> {
@@ -170,14 +200,14 @@ impl Registry {
             .map_err(|_| Status::unavailable("credential broker unavailable"))?;
         let slot = slots
             .iter()
-            .filter(|slot| slot.environment_id == environment_id && slot.generation == generation)
+            .filter(|slot| slot.scope == *scope)
             .fold(None, |found, slot| {
                 // Every candidate is compared, so the time taken does not
                 // depend on which one matches.
                 let matches = slot.handle.matches(presented);
                 found.or(matches.then_some(slot))
             })
-            .ok_or_else(|| Status::permission_denied("credential bridge denied"))?;
+            .ok_or_else(handle_refused)?;
         if slot
             .occupied
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -194,6 +224,8 @@ impl Registry {
                 flag: Arc::clone(&slot.occupied),
                 _permit: permit,
             },
+            environment_id: slot.environment_id,
+            generation: slot.generation,
         })
     }
 }

@@ -14,17 +14,18 @@ use codewire_credential_broker::{
     BrokerUpstreamError, BrokerUpstreamRequest, BrokerUpstreamResponse, BrokerUpstreamTransport,
 };
 use codewire_daemon_proto::{
+    CREDENTIAL_BRIDGE_EPOCH_HANDLE_BYTES, CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER,
     CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES, CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES,
     CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
 };
 use codewire_proto::codewire::{bridge::v1 as public_bridge, v1 as proto};
 use codewire_server_core::connect::{ConnectAuthLayer, connect_router_with_auth};
 use connectrpc::client::{BoxFuture, CallOptions, ClientBody, ClientTransport};
-use connectrpc::{ConnectError, Protocol};
+use connectrpc::{ConnectError, ErrorCode, Protocol};
 use http::{Request, Response, StatusCode};
 use tokio_util::sync::CancellationToken;
 
-use crate::mutation::tests::support::{SESSION, api_key};
+use crate::mutation::tests::support::{BOB, SESSION, api_key};
 
 const PATH: &str = "/codewire.v1.CredentialDelegationService/DelegateCredentials";
 const BOUND: Duration = Duration::from_secs(20);
@@ -215,6 +216,134 @@ async fn connect(
     Ok(stream)
 }
 
+/// A raw admission as `owner`, and the front-door handle its answer carries
+/// (#4909).
+async fn admit_raw(
+    client: &reqwest::Client,
+    url: &str,
+    protocol: Protocol,
+    open: &proto::CredentialDelegationOpen,
+) -> Result<(CredentialDelegationStream, Vec<u8>)> {
+    let mut stream = raw(
+        client,
+        url,
+        protocol,
+        CallOptions::default()
+            .try_with_header("authorization", format!("Bearer {}", oauth(ALICE)))?,
+    )
+    .await?;
+    stream
+        .send(proto::DelegateCredentialsRequest {
+            input: Some(proto::delegate_credentials_request::Input::Open(Box::new(
+                open.clone(),
+            ))),
+            ..Default::default()
+        })
+        .await?;
+    stream.send(ready(open)).await?;
+    let acknowledgment = response(&mut stream).await?;
+    ensure!(matches!(
+        acknowledgment.output,
+        Some(proto::delegate_credentials_response::Output::Admitted(_))
+    ));
+    Ok((stream, acknowledgment.front_door_epoch))
+}
+
+/// A front-door join as `owner` presenting `handle`, its first frame the
+/// epoch's Ready. The stream is held by the caller while it lives.
+async fn join_front_door(
+    client: &reqwest::Client,
+    url: &str,
+    protocol: Protocol,
+    owner: &str,
+    handle: &[u8],
+    open: &proto::CredentialDelegationOpen,
+) -> Result<
+    connectrpc::client::BidiStream<
+        reqwest::Body,
+        proto::FrontDoorDelegationRequest,
+        proto::__buffa::view::FrontDoorDelegationResponseView<'static>,
+    >,
+> {
+    let options = CallOptions::default()
+        .try_with_header("authorization", format!("Bearer {}", oauth(owner)))?
+        .try_with_header(
+            CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER,
+            base64::engine::general_purpose::STANDARD_NO_PAD.encode(handle),
+        )?;
+    let mut stream = proto::CredentialDelegationServiceClient::new(
+        Transport(client.clone()),
+        connectrpc::client::ClientConfig::new(url.parse()?).with_protocol(protocol),
+    )
+    .front_door_delegation_with_options(options)
+    .await?;
+    let Some(proto::delegate_credentials_request::Input::Frame(frame)) = ready(open).input else {
+        anyhow::bail!("the Ready helper changed");
+    };
+    let _ = stream
+        .send(proto::FrontDoorDelegationRequest {
+            frame: Some(*frame).into(),
+            ..Default::default()
+        })
+        .await;
+    Ok(stream)
+}
+
+/// What a join that must be refused was answered.
+async fn join_refused(
+    client: &reqwest::Client,
+    url: &str,
+    protocol: Protocol,
+    owner: &str,
+    handle: &[u8],
+    open: &proto::CredentialDelegationOpen,
+) -> Result<(ErrorCode, String)> {
+    let mut stream = join_front_door(client, url, protocol, owner, handle, open).await?;
+    match tokio::time::timeout(
+        BOUND,
+        stream.message::<proto::FrontDoorDelegationResponse>(),
+    )
+    .await?
+    {
+        Err(error) => Ok((error.code, error.message.unwrap_or_default())),
+        // An admission, or anything else, before the refusal is a join served.
+        Ok(_) => anyhow::bail!("a front-door join that must be refused was answered"),
+    }
+}
+
+/// A join that must be served: its first answer is the admission, naming
+/// exactly the front-door operations the epoch serves.
+async fn join_admitted(
+    client: &reqwest::Client,
+    url: &str,
+    protocol: Protocol,
+    handle: &[u8],
+    open: &proto::CredentialDelegationOpen,
+) -> Result<impl Sized> {
+    let mut stream = join_front_door(client, url, protocol, ALICE, handle, open).await?;
+    let first = tokio::time::timeout(
+        BOUND,
+        stream.message::<proto::FrontDoorDelegationResponse>(),
+    )
+    .await??
+    .context("the join ended before its admission")?
+    .to_owned_message();
+    let Some(proto::front_door_delegation_response::Output::Admitted(admitted)) = first.output
+    else {
+        anyhow::bail!("a join's first answer was not its admission");
+    };
+    ensure!(
+        admitted.capabilities
+            == [
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR,
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
+            ],
+        "{:?}",
+        admitted.capabilities
+    );
+    Ok(stream)
+}
+
 fn keepalive() -> proto::DelegateCredentialsRequest {
     proto::DelegateCredentialsRequest {
         input: Some(proto::delegate_credentials_request::Input::Keepalive(
@@ -342,6 +471,39 @@ async fn journey(protocol: Protocol) -> Result<()> {
             ensure!(matches!(answer.output, Some(proto::delegate_credentials_response::Output::Keepalive(_))), "keepalive not answered");
             ensure!(!answer.accepts_keepalive, "the flag belongs to the admission only");
         }
+
+        // The owner's local front door joins its own epoch by the handle the
+        // admission answered with; nobody else does (#4909). An unknown and
+        // another owner's handle get one refusal, word for word.
+        let step = Duration::from_secs(5);
+        // An Open that doesn't declare a front door gets no handle.
+        let (undeclared, none) = tokio::time::timeout(step, admit_raw(&client, &url, protocol, &open))
+            .await
+            .context("front door: undeclared admission")??;
+        ensure!(none.is_empty(), "an undeclared delegation got a handle");
+        drop(undeclared);
+        let mut open = open.clone();
+        open.front_door = true;
+        let (epoch, handle) = tokio::time::timeout(step, admit_raw(&client, &url, protocol, &open))
+            .await
+            .context("front door: admission")??;
+        ensure!(handle.len() == CREDENTIAL_BRIDGE_EPOCH_HANDLE_BYTES, "the admission carries one handle");
+        let joined = tokio::time::timeout(step, join_admitted(&client, &url, protocol, &handle, &open))
+            .await
+            .context("front door: first join")??;
+        let (code, _) = tokio::time::timeout(step, join_refused(&client, &url, protocol, ALICE, &handle, &open))
+            .await
+            .context("front door: second join")??;
+        ensure!(code == ErrorCode::AlreadyExists, "a second join of a live epoch: {code:?}");
+        let mut unknown = handle.clone();
+        unknown[0] ^= 1;
+        for (owner, presented) in [(BOB, handle.as_slice()), (ALICE, unknown.as_slice())] {
+            let refusal = tokio::time::timeout(step, join_refused(&client, &url, protocol, owner, presented, &open))
+                .await
+                .context("front door: refused join")??;
+            ensure!(refusal == (ErrorCode::PermissionDenied, "credential delegation denied".to_owned()), "{refusal:?}");
+        }
+        drop((joined, epoch));
 
         // A repeated Open and an over-limit envelope close their own epochs.
         for oversized in [false, true] {

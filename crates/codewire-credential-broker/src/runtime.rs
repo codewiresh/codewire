@@ -1371,8 +1371,9 @@ where
     }
 
     /// This broker serves beside the environment's front door. Only
-    /// [`crate::run_admitted_credential_bridges`] calls it, before either
-    /// session serves, so no request can turn it on or off.
+    /// [`crate::run_admitted_credential_bridges`], before either session
+    /// serves, and a delegation epoch whose admitted Open declared a front
+    /// door (#4909), at admission, call it; no request can turn it on or off.
     pub(crate) fn paired_with_front_door(mut self) -> Self {
         self.login_delivery = LoginDelivery::Placeholder;
         self

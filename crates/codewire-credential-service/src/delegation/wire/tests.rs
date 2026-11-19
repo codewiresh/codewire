@@ -303,6 +303,7 @@ fn delegation_error_mapping_discards_upstream_diagnostics() {
         Status::permission_denied("synthetic-provider-secret-canary"),
         Status::unavailable("synthetic-provider-secret-canary"),
         Status::resource_exhausted("synthetic-provider-secret-canary"),
+        Status::already_exists("synthetic-provider-secret-canary"),
     ] {
         let error = wire_error(status);
         assert!(!format!("{error:?}").contains("synthetic-provider-secret-canary"));
@@ -404,4 +405,97 @@ async fn delegation_response_merges_keepalive_answers_and_ends_with_the_bridge()
     drop(frames_tx);
     assert!(responses.next().await.is_none());
     drop(keepalives);
+}
+
+/// A front-door delegation carries front-door frames both ways unchanged,
+/// and the same bounds as a delegation: no empty frame, and never a host
+/// Open, which the local relay writes itself (#4909).
+#[test]
+fn front_door_delegation_carries_front_door_frames_and_refuses_open_or_empty() {
+    use bridge::credential_bridge_guest_message::Payload as Guest;
+    use bridge::credential_bridge_host_message::Payload as Host;
+    let request_id = Uuid::new_v4().to_string();
+    let guest = bridge::CredentialBridgeGuestMessage {
+        payload: Some(Guest::StreamData(bridge::CredentialBridgeStreamData {
+            request_id: request_id.clone(),
+            data: b"frame".to_vec(),
+        })),
+    };
+    let bytes = guest.encode_to_vec();
+    let public = public_bridge::CredentialBridgeGuestMessage::decode_from_slice(&bytes).unwrap();
+    let decoded = decode_front_door_frame(proto::FrontDoorDelegationRequest {
+        frame: Some(public).into(),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(decoded.encode_to_vec(), bytes);
+    for empty in [
+        proto::FrontDoorDelegationRequest::default(),
+        proto::FrontDoorDelegationRequest {
+            frame: Some(public_bridge::CredentialBridgeGuestMessage::default()).into(),
+            ..Default::default()
+        },
+    ] {
+        assert_eq!(
+            decode_front_door_frame(empty).unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    let host = bridge::CredentialBridgeHostMessage {
+        payload: Some(Host::StreamData(bridge::CredentialBridgeStreamData {
+            request_id,
+            data: b"answer".to_vec(),
+        })),
+    };
+    let encoded = host.encode_to_vec();
+    let wire = encode_front_door_frame(host).unwrap();
+    let Some(proto::front_door_delegation_response::Output::Frame(frame)) = wire.output else {
+        panic!("a front-door frame must not be an admission");
+    };
+    assert_eq!(frame.encode_to_vec(), encoded);
+    for refused in [
+        bridge::CredentialBridgeHostMessage::default(),
+        bridge::CredentialBridgeHostMessage {
+            payload: Some(Host::Open(bridge::CredentialBridgeOpen::default())),
+        },
+    ] {
+        assert!(encode_front_door_frame(refused).is_err());
+    }
+}
+
+/// A refused join is logged by its code alone: an unknown, ended and other
+/// owner's handle are one reason, and nothing presented is ever written.
+#[test]
+fn a_refused_front_door_join_is_counted_by_code_and_never_by_its_content() {
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let writer = {
+        let lines = std::sync::Arc::clone(&lines);
+        move || CaptureWriter(std::sync::Arc::clone(&lines))
+    };
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(writer)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        front_door_refused(&Status::permission_denied("synthetic-presented-handle"));
+        front_door_refused(&Status::already_exists("synthetic-second-join"));
+    });
+    let logged = String::from_utf8(lines.lock().unwrap().clone()).unwrap();
+    assert!(logged.contains("reason=\"no_live_epoch\""), "{logged}");
+    assert!(logged.contains("reason=\"already_joined\""), "{logged}");
+    assert!(!logged.contains("synthetic"), "{logged}");
+}
+
+struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }

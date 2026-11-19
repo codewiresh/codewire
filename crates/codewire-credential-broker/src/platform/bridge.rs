@@ -12,6 +12,7 @@
 //! body being dropped, not an uncommunicated remote loss of interest; the
 //! original authenticated expiry and owner shutdown still bound that epoch.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -46,11 +47,12 @@ use crate::{
 };
 
 mod front_door;
+pub use front_door::FrontDoorScope;
 use front_door::{EpochBounds, EpochHandle, Registry as FrontDoorRegistry};
 
 /// The operations a joined front-door stream serves, listed in its response
 /// headers; the relay copies exactly these into the front door's Open.
-const FRONT_DOOR_CAPABILITIES: &[&str] = &[
+pub const FRONT_DOOR_CAPABILITIES: &[&str] = &[
     codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR,
     codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
 ];
@@ -284,7 +286,7 @@ where
         I: Stream<Item = Result<v1::CredentialBridgeGuestMessage, Status>> + Send + 'static,
         F: Future<Output = Result<(Arc<B>, I), PlatformBridgeAuthenticationError>> + Send,
     {
-        let (stream, expires_at_unix, _) = self.serve(admission, false).await?;
+        let (stream, expires_at_unix, _) = self.serve(admission, Joinable::No).await?;
         Ok((stream, expires_at_unix))
     }
 
@@ -307,19 +309,125 @@ where
         I: Stream<Item = Result<v1::CredentialBridgeGuestMessage, Status>> + Send + 'static,
         F: Future<Output = Result<(Arc<B>, I), PlatformBridgeAuthenticationError>> + Send,
     {
-        let (stream, expires_at_unix, handle) = self.serve(admission, true).await?;
-        Ok((stream, expires_at_unix, handle.ok_or_else(unavailable)?))
+        let (stream, expires_at_unix, handle) = self.serve(admission, Joinable::Binding).await?;
+        Ok((
+            stream,
+            expires_at_unix,
+            handle.ok_or_else(unavailable)?.header_value(),
+        ))
+    }
+
+    /// [`Self::serve_authenticated`] for an owner's delegation epoch (#4909).
+    /// The admission also says whether the delegation's Open declared a front
+    /// door. If it did, the epoch's broker seals agent logins with
+    /// placeholders from its first request, that owner's local front door may
+    /// join it, and its handle is returned, for the admission answer and
+    /// nowhere else. If not, logins are delivered as before, no front door
+    /// can join, and the handle is empty.
+    pub async fn serve_authenticated_delegation<B, I, F>(
+        &self,
+        owner: String,
+        admission: F,
+    ) -> Result<
+        (
+            ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>,
+            u64,
+            Vec<u8>,
+        ),
+        Status,
+    >
+    where
+        B: PlatformRuntimeAuthority + 'static,
+        I: Stream<Item = Result<v1::CredentialBridgeGuestMessage, Status>> + Send + 'static,
+        F: Future<Output = Result<(Arc<B>, I, bool), PlatformBridgeAuthenticationError>> + Send,
+    {
+        // Whether the delegation's admitted Open declared a front door: read
+        // only once admission has succeeded.
+        let front_door = Arc::new(AtomicBool::new(false));
+        let declared = Arc::clone(&front_door);
+        let admission = async move {
+            let (authority, input, wanted) = admission.await?;
+            declared.store(wanted, Ordering::Release);
+            Ok((authority, input))
+        };
+        let (stream, expires_at_unix, handle) = self
+            .serve(admission, Joinable::Owner(owner, front_door))
+            .await?;
+        Ok((
+            stream,
+            expires_at_unix,
+            handle.map(|handle| handle.to_vec()).unwrap_or_default(),
+        ))
+    }
+
+    /// An owner's local front door joins one of that owner's delegation
+    /// epochs by the handle in its request headers (#4909), read exactly as a
+    /// hosted join's. The caller has checked the owner's OAuth; the epoch's
+    /// environment comes from the epoch. A missing, repeated or wrong-length
+    /// handle, or one that names no live epoch of this owner, is refused the
+    /// same way as any other.
+    pub async fn join_delegated_front_door(
+        &self,
+        owner: String,
+        metadata: &MetadataMap,
+        input: BoxStream<'static, Result<v1::CredentialBridgeGuestMessage, Status>>,
+    ) -> Result<ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>, Status> {
+        let permit = self.acquire()?;
+        let deadline = Instant::now() + ADMISSION_TIMEOUT;
+        tokio::time::timeout_at(deadline, async {
+            let presented =
+                EpochHandle::presented(metadata).ok_or_else(front_door::handle_refused)?;
+            self.join(FrontDoorScope::Owner(owner), &presented, input, permit)
+                .await
+        })
+        .await
+        .map_err(|_| Status::deadline_exceeded("front-door bridge admission timed out"))?
+    }
+
+    /// Join the epoch in `scope` whose handle is `presented`, as its
+    /// front-door entry. Shared by the hosted and delegated joins.
+    async fn join(
+        &self,
+        scope: FrontDoorScope,
+        presented: &EpochHandle,
+        input: BoxStream<'static, Result<v1::CredentialBridgeGuestMessage, Status>>,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>, Status> {
+        let claim = self.state.front_doors.claim(&scope, presented, permit)?;
+        let epoch = Epoch {
+            shutdown: self.state.shutdown.clone(),
+            input_closed: CancellationToken::new(),
+            expires_at_unix: claim.bounds.expires_at_unix,
+            deadline: claim.bounds.deadline,
+        };
+        epoch.ensure_live().map_err(bridge_status)?;
+        let (output, receiver) = mpsc::channel(RESPONSE_BUFFER);
+        let sink = ResponseSink { output, epoch };
+        let transport = RelayTransport {
+            input,
+            sink,
+            _occupied: Some(claim.guard),
+        };
+        let admitted = admit_credential_bridge(transport, claim.environment_id, claim.generation)
+            .await
+            .map_err(bridge_status)?;
+        claim
+            .joins
+            .send(admitted)
+            .await
+            .map_err(|_| unavailable())?;
+        Ok(ReceiverStream::new(receiver))
     }
 
     async fn serve<B, I, F>(
         &self,
         admission: F,
-        joinable: bool,
+        joinable: Joinable,
     ) -> Result<
         (
             ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>,
             u64,
-            Option<tonic::metadata::BinaryMetadataValue>,
+            Option<EpochHandle>,
         ),
         Status,
     >
@@ -363,7 +471,26 @@ where
         } = admission?;
         sink.epoch.ensure_live().map_err(bridge_status)?;
         let expires_at_unix = sink.epoch.expires_at_unix;
-        if !joinable {
+        let scope = match joinable {
+            Joinable::No => None,
+            Joinable::Binding => Some(FrontDoorScope::Binding {
+                environment_id,
+                generation,
+            }),
+            Joinable::Owner(owner, front_door) => front_door
+                .load(Ordering::Acquire)
+                .then_some(FrontDoorScope::Owner(owner)),
+        };
+        // A delegation that declared a front door delivers placeholders, never
+        // the sign-in's tokens, from its first request: before any join, so a
+        // front door that never joins fails closed. Hosted epochs are left as
+        // they are (#4001).
+        let broker = if seals_placeholders(scope.as_ref()) {
+            broker.paired_with_front_door()
+        } else {
+            broker
+        };
+        let Some(scope) = scope else {
             self.spawn_worker(permit, async move {
                 // Never select cancellation against or abort this future. Transport
                 // termination ends request tasks, then the shared runner drains
@@ -373,7 +500,7 @@ where
                 }
             })?;
             return Ok((ReceiverStream::new(receiver), expires_at_unix, None));
-        }
+        };
         let (joins, joining) = mpsc::channel(1);
         let bounds = EpochBounds {
             expires_at_unix,
@@ -382,7 +509,7 @@ where
         let (handle, registration) =
             self.state
                 .front_doors
-                .register(environment_id, generation, bounds, joins)?;
+                .register(scope, environment_id, generation, bounds, joins)?;
         self.spawn_worker(permit, async move {
             // The epoch can be joined for exactly as long as this worker runs.
             let _registration = registration;
@@ -627,38 +754,17 @@ where
                 Uuid::parse_str(session.context.environment_id.as_str()).map_err(|_| denied())?;
             let generation = session.context.environment_generation;
             // Then the handle, only among this binding's live epochs.
-            let presented = EpochHandle::presented(&metadata).ok_or_else(denied)?;
-            let claim =
-                self.state
-                    .front_doors
-                    .claim(environment_id, generation, &presented, permit)?;
-            let epoch = Epoch {
-                shutdown: self.state.shutdown.clone(),
-                input_closed: CancellationToken::new(),
-                expires_at_unix: claim.bounds.expires_at_unix,
-                deadline: claim.bounds.deadline,
+            let presented =
+                EpochHandle::presented(&metadata).ok_or_else(front_door::handle_refused)?;
+            let scope = FrontDoorScope::Binding {
+                environment_id,
+                generation,
             };
-            epoch.ensure_live().map_err(bridge_status)?;
-            let (output, receiver) = mpsc::channel(RESPONSE_BUFFER);
-            let sink = ResponseSink { output, epoch };
-            let transport = RelayTransport {
-                input: input.boxed(),
-                sink,
-                _occupied: Some(claim.guard),
-            };
-            let admitted = admit_credential_bridge(transport, environment_id, generation)
-                .await
-                .map_err(bridge_status)?;
-            claim
-                .joins
-                .send(admitted)
-                .await
-                .map_err(|_| unavailable())?;
-            Ok::<_, Status>(receiver)
+            self.join(scope, &presented, input.boxed(), permit).await
         })
         .await
         .map_err(|_| Status::deadline_exceeded("front-door bridge admission timed out"))??;
-        let mut response = Response::new(ReceiverStream::new(joined));
+        let mut response = Response::new(joined);
         for capability in FRONT_DOOR_CAPABILITIES {
             response.metadata_mut().append(
                 codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER,
@@ -667,6 +773,23 @@ where
         }
         Ok(response)
     }
+}
+
+/// Whether an epoch joinable in `scope` seals its agent logins with
+/// placeholders: only a delegation that declared a front door (#4909).
+fn seals_placeholders(scope: Option<&FrontDoorScope>) -> bool {
+    matches!(scope, Some(FrontDoorScope::Owner(_)))
+}
+
+/// Whether an admitted epoch can be joined by a front door, and in which
+/// scope.
+enum Joinable {
+    No,
+    /// Hosted (#4001): the binding the workspace authorization names.
+    Binding,
+    /// Delegated (#4909): the owner whose OAuth admitted the delegation, and
+    /// whether its Open declared a front door.
+    Owner(String, Arc<AtomicBool>),
 }
 
 #[derive(Clone)]

@@ -5,6 +5,7 @@
 
 mod authenticated;
 mod front_door;
+mod front_door_delegation;
 mod rotation;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
