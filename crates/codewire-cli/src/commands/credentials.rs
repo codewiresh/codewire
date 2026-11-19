@@ -83,6 +83,7 @@ async fn handle_local_with_receipt(
     // store left serving running VMs still saves a connect correctly, so it
     // goes on without the check.
     let store_probe = codewire_local_credentials::AuthorityFeature::StoreProbe;
+    let mut store_check_explained = false;
     if matches!(
         operation,
         CredentialOperation::Credential(CredentialsCommand::Connect(_))
@@ -90,6 +91,9 @@ async fn handle_local_with_receipt(
     {
         drop(client);
         client = super::connect_local_credential_authority_preferring(store_probe).await?;
+        if !store_probe.served_by(client.info().protocol_version) {
+            store_check_explained = explain_previous_cws_store(&mut client).await?;
+        }
     }
     #[cfg(target_os = "linux")]
     if store_notice::writes_material(&operation) {
@@ -105,7 +109,9 @@ async fn handle_local_with_receipt(
         CredentialOperation::Credential(command) => command,
     };
     match command {
-        CredentialsCommand::Connect(args) => connect_credential(&mut client, args, execution).await,
+        CredentialsCommand::Connect(args) => {
+            connect_credential(&mut client, args, execution, store_check_explained).await
+        }
         CredentialsCommand::Add(args) => add_credential(&mut client, args, execution).await,
         CredentialsCommand::Generate(args) => generate_local_ssh(&mut client, &args)
             .await
@@ -188,10 +194,47 @@ async fn connect_credential(
     client: &mut LocalCredentialClient,
     args: CredentialConnectArgs,
     execution: &mut super::credential_input::CredentialExecution,
+    store_check_explained: bool,
 ) -> anyhow::Result<()> {
     let json = matches!(args.output, OutputFormat::Json);
-    let mut store = LocalConnectStore { client, json };
+    let mut store = LocalConnectStore {
+        client,
+        json,
+        store_check_explained,
+    };
     super::credential_input::connect::connect(&mut store, args, execution).await
+}
+
+/// After a cw update, the store a connect would use is the previous cw's
+/// while its VMs run there (`docs/dev/LINUX-LOCAL-VMS.md`, "Credentials after
+/// an upgrade"): name them and the step that moves them, before any provider
+/// link, and at a terminal offer that restart. Once they run on this cw, its
+/// store replaces the previous one and the connect goes on with it. False
+/// when no VM can be named, so the connect says only that the store is the
+/// previous cw's.
+async fn explain_previous_cws_store(client: &mut LocalCredentialClient) -> anyhow::Result<bool> {
+    let Some((config, previous)) = super::previous_cw_with_vms().await else {
+        return Ok(false);
+    };
+    let names: Vec<&str> = previous.stopping().collect();
+    let style =
+        crate::output::Capabilities::from_process(crate::output::OutputMode::Text).stderr_style();
+    eprintln!(
+        "{} {}",
+        style.status(crate::output::Status::Attention),
+        previous_cws_store_notice(&names)
+    );
+    eprintln!(
+        "{} cw upgrade --vms",
+        style.status(crate::output::Status::Next)
+    );
+    if super::offer_previous_vms_restart(&config, &previous).await? {
+        *client = super::connect_local_credential_authority_preferring(
+            codewire_local_credentials::AuthorityFeature::StoreProbe,
+        )
+        .await?;
+    }
+    Ok(true)
 }
 
 /// The store must accept a write before any provider step (#4826): a refusal
@@ -244,8 +287,22 @@ fn probe_refusal(save: Save<'_>, status: &tonic::Status) -> Option<anyhow::Error
     ))
 }
 
-/// Said once when a connect goes on without checking the store first.
-const STORE_CHECK_SKIPPED: &str = "Couldn't check the local credential store first: it's still the one the cw you updated from started, while local VMs run.";
+/// What a connect says while the previous cw's VMs keep its store.
+fn previous_cws_store_notice(names: &[&str]) -> String {
+    let (noun, run, them) = if names.len() == 1 {
+        ("VM", "runs", "it")
+    } else {
+        ("VMs", "run", "them")
+    };
+    format!(
+        "Your local {noun} {} still {run} on the cw you updated from, and so does your local credential store, so it can't be checked before you sign in. Restarting {them} on this cw moves it here.",
+        names.join(", ")
+    )
+}
+
+/// Said once when a connect goes on without checking the store first and no
+/// VM on the previous cw can be named.
+const STORE_CHECK_SKIPPED: &str = "Your local credential store is still the one the cw you updated from started, so it can't be checked before you sign in; it switches to this cw once no local VM runs.";
 
 fn print_store_check_skipped() {
     let style =
@@ -261,6 +318,8 @@ fn print_store_check_skipped() {
 struct LocalConnectStore<'a> {
     client: &'a mut LocalCredentialClient,
     json: bool,
+    /// The previous cw's store was already explained before the connect.
+    store_check_explained: bool,
 }
 
 /// A provider's answer, held only until it is saved.
@@ -333,7 +392,9 @@ impl ConnectStore for LocalConnectStore<'_> {
             };
             probe_local_store(self.client, save, self.json).await
         } else {
-            print_store_check_skipped();
+            if !self.store_check_explained {
+                print_store_check_skipped();
+            }
             Ok(())
         }
     }
@@ -809,8 +870,13 @@ async fn add_credential(
     execution: &mut super::credential_input::CredentialExecution,
 ) -> anyhow::Result<()> {
     if args.provider.as_deref() == Some(CLAUDE_SUBSCRIPTION_ALIAS) {
-        return connect_credential(client, claude_token_from_alias("local", &args)?, execution)
-            .await;
+        return connect_credential(
+            client,
+            claude_token_from_alias("local", &args)?,
+            execution,
+            false,
+        )
+        .await;
     }
     if args.provider.as_deref() == Some("ssh") {
         let name = validate_ssh_import(&args)?;
@@ -1506,6 +1572,21 @@ mod local_store_tests;
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_connect_on_the_previous_cws_store_names_its_vms_and_the_move() {
+        let one = super::previous_cws_store_notice(&["dev"]);
+        assert_eq!(
+            one,
+            "Your local VM dev still runs on the cw you updated from, and so does your local credential store, so it can't be checked before you sign in. Restarting it on this cw moves it here."
+        );
+        let two = super::previous_cws_store_notice(&["dev", "web"]);
+        assert!(
+            two.starts_with("Your local VMs dev, web still run"),
+            "{two}"
+        );
+        assert!(two.contains("Restarting them on this cw"), "{two}");
+    }
+
+    #[test]
     fn oversized_stdin_after_maximum_crlf_is_not_silently_truncated() {
         let mut input = vec![b'x'; super::MAX_PROTECTED_VALUE_BYTES];
         input.extend_from_slice(b"\r\n");
@@ -2051,6 +2132,7 @@ mod tests {
                 guided: false,
             },
             &mut execution,
+            false,
         )
         .await
         .unwrap_err();

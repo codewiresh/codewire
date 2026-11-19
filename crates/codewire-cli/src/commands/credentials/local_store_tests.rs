@@ -121,6 +121,7 @@ async fn a_store_that_refuses_a_write_is_not_ready_for_a_sign_in() {
     *store.refusal.lock().unwrap() = Some(ProtectedStoreError::AccessDenied);
     let (_authority, mut client) = serve(store.clone()).await;
     let error = LocalConnectStore {
+        store_check_explained: false,
         client: &mut client,
         json: false,
     }
@@ -138,6 +139,7 @@ async fn a_store_that_refuses_a_write_is_not_ready_for_a_sign_in() {
 
     *store.refusal.lock().unwrap() = None;
     LocalConnectStore {
+        store_check_explained: false,
         client: &mut client,
         json: false,
     }
@@ -167,6 +169,7 @@ async fn a_store_that_times_out_or_is_unavailable_is_not_ready() {
         let text = format!(
             "{:#}",
             LocalConnectStore {
+                store_check_explained: false,
                 client: &mut client,
                 json: false,
             }

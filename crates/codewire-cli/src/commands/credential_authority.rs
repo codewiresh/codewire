@@ -275,23 +275,46 @@ pub(crate) async fn connect_local_credential_authority_for_boot()
     let running = codewire_local_vmm::supervisor_upgrade::vms_that_may_run(&mut supervisor)
         .await
         .map_err(anyhow::Error::from)?;
-    Err(another_cws_authority_refusal(&running))
+    // Boxed: the offer restarts VMs through this same boot path. It cannot
+    // come back here, because the move retires the previous supervisor first.
+    Err(Box::pin(super::offer_restart_when_refused(
+        another_cws_authority_refusal(running).into(),
+    ))
+    .await)
 }
 
 /// What a user reads when a VM would start with credentials that another
 /// cw's credential authority keeps: which VMs keep it serving, and the
-/// command that stops one.
-fn another_cws_authority_refusal(running: &[String]) -> anyhow::Error {
-    if running.is_empty() {
-        // The VM that kept it serving stopped between the two looks.
-        return anyhow::anyhow!(
-            "your local credentials are still kept by the cw you updated from, which can't give a VM started by this cw its credentials; no local VM runs any more, so run this again"
-        );
-    }
-    anyhow::anyhow!(
-        "your local VMs {} keep your local credentials with the cw you updated from, which can't give a VM started by this cw its credentials; it switches to this cw once they stop (`cw --local stop NAME`)",
-        running.join(", ")
+/// command that stops one. Typed, so that the restart offer knows it.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AnotherCwsAuthority {
+    /// The VM that kept it serving stopped between the two looks.
+    #[error(
+        "your local credentials are still kept by the cw you updated from, which can't give a VM started by this cw its credentials; no local VM runs any more, so run this again"
+    )]
+    NoneRuns,
+    #[error("{}", running_refusal(.0))]
+    Running(Vec<String>),
+}
+
+fn running_refusal(names: &[String]) -> String {
+    let (noun, keep, they) = if names.len() == 1 {
+        ("VM", "keeps", "it stops")
+    } else {
+        ("VMs", "keep", "they stop")
+    };
+    format!(
+        "your local {noun} {} {keep} your local credentials with the cw you updated from, which can't give a VM started by this cw its credentials; it switches to this cw once {they} (`cw --local stop NAME`)",
+        names.join(", ")
     )
+}
+
+fn another_cws_authority_refusal(running: Vec<String>) -> AnotherCwsAuthority {
+    if running.is_empty() {
+        AnotherCwsAuthority::NoneRuns
+    } else {
+        AnotherCwsAuthority::Running(running)
+    }
 }
 
 /// Replace a running authority that is another cw's, so the VM a boot command
@@ -942,12 +965,18 @@ mod tests {
     #[test]
     fn a_boot_another_cws_credential_service_cannot_serve_names_the_vms_to_stop() {
         let refusal =
-            another_cws_authority_refusal(&["dev".to_owned(), "web".to_owned()]).to_string();
+            another_cws_authority_refusal(vec!["dev".to_owned(), "web".to_owned()]).to_string();
         assert_eq!(
             refusal,
             "your local VMs dev, web keep your local credentials with the cw you updated from, which can't give a VM started by this cw its credentials; it switches to this cw once they stop (`cw --local stop NAME`)"
         );
-        let raced = another_cws_authority_refusal(&[]).to_string();
+        let one = another_cws_authority_refusal(vec!["dev".to_owned()]).to_string();
+        assert!(
+            one.starts_with("your local VM dev keeps your local credentials")
+                && one.contains("once it stops"),
+            "{one}"
+        );
+        let raced = another_cws_authority_refusal(Vec::new()).to_string();
         assert!(raced.ends_with("run this again"), "{raced}");
         assert!(!raced.contains("cw --local stop"), "{raced}");
     }

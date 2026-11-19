@@ -593,12 +593,36 @@ a VM that this cw starts its credentials.
 
   ```text
   your local VMs dev, web keep your local credentials with the cw you updated from, which can't give a VM started by this cw its credentials; it switches to this cw once they stop (`cw --local stop NAME`)
+  cw: restart them with `cw upgrade --vms`
   ```
 
-  A VM with no credential profile starts as before. One command is not
+  With one VM it reads `your local VM dev keeps …` and `once it stops`.
+  At a terminal the command also offers that restart, with the consent
+  `cw upgrade --vms` asks for, since a restart ends the work running in
+  them. Restarting the first VM on this cw also replaces the credential
+  service, so once they run here the refused command runs again by hand
+  and is served. A VM with no credential profile starts as before. One command is not
   refused: `cw --local restart NAME` when NAME is the only VM that keeps the
   other cw's service. Its own stop is what frees the service, so the check
   is made after the stop and the start replaces the service.
+- **A sign-in while it serves.** `cw credentials --local connect` saves to
+  the credential service that is running. When that is the previous cw's,
+  which can't check its store first (#4826), the connect names the VMs that
+  keep it and the one step that moves them, before any provider link:
+
+  ```text
+  ! Your local VMs dev, web still run on the cw you updated from, and so does your local credential store, so it can't be checked before you sign in. Restarting them on this cw moves it here.
+  → cw upgrade --vms
+  ```
+
+  At a terminal it offers that restart first, with the same consent. When
+  you accept, the VMs restart on this cw, its credential service replaces
+  the previous one, and the connect checks the store and carries on in the
+  same command. When you decline, or without a terminal, the connect carries
+  on unchecked and saves to the previous cw's service, which keeps the
+  credential when it is replaced. When no VM can be named, the connect says
+  only that the store is still the previous cw's and switches once no local
+  VM runs, and it offers nothing.
 - **What the logs say.** A start that fails says why in two places, the
   runner's log (`logs/runner-ID.log` under the local VM state) and the
   credential service's broker log (`logs/brokers.log` under the credential

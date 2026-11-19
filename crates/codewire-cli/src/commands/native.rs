@@ -3001,14 +3001,14 @@ fn refuse_orphaned(
 }
 
 /// A boot command or `cw setup --local` refused while a previous cw's
-/// supervisor may run a VM (#2826): at a terminal, offer to move them here.
-/// The refused command itself does not continue; it runs again by hand.
-async fn offer_restart_when_refused(error: anyhow::Error) -> anyhow::Error {
-    use codewire_local_vmm::supervisor_upgrade::{TakeoverError, previous_cw};
-    if !matches!(
-        error.downcast_ref::<TakeoverError>(),
-        Some(TakeoverError::Busy(_))
-    ) {
+/// supervisor may run a VM (#2826), or while its credential service must
+/// keep serving them (#5238): at a terminal, offer to move them here. The
+/// refused command itself does not continue; it runs again by hand. The
+/// move retires the previous supervisor before it starts anything, so a
+/// start the move makes finds nothing to offer.
+pub(crate) async fn offer_restart_when_refused(error: anyhow::Error) -> anyhow::Error {
+    use codewire_local_vmm::supervisor_upgrade::previous_cw;
+    if !restart_offer_applies(&error) {
         return error;
     }
     let hint = || anyhow::anyhow!("{error}\ncw: restart them with `cw upgrade --vms`");
@@ -3036,6 +3036,50 @@ async fn offer_restart_when_refused(error: anyhow::Error) -> anyhow::Error {
         ),
         Err(failure) => failure,
     }
+}
+
+/// A refusal that VMs on the previous cw cause, which moving them answers.
+fn restart_offer_applies(error: &anyhow::Error) -> bool {
+    use super::credential_authority::AnotherCwsAuthority;
+    use codewire_local_vmm::supervisor_upgrade::TakeoverError;
+    matches!(
+        error.downcast_ref::<TakeoverError>(),
+        Some(TakeoverError::Busy(_))
+    ) || matches!(
+        error.downcast_ref::<AnotherCwsAuthority>(),
+        Some(AnotherCwsAuthority::Running(_))
+    )
+}
+
+/// The VMs that still run on the previous cw's supervisor, with the config to
+/// move them, or `None` when it serves none or can't be asked.
+pub(crate) async fn previous_cw_with_vms() -> Option<(
+    NativeRuntimeConfig,
+    codewire_local_vmm::supervisor_upgrade::PreviousCw,
+)> {
+    let config = native_runtime_config().ok()?;
+    let previous = codewire_local_vmm::supervisor_upgrade::previous_cw(&config)
+        .await
+        .ok()
+        .flatten()?;
+    let has_vms = previous.stopping().next().is_some();
+    has_vms.then_some((config, previous))
+}
+
+/// For a command that goes on either way: at a terminal, offer to restart
+/// `previous`'s VMs on this cw. True once they moved; a VM no stop reaches,
+/// a declined offer or no terminal moves nothing.
+pub(crate) async fn offer_previous_vms_restart(
+    config: &NativeRuntimeConfig,
+    previous: &codewire_local_vmm::supervisor_upgrade::PreviousCw,
+) -> anyhow::Result<bool> {
+    if refuse_orphaned(previous).is_err() {
+        return Ok(false);
+    }
+    if !matches!(restart_consent(previous, false), Consent::Yes) {
+        return Ok(false);
+    }
+    move_previous_environments(config, previous, false).await
 }
 
 async fn connect_native_after_authority_admission<T, A, AF, C, CF>(
@@ -4459,6 +4503,25 @@ fn native_status(status: tonic::Status) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_restart_offer_answers_vms_on_the_previous_cw_only() {
+        use super::super::credential_authority::AnotherCwsAuthority;
+        use codewire_local_vmm::supervisor_upgrade::TakeoverError;
+        assert!(super::restart_offer_applies(&anyhow::Error::from(
+            TakeoverError::Busy("dev".into())
+        )));
+        assert!(super::restart_offer_applies(&anyhow::Error::from(
+            AnotherCwsAuthority::Running(vec!["dev".into(), "web".into()])
+        )));
+        // Nothing runs any more, so there is nothing to move.
+        assert!(!super::restart_offer_applies(&anyhow::Error::from(
+            AnotherCwsAuthority::NoneRuns
+        )));
+        assert!(!super::restart_offer_applies(&anyhow::anyhow!(
+            "your local VMs dev keep your local credentials"
+        )));
+    }
 
     /// A native runtime whose state root is `root`, as a cw run with
     /// CODEWIRE_NATIVE_STATE_ROOT sees it.

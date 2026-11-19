@@ -310,15 +310,30 @@ Issues: #4714 (local), #2559 (cloud).
   not yet observed.
 - **Store check after a `cw` update** (#4826), locally, with a store the
   earlier `cw` left running, which can't check itself first:
-  - with a local VM running: the store stays, the connect goes on without
-    the check, and `cw` prints `! Couldn't check the local credential store
-    first: it's still the one the cw you updated from started, while local
-    VMs run.` before the link;
+  - with a local VM running, piped or declined: before the link, `cw`
+    prints `! Your local VMs NAME still run on the cw you updated from, and
+    so does your local credential store, so it can't be checked before you
+    sign in. Restarting them on this cw moves it here.` and
+    `→ cw upgrade --vms`; the store
+    stays, and the connect goes on without the check. After the VM is moved,
+    `cw credentials --local list` still shows the credential;
+  - with a local VM running, at a terminal: `cw` offers the restart; on yes
+    the VM restarts on this cw, the store is replaced, the check runs and
+    the same connect goes on to the link (`docs/dev/LINUX-LOCAL-VMS.md`,
+    "Credentials after an upgrade", #5238);
   - with no local VM running: the store is replaced before the link, and the
     check runs; with the login keychain locked, the connect stops there,
     saying the keychain is locked and how to unlock it, before any link.
 
-  Not yet observed.
+  Observed on a Linux host, 2026-11-19 (#5238), #5461 at e2a402b342 against
+  VMs left on released v0.4.22, in the credentials smoke's private HOME and
+  Secret Service: piped, the notice and `→ cw upgrade --vms` came before the
+  link and the VM kept running; at a terminal, declined, the same; accepted,
+  `old-run` stopped, started on this cw, and the connect went on to the
+  link, where Ctrl-C saved nothing; `credentials --local list` still showed
+  the earlier key; a second connect, once the store was this cw's, printed
+  no notice. Not yet observed: a store the earlier `cw` left with no VM
+  running, the locked keychain, and a Mac.
 - **Stopped mid-refresh:** a local store whose authority stopped during the
   sign-in's refresh (killed, a crash or a power loss) still opens, and
   `cw credentials --local list` shows the sign-in refreshed, as it was, or
@@ -328,7 +343,7 @@ Issues: #4714 (local), #2559 (cloud).
 - **Gotchas:** after a `cw` update, the first local `connect claude` may
   replace the credential store the previous `cw` left running (starting the
   local VM supervisor, as a VM command does); with a local VM running, it
-  stops and asks you to stop the VMs first.
+  offers to restart the VMs on this `cw` first, as above.
 - **Observed:**
   - Linux local VM, #4798 at f5657302c, 2026-11-15, isolated HOME and Secret
     Service:
