@@ -39,6 +39,7 @@ use tokio_stream::{Stream, StreamExt};
 use tonic::Status;
 use uuid::Uuid;
 
+pub mod front_door_router;
 mod front_door_session;
 pub use front_door_session::{
     FRONT_DOOR_OPEN_TIMEOUT, FRONT_DOOR_SESSION_ROLE_TAG, FrontDoorHostSender,

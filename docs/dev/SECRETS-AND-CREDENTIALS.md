@@ -1773,9 +1773,10 @@ routes, across epochs as well. It does so as follows:
   payload reaches a log or a metric.
 - **Opening:** a guest `Request` or `Upgrade` with an id that isn't live opens
   it on the current upstream. A live id, or one finished within the last 60
-  seconds, can't be opened again: the reuse gets the bridge's error response
-  for that id (a request's `ResponseFailure`, a socket's reset `StreamClose`)
-  and is counted.
+  seconds, can't be opened again: the reuse is dropped and counted, never
+  answered or forwarded, since the id's own request would read the answer.
+  So is a frame of the other kind for a live id (a `Cancel` on a socket, say);
+  the id goes on as it was.
 - **Frames the front-door entry never serves** (`EnvironmentProjection`,
   `Ssh`, `CodexLogin`, `ClaudeLogin`) are refused by the router with the
   error response for their id, so no SSH or login flow crosses this carrier.
