@@ -10,8 +10,13 @@ on:
   # zizmor: ignore[dangerous-triggers] The protected-base workflow executes only sealed scanners over candidate data.
   pull_request_target:
     types: [opened, synchronize, reopened]
+  # mq/ branches are the merge queue's batches (infra#2599). A batch's push runs
+  # the batch's own copy of this file, so the queue lands a squash that changes
+  # this file (or any MQ_CI_PATHS path) only with a workflow review at its head
+  # (tools/merge-queue/README.md, "How CI is proven"). Every policy is loaded
+  # from the main commit the batch was built on, as a pull request's scan does.
   push:
-    branches: [main]
+    branches: [main, 'mq/**']
 
 jobs:
   source-approval: # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; the disposable runner and network policy enforce no write.
@@ -25,9 +30,11 @@ jobs:
         env:
           EVENT_NAME: ${{ forgejo.event_name }}
           EVENT_PATH: ${{ forgejo.event_path }}
+          EVENT_REF: ${{ forgejo.ref }}
           EVENT_SHA: ${{ forgejo.sha }}
         run: |
           set -euo pipefail
+          batch=false
           case "$EVENT_NAME" in
             pull_request_target)
               head_sha="$(jq -er '.pull_request.head.sha | strings | select(test("^[0-9a-f]{40}$"))' "$EVENT_PATH")"
@@ -36,6 +43,9 @@ jobs:
             push)
               head_sha="$EVENT_SHA"
               base_sha="$EVENT_SHA"
+              # A merge-queue batch's base is the main commit it was built on,
+              # found from its history in the next steps.
+              [[ "$EVENT_REF" != refs/heads/mq/* ]] || batch=true
               ;;
             *)
               echo 'unsupported source-approval event' >&2
@@ -46,12 +56,44 @@ jobs:
           {
             echo "head_sha=$head_sha"
             echo "base_sha=$base_sha"
+            echo "batch=$batch"
           } >> "$FORGEJO_OUTPUT"
+
+      - name: Check out the merge-queue batch's history as data
+        if: steps.selection.outputs.batch == 'true'
+        uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.selection.outputs.head_sha }}
+          path: .batch-history
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+          lfs: false
+          clean: true
+
+      - name: Find the main commit the merge-queue batch was built on
+        id: batch
+        if: steps.selection.outputs.batch == 'true'
+        shell: bash
+        working-directory: .batch-history
+        env:
+          HEAD_SHA: ${{ steps.selection.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=core.hooksPath
+          export GIT_CONFIG_VALUE_0=/dev/null
+          [[ "$(git rev-parse --verify HEAD^{commit})" == "$HEAD_SHA" ]]
+          base="$(git merge-base HEAD refs/remotes/origin/main)"
+          [[ "$base" =~ ^[0-9a-f]{40}$ && "$base" != "$HEAD_SHA" ]]
+          echo "merge-queue batch: scanned with the policy of main commit $base"
+          echo "base_sha=$base" >> "$FORGEJO_OUTPUT"
 
       - name: Check out protected policy base
         uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.selection.outputs.base_sha }}
+          ref: ${{ steps.batch.outputs.base_sha || steps.selection.outputs.base_sha }}
           path: .source-approval-base
           fetch-depth: 1
           persist-credentials: false
@@ -71,7 +113,7 @@ jobs:
           clean: true
 
       - name: Check out candidate history as data for the content scan
-        if: forgejo.event_name == 'pull_request_target'
+        if: forgejo.event_name == 'pull_request_target' || steps.selection.outputs.batch == 'true'
         uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.selection.outputs.head_sha }}
@@ -83,11 +125,12 @@ jobs:
           clean: true
 
       - name: Refuse private content before merge
-        if: forgejo.event_name == 'pull_request_target'
+        if: forgejo.event_name == 'pull_request_target' || steps.selection.outputs.batch == 'true'
         shell: bash
         working-directory: .content-scan
         env:
-          BASE_SHA: ${{ steps.selection.outputs.base_sha }}
+          BASE_SHA: ${{ steps.batch.outputs.base_sha || steps.selection.outputs.base_sha }}
+          BATCH: ${{ steps.selection.outputs.batch }}
           EVENT_PATH: ${{ forgejo.event_path }}
           HEAD_SHA: ${{ steps.selection.outputs.head_sha }}
           # The mirror's own private patterns. A finding names only the commit and
@@ -109,10 +152,16 @@ jobs:
               exit 65
             }
           done
-          # The squash commit's message comes from the title and body.
+          # The squash commit's message comes from the title and body. A
+          # merge-queue batch already holds its squash commits, so their
+          # messages are what lands, and they are what is scanned.
           text="$(mktemp)"
-          jq -r '[.pull_request.title // "", .pull_request.body // ""] | join("\n")' \
-            "$EVENT_PATH" >"$text"
+          if [[ "$BATCH" == true ]]; then
+            git log --format=%B "$BASE_SHA..$HEAD_SHA" >"$text"
+          else
+            jq -r '[.pull_request.title // "", .pull_request.body // ""] | join("\n")' \
+              "$EVENT_PATH" >"$text"
+          fi
           CI=true bash "$trusted/check-mirror-content.sh" --pull-request --no-gitleaks \
             --patterns "$trusted/public-content-patterns.txt" --message-file "$text" \
             "$BASE_SHA" "$HEAD_SHA"
@@ -202,7 +251,8 @@ jobs:
         shell: bash
         working-directory: candidate
         env:
-          BASE_SHA: ${{ steps.selection.outputs.base_sha }}
+          BASE_SHA: ${{ steps.batch.outputs.base_sha || steps.selection.outputs.base_sha }}
+          BATCH: ${{ steps.selection.outputs.batch }}
           EVENT_NAME: ${{ forgejo.event_name }}
           EXPECTED_SUPPLYCHAIN: 47a53e3035dbbd040f3249bd2ac858617a7c8fd7
           HEAD_SHA: ${{ steps.selection.outputs.head_sha }}
@@ -222,7 +272,7 @@ jobs:
           source_policy=.supplychain/source-policy.json
           gitleaks_config=.gitleaks.toml
           bun_baseline=.supplychain/bun-baseline.json
-          if [[ "$EVENT_NAME" == pull_request_target ]]; then
+          if [[ "$EVENT_NAME" == pull_request_target || "$BATCH" == true ]]; then
             install_trusted_input() {
               local source="$1"
               local destination="$2"

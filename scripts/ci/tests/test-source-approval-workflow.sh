@@ -40,6 +40,29 @@ grep -Fq 'SUPPLYCHAIN_DATA_DIR: ${{ steps.advisories.outputs.data_dir }}' "$WORK
 if grep -Fq 'OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY' "$WORKFLOW"; then
   fail 'Codewire keeps OSV live; the scan must not read the bundle databases'
 fi
+# A merge-queue batch is scanned like a pull request (infra#2599): on its push,
+# against the main commit it was built on, with that commit's policy only.
+grep -Fxq "    branches: [main, 'mq/**']" "$WORKFLOW" ||
+  fail 'a merge-queue batch push does not run the supply-chain scan'
+# shellcheck disable=SC2016 # Match the workflow's literal text.
+grep -Fq 'base="$(git merge-base HEAD refs/remotes/origin/main)"' "$WORKFLOW" ||
+  fail 'a merge-queue batch is not scanned against the main commit it was built on'
+# shellcheck disable=SC2016 # Match the workflow's literal text.
+[[ "$(grep -cF 'ref: ${{ steps.batch.outputs.base_sha || steps.selection.outputs.base_sha }}' "$WORKFLOW")" == 1 ]] ||
+  fail "the protected policy base is not a merge-queue batch's main commit"
+# shellcheck disable=SC2016 # Match the workflow's literal text.
+[[ "$(grep -cF 'BASE_SHA: ${{ steps.batch.outputs.base_sha || steps.selection.outputs.base_sha }}' "$WORKFLOW")" == 2 ]] ||
+  fail "the content and sealed scans do not check the batch's protected policy base"
+# The private-content scan runs for a batch too, over its merge base to its
+# head, with the squash messages the queue made as the message to check.
+[[ "$(grep -cFx "        if: forgejo.event_name == 'pull_request_target' || steps.selection.outputs.batch == 'true'" "$WORKFLOW")" == 2 ]] ||
+  fail "a merge-queue batch lands without the private-content scan"
+# shellcheck disable=SC2016 # Match the workflow's literal text.
+grep -Fq 'git log --format=%B "$BASE_SHA..$HEAD_SHA" >"$text"' "$WORKFLOW" ||
+  fail "a merge-queue batch's squash messages are not scanned for private content"
+# shellcheck disable=SC2016 # Match the workflow's literal text.
+grep -Fq 'if [[ "$EVENT_NAME" == pull_request_target || "$BATCH" == true ]]; then' "$WORKFLOW" ||
+  fail "a merge-queue batch's scan reads policy from the batch instead of the protected base"
 verifier="$FIXTURE/advisory-verifier.py"
 awk '/^          python3 -I - "\$ADVISORIES"/ { capture = 1; next }
      capture && /^          PY$/ { exit }
