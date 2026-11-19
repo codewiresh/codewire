@@ -253,6 +253,10 @@ impl EgressEvents for LoggedEvents {
             RoundEnd::SendSelfCheck => {
                 tracing::warn!(repeated, "egress self-check result not sent")
             }
+            RoundEnd::TrustChanged => tracing::warn!(
+                repeated,
+                "egress stream dropped: its host's egress trust differs from the one installed"
+            ),
             RoundEnd::Bridge(result) => {
                 tracing::warn!(?result, repeated, "egress stream ended; redialling")
             }
@@ -270,6 +274,7 @@ fn round_reason(end: &RoundEnd) -> &'static str {
         RoundEnd::Connect(_) => "connect",
         RoundEnd::SendSelfCheck => "send_self_check",
         RoundEnd::Bridge(_) => "bridge",
+        RoundEnd::TrustChanged => "trust_changed",
     }
 }
 

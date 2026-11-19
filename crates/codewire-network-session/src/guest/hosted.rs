@@ -48,6 +48,14 @@ pub struct HostedEgressConfig {
     /// How long a stream must carry packets to count as established, so the
     /// next redial goes at once and the backoff starts over.
     pub steady_after: Duration,
+    /// The first wait after a session whose trust differs from the pinned one
+    /// (#5006). Redialling cannot heal that, since only a restart of the
+    /// Sandbox does, so it is paced apart from, and slower than, the loop's
+    /// own backoff: a node that lost a Pod's CA is not met with a session and
+    /// an admission from every Sandbox every few seconds.
+    pub trust_changed_backoff: Duration,
+    /// The longest wait between such sessions.
+    pub trust_changed_max_backoff: Duration,
 }
 
 impl HostedEgressConfig {
@@ -60,6 +68,12 @@ impl HostedEgressConfig {
         first_backoff: Duration::from_millis(500),
         max_backoff: Duration::from_secs(5),
         steady_after: Duration::from_secs(10),
+        // The values of the daemon's binding refusal pacing,
+        // `BROKER_REFUSAL_RETRY_INITIAL` and `BROKER_REFUSAL_RETRY_MAX` in
+        // codewire-workspace-access (#5039), which a refusal that redialling
+        // cannot heal shares.
+        trust_changed_backoff: Duration::from_secs(30),
+        trust_changed_max_backoff: Duration::from_secs(60),
     };
 }
 
@@ -106,6 +120,11 @@ pub enum RoundEnd {
     SendSelfCheck,
     /// The stream carried packets, then the bridge ended.
     Bridge(Result<(), GuestBridgeError>),
+    /// The host's egress trust differs from the one pinned when the daemon
+    /// first became ready, which the daemon installed and the workload now
+    /// trusts. The stream is dropped before its self-check, never bridged or
+    /// reported, and the loop redials (#5006).
+    TrustChanged,
 }
 
 /// Run the egress loop for as long as the daemon runs. `self_check` runs the
@@ -124,11 +143,25 @@ where
     Fut: Future<Output = SelfCheck>,
     E: EgressEvents,
 {
-    let mut ready = false;
+    // The trust of the session that first became ready; `Some` once ready.
+    let mut pinned = None;
     let mut backoff = config.first_backoff;
+    let mut trust_backoff = config.trust_changed_backoff;
     loop {
-        let (end, bridged) = round(config, connector, &self_check, &tun, events, &mut ready).await;
+        let (end, bridged) = round(config, connector, &self_check, &tun, events, &mut pinned).await;
         events.round_ended(&end);
+        match end {
+            RoundEnd::TrustChanged => {
+                drain(&tun, trust_backoff).await;
+                trust_backoff = trust_backoff
+                    .saturating_mul(2)
+                    .min(config.trust_changed_max_backoff);
+                continue;
+            }
+            // Only a session with the pinned trust reaches the bridge.
+            RoundEnd::Bridge(_) => trust_backoff = config.trust_changed_backoff,
+            _ => {}
+        }
         if bridged >= config.steady_after {
             backoff = config.first_backoff;
             continue;
@@ -162,7 +195,7 @@ async fn round<C, F, Fut, E>(
     self_check: &F,
     tun: &Arc<AsyncFd<OwnedFd>>,
     events: &mut E,
-    ready: &mut bool,
+    pinned: &mut Option<EgressTrust>,
 ) -> (RoundEnd, Duration)
 where
     C: EgressConnector,
@@ -178,9 +211,16 @@ where
         Ok(authenticated) => authenticated,
         Err(error) => return (RoundEnd::Connect(with_sources(&error)), Duration::ZERO),
     };
-    // Every session's trust is reported. The daemon installs the first ready
-    // session's before it serves (#4001); refusing a later session whose
-    // trust differs is #5006.
+    // Every session's trust is reported, except one that differs from the
+    // trust pinned when the daemon first became ready: the daemon installed
+    // that one before it served, so a redial with another is ended before its
+    // self-check and never bridged (#5006).
+    if pinned
+        .as_ref()
+        .is_some_and(|pinned| *pinned != egress_trust)
+    {
+        return (RoundEnd::TrustChanged, Duration::ZERO);
+    }
     events.egress_trust(&egress_trust);
     let check = tokio::time::timeout(config.self_check_bound, self_check());
     let Ok(result) = draining(tun, check).await else {
@@ -195,8 +235,8 @@ where
     if let SelfCheck::Failed(reason) = result {
         return (RoundEnd::SelfCheckFailed(reason), Duration::ZERO);
     }
-    if !*ready {
-        *ready = true;
+    if pinned.is_none() {
+        *pinned = Some(egress_trust);
         events.ready();
     }
     let bridged = Instant::now();

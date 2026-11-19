@@ -30,6 +30,8 @@ fn config() -> HostedEgressConfig {
         first_backoff: Duration::from_millis(20),
         max_backoff: Duration::from_millis(40),
         steady_after: Duration::from_millis(100),
+        trust_changed_backoff: Duration::from_millis(20),
+        trust_changed_max_backoff: Duration::from_millis(40),
     }
 }
 
@@ -157,6 +159,7 @@ impl EgressEvents for Recorder {
             RoundEnd::SelfCheckFailed(reason) => format!("failed-{reason:?}"),
             RoundEnd::SendSelfCheck => "send".to_owned(),
             RoundEnd::Bridge(_) => "bridge".to_owned(),
+            RoundEnd::TrustChanged => "trust-changed".to_owned(),
         };
         let _ = self.0.send(Event::Ended(name));
     }
@@ -252,7 +255,7 @@ async fn a_passed_check_is_the_first_frame_and_reports_ready_once() {
             hold: Duration::ZERO,
         },
         Host::Serve {
-            trust: EgressTrust::None,
+            trust: EgressTrust::Ca(vec![0x30; 40]),
             hold: WAIT,
         },
     ];
@@ -265,7 +268,7 @@ async fn a_passed_check_is_the_first_frame_and_reports_ready_once() {
     // The host closes at once, so the loop backs off and redials, and a
     // second pass does not report ready again.
     assert_eq!(walk.event().await, Event::Ended("bridge".to_owned()));
-    assert_eq!(walk.event().await, Event::Trust(false));
+    assert_eq!(walk.event().await, Event::Trust(true));
     assert_eq!(walk.seen().await, Seen::FirstFrame(SelfCheck::Passed));
     // Packets cross once the second stream is up.
     walk.peer.send(&ipv4_packet(60)).unwrap();
@@ -275,6 +278,91 @@ async fn a_passed_check_is_the_first_frame_and_reports_ready_once() {
         "nothing else, and no second ready"
     );
     assert_eq!(walk.egress.dials.load(Ordering::SeqCst), 2);
+}
+
+// The daemon installed the first ready session's trust before it served, and
+// the workload's NODE_EXTRA_CA_CERTS is fixed from then. A redial whose host
+// sends a different trust is ended before its self-check and never bridged
+// or reported; the loop redials, and a session with the pinned trust is
+// bridged again (#5006).
+#[tokio::test]
+async fn a_redial_with_a_changed_trust_is_dropped_and_never_bridged() {
+    let pinned = EgressTrust::Ca(vec![0x30; 40]);
+    let hosts = vec![
+        Host::Serve {
+            trust: pinned.clone(),
+            hold: Duration::ZERO,
+        },
+        Host::Serve {
+            trust: EgressTrust::None,
+            hold: WAIT,
+        },
+        Host::Serve {
+            trust: pinned,
+            hold: WAIT,
+        },
+    ];
+    let mut walk = start(hosts, || async { SelfCheck::Passed });
+    assert_eq!(walk.event().await, Event::Trust(true));
+    assert_eq!(walk.seen().await, Seen::FirstFrame(SelfCheck::Passed));
+    assert_eq!(walk.event().await, Event::Ready);
+    assert_eq!(walk.event().await, Event::Ended("bridge".to_owned()));
+    // The changed trust: no trust event, no self-check frame, no bridge.
+    assert_eq!(walk.event().await, Event::Ended("trust-changed".to_owned()));
+    assert_eq!(walk.seen().await, Seen::NoFrame);
+    // The pinned trust again: bridged, and packets cross.
+    assert_eq!(walk.event().await, Event::Trust(true));
+    assert_eq!(walk.seen().await, Seen::FirstFrame(SelfCheck::Passed));
+    walk.peer.send(&ipv4_packet(60)).unwrap();
+    assert_eq!(walk.seen().await, Seen::Packet);
+    assert!(
+        walk.events.try_recv().is_err(),
+        "nothing else, and no second ready"
+    );
+    assert_eq!(walk.egress.dials.load(Ordering::SeqCst), 3);
+}
+
+// A changed trust is paced apart and slower than the loop's own backoff:
+// redialling cannot heal it, so each further session waits at least the
+// trust wait, doubling to its cap (#5006). Lower bounds only.
+#[tokio::test]
+async fn changed_trust_redials_wait_the_trust_pacing_and_double() {
+    let pinned = EgressTrust::Ca(vec![0x30; 40]);
+    let mut hosts = vec![Host::Serve {
+        trust: pinned,
+        hold: Duration::ZERO,
+    }];
+    for _ in 0..3 {
+        hosts.push(Host::Serve {
+            trust: EgressTrust::None,
+            hold: WAIT,
+        });
+    }
+    // Far above the loop's own backoff (20 ms) and far below `WAIT`, which
+    // bounds each event the walk waits for.
+    let trust_wait = Duration::from_millis(300);
+    let mut walk = start_with(
+        HostedEgressConfig {
+            trust_changed_backoff: trust_wait,
+            trust_changed_max_backoff: trust_wait * 2,
+            ..config()
+        },
+        hosts,
+        || async { SelfCheck::Passed },
+    );
+    assert_eq!(walk.event().await, Event::Trust(true));
+    assert_eq!(walk.event().await, Event::Ready);
+    assert_eq!(walk.event().await, Event::Ended("bridge".to_owned()));
+    assert_eq!(walk.event().await, Event::Ended("trust-changed".to_owned()));
+    let first = std::time::Instant::now();
+    assert_eq!(walk.event().await, Event::Ended("trust-changed".to_owned()));
+    let second = std::time::Instant::now();
+    assert!(
+        second - first >= trust_wait,
+        "the trust wait, not the loop's"
+    );
+    assert_eq!(walk.event().await, Event::Ended("trust-changed".to_owned()));
+    assert!(second.elapsed() >= trust_wait * 2, "doubled to its cap");
 }
 
 #[tokio::test]
