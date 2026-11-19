@@ -32,4 +32,7 @@ FROM ${DEBIAN_IMAGE}
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /out/codewire-mesh /usr/local/bin/codewire-mesh
 EXPOSE 8080
+# Mesh is internet-facing, so it runs unprivileged: its ports are above 1024
+# and it writes no files.
+USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/codewire-mesh"]

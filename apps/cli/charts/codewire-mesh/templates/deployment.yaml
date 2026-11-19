@@ -148,6 +148,19 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          # Mesh writes no files: its state is in Postgres (or memory) and
+          # NATS, and it only reads its mounted authorization roots.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           {{- if .Values.meshAuthorization.tlsRootsConfigMap }}
           volumeMounts:
             - name: mesh-authorization-roots
