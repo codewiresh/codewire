@@ -72,6 +72,20 @@ pub use store::{
 };
 pub use transient::{MAX_SEALED_TRANSIENT_TEXT_BYTES, MAX_TRANSIENT_VALUE_BYTES};
 
+/// A name lookup's failure. A name is unique per owner and provider, so a bare
+/// name two of the owner's providers share names no one credential.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum CredentialNameError {
+    /// The providers, sorted and each once, of the owner's credentials with
+    /// this name. Never their IDs.
+    #[error("credential name matches more than one provider's credential")]
+    Ambiguous {
+        providers: Vec<codewire_access::ProviderId>,
+    },
+    #[error(transparent)]
+    Credential(#[from] PlatformCredentialError),
+}
+
 /// Closed, value-blind errors. SQL/provider errors are deliberately discarded:
 /// neither their messages nor their source chains are safe output contracts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]

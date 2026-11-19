@@ -11,7 +11,9 @@ use codewire_credential_broker::provider_oauth::claude::{
 };
 use codewire_local_credentials::StoreRefusal;
 
-use crate::commands::credential_input::connect::{CredentialConnectProviderArg, connected_noun};
+use crate::commands::credential_input::connect::{
+    CredentialConnectProviderArg, connected_noun, provider_id,
+};
 use crate::commands::platform_commands::shell_word;
 
 /// What a store's answer says about a save, by its code alone.
@@ -19,6 +21,10 @@ use crate::commands::platform_commands::shell_word;
 pub(in crate::commands) enum Answer {
     /// The name is taken.
     AlreadyExists,
+    /// The name is taken, and the command found that no credential of the
+    /// provider it saves holds it: until migration 0042 the cloud refuses a
+    /// name another provider's credential holds (#4928).
+    TakenByAnotherProvider,
     /// The credential to reconnect is gone.
     NotFound,
     /// Any other definite refusal: nothing was saved.
@@ -43,9 +49,11 @@ pub(in crate::commands) struct Save<'a> {
 pub(in crate::commands) enum Kind<'a> {
     Connect(CredentialConnectProviderArg),
     /// `add PROVIDER` or `generate ssh`, by the command to run again (after
-    /// `cw credentials --PLACEMENT`, before `--name`) and what it saves.
+    /// `cw credentials --PLACEMENT`, before `--name`), the provider its name
+    /// is unique in, and what it saves.
     Write {
         command: &'a str,
+        provider: &'a str,
         what: &'a str,
     },
     /// `rotate NAME`, and what the credential is.
@@ -57,6 +65,8 @@ pub(in crate::commands) enum Kind<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Outcome {
     NameInUse,
+    NameInAnotherProvider,
+    NameReservesProvider,
     Deleted,
     Changed,
     GithubConnected,
@@ -71,6 +81,18 @@ enum Outcome {
 
 const CLAUDE_CODE_INVALID_REASON: &str = "CREDENTIAL_CLAUDE_SIGN_IN_CODE_INVALID";
 const CLAUDE_SIGN_IN_EXPIRED_REASON: &str = "CREDENTIAL_CLAUDE_SIGN_IN_EXPIRED";
+
+impl Kind<'_> {
+    /// The provider a saved name is unique in (#4928); a rotation saves no
+    /// new name.
+    fn provider(&self) -> Option<&str> {
+        match self {
+            Self::Connect(provider) => Some(provider_id(*provider)),
+            Self::Write { provider, .. } => Some(provider),
+            Self::Rotate { .. } => None,
+        }
+    }
+}
 
 /// One classifier for both placements: the local store's reason and the
 /// credential service's `ErrorInfo` reason are the same strings for the same
@@ -91,6 +113,8 @@ fn classify(answer: Answer, reason: Option<&str>) -> Outcome {
         Outcome::KeychainMissing
     } else if is(StoreRefusal::KeyringTimedOut) {
         Outcome::KeyringTimedOut
+    } else if is(StoreRefusal::CredentialNameReservesProvider) {
+        Outcome::NameReservesProvider
     } else if reason == Some(CLAUDE_CODE_INVALID_REASON) {
         Outcome::ClaudeCodeInvalid
     } else if reason == Some(CLAUDE_SIGN_IN_EXPIRED_REASON) {
@@ -98,6 +122,7 @@ fn classify(answer: Answer, reason: Option<&str>) -> Outcome {
     } else {
         match answer {
             Answer::AlreadyExists => Outcome::NameInUse,
+            Answer::TakenByAnotherProvider => Outcome::NameInAnotherProvider,
             Answer::NotFound => Outcome::Deleted,
             Answer::Refused | Answer::Uncertain => Outcome::Refused,
         }
@@ -144,7 +169,7 @@ fn words(save: Save<'_>, outcome: Outcome, keychain: Option<&Path>) -> (String, 
                 named(&command, "NAME"),
             )
         }
-        Kind::Write { command, what } => (
+        Kind::Write { command, what, .. } => (
             what,
             named(command, &shell_word(name)),
             named(command, "NAME"),
@@ -161,9 +186,26 @@ fn words(save: Save<'_>, outcome: Outcome, keychain: Option<&Path>) -> (String, 
         ("Codewire", "in your Codewire account")
     };
     match outcome {
+        // Only the provider: the store answered for a credential this
+        // command could not read (cw-security on #4928).
         Outcome::NameInUse => (
+            match kind.provider() {
+                Some(provider) => {
+                    format!("that name is in use in {provider}, so your {what} wasn't saved")
+                }
+                None => format!("that name is in use, so your {what} wasn't saved"),
+            },
+            Some(renamed),
+        ),
+        Outcome::NameInAnotherProvider => (
             format!(
-                "a {placement} credential is already named {name:?}, so your {what} wasn't saved"
+                "a credential of another provider already uses {name:?} {place}, so your {what} wasn't saved"
+            ),
+            Some(renamed),
+        ),
+        Outcome::NameReservesProvider => (
+            format!(
+                "a credential's name can't start with anthropic/, openai/, github/ or ssh/, so your {what} wasn't saved"
             ),
             Some(renamed),
         ),
@@ -300,8 +342,14 @@ mod tests {
             (
                 Answer::AlreadyExists,
                 None,
-                "a local credential is already named \"work\", so your GitHub sign-in wasn't saved",
-                "a cloud credential is already named \"work\", so your GitHub sign-in wasn't saved",
+                "that name is in use in github, so your GitHub sign-in wasn't saved",
+                "that name is in use in github, so your GitHub sign-in wasn't saved",
+            ),
+            (
+                Answer::Refused,
+                Some("CREDENTIAL_NAME_RESERVES_PROVIDER"),
+                "a credential's name can't start with anthropic/, openai/, github/ or ssh/, so your GitHub sign-in wasn't saved",
+                "a credential's name can't start with anthropic/, openai/, github/ or ssh/, so your GitHub sign-in wasn't saved",
             ),
             (
                 Answer::AlreadyExists,
@@ -384,6 +432,7 @@ mod tests {
                 placement: "local",
                 kind: Kind::Write {
                     command: "add anthropic",
+                    provider: "anthropic",
                     what: "Anthropic API key",
                 },
                 name: "work key",
@@ -394,7 +443,7 @@ mod tests {
         );
         assert_eq!(
             crate::error_report::sentence(&error),
-            "a local credential is already named \"work key\", so your Anthropic API key wasn't saved"
+            "that name is in use in anthropic, so your Anthropic API key wasn't saved"
         );
         assert_eq!(
             crate::error_report::next_step(&error).as_deref(),

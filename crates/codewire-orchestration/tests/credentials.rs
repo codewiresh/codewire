@@ -220,28 +220,63 @@ async fn metadata_name_resolution_keeps_owner_kind_exact_matching_and_active_own
         let reader = CredentialMetadataReader::new(h.reader.clone(), builtin_provider_catalog());
         let user = Owner::User(OwnerId::parse(ALICE)?);
         let organization = Owner::Organization(OwnerId::parse(ALICE)?);
-        ensure!(reader.resolve(&user,"WORK CODEX").await?.id.as_str() == ALICE_CREDENTIAL);
-        ensure!(reader.resolve(&organization,"work codex").await?.id.as_str() == ORG_CREDENTIAL);
-        for name in ["Work","%","Work Code_"] { ensure!(reader.resolve(&user,name).await == Err(PlatformCredentialError::NotFound)); }
-        for name in [""," Work Codex","Work Codex ","Work\nCodex"] { ensure!(reader.resolve(&user,name).await == Err(PlatformCredentialError::InvalidInput)); }
-        ensure!(reader.resolve(&user,&"é".repeat(129)).await == Err(PlatformCredentialError::InvalidInput));
+        ensure!(reader.resolve(&user,"WORK CODEX",None).await?.id.as_str() == ALICE_CREDENTIAL);
+        ensure!(reader.resolve(&organization,"work codex",None).await?.id.as_str() == ORG_CREDENTIAL);
+        for name in ["Work","%","Work Code_"] { ensure!(reader.resolve(&user,name,None).await == Err(PlatformCredentialError::NotFound.into())); }
+        for name in [""," Work Codex","Work Codex ","Work\nCodex"] { ensure!(reader.resolve(&user,name,None).await == Err(PlatformCredentialError::InvalidInput.into())); }
+        ensure!(reader.resolve(&user,&"é".repeat(129),None).await == Err(PlatformCredentialError::InvalidInput.into()));
         sqlx::query("UPDATE organizations SET deletion_state='deleting',deletion_generation=1, \
             deletion_requested_at=now(),deletion_requested_by=$1,deletion_phase='write_fenced', \
             deletion_operation_id='synthetic-delete',deletion_workflow_id='synthetic-delete' WHERE id=$1")
             .bind(ALICE).execute(&h.db).await?;
-        ensure!(reader.resolve(&organization,"Work Codex").await == Err(PlatformCredentialError::NotFound));
-        ensure!(reader.resolve(&user,"Work Codex").await?.id.as_str() == ALICE_CREDENTIAL);
+        ensure!(reader.resolve(&organization,"Work Codex",None).await == Err(PlatformCredentialError::NotFound.into()));
+        ensure!(reader.resolve(&user,"Work Codex",None).await?.id.as_str() == ALICE_CREDENTIAL);
         // Resolve must be a plain metadata read, not a SHARE-lock acquisition.
         let mut locked = h.db.begin().await?;
         sqlx::query("SELECT id FROM platform_credentials WHERE id=$1 FOR UPDATE")
             .bind(ALICE_CREDENTIAL).fetch_one(&mut *locked).await?;
-        let found = tokio::time::timeout(std::time::Duration::from_secs(1), reader.resolve(&user,"Work Codex")).await??;
+        let found = tokio::time::timeout(std::time::Duration::from_secs(1), reader.resolve(&user,"Work Codex",None)).await??;
         ensure!(found.id.as_str() == ALICE_CREDENTIAL);
         locked.rollback().await?;
         sqlx::query("DELETE FROM users WHERE id=$1").bind(BOB).execute(&h.db).await?;
-        ensure!(reader.resolve(&Owner::User(OwnerId::parse(BOB)?), "Work Codex").await == Err(PlatformCredentialError::NotFound));
-        ensure!(reader.resolve(&user,"Work Codex").await?.id.as_str() == ALICE_CREDENTIAL);
+        ensure!(reader.resolve(&Owner::User(OwnerId::parse(BOB)?),"Work Codex",None).await == Err(PlatformCredentialError::NotFound.into()));
+        ensure!(reader.resolve(&user,"Work Codex",None).await?.id.as_str() == ALICE_CREDENTIAL);
         Ok(())
     }.await;
+    h.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn a_provider_narrows_a_name_and_reaches_only_its_owner() -> Result<()> {
+    let h = Harness::create().await?;
+    let result = async {
+        // Alice's "Work Codex" is an OpenAI credential. Until migration 0042,
+        // no other provider's credential of hers may share the name.
+        sqlx::query("INSERT INTO platform_credentials(id,user_id,provider,authentication_kind,display_name,status,revocation_generation,material_generation) VALUES ($1,$2,$3,$4,$5,'active',1,1)")
+            .bind("credential-shared-github").bind(ALICE).bind("github").bind("oauth").bind("Shared").execute(&h.db).await?;
+        let found = h
+            .ok("GetCredential", Auth::Alice, json!({"name":"work codex","provider":"openai"}))
+            .await?;
+        ensure!(found["credential"]["id"] == ALICE_CREDENTIAL);
+        let found = h
+            .ok("GetCredential", Auth::Alice, json!({"name":"SHARED","provider":"github"}))
+            .await?;
+        ensure!(found["credential"]["id"] == "credential-shared-github");
+        for provider in ["anthropic", "github"] {
+            h.error("GetCredential", Auth::Alice, json!({"name":"work codex","provider":provider}), "not_found").await?;
+        }
+        for provider in ["OpenAI", "gitlab", ""] {
+            h.error("GetCredential", Auth::Alice, json!({"name":"work codex","provider":provider}), "invalid_argument").await?;
+        }
+        h.error("GetCredential", Auth::Alice, json!({"credentialId":ALICE_CREDENTIAL,"provider":"openai"}), "invalid_argument").await?;
+        // Bob's own "Work Codex" is his; Alice's names never reach him.
+        let bob = h.ok("GetCredential", Auth::Bob, json!({"name":"work codex","provider":"openai"})).await?;
+        ensure!(bob["credential"]["id"] == BOB_CREDENTIAL);
+        h.error("GetCredential", Auth::Bob, json!({"name":"shared"}), "not_found").await?;
+        h.error("GetCredential", Auth::Bob, json!({"name":"shared","provider":"github"}), "not_found").await?;
+        Ok(())
+    }
+    .await;
     h.finish(result).await
 }

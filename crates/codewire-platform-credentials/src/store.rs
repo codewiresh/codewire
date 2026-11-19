@@ -16,7 +16,8 @@ use sqlx::{Executor, PgPool, Postgres, Transaction};
 
 use crate::model::{auth_kind, parse_auth_kind, parse_ssh_public_key, parse_status};
 use crate::{
-    CredentialRecord, CredentialRegistration, CredentialVersion, PlatformCredentialError as Error,
+    CredentialNameError, CredentialRecord, CredentialRegistration, CredentialVersion,
+    PlatformCredentialError as Error,
 };
 
 #[cfg(feature = "interception-ca")]
@@ -62,29 +63,57 @@ impl CredentialMetadataReader {
     }
 
     /// Exact case-insensitive name lookup in one active owner namespace,
-    /// matching the existing lower(display_name) unique indexes. No fuzzy,
+    /// matching the per-provider lower(display_name) unique indexes. No fuzzy,
     /// cross-owner or material lookup, and no row locks are acquired.
-    pub async fn resolve(&self, owner: &Owner, name: &str) -> Result<CredentialMetadata, Error> {
+    ///
+    /// A name is unique only within a provider. Without `provider`, a name two
+    /// providers share is [`CredentialNameError::Ambiguous`], never a guess.
+    /// The owner predicate comes first, so the providers listed are only ever
+    /// those of this owner's own credentials.
+    pub async fn resolve(
+        &self,
+        owner: &Owner,
+        name: &str,
+        provider: Option<&ProviderId>,
+    ) -> Result<CredentialMetadata, CredentialNameError> {
         if name.is_empty()
             || name.len() > 256
             || name.trim() != name
             || name.chars().any(char::is_control)
         {
-            return Err(Error::InvalidInput);
+            return Err(Error::InvalidInput.into());
         }
         let sql = format!(
             "SELECT {METADATA_COLUMNS} FROM platform_credentials c \
-             WHERE {OWNER_PREDICATE} AND lower(c.display_name)=lower($3)"
+             WHERE {OWNER_PREDICATE} AND lower(c.display_name)=lower($3) \
+               AND ($4::text IS NULL OR c.provider=$4) \
+             ORDER BY c.provider"
         );
-        let row: MetadataRow = sqlx::query_as(&sql)
+        let rows: Vec<MetadataRow> = sqlx::query_as(&sql)
             .bind(owner_kind(owner))
             .bind(owner.id().as_str())
             .bind(name)
-            .fetch_optional(&self.pool)
+            .bind(provider.map(ProviderId::as_str))
+            .fetch_all(&self.pool)
             .await
-            .map_err(database_error)?
-            .ok_or(Error::NotFound)?;
-        Ok(row.record(&self.catalog)?.metadata)
+            .map_err(database_error)?;
+        let mut matches = rows
+            .into_iter()
+            .map(|row| row.record(&self.catalog).map(|record| record.metadata))
+            .collect::<Result<Vec<_>, _>>()?;
+        match matches.len() {
+            0 => Err(Error::NotFound.into()),
+            1 => Ok(matches.remove(0)),
+            _ => {
+                let providers: BTreeSet<ProviderId> = matches
+                    .into_iter()
+                    .map(|metadata| metadata.provider)
+                    .collect();
+                Err(CredentialNameError::Ambiguous {
+                    providers: providers.into_iter().collect(),
+                })
+            }
+        }
     }
 
     /// Stable ID cursor, bounded independently of the caller. A missing or

@@ -23,7 +23,7 @@ impl CredentialMutationOwner {
         // name selects the verified provider account as its canonical name.
         // Reconnect still fences the exact previously observed name/version.
         if !name.is_empty() || replacement.is_some() {
-            validate_name(&name)?;
+            validate_target_name(&name, replacement.is_some())?;
         }
         let scope = Scope::new(authority, self.stop.child_token(), ENROLLMENT_TIMEOUT)?;
         let accepting = self.accepting.lock().map_err(|_| Error::Unavailable)?;

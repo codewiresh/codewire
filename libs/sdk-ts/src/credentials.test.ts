@@ -109,6 +109,10 @@ async function checkCredentialTransport(assertTimers: (expected: number) => Prom
       if (method === "ListCredentials") return unary({ credentials: [credential], nextPageToken: body.pageToken ? "" : "page-two" });
       if (method === "GetCredential") {
         if (body.credentialId === "missing") return unary({});
+        if (body.name === "shared" && !body.provider) {
+          return unary({ code: "failed_precondition",
+            message: "credential name matches more than one credential (anthropic,openai); name its provider" }, 400);
+        }
         const statuses: Record<string, string> = { expired: "CREDENTIAL_STATUS_EXPIRED", refresh_failed: "CREDENTIAL_STATUS_REFRESH_FAILED", revoked: "CREDENTIAL_STATUS_REVOKED" };
         return unary({ credential: body.name === "ssh"
           ? sshCredential
@@ -170,7 +174,12 @@ async function checkCredentialTransport(assertTimers: (expected: number) => Prom
     assert.equal((await cw.credentials.getByName(status)).status, status);
     assert.equal(calls.at(-1)!.body.name, status);
     assert.ok(!("credentialId" in calls.at(-1)!.body));
+    assert.ok(!("provider" in calls.at(-1)!.body));
   }
+  assert.equal((await cw.credentials.getByName("shared", "anthropic")).name, "personal");
+  assert.deepEqual(calls.at(-1)!.body, { name: "shared", provider: "anthropic" });
+  await assert.rejects(cw.credentials.getByName("shared"), (error: unknown) =>
+    error instanceof CodewireError && error.status === 400 && /\(anthropic,openai\)/.test(error.detail));
   const ssh = await cw.credentials.getByName("ssh");
   assert.equal(ssh.authentication_kind, "ssh_key");
   assert.deepEqual(ssh.ssh_public_key, {

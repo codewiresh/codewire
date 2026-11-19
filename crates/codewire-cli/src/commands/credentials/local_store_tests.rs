@@ -247,3 +247,178 @@ async fn a_call_behind_a_frozen_keyring_shows_the_waiting_line() {
     );
     probe.await.unwrap().unwrap();
 }
+
+/// Saves a synthetic credential straight to the store.
+async fn save(
+    client: &mut LocalCredentialClient,
+    provider: &str,
+    kind: CredentialAuthKind,
+    name: &str,
+) -> CredentialRecord {
+    client
+        .add_credential(
+            NewCredential {
+                provider: ProviderId::parse(provider).unwrap(),
+                authentication_kind: kind,
+                display_name: name.into(),
+                account_hint: None,
+                expires_at_unix: None,
+            },
+            ProtectedValue::from_slice(b"synthetic-credential-value").unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// The owner's case against the real store (#4928): a Claude sign-in named
+/// `walk`, then a Codex sign-in under the same name, saved as `connect`
+/// saves it; both stay, each with its own ID.
+#[tokio::test]
+async fn a_claude_sign_in_and_a_codex_sign_in_share_a_name_in_the_store() {
+    let (_authority, mut client) = serve(Store::default()).await;
+    let claude = save(
+        &mut client,
+        "anthropic",
+        CredentialAuthKind::ClaudeSignIn,
+        "walk",
+    )
+    .await;
+    let records = client.list_credentials().await.unwrap();
+    let target =
+        select_oauth_connection_target(records, "walk", CredentialConnectProviderArg::Codex)
+            .unwrap();
+    assert!(target.existing.is_none());
+    let codex = publish_oauth_connection(
+        &mut client,
+        target,
+        ProtectedValue::from_slice(b"synthetic-codex-sign-in").unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_ne!(codex.metadata.id, claude.metadata.id);
+    assert_eq!(codex.metadata.display_name, "walk");
+    assert_eq!(client.list_credentials().await.unwrap().len(), 2);
+}
+
+/// A bare shared name is refused before anything changes; `PROVIDER/NAME`
+/// deletes only the named one; a slot needs no prefix; a rename onto a name
+/// its provider has is refused, onto another provider's name is not.
+#[tokio::test]
+async fn provider_name_acts_on_one_credential_and_a_bare_shared_name_changes_nothing() {
+    let (_authority, mut client) = serve(Store::default()).await;
+    let anthropic = save(&mut client, "anthropic", CredentialAuthKind::ApiKey, "walk").await;
+    let openai = save(&mut client, "openai", CredentialAuthKind::ApiKey, "walk").await;
+    let before = client.list_credentials().await.unwrap();
+
+    let refusal = format!(
+        "{:#}",
+        delete::delete_credential(
+            &mut client,
+            crate::commands::CredentialDeleteArgs {
+                credential: Some("walk".into()),
+                yes: true,
+            },
+        )
+        .await
+        .unwrap_err()
+    );
+    assert_eq!(
+        refusal,
+        "\"walk\" names more than one credential (anthropic, openai); name one, for example anthropic/walk"
+    );
+    assert_eq!(client.list_credentials().await.unwrap(), before);
+
+    // A profile's openai slot takes the bare name.
+    set_profile_entry(
+        &mut client,
+        crate::commands::CredentialProfileSetArgs {
+            profile: "daily".into(),
+            slot: Some("openai".into()),
+            credential: Some("walk".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let profile = client.list_profiles().await.unwrap().remove(0);
+    assert_eq!(
+        profile.profile.entries.values().collect::<Vec<_>>(),
+        [&openai.metadata.id]
+    );
+
+    // A rename onto anthropic's own name is refused; another provider's
+    // credential of that name is no collision.
+    let other = save(
+        &mut client,
+        "anthropic",
+        CredentialAuthKind::ApiKey,
+        "other",
+    )
+    .await;
+    let refusal = format!(
+        "{:#}",
+        rename_credential(
+            &mut client,
+            crate::commands::CredentialRenameArgs {
+                credential: "other".into(),
+                name: "walk".into(),
+            },
+        )
+        .await
+        .unwrap_err()
+    );
+    assert_eq!(
+        refusal,
+        "\"walk\" is in use in anthropic by an Anthropic API key; choose another name, for example walk-2"
+    );
+    rename_credential(
+        &mut client,
+        crate::commands::CredentialRenameArgs {
+            credential: "id:".to_owned() + other.metadata.id.as_str(),
+            name: "ssh/x".into(),
+        },
+    )
+    .await
+    .unwrap_err();
+    let mut renamed = save(&mut client, "openai", CredentialAuthKind::ApiKey, "spare").await;
+    rename_credential(
+        &mut client,
+        crate::commands::CredentialRenameArgs {
+            credential: "spare".into(),
+            name: "other".into(),
+        },
+    )
+    .await
+    .unwrap();
+    renamed = client.get_credential(&renamed.metadata.id).await.unwrap();
+    assert_eq!(renamed.metadata.display_name, "other");
+
+    // The profile still selects openai's walk, so delete the anthropic one.
+    delete::delete_credential(
+        &mut client,
+        crate::commands::CredentialDeleteArgs {
+            credential: Some("anthropic/walk".into()),
+            yes: true,
+        },
+    )
+    .await
+    .unwrap();
+    let left = client.list_credentials().await.unwrap();
+    assert!(
+        left.iter()
+            .all(|record| record.metadata.id != anthropic.metadata.id)
+    );
+    assert!(
+        left.iter()
+            .any(|record| record.metadata.id == openai.metadata.id)
+    );
+    // With one `walk` left, the bare name acts on it.
+    assert_eq!(
+        resolve_credential(&mut client, "walk", None)
+            .await
+            .unwrap()
+            .metadata
+            .id,
+        openai.metadata.id
+    );
+}

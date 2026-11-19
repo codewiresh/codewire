@@ -7,8 +7,10 @@ use super::credential_input::connect::{
     claude_token_rotate_refusal, provider_id, provider_label, read_claude_token,
 };
 use super::credential_input::{
-    ParsedCredentialSelector, SSH_PUBLIC_KEY_GITHUB_HINT, parse_credential_selector,
-    prompt_credential_material, read_ssh_import, validate_ssh_generation, validate_ssh_import,
+    CredentialName, NameLookup, NameReading, NamedCredential, ParsedCredentialSelector,
+    SSH_PUBLIC_KEY_GITHUB_HINT, admit_name, admit_new_name, name_taken, parse_credential_selector,
+    prompt_credential_material, read_ssh_import, settle_name, validate_ssh_generation,
+    validate_ssh_import,
 };
 use super::credentials::output::save_refusal::{Answer, Kind, Save, save_error};
 use super::login_screen;
@@ -20,9 +22,23 @@ pub(super) async fn generate_ssh(
     args: &CredentialGenerateArgs,
 ) -> anyhow::Result<rpc::Credential> {
     let name = validate_ssh_generation(args)?;
-    let response = client.generate_ssh_credential(rpc::GenerateSshCredentialRequest {
-        name, expires_at_unix: args.expires_at, ..Default::default()
-    }).await.context("generate cloud SSH identity; inspect by name before retrying an uncertain acknowledgement")?;
+    admit_cloud_name(client, "ssh", &name, None).await?;
+    let generated = client
+        .generate_ssh_credential(rpc::GenerateSshCredentialRequest {
+            name: name.clone(),
+            expires_at_unix: args.expires_at,
+            ..Default::default()
+        })
+        .await;
+    let response = cloud_written(
+        client,
+        generated,
+        "ssh",
+        &name,
+        None,
+        "generate cloud SSH identity; inspect by name before retrying an uncertain acknowledgement",
+    )
+    .await?;
     let credential = response
         .credential
         .into_option()
@@ -105,29 +121,7 @@ async fn handle_with_receipt(
         }
         CredentialsCommand::Add(args) => {
             if args.provider.as_deref() == Some("ssh") {
-                let name = validate_ssh_import(&args)?;
-                // Confirm owner-scoped access and name availability before
-                // reading the explicitly selected private file or passphrase.
-                anyhow::ensure!(
-                    find_named(client, &name).await?.is_none(),
-                    super::credentials::output::refusal::name_in_use("cloud", &name)
-                );
-                let mut input = read_ssh_import(&args)?;
-                let response = client.add_ssh_credential(rpc::AddSshCredentialRequest {
-                    name,
-                    private_key: std::mem::take(&mut *input.private_key),
-                    passphrase: input.passphrase.as_mut().map(|value| std::mem::take(&mut **value)),
-                    expires_at_unix: args.expires_at,
-                    ..Default::default()
-                }).await.context("import the cloud SSH key; inspect by name before retrying an uncertain acknowledgement")?;
-                return print(
-                    &[response
-                        .credential
-                        .into_option()
-                        .inspect(|record| remember_platform(record, execution))
-                        .context("Codewire omitted the SSH key's details")?],
-                    OutputFormat::Text,
-                );
+                return import_ssh(client, &args, execution).await;
             }
             if args.provider.as_deref() == Some(CLAUDE_SUBSCRIPTION) {
                 return super::credential_input::connect::connect(
@@ -138,17 +132,30 @@ async fn handle_with_receipt(
                 .await;
             }
             validate_key_arguments(&args)?;
-            let material = prompt_credential_material(
-                args.provider.as_deref().unwrap_or_default(),
-                codewire_access::CredentialAuthKind::ApiKey,
-            )?;
-            let response = client.add_api_key_credential(rpc::AddApiKeyCredentialRequest {
-                provider: args.provider.context("credential provider is required")?,
-                name: args.name.as_deref().context("credential name is required")?.trim().to_owned(),
-                value: material.expose_secret().to_vec(),
-                expires_at_unix: args.expires_at,
-                ..Default::default()
-            }).await.context("add the cloud API key; inspect by name before retrying an uncertain acknowledgement")?;
+            let provider = args
+                .provider
+                .clone()
+                .context("credential provider is required")?;
+            let name = args
+                .name
+                .as_deref()
+                .context("credential name is required")?
+                .trim()
+                .to_owned();
+            // The name is checked before the key is asked for.
+            admit_cloud_name(client, &provider, &name, None).await?;
+            let material =
+                prompt_credential_material(&provider, codewire_access::CredentialAuthKind::ApiKey)?;
+            let added = client
+                .add_api_key_credential(rpc::AddApiKeyCredentialRequest {
+                    provider: provider.clone(),
+                    name: name.clone(),
+                    value: material.expose_secret().to_vec(),
+                    expires_at_unix: args.expires_at,
+                    ..Default::default()
+                })
+                .await;
+            let response = cloud_written(client, added, &provider, &name, None, "add the cloud API key; inspect by name before retrying an uncertain acknowledgement").await?;
             print(
                 &[response
                     .credential
@@ -161,11 +168,17 @@ async fn handle_with_receipt(
         CredentialsCommand::Rename(args) => {
             let name = trimmed_required(&args.name, "credential name")?.to_owned();
             let current = resolve(client, &args.credential).await?;
-            let response = client.rename_credential(rpc::RenameCredentialRequest {
-                credential_id: current.id.clone(),
-                expected_revocation_generation: current.revocation_generation,
-                expected_name: current.name.clone(), name: name.clone(), ..Default::default()
-            }).await.context("rename the exact cloud credential; inspect metadata before retrying an uncertain result")?;
+            admit_cloud_name(client, &current.provider, &name, Some(&current)).await?;
+            let renamed = client
+                .rename_credential(rpc::RenameCredentialRequest {
+                    credential_id: current.id.clone(),
+                    expected_revocation_generation: current.revocation_generation,
+                    expected_name: current.name.clone(),
+                    name: name.clone(),
+                    ..Default::default()
+                })
+                .await;
+            let response = cloud_written(client, renamed, &current.provider, &name, Some(&current), "rename the exact cloud credential; inspect metadata before retrying an uncertain result").await?;
             let renamed = response
                 .credential
                 .into_option()
@@ -206,6 +219,49 @@ async fn handle_with_receipt(
             unreachable!("profiles have a separate dispatcher")
         }
     }
+}
+
+/// `add ssh` in the cloud: the name is admitted before the key file or
+/// passphrase is read.
+async fn import_ssh(
+    client: &CodewireClient,
+    args: &CredentialAddArgs,
+    execution: &mut super::credential_input::CredentialExecution,
+) -> anyhow::Result<()> {
+    let name = validate_ssh_import(args)?;
+    // Confirm owner-scoped access and name availability before
+    // reading the explicitly selected private file or passphrase.
+    admit_cloud_name(client, "ssh", &name, None).await?;
+    let mut input = read_ssh_import(args)?;
+    let added = client
+        .add_ssh_credential(rpc::AddSshCredentialRequest {
+            name: name.clone(),
+            private_key: std::mem::take(&mut *input.private_key),
+            passphrase: input
+                .passphrase
+                .as_mut()
+                .map(|value| std::mem::take(&mut **value)),
+            expires_at_unix: args.expires_at,
+            ..Default::default()
+        })
+        .await;
+    let response = cloud_written(
+        client,
+        added,
+        "ssh",
+        &name,
+        None,
+        "import the cloud SSH key; inspect by name before retrying an uncertain acknowledgement",
+    )
+    .await?;
+    print(
+        &[response
+            .credential
+            .into_option()
+            .inspect(|record| remember_platform(record, execution))
+            .context("Codewire omitted the SSH key's details")?],
+        OutputFormat::Text,
+    )
 }
 
 /// A Claude subscription token: the anthropic provider's OAuth kind.
@@ -327,14 +383,29 @@ impl ConnectStore for CloudConnectStore<'_> {
         provider: CredentialConnectProviderArg,
         name: &str,
     ) -> anyhow::Result<Option<rpc::Credential>> {
-        let current = find_named(self.client, name).await?;
+        // Only this provider's credentials: another provider's may share the
+        // name (#4928). `PROVIDER/NAME` reconnects that provider's credential.
+        let scope = provider_id(provider);
+        let Some(current) = find_name(self.client, CredentialName::parse(name), Some(scope))
+            .await
+            .context("inspect existing platform credential before enrollment")?
+        else {
+            admit_new_name(name)?;
+            return Ok(None);
+        };
+        if current.authentication_kind != cloud_connected_kind(provider) {
+            // This provider's other kind holds the name: a Claude sign-in and
+            // a Claude token can't share one (cw-pm on #4928).
+            let held = provider_credentials(self.client, scope).await?;
+            return Err(name_taken(scope, &current, &held, cloud_kind_label));
+        }
         oauth_connection_request(
-            provider_id(provider),
+            scope,
             cloud_connected_kind(provider),
-            name,
-            current.as_ref(),
+            &current.name,
+            Some(&current),
         )?;
-        Ok(current)
+        Ok(Some(current))
     }
 
     async fn connections(
@@ -511,23 +582,19 @@ impl ConnectStore for CloudConnectStore<'_> {
             }
         };
         let enrolled = tokio::select! {
-            result = enrollment => result.map_err(|error| {
-                cloud_save_error(
-                    Save {
-                        placement: "cloud",
-                        kind: Kind::Connect(target.provider),
-                        name: &target.name,
-                    },
-                    error,
-                )
-            }),
-            () = keys.pressed() => Err(anyhow::anyhow!(
-                "enrollment cancelled; inspect the credential by name before retrying because storage acknowledgement may be unknown"
-            )),
+            result = enrollment => result.map_err(Some),
+            () = keys.pressed() => Err(None),
         };
-        // The terminal is back before the result prints.
+        // The terminal is back before the result prints, or the service's
+        // refusal is looked into.
         keys.stop_keys();
-        let (credential, pending) = enrolled?;
+        let (credential, pending) = match enrolled {
+            Ok(enrolled) => enrolled,
+            Err(Some(error)) => return Err(refused_connect(client, &target, error).await),
+            Err(None) => anyhow::bail!(
+                "enrollment cancelled; inspect the credential by name before retrying because storage acknowledgement may be unknown"
+            ),
+        };
         let (who, expires) = match target.provider {
             CredentialConnectProviderArg::ClaudeToken => {
                 (credential.name.as_str(), credential.expires_at_unix)
@@ -559,26 +626,248 @@ impl ConnectStore for CloudConnectStore<'_> {
     }
 }
 
-async fn find_named(
+/// The ErrorInfo reason of a name the service would not choose a credential
+/// for; its `providers` metadata lists theirs, comma-joined (#4928).
+const CREDENTIAL_NAME_AMBIGUOUS: &str = "CREDENTIAL_NAME_AMBIGUOUS";
+
+/// What the service holds of one reading of a name: the credential, none, or
+/// the providers of the several it would not choose between. The service
+/// answers only for credentials the caller may read.
+async fn lookup_name(
     client: &CodewireClient,
-    name: &str,
-) -> anyhow::Result<Option<rpc::Credential>> {
+    reading: NameReading<'_>,
+) -> anyhow::Result<NameLookup<rpc::Credential>> {
     match client
         .get_credential(rpc::GetCredentialRequest {
-            selector: Some(rpc::get_credential_request::Selector::Name(name.to_owned())),
+            selector: Some(rpc::get_credential_request::Selector::Name(
+                reading.name.to_owned(),
+            )),
+            provider: reading.provider.map(str::to_owned),
             ..Default::default()
         })
         .await
     {
-        Ok(response) => Ok(Some(
+        Ok(response) => Ok(NameLookup::Matches(vec![
             response
                 .credential
                 .into_option()
                 .context("Codewire omitted the credential's details")?,
-        )),
-        Err(error) if error.code() == rpc::ErrorCode::NotFound => Ok(None),
-        Err(error) => Err(error).context("inspect existing platform credential before enrollment"),
+        ])),
+        Err(error) if error.code() == rpc::ErrorCode::NotFound => {
+            Ok(NameLookup::Matches(Vec::new()))
+        }
+        Err(error) => match ambiguous_providers(&error) {
+            Some(providers) => Ok(NameLookup::Ambiguous(providers)),
+            None => Err(error.into()),
+        },
     }
+}
+
+/// The providers of the service's ambiguous-name refusal; none for any other
+/// error, or one that lists no provider.
+fn ambiguous_providers(error: &rpc::ClientError) -> Option<Vec<String>> {
+    if error.code() != rpc::ErrorCode::FailedPrecondition
+        || service_reason(error) != Some(CREDENTIAL_NAME_AMBIGUOUS)
+    {
+        return None;
+    }
+    let providers = error
+        .error_info()?
+        .metadata()
+        .get("providers")?
+        .split(',')
+        .filter(|provider| !provider.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    (!providers.is_empty()).then_some(providers)
+}
+
+/// A refusal's closed reason from the credential service.
+fn service_reason(error: &rpc::ClientError) -> Option<&str> {
+    error
+        .error_info()
+        .filter(|info| info.domain() == "codewire.sh")
+        .map(rpc::ErrorInfo::reason)
+        .filter(|reason| !reason.is_empty())
+}
+
+/// The credential `name` names in its readings, as the local store resolves
+/// it (#4928): one reading's credential, none, or a refusal naming each when
+/// they find more than one. Within `scope` only that provider's credentials
+/// are asked for.
+async fn find_name(
+    client: &CodewireClient,
+    name: CredentialName<'_>,
+    scope: Option<&str>,
+) -> anyhow::Result<Option<rpc::Credential>> {
+    let mut lookups = Vec::new();
+    for reading in name.readings(scope) {
+        lookups.push((reading, lookup_name(client, reading).await?));
+    }
+    settle_name(name.text, lookups)
+}
+
+/// Every credential of `provider` the caller may read.
+async fn provider_credentials(
+    client: &CodewireClient,
+    provider: &str,
+) -> anyhow::Result<Vec<rpc::Credential>> {
+    let mut credentials = list_all(client)
+        .await
+        .context("list cloud credentials to suggest a free name")?;
+    credentials.retain(|credential| credential.provider == provider);
+    Ok(credentials)
+}
+
+/// Refuses `name` for a new credential of `provider`, or for `renaming`,
+/// before anything is asked for or saved, as locally (#4928): a name that
+/// starts with a provider id and `/`, or one this provider's credential the
+/// caller may read holds, named with a free name. Any other holder is the
+/// service's to refuse ([`cloud_written`]).
+async fn admit_cloud_name(
+    client: &CodewireClient,
+    provider: &str,
+    name: &str,
+    renaming: Option<&rpc::Credential>,
+) -> anyhow::Result<()> {
+    if renaming.is_none_or(|renamed| renamed.name != name) {
+        admit_new_name(name)?;
+    }
+    let reading = NameReading {
+        name,
+        provider: Some(provider),
+    };
+    let NameLookup::Matches(holders) = lookup_name(client, reading)
+        .await
+        .context("check the cloud credential name")?
+    else {
+        return Ok(());
+    };
+    if holders
+        .iter()
+        .all(|holder| renaming.is_some_and(|renamed| renamed.id == holder.id))
+    {
+        return Ok(());
+    }
+    let held = provider_credentials(client, provider).await?;
+    admit_name(provider, name, &held, renaming, cloud_kind_label)
+}
+
+/// What a cloud write says when the service refuses its name (#4928): a
+/// name that starts with a provider id and `/`, or one taken in `provider`
+/// when this command could not look up who holds it, named by provider only
+/// (cw-security on #4928). Any other error keeps its context.
+fn cloud_name_error(
+    error: rpc::ClientError,
+    provider: &str,
+    name: &str,
+    context: &'static str,
+) -> anyhow::Error {
+    let reason = service_reason(&error);
+    if reason
+        == Some(codewire_local_credentials::StoreRefusal::CredentialNameReservesProvider.reason())
+    {
+        return anyhow::anyhow!(super::credentials::output::refusal::reserved_name(name));
+    }
+    if error.code() == rpc::ErrorCode::AlreadyExists && reason.is_none() {
+        return anyhow::anyhow!(super::credentials::output::refusal::name_in_use(provider));
+    }
+    anyhow::Error::new(error).context(context)
+}
+
+/// A cloud write's result, with a refused name worded by
+/// [`cloud_name_error`], or, when the service says the name is taken, by
+/// who holds it ([`taken_name_holder`]).
+async fn cloud_written<T>(
+    client: &CodewireClient,
+    result: Result<T, rpc::ClientError>,
+    provider: &str,
+    name: &str,
+    renaming: Option<&rpc::Credential>,
+    context: &'static str,
+) -> anyhow::Result<T> {
+    let error = match result {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    if is_name_taken(&error) {
+        match taken_name_holder(client, provider, name, renaming).await {
+            TakenBy::Holder(refusal) => return Err(refusal),
+            TakenBy::AnotherProvider => {
+                return Err(anyhow::anyhow!(
+                    super::credentials::output::refusal::name_in_another_provider(name)
+                ));
+            }
+            TakenBy::Unknown => {}
+        }
+    }
+    Err(cloud_name_error(error, provider, name, context))
+}
+
+/// The service refused a name as taken, with no other reason.
+fn is_name_taken(error: &rpc::ClientError) -> bool {
+    error.code() == rpc::ErrorCode::AlreadyExists && service_reason(error).is_none()
+}
+
+/// Who holds a name the service refused as taken.
+enum TakenBy {
+    /// A credential of the requested provider the caller may read, named.
+    Holder(anyhow::Error),
+    /// No credential of the requested provider holds it.
+    AnotherProvider,
+    /// The lookup failed: the refusal keeps the provider-only words.
+    Unknown,
+}
+
+/// Until migration 0042 makes the cloud's name indexes per provider, the
+/// service also refuses a name any other of the owner's credentials holds,
+/// whatever its provider (#4928). So a refusal is checked against
+/// `provider`'s own holder first: one the caller may read is named with a
+/// free name, as before the write; with none, the name is another
+/// provider's. `renaming` keeps its own name and is no holder.
+async fn taken_name_holder(
+    client: &CodewireClient,
+    provider: &str,
+    name: &str,
+    renaming: Option<&rpc::Credential>,
+) -> TakenBy {
+    let reading = NameReading {
+        name,
+        provider: Some(provider),
+    };
+    let Ok(NameLookup::Matches(holders)) = lookup_name(client, reading).await else {
+        return TakenBy::Unknown;
+    };
+    let Some(holder) = holders
+        .into_iter()
+        .find(|holder| renaming.is_none_or(|renamed| renamed.id != holder.id))
+    else {
+        return TakenBy::AnotherProvider;
+    };
+    let held = provider_credentials(client, provider)
+        .await
+        .unwrap_or_else(|_| vec![holder.clone()]);
+    TakenBy::Holder(name_taken(provider, &holder, &held, cloud_kind_label))
+}
+
+impl NamedCredential for rpc::Credential {
+    fn credential_id(&self) -> &str {
+        &self.id
+    }
+
+    fn provider_id(&self) -> &str {
+        &self.provider
+    }
+
+    fn credential_name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// A cloud credential's kind, as messages name it.
+fn cloud_kind_label(credential: &rpc::Credential) -> String {
+    super::credentials::output::CredentialView::cloud(credential)
+        .map_or_else(|_| credential.provider.clone(), |view| view.kind_label())
 }
 
 /// A device flow's challenge (Codex, GitHub): the link screen, then the code
@@ -682,35 +971,44 @@ pub(super) async fn resolve(
     client: &CodewireClient,
     selector: &str,
 ) -> anyhow::Result<rpc::Credential> {
-    let selector = match parse_credential_selector(selector)? {
+    resolve_in(client, selector, None).await
+}
+
+/// The credential `selector` names. A name is looked up in each of its
+/// readings, with the provider the service narrows it to (#4928). Within
+/// `scope`, the provider a profile slot fixes, a bare name needs no
+/// `PROVIDER/`; one only another provider's credential has is still found,
+/// for the slot to refuse in its own words.
+pub(super) async fn resolve_in(
+    client: &CodewireClient,
+    selector: &str,
+    scope: Option<&str>,
+) -> anyhow::Result<rpc::Credential> {
+    let name = match parse_credential_selector(selector)? {
         ParsedCredentialSelector::Id(id) => {
-            rpc::get_credential_request::Selector::CredentialId(id.to_string())
+            return client
+                .get_credential(rpc::GetCredentialRequest {
+                    selector: Some(rpc::get_credential_request::Selector::CredentialId(
+                        id.to_string(),
+                    )),
+                    ..Default::default()
+                })
+                .await?
+                .credential
+                .into_option()
+                .context("Codewire omitted the credential's details");
         }
-        ParsedCredentialSelector::Name(name) => {
-            rpc::get_credential_request::Selector::Name(name.to_owned())
-        }
+        ParsedCredentialSelector::Name(name) => name,
     };
-    let name = match &selector {
-        rpc::get_credential_request::Selector::Name(name) => Some(name.clone()),
-        _ => None,
+    let found = match find_name(client, name, scope).await? {
+        None if scope.is_some() => find_name(client, name, None).await?,
+        found => found,
     };
-    client
-        .get_credential(rpc::GetCredentialRequest {
-            selector: Some(selector),
-            ..Default::default()
-        })
-        .await
-        .map_err(|error| match name {
-            Some(name) if error.code() == rpc::ErrorCode::NotFound => {
-                anyhow::anyhow!(super::credentials::output::refusal::not_found(
-                    "cloud", &name
-                ))
-            }
-            _ => error.into(),
-        })?
-        .credential
-        .into_option()
-        .context("Codewire omitted the credential's details")
+    found.ok_or_else(|| {
+        anyhow::anyhow!(super::credentials::output::refusal::not_found(
+            "cloud", name.text
+        ))
+    })
 }
 
 /// The service's pending entries as the notice takes them; an unknown kind
@@ -868,7 +1166,11 @@ async fn delete_credential(
         })
         .await;
     if active {
-        deleted.context(refusal::revoked_not_deleted("cloud", &current.name))?;
+        deleted.context(refusal::revoked_not_deleted(
+            "cloud",
+            &current.provider,
+            &current.name,
+        ))?;
     } else {
         deleted.context("delete exact revoked cloud credential revision; inspect metadata before retrying an uncertain result")?;
     }
@@ -957,18 +1259,64 @@ fn provider_answer(
     )
 }
 
+/// What a cloud connect says when the service refuses `target`
+/// ([`cloud_connect_error`]).
+async fn refused_connect(
+    client: &CodewireClient,
+    target: &ConnectTarget<rpc::Credential>,
+    error: rpc::ClientError,
+) -> anyhow::Error {
+    let save = Save {
+        placement: "cloud",
+        kind: Kind::Connect(target.provider),
+        name: &target.name,
+    };
+    cloud_connect_error(client, save, target.existing.as_ref(), error).await
+}
+
+/// What a cloud connect says when the service doesn't save it: a name it
+/// refuses as taken is checked against the provider's own holder first
+/// ([`taken_name_holder`]); anything else is [`cloud_save_error`]'s.
+async fn cloud_connect_error(
+    client: &CodewireClient,
+    save: Save<'_>,
+    existing: Option<&rpc::Credential>,
+    error: rpc::ClientError,
+) -> anyhow::Error {
+    if let (true, Kind::Connect(provider)) = (is_name_taken(&error), save.kind) {
+        match taken_name_holder(client, provider_id(provider), save.name, existing).await {
+            TakenBy::Holder(refusal) => return refusal,
+            TakenBy::AnotherProvider => {
+                return save_error(save, Answer::TakenByAnotherProvider, None, None);
+            }
+            TakenBy::Unknown => {}
+        }
+    }
+    cloud_save_error(save, error)
+}
+
 /// What a cloud connect says when the service doesn't save a Claude sign-in
 /// or token: the words a local connect uses for the same cause (#4826), told
 /// by the code and the service's closed reason, never its message. Codex and
 /// GitHub keep the fixed words the client gives their enrollment streams.
 fn cloud_save_error(save: Save<'_>, error: rpc::ClientError) -> anyhow::Error {
     use rpc::ErrorCode;
-    if !matches!(
-        save.kind,
-        Kind::Connect(
-            CredentialConnectProviderArg::Claude | CredentialConnectProviderArg::ClaudeToken
+    // A refused name says so for every connect (#4928): one taken in the
+    // provider, by provider only, or one that starts with a provider id.
+    let reason = service_reason(&error);
+    let name_refused = (error.code() == ErrorCode::AlreadyExists && reason.is_none())
+        || reason
+            == Some(
+                codewire_local_credentials::StoreRefusal::CredentialNameReservesProvider.reason(),
+            );
+    if !name_refused
+        && !matches!(
+            save.kind,
+            Kind::Connect(
+                CredentialConnectProviderArg::Claude | CredentialConnectProviderArg::ClaudeToken
+            )
         )
-    ) {
+    {
         return anyhow::Error::new(error).context("save the sign-in in your Codewire account");
     }
     tracing::debug!(
@@ -988,10 +1336,6 @@ fn cloud_save_error(save: Save<'_>, error: rpc::ClientError) -> anyhow::Error {
         | ErrorCode::DataLoss => Answer::Uncertain,
         _ => Answer::Refused,
     };
-    let reason = error
-        .error_info()
-        .filter(|info| info.domain() == "codewire.sh")
-        .map(rpc::ErrorInfo::reason);
     save_error(save, answer, reason, None)
 }
 
@@ -1016,6 +1360,7 @@ mod tests {
                 rpc::CredentialStatus::Active,
             )
             .await;
+            lookup(&server, "renamed", Some("openai"), Lookup::NotFound).await;
             let mut expected = metadata(rpc::CredentialStatus::Active);
             expected.name = "renamed".into();
             if invalid_ack {
@@ -1375,7 +1720,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "cloud credential \"work\" was revoked, but may not have been deleted; run `cw credentials --cloud delete work` again"
+            "cloud credential \"work\" was revoked, but may not have been deleted; run `cw credentials --cloud delete openai/work` again"
         );
         server.verify().await;
     }
@@ -1740,6 +2085,463 @@ mod tests {
         server.verify().await;
     }
 
+    /// The service's answer to a name lookup: a credential, not found, or
+    /// its refusal to choose between providers (#4928).
+    enum Lookup {
+        Found(Box<rpc::Credential>),
+        NotFound,
+        Ambiguous(&'static str),
+    }
+
+    fn credential(
+        id: &str,
+        provider: &str,
+        kind: rpc::CredentialAuthenticationKind,
+        name: &str,
+    ) -> rpc::Credential {
+        rpc::Credential {
+            id: id.into(),
+            name: name.into(),
+            provider: provider.into(),
+            authentication_kind: kind.into(),
+            status: rpc::CredentialStatus::Active.into(),
+            revocation_generation: REVISION,
+            ..Default::default()
+        }
+    }
+
+    const CLAUDE_WALK: &str = "0f1c4a1e-6a51-4c5d-9f0c-6b2f7c1d2e01";
+    const CODEX_WALK: &str = "0f1c4a1e-6a51-4c5d-9f0c-6b2f7c1d2e02";
+
+    fn claude_walk() -> rpc::Credential {
+        credential(
+            CLAUDE_WALK,
+            "anthropic",
+            rpc::CredentialAuthenticationKind::ClaudeSignIn,
+            "walk",
+        )
+    }
+
+    fn codex_walk() -> rpc::Credential {
+        credential(
+            CODEX_WALK,
+            "openai",
+            rpc::CredentialAuthenticationKind::Oauth,
+            "walk",
+        )
+    }
+
+    /// Mounts the service's answer to one exact name lookup.
+    async fn lookup(server: &MockServer, name: &str, provider: Option<&str>, answer: Lookup) {
+        lookups(server, name, provider, vec![lookup_answer(answer)]).await;
+    }
+
+    /// Mounts the service's answers to an exact name lookup asked once for
+    /// each, in turn.
+    async fn lookups(
+        server: &MockServer,
+        name: &str,
+        provider: Option<&str>,
+        answers: Vec<ResponseTemplate>,
+    ) {
+        let request = rpc::GetCredentialRequest {
+            selector: Some(rpc::get_credential_request::Selector::Name(name.into())),
+            provider: provider.map(str::to_owned),
+            ..Default::default()
+        };
+        for response in answers {
+            Mock::given(method("POST"))
+                .and(path("/codewire.v1.CredentialService/GetCredential"))
+                .and(body_bytes(request.encode_to_vec()))
+                .respond_with(response)
+                .up_to_n_times(1)
+                .expect(1)
+                .mount(server)
+                .await;
+        }
+    }
+
+    fn lookup_answer(answer: Lookup) -> ResponseTemplate {
+        match answer {
+            Lookup::Found(credential) => ResponseTemplate::new(200)
+                .insert_header("content-type", "application/proto")
+                .set_body_bytes(
+                    rpc::GetCredentialResponse {
+                        credential: Some(*credential).into(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                ),
+            Lookup::NotFound => refusal(404, "not_found", None),
+            Lookup::Ambiguous(providers) => refusal(
+                400,
+                "failed_precondition",
+                Some((CREDENTIAL_NAME_AMBIGUOUS, Some(providers))),
+            ),
+        }
+    }
+
+    fn refusal(status: u16, code: &str, reason: Option<(&str, Option<&str>)>) -> ResponseTemplate {
+        let details = reason
+            .map(|(reason, providers)| {
+                let mut info = codewire_proto::google::rpc::ErrorInfo {
+                    reason: reason.into(),
+                    domain: "codewire.sh".into(),
+                    ..Default::default()
+                };
+                if let Some(providers) = providers {
+                    info.metadata.insert("providers".into(), providers.into());
+                }
+                vec![connectrpc::ErrorDetail::from_message(
+                    "google.rpc.ErrorInfo",
+                    &info,
+                )]
+            })
+            .unwrap_or_default();
+        ResponseTemplate::new(status)
+            .insert_header("content-type", "application/json")
+            .set_body_json(serde_json::json!({
+                "code": code,
+                "message": "synthetic refusal",
+                "details": details,
+            }))
+    }
+
+    async fn listing(server: &MockServer, credentials: Vec<rpc::Credential>) {
+        unary(
+            server,
+            "CredentialService",
+            "ListCredentials",
+            rpc::ListCredentialsRequest {
+                page_size: 100,
+                ..Default::default()
+            },
+            rpc::ListCredentialsResponse {
+                credentials,
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    /// A bare name the service finds under two providers is refused in the
+    /// local words, and nothing is deleted; `PROVIDER/NAME` asks for that
+    /// provider's credential only (#4928).
+    #[tokio::test]
+    async fn a_bare_shared_cloud_name_is_refused_with_the_choice_and_changes_nothing() {
+        let server = MockServer::start().await;
+        let client = client(&server);
+        lookup(&server, "walk", None, Lookup::Ambiguous("anthropic,openai")).await;
+        let error = execute(
+            &client,
+            CredentialsCommand::Delete(CredentialDeleteArgs {
+                credential: Some("walk".into()),
+                yes: true,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "\"walk\" names more than one credential (anthropic, openai); name one, for example anthropic/walk"
+        );
+        // The lookup only: no profile listing, revoke or delete.
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        server.verify().await;
+        server.reset().await;
+
+        lookup(&server, "openai/walk", None, Lookup::NotFound).await;
+        lookup(
+            &server,
+            "walk",
+            Some("openai"),
+            Lookup::Found(Box::new(codex_walk())),
+        )
+        .await;
+        assert_eq!(
+            resolve(&client, "openai/walk").await.unwrap().id,
+            CODEX_WALK
+        );
+        server.verify().await;
+        server.reset().await;
+
+        // A slot's provider narrows a bare name, so it needs no prefix.
+        lookup(
+            &server,
+            "walk",
+            Some("anthropic"),
+            Lookup::Found(Box::new(claude_walk())),
+        )
+        .await;
+        assert_eq!(
+            resolve_in(&client, "walk", Some("anthropic"))
+                .await
+                .unwrap()
+                .id,
+            CLAUDE_WALK
+        );
+        server.verify().await;
+    }
+
+    /// cw-security's first condition on #4928, in the cloud: both readings
+    /// are asked for, and two different credentials are refused naming both.
+    #[tokio::test]
+    async fn a_literal_cloud_provider_name_beside_that_providers_name_is_refused() {
+        let server = MockServer::start().await;
+        let client = client(&server);
+        let literal = credential(
+            "0f1c4a1e-6a51-4c5d-9f0c-6b2f7c1d2e03",
+            "ssh",
+            rpc::CredentialAuthenticationKind::SshKey,
+            "github/work",
+        );
+        let github = credential(
+            "0f1c4a1e-6a51-4c5d-9f0c-6b2f7c1d2e04",
+            "github",
+            rpc::CredentialAuthenticationKind::Oauth,
+            "work",
+        );
+        lookup(
+            &server,
+            "github/work",
+            None,
+            Lookup::Found(Box::new(literal.clone())),
+        )
+        .await;
+        lookup(
+            &server,
+            "work",
+            Some("github"),
+            Lookup::Found(Box::new(github)),
+        )
+        .await;
+        assert_eq!(
+            format!("{:#}", resolve(&client, "github/work").await.unwrap_err()),
+            "\"github/work\" names more than one credential (github \"work\", ssh \"github/work\"); name one, for example ssh/github/work"
+        );
+        server.verify().await;
+        server.reset().await;
+        // With only the literal one, it acts on that.
+        lookup(
+            &server,
+            "github/work",
+            None,
+            Lookup::Found(Box::new(literal.clone())),
+        )
+        .await;
+        lookup(&server, "work", Some("github"), Lookup::NotFound).await;
+        assert_eq!(resolve(&client, "github/work").await.unwrap(), literal);
+        server.verify().await;
+    }
+
+    /// The owner's case in the cloud: a Codex connect named like a Claude
+    /// sign-in asks only for an OpenAI credential of that name, and goes on.
+    /// A Claude token under a Claude sign-in's name is refused naming it.
+    #[tokio::test]
+    async fn a_cloud_connect_collides_only_within_its_provider() {
+        let server = MockServer::start().await;
+        let client = client(&server);
+        lookup(&server, "walk", Some("openai"), Lookup::NotFound).await;
+        let found = CloudConnectStore { client: &client }
+            .named(CredentialConnectProviderArg::Codex, "walk")
+            .await
+            .unwrap();
+        assert!(found.is_none());
+        server.verify().await;
+        server.reset().await;
+
+        lookup(
+            &server,
+            "walk",
+            Some("anthropic"),
+            Lookup::Found(Box::new(claude_walk())),
+        )
+        .await;
+        listing(&server, vec![claude_walk(), codex_walk()]).await;
+        let error = CloudConnectStore { client: &client }
+            .named(CredentialConnectProviderArg::ClaudeToken, "walk")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "\"walk\" is in use in anthropic by a Claude (sign-in) credential; choose another name, for example walk-2"
+        );
+        server.verify().await;
+        server.reset().await;
+
+        // A new name with a provider prefix asks nothing more of the service.
+        lookup(&server, "anthropic/walk", Some("openai"), Lookup::NotFound).await;
+        let error = CloudConnectStore { client: &client }
+            .named(CredentialConnectProviderArg::Codex, "anthropic/walk")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "a credential's name can't start with anthropic/, which reads as a provider; choose another name"
+        );
+        server.verify().await;
+    }
+
+    /// The service's refusal of a rename to `walk`, after the CLI's own
+    /// check found no OpenAI credential of that name.
+    async fn refused_rename(server: &MockServer, client: &CodewireClient) -> anyhow::Error {
+        expect_metadata(
+            server,
+            rpc::get_credential_request::Selector::Name("work".into()),
+            rpc::CredentialStatus::Active,
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/codewire.v1.CredentialMutationService/RenameCredential",
+            ))
+            .respond_with(refusal(409, "already_exists", None))
+            .expect(1)
+            .mount(server)
+            .await;
+        execute(
+            client,
+            CredentialsCommand::Rename(CredentialRenameArgs {
+                credential: "work".into(),
+                name: "walk".into(),
+            }),
+        )
+        .await
+        .unwrap_err()
+    }
+
+    /// A Codex sign-in's save to `walk` that the service refused as taken.
+    async fn refused_codex_save(client: &CodewireClient) -> String {
+        let taken = rpc::ClientError::from(connectrpc::ConnectError::new(
+            connectrpc::ErrorCode::AlreadyExists,
+            "credential name already exists",
+        ));
+        let save = Save {
+            placement: "cloud",
+            kind: Kind::Connect(CredentialConnectProviderArg::Codex),
+            name: "walk",
+        };
+        crate::error_report::sentence(&cloud_connect_error(client, save, None, taken).await)
+    }
+
+    /// Until migration 0042 the cloud refuses a name another provider's
+    /// credential holds (#4928). When the service says a name is taken and
+    /// the provider's own lookup, asked again, finds no holder, the refusal
+    /// says another provider has it, for a rename and a sign-in's save.
+    #[tokio::test]
+    async fn a_name_the_cloud_refuses_that_its_provider_does_not_hold_is_another_providers() {
+        let server = MockServer::start().await;
+        let client = client(&server);
+        let not_found = || lookup_answer(Lookup::NotFound);
+        lookups(
+            &server,
+            "walk",
+            Some("openai"),
+            vec![not_found(), not_found()],
+        )
+        .await;
+        assert_eq!(
+            format!("{:#}", refused_rename(&server, &client).await),
+            "a credential of another provider already uses \"walk\" in your Codewire account; choose another name"
+        );
+        server.verify().await;
+        server.reset().await;
+
+        lookup(&server, "walk", Some("openai"), Lookup::NotFound).await;
+        assert_eq!(
+            refused_codex_save(&client).await,
+            "a credential of another provider already uses \"walk\" in your Codewire account, so your Codex sign-in wasn't saved"
+        );
+        server.verify().await;
+    }
+
+    /// When the lookup after the refusal finds a credential of the provider
+    /// the caller may read, it is named with a free name, as before a write.
+    #[tokio::test]
+    async fn a_name_the_cloud_refuses_that_a_readable_credential_of_its_provider_holds_names_it() {
+        let server = MockServer::start().await;
+        let client = client(&server);
+        lookups(
+            &server,
+            "walk",
+            Some("openai"),
+            vec![
+                lookup_answer(Lookup::NotFound),
+                lookup_answer(Lookup::Found(Box::new(codex_walk()))),
+            ],
+        )
+        .await;
+        listing(
+            &server,
+            vec![metadata(rpc::CredentialStatus::Active), codex_walk()],
+        )
+        .await;
+        let taken = "\"walk\" is in use in openai by a Codex credential; choose another name, for example walk-2";
+        assert_eq!(
+            format!("{:#}", refused_rename(&server, &client).await),
+            taken
+        );
+        server.verify().await;
+        server.reset().await;
+
+        lookup(
+            &server,
+            "walk",
+            Some("openai"),
+            Lookup::Found(Box::new(codex_walk())),
+        )
+        .await;
+        listing(&server, vec![codex_walk()]).await;
+        assert_eq!(refused_codex_save(&client).await, taken);
+        server.verify().await;
+    }
+
+    /// When the lookup after the refusal fails, the refusal names the
+    /// provider only, never a holder (cw-security on #4928); so does a
+    /// sign-in's save, and the store's reserved name keeps its words.
+    #[tokio::test]
+    async fn a_name_the_cloud_refuses_whose_holder_cannot_be_looked_up_names_only_its_provider() {
+        let server = MockServer::start().await;
+        let client = client(&server);
+        let unreadable = || refusal(403, "permission_denied", None);
+        lookups(
+            &server,
+            "walk",
+            Some("openai"),
+            vec![lookup_answer(Lookup::NotFound), unreadable()],
+        )
+        .await;
+        assert_eq!(
+            format!("{:#}", refused_rename(&server, &client).await),
+            "that name is in use in openai; choose another name"
+        );
+        server.verify().await;
+        server.reset().await;
+
+        lookups(&server, "walk", Some("openai"), vec![unreadable()]).await;
+        assert_eq!(
+            refused_codex_save(&client).await,
+            "that name is in use in openai, so your Codex sign-in wasn't saved"
+        );
+        server.verify().await;
+
+        let reserved = rpc::ClientError::from(
+            connectrpc::ConnectError::new(connectrpc::ErrorCode::InvalidArgument, "reserved")
+                .with_detail(connectrpc::ErrorDetail::from_message(
+                    "google.rpc.ErrorInfo",
+                    &codewire_proto::google::rpc::ErrorInfo {
+                        reason: "CREDENTIAL_NAME_RESERVES_PROVIDER".into(),
+                        domain: "codewire.sh".into(),
+                        ..Default::default()
+                    },
+                )),
+        );
+        assert_eq!(
+            format!("{:#}", cloud_name_error(reserved, "ssh", "github/x", "add")),
+            "a credential's name can't start with github/, which reads as a provider; choose another name"
+        );
+    }
+
     #[tokio::test]
     async fn reconnect_metadata_failure_is_not_treated_as_a_missing_credential() {
         let server = MockServer::start().await;
@@ -1751,7 +2553,11 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        assert!(find_named(&client(&server), "work").await.is_err());
+        let reading = NameReading {
+            name: "work",
+            provider: None,
+        };
+        assert!(lookup_name(&client(&server), reading).await.is_err());
         server.verify().await;
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }

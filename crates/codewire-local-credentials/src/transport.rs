@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 24;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 25;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -67,6 +67,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         24,
         "RevokeCredentialAtProvider revokes, then asks a Codex sign-in's provider through a confined executor (#4717)",
     ),
+    (
+        25,
+        "a credential's name is unique per provider (store schema 7), and a new name may not start with a provider id and / (#4928)",
+    ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 
@@ -105,10 +109,15 @@ pub enum AuthorityFeature {
     /// `RevokeCredentialAtProvider`: a revoke that also asks the credential's
     /// provider (#4717). An older authority only revokes in Codewire.
     ProviderRevocation,
+    /// A credential's name is unique per provider, not across providers
+    /// (#4928): a Claude sign-in and a Codex sign-in may share one. An older
+    /// authority refuses the second name, and accepts a new name starting
+    /// with a provider id and `/`.
+    NamesPerProvider,
 }
 
 impl AuthorityFeature {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::PlatformGithub,
         Self::ClaudeSignIn,
         Self::DefaultProfile,
@@ -118,6 +127,7 @@ impl AuthorityFeature {
         Self::BootSecrets,
         Self::StoreProbe,
         Self::ProviderRevocation,
+        Self::NamesPerProvider,
     ];
 
     /// The protocol that introduced it.
@@ -132,6 +142,7 @@ impl AuthorityFeature {
             Self::BootSecrets => 22,
             Self::StoreProbe => 23,
             Self::ProviderRevocation => 24,
+            Self::NamesPerProvider => 25,
         }
     }
 

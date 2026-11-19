@@ -23,6 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use codewire_access::{
     CredentialAuthKind, CredentialId, CredentialMetadata, Owner, OwnerId, ProviderId,
+    reserves_provider_prefix,
 };
 use codewire_credential_broker::GitHubAppAuthorizationOwner;
 use codewire_credential_broker::provider_oauth::DeviceLoginError;
@@ -71,6 +72,8 @@ pub enum CredentialMutationError {
     ClaudeSignInCodeInvalid,
     /// The Claude sign-in was started too long ago.
     ClaudeSignInExpired,
+    /// A new or renamed credential's name starts with a provider id and `/`.
+    NameReservesProvider,
 }
 
 type Error = CredentialMutationError;
@@ -191,8 +194,8 @@ impl CredentialMutationOwner {
         credential_id: Option<String>,
         expected_revision: Option<u64>,
     ) -> Result<Events, Error> {
-        validate_name(&name)?;
         let replacement = replacement_selector(credential_id, expected_revision)?;
+        validate_target_name(&name, replacement.is_some())?;
         let scope = Scope::new(authority, self.stop.child_token(), ENROLLMENT_TIMEOUT)?;
         let accepting = self.accepting.lock().map_err(|_| Error::Unavailable)?;
         let permit = self.admit(*accepting)?;
@@ -225,6 +228,7 @@ impl CredentialMutationOwner {
         expires_at_unix: Option<u64>,
     ) -> Result<CredentialMetadata, Error> {
         validate_api_key(&provider, &name, material.expose_secret(), expires_at_unix)?;
+        validate_new_name(&name)?;
         let registration = CredentialRegistration {
             provider: ProviderId::parse(provider).map_err(|_| Error::InvalidInput)?,
             authentication_kind: CredentialAuthKind::ApiKey,
@@ -274,6 +278,7 @@ impl CredentialMutationOwner {
         validate_name(&name)?;
         validate_claude_subscription_token(material.expose_secret())?;
         let replacement = replacement_selector(credential_id, expected_revision)?;
+        validate_target_name(&name, replacement.is_some())?;
         let expires_at_unix = unix_now()?
             .checked_add(CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS)
             .ok_or(Error::Unavailable)?;
@@ -576,6 +581,30 @@ fn validate_name(name: &str) -> Result<(), Error> {
         Err(Error::InvalidInput)
     } else {
         Ok(())
+    }
+}
+
+/// A name a credential is created with or renamed to. `PROVIDER/NAME` would
+/// read a name that starts with a provider id and `/` as another credential,
+/// so no new name may (docs/dev/SECRETS-AND-CREDENTIALS.md, "Credential
+/// names"). A credential that already has one keeps it: reconnecting,
+/// rotating or naming it as the expected name checks only [`validate_name`].
+fn validate_new_name(name: &str) -> Result<(), Error> {
+    validate_name(name)?;
+    if reserves_provider_prefix(name) {
+        Err(Error::NameReservesProvider)
+    } else {
+        Ok(())
+    }
+}
+
+/// An enrollment's name: new unless it reconnects an existing credential,
+/// whose name must then match exactly.
+fn validate_target_name(name: &str, reconnect: bool) -> Result<(), Error> {
+    if reconnect {
+        validate_name(name)
+    } else {
+        validate_new_name(name)
     }
 }
 

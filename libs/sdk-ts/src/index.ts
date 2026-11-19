@@ -70,6 +70,7 @@ export type {
 export { Credentials, EnrollmentOutcomeUnknownError } from "./credentials.js";
 export type {
   Credential,
+  CredentialProvider,
   SshPublicKey,
   GithubRepository,
   GithubRepositoryPage,

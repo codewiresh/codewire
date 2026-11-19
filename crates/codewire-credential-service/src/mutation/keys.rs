@@ -31,7 +31,7 @@ impl CredentialMutationOwner {
                 name,
             } => {
                 validate_name(expected_name)?;
-                validate_name(name)?;
+                validate_new_name(name)?;
             }
             Update::Rotate {
                 material,

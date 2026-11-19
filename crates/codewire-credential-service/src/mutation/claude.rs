@@ -122,6 +122,7 @@ impl CredentialMutationOwner {
         );
         drop(authorization_code);
         let replacement = replacement_selector(credential_id, expected_revision)?;
+        validate_target_name(&name, replacement.is_some())?;
         // A malformed, expired or future handle is refused before any work.
         handle_issued_at(&handle, unix_now()?)?;
         let scope = Scope::new(authority, self.stop.child_token(), CLAUDE_SIGN_IN_TIMEOUT)?;

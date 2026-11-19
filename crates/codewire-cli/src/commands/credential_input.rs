@@ -377,8 +377,134 @@ pub(super) fn credential_command_json(command: &CredentialsCommand) -> bool {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ParsedCredentialSelector<'a> {
-    Name(&'a str),
+    Name(CredentialName<'a>),
     Id(CredentialId),
+}
+
+/// A credential's name as typed (#4928). A name is unique only within a
+/// provider, so `PROVIDER/NAME` names one: the prefix is a provider only when
+/// it is one of the stored provider ids, and any other `/` is part of the
+/// name. A name an older Codewire saved as `github/work` still reads as that
+/// literal name too, so a lookup tries both readings
+/// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Credential names").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CredentialName<'a> {
+    /// The whole text, read as a name.
+    pub(super) text: &'a str,
+    /// The provider and the name after it, when the text starts with a
+    /// provider id and `/`; never for `name:NAME`, which is always literal.
+    pub(super) qualified: Option<(&'a str, &'a str)>,
+}
+
+/// One reading of a typed name: the name, and the provider it must be in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct NameReading<'a> {
+    pub(super) name: &'a str,
+    pub(super) provider: Option<&'a str>,
+}
+
+impl<'a> CredentialName<'a> {
+    /// A bare name, with its `PROVIDER/NAME` reading where it has one.
+    pub(super) fn parse(text: &'a str) -> Self {
+        let qualified = text.split_once('/').filter(|(provider, name)| {
+            codewire_access::is_credential_name_provider(provider)
+                && !name.is_empty()
+                && name.trim() == *name
+        });
+        Self { text, qualified }
+    }
+
+    /// A name that is only ever itself: `name:NAME`.
+    pub(super) fn literal(text: &'a str) -> Self {
+        Self {
+            text,
+            qualified: None,
+        }
+    }
+
+    /// The readings to look up. Within `scope`, a provider a command fixes
+    /// (a connect's, a profile slot's), only that provider's credentials
+    /// match, and a `PROVIDER/` naming another provider reads only as the
+    /// literal name.
+    pub(super) fn readings(&self, scope: Option<&'a str>) -> Vec<NameReading<'a>> {
+        let mut readings = vec![NameReading {
+            name: self.text,
+            provider: scope,
+        }];
+        if let Some((provider, name)) = self.qualified
+            && scope.is_none_or(|scope| scope == provider)
+        {
+            readings.push(NameReading {
+                name,
+                provider: Some(provider),
+            });
+        }
+        readings
+    }
+}
+
+/// What a credential's store holds of one name reading.
+pub(super) enum NameLookup<R> {
+    /// Every credential the reading matches; none when nothing does.
+    Matches(Vec<R>),
+    /// The store refused to choose: the name matches credentials of these
+    /// providers (the cloud's `CREDENTIAL_NAME_AMBIGUOUS`).
+    Ambiguous(Vec<String>),
+}
+
+/// A credential a name can resolve to, in either placement.
+pub(super) trait NamedCredential {
+    fn credential_id(&self) -> &str;
+    fn provider_id(&self) -> &str;
+    fn credential_name(&self) -> &str;
+}
+
+/// The one credential `name`'s readings match, or none. More than one, across
+/// every reading, is refused before anything changes, naming each match and
+/// a way to name one, in the same words in both placements (#4928;
+/// cw-security's first condition on #4928).
+pub(super) fn settle_name<R: NamedCredential>(
+    name: &str,
+    lookups: Vec<(NameReading<'_>, NameLookup<R>)>,
+) -> anyhow::Result<Option<R>> {
+    let mut found: Vec<R> = Vec::new();
+    let mut matches: Vec<(String, String)> = Vec::new();
+    let mut ambiguous = false;
+    for (reading, lookup) in lookups {
+        match lookup {
+            NameLookup::Matches(records) => {
+                for record in records {
+                    if found
+                        .iter()
+                        .any(|seen| seen.credential_id() == record.credential_id())
+                    {
+                        continue;
+                    }
+                    matches.push((
+                        record.provider_id().to_owned(),
+                        record.credential_name().to_owned(),
+                    ));
+                    found.push(record);
+                }
+            }
+            NameLookup::Ambiguous(providers) => {
+                ambiguous = true;
+                matches.extend(
+                    providers
+                        .into_iter()
+                        .map(|provider| (provider, reading.name.to_owned())),
+                );
+            }
+        }
+    }
+    if ambiguous || matches.len() > 1 {
+        matches.sort();
+        matches.dedup();
+        anyhow::bail!(super::credentials::output::refusal::ambiguous_name(
+            name, &matches
+        ));
+    }
+    Ok(found.pop())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -393,10 +519,9 @@ pub(super) fn parse_credential_selector(
 ) -> anyhow::Result<ParsedCredentialSelector<'_>> {
     let selector = trimmed_required(selector, "credential selector")?;
     if let Some(name) = selector.strip_prefix("name:") {
-        return Ok(ParsedCredentialSelector::Name(explicit_selector_name(
-            name,
-            "credential",
-        )?));
+        return Ok(ParsedCredentialSelector::Name(CredentialName::literal(
+            explicit_selector_name(name, "credential")?,
+        )));
     }
     if let Some(id) = selector.strip_prefix("id:") {
         let id = canonical_selector_id(id, "credential")?;
@@ -405,7 +530,80 @@ pub(super) fn parse_credential_selector(
         ));
     }
     reject_unknown_selector_prefix(selector, "credential")?;
-    Ok(ParsedCredentialSelector::Name(selector))
+    Ok(ParsedCredentialSelector::Name(CredentialName::parse(
+        selector,
+    )))
+}
+
+/// Refuses `name` for a credential of `provider` before anything is asked
+/// for or saved (#4928): a name that starts with a provider id and `/`, or
+/// one another credential of that provider holds, which is named with a free
+/// name in that provider. Another provider's credential may share the name.
+/// `held` is what this command could read; `renaming` is the credential a
+/// rename changes, which keeps its own name, even one an older Codewire
+/// saved with a provider prefix.
+pub(super) fn admit_name<R: NamedCredential>(
+    provider: &str,
+    name: &str,
+    held: &[R],
+    renaming: Option<&R>,
+    kind: impl Fn(&R) -> String,
+) -> anyhow::Result<()> {
+    if renaming.is_none_or(|record| record.credential_name() != name) {
+        admit_new_name(name)?;
+    }
+    let in_provider = |record: &&R| record.provider_id() == provider;
+    let holder = held.iter().filter(in_provider).find(|record| {
+        record.credential_name().eq_ignore_ascii_case(name)
+            && renaming.is_none_or(|renamed| renamed.credential_id() != record.credential_id())
+    });
+    match holder {
+        Some(holder) => Err(name_taken(provider, holder, held, kind)),
+        None => Ok(()),
+    }
+}
+
+/// `holder`, of `provider`, has the name: it is named, with the first free
+/// `NAME-2`, `NAME-3`, … among `held` in that provider.
+pub(super) fn name_taken<R: NamedCredential>(
+    provider: &str,
+    holder: &R,
+    held: &[R],
+    kind: impl Fn(&R) -> String,
+) -> anyhow::Error {
+    let name = holder.credential_name();
+    let free = free_name(name, |candidate| {
+        held.iter().any(|record| {
+            record.provider_id() == provider
+                && record.credential_name().eq_ignore_ascii_case(candidate)
+        })
+    });
+    anyhow::anyhow!(super::credentials::output::refusal::name_taken(
+        provider,
+        name,
+        &kind(holder),
+        free.as_deref(),
+    ))
+}
+
+/// Refuses a new name that starts with a provider id and `/`, which
+/// `PROVIDER/NAME` would read as another credential (#4928), with the rule
+/// both stores keep (`codewire_access::reserves_provider_prefix`).
+pub(super) fn admit_new_name(name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !codewire_access::reserves_provider_prefix(name),
+        super::credentials::output::refusal::reserved_name(name)
+    );
+    Ok(())
+}
+
+/// The first of `NAME-2`, `NAME-3`, … that `taken` says is free and fits a
+/// name's 256 bytes; none past a bound.
+fn free_name(name: &str, taken: impl Fn(&str) -> bool) -> Option<String> {
+    (2..1000)
+        .map(|number| format!("{name}-{number}"))
+        .take_while(|candidate| candidate.len() <= 256)
+        .find(|candidate| !taken(candidate))
 }
 
 pub(super) fn parse_profile_selector(selector: &str) -> anyhow::Result<ParsedProfileSelector> {
@@ -497,6 +695,18 @@ pub(super) fn profile_set_credential(
         .ok_or_else(|| anyhow::anyhow!("select a credential for this provider"))
 }
 
+/// The provider whose credentials a profile slot takes, so `set SLOT NAME`
+/// needs no `PROVIDER/` (#4928): codex and openai take OpenAI's, anthropic
+/// Anthropic's, ssh the SSH keys.
+pub(super) fn slot_provider(slot: &str) -> Option<&'static str> {
+    match slot {
+        "codex" | "openai" => Some("openai"),
+        "anthropic" => Some("anthropic"),
+        "ssh" => Some("ssh"),
+        _ => None,
+    }
+}
+
 pub(super) fn supported_profile_slot(
     value: &str,
     provider: &ProviderId,
@@ -570,7 +780,8 @@ pub(super) fn expiry_arg(value: &str) -> Result<u64, String> {
 pub(super) const PROFILE_SLOTS: [&str; 5] = ["codex", "openai", "github", "anthropic", "ssh"];
 
 /// How a credentials command names one credential.
-pub(super) const SELECTOR_HELP: &str = "Credential name, name:NAME or id:UUID";
+pub(super) const SELECTOR_HELP: &str =
+    "Credential name, PROVIDER/NAME (anthropic, openai, github or ssh), name:NAME or id:UUID";
 
 /// A profile slot, in `set` and `unset`.
 pub(super) const SLOT_HELP: &str = "Which of the profile's providers";
@@ -1446,7 +1657,10 @@ mod tests {
         const ID: &str = "11111111-1111-4111-8111-111111111111";
         assert!(matches!(
             parse_credential_selector(ID).unwrap(),
-            ParsedCredentialSelector::Name(ID)
+            ParsedCredentialSelector::Name(CredentialName {
+                text: ID,
+                qualified: None
+            })
         ));
         assert!(matches!(
             parse_credential_selector(&format!("id:{ID}")).unwrap(),
@@ -1459,6 +1673,77 @@ mod tests {
         for invalid in ["id:", "id:not-a-uuid", "provider:work", "name: work"] {
             assert!(parse_credential_selector(invalid).is_err());
         }
+    }
+
+    /// A prefix is a provider only when it is one of the four stored ids, in
+    /// that case; `name:` is always the literal name (#4928).
+    #[test]
+    fn a_provider_prefix_reads_as_a_provider_only_for_the_four_ids() {
+        fn named(selector: &str) -> CredentialName<'_> {
+            match parse_credential_selector(selector).unwrap() {
+                ParsedCredentialSelector::Name(name) => name,
+                ParsedCredentialSelector::Id(_) => panic!("{selector} is a name"),
+            }
+        }
+        for (selector, qualified) in [
+            ("anthropic/walk", Some(("anthropic", "walk"))),
+            ("openai/n@example.com", Some(("openai", "n@example.com"))),
+            ("github/work/nested", Some(("github", "work/nested"))),
+            ("ssh/deploy", Some(("ssh", "deploy"))),
+            ("walk", None),
+            ("gitlab/work", None),
+            ("Anthropic/walk", None),
+            ("work/github", None),
+            ("github/", None),
+            ("github/ work", None),
+            ("name:openai/walk", None),
+        ] {
+            assert_eq!(named(selector).qualified, qualified, "{selector}");
+        }
+        assert_eq!(named("name:openai/walk").text, "openai/walk");
+
+        let both = CredentialName::parse("github/work");
+        assert_eq!(
+            both.readings(None),
+            [
+                NameReading {
+                    name: "github/work",
+                    provider: None
+                },
+                NameReading {
+                    name: "work",
+                    provider: Some("github")
+                },
+            ]
+        );
+        // A connect or a slot fixes the provider; another provider's prefix
+        // is then only part of the name.
+        assert_eq!(
+            both.readings(Some("ssh")),
+            [NameReading {
+                name: "github/work",
+                provider: Some("ssh")
+            }]
+        );
+        assert_eq!(both.readings(Some("github")).len(), 2);
+        for (slot, provider) in [
+            ("codex", Some("openai")),
+            ("openai", Some("openai")),
+            ("anthropic", Some("anthropic")),
+            ("ssh", Some("ssh")),
+            ("github", None),
+        ] {
+            assert_eq!(slot_provider(slot), provider, "{slot}");
+        }
+    }
+
+    #[test]
+    fn a_free_name_is_the_first_unused_number_that_fits() {
+        let taken = ["walk", "WALK-2", "walk-3"];
+        let used = |name: &str| taken.iter().any(|held| held.eq_ignore_ascii_case(name));
+        assert_eq!(free_name("walk", used).as_deref(), Some("walk-4"));
+        assert_eq!(free_name("other", used).as_deref(), Some("other-2"));
+        assert_eq!(free_name(&"x".repeat(255), |_| false), None);
     }
 
     #[test]

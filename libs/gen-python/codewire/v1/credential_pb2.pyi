@@ -197,12 +197,14 @@ class ListCredentialsResponse(_message.Message):
     def __init__(self, credentials: _Optional[_Iterable[_Union[Credential, _Mapping]]] = ..., next_page_token: _Optional[str] = ...) -> None: ...
 
 class GetCredentialRequest(_message.Message):
-    __slots__ = ("credential_id", "name")
+    __slots__ = ("credential_id", "name", "provider")
     CREDENTIAL_ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
+    PROVIDER_FIELD_NUMBER: _ClassVar[int]
     credential_id: str
     name: str
-    def __init__(self, credential_id: _Optional[str] = ..., name: _Optional[str] = ...) -> None: ...
+    provider: str
+    def __init__(self, credential_id: _Optional[str] = ..., name: _Optional[str] = ..., provider: _Optional[str] = ...) -> None: ...
 
 class GetCredentialResponse(_message.Message):
     __slots__ = ("credential",)

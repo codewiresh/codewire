@@ -248,9 +248,18 @@ func (s *CredentialService) Get(ctx context.Context, id string) (*Credential, er
 	return s.get(ctx, &codewirev1.GetCredentialRequest{Selector: &codewirev1.GetCredentialRequest_CredentialId{CredentialId: id}})
 }
 
-// GetByName selects an exact case-insensitive personal name.
+// GetByName selects an exact case-insensitive personal name. A name is unique
+// per provider: one that more than one of the account's credentials share is
+// refused (status 400, naming the providers), never guessed. Use
+// GetByProviderName to name one.
 func (s *CredentialService) GetByName(ctx context.Context, name string) (*Credential, error) {
 	return s.get(ctx, &codewirev1.GetCredentialRequest{Selector: &codewirev1.GetCredentialRequest_Name{Name: name}})
+}
+
+// GetByProviderName selects an exact case-insensitive personal name within one
+// provider: anthropic, openai, github or ssh.
+func (s *CredentialService) GetByProviderName(ctx context.Context, provider, name string) (*Credential, error) {
+	return s.get(ctx, &codewirev1.GetCredentialRequest{Selector: &codewirev1.GetCredentialRequest_Name{Name: name}, Provider: &provider})
 }
 
 func (s *CredentialService) get(ctx context.Context, request *codewirev1.GetCredentialRequest) (*Credential, error) {

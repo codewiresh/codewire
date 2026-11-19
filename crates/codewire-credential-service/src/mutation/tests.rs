@@ -26,6 +26,7 @@ mod additions;
 mod claude;
 mod github;
 mod lifecycle;
+mod names;
 mod process_test_support;
 mod provider_revocation;
 mod ssh;

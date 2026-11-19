@@ -7,6 +7,7 @@
 //! and the derived grants consumed by a placement credential broker.
 
 mod catalog;
+mod credential_name;
 mod front_door;
 mod grant;
 mod id;
@@ -19,6 +20,9 @@ mod refusal;
 pub use catalog::{
     CLAUDE_LOGIN_OPERATION, CLAUDE_LOGIN_ROUTE, CODEX_LOGIN_OPERATION, CODEX_LOGIN_ROUTE,
     builtin_provider_catalog, claude_login_permission, codex_login_permission,
+};
+pub use credential_name::{
+    CREDENTIAL_NAME_PROVIDERS, is_credential_name_provider, reserves_provider_prefix,
 };
 pub use front_door::{
     ANTHROPIC_API_HOST, CHATGPT_HOST, FRONT_DOOR_HOSTS, FrontDoorHost, INTERCEPT_PORT,

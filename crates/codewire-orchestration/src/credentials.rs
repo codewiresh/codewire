@@ -1,7 +1,12 @@
 //! Personal credential metadata only: no material store, KEK, or lifecycle writes.
 
-use codewire_access::{CredentialId, CredentialMetadata, Owner, OwnerId, builtin_provider_catalog};
-use codewire_platform_credentials::{CredentialMetadataReader, PlatformCredentialError};
+use codewire_access::{
+    CredentialId, CredentialMetadata, Owner, OwnerId, ProviderId, builtin_provider_catalog,
+    is_credential_name_provider,
+};
+use codewire_platform_credentials::{
+    CredentialMetadataReader, CredentialNameError, PlatformCredentialError,
+};
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::{AppError, AppResult};
 use sqlx::PgPool;
@@ -54,23 +59,48 @@ impl Credentials {
         Ok((credentials, next))
     }
 
+    /// The owner is the caller, so a name another account uses is not found,
+    /// and an ambiguous name lists only the caller's own providers.
     pub async fn get(
         &self,
         user: &AuthUser,
         selector: CredentialSelector<'_>,
-    ) -> AppResult<CredentialMetadata> {
+    ) -> AppResult<CredentialLookup> {
         let owner = personal_owner(user)?;
         match selector {
-            CredentialSelector::Id(id) => self.reader.get(&owner, &credential_id(id)?).await,
-            CredentialSelector::Name(name) => self.reader.resolve(&owner, name).await,
+            CredentialSelector::Id(id) => self
+                .reader
+                .get(&owner, &credential_id(id)?)
+                .await
+                .map(CredentialLookup::Found)
+                .map_err(metadata_error),
+            CredentialSelector::Name { name, provider } => {
+                let provider = provider.map(credential_provider).transpose()?;
+                match self.reader.resolve(&owner, name, provider.as_ref()).await {
+                    Ok(credential) => Ok(CredentialLookup::Found(credential)),
+                    Err(CredentialNameError::Ambiguous { providers }) => {
+                        Ok(CredentialLookup::Ambiguous(providers))
+                    }
+                    Err(CredentialNameError::Credential(error)) => Err(metadata_error(error)),
+                }
+            }
         }
-        .map_err(metadata_error)
     }
 }
 
 pub enum CredentialSelector<'a> {
     Id(&'a str),
-    Name(&'a str),
+    /// A provider narrows the name to that provider's credential.
+    Name {
+        name: &'a str,
+        provider: Option<&'a str>,
+    },
+}
+
+pub enum CredentialLookup {
+    Found(CredentialMetadata),
+    /// The name matches the caller's credentials of these providers, sorted.
+    Ambiguous(Vec<ProviderId>),
 }
 
 fn personal_owner(user: &AuthUser) -> AppResult<Owner> {
@@ -78,6 +108,13 @@ fn personal_owner(user: &AuthUser) -> AppResult<Owner> {
     Ok(Owner::User(
         OwnerId::parse(&user.user_id).map_err(|_| AppError::Unauthorized)?,
     ))
+}
+
+fn credential_provider(value: &str) -> AppResult<ProviderId> {
+    if !is_credential_name_provider(value) {
+        return Err(invalid());
+    }
+    ProviderId::parse(value).map_err(|_| invalid())
 }
 
 fn credential_id(value: &str) -> AppResult<CredentialId> {

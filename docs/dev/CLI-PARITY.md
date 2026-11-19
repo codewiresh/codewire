@@ -89,6 +89,8 @@ reconnect, show the provider step and print the result in their own way.
 | `add PROVIDER` for an unsupported provider | "provider mistral does not support API-key enrollment" | "API-key enrollment supports openai or anthropic; use add claude-subscription …" | **Gap C4** (one message) |
 | `add … --account-hint` | Accepted and listed | Refused: "platform API keys do not use --account-hint" | **Gap C5** |
 | `add` with a name already in use | Raw store error: "add local credential: code: 'Some entity that we attempted to create already exists', message: "local credential record already exists"" | "add platform API key; inspect by name before retrying an uncertain acknowledgement: credential name already exists" | **Gap C4** |
+| A name another provider's credential has (#4928) | `connect`, `add`, `generate` and `rename` take it; a name this provider's credential has is refused before any sign-in or key prompt, naming that credential's kind and a free `NAME-2` | Same, by name and provider; a name the service refuses that the CLI could not read says only the provider | same |
+| A bare name two providers share (#4928) | `get`, `rename`, `rotate`, `revoke`, `delete` and `connect --name` refuse it before anything changes, listing the providers; `PROVIDER/NAME` names one, and `set SLOT NAME` needs no prefix | Same words, from the service's `CREDENTIAL_NAME_AMBIGUOUS` | same |
 
 ### Credential lifecycle
 

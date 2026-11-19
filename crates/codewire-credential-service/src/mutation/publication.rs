@@ -96,7 +96,7 @@ async fn enroll_material(
                     return Err(Error::EnrollmentFailed);
                 }
                 let name = account_hint.as_deref().ok_or(Error::EnrollmentFailed)?;
-                super::validate_name(name)?;
+                super::validate_new_name(name)?;
                 EnrollmentTarget::Create(name.to_owned())
             }
             target => target,

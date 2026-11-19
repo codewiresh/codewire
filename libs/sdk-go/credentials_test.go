@@ -201,6 +201,15 @@ func TestCredentialsMetadataAndExactLifecycle(t *testing.T) {
 		if _, ok := f.last().(*codewirev1.GetCredentialRequest).Selector.(*codewirev1.GetCredentialRequest_Name); !ok {
 			t.Fatal("name selector was guessed")
 		}
+		if f.last().(*codewirev1.GetCredentialRequest).Provider != nil {
+			t.Fatal("a bare name sent a provider")
+		}
+	}
+	if _, err := c.Credentials.GetByProviderName(ctx, "anthropic", "shared"); err != nil {
+		t.Fatal(err)
+	}
+	if request := f.last().(*codewirev1.GetCredentialRequest); request.GetName() != "shared" || request.Provider == nil || *request.Provider != "anthropic" {
+		t.Fatalf("provider name selector changed: %v", request)
 	}
 	value, err := c.Credentials.Revoke(ctx, "credential-one", credentialExact)
 	if err != nil || value.Status != "revoked" || f.last().(*codewirev1.RevokeCredentialRequest).ExpectedRevocationGeneration != credentialExact {

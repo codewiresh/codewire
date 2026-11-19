@@ -249,28 +249,61 @@ on #4928, 2026-11-17, with cw-security's conditions):
   the store.
 - When a name is already taken in the same provider and the command is not a
   reconnect of that credential (`connect … --name` repeated, above), the
-  refusal names the credential that holds it and suggests a free name in that
-  provider: `anthropic already has a credential named "walk" (Claude
-  sign-in); choose another name, for example walk-2`.
+  refusal, before any sign-in or prompt for a key, names the credential that
+  holds it by its kind (the glossary's kind words) and suggests the first free
+  `NAME-2`, `NAME-3`, … in that provider: `"walk" is in use in anthropic by
+  a Claude (sign-in) credential; choose another name, for example walk-2`.
+  `connect`, `add`, `generate` and `rename` check it the same way in both
+  placements.
+- The holder is named only to a caller who may read it (cw-security's
+  addition on #4928, 2026-11-19). When the store or the service refuses a name as taken and the
+  command could read no credential holding it, such as an organization's
+  credential the caller may not read, it says only the provider: `That name
+  is in use in anthropic; choose another name` (for a sign-in, `That name is
+  in use in openai, so your Codex sign-in wasn't saved`). The cloud
+  credential commands are personal today, so the CLI names a holder only
+  when its own lookup by name and provider found it.
 - A new or renamed credential's name may not start with a provider id
   followed by `/` (`anthropic/`, `openai/`, `github/`, `ssh/`), in either
-  store. A credential an older Codewire saved with such a name keeps it and
-  keeps working.
+  store: `A credential's name can't start with github/, which reads as a
+  provider; choose another name`. The CLI checks it before any sign-in or
+  prompt; the stores refuse it too, with reason
+  `CREDENTIAL_NAME_RESERVES_PROVIDER`, which the CLI words the same way. A
+  credential an older Codewire saved with such a name keeps it and keeps
+  working, and a rename that keeps its name is no new name.
 
 Every command that takes a credential name (`get`, `rename`, `rotate`,
 `revoke`, `delete`, and `connect --name` when it reconnects) also accepts
 `PROVIDER/NAME`:
 
-- A prefix is read as a provider only when it is one of the four ids; any
-  other name containing `/` is a whole name.
+- A prefix is read as a provider only when it is one of the four ids,
+  exactly as stored (lowercase); any other name containing `/` is a whole
+  name. `name:NAME` is always the literal name, never `PROVIDER/NAME`.
+- `connect PROVIDER --name NAME` looks only in that provider, so another
+  provider's credential of that name is neither reconnected nor a collision;
+  `connect codex --name openai/walk` reconnects OpenAI's `walk`.
 - A bare name that matches one credential acts on it. A bare name that matches
   more than one is refused before anything changes, with the choice, in both
   placements: `"n@example.com" names more than one credential (anthropic,
-  openai); name one, for example anthropic/n@example.com`.
+  openai); name one, for example anthropic/n@example.com`. The cloud's
+  refusal is `FAILED_PRECONDITION` with ErrorInfo reason
+  `CREDENTIAL_NAME_AMBIGUOUS` and the providers, comma-joined, in its
+  `providers` metadata; the local store's carries the same reason and
+  `codewire-store-refusal-providers`. The CLI resolves a local name from the
+  store's listing and a cloud name with `GetCredentialRequest.provider`, and
+  words both the same.
 - A name with two readings, such as a literal `github/work` an older Codewire
   saved beside a GitHub credential named `work`, acts only when exactly one
-  credential matches either reading; otherwise it is refused naming both.
-- `--profile P set SLOT NAME` needs no prefix: the slot fixes the provider.
+  credential matches either reading; otherwise it is refused naming both:
+  `"github/work" names more than one credential (github "work", ssh
+  "github/work"); name one, for example ssh/github/work`. The CLI looks up
+  both readings in both placements.
+- `--profile P set SLOT NAME` needs no prefix: the slot fixes the provider
+  (`codex` and `openai` take OpenAI's, `anthropic` Anthropic's, `ssh` the SSH
+  keys). A name only another provider has is still found, so the slot refuses
+  it in its own words.
+- A command that suggests running itself again, such as a `delete` whose
+  revoke succeeded, names the credential as `PROVIDER/NAME`.
 - `list`, `get` and the dashboard show the provider beside each name.
 
 Names are resolved only at the CLI and the API edge. Profile entries, grants,
@@ -299,13 +332,23 @@ lapses, and every existing row stays valid. Rolling back recreates the old
 indexes, which fails once two providers share a name: rename one of them
 first.
 
+Until migration 0042 is applied, the cloud still refuses a name another
+provider's credential holds, and says so in those words: when the service
+refuses a name as taken and the CLI then finds no credential of the requested
+provider holding it, it says `A credential of another provider already uses
+"walk" in your Codewire account; choose another name`.
+
 A local store moves to schema 7, whose `credentials` table is unique on
 `(provider, display_name COLLATE NOCASE)` instead of `display_name`. The
 upgrade copies every row unchanged; every schema 6 store is already unique.
 The authority's name lookups take the provider, as the cloud's do. A new
 authority protocol and `AuthorityFeature::NamesPerProvider` mark the change; a
 `cw` that needs it replaces an older authority only while no local VM runs, as
-#4798's path does.
+#4798's path does. It needs it only for a `connect`, `add`, `generate` or
+`rename` whose name another provider's credential already has: names are
+resolved in the CLI from the listing, and an older store can hold no name two
+providers share, so every other command keeps working with an older
+authority that still serves a running VM.
 
 Renaming a platform profile (`AccessProfileService.RenameAccessProfile`, or
 **Rename** in a profile's menu in Settings → Credentials) changes only its

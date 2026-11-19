@@ -234,9 +234,10 @@ pub(in crate::commands) trait ConnectStore {
     /// What the provider handed back, held until the credential is saved.
     type Approval;
 
-    /// The credential named `name` when it is this provider's connected
-    /// kind. A credential of another provider or kind under that name is an
-    /// error, never a target.
+    /// This provider's credential named `name` (or `PROVIDER/NAME`) when it
+    /// is the connected kind. Another provider's credential may share the
+    /// name (#4928); this provider's credential of another kind under it is
+    /// an error, never a target, as is a new name a store would refuse.
     async fn named(
         &mut self,
         provider: CredentialConnectProviderArg,
@@ -323,6 +324,10 @@ async fn connect_with<S: ConnectStore>(
     )?
     .to_owned();
     let existing = existing_connection(store, provider, &name).await?;
+    // A reconnect keeps the credential's own name, however it was typed.
+    let name = existing
+        .as_ref()
+        .map_or(name, |record| S::display_name(record).to_owned());
     if let Some(record) = &existing {
         let reconnecting = S::describe(record)?;
         if !confirm_reconnect_with(
@@ -377,8 +382,12 @@ async fn existing_connection<S: ConnectStore>(
             S::PLACEMENT
         );
         if let Some(connected) = connections.first().map(S::display_name) {
+            let typed = super::CredentialName::parse(name);
             anyhow::ensure!(
-                connected.eq_ignore_ascii_case(name),
+                connected.eq_ignore_ascii_case(name)
+                    || typed.qualified.is_some_and(|(prefix, name)| {
+                        prefix == provider_id(provider) && connected.eq_ignore_ascii_case(name)
+                    }),
                 "GitHub is already connected as {connected}; run `cw credentials --{} connect github --name {} --yes` to reconnect it",
                 S::PLACEMENT,
                 crate::commands::platform_commands::shell_word(connected)

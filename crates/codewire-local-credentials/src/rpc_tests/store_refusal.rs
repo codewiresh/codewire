@@ -59,13 +59,28 @@ async fn a_definite_refusal_names_its_reason_over_the_transport() {
         Some("CREDENTIAL_REVISION_CHANGED")
     );
 
-    // A taken name is told by its code alone.
-    let taken = client
+    // A name is unique per provider (#4928): another provider's credential
+    // may share it, and a taken name is told by its code alone.
+    client
         .add_credential(oauth("openai", "work"), material())
+        .await
+        .unwrap();
+    let taken = client
+        .add_credential(oauth("openai", "WORK"), material())
         .await
         .unwrap_err();
     assert_eq!(taken.code(), Code::AlreadyExists);
     assert_eq!(store_refusal_reason(&taken), None);
+
+    let reserved = client
+        .add_credential(oauth("openai", "github/work"), material())
+        .await
+        .unwrap_err();
+    assert_eq!(reserved.code(), Code::InvalidArgument);
+    assert_eq!(
+        store_refusal_reason(&reserved),
+        Some("CREDENTIAL_NAME_RESERVES_PROVIDER")
+    );
 
     shutdown.send(()).unwrap();
     task.await.unwrap().unwrap();

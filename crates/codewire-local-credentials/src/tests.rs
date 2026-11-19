@@ -1701,7 +1701,7 @@ fn names_are_unique_case_insensitively_and_metadata_lifecycle_is_explicit() {
     );
     assert_eq!(
         authority
-            .resolve_credential("wOrK")
+            .resolve_credential("wOrK", None)
             .expect("resolve credential")
             .metadata
             .id,
@@ -3066,6 +3066,7 @@ fn generic_operation_lease_rejects_runnable_ssh_before_store_read() {
 
 /// Remove exactly the version-6 default profile table.
 fn downgrade_to_schema_five(connection: &Connection) {
+    credential_names::downgrade_to_schema_six(connection);
     connection
         .execute_batch(
             "DROP TABLE default_profiles;
@@ -3860,7 +3861,7 @@ fn the_credential_kinds_the_local_authority_stores_are_pinned_to_its_protocol() 
         admitted, expected,
         "bump the authority protocol with this set"
     );
-    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 24);
+    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 25);
 }
 
 /// The store keeps one default profile as the cloud does (#4717): the first
@@ -3998,4 +3999,5 @@ fn move_default_away(authority: &LocalCredentialAuthority<TestProtectedStore>) {
     );
 }
 
+mod credential_names;
 mod refresh_crash;

@@ -7,7 +7,7 @@ use codewire_client::{self as rpc, CodewireClient};
 
 use super::credential_input::{
     CredentialOperation, GITHUB_ALWAYS_INCLUDED, ParsedProfileSelector, parse_profile_selector,
-    profile_set_credential, profile_slot_for,
+    profile_set_credential, profile_slot_for, slot_provider,
 };
 use super::*;
 
@@ -70,11 +70,14 @@ async fn handle_profile(
         }
         CredentialProfileCommand::Set(args) => {
             let selector = profile_set_credential(&args)?;
-            let credential = super::platform_credentials::resolve(client, selector).await?;
+            let slot = args.slot.as_deref().context("a provider is required")?;
+            let credential =
+                super::platform_credentials::resolve_in(client, selector, slot_provider(slot))
+                    .await?;
             let kind = platform_authentication_kind(&credential)?;
             let slot = profile_slot_for(
                 &credential.name,
-                args.slot.as_deref().context("a provider is required")?,
+                slot,
                 &ProviderId::parse(&credential.provider)?,
                 kind,
             )?
@@ -458,6 +461,8 @@ mod tests {
                 selector: Some(rpc::get_credential_request::Selector::Name(
                     "codex-work".into(),
                 )),
+                // The codex slot's provider narrows the name (#4928).
+                provider: Some("openai".into()),
                 ..Default::default()
             },
             rpc::GetCredentialResponse {

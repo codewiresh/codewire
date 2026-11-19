@@ -21,6 +21,7 @@ mod broker_process;
 mod claude_token;
 mod client;
 mod control;
+mod credential_names;
 mod default_profile;
 mod error;
 mod placeholder;
@@ -36,6 +37,9 @@ mod store_refusal;
 mod transport;
 mod workload_secret;
 
+use credential_names::{
+    CREDENTIALS_TABLE_BODY, credential_names_unique_per_provider, upgrade_credential_names_schema,
+};
 use default_profile::{
     DEFAULT_PROFILE_SCHEMA, make_first_profile_default, upgrade_default_profile_schema,
 };
@@ -96,7 +100,10 @@ pub use repository::{
 pub use service::serve_local_credential_authority;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use service::serve_os_local_credential_authority_with_process_spawners;
-pub use store_refusal::{STORE_REFUSAL_KEY, StoreRefusal, store_refusal_reason};
+pub use store_refusal::{
+    STORE_REFUSAL_KEY, STORE_REFUSAL_PROVIDERS_KEY, StoreRefusal, store_refusal_providers,
+    store_refusal_reason,
+};
 pub use transport::{
     AuthorityFeature, AuthorityRuntimeConfig, AuthorityRuntimeError, MAXIMUM_SOCKET_PATH_BYTES,
     authority_exit_code, check_socket_path,
@@ -153,18 +160,22 @@ pub const AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES: [&str; 2] =
 
 const AUTHORITY_LOCK_FILE: &str = "authority.lock";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_4352; // "CWCR"
-const DATABASE_SCHEMA_VERSION: i64 = 6;
+const DATABASE_SCHEMA_VERSION: i64 = 7;
+/// Adds the store's default profile.
+const DEFAULT_PROFILE_DATABASE_SCHEMA_VERSION: i64 = 6;
 /// Makes GitHub one connection per store.
 const GITHUB_SINGLETON_DATABASE_SCHEMA_VERSION: i64 = 5;
 /// Adds typed SSH public-key metadata.
 const SSH_DATABASE_SCHEMA_VERSION: i64 = 4;
 const PREVIOUS_DATABASE_SCHEMA_VERSION: i64 = 3;
 /// GitHub is one connection per local store. Every profile includes it and
-/// never stores a GitHub credential ID.
-const GITHUB_SINGLETON_SCHEMA: &str = "
+/// never stores a GitHub credential ID. The index is on `credentials`, so a
+/// rebuild of that table recreates it; the triggers are on `profile_entries`.
+const GITHUB_SINGLETON_INDEX: &str = "
     CREATE UNIQUE INDEX credentials_github_oauth_singleton
       ON credentials(provider, authentication_kind)
-      WHERE provider = 'github' AND authentication_kind = 'oauth' AND status = 'active';
+      WHERE provider = 'github' AND authentication_kind = 'oauth' AND status = 'active';";
+const GITHUB_SINGLETON_TRIGGERS: &str = "
     CREATE TRIGGER profile_entries_github_insert BEFORE INSERT ON profile_entries
       WHEN NEW.capability_slot = 'github'
       BEGIN SELECT RAISE(ABORT, 'GitHub is always included, never an entry'); END;
@@ -803,6 +814,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             .into());
         }
 
+        credential_names::admit_new_name(&input.display_name)?;
         let input = claude_token::admit(input, &material)?;
         let id = CredentialId::parse(Uuid::new_v4().to_string())?;
         let metadata = CredentialMetadata {
@@ -938,26 +950,6 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             .map(|record| record.public)
     }
 
-    pub fn resolve_credential(
-        &self,
-        display_name: &str,
-    ) -> Result<CredentialRecord, LocalCredentialError> {
-        let connection = self.connection()?;
-        let id = connection
-            .query_row(
-                "SELECT id FROM credentials
-                 WHERE display_name = ?1 COLLATE NOCASE AND material_state = 'ready'",
-                [display_name],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(database_error)?
-            .ok_or(LocalCredentialError::CredentialNotFound)?;
-        let id = CredentialId::parse(id).map_err(|_| LocalCredentialError::CorruptMetadata)?;
-        load_internal_credential(&connection, &id, Some(MaterialState::Ready))
-            .map(|record| record.public)
-    }
-
     pub fn rename_credential(
         &self,
         id: &CredentialId,
@@ -966,6 +958,9 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         let connection = self.connection()?;
         let current = load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
         let mut metadata = current.public.metadata;
+        if display_name != metadata.display_name {
+            credential_names::admit_new_name(&display_name)?;
+        }
         metadata.display_name = display_name;
         metadata.validate()?;
         let changed = connection.execute(
@@ -2546,31 +2541,13 @@ fn configure_database(connection: &Connection) -> Result<(), LocalCredentialErro
 
 fn initialize_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
     connection
-        .execute_batch(
+        .execute_batch(&format!(
             "BEGIN IMMEDIATE;
              CREATE TABLE authority_metadata(
                key TEXT PRIMARY KEY NOT NULL,
                value TEXT NOT NULL
              ) STRICT;
-             CREATE TABLE credentials(
-               id TEXT PRIMARY KEY NOT NULL,
-               provider TEXT NOT NULL,
-               authentication_kind TEXT NOT NULL,
-               display_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
-               account_hint TEXT NULL,
-               ssh_public_key_openssh TEXT NULL,
-               ssh_public_key_fingerprint TEXT NULL
-                 CHECK((ssh_public_key_openssh IS NULL) = (ssh_public_key_fingerprint IS NULL)),
-               status TEXT NOT NULL CHECK(status IN ('active', 'expired', 'refresh_failed', 'revoked')),
-               expires_at_unix INTEGER NULL CHECK(expires_at_unix IS NULL OR expires_at_unix >= 0),
-               revocation_generation INTEGER NOT NULL CHECK(revocation_generation > 0),
-               material_generation INTEGER NOT NULL CHECK(material_generation > 0),
-               protected_entry_id TEXT NOT NULL UNIQUE,
-               store_persistence TEXT NOT NULL CHECK(store_persistence IN ('operating_system', 'process_lifetime')),
-               material_state TEXT NOT NULL CHECK(material_state IN ('pending_write', 'ready', 'pending_delete')),
-               created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
-               updated_at_unix_ms INTEGER NOT NULL CHECK(updated_at_unix_ms >= created_at_unix_ms)
-             ) STRICT;
+             CREATE TABLE credentials({CREDENTIALS_TABLE_BODY}
              CREATE TABLE protected_entry_journal(
                credential_id TEXT PRIMARY KEY NOT NULL,
                operation TEXT NOT NULL CHECK(operation IN ('rollback_write', 'delete_retired')),
@@ -2646,12 +2623,12 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalCredentialError
                protected_entry_id TEXT NOT NULL UNIQUE,
                created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
                FOREIGN KEY(secret_id) REFERENCES workload_secrets(id) ON DELETE CASCADE
-             ) STRICT;",
-        )
+             ) STRICT;"
+        ))
         .map_err(database_error)?;
     connection
         .execute_batch(&format!(
-            "{GITHUB_SINGLETON_SCHEMA} {DEFAULT_PROFILE_SCHEMA} COMMIT;"
+            "{GITHUB_SINGLETON_INDEX} {GITHUB_SINGLETON_TRIGGERS} {DEFAULT_PROFILE_SCHEMA} COMMIT;"
         ))
         .map_err(database_error)?;
     connection
@@ -2702,6 +2679,9 @@ fn validate_schema(connection: &Connection) -> Result<(), LocalCredentialError> 
     if !default_profiles {
         return Err(LocalCredentialError::InvalidDatabase);
     }
+    if !credential_names_unique_per_provider(connection)? {
+        return Err(LocalCredentialError::InvalidDatabase);
+    }
     Ok(())
 }
 
@@ -2718,6 +2698,7 @@ fn validate_openable_schema(connection: &Connection) -> Result<(), LocalCredenti
             PREVIOUS_DATABASE_SCHEMA_VERSION
                 | SSH_DATABASE_SCHEMA_VERSION
                 | GITHUB_SINGLETON_DATABASE_SCHEMA_VERSION
+                | DEFAULT_PROFILE_DATABASE_SCHEMA_VERSION
                 | DATABASE_SCHEMA_VERSION
         )
     {
@@ -2772,17 +2753,25 @@ fn upgrade_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
             upgrade_ssh_schema(connection)?;
             upgrade_github_singleton_schema(connection)?;
             upgrade_default_profile_schema(connection)?;
+            upgrade_credential_names_schema(connection)?;
             validate_schema(connection)
         }
         SSH_DATABASE_SCHEMA_VERSION => {
             validate_schema_tables(connection)?;
             upgrade_github_singleton_schema(connection)?;
             upgrade_default_profile_schema(connection)?;
+            upgrade_credential_names_schema(connection)?;
             validate_schema(connection)
         }
         GITHUB_SINGLETON_DATABASE_SCHEMA_VERSION => {
             validate_schema_tables(connection)?;
             upgrade_default_profile_schema(connection)?;
+            upgrade_credential_names_schema(connection)?;
+            validate_schema(connection)
+        }
+        DEFAULT_PROFILE_DATABASE_SCHEMA_VERSION => {
+            validate_schema_tables(connection)?;
+            upgrade_credential_names_schema(connection)?;
             validate_schema(connection)
         }
         _ => Err(LocalCredentialError::UnsupportedSchema),
@@ -2826,7 +2815,7 @@ fn upgrade_github_singleton_schema(connection: &Connection) -> Result<(), LocalC
     transaction
         .execute_batch(&format!(
             "DELETE FROM profile_entries WHERE capability_slot = 'github';
-             {GITHUB_SINGLETON_SCHEMA}"
+             {GITHUB_SINGLETON_INDEX} {GITHUB_SINGLETON_TRIGGERS}"
         ))
         .map_err(database_error)?;
     transaction

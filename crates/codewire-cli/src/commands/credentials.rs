@@ -22,10 +22,12 @@ use crate::config::OsEnv;
 
 pub(in crate::commands) mod confirm;
 mod delete;
+mod names;
 pub(in crate::commands) mod output;
 mod store_notice;
 mod store_wait;
 
+use names::{local_kind, local_lookups, resolve_credential};
 use output::save_refusal::{Answer, Kind, Save, save_error};
 
 #[cfg(test)]
@@ -40,10 +42,10 @@ use super::credential_input::connect::{
 #[cfg(test)]
 use super::credential_input::supported_profile_slot;
 use super::credential_input::{
-    CredentialOperation, GITHUB_ALWAYS_INCLUDED, ParsedCredentialSelector, ParsedProfileSelector,
-    SSH_PUBLIC_KEY_GITHUB_HINT, parse_credential_selector, parse_profile_selector,
+    CredentialName, CredentialOperation, GITHUB_ALWAYS_INCLUDED, ParsedProfileSelector,
+    SSH_PUBLIC_KEY_GITHUB_HINT, admit_name, name_taken, parse_profile_selector,
     profile_set_credential, profile_slot_for, prompt_credential_material, read_ssh_import,
-    validate_ssh_generation, validate_ssh_import,
+    settle_name, slot_provider, validate_ssh_generation, validate_ssh_import,
 };
 #[cfg(test)]
 use super::credential_input::{
@@ -73,12 +75,13 @@ async fn handle_local_with_receipt(
     operation: CredentialOperation,
     execution: &mut super::credential_input::CredentialExecution,
 ) -> anyhow::Result<()> {
-    let mut client = match authority_feature_needed(&operation) {
+    let client = match authority_feature_needed(&operation) {
         Some((feature, needed_for)) => {
             super::connect_local_credential_authority_serving(feature, needed_for).await?
         }
         None => connect_local_credential_authority().await?,
     };
+    let mut client = names::serving_names_per_provider(client, &operation).await?;
     // A connect checks the store first where it can (#4826), but an older
     // store left serving running VMs still saves a connect correctly, so it
     // goes on without the check.
@@ -803,30 +806,31 @@ fn select_oauth_connection_target(
 ) -> anyhow::Result<OAuthConnectionTarget> {
     let provider = ProviderId::parse(provider_id(connect))?;
     let authentication_kind = connected_kind(connect);
-    let mut matches = records.into_iter().filter(|record| {
-        record
-            .metadata
-            .display_name
-            .eq_ignore_ascii_case(display_name)
-    });
-    let existing = matches.next();
-    anyhow::ensure!(
-        matches.next().is_none(),
-        "local credential name {display_name:?} is ambiguous; inspect and rename the records before reconnecting"
-    );
-    if let Some(record) = &existing {
-        anyhow::ensure!(
-            record.metadata.provider == provider
-                && record.metadata.authentication_kind == authentication_kind,
-            "local credential {display_name:?} belongs to a different provider or authentication kind; use a distinct name"
-        );
-        record.metadata.validate()?;
+    // Only this provider's credentials: another provider's may share the
+    // name (#4928). `PROVIDER/NAME` reconnects that provider's credential.
+    let name = CredentialName::parse(display_name);
+    let readings = name.readings(Some(provider.as_str()));
+    let existing = settle_name(display_name, local_lookups(&records, &readings))?;
+    let Some(record) = existing else {
+        admit_name(provider.as_str(), display_name, &records, None, local_kind)?;
+        return Ok(OAuthConnectionTarget {
+            provider,
+            authentication_kind,
+            display_name: display_name.to_owned(),
+            existing: None,
+        });
+    };
+    if record.metadata.authentication_kind != authentication_kind {
+        // This provider's other kind holds the name: a Claude sign-in and a
+        // Claude token can't share one (cw-pm on #4928).
+        return Err(name_taken(provider.as_str(), &record, &records, local_kind));
     }
+    record.metadata.validate()?;
     Ok(OAuthConnectionTarget {
         provider,
         authentication_kind,
-        display_name: display_name.to_owned(),
-        existing,
+        display_name: record.metadata.display_name.clone(),
+        existing: Some(record),
     })
 }
 
@@ -880,12 +884,14 @@ async fn add_credential(
     }
     if args.provider.as_deref() == Some("ssh") {
         let name = validate_ssh_import(&args)?;
-        ensure_name_free(client, &name).await?;
+        let records = store_wait::waiting_on_store(false, client.list_credentials()).await?;
+        admit_name("ssh", &name, &records, None, local_kind)?;
         let input = read_ssh_import(&args)?;
         let save = Save {
             placement: "local",
             kind: Kind::Write {
                 command: "add ssh",
+                provider: "ssh",
                 what: "SSH key",
             },
             name: &name,
@@ -935,7 +941,9 @@ async fn add_credential(
         "credential name",
     )?
     .to_owned();
-    ensure_name_free(client, &display_name).await?;
+    // The name is checked before the key is asked for, as in the cloud.
+    let records = store_wait::waiting_on_store(false, client.list_credentials()).await?;
+    admit_name(provider.as_str(), &display_name, &records, None, local_kind)?;
     let input = NewCredential {
         provider,
         authentication_kind,
@@ -944,6 +952,7 @@ async fn add_credential(
         expires_at_unix: args.expires_at,
     };
     let material = prompt_credential_material(input.provider.as_str(), input.authentication_kind)?;
+    let provider = input.provider.to_string();
     let (command, what, name) = (
         format!("add {}", input.provider),
         output::kind_label(
@@ -956,6 +965,7 @@ async fn add_credential(
         placement: "local",
         kind: Kind::Write {
             command: &command,
+            provider: &provider,
             what: &what,
         },
         name: &name,
@@ -969,17 +979,6 @@ async fn add_credential(
 
 /// Refuses `name` if a local credential has it, before the key is asked for, as in the cloud.
 /// The listing can wait behind another command's store call, so it shows the waiting line (#5271).
-async fn ensure_name_free(client: &mut LocalCredentialClient, name: &str) -> anyhow::Result<()> {
-    let records = store_wait::waiting_on_store(false, client.list_credentials()).await?;
-    anyhow::ensure!(
-        !records
-            .iter()
-            .any(|record| record.metadata.display_name.eq_ignore_ascii_case(name)),
-        output::refusal::name_in_use("local", name)
-    );
-    Ok(())
-}
-
 async fn list_credentials(
     client: &mut LocalCredentialClient,
     args: CredentialListArgs,
@@ -995,7 +994,7 @@ async fn get_credential(
     client: &mut LocalCredentialClient,
     args: CredentialSelectorArgs,
 ) -> anyhow::Result<()> {
-    let record = resolve_credential(client, &args.credential).await?;
+    let record = resolve_credential(client, &args.credential, None).await?;
     print_listing(client, &[record], args.output).await
 }
 
@@ -1003,12 +1002,29 @@ async fn rename_credential(
     client: &mut LocalCredentialClient,
     args: CredentialRenameArgs,
 ) -> anyhow::Result<()> {
-    let record = resolve_credential(client, &args.credential).await?;
+    let record = resolve_credential(client, &args.credential, None).await?;
     let name = trimmed_required(&args.name, "credential name")?.to_owned();
+    let records = client
+        .list_credentials()
+        .await
+        .context("list local credentials")?;
+    let provider = record.metadata.provider.as_str();
+    admit_name(provider, &name, &records, Some(&record), local_kind)?;
     let renamed = client
         .rename_credential(&record.metadata.id, name)
         .await
-        .context("rename local credential")?;
+        .map_err(|status| match status.code() {
+            _ if codewire_local_credentials::store_refusal_reason(&status)
+                == Some(
+                    codewire_local_credentials::StoreRefusal::CredentialNameReservesProvider
+                        .reason(),
+                ) =>
+            {
+                anyhow::anyhow!(output::refusal::reserved_name(&args.name))
+            }
+            tonic::Code::AlreadyExists => anyhow::anyhow!(output::refusal::name_in_use(provider)),
+            _ => anyhow::Error::new(status).context("rename local credential"),
+        })?;
     print_credentials(&[renamed], OutputFormat::Text)
 }
 
@@ -1017,7 +1033,8 @@ async fn rotate_credential(
     args: CredentialRotateArgs,
 ) -> anyhow::Result<()> {
     let record =
-        store_wait::waiting_on_store(false, resolve_credential(client, &args.credential)).await?;
+        store_wait::waiting_on_store(false, resolve_credential(client, &args.credential, None))
+            .await?;
     if record.metadata.authentication_kind == CredentialAuthKind::SshKey {
         anyhow::bail!(output::refusal::ROTATE_SSH);
     }
@@ -1074,7 +1091,7 @@ async fn revoke_credential(
     client: &mut LocalCredentialClient,
     args: confirm::CredentialRevokeArgs,
 ) -> anyhow::Result<()> {
-    let record = resolve_credential(client, &args.credential).await?;
+    let record = resolve_credential(client, &args.credential, None).await?;
     let name = &record.metadata.display_name;
     if !confirm::confirm(
         "local",
@@ -1119,10 +1136,16 @@ async fn generate_local_ssh(
     args: &super::CredentialGenerateArgs,
 ) -> anyhow::Result<CredentialRecord> {
     let name = validate_ssh_generation(args)?;
+    let records = client
+        .list_credentials()
+        .await
+        .context("list local credentials")?;
+    admit_name("ssh", &name, &records, None, local_kind)?;
     let save = Save {
         placement: "local",
         kind: Kind::Write {
             command: "generate ssh",
+            provider: "ssh",
             what: "SSH key",
         },
         name: &name,
@@ -1292,10 +1315,11 @@ async fn set_profile_entry(
     args: CredentialProfileSetArgs,
 ) -> anyhow::Result<()> {
     let selector = profile_set_credential(&args)?;
-    let credential = resolve_credential(client, selector).await?;
+    let slot = args.slot.as_deref().context("a provider is required")?;
+    let credential = resolve_credential(client, selector, slot_provider(slot)).await?;
     let slot = profile_slot_for(
         &credential.metadata.display_name,
-        args.slot.as_deref().context("a provider is required")?,
+        slot,
         &credential.metadata.provider,
         credential.metadata.authentication_kind,
     )?;
@@ -1418,25 +1442,6 @@ async fn delete_profile(
     Ok(())
 }
 
-async fn resolve_credential(
-    client: &mut LocalCredentialClient,
-    selector: &str,
-) -> anyhow::Result<CredentialRecord> {
-    match parse_credential_selector(selector)? {
-        ParsedCredentialSelector::Id(id) => client
-            .get_credential(&id)
-            .await
-            .with_context(|| format!("get local credential by ID {id}")),
-        ParsedCredentialSelector::Name(name) => {
-            let records = client
-                .list_credentials()
-                .await
-                .context("list local credentials")?;
-            select_credential_by_name(&records, name)
-        }
-    }
-}
-
 async fn resolve_profile(
     client: &mut LocalCredentialClient,
     selector: &str,
@@ -1458,22 +1463,6 @@ async fn resolve_profile(
             select_profile_by_name(&records, name.as_str())
         }
     }
-}
-
-fn select_credential_by_name(
-    records: &[CredentialRecord],
-    name: &str,
-) -> anyhow::Result<CredentialRecord> {
-    let mut matches = records
-        .iter()
-        .filter(|record| record.metadata.display_name.eq_ignore_ascii_case(name));
-    let record = matches
-        .next()
-        .ok_or_else(|| anyhow::anyhow!(output::refusal::not_found("local", name)))?;
-    if matches.next().is_some() {
-        anyhow::bail!("local credential name {name:?} is ambiguous");
-    }
-    Ok(record.clone())
 }
 
 fn select_profile_by_name(
@@ -1570,6 +1559,8 @@ async fn print_profile_revisions(
 #[cfg(test)]
 mod local_store_tests;
 #[cfg(test)]
+mod names_tests;
+#[cfg(test)]
 mod tests {
     #[test]
     fn a_connect_on_the_previous_cws_store_names_its_vms_and_the_move() {
@@ -1609,6 +1600,8 @@ mod tests {
         AccessProfile, AccessProfileScope, CredentialMetadata, OwnerId, Placement,
     };
 
+    use super::super::credential_input::{ParsedCredentialSelector, parse_credential_selector};
+    use super::names::select_credential_by_name;
     use super::*;
     use crate::{Cli, Command};
 
@@ -1658,7 +1651,7 @@ mod tests {
         credential_with("11111111-1111-4111-8111-111111111111", "work-openai")
     }
 
-    fn credential_with(id: &str, display_name: &str) -> CredentialRecord {
+    pub(super) fn credential_with(id: &str, display_name: &str) -> CredentialRecord {
         CredentialRecord {
             metadata: CredentialMetadata {
                 id: CredentialId::parse(id).unwrap(),
@@ -1708,14 +1701,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(target.existing.unwrap(), record);
+        // Another provider's credential of that name is neither reconnected
+        // nor in the way (#4928).
         for provider in [
             CredentialConnectProviderArg::Github,
             CredentialConnectProviderArg::Claude,
         ] {
-            assert!(
-                select_oauth_connection_target(vec![record.clone()], "work-openai", provider,)
-                    .is_err()
-            );
+            let target =
+                select_oauth_connection_target(vec![record.clone()], "work-openai", provider)
+                    .unwrap();
+            assert!(target.existing.is_none());
         }
         let mut wrong_kind = record.clone();
         wrong_kind.metadata.authentication_kind = CredentialAuthKind::ApiKey;
@@ -1737,7 +1732,7 @@ mod tests {
         )
         .err()
         .unwrap();
-        assert!(error.to_string().contains("ambiguous"));
+        assert!(error.to_string().contains("names more than one credential"));
         let target = select_oauth_connection_target(
             vec![credential()],
             "new-name",
@@ -2212,7 +2207,7 @@ mod tests {
             panic!("a bare credential selector must be a name");
         };
         assert_eq!(
-            select_credential_by_name(&records, name)
+            select_credential_by_name(&records, name, None)
                 .unwrap()
                 .metadata
                 .id
@@ -2234,7 +2229,7 @@ mod tests {
             panic!("a name: credential selector must be a name");
         };
         assert_eq!(
-            select_credential_by_name(&records, name)
+            select_credential_by_name(&records, name, None)
                 .unwrap()
                 .metadata
                 .id
@@ -2249,7 +2244,7 @@ mod tests {
             panic!("name: must escape a name beginning with id:");
         };
         assert_eq!(
-            select_credential_by_name(&records, name)
+            select_credential_by_name(&records, name, None)
                 .unwrap()
                 .metadata
                 .id
@@ -2280,8 +2275,12 @@ mod tests {
             credential_with(ID, "work"),
             credential_with("22222222-2222-4222-8222-222222222222", "WORK"),
         ];
-        let error = select_credential_by_name(&records, "work").unwrap_err();
-        assert!(error.to_string().contains("ambiguous"));
+        let error =
+            select_credential_by_name(&records, CredentialName::parse("work"), None).unwrap_err();
+        assert!(
+            error.to_string().contains("names more than one credential"),
+            "{error}"
+        );
     }
 
     #[test]

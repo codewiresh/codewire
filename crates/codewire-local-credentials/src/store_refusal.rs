@@ -26,7 +26,17 @@ pub enum StoreRefusal {
     /// timed out was never made ready, so nothing lists or leases it
     /// (#5271).
     KeyringTimedOut,
+    /// A name with no provider matched credentials of more than one provider.
+    /// [`STORE_REFUSAL_PROVIDERS_KEY`] lists them.
+    CredentialNameAmbiguous,
+    /// A new or renamed credential's name starts with a provider id and `/`.
+    CredentialNameReservesProvider,
 }
+
+/// The status metadata key that lists, comma-joined and sorted, the providers
+/// of a [`StoreRefusal::CredentialNameAmbiguous`] refusal; never an ID. The
+/// cloud's ErrorInfo carries the same list as `providers`.
+pub const STORE_REFUSAL_PROVIDERS_KEY: &str = "codewire-store-refusal-providers";
 
 impl StoreRefusal {
     /// The reason on the wire. Where the cloud's credential service refuses
@@ -39,6 +49,8 @@ impl StoreRefusal {
             Self::KeychainLocked => "LOCAL_KEYCHAIN_LOCKED",
             Self::KeychainMissing => "LOCAL_KEYCHAIN_MISSING",
             Self::KeyringTimedOut => "LOCAL_KEYRING_TIMED_OUT",
+            Self::CredentialNameAmbiguous => "CREDENTIAL_NAME_AMBIGUOUS",
+            Self::CredentialNameReservesProvider => "CREDENTIAL_NAME_RESERVES_PROVIDER",
         }
     }
 
@@ -54,4 +66,20 @@ impl StoreRefusal {
 /// reasons it knows; an authority older than #4826 sends none.
 pub fn store_refusal_reason(status: &Status) -> Option<&str> {
     status.metadata().get(STORE_REFUSAL_KEY)?.to_str().ok()
+}
+
+/// The providers a [`StoreRefusal::CredentialNameAmbiguous`] refusal lists,
+/// in its order; empty when `status` carries none.
+pub fn store_refusal_providers(status: &Status) -> Vec<&str> {
+    status
+        .metadata()
+        .get(STORE_REFUSAL_PROVIDERS_KEY)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(',')
+                .filter(|provider| !provider.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }

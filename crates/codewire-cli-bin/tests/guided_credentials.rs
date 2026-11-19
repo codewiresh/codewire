@@ -10,7 +10,13 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::{Router, body::Bytes, extract::State, http::Uri, response::IntoResponse};
+use axum::{
+    Router,
+    body::Bytes,
+    extract::State,
+    http::{StatusCode, Uri},
+    response::{IntoResponse, Response},
+};
 use buffa::Message as _;
 use codewire_client as rpc;
 
@@ -26,11 +32,7 @@ struct Fixture {
     expected_slot: Option<&'static str>,
 }
 
-async fn authority(
-    State(state): State<Arc<Mutex<Fixture>>>,
-    uri: Uri,
-    body: Bytes,
-) -> impl IntoResponse {
+async fn authority(State(state): State<Arc<Mutex<Fixture>>>, uri: Uri, body: Bytes) -> Response {
     let method = uri.path().rsplit('/').next().unwrap();
     let mut state = state.lock().unwrap();
     state.requests.push(method.into());
@@ -62,7 +64,14 @@ async fn authority(
         "ListAccessProfiles" => rpc::ListAccessProfilesResponse::default().encode_to_vec(),
         "GetCredential" => {
             let request = rpc::GetCredentialRequest::decode(&mut body.as_ref()).unwrap();
-            let mut record = state.credential.clone().unwrap();
+            // A new name is checked before its value is asked for (#4928):
+            // before anything is saved, no credential holds it.
+            let Some(mut record) = state.credential.clone() else {
+                assert!(
+                    matches!(request.selector, Some(rpc::get_credential_request::Selector::Name(ref name)) if name == "work")
+                );
+                return not_found();
+            };
             if record.authentication_kind == rpc::CredentialAuthenticationKind::Oauth {
                 assert!(
                     matches!(request.selector, Some(rpc::get_credential_request::Selector::Name(ref name)) if name == "work")
@@ -123,7 +132,17 @@ async fn authority(
         }
         _ => panic!("unexpected fixture method {method}"),
     };
-    ([("content-type", "application/proto")], bytes)
+    ([("content-type", "application/proto")], bytes).into_response()
+}
+
+/// Connect's unary `not_found` error.
+fn not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [("content-type", "application/json")],
+        r#"{"code":"not_found","message":"credential or active owner not found"}"#,
+    )
+        .into_response()
 }
 
 struct Pty {
@@ -324,7 +343,9 @@ async fn hidden_cancellation_restores_terminal_without_a_credential_write() {
             process.send(b"synthetic-partial");
             process.send(&[cancel]);
             process.finish(false);
-            assert!(state.lock().unwrap().requests.is_empty());
+            // Only the name check reached the service; nothing was written.
+            let requests = std::mem::take(&mut state.lock().unwrap().requests);
+            assert_eq!(requests, ["GetCredential"]);
         }
     })
     .await

@@ -1,21 +1,30 @@
 //! Generated material-free credential metadata service. No mutation routes.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use codewire_access::ProviderId;
 use codewire_proto::codewire::v1::{
     Credential, CredentialAuthenticationKind, CredentialService, CredentialStatus,
     GetCredentialRequest, GetCredentialResponse, ListCredentialsRequest, ListCredentialsResponse,
     get_credential_request,
 };
 use codewire_server_core::auth::AuthUser;
-use codewire_server_core::connect::{auth_user, rpc_app_error};
+use codewire_server_core::connect::{auth_user, rpc_app_error, wire_error};
+use codewire_server_core::connect_error::{
+    ConnectCode, ConnectError, ConnectErrorDetail, ERROR_INFO_DOMAIN, ErrorInfo,
+};
 use codewire_server_core::{AppError, AppResult};
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
 use sqlx::PgPool;
 
-use crate::credentials::{CredentialSelector, Credentials};
+use crate::credentials::{CredentialLookup, CredentialSelector, Credentials};
+
+/// The ErrorInfo reason of a name that matches more than one of the caller's
+/// credentials; its `providers` metadata lists their providers, comma-joined.
+pub const CREDENTIAL_NAME_AMBIGUOUS: &str = "CREDENTIAL_NAME_AMBIGUOUS";
 
 /// Mount only CredentialService with ordinary account authentication. Cookies
 /// and scoped OAuth are accepted; organization API keys never confer ownership.
@@ -58,22 +67,64 @@ impl CredentialService for MetadataService {
     ) -> ServiceResult<GetCredentialResponse> {
         let user = account_user(&ctx)?;
         let request = request.to_owned_message();
+        let provider = request.provider.as_deref();
         let selector = match &request.selector {
-            Some(get_credential_request::Selector::CredentialId(id)) => CredentialSelector::Id(id),
-            Some(get_credential_request::Selector::Name(name)) => CredentialSelector::Name(name),
-            None => {
+            Some(get_credential_request::Selector::CredentialId(id)) if provider.is_none() => {
+                CredentialSelector::Id(id)
+            }
+            Some(get_credential_request::Selector::Name(name)) => {
+                CredentialSelector::Name { name, provider }
+            }
+            _ => {
                 return Err(rpc_app_error(
-                    &AppError::BadRequest("one credential selector is required".into()),
+                    &AppError::BadRequest(
+                        "one credential selector is required; a provider narrows only a name"
+                            .into(),
+                    ),
                     &ctx,
                 ));
             }
         };
-        let credential = bounded(&ctx, self.credentials.get(&user, selector)).await?;
+        let credential = match bounded(&ctx, self.credentials.get(&user, selector)).await? {
+            CredentialLookup::Found(credential) => credential,
+            CredentialLookup::Ambiguous(providers) => {
+                return Err(ambiguous_name(&providers, &ctx));
+            }
+        };
         connectrpc::Response::ok(GetCredentialResponse {
             credential: Some(proto_credential(credential)).into(),
             ..Default::default()
         })
     }
+}
+
+/// Refused before anything acts on it, so an older client that sends a bare
+/// shared name gets this rather than a guess. Providers only, never IDs.
+fn ambiguous_name(providers: &[ProviderId], ctx: &RequestContext) -> connectrpc::ConnectError {
+    let providers = providers
+        .iter()
+        .map(ProviderId::as_str)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut metadata = BTreeMap::from([("providers".to_owned(), providers.clone())]);
+    if let Some(request_id) = ctx
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+    {
+        metadata.insert("request_id".to_owned(), request_id.to_owned());
+    }
+    wire_error(&ConnectError {
+        code: ConnectCode::FailedPrecondition,
+        message: format!(
+            "credential name matches more than one credential ({providers}); name its provider"
+        ),
+        details: vec![ConnectErrorDetail::ErrorInfo(ErrorInfo {
+            reason: CREDENTIAL_NAME_AMBIGUOUS.into(),
+            domain: ERROR_INFO_DOMAIN.into(),
+            metadata,
+        })],
+    })
 }
 
 fn account_user(ctx: &RequestContext) -> Result<AuthUser, connectrpc::ConnectError> {

@@ -1,6 +1,6 @@
 //! The local credential authority's failures, none of which carries material.
 
-use codewire_access::AccessError;
+use codewire_access::{AccessError, ProviderId};
 use codewire_protected_store::ProtectedStoreError;
 use thiserror::Error;
 
@@ -41,6 +41,14 @@ pub enum LocalCredentialError {
     AmbiguousGitHubConnections,
     #[error("local credential was not found")]
     CredentialNotFound,
+    /// A name with no provider matched credentials of more than one provider.
+    /// The providers are sorted, each once; never the credentials' IDs.
+    #[error("local credential name matches more than one provider's credential")]
+    CredentialNameAmbiguous { providers: Vec<ProviderId> },
+    /// A new or renamed credential's name starts with a provider id and `/`,
+    /// which `PROVIDER/NAME` would read as another credential.
+    #[error("a new local credential name may not start with anthropic/, openai/, github/ or ssh/")]
+    CredentialNameReservesProvider,
     #[error("local credential is not available")]
     CredentialUnavailable,
     #[error("local credential is inactive")]

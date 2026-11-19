@@ -3,6 +3,7 @@ import {
   CredentialAuthenticationKind,
   CredentialStatus,
   EnrollCodexRequestSchema,
+  GetCredentialRequestSchema,
   SshPublicKeySchema,
   GithubRepositorySchema,
   ListGithubRepositoriesRequestSchema,
@@ -12,6 +13,9 @@ import {
 } from "@codewire/proto-ts/gen/codewire/v1/credential_pb";
 import type { CredentialClient, CredentialMutationClient, GithubRepositoryClient } from "./transport.js";
 import { mapConnectError } from "./types.js";
+
+/** The providers a credential name is unique within. */
+export type CredentialProvider = "anthropic" | "openai" | "github" | "ssh";
 
 /** Personal platform metadata. No provider token or protected-store reference. */
 export interface Credential {
@@ -126,6 +130,9 @@ export function assertCredentialConverterCoverage(): void {
   assertFields("SSH public key", SshPublicKeySchema.fields, new Map([
     [1, "openssh"], [2, "fingerprint"],
   ]));
+  assertFields("credential lookup", GetCredentialRequestSchema.fields, new Map([
+    [1, "credential_id"], [2, "name"], [3, "provider"],
+  ]));
   assertFields("Codex enrollment", EnrollCodexRequestSchema.fields, new Map([
     [1, "name"], [2, "credential_id"], [3, "expected_revocation_generation"],
   ]));
@@ -220,9 +227,12 @@ export class Credentials {
     } catch (error) { throw mapConnectError(error); }
   }
 
-  async getByName(name: string): Promise<Credential> {
+  /** A name is unique per provider. Without `provider`, a name that more
+   * than one of the account's credentials share is refused with a
+   * CodewireError (status 400) naming the providers, never guessed. */
+  async getByName(name: string, provider?: CredentialProvider): Promise<Credential> {
     try {
-      return fromCredential((await this.client.getCredential({ selector: { case: "name", value: name } })).credential);
+      return fromCredential((await this.client.getCredential({ selector: { case: "name", value: name }, provider })).credential);
     } catch (error) { throw mapConnectError(error); }
   }
 

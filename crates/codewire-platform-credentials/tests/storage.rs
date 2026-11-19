@@ -6,6 +6,8 @@
 mod interception_ca;
 #[path = "storage/lifecycle.rs"]
 mod lifecycle;
+#[path = "storage/names.rs"]
+mod names;
 #[path = "storage/ssh.rs"]
 mod ssh;
 mod support;

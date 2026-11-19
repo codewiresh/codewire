@@ -456,6 +456,10 @@ fn error(error: Error) -> connectrpc::ConnectError {
             (ConnectCode::InvalidArgument, CLAUDE_SIGN_IN_CODE_INVALID)
         }
         Error::ClaudeSignInExpired => (ConnectCode::FailedPrecondition, CLAUDE_SIGN_IN_EXPIRED),
+        Error::NameReservesProvider => (
+            ConnectCode::InvalidArgument,
+            "a new credential name may not start with anthropic/, openai/, github/ or ssh/",
+        ),
     };
     // Closed classifications only: provider stderr, material, SQL and source
     // errors are never retained in the service error or its public detail.
@@ -471,6 +475,7 @@ fn error(error: Error) -> connectrpc::ConnectError {
         Error::PublicationUnknown => "CREDENTIAL_MUTATION_UNCERTAIN",
         Error::ClaudeSignInCodeInvalid => "CREDENTIAL_CLAUDE_SIGN_IN_CODE_INVALID",
         Error::ClaudeSignInExpired => "CREDENTIAL_CLAUDE_SIGN_IN_EXPIRED",
+        Error::NameReservesProvider => "CREDENTIAL_NAME_RESERVES_PROVIDER",
         _ => "",
     };
     wire_error(&ConnectError {
@@ -551,6 +556,11 @@ mod tests {
                 Error::ClaudeSignInExpired,
                 "CREDENTIAL_CLAUDE_SIGN_IN_EXPIRED",
                 connectrpc::ErrorCode::FailedPrecondition,
+            ),
+            (
+                Error::NameReservesProvider,
+                "CREDENTIAL_NAME_RESERVES_PROVIDER",
+                connectrpc::ErrorCode::InvalidArgument,
             ),
         ] {
             let wire = error(failure);

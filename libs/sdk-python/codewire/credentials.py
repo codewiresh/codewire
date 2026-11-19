@@ -200,10 +200,15 @@ class Credentials:
         return _response_credential(self._context.unary(
             self._client.get_credential, pb.GetCredentialRequest(credential_id=credential_id)))
 
-    def get_by_name(self, name: str) -> Credential:
-        """Exact case-insensitive owner-scoped name, never an inferred ID."""
+    def get_by_name(self, name: str, provider: str | None = None) -> Credential:
+        """Exact case-insensitive owner-scoped name, never an inferred ID.
+
+        A name is unique per provider (anthropic, openai, github or ssh).
+        Without ``provider``, a name that more than one of the account's
+        credentials share is refused, naming the providers, never guessed.
+        """
         return _response_credential(self._context.unary(
-            self._client.get_credential, pb.GetCredentialRequest(name=name)))
+            self._client.get_credential, pb.GetCredentialRequest(name=name, provider=provider)))
 
     def enroll_codex(self, name: str) -> Generator[CodexEnrollmentEvent, None, None]:
         """Yield the challenge immediately, then committed metadata.

@@ -2,8 +2,9 @@
 
 use codewire_access::AccessError;
 use tonic::Status;
+use tonic::metadata::MetadataValue;
 
-use crate::{LocalCredentialError, StoreRefusal};
+use crate::{LocalCredentialError, STORE_REFUSAL_PROVIDERS_KEY, StoreRefusal};
 
 pub(super) fn status_for_access_error(_error: AccessError) -> Status {
     Status::invalid_argument("invalid local credential request")
@@ -29,6 +30,31 @@ pub(super) fn status_for_error(error: LocalCredentialError) -> Status {
         LocalCredentialError::AmbiguousGitHubConnections => Status::failed_precondition(
             "local credential metadata has more than one active GitHub connection",
         ),
+        LocalCredentialError::CredentialNameAmbiguous { providers } => {
+            let mut status = StoreRefusal::CredentialNameAmbiguous.attach(
+                Status::failed_precondition(
+                    "local credential name matches more than one provider's credential",
+                ),
+            );
+            let providers = providers
+                .iter()
+                .map(|provider| provider.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            // Provider ids are ASCII, so this never fails; a list it could not
+            // carry is left off rather than guessed.
+            if let Ok(value) = MetadataValue::try_from(providers) {
+                status
+                    .metadata_mut()
+                    .insert(STORE_REFUSAL_PROVIDERS_KEY, value);
+            }
+            status
+        }
+        LocalCredentialError::CredentialNameReservesProvider => {
+            StoreRefusal::CredentialNameReservesProvider.attach(Status::invalid_argument(
+                "a new local credential name may not start with anthropic/, openai/, github/ or ssh/",
+            ))
+        }
         LocalCredentialError::CredentialNotFound
         | LocalCredentialError::ProfileNotFound
         | LocalCredentialError::ProfileRevisionNotFound
@@ -128,5 +154,31 @@ mod status_tests {
             corrupt.message(),
             "local credential operation cannot be applied"
         );
+    }
+
+    #[test]
+    fn an_ambiguous_name_lists_its_providers_and_no_ids() {
+        let providers = ["anthropic", "openai"]
+            .map(|provider| codewire_access::ProviderId::parse(provider).unwrap());
+        let status = status_for_error(LocalCredentialError::CredentialNameAmbiguous {
+            providers: providers.to_vec(),
+        });
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            crate::store_refusal_reason(&status),
+            Some("CREDENTIAL_NAME_AMBIGUOUS")
+        );
+        assert_eq!(
+            crate::store_refusal_providers(&status),
+            ["anthropic", "openai"]
+        );
+
+        let reserved = status_for_error(LocalCredentialError::CredentialNameReservesProvider);
+        assert_eq!(reserved.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            crate::store_refusal_reason(&reserved),
+            Some("CREDENTIAL_NAME_RESERVES_PROVIDER")
+        );
+        assert!(crate::store_refusal_providers(&reserved).is_empty());
     }
 }

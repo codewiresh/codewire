@@ -157,6 +157,10 @@ class CredentialsTestCase(unittest.TestCase):
         for status in ["expired", "refresh_failed", "revoked"]:
             self.assertEqual(self.cw.credentials.get_by_name(status)["status"], status)
             self.assertEqual(self.fixture.calls[-1][1].WhichOneof("selector"), "name")
+            self.assertFalse(self.fixture.calls[-1][1].HasField("provider"))
+        self.cw.credentials.get_by_name("shared", provider="anthropic")
+        self.assertEqual(self.fixture.calls[-1][1].name, "shared")
+        self.assertEqual(self.fixture.calls[-1][1].provider, "anthropic")
         with self.assertRaisesRegex(RuntimeError, "omitted credential"):
             self.cw.credentials.get("missing")
 

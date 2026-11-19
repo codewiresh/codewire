@@ -119,7 +119,7 @@ impl CredentialView {
     }
 
     /// What kind of credential it is, as a person names it.
-    fn kind_label(&self) -> String {
+    pub(in crate::commands) fn kind_label(&self) -> String {
         kind_label(&self.provider, self.authentication_kind)
     }
 
@@ -456,9 +456,78 @@ pub(in crate::commands) mod refusal {
         )
     }
 
-    /// A new credential's name is taken.
-    pub(in crate::commands) fn name_in_use(placement: &str, name: &str) -> String {
-        format!("a {placement} credential is already named {name:?}; choose another --name")
+    /// A name that matches more than one credential, refused before anything
+    /// changes, the same in both placements (#4928). `matches` are each
+    /// match's provider and name, sorted. When every match has the typed name
+    /// only the providers are listed; when a name also reads as
+    /// `PROVIDER/NAME` each match is named. The example names the first
+    /// match that has the typed name, which `PROVIDER/NAME` then picks out.
+    pub(in crate::commands) fn ambiguous_name(name: &str, matches: &[(String, String)]) -> String {
+        let one_name = matches
+            .iter()
+            .all(|(_, held)| held.eq_ignore_ascii_case(name));
+        let listed = matches
+            .iter()
+            .map(|(provider, held)| {
+                if one_name {
+                    provider.clone()
+                } else {
+                    format!("{provider} {held:?}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let example = matches
+            .iter()
+            .find(|(_, held)| held.eq_ignore_ascii_case(name))
+            .or(matches.first())
+            .map(|(provider, held)| format!("{provider}/{held}"))
+            .unwrap_or_default();
+        format!(
+            "{name:?} names more than one credential ({listed}); name one, for example {example}"
+        )
+    }
+
+    /// A new or renamed credential's name that another credential of the
+    /// same provider holds (#4928): which one, and a name that is free in
+    /// that provider. Another provider's credential may share the name.
+    pub(in crate::commands) fn name_taken(
+        provider: &str,
+        held: &str,
+        kind: &str,
+        free: Option<&str>,
+    ) -> String {
+        let example = free.map_or_else(String::new, |free| format!(", for example {free}"));
+        format!(
+            "{held:?} is in use in {provider} by {}; choose another name{example}",
+            a_kind(kind)
+        )
+    }
+
+    /// The store refused a name as taken in `provider` when this command
+    /// could read no credential that holds it, such as an organization's
+    /// credential the caller may not read (cw-security on #4928): the
+    /// provider only, never the holder.
+    pub(in crate::commands) fn name_in_use(provider: &str) -> String {
+        format!("that name is in use in {provider}; choose another name")
+    }
+
+    /// Codewire refused a name as taken and no credential of the requested
+    /// provider holds it: until migration 0042 the cloud's index refuses a
+    /// name another provider's credential of the owner holds (#4928).
+    pub(in crate::commands) fn name_in_another_provider(name: &str) -> String {
+        format!(
+            "a credential of another provider already uses {name:?} in your Codewire account; choose another name"
+        )
+    }
+
+    /// A new or renamed credential's name that starts with a provider id and
+    /// `/`, which `PROVIDER/NAME` would read as another credential (#4928).
+    pub(in crate::commands) fn reserved_name(name: &str) -> String {
+        let prefix = name.split_once('/').map_or(name, |(prefix, _)| prefix);
+        format!(
+            "a credential's name can't start with {prefix}/, which reads as a provider; choose another name"
+        )
     }
 
     /// `add` takes this provider's key from neither placement.
@@ -513,9 +582,16 @@ pub(in crate::commands) mod refusal {
 
     /// `delete` whose revoke succeeded and whose delete failed or may not
     /// have reached the store: running `delete` again finishes it either way.
-    pub(in crate::commands) fn revoked_not_deleted(placement: &str, name: &str) -> String {
+    /// The command names it as `PROVIDER/NAME`, which another provider's
+    /// credential of the same name can't make ambiguous (#4928).
+    pub(in crate::commands) fn revoked_not_deleted(
+        placement: &str,
+        provider: &str,
+        name: &str,
+    ) -> String {
+        let again = crate::commands::platform_commands::shell_word(&format!("{provider}/{name}"));
         format!(
-            "{placement} credential {name:?} was revoked, but may not have been deleted; run `cw credentials --{placement} delete {name}` again"
+            "{placement} credential {name:?} was revoked, but may not have been deleted; run `cw credentials --{placement} delete {again}` again"
         )
     }
 
@@ -1320,8 +1396,8 @@ mod delete_tests {
             "Local credential \"work\" revoked in Codewire."
         );
         assert_eq!(
-            refusal::revoked_not_deleted("local", "work"),
-            "local credential \"work\" was revoked, but may not have been deleted; run `cw credentials --local delete work` again"
+            refusal::revoked_not_deleted("local", "openai", "work"),
+            "local credential \"work\" was revoked, but may not have been deleted; run `cw credentials --local delete openai/work` again"
         );
     }
 }

@@ -92,7 +92,11 @@ pub(crate) fn upgrade_default_profile_schema(
         .execute_batch(DEFAULT_PROFILE_SCHEMA)
         .map_err(database_error)?;
     transaction
-        .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
+        .pragma_update(
+            None,
+            "user_version",
+            DEFAULT_PROFILE_DATABASE_SCHEMA_VERSION,
+        )
         .map_err(database_error)?;
     transaction.commit().map_err(database_error)
 }

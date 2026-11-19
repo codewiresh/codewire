@@ -24,6 +24,7 @@ pub(super) async fn delete_credential(
         args.credential
             .as_deref()
             .context("delete requires a credential selector")?,
+        None,
     )
     .await?;
     let name = &record.metadata.display_name;
@@ -66,7 +67,11 @@ pub(super) async fn delete_credential(
     }
     let deleted = client.delete_credential(&record.metadata.id).await;
     if active {
-        deleted.context(refusal::revoked_not_deleted("local", name))?;
+        deleted.context(refusal::revoked_not_deleted(
+            "local",
+            record.metadata.provider.as_str(),
+            name,
+        ))?;
     } else {
         deleted.context("delete local credential")?;
     }

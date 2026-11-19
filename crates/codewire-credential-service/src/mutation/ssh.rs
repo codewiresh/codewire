@@ -11,7 +11,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-use super::{CredentialMutationOwner, Error, Scope, publication, unix_now, validate_name};
+use super::{CredentialMutationOwner, Error, Scope, publication, unix_now, validate_new_name};
 
 const SSH_PREPARATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -62,7 +62,7 @@ impl CredentialMutationOwner {
         expires_at_unix: Option<u64>,
         input: Input,
     ) -> Result<CredentialMetadata, Error> {
-        validate_name(&name)?;
+        validate_new_name(&name)?;
         validate_expiry(expires_at_unix, unix_now()?)?;
         input.validate()?;
         let scope = Scope::new(authority, self.stop.child_token(), SSH_PREPARATION_TIMEOUT)?;

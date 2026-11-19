@@ -98,8 +98,8 @@ async fn rename_is_metadata_only_owner_scoped_and_transaction_bound() -> Result<
         ensure!(provider.generate_calls.load(Ordering::SeqCst) == calls);
         ensure!(provider.unwrap_calls.load(Ordering::SeqCst) == 0);
         let reader = CredentialMetadataReader::new(pool.clone(), builtin_provider_catalog());
-        ensure!(reader.resolve(&owner, "original").await == Err(Error::NotFound));
-        ensure!(reader.resolve(&owner, "RENAMED").await? == renamed.metadata);
+        ensure!(reader.resolve(&owner, "original", None).await == Err(Error::NotFound.into()));
+        ensure!(reader.resolve(&owner, "RENAMED", None).await? == renamed.metadata);
         ensure!(
             store
                 .read_for_broker(&owner, &renamed.metadata.id, renamed.version)
