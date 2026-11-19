@@ -24,7 +24,7 @@ met by a base-URL route.
 
 ## Where the walk stands
 
-Updated 2026-11-18. A hosted Sandbox is recorded on Dev and on Production
+Updated 2026-11-19. A hosted Sandbox is recorded on Dev and on Production
 separately.
 
 | ID | Issue | Linux local VM | macOS local VM | Dev | Production |
@@ -42,11 +42,11 @@ separately.
 | `learn-mode` | #4015 | after launch | after launch | after launch | after launch |
 | `agent-vm-interception` | #3999 (#4809, #4884, #4812, #4887) | partly observed 2026-11-18, source 582326b40 (an API key; the smoke) | no command yet | n/a | n/a |
 | `agent-vm-platform-profile` | #4909 | no command yet | no command yet | n/a | n/a |
-| `agent-claude` | #3999, #4001 | no command yet | no command yet | no command yet | no command yet |
-| `agent-codex` | #3999, #4001 | no command yet | no command yet | no command yet | no command yet |
+| `agent-claude` | #3999, #4001 | no command yet | partly observed 2026-11-19, v0.4.24 | no command yet | no command yet |
+| `agent-codex` | #3999, #4001 | no command yet | partly observed 2026-11-19, source 8f3a2d502 | no command yet | no command yet |
 | `agent-codex-websocket` | #3999 | no command yet | no command yet | n/a | n/a |
 | `agent-claude-websocket` | #3999 | no command yet | no command yet | n/a | n/a |
-| `agent-github` | #3999 | no command yet | no command yet | n/a | n/a |
+| `agent-github` | #3999 | no command yet | partly observed 2026-11-19, v0.4.24 (read only) | n/a | n/a |
 | `no-token-at-rest` | #3999 (#4897), #4001 | no command yet | no command yet | no command yet | no command yet |
 | `agent-own-key` | #3999, #4001 | no command yet | no command yet | no command yet | no command yet |
 | `agent-fail-closed` | #3999, #4001 | partly observed 2026-11-18, source 582326b40 (the smoke) | no command yet | no command yet | no command yet |
@@ -875,7 +875,20 @@ is #4798.
     the logs for the real token, done by its holder without printing it. No
     command yet; the tool is owned by #3999, whose done-when requires that
     no real token is found there.
-- **Observed:** not yet observed.
+- **Observed:** partly. A local VM on macOS 27.2.1 (Apple silicon), `cw`
+  v0.4.24, interception switched on with `egress-intercept`, the owner's
+  Claude sign-in connected with `connect claude` (2026-11-19, #3999):
+  - neither base URL was set, and no `ANTHROPIC_*` variable was;
+  - the access token in `~/.claude/.credentials.json` began `cwp1_`;
+  - `claude -p` answered `ok`;
+  - the header read the plan's name ("Claude Ultra"); `/status` showed
+    "Claude Ultra account", the owner's organization and the front door's
+    CA, and `/usage` showed the plan's weekly usage. Claude Code was 2.1.328,
+    updated by itself from the image's 2.1.308.
+
+  Not yet observed: the search for the real token, a session across a token
+  refresh, a revocation while the agent runs, a restored checkpoint and a
+  second person's terminal.
 
 ## `agent-codex`: Codex with stock settings and no token inside
 
@@ -902,7 +915,7 @@ Issues: #3999 (local VMs; changes 8 and 11), #4001 (hosted Sandboxes).
   ```sh
   cw --local exec --in egress-walk -- sh -c 'env | grep -c -E "^OPENAI_BASE_URL=" || true; grep -c -E "^\[model_providers" "${CODEX_HOME:-$HOME/.codex}/config.toml" 2>/dev/null || true'
   cw --local exec --in egress-walk -- sh -c 'jq -r "[.auth_mode, (.tokens.access_token|startswith(\"cwp1_\")), .tokens.refresh_token] | @tsv" "${CODEX_HOME:-$HOME/.codex}/auth.json"'
-  cw --local exec --in egress-walk -- codex exec --skip-git-repo-check 'Reply with the single word ok.'
+  cw --local exec --in egress-walk -- sh -c 'codex exec --skip-git-repo-check "Reply with the single word ok." </dev/null'
   ```
 
   Then start `codex` in a shell in the environment and run `/status`.
@@ -956,12 +969,31 @@ Issues: #3999 (local VMs; changes 8 and 11), #4001 (hosted Sandboxes).
     rule allows the host. Not yet true: today a path the route does not
     serve is refused whatever it carries (#4898), until the policy rule in
     `agent-own-key` is built.
+  - `codex exec` reads more input from stdin while stdin is open, and
+    `cw exec` leaves it open: without `</dev/null` it prints "Reading
+    additional input from stdin..." and waits.
   - Codex tries a WebSocket for the model call first. Until changes 9 and 10 it
     falls back to HTTPS; a slow first answer is that fallback.
   - The placeholder belongs to one environment: copied elsewhere, it is
     forwarded untouched and rejected.
-- **Observed:** not yet observed. Offline evidence of the formats and paths is
-  on #3999 (2026-11-15).
+- **Observed:** partly. A local VM on macOS 27.2.1 (Apple silicon),
+  interception on, the owner's ChatGPT sign-in:
+  - `main` at 8f3a2d502 with #5455, 2026-11-19 (#5447): the first command
+    printed `0` twice, `CODEX_CA_CERTIFICATE` named
+    `/run/codewire-host/ca-certificates.crt`, the login file read `chatgpt
+    true` and the managed marker, and the ID token held only `email`, `exp`
+    (2099), and the account id, plan type and user id. `codex exec`
+    (codex-cli 0.160.0) answered `ok` with nothing set by hand, and `/status`
+    in `cw run codex` showed the account's plan, weekly limit and credits.
+  - `cw` v0.4.24, 2026-11-19 (#3999): failure observed. `codex exec` failed
+    with "workspace routing discovery failed": every request to
+    `chatgpt.com` failed its TLS handshake, because Codewire did not set
+    `CODEX_CA_CERTIFICATE` (#5447).
+
+  Not yet observed: the routed origins, a token refresh, a revocation while
+  Codex runs, a stop and start, a restored checkpoint, the search for the
+  real tokens, and hosted Sandboxes. Offline evidence of the formats and
+  paths is on #3999 (2026-11-15).
 
 ## `agent-codex-websocket`: Codex's socket across a refresh and a revocation
 
@@ -1129,7 +1161,12 @@ Issue: #3999. Hosted Sandboxes follow with #4001.
     with one read elsewhere sees a different string for those forms.
   - A VM restored from a checkpoint keeps the bindings of the boot it was
     captured from.
-- **Observed:** not yet observed.
+- **Observed:** partly, read only. A local VM on macOS 27.2.1 (Apple
+  silicon), `cw` v0.4.24, interception on, the owner's GitHub connection
+  (2026-11-19, #3999): `gh auth token` began `codewire`, a placeholder;
+  `gh api user` named the owner's account; a private repository cloned over
+  HTTPS and `gh pr list` listed its pull requests. The push, the SSH-form
+  clone and the other states are not yet observed.
 
 ## `no-token-at-rest`: no credential value is left on a disk, in a checkpoint or in a log
 
