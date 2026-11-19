@@ -4,8 +4,10 @@
 //! - **Saved card.** The purchase is a `billing_top_ups` row charged exactly
 //!   as an automatic top-up is ([`StripeHandle::charge_top_up`]: its own EUR
 //!   invoice, paid off-session, every step keyed on the top-up id). The row
-//!   takes the organization's one pending slot, so it never races the
-//!   automatic sweep, and the sweep resumes it if this request dies mid-way.
+//!   takes the organization's one pending slot, and the sweep resumes it if
+//!   this request dies mid-way. Only the caller holding the top-up's claim
+//!   ([`claim_top_up`]) pays it, so the request and the sweep never send
+//!   Stripe the same key at once (#5365).
 //!   - Paid: [`complete_top_up`] credits it.
 //!   - The bank wants the customer to approve it (SCA): the top-up is
 //!     recorded as failed with `authentication_required`, which frees the
@@ -26,6 +28,7 @@
 //! [`StripeHandle::charge_top_up`]: crate::stripe_client::StripeHandle
 //! [`complete_top_up`]: crate::credit::complete_top_up
 //! [`fail_top_up`]: crate::credit::fail_top_up
+//! [`claim_top_up`]: crate::credit::claim_top_up
 
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org_deletion::{
@@ -35,7 +38,7 @@ use codewire_server_core::{AppError, AppResult, ValidationIssue};
 use sha2::{Digest, Sha256};
 
 use crate::checkout_sessions::{billing_idempotency_key, org_identity, require_billing_admin};
-use crate::credit::{complete_top_up, fail_top_up, top_up_ledger_key};
+use crate::credit::{Claim, claim_top_up, complete_top_up, fail_top_up, top_up_ledger_key};
 use crate::overview::AUTO_TOP_UP_CENTS;
 use crate::routes::BillingState;
 use crate::stripe_client::{AUTHENTICATION_REQUIRED, CreditCheckout, TopUpCharge, failure_code};
@@ -295,22 +298,55 @@ async fn charge(
             code: "no_customer".to_owned(),
         });
     };
+    // Settlement pays pending rows too; whichever of the two claims it
+    // first pays it, and the buyer waits for that one's answer (#5365).
+    let claim = match claim_top_up(pool, top_up_id, true)
+        .await
+        .map_err(AppError::Internal)?
+    {
+        Claim::Paying(claim) => claim,
+        Claim::Busy => return Err(unconfirmed()),
+        // The row is no longer pending, so this does not charge again.
+        Claim::Settled => {
+            return Ok(Box::pin(earlier_attempt(state, organization_id, top_up_id))
+                .await?
+                .unwrap_or(AddCreditOutcome::InProgress));
+        }
+    };
     if let Some(owner) = crate::webhook::org_owner_email_by_id(pool, organization_id).await {
         state.stripe.sync_customer_email(&customer, &owner).await;
     }
-    let charged = run_organization_billing_mutation(pool, organization_id, async {
-        state
-            .stripe
-            .charge_top_up(
-                &customer,
-                organization_id,
-                top_up_id,
-                i64::from(amount_cents),
-            )
+    let charged = match claim.paid_invoice(&state.stripe).await {
+        Ok(Some(invoice_id)) => Ok(TopUpCharge::Paid { invoice_id }),
+        Ok(None) => {
+            run_organization_billing_mutation(pool, organization_id, async {
+                state
+                    .stripe
+                    .charge_top_up(
+                        &customer,
+                        organization_id,
+                        top_up_id,
+                        i64::from(amount_cents),
+                    )
+                    .await
+                    .map_err(OrganizationBillingMutationError::ambiguous)
+            })
             .await
-            .map_err(OrganizationBillingMutationError::ambiguous)
-    })
-    .await;
+        }
+        Err(error) => Err(error),
+    };
+    let outcome = record_charge(pool, organization_id, top_up_id, charged).await;
+    claim.release().await;
+    outcome
+}
+
+/// Records how a purchase's charge ended.
+async fn record_charge(
+    pool: &sqlx::PgPool,
+    organization_id: &str,
+    top_up_id: &str,
+    charged: AppResult<TopUpCharge>,
+) -> AppResult<AddCreditOutcome> {
     match charged {
         Ok(TopUpCharge::Paid { invoice_id }) => {
             complete_top_up(pool, top_up_id, &invoice_id)
@@ -338,19 +374,23 @@ async fn charge(
             Ok(AddCreditOutcome::ActionRequired { payment_url })
         }
         Err(error) => {
-            // The top-up stays pending; the credit sweep resumes the same
-            // charge within a minute.
             tracing::warn!(
                 organization_id,
                 top_up_id,
                 ?error,
                 "add credit: charge unconfirmed"
             );
-            Err(AppError::ServiceUnavailable(
-                "the payment could not be confirmed yet; it is retried automatically".into(),
-            ))
+            Err(unconfirmed())
         }
     }
+}
+
+/// The answer while a purchase's charge is unconfirmed: it stays pending,
+/// and the credit sweep resumes the same charge within a minute.
+fn unconfirmed() -> AppError {
+    AppError::ServiceUnavailable(
+        "the payment could not be confirmed yet; it is retried automatically".into(),
+    )
 }
 
 /// Opens Stripe's payment page for an organization with no saved card.

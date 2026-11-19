@@ -316,6 +316,116 @@ pub async fn fail_top_up(
     Ok(())
 }
 
+/// A pending top-up older than this may outlive its Stripe idempotency keys,
+/// which Stripe keeps for at least 24 hours, so paying it looks for its paid
+/// invoice first (#5365). A younger one is resumed by its keys, and by this
+/// age Stripe's search, which can lag by up to an hour, has its invoice.
+const STALE_TOP_UP: &str = "12 hours";
+
+/// How long a buyer waits for another caller paying the same top-up.
+const CLAIM_WAIT: &str = "30s";
+
+/// The one caller paying a pending top-up (#5365). A purchase and settlement
+/// both pay pending rows, with the same idempotency keys, and Stripe refuses
+/// the second of two concurrent requests with one key (409). The claim is a
+/// transaction-scoped advisory lock on the top-up's id. Nothing is written
+/// under it, so ending the transaction, or losing its connection, only lets
+/// the next caller in.
+pub(crate) struct TopUpClaim {
+    transaction: sqlx::Transaction<'static, sqlx::Postgres>,
+    top_up_id: String,
+    stale: bool,
+}
+
+/// What claiming a top-up came to.
+pub(crate) enum Claim {
+    Paying(TopUpClaim),
+    /// Another caller is paying it.
+    Busy,
+    /// It is no longer pending.
+    Settled,
+}
+
+/// Claims a pending top-up for paying. With `wait`, waits up to
+/// [`CLAIM_WAIT`] for another caller to finish; without, leaves a top-up
+/// another caller holds to that caller.
+pub(crate) async fn claim_top_up(
+    pool: &PgPool,
+    top_up_id: &str,
+    wait: bool,
+) -> anyhow::Result<Claim> {
+    let mut transaction = pool.begin().await?;
+    // The claim's transaction sits idle while its holder calls Stripe.
+    sqlx::query(
+        "SELECT set_config('idle_in_transaction_session_timeout', '90s', true), \
+                set_config('lock_timeout', $1, true)",
+    )
+    .bind(CLAIM_WAIT)
+    .execute(&mut *transaction)
+    .await?;
+    let locked = if wait {
+        match sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended('billing-top-up:' || $1, 0))",
+        )
+        .bind(top_up_id)
+        .execute(&mut *transaction)
+        .await
+        {
+            Ok(_) => true,
+            // lock_not_available: the wait ran out.
+            Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("55P03") => false,
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        sqlx::query_scalar(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended('billing-top-up:' || $1, 0))",
+        )
+        .bind(top_up_id)
+        .fetch_one(&mut *transaction)
+        .await?
+    };
+    if !locked {
+        return Ok(Claim::Busy);
+    }
+    let stale: Option<bool> = sqlx::query_scalar(
+        "SELECT created_at < now() - $2::interval FROM billing_top_ups \
+         WHERE id = $1 AND state = 'pending'",
+    )
+    .bind(top_up_id)
+    .bind(STALE_TOP_UP)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    Ok(match stale {
+        Some(stale) => Claim::Paying(TopUpClaim {
+            transaction,
+            top_up_id: top_up_id.to_owned(),
+            stale,
+        }),
+        None => Claim::Settled,
+    })
+}
+
+impl TopUpClaim {
+    /// The invoice that already paid this top-up, when it is old enough that
+    /// charging it again could make a new one. A younger top-up does not ask.
+    pub(crate) async fn paid_invoice(
+        &self,
+        stripe: &crate::stripe_client::StripeHandle,
+    ) -> Result<Option<String>, codewire_server_core::AppError> {
+        if !self.stale {
+            return Ok(None);
+        }
+        stripe.paid_top_up_invoice(&self.top_up_id).await
+    }
+
+    /// Lets the next caller in, once this one has recorded how the charge
+    /// ended.
+    pub(crate) async fn release(self) {
+        // Nothing was written under the claim.
+        let _ = self.transaction.rollback().await;
+    }
+}
+
 /// Credits a one-time purchase paid through Stripe Checkout, once per
 /// top-up id, whichever delivery of its completion gets here first. It has
 /// no `billing_top_ups` row: Stripe's session, not a resumable charge, makes
@@ -466,28 +576,65 @@ pub async fn settle_organization(
             }
         }
     };
+    let claim = match claim_top_up(pool, &top_up_id, false).await? {
+        Claim::Paying(claim) => claim,
+        // Its other payer records how it ends.
+        Claim::Busy => return Ok(Settlement::Pending),
+        // Another payer has just finished it; the next run reads how.
+        Claim::Settled => return Ok(Settlement::Pending),
+    };
+    let settlement = pay_claimed(
+        pool,
+        stripe,
+        &claim,
+        customer,
+        organization_id,
+        &top_up_id,
+        amount_cents,
+    )
+    .await;
+    claim.release().await;
+    settlement
+}
+
+/// Pays a top-up this caller has claimed and records how it ended.
+async fn pay_claimed(
+    pool: &PgPool,
+    stripe: &crate::stripe_client::StripeHandle,
+    claim: &TopUpClaim,
+    customer: Option<String>,
+    organization_id: &str,
+    top_up_id: &str,
+    amount_cents: i32,
+) -> anyhow::Result<Settlement> {
     let Some(customer) = customer else {
-        fail_top_up(pool, &top_up_id, None, "no_customer").await?;
+        fail_top_up(pool, top_up_id, None, "no_customer").await?;
         return Ok(Settlement::Exhausted);
     };
     if let Some(owner) = crate::webhook::org_owner_email_by_id(pool, organization_id).await {
         stripe.sync_customer_email(&customer, &owner).await;
     }
-    match stripe
-        .charge_top_up(
-            &customer,
-            organization_id,
-            &top_up_id,
-            i64::from(amount_cents),
-        )
-        .await
-    {
+    let charged = match claim.paid_invoice(stripe).await {
+        Ok(Some(invoice_id)) => Ok(crate::stripe_client::TopUpCharge::Paid { invoice_id }),
+        Ok(None) => {
+            stripe
+                .charge_top_up(
+                    &customer,
+                    organization_id,
+                    top_up_id,
+                    i64::from(amount_cents),
+                )
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    match charged {
         Ok(crate::stripe_client::TopUpCharge::Paid { invoice_id }) => {
-            complete_top_up(pool, &top_up_id, &invoice_id).await?;
+            complete_top_up(pool, top_up_id, &invoice_id).await?;
             Ok(Settlement::ToppedUp)
         }
         Ok(crate::stripe_client::TopUpCharge::Declined { invoice_id, code }) => {
-            fail_top_up(pool, &top_up_id, invoice_id.as_deref(), &code).await?;
+            fail_top_up(pool, top_up_id, invoice_id.as_deref(), &code).await?;
             Ok(Settlement::Exhausted)
         }
         // Nobody is there to approve it. Its open invoice still credits if
@@ -495,7 +642,7 @@ pub async fn settle_organization(
         Ok(crate::stripe_client::TopUpCharge::ActionRequired { invoice_id, .. }) => {
             fail_top_up(
                 pool,
-                &top_up_id,
+                top_up_id,
                 Some(&invoice_id),
                 crate::stripe_client::AUTHENTICATION_REQUIRED,
             )

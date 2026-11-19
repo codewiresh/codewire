@@ -1,7 +1,7 @@
 //! "Add credit" against a fake Stripe. The `db_` tests need `DATABASE_URL`
 //! (the "credit purchase matrix" database lane) and skip without it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -84,6 +84,15 @@ struct Fake {
     invoice_status: &'static str,
     invoices: u32,
     seen: Vec<Seen>,
+    /// Answers to finished keyed requests, which Stripe replays.
+    replays: HashMap<String, (StatusCode, String)>,
+    /// Keyed requests still being answered; Stripe refuses another request
+    /// with one of these keys with 409.
+    in_flight: HashSet<String>,
+    /// When set, a pay call is answered only after a permit is added.
+    pay_gate: Option<Arc<tokio::sync::Semaphore>>,
+    /// What invoice search finds.
+    searchable: Vec<Value>,
 }
 
 type Shared = Arc<Mutex<Fake>>;
@@ -192,25 +201,68 @@ fn card_error(code: &str, decline_code: &str) -> (StatusCode, String) {
     (StatusCode::PAYMENT_REQUIRED, body.to_string())
 }
 
+/// Stripe's idempotency as the fake keeps it: a finished keyed request is
+/// replayed, and a concurrent one with the same key is refused with 409.
 async fn stripe(
-    State(fake): State<Shared>,
+    State(shared): State<Shared>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> (StatusCode, String) {
-    let form: BTreeMap<String, String> = url::form_urlencoded::parse(&body).into_owned().collect();
-    let mut fake = fake.lock().unwrap();
-    fake.seen.push(Seen {
-        method: method.clone(),
-        path: uri.path().to_owned(),
-        form: form.clone(),
-        idempotency_key: headers
-            .get("idempotency-key")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned),
-    });
-    let segments: Vec<&str> = uri.path().trim_start_matches("/v1/").split('/').collect();
+    let form: BTreeMap<String, String> = url::form_urlencoded::parse(&body)
+        .chain(url::form_urlencoded::parse(
+            uri.query().unwrap_or("").as_bytes(),
+        ))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let gate = {
+        let mut fake = shared.lock().unwrap();
+        fake.seen.push(Seen {
+            method: method.clone(),
+            path: uri.path().to_owned(),
+            form: form.clone(),
+            idempotency_key: key.clone(),
+        });
+        if let Some(key) = &key {
+            if let Some(replay) = fake.replays.get(key) {
+                return replay.clone();
+            }
+            if !fake.in_flight.insert(key.clone()) {
+                return (
+                    StatusCode::CONFLICT,
+                    json!({"error": {"type": "idempotency_error", "message": "another request with this key is in progress"}})
+                        .to_string(),
+                );
+            }
+        }
+        fake.pay_gate
+            .clone()
+            .filter(|_| method == Method::POST && uri.path().ends_with("/pay"))
+    };
+    if let Some(gate) = gate {
+        gate.acquire().await.unwrap().forget();
+    }
+    let mut fake = shared.lock().unwrap();
+    let answer = respond(&mut fake, method, uri.path(), &form);
+    if let Some(key) = key {
+        fake.in_flight.remove(&key);
+        fake.replays.insert(key, answer.clone());
+    }
+    answer
+}
+
+fn respond(
+    fake: &mut Fake,
+    method: Method,
+    path: &str,
+    form: &BTreeMap<String, String>,
+) -> (StatusCode, String) {
+    let segments: Vec<&str> = path.trim_start_matches("/v1/").split('/').collect();
     let ok = |value: Value| (StatusCode::OK, value.to_string());
     let customer_of =
         |form: &BTreeMap<String, String>| form.get("customer").cloned().unwrap_or_default();
@@ -232,20 +284,14 @@ async fn stripe(
         (Method::POST, ["invoices"]) => {
             fake.invoices += 1;
             let id = format!("in_{}_{}", fake.prefix, fake.invoices);
-            ok(invoice(
-                &id,
-                "draft",
-                &customer_of(&form),
-                0,
-                metadata(&form),
-            ))
+            ok(invoice(&id, "draft", &customer_of(form), 0, metadata(form)))
         }
         (Method::POST, ["invoiceitems"]) => ok(json!({
             "id": "ii_fake",
             "object": "invoiceitem",
             "amount": form.get("amount").and_then(|amount| amount.parse::<i64>().ok()).unwrap_or(0),
             "currency": "eur",
-            "customer": customer_of(&form),
+            "customer": customer_of(form),
             "date": CREATED,
             "discountable": true,
             "livemode": false,
@@ -264,6 +310,13 @@ async fn stripe(
                 card_error("authentication_required", "authentication_required")
             }
         },
+        (Method::GET, ["invoices", "search"]) => ok(json!({
+            "object": "search_result",
+            "data": fake.searchable,
+            "has_more": false,
+            "next_page": null,
+            "url": "/v1/invoices/search"
+        })),
         (Method::GET, ["invoices", id]) => {
             ok(invoice(id, fake.invoice_status, "cus_fake", 0, json!({})))
         }
@@ -298,6 +351,10 @@ impl Harness {
             invoice_status: "open",
             invoices: 0,
             seen: Vec::new(),
+            replays: HashMap::new(),
+            in_flight: HashSet::new(),
+            pay_gate: None,
+            searchable: Vec::new(),
         }));
         let app = Router::new().fallback(stripe).with_state(fake.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -333,6 +390,43 @@ impl Harness {
             .iter()
             .filter(|seen| seen.method == Method::POST && seen.path.starts_with("/v1/invoices"))
             .count()
+    }
+
+    fn pays(&self) -> usize {
+        self.seen()
+            .iter()
+            .filter(|seen| seen.method == Method::POST && seen.path.ends_with("/pay"))
+            .count()
+    }
+
+    /// Holds every pay call until the returned gate gets a permit.
+    fn hold_pay(&self) -> Arc<tokio::sync::Semaphore> {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        self.fake.lock().unwrap().pay_gate = Some(gate.clone());
+        gate
+    }
+
+    /// Waits until a pay call has arrived.
+    async fn paying(&self) {
+        for _ in 0..200 {
+            if self.pays() > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("no pay call arrived: {:?}", self.seen());
+    }
+
+    async fn settle(&self, fixture: &Fixture) -> crate::credit::Settlement {
+        crate::credit::settle_organization(
+            &self.state.pool,
+            &self.state.stripe,
+            codewire_server_core::credit_enforcement::CreditEnforcement::On,
+            &fixture.organization_id,
+            false,
+        )
+        .await
+        .unwrap()
     }
 
     fn only(&self, method: Method, path: &str) -> Seen {
@@ -658,6 +752,148 @@ async fn db_a_retried_purchase_resumes_its_own_charge() {
     );
     assert_eq!(balance_cents(&pool, &fixture).await, 5_000);
     assert_eq!(top_ups(&pool, &fixture).await.len(), 1);
+    cleanup(&pool, fixture).await;
+}
+
+/// Waits until a session waits for a top-up's claim.
+async fn waiting_for_claim(pool: &PgPool) {
+    for _ in 0..200 {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' \
+             AND wait_event = 'advisory' AND query LIKE '%billing-top-up:%')",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("nobody waited for the top-up's claim");
+}
+
+async fn insert_pending(pool: &PgPool, fixture: &Fixture, top_up_id: &str, age: &str) {
+    sqlx::query(
+        "INSERT INTO billing_top_ups (id, organization_id, amount_cents, created_at) \
+         VALUES ($1, $2, 5000, now() - $3::interval)",
+    )
+    .bind(top_up_id)
+    .bind(&fixture.organization_id)
+    .bind(age)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn db_the_sweep_leaves_a_purchase_being_paid_to_its_buyer() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let fixture = seed(&pool, "owner", true).await;
+    let harness = Harness::new(pool.clone(), true, Pay::Paid).await;
+    // A purchase is a pending top-up, so settlement, triggered by the same
+    // credit change, finds it while its buyer is paying it (#5365).
+    let gate = harness.hold_pay();
+    let request = "raced-request-000000000001";
+    let (bought, swept) = tokio::join!(buy(&harness, &fixture, 5_000, request), async {
+        harness.paying().await;
+        let swept = harness.settle(&fixture).await;
+        gate.add_permits(1);
+        swept
+    });
+    assert_eq!(bought.unwrap(), AddCreditOutcome::Paid);
+    assert_eq!(swept, crate::credit::Settlement::Pending);
+    // Settlement sent Stripe nothing, so no request met the buyer's keys.
+    harness.only(Method::POST, "/v1/invoices");
+    assert_eq!(harness.pays(), 1, "{:?}", harness.seen());
+    assert_eq!(balance_cents(&pool, &fixture).await, 5_000);
+    cleanup(&pool, fixture).await;
+}
+
+#[tokio::test]
+async fn db_a_buyer_waits_for_the_sweep_paying_their_purchase() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let fixture = seed(&pool, "owner", true).await;
+    let harness = Harness::new(pool.clone(), true, Pay::Paid).await;
+    // Settlement is paying the purchase when its buyer's request resumes it:
+    // the buyer gets the payment's answer, not Stripe's 409 (#5365).
+    let request = "raced-request-000000000002";
+    let top_up_id = purchase_top_up_id(&fixture.organization_id, request, 5_000);
+    insert_pending(&pool, &fixture, &top_up_id, "0 seconds").await;
+    let gate = harness.hold_pay();
+    let (swept, bought) = tokio::join!(harness.settle(&fixture), async {
+        harness.paying().await;
+        let (bought, ()) = tokio::join!(buy(&harness, &fixture, 5_000, request), async {
+            waiting_for_claim(&pool).await;
+            gate.add_permits(1);
+        });
+        bought
+    });
+    assert_eq!(swept, crate::credit::Settlement::ToppedUp);
+    assert_eq!(bought.unwrap(), AddCreditOutcome::Paid);
+    harness.only(Method::POST, "/v1/invoices");
+    assert_eq!(harness.pays(), 1, "{:?}", harness.seen());
+    // A fresh top-up's keys still hold, so nothing searched for its invoice.
+    assert!(
+        !harness
+            .seen()
+            .iter()
+            .any(|seen| seen.path == "/v1/invoices/search")
+    );
+    assert_eq!(balance_cents(&pool, &fixture).await, 5_000);
+    cleanup(&pool, fixture).await;
+}
+
+#[tokio::test]
+async fn db_a_stale_top_up_whose_invoice_was_paid_is_completed_without_a_charge() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let fixture = seed(&pool, "owner", true).await;
+    let harness = Harness::new(pool.clone(), true, Pay::Paid).await;
+    // Its payment went through two days ago, but neither settlement nor the
+    // `invoice.paid` delivery recorded it. Its idempotency keys may be gone,
+    // so charging it again could make a second invoice (#5365).
+    let suffix = &fixture.organization_id[14..];
+    let top_up_id = format!("stale-{suffix}");
+    let invoice_id = format!("in_stale_{}", suffix.replace('-', ""));
+    insert_pending(&pool, &fixture, &top_up_id, "2 days").await;
+    harness.fake.lock().unwrap().searchable = vec![
+        invoice(
+            &format!("{invoice_id}x"),
+            "paid",
+            &fixture.customer_id,
+            500_000,
+            json!({"kind": "credit_top_up", "top_up_id": "another-top-up"}),
+        ),
+        invoice(
+            &invoice_id,
+            "paid",
+            &fixture.customer_id,
+            500_000,
+            json!({"kind": "credit_top_up", "org_id": fixture.organization_id, "top_up_id": top_up_id}),
+        ),
+    ];
+
+    assert_eq!(
+        harness.settle(&fixture).await,
+        crate::credit::Settlement::ToppedUp
+    );
+    let search = harness.only(Method::GET, "/v1/invoices/search");
+    assert_eq!(
+        search.form.get("query"),
+        Some(&format!("metadata['top_up_id']:'{top_up_id}'"))
+    );
+    assert_eq!(harness.charges(), 0, "{:?}", harness.seen());
+    assert_eq!(
+        top_ups(&pool, &fixture).await,
+        [("paid".to_owned(), 5_000, Some(invoice_id), None)]
+    );
+    assert_eq!(balance_cents(&pool, &fixture).await, 5_000);
     cleanup(&pool, fixture).await;
 }
 

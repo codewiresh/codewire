@@ -148,7 +148,10 @@ the first Production release after codewire/deploy#245.
 - **States to exercise:** a saved card; a bank that asks to confirm a charge
   on a saved card, which goes on to Stripe's invoice page; no card yet,
   where **Pay** first opens Stripe's card field under Add credit, then saves
-  the card and buys the credit with it, with no top-up on top (#4750).
+  the card and buys the credit with it, with no top-up on top (#4750). The
+  purchase also sets off settlement, which finds it pending; only one of
+  the two pays it, and the buyer sees it paid, never "could not be
+  confirmed" (#5365).
 - **Driving it:** choose an amount and **Pay**.
 - **Proof:** the balance rises by exactly that amount, and one paid invoice
   for it appears under **Invoices**.

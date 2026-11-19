@@ -34,7 +34,7 @@ use stripe::{IdempotencyKey, RequestStrategy, StripeRequest};
 use stripe_billing::billing_portal_session::CreateBillingPortalSession;
 use stripe_billing::invoice::{
     CreateInvoice, CreateInvoicePendingInvoiceItemsBehavior, FinalizeInvoiceInvoice, PayInvoice,
-    RetrieveInvoice,
+    RetrieveInvoice, SearchInvoice,
 };
 use stripe_billing::invoice_item::{CreateInvoiceItem, UpdateInvoiceItem};
 use stripe_billing::subscription::{CancelSubscription, ListSubscription, RetrieveSubscription};
@@ -1229,6 +1229,43 @@ impl StripeHandle {
                 None => Err(stripe_err(error)),
             },
         }
+    }
+
+    /// The paid invoice of a top-up, found by the `top_up_id` its metadata
+    /// carries. A pending top-up old enough that its idempotency keys may have
+    /// expired looks here before it is charged again (#5365).
+    pub(crate) async fn paid_top_up_invoice(
+        &self,
+        top_up_id: &str,
+    ) -> Result<Option<String>, AppError> {
+        // Top-up ids are UUIDs or derived `credit-…` ids; nothing else is
+        // quoted into a search query.
+        if top_up_id.is_empty()
+            || !top_up_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(AppError::InternalMsg(
+                "top-up id cannot be searched for".into(),
+            ));
+        }
+        let client = self.client()?;
+        let found = SearchInvoice::new(format!("metadata['top_up_id']:'{top_up_id}'"))
+            .send(client)
+            .await
+            .map_err(stripe_err)?;
+        Ok(found
+            .data
+            .into_iter()
+            .filter(|invoice| invoice.status == Some(stripe_shared::InvoiceStatus::Paid))
+            .filter(|invoice| {
+                invoice
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("top_up_id"))
+                    .is_some_and(|id| id == top_up_id)
+            })
+            .find_map(|invoice| invoice.id.map(|id| id.to_string())))
     }
 
     /// An invoice's state and its Stripe payment page, for a credit request
