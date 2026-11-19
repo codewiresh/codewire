@@ -471,6 +471,7 @@ grep -Fq 'Runtime provenance is invalid for mesh' "$work/rebadged.err" ||
 egress_ref="registry.example.invalid/codewire/egress@$digest"
 : >"$signature_state"
 : >"$signature_annotations"
+: >"$curl_log"
 if ! PATH="$work/bin:$PATH" RUNNER_TEMP="$work/tmp" \
     "$SIGNER" --egress "$egress_ref" "$public_key" >"$work/egress.out" 2>"$work/egress.err"; then
   sed -n '1,40p' "$work/egress.err" >&2
@@ -482,6 +483,13 @@ grep -Fq "$egress_ref dev.codewire.image-family=egress" "$signature_annotations"
   fail 'egress signature did not name its family'
 grep -Fq 'Verified and signed the exact cw-egress image in Harbor' "$work/egress.out" ||
   fail 'egress signing omitted its result'
+# It reads and signs in Harbor, so it logs in there, as delivery does: a
+# GHCR login left Harbor's HEAD unauthorized (Deploy Dev 62494).
+[[ "$(grep -c '/v1/platform/data/ci/codewire/harbor-publisher$' "$curl_log")" -eq 1 ]] ||
+  fail 'egress signing did not log in to Harbor exactly once'
+if grep -q '/v1/platform/data/ci/codewire/ghcr-publisher$' "$curl_log"; then
+  fail 'egress signing logged in to GHCR instead of Harbor'
+fi
 for refused in \
     "registry.example.invalid/codewire/mesh@$digest" \
     "registry.example.invalid/codewire/egress:$source_sha" \

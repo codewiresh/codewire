@@ -207,7 +207,8 @@ registry_login() {
 }
 
 refresh_openbao_token
-if [[ "$sign_target" == delivery ]]; then
+# Delivery and cw-egress sign in Harbor; the mirror signs in GHCR.
+if [[ "$sign_target" == delivery || "$sign_target" == egress ]]; then
   registry_login platform/data/ci/codewire/harbor-publisher "$HARBOR_HOST" password
 else
   registry_login platform/data/ci/codewire/ghcr-publisher "$GHCR_HOST" token
