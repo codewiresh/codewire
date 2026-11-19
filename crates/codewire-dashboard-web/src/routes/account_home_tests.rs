@@ -451,7 +451,11 @@ async fn the_overview_reads_every_organization_once_and_at_once() {
         r#"<title id="first-org-chart-title">Hourly Sandbox cost for first-org</title>"#
     ));
     assert_eq!(html.matches(r#"<rect class="cw-chart-bar""#).count(), 24);
-    assert!(html.contains(r#"x="280" y="8" width="8" height="72" tabindex="0">"#));
+    // €0.84 on a €1.00 scale, its labels hidden from screen readers (#4959).
+    assert!(html.contains(r#"x="280" y="20" width="8" height="60" tabindex="0">"#));
+    assert!(html.contains(
+        r#"<div class="cw-chart-scale" aria-hidden="true"><span>€1.00</span><span>€0.50</span><span>€0</span></div>"#
+    ));
     assert!(html.contains(r#"<a class="cw-button cw-button--small cw-button--outline" href="/first-org/billing/">Billing</a>"#));
     // second-org: never had a Sandbox, and a member gets no Billing link.
     assert!(html.contains(
@@ -562,6 +566,7 @@ fn the_checklist_markup_follows_each_step() {
         get_started: Some(steps(false, false, false, true)),
         organizations: vec![card(None)],
         shared_scale: false,
+        scale: None,
     });
     assert!(to_do.contains("0 of 3 done."));
     assert_eq!(
@@ -584,6 +589,7 @@ fn the_checklist_markup_follows_each_step() {
         get_started: Some(steps(true, true, false, true)),
         organizations: vec![card(None)],
         shared_scale: false,
+        scale: None,
     });
     assert!(done.contains("2 of 3 done."));
     assert_eq!(
@@ -599,6 +605,7 @@ fn the_checklist_markup_follows_each_step() {
         get_started: None,
         organizations: vec![card(None)],
         shared_scale: false,
+        scale: None,
     });
     assert!(!all.contains("Get started"));
     assert!(all.contains(r#"<h3 id="example-org-name">example-org</h3>"#));
@@ -611,6 +618,7 @@ fn a_member_is_told_who_adds_the_card() {
         get_started: Some(steps(false, false, false, false)),
         organizations: vec![card(None)],
         shared_scale: false,
+        scale: None,
     });
     assert!(
         html.contains("<p>An organization owner or admin adds a card on the Billing page.</p>")
@@ -634,6 +642,7 @@ fn an_unmetered_organization_shows_unlimited() {
             running: 0,
         }))],
         shared_scale: false,
+        scale: None,
     });
     assert!(html.contains("<p>Nothing to add: cloud use isn’t charged here.</p>"));
     assert!(html.contains(

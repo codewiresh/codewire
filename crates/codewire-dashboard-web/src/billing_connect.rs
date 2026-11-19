@@ -18,6 +18,7 @@ use crate::{
     state::AppState,
     time_display::calendar_date,
     transport::BrowserTransport,
+    usage_scale::{UsageScale, ZERO_Y},
     view::SandboxStartView,
 };
 
@@ -313,6 +314,9 @@ pub(crate) struct BillingPageView {
     pub(crate) memory_hours: String,
     pub(crate) usage: Vec<BillingUsageRow>,
     pub(crate) usage_bars: Vec<BillingUsageBar>,
+    /// The euro scale the bars are drawn against; `None` when no hour cost
+    /// anything.
+    pub(crate) usage_scale: Option<UsageScale>,
     pub(crate) invoices_available: bool,
     pub(crate) invoices: Vec<BillingInvoiceRow>,
     pub(crate) events_available: bool,
@@ -548,20 +552,21 @@ pub(crate) async fn billing_page(
         .into_iter()
         .rev()
         .collect::<Vec<_>>();
-    let max_cost = hourly
-        .iter()
-        .map(|entry| entry.cost_nano_eur.max(0))
-        .max()
-        .unwrap_or(0);
+    let usage_scale = UsageScale::for_max(
+        hourly
+            .iter()
+            .map(|entry| entry.cost_nano_eur.max(0))
+            .max()
+            .unwrap_or(0),
+    );
     let usage_bars = hourly
         .into_iter()
         .enumerate()
         .map(|(index, entry)| {
-            let height = if max_cost == 0 {
-                2
-            } else {
-                (i128::from(entry.cost_nano_eur.max(0)) * 72 / i128::from(max_cost)).max(2) as usize
-            };
+            let height = usage_scale
+                .as_ref()
+                .map_or(0, |scale| scale.height(entry.cost_nano_eur))
+                .max(2) as usize;
             let occurred = entry
                 .hour
                 .into_option()
@@ -569,7 +574,7 @@ pub(crate) async fn billing_page(
                 .unwrap_or_else(|| "Unknown hour".to_owned());
             BillingUsageBar {
                 x: 8 + index * 12,
-                y: 80usize.saturating_sub(height),
+                y: (ZERO_Y as usize).saturating_sub(height),
                 height,
                 label: format!("{occurred}: {}", euro_text(entry.cost_nano_eur)),
             }
@@ -621,6 +626,7 @@ pub(crate) async fn billing_page(
             })
             .collect(),
         usage_bars,
+        usage_scale,
         invoices_available: invoices.is_some(),
         invoices: invoices
             .into_iter()

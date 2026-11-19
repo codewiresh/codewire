@@ -18,7 +18,7 @@ test("Billing reads balance, payment methods, top-up, Add credit, invoices", { t
   const stack = page.locator("#billing-stack");
   const order = await stack.locator(":scope > header, :scope > section").evaluateAll((parts) =>
     parts.map((part) => part.getAttribute("aria-label") || part.querySelector("h2")?.textContent?.trim()));
-  expect(order).toEqual(["Compute credit", "Payment methods", "Automatic top-up", "Add credit", "Invoices"]);
+  expect(order).toEqual(["Compute credit", "Payment methods", "Automatic top-up", "Add credit", "Invoices", "Sandbox Usage"]);
 
   // Add card is the first action, at primary weight, as Pay is.
   const addCard = stack.getByRole("button", { name: "Add card" });

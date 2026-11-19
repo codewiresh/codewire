@@ -20,9 +20,13 @@ dl.cw-stat-grid { margin: 0; }
 .cw-stat small { color: var(--fg-tertiary); font-size: var(--text-small); font-weight: var(--weight-regular); }
 .cw-usage-chart { margin: var(--space-5) 0 0; padding-top: var(--space-4); border-top: 1px solid var(--border-subtle); }
 .cw-usage-chart figcaption { margin-bottom: var(--space-2); color: var(--fg-secondary); font-size: var(--text-small); }
-/* The chart fills its figure's width; bars stretch with it and stop short of the axis, which keeps a one-pixel line from edge to edge. */
-.cw-usage-chart svg { display: block; width: 100%; height: 11rem; }
+/* The chart fills its figure's width beside its euro scale (#4959); bars stretch with it and stand on the €0 line, drawn last so it stays a one-pixel line from edge to edge. The scale's labels are HTML, so they never stretch: a column as tall as the chart, its first label level with the top gridline (y = 8 of 88) and its last with the €0 line (y = 80). */
+.cw-chart-plot { display: flex; gap: var(--space-2); }
+.cw-chart-scale { display: flex; flex: none; flex-direction: column; justify-content: space-between; padding-block: calc(var(--chart-height) * 8 / 88); color: var(--fg-tertiary); font-family: var(--font-mono); font-size: var(--text-micro); text-align: end; }
+.cw-chart-scale > span { display: flex; align-items: center; justify-content: flex-end; height: 0; white-space: nowrap; }
+.cw-usage-chart svg { display: block; flex: 1 1 auto; min-width: 0; width: 100%; height: var(--chart-height); }
 .cw-chart-axis { fill: none; stroke: var(--border-hover); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.cw-chart-grid { fill: none; stroke: var(--border-subtle); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .cw-chart-bar { fill: var(--accent); rx: 2; }
 .cw-chart-bar:is(:hover, :focus-visible) { fill: var(--fg-primary); }
 .cw-table-wrap { max-width: 100%; overflow-x: auto; }

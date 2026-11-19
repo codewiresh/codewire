@@ -42,6 +42,7 @@ mod test_support;
 mod time_display;
 mod transport;
 mod updates_connect;
+mod usage_scale;
 mod view;
 
 use axum::Router;

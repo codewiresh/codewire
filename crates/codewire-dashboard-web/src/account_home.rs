@@ -22,6 +22,7 @@ use crate::{
     billing_connect::{self, BillingSummary, HourCost},
     environment_connect,
     state::AppState,
+    usage_scale::{UsageScale, ZERO_Y},
     view::OrganizationRow,
 };
 
@@ -31,10 +32,9 @@ const READ_TIMEOUT: Duration = Duration::from_secs(2);
 const CONCURRENT_ORGANIZATIONS: usize = 8;
 const HOURS: i64 = 24;
 const SECONDS_PER_HOUR: i64 = 3_600;
-/// The chart's geometry, as on the Billing page: bars stand on the axis at
-/// y = 80 and the tallest is 72 high; each slot is 12 wide from x = 4.
-const AXIS_Y: i64 = 80;
-const BAR_MAX: i64 = 72;
+/// The chart's geometry, as on the Billing page: bars stand on the zero line
+/// of the euro scale (`usage_scale`), at least 2 high when the hour cost
+/// anything; each slot is 12 wide from x = 4.
 const BAR_MIN: i64 = 2;
 const SLOT_START: i64 = 4;
 const SLOT_WIDTH: i64 = 12;
@@ -62,6 +62,9 @@ pub(crate) struct AccountOverviewView {
     pub(crate) organizations: Vec<OrganizationCardView>,
     /// More than one card has a chart, all drawn on the same scale.
     pub(crate) shared_scale: bool,
+    /// The euro scale every card's chart is drawn against; `None` when no
+    /// hour of any card cost anything.
+    pub(crate) scale: Option<UsageScale>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -248,12 +251,14 @@ pub(crate) fn build(
                 .map(|hourly| last_day(hourly, now))
         })
         .collect();
-    let scale = charts
-        .iter()
-        .flatten()
-        .flat_map(|hours| hours.iter().copied())
-        .max()
-        .unwrap_or(0);
+    let scale = UsageScale::for_max(
+        charts
+            .iter()
+            .flatten()
+            .flat_map(|hours| hours.iter().copied())
+            .max()
+            .unwrap_or(0),
+    );
     let shared_scale = charts.iter().flatten().count() > 1;
     let first_hour = now - now.rem_euclid(SECONDS_PER_HOUR) - (HOURS - 1) * SECONDS_PER_HOUR;
 
@@ -281,7 +286,7 @@ pub(crate) fn build(
                 role: organization.role,
                 stats,
                 bars: chart
-                    .map(|hours| bars(&hours, scale, first_hour))
+                    .map(|hours| bars(&hours, scale.as_ref(), first_hour))
                     .unwrap_or_default(),
                 no_usage: reads.sandboxes.is_some_and(|sandboxes| !sandboxes.ever),
                 sandboxes_url: format!("/{}/", organization.slug),
@@ -295,6 +300,7 @@ pub(crate) fn build(
         get_started,
         organizations,
         shared_scale,
+        scale,
     }
 }
 
@@ -314,23 +320,24 @@ fn last_day(hourly: &[HourCost], now: i64) -> [i64; HOURS as usize] {
     hours
 }
 
-fn bars(hours: &[i64; HOURS as usize], scale: i64, first_hour: i64) -> Vec<UsageBar> {
+fn bars(
+    hours: &[i64; HOURS as usize],
+    scale: Option<&UsageScale>,
+    first_hour: i64,
+) -> Vec<UsageBar> {
     hours
         .iter()
         .enumerate()
         .map(|(slot, nano_eur)| {
-            let height = if *nano_eur == 0 || scale == 0 {
-                0
-            } else {
-                // Nano-euros times the bar height can pass i64 for a big hour.
-                let height = i128::from(*nano_eur) * i128::from(BAR_MAX) / i128::from(scale);
-                (height as i64).max(BAR_MIN)
+            let height = match scale {
+                Some(scale) if *nano_eur > 0 => scale.height(*nano_eur).max(BAR_MIN),
+                _ => 0,
             };
             let hour =
                 (first_hour + slot as i64 * SECONDS_PER_HOUR).rem_euclid(86_400) / SECONDS_PER_HOUR;
             UsageBar {
                 x: SLOT_START + slot as i64 * SLOT_WIDTH,
-                y: AXIS_Y - height,
+                y: ZERO_Y - height,
                 height,
                 label: format!("{hour:02}:00 UTC, {}", euro_text(*nano_eur)),
             }
@@ -604,14 +611,24 @@ mod tests {
             NOW,
         );
         assert!(view.shared_scale);
+        // The busiest hour, €0.84, sets one euro scale for every card: €1.00
+        // at the top, 72 high.
+        let ticks = &view.scale.as_ref().expect("a scale").ticks;
+        assert_eq!(
+            ticks
+                .iter()
+                .map(|tick| tick.label.as_str())
+                .collect::<Vec<_>>(),
+            ["€1.00", "€0.50", "€0"]
+        );
         let busy = &view.organizations[0].bars;
         assert_eq!(busy.len(), 24);
         assert_eq!(
             busy[23],
             UsageBar {
                 x: 280,
-                y: 8,
-                height: 72,
+                y: 20,
+                height: 60,
                 label: "15:00 UTC, €0.84".into(),
             }
         );
@@ -619,15 +636,15 @@ mod tests {
             busy[0],
             UsageBar {
                 x: 4,
-                y: 62,
-                height: 18,
+                y: 65,
+                height: 15,
                 label: "16:00 UTC, €0.21".into(),
             }
         );
         assert_eq!(busy[1].height, 0);
         assert_eq!(busy[1].label, "17:00 UTC, €0.00");
         let quiet = &view.organizations[1].bars;
-        assert_eq!(quiet[18].height, 36, "half the busiest hour, on its scale");
+        assert_eq!(quiet[18].height, 30, "€0.42 on the shared €1.00 scale");
         // One chart alone is on its own scale and says nothing of others.
         let alone = build(
             true,

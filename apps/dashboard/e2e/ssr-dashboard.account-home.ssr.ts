@@ -51,3 +51,46 @@ test("organization cards keep tile values on one line, and one organization's ca
     }
   }
 });
+
+// The usage charts' euro scale (#4959): ticks from the top down to €0, the top
+// at least the largest hour, each label level with its gridline, hidden from
+// screen readers, and the same on the account overview and the Billing page.
+const euros = (text: string) => Number((text.match(/€([0-9.]+)/) ?? ["", "NaN"])[1]);
+
+for (const name of ["account-overview-active", "account-overview-unlimited", "organization-billing"]) {
+  test(`the usage chart's euro scale reads off every bar, ${name}`, { tag: "@mobile" }, async ({ page }) => {
+    test.skip(!process.env.CODEWIRE_DESIGN_ORIGIN, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN");
+    await page.goto(fixture(name));
+    const charts = page.locator(".cw-usage-chart");
+    await expect(charts).not.toHaveCount(0);
+    for (const chart of await charts.all()) {
+      const scale = chart.locator(".cw-chart-scale");
+      await expect(scale).toHaveAttribute("aria-hidden", "true");
+      const labels = await scale.locator("span").allTextContents();
+      const values = labels.map(euros);
+      expect(values.at(-1), labels.join(" ")).toBe(0);
+      for (let i = 1; i < values.length; i++) expect(values[i - 1], labels.join(" ")).toBeGreaterThan(values[i]);
+      const bars = (await chart.locator(".cw-chart-bar title").allTextContents()).map(euros);
+      expect(values[0], labels.join(" ")).toBeGreaterThanOrEqual(Math.max(...bars));
+      // Each label is level with its line: the top gridline at 8 of 88, the
+      // €0 line at 80, in the chart's own height.
+      const svg = (await chart.locator("svg").boundingBox())!;
+      const centers = await scale.locator("span").evaluateAll((spans) =>
+        spans.map((span) => {
+          // The text, not its zero-height line: where a reader sees the label.
+          const range = document.createRange();
+          range.selectNodeContents(span);
+          const box = range.getBoundingClientRect();
+          return box.top + box.height / 2;
+        }));
+      expect(Math.abs(centers[0] - (svg.y + svg.height * 8 / 88))).toBeLessThanOrEqual(1.5);
+      expect(Math.abs(centers.at(-1)! - (svg.y + svg.height * 80 / 88))).toBeLessThanOrEqual(1.5);
+      const box = (await scale.boundingBox())!;
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(svg.x);
+    }
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+  });
+}
+

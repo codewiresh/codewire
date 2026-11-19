@@ -118,12 +118,16 @@
               {% if !billing.usage_bars.is_empty() %}
               <figure class="cw-usage-chart">
                 <figcaption>Hourly cost, most recent 24 hours</figcaption>
-                <svg viewBox="0 0 304 88" preserveAspectRatio="none" role="img" aria-labelledby="usage-chart-title usage-chart-description">
-                  <title id="usage-chart-title">Hourly Sandbox cost</title>
-                  <desc id="usage-chart-description">Bar chart of hourly Sandbox cost. Exact values are available from each bar and the Sandbox table.</desc>
-                  <path class="cw-chart-axis" d="M0 84H304"/>
-                  {% for bar in billing.usage_bars %}<rect class="cw-chart-bar" x="{{ bar.x }}" y="{{ bar.y }}" width="8" height="{{ bar.height }}" tabindex="0"><title>{{ bar.label }}</title></rect>{% endfor %}
-                </svg>
+                <div class="cw-chart-plot">
+                  {% if let Some(scale) = billing.usage_scale %}<div class="cw-chart-scale" aria-hidden="true">{% for tick in scale.ticks %}<span>{{ tick.label }}</span>{% endfor %}</div>{% endif %}
+                  <svg viewBox="0 0 304 88" preserveAspectRatio="none" role="img" aria-labelledby="usage-chart-title usage-chart-description">
+                    <title id="usage-chart-title">Hourly Sandbox cost</title>
+                    <desc id="usage-chart-description">Bar chart of hourly Sandbox cost. Exact values are available from each bar and the Sandbox table.</desc>
+                    {% if let Some(scale) = billing.usage_scale %}{% for tick in scale.ticks %}{% if !loop.last %}<path class="cw-chart-grid" d="M0 {{ tick.y }}H304"/>{% endif %}{% endfor %}{% endif %}
+                    {% for bar in billing.usage_bars %}<rect class="cw-chart-bar" x="{{ bar.x }}" y="{{ bar.y }}" width="8" height="{{ bar.height }}" tabindex="0"><title>{{ bar.label }}</title></rect>{% endfor %}
+                    <path class="cw-chart-axis" d="M0 80H304"/>
+                  </svg>
+                </div>
               </figure>
               {% endif %}
               {% if !billing.usage.is_empty() %}
