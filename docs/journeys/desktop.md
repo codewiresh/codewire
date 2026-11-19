@@ -110,12 +110,22 @@ when both have been observed.
   - the viewer shows an XFCE desktop with a panel, and the typed line
     appears in its terminal;
   - `cw vnc desk-walk --status` before and after the second `cw vnc` names
-    the same start time.
+    the same start time;
+  - the viewer opens without asking for anything, on a Mac's built-in
+    viewer too: `cw vnc` gave it the password. With `--no-open`, the
+    printed password lets a viewer of your own connect, and a wrong one is
+    refused by the VNC server;
+  - the password is nowhere it should not be: `--status` does not print it;
+    `cw logs desk-walk --session codewire-desktop` does not contain it;
+    inside the environment, neither `ps -eo args` nor the environment of a
+    command started there contains it; on the computer, `ps` during
+    `cw vnc` shows no command line with it.
 - **Gotchas:** the `/dev/tcp` read needs `bash`. A viewer that connects is
   not proof that `cw vnc` chose the environment you meant; compare the host
-  name the desktop's terminal prints with `cw info desk-walk`. The Mac
-  walk records whether the system viewer connected without asking for a
-  password (#3223's open point).
+  name the desktop's terminal prints with `cw info desk-walk`. The password
+  searches need the password: take it from `--no-open`, and search for the
+  exact eight characters. On the owner's Mac the viewer is opened in a
+  session the owner can watch, never over a bare remote command.
 - **Observed:** not yet observed.
 
 ## `desktop-agent`: an agent draws on the desktop and reads it
@@ -194,7 +204,8 @@ when both have been observed.
   - on the stop, the viewer disconnects and `cw vnc` prints that the
     environment stopped, not an `ssh` exit status;
   - after the start, `--status` says stopped, and the next `cw vnc` shows a
-    fresh desktop with no `desk-mark` window and a later start time;
+    fresh desktop with no `desk-mark` window, a later start time and a new
+    password; a viewer offering the earlier password is refused;
   - after `--stop`, `--status` says stopped, nothing listens on 5901, a new
     command prints `unset`, the session `codewire-desktop` reads as ended in
     `cw ls desk-walk`, and the second `--stop` exits 0.

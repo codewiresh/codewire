@@ -50,7 +50,9 @@ Ubuntu snapshot: TigerVNC's `Xvnc` (one process that is both the X server and
 the VNC server), an XFCE session (window manager, panel, desktop, settings,
 file manager and terminal), `xdotool` to send input, `scrot` to capture the
 screen, a font and an icon theme. A launcher under `/opt/codewire/desktop/`
-starts them. The VNC server and the session package are pinned to exact
+starts them; it reads the viewer password from its standard input, writes
+the server's password file with the VNC package's own tool, and refuses to
+start without one. The VNC server and the session package are pinned to exact
 versions, as the image's SSH server is.
 
 The image has no browser. A browser is the user's or the agent's own install,
@@ -71,7 +73,7 @@ a desktop belongs to an environment.
 | RPC | Result |
 | --- | --- |
 | `StartDesktop` | Starts the desktop and answers once its VNC listener accepts a connection, within 10 seconds; a desktop that is already running is returned, never restarted. |
-| `GetDesktop` | The state: `unavailable`, `stopped`, `starting` or `running`. `running` carries the display (`:1`), the port (5901) and when it started. |
+| `GetDesktop` | The state: `unavailable`, `stopped`, `starting` or `running`. `running` carries the display (`:1`), the port (5901), when it started and the viewer password. |
 | `StopDesktop` | Ends the desktop's whole process group. Stopping a desktop that is not running succeeds. |
 
 - `unavailable` means this environment's image has no desktop: `Xvnc` or the
@@ -96,19 +98,53 @@ a desktop belongs to an environment.
   and nothing else is added to a process's environment. After a stop, new
   processes get no `DISPLAY`.
 
-The VNC server asks for no password: the transport that reaches it has
-already admitted the viewer, and every process in the workload is the same
-user and can reach the X server anyway. Open until measured on a Mac
-(#3223): whether macOS's built-in viewer connects to a server with no
-password. If it does not, the desktop takes a random password at each start,
-`GetDesktop` returns it and both viewers send it; it would authenticate
-nothing, and this page changes before `cw vnc` ships.
+## The viewer password
+
+The VNC server asks for a password, and the password protects nothing. It
+exists because macOS's built-in viewer will not open a desktop without one:
+measured on macOS 27.2 on 2026-11-18 (#3223), that viewer connects to a
+server with no password and never starts the session, and with a password
+in the address it goes straight to the picture. Every viewer uses the same
+scheme, so there is one path to test.
+
+It is not an access control. VNC's password scheme is a DES challenge over
+at most eight characters, and every process in the workload can reach the X
+server without it. What admits a viewer is still the transport, and guest
+port 5901 stays reserved exactly as below.
+
+- **Made** by the daemon each time `StartDesktop` launches a desktop: eight
+  characters, lowercase letters and digits, from the system's random
+  source. A desktop that is already running keeps its password. A stop ends
+  it, and the next start makes a new one. Nothing rotates it while the
+  desktop runs.
+- **Held** in the daemon's memory for the desktop's lifetime, and nowhere
+  durable: not in the session's record, its command, its environment or its
+  output.
+- **Given to the launcher** on its standard input, never as an argument or
+  an environment variable. The launcher writes the VNC server's password
+  file, readable by the workload user only, in its private runtime
+  directory, and removes it with the directory at the stop. Neither the
+  launcher nor the server prints it, so `cw logs` never shows it.
+- **Returned** by `StartDesktop` and `GetDesktop` to a caller who may open
+  the desktop, and by no other call. The field is marked for redaction in
+  every contract that carries it, and no service logs it, audits it or puts
+  it in an error.
+- **`cw vnc`** keeps it in memory and gives it to the local viewer only,
+  without putting it on a command line that other users of the computer
+  could read. With `--no-open` it prints the address and the password, for
+  a viewer of the user's own. `--status` never prints it. It is never
+  written to a file that outlives the command.
+- **The dashboard** receives it in the answer to the panel's own state
+  read, keeps it in the page's memory and hands it to the viewer. It is
+  never in a URL, in browser storage or in the page's markup. The desktop
+  stream carries the VNC handshake as bytes; orchestration does not read
+  the password out of it.
 
 ## The reserved port
 
-The VNC listener has no password, so the only ways to it must be the two
-that admit a viewer. Guest port 5901 is therefore reserved on every
-placement, whether or not a desktop runs:
+The viewer password is no boundary, so the only ways to the VNC listener
+must be the two that admit a viewer. Guest port 5901 is therefore reserved
+on every placement, whether or not a desktop runs:
 
 - **Hosted.** The port API refuses to publish 5901 with `port_reserved`, as
   it refuses the daemon's SSH port, so no preview URL and no Mesh port can
@@ -158,9 +194,9 @@ cw vnc [ENV] --stop      stop the desktop
 `cw vscode` does, picks a free port on the computer's loopback and runs
 OpenSSH with one local forward from that port to `127.0.0.1:5901` through
 the environment's managed alias. It prints `vnc://127.0.0.1:PORT`, opens
-that address in the system's viewer where one is registered, and holds the
-forward until Ctrl-C. Leaving `cw vnc` closes the forward and leaves the
-desktop running.
+that address in the system's viewer where one is registered, giving the
+viewer the password ("The viewer password"), and holds the forward until
+Ctrl-C. Leaving `cw vnc` closes the forward and leaves the desktop running.
 
 When the forward ends by itself, `cw vnc` asks the control plane why and
 says "the environment stopped" or "the desktop ended", never OpenSSH's exit
@@ -169,8 +205,9 @@ status alone. Each refusal names its repair: an image with no desktop
 (`cw start`), a runtime too old for the capability (the update command for
 that placement), and no `ssh` on the computer.
 
-Someone who prefers their own viewer needs only the alias:
-`ssh -L 5901:127.0.0.1:5901 cw-cloud-ID`, after a start.
+Someone who prefers their own viewer needs the alias and the password:
+`ssh -L 5901:127.0.0.1:5901 cw-cloud-ID`, after `cw vnc ENV --no-open` has
+started the desktop and printed it.
 
 ## The dashboard viewer
 
@@ -243,6 +280,8 @@ admission refuses them.
   environment's egress policy and no other.
 - **Whoever may open a terminal may watch.** An organization owner or admin
   can open a Sandbox's desktop and sees what its creator sees.
+- **The viewer password is not a secret worth keeping.** Anything in the
+  workload can read the server's password file and the screen itself.
 
 - **A relay the user runs is theirs.** Publishing a port that a program in
   the workload bridges to the desktop exposes the desktop to whoever may
