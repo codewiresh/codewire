@@ -27,6 +27,11 @@
 //!   four-word statement summary, the row counts and the duration, never the
 //!   statement text or a bound value.
 //!
+//! A trace starts only at an entry point. A span with no parent is exported
+//! when it is a server, consumer or producer span, and is otherwise dropped
+//! with everything under it, so a background loop exports nothing
+//! (docs/CONFIGURATION.md, "Tracing").
+//!
 //! No log event becomes a span event, and URL-valued attributes lose their
 //! query string before export. Span attributes never carry a secret, a token
 //! or user content: instrumented functions record identifiers such as
@@ -339,7 +344,7 @@ mod otel {
 
     use opentelemetry::propagation::{Extractor, Injector};
     use opentelemetry::trace::{
-        Link, SpanKind, TraceContextExt as _, TraceId, TraceState, Tracer as _,
+        Link, SpanContext, SpanKind, TraceContextExt as _, TraceId, Tracer as _,
     };
     use opentelemetry::{Context, Key, KeyValue, Value};
     use opentelemetry_sdk::Resource;
@@ -391,7 +396,7 @@ mod otel {
 
             let provider = SdkTracerProvider::builder()
                 .with_span_processor(RedactUrlQueries(processor))
-                .with_sampler(NoRootClientSpans(Config::default().sampler))
+                .with_sampler(EntryPointRoots(Config::default().sampler))
                 .with_resource(resource(service_name))
                 .build();
             let tracer = provider.tracer(SCOPE);
@@ -478,13 +483,18 @@ mod otel {
         !metadata.is_span() && metadata.target() == "sqlx::query"
     }
 
-    /// Drops a client span (kube-client's request span) that has no parent:
-    /// background reconcilers would otherwise export one root trace per
-    /// Kubernetes request. Everything else goes to the configured sampler.
+    /// Starts a trace only at an entry point. A span with no parent is
+    /// sampled only as a server, consumer or producer span: a background
+    /// loop's instrumented call or Kubernetes request would otherwise export
+    /// one root trace per pass (the liveness loop's probes were 85% of Dev's
+    /// spans, #5457). A span under a local parent that was not sampled is
+    /// dropped as well, so a dropped root's children never export as orphans
+    /// under a sampler that ignores its parent. Everything else goes to the
+    /// configured sampler.
     #[derive(Clone, Debug)]
-    pub(super) struct NoRootClientSpans(pub(super) Box<dyn ShouldSample>);
+    pub(super) struct EntryPointRoots(pub(super) Box<dyn ShouldSample>);
 
-    impl ShouldSample for NoRootClientSpans {
+    impl ShouldSample for EntryPointRoots {
         fn should_sample(
             &self,
             parent_context: Option<&Context>,
@@ -494,13 +504,24 @@ mod otel {
             attributes: &[KeyValue],
             links: &[Link],
         ) -> SamplingResult {
-            let has_parent = parent_context
-                .is_some_and(|cx| cx.has_active_span() && cx.span().span_context().is_valid());
-            if !has_parent && *span_kind == SpanKind::Client {
+            let parent: Option<SpanContext> = parent_context
+                .filter(|cx| cx.has_active_span())
+                .map(|cx| cx.span().span_context().clone())
+                .filter(SpanContext::is_valid);
+            let dropped = match &parent {
+                None => !matches!(
+                    span_kind,
+                    SpanKind::Server | SpanKind::Consumer | SpanKind::Producer
+                ),
+                Some(parent) => !parent.is_remote() && !parent.is_sampled(),
+            };
+            if dropped {
                 return SamplingResult {
                     decision: SamplingDecision::Drop,
                     attributes: Vec::new(),
-                    trace_state: TraceState::default(),
+                    trace_state: parent
+                        .map(|parent| parent.trace_state().clone())
+                        .unwrap_or_default(),
                 };
             }
             self.0
@@ -844,8 +865,8 @@ mod tests {
         use opentelemetry_sdk::trace::{Sampler, SamplingDecision, ShouldSample as _};
 
         use super::super::otel::{
-            HeaderCarrier, HeaderCarrierMut, NoRootClientSpans, exported_span,
-            redact_url_attributes, resource, service_resource_name,
+            EntryPointRoots, HeaderCarrier, HeaderCarrierMut, exported_span, redact_url_attributes,
+            resource, service_resource_name,
         };
         use super::*;
 
@@ -961,20 +982,145 @@ mod tests {
         }
 
         #[test]
-        fn root_client_spans_are_dropped_and_children_follow_the_sampler() {
+        fn a_trace_starts_only_at_a_server_consumer_or_producer_span() {
             let sampler =
-                NoRootClientSpans(Box::new(Sampler::ParentBased(Box::new(Sampler::AlwaysOn))));
+                EntryPointRoots(Box::new(Sampler::ParentBased(Box::new(Sampler::AlwaysOn))));
             let trace_id = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap();
-            let root_client =
-                sampler.should_sample(None, trace_id, "HTTP", &SpanKind::Client, &[], &[]);
-            assert_eq!(root_client.decision, SamplingDecision::Drop);
-            let root_internal =
-                sampler.should_sample(None, trace_id, "request", &SpanKind::Internal, &[], &[]);
-            assert_eq!(root_internal.decision, SamplingDecision::RecordAndSample);
+            let root = |kind: SpanKind| {
+                sampler
+                    .should_sample(None, trace_id, "root", &kind, &[], &[])
+                    .decision
+            };
+            assert_eq!(root(SpanKind::Client), SamplingDecision::Drop);
+            assert_eq!(root(SpanKind::Internal), SamplingDecision::Drop);
+            assert_eq!(root(SpanKind::Server), SamplingDecision::RecordAndSample);
+            assert_eq!(root(SpanKind::Consumer), SamplingDecision::RecordAndSample);
+            assert_eq!(root(SpanKind::Producer), SamplingDecision::RecordAndSample);
             let parent = remote_context();
-            let child_client =
-                sampler.should_sample(Some(&parent), trace_id, "HTTP", &SpanKind::Client, &[], &[]);
-            assert_eq!(child_client.decision, SamplingDecision::RecordAndSample);
+            for kind in [SpanKind::Client, SpanKind::Internal] {
+                let child =
+                    sampler.should_sample(Some(&parent), trace_id, "child", &kind, &[], &[]);
+                assert_eq!(
+                    child.decision,
+                    SamplingDecision::RecordAndSample,
+                    "{kind:?}"
+                );
+            }
+        }
+
+        /// A sampler that ignores its parent would export a dropped root's
+        /// children as orphans; a remote caller's unsampled flag stays that
+        /// sampler's to judge.
+        #[test]
+        fn a_span_under_an_unsampled_local_parent_is_dropped_whatever_the_sampler() {
+            let sampler = EntryPointRoots(Box::new(Sampler::AlwaysOn));
+            let trace_id = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap();
+            let unsampled = |remote: bool| {
+                Context::new().with_remote_span_context(SpanContext::new(
+                    trace_id,
+                    SpanId::from_hex("00f067aa0ba902b7").unwrap(),
+                    TraceFlags::default(),
+                    remote,
+                    TraceState::from_key_value([("codewire", "dev")]).unwrap(),
+                ))
+            };
+            let local = sampler.should_sample(
+                Some(&unsampled(false)),
+                trace_id,
+                "HTTP",
+                &SpanKind::Client,
+                &[],
+                &[],
+            );
+            assert_eq!(local.decision, SamplingDecision::Drop);
+            assert_eq!(local.trace_state.header(), "codewire=dev");
+            let remote = sampler.should_sample(
+                Some(&unsampled(true)),
+                trace_id,
+                "request",
+                &SpanKind::Server,
+                &[],
+                &[],
+            );
+            assert_eq!(remote.decision, SamplingDecision::RecordAndSample);
+        }
+
+        /// The liveness loop as it runs: an instrumented probe with no span
+        /// around it, a Kubernetes request and a statement under it. Nothing
+        /// is exported. The same loop's signal to a workflow is one trace.
+        #[tokio::test]
+        async fn a_background_loop_exports_only_the_work_it_starts() {
+            use tracing::Instrument as _;
+            use tracing_subscriber::layer::SubscriberExt as _;
+
+            let collected = Collected::default();
+            let exporter = super::super::otel::Exporter::with_processor(
+                "orchestration",
+                opentelemetry_sdk::trace::SimpleSpanProcessor::new(collected.clone()),
+            );
+            let subscriber = tracing_subscriber::registry().with(exporter.layers());
+            let _default = tracing::subscriber::set_default(subscriber);
+            opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+            let _export_active = EXPORT_ACTIVE_TESTS.lock().await;
+            EXPORT_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+
+            let probe_carrier = async {
+                async {
+                    tracing::debug!(
+                        target: "sqlx::query",
+                        summary = "SELECT 1",
+                        elapsed_secs = 0.001_f64,
+                    );
+                }
+                .instrument(tracing::debug_span!(
+                    target: "kube_client::client::builder",
+                    "HTTP",
+                    otel.kind = "client",
+                ))
+                .await;
+                tracing::debug!(
+                    target: "sqlx::query",
+                    summary = "SELECT id, state",
+                    elapsed_secs = 0.001_f64,
+                );
+                TraceContext::current()
+            }
+            .instrument(tracing::debug_span!(
+                "probe_environment",
+                environment_id = "env-1"
+            ))
+            .await;
+            let signal_carrier = async { TraceContext::current() }
+                .instrument(tracing::debug_span!(
+                    "temporal.signal_with_start",
+                    otel.kind = "producer",
+                    otel.name = "SignalWithStartWorkflow:EnvironmentWorkflow",
+                ))
+                .await;
+            exporter.provider().force_flush().unwrap();
+            EXPORT_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+
+            let spans = collected.0.lock().unwrap().clone();
+            let names: Vec<&str> = spans.iter().map(|span| span.name.as_ref()).collect();
+            assert_eq!(
+                names,
+                ["SignalWithStartWorkflow:EnvironmentWorkflow"],
+                "only the signal is exported"
+            );
+            assert_eq!(spans[0].span_kind, SpanKind::Producer);
+            // A carrier filled under the dropped probe never marks a receiver
+            // as sampled; the signal's does.
+            assert!(
+                probe_carrier
+                    .traceparent
+                    .is_none_or(|traceparent| traceparent.ends_with("-00")),
+            );
+            assert!(
+                signal_carrier
+                    .traceparent
+                    .expect("the signal carries its trace")
+                    .ends_with("-01")
+            );
         }
 
         #[test]

@@ -534,10 +534,21 @@ counts, and timings. They never carry a secret, a token, a credential, an
 environment variable's value or user content: a URL's query string is removed
 before export (a Kubernetes exec URL carries its command line there), no log
 event is exported, and a statement's text and bound values are never recorded.
-Health probes and metrics scrapes start no trace, and a Kubernetes request or
-statement outside a traced operation (a background reconciler's) is not
-exported. A request's `traceparent` is honoured from any caller, so with a
-ratio sampler a client can ask for its own request to be sampled.
+Health probes and metrics scrapes start no trace. A request's `traceparent` is
+honoured from any caller, so with a ratio sampler a client can ask for its own
+request to be sampled.
+
+A trace starts at an incoming request or a message, never in a background
+loop. A span with no parent is exported only when it is a server span (a
+request), a consumer span (a Temporal activity) or a producer span (a signal to
+a workflow). Any other span with no parent is dropped with everything under
+it, whatever sampler is set: the liveness loop's probe of each running
+environment every five seconds, the warm-pool pass, and a reconciler's
+Kubernetes requests and statements export nothing. The same probe inside a
+create or a request is part of that trace. A loop that starts work on an
+environment, such as an automatic stop, sends a signal, so that work is one
+trace with its activities. The volume therefore follows requests and actions,
+not the number of running environments.
 
 Codewire's spans are at `DEBUG` level, so at the default `RUST_LOG=info` they
 do not appear in the JSON logs, which are the same whether or not export is on.
