@@ -47,6 +47,83 @@ Everything acting for a request stops on its own:
 So nothing can act for a request 15 minutes after its admission
 (`ABANDONED_AFTER`).
 
+## Where an upload is staged (#5508)
+
+An update's `cw` arrives in chunks, at most 512 MiB in all, and is kept on
+disk until it is checked and handed to the sandbox. It is staged under one
+directory the server makes for itself, so the server can run with a
+read-only root filesystem.
+
+- **The mount.** Orchestration's Pod mounts an `emptyDir` at
+  `/var/lib/codewire-orchestration/staging`, on disk, not in memory, with
+  `sizeLimit: 2Gi`. The path is fixed, and `CODEWIRE_CW_RUNTIME_STAGING`
+  overrides it only for tests and local runs. `fsGroup` makes the mount's
+  root root-owned and group-writable (2777), so the server never uses the
+  mount's root for an upload.
+- **The private directory.** At startup, before it serves, the server
+  creates `<mount>/cw-runtime` with mode 0700 if it is absent. It opens it
+  with `O_DIRECTORY | O_NOFOLLOW` and requires it to be owned by the
+  server's own uid, with mode exactly 0700.
+- **Refusal to start.** The server exits with
+  `cw runtime staging unavailable` when:
+  - the mount is absent;
+  - the private directory can't be created or opened;
+  - it is a symlink;
+  - it isn't owned by the server;
+  - its mode isn't exactly 0700.
+
+  It never falls back to `std::env::temp_dir()` or `/tmp`.
+- **The intake's walk** starts at that private directory. The server already
+  holds it open and has checked it, so the walk doesn't follow or check the
+  mount above it. Below it nothing changes:
+  - each upload gets its own `codewire-cw-runtime-<uuid>` directory, 0700 and
+    owned by the server;
+  - the upload file is created exclusively (`O_EXCL`, `O_NOFOLLOW`), mode
+    0600;
+  - every directory the walk holds is still checked by `owner_directory`.
+
+  The ownership rule itself doesn't change: there is no exception for a
+  group-writable parent.
+- **Space.**
+  - **The rule:** an upload holds one of three slots for as long as it runs.
+    The server counts uploads in flight in-process; each replica has its own
+    `emptyDir`, so a per-process count is exact for its mount. The slot is
+    taken before the first chunk is written. A fourth concurrent upload gets
+    `unavailable`, and nothing is recorded.
+  - **A second check:** with a slot held, the upload is also refused unless
+    the staging filesystem has at least 512 MiB free (`statvfs`).
+  - **Why:** three uploads of at most 512 MiB each stay inside the 2 GiB
+    limit, which would make the kubelet evict the Pod. A free-space check
+    alone races: uploads that start together all see the same free space.
+  - **Release:** the slot is a guard released however the upload ends:
+    success, refusal, error, timeout, drain or a dropped connection.
+  - **Cleanup:** an upload's directory is removed when it ends, however it
+    ends.
+  - **After a restart:** only a new Pod starts with an empty mount. An
+    `emptyDir` survives a container restart (a crash, an OOM kill, a failed
+    liveness probe), so leftovers can remain. So at startup, after validating
+    `cw-runtime` and before serving, the server removes every entry inside
+    it. It works relative to the held directory descriptor (`unlinkat`, and
+    `openat` with `O_NOFOLLOW` for each subdirectory it empties), never by
+    path, and never follows a symlink out of it.
+- **Tests.**
+  - **Startup:** refuses a missing mount, a symlinked private directory, the
+    wrong owner and a mode other than 0700, and makes the directory when
+    it's absent.
+  - **Leftovers:** startup empties a `cw-runtime` left holding an old upload
+    directory, a stray file and a symlink pointing outside. It removes the
+    symlink itself without following it, and leaves its target untouched.
+  - **Intake:** stages under the private directory, even when the mount's
+    root is 2777 with setgid, and refuses an upload when less than 512 MiB
+    is free.
+  - **Concurrency:** with three uploads in flight, a fourth gets
+    `unavailable`. Once one of the three ends, however it ends, a new one is
+    admitted.
+  - **Never `temp_dir`:** a test proves no upload path calls it.
+- **Deployment.** Orchestration's container then sets
+  `readOnlyRootFilesystem: true`, like the other services (#5505–#5510). Its
+  Kind overlays mount the same `emptyDir`.
+
 ## Rollouts (#4460)
 
 A replica that a rollout is replacing drains for 270 s from SIGTERM.
