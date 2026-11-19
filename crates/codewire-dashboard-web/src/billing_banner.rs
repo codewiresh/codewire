@@ -273,6 +273,25 @@ pub(crate) fn runway_text(facts: &CreditFacts, sandboxes: &[SandboxLoad]) -> Opt
     })
 }
 
+/// A Sandbox's rate, and what its running time has cost, at the
+/// organization's rate card (#5186): its row menu's usage and its page's
+/// rate. Both stay empty where nothing is charged.
+pub(crate) fn price_sandbox(facts: &CreditFacts, row: &mut EnvironmentRow) {
+    if !facts.billing_enabled || facts.unmetered {
+        return;
+    }
+    let size = SandboxLoad {
+        running: true,
+        cpu_millicores: row.cpu_millicores,
+        memory_mib: row.memory_mb,
+        disk_gib: row.disk_gb,
+    };
+    let hourly = hourly_cost_scaled(facts, &[size]);
+    row.hourly_rate = format!("{}/h", euro_text((hourly / SIZE_DENOMINATOR) as i64));
+    let spent = hourly * i128::from(row.running_seconds.max(0)) / (3_600 * SIZE_DENOMINATOR);
+    row.cost = euro_text(spent as i64);
+}
+
 /// What the running Sandboxes cost per hour, in nano-euros times
 /// `SIZE_DENOMINATOR`, so nothing is rounded before the comparison.
 fn hourly_cost_scaled(facts: &CreditFacts, sandboxes: &[SandboxLoad]) -> i128 {
@@ -726,5 +745,49 @@ mod tests {
                 top_up_charging: false,
             })
         );
+    }
+
+    #[test]
+    fn a_sandbox_is_priced_at_the_rate_card_in_euros() {
+        // 2 vCPU, 4 GiB and 10 GiB at the regular rate card, three hours.
+        let mut row = crate::environment_connect::environment_row(
+            codewire_proto::codewire::v1::Environment {
+                cpu_millicores: 2_000,
+                memory_mb: 4_096,
+                disk_gb: 10,
+                total_running_seconds: 3 * 3_600,
+                ..Default::default()
+            },
+        );
+        price_sandbox(&facts(), &mut row);
+        assert_eq!(row.hourly_rate, "€0.14487/h");
+        assert_eq!(row.cost, "€0.43461");
+        // Never run: nothing spent, at the same rate.
+        let mut fresh = crate::environment_connect::environment_row(
+            codewire_proto::codewire::v1::Environment {
+                cpu_millicores: 1_000,
+                memory_mb: 2_048,
+                disk_gb: 10,
+                ..Default::default()
+            },
+        );
+        price_sandbox(&facts(), &mut fresh);
+        assert_eq!(fresh.hourly_rate, "€0.07287/h");
+        assert_eq!(fresh.cost, "€0.00");
+        // Unlimited, or billing off: no price at all.
+        for quiet in [
+            CreditFacts {
+                unmetered: true,
+                ..facts()
+            },
+            CreditFacts {
+                billing_enabled: false,
+                ..facts()
+            },
+        ] {
+            let mut row = crate::environment_connect::environment_row(Default::default());
+            price_sandbox(&quiet, &mut row);
+            assert_eq!((row.cost.as_str(), row.hourly_rate.as_str()), ("", ""));
+        }
     }
 }

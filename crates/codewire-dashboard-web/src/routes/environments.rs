@@ -1851,7 +1851,7 @@ async fn filtered_environments(
 ) -> Result<Vec<crate::view::EnvironmentRow>, ConnectError> {
     let mut environments = environment_connect::inventory(
         state,
-        cookie,
+        cookie.clone(),
         org_id,
         query.destroyed || query.state == "destroyed",
     )
@@ -1865,6 +1865,16 @@ async fn filtered_environments(
                 || environment.name.to_lowercase().contains(&search)
                 || environment.preset_name.to_lowercase().contains(&search))
     });
+    // The rate card prices each row's usage (#5186). An empty list reads no
+    // billing, so the start panel's refresh stays free; billing that does not
+    // answer leaves the rows unpriced, never the list unread.
+    if !environments.is_empty()
+        && let Some(facts) = crate::billing_connect::credit_facts(state, cookie, org_id).await
+    {
+        for environment in &mut environments {
+            crate::billing_banner::price_sandbox(&facts, environment);
+        }
+    }
     Ok(environments)
 }
 
@@ -2961,6 +2971,7 @@ mod tests {
                 shutdown_at: None,
                 shutdown_at_label: "Not currently scheduled".into(),
                 cost: String::new(),
+                running_seconds: 0,
                 running_time: String::new(),
                 resources: String::new(),
                 cpu_millicores: 1000,
@@ -3048,6 +3059,7 @@ mod tests {
             shutdown_at: None,
             shutdown_at_label: "Not currently scheduled".into(),
             cost: String::new(),
+            running_seconds: 0,
             running_time: String::new(),
             resources: String::new(),
             cpu_millicores,

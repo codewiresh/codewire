@@ -59,17 +59,18 @@ pub(super) async fn page(
     if let Err(error) = enforce_two_factor(&identity) {
         return error_page(error);
     }
-    let mut environment = match environment_connect::environment(
-        &state,
-        cookie.clone(),
-        &organization.id,
-        &environment_id,
-    )
-    .await
-    {
+    let (environment, credit) = tokio::join!(
+        environment_connect::environment(&state, cookie.clone(), &organization.id, &environment_id),
+        crate::billing_connect::credit_facts(&state, cookie.clone(), &organization.id),
+    );
+    let mut environment = match environment {
         Ok(environment) => environment,
         Err(error) => return connect_page_error(error, &continuation, &headers),
     };
+    // Its rate at the organization's rate card (#5186).
+    if let Some(facts) = &credit {
+        crate::billing_banner::price_sandbox(facts, &mut environment);
+    }
     super::environments::apply_confidential_visibility(&state, &mut environment);
     environment_connect::mark_bound_credential_attention(&state, cookie, &mut environment).await;
     let websocket_origin =

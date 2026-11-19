@@ -1036,12 +1036,18 @@ pub(crate) struct EnvironmentRow {
     pub(crate) deletion_state: &'static str,
     pub(crate) shutdown_at: Option<String>,
     pub(crate) shutdown_at_label: String,
+    /// What its running time has cost at the organization's rate card, such
+    /// as "€0.42"; empty where nothing is charged or billing is unavailable
+    /// (`billing_banner::price_sandbox`).
     pub(crate) cost: String,
+    /// Seconds it has run, which `cost` is priced from.
+    pub(crate) running_seconds: i64,
     pub(crate) running_time: String,
     pub(crate) resources: String,
     pub(crate) cpu_millicores: i32,
     pub(crate) memory_mb: i32,
     pub(crate) disk_gb: i32,
+    /// Its size at the rate card, such as "€0.20127/h"; empty as `cost` is.
     pub(crate) hourly_rate: String,
     pub(crate) can_start: bool,
     pub(crate) can_stop: bool,

@@ -940,10 +940,6 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
     } else {
         environment.name.clone()
     };
-    let cpu_vcpu = f64::from(environment.cpu_millicores) / 1_000.0;
-    let memory_gib = f64::from(environment.memory_mb) / 1_024.0;
-    let per_second = cpu_vcpu * 0.000_014 + memory_gib * 0.000_004_5;
-    let running_seconds = f64::from(environment.total_running_seconds);
     EnvironmentRow {
         id: environment.id.clone(),
         name: display_name,
@@ -965,7 +961,9 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
             .into_option()
             .map(|timestamp| past_time(timestamp.seconds))
             .unwrap_or_else(|| "—".to_owned()),
-        cost: format!("${:.2}", running_seconds * per_second),
+        // Priced from the organization's rate card by whoever read it.
+        cost: String::new(),
+        running_seconds: i64::from(environment.total_running_seconds),
         deletion_state,
         shutdown_at,
         shutdown_at_label,
@@ -979,7 +977,7 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
         cpu_millicores: environment.cpu_millicores,
         memory_mb: environment.memory_mb,
         disk_gb: environment.disk_gb,
-        hourly_rate: format!("${:.2}/h", per_second * 3_600.0),
+        hourly_rate: String::new(),
         // Start from error asks the runtime to retry creation.
         can_start: matches!(state, "stopped" | "error"),
         can_stop: state == "running",
@@ -1605,9 +1603,10 @@ mod tests {
             })),
             "0.75 vCPU / 1536 MiB / 10 GiB disk"
         );
-        let price = format!("${:.2}", 3600.0 * (0.75 * 0.000_014 + 1.5 * 0.000_004_5));
-        assert_eq!(row.cost, price);
-        assert_eq!(row.hourly_rate, format!("{price}/h"));
+        // The rate card prices it, not the inventory (#5186).
+        assert_eq!(row.running_seconds, 3600);
+        assert_eq!(row.cost, "");
+        assert_eq!(row.hourly_rate, "");
     }
 
     #[test]
