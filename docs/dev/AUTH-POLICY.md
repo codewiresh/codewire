@@ -497,12 +497,38 @@ The database records each loss in `credential_revocations`:
 A revoked Connect stream ends with `permission_denied`, "access revoked". A
 WebSocket closes with code 1008. Each writes a `stream.revoked` audit event
 naming the user, the kind of loss, the surface and the environment, never a
-credential or the stream's contents. The terminal and SSH-proxy WebSockets,
-the coordinator's and Mesh sessions, and removal from an organization don't
-end a stream yet. `cw shell` and `cw exec` reach a hosted environment over
-its tailnet by default, which the coordinator's session carries, so they don't end yet
-either. `cw shell` with `CW_SSH_TRANSPORT=websocket` skips the tailnet and
-attaches through the API's `AttachSession` stream, which does end.
+credential or the stream's contents.
+
+`cw shell` and `cw exec` reach a hosted environment over its tailnet by
+default. The client's `Coordinate` session with the coordinator carries that
+connection, and it ends in the same four cases (#3586):
+- **Admission:** the coordinator admits the session into the same fence when
+  it authenticates the hello. A rejoin with a revoked credential is refused at
+  its hello, as any new request is.
+- **Ending:** a revocation ends the session with `permission_denied`, "access
+  revoked", writes `stream.revoked` with the surface `tailnet`, and removes the
+  client from the environment's peers. From then on no packet passes between
+  them, and `cw` ends the shell or exec with "Access revoked". The removal
+  happens within seconds normally and within 30 seconds at most.
+- **The environment's replica:** the coordinator replica that serves the
+  environment enforces the removal itself. The client's node, published to the
+  other replicas over NATS, carries its admission's ids and hashes, never a
+  credential, within a size bound, and the log position its replica's fence
+  has processed. The environment's replica admits the peer into its own
+  fence, which reads revocations from the database, and refuses it if the log
+  holds a row for its keys after that position. It also refuses a position
+  beyond the log's head or older than the log's oldest retained row, and it
+  keeps fencing the peer for as long as it serves it. The data can only take
+  access away, never grant or widen it. Once every replica sends it, a remote
+  client node without it is refused. Who may publish those subjects is
+  limited by the NATS accounts (infra#2620).
+- **Not yet:** on the environment's side, an SSH connection from a removed
+  peer carries nothing but ends only when it times out. Closing a removed
+  peer's connections at once is the next step.
+
+The terminal and SSH-proxy WebSockets, Mesh sessions, and removal from an
+organization don't end a stream yet. Expiry ends no tailnet connection
+either (#3827).
 
 ## Account suspension
 

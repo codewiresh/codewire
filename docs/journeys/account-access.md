@@ -15,6 +15,7 @@ Updated 2026-11-18.
 | --- | --- | --- |
 | `access-ticket` | not yet observed | not yet observed |
 | `access-streams` | not yet observed | not yet observed |
+| `access-tailnet` | not yet observed | not yet observed |
 
 ## `access-ticket`: a terminal ticket from a session that has ended
 
@@ -101,12 +102,11 @@ terminal and the SSH proxy follow in the next step.
   their step. The expiry case and the browser-session case are the database
   tests', since a walk can't wait out a credential's lifetime.
 - **Gotchas:**
-  - the dashboard's terminal, the SSH proxy, and the coordinator's and Mesh
-    sessions aren't covered yet, so they outlive every case here;
+  - the dashboard's terminal, the SSH proxy and Mesh sessions aren't covered
+    yet, so they outlive every case here;
   - plain `cw shell` and `cw exec` on a hosted Sandbox run over its tailnet,
-    which the coordinator's `Coordinate` session carries, so they outlive
-    every case here too until that session joins the fence (the design's
-    third step). On 2026-11-18 a tailnet `cw shell` kept running 35 s after
+    which the coordinator's `Coordinate` session carries; `access-tailnet`
+    covers them. On 2026-11-18 a tailnet `cw shell` kept running 35 s after
     `cw logout`, and a tailnet `cw exec` 30 s after its key was disabled.
     A new one can't start: with a signed-out token or a disabled key,
     `cw shell` and `cw exec` stop at their first call, and the tailnet's own
@@ -128,3 +128,48 @@ terminal and the SSH proxy follow in the next step.
     `admin.account.disabled`);
   - enabled again: the old browser session had ended, and a new `cw login`
     and shell worked at once.
+
+## `access-tailnet`: a tailnet shell or exec when its authority is lost
+
+Issue: #3586, its third step (cw-security, 2026-11-18). A launch item (owner,
+2026-11-18).
+
+- **Entry points:** plain `cw shell` and `cw exec` on a hosted Sandbox, which
+  run over its tailnet, signed in with an OAuth token from `cw login` or an
+  API key in `CODEWIRE_API_KEY`.
+- **States to exercise:**
+  - the OAuth token behind a tailnet shell is revoked: that shell ends with
+    "Access revoked", and a tailnet shell signed in on another machine keeps
+    running;
+  - the API key behind a tailnet exec is disabled: that exec ends;
+  - the account is disabled: every tailnet connection of the account ends;
+  - a new `cw shell` with the revoked credential is refused;
+  - a credential that only expires: its connection keeps running.
+- **Driving it:** a running Sandbox of the walk account, and an administrator
+  on Admin → Accounts for the disable. Two throwaway `HOME`s, A and B, stand
+  for two machines.
+  1. In A and in B, run `cw login`, then `cw shell <sandbox>`; its first line
+     says "via" the tailnet path, not "via API". In each shell run
+     `while :; do date -u +%T.%N; sleep 0.2; done`, so the last line that
+     arrives shows when packets stopped. With an API key from Settings in
+     `CODEWIRE_API_KEY`, run `cw exec <sandbox> -- sh -c 'while :; do date -u
+     +%T.%N; sleep 0.2; done'`.
+  2. In a second terminal on A, copy A's saved sign-in aside, then run
+     `cw logout`; it revokes the token A's shell holds. A's lines stop and its
+     shell ends with "Access revoked". B's shell and the exec keep printing.
+  3. In Settings, disable the API key: the exec's lines stop and it ends with
+     "Access revoked".
+  4. Disable the account: B's lines stop and its shell ends. Enable the
+     account afterwards; a new `cw login` and `cw shell` work at once.
+  5. With the copy of A's revoked sign-in, run `cw shell <sandbox>`: refused.
+- **Proof:** the last line each stream printed lies within 30 seconds of its
+  revocation, a `stream.revoked` audit event with the surface `tailnet` for
+  each, and the surviving streams still printing at the end of their step.
+  The expiry case, the dropped NATS remove and a rejoin refused at the hello
+  are the coordinator's tests.
+- **Gotchas:**
+  - the two coordinator replicas matter in Production, not on a one-replica
+    Kind cluster; the dropped-publish case is a test, not a walk;
+  - on the Sandbox's side an SSH connection from a removed peer ends only
+    when it times out, until the next step closes it at once.
+- **Observed:** not yet observed.
