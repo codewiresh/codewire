@@ -65,11 +65,11 @@ SELECTION_JOB = "Verification selection"
 GATE_STEP = "Wait for this run's admission"
 # Not "blocked": a run awaiting approval holds no slot until it is approved.
 UNFINISHED_RUN_STATES = ("waiting", "running", "unknown")
-# One at a time until one run is under five minutes, then more only if the
-# hosts have room (owner, 2026-11-18: "actually do 1 right now ... see how
-# fast we can get them, possible that we get sub 5 minutes, then we can see if
-# there is more resources for more."; codewire#5311).
-ADMITTED_LIMIT = 1
+# Two at a time, as a measured trial: one run left the second pull request
+# build VM idle while about 12 runs waited an hour each (owner, 2026-11-18:
+# "Yes, we can try two PRs at a time"; codewire#5311). Back to 1 if an
+# admitted run's own time grows by more than about a minute.
+ADMITTED_LIMIT = 2
 # Waiting gates hold light runner slots, and past WAITING_LIMIT the oldest
 # start over the limit, so this is what keeps ADMITTED_LIMIT true. At 2, on
 # 2026-11-18, overflow let eight pull request runs in at once against a limit

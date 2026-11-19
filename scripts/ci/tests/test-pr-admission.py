@@ -148,26 +148,28 @@ class PrAdmission(unittest.TestCase):
 
     def setUp(self) -> None:
         # The cases were written for six admitted runs at once, and read the
-        # algorithm at that limit; test_the_limit_is_one reads the shipped one.
+        # algorithm at that limit; test_the_limit_is_two reads the shipped one.
         patcher = mock.patch.object(gate, "ADMITTED_LIMIT", 6)
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_the_limit_is_one(self) -> None:
-        # Owner, 2026-11-18: "actually do 1 right now" (codewire#5311).
+    def test_the_limit_is_two(self) -> None:
+        # Owner, 2026-11-18: "Yes, we can try two PRs at a time" (codewire#5311).
         mock.patch.stopall()
-        self.assertEqual(gate.ADMITTED_LIMIT, 1)
-        self.assertEqual(self.decide({10: "waiting"}, 10)[0], gate.ADMITTED)
-        self.assertEqual(self.decide({1: "admitted", 10: "waiting"}, 10)[0], gate.WAIT)
-        self.assertEqual(self.decide({9: "waiting", 10: "waiting"}, 9)[0], gate.ADMITTED)
-        self.assertEqual(self.decide({9: "waiting", 10: "waiting"}, 10)[0], gate.WAIT)
+        self.assertEqual(gate.ADMITTED_LIMIT, 2)
+        self.assertEqual(self.decide({1: "admitted", 10: "waiting"}, 10)[0], gate.ADMITTED)
+        self.assertEqual(self.decide({1: "admitted", 2: "admitted", 10: "waiting"}, 10)[0], gate.WAIT)
+        self.assertEqual(self.decide({1: "admitted", 9: "waiting", 10: "waiting"}, 9)[0], gate.ADMITTED)
+        self.assertEqual(self.decide({1: "admitted", 9: "waiting", 10: "waiting"}, 10)[0], gate.WAIT)
 
     def test_the_days_peak_waits_instead_of_overflowing(self) -> None:
         # 2026-11-18: eight pull request runs at once, seven of their gates
-        # waiting. At the shipped limits one runs and all seven wait.
+        # waiting. At the shipped limits the oldest joins the one running and
+        # the other six wait.
         mock.patch.stopall()
         state = {1: "admitted"} | {run_id: "waiting" for run_id in range(10, 17)}
-        self.assertEqual([self.decide(state, run_id)[0] for run_id in range(10, 17)], [gate.WAIT] * 7)
+        self.assertEqual([self.decide(state, run_id)[0] for run_id in range(10, 17)],
+                         [gate.ADMITTED] + [gate.WAIT] * 6)
 
     def decide(self, state: dict, own: int, *, blocked=(), unreadable=(), **options):
         return gate.decide(FakeForgejo([state], blocked=blocked, unreadable=unreadable, shape=self.SHAPE),
