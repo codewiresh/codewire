@@ -691,9 +691,10 @@ request.setTimeout(10000,()=>request.destroy());request.on('error',()=>process.e
             let output = probe.trigger_and_collect().await?;
             let (unavailable, egress) = authority_loss_output(output)?;
             require(
+                // The shared refusal names the route's provider (#5057).
                 unavailable.status == 503
                     && unavailable.body
-                        == "Codewire: the credential can't be used right now; try again.\n"
+                        == "Codewire: the OpenAI credential can't be used right now; try again.\n"
                     && !unavailable.body.contains(GUEST_CALLER_BEARER),
             )?;
             stage("managed-general-egress-independent");
@@ -1881,7 +1882,7 @@ function generalEgress(){
         // same-user observer /proc/PID/exe even though cmdline and PPid remain
         // readable. Retain the exact argv, UID and validated authority-parent
         // discriminator; the authority's own executable is checked below.
-        exact_process_argv(&process, &expected_broker_argv(args, environment))
+        exact_broker_argv(&process, &expected_broker_argv(args, environment))
             && exact_authority_process(parent_pid, args)
     }
 
@@ -1909,20 +1910,50 @@ function generalEgress(){
     }
 
     fn exact_process_argv(process: &Path, expected: &[OsString]) -> bool {
-        let Ok(command) = fs::read(process.join("cmdline")) else {
+        process_argv(process).is_some_and(|actual| {
+            actual.len() == expected.len() && argv_starts_with(&actual, expected)
+        })
+    }
+
+    /// The broker's exact argv, then its provider lookup rule, the one part
+    /// the spawner chooses per spawn (#5286): `--start-whatever-resolves`,
+    /// or one `--may-not-resolve=HOST` for each provider host that did not
+    /// resolve, none when every one did.
+    fn exact_broker_argv(process: &Path, expected: &[OsString]) -> bool {
+        let Some(actual) = process_argv(process) else {
             return false;
         };
-        if command.is_empty() || command.len() > MAX_PROC_CMDLINE || command.last() != Some(&0) {
+        if actual.len() < expected.len() || !argv_starts_with(&actual, expected) {
             return false;
         }
-        let actual = command[..command.len() - 1]
-            .split(|byte| *byte == 0)
-            .collect::<Vec<_>>();
-        actual.len() == expected.len()
-            && actual
-                .iter()
-                .zip(expected.iter())
-                .all(|(actual, expected)| *actual == expected.as_os_str().as_bytes())
+        match &actual[expected.len()..] {
+            [only] if only.as_slice() == b"--start-whatever-resolves" => true,
+            rest => rest.iter().all(|argument| {
+                argument
+                    .strip_prefix(b"--may-not-resolve=")
+                    .is_some_and(|host| !host.is_empty())
+            }),
+        }
+    }
+
+    fn argv_starts_with(actual: &[Vec<u8>], expected: &[OsString]) -> bool {
+        actual
+            .iter()
+            .zip(expected.iter())
+            .all(|(actual, expected)| actual.as_slice() == expected.as_os_str().as_bytes())
+    }
+
+    fn process_argv(process: &Path) -> Option<Vec<Vec<u8>>> {
+        let command = fs::read(process.join("cmdline")).ok()?;
+        if command.is_empty() || command.len() > MAX_PROC_CMDLINE || command.last() != Some(&0) {
+            return None;
+        }
+        Some(
+            command[..command.len() - 1]
+                .split(|byte| *byte == 0)
+                .map(<[u8]>::to_vec)
+                .collect(),
+        )
     }
 
     fn process_parent_pid(process: &Path) -> Option<i32> {
@@ -1967,6 +1998,10 @@ function generalEgress(){
                 .join("runners")
                 .join(format!("{}.sock", environment.id))
                 .into_os_string(),
+            // The smoke's authority stores in its private Secret Service
+            // (#5255).
+            "--protected-store".into(),
+            "secret-service".into(),
             "--http-provider".into(),
             "openai-api-key".into(),
             "--http-provider".into(),
@@ -1975,6 +2010,9 @@ function generalEgress(){
             "anthropic-api-key".into(),
             "--http-provider".into(),
             "github-oauth".into(),
+            // The spawner's answer when the environment's network policy
+            // allows GitHub's hosts by rule, as the smoke's does (#4926).
+            "--network-policy-allows-github".into(),
         ]
     }
 
@@ -2102,23 +2140,30 @@ function generalEgress(){
         require(output.exit_code == 0 && output.stdout.is_empty() && output.stderr.is_empty())
     }
 
-    /// Codex's own login is the listed direct delivery exception: it replaces
-    /// the proxy configuration and carries only a placeholder refresh token.
+    /// Codex's own login is the listed direct delivery exception: it carries
+    /// only a placeholder refresh token, and the proxy configuration gives way
+    /// to the provider-free one that keeps only Codex's sandbox setting
+    /// (#4956, #5462).
     async fn require_codex_login_delivered(client: &SessionClient) -> SmokeResult<()> {
-        let command = format!(
-            "test \"$CODEX_HOME\" = '{CODEX_GUEST_HOME_PATH}' && test ! -e \"$CODEX_HOME/config.toml\" && cat -- \"$CODEX_HOME/auth.json\""
+        let signed_in =
+            CodexProviderProjection::for_loopback_port(CREDENTIAL_BRIDGE_LOOPBACK_PORT)?
+                .signed_in_config_toml()
+                .to_owned();
+        // The daemon writes the login before it replaces the configuration.
+        let config = format!(
+            "test \"$CODEX_HOME\" = '{CODEX_GUEST_HOME_PATH}' && test -f \"$CODEX_HOME/auth.json\" && cat -- \"$CODEX_HOME/config.toml\""
         );
         let deadline = Instant::now() + CODEX_LOGIN_SETTLE;
         loop {
             let output = run_transient(
                 client,
-                vec!["/bin/sh".into(), "-c".into(), command.clone()],
+                vec!["/bin/sh".into(), "-c".into(), config.clone()],
                 "/",
                 Vec::new(),
             )
             .await?;
-            if output.exit_code == 0 {
-                return validate_codex_login(&output);
+            if output.exit_code == 0 && output.stdout == signed_in.as_bytes() {
+                break;
             }
             if Instant::now() >= deadline {
                 stage("config-login-not-delivered");
@@ -2126,6 +2171,17 @@ function generalEgress(){
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+        let login = format!(
+            "test \"$CODEX_HOME\" = '{CODEX_GUEST_HOME_PATH}' && cat -- \"$CODEX_HOME/auth.json\""
+        );
+        let output = run_transient(
+            client,
+            vec!["/bin/sh".into(), "-c".into(), login],
+            "/",
+            Vec::new(),
+        )
+        .await?;
+        validate_codex_login(&output)
     }
 
     fn validate_codex_login(output: &ExecOutput) -> SmokeResult<()> {
@@ -4489,6 +4545,8 @@ process.stdout.write(JSON.stringify({before,http:httpCount,tls:tlsCount,stdout,e
                 "environment",
                 "--runner-socket",
                 "/state/runners/00000000-0000-4000-8000-000000000001.sock",
+                "--protected-store",
+                "secret-service",
                 "--http-provider",
                 "openai-api-key",
                 "--http-provider",
@@ -4497,6 +4555,7 @@ process.stdout.write(JSON.stringify({before,http:httpCount,tls:tlsCount,stdout,e
                 "anthropic-api-key",
                 "--http-provider",
                 "github-oauth",
+                "--network-policy-allows-github",
             ]
             .into_iter()
             .map(OsString::from)
@@ -4526,12 +4585,27 @@ process.stdout.write(JSON.stringify({before,http:httpCount,tls:tlsCount,stdout,e
             let expected = expected_broker_argv(&args, &environment);
             assert_eq!(expected, actual);
             let process = tempfile::tempdir().unwrap();
-            fs::write(
-                process.path().join("cmdline"),
-                proc_cmdline_fixture(&actual),
-            )
-            .unwrap();
-            assert!(exact_process_argv(process.path(), &expected));
+            // Each lookup rule the spawner may add after the exact argv
+            // (#5286): none, the first spawn's, or the hosts that did not
+            // resolve.
+            for tail in [
+                &[][..],
+                &["--start-whatever-resolves"][..],
+                &["--may-not-resolve=chatgpt.com"][..],
+                &[
+                    "--may-not-resolve=api.openai.com",
+                    "--may-not-resolve=github.com",
+                ][..],
+            ] {
+                let mut candidate = actual.clone();
+                candidate.extend(tail.iter().map(OsString::from));
+                fs::write(
+                    process.path().join("cmdline"),
+                    proc_cmdline_fixture(&candidate),
+                )
+                .unwrap();
+                assert!(exact_broker_argv(process.path(), &expected), "{tail:?}");
+            }
         }
 
         #[test]
@@ -4545,7 +4619,7 @@ process.stdout.write(JSON.stringify({before,http:httpCount,tls:tlsCount,stdout,e
                     proc_cmdline_fixture(candidate),
                 )
                 .unwrap();
-                assert!(!exact_process_argv(process.path(), &expected));
+                assert!(!exact_broker_argv(process.path(), &expected));
             };
             let mut retired = actual[..10].to_vec();
             retired.extend(
@@ -4576,25 +4650,36 @@ process.stdout.write(JSON.stringify({before,http:httpCount,tls:tlsCount,stdout,e
                     "/other-state/runners/00000000-0000-4000-8000-000000000001.sock",
                 ),
                 (12, "--credential-authentication-kind"),
-                (13, "codex-oauth"),
-                (15, "openai-api-key"),
-                (17, "github-oauth"),
-                (19, "anthropic-api-key"),
+                (13, "file"),
+                (15, "codex-oauth"),
+                (17, "openai-api-key"),
+                (19, "github-oauth"),
+                (21, "anthropic-api-key"),
+                (22, "--platform-delegated"),
             ] {
                 let mut candidate = actual.clone();
                 candidate[index] = replacement.into();
                 rejects(&candidate);
             }
             let mut reordered = actual.clone();
-            reordered.swap(13, 15);
+            reordered.swap(15, 17);
             rejects(&reordered);
-            rejects(&actual[..18]); // Missing selected GitHub provider.
+            rejects(&actual[..20]); // Missing selected GitHub provider.
+            rejects(&actual[..22]); // Missing the network policy's GitHub answer.
             let mut additional = actual.clone();
             additional.extend(["--http-provider", "anthropic-api-key"].map(OsString::from));
             rejects(&additional);
-            additional = actual;
-            additional.push(OsString::new());
-            rejects(&additional);
+            for tail in [
+                &[""][..],
+                &["--may-not-resolve="][..],
+                &["--start-whatever-resolves", "--start-whatever-resolves"][..],
+                &["--start-whatever-resolves", "--may-not-resolve=chatgpt.com"][..],
+                &["--boot-secrets-fd", "4"][..],
+            ] {
+                let mut candidate = actual.clone();
+                candidate.extend(tail.iter().map(OsString::from));
+                rejects(&candidate);
+            }
         }
 
         #[test]
@@ -4606,7 +4691,7 @@ process.stdout.write(JSON.stringify({before,http:httpCount,tls:tlsCount,stdout,e
             unterminated.pop();
             for invalid in [Vec::new(), unterminated, vec![0; MAX_PROC_CMDLINE + 1]] {
                 fs::write(process.path().join("cmdline"), invalid).unwrap();
-                assert!(!exact_process_argv(process.path(), &expected));
+                assert!(!exact_broker_argv(process.path(), &expected));
             }
         }
     }
