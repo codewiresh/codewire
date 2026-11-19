@@ -44,8 +44,10 @@ Each value is copied from the signed release record
 release key): `sha256` and `size` are that target's `executable`. The flake
 fetches `https://releases.codewire.sh/cw/v1/blobs/sha256/<sha256>` as a
 fixed-output download, so Nix refuses any other bytes. The flake holds no
-version or hash of its own; `nix/release.json` is the only file a release
-changes.
+version or hash of its own. Beside the pin, `nix/SHA256SUMS` and
+`nix/SHA256SUMS.asc` are that release's signed checksums, byte for byte, so
+the pin can be proved without the network ("The pin's proof"). These three
+files are the only ones a release changes.
 
 `flake.lock` pins nixpkgs, which the flake uses only for `stdenv`, `patchelf`
 and glibc. Moving it is an ordinary reviewed change. A configuration that
@@ -102,7 +104,11 @@ or is shadowed by the Nix one depending on `PATH`.
 
 ## How a release moves the flake
 
-Target, not shipped (#5399).
+`codewire-release-pin-bot` and its OpenBao roles `codewire-source-release-pin-propose`
+and `-schedule` were provisioned on 2026-11-18 through infra's checked-in helpers
+(infra#2771; the commands and results are recorded on #5399). Without the
+stored token or the role the job fails closed, and a rerun of the job alone
+recovers it; the flake stays on its last pin meanwhile.
 
 After `cli-release` confirms that `cw upgrade` offers the release
 (`cw_release_r2.py offered`), its last job proposes the pin
@@ -113,7 +119,9 @@ cw-orchestrator, 2026-11-18):
    `SHA256SUMS.asc` with the release key, and refuses unless the channel names
    this run's tag.
 2. It writes `nix/release.json` from that record, and refuses unless every
-   `sha256` appears in the signed `SHA256SUMS` for that target's asset.
+   `sha256` appears in the signed `SHA256SUMS` for that target's asset. It
+   writes that `SHA256SUMS` and `SHA256SUMS.asc` beside it, and the proposal
+   refuses any other changed file.
 3. It pushes the one branch `automation/nix-release-pin` and opens or updates
    its pull request as `codewire-release-pin-bot`, in the same way
    `propose-workspace-image-pin.sh` does. The bot can push that branch and open
@@ -127,28 +135,61 @@ cw-orchestrator, 2026-11-18):
    `exact match`.
 
 cw-review approves it as routine and it lands through the merge queue. A
-newer release rewrites the same branch, so the flake never moves backwards.
+newer release rewrites the same branch, and the Supply-chain scan refuses an
+older pin than main's, so the flake never moves backwards.
 The flake therefore trails the release by that review. Approving it with a
 verifier instead of a person would widen what lands on main without a review,
 and waits for the owner.
 
+## The pin's proof
+
+Any pull request that changes `nix/` must carry a pin the release key signed,
+whoever pushed it: either bot's token, or a person. The branch can't be
+protected so that only the release-pin bot may push it, because Forgejo 17
+refuses every force push to a protected branch and has no force-push
+allowlist. So the required Supply-chain scan proves the pin instead
+(cw-security, 2026-11-18, on #5399).
+
+`source-approval.yml` runs on `pull_request_target`, from the protected base.
+Its step "Prove the Nix pin against the signed release" runs the base's
+`nix_release_pin.py verify` over the candidate checked out as data; none of
+the candidate's code runs. Offline, with the base's release key
+(`apps/cli/GPG_PUBLIC_KEY.asc`) and fingerprint (`cw_release.py`), it refuses:
+
+- `nix/SHA256SUMS` whose `nix/SHA256SUMS.asc` isn't a valid signature by that
+  key;
+- a pinned `sha256` that isn't the one the signed `SHA256SUMS` lists for
+  `cw-<release_tag>-<target>`, and a pin of anything but the four systems and
+  their targets, in the rendered layout;
+- a `release_tag` older than the base's pin;
+- a candidate that changes `nix/` together with the release key or
+  fingerprint. Changing the key needs cw-security, in a pull request of its
+  own.
+
+A candidate whose `nix/` and key are byte for byte the base's is not checked,
+so the step never holds an unrelated pull request. cw-review's approval of the
+exact head and the GitHub check after merge are the second and third gates.
+
 ## The check
 
-Target, not shipped (#5399).
+`.github/workflows/nix-flake.yml` runs on GitHub, on the public mirror's main,
+when `flake.nix`, `flake.lock`, `nix/**` or the workflow itself changes, and on
+dispatch. It runs where Nix users install from, so Codewire's own runners need
+no Nix image and no new egress (cw-orchestrator, 2026-11-18, on #5399). The
+mirror carries only main, so the check follows a merge; before it, the pin's
+pull request carries the release step's recomputation for review. It:
 
-`.gitea/workflows/nix-flake.yaml` runs only when `flake.nix`, `flake.lock` or
-`nix/**` changes, on pull requests and on main. It is not part of Required
-verification, so it never holds an unrelated pull request. It:
+- evaluates every system's package (`nix flake check --all-systems`);
+- on GitHub-hosted Linux x86_64 and macOS arm64, installs `cw` from the flake,
+  runs `cw version`, which must print the pinned `release_tag`, and compares
+  the installed file's SHA-256 with the pin; on macOS it also verifies the
+  signature with `codesign --verify --strict`;
+- recomputes the pin from the signed release with `nix_release_pin.py check
+  --blobs`, which also downloads each of the four executables and compares
+  its SHA-256 and size.
 
-- evaluates the four systems' packages;
-- builds `packages.x86_64-linux.cw` and runs `cw version`, which must print
-  `release_tag`;
-- downloads each of the four blobs and refuses unless its SHA-256 and size
-  equal `nix/release.json` and the signed release record.
-
-It runs in the `nixos/nix` image, pinned by digest and admitted through the
-approved-image pipeline (cw-security, 2026-11-18, on #5399); no job installs
-Nix itself. The job holds no credential, its egress is only `github.com`,
-`cache.nixos.org` and `releases.codewire.sh`, and Nix runs with
-`accept-flake-config = false`, `sandbox = true`, `require-sigs = true` and only
-the default cache's key.
+Nix runs with `accept-flake-config = false`, `sandbox = true`,
+`require-sigs = true`, only the default cache and its key, and the runner's
+user not trusted, so a flake can't widen what Nix trusts (cw-security,
+2026-11-18, on #5399). The installer is `cachix/install-nix-action`, pinned by
+commit. The jobs only read the repository and hold no secret.

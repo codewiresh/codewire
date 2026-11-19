@@ -1843,6 +1843,7 @@ run_release() {
   python3 -B scripts/ci/tests/test-scorecard-workflow.py
   python3 -B scripts/ci/tests/test-fuzz-workflow.py
   python3 -B scripts/ci/tests/test-codeql-workflow.py
+  python3 -B scripts/ci/tests/test-nix-flake-workflow.py
   python3 scripts/ci/tests/test-image-bundle.py
   scripts/ci/tests/test-deploy-prod-workflow.sh
   python3 scripts/checks/repo_checks.py production-source-ownership --self-test

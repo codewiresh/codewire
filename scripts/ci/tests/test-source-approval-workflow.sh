@@ -349,6 +349,60 @@ chmod 600 "$unreadable/src/locked.txt"
 #     because it tells Gitleaks to ignore the marker; a Gitleaks that reads
 #     the marker does not.
 # Everything is offline: the advisory database is one record written here.
+# The Nix pin's proof (#5399): the protected base's own tool, key and
+# fingerprint prove the candidate's nix/ offline; the candidate's code never
+# runs. Run the step itself over trees built from this checkout's real pin.
+nix_step="$FIXTURE/nix-pin-step.sh"
+awk '/^      - name: Prove the Nix pin against the signed release$/ { found = 1; next }
+     found && /^        run: \|$/ { capture = 1; next }
+     capture && /^      - name:/ { exit }
+     capture { sub(/^          /, ""); print }' "$WORKFLOW" >"$nix_step"
+# shellcheck disable=SC2016 # Match the step's own text literally.
+grep -Fxq 'python3 -I -B "$tool" verify --base "$base" --candidate "$GITHUB_WORKSPACE/candidate"' "$nix_step" ||
+  fail 'the Nix pin is not proved by the protected base tool over the candidate as data'
+nix_tree() {
+  mkdir -p "$1/nix" "$1/apps/cli" "$1/scripts/ci/release"
+  cp "$ROOT/apps/cli/GPG_PUBLIC_KEY.asc" "$1/apps/cli/"
+  cp "$ROOT/scripts/ci/release/nix_release_pin.py" "$ROOT/scripts/ci/release/cw_release.py" \
+    "$ROOT/scripts/ci/release/cw_release_r2.py" "$1/scripts/ci/release/"
+  cp "$ROOT/nix/release.json" "$ROOT/nix/SHA256SUMS" "$ROOT/nix/SHA256SUMS.asc" "$1/nix/"
+}
+nix_proof() { # WORKSPACE: run the step with that workspace; prints its exit status
+  local status=0
+  (cd "$1" && GITHUB_WORKSPACE="$1" bash -euo pipefail "$nix_step") >"$1.out" 2>&1 || status=$?
+  printf '%s' "$status"
+}
+ws="$FIXTURE/nix-proved"
+nix_tree "$ws/.source-approval-base"
+nix_tree "$ws/candidate"
+rm "$ws/.source-approval-base/nix/SHA256SUMS" "$ws/.source-approval-base/nix/SHA256SUMS.asc"
+[[ "$(nix_proof "$ws")" == 0 ]] && grep -Fq 'proved against its signed SHA256SUMS' "$ws.out" ||
+  fail "a signed pin was not proved: $(cat "$ws.out")"
+ws="$FIXTURE/nix-same"
+nix_tree "$ws/.source-approval-base"
+nix_tree "$ws/candidate"
+[[ "$(nix_proof "$ws")" == 0 ]] && grep -Fq "nothing to prove" "$ws.out" ||
+  fail "the base's own pin was not skipped: $(cat "$ws.out")"
+# A tampered pin is refused even when the candidate's own tool would pass it.
+ws="$FIXTURE/nix-tampered"
+nix_tree "$ws/.source-approval-base"
+nix_tree "$ws/candidate"
+python3 - "$ws/candidate/nix/release.json" <<'PY'
+import json, sys
+pin = json.load(open(sys.argv[1]))
+digest = pin["targets"]["x86_64-linux"]["sha256"]
+pin["targets"]["x86_64-linux"]["sha256"] = ("0" if digest[0] != "0" else "1") + digest[1:]
+open(sys.argv[1], "w").write(json.dumps(pin, indent=2) + "\n")
+PY
+printf 'import sys\nsys.exit(0)\n' >"$ws/candidate/scripts/ci/release/nix_release_pin.py"
+[[ "$(nix_proof "$ws")" == 1 ]] && grep -Fq 'x86_64-linux:' "$ws.out" ||
+  fail "a tampered pin was not refused by the base tool: $(cat "$ws.out")"
+ws="$FIXTURE/nix-no-tool"
+nix_tree "$ws/.source-approval-base"
+nix_tree "$ws/candidate"
+ln -sf /bin/true "$ws/.source-approval-base/scripts/ci/release/nix_release_pin.py"
+[[ "$(nix_proof "$ws")" == 65 ]] || fail 'a base tool that is not a regular file was run'
+
 expected_supplychain="$(sed -n 's/^ *EXPECTED_SUPPLYCHAIN: \([0-9a-f]\{40\}\)$/\1/p' "$WORKFLOW")"
 [[ "$expected_supplychain" =~ ^[0-9a-f]{40}$ ]] || fail 'the workflow names no sealed Supplychain revision'
 sealed() { # supplychain arguments, run as the sealed revision

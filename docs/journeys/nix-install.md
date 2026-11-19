@@ -9,7 +9,10 @@ docs' install page ("Install with Nix"). The format is in
 
 ## Where the journey stands
 
-Updated 2026-11-18. Written first; every step is not yet observed.
+Updated 2026-11-19. Written first; only `nix-check-refuses` is observed so
+far, its local half on x86_64 Linux (2026-11-19: the Supply-chain proof, the
+signed-release check and `nix build` in `nixos/nix` 2.28.3 each refused a pin
+with one digit changed).
 
 | ID | x86_64-linux (NixOS) | aarch64-linux | aarch64-darwin | x86_64-darwin |
 | --- | --- | --- | --- | --- |
@@ -19,7 +22,7 @@ Updated 2026-11-18. Written first; every step is not yet observed.
 | `nix-local-vm` | not applicable | not applicable | not yet observed | not applicable |
 | `nix-upgrade-refusal` | not yet observed | not yet observed | not yet observed | not yet observed |
 | `nix-release-moves` | not yet observed | not applicable | not applicable | not applicable |
-| `nix-check-refuses` | not yet observed (CI) | not applicable | not applicable | not applicable |
+| `nix-check-refuses` | local half observed 2026-11-19 | not applicable | public CI not yet observed | not applicable |
 
 The done-when needs `x86_64-linux` on NixOS and `aarch64-darwin`. The other two
 are walked when a machine is at hand, and say so until then.
@@ -101,7 +104,21 @@ are walked when a machine is at hand, and say so until then.
 
 ## `nix-check-refuses`: a wrong hash fails the check
 
-- **Do:** on a throwaway pull request, change one `sha256` in
-  `nix/release.json` by one digit.
-- **See:** the Nix check fails and names that system and both hashes. Close
-  the pull request.
+The public check runs only on main, so a wrong hash is proved with its two
+commands on a copy of the flake, never on main.
+
+- **Do:** in a scratch copy of the checkout (`git archive HEAD | tar -x -C
+  COPY`), change the `x86_64-linux` `sha256` in `nix/release.json` by one
+  digit. Run
+  `python3 -I -B scripts/ci/release/nix_release_pin.py check --pin COPY/nix/release.json`
+  from the checkout, and `nix build path:COPY#cw` on x86_64 Linux.
+- **See:** the first fails and names `x86_64-linux` with the pinned and the
+  signed value. The second fails because the download is addressed by the
+  digest: no blob has the tampered one, so the fetch answers 404 and the build
+  stops with "cannot download".
+- **And before merge:** run the Supply-chain scan's proof the way the step
+  does, with this checkout as the base and the copy as the candidate:
+  `python3 -I -B scripts/ci/release/nix_release_pin.py verify --base . --candidate COPY`.
+  It fails, naming `x86_64-linux` and saying the hash is not the signed one.
+- **And:** the latest `Nix flake` run on the public mirror's Actions page,
+  for the current pin, is green on Linux and macOS.

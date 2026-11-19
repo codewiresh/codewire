@@ -166,6 +166,23 @@ jobs:
             --patterns "$trusted/public-content-patterns.txt" --message-file "$text" \
             "$BASE_SHA" "$HEAD_SHA"
 
+      # The Nix flake's pin (docs/dev/CLI-NIX-INSTALL.md, "The pin's proof";
+      # #5399): a change to nix/ must carry a pin the release key signed. The
+      # protected base's own tool, release key and fingerprint prove it
+      # offline; the candidate is read as data and none of its code runs. A
+      # candidate whose nix/ and key are the base's is not checked.
+      - name: Prove the Nix pin against the signed release
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$GITHUB_WORKSPACE/.source-approval-base"
+          tool="$base/scripts/ci/release/nix_release_pin.py"
+          [[ -f "$tool" && ! -L "$tool" ]] || {
+            echo "protected-base Nix pin tool is not a regular file: $tool" >&2
+            exit 65
+          }
+          python3 -I -B "$tool" verify --base "$base" --candidate "$GITHUB_WORKSPACE/candidate"
+
       - name: Verify the mounted advisory bundle
         id: advisories
         shell: bash

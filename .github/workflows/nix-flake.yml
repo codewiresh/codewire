@@ -1,0 +1,102 @@
+name: Nix flake
+
+# Forgejo ignores this directory. GitHub checks the repository's flake.nix,
+# which installs the released cw for Nix users (docs/dev/CLI-NIX-INSTALL.md,
+# #5399), on the public mirror's main whenever the flake or its release pin
+# changes, and on dispatch. It runs where those users install from, so Codewire's
+# own runners need no Nix and no new egress. The private mirror skips the jobs.
+on:
+  push:
+    branches: [main]
+    paths:
+      - flake.nix
+      - flake.lock
+      - "nix/**"
+      - .github/workflows/nix-flake.yml
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: nix-flake
+  cancel-in-progress: true
+
+jobs:
+  flake:
+    name: Install and run cw from the flake (${{ matrix.os }})
+    if: github.event.repository.private == false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A flake's nixConfig can't add substituters or keys, builds are
+      # sandboxed, and only the default cache's signatures are trusted.
+      - name: Install Nix
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          set_as_trusted_user: false
+          enable_kvm: false
+          extra_nix_config: |
+            accept-flake-config = false
+            sandbox = true
+            require-sigs = true
+            substituters = https://cache.nixos.org/
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+
+      - name: Evaluate every system's package
+        run: nix flake check --all-systems --no-build
+
+      # The fixed-output download refuses bytes whose hash isn't the pin, so a
+      # build is itself the hash check for this runner's system.
+      - name: Install cw and run it
+        run: |
+          set -euo pipefail
+          release="$(jq -r .release_tag nix/release.json)"
+          system="$(nix eval --impure --raw --expr builtins.currentSystem)"
+          out="$(nix build --no-link --print-out-paths .#cw)"
+          version="$(nix run .#cw -- version)"
+          [[ "$version" == "cw $release" ]] || {
+            echo "::error::the flake's cw prints '$version', not 'cw $release'"
+            exit 1
+          }
+          # Both runners' systems install the release byte for byte.
+          want="$(jq -r --arg system "$system" '.targets[$system].sha256' nix/release.json)"
+          got="$(shasum -a 256 "$out/bin/cw" | cut -d' ' -f1)"
+          [[ "$got" == "$want" ]] || {
+            echo "::error::$system installs $got, not the released $want"
+            exit 1
+          }
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            codesign --verify --strict --verbose=2 "$out/bin/cw"
+          fi
+          echo "$system: cw $release, $got"
+
+  pin:
+    name: Check the pin against the signed release
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Every system's executable, including the two no runner here installs:
+      # its hash and size against the signed release, and the bytes served.
+      - name: Recompute the pin from the signed release
+        run: python3 -I -B scripts/ci/release/nix_release_pin.py check --pin nix/release.json --blobs

@@ -334,7 +334,7 @@ def check(text, ci_text):
     blocks = jobs(text)
     need(list(blocks) == ["pending", "release-selection", "build-runtime-linux", "build-helper-darwin", "sign-helper",
                           "pack-runtime", "build-darwin", "sign-darwin", "build-linux-musl", "build-linux-gnu",
-                          "build-release", "package-release"], "unexpected job set")
+                          "build-release", "package-release", "propose-nix-release-pin"], "unexpected job set")
     runtime, darwin = blocks.get("build-runtime-linux", ""), blocks.get("build-darwin", "")
     pack = blocks.get("pack-runtime", "")
     linux_builds = {target: blocks.get(job, "") for job, target in LINUX_BUILDS}
@@ -621,6 +621,22 @@ def check(text, ci_text):
     need(-1 not in positions and positions == sorted(positions), "publication steps are missing or reordered")
     need(names[-2:] == ["Publish signed release assets", "Confirm cw upgrade offers this release"],
          "work follows mirror publication, or the run ends before cw upgrade offers the release")
+    # The Nix flake's pin (#5399): proposed only after publication is
+    # confirmed, by a job whose one capability is the release-pin bot token.
+    nix_pin = blocks.get("propose-nix-release-pin", "")
+    need("    needs: [release-selection, package-release]\n    runs-on: " + TRUSTED_LIGHT
+         + "\n    enable-openid-connect: true\n" in nix_pin,
+         "the Nix pin is not proposed after publication on a protected runner")
+    need(not re.search(r"^    if:", nix_pin, re.M), "the Nix pin can be proposed without a publication")
+    need("          persist-credentials: false\n" in nix_pin and "GITEA_TOKEN" not in nix_pin,
+         "the Nix pin proposal holds the job token")
+    need(nix_pin.count("fetch-openbao-") == 1
+         and 'scripts/ci/setup/fetch-openbao-release-pin-bot-token.sh "$bot_work/token"' in nix_pin
+         and 'scripts/ci/release/propose-nix-release-pin.sh "$RELEASE_TAG"' in nix_pin,
+         "the Nix pin proposal does not read exactly the release-pin bot token")
+    for capability in CAPABILITIES + MACOS_SIGNING:
+        if capability not in ("enable-openid-connect", "fetch-openbao-"):
+            need(capability not in nix_pin, f"the Nix pin proposal holds capability {capability}")
     # Every run ends by reading the public channel as cw upgrade does (#4492).
     offered = dict(steps(package)).get("Confirm cw upgrade offers this release", "")
     need("        if:" not in offered, "the offered check is conditional")
@@ -726,6 +742,15 @@ MUTATIONS = {
     "unbounded protoc download": lambda t: t.replace(
         "          scripts/ci/release/fetch-pinned.sh \"https://github.com/protocolbuffers",
         "          curl -fsSL -o /tmp/protoc.zip \"https://github.com/protocolbuffers", 1),
+    "Nix pin before publication": lambda t: t.replace(
+        "    needs: [release-selection, package-release]\n", "    needs: [release-selection]\n", 1),
+    "Nix pin with the release signing key": lambda t: t.replace(
+        '          scripts/ci/setup/fetch-openbao-release-pin-bot-token.sh "$bot_work/token"\n',
+        '          scripts/ci/setup/fetch-openbao-release-pin-bot-token.sh "$bot_work/token"\n'
+        '          scripts/ci/setup/fetch-openbao-release-signing-key.sh "$bot_work/key"\n', 1),
+    "Nix pin with the job token": lambda t: t.replace(
+        "          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}\n        run: |\n          set -euo pipefail\n          bot_work=",
+        "          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}\n          GITEA_TOKEN: ${{ github.token }}\n        run: |\n          set -euo pipefail\n          bot_work=", 1),
     "global OIDC": lambda t: t.replace("\n\nenv:\n", "\n\nenable-openid-connect: true\n\nenv:\n", 1),
     "OIDC in build": lambda t: t.replace("    runs-on: " + TRUSTED_LIGHT + "\n    timeout-minutes: 30\n",
                                          "    runs-on: " + TRUSTED_LIGHT + "\n    enable-openid-connect: true\n"

@@ -1291,3 +1291,34 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
         run: python3 ../scripts/ci/release/cw_release_r2.py offered --version "$RELEASE_TAG"
+
+  # The Nix flake follows the release (docs/dev/CLI-NIX-INSTALL.md, "How a
+  # release moves the flake"; #5399): one pull request that changes only
+  # nix/release.json, whose body is the recomputation from the signed release
+  # cw upgrade now offers. The release-pin bot opens it and cannot merge it.
+  # It runs once publication is confirmed and holds only that bot's token.
+  propose-nix-release-pin:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's one capability is the release-pin bot token it reads by OIDC.
+    name: Propose the Nix flake's release pin
+    needs: [release-selection, package-release]
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
+    timeout-minutes: 15
+    env:
+      CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Propose the pin as the release-pin bot
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          bot_work="$(mktemp -d "$RUNNER_TEMP/release-pin-bot.XXXXXX")"
+          trap 'find "$bot_work" -type f -exec shred -u {} +; rm -rf "$bot_work"' EXIT
+          scripts/ci/setup/fetch-openbao-release-pin-bot-token.sh "$bot_work/token"
+          RELEASE_PIN_BOT_TOKEN_FILE="$bot_work/token" \
+            scripts/ci/release/propose-nix-release-pin.sh "$RELEASE_TAG"

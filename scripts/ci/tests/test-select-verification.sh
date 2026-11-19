@@ -1988,6 +1988,9 @@ run_paths_case cw_release_delivery_shell pull_request refs/pull/2255/head false 
   scripts/ci/release/sign-cw-release.sh \
   scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh \
   scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh \
+  scripts/ci/setup/fetch-openbao-release-pin-bot-token.sh \
+  scripts/ci/tests/test-fetch-openbao-release-pin-bot-token.sh \
+  scripts/ci/release/propose-nix-release-pin.sh scripts/ci/tests/test-propose-nix-release-pin.sh \
   scripts/ci/setup/fetch-openbao-release-signing-key.sh \
   scripts/ci/tests/test-fetch-openbao-release-signing-key.sh \
   scripts/ci/release/sign-macos-cw.sh scripts/ci/setup/fetch-openbao-macos-signing.sh \
@@ -1998,6 +2001,7 @@ run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false 
   'go_consumer_interop go_support policy release confidential_script_tests security security_js' \
   scripts/ci/tests/cw_release_fixtures.py scripts/ci/tests/test-cli-release-workflow.py \
   scripts/ci/tests/test-cw-release-delivery.py scripts/ci/tests/test-cw-release-r2.py \
+  scripts/ci/release/nix_release_pin.py scripts/ci/tests/test-nix-release-pin.py \
   scripts/ci/tests/test-package-cw-release.py scripts/ci/release/local_runtime_parts.py \
   scripts/ci/release/local_runtime_sources.py scripts/ci/release/local-runtime-sources.json \
   scripts/ci/release/build-runtime-kernel.sh scripts/ci/tests/test-local-runtime-parts.py \
@@ -2092,6 +2096,9 @@ run_paths_case fuzz_workflow pull_request refs/pull/3512/head false \
 run_paths_case codeql_workflow pull_request refs/pull/3512/head false \
   'confidential_script_tests go_consumer_interop go_support policy release security security_js' \
   .github/workflows/codeql.yml scripts/ci/tests/test-codeql-workflow.py
+run_paths_case nix_flake_workflow pull_request refs/pull/5399/head false \
+  'confidential_script_tests go_consumer_interop go_support policy release security security_js' \
+  .github/workflows/nix-flake.yml scripts/ci/tests/test-nix-flake-workflow.py
 # Removing the token-based releases needs only the release proofs (#3512).
 run_paths_case retired_sdk_token_releases pull_request refs/pull/3512/head false \
   'confidential_script_tests go_consumer_interop go_support policy release security security_js' \

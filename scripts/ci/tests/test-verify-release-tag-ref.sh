@@ -885,12 +885,15 @@ python3 -B "$ROOT/scripts/ci/tests/test-cw-install.py" >/dev/null 2>&1 || { echo
 python3 -B "$ROOT/scripts/ci/tests/test-cli-release-workflow.py"
 python3 -B "$ROOT/scripts/ci/tests/test-cw-release-delivery.py" >/dev/null 2>&1 || { echo 'cw release delivery tests failed' >&2; exit 1; }
 python3 -B "$ROOT/scripts/ci/tests/test-cw-release-r2.py" >/dev/null 2>&1 || { echo 'cw release R2 publisher tests failed' >&2; exit 1; }
+python3 -B "$ROOT/scripts/ci/tests/test-nix-release-pin.py" >/dev/null 2>&1 || { echo 'Nix release pin tests failed' >&2; exit 1; }
 python3 -B "$ROOT/scripts/ci/tests/test-package-cw-release.py" >/dev/null 2>&1 || { echo 'cw release packaging tests failed' >&2; exit 1; }
 python3 -B "$ROOT/scripts/ci/tests/test-local-runtime-parts.py" >/dev/null 2>&1 || { echo 'local runtime parts and source pin tests failed' >&2; exit 1; }
 "$ROOT/scripts/ci/tests/test-dry-run-superseded.sh" >/dev/null
 "$ROOT/scripts/ci/tests/test-dry-run-deferral.sh" >/dev/null
 "$ROOT/scripts/ci/tests/test-dispatch-source.sh" >/dev/null
 "$ROOT/scripts/ci/tests/test-fetch-openbao-releases-r2-credentials.sh"
+"$ROOT/scripts/ci/tests/test-fetch-openbao-release-pin-bot-token.sh"
+"$ROOT/scripts/ci/tests/test-propose-nix-release-pin.sh" >/dev/null
 "$ROOT/scripts/ci/tests/test-fetch-openbao-release-signing-key.sh"
 "$ROOT/scripts/ci/tests/test-fetch-openbao-macos-signing.sh"
 "$ROOT/scripts/ci/tests/test-sign-macos-cw.sh"

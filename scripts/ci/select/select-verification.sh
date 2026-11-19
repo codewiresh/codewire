@@ -1367,11 +1367,12 @@ if [ "$event_selected" = false ]; then
       .github/workflows/sdk-release.yml|scripts/ci/tests/test-sdk-release-workflow.py|\
       .github/workflows/scorecard.yml|scripts/ci/tests/test-scorecard-workflow.py|\
       .github/workflows/fuzz.yml|scripts/ci/tests/test-fuzz-workflow.py|fuzz/*|\
-      .github/workflows/codeql.yml|scripts/ci/tests/test-codeql-workflow.py)
+      .github/workflows/codeql.yml|scripts/ci/tests/test-codeql-workflow.py|\
+      .github/workflows/nix-flake.yml|scripts/ci/tests/test-nix-flake-workflow.py)
         # GitHub-only workflows: trusted SDK releases (#3512), the public
-        # OpenSSF Scorecard result, CodeQL code scanning and the cargo-fuzz
+        # OpenSSF Scorecard result, CodeQL code scanning, the cargo-fuzz
         # targets, which build only with nightly in their own workspace
-        # (docs/dev/FUZZING.md).
+        # (docs/dev/FUZZING.md), and the Nix flake's check (#5399).
         select_token release
         recognized=true
         ;;
@@ -2526,6 +2527,10 @@ if [ "$event_selected" = false ]; then
       scripts/ci/setup/fetch-openbao-macos-signing.sh|\
       scripts/ci/tests/cw_release_fixtures.py|scripts/ci/tests/test-cli-release-workflow.py|\
       scripts/ci/tests/test-cw-release-delivery.py|scripts/ci/tests/test-cw-release-r2.py|\
+      scripts/ci/release/nix_release_pin.py|scripts/ci/tests/test-nix-release-pin.py|\
+      scripts/ci/release/propose-nix-release-pin.sh|scripts/ci/tests/test-propose-nix-release-pin.sh|\
+      scripts/ci/setup/fetch-openbao-release-pin-bot-token.sh|\
+      scripts/ci/tests/test-fetch-openbao-release-pin-bot-token.sh|\
       scripts/ci/tests/test-package-cw-release.py|\
       scripts/ci/release/local_runtime_parts.py|scripts/ci/release/local_runtime_sources.py|\
       scripts/ci/release/local-runtime-sources.json|scripts/ci/release/build-runtime-kernel.sh|\
