@@ -1352,7 +1352,8 @@ require_boot_intercepts() {
   decision="$(grep -E ' event=egress_intercept( |$)' "$STATE_ROOT/logs/supervisor.log" | tail -n 1)"
   [[ "$decision" == *' switch=on'* && "$decision" != *' skipped='* ]] ||
     die "$label: the supervisor did not turn interception on for this boot: ${decision:-no decision logged}"
-  for _attempt in {1..50}; do
+  # Up to a minute, for a loaded host; a boot that paired does not wait.
+  for _attempt in {1..300}; do
     paired="$(grep -Ec ' event=front_door_pairing( .*)? outcome=paired( |$)' \
       "$STATE_ROOT/logs/runner-$ENVIRONMENT_ID.log" || true)"
     [[ "$paired" -ge 1 ]] && break

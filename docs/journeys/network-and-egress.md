@@ -40,7 +40,7 @@ separately.
 | `refusal-in-environment` | #4015 | no command yet | no command yet | no command yet | no command yet |
 | `refusal-readable` | #5057, #5058 | no command yet | no command yet | n/a | n/a |
 | `learn-mode` | #4015 | after launch | after launch | after launch | after launch |
-| `agent-vm-interception` | #3999 (#4809, #4884, #4812, #4887) | partly observed 2026-11-16, source bb379db0e (an API key; the smoke) | no command yet | n/a | n/a |
+| `agent-vm-interception` | #3999 (#4809, #4884, #4812, #4887) | partly observed 2026-11-18, source 582326b40 (an API key; the smoke) | no command yet | n/a | n/a |
 | `agent-vm-platform-profile` | #4909 | no command yet | no command yet | n/a | n/a |
 | `agent-claude` | #3999, #4001 | no command yet | no command yet | no command yet | no command yet |
 | `agent-codex` | #3999, #4001 | no command yet | no command yet | no command yet | no command yet |
@@ -49,7 +49,7 @@ separately.
 | `agent-github` | #3999 | no command yet | no command yet | n/a | n/a |
 | `no-token-at-rest` | #3999 (#4897), #4001 | no command yet | no command yet | no command yet | no command yet |
 | `agent-own-key` | #3999, #4001 | no command yet | no command yet | no command yet | no command yet |
-| `agent-fail-closed` | #3999, #4001 | partly observed 2026-11-16, source bb379db0e (the smoke) | no command yet | no command yet | no command yet |
+| `agent-fail-closed` | #3999, #4001 | partly observed 2026-11-18, source 582326b40 (the smoke) | no command yet | no command yet | no command yet |
 | `agent-switch-off` | #3999 | no command yet | no command yet | n/a | n/a |
 | `agent-hosted` | #4001 | n/a | n/a | no command yet | no command yet |
 | `hosted-enforcement` | #4000 | n/a | n/a | no command yet | no command yet |
@@ -705,14 +705,15 @@ request adds.
     denies everything (no file, no new socket, no process), where Linux
     uses Landlock and seccomp (#4916). The walk is the same on both; a Mac
     boot with the switch on is not yet observed.
-- **Observed:** partly. Linux local VM (x86_64, KVM), 2026-11-16, by the
+- **Observed:** partly. Linux local VM (x86_64, KVM), 2026-11-18, by the
   native local smoke's interception mode
   (`scripts/ci/verify/smoke-native-local-environment.sh
   --managed-credential-broker --egress-interception
   --egress-interception-renewals 2`, synthetic credentials and a synthetic
-  provider), host `cw` built from bb379db0e and the guest runtime from
-  bc374484e, the same code (the two commits between change only the smoke
-  script). With the switch on and an Anthropic API key selected: the boot's
+  provider), host `cw`, credential broker and guest runtime built from
+  582326b40, which is `main` at aa729bf8d plus the smoke's own change; the
+  run is recorded on #3999. An earlier run, 2026-11-16 at bb379db0e, saw
+  the same. With the switch on and an Anthropic API key selected: the boot's
   recorded state
   and the supervisor's log say interception is on, and the runner's log
   records the front door paired; the guest trusts the boot's authority
@@ -1246,7 +1247,8 @@ Issues: #3999, #4001.
 - **Gotchas:** a request that hangs is a failure of this step, even though
   nothing leaked.
 - **Observed:** partly, in the same run as `agent-vm-interception` (Linux
-  local VM, 2026-11-16, source bb379db0e). With the front door killed, a
+  local VM, 2026-11-18, source 582326b40, recorded on #3999). With the
+  front door killed, a
   request to the intercepted host ended at once with a closed connection
   while the VM kept running, and a stop and start restored it. The request
   was served after each of two routine renewals of the credential broker,
