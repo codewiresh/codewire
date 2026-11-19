@@ -129,6 +129,21 @@ where
     finish_plain(tcp, host, private, rng).await
 }
 
+/// The HTTP upgrade and DERP handshake over a connection the caller opened,
+/// such as a hosted egress daemon's dial by the Pod interface. `host` is the
+/// HTTP authority.
+pub async fn connect_plain_stream<R>(
+    tcp: TcpStream,
+    host: &str,
+    private: key::NodePrivate,
+    rng: &mut R,
+) -> Result<Client<TcpStream>, Error>
+where
+    R: rand_core::RngCore + rand_core::CryptoRng,
+{
+    finish_plain(tcp, host, private, rng).await
+}
+
 async fn finish_plain<R>(
     mut tcp: TcpStream,
     host: &str,
@@ -178,6 +193,21 @@ where
     finish_tls(tcp, host, config, private, rng).await
 }
 
+/// TLS, the HTTP upgrade and the DERP handshake over a connection the caller
+/// opened. `host` is the certificate identity and the HTTP authority.
+pub async fn connect_tls_stream<R>(
+    tcp: TcpStream,
+    host: &str,
+    config: rustls::ClientConfig,
+    private: key::NodePrivate,
+    rng: &mut R,
+) -> Result<Client<tokio_rustls::client::TlsStream<TcpStream>>, Error>
+where
+    R: rand_core::RngCore + rand_core::CryptoRng,
+{
+    finish_tls(tcp, host, config, private, rng).await
+}
+
 async fn finish_tls<R>(
     tcp: TcpStream,
     host: &str,
@@ -210,6 +240,31 @@ pub fn webpki_tls_config() -> rustls::ClientConfig {
     rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth()
+}
+
+/// [`webpki_tls_config`] that also trusts `extra_roots`. A root that does
+/// not parse is an error, never skipped.
+pub fn webpki_tls_config_with_roots(
+    extra_roots: &[rustls_pki_types::CertificateDer<'static>],
+) -> Result<rustls::ClientConfig, Error> {
+    Ok(rustls::ClientConfig::builder()
+        .with_root_certificates(webpki_and(extra_roots)?)
+        .with_no_client_auth())
+}
+
+/// The WebPKI roots with `extra_roots` added, never in their place.
+fn webpki_and(
+    extra_roots: &[rustls_pki_types::CertificateDer<'static>],
+) -> Result<rustls::RootCertStore, Error> {
+    let mut roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    for root in extra_roots {
+        roots
+            .add(root.clone())
+            .map_err(|_| Error::Tls("an extra DERP root does not parse".into()))?;
+    }
+    Ok(roots)
 }
 
 /// Build a rustls client configuration that still uses TLS but skips server

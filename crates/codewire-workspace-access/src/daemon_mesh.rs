@@ -111,10 +111,21 @@ pub trait MeshJoiner: Send + Sync {
 }
 
 /// Joins through [`codewire_client::member_tailnet::MemberTailnet`], with a
-/// fresh key per stream and absolute DNS lookups (#2701). Hosted daemons run
-/// on Linux only, as the member tailnet does.
+/// fresh key per stream and absolute DNS lookups (#2701), or, for a
+/// broker-mode daemon, at its configured addresses by the Pod interface with
+/// no lookup at all (#4000). Hosted daemons run on Linux only, as the member
+/// tailnet does.
 #[cfg(target_os = "linux")]
-pub struct MemberTailnetJoiner;
+pub struct MemberTailnetJoiner {
+    platform: Option<crate::platform::DaemonPlatform>,
+}
+
+#[cfg(target_os = "linux")]
+impl MemberTailnetJoiner {
+    pub fn new(platform: Option<crate::platform::DaemonPlatform>) -> Self {
+        Self { platform }
+    }
+}
 
 #[cfg(target_os = "linux")]
 #[async_trait]
@@ -143,23 +154,51 @@ impl MeshJoiner for MemberTailnetJoiner {
         environment_id: Uuid,
     ) -> Result<Arc<dyn MeshMembership>, JoinError> {
         use codewire_client::member_tailnet::{
-            MemberSetupError, MemberTailnet, MemberTransportOptions,
+            MemberPlatform, MemberSetupError, MemberTailnet, MemberTransportOptions,
         };
         let secret = codewire_tailnet::wg::StaticSecret::random_from_rng(rand::rngs::OsRng);
-        match MemberTailnet::peer(
-            target.mesh_url(),
-            code,
-            target.org_id(),
-            target.network_id(),
-            environment_id,
-            secret,
-            MemberTransportOptions {
-                absolute_dns: true,
-                ..Default::default()
-            },
-        )
-        .await
-        {
+        let joined = match &self.platform {
+            None => {
+                MemberTailnet::peer(
+                    target.mesh_url(),
+                    code,
+                    target.org_id(),
+                    target.network_id(),
+                    environment_id,
+                    secret,
+                    MemberTransportOptions {
+                        absolute_dns: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+            }
+            Some(platform) => {
+                let Some(mesh) = platform.mesh else {
+                    tracing::warn!(
+                        "workspace Mesh has no configured address; a broker-mode daemon looks no Mesh URL up"
+                    );
+                    return Err(JoinError::Unreachable);
+                };
+                MemberTailnet::peer_on_platform(
+                    target.mesh_url(),
+                    code,
+                    target.org_id(),
+                    target.network_id(),
+                    environment_id,
+                    secret,
+                    &MemberPlatform {
+                        mesh,
+                        derp_host: platform.derp_host.clone(),
+                        derp: platform.derp,
+                        derp_extra_roots: platform.derp_extra_roots.clone(),
+                        dial: std::sync::Arc::clone(&platform.dial),
+                    },
+                )
+                .await
+            }
+        };
+        match joined {
             Ok(member) => Ok(Arc::new(member)),
             Err(error) => {
                 let rpc = error

@@ -17,6 +17,9 @@ use uuid::Uuid;
 
 use crate::execution::ProcessExecution;
 
+mod broker;
+pub use broker::{BrokerPlatform, DerpAddress};
+
 pub const SHIM_ADDR_ENV: &str = "CODEWIRE_WORKSPACE_SHIM_ADDR";
 pub const WORKSPACE_ROOT_ENV: &str = "CODEWIRE_WORKSPACE_ROOT";
 pub const HOME_ROOT_ENV: &str = "CODEWIRE_HOME_ROOT";
@@ -377,7 +380,8 @@ impl HostedDaemonMode {
             .and_then(|value| value.into_string().ok())
             .filter(|value| canonical_uid(value))
             .ok_or(ConfigError::InvalidWorkspaceBinding)?;
-        let measured = MeasuredAnchors::from_lookup(&lookup)?;
+        let measured = MeasuredAnchors::from_lookup(&lookup)?.map(Box::new);
+        let broker = BrokerPlatform::from_lookup(&lookup)?.map(Box::new);
         Ok(Self::Binding(WorkspaceBindingConfig {
             binding_url,
             pod_uid,
@@ -388,6 +392,7 @@ impl HostedDaemonMode {
             // measured roots, held in memory.
             tls_roots_file: WORKSPACE_BINDING_TLS_ROOTS_FILE.into(),
             measured,
+            broker,
             placement: HostedPlacement::from_lookup(&lookup),
         }))
     }
@@ -402,7 +407,10 @@ pub struct WorkspaceBindingConfig {
     pod_uid: String,
     token_path: PathBuf,
     tls_roots_file: PathBuf,
-    measured: Option<MeasuredAnchors>,
+    // Both boxed, so `HostedDaemonMode::Binding` stays within clippy's
+    // `large_enum_variant` beside the boxed environment-token config.
+    measured: Option<Box<MeasuredAnchors>>,
+    broker: Option<Box<BrokerPlatform>>,
     placement: HostedPlacement,
 }
 
@@ -415,6 +423,7 @@ impl fmt::Debug for WorkspaceBindingConfig {
             .field("token_path", &self.token_path)
             .field("tls_roots_file", &self.tls_roots_file)
             .field("measured", &self.measured)
+            .field("broker", &self.broker)
             .finish_non_exhaustive()
     }
 }
@@ -569,6 +578,11 @@ impl WorkspaceBindingConfig {
         &self.binding_url
     }
 
+    /// A hosted egress Pod's platform addresses; None outside broker mode.
+    pub fn broker(&self) -> Option<&BrokerPlatform> {
+        self.broker.as_deref()
+    }
+
     pub fn pod_uid(&self) -> &str {
         &self.pod_uid
     }
@@ -586,7 +600,7 @@ impl WorkspaceBindingConfig {
 
     /// A confidential workspace's measured anchors.
     pub fn measured(&self) -> Option<&MeasuredAnchors> {
-        self.measured.as_ref()
+        self.measured.as_deref()
     }
 
     /// Redirect the projected token, for tests of the binding loop.
@@ -763,6 +777,13 @@ pub enum ConfigError {
     InvalidCodexLoginCheckPeriod,
     #[error("measured workspace anchors are invalid")]
     InvalidMeasuredAnchors,
+    #[error("{0} is missing or is not an IPv4 address and port")]
+    BrokerAddress(&'static str),
+    #[error(
+        "{} is missing or is not hostname=IPv4:port",
+        codewire_daemon_proto::DERP_ADDR_ENV
+    )]
+    BrokerDerpAddress,
 }
 
 /// The Codex login check period `value` selects: [`CODEX_LOGIN_CHECK_PERIOD`]

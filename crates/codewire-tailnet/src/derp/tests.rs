@@ -468,3 +468,12 @@ async fn recv_dropped_mid_frame_keeps_the_stream_framed() {
     }
     server.await.unwrap();
 }
+
+#[test]
+fn a_platform_relays_extra_roots_are_added_to_the_webpki_roots_never_in_their_place() {
+    let webpki = webpki_roots::TLS_SERVER_ROOTS.len();
+    assert_eq!(super::webpki_and(&[]).unwrap().roots.len(), webpki);
+    // A root that does not parse is refused, never skipped.
+    let malformed = rustls_pki_types::CertificateDer::from(vec![0x30, 0x03, 0x02, 0x01, 0x00]);
+    assert!(super::webpki_and(&[malformed]).is_err());
+}

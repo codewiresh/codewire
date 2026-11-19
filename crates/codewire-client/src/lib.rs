@@ -52,9 +52,9 @@ pub use credential_delegation::{AdmittedCredentialDelegation, CredentialDelegati
 pub use tailnet::{
     EnvironmentTailnetDiagnostic, ExpectedTransport, NativeClientFacade, SshTransportMode,
     StunServer, TailnetConnection, TailnetDerpMapDiagnostic, TailnetDiagnosticOptions,
-    TailnetDiagnosticStage, TailnetPathDiagnostic, TailnetPeerDiagnostic, derp_target_from_map,
-    diagnose_environment_tailnet, parse_duration, pipe_shell_stdio, resolve_stun_servers,
-    stun_servers_from_map,
+    TailnetDiagnosticStage, TailnetPathDiagnostic, TailnetPeerDiagnostic, derp_target_for_host,
+    derp_target_from_map, diagnose_environment_tailnet, parse_duration, pipe_shell_stdio,
+    resolve_stun_servers, stun_servers_from_map,
 };
 
 /// The one Rust client core consumed by the CLI and native bindings: the

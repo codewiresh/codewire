@@ -427,3 +427,32 @@ async fn the_connect_socket_refuses_until_the_environment_joined() {
     let (answer, _) = connect(current, b"CWMESHCONNECT1 app-2 7\n").await;
     assert_eq!(answer, "ERR not_joined\n");
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_broker_daemon_without_a_mesh_address_refuses_mesh_rather_than_look_it_up() {
+    let dialled = std::sync::Arc::new(Mutex::new(Vec::<std::net::SocketAddr>::new()));
+    let record = std::sync::Arc::clone(&dialled);
+    let joiner = MemberTailnetJoiner::new(Some(crate::platform::DaemonPlatform {
+        coordinator: "127.0.0.1:9".parse().unwrap(),
+        mesh: None,
+        derp_host: "derp.codewire.invalid".to_owned(),
+        derp: "127.0.0.1:9".parse().unwrap(),
+        derp_extra_roots: Vec::new(),
+        dial: std::sync::Arc::new(move |peer| {
+            record.lock().unwrap().push(peer);
+            Box::pin(tokio::net::TcpStream::connect(peer))
+        }),
+        refusal: Default::default(),
+    }));
+    let target = MeshTarget::from_fields(&MeshFields {
+        mesh_url: "https://mesh.codewire.invalid",
+        org_id: "org-1",
+        network_id: "net-1",
+        node_name: "app-1",
+    })
+    .unwrap();
+    let joined = joiner.join(&target, "code", Uuid::new_v4()).await;
+    assert!(matches!(joined, Err(JoinError::Unreachable)));
+    assert!(dialled.lock().unwrap().is_empty());
+}

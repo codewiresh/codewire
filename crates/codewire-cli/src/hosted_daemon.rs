@@ -49,17 +49,47 @@ pub(crate) async fn run_bound_hosted_daemon_with(
         "hosted environment daemon waiting for its workspace binding"
     );
     // A broker-mode Pod's default route is its egress TUN (#4000): it reaches
-    // the binding at its rendered address by the Pod interface, and serves
-    // nothing until its first egress self-check has passed.
+    // the binding and its other platform peers at their configured addresses
+    // by the Pod interface, and serves nothing until its first egress
+    // self-check has passed.
     #[cfg(target_os = "linux")]
-    let egress = hosted_egress::EgressSettings::from_lookup(config.pod_uid(), |name| {
-        std::env::var(name).ok()
-    })?;
+    if config.broker().is_some() {
+        hosted_egress::prove_pod_interface()?;
+    }
+    #[cfg(target_os = "linux")]
+    let egress = config
+        .broker()
+        .map(|broker| {
+            hosted_egress::EgressSettings::from_broker(broker, config.pod_uid(), |name| {
+                std::env::var(name).ok()
+            })
+        })
+        .transpose()?;
+    // What the tailnet refuses in broker mode, reported by GetHealth.
+    #[cfg(target_os = "linux")]
+    let refusal = config
+        .broker()
+        .map(|_| codewire_daemon::platform_refusal::PlatformRefusal::default());
+    // The relay's certificate may chain to the deployment's own authority,
+    // mounted with the coordinator's; a confidential workspace trusts the
+    // WebPKI roots only.
+    #[cfg(target_os = "linux")]
+    let derp_extra_roots = hosted_egress::derp_extra_roots(
+        config.broker().is_some(),
+        config.measured().is_some(),
+        std::path::Path::new(codewire_daemon_proto::COORDINATOR_EXTRA_ROOTS_MOUNT_PATH),
+        "ca.crt",
+    )
+    .context("read the deployment's extra roots for its DERP relay")?;
+    #[cfg(target_os = "linux")]
+    let platform = config
+        .broker()
+        .zip(refusal.clone())
+        .map(|(broker, refusal)| hosted_egress::daemon_platform(broker, refusal, derp_extra_roots));
     #[cfg(target_os = "linux")]
     let route = egress
         .as_ref()
-        .map(hosted_egress::EgressSettings::binding_route)
-        .transpose()?;
+        .map(hosted_egress::EgressSettings::binding_route);
     #[cfg(not(target_os = "linux"))]
     let route = None;
     let client = std::sync::Arc::new(
@@ -136,6 +166,7 @@ pub(crate) async fn run_bound_hosted_daemon_with(
                 daemon_port,
                 exec_shell: codewire_daemon::env::default_shell_for(&daemon_config),
                 measured,
+                platform,
             },
             connector,
             client.clone(),
@@ -160,6 +191,10 @@ pub(crate) async fn run_bound_hosted_daemon_with(
         Some(app_ports),
         Some(pod_uid),
         defaults,
+        #[cfg(target_os = "linux")]
+        refusal,
+        #[cfg(not(target_os = "linux"))]
+        None,
     )
     .await
 }

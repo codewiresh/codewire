@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use crate::conn::{Transport, WgDatagram};
 use crate::derp::{self, BoxedStream, NodePrivate, ReceivedMessage};
 use crate::dns::absolute_dns_name;
+use crate::platform_dial::{PlatformRoots, TcpDial};
 use crate::wg::StaticSecret;
 
 const DERP_RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -44,6 +45,9 @@ enum Dial {
     Name { absolute: bool },
     /// Exactly these addresses; nothing is looked up.
     Resolved(Arc<[SocketAddr]>),
+    /// One platform address through the caller's dial, its certificate
+    /// verified against the WebPKI and these roots; nothing is looked up.
+    Platform(SocketAddr, TcpDial, Arc<PlatformRoots>),
 }
 
 impl Dial {
@@ -87,6 +91,36 @@ pub async fn connect_derp_transport_resolved(
 ) -> Result<Transport, derp::Error> {
     let addresses = validate_resolved_addresses(target, addresses)?;
     connect_derp_transport_inner(target, Dial::Resolved(addresses), secret).await
+}
+
+/// Connect and reconnect to one platform address, every connection opened
+/// by `dial`, while [`DerpTarget::host`] stays the TLS name and the HTTP
+/// authority. The address replaces the map's host and port: a hosted egress
+/// daemon reaches the deployment's relay in the cluster, by the Pod
+/// interface, and resolves no names. Only a verified TLS target is dialled,
+/// against the WebPKI roots and `extra_roots`, whatever the map says, so no
+/// caller reaches its relay unverified.
+pub async fn connect_derp_transport_platform(
+    target: &DerpTarget,
+    address: SocketAddr,
+    dial: TcpDial,
+    extra_roots: PlatformRoots,
+    secret: &StaticSecret,
+) -> Result<Transport, derp::Error> {
+    if target.host.trim().is_empty()
+        || address.port() == 0
+        || address.ip().is_unspecified()
+        || address.ip().is_multicast()
+    {
+        return Err(derp::Error::Protocol("invalid platform DERP target"));
+    }
+    if target.transport != (DerpTransport::Tls { skip_verify: false }) {
+        return Err(derp::Error::Protocol(
+            "a platform DERP target must verify its certificate",
+        ));
+    }
+    let dial = Dial::Platform(address, dial, Arc::new(extra_roots));
+    connect_derp_transport_inner(target, dial, secret).await
 }
 
 async fn connect_derp_transport_inner(
@@ -217,6 +251,13 @@ async fn connect_derp_client(
         Dial::Name { absolute } => vec![ConnectAddress::Named(Dial::named_address(
             target, *absolute,
         ))],
+        Dial::Platform(address, dial, roots) => {
+            vec![ConnectAddress::Platform(
+                *address,
+                Arc::clone(dial),
+                Arc::clone(roots),
+            )]
+        }
     };
     let mut last_error = None;
     for address in candidates {
@@ -232,6 +273,10 @@ async fn connect_derp_client(
                     .await
                     .map(|client| client.boxed())
             }
+            // `connect_derp_transport_platform` admits only verified TLS.
+            (DerpTransport::Plain, ConnectAddress::Platform(..)) => Err(derp::Error::Protocol(
+                "a platform DERP target must verify its certificate",
+            )),
             (DerpTransport::Tls { skip_verify }, address) => {
                 let tls_config = if skip_verify {
                     derp::insecure_tls_config_for_tests()
@@ -257,6 +302,26 @@ async fn connect_derp_client(
                     )
                     .await
                     .map(|client| client.boxed()),
+                    ConnectAddress::Platform(address, dial, roots) => {
+                        match (derp::webpki_tls_config_with_roots(&roots), skip_verify) {
+                            (Err(error), _) => Err(error),
+                            (Ok(_), true) => Err(derp::Error::Protocol(
+                                "a platform DERP target must verify its certificate",
+                            )),
+                            (Ok(config), false) => match dial(address).await {
+                                Ok(tcp) => derp::connect_tls_stream(
+                                    tcp,
+                                    &target.host,
+                                    config,
+                                    private.clone(),
+                                    &mut rng,
+                                )
+                                .await
+                                .map(|client| client.boxed()),
+                                Err(error) => Err(error.into()),
+                            },
+                        }
+                    }
                 }
             }
         };
@@ -271,6 +336,7 @@ async fn connect_derp_client(
 enum ConnectAddress {
     Named(String),
     Resolved(SocketAddr),
+    Platform(SocketAddr, TcpDial, Arc<PlatformRoots>),
 }
 
 fn validate_resolved_addresses(

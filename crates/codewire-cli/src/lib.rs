@@ -1148,7 +1148,7 @@ async fn run_hosted_daemon() -> anyhow::Result<()> {
         .try_init();
     match codewire_daemon::HostedDaemonMode::from_env()? {
         codewire_daemon::HostedDaemonMode::EnvironmentToken(config) => {
-            serve_hosted_daemon(*config, false, None, None, None, None).await
+            serve_hosted_daemon(*config, false, None, None, None, None, None).await
         }
         codewire_daemon::HostedDaemonMode::Binding(config) => run_bound_hosted_daemon(config).await,
     }
@@ -1179,6 +1179,7 @@ async fn serve_hosted_daemon(
     app_ports: Option<codewire_daemon::app_ports::AppPortsSender>,
     pod_uid: Option<String>,
     defaults: Option<HostedDefaultsOutcome>,
+    platform: Option<codewire_daemon::platform_refusal::PlatformRefusal>,
 ) -> anyhow::Result<()> {
     use tokio_stream::wrappers::TcpListenerStream;
 
@@ -1249,7 +1250,8 @@ async fn serve_hosted_daemon(
                 &pod_uid,
                 codewire_daemon::codex_home::CodexHome::default(),
                 app_ports,
-                defaults,
+                codewire_daemon::service::DaemonRuntimeState::ready_with_defaults(defaults)
+                    .with_platform_refusal(platform.unwrap_or_default()),
                 incoming,
                 hosted_daemon_shutdown_signal(),
             )
@@ -1266,7 +1268,7 @@ async fn serve_hosted_daemon(
         }
     };
     #[cfg(not(target_os = "linux"))]
-    let _ = (app_ports, pod_uid, defaults);
+    let _ = (app_ports, pod_uid, defaults, platform);
     #[cfg(not(target_os = "linux"))]
     codewire_daemon::serve_grpc_with_incoming(config, incoming, hosted_daemon_shutdown_signal())
         .await

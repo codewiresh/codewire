@@ -60,6 +60,8 @@ pub struct DaemonRuntimeState {
     state: v1::DaemonState,
     message: String,
     diagnostics: Vec<v1::HealthDiagnostic>,
+    /// A broker-mode daemon's live platform refusal (#4000).
+    platform: crate::platform_refusal::PlatformRefusal,
 }
 
 impl DaemonRuntimeState {
@@ -72,7 +74,17 @@ impl DaemonRuntimeState {
             state,
             message: message.into(),
             diagnostics,
+            platform: Default::default(),
         }
+    }
+
+    /// Also report `platform`'s refusal while it lasts.
+    pub fn with_platform_refusal(
+        mut self,
+        platform: crate::platform_refusal::PlatformRefusal,
+    ) -> Self {
+        self.platform = platform;
+        self
     }
 
     pub fn ready() -> Self {
@@ -193,6 +205,7 @@ impl DaemonService for DaemonServiceImpl {
         self.authorize(&request)?;
         let mut diagnostics = self.runtime_state.diagnostics.clone();
         diagnostics.extend(self.session_engine.store_diagnostic());
+        diagnostics.extend(self.runtime_state.platform.diagnostic());
         Ok(Response::new(v1::GetHealthResponse {
             state: self.runtime_state.state as i32,
             message: self.runtime_state.message.clone(),

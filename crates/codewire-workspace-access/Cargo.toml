@@ -44,6 +44,11 @@ libc = "0.2"
 [dev-dependencies]
 # The client half of the session subsystem, for its tests.
 codewire-client = { workspace = true, features = ["tailnet-session"] }
+# An in-process DERP relay, for the broker-mode dial tests, certified by a
+# test authority.
+codewire-derp = { workspace = true }
+rcgen = "0.13"
+rustls = { version = "=0.23.46", default-features = false, features = ["ring"] }
 russh-sftp = { workspace = true }
 serde = { workspace = true }
 url = { workspace = true }

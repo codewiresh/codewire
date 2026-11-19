@@ -34,6 +34,7 @@ pub mod local_transport;
 pub mod login_cleanup;
 #[cfg(target_os = "linux")]
 pub mod platform_managed;
+pub mod platform_refusal;
 #[cfg(unix)]
 mod private_files;
 pub mod server;
@@ -49,12 +50,13 @@ pub mod workspace_defaults;
 
 pub use codewire_daemon_proto::{DaemonAuthToken, HOSTED_EXEC_AMBIGUOUS_EXIT_CODE};
 pub use config::{
-    BindResponseFields, CODEX_LOGIN_CHECK_PERIOD, CODEX_LOGIN_CHECK_PERIOD_ENV,
+    BindResponseFields, BrokerPlatform, CODEX_LOGIN_CHECK_PERIOD, CODEX_LOGIN_CHECK_PERIOD_ENV,
     CODEX_LOGIN_CHECK_PERIOD_MIN, Config, ConfigError, CredentialBridgeConfig,
     CredentialBridgeTransport, DEFAULT_HOME_ROOT, DEFAULT_LISTEN_ADDR, DEFAULT_WORKSPACE_ROOT,
-    DeclaredMount, HOME_ROOT_ENV, HostConfig, HostedDaemonMode, InvalidWorkspaceBinding,
-    LaunchProjectionConfig, MeasuredAnchors, NativeLaunchProjectionConfig, SHIM_ADDR_ENV,
-    WORKSPACE_ROOT_ENV, WorkspaceBinding, WorkspaceBindingConfig, codex_login_check_period,
+    DeclaredMount, DerpAddress, HOME_ROOT_ENV, HostConfig, HostedDaemonMode,
+    InvalidWorkspaceBinding, LaunchProjectionConfig, MeasuredAnchors, NativeLaunchProjectionConfig,
+    SHIM_ADDR_ENV, WORKSPACE_ROOT_ENV, WorkspaceBinding, WorkspaceBindingConfig,
+    codex_login_check_period,
 };
 pub use durable_session::NeverRestarts;
 pub use server::serve_grpc_with_incoming;

@@ -19,7 +19,7 @@ pub use connect::{ConnectOriginTransport, PeerDial};
 
 #[cfg(feature = "test-support")]
 pub mod test_support;
-pub use files::{ServerTlsFiles, read_optional_roots};
+pub use files::{ServerTlsFiles, read_optional_roots, roots_from_pem};
 pub use incoming::{PeerTlsListener, TlsIncoming, TlsListener};
 pub use peer::{TlsPeer, VerifiedClient};
 

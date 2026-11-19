@@ -323,6 +323,13 @@ pub async fn read_optional_roots(
     certificates(&bytes).map(Some)
 }
 
+/// The certificates of a PEM trust bundle the caller has read itself: each
+/// one must parse and be usable as a root, and an empty or malformed bundle
+/// is an error, never a partial set.
+pub fn roots_from_pem(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, TlsError> {
+    certificates(pem)
+}
+
 pub(crate) fn certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, TlsError> {
     let mut remaining = pem;
     let mut certificates = Vec::new();

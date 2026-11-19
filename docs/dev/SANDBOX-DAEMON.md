@@ -502,6 +502,24 @@ Every hosted workspace binds at claim time, confidential ones included
   which the fixed-purpose hosted exec reads, prepares Codex's `~/.codex` for
   the bound clients, and only then listens on 7777, serves SSH on 2222 and
   joins the tailnet (see "Workspace access" above).
+- **Broker mode resolves no names (#4000).** A Pod rendered with
+  `CODEWIRE_EGRESS_STREAM_ADDR` is in broker mode: its default route is the
+  egress TUN. Every platform peer is then an `IPv4:port` from the Pod's
+  configuration, and every connection to one is bound to the Pod's own
+  interface, while the peer's URL keeps the TLS name. The peers and their
+  variables:
+  - the binding: `CODEWIRE_WORKSPACE_BINDING_ADDR`;
+  - the tailnet coordinator: `CODEWIRE_COORDINATOR_ADDR`, else
+    `CODEWIRE_API_ADDR`;
+  - Mesh: `CODEWIRE_MESH_ADDR`, rendered only with a Mesh URL. Without it a
+    Mesh URL in the grant is refused, not looked up;
+  - the deployment's own DERP relay:
+    `CODEWIRE_DERP_ADDR=<hostname>=<IPv4:port>`. Only the DERP map node with
+    that hostname is dialled.
+
+  A missing or malformed address stops the daemon's start and names its
+  variable. STUN is not run, and the direct UDP endpoints in the access
+  grant must be address literals.
 - **Record before release.** As soon as the chain is bind-ready, while
   create and start still wait for Claim Ready, orchestration
   verifies the Claim → Sandbox → Pod UID chain, images and the workspace PVC

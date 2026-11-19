@@ -130,6 +130,9 @@ pub(crate) struct BoundAccess {
     /// A confidential workspace (B2c): trust only the coordinator's WebPKI
     /// roots compiled into the measured daemon, never a mounted bundle.
     pub measured: bool,
+    /// A broker-mode daemon's platform path (#4000): the coordinator, Mesh
+    /// and DERP at configured addresses by the Pod interface.
+    pub platform: Option<codewire_workspace_access::platform::DaemonPlatform>,
 }
 
 /// Serve workspace access for the accepted binding until `shutdown`.
@@ -208,7 +211,7 @@ pub(crate) async fn serve(
                 },
                 grants.subscribe(),
                 mesh_plane,
-                Arc::new(MemberTailnetJoiner),
+                Arc::new(MemberTailnetJoiner::new(bound.platform.clone())),
                 app_ports.subscribe(),
                 current_membership,
                 shutdown.clone(),
@@ -235,13 +238,20 @@ pub(crate) async fn serve(
                         WORKSPACE_TAILNET_UDP_PORT,
                     )),
                     reserved_ports,
+                    platform: bound.platform.clone(),
                 },
                 grants.clone(),
                 plane.clone(),
-                Arc::new(if bound.measured {
-                    PublicCoordinator::webpki_only()
-                } else {
-                    PublicCoordinator::new()
+                Arc::new({
+                    let coordinator = if bound.measured {
+                        PublicCoordinator::webpki_only()
+                    } else {
+                        PublicCoordinator::new()
+                    };
+                    match &bound.platform {
+                        Some(platform) => coordinator.on_platform(platform),
+                        None => coordinator,
+                    }
                 }),
                 TailnetSsh {
                     config: ssh_config,

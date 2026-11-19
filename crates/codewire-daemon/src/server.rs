@@ -360,14 +360,15 @@ where
 /// environment's application ports: `SetAppPorts` replaces the set in
 /// `app_ports`. `pod_uid` is this Pod's downward-API UID, which its binding
 /// was checked against; the platform managed service keeps this Pod's own
-/// request book under it.
+/// request book under it. `runtime_state` is the bound daemon's: ready, with
+/// what it wrote before serving and, in broker mode, its platform refusal.
 #[cfg(target_os = "linux")]
 pub async fn serve_bound_hosted_grpc_with_incoming<I, IO, IE, F>(
     config: Config,
     pod_uid: &str,
     codex_home: crate::codex_home::CodexHome,
     app_ports: crate::app_ports::AppPortsSender,
-    defaults: Option<crate::workspace_defaults::DefaultsOutcome>,
+    runtime_state: DaemonRuntimeState,
     incoming: I,
     shutdown: F,
 ) -> Result<()>
@@ -380,7 +381,7 @@ where
     let logins = HostedLogins::from_env(codex_home)?;
     serve(
         config,
-        DaemonRuntimeState::ready_with_defaults(defaults),
+        runtime_state,
         Some(logins),
         None,
         Some((app_ports, pod_uid)),

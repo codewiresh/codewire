@@ -10,6 +10,7 @@ use anyhow::{Context, ensure};
 use codewire_tailnet::conn::{Conn, Options, PeerPath};
 use codewire_tailnet::derp_transport::{
     DerpTarget, DerpTransport, connect_derp_transport, connect_derp_transport_absolute,
+    connect_derp_transport_platform,
 };
 use codewire_tailnet::direct_udp;
 use codewire_tailnet::disco::DiscoPrivate;
@@ -79,6 +80,44 @@ pub struct MemberTransportOptions {
     pub absolute_dns: bool,
 }
 
+/// A hosted egress daemon's Mesh member (#4000; `designs/hosted-egress.md`,
+/// "The daemon's platform path"): Mesh and the deployment's own DERP relay
+/// at configured addresses, every connection opened by `dial`, which binds
+/// it to the Pod's interface. Nothing is looked up, and the member is DERP
+/// only: its own direct UDP would leave by the egress TUN.
+#[derive(Clone)]
+pub struct MemberPlatform {
+    pub mesh: SocketAddr,
+    /// The DERP map hostname of the deployment's relay; no other node is
+    /// dialled.
+    pub derp_host: String,
+    pub derp: SocketAddr,
+    /// Roots the relay's certificate may chain to beside the WebPKI roots.
+    pub derp_extra_roots: codewire_tailnet::platform_dial::PlatformRoots,
+    pub dial: codewire_tailnet::platform_dial::TcpDial,
+}
+
+/// How a member reaches Mesh and DERP.
+#[derive(Clone, Copy)]
+enum MemberRoute<'a> {
+    /// By looking names up, under `options`.
+    LookedUp(MemberTransportOptions),
+    /// A hosted egress daemon's configured addresses.
+    Platform(&'a MemberPlatform),
+}
+
+impl MemberRoute<'_> {
+    fn options(self) -> MemberTransportOptions {
+        match self {
+            Self::LookedUp(options) => options,
+            Self::Platform(_) => MemberTransportOptions {
+                derp_only: true,
+                absolute_dns: true,
+            },
+        }
+    }
+}
+
 pub struct MemberTailnet {
     conn: Arc<Conn>,
     peers: watch::Receiver<Vec<Node>>,
@@ -135,7 +174,7 @@ impl MemberTailnet {
             network,
             Uuid::new_v4(),
             StaticSecret::random_from_rng(OsRng),
-            options,
+            MemberRoute::LookedUp(options),
             client.config().mesh_url().scheme() == "http"
                 && is_loopback(client.config().mesh_url()),
         )
@@ -152,9 +191,63 @@ impl MemberTailnet {
         secret: StaticSecret,
         options: MemberTransportOptions,
     ) -> anyhow::Result<Self> {
+        Self::peer_through(
+            origin,
+            enrollment,
+            org,
+            network,
+            environment_id,
+            secret,
+            MemberRoute::LookedUp(options),
+        )
+        .await
+    }
+
+    /// [`Self::peer`] for a hosted egress daemon, through `platform`.
+    pub async fn peer_on_platform(
+        origin: &str,
+        enrollment: &str,
+        org: &str,
+        network: &str,
+        environment_id: Uuid,
+        secret: StaticSecret,
+        platform: &MemberPlatform,
+    ) -> anyhow::Result<Self> {
+        Self::peer_through(
+            origin,
+            enrollment,
+            org,
+            network,
+            environment_id,
+            secret,
+            MemberRoute::Platform(platform),
+        )
+        .await
+    }
+
+    async fn peer_through(
+        origin: &str,
+        enrollment: &str,
+        org: &str,
+        network: &str,
+        environment_id: Uuid,
+        secret: StaticSecret,
+        route: MemberRoute<'_>,
+    ) -> anyhow::Result<Self> {
         let origin_url = url::Url::parse(origin).context("invalid member Mesh origin")?;
         let identity = MeshCoordinateIdentity::peer(org, network);
-        let coordinator = if options.absolute_dns {
+        let options = route.options();
+        let coordinator = if let MemberRoute::Platform(platform) = route {
+            MeshCoordinatorPeerSession::connect_platform_with_setup_timeout(
+                origin,
+                enrollment,
+                identity,
+                platform.mesh,
+                Arc::clone(&platform.dial),
+                SETUP_TIMEOUT,
+            )
+            .await
+        } else if options.absolute_dns {
             let host = origin_url
                 .host_str()
                 .context("member Mesh origin needs a host")?;
@@ -191,7 +284,7 @@ impl MemberTailnet {
             network,
             environment_id,
             secret,
-            options,
+            route,
             origin_url.scheme() == "http" && is_loopback(&origin_url),
         )
         .await
@@ -202,17 +295,36 @@ impl MemberTailnet {
         network: &str,
         id: Uuid,
         secret: StaticSecret,
-        options: MemberTransportOptions,
+        route: MemberRoute<'_>,
         local_fixture_origin: bool,
     ) -> anyhow::Result<Self> {
+        let options = route.options();
         let map = coordinator
             .take_setup_derp_map()
             .context("member DERP map missing")?;
-        let target = member_derp_target(&map, local_fixture_origin)?;
-        let fallback = if options.absolute_dns {
-            connect_derp_transport_absolute(&target, &secret).await
-        } else {
-            connect_derp_transport(&target, &secret).await
+        let fallback = match route {
+            MemberRoute::Platform(platform) => {
+                let target = crate::tailnet::derp_target_for_host(Some(&map), &platform.derp_host)
+                    .with_context(|| {
+                        format!("the member DERP map has no node {}", platform.derp_host)
+                    })?;
+                connect_derp_transport_platform(
+                    &target,
+                    platform.derp,
+                    Arc::clone(&platform.dial),
+                    platform.derp_extra_roots.clone(),
+                    &secret,
+                )
+                .await
+            }
+            MemberRoute::LookedUp(_) => {
+                let target = member_derp_target(&map, local_fixture_origin)?;
+                if options.absolute_dns {
+                    connect_derp_transport_absolute(&target, &secret).await
+                } else {
+                    connect_derp_transport(&target, &secret).await
+                }
+            }
         }
         .context("member TLS DERP connection failed")?;
         let disco = DiscoPrivate::generate(&mut OsRng);

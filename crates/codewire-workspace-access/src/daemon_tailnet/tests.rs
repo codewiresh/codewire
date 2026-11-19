@@ -916,3 +916,269 @@ async fn a_relay_client_after_four_other_clients_gets_its_relay_within_its_wait(
         "the relay client had no relay {wait:?} after it arrived; allocations reached orchestration at {calls:?} ms"
     );
 }
+
+/// A loopback proxy to `upstream`; `cut` ends every connection it carries,
+/// so a client must open a new one.
+async fn cuttable_proxy(upstream: SocketAddr) -> (SocketAddr, Arc<Notify>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let cut = Arc::new(Notify::new());
+    let cuts = Arc::clone(&cut);
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let cut = Arc::clone(&cuts);
+            tokio::spawn(async move {
+                let Ok(mut server) = tokio::net::TcpStream::connect(upstream).await else {
+                    return;
+                };
+                tokio::select! {
+                    _ = tokio::io::copy_bidirectional(&mut client, &mut server) => {}
+                    () = cut.notified() => {}
+                }
+            });
+        }
+    });
+    (address, cut)
+}
+
+/// A dial that records every address it is asked for.
+fn recording_dial() -> (
+    codewire_tailnet::platform_dial::TcpDial,
+    Arc<StdMutex<Vec<SocketAddr>>>,
+) {
+    let dialled = Arc::new(StdMutex::new(Vec::<SocketAddr>::new()));
+    let record = Arc::clone(&dialled);
+    let dial: codewire_tailnet::platform_dial::TcpDial = Arc::new(move |peer| {
+        record.lock().unwrap().push(peer);
+        Box::pin(tokio::net::TcpStream::connect(peer))
+    });
+    (dial, dialled)
+}
+
+// Names no resolver answers: a connection is made only without a lookup.
+const RELAY_HOST: &str = "derp.codewire.invalid";
+const OTHER_HOST: &str = "other.codewire.invalid";
+
+/// A test authority and a relay certificate it issued for `host`: the
+/// relay's server configuration, and the authority as a root to trust.
+fn relay_pki(
+    host: &str,
+) -> (
+    rustls::ServerConfig,
+    codewire_tailnet::platform_dial::CertificateDer<'static>,
+) {
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut ca = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::CrlSign,
+    ];
+    let ca = ca.self_signed(&ca_key).unwrap();
+    let leaf_key = rcgen::KeyPair::generate().unwrap();
+    let mut leaf = rcgen::CertificateParams::new(vec![host.to_owned()]).unwrap();
+    leaf.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+    let leaf = leaf.signed_by(&leaf_key, &ca, &ca_key).unwrap();
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![leaf.der().clone()],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(leaf_key.serialize_der().into()),
+        )
+        .unwrap();
+    (config, ca.der().clone())
+}
+
+/// An in-process DERP relay serving `tls`.
+async fn serve_relay(tls: rustls::ServerConfig) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let relay =
+        codewire_derp::Relay::new(codewire_tailnet::derp::NodePrivate::generate(&mut OsRng));
+    tokio::spawn(async move {
+        let _ = codewire_derp::serve_tls(listener, relay, tls).await;
+    });
+    address
+}
+
+#[tokio::test]
+async fn a_broker_daemon_dials_its_verified_relay_by_address_and_redials_there_after_a_drop() {
+    let (tls, root) = relay_pki(RELAY_HOST);
+    let relay = serve_relay(tls).await;
+    let (proxy, cut) = cuttable_proxy(relay).await;
+    let (dial, dialled) = recording_dial();
+    let platform = DaemonPlatform {
+        coordinator: "127.0.0.1:9".parse().unwrap(),
+        mesh: None,
+        derp_host: RELAY_HOST.to_owned(),
+        derp: proxy,
+        derp_extra_roots: vec![root],
+        dial,
+        refusal: Default::default(),
+    };
+    // The deployment's relay is not the map's first node, which is skipped.
+    let map = serde_json::json!({"Regions": {"1": {"Nodes": [
+        {"HostName": OTHER_HOST, "DERPPort": 443},
+        {"HostName": RELAY_HOST, "DERPPort": 443},
+    ]}}});
+    let grant = grant_for("https://coordinator.codewire.invalid");
+    let secret = StaticSecret::random_from_rng(OsRng);
+    let _transport = connect_derp(Some(&platform), Some(&map), &grant, &secret)
+        .await
+        .unwrap();
+    assert_eq!(*dialled.lock().unwrap(), [proxy]);
+
+    cut.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while dialled.lock().unwrap().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the transport redials after its relay connection drops");
+    assert!(dialled.lock().unwrap().iter().all(|peer| *peer == proxy));
+}
+
+#[tokio::test]
+async fn no_caller_reaches_a_platform_relay_unverified() {
+    // The Mesh member and the daemon reach the relay through this one call.
+    let (dial, dialled) = recording_dial();
+    let secret = StaticSecret::random_from_rng(OsRng);
+    for transport in [
+        DerpTransport::Tls { skip_verify: true },
+        DerpTransport::Plain,
+    ] {
+        let target = DerpTarget {
+            host: RELAY_HOST.to_owned(),
+            port: 443,
+            transport,
+        };
+        let refused = connect_derp_transport_platform(
+            &target,
+            "127.0.0.1:9".parse().unwrap(),
+            Arc::clone(&dial),
+            Vec::new(),
+            &secret,
+        )
+        .await;
+        assert!(refused.is_err());
+    }
+    assert!(dialled.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_daemon_outside_broker_mode_still_dials_a_node_marked_for_tests() {
+    // The non-broker path is unchanged: it looks the name up (here an
+    // address literal, which no resolver is asked about) and honours the
+    // map's InsecureForTests.
+    let relay = serve_relay(codewire_derp::self_signed_tls_config(&[]).unwrap()).await;
+    let map = serde_json::json!({"Regions": {"1": {"Nodes": [
+        {"HostName": "127.0.0.1", "DERPPort": relay.port(), "InsecureForTests": true},
+    ]}}});
+    let grant = grant_for("https://coordinator.codewire.invalid");
+    let secret = StaticSecret::random_from_rng(OsRng);
+    connect_derp(None, Some(&map), &grant, &secret)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_broker_daemon_dials_only_its_deployments_verified_relay() {
+    let (dial, dialled) = recording_dial();
+    let platform = DaemonPlatform {
+        coordinator: "127.0.0.1:9".parse().unwrap(),
+        mesh: None,
+        derp_host: RELAY_HOST.to_owned(),
+        derp: "127.0.0.1:9".parse().unwrap(),
+        derp_extra_roots: Vec::new(),
+        dial,
+        refusal: Default::default(),
+    };
+    let grant = grant_for("https://coordinator.codewire.invalid");
+    let refused = |map: serde_json::Value| {
+        let platform = platform.clone();
+        let grant = grant.clone();
+        let secret = StaticSecret::random_from_rng(OsRng);
+        async move {
+            let error = connect_derp(Some(&platform), Some(&map), &grant, &secret)
+                .await
+                .err()
+                .expect("refused");
+            let refusal = error
+                .downcast_ref::<BrokerRefusal>()
+                .expect("a typed refusal");
+            (refusal.class(), refusal.to_string())
+        }
+    };
+
+    // A map without the deployment's relay dials nothing.
+    let (class, message) = refused(serde_json::json!({"Regions": {"1": {"Nodes": [
+        {"HostName": OTHER_HOST, "DERPPort": 443},
+    ]}}}))
+    .await;
+    assert_eq!(class, "broker_no_deployment_relay");
+    assert!(message.contains(RELAY_HOST), "{message}");
+    // The relay is never dialled unverified, whatever the map says.
+    for node in [
+        serde_json::json!({"HostName": RELAY_HOST, "DERPPort": 443, "InsecureForTests": true}),
+        serde_json::json!({"HostName": RELAY_HOST, "DERPPort": 8443}),
+    ] {
+        let (class, _) = refused(serde_json::json!({"Regions": {"1": {"Nodes": [node]}}})).await;
+        assert_eq!(class, "broker_relay_unverified");
+    }
+    assert!(dialled.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_refusal_is_reported_and_backed_off_until_the_tailnet_comes_up() {
+    let (dial, _) = recording_dial();
+    let platform = DaemonPlatform {
+        coordinator: "127.0.0.1:9".parse().unwrap(),
+        mesh: None,
+        derp_host: RELAY_HOST.to_owned(),
+        derp: "127.0.0.1:9".parse().unwrap(),
+        derp_extra_roots: Vec::new(),
+        dial,
+        refusal: Default::default(),
+    };
+    let refusal = BrokerRefusal::EndpointNotLiteral("udp.codewire.invalid:31000".to_owned());
+    let mut pacing = RefusalPacing::default();
+    assert_eq!(pacing.wait(), COORDINATOR_RETRY_DELAY);
+    let mut waits = Vec::new();
+    for _ in 0..3 {
+        pacing.refused(&refusal, &platform);
+        waits.push(pacing.wait().as_secs());
+    }
+    // Backed off, capped at a minute, and shown in health meanwhile.
+    assert_eq!(waits, [30, 60, 60]);
+    assert_eq!(
+        platform.refusal.class(),
+        Some("broker_endpoint_not_literal")
+    );
+    // Any other failure retries at the ordinary pace.
+    pacing.failed();
+    assert_eq!(pacing.wait(), COORDINATOR_RETRY_DELAY);
+    pacing.refused(&refusal, &platform);
+    assert_eq!(pacing.wait().as_secs(), 30);
+    // The tailnet coming up clears both.
+    pacing.up(Some(&platform));
+    assert_eq!(pacing.wait(), COORDINATOR_RETRY_DELAY);
+    assert_eq!(platform.refusal.class(), None);
+}
+
+#[test]
+fn a_broker_daemons_direct_endpoints_are_literals_never_looked_up() {
+    let endpoint: SocketAddr = "203.0.113.7:31000".parse().unwrap();
+    assert_eq!(
+        literal_endpoints(&[
+            "203.0.113.7:31000".to_owned(),
+            "203.0.113.7:31000".to_owned()
+        ])
+        .unwrap(),
+        [endpoint]
+    );
+    for bad in ["udp.codewire.invalid:31000", "203.0.113.7", ""] {
+        let refusal = literal_endpoints(&[bad.to_owned()]).unwrap_err();
+        assert_eq!(refusal.class(), "broker_endpoint_not_literal", "{bad:?}");
+    }
+}

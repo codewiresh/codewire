@@ -5,7 +5,6 @@
 //! construction, auth injection, protocol selection, TLS, and retry/setup
 //! policy; `codewire-tailnet` remains the packet and node-mechanics crate.
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
@@ -20,7 +19,6 @@ use codewire_proto::codewire::internal::v1::{
     coordinate_response, mesh_coordinator_service_coordinate_request,
     mesh_coordinator_service_coordinate_response,
 };
-use codewire_tailnet::dns::absolute_dns_name;
 use codewire_tailnet::node::Node;
 use connectrpc::Protocol;
 use connectrpc::client::{
@@ -28,6 +26,9 @@ use connectrpc::client::{
 };
 use tokio::sync::mpsc;
 use uuid::Uuid;
+
+mod connect;
+use connect::*;
 
 const COORDINATOR_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 /// The coordinator pings every session every 15 s
@@ -87,25 +88,6 @@ impl CoordinatorWireProtocol {
         match self {
             Self::DirectConnect => Protocol::Connect,
             Self::PublicEdgeGrpc => Protocol::Grpc,
-        }
-    }
-}
-
-/// How a TLS dial looks up the coordinator URL's host. TLS verification and
-/// the HTTP authority use the host as configured either way.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HostLookup {
-    AsConfigured,
-    /// As an absolute DNS name, so no resolver search domain is tried
-    /// (#2701, see [`codewire_tailnet::dns`]).
-    Absolute,
-}
-
-impl HostLookup {
-    fn name(self, host: &str) -> Cow<'_, str> {
-        match self {
-            Self::AsConfigured => Cow::Borrowed(host),
-            Self::Absolute => absolute_dns_name(host),
         }
     }
 }
@@ -424,6 +406,49 @@ impl CoordinatorPeerSession {
         extra_roots: Vec<rustls_pki_types::CertificateDer<'static>>,
         setup_timeout: Duration,
     ) -> Result<Self, Error> {
+        Self::connect_public_edge_grpc_with_lookup(
+            url,
+            bearer_token,
+            identity,
+            extra_roots,
+            setup_timeout,
+            HostLookup::Absolute,
+        )
+        .await
+    }
+
+    /// [`Self::connect_public_edge_grpc_absolute`] for a hosted egress
+    /// daemon, which resolves no names (#4000): every connection goes to
+    /// `address` through `dial`, which binds it to the Pod's interface. TLS
+    /// verification and the HTTP authority keep the URL's host.
+    pub async fn connect_public_edge_grpc_platform(
+        url: &str,
+        bearer_token: &str,
+        identity: PrimaryCoordinateIdentity,
+        extra_roots: Vec<rustls_pki_types::CertificateDer<'static>>,
+        setup_timeout: Duration,
+        address: SocketAddr,
+        dial: codewire_tailnet::platform_dial::TcpDial,
+    ) -> Result<Self, Error> {
+        Self::connect_public_edge_grpc_with_lookup(
+            url,
+            bearer_token,
+            identity,
+            extra_roots,
+            setup_timeout,
+            HostLookup::Platform(address, dial),
+        )
+        .await
+    }
+
+    async fn connect_public_edge_grpc_with_lookup(
+        url: &str,
+        bearer_token: &str,
+        identity: PrimaryCoordinateIdentity,
+        extra_roots: Vec<rustls_pki_types::CertificateDer<'static>>,
+        setup_timeout: Duration,
+        lookup: HostLookup,
+    ) -> Result<Self, Error> {
         let mut roots = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
@@ -437,7 +462,7 @@ impl CoordinatorPeerSession {
             CoordinatorWireProtocol::PublicEdgeGrpc,
             Some(coordinator_tls_config_with_roots(roots)?),
             setup_timeout,
-            HostLookup::Absolute,
+            lookup,
         )
         .await
     }
@@ -522,13 +547,19 @@ impl CoordinatorPeerSession {
             .ok_or_else(|| Error::Url("coordinator URL must include a scheme".into()))?;
 
         let connection = match scheme {
+            // A plaintext connect looks the host up; a platform address never is.
+            "http" if matches!(lookup, HostLookup::Platform(..)) => {
+                return Err(Error::Url(
+                    "a platform coordinator address is reached over https only".into(),
+                ));
+            }
             "http" => http2_builder().connect_plaintext(base_uri.clone()).await?,
             "https" => {
                 let tls_config = tls_config.unwrap_or(coordinator_tls_config()?);
                 http2_builder()
                     .connect_with_connector(
                         tower::service_fn(move |uri| {
-                            connect_ring_tls(uri, Arc::clone(&tls_config), lookup)
+                            connect_ring_tls(uri, Arc::clone(&tls_config), lookup.clone())
                         }),
                         base_uri.clone(),
                     )
@@ -806,7 +837,14 @@ impl MeshCoordinatorPeerSession {
     ) -> Result<Self, Error> {
         tokio::time::timeout(
             setup_timeout,
-            Self::connect_inner(url, bearer_token, identity, None, None),
+            Self::connect_inner(
+                url,
+                bearer_token,
+                identity,
+                None,
+                None,
+                HostLookup::AsConfigured,
+            ),
         )
         .await
         .map_err(|_| Error::SetupTimeout(setup_timeout))?
@@ -828,7 +866,41 @@ impl MeshCoordinatorPeerSession {
         let addresses = validated_resolved_addresses(url, addresses)?;
         tokio::time::timeout(
             setup_timeout,
-            Self::connect_inner(url, bearer_token, identity, None, Some(addresses)),
+            Self::connect_inner(
+                url,
+                bearer_token,
+                identity,
+                None,
+                Some(addresses),
+                HostLookup::AsConfigured,
+            ),
+        )
+        .await
+        .map_err(|_| Error::SetupTimeout(setup_timeout))?
+    }
+
+    /// Connect for a hosted egress daemon, which resolves no names (#4000):
+    /// every connection goes to `address` through `dial`, which binds it to
+    /// the Pod's interface. TLS verification and the HTTP authority keep the
+    /// URL's host, which must be `https`.
+    pub async fn connect_platform_with_setup_timeout(
+        url: &str,
+        bearer_token: &str,
+        identity: MeshCoordinateIdentity,
+        address: SocketAddr,
+        dial: codewire_tailnet::platform_dial::TcpDial,
+        setup_timeout: Duration,
+    ) -> Result<Self, Error> {
+        tokio::time::timeout(
+            setup_timeout,
+            Self::connect_inner(
+                url,
+                bearer_token,
+                identity,
+                None,
+                None,
+                HostLookup::Platform(address, dial),
+            ),
         )
         .await
         .map_err(|_| Error::SetupTimeout(setup_timeout))?
@@ -845,7 +917,14 @@ impl MeshCoordinatorPeerSession {
         let tls_config = coordinator_tls_config_with_root(root_certificate_der)?;
         tokio::time::timeout(
             COORDINATOR_SETUP_TIMEOUT,
-            Self::connect_inner(url, bearer_token, identity, Some(tls_config), None),
+            Self::connect_inner(
+                url,
+                bearer_token,
+                identity,
+                Some(tls_config),
+                None,
+                HostLookup::AsConfigured,
+            ),
         )
         .await
         .map_err(|_| Error::SetupTimeout(COORDINATOR_SETUP_TIMEOUT))?
@@ -857,6 +936,7 @@ impl MeshCoordinatorPeerSession {
         identity: MeshCoordinateIdentity,
         tls_config: Option<Arc<rustls::ClientConfig>>,
         resolved_addresses: Option<Arc<[SocketAddr]>>,
+        lookup: HostLookup,
     ) -> Result<Self, Error> {
         let base_uri = coordinator_origin(url)?;
         let scheme = base_uri
@@ -864,6 +944,12 @@ impl MeshCoordinatorPeerSession {
             .ok_or_else(|| Error::Url("Mesh coordinator URL must include a scheme".into()))?;
 
         let (connection, protocol) = match scheme {
+            // A plaintext connect looks the host up; a platform address never is.
+            "http" if matches!(lookup, HostLookup::Platform(..)) => {
+                return Err(Error::Url(
+                    "a platform Mesh address is reached over https only".into(),
+                ));
+            }
             "http" => (
                 match resolved_addresses.clone() {
                     Some(addresses) => {
@@ -908,7 +994,7 @@ impl MeshCoordinatorPeerSession {
                                         connect_ring_tls(
                                             uri,
                                             Arc::clone(&tls_config),
-                                            HostLookup::AsConfigured,
+                                            lookup.clone(),
                                         )
                                     }),
                                     base_uri.clone(),
@@ -1175,174 +1261,6 @@ fn decode_derp_map(bytes: &[u8]) -> Result<serde_json::Value, Error> {
         return Err(Error::DerpMapTooLarge);
     }
     serde_json::from_slice(bytes).map_err(Error::from)
-}
-
-fn coordinator_tls_config() -> Result<Arc<rustls::ClientConfig>, Error> {
-    let roots = rustls::RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
-    coordinator_tls_config_with_roots(roots)
-}
-
-#[cfg(feature = "kind-e2e")]
-fn coordinator_tls_config_with_root(
-    root_certificate_der: Vec<u8>,
-) -> Result<Arc<rustls::ClientConfig>, Error> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots
-        .add(rustls_pki_types::CertificateDer::from(root_certificate_der))
-        .map_err(|error| Error::Url(format!("invalid KIND root certificate: {error}")))?;
-    coordinator_tls_config_with_roots(roots)
-}
-
-fn coordinator_tls_config_with_roots(
-    roots: rustls::RootCertStore,
-) -> Result<Arc<rustls::ClientConfig>, Error> {
-    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|error| Error::Url(format!("unsupported TLS protocol configuration: {error}")))?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    config.alpn_protocols = vec![b"h2".to_vec()];
-    Ok(Arc::new(config))
-}
-
-async fn connect_ring_tls(
-    uri: http::Uri,
-    config: Arc<rustls::ClientConfig>,
-    lookup: HostLookup,
-) -> Result<
-    hyper_util::rt::TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
-    io::Error,
-> {
-    let host = uri
-        .host()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "TLS URI has no host"))?
-        .to_owned();
-    let port = uri.port_u16().unwrap_or(443);
-    let tcp = tokio::net::TcpStream::connect((lookup.name(&host).as_ref(), port)).await?;
-    // The server name comes from the URI, never from the looked-up name.
-    finish_ring_tls(&uri, config, tcp).await
-}
-
-async fn connect_resolved_plain(
-    uri: http::Uri,
-    addresses: Arc<[SocketAddr]>,
-) -> Result<hyper_util::rt::TokioIo<tokio::net::TcpStream>, io::Error> {
-    ensure_resolved_connector_port(&uri, &addresses)?;
-    connect_resolved_tcp(&addresses)
-        .await
-        .map(hyper_util::rt::TokioIo::new)
-}
-
-async fn connect_ring_tls_resolved(
-    uri: http::Uri,
-    config: Arc<rustls::ClientConfig>,
-    addresses: Arc<[SocketAddr]>,
-) -> Result<
-    hyper_util::rt::TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
-    io::Error,
-> {
-    ensure_resolved_connector_port(&uri, &addresses)?;
-    let tcp = connect_resolved_tcp(&addresses).await?;
-    finish_ring_tls(&uri, config, tcp).await
-}
-
-async fn finish_ring_tls(
-    uri: &http::Uri,
-    config: Arc<rustls::ClientConfig>,
-    tcp: tokio::net::TcpStream,
-) -> Result<
-    hyper_util::rt::TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
-    io::Error,
-> {
-    let host = uri
-        .host()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "TLS URI has no host"))?
-        .to_owned();
-    let server_name = rustls_pki_types::ServerName::try_from(host.clone()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "TLS URI host is not a DNS name",
-        )
-    })?;
-    tcp.set_nodelay(true)?;
-    let tls = tokio_rustls::TlsConnector::from(config)
-        .connect(server_name, tcp)
-        .await
-        .map_err(io::Error::other)?;
-    if tls.get_ref().1.alpn_protocol() != Some(b"h2") {
-        return Err(io::Error::other(
-            "coordinator TLS peer did not negotiate HTTP/2",
-        ));
-    }
-    Ok(hyper_util::rt::TokioIo::new(tls))
-}
-
-async fn connect_resolved_tcp(addresses: &[SocketAddr]) -> io::Result<tokio::net::TcpStream> {
-    let mut last_error = None;
-    for address in addresses {
-        match tokio::net::TcpStream::connect(*address).await {
-            Ok(stream) => {
-                stream.set_nodelay(true)?;
-                return Ok(stream);
-            }
-            Err(error) => last_error = Some(error),
-        }
-    }
-    Err(last_error.unwrap_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "resolved coordinator address set is empty",
-        )
-    }))
-}
-
-fn validated_resolved_addresses(
-    url: &str,
-    addresses: Vec<SocketAddr>,
-) -> Result<Arc<[SocketAddr]>, Error> {
-    let uri = coordinator_origin(url)?;
-    let port = coordinator_port(&uri)?;
-    if addresses.is_empty() || addresses.len() > MAX_RESOLVED_COORDINATOR_ADDRESSES {
-        return Err(Error::Url(
-            "resolved coordinator address set is empty or exceeds its limit".into(),
-        ));
-    }
-    if addresses.iter().any(|address| {
-        address.port() != port || address.ip().is_unspecified() || address.ip().is_multicast()
-    }) {
-        return Err(Error::Url(
-            "resolved coordinator address does not match the configured authority".into(),
-        ));
-    }
-    let mut addresses = addresses;
-    addresses.sort_unstable();
-    addresses.dedup();
-    Ok(Arc::from(addresses))
-}
-
-fn ensure_resolved_connector_port(uri: &http::Uri, addresses: &[SocketAddr]) -> io::Result<()> {
-    let port = coordinator_port(uri).map_err(io::Error::other)?;
-    if addresses.is_empty() || addresses.iter().any(|address| address.port() != port) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "resolved coordinator address port mismatch",
-        ));
-    }
-    Ok(())
-}
-
-fn coordinator_port(uri: &http::Uri) -> Result<u16, Error> {
-    uri.port_u16()
-        .or_else(|| match uri.scheme_str() {
-            Some("http") => Some(80),
-            Some("https") => Some(443),
-            _ => None,
-        })
-        .ok_or_else(|| Error::Url("coordinator URL has no supported port".into()))
 }
 
 fn handle_response<P, D>(

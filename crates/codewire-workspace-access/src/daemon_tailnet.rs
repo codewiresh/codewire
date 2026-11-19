@@ -24,15 +24,15 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use codewire_client::{
     BearerToken, COORDINATOR_SETUP_TIMEOUT, CoordinatorError, CoordinatorHandlers,
-    CoordinatorPeerSession, PrimaryCoordinateIdentity, StunServer, derp_target_from_map,
-    resolve_stun_servers, stun_servers_from_map,
+    CoordinatorPeerSession, PrimaryCoordinateIdentity, StunServer, derp_target_for_host,
+    derp_target_from_map, resolve_stun_servers, stun_servers_from_map,
 };
 use codewire_daemon::access::WorkspaceAccessGrant;
 use codewire_daemon::app_ports::AppPorts;
 use codewire_daemon_proto::COORDINATOR_EXTRA_ROOTS_FILE;
 use codewire_tailnet::conn::{Conn, Options};
 use codewire_tailnet::derp_transport::{
-    DerpTarget, DerpTransport, connect_derp_transport_absolute,
+    DerpTarget, DerpTransport, connect_derp_transport_absolute, connect_derp_transport_platform,
 };
 use codewire_tailnet::direct_udp;
 use codewire_tailnet::disco::{DiscoPrivate, UDPRelayEndpoint};
@@ -53,9 +53,17 @@ use crate::daemon_access::{
     record_host_key_until_accepted,
 };
 use crate::peer_relay::{CallBudget, PeerRelayAllocator, PeerRelayBackend};
+use crate::platform::{BrokerRefusal, DaemonPlatform};
 
 /// Wait between coordinator connection attempts.
 pub const COORDINATOR_RETRY_DELAY: Duration = Duration::from_secs(5);
+/// A broker-mode refusal (a name where an address belongs, a map without
+/// the deployment's relay, an unverified relay) does not heal on its own;
+/// its retries back off from this to [`BROKER_REFUSAL_RETRY_MAX`], so a
+/// mis-rendered fleet does not refresh and redial every few seconds.
+const BROKER_REFUSAL_RETRY_INITIAL: Duration = Duration::from_secs(30);
+/// Capped at a minute, so a corrected render or map applies within one.
+const BROKER_REFUSAL_RETRY_MAX: Duration = Duration::from_secs(60);
 const REFRESH_RETRY_INITIAL: Duration = Duration::from_secs(1);
 const REFRESH_RETRY_MAX: Duration = Duration::from_secs(30);
 const HOST_KEY_RECORD_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
@@ -165,6 +173,9 @@ pub trait CoordinatorDialer: Send + Sync + 'static {
 /// the daemon dials, its host is looked up as an absolute DNS name (#2701).
 pub struct PublicCoordinator {
     extra_roots_file: Option<PathBuf>,
+    /// A broker-mode daemon's coordinator address and Pod-interface dial:
+    /// its URL's host is then never looked up.
+    platform: Option<(SocketAddr, codewire_tailnet::platform_dial::TcpDial)>,
 }
 
 impl PublicCoordinator {
@@ -176,6 +187,7 @@ impl PublicCoordinator {
     pub fn with_extra_roots_file(extra_roots_file: impl Into<PathBuf>) -> Self {
         Self {
             extra_roots_file: Some(extra_roots_file.into()),
+            platform: None,
         }
     }
 
@@ -184,7 +196,14 @@ impl PublicCoordinator {
     pub fn webpki_only() -> Self {
         Self {
             extra_roots_file: None,
+            platform: None,
         }
+    }
+
+    /// Reach the coordinator at the broker-mode daemon's configured address.
+    pub fn on_platform(mut self, platform: &DaemonPlatform) -> Self {
+        self.platform = Some((platform.coordinator, Arc::clone(&platform.dial)));
+        self
     }
 }
 
@@ -208,14 +227,31 @@ impl CoordinatorDialer for PublicCoordinator {
                 .unwrap_or_default(),
             None => Default::default(),
         };
-        CoordinatorPeerSession::connect_public_edge_grpc_absolute(
-            grant.coordinator_url(),
-            grant.peer_token().expose_secret(),
-            PrimaryCoordinateIdentity::sidecar(environment_id),
-            extra_roots,
-            COORDINATOR_SETUP_TIMEOUT,
-        )
-        .await
+        let identity = PrimaryCoordinateIdentity::sidecar(environment_id);
+        match &self.platform {
+            Some((address, dial)) => {
+                CoordinatorPeerSession::connect_public_edge_grpc_platform(
+                    grant.coordinator_url(),
+                    grant.peer_token().expose_secret(),
+                    identity,
+                    extra_roots,
+                    COORDINATOR_SETUP_TIMEOUT,
+                    *address,
+                    Arc::clone(dial),
+                )
+                .await
+            }
+            None => {
+                CoordinatorPeerSession::connect_public_edge_grpc_absolute(
+                    grant.coordinator_url(),
+                    grant.peer_token().expose_secret(),
+                    identity,
+                    extra_roots,
+                    COORDINATOR_SETUP_TIMEOUT,
+                )
+                .await
+            }
+        }
     }
 }
 
@@ -540,6 +576,9 @@ pub struct DaemonTailnetConfig {
     /// daemon's SSH and gRPC listeners; `codewire_daemon_proto::
     /// platform_listeners`). Port 22 is always SSH.
     pub reserved_ports: BTreeSet<u16>,
+    /// A broker-mode daemon's platform path: DERP at the deployment's own
+    /// relay, direct UDP endpoints taken as literals, and no STUN.
+    pub platform: Option<DaemonPlatform>,
 }
 
 /// Build the tailnet connection from the coordinator's DERP map (falling
@@ -553,30 +592,23 @@ pub async fn connect_daemon_tailnet(
     grant: &WorkspaceAccessGrant,
     plane: Arc<dyn AccessControlPlane>,
 ) -> Result<DaemonTailnet> {
-    let target = match derp_target_from_map(derp_map) {
-        Some(target) => target,
-        None => derp_target_from_origin(grant.coordinator_url())?,
-    };
-    tracing::info!(
-        derp_host = %target.host,
-        derp_port = target.port,
-        "workspace tailnet connecting DERP relay"
-    );
     let secret = StaticSecret::random_from_rng(OsRng);
-    let fallback = connect_derp_transport_absolute(&target, &secret)
-        .await
-        .context("connect DERP relay")?;
+    let fallback = connect_derp(config.platform.as_ref(), derp_map, grant, &secret).await?;
     let local_node_key = NodePublic::from_raw(PublicKey::from(&secret).to_bytes());
     let disco_private = DiscoPrivate::generate(&mut OsRng);
     let local_disco = disco_private.public();
-    let advertised = resolve_endpoints(grant.direct_udp_endpoints())
-        .await
-        .context("resolve the environment's direct UDP endpoints")?;
+    let advertised = match &config.platform {
+        Some(_) => literal_endpoints(grant.direct_udp_endpoints())?,
+        None => resolve_endpoints(grant.direct_udp_endpoints())
+            .await
+            .context("resolve the environment's direct UDP endpoints")?,
+    };
     // Peers reach a daemon directly at the endpoint the platform publishes
     // for it. Behind that endpoint a STUN answer could name only the node's
     // outbound NAT mapping, which admits replies from that STUN server and
     // nothing else, so STUN runs only for a daemon with no published endpoint.
-    let stun = if advertised.is_empty() {
+    // A broker-mode daemon runs none: its probes would leave by the TUN.
+    let stun = if advertised.is_empty() && config.platform.is_none() {
         let servers = stun_servers_from_map(derp_map)
             .into_iter()
             .map(|server| StunServer {
@@ -665,6 +697,130 @@ fn derp_target_from_origin(origin: &str) -> Result<DerpTarget> {
     })
 }
 
+/// The tailnet start loop's handling of a broker-mode refusal: what it
+/// reports, and how long the next attempt waits.
+#[derive(Default)]
+struct RefusalPacing {
+    /// Set while the last attempt ended in a refusal.
+    delay: Option<Duration>,
+}
+
+impl RefusalPacing {
+    fn wait(&self) -> Duration {
+        self.delay.unwrap_or(COORDINATOR_RETRY_DELAY)
+    }
+
+    /// Report `refusal` in the daemon's health and back off.
+    fn refused(&mut self, refusal: &BrokerRefusal, platform: &DaemonPlatform) {
+        self.delay = Some(
+            self.delay
+                .map_or(BROKER_REFUSAL_RETRY_INITIAL, |delay| delay * 2)
+                .min(BROKER_REFUSAL_RETRY_MAX),
+        );
+        tracing::error!(
+            class = refusal.class(),
+            error = %refusal,
+            "workspace tailnet refuses a platform input it would have to look up; retrying"
+        );
+        platform
+            .refusal
+            .refuse(refusal.class(), refusal.to_string());
+    }
+
+    /// Any other failure retries at the ordinary pace.
+    fn failed(&mut self) {
+        self.delay = None;
+    }
+
+    /// The tailnet is up: nothing is refused.
+    fn up(&mut self, platform: Option<&DaemonPlatform>) {
+        self.delay = None;
+        if let Some(platform) = platform {
+            platform.refusal.clear();
+        }
+    }
+}
+
+/// The tailnet's DERP relay: the map's first node, else DERP on the
+/// coordinator's origin. A broker-mode daemon dials only the deployment's own
+/// relay, at its configured address; with no map, DERP on the coordinator's
+/// origin at the coordinator's address.
+async fn connect_derp(
+    platform: Option<&DaemonPlatform>,
+    derp_map: Option<&serde_json::Value>,
+    grant: &WorkspaceAccessGrant,
+    secret: &StaticSecret,
+) -> Result<codewire_tailnet::conn::Transport> {
+    let Some(platform) = platform else {
+        let target = match derp_target_from_map(derp_map) {
+            Some(target) => target,
+            None => derp_target_from_origin(grant.coordinator_url())?,
+        };
+        tracing::info!(
+            derp_host = %target.host,
+            derp_port = target.port,
+            "workspace tailnet connecting DERP relay"
+        );
+        return connect_derp_transport_absolute(&target, secret)
+            .await
+            .context("connect DERP relay");
+    };
+    let (target, address) = match derp_map {
+        Some(map) => {
+            if let Some(first) = derp_target_from_map(Some(map))
+                && first.host != platform.derp_host
+            {
+                tracing::info!(
+                    derp_host = %first.host,
+                    "workspace tailnet skips a DERP node that is not the deployment's relay"
+                );
+            }
+            let target = derp_target_for_host(Some(map), &platform.derp_host)
+                .ok_or_else(|| BrokerRefusal::NoDeploymentRelay(platform.derp_host.clone()))?;
+            (target, platform.derp)
+        }
+        None => (
+            derp_target_from_origin(grant.coordinator_url())?,
+            platform.coordinator,
+        ),
+    };
+    // Whether the relay's certificate is verified must not hang on the
+    // coordinator's map: a node on another port, or marked for tests, is
+    // refused rather than dialled without verification.
+    if target.transport != (DerpTransport::Tls { skip_verify: false }) {
+        return Err(BrokerRefusal::UnverifiedRelay(target.host).into());
+    }
+    tracing::info!(
+        derp_host = %target.host,
+        derp_address = %address,
+        "workspace tailnet connecting DERP relay by the Pod interface"
+    );
+    connect_derp_transport_platform(
+        &target,
+        address,
+        Arc::clone(&platform.dial),
+        platform.derp_extra_roots.clone(),
+        secret,
+    )
+    .await
+    .context("connect DERP relay")
+}
+
+/// A broker-mode daemon's direct UDP endpoints: address literals only. A
+/// name is a rendering error, never looked up.
+fn literal_endpoints(endpoints: &[String]) -> Result<Vec<SocketAddr>, BrokerRefusal> {
+    let mut parsed = Vec::new();
+    for endpoint in endpoints {
+        let address: SocketAddr = endpoint
+            .parse()
+            .map_err(|_| BrokerRefusal::EndpointNotLiteral(endpoint.clone()))?;
+        if !parsed.contains(&address) {
+            parsed.push(address);
+        }
+    }
+    Ok(parsed)
+}
+
 async fn resolve_endpoints(endpoints: &[String]) -> Result<Vec<SocketAddr>> {
     let mut resolved = Vec::new();
     for endpoint in endpoints {
@@ -701,6 +857,7 @@ pub async fn run(
 ) -> Result<()> {
     let mut stop = shutdown.clone();
     let mut first_attempt = true;
+    let mut pacing = RefusalPacing::default();
     let (first, tailnet) = loop {
         if !first_attempt {
             if let Err(error) = grants.refresh().await {
@@ -708,7 +865,7 @@ pub async fn run(
             }
             tokio::select! {
                 _ = stop.changed() => return Ok(()),
-                () = tokio::time::sleep(COORDINATOR_RETRY_DELAY) => {}
+                () = tokio::time::sleep(pacing.wait()) => {}
             }
         }
         first_attempt = false;
@@ -718,6 +875,7 @@ pub async fn run(
             Ok(dialed) => dialed,
             Err(error) => {
                 tracing::warn!(error = %error, "workspace tailnet coordinator unavailable; retrying");
+                pacing.failed();
                 continue;
             }
         };
@@ -725,10 +883,20 @@ pub async fn run(
         match connect_daemon_tailnet(&config, derp_map.as_ref(), &grants.current(), plane.clone())
             .await
         {
-            Ok(tailnet) => break (dialed, Arc::new(tailnet)),
-            Err(error) => {
-                tracing::warn!(error = %format!("{error:#}"), "workspace tailnet unavailable; retrying");
+            Ok(tailnet) => {
+                pacing.up(config.platform.as_ref());
+                break (dialed, Arc::new(tailnet));
             }
+            Err(error) => match (error.downcast_ref::<BrokerRefusal>(), &config.platform) {
+                (Some(refusal), Some(platform)) => pacing.refused(refusal, platform),
+                _ => {
+                    tracing::warn!(
+                        error = %format!("{error:#}"),
+                        "workspace tailnet unavailable; retrying"
+                    );
+                    pacing.failed();
+                }
+            },
         }
     };
     let mut listener = tailnet

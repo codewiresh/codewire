@@ -52,6 +52,9 @@ pub mod derp_transport;
 /// Absolute lookups for the endpoint names a Sandbox daemon dials (#2701).
 pub mod dns;
 
+/// The dial a hosted egress daemon opens every platform connection with.
+pub mod platform_dial;
+
 /// UDP peer relay server/client primitives for #257.
 pub mod udp_relay;
 

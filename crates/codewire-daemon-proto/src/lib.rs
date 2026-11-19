@@ -57,6 +57,18 @@ pub const CLUSTER_DNS_IP_ENV: &str = "CODEWIRE_CLUSTER_DNS_IP";
 /// The binding Service's `address:port` for a hosted egress Pod, which
 /// resolves no names. The binding URL keeps the TLS name.
 pub const WORKSPACE_BINDING_ADDR_ENV: &str = "CODEWIRE_WORKSPACE_BINDING_ADDR";
+/// The public gateway's in-cluster `address:port` for a hosted egress Pod:
+/// the tailnet coordinator's address when [`COORDINATOR_ADDR_ENV`] is unset,
+/// as the coordinator URL falls back to the API URL.
+pub const API_ADDR_ENV: &str = "CODEWIRE_API_ADDR";
+/// The tailnet coordinator's in-cluster `address:port`, when it is not the
+/// API's. Its URL, from the access grant, keeps the TLS name.
+pub const COORDINATOR_ADDR_ENV: &str = "CODEWIRE_COORDINATOR_ADDR";
+/// Mesh's in-cluster `address:port`, rendered only with a Mesh URL.
+pub const MESH_ADDR_ENV: &str = "CODEWIRE_MESH_ADDR";
+/// The deployment's own DERP relay as `hostname=address:port`: the DERP map
+/// node with that hostname is dialled at that address, under that name.
+pub const DERP_ADDR_ENV: &str = "CODEWIRE_DERP_ADDR";
 /// Where a hosted egress daemon installs the egress trust before it serves:
 /// the interception CA, or a comment-only file for none (#4001). The
 /// broker-mode Pod template points `NODE_EXTRA_CA_CERTS` here.
@@ -679,6 +691,10 @@ mod tests {
             WORKSPACE_BINDING_ADDR_ENV,
             "CODEWIRE_WORKSPACE_BINDING_ADDR"
         );
+        assert_eq!(API_ADDR_ENV, "CODEWIRE_API_ADDR");
+        assert_eq!(COORDINATOR_ADDR_ENV, "CODEWIRE_COORDINATOR_ADDR");
+        assert_eq!(MESH_ADDR_ENV, "CODEWIRE_MESH_ADDR");
+        assert_eq!(DERP_ADDR_ENV, "CODEWIRE_DERP_ADDR");
         assert_eq!(
             HOSTED_EGRESS_TRUST_CA_PATH,
             "/codewire/run/egress-trust/ca.pem"

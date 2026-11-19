@@ -1285,6 +1285,23 @@ pub struct StunServer {
 
 /// The first DERP relay node of a coordinator DERP map, in region order.
 pub fn derp_target_from_map(map: Option<&Value>) -> Option<DerpTarget> {
+    find_derp_target(map, |_| true)
+}
+
+/// The DERP map's node named `host`, for a hosted egress daemon, which dials
+/// only the deployment's own relay (#4000; `designs/hosted-egress.md`, "The
+/// daemon's platform path"). Every other node is skipped, never looked up.
+pub fn derp_target_for_host(map: Option<&Value>, host: &str) -> Option<DerpTarget> {
+    find_derp_target(map, |target| target.host == host)
+}
+
+/// The first DERP node, in region order, that `accept` takes. STUN-only and
+/// blank-named nodes are skipped; a region without nodes, or a node without
+/// a hostname, reached before one is taken ends the search with none.
+fn find_derp_target(
+    map: Option<&Value>,
+    accept: impl Fn(&DerpTarget) -> bool,
+) -> Option<DerpTarget> {
     let regions = map?.get("Regions")?.as_object()?;
     let mut region_keys = regions.keys().collect::<Vec<_>>();
     region_keys.sort();
@@ -1312,13 +1329,16 @@ pub fn derp_target_from_map(map: Option<&Value>) -> Option<DerpTarget> {
                 .get("InsecureForTests")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            return Some(DerpTarget {
+            let target = DerpTarget {
                 host: host.to_string(),
                 port,
                 transport: DerpTransport::Tls {
                     skip_verify: insecure || port != 443,
                 },
-            });
+            };
+            if accept(&target) {
+                return Some(target);
+            }
         }
     }
     None

@@ -35,7 +35,7 @@ async fn main() {
 #[cfg(target_os = "linux")]
 mod linux {
     use anyhow::{Context as _, anyhow};
-    use codewire_cli::hosted_egress::{EgressSettings, LoggedEvents, spawn};
+    use codewire_cli::hosted_egress::{EgressSettings, LoggedEvents, prove_pod_interface, spawn};
     use codewire_daemon_proto::WORKSPACE_POD_UID_ENV;
     use codewire_network_session::EgressTrust;
     use codewire_network_session::guest::hosted::{EgressEvents, RoundEnd};
@@ -46,8 +46,9 @@ mod linux {
     pub(super) async fn run() -> anyhow::Result<()> {
         let pod_uid = std::env::var(WORKSPACE_POD_UID_ENV)
             .with_context(|| format!("{WORKSPACE_POD_UID_ENV} is required"))?;
-        let settings = EgressSettings::from_lookup(&pod_uid, |name| std::env::var(name).ok())?
+        let settings = EgressSettings::from_env(&pod_uid)?
             .ok_or_else(|| anyhow!("no egress stream address is set"))?;
+        prove_pod_interface()?;
         spawn(
             settings,
             FixtureEvents {

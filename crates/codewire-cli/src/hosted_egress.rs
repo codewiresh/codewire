@@ -10,9 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow};
-use codewire_daemon_proto::{
-    CLUSTER_DNS_IP_ENV, EGRESS_STREAM_ADDR_ENV, EGRESS_TOKEN_PATH, WORKSPACE_BINDING_ADDR_ENV,
-};
+use codewire_daemon_proto::{CLUSTER_DNS_IP_ENV, EGRESS_TOKEN_PATH};
 use codewire_network_session::guest::hosted::{
     EgressEvents, HostedEgressConfig, PodConnector, RoundEnd, run,
 };
@@ -22,6 +20,9 @@ use codewire_network_session::{EgressTrust, SelfCheck, SelfCheckFailure};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::oneshot;
 use uuid::Uuid;
+
+mod derp_roots;
+pub(crate) use derp_roots::derp_extra_roots;
 
 /// What the Pod template gives a broker-mode daemon: the Pod's egress and the
 /// address it reaches the binding at.
@@ -37,62 +38,80 @@ pub struct EgressSettings {
 }
 
 impl EgressSettings {
-    /// None when the template rendered no egress stream: the Pod is not in
-    /// broker mode. In broker mode a missing or malformed address, or a Pod
-    /// UID that does not parse, refuses to start and names its variable:
-    /// nothing falls back to a looked-up name over the TUN.
-    pub fn from_lookup(
+    /// A broker-mode daemon's egress, from the platform addresses parsed at
+    /// start (`codewire_daemon::BrokerPlatform`), the one parse of broker
+    /// mode.
+    pub fn from_broker(
+        broker: &codewire_daemon::BrokerPlatform,
         pod_uid: &str,
         lookup: impl Fn(&str) -> Option<String>,
-    ) -> anyhow::Result<Option<Self>> {
-        let Some(stream_addr) = lookup(EGRESS_STREAM_ADDR_ENV) else {
-            return Ok(None);
-        };
-        let stream_addr = ipv4_address(EGRESS_STREAM_ADDR_ENV, &stream_addr)?;
-        let binding_addr = lookup(WORKSPACE_BINDING_ADDR_ENV).with_context(|| {
-            format!("{WORKSPACE_BINDING_ADDR_ENV} is required with {EGRESS_STREAM_ADDR_ENV}")
-        })?;
-        let binding_addr = ipv4_address(WORKSPACE_BINDING_ADDR_ENV, &binding_addr)?;
+    ) -> anyhow::Result<Self> {
         let pod_uid = pod_uid.parse().context("the bound Pod UID is not a UUID")?;
         let cluster_dns = lookup(CLUSTER_DNS_IP_ENV).and_then(|value| value.trim().parse().ok());
-        Ok(Some(Self {
-            stream_addr,
-            binding_addr,
+        Ok(Self {
+            stream_addr: broker.stream(),
+            binding_addr: broker.binding(),
             pod_uid,
             cluster_dns,
-        }))
+        })
     }
 
-    /// The binding's address and the Pod-interface dial, after proving a
-    /// platform connection can be bound to the Pod interface.
-    pub(crate) fn binding_route(&self) -> anyhow::Result<(SocketAddr, codewire_tls::PeerDial)> {
-        prove_pod_interface()?;
-        let dial: codewire_tls::PeerDial = Arc::new(|peer| {
-            Box::pin(async move {
-                match peer {
-                    SocketAddr::V4(peer) => pod_interface::connect_tcp(peer).await,
-                    SocketAddr::V6(_) => Err(std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        "the Pod interface carries IPv4 platform connections only",
-                    )),
-                }
-            })
-        });
-        Ok((self.binding_addr.into(), dial))
+    /// For the hosted guest fixture, which has no daemon configuration: the
+    /// same one parse of broker mode, over the process environment. None
+    /// outside broker mode.
+    pub fn from_env(pod_uid: &str) -> anyhow::Result<Option<Self>> {
+        codewire_daemon::BrokerPlatform::from_env()?
+            .map(|broker| Self::from_broker(&broker, pod_uid, |name| std::env::var(name).ok()))
+            .transpose()
+    }
+
+    /// The binding's address and the Pod-interface dial.
+    pub(crate) fn binding_route(&self) -> (SocketAddr, codewire_tls::PeerDial) {
+        (self.binding_addr.into(), pod_dial())
     }
 }
 
-fn ipv4_address(name: &str, value: &str) -> anyhow::Result<SocketAddrV4> {
-    value
-        .trim()
-        .parse()
-        .with_context(|| format!("{name} is not an IPv4 address and port"))
+/// A broker-mode daemon's tailnet and Mesh platform path (#4000): the
+/// coordinator, Mesh and the deployment's DERP relay at their configured
+/// addresses, by the same Pod-interface dial as the binding. `refusal` is
+/// where the tailnet reports a platform input it refuses, for GetHealth.
+pub(crate) fn daemon_platform(
+    broker: &codewire_daemon::BrokerPlatform,
+    refusal: codewire_daemon::platform_refusal::PlatformRefusal,
+    derp_extra_roots: codewire_tailnet::platform_dial::PlatformRoots,
+) -> codewire_workspace_access::platform::DaemonPlatform {
+    codewire_workspace_access::platform::DaemonPlatform {
+        coordinator: broker.coordinator().into(),
+        mesh: broker.mesh().map(SocketAddr::from),
+        derp_host: broker.derp().host().to_owned(),
+        derp: broker.derp().address().into(),
+        derp_extra_roots,
+        dial: pod_dial(),
+        refusal,
+    }
 }
 
-/// A platform connection can be bound to the Pod interface as this uid. A
-/// refused bind fails the daemon closed at start, rather than leaving every
-/// platform connection to fail later.
-fn prove_pod_interface() -> anyhow::Result<()> {
+/// Every platform connection's dial: an IPv4 socket bound to the Pod's
+/// interface. The same type as `codewire_tailnet::platform_dial::TcpDial`.
+fn pod_dial() -> codewire_tls::PeerDial {
+    Arc::new(|peer| {
+        Box::pin(async move {
+            match peer {
+                SocketAddr::V4(peer) => pod_interface::connect_tcp(peer).await,
+                SocketAddr::V6(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "the Pod interface carries IPv4 platform connections only",
+                )),
+            }
+        })
+    })
+}
+
+/// A platform connection can be bound to the Pod interface as this uid.
+/// Called once at a broker-mode start, before any platform dial: a refused
+/// bind fails the start, rather than leaving every platform connection to
+/// fail later.
+pub fn prove_pod_interface() -> anyhow::Result<()> {
     drop(pod_interface::tcp_socket()?);
     Ok(())
 }
@@ -117,7 +136,6 @@ pub fn spawn<E>(settings: EgressSettings, mut events: E) -> anyhow::Result<()>
 where
     E: EgressEvents + Send + 'static,
 {
-    prove_pod_interface()?;
     let tun = codewire_vmm_guest_probe::tun::open(HOSTED_TUN_NAME)
         .map_err(|error| anyhow!("attach the egress TUN {HOSTED_TUN_NAME}: {error}"))?;
     #[allow(deprecated)]
@@ -318,48 +336,51 @@ impl<R: PartialEq> RoundLog<R> {
 mod tests {
     use std::collections::HashMap;
 
+    use codewire_daemon_proto::{
+        API_ADDR_ENV, DERP_ADDR_ENV, EGRESS_STREAM_ADDR_ENV, WORKSPACE_BINDING_ADDR_ENV,
+    };
+
     use super::*;
 
     const POD: &str = "01234567-89ab-4def-8123-456789abcdef";
 
-    fn settings(pod_uid: &str, values: &[(&str, &str)]) -> anyhow::Result<Option<EgressSettings>> {
-        let values: HashMap<String, String> = values
-            .iter()
-            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-            .collect();
-        EgressSettings::from_lookup(pod_uid, |key| values.get(key).cloned())
+    /// A broker Pod's rendering, `values` added.
+    fn settings(pod_uid: &str, values: &[(&str, &str)]) -> anyhow::Result<EgressSettings> {
+        let values: HashMap<String, String> = [
+            (EGRESS_STREAM_ADDR_ENV, "10.0.0.7:8089"),
+            (WORKSPACE_BINDING_ADDR_ENV, "10.96.0.20:8087"),
+            (API_ADDR_ENV, "10.96.0.30:443"),
+            (DERP_ADDR_ENV, "derp.codewire.invalid=10.96.0.40:8443"),
+        ]
+        .iter()
+        .chain(values)
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+        let broker = codewire_daemon::BrokerPlatform::from_lookup(&|key| {
+            values.get(key).map(std::ffi::OsString::from)
+        })?
+        .expect("a rendered stream address is broker mode");
+        EgressSettings::from_broker(&broker, pod_uid, |key| values.get(key).cloned())
     }
 
-    const STREAM: (&str, &str) = (EGRESS_STREAM_ADDR_ENV, "10.0.0.7:8089");
-    const BINDING: (&str, &str) = (WORKSPACE_BINDING_ADDR_ENV, "10.96.0.20:8087");
-
     #[test]
-    fn no_stream_address_is_not_broker_mode() {
-        assert_eq!(settings(POD, &[]).unwrap(), None);
-        // Without a stream, a binding address alone changes nothing.
-        assert_eq!(settings(POD, &[BINDING]).unwrap(), None);
-    }
-
-    #[test]
-    fn the_template_values_parse_and_a_bad_dns_address_fails_closed() {
-        let parsed = settings(POD, &[STREAM, BINDING, (CLUSTER_DNS_IP_ENV, "10.96.0.10")])
-            .unwrap()
-            .unwrap();
+    fn the_broker_values_parse_and_a_bad_dns_address_fails_closed() {
+        let parsed = settings(POD, &[(CLUSTER_DNS_IP_ENV, "10.96.0.10")]).unwrap();
         assert_eq!(parsed.stream_addr, "10.0.0.7:8089".parse().unwrap());
         assert_eq!(parsed.binding_addr, "10.96.0.20:8087".parse().unwrap());
         assert_eq!(parsed.pod_uid, POD.parse::<Uuid>().unwrap());
         assert_eq!(parsed.cluster_dns, Some(Ipv4Addr::new(10, 96, 0, 10)));
         for dns in [None, Some("kube-dns"), Some("10.96.0.10:53")] {
-            let mut values = vec![STREAM, BINDING];
-            if let Some(dns) = dns {
-                values.push((CLUSTER_DNS_IP_ENV, dns));
-            }
-            assert_eq!(
-                settings(POD, &values).unwrap().unwrap().cluster_dns,
-                None,
-                "{dns:?}"
-            );
+            let values: Vec<(&str, &str)> = dns
+                .map(|dns| (CLUSTER_DNS_IP_ENV, dns))
+                .into_iter()
+                .collect();
+            assert_eq!(settings(POD, &values).unwrap().cluster_dns, None, "{dns:?}");
         }
+        assert!(
+            settings("pod", &[]).is_err(),
+            "a Pod UID that is not a UUID"
+        );
     }
 
     #[tokio::test]
@@ -446,49 +467,5 @@ mod tests {
         // The same reason again after a minute.
         assert_eq!(log.admit("dns", at(75)), Some(1));
         assert_eq!(log.admit("dns", at(80)), None);
-    }
-
-    #[test]
-    fn in_broker_mode_a_missing_blank_or_malformed_value_refuses_to_start() {
-        let refused = |values: &[(&str, &str)], pod_uid: &str, names: &str| {
-            let error = settings(pod_uid, values).unwrap_err();
-            assert!(format!("{error:#}").contains(names), "{error:#}");
-        };
-        // A blank stream address is malformed, not "egress off".
-        refused(
-            &[(EGRESS_STREAM_ADDR_ENV, " "), BINDING],
-            POD,
-            EGRESS_STREAM_ADDR_ENV,
-        );
-        refused(
-            &[(EGRESS_STREAM_ADDR_ENV, "codewire-egress:8089"), BINDING],
-            POD,
-            EGRESS_STREAM_ADDR_ENV,
-        );
-        // The Pod interface carries IPv4 only.
-        refused(
-            &[(EGRESS_STREAM_ADDR_ENV, "[fd00::7]:8089"), BINDING],
-            POD,
-            EGRESS_STREAM_ADDR_ENV,
-        );
-        // The binding is never looked up by name over the TUN.
-        refused(&[STREAM], POD, WORKSPACE_BINDING_ADDR_ENV);
-        refused(
-            &[STREAM, (WORKSPACE_BINDING_ADDR_ENV, "")],
-            POD,
-            WORKSPACE_BINDING_ADDR_ENV,
-        );
-        refused(
-            &[
-                STREAM,
-                (
-                    WORKSPACE_BINDING_ADDR_ENV,
-                    "codewire-orchestration-workspace-binding:8087",
-                ),
-            ],
-            POD,
-            WORKSPACE_BINDING_ADDR_ENV,
-        );
-        refused(&[STREAM, BINDING], "pod", "Pod UID");
     }
 }
