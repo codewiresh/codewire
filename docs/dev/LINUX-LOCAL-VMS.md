@@ -656,6 +656,46 @@ VM credentials smoke (#5220). Never script or loop calls to your own Secret
 Service: a loop of short D-Bus reads has crashed a desktop keyring daemon
 (#5256).
 
+## Limits inside a VM
+
+### Processes
+
+Everything a VM's workspace runs shares one ceiling of 4,096 processes and
+threads: the workspace's own processes and sessions, dockerd, and every
+Docker container, however they are nested (#5384). Codewire's own services
+in the guest (its init, the daemon and the network agent) are outside it, so
+a workload that hits the ceiling cannot starve them. Docker containers
+together may hold at most 1,536 of the 4,096, so a container that forks
+without end leaves the workspace room to stop it.
+
+- A program that forks past a ceiling gets `EAGAIN` ("Resource temporarily
+  unavailable") and keeps running. The VM stays `running`, `cw` still reaches
+  it, and the workspace disk is untouched.
+- A container at Docker's ceiling is stopped from the workspace as usual:
+  `cw exec --in NAME -- docker kill CONTAINER`.
+- While the whole workload is at its ceiling, which a program in the
+  workspace itself can reach, nothing new can start in it. That includes a
+  `cw exec` or a new shell: they fail at once, saying that no process could
+  be started, not with a timeout or a lost VM. They work again once
+  processes end, and `cw --local restart NAME` clears it at once.
+- The guest counts each refusal in the workload's `pids.events` files. The
+  workspace does not see them; a privileged container that mounts the
+  guest's cgroup hierarchy can read them, which is how the journey checks
+  the count.
+
+The ceilings are a guard against a program that runs away, not a boundary
+against the VM's own user: whoever can run a privileged container in the VM
+can change the guest's cgroups. They are the same for every VM size and on
+Linux and macOS hosts, and the numbers are provisional until the headroom is
+measured; an idle workload with one container holds about 50.
+
+**Not yet built** (#5384). Today nothing bounds the workload's processes: on
+v0.4.22, in a 2 vCPU, 4 GiB VM, a program that forked sleeping children had
+about 6,400 alive when `cw exec` stopped answering, and the VM turned `error`
+(`guest_shutdown`). `cw --local restart` recovered it and the workspace
+survived. The journey step is `local-vm-fork-burst` in
+`docs/journeys/local-vm-limits.md`.
+
 ## Troubleshooting
 
 **`this host cannot run local VMs yet`**: fix each listed item, then rerun the
