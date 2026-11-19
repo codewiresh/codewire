@@ -1290,11 +1290,32 @@ Issue: #3999.
 
 Issue: #4001. This step adds what only the hosted placement has to prove;
 `agent-claude`, `agent-codex`, `agent-own-key` and `agent-fail-closed` are
-walked on a hosted Sandbox as well.
+walked on a hosted Sandbox as well. The spec is "Hosted interception" in
+[SECRETS-AND-CREDENTIALS.md](../dev/SECRETS-AND-CREDENTIALS.md).
+
+**Done when** (owner, 2026-11-19, #4001): every connected agent credential
+goes through the proxy in a cloud Sandbox on Dev, with the switch on, and no
+real token is inside the Sandbox. Each row below is walked on Dev:
+
+| Credential | Walked by | Proof inside the Sandbox |
+| --- | --- | --- |
+| Claude sign-in | a `claude -p` turn, then `/usage` and the plan display | the turn answers, `/usage` and the plan show; the login file's tokens are `sk-ant-oat01-cwp1_…` placeholders |
+| Claude subscription token | a `claude -p` turn | `CLAUDE_CODE_OAUTH_TOKEN` is an `sk-ant-oat01-cwp1_…` placeholder |
+| Anthropic API key | a `claude -p` turn | `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` is a placeholder in its placement's prefix |
+| Codex sign-in | a `codex exec` task, with account routing | `~/.codex/auth.json` holds placeholders in Codex's JWT shape |
+| OpenAI API key | a `codex exec` task on the key | the key's variable is a placeholder |
+| GitHub | `git clone` and `git push` over HTTPS, and `gh api user` | `git credential fill` and `gh auth token` give a placeholder or nothing |
+
+For each, the Sandbox's volume, environment, login files and process
+arguments hold no real token, and the hosted sign-in exception is not used
+(#4002). Not yet observed.
 
 - **Entry points:** none for a user. Interception is a deployment setting
   for hosted Sandboxes (#4001).
 - **States to exercise:**
+  - each credential in the table above, one Sandbox per credential form or
+    one Sandbox selecting them all;
+  - the switch off: the same Sandbox behaves exactly as today;
   - two Sandboxes of different users on one node, each with a Claude
     credential;
   - one Sandbox's front door session opened with another Sandbox's token;
@@ -1308,6 +1329,11 @@ walked on a hosted Sandbox as well.
     life.
 - **Driving it:** no command yet (#4001).
 - **Proof:**
+  - each row of the table above holds;
+  - a Sandbox's front door delivers no real Claude or Codex login: an epoch
+    that serves the front door delivers placeholder logins or none;
+  - with the switch off, the Sandbox's logins, variables and requests are
+    exactly today's;
   - a front door session for one Sandbox is refused another Sandbox's
     token, and no request of one Sandbox is ever served with the other's
     credential;

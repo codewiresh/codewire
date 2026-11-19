@@ -1884,6 +1884,60 @@ routes, across epochs as well. It does so as follows:
   the bridge's frame limit, an envelope that can't be parsed, or a second
   `Ready`, which has no id to answer. Every other refusal is per id.
 
+### Hosted interception (not yet built, #4001)
+
+With hosted interception on, a hosted Sandbox's agent credentials go through
+the proxy as a local VM's do with its front door, and the Sandbox holds no
+real token (owner, 2026-11-19, #4001). It is a deployment switch,
+`CODEWIRE_HOSTED_INTERCEPTION_ENABLED` on orchestration, off by default, and it
+takes effect at a Sandbox's next start, never during its life.
+
+- **The path.** The Sandbox's egress broker in `cw-egress` sends each agent
+  host on 443 to the Sandbox's front door. The front door decrypts with a leaf
+  of the Pod's interception CA (below) and hands the request, holding only
+  the placeholder, through orchestration's credential relay to the
+  credential service as a front-door session joined to the Sandbox's
+  admitted epoch. The credential service checks authority, swaps in the real
+  token, redacts the reply and refreshes, exactly as a local broker does.
+  `cw-egress` holds certificates and no credential, and a front door never
+  acts for another Sandbox.
+- **Every connected agent credential.** The Claude sign-in, with `/usage` and
+  the plan display working; a Claude subscription token; an Anthropic API
+  key; the Codex sign-in, with Codex's account routing; an OpenAI API key;
+  and GitHub (the App login and a personal access token), for Git over HTTPS
+  and `gh`. A credential the Sandbox's profile does not select is not bound.
+- **Placeholders, in the local shape.** Each placement carries a
+  per-environment placeholder derived as above, under a key the credential
+  service holds for that environment (#5017), never stored. It keeps its
+  form's provider prefix (#5159): `sk-ant-oat01-cwp1_` and 43 base64url
+  characters in Claude Code's login file, `CLAUDE_CODE_OAUTH_TOKEN` and
+  `ANTHROPIC_AUTH_TOKEN`; `sk-ant-api03-cwp1_` and 43 in `ANTHROPIC_API_KEY`.
+  Codex's login keeps its unsigned JWT shape, and GitHub its own grammar
+  (#5149). A placeholder is recognised by its whole value's length and
+  charset, never by a prefix, and one sent outside the route table is
+  refused, never forwarded.
+- **Delivery follows the front door.** A hosted epoch that serves the
+  Sandbox's front door delivers Claude and Codex logins with placeholders
+  only, or refuses them; it never delivers a real login beside a front door,
+  and an epoch that would is refused at admission. A Sandbox whose binding
+  turns interception on has its earlier real login file removed.
+- **The sign-in exception ends.** With the switch on, the two hosted rows of
+  [Direct delivery exceptions](#direct-delivery-exceptions) no longer apply:
+  no real Codex or Claude sign-in token is written into the Sandbox (#4002).
+- **Off is today.** With the switch off, every hosted path is exactly as
+  before.
+
+**Not yet built.** Merged: the front-door stream joining an admitted epoch
+(#4934), `EgressService.FrontDoorSession` (#4906, answering `UNIMPLEMENTED`),
+and the per-Pod CA (#5051). Open: the placeholder keys and their failed-read
+refusal (#5017, #5087), the bindings and the switch (#5013, #5023), the relay
+session and its router (#5021, #5439, #5056), the CA's ensure, leaf signing
+and sweep (#5170, #5071), and the idle end (#5125). Then the gates on the
+switch: a destroyed environment's key deleted, delivery following the front
+door, one per-client host selection for local and hosted, and `cw-egress`
+reopening an ended session. The journey is `agent-hosted` in
+`docs/journeys/network-and-egress.md`.
+
 ### Hosted interception CA (not yet served)
 
 With hosted interception on (#4001), each Sandbox Pod has one interception
