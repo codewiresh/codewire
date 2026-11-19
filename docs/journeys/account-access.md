@@ -9,7 +9,7 @@ The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-17.
+Updated 2026-11-18.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -59,32 +59,40 @@ Issue: #3586, its first step (cw-security, 2026-11-16).
     answered `401`;
   - asking with an API key answered `permission_denied`.
 
-  The `101` of a full handshake is not yet observed: that cluster's
-  manifests were older than main's and ran no Sandbox.
+  On 2026-11-18, on a Kind cluster brought up from main 4199fd0f6 with a
+  running Sandbox, a live session's ticket opened the terminal WebSocket
+  (`101`), and the same ticket used again was refused.
 
 ## `access-streams`: a stream already open when its authority is lost
 
 Issue: #3586, its second step (cw-security, 2026-11-16). The dashboard's
 terminal and the SSH proxy follow in the next step.
 
-- **Entry points:** `cw shell` (an attached session) and `cw exec`, signed in
-  with an OAuth token from `cw login` or an API key in `CODEWIRE_API_KEY`.
+- **Entry points:** streams through the API, signed in with an OAuth token
+  from `cw login` or an API key: `cw shell` with
+  `CW_SSH_TRANSPORT=websocket`, which skips the tailnet and attaches through
+  the API's `AttachSession` stream, and `StreamExec`, the API's exec, as an
+  SDK calls it. By default `cw shell` and `cw exec` reach a hosted Sandbox
+  over its tailnet instead, which this step does not fence (see Gotchas).
 - **States to exercise:**
-  - the OAuth token behind a `cw shell` is revoked: that shell ends, and a
-    `cw shell` signed in on another machine keeps running;
-  - the API key behind a `cw exec` is disabled: that exec ends;
+  - the OAuth token behind a shell is revoked: that shell ends, and a shell
+    signed in on another machine keeps running;
+  - the API key behind an exec is disabled: that exec ends;
   - the account is disabled: every stream of the account ends;
   - a credential that only expires: its stream keeps running.
 - **Driving it:** a running Sandbox of the walk account, and an
-  administrator on Admin → Account Access for the disable. Two throwaway
-  `HOME`s, A and B, stand for two machines.
-  1. In A and in B, run `cw login`, then `cw shell <sandbox>`. With an API
-     key from Settings in `CODEWIRE_API_KEY`, run
-     `cw exec <sandbox> -- sleep 600`.
+  administrator on Admin → Accounts for the disable. Two throwaway `HOME`s,
+  A and B, stand for two machines.
+  1. In A and in B, run `cw login`, then
+     `CW_SSH_TRANSPORT=websocket cw shell <sandbox>`; its first line says
+     "via API". With an API key from Settings as the bearer token, call
+     `POST /codewire.v1.ExecService/StreamExec` (Connect, server streaming)
+     with the organization, the Sandbox and the command `sleep 600`.
   2. In a second terminal on A, run `cw logout`. It revokes A's token, and
-     A's shell ends within seconds with "access revoked". B's shell and the
+     A's shell ends within seconds with "Access revoked". B's shell and the
      exec keep running.
-  3. In Settings, disable the API key: the exec ends with "access revoked".
+  3. In Settings, disable the API key: the exec's stream ends with
+     `permission_denied`, "access revoked".
   4. Disable the account: B's shell ends within seconds. Enable the account
      afterwards; a new `cw login` and `cw shell` work at once.
 - **Proof:** each ending within 30 seconds of its revocation, and a
@@ -92,6 +100,31 @@ terminal and the SSH proxy follow in the next step.
   surface. The streams that should survive are still running at the end of
   their step. The expiry case and the browser-session case are the database
   tests', since a walk can't wait out a credential's lifetime.
-- **Gotchas:** the dashboard's terminal, the SSH proxy, and the coordinator's
-  and Mesh sessions aren't covered yet, so they outlive every case here.
-- **Observed:** not yet observed.
+- **Gotchas:**
+  - the dashboard's terminal, the SSH proxy, and the coordinator's and Mesh
+    sessions aren't covered yet, so they outlive every case here;
+  - plain `cw shell` and `cw exec` on a hosted Sandbox run over its tailnet,
+    which the coordinator's `Coordinate` session carries, so they outlive
+    every case here too until that session joins the fence (the design's
+    third step). On 2026-11-18 a tailnet `cw shell` kept running 35 s after
+    `cw logout`, and a tailnet `cw exec` 30 s after its key was disabled.
+    A new one can't start: with a signed-out token or a disabled key,
+    `cw shell` and `cw exec` stop at their first call, and the tailnet's own
+    first call, `GetEnvironmentHostKey`, answers `401`;
+  - disabling an account revokes its sessions, tokens and the user in one
+    transaction, so a stream's audit event can name the token it was
+    admitted with rather than `user`. `admin.account.disabled` is beside it.
+- **Observed:** on a local Kind cluster brought up from main 4199fd0f6
+  (with #5201), 2026-11-18, as the seeded `e2e-owner`, with `e2e-admin` for
+  the disable, every stream on the API path:
+  - `cw logout` on A at 19:41:36.882: A's shell ended at 19:41:36.907 with
+    "Access revoked" (`stream.revoked`, surface `attach`, `oauth_token`);
+    B's shell and the exec kept running;
+  - the key disabled at 19:44:10.3: the exec ended at 19:44:10.538 with
+    `permission_denied` "access revoked" (`stream.revoked`, `exec`,
+    `api_key`); B's shell kept running;
+  - the account disabled at 19:44:57.4: B's shell ended at 19:44:57.460
+    (`stream.revoked`, `attach`, `oauth_token`, beside
+    `admin.account.disabled`);
+  - enabled again: the old browser session had ended, and a new `cw login`
+    and shell worked at once.

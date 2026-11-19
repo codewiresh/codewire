@@ -499,7 +499,10 @@ WebSocket closes with code 1008. Each writes a `stream.revoked` audit event
 naming the user, the kind of loss, the surface and the environment, never a
 credential or the stream's contents. The terminal and SSH-proxy WebSockets,
 the coordinator's and Mesh sessions, and removal from an organization don't
-end a stream yet.
+end a stream yet. `cw shell` and `cw exec` reach a hosted environment over
+its tailnet by default, which the coordinator's session carries, so they don't end yet
+either. `cw shell` with `CW_SSH_TRANSPORT=websocket` skips the tailnet and
+attaches through the API's `AttachSession` stream, which does end.
 
 ## Account suspension
 
