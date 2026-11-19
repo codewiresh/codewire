@@ -1426,7 +1426,10 @@ Issue: #4000.
     open, a second is in the middle of a long download, and a third has an
     open terminal or SSH session;
   - a Sandbox created, and one started, while that rollout is under way;
-  - a new `cw-egress` version that never becomes ready.
+  - a new `cw-egress` version that never becomes ready;
+  - a Sandbox whose daemon speaks a version of the egress stream that its
+    node's `cw-egress` does not accept, as when a release reaches the
+    daemon before `cw-egress`.
 - **Driving it:** no command yet (#4000).
 - **Proof:**
   - the status reads `NOT_ENFORCED` for the first state, `ENFORCED` with the
@@ -1501,6 +1504,16 @@ Issue: #4000.
     new version from their first connection;
   - a version that never becomes ready moves no Sandbox, and no Sandbox
     loses its egress;
+  - a daemon whose stream version `cw-egress` does not accept gets no
+    egress stream. `cw-egress` answers with the versions it accepts before
+    it reads the Sandbox's token, and the daemon's log names both ranges.
+    Only an update cures it, so the daemon tries again after 30 s and then
+    every 60 s, never every few seconds. A daemon that was already serving
+    shows the refusal in its health as `egress_version_unsupported`, with
+    both ranges, for as long as it lasts; one that has not yet passed its
+    first self-check serves nothing, so its log is where it reads. Once
+    `cw-egress` accepts the daemon's version, the next try connects and the
+    health line clears (not yet observed);
   - through every move the status reads `ENFORCED`, never `NOT_ENFORCED` or
     `FAILED_CLOSED`, the refusal log keeps its counts, and `cw-egress`'s
     log names the Sandboxes that moved idle and those cut at the deadline,
