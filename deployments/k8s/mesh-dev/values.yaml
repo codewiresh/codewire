@@ -30,6 +30,15 @@ mesh:
   derpURL: https://derp.codewire-dev.sh
   listenAddr: "0.0.0.0:8080"
 
+# Two replicas share the live registry through NATS, signed in as Mesh's own
+# user in its own account (codewire#3542). Dev's NATS is one server, so the
+# shared bucket has one replica.
+replicaCount: 2
+nats:
+  url: nats://nats.dev.svc.cluster.local:4222
+  kvReplicas: 1
+  loginSecret: nats-mesh-login
+
 ingress:
   enabled: true
   className: nginx
