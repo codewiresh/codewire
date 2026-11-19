@@ -914,6 +914,12 @@ database_lane_core() {
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test -p codewire-server-core --lib revocation::database_tests:: \
       -- --ignored --nocapture --test-threads=1
+
+  # #3586: an admission one replica carries for another to enforce.
+  counted_suite "server-core carried admission matrix" server-core-carried-admission \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test -p codewire-server-core --lib revocation::carried::database_tests:: \
+      -- --ignored --nocapture --test-threads=1
 }
 
 database_lane_credential_mutations() {
@@ -1931,6 +1937,19 @@ run_coordinator() {
   listed_run "coordinator client re-check" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo_ci test --profile ci -p codewire-coordinator --lib \
       connect::tests::production_client_session_ends_when_its_access_is_revoked -- --exact \
+      --nocapture
+
+  # #3586: a client's session ends when its credential is lost, and the
+  # environment's replica drops a remote client on its own read of the log.
+  logfile="$RUN_DIR/coordinator-credential-revocation.log"
+  listed_run "coordinator credential revocation" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-coordinator --lib \
+      connect::tests::revocation::a_client_session_ends_when_its_credential_is_revoked_and_cannot_rejoin_with_it -- --exact \
+      --nocapture
+  logfile="$RUN_DIR/coordinator-remote-client-revocation.log"
+  listed_run "coordinator remote client revocation" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-coordinator --lib \
+      session::fenced::tests::a_remote_client_is_dropped_by_the_serving_replica_alone -- --exact \
       --nocapture
 
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \

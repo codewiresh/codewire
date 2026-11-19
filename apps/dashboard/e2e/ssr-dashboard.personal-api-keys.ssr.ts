@@ -135,7 +135,7 @@ test("menu actions and the Delete confirmation submit exact key and organization
   const owner = page.getByRole("dialog", { name: "Delete CI pipeline?", exact: true });
   await expect(action(owner, "Cancel")).toBeFocused();
   await expect(owner).toContainText("Alpha team");
-  await expect(owner).toContainText("Future requests using it will fail");
+  await expect(owner).toContainText("Requests using it fail, and the cw shell, cw exec and API connections opened with it end within seconds.");
   await page.keyboard.press("Escape");
   await expect(owner).toBeHidden();
   expect(posts).toHaveLength(1);

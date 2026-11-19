@@ -12,11 +12,11 @@ fn session(user: &str, session: &str) -> Admitted {
     Admitted::session(user, session)
 }
 
-fn revoked_now(watch: &Watch) -> Option<Revocation> {
+pub(super) fn revoked_now(watch: &Watch) -> Option<Revocation> {
     *watch.revoked.borrow()
 }
 
-async fn database() -> PgPool {
+pub(super) async fn database() -> PgPool {
     let url =
         std::env::var("TEST_DATABASE_URL").expect("ignored DB test requires TEST_DATABASE_URL");
     PgPoolOptions::new()
@@ -27,14 +27,14 @@ async fn database() -> PgPool {
 }
 
 /// A user with one live session, one OAuth access token and one API key.
-struct Account {
-    user_id: String,
-    session_id: String,
-    token_hash: String,
-    key_id: String,
+pub(super) struct Account {
+    pub(super) user_id: String,
+    pub(super) session_id: String,
+    pub(super) token_hash: String,
+    pub(super) key_id: String,
 }
 
-async fn account(pool: &PgPool, name: &str) -> Account {
+pub(super) async fn account(pool: &PgPool, name: &str) -> Account {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let user_id = format!("user_fence_{name}_{suffix}");
     let account = Account {
@@ -91,12 +91,12 @@ async fn add_session(pool: &PgPool, user_id: &str, session_id: &str, lifetime: &
     .expect("session");
 }
 
-async fn execute(pool: &PgPool, sql: &str, id: &str) {
+pub(super) async fn execute(pool: &PgPool, sql: &str, id: &str) {
     sqlx::query(sql).bind(id).execute(pool).await.expect(sql);
 }
 
 /// Admits with a re-read that passes, as a live credential's would.
-async fn admitted(fence: &Fence, pool: &PgPool, admitted: &Admitted) -> Watch {
+pub(super) async fn admitted(fence: &Fence, pool: &PgPool, admitted: &Admitted) -> Watch {
     fence
         .admit(pool, admitted, async { Ok(()) })
         .await
@@ -104,7 +104,7 @@ async fn admitted(fence: &Fence, pool: &PgPool, admitted: &Admitted) -> Watch {
 }
 
 /// Reads the log as the backstop does, with no wake-up.
-async fn backstop(fence: &Fence, pool: &PgPool, cursor: &mut LogCursor) {
+pub(super) async fn backstop(fence: &Fence, pool: &PgPool, cursor: &mut LogCursor) {
     fence.read_log(pool, cursor).await.expect("read the log");
 }
 

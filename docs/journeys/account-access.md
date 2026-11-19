@@ -172,4 +172,15 @@ Issue: #3586, its third step (cw-security, 2026-11-18). A launch item (owner,
     Kind cluster; the dropped-publish case is a test, not a walk;
   - on the Sandbox's side an SSH connection from a removed peer ends only
     when it times out, until the next step closes it at once.
-- **Observed:** not yet observed.
+- **Observed:** on the local Kind cluster before merge, 2026-11-18, main
+  4199fd0f6 with this step's coordinator and `cw` (#3586), plain `cw shell`
+  and `cw exec` running "via DERP":
+  - `cw logout` on A at 22:12:39.648: A's last line 22:12:39.53, then
+    "Access revoked" at 22:12:39.965; B's shell and the exec kept printing;
+  - the key disabled at 22:13:07.320: the exec's last line 22:13:07.30,
+    "Access revoked" at 22:13:08.346; B's shell kept printing;
+  - the account disabled at 22:13:37.386: B's last line 22:13:37.29,
+    "Access revoked" at 22:13:37.664;
+  - each wrote `stream.revoked` with the surface `tailnet`; the revoked
+    token's new `cw shell` and `cw exec` were refused; after the account was
+    enabled again, a new sign-in and shell worked at once.

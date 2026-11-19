@@ -23,6 +23,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     let mut state = CoordinatorState::new(pool.clone(), cfg.session_secret.clone(), derp_map);
+    state.spawn_revocation_listener();
     if let Some(client) = nats {
         state = state.with_nats_client(client, cfg.nats_kv_replicas).await?;
     }

@@ -93,7 +93,7 @@ pub async fn pipe_shell_stdio(
 pub struct TailnetConnection {
     stream: Option<codewire_tailnet::netstack::TcpStream>,
     _conn: Arc<Conn>,
-    coordinator_task: tokio::task::JoinHandle<()>,
+    coordinator_task: tokio::task::JoinHandle<crate::coordinator::Error>,
 }
 
 impl TailnetConnection {
@@ -133,7 +133,7 @@ pub(crate) struct DialedTailnetSsh {
     /// Read by `tailnet_session` for the live path.
     #[cfg_attr(not(feature = "tailnet-session"), allow(dead_code))]
     pub(crate) peer: Node,
-    pub(crate) coordinator_task: tokio::task::JoinHandle<()>,
+    pub(crate) coordinator_task: tokio::task::JoinHandle<crate::coordinator::Error>,
 }
 
 /// Join the environment's tailnet and dial its daemon's SSH port, as
@@ -269,7 +269,7 @@ struct TailnetSession {
     environment_uuid: Uuid,
     conn: Arc<Conn>,
     peer: Node,
-    coordinator_task: tokio::task::JoinHandle<()>,
+    coordinator_task: tokio::task::JoinHandle<crate::coordinator::Error>,
     derp_map: Option<Value>,
     direct_udp: Option<direct_udp::Handle>,
 }
@@ -461,7 +461,7 @@ struct CoordinatorTask {
 fn spawn_coordinator_task(
     task: CoordinatorTask,
     first: CoordinatorPeerSession,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::task::JoinHandle<crate::coordinator::Error> {
     tokio::spawn(async move {
         let CoordinatorTask {
             conn,
@@ -501,19 +501,20 @@ fn spawn_coordinator_task(
                 result
             },
         )
-        .await;
+        .await
     })
 }
 
 /// Run `first`, then join again through `dial` whenever a session ends,
-/// until the coordinator refuses this peer. Waits
+/// until the coordinator refuses this peer, and return the refusal. Waits
 /// [`COORDINATOR_REJOIN_INITIAL_DELAY`] after a session ends and doubles the
 /// wait after each failed join, up to [`COORDINATOR_REJOIN_MAX_DELAY`].
 async fn keep_coordinator_sessions<D, DF, R, RF>(
     first: CoordinatorPeerSession,
     mut dial: D,
     mut run: R,
-) where
+) -> crate::coordinator::Error
+where
     D: FnMut() -> DF,
     DF: std::future::Future<Output = Result<CoordinatorPeerSession, crate::coordinator::Error>>,
     R: FnMut(CoordinatorPeerSession) -> RF,
@@ -531,7 +532,7 @@ async fn keep_coordinator_sessions<D, DF, R, RF>(
                 }
                 Err(error) if error.is_refusal() => {
                     debug_coordinator("refused", Some(&error));
-                    return;
+                    return error;
                 }
                 Err(error) => {
                     debug_coordinator("rejoin failed", Some(&error));
@@ -545,7 +546,7 @@ async fn keep_coordinator_sessions<D, DF, R, RF>(
         match run(coordinator).await {
             Err(error) if error.is_refusal() => {
                 debug_coordinator("refused", Some(&error));
-                return;
+                return error;
             }
             Err(error) => debug_coordinator("session failed", Some(&error)),
             Ok(()) => debug_coordinator("session ended", None),
@@ -1666,12 +1667,16 @@ mod tests {
             ])
             .await;
             let first = dial(address).await.expect("first session");
-            tokio::time::timeout(
+            let refusal = tokio::time::timeout(
                 HANG_GUARD,
                 keep_coordinator_sessions(first, || dial(address), run),
             )
             .await
             .expect("a refusal ends the rejoin loop");
+            assert!(
+                refusal.into_refusal().is_some(),
+                "the loop returns its refusal"
+            );
             assert_eq!(coordinator.sessions.load(Ordering::SeqCst), 3);
         }
 

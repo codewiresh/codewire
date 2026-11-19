@@ -366,18 +366,28 @@ impl ShellOutput {
 
 /// One environment's tailnet and the SSH connection to its daemon.
 pub struct EnvironmentTailnet {
-    ssh: EnvironmentSsh,
+    ssh: Arc<EnvironmentSsh>,
     conn: Arc<Conn>,
     peer: Node,
     derp_forced: bool,
-    coordinator: tokio::task::JoinHandle<()>,
+    coordinator: tokio::task::AbortHandle,
+    /// Ends the SSH connection once the coordinator refuses this client, so
+    /// its shell and commands end at once rather than on SSH's timeout.
+    refused: tokio::task::JoinHandle<()>,
+    refusal: Arc<std::sync::OnceLock<crate::ClientError>>,
 }
 
 impl Drop for EnvironmentTailnet {
     fn drop(&mut self) {
         self.coordinator.abort();
+        self.refused.abort();
     }
 }
+
+/// How long the refused client waits for the daemon to acknowledge its SSH
+/// disconnect; the daemon has already dropped it as a peer, so this rarely
+/// completes and only bounds the wait.
+const REFUSED_CLOSE_LIMIT: Duration = Duration::from_secs(1);
 
 impl EnvironmentTailnet {
     /// Join `environment_id`'s tailnet and open an SSH connection to its
@@ -398,18 +408,35 @@ impl EnvironmentTailnet {
         let dialed = dial_tailnet_ssh(client, org_id, environment_id).await?;
         let coordinator = dialed.coordinator_task;
         let ssh = match EnvironmentSsh::connect(dialed.stream, &recorded.public_key_openssh).await {
-            Ok(ssh) => ssh,
+            Ok(ssh) => Arc::new(ssh),
             Err(error) => {
                 coordinator.abort();
                 return Err(error);
             }
         };
+        let refusal = Arc::new(std::sync::OnceLock::new());
+        let coordinator_abort = coordinator.abort_handle();
+        let refused = tokio::spawn({
+            let ssh = Arc::clone(&ssh);
+            let refusal = Arc::clone(&refusal);
+            async move {
+                if let Ok(error) = coordinator.await
+                    && let Some(refused) = error.into_refusal()
+                {
+                    // This task is the cell's only writer, so it is empty here.
+                    let _ = refusal.set(refused);
+                }
+                ssh.close(REFUSED_CLOSE_LIMIT).await;
+            }
+        });
         Ok(Self {
             ssh,
             conn: dialed.conn,
             peer: dialed.peer,
             derp_forced: std::env::var_os("CW_DERP_ONLY").is_some(),
-            coordinator,
+            coordinator: coordinator_abort,
+            refused,
+            refusal,
         })
     }
 
@@ -417,7 +444,13 @@ impl EnvironmentTailnet {
     /// client (its access was revoked); a caller then connects again, and is
     /// told why if it may not.
     pub fn is_closed(&self) -> bool {
-        self.ssh.is_closed() || self.coordinator.is_finished()
+        self.ssh.is_closed() || self.refused.is_finished()
+    }
+
+    /// Why the coordinator refused this client, once it has: the server's
+    /// own error, such as "access revoked" (#3586).
+    pub fn refusal(&self) -> Option<crate::ClientError> {
+        self.refusal.get().cloned()
     }
 
     /// Open an interactive shell over this environment's tailnet; see

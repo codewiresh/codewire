@@ -57,6 +57,7 @@ fn spawn_session_as(
         peers,
         coordination: None,
         derp_map: crate::test_derp_map(),
+        revocations: crate::test_revocations(),
     };
     spawn_on(context, peer_id, sidecar_id, kind, principal)
 }
@@ -91,6 +92,7 @@ fn spawn_on(
             proof,
         },
         Some(test_checks(Some(1), Duration::from_secs(3600))),
+        None,
         None,
     ));
     (input_tx, output_rx, task)
@@ -168,6 +170,7 @@ fn spawn_peer(
             peers,
             coordination: None,
             derp_map: crate::test_derp_map(),
+            revocations: crate::test_revocations(),
         },
         SessionPeer {
             peer_id: env_id,
@@ -178,6 +181,7 @@ fn spawn_peer(
             proof: Some(proof),
         },
         Some(checks),
+        None,
         None,
     ));
     (input_tx, output_rx, task)
@@ -388,6 +392,7 @@ async fn an_environment_peer_without_proof_never_registers() {
             peers: peers.clone(),
             coordination: None,
             derp_map: crate::test_derp_map(),
+            revocations: crate::test_revocations(),
         },
         SessionPeer {
             peer_id: env_id,
@@ -398,6 +403,7 @@ async fn an_environment_peer_without_proof_never_registers() {
             proof: None,
         },
         Some(test_checks(Some(1), Duration::from_secs(3600))),
+        None,
         None,
     )
     .await;
@@ -549,6 +555,7 @@ async fn a_refused_client_recheck_ends_the_session_and_removes_the_client() {
             peers,
             coordination: None,
             derp_map: crate::test_derp_map(),
+            revocations: crate::test_revocations(),
         },
         SessionPeer {
             peer_id: client_id,
@@ -560,6 +567,7 @@ async fn a_refused_client_recheck_ends_the_session_and_removes_the_client() {
         },
         Some(test_checks(Some(1), Duration::from_millis(20))),
         Some(Box::new(access.clone())),
+        None,
     ));
     assert!(matches!(
         next_output(&mut sidecar_out).await,
@@ -616,6 +624,7 @@ async fn derp_admission_knows_a_live_session_key_until_it_ends() {
         peers: peers.clone(),
         coordination: None,
         derp_map: crate::test_derp_map(),
+        revocation: codewire_server_core::revocation::Fence::new(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -904,6 +913,7 @@ async fn a_reconnect_to_another_replica_retires_the_session_on_the_first() {
             peers: Arc::new(PeerRegistry::default()),
             coordination: Some(CoordinationPlane::setup(client, 1).await.unwrap()),
             derp_map: crate::test_derp_map(),
+            revocations: crate::test_revocations(),
         });
     }
     let env_id = Uuid::new_v4();

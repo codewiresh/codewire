@@ -22,8 +22,14 @@ use super::node_keys::SessionNodeKey;
 use super::peer::{PeerProof, PeerVerifier, ProofError, unix_now};
 use super::{
     COORDINATE_HEARTBEAT_INTERVAL, CoordinationPlane, DerpMap, PeerEvent, PeerKind, PeerRegistry,
-    SIDECAR_KV_REFRESH, Transport, log_node, spawn_node_subscription, spawn_remove_subscription,
+    RemoteEvent, SIDECAR_KV_REFRESH, Transport, log_node, spawn_node_subscription,
+    spawn_remove_subscription,
 };
+use codewire_server_core::revocation::Revocation;
+
+mod fenced;
+use fenced::RemoteClients;
+pub(crate) use fenced::{ClientNodeMessage, FencedClient, Revocations};
 
 /// A decoded message entering the shared peer session.
 pub(crate) enum SessionInput {
@@ -44,6 +50,8 @@ pub(crate) enum SessionOutput {
     Heartbeat,
     /// The client lost its access to the environment; the session ends.
     AccessRevoked,
+    /// The credential that admitted the client was lost; the session ends.
+    CredentialRevoked,
     /// The session's node key could not be bound to it; the session ends.
     NodeKeyRefused(Refusal),
 }
@@ -98,6 +106,7 @@ pub(crate) struct SessionContext {
     /// The optional cross-replica NATS/KV plane.
     pub(crate) coordination: Option<Arc<CoordinationPlane>>,
     pub(crate) derp_map: DerpMap,
+    pub(crate) revocations: Revocations,
 }
 
 /// The checks behind environment-peer sessions and the cadence of their
@@ -119,6 +128,8 @@ enum PeerEnd {
     BadProof,
     /// A client's re-check refused its access to the environment.
     AccessRevoked,
+    /// The credential that admitted a client was lost.
+    CredentialRevoked(Revocation),
     /// The node key the peer announced was refused.
     NodeKeyRefused(Refusal),
     /// A newer session of the same principal took the node key over.
@@ -152,11 +163,13 @@ pub(crate) async fn run_peer_session<Source, Sink>(
     peer: SessionPeer,
     checks: Option<PeerChecks>,
     client_access: Option<Box<dyn ClientAccess>>,
+    fenced: Option<FencedClient>,
 ) where
     Source: SessionSource,
     Sink: SessionSink,
 {
-    let Some(mut session) = PeerSession::start(context, peer, checks, client_access).await else {
+    let Some(mut session) = PeerSession::start(context, peer, checks, client_access, fenced).await
+    else {
         return;
     };
     if !sink
@@ -188,8 +201,8 @@ struct PeerSession {
     owner: Uuid,
     events: mpsc::UnboundedReceiver<PeerEvent>,
     /// Held so `remote_rx` stays open while no subscription feeds it.
-    _remote_tx: mpsc::UnboundedSender<PeerEvent>,
-    remote_rx: mpsc::UnboundedReceiver<PeerEvent>,
+    _remote_tx: mpsc::UnboundedSender<RemoteEvent>,
+    remote_rx: mpsc::UnboundedReceiver<RemoteEvent>,
     /// The session's node key, admitted by DERP while the session lives.
     node_key: SessionNodeKey,
     /// The node key's binding to this session's principal and environment.
@@ -203,6 +216,11 @@ struct PeerSession {
     generation: i64,
     recheck_every: Duration,
     client_access: Option<Box<dyn ClientAccess>>,
+    revocations: Revocations,
+    /// A client's admission, fenced here.
+    fenced: Option<FencedClient>,
+    /// An environment session's clients from other replicas, fenced here.
+    remote_clients: RemoteClients,
 }
 
 impl PeerSession {
@@ -213,11 +231,13 @@ impl PeerSession {
         peer: SessionPeer,
         checks: Option<PeerChecks>,
         client_access: Option<Box<dyn ClientAccess>>,
+        fenced: Option<FencedClient>,
     ) -> Option<Self> {
         let SessionContext {
             peers,
             coordination,
             derp_map,
+            revocations,
         } = context;
         let SessionPeer {
             peer_id,
@@ -309,6 +329,9 @@ impl PeerSession {
             generation,
             recheck_every,
             client_access,
+            revocations,
+            fenced,
+            remote_clients: RemoteClients::default(),
         })
     }
 
@@ -344,6 +367,12 @@ impl PeerSession {
                     self.recheck().await
                 }
                 _ = binding_refresh.tick() => self.refresh_binding().await,
+                revocation = fenced::revoked(&mut self.fenced) => {
+                    ControlFlow::Break(Some(PeerEnd::CredentialRevoked(revocation)))
+                }
+                peer_id = self.remote_clients.next_revoked() => {
+                    self.forward(sink, Some(PeerEvent::Remove(peer_id)), "fence").await
+                }
                 () = silence, if self.pinged => ControlFlow::Break(Some(PeerEnd::Silent)),
                 input = source.next() => self.handle_input(input).await,
             };
@@ -379,17 +408,38 @@ impl PeerSession {
 
     /// Sends one event from another replica. A removal naming this session
     /// retires it; a client is sent no other removal, since it peers only
-    /// with its environment.
+    /// with its environment. A client's node reaches an environment only once
+    /// this replica's fence admits it.
     async fn forward_remote<Sink: SessionSink>(
-        &self,
+        &mut self,
         sink: &mut Sink,
-        event: Option<PeerEvent>,
+        event: Option<RemoteEvent>,
     ) -> Turn {
+        let event = match event {
+            Some(RemoteEvent::Client(message)) => {
+                let ClientNodeMessage { node, admission } = *message;
+                let forward = self
+                    .remote_clients
+                    .admit(&self.revocations, node.id, admission.as_ref())
+                    .await;
+                if !forward {
+                    return ControlFlow::Continue(());
+                }
+                Some(PeerEvent::Update(vec![node]))
+            }
+            Some(RemoteEvent::Peer(event)) => Some(event),
+            None => None,
+        };
         match (event, self.peer.kind) {
             (Some(PeerEvent::Remove(id)), _) if id == self.binding.session() => {
                 ControlFlow::Break(Some(PeerEnd::Retired))
             }
             (Some(PeerEvent::Remove(_)), PeerKind::Client) => ControlFlow::Continue(()),
+            (Some(PeerEvent::Remove(id)), PeerKind::Sidecar) => {
+                self.remote_clients.remove(id);
+                self.forward(sink, Some(PeerEvent::Remove(id)), "remote")
+                    .await
+            }
             (event, _) => self.forward(sink, event, "remote").await,
         }
     }
@@ -487,6 +537,7 @@ impl PeerSession {
             Some(SessionInput::Node(node)) => {
                 self.claim_node_key(&node).await?;
                 self.node_key.observe(node.key).await;
+                let admission = self.revocations.carry(self.fenced.as_ref());
                 handle_node_update(
                     &self.peers,
                     self.owner,
@@ -494,7 +545,7 @@ impl PeerSession {
                     &self.last_sidecar_node,
                     &self.peer,
                     self.generation,
-                    node,
+                    ClientNodeMessage { node, admission },
                 )
                 .await;
             }
@@ -555,12 +606,20 @@ impl PeerSession {
         );
         let reason = match ended {
             Some(PeerEnd::AccessRevoked) => Some(SessionOutput::AccessRevoked),
+            Some(PeerEnd::CredentialRevoked(_)) => Some(SessionOutput::CredentialRevoked),
             Some(PeerEnd::NodeKeyRefused(refusal)) => Some(SessionOutput::NodeKeyRefused(refusal)),
             _ => None,
         };
         if let Some(reason) = reason {
             // Tell the peer why before its stream closes; it may already be gone.
             let _ = sink.send(reason).await;
+        }
+        if let (Some(PeerEnd::CredentialRevoked(revocation)), Some(fenced)) =
+            (ended, self.fenced.as_ref())
+        {
+            self.revocations
+                .record(fenced, revocation, self.env_id)
+                .await;
         }
         self.peers.deregister(peer_id, self.owner);
         self.node_key.close().await;
@@ -604,7 +663,7 @@ async fn subscribe_remote(
     coordination: &CoordinationPlane,
     peer: &SessionPeer,
     checks: Option<&PeerChecks>,
-    remote_tx: &mpsc::UnboundedSender<PeerEvent>,
+    remote_tx: &mpsc::UnboundedSender<RemoteEvent>,
 ) {
     let SessionPeer {
         peer_id,
@@ -642,7 +701,7 @@ async fn subscribe_remote(
                             &node,
                             Some(transport),
                         );
-                        let _ = remote_tx.send(PeerEvent::Update(vec![node]));
+                        let _ = remote_tx.send(RemoteEvent::Peer(PeerEvent::Update(vec![node])));
                     } else {
                         tracing::info!(%env_id, %peer_id, generation, "coordinator sidecar KV node is from a past generation");
                     }
@@ -723,8 +782,12 @@ async fn handle_node_update(
     last_sidecar_node: &Arc<AsyncMutex<Option<Node>>>,
     peer: &SessionPeer,
     generation: i64,
-    mut node: Node,
+    update: ClientNodeMessage,
 ) {
+    let ClientNodeMessage {
+        mut node,
+        admission,
+    } = update;
     let SessionPeer {
         peer_id,
         sidecar_id,
@@ -751,7 +814,8 @@ async fn handle_node_update(
             let Some(coordination) = coordination else {
                 return;
             };
-            if let Err(err) = coordination.publish_client_node(env_id, &node).await {
+            let message = ClientNodeMessage { node, admission };
+            if let Err(err) = coordination.publish_client_node(env_id, &message).await {
                 tracing::warn!(error = ?err, %env_id, %peer_id, "coordinator client node publish failed");
             }
         }

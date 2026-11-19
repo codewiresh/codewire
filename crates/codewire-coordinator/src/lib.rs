@@ -45,6 +45,8 @@ pub struct CoordinatorState {
     peers: Arc<PeerRegistry>,
     coordination: Option<Arc<CoordinationPlane>>,
     derp_map: DerpMap,
+    /// Ends client sessions whose credential is lost (#3586).
+    revocation: codewire_server_core::revocation::Fence,
 }
 
 impl CoordinatorState {
@@ -58,7 +60,14 @@ impl CoordinatorState {
             peers: Arc::new(PeerRegistry::default()),
             coordination: None,
             derp_map,
+            revocation: codewire_server_core::revocation::Fence::new(),
         }
+    }
+
+    /// Runs this process's read of the credential revocation log, which ends
+    /// the client sessions it names.
+    pub fn spawn_revocation_listener(&self) -> tokio::task::JoinHandle<()> {
+        self.revocation.spawn_listener(self.pool.clone())
     }
 
     /// Attach the optional cross-replica NATS/JetStream plane, its KV
@@ -146,15 +155,23 @@ impl CoordinationPlane {
         Ok(sub)
     }
 
-    async fn publish_client_node(&self, env_id: Uuid, node: &Node) -> anyhow::Result<()> {
-        self.publish_node(clients_subject(env_id), node).await
+    async fn publish_client_node(
+        &self,
+        env_id: Uuid,
+        message: &session::ClientNodeMessage,
+    ) -> anyhow::Result<()> {
+        self.publish_node(clients_subject(env_id), message).await
     }
 
     async fn publish_sidecar_node(&self, env_id: Uuid, node: &Node) -> anyhow::Result<()> {
         self.publish_node(agent_subject(env_id), node).await
     }
 
-    async fn publish_node(&self, subject: String, node: &Node) -> anyhow::Result<()> {
+    async fn publish_node(
+        &self,
+        subject: String,
+        node: &impl serde::Serialize,
+    ) -> anyhow::Result<()> {
         let data = serde_json::to_vec(node)?;
         self.client.publish(subject, Bytes::from(data)).await?;
         Ok(())
@@ -460,27 +477,42 @@ impl PeerKind {
 
 fn spawn_node_subscription(
     mut sub: async_nats::Subscriber,
-    tx: mpsc::UnboundedSender<PeerEvent>,
+    tx: mpsc::UnboundedSender<RemoteEvent>,
     env_id: Uuid,
     source: &'static str,
 ) {
     tokio::spawn(async move {
         while let Some(msg) = sub.next().await {
-            match serde_json::from_slice::<Node>(msg.payload.as_ref()) {
-                Ok(node) => {
+            let payload = msg.payload.as_ref();
+            let event = if source == "agent" {
+                serde_json::from_slice::<Node>(payload).map(|node| {
                     log_node(
                         "coordinator NATS node received",
                         env_id,
                         node.id,
-                        if source == "agent" {
-                            PeerKind::Sidecar
-                        } else {
-                            PeerKind::Client
-                        },
+                        PeerKind::Sidecar,
                         &node,
                         None,
                     );
-                    let _ = tx.send(PeerEvent::Update(vec![node]));
+                    RemoteEvent::Peer(PeerEvent::Update(vec![node]))
+                })
+            } else {
+                serde_json::from_slice::<session::ClientNodeMessage>(payload).map(|message| {
+                    let node = &message.node;
+                    log_node(
+                        "coordinator NATS node received",
+                        env_id,
+                        node.id,
+                        PeerKind::Client,
+                        node,
+                        None,
+                    );
+                    RemoteEvent::Client(Box::new(message))
+                })
+            };
+            match event {
+                Ok(event) => {
+                    let _ = tx.send(event);
                 }
                 Err(err) => {
                     tracing::warn!(error = ?err, %env_id, source, "coordinator NATS node decode failed");
@@ -492,7 +524,7 @@ fn spawn_node_subscription(
 
 fn spawn_remove_subscription(
     mut sub: async_nats::Subscriber,
-    tx: mpsc::UnboundedSender<PeerEvent>,
+    tx: mpsc::UnboundedSender<RemoteEvent>,
     env_id: Uuid,
 ) {
     tokio::spawn(async move {
@@ -508,7 +540,7 @@ fn spawn_remove_subscription(
                         %peer_id,
                         "coordinator NATS peer remove received"
                     );
-                    let _ = tx.send(PeerEvent::Remove(peer_id));
+                    let _ = tx.send(RemoteEvent::Peer(PeerEvent::Remove(peer_id)));
                 }
                 Err(err) => {
                     tracing::warn!(error = ?err, %env_id, "coordinator NATS remove payload was not a UUID");
@@ -665,6 +697,18 @@ fn bool_setting(lookup: &impl Fn(&str) -> Option<String>, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// A fence for tests whose database is never reached: no test session here
+/// is admitted with a credential.
+#[cfg(test)]
+pub(crate) fn test_revocations() -> session::Revocations {
+    session::Revocations {
+        fence: codewire_server_core::revocation::Fence::new(),
+        pool: sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused@127.0.0.1:1/unused")
+            .expect("a lazy pool never connects"),
+    }
+}
+
 /// A DERP map for tests, naming a relay that never resolves.
 #[cfg(test)]
 pub(crate) fn test_derp_map() -> DerpMap {
@@ -712,6 +756,13 @@ fn build_derp_map(cfg: DerpMapConfig) -> serde_json::Value {
 enum PeerEvent {
     Update(Vec<Node>),
     Remove(Uuid),
+}
+
+/// An event from another replica for a session here.
+enum RemoteEvent {
+    Peer(PeerEvent),
+    /// A client's node with the admission its replica carries for it.
+    Client(Box<session::ClientNodeMessage>),
 }
 
 impl PeerEvent {

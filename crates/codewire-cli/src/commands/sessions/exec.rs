@@ -94,6 +94,11 @@ pub(crate) async fn handle_exec_command(globals: &Globals, args: ExecArgs) -> an
             // However the run ended, end the connection while this process
             // can still send: an interrupted command ends with it.
             tailnet.close(std::time::Duration::from_secs(5)).await;
+            if let Some(refused) = tailnet.refusal() {
+                return Err(crate::commands::platform_commands::display_client_error(
+                    refused,
+                ));
+            }
             code?
         }
     };

@@ -284,6 +284,9 @@ pub async fn attach(
     let fallback = if mode == SshTransportMode::WebSocket {
         "CW_SSH_TRANSPORT=websocket".to_owned()
     } else {
+        if let Some(refused) = tailnet.as_ref().and_then(EnvironmentTailnet::refusal) {
+            return Err(HostedShellError::Client(refused));
+        }
         if tailnet.as_ref().is_some_and(EnvironmentTailnet::is_closed) {
             *tailnet = None;
         }

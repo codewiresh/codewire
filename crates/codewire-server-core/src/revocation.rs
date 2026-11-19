@@ -16,6 +16,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -286,9 +287,21 @@ impl Watch {
 }
 
 /// The process's registry of admitted streams. Cloning shares it.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Fence {
     registry: Arc<Mutex<Registry>>,
+    /// The log position below which the listener has read every row, or -1
+    /// before its first read ([`LogCursor::position`]).
+    through: Arc<AtomicI64>,
+}
+
+impl Default for Fence {
+    fn default() -> Self {
+        Self {
+            registry: Arc::default(),
+            through: Arc::new(AtomicI64::new(-1)),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -394,6 +407,20 @@ impl Registry {
     }
 }
 
+async fn current_snapshot(pool: &PgPool) -> Result<Snapshot, Refused> {
+    let text: String = sqlx::query_scalar("SELECT pg_current_snapshot()::text")
+        .fetch_one(pool)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "stream admission could not take a snapshot");
+            Refused::Unavailable
+        })?;
+    Snapshot::parse(&text).ok_or_else(|| {
+        tracing::warn!(snapshot = %text, "stream admission read an unparseable snapshot");
+        Refused::Unavailable
+    })
+}
+
 impl Fence {
     pub fn new() -> Self {
         Self::default()
@@ -413,18 +440,7 @@ impl Fence {
         admitted: &Admitted,
         recheck: impl Future<Output = Result<(), Refused>>,
     ) -> Result<Watch, Refused> {
-        let text: String = sqlx::query_scalar("SELECT pg_current_snapshot()::text")
-            .fetch_one(pool)
-            .await
-            .map_err(|error| {
-                tracing::warn!(%error, "stream admission could not take a snapshot");
-                Refused::Unavailable
-            })?;
-        let Some(snapshot) = Snapshot::parse(&text) else {
-            tracing::warn!(snapshot = %text, "stream admission read an unparseable snapshot");
-            return Err(Refused::Unavailable);
-        };
-        let watch = self.register(admitted, snapshot);
+        let watch = self.register(admitted, current_snapshot(pool).await?);
         recheck.await?;
         Ok(watch)
     }
@@ -519,6 +535,7 @@ impl Fence {
         let entries: Vec<LogEntry> = rows.iter().filter_map(LogRow::entry).collect();
         self.dispatch(&entries);
         cursor.record(rows.iter().map(|row| row.seq), Instant::now());
+        self.through.store(cursor.position(), Ordering::Release);
         Ok(())
     }
 }
@@ -608,7 +625,20 @@ impl LogCursor {
             self.gaps.pop_first();
         }
     }
+
+    /// The highest position at and below which every row has been read: just
+    /// below the oldest skipped number still awaited, else the newest read,
+    /// else 0 when the log has held nothing.
+    fn position(&self) -> i64 {
+        match self.gaps.first_key_value() {
+            Some((&gap, _)) => gap.saturating_sub(1),
+            None => self.last.unwrap_or(0),
+        }
+    }
 }
+
+mod carried;
+pub use carried::CarriedAdmission;
 
 #[cfg(test)]
 mod database_tests;

@@ -140,6 +140,19 @@ impl Error {
             connectrpc::ErrorCode::PermissionDenied | connectrpc::ErrorCode::Unauthenticated
         )
     }
+
+    /// The server's refusal, as the API's own errors carry it, for the
+    /// caller to word; `None` unless [`Error::is_refusal`].
+    pub fn into_refusal(self) -> Option<crate::ClientError> {
+        if !self.is_refusal() {
+            return None;
+        }
+        match self {
+            Self::Connect(error) => Some(error.into()),
+            Self::Credential(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 impl crate::CodewireClient {

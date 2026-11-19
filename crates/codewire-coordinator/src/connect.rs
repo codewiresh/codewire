@@ -11,8 +11,12 @@ use codewire_proto::codewire::internal::v1::{
     CoordinatePeerRemove as PeerRemove, CoordinatePeerUpdate as PeerUpdate, CoordinatePing as Ping,
     CoordinateRequest, CoordinateResponse, CoordinatorService, coordinate_request,
 };
-use codewire_server_core::auth::{AuthState, AuthUser, authenticate_headers_with_context};
+use codewire_server_core::auth::{
+    AuthState, AuthUser, Authentication, authenticate_headers_with_context,
+};
 use codewire_server_core::connect::app_error_to_wire;
+use codewire_server_core::error::AppError;
+use codewire_server_core::revocation::{Admitted, Refused};
 use connectrpc::{ConnectError, InboundStream, RequestContext, ServiceResult, ServiceStream};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
@@ -21,8 +25,8 @@ use uuid::Uuid;
 use crate::node_bindings::{Principal, Refusal};
 use crate::peer::{DbPeerVerifier, PEER_RECHECK_INTERVAL, PeerProof, PeerVerifier, ProofError};
 use crate::session::{
-    ClientAccess, ClientRecheck, PeerChecks, SessionContext, SessionInput, SessionOutput,
-    SessionPeer, SessionSink, SessionSource, run_peer_session,
+    ClientAccess, ClientRecheck, FencedClient, PeerChecks, Revocations, SessionContext,
+    SessionInput, SessionOutput, SessionPeer, SessionSink, SessionSource, run_peer_session,
 };
 use crate::{
     CoordinatorState, PeerEvent, PeerKind, Transport, authorize_client, bearer_token,
@@ -58,11 +62,16 @@ fn router_with_authorizer(
     authorizer: Arc<dyn CoordinateAuthorizer>,
     checks: PeerChecks,
 ) -> axum::Router {
+    let revocations = Revocations {
+        fence: state.revocation.clone(),
+        pool: state.pool.clone(),
+    };
     let connect = connectrpc::Router::new().add_service(Arc::new(CoordinateService {
         context: SessionContext {
             peers: state.peers,
             coordination: state.coordination,
             derp_map: state.derp_map,
+            revocations,
         },
         authorizer,
         checks,
@@ -83,10 +92,15 @@ struct AuthorizedPeer {
     proof: Option<PeerProof>,
     /// A client's access, re-checked while its session lives.
     client_access: Option<Box<dyn ClientAccess>>,
+    /// A client's admission, ended when its credential is lost.
+    fenced: Option<FencedClient>,
 }
 
 /// The message a client reads when a re-check refuses its access.
 const ACCESS_REVOKED: &str = "environment access revoked";
+/// The message a client reads when the credential it joined with is lost,
+/// as every revoked stream reads (AUTH-POLICY, "Account access revocation").
+const CREDENTIAL_REVOKED: &str = "access revoked";
 
 /// The error a peer reads when its node key is refused. A lost race and an
 /// unreachable store are worth retrying; a key bound elsewhere is not.
@@ -196,6 +210,7 @@ impl ProductionAuthorizer {
                 kind: PeerKind::Sidecar,
                 proof: Some(proof),
                 client_access: None,
+                fenced: None,
             });
         }
         // A peer token never authenticates a client session.
@@ -227,6 +242,7 @@ impl ProductionAuthorizer {
             Ok(environment_id) => environment_id,
             Err(response) => return Err(response_to_connect_error(response).await),
         };
+        let fenced = self.fence_client(headers, &authentication).await?;
         Ok(AuthorizedPeer {
             peer_id: Uuid::new_v4(),
             principal: Principal::User(authentication.user.user_id.clone()),
@@ -239,8 +255,48 @@ impl ProductionAuthorizer {
                 org_id: hello.org_id.trim().to_owned(),
                 environment_id: hello.environment_id.trim().to_owned(),
             })),
+            fenced: Some(fenced),
         })
     }
+
+    /// Admits a client's session to the fence: registers it under its user
+    /// and credential, then authenticates the hello's headers again, so a
+    /// revocation either refuses it here or ends it later (#3586).
+    async fn fence_client(
+        &self,
+        headers: &HeaderMap,
+        authentication: &Authentication,
+    ) -> Result<FencedClient, ConnectError> {
+        let admitted = admitted_by(authentication)
+            .ok_or_else(|| ConnectError::unauthenticated(CREDENTIAL_REVOKED))?;
+        let recheck = async {
+            match authenticate_headers_with_context(&self.auth, headers).await {
+                Ok(again) if admitted_by(&again).as_ref() == Some(&admitted) => Ok(()),
+                Ok(_) | Err(AppError::Unauthorized | AppError::Forbidden) => Err(Refused::Revoked),
+                Err(_) => Err(Refused::Unavailable),
+            }
+        };
+        let watch = self
+            .state
+            .revocation
+            .admit(&self.state.pool, &admitted, recheck)
+            .await
+            .map_err(|refused| match refused {
+                Refused::Revoked => ConnectError::unauthenticated(CREDENTIAL_REVOKED),
+                Refused::Unavailable => ConnectError::unavailable(
+                    "coordinator session admission is unavailable; try again",
+                ),
+            })?;
+        Ok(FencedClient::new(admitted, watch))
+    }
+}
+
+fn admitted_by(authentication: &Authentication) -> Option<Admitted> {
+    Admitted::from_request(
+        &authentication.user,
+        &authentication.credential,
+        authentication.oauth_bearer_authority(),
+    )
 }
 
 async fn response_to_connect_error(response: axum::response::Response) -> ConnectError {
@@ -327,6 +383,7 @@ impl CoordinatorService for CoordinateService {
             },
             Some(self.checks.clone()),
             peer.client_access,
+            peer.fenced,
         );
         tokio::spawn(session);
 
@@ -377,6 +434,9 @@ impl SessionSink for ConnectSink {
     async fn send(&mut self, output: SessionOutput) -> bool {
         let response = match output {
             SessionOutput::AccessRevoked => Err(ConnectError::permission_denied(ACCESS_REVOKED)),
+            SessionOutput::CredentialRevoked => {
+                Err(ConnectError::permission_denied(CREDENTIAL_REVOKED))
+            }
             SessionOutput::NodeKeyRefused(refusal) => Err(node_key_refused(refusal)),
             output => {
                 let response = session_output_to_proto(output);
@@ -414,6 +474,9 @@ fn session_output_to_proto(output: SessionOutput) -> Result<CoordinateResponse, 
         SessionOutput::Heartbeat => Ping::default().into(),
         SessionOutput::AccessRevoked => {
             return Err(ConnectError::permission_denied(ACCESS_REVOKED));
+        }
+        SessionOutput::CredentialRevoked => {
+            return Err(ConnectError::permission_denied(CREDENTIAL_REVOKED));
         }
         SessionOutput::NodeKeyRefused(refusal) => return Err(node_key_refused(refusal)),
     };
@@ -555,6 +618,7 @@ mod tests {
                             expires_at: crate::peer::unix_now() + 600,
                         }),
                         client_access: None,
+                        fenced: None,
                     })
                 } else {
                     Ok(AuthorizedPeer {
@@ -564,6 +628,7 @@ mod tests {
                         kind: PeerKind::Client,
                         proof: None,
                         client_access: None,
+                        fenced: None,
                     })
                 }
             })
@@ -624,6 +689,14 @@ mod tests {
             "protocol-parity-secret".into(),
             crate::test_derp_map(),
         );
+        start_production_state(state, pool, recheck).await
+    }
+
+    async fn start_production_state(
+        state: CoordinatorState,
+        pool: sqlx::PgPool,
+        recheck: std::time::Duration,
+    ) -> (std::net::SocketAddr, JoinHandle<()>) {
         let app = codewire_server_core::AppBuilder::new("coordinator-production-auth-parity-test")
             .with_routes(production_router(state, AuthState { pool }, recheck))
             .into_router();
@@ -1106,6 +1179,8 @@ mod tests {
     /// 127.0.0.1, not a speed expectation (docs/dev/AGENT-WORKFLOW.md "Failure
     /// convergence"). A starved CI guest failed a fixed 5 s (#4241, #4169).
     const PRODUCTION_AUTH_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
+
+    mod revocation;
 
     async fn production_auth_outcome(
         pool: sqlx::PgPool,
