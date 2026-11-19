@@ -1762,6 +1762,12 @@ run_paths_case sdk_ts_runner pull_request refs/pull/1511/head false \
   'policy sdk_ts security security_js' \
   scripts/runtime/dev/run-sdk-ts-e2e.sh \
   scripts/runtime/tests/test-run-sdk-ts-e2e.sh
+# The Rust SDK has no family of its own; its Dev runner is tested with the
+# other Dev smoke runners.
+run_paths_case sdk_rust_runner pull_request refs/pull/3511/head false \
+  'policy dev_smoke_script_tests security security_js' \
+  scripts/runtime/dev/run-sdk-rust-e2e.sh \
+  scripts/runtime/tests/test-run-sdk-rust-e2e.sh
 run_paths_case retired_sdk_examples pull_request refs/pull/1512/head false \
   'policy' \
   libs/sdk-examples/run-claude/README.md \

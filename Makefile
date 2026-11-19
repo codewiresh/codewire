@@ -81,7 +81,7 @@ help:
 	@echo ""
 	@echo "SDK (libs/sdk-{go,python,ts}):"
 	@echo "  make test-sdk     - Typecheck + unit tests across all 3 SDK languages"
-	@echo "  make sdk-e2e      - Run e2e tests against a running server (all 3 languages)"
+	@echo "  make sdk-e2e      - Run e2e tests against a running server (all 4 languages)"
 
 # Load environment from .env if it exists
 -include .env
@@ -597,11 +597,11 @@ ios-clean:
 	$(MAKE) -C apps/ios clean
 
 # --- SDK -------------------------------------------------------------------
-# Codewire SDK lives in libs/sdk-{go,python,ts}. Targets here mirror what the
-# old separate codewiresh/sdk Makefile exposed.
+# The Codewire SDKs live in libs/sdk-{go,python,ts} and crates/codewire (Rust).
+# Targets here mirror what the old separate codewiresh/sdk Makefile exposed.
 
 .PHONY: test-sdk test-sdk-go test-sdk-python test-sdk-ts \
-        sdk-e2e sdk-e2e-go sdk-e2e-python sdk-e2e-ts
+        sdk-e2e sdk-e2e-go sdk-e2e-python sdk-e2e-ts sdk-e2e-rust
 
 test-sdk: test-sdk-go test-sdk-python test-sdk-ts
 
@@ -621,7 +621,7 @@ test-sdk-python:
 	  (cd /tmp && $(CURDIR)/libs/sdk-python/.venv/bin/python -c 'from codewire._transport import ConnectTransport; from codewire.errors import CodewireError; from codewire.v1.api_key_connect import ApiKeyServiceClientSync; from google.rpc.error_details_pb2 import BadRequest; assert CodewireError and BadRequest and isinstance(ConnectTransport("https://codewire.example", "").client(ApiKeyServiceClientSync), ApiKeyServiceClientSync)')
 	scripts/runtime/tests/test-run-sdk-python-e2e.sh
 
-sdk-e2e: sdk-e2e-go sdk-e2e-python sdk-e2e-ts
+sdk-e2e: sdk-e2e-go sdk-e2e-python sdk-e2e-ts sdk-e2e-rust
 
 sdk-e2e-go:
 	cd libs/sdk-go && go test -tags e2e -run TestE2E -v -timeout 10m
@@ -633,3 +633,6 @@ sdk-e2e-python: test-sdk-python
 
 sdk-e2e-ts:
 	cd libs/sdk-ts && npm ci --silent --install-links --ignore-scripts && ./node_modules/.bin/tsx src/e2e.ts
+
+sdk-e2e-rust:
+	cargo run --locked -p codewire --example quickstart

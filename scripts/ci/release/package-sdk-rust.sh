@@ -7,8 +7,8 @@
 # `cargo package` builds each crate from its packaged sources alone, with
 # codewire built against the packaged codewire-proto rather than the
 # workspace's copy, so a crate that would not build from crates.io is never
-# written to OUTDIR. The packages may carry only their own sources, licenses
-# and the protos codewire-proto compiles, never a global-administrator one;
+# written to OUTDIR. The packages may carry only their own sources, examples,
+# licenses and the protos codewire-proto compiles, never a global-administrator one;
 # nothing else from the workspace. CODEWIRE_SDK_PACKAGE_TARGET_DIR names a target folder to
 # build in, which CI keeps warm between runs; by default it is a temporary one.
 set -euo pipefail
@@ -46,7 +46,7 @@ for crate in codewire-proto codewire; do
   [[ -f "$file" ]] || fail "cargo package wrote no $crate-$version.crate"
   tar -tzf "$file" | sed "s|^$crate-$version/||" >"$work/$crate.contents"
   grep -qx 'LICENSE' "$work/$crate.contents" || fail "$crate is packaged without its LICENSE"
-  if grep -vE '^(\.cargo_vcs_info\.json|Cargo\.toml|Cargo\.toml\.orig|Cargo\.lock|LICENSE|LICENSE-APACHE|README\.md|build\.rs|src/.*\.rs|proto/(codewire|google)/.*\.proto)$' \
+  if grep -vE '^(\.cargo_vcs_info\.json|Cargo\.toml|Cargo\.toml\.orig|Cargo\.lock|LICENSE|LICENSE-APACHE|README\.md|build\.rs|src/.*\.rs|examples/.*\.rs|proto/(codewire|google)/.*\.proto)$' \
     "$work/$crate.contents"; then
     fail "$crate's package carries files beyond its sources and licenses"
   fi
