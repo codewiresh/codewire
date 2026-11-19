@@ -781,9 +781,11 @@ no root, the image's root stays `nosuid`, and `sudo` refuses with "no new
 privileges". Create the VM with
 Docker on to use `sudo`.
 
-**Not yet observed** (#5464). Before this change every local VM's workload
-ran with no-new-privileges, and `sudo` refused in it (reported on v0.4.21).
-The journey step is `local-vm-sudo` in `docs/journeys/local-vm-limits.md`.
+Observed on a Linux host and on a Mac, 2026-11-19 (#5464), in a session;
+an `install_command` and a startup script are not yet observed. Before this
+change every local VM's workload ran with no-new-privileges, and `sudo`
+refused in it (reported on v0.4.21). The journey step is `local-vm-sudo` in
+`docs/journeys/local-vm-limits.md`.
 
 ## Limits inside a VM
 

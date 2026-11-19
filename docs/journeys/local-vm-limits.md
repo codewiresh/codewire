@@ -15,7 +15,7 @@ Updated 2026-11-19.
 | ID | Linux host | Mac |
 | --- | --- | --- |
 | `local-vm-fork-burst` | not yet observed; failure observed on v0.4.22, 2026-11-18 (#5384) | not yet observed |
-| `local-vm-sudo` | not yet observed; failure reported on v0.4.21 (#5464) | not yet observed |
+| `local-vm-sudo` | observed in a session, 2026-11-19 (#5464) | observed in a session, 2026-11-19 (#5464) |
 
 ## `local-vm-fork-burst`: a fork burst is refused and the VM stays up
 
@@ -89,11 +89,11 @@ Updated 2026-11-19.
 - **States to exercise:** a default VM (Docker on); a VM created with
   `--no-docker`; a stop and start of each.
 - **Driving it:**
-  1. `cw create --local --name root-walk --no-file --no-profile --yes`.
+  1. In an empty folder, `cw create --local --name root-walk --path-mode empty --no-profile --yes`.
   2. `cw exec --in root-walk -- sh -c 'id -un; grep NoNewPrivs /proc/self/status; sudo -n true && echo sudo-ok'`.
   3. `cw exec --in root-walk -- sh -c 'sudo apt-get update -qq && sudo apt-get install -y -qq cowsay && /usr/games/cowsay ok'`.
   4. `cw exec --in root-walk -- sh -c 'grep -E "^Cap(Eff|Bnd)" /proc/self/status; sudo grep -E "^Cap(Eff|Bnd)" /proc/self/status'`.
-  5. `cw exec --in root-walk -- sh -c 'cp /usr/bin/sudo /workspace/s && sudo chown root /workspace/s && sudo chmod u+s /workspace/s; /workspace/s -n true'`.
+  5. `cw exec --in root-walk -- sh -c 'cp /usr/bin/id /workspace/idcopy && sudo chown root /workspace/idcopy && sudo chmod u+s /workspace/idcopy && ls -l /workspace/idcopy && /workspace/idcopy -u'`.
   6. `cw --local stop root-walk`, `cw --local start root-walk`, and step 2 again.
   7. The same as steps 1 and 2 with `--no-docker` and an image that has
      `sudo`, as `confined-walk`.
@@ -103,11 +103,28 @@ Updated 2026-11-19.
   - step 4: the session's `CapEff` is all zeros, and under `sudo` it is the
     default set listed in `LINUX-LOCAL-VMS.md` ("Root and sudo in a VM"),
     which is also the bounding set; no `CAP_SYS_ADMIN`;
-  - step 5's copy does not run as root: the workspace is `nosuid`;
+  - step 5's copy is root-owned and setuid but prints the workspace
+    user's uid, not 0: the workspace is `nosuid`;
   - after the stop and start, step 2 prints the same;
   - in `confined-walk`, step 2 prints `NoNewPrivs: 1`, and `sudo` refuses
     with "no new privileges".
 - **Gotchas:** the image's own `sudo` and its sudoers entry give the
   workspace user passwordless `sudo`; an image without them has no `sudo`
   either way.
-- **Observed:** not yet observed.
+- **Observed:**
+  - Linux (x86_64, KVM) and macOS 27.2.1 (M3), 2026-11-19 (#5464), a
+    runtime built from a scratch merge of main, #5483 and #5485,
+    `--no-profile`:
+    every step's proof held, with the same output on both hosts. Step 2
+    printed `codewire`, `NoNewPrivs: 0` and `sudo-ok`; step 3 printed
+    `cowsay`'s `ok`; step 4 printed `CapEff` `0000000000000000`, then
+    `00000000a80425fb` under `sudo`, with the bounding set `00000000a80425fb`
+    both times; step 5 printed `-rwsr-xr-x` and uid 1000. After the stop and
+    start, step 2 printed the same. In `confined-walk`, step 2 printed
+    `NoNewPrivs: 1`, and `sudo` refused: `sudo: The "no new privileges" flag is
+    set, which prevents sudo from running as root.`
+  - The first walk of the same steps failed on both hosts: `sudo` stopped
+    with "effective uid is not 0", because the image's root was mounted
+    `nosuid`. #5483 mounts it `nodev` only with Docker on.
+  - `sudo` in an `install_command` and in a startup script, and
+    `confined-walk` after a stop and start: not yet observed (#5464).

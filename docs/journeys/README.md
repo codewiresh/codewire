@@ -18,7 +18,7 @@ runs the same commands and holds the result to the same standard.
 | [local-vm-mac.md](local-vm-mac.md) | Local VMs on a Mac (#4370 step 11): install, create, shell, run, stop and start on macOS 27 and 26 |
 | [local-vm-upgrade.md](local-vm-upgrade.md) | Local VMs across an upgrade that changes the guest runtime ABI (#4980): a start moves a stopped environment onto the installed runtime, and old VM checkpoints say why they can't be restored and can be removed |
 | [local-vm-credentials-smoke.md](local-vm-credentials-smoke.md) | The automated local VM credentials and proxy smoke (#5220): a profile added after create, each credential type through the proxy and revoked, attach across a restart, an upgrade with the previous release's authority or VM in place, and the proxy down |
-| [local-vm-limits.md](local-vm-limits.md) | Limits inside a local VM (#5384): a workload that forks without end is refused by the guest, and the VM stays up |
+| [local-vm-limits.md](local-vm-limits.md) | Limits inside a local VM (#5384, #5464): a workload that forks without end is refused by the guest, and the VM stays up; `sudo` works with Docker on and refuses with `--no-docker` |
 | [local-vm-docker.md](local-vm-docker.md) | Docker in a local VM (#5418): `docker exec` runs in the container it names, also after the VM is stopped and started |
 | [invitations.md](invitations.md) | Invite a teammate by email, who accepts, is listed and can be removed, within the invitation limits |
 | [self-hosted.md](self-hosted.md) | The self-hosted walk (#4121): install, the first admin, invite links and sign-up without an invite |
