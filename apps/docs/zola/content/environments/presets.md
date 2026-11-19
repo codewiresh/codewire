@@ -1,7 +1,7 @@
 ---
 title: Images and presets
 description: Save an image, install and startup commands, resources and a lifetime once in the organization, and create hosted sandboxes from it.
-updated: 2026-11-17
+updated: 2026-11-19
 weight: 4
 aliases: ["/guides/presets"]
 ---
@@ -35,7 +35,7 @@ Preset created: Team web.
 | `SLUG` | The name members use with `--preset` |
 | `--name` | Display name; defaults to the slug |
 | `--image` | Container image; `workspace` is the Codewire workspace image, and `go`, `node` and `python` are shorthands |
-| `--install`, `--startup` | The install command, run once at setup, and a startup script that finishes; start servers in a session, not here |
+| `--install`, `--startup` | The install command, run once at setup, and a startup script that finishes, starting servers in the background ([Services after a start](@/environments/services.md)) |
 | `--cpu`, `--memory`, `--disk` | Default CPU cores, MB and GB |
 | `--ttl` | Default lifetime, for example `2h`; the sandbox is removed when it ends |
 | `--description` | Shown in lists and the dashboard |

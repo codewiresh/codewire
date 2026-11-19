@@ -1,7 +1,7 @@
 ---
 title: codewire.yaml keys
 description: Every key codewire.yaml accepts, with its type and limits.
-updated: 2026-11-15
+updated: 2026-11-19
 weight: 2
 ---
 
@@ -19,7 +19,7 @@ in every file merged with repeated `--file`; see
 | `image` | string | `workspace` for the Codewire image, or any OCI reference |
 | `repositories` | list | `source`, optional `branch` or `revision`, `destination` under `/workspace` or `/workspace` itself, optional `known_hosts` lines for SSH sources other than `github.com`; up to 64; a destination may lie inside another repository's, which is cloned first |
 | `working_directory` | string | default `/workspace` |
-| `install_command`, `startup_script` | string | install runs once at setup; startup runs at every boot |
+| `install_command`, `startup_script` | string | install runs once at setup; startup runs at every boot and must finish ([Services after a start](@/environments/services.md)) |
 | `environment` | map | plain variables, up to 256; never secret values |
 | `secrets` | object | `organization: true`, `user: local|platform`, `project: NAME` |
 | `credentials` | object | `profile: NAME`, `local:NAME` or `platform:NAME` |

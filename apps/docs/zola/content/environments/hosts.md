@@ -1,8 +1,8 @@
 ---
 title: Hosts
 description: Computers you own that provide VMs for your organization's environments. How a host connects to Codewire, who may use it, and how to set one up.
-updated: 2026-11-15
-weight: 8
+updated: 2026-11-19
+weight: 9
 ---
 
 A host is a computer, yours or your team's, that runs Codewire VMs for your

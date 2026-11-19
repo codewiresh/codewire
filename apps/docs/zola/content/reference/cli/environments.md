@@ -1,7 +1,7 @@
 ---
 title: Environments
 description: ls, info, create, start, stop, restart, rm, update, ports, local-https, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh, setup rex, checkpoint and preset.
-updated: 2026-11-16
+updated: 2026-11-19
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -158,7 +158,8 @@ retries its create, which replaces a failed Pod.
 
 A cloud `start` returns once the environment is usable: its Git identity is
 set and its startup script has finished, as after `create`. A long startup
-script makes the start as long, so start servers in a session instead.
+script makes the start as long, so a startup script starts its servers in
+the background and exits ([Services after a start](@/environments/services.md)).
 Ctrl-C ends only the wait; the start carries on. With `--output json`, a
 cloud `start` prints `{"status": "running"}` when it returns, and `stop`
 prints `{"status": "stopped"}`.

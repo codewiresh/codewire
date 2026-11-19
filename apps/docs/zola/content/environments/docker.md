@@ -2,7 +2,7 @@
 title: Docker inside an environment
 description: Every hosted sandbox and local VM runs its own Docker daemon, so agents and builds can use containers without touching your machine's Docker.
 updated: 2026-11-19
-weight: 6
+weight: 7
 aliases: ["/guides/docker"]
 ---
 

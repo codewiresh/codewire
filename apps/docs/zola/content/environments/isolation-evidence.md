@@ -1,8 +1,8 @@
 ---
 title: Isolation evidence
 description: See how a hosted sandbox is isolated with cw report - its runtime, VM boundary, images by digest, and whether it makes a confidential computing claim.
-updated: 2026-10-26
-weight: 7
+updated: 2026-11-19
+weight: 8
 ---
 
 Every hosted sandbox runs in its own VM. `cw report` shows the evidence

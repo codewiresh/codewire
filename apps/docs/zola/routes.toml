@@ -122,6 +122,12 @@ source = "content/environments/resources.md"
 output = "environments/resources/index.html"
 
 [[routes]]
+canonical = "/docs/environments/services"
+redirect_from = "/docs/environments/services/"
+source = "content/environments/services.md"
+output = "environments/services/index.html"
+
+[[routes]]
 canonical = "/docs/environments/workspace-image"
 redirect_from = "/docs/environments/workspace-image/"
 source = "content/environments/workspace-image.md"

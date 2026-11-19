@@ -1,7 +1,7 @@
 ---
 title: Troubleshooting hosted sandboxes
 description: Find out why a hosted sandbox failed to create, start or connect, why a preview or a conversation does not respond, and how to recover.
-updated: 2026-11-15
+updated: 2026-11-19
 weight: 7
 ---
 
@@ -33,8 +33,9 @@ See [Resources and limits](@/environments/resources.md).
 
 `cw logs ENV --setup --follow` shows each step as it runs: cloning, the
 install command and the startup script. A startup script must finish; a
-server started there keeps setup waiting. Start servers in a session instead:
-`cw run --in ENV --name server --detach -- npm run dev`. A failed clone of a
+server it starts keeps setup waiting unless it runs in the background with
+its own output, as [Services after a start](@/environments/services.md)
+shows. A failed clone of a
 private repository usually means the GitHub App cannot reach it; see
 [Git repositories](@/access/git.md).
 

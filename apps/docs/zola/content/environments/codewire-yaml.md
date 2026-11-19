@@ -1,7 +1,7 @@
 ---
 title: codewire.yaml
 description: Describe an environment once in codewire.yaml so that cw create builds it the same way every time, locally or on the platform.
-updated: 2026-11-14
+updated: 2026-11-19
 weight: 1
 aliases: ["/guides/project-file"]
 ---
@@ -13,7 +13,7 @@ for local VMs, and explicit flags override both.
 
 ```sh
 cw init                                                   # writes codewire.yaml from the current directory
-cw init --image workspace --install 'pnpm install' --startup 'pnpm dev'
+cw init --image workspace --install 'pnpm install'
 cw create --local --name app             # a local VM from the nearest codewire.yaml
 cw create --cloud --name app             # the same file, for a cloud environment
 cw create --cloud --name app --file codewire.ci.yaml   # another file
@@ -120,7 +120,7 @@ repositories:
     destination: app
 
 install_command: pnpm install
-startup_script: pnpm dev
+startup_script: cd /workspace/app && setsid pnpm dev > /tmp/dev.log 2>&1 < /dev/null &
 
 environment:
   LOG_LEVEL: info

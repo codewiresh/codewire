@@ -1,7 +1,7 @@
 ---
 title: Lifecycle
 description: Stop, start, resize and remove environments; give hosted sandboxes a lifetime, extend it, and protect them from deletion.
-updated: 2026-11-12
+updated: 2026-11-19
 weight: 5
 aliases: ["/guides/lifecycle"]
 ---
@@ -42,8 +42,9 @@ far it has come. `cw start` is refused until the state is `stopped`. See
 
 A hosted `cw start` returns once the sandbox is usable: its Git identity is set
 and its startup script has run, as after `cw create`, so the next command can
-open a session straight away. A long startup script makes the start as long;
-start servers in a session instead.
+open a session straight away. A long startup script makes the start as long,
+so a startup script starts its services in the background and exits; see
+[Services after a start](@/environments/services.md).
 
 ## Resize
 
