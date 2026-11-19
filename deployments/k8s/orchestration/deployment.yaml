@@ -33,8 +33,13 @@ spec:
       # drains; at SIGTERM it hands over leadership and its Temporal tasks
       # at once, so only open HTTP streams keep it (#4426).
       terminationGracePeriodSeconds: 300
-      # Group-reads the 0440 internal TLS leaf; the image runs as 65532.
+      # Runs as the image's 65532, which reads the 0440 internal TLS leaf
+      # through fsGroup. Dev's hosted guard requires exactly this Pod
+      # securityContext, so seccomp is set on the container.
       securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
         fsGroup: 65532
         fsGroupChangePolicy: OnRootMismatch
       containers:
@@ -44,6 +49,21 @@ spec:
           # `command`.
           image: git.example.com/codewire/services:latest
           command: ["/codewire-orchestration"]
+          # The root filesystem stays writable for one path: a cw runtime
+          # upload is received below the temporary directory, and every
+          # directory on its path must be owned by root or this user and
+          # writable by no one else, except a root-owned 1777 one
+          # (crates/codewire-orchestration/src/api/cw_runtime/intake.rs).
+          # Under this Pod's fsGroup an emptyDir is setgid 2777 or 3777,
+          # which the intake refuses, so a read-only root waits for the
+          # intake to admit a volume (#5508).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: 8084
               name: http

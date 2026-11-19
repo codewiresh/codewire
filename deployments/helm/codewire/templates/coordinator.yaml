@@ -23,11 +23,24 @@ spec:
       # Coordinate WebSockets are long-lived; give clients time to reconnect
       # elsewhere before the pod goes away.
       terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: coordinator
           # Runs from the shared Rust services image; command selects the
           # coordinator binary.
           command: ["/codewire-coordinator"]
+          # The binary writes no file, so nothing in the container is
+          # writable (#5506).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           {{- include "codewire.serviceContainer" (dict "root" $ "service" .) | nindent 10 }}
           ports:
             - containerPort: 8090

@@ -30,12 +30,25 @@ spec:
     spec:
       imagePullSecrets:
         - name: harbor-registry
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: billing
           # Runs from the shared codewire/services image (one image, many
           # entrypoints); the codewire-billing binary is selected by `command`.
           image: git.example.com/codewire/services:latest
           command: ["/codewire-billing"]
+          # The binary writes no file, so nothing in the container is
+          # writable (#5505).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           ports:
             - containerPort: 8081
               name: http

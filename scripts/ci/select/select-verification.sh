@@ -2396,9 +2396,11 @@ if [ "$event_selected" = false ]; then
         select_token policy
         recognized=true
         ;;
-      # The chart's equivalence with the Kustomize trees (#2908) runs in
-      # Deploy, with the fixture it renders Production's source tree from.
+      # The chart's equivalence with the Kustomize trees (#2908) and the
+      # services' container hardening (#5505) run in Deploy, with the
+      # fixture they render Production's source tree from.
       scripts/ci/tests/test-deploy-helm-chart.py|\
+      scripts/ci/tests/test-deploy-service-hardening.py|\
       scripts/ci/tests/fixtures/helm-chart-values-source.yaml)
         select_token deploy
         recognized=true

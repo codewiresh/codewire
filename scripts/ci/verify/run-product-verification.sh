@@ -1940,6 +1940,10 @@ run_deploy() {
   install_helm
   # The Codewire chart renders what the Kustomize trees render (#2908).
   python3 -B scripts/ci/tests/test-deploy-helm-chart.py
+  # Every service on the services image runs non-root and read-only, with
+  # no privilege escalation or capabilities; the check lists any exception
+  # (#5505).
+  python3 -B scripts/ci/tests/test-deploy-service-hardening.py
   scripts/ci/tests/test-deploy-mesh-ingress-protocol.sh
   local default_mesh_render
   default_mesh_render="$(helm template test apps/cli/charts/codewire-mesh \

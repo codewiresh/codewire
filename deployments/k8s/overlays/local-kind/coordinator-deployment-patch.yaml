@@ -46,6 +46,13 @@
       env:
         - name: PGPASSWORD
           value: codewire
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
 - op: add
   path: /spec/template/spec/containers/0/startupProbe
   value:

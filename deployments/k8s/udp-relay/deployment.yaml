@@ -75,10 +75,15 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
+          # The relay writes no file, so nothing in the container is
+          # writable (#5510). The image has no account for 65532, so
+          # without runAsGroup its primary group would be root's.
           securityContext:
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             runAsNonRoot: true
             runAsUser: 65532
+            runAsGroup: 65532
             capabilities:
               drop:
                 - ALL

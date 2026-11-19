@@ -867,6 +867,10 @@ run_paths_case helm_chart_equivalence pull_request refs/pull/2908/head false \
   deployments/helm/codewire/values.yaml \
   scripts/ci/tests/test-deploy-helm-chart.py \
   scripts/ci/tests/fixtures/helm-chart-values-source.yaml
+# The services' container hardening check runs in Deploy too (#5505).
+run_paths_case service_container_hardening pull_request refs/pull/5505/head false \
+  'deploy policy security security_js' \
+  scripts/ci/tests/test-deploy-service-hardening.py
 # The parsed structure of ci.yaml is a Policy CI-script test.
 run_paths_case ci_workflow_structure pull_request refs/pull/3660/head false \
   'policy security security_js' scripts/ci/tests/test-ci-workflow-structure.py

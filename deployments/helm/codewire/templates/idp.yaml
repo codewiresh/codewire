@@ -27,12 +27,25 @@ spec:
       {{- include "codewire.servicePod" (dict "root" $ "service" .) | nindent 6 }}
       # The preStop delay, then 30 s for requests already in flight (#4426).
       terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: idp
           # The Rust OIDC provider. Runs from the shared codewire/services
           # image (one image, many entrypoints); the codewire-idp binary is
           # selected by `command`.
           command: ["/codewire-idp"]
+          # The binary writes no file, so nothing in the container is
+          # writable (#5507).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           {{- include "codewire.serviceContainer" (dict "root" $ "service" .) | nindent 10 }}
           ports:
             # The API: the edge and the dashboard only (its NetworkPolicy).

@@ -101,6 +101,13 @@ coordinator:
       env:
         - name: PGPASSWORD
           value: codewire
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault
   startupProbe: &startupProbe
     httpGet:
       path: /healthz

@@ -25,11 +25,24 @@ spec:
         codewire.sh/ses-credential-generation: "1"
     spec:
       {{- include "codewire.servicePod" (dict "root" $ "service" .) | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: billing
           # Runs from the shared codewire/services image (one image, many
           # entrypoints); the codewire-billing binary is selected by `command`.
           command: ["/codewire-billing"]
+          # The binary writes no file, so nothing in the container is
+          # writable (#5505).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           {{- include "codewire.serviceContainer" (dict "root" $ "service" .) | nindent 10 }}
           ports:
             - containerPort: 8081
