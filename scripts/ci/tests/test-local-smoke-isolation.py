@@ -464,10 +464,13 @@ class Runner(unittest.TestCase):
         self.assertEqual(list(scratch.iterdir()), [])
 
 
+# The fake is raw before it shows the hint, because the runner types as soon
+# as it sees the hint: typed in the cooked terminal, the line's \r arrives as
+# \n, and setraw's flush drops it (Policy run 62638).
 FAKE_ATTACH = """#!/usr/bin/python3 -I
 import os, subprocess, tty
-print("Detach: Ctrl-B, then d", flush=True)
 tty.setraw(0)
+print("Detach: Ctrl-B, then d", flush=True)
 line = b""
 while not line.endswith(b"\\r"):
     line += os.read(0, 1)
@@ -486,7 +489,9 @@ class Attach(unittest.TestCase):
     detach, and passes only when a live shell printed the marker and cw
     detached."""
 
-    def attach(self, shell):
+    # A live shell's attach ends at the marker, so its deadline only bounds a
+    # hang; a dead shell's waits out its deadline, which is what it tests.
+    def attach(self, shell, seconds):
         scratch = scratch_directory(self, "smoke-attach-")
         fake = scratch / "cw"
         fake.write_text(FAKE_ATTACH)
@@ -495,17 +500,17 @@ class Attach(unittest.TestCase):
                               capture_output=True, text=True, check=True, timeout=30).stdout
         return subprocess.run(["python3", "-I", "-c", code, "echo signed-$((2 + 3))", "signed-5",
                                str(fake), "--local", "attach", "vm", "--session", "s"],
-                              capture_output=True, text=True, timeout=60,
-                              env={**os.environ, "FAKE_SHELL": shell, "SMOKE_ATTACH_SECONDS": "5"})
+                              capture_output=True, text=True, timeout=seconds + 60,
+                              env={**os.environ, "FAKE_SHELL": shell, "SMOKE_ATTACH_SECONDS": str(seconds)})
 
     def test_a_live_shell_that_prints_the_marker_passes_and_detaches(self):
-        result = self.attach("live")
+        result = self.attach("live", 300)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("signed-5", result.stdout)
         self.assertIn("Detached from vm/s", result.stdout)
 
     def test_a_shell_that_never_answers_fails_at_the_deadline(self):
-        result = self.attach("dead")
+        result = self.attach("dead", 5)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertNotIn("signed-5", result.stdout)
 
