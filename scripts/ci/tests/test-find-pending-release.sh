@@ -189,10 +189,17 @@ DISPATCHED_TAG=v0.4.0 find_release dispatch deploy-prod workflow_dispatch || fai
 output_is dispatch release_tag=v0.4.0
 unmarked dispatch
 grep -Fq 'notice: this dispatch was not recorded' "$fixture/dispatch.out" || fail "an unrecorded dispatch was silent: $(cat "$fixture/dispatch.out")"
-DISPATCHED_TAG=v0.4.0 DISPATCHED_R2_PUBLICATION=immutable DISPATCHED_R2_PROMOTE_CHANNEL=none \
+DISPATCHED_TAG=v0.4.0 DISPATCHED_R2_PUBLICATION=immutable DISPATCHED_R2_PROMOTE_CHANNEL=stable \
   find_release dispatch-cli cli-release workflow_dispatch || fail "cli dispatch: $(cat "$fixture/dispatch-cli.out")"
-output_is dispatch-cli release_tag=v0.4.0 r2_publication=immutable r2_promote_channel=none
-for bad in 'DISPATCHED_TAG=v0.4.0;x' 'DISPATCHED_R2_PUBLICATION=stable' 'DISPATCHED_R2_PROMOTE_CHANNEL=beta'; do
+output_is dispatch-cli release_tag=v0.4.0 r2_publication=immutable r2_promote_channel=stable
+# A dispatch that names neither still publishes and moves stable.
+DISPATCHED_TAG=v0.4.0 find_release dispatch-cli-default cli-release workflow_dispatch ||
+  fail "cli dispatch without inputs: $(cat "$fixture/dispatch-cli-default.out")"
+output_is dispatch-cli-default release_tag=v0.4.0 r2_publication=immutable r2_promote_channel=stable
+# A release never skips publication or the channel (#4492): v0.4.17's
+# recovery with both off ended green while cw upgrade still offered v0.4.16.
+for bad in 'DISPATCHED_TAG=v0.4.0;x' 'DISPATCHED_R2_PUBLICATION=stable' 'DISPATCHED_R2_PROMOTE_CHANNEL=beta' \
+    'DISPATCHED_R2_PUBLICATION=none' 'DISPATCHED_R2_PROMOTE_CHANNEL=none'; do
   # shellcheck disable=SC2163 # Each case names one variable to set.
   if (export DISPATCHED_TAG=v0.4.0 "$bad"; find_release dispatch-bad cli-release workflow_dispatch); then
     fail "the dispatch input $bad was accepted"

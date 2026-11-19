@@ -7,22 +7,24 @@ on:
         description: Existing canonical vMAJOR.MINOR.PATCH tag to recover
         required: true
         type: string
-      # A dispatch delivers what the schedule delivers unless told otherwise:
-      # with none, a recovery published only Gitea and GitHub and left
+      # A dispatch delivers what the schedule delivers, with no way to skip
+      # it: a recovery that published only Gitea and GitHub left
       # releases.codewire.sh, which cw upgrade reads, without the release
-      # (v0.4.17, #4444). The channel never moves to an older release.
+      # (v0.4.17, #4444), and still ended green. A run that publishes nothing
+      # is cw-release-dry-run.yaml (#4492). The channel never moves to an
+      # older release.
       r2_publication:
-        description: Immutable R2 publication (requires the admitted release route)
+        description: Immutable R2 publication (always; requires the admitted release route)
         required: false
         type: choice
         default: immutable
-        options: [none, immutable]
+        options: [immutable]
       r2_promote_channel:
-        description: Channel to move after exact public readback (default stable)
+        description: Channel to move after exact public readback (always stable)
         required: false
         type: choice
         default: stable
-        options: [none, stable]
+        options: [stable]
 
   # A pushed, signed release tag is picked up within five minutes (owner,
   # 2026-10-23, #2892). A scheduled run is main's workflow; its first job only
@@ -1147,7 +1149,7 @@ jobs:
         run: |
           set -euo pipefail
           [ "$CW_RELEASE_R2_ROUTE_ADMITTED" = 'true' ] || {
-            echo 'The R2 release route is not admitted; select r2_publication=none' >&2
+            echo 'The R2 release route is not admitted: admit it, since a release always publishes to releases.codewire.sh' >&2
             exit 1
           }
           r2_work="${RUNNER_TEMP:?}/codewire-release-r2"

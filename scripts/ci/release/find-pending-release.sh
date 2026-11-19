@@ -3,7 +3,10 @@
 # delivers, as GITHUB_OUTPUT release_tag (empty when there is none), plus
 # cli-release's r2_publication and r2_promote_channel.
 #
-# A dispatch (the owner's recovery path) delivers the tag it names. A scheduled
+# A dispatch (the owner's recovery path) delivers the tag it names, and like
+# every release it publishes to releases.codewire.sh and moves stable: any
+# other r2_publication or r2_promote_channel is refused before a job builds
+# (#4492; the run that publishes nothing is cw-release-dry-run.yaml). A scheduled
 # run picks up a pushed release tag (owner, 2026-10-23, #2892): the newest
 # canonical v* tag on origin that Forgejo verifies as signed by the release
 # tagger (CODEWIRE_RELEASE_TAGGER), when
@@ -50,13 +53,13 @@ case "${GITHUB_EVENT_NAME:-}" in
     tag="${DISPATCHED_TAG:-}"
     [[ "$tag" =~ $semver ]] || fail "the dispatched release tag '$tag' is not exact semver"
     if [[ "$workflow" == cli-release ]]; then
-      [[ "${DISPATCHED_R2_PUBLICATION:-none}" =~ ^(none|immutable)$ ]] ||
-        fail 'the dispatched r2_publication must be none or immutable'
-      [[ "${DISPATCHED_R2_PROMOTE_CHANNEL:-none}" =~ ^(none|stable)$ ]] ||
-        fail 'the dispatched r2_promote_channel must be none or stable'
+      [[ "${DISPATCHED_R2_PUBLICATION:-immutable}" == immutable ]] ||
+        fail 'a release always publishes: r2_publication must be immutable (cw-release-dry-run.yaml publishes nothing)'
+      [[ "${DISPATCHED_R2_PROMOTE_CHANNEL:-stable}" == stable ]] ||
+        fail 'a release always moves stable: r2_promote_channel must be stable (cw-release-dry-run.yaml publishes nothing)'
     fi
     printf 'dispatched release: %s\n' "$tag"
-    emit "$tag" "${DISPATCHED_R2_PUBLICATION:-none}" "${DISPATCHED_R2_PROMOTE_CHANNEL:-none}"
+    emit "$tag" immutable stable
     dispatched=true
     ;;
   schedule) dispatched=false ;;

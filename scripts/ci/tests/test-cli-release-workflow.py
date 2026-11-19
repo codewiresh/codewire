@@ -330,6 +330,11 @@ def check(text, ci_text):
          "a dispatched release does not default to its R2 publication")
     need(re.search(r"r2_promote_channel:\n(?:        .*\n)*?        default: stable", header) is not None,
          "a dispatched release does not default to moving stable")
+    # ...and can't be told to skip either (#4492).
+    need(re.search(r"r2_publication:\n(?:        .*\n)*?        options: \[immutable\]\n", header) is not None,
+         "a dispatched release may skip its R2 publication")
+    need(re.search(r"r2_promote_channel:\n(?:        .*\n)*?        options: \[stable\]\n", header) is not None,
+         "a dispatched release may skip moving stable")
     need("tags:" not in header, "tag-owned workflow code may release")
     blocks = jobs(text)
     need(list(blocks) == ["pending", "release-selection", "build-runtime-linux", "build-helper-darwin", "sign-helper",
@@ -923,10 +928,15 @@ MUTATIONS = {
                                            "          CW_RELEASE_SOURCE_SHA", 1),
     "route inactive": lambda t: t.replace("CW_RELEASE_R2_ROUTE_ADMITTED: 'true'", "CW_RELEASE_R2_ROUTE_ADMITTED: 'false'"),
     "route unknown": lambda t: t.replace("CW_RELEASE_R2_ROUTE_ADMITTED: 'true'", "CW_RELEASE_R2_ROUTE_ADMITTED: 'unknown'"),
-    "promotion default": lambda t: t.replace("        default: stable\n        options: [none, stable]",
+    "promotion default": lambda t: t.replace("        default: stable\n        options: [stable]",
                                              "        default: none\n        options: [none, stable]"),
-    "publication default": lambda t: t.replace("        default: immutable\n        options: [none, immutable]",
+    "publication default": lambda t: t.replace("        default: immutable\n        options: [immutable]",
                                                "        default: none\n        options: [none, immutable]"),
+    # A release can't be told to skip either one, even with the default kept (#4492).
+    "promotion skippable": lambda t: t.replace("        default: stable\n        options: [stable]",
+                                               "        default: stable\n        options: [none, stable]"),
+    "publication skippable": lambda t: t.replace("        default: immutable\n        options: [immutable]",
+                                                 "        default: immutable\n        options: [none, immutable]"),
     "credential before admission": lambda t: t.replace(
         "          r2_work=\"${RUNNER_TEMP:?}/codewire-release-r2\"\n          mkdir -m 0700 \"$r2_work\"\n"
         "          ../scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh \"$r2_work/aws-credentials\"\n", "", 1)
