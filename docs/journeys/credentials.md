@@ -9,7 +9,7 @@ surface proves nothing about another. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-18. Every step not listed as observed is **not yet
+Updated 2026-11-19. Every step not listed as observed is **not yet
 observed**.
 
 | ID | Linux local VM | Mac local VM | Hosted Sandbox (Dev) |
@@ -26,6 +26,7 @@ observed**.
 | `cred-delivery-diagnosis` | not yet observed | not yet observed | local VMs only |
 | `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, the early replacements on that build plus their change, and `main` at 4cae0f601 through the smoke, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | observed, #5286: main's tree at 57b68c6be (#5295 and #5312), 2026-11-18, with a name resolving only to private addresses; the provider came back at the regular replacement, not the early ones (a sign-in's token host not walked) | local VMs only |
 | `cred-file-store` | not yet observed (#5255) | the macOS file store; not part of this check | local stores only |
+| `cred-same-name` | not yet observed (#4928) | not yet observed (#4928) | not yet observed (#4928) |
 
 ## Before the walk
 
@@ -701,4 +702,60 @@ The spec is
   - Removing the throwaway `HOME` leaves no Codewire entry in the private
     keyring.
 - **Gotchas:** entries are plaintext: never walk it with a real credential.
+- **Observed:** not yet observed.
+
+## 13. `cred-same-name`: one name for a credential of each provider
+
+Issue: #4928. The rules are in `docs/dev/SECRETS-AND-CREDENTIALS.md`,
+"Credential names". The owner labels credentials by account: a Claude
+sign-in and a Codex sign-in both named after their email address.
+
+- **Entry points:** `cw credentials --local|--cloud connect`, `add`, `get`,
+  `rename`, `delete` and `--profile P set`, and the dashboard's credential
+  list and add form.
+- **States to exercise:**
+  - the same name under two providers, in each placement;
+  - a bare name that matches more than one credential;
+  - `PROVIDER/NAME` acting on the named one only;
+  - a name already taken in the same provider (a Claude sign-in and a Claude
+    token);
+  - a store made before the change, holding a credential literally named
+    `github/work` beside a GitHub credential named `work`;
+  - in the cloud, an organization's credential looked up by someone who
+    isn't a member.
+- **Driving it:** the throwaway `HOME` and private store of
+  [Before the walk](#before-the-walk). The owner's own steps use real
+  sign-ins, removed at the end; the rest use synthetic keys from stdin.
+  1. `cw credentials --local connect claude --name walk`, then
+     `cw credentials --local connect codex --name walk`.
+  2. `cw credentials --local list`, and `get walk`.
+  3. `get openai/walk`, then `rename openai/walk walk-codex` and back.
+  4. `cw credentials --local connect claude-token --name walk`.
+  5. `--profile same set anthropic walk` and `--profile same set codex walk`,
+     then `cw create --local --profile local:same` and a request on each
+     provider's route in the VM.
+  6. `delete openai/walk`, then `list`.
+  7. Steps 1 to 6 again with `--cloud` on Dev, and the dashboard's list.
+  8. On Dev, a second account that isn't a member of the organization runs
+     `get NAME` for a name two of the organization's credentials share.
+- **Proof:**
+  - step 1: both connects succeed; neither says the name is in use;
+  - step 2: `list` shows both, each with its provider; `get walk` changes
+    nothing and answers `"walk" names more than one credential (anthropic,
+    openai); name one, for example anthropic/walk`;
+  - step 3: only the Codex credential is shown and renamed;
+  - step 4: refused, naming the Claude sign-in that holds `walk` and
+    suggesting a free name;
+  - step 5: each slot takes its own provider's `walk`, and each request
+    reaches its provider;
+  - step 6: only the Codex credential is gone;
+  - step 7: the same in the cloud, and the dashboard shows the provider
+    beside each name;
+  - step 8: `not found`, exactly as for a name that doesn't exist, with no
+    provider listed.
+- **Gotchas:**
+  - A `cw` older than the change, talking to a store that already holds the
+    same name twice, is refused by the store rather than given one of them.
+  - Names are case-insensitive: `Walk` and `walk` are the same name in one
+    provider.
 - **Observed:** not yet observed.

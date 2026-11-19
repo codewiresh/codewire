@@ -232,6 +232,81 @@ asking for the key. A stale identity revision or renamed record cannot be
 silently overwritten. OAuth reconnect and automatic refresh remain separate
 operations; automatic refresh never reactivates a revoked identity.
 
+#### Credential names (in progress, #4928)
+
+People label credentials by account, often their email address, and use the
+same label for each provider they sign in with. A credential's name is unique
+per owner and **provider**, case-insensitively, in both stores (design agreed
+on #4928, 2026-11-17, with cw-security's conditions):
+
+- The provider is the stored provider id: `anthropic` (Claude sign-in, Claude
+  setup token and Anthropic API key), `openai` (Codex and OpenAI API key),
+  `github` and `ssh`. A Claude sign-in and a Codex sign-in can both be
+  `n@example.com`; a Claude sign-in and a Claude token can't share a name.
+- The owner is the signed-in user, or for a cloud credential an organization
+  holds, that organization. Local and cloud credentials are separate stores,
+  so the same name in each is never ambiguous: `--local` and `--cloud` pick
+  the store.
+- When a name is already taken in the same provider and the command is not a
+  reconnect of that credential (`connect … --name` repeated, above), the
+  refusal names the credential that holds it and suggests a free name in that
+  provider: `anthropic already has a credential named "walk" (Claude
+  sign-in); choose another name, for example walk-2`.
+- A new or renamed credential's name may not start with a provider id
+  followed by `/` (`anthropic/`, `openai/`, `github/`, `ssh/`), in either
+  store. A credential an older Codewire saved with such a name keeps it and
+  keeps working.
+
+Every command that takes a credential name (`get`, `rename`, `rotate`,
+`revoke`, `delete`, and `connect --name` when it reconnects) also accepts
+`PROVIDER/NAME`:
+
+- A prefix is read as a provider only when it is one of the four ids; any
+  other name containing `/` is a whole name.
+- A bare name that matches one credential acts on it. A bare name that matches
+  more than one is refused before anything changes, with the choice, in both
+  placements: `"n@example.com" names more than one credential (anthropic,
+  openai); name one, for example anthropic/n@example.com`.
+- A name with two readings, such as a literal `github/work` an older Codewire
+  saved beside a GitHub credential named `work`, acts only when exactly one
+  credential matches either reading; otherwise it is refused naming both.
+- `--profile P set SLOT NAME` needs no prefix: the slot fixes the provider.
+- `list`, `get` and the dashboard show the provider beside each name.
+
+Names are resolved only at the CLI and the API edge. Profile entries, grants,
+the broker's leases, refresh journals and revocations refer to a credential by
+its ID in both stores (local `profile_entries.credential_id`, cloud
+`platform_access_profile_entries.credential_id` and
+`credential_revocations.credential_id`), and nothing stores a name to resolve
+later, so renaming a credential never moves a binding.
+
+In the cloud, the ambiguity refusal comes after authorization. A caller who may
+not read an organization's credentials gets the same answer as for a name that
+doesn't exist, never the list of providers; the list names only providers of
+credentials the caller may already read. `GetCredentialRequest` carries an
+optional `provider` beside the name. A name that matches more than one
+credential without it answers `FAILED_PRECONDITION`, whose ErrorInfo reason
+lists the matching providers and no IDs, so an older `cw` that sends a bare
+ambiguous name is refused rather than given a guess. Enrolment's "name in use"
+check is scoped to the provider, as is the dashboard add form's.
+
+The cloud migration is forward-only. It creates unique indexes on
+`(user_id, provider, lower(display_name))` and
+`(organization_id, provider, lower(display_name))` before it drops
+`platform_credentials_user_display_name_key` and
+`platform_credentials_organization_display_name_key`, so uniqueness never
+lapses, and every existing row stays valid. Rolling back recreates the old
+indexes, which fails once two providers share a name: rename one of them
+first.
+
+A local store moves to schema 7, whose `credentials` table is unique on
+`(provider, display_name COLLATE NOCASE)` instead of `display_name`. The
+upgrade copies every row unchanged; every schema 6 store is already unique.
+The authority's name lookups take the provider, as the cloud's do. A new
+authority protocol and `AuthorityFeature::NamesPerProvider` mark the change; a
+`cw` that needs it replaces an older authority only while no local VM runs, as
+#4798's path does.
+
 Renaming a platform profile (`AccessProfileService.RenameAccessProfile`, or
 **Rename** in a profile's menu in Settings → Credentials) changes only its
 label. It uses Create profile's name rules, publishes no revision and keeps the
