@@ -80,17 +80,28 @@ pub(super) async fn doctor_local_egress_check() -> DoctorCheck {
             );
         };
         let mut unavailable = Vec::new();
+        let mut interception_lost = Vec::new();
         for environment in environments
             .iter()
             .filter(|environment| environment.state == v1::EnvironmentState::Running as i32)
         {
-            if let Ok(shown) = client.get(&environment.name).await
-                && let Some(egress) = shown.egress_unavailable
-            {
+            let Ok(shown) = client.get(&environment.name).await else {
+                continue;
+            };
+            if let Some(egress) = shown.egress_unavailable {
                 unavailable.push((environment.name.clone(), egress.since_unix_ms));
             }
+            if shown.interception.is_some_and(|interception| {
+                interception.state == v1::InterceptionState::Lost as i32
+            }) {
+                interception_lost.push(environment.name.clone());
+            }
         }
-        local_egress_row(&unavailable, std::time::SystemTime::now())
+        local_egress_row(
+            &unavailable,
+            &interception_lost,
+            std::time::SystemTime::now(),
+        )
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     doctor_check(LOCAL_EGRESS, DoctorStatus::Ok, "no local VMs on this host")
@@ -194,14 +205,33 @@ fn local_store_row(
 
 /// The row for the running VMs whose egress is unavailable, each with when its
 /// refusing began.
-fn local_egress_row(unavailable: &[(String, i64)], now: std::time::SystemTime) -> DoctorCheck {
-    if unavailable.is_empty() {
+fn local_egress_row(
+    unavailable: &[(String, i64)],
+    interception_lost: &[String],
+    now: std::time::SystemTime,
+) -> DoctorCheck {
+    if unavailable.is_empty() && interception_lost.is_empty() {
         return doctor_check(
             LOCAL_EGRESS,
             DoctorStatus::Ok,
             "every running local VM's egress broker answers in time",
         );
     }
+    let mut problems = Vec::new();
+    if !unavailable.is_empty() {
+        problems.push(unavailable_egress(unavailable, now));
+    }
+    if !interception_lost.is_empty() {
+        problems.push(format!(
+            "agents can't reach their providers in {}; restart each VM with `cw --local restart NAME`",
+            interception_lost.join(", ")
+        ));
+    }
+    doctor_check(LOCAL_EGRESS, DoctorStatus::Warn, problems.join("; "))
+}
+
+/// The VMs whose egress broker is past its deadline, each with how long.
+fn unavailable_egress(unavailable: &[(String, i64)], now: std::time::SystemTime) -> String {
     let names = unavailable
         .iter()
         .map(|(name, since_unix_ms)| {
@@ -215,12 +245,8 @@ fn local_egress_row(unavailable: &[(String, i64)], now: std::time::SystemTime) -
         })
         .collect::<Vec<_>>()
         .join(", ");
-    doctor_check(
-        LOCAL_EGRESS,
-        DoctorStatus::Warn,
-        format!(
-            "egress unavailable in {names}: the egress broker is past its deadline and requests are refused; `cw --local info NAME` shows it"
-        ),
+    format!(
+        "egress unavailable in {names}: the egress broker is past its deadline and requests are refused; `cw --local info NAME` shows it"
     )
 }
 
@@ -273,14 +299,45 @@ mod tests {
     #[test]
     fn doctor_names_each_vm_whose_egress_is_unavailable() {
         let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_130);
-        let none = local_egress_row(&[], now);
+        let none = local_egress_row(&[], &[], now);
         assert_eq!(none.status, DoctorStatus::Ok);
-        let row = local_egress_row(&[("dev".to_owned(), 1_700_000_000_000)], now);
+        let row = local_egress_row(&[("dev".to_owned(), 1_700_000_000_000)], &[], now);
         assert_eq!(row.status, DoctorStatus::Warn);
         assert!(
             row.detail.contains("egress unavailable in dev for 2m 10s"),
             "{}",
             row.detail
+        );
+    }
+
+    /// Doctor names each running VM whose interception was lost, and the
+    /// restart that restores it, beside any unavailable egress (#5216).
+    #[test]
+    fn doctor_names_each_vm_whose_interception_was_lost() {
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_130);
+        let row = local_egress_row(&[], &["dev".to_owned(), "app".to_owned()], now);
+        assert_eq!(row.status, DoctorStatus::Warn);
+        assert!(
+            row.detail
+                .starts_with("agents can't reach their providers in dev, app; restart each VM"),
+            "{}",
+            row.detail
+        );
+        let both = local_egress_row(
+            &[("web".to_owned(), 1_700_000_000_000)],
+            &["dev".to_owned()],
+            now,
+        );
+        assert!(
+            both.detail.contains("egress unavailable in web for 2m 10s"),
+            "{}",
+            both.detail
+        );
+        assert!(
+            both.detail
+                .contains("; agents can't reach their providers in dev"),
+            "{}",
+            both.detail
         );
     }
 }

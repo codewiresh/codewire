@@ -1246,9 +1246,22 @@ Issues: #3999, #4001.
     macOS a socket can die in flight under load. The runner's log has the
     same stage on its `front_door_pairing` line, and for a later credential
     broker's socket the front door does not take, `outcome=front_door_dropped`
-    with the stage, after which the next broker pairs.
-- **Gotchas:** a request that hangs is a failure of this step, even though
-  nothing leaked.
+    with the stage, after which the next broker pairs;
+  - **a front door that ended is shown** (#5216, the `lost` state of
+    #4912). Once it has ended without a stop being asked for,
+    `cw --local info NAME` shows
+    `Credentials: ! agents can't reach their providers; restart the VM`,
+    then `→ cw --local restart NAME`, and `--output json` carries
+    `"interception": {"state": "lost"}`. `cw doctor` names the VM with the
+    same step. A front door the runner stops, for a stop or a restart, is
+    not shown.
+- **Gotchas:**
+  - a request that hangs is a failure of this step, even though nothing
+    leaked;
+  - SIGTERM ends the front door at once: it has no handler, and nothing it
+    inherits blocks or ignores the signal
+    (`sigterm_ends_a_serving_front_door_at_once`). The 20 s the 2026-11-17
+    walk saw after a SIGTERM was not reproduced (#5216).
 - **Observed:** partly, in the same run as `agent-vm-interception` (Linux
   local VM, 2026-11-18, source 582326b40, recorded on #3999). With the
   front door killed, a
@@ -1259,8 +1272,17 @@ Issues: #3999, #4001.
   observed: that no connection leaves the egress broker for that host (the
   run shows the guest's request ended at once, not the broker's refusal
   record, #5058); other destinations still following the policy; the
-  credential broker killed; and either one missing when the environment
-  starts.
+  credential broker killed; either one missing when the environment
+  starts; and the ended front door shown by `cw --local info` and
+  `cw doctor` (#5216).
+
+  Also observed, on a macOS local VM (v0.4.24, 2026-11-19, #5216): SIGTERM
+  to the front door by its PID ended it within 2 s, and the VM stayed
+  running. `curl` to the intercepted host then failed in 50 ms (exit 7,
+  connection refused), but `claude -p` printed nothing until a 120 s cap
+  ended it: Claude Code retries a refused connection silently. The
+  connection fails at once; the agent does not, which is why the ended
+  front door must show in `cw --local info` and `cw doctor`.
 
 ## `agent-switch-off`: with interception off, a local VM behaves as today
 

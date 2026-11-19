@@ -472,6 +472,12 @@ the connection to a TLS front door, one process per VM, instead of dialling.
 The front door is confined to no filesystem, no new sockets and no process
 creation, and holds only the descriptors it inherits: by Landlock and
 seccomp on Linux, and by a Seatbelt profile on macOS.
+A front door that ends without a stop being asked for is not restarted: from
+then on every intercepted connection is refused at once, the VM keeps
+running, and `cw --local info` and `cw doctor` say that its agents can't
+reach their providers and that `cw --local restart NAME` restores them; the
+JSON carries `"interception": {"state": "lost"}` (#5216, the `lost` state of
+#4912).
 What an agent sends to its provider is not documented and changes
 between releases, so a compatibility test runs the real Claude Code against a
 stand-in provider (#4925): for the image's version when that version or a

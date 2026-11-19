@@ -590,6 +590,7 @@ impl RunnerState {
             error_code: self.error_code.unwrap_or_default().to_owned(),
             exit: self.reported_exit(),
             egress_unavailable: self.egress_unavailable(),
+            interception: self.interception(),
             cw_runtime_catalog_generation: self
                 .cw_runtime_catalog_generation()
                 .unwrap_or_default()

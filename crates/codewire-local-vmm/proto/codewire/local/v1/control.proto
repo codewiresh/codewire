@@ -918,6 +918,9 @@ message Environment {
   RunnerExit runner_exit = 29;
   // Read from the running VM's runner when the environment is shown (#4965).
   EgressUnavailable egress_unavailable = 30;
+  // Read from the running VM's runner when the environment is shown (#4912,
+  // #5216).
+  Interception interception = 31;
 }
 
 message ListEnvironmentsRequest {}
@@ -1036,6 +1039,7 @@ message RunnerInfo {
   // error and state (#4953).
   RunnerExit exit = 7;
   EgressUnavailable egress_unavailable = 8;
+  Interception interception = 9;
 }
 
 // The VM's egress broker is past its deadline, so its network worker refuses
@@ -1046,6 +1050,37 @@ message EgressUnavailable {
   uint64 late_answers = 1;
   // When the refusing began.
   int64 since_unix_ms = 2;
+}
+
+// Whether a running boot keeps agents' real credentials out of the VM, and
+// why not (#4912). Absent for a stopped VM: only a running boot reports it.
+enum InterceptionState {
+  INTERCEPTION_STATE_UNSPECIFIED = 0;
+  // The switch was on and the boot intercepts: agents hold placeholders.
+  INTERCEPTION_STATE_INTERCEPTED = 1;
+  // The switch was on but the boot does not intercept; reason says why.
+  INTERCEPTION_STATE_NOT_INTERCEPTED = 2;
+  // The per-host switch was off for this boot.
+  INTERCEPTION_STATE_OFF = 3;
+  // The boot intercepted, but its front door ended after the start: requests
+  // to agent hosts now fail closed until the VM restarts.
+  INTERCEPTION_STATE_LOST = 4;
+}
+
+// Why a switched-on boot does not intercept. Set only with NOT_INTERCEPTED.
+enum InterceptionReason {
+  INTERCEPTION_REASON_UNSPECIFIED = 0;
+  // The credentials come from the platform; goes away with #4909.
+  INTERCEPTION_REASON_PLATFORM_CREDENTIALS = 1;
+  // No credential broker: no agent credential is selected.
+  INTERCEPTION_REASON_NO_CREDENTIALS = 2;
+  // The running credential authority predates boot secrets.
+  INTERCEPTION_REASON_CREDENTIAL_SERVICE_OUTDATED = 3;
+}
+
+message Interception {
+  InterceptionState state = 1;
+  InterceptionReason reason = 2;
 }
 
 // How one of a runner's processes (the VMM or a sidecar) ended.

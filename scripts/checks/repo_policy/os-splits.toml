@@ -96,7 +96,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli-bin/tests/local_credential_authority.rs" = { group = "credentials", count = 1 }
 "crates/codewire-cli-bin/tests/local_git_credential_helper.rs" = { group = "credentials", count = 7 }
 "crates/codewire-cli-bin/tests/native_egress_broker.rs" = { group = "vm-backend", count = 1 }
-"crates/codewire-cli-bin/tests/native_front_door.rs" = { group = "vm-backend", count = 9 }
+"crates/codewire-cli-bin/tests/native_front_door.rs" = { group = "vm-backend", count = 10 }
 "crates/codewire-cli-bin/tests/native_mesh_enrollment.rs" = { group = "vm-backend", count = 1 }
 "crates/codewire-cli-bin/tests/native_mesh_transport.rs" = { group = "vm-backend", count = 1 }
 "crates/codewire-cli-bin/tests/native_network_confinement.rs" = { group = "vm-backend", count = 1 }

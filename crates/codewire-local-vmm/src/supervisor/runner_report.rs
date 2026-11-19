@@ -36,6 +36,7 @@ pub(super) async fn with_runner_report(
     if let Ok(Some(info)) = info {
         environment.runner_exit = reported_exit(&environment, &info);
         environment.egress_unavailable = reported_egress(&environment, &info);
+        environment.interception = reported_interception(&environment, &info);
     }
     environment
 }
@@ -46,13 +47,31 @@ fn reported_egress(
     environment: &v1::Environment,
     info: &v1::RunnerInfo,
 ) -> Option<v1::EgressUnavailable> {
-    let running = v1::EnvironmentState::Running as i32;
-    (info.environment_id == environment.id
-        && info.generation == environment.generation
-        && info.state == running
-        && environment.state == running)
+    reports_running(environment, info)
         .then_some(info.egress_unavailable)
         .flatten()
+}
+
+/// The interception `info` reports for a running `environment`: only from
+/// its own runner, at the same generation, while both say running (#4912,
+/// #5216).
+fn reported_interception(
+    environment: &v1::Environment,
+    info: &v1::RunnerInfo,
+) -> Option<v1::Interception> {
+    reports_running(environment, info)
+        .then_some(info.interception)
+        .flatten()
+}
+
+/// Whether `info` is the running `environment`'s own runner, at the same
+/// generation, while both say running.
+fn reports_running(environment: &v1::Environment, info: &v1::RunnerInfo) -> bool {
+    let running = v1::EnvironmentState::Running as i32;
+    info.environment_id == environment.id
+        && info.generation == environment.generation
+        && info.state == running
+        && environment.state == running
 }
 
 /// The exit `info` reports for the error `environment` shows: only from the
@@ -177,6 +196,56 @@ mod tests {
             },
         ] {
             assert_eq!(reported_egress(&environment, &other), None, "{other:?}");
+        }
+    }
+
+    /// A running VM's runner reporting its interception lost is shown only
+    /// for the same environment, at the same generation, while both say
+    /// running (#5216).
+    #[test]
+    fn lost_interception_is_shown_only_for_the_same_running_environment() {
+        let running = v1::EnvironmentState::Running as i32;
+        let lost = v1::Interception {
+            state: v1::InterceptionState::Lost as i32,
+            reason: v1::InterceptionReason::Unspecified as i32,
+        };
+        let environment = v1::Environment {
+            id: "0d8f6f28-5d3c-4f86-a5b1-6a2f6d0b7f3e".to_owned(),
+            state: running,
+            generation: 3,
+            ..Default::default()
+        };
+        let info = v1::RunnerInfo {
+            environment_id: environment.id.clone(),
+            state: running,
+            generation: 3,
+            interception: Some(lost),
+            ..Default::default()
+        };
+        assert_eq!(reported_interception(&environment, &info), Some(lost));
+        for other in [
+            v1::RunnerInfo {
+                environment_id: "6c1a1c55-5d0b-4f7e-9d38-0c8d9c2f4a11".to_owned(),
+                ..info.clone()
+            },
+            v1::RunnerInfo {
+                generation: 2,
+                ..info.clone()
+            },
+            v1::RunnerInfo {
+                state: v1::EnvironmentState::Stopped as i32,
+                ..info.clone()
+            },
+            v1::RunnerInfo {
+                interception: None,
+                ..info.clone()
+            },
+        ] {
+            assert_eq!(
+                reported_interception(&environment, &other),
+                None,
+                "{other:?}"
+            );
         }
     }
 }

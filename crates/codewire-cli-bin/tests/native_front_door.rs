@@ -638,3 +638,43 @@ fn a_front_door_refuses_swapped_or_untagged_sockets() {
         assert!(!child.exited().success());
     }
 }
+
+/// SIGTERM ends a serving front door at once: it has no handler, and nothing
+/// it inherits blocks or ignores the signal (#5216).
+#[test]
+fn sigterm_ends_a_serving_front_door_at_once() {
+    let (runner, mut child) = spawn(Uuid::new_v4());
+    send_message(&runner, &bindings(&[BOUND]), &[]);
+    assert!(receive_message(&runner).starts_with(FRONT_DOOR_READY_MESSAGE));
+    let (handoff, handoff_door_end) = stream_pair().unwrap();
+    let mut handoff = HandoffSender::new(handoff).unwrap();
+    handoff.send_frame(HANDOFF_ROLE_TAG, &[]).unwrap();
+    let (credentials, credentials_door_end) = std::os::unix::net::UnixStream::pair().unwrap();
+    (&credentials)
+        .write_all(&[FRONT_DOOR_CREDENTIAL_TAG])
+        .unwrap();
+    send_message(
+        &runner,
+        FRONT_DOOR_SOCKETS_MESSAGE,
+        &[handoff_door_end.as_fd(), credentials_door_end.as_fd()],
+    );
+    assert_eq!(receive_message(&runner), front_door_serving_message(1));
+
+    #[cfg(target_os = "linux")]
+    {
+        let term = 1u64 << (libc::SIGTERM - 1);
+        for field in ["SigBlk", "SigIgn"] {
+            let mask = u64::from_str_radix(&status_field(child.pid(), field), 16).unwrap();
+            assert_eq!(mask & term, 0, "{field} holds SIGTERM");
+        }
+    }
+    let pid = libc::pid_t::try_from(child.pid()).unwrap();
+    // SAFETY: a signal to the child this test started and has not reaped.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    // `exited` is the hang guard: it fails after `WAIT`.
+    let status = child.exited();
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&status),
+        Some(libc::SIGTERM)
+    );
+}
