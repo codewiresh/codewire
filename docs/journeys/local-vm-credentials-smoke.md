@@ -195,7 +195,8 @@ same (#5238).
   host measures the guest clock's offset through `cw exec` (to within half a
   second), kills the one helper of that kind the `cw` under test runs for
   the VM, then reads the log in the host's clock. After the egress broker's
-  kill, `cw stop` and `cw start`.
+  kill, `cw exec`, `cw ls --output json` and `cw --local info`, then
+  `cw stop` and `cw start`.
 - **Proof:**
   - **The credential broker mends by itself,** as
     [SECRETS-AND-CREDENTIALS.md](../dev/SECRETS-AND-CREDENTIALS.md) says:
@@ -206,10 +207,16 @@ same (#5238).
     second or more after the kill gets an answer, whether through the proxy
     or straight to an address, and the VM turns `error`. `cw stop` and
     `cw start` restore HTTPS from the guest.
-  - **A readable refusal: not met (#5359).** The guest's requests just time
-    out, `cw exec` answers `Failed_precondition: local environment is not
-    in the required state`, and `cw ls` names no cause. The smoke logs what
-    `cw exec` says and checks it once #5359 lands.
+  - **A readable refusal** (not yet observed, #5359): after the egress
+    broker's kill, `cw exec` in the VM fails saying that the VM's network
+    broker stopped, so nothing can leave the VM, with `cw --local start
+    NAME` as its next step; `cw ls --output json` has `"error":
+    "egress_broker_exit"` for the VM; and `cw --local info NAME` shows the
+    code, the same sentence and the same next step. Today the guest's
+    requests just time out, `cw exec` answers `Failed_precondition: local
+    environment is not in the required state`, and `cw ls --output json`
+    has `"error": null`; the smoke logs what `cw exec` says and checks none
+    of this until #5359 lands.
   - **No provider call while it is down:** with synthetic providers, Part B
     (#5220).
 - **Observed:** `main` at 1250f23ed, 2026-11-18, by hand on a Linux host,

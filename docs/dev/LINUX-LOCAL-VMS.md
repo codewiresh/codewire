@@ -225,6 +225,47 @@ repository it reaches (#4927 narrows that). Hosted Sandboxes do not apply
 network policies yet. The journey step is `locked-refuses-managed-github` in
 `docs/journeys/network-and-egress.md`.
 
+## A VM that lost its network
+
+Every running local VM has two host processes for its network: the network
+worker, which carries the guest's packets, and the egress broker, which makes
+each outbound connection and enforces the network policy. Neither is started
+again while the VM runs. Losing either fails the VM closed, as on a Mac
+([MACOS-CLI.md](MACOS-CLI.md)):
+
+- If the broker ends, the environment turns `error` (`egress_broker_exit`).
+- If the worker ends, the environment turns `error` (`network_worker_exit`).
+- In both cases, from the second it ends, nothing the guest sends gets out,
+  by name or straight to an address. `cw --local start NAME` restores it,
+  and so does `cw --local stop NAME` then `cw --local start NAME`.
+
+The credential broker is different: the credential service starts another,
+and the agent answers again within seconds
+([SECRETS-AND-CREDENTIALS.md](SECRETS-AND-CREDENTIALS.md)).
+
+While the VM is in that state, `cw` says why and what to do:
+
+- `cw --local info NAME` shows the code and how the process ended, for
+  example `Error: egress_broker_exit (exited 72: egress_broker_protocol)`,
+  then that the VM's network broker stopped, so nothing can leave the VM,
+  and the next step, `cw --local start NAME`. For the worker it says the
+  VM's network worker.
+- `cw exec`, `cw shell` and `cw run` in that VM fail with the same sentence
+  and next step.
+- `cw ls --output json` carries the code in the VM's `error`, which is
+  `null` for a VM with nothing wrong.
+- A VM in `error` for any other cause is named too: those commands and
+  `error` give its code, where the commands said only that the environment
+  is not in the required state.
+
+**Not yet built** (#5359). Today `cw --local info` shows the code line and
+nothing under it, `cw exec` says `Failed_precondition: local environment is
+not in the required state`, `cw shell` the same, and `cw ls --output json`
+has `"error": null`. The VM does fail closed, and `cw --local start NAME`
+does restore it (observed on `main`, 2026-11-18, for the broker; for the
+worker only the state and the code are observed). The journey step is
+`smoke-proxy-down` in `docs/journeys/local-vm-credentials-smoke.md`.
+
 ## Host ports
 
 `cw ports ENV --publish PORT`, and `ports:` entries with `host_port` in
