@@ -11,6 +11,7 @@
 
 use std::io;
 use std::os::fd::OwnedFd;
+use std::time::Duration;
 
 use codewire_egress_policy::handoff::{
     HandoffError, HandoffReceiver, HandoffSender, InterceptedStreamHeader,
@@ -125,10 +126,19 @@ fn protocol(error: ProtocolError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
+/// Reads the egress broker's role tag, its first frame on the hand-off end,
+/// within `timeout` and before anything is served. It reads on a duplicate
+/// of `handoff` that is dropped after it, so [`HandoffSocket`] starts at the
+/// first intercepted stream. `Closed` is a peer gone before any byte.
+pub fn expect_broker_role_tag(handoff: &OwnedFd, timeout: Duration) -> Result<(), HandoffError> {
+    let duplicate = rustix::io::fcntl_dupfd_cloexec(handoff, 0).map_err(|_| HandoffError::Io)?;
+    HandoffReceiver::new(duplicate)?.expect_role_tag(timeout)
+}
+
 /// A connected `AF_UNIX` `SOCK_STREAM` socket that closes on exec. The
 /// receiver no longer checks its end, so the front door does, whoever
 /// passed it.
-fn connected_unix_stream(socket: &OwnedFd) -> bool {
+pub fn connected_unix_stream(socket: &OwnedFd) -> bool {
     let unix = rustix::net::getsockname(socket)
         .is_ok_and(|address| address.address_family() == rustix::net::AddressFamily::UNIX);
     unix && rustix::net::sockopt::socket_type(socket) == Ok(rustix::net::SocketType::STREAM)

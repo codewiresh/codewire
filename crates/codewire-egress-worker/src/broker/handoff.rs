@@ -131,4 +131,111 @@ mod tests {
         let unused = std::os::fd::RawFd::try_from(limit).unwrap_or(std::os::fd::RawFd::MAX);
         assert!(!is_inherited_unix_stream(unused));
     }
+
+    /// A resolver that answers every name with one public address.
+    struct OneAddress;
+
+    #[async_trait::async_trait]
+    impl codewire_egress_broker::DnsResolver for OneAddress {
+        async fn resolve(
+            &self,
+            _request: codewire_egress_broker::DnsResolverRequest,
+        ) -> Result<
+            codewire_egress_broker::DnsResolverOutcome,
+            codewire_egress_broker::BrokerAdapterFailure,
+        > {
+            let address = codewire_egress_policy::lease::DnsAddress::new(PUBLIC, 60).unwrap();
+            Ok(codewire_egress_broker::DnsResolverOutcome::Positive(
+                codewire_egress_policy::lease::DnsResolution::new(vec![], vec![address]).unwrap(),
+            ))
+        }
+    }
+
+    /// A connector that records every dial it is asked for.
+    #[derive(Default)]
+    struct Dials(std::sync::Mutex<Vec<std::net::SocketAddr>>);
+
+    #[async_trait::async_trait]
+    impl codewire_egress_broker::TcpConnector for Dials {
+        type Stream = ();
+
+        async fn connect(
+            &self,
+            destination: std::net::SocketAddr,
+        ) -> Result<(), codewire_egress_broker::BrokerAdapterFailure> {
+            self.0.lock().unwrap().push(destination);
+            Ok(())
+        }
+    }
+
+    const PUBLIC: std::net::IpAddr =
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(93, 184, 216, 34));
+
+    /// #4001: a hosted broker whose Pod's bindings cannot be served has no
+    /// front door, yet reads those bindings before it admits anything, so
+    /// each dial to a bound host is refused `intercept_unavailable` and never
+    /// dialled, while every other dial carries on. A binding on another port
+    /// is refused on that port.
+    #[tokio::test]
+    async fn a_refusing_broker_reads_its_bindings_first_and_never_dials_them() {
+        for port in [443, 8443] {
+            refuses_a_bound_dial(port).await;
+        }
+    }
+
+    async fn refuses_a_bound_dial(port: u16) {
+        use codewire_egress_broker::{DnsRecordFamily, PolicyEgressBroker, SystemBrokerClock};
+        use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
+        use codewire_egress_policy::lease::RefusalReason;
+        use codewire_egress_policy::{CompiledPolicy, RouteClass};
+        use std::io::Write as _;
+        use std::sync::Arc;
+
+        let dials = Arc::new(Dials::default());
+        let broker = PolicyEgressBroker::new(
+            CompiledPolicy::developer_baseline(),
+            RouteClass::General,
+            Arc::new(OneAddress),
+            Arc::clone(&dials),
+            Arc::new(SystemBrokerClock::new()),
+        );
+        let (mut supervisor, control) = std::os::unix::net::UnixStream::pair().unwrap();
+        let bound =
+            InterceptSet::new([InterceptBinding::new("api.openai.com", port).unwrap()]).unwrap();
+        supervisor
+            .write_all(&crate::host_addresses::encode_frame(&Default::default()))
+            .unwrap();
+        supervisor
+            .write_all(&crate::broker_control::encode_intercept_frame(&bound).unwrap())
+            .unwrap();
+        let _control = super::super::receive_startup_control(
+            control,
+            &broker,
+            super::super::BrokerIntercepts::Refuse,
+        )
+        .await
+        .unwrap();
+
+        let destination = std::net::SocketAddr::new(PUBLIC, port);
+        broker
+            .resolve_dns("api.openai.com", DnsRecordFamily::Ipv4)
+            .await
+            .unwrap();
+        assert!(broker.connect_tcp(destination).await.is_err());
+        let counts = broker.refusal_counts().await;
+        assert_eq!(counts.get(RefusalReason::InterceptUnavailable), 1);
+        assert_eq!(
+            RefusalReason::InterceptUnavailable.code(),
+            "intercept_unavailable"
+        );
+        assert!(dials.0.lock().unwrap().is_empty());
+
+        broker
+            .resolve_dns("example.org", DnsRecordFamily::Ipv4)
+            .await
+            .unwrap();
+        let other = std::net::SocketAddr::new(PUBLIC, 80);
+        broker.connect_tcp(other).await.unwrap();
+        assert_eq!(*dials.0.lock().unwrap(), [other]);
+    }
 }

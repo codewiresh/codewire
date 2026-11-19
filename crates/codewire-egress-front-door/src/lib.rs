@@ -236,6 +236,14 @@ impl LeafSource for EnvironmentCa {
     }
 }
 
+/// A shared source: the front door serves from it while its owner installs
+/// new leaves ([`SignedLeaves::install`]).
+impl<L: LeafSource> LeafSource for Arc<L> {
+    fn leaf(&self, host: &str) -> Result<(String, Arc<CertifiedKey>), CaError> {
+        L::leaf(self, host)
+    }
+}
+
 /// Which host a connection must be for.
 #[derive(Clone, Copy)]
 enum Expected<'a> {

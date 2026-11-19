@@ -5,9 +5,11 @@
 //! forwards the token to orchestration, which admits the stream only for a
 //! broker-mode Pod on cw-egress's node, and returns the Pod's assignment.
 //! cw-egress keys the stream's network session ([`key`]) and runs one
-//! confined worker and broker pair for it. A newer stream for the same Pod
-//! replaces the older, and every start counts against a limit per peer
-//! address, checked before orchestration is asked ([`replacement`]).
+//! confined worker and broker pair for it, and for a Pod whose assignment
+//! intercepts its agent hosts, a confined front door beside them
+//! ([`interception`], #4001). A newer stream for the same Pod replaces the
+//! older, and every start counts against a limit per peer address, checked
+//! before orchestration is asked ([`replacement`]).
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +18,9 @@ pub mod admitted;
 #[cfg(target_os = "linux")]
 pub mod children;
 pub mod drain;
+#[cfg(target_os = "linux")]
+pub mod front_door;
+pub mod interception;
 #[cfg(target_os = "linux")]
 pub mod launch;
 #[cfg(target_os = "linux")]

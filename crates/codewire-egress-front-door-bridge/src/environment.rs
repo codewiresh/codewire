@@ -63,7 +63,8 @@ pub enum Ended {
 /// come from its own CA on a local VM, and from the credential service's
 /// signer on hosted ([`codewire_egress_front_door::SignedLeaves`], #4001).
 pub struct EnvironmentFrontDoor<L = EnvironmentCa> {
-    environment_id: String,
+    /// The identity the egress broker stamps on each stream it hands over.
+    handoff_identity: String,
     intercepts: InterceptSet,
     bridge: CredentialBridge,
     door: Arc<FrontDoor<CredentialRouteBackend, L>>,
@@ -137,11 +138,20 @@ impl<L: LeafSource> EnvironmentFrontDoor<L> {
         let backend = CredentialRouteBackend::new(routes, bridge.clone());
         let door = FrontDoor::new(leaves, backend, FrontDoorConfig::default());
         Ok(Self {
-            environment_id: environment_id.to_string(),
+            handoff_identity: environment_id.to_string(),
             intercepts,
             bridge,
             door: Arc::new(door),
         })
+    }
+
+    /// Admit only streams the egress broker stamps with `identity` rather
+    /// than the environment's: a hosted Pod's broker is bound to the Pod,
+    /// whose own front door this is (#4001).
+    #[must_use]
+    pub fn handed_off_as(mut self, identity: Uuid) -> Self {
+        self.handoff_identity = identity.to_string();
+        self
     }
 
     /// Serve until the egress broker closes the hand-off socket or `later`
@@ -153,7 +163,8 @@ impl<L: LeafSource> EnvironmentFrontDoor<L> {
     /// a generation's broker every few minutes (#3999). Each new session takes
     /// all new work while the one it replaces finishes the requests already
     /// sent on it. A session that ends without a successor leaves requests
-    /// failing closed at the bridge until one pairs.
+    /// failing closed at the bridge until one pairs, and so does starting
+    /// with none, as a hosted front door does until its session opens.
     ///
     /// The caller has admitted every socket before this: each is a connected
     /// Unix stream that closes on exec, and each peer's role tag has been
@@ -164,7 +175,7 @@ impl<L: LeafSource> EnvironmentFrontDoor<L> {
     pub async fn serve<S: SessionStream>(
         self,
         handoff: OwnedFd,
-        credentials: S,
+        credentials: Option<S>,
         mut later: tokio::sync::mpsc::Receiver<S>,
     ) -> Ended {
         let mut handoff = match HandoffSocket::new(handoff) {
@@ -173,7 +184,9 @@ impl<L: LeafSource> EnvironmentFrontDoor<L> {
         };
         let mut streams = JoinSet::new();
         let mut sessions = Sessions::default();
-        sessions.attach(&self.bridge, credentials);
+        if let Some(credentials) = credentials {
+            sessions.attach(&self.bridge, credentials);
+        }
         let ended = loop {
             tokio::select! {
                 next = later.recv() => match next {
@@ -227,7 +240,7 @@ impl<L: LeafSource> EnvironmentFrontDoor<L> {
     /// its own bindings; the broker is never trusted for either.
     fn admit(&self, streams: &mut JoinSet<()>, header: InterceptedStreamHeader, stream: OwnedFd) {
         let stream_id = header.stream_id;
-        if header.environment_id != self.environment_id {
+        if header.environment_id != self.handoff_identity {
             tracing::warn!(stream_id, outcome = "other_environment");
             return;
         }

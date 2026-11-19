@@ -1,15 +1,23 @@
-//! A Pod's pair as two processes of cw-egress's own image (#4000).
+//! A Pod's pair as two processes of cw-egress's own image (#4000), and for
+//! a Pod that intercepts, its front door as a third (#4001).
 //!
 //! The broker starts first and is enforcing its policy before the worker
 //! exists, so nothing can ask it anything earlier. The worker then gets the
 //! broker's IPC sessions and the guest's stream, and the supervisor keeps
 //! neither: after a start it holds two process handles, the broker's control
 //! socket and the worker's status socket.
+//!
+//! A front door starts before both: it is confined and holds its key before
+//! the broker exists. The broker then starts with its end of their hand-off
+//! socket and the bindings, the front door takes the other end, and only
+//! then does the worker start, so no dial is admitted before the front door
+//! serves.
 
 use std::os::linux::fs::MetadataExt as _;
 use std::time::Duration;
 
 use codewire_confinement::spawn::OwnImage;
+use codewire_egress_policy::handoff::stream_pair;
 use codewire_egress_policy::host_addresses::HostAddressSet;
 use codewire_egress_policy::{CompiledPolicy, PolicyDigest};
 use codewire_egress_worker::broker::EgressBrokerStartupFailure;
@@ -18,9 +26,12 @@ use codewire_egress_worker::worker::NetworkWorkerStartupFailure;
 use thiserror::Error;
 use tokio::time::Instant;
 
+use crate::front_door::protocol::{FrontDoorStage, LeafRefusal};
+use crate::interception::PairIntercepts;
 use crate::supervisor::{Launch, Pair, PairSpec, PairStatus};
 
 mod broker;
+mod front_door;
 mod spawner;
 mod worker;
 
@@ -43,6 +54,12 @@ pub enum StartError {
     Broker(EgressBrokerStartupFailure),
     #[error("the worker refused to start: {}", .0.code())]
     Worker(NetworkWorkerStartupFailure),
+    #[error("the front door refused to start: {}", .0.code())]
+    FrontDoor(FrontDoorStage),
+    #[error("the front door kept its leaves: {}", .0.code())]
+    Leaves(LeafRefusal),
+    #[error("the pair has no front door")]
+    NoFrontDoor,
 }
 
 impl From<parent::StartError> for StartError {
@@ -78,13 +95,14 @@ impl ProcessLaunch {
 /// How long a worker has to say its last word once its broker is gone.
 const LAST_WORD: Duration = Duration::from_secs(1);
 
-/// One Pod's running broker and worker.
+/// One Pod's running broker and worker, and its front door when it has one.
 pub struct ProcessPair {
     broker: broker::Broker,
-    /// The broker's end was seen. It is not the pair's end until the worker
-    /// has had its last word.
+    /// The broker's end, or its front door's, was seen. It is not the pair's
+    /// end until the worker has had its last word.
     broker_gone: bool,
     worker: worker::Worker,
+    front_door: Option<front_door::FrontDoor>,
 }
 
 impl Launch for ProcessLaunch {
@@ -93,15 +111,39 @@ impl Launch for ProcessLaunch {
 
     async fn start(&self, spec: PairSpec) -> Result<ProcessPair, StartError> {
         let deadline = Instant::now() + START_TIMEOUT;
+        let mut front_door = None;
+        let mut door_end = None;
+        let intercepts = match &spec.intercepts {
+            PairIntercepts::Off => broker::Intercepts::Off,
+            PairIntercepts::Refuse(hosts) => broker::Intercepts::Refuse(hosts),
+            PairIntercepts::FrontDoor(door) => {
+                front_door = Some(
+                    front_door::start(&self.image, &self.spawner, spec.pod_uid, door, deadline)
+                        .await?,
+                );
+                let (end, theirs) = stream_pair().map_err(|_| StartError::Spawn)?;
+                door_end = Some(theirs);
+                broker::Intercepts::HandOff {
+                    end,
+                    hosts: &door.intercepts,
+                }
+            }
+        };
         let (broker, sessions) = broker::start(
             &self.image,
             &self.spawner,
-            spec.pod_uid,
-            &spec.policy,
-            &self.refused,
+            broker::BrokerSpec {
+                pod_uid: spec.pod_uid,
+                policy: &spec.policy,
+                refused: &self.refused,
+                intercepts,
+            },
             deadline,
         )
         .await?;
+        if let (Some(front_door), Some(door_end)) = (front_door.as_mut(), door_end) {
+            front_door.take_handoff(door_end, deadline).await?;
+        }
         let worker = worker::start(
             &self.image,
             &self.spawner,
@@ -119,7 +161,28 @@ impl Launch for ProcessLaunch {
             broker,
             broker_gone: false,
             worker,
+            front_door,
         })
+    }
+}
+
+impl ProcessPair {
+    /// The front door's public key, as a DER SubjectPublicKeyInfo: what the
+    /// credential service's signer issues its leaves for. `None` without a
+    /// front door.
+    pub fn front_door_key(&self) -> Option<&[u8]> {
+        self.front_door
+            .as_ref()
+            .map(front_door::FrontDoor::public_key_spki)
+    }
+
+    /// Has the front door serve `leaves`, DER certificates for its key, from
+    /// now on, all or none. A refusal keeps the leaves it had.
+    pub async fn install_leaves<C: AsRef<[u8]>>(&mut self, leaves: &[C]) -> Result<(), StartError> {
+        match self.front_door.as_mut() {
+            Some(front_door) => front_door.install(leaves).await,
+            None => Err(StartError::NoFrontDoor),
+        }
     }
 }
 
@@ -127,12 +190,19 @@ impl Pair for ProcessPair {
     type Error = StartError;
 
     async fn status(&mut self) -> PairStatus {
-        next_status(
-            self.worker.status(),
-            &mut self.broker_gone,
-            self.broker.exited(),
-        )
-        .await
+        let front_door = self.front_door.as_mut();
+        let broker = &mut self.broker;
+        // The front door lives and dies with the pair.
+        let exited = async move {
+            match front_door {
+                Some(front_door) => tokio::select! {
+                    () = broker.exited() => {}
+                    () = front_door.exited() => {}
+                },
+                None => broker.exited().await,
+            }
+        };
+        next_status(self.worker.status(), &mut self.broker_gone, exited).await
     }
 
     async fn replace(&mut self, policy: &CompiledPolicy) -> Result<PolicyDigest, StartError> {
@@ -146,6 +216,9 @@ impl Pair for ProcessPair {
     async fn end(self) {
         self.worker.end().await;
         self.broker.end().await;
+        if let Some(front_door) = self.front_door {
+            front_door.end().await;
+        }
     }
 }
 
@@ -204,12 +277,22 @@ mod tests {
     #[test]
     fn a_child_running_another_executable_is_refused() {
         let image = OwnImage::open().unwrap();
-        // A shell that waits on its input, so it is alive while it is looked at.
+        // A shell that waits on its input, so it is alive while it is looked
+        // at. A spawn can return before the child's exec has replaced this
+        // image, so the shell's first line is awaited before its executable
+        // is read.
         let mut other = std::process::Command::new("/bin/sh")
-            .args(["-c", "read line"])
+            .args(["-c", "echo started; read line"])
             .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .spawn()
             .unwrap();
+        let mut started = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(other.stdout.as_mut().unwrap()),
+            &mut started,
+        )
+        .unwrap();
         let running = executable_of(other.id());
         other.kill().unwrap();
         other.wait().unwrap();

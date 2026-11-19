@@ -23,13 +23,22 @@ fn cw_egress(arguments: &[&str]) -> Option<i32> {
 fn a_mistyped_child_word_is_a_usage_error() {
     assert_eq!(cw_egress(&["__egress-brokr", "--pod-uid", POD]), Some(64));
     assert_eq!(cw_egress(&["__egress-worker"]), Some(64));
+    assert_eq!(
+        cw_egress(&[
+            "__egress-front-door",
+            "--pod-uid",
+            POD,
+            "--intercept-handoff"
+        ]),
+        Some(64)
+    );
 }
 
 #[test]
 fn a_child_started_without_its_sockets_fails_as_that_child() {
     // No supervisor gave these their inherited sockets, so each fails at
     // its own first step with its own code, not the usage error and not 0.
-    for word in ["__egress-broker", "__egress-worker"] {
+    for word in ["__egress-broker", "__egress-worker", "__egress-front-door"] {
         let code = cw_egress(&[word, "--pod-uid", POD]);
         assert!(
             matches!(code, Some(code) if code != 0 && code != 64),

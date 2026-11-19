@@ -1400,7 +1400,10 @@ arguments hold no real token, and the hosted sign-in exception is not used
     Sandbox that has made intercepted calls;
   - a Sandbox claimed from the warm pool;
   - the credential service unreachable for longer than a certificate's
-    life.
+    life;
+  - bindings no front door can serve: an exact name on a port other than
+    443, and a suffix;
+  - a credential added to a running Sandbox, changing its bound hosts.
 - **Driving it:** no command yet (#4001).
 - **Proof:**
   - each row of the table above holds;
@@ -1427,7 +1430,12 @@ arguments hold no real token, and the hosted sign-in exception is not used
   - with the credential service unreachable past a certificate's life,
     an intercepted host fails closed and the Sandbox's status shows it.
     Its other egress is unaffected, and interception returns by itself
-    when the service does.
+    when the service does;
+  - an exact name the front door can't serve is refused on its bound port
+    as `intercept_unavailable` and never dialled, while other egress works;
+    a suffix binding leaves the Sandbox with no egress through `cw-egress`;
+  - after a change to the bound hosts, the new set is intercepted and a
+    host no longer bound is ordinary egress again.
 - **Gotchas:**
   - The search for the real token is done by its holder, without
     printing it; the tool is owned by #3999.

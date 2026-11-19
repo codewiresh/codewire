@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::admitted::AdmittedStream;
+use crate::interception::PairIntercepts;
 
 mod pod;
 #[cfg(test)]
@@ -43,6 +44,10 @@ pub struct PairSpec {
     pub stream: TcpStream,
     pub key: NetworkKey,
     pub policy: CompiledPolicy,
+    /// Off but for a bound Pod whose assignment intercepts: the pair then
+    /// runs its front door, and its broker hands that door the dials it
+    /// intercepts, or it has none and its broker refuses them (#4001).
+    pub intercepts: PairIntercepts,
 }
 
 /// One of the two ways a guest tries to get round its egress path when it
@@ -77,19 +82,21 @@ pub enum PairStatus {
     Ended,
 }
 
-/// Starts a Pod's worker and broker.
+/// Starts a Pod's worker and broker, and its front door when it has one.
 pub trait Launch: Send + Sync + 'static {
     type Pair: Pair;
     type Error: std::fmt::Display + Send;
 
-    /// Resolves once both processes are confined, the broker enforces
-    /// `spec.policy` and the worker reports the guest's session
-    /// authenticated. A failure, or dropping the future, leaves no process.
+    /// Resolves once every process is confined, the front door serves its
+    /// end of the broker's hand-off, the broker enforces `spec.policy` and
+    /// the worker reports the guest's session authenticated. A failure, or
+    /// dropping the future, leaves no process.
     fn start(&self, spec: PairSpec)
     -> impl Future<Output = Result<Self::Pair, Self::Error>> + Send;
 }
 
-/// One Pod's running worker and broker. Dropping it kills both.
+/// One Pod's running worker and broker, and front door when it has one.
+/// Dropping it kills them all.
 pub trait Pair: Send + 'static {
     type Error: std::fmt::Display + Send;
 
@@ -108,7 +115,7 @@ pub trait Pair: Send + 'static {
     /// as [`PairStatus::NoFlow`].
     fn request_drain(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Kills and reaps both processes.
+    /// Kills and reaps every process.
     fn end(self) -> impl Future<Output = ()> + Send;
 }
 

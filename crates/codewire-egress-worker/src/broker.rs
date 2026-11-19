@@ -10,7 +10,9 @@
 //! `SOCK_STREAM` Unix socket to the environment's front door at
 //! [`EGRESS_BROKER_HANDOFF_FD`], reads its interception bindings from the
 //! control channel before it is ready, and hands every intercepted dial over
-//! instead of refusing it (#3999).
+//! instead of refusing it (#3999). Started to refuse them
+//! ([`BrokerIntercepts::Refuse`]), it reads its bindings the same way but has
+//! no front door, so every dial they intercept is refused (#4001).
 
 use std::io::{self, Read as _, Write as _};
 use std::os::fd::{FromRawFd as _, RawFd};
@@ -391,17 +393,43 @@ pub fn encode_egress_broker_bootstrap(
     Ok(bytes)
 }
 
+/// What a broker does with the dials its interception bindings name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrokerIntercepts {
+    /// No bindings at startup; any that arrive later are refused.
+    Off,
+    /// Bindings before it is ready, each dial they name handed to the front
+    /// door at [`EGRESS_BROKER_HANDOFF_FD`].
+    HandOff,
+    /// Bindings before it is ready, and no front door: each dial they name
+    /// is refused as `intercept_unavailable`, never dialled.
+    Refuse,
+}
+
 /// Entrypoint used only by the hidden `cw` broker command.
 pub async fn run_inherited_egress_broker(
     environment_id: Uuid,
     generation: u64,
     intercept_handoff: bool,
 ) -> Result<(), EgressBrokerProcessError> {
+    let intercepts = if intercept_handoff {
+        BrokerIntercepts::HandOff
+    } else {
+        BrokerIntercepts::Off
+    };
+    run_inherited_egress_broker_intercepting(environment_id, generation, intercepts).await
+}
+
+/// [`run_inherited_egress_broker`], with what it does with intercepted dials.
+pub async fn run_inherited_egress_broker_intercepting(
+    environment_id: Uuid,
+    generation: u64,
+    intercepts: BrokerIntercepts,
+) -> Result<(), EgressBrokerProcessError> {
     let mut bootstrap = inherited_std_unix_stream(EGRESS_BROKER_BOOTSTRAP_FD)?;
-    let handoff = intercept_handoff
+    let handoff = (intercepts == BrokerIntercepts::HandOff)
         .then(|| handoff::inherited_handoff(EGRESS_BROKER_HANDOFF_FD, environment_id))
         .transpose()?;
-    let handing_off = handoff.is_some();
     let control = inherited_std_unix_stream(EGRESS_BROKER_HOST_ADDRESSES_FD)?;
     let sessions = (0..EGRESS_BROKER_INHERITED_SESSIONS)
         .map(|index| {
@@ -445,7 +473,7 @@ pub async fn run_inherited_egress_broker(
     // The host's own addresses, and the interception bindings when handing
     // off, arrive before the broker can admit anything; every later update
     // replaces them (#2614, #3999).
-    let mut control = match receive_startup_control(control, &broker, handing_off).await {
+    let mut control = match receive_startup_control(control, &broker, intercepts).await {
         Ok(control) => control,
         Err(error) => {
             let _ = write_status(&bootstrap, error.startup_failure().message());
@@ -476,7 +504,8 @@ pub async fn run_inherited_egress_broker(
         })
         .and_then(|()| {
             #[cfg(target_os = "linux")]
-            let installed = handoff::install_broker_syscalls(handing_off);
+            let installed =
+                handoff::install_broker_syscalls(intercepts == BrokerIntercepts::HandOff);
             #[cfg(target_os = "macos")]
             let installed = install_inet_socket_only_syscalls();
             installed.map_err(|_| EgressBrokerProcessError::SyscallConfinement)
@@ -539,11 +568,11 @@ pub async fn run_inherited_egress_broker(
 }
 
 /// The runner's control channel at startup: the host addresses, then the
-/// interception bindings when handing off.
+/// interception bindings unless interception is off.
 async fn receive_startup_control<R, C, K>(
     control: StdUnixStream,
     broker: &PolicyEgressBroker<R, C, K>,
-    handing_off: bool,
+    intercepts: BrokerIntercepts,
 ) -> Result<tokio::net::UnixStream, EgressBrokerProcessError>
 where
     R: codewire_egress_broker::DnsResolver,
@@ -551,7 +580,7 @@ where
     K: codewire_egress_broker::BrokerClock,
 {
     let mut control = receive_host_addresses(control, broker).await?;
-    if handing_off {
+    if intercepts != BrokerIntercepts::Off {
         handoff::receive_intercepts(&mut control, broker).await?;
     }
     Ok(control)

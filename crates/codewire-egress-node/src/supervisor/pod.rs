@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use super::{Launch, Pair, PairSpec, PairStatus, SELF_CHECK_TIMEOUT, Signals};
 use crate::admitted::{AdmittedStream, FailureCode, PodEvent, PodEvents};
+use crate::interception::{Interception, InterceptionRefusal, PairIntercepts};
 use crate::orchestration::{Assignment, AssignmentError};
 
 pub(super) struct Pod<L> {
@@ -34,25 +35,49 @@ struct Enforcing {
     environment: Option<String>,
     policy: CompiledPolicy,
     revision: u32,
+    /// Started with the pair: a pair's front door, its broker's hand-off
+    /// and the hosts its broker refuses exist from its start or not at all.
+    intercepts: PairIntercepts,
 }
 
 impl Enforcing {
-    fn of(assignment: Assignment) -> Self {
+    /// What `assignment` has a pair enforce, or, for interception no broker
+    /// set can refuse, why the Pod gets no pair: its agent hosts' requests
+    /// carry placeholders and must never be dialled (#5159).
+    fn of(assignment: Assignment, pod_uid: Uuid) -> Result<Self, InterceptionRefusal> {
         match assignment {
-            Assignment::Unbound { .. } => Self {
+            Assignment::Unbound { .. } => Ok(Self {
                 environment: None,
                 policy: BuiltinPolicy::Locked.compile(),
                 revision: 0,
-            },
+                intercepts: PairIntercepts::Off,
+            }),
             Assignment::Bound {
                 environment_id,
                 policy,
+                interception,
                 ..
-            } => Self {
-                environment: Some(environment_id),
-                policy: policy.policy,
-                revision: policy.revision,
-            },
+            } => {
+                match &interception {
+                    Interception::RefuseHosts { why, .. } => tracing::warn!(
+                        %pod_uid,
+                        reason = why.code(),
+                        "a Pod's interception bindings cannot be served; its broker refuses their hosts"
+                    ),
+                    Interception::FailClosed(why) => tracing::warn!(
+                        %pod_uid,
+                        reason = why.code(),
+                        "a Pod's interception bindings cannot be refused; it gets no egress pair"
+                    ),
+                    Interception::Off | Interception::On(_) => {}
+                }
+                Ok(Self {
+                    environment: Some(environment_id),
+                    policy: policy.policy,
+                    revision: policy.revision,
+                    intercepts: interception.pair()?,
+                })
+            }
         }
     }
 
@@ -64,12 +89,17 @@ impl Enforcing {
     }
 
     /// What moving to `next` takes. A bound Pod never goes back to unbound
-    /// and never changes environment: either means its sandbox is over.
+    /// and never changes environment: either means its sandbox is over. A
+    /// pair cannot change what it intercepts, so any change to that ends
+    /// the pair, and the guest's redial starts one with the new set.
     fn change_to(&self, next: &Self) -> Change {
         match (&self.environment, &next.environment) {
             (Some(current), Some(next)) if current != next => return Change::End,
             (Some(_), None) => return Change::End,
             _ => {}
+        }
+        if self.intercepts != next.intercepts {
+            return Change::End;
         }
         if self.policy.digest() != next.policy.digest() {
             Change::Replace
@@ -137,23 +167,31 @@ impl<L: Launch> Pod<L> {
             changes,
             events,
         } = admitted;
-        let enforcing = Enforcing::of(assignment);
-        let spec = PairSpec {
-            pod_uid,
-            stream,
-            key,
-            policy: enforcing.policy.clone(),
-        };
-        let started = tokio::select! {
-            () = self.stop.cancelled() => Err(End::Told),
-            () = self.signals.shutdown.cancelled() => Err(shut_down(&self.signals)),
-            started = self.launch.start(spec) => started.map_err(|error| {
-                tracing::warn!(%pod_uid, %pod_name, %peer, %error, "an egress pair did not start");
-                End::Lost
-            }),
+        let started = match Enforcing::of(assignment, pod_uid) {
+            // Logged where it was decided; no process is started.
+            Err(_) => Err(End::Lost),
+            Ok(enforcing) => {
+                let spec = PairSpec {
+                    pod_uid,
+                    stream,
+                    key,
+                    policy: enforcing.policy.clone(),
+                    intercepts: enforcing.intercepts.clone(),
+                };
+                tokio::select! {
+                    () = self.stop.cancelled() => Err(End::Told),
+                    () = self.signals.shutdown.cancelled() => Err(shut_down(&self.signals)),
+                    started = self.launch.start(spec) => started
+                        .map(|pair| (pair, enforcing))
+                        .map_err(|error| {
+                            tracing::warn!(%pod_uid, %pod_name, %peer, %error, "an egress pair did not start");
+                            End::Lost
+                        }),
+                }
+            }
         };
         let end = match started {
-            Ok(mut pair) => {
+            Ok((mut pair, enforcing)) => {
                 let end = Session {
                     pod_uid,
                     pair: &mut pair,
@@ -268,7 +306,8 @@ impl<P: Pair> Session<'_, P> {
     async fn apply_latest(&mut self) -> Result<(), End> {
         let latest = self.changes.borrow_and_update().clone();
         let next = match latest {
-            Ok(assignment) => Enforcing::of(assignment),
+            // Logged where it was decided.
+            Ok(assignment) => Enforcing::of(assignment, self.pod_uid).map_err(|_| End::Lost)?,
             Err(_) => return Err(End::Failed(FailureCode::PolicyDigestMismatch)),
         };
         match self.enforcing.change_to(&next) {

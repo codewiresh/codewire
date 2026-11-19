@@ -20,6 +20,8 @@ harness = false
 [dependencies]
 codewire-confinement = { workspace = true }
 codewire-egress-broker = { workspace = true }
+codewire-egress-front-door = { workspace = true }
+codewire-egress-front-door-bridge = { workspace = true }
 codewire-egress-policy = { workspace = true }
 codewire-egress-worker = { workspace = true }
 codewire-network-session = { workspace = true }
@@ -38,8 +40,14 @@ uuid = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+# A test signer's CA and a TLS client that trusts only it, on the front
+# door's own ring-only Rustls.
+rcgen = "0.13"
 rustix = { workspace = true, features = ["process"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+time = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
 codewire-workspace-hack.workspace = true
 
 [lints]

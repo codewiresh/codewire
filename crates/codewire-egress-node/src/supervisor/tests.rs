@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use super::*;
 use crate::admitted::{AdmittedStream, FailureCode, PodEvent, PodEvents};
+use crate::interception::{FrontDoorSpec, Interception, InterceptionRefusal, PairIntercepts};
 use crate::orchestration::{AssignedPolicy, Assignment, AssignmentError, PlatformAllow};
 
 /// What the fake launcher was asked to do, in order.
@@ -42,6 +43,8 @@ struct World {
     /// While set, a pair's reaping waits here.
     reaping: Option<Arc<Notify>>,
     acks: Acks,
+    /// What each start intercepts, in order.
+    intercepts: Vec<PairIntercepts>,
 }
 
 #[derive(Clone, Default)]
@@ -85,6 +88,7 @@ impl Launch for Fake {
         world
             .did
             .push(Did::Started(spec.pod_uid, spec.policy.digest()));
+        world.intercepts.push(spec.intercepts);
         Ok(FakePair {
             pod: spec.pod_uid,
             fake: self.clone(),
@@ -162,6 +166,41 @@ fn bound(environment: &str, revision: u32, policy: CompiledPolicy) -> Assignment
             policy,
         },
         platform: platform(),
+        interception: Interception::Off,
+    }
+}
+
+const ENVIRONMENT: Uuid = Uuid::from_u128(0x6f1c_2a0e_8b4d_4e2a_9c3f_1d2e_3f4a_5b6c);
+
+fn front_door(hosts: &[&str]) -> FrontDoorSpec {
+    FrontDoorSpec {
+        environment_id: ENVIRONMENT,
+        generation: 1,
+        intercepts: codewire_egress_policy::intercept::InterceptSet::new(hosts.iter().map(
+            |host| codewire_egress_policy::intercept::InterceptBinding::new(host, 443).unwrap(),
+        ))
+        .unwrap(),
+    }
+}
+
+/// `ENVIRONMENT` bound with `interception`.
+fn intercepting(interception: Interception) -> Assignment {
+    let Assignment::Bound {
+        environment_id,
+        operation_generation,
+        policy,
+        platform,
+        ..
+    } = bound(&ENVIRONMENT.to_string(), 1, open())
+    else {
+        unreachable!("bound");
+    };
+    Assignment::Bound {
+        environment_id,
+        operation_generation,
+        policy,
+        platform,
+        interception,
     }
 }
 
@@ -696,4 +735,124 @@ async fn a_shutdown_during_the_self_check_ends_the_pair_and_is_not_a_failed_chec
     // Not `FailedClosed` first: the guest was cut off, it did not fail.
     assert_eq!(pod.next().await, PodEvent::Ended { moved: false });
     assert!(harness.fake.did().contains(&Did::Ended(POD)));
+}
+
+/// A pair's front door is started with it from its assignment, and only
+/// with interception on and a set cw-egress serves. Off, the pair starts
+/// exactly as without interception; unservable, its broker refuses the bound
+/// hosts instead.
+#[tokio::test]
+async fn a_pair_intercepts_what_its_assignment_says() {
+    let harness = Harness::new().await;
+    let spec = front_door(&["api.openai.com"]);
+    let hosts = spec.intercepts.clone();
+    let _on = harness
+        .enforcing(POD, intercepting(Interception::On(spec.clone())))
+        .await;
+    let _off = harness
+        .enforcing(OTHER_POD, intercepting(Interception::Off))
+        .await;
+    let _refusing = harness
+        .enforcing(
+            THIRD_POD,
+            intercepting(Interception::RefuseHosts {
+                hosts: hosts.clone(),
+                why: InterceptionRefusal::Port,
+            }),
+        )
+        .await;
+    assert_eq!(
+        harness.fake.world().intercepts,
+        [
+            PairIntercepts::FrontDoor(spec),
+            PairIntercepts::Off,
+            PairIntercepts::Refuse(hosts)
+        ]
+    );
+}
+
+/// Bindings no broker set can refuse, a suffix among them, start no pair:
+/// the bound hosts' requests carry placeholders and are never dialled
+/// (#5159). The stream ends as a failed start does.
+#[tokio::test]
+async fn bindings_no_broker_can_refuse_start_no_pair() {
+    let harness = Harness::new().await;
+    let mut pod = harness
+        .admit(
+            POD,
+            intercepting(Interception::FailClosed(InterceptionRefusal::Suffix)),
+        )
+        .await;
+    assert_eq!(pod.next().await, PodEvent::Ended { moved: false });
+    assert_eq!(harness.fake.did(), []);
+    assert!(harness.fake.world().intercepts.is_empty());
+}
+
+/// A pair keeps what it intercepts from its start: a new set, interception
+/// turned off or on, a set it must now refuse or one it cannot all end it,
+/// and the guest's redial starts the next with what the assignment now says.
+/// A new revision of the same set's policy does not.
+#[tokio::test]
+async fn a_change_to_a_pairs_front_door_ends_the_pair() {
+    let harness = Harness::new().await;
+    let first = front_door(&["api.openai.com"]);
+    let changes = [
+        Interception::On(front_door(&["api.openai.com", "chatgpt.com"])),
+        Interception::Off,
+        Interception::RefuseHosts {
+            hosts: first.intercepts.clone(),
+            why: InterceptionRefusal::Port,
+        },
+        Interception::FailClosed(InterceptionRefusal::Suffix),
+    ];
+    let pods = [POD, OTHER_POD, THIRD_POD, Uuid::from_u128(6)];
+    for (pod_uid, change) in pods.into_iter().zip(changes) {
+        let mut pod = harness
+            .enforcing(pod_uid, intercepting(Interception::On(first.clone())))
+            .await;
+        pod.changes.send(Ok(intercepting(change))).unwrap();
+        assert_eq!(pod.next().await, PodEvent::Ended { moved: false });
+        assert_eq!(harness.fake.did().last(), Some(&Did::Ended(pod_uid)));
+    }
+
+    let fourth = Uuid::from_u128(4);
+    let mut pod = harness
+        .enforcing(fourth, intercepting(Interception::Off))
+        .await;
+    pod.changes
+        .send(Ok(intercepting(Interception::On(first.clone()))))
+        .unwrap();
+    assert_eq!(pod.next().await, PodEvent::Ended { moved: false });
+
+    let fifth = Uuid::from_u128(5);
+    let mut pod = harness
+        .enforcing(fifth, intercepting(Interception::On(first.clone())))
+        .await;
+    let Assignment::Bound {
+        environment_id,
+        operation_generation,
+        platform,
+        ..
+    } = intercepting(Interception::Off)
+    else {
+        unreachable!("bound");
+    };
+    pod.changes
+        .send(Ok(Assignment::Bound {
+            environment_id,
+            operation_generation,
+            policy: AssignedPolicy {
+                reference: "platform:web".into(),
+                revision: 2,
+                policy: locked(),
+            },
+            platform,
+            interception: Interception::On(first),
+        }))
+        .unwrap();
+    assert_eq!(pod.next().await, enforced(2, &locked()));
+    assert_eq!(
+        harness.fake.did().last(),
+        Some(&Did::Replaced(fifth, locked().digest()))
+    );
 }

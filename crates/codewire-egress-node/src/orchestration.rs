@@ -24,6 +24,8 @@ use http::header::AUTHORIZATION;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+use crate::interception::{Interception, interception};
+
 /// The longest one unary call to orchestration may take.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -52,6 +54,7 @@ pub enum Assignment {
         operation_generation: i64,
         policy: AssignedPolicy,
         platform: Vec<PlatformAllow>,
+        interception: Interception,
     },
 }
 
@@ -115,6 +118,7 @@ pub fn assignment(assignment: &EgressAssignment) -> Result<Assignment, Assignmen
                     policy,
                 },
                 platform,
+                interception: interception(bound),
             })
         }
     }

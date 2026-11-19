@@ -19,6 +19,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(target_os = "linux")]
+pub mod confine;
+pub mod control;
 mod environment;
 pub mod handoff;
 

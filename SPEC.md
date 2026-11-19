@@ -983,7 +983,17 @@ refused rather than started with an empty frame, and the guest redials. The
 front door's requests go to the credential service over the
 `EgressService.FrontDoorSession` cw-egress opens for that Pod alone, reopened
 when it ends. Without a signed leaf, or without a session, intercepted hosts
-fail closed and other egress carries on. The journey is `agent-hosted` in
+fail closed and other egress carries on. A binding is never dialled as
+ordinary egress when no front door can serve it (#5159). If every binding is
+an exact name but the set can't be served (a port other than 443, a name not
+in canonical form, or an environment or generation the front door can't be
+keyed by), the Pod gets no front door, its broker refuses each binding's
+dials on that binding's own port as `intercept_unavailable`, and other egress
+carries on. A suffix, a host that is not an exact name, a port that is not
+one, or more bindings than a set holds start no egress for the Pod at all, so
+the Sandbox has no egress through cw-egress. A change to the intercepted set
+ends the Pod's egress pair, and the next one starts with the new set. The
+journey is `agent-hosted` in
 `docs/journeys/network-and-egress.md`, not yet observed.
 
 Hosted enforcement status (#4000;

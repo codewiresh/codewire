@@ -15,11 +15,14 @@ use std::time::Duration;
 
 use codewire_confinement::spawn::OwnImage;
 use codewire_egress_node::children::run_child;
+use codewire_egress_node::front_door::protocol::LeafRefusal;
+use codewire_egress_node::interception::{FrontDoorSpec, PairIntercepts};
 use codewire_egress_node::launch::{ProcessLaunch, ProcessPair, StartError};
 use codewire_egress_node::supervisor::{
     Launch as _, Pair as _, PairSpec, PairStatus, SelfCheckProbe,
 };
 use codewire_egress_policy::host_addresses::HostAddressSet;
+use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
 use codewire_egress_policy::{BuiltinPolicy, CompiledPolicy};
 use codewire_egress_worker::hosted::HOSTED_GENERATION;
 use codewire_network_session::guest::{GuestSession, authenticate_guest};
@@ -64,6 +67,17 @@ const TESTS: &[(&str, Test)] = &[
     ("children_outlive_the_thread_that_asked_for_them", || {
         Box::pin(children_outlive_the_thread_that_asked_for_them())
     }),
+    (
+        "a_pair_that_intercepts_runs_a_confined_front_door_that_takes_its_leaves",
+        || Box::pin(a_pair_that_intercepts_runs_a_confined_front_door_that_takes_its_leaves()),
+    ),
+    ("a_front_door_that_dies_ends_the_pair", || {
+        Box::pin(a_front_door_that_dies_ends_the_pair())
+    }),
+    (
+        "a_pair_that_refuses_its_bindings_runs_a_refusing_broker_and_no_front_door",
+        || Box::pin(a_pair_that_refuses_its_bindings_runs_a_refusing_broker_and_no_front_door()),
+    ),
 ];
 
 fn main() -> ExitCode {
@@ -158,6 +172,19 @@ async fn start_from(
     Result<ProcessPair, StartError>,
     Option<GuestSession<TcpStream>>,
 ) {
+    start_with(launch, policy, guest_key, PairIntercepts::Off).await
+}
+
+/// [`start_from`], intercepting `intercepts`.
+async fn start_with(
+    launch: &ProcessLaunch,
+    policy: CompiledPolicy,
+    guest_key: NetworkKey,
+    intercepts: PairIntercepts,
+) -> (
+    Result<ProcessPair, StartError>,
+    Option<GuestSession<TcpStream>>,
+) {
     let (guest, accepted) = stream().await;
     let guest = tokio::spawn(async move {
         authenticate_guest(guest, &guest_key, POD, HOSTED_GENERATION)
@@ -170,6 +197,7 @@ async fn start_from(
             stream: accepted,
             key: key(),
             policy,
+            intercepts,
         })
         .await;
     let guest = tokio::time::timeout(PATIENCE, guest)
@@ -277,6 +305,8 @@ async fn a_pair_is_two_children_of_the_image_that_take_a_new_policy_and_end_toge
     let mut pair = pair.unwrap();
     let mut guest = guest.expect("the guest authenticated the session");
 
+    // Without interception: no front door, and a broker that hands off
+    // nothing, exactly as before it existed.
     let commands: Vec<String> = children().into_iter().map(|(_, command)| command).collect();
     assert_eq!(
         commands,
@@ -410,4 +440,147 @@ async fn children_outlive_the_thread_that_asked_for_them() {
 
     drop(pair);
     no_child_is_left().await;
+}
+
+/// An intercepting pair for `POD`, its guest authenticated.
+async fn start_intercepting() -> (ProcessPair, GuestSession<TcpStream>) {
+    let front_door = FrontDoorSpec {
+        environment_id: Uuid::from_u128(0x6f1c_2a0e_8b4d_4e2a_9c3f_1d2e_3f4a_5b6c),
+        generation: 1,
+        intercepts: InterceptSet::new([InterceptBinding::new(BOUND, 443).unwrap()]).unwrap(),
+    };
+    let (pair, guest) = start_with(
+        &launch(),
+        BuiltinPolicy::Open.compile(),
+        key(),
+        PairIntercepts::FrontDoor(front_door),
+    )
+    .await;
+    (
+        pair.unwrap(),
+        guest.expect("the guest authenticated the session"),
+    )
+}
+
+const BOUND: &str = "api.openai.com";
+
+/// A leaf for `spki`, the front door's key, from a CA standing in for the
+/// credential service's signer.
+fn leaf_for(spki: &[u8]) -> Vec<u8> {
+    struct Spki<'a>(&'a [u8]);
+    impl rcgen::PublicKeyData for Spki<'_> {
+        fn der_bytes(&self) -> &[u8] {
+            // A P-256 SPKI ends with the 65-byte uncompressed point.
+            &self.0[self.0.len() - 65..]
+        }
+        fn algorithm(&self) -> &'static rcgen::SignatureAlgorithm {
+            &rcgen::PKCS_ECDSA_P256_SHA256
+        }
+    }
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+    let mut ca = rcgen::CertificateParams::default();
+    ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Constrained(0));
+    let ca = ca.self_signed(&key).unwrap();
+    let mut params = rcgen::CertificateParams::new(vec![BOUND.to_owned()]).unwrap();
+    let now = time::OffsetDateTime::now_utc();
+    params.not_before = now - time::Duration::minutes(5);
+    params.not_after = now + time::Duration::hours(1);
+    params
+        .signed_by(&Spki(spki), &ca, &key)
+        .unwrap()
+        .der()
+        .to_vec()
+}
+
+/// One line of a process's `/proc` status.
+fn status_line(pid: i32, field: &str) -> Option<String> {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix(field)
+                .map(|value| value.trim().to_owned())
+        })
+}
+
+async fn a_pair_that_intercepts_runs_a_confined_front_door_that_takes_its_leaves() {
+    let (mut pair, mut guest) = start_intercepting().await;
+
+    let commands: Vec<String> = children().into_iter().map(|(_, command)| command).collect();
+    assert_eq!(
+        commands,
+        [
+            format!("cw-egress __egress-broker --pod-uid {POD} --intercept-handoff "),
+            format!("cw-egress __egress-front-door --pod-uid {POD} "),
+            format!("cw-egress __egress-worker --pod-uid {POD} "),
+        ]
+    );
+    let (front_door, _) = children()
+        .into_iter()
+        .find(|(_, command)| command.contains("__egress-front-door"))
+        .unwrap();
+    // No new privileges and a syscall filter; its Landlock domain has no
+    // line here.
+    assert_eq!(status_line(front_door, "NoNewPrivs:").as_deref(), Some("1"));
+    assert_eq!(status_line(front_door, "Seccomp:").as_deref(), Some("2"));
+
+    let spki = pair.front_door_key().expect("its public key").to_vec();
+    assert_eq!(
+        pair.install_leaves(&[b"not a certificate".to_vec()]).await,
+        Err(StartError::Leaves(LeafRefusal::Invalid))
+    );
+    pair.install_leaves(&[leaf_for(&spki)]).await.unwrap();
+
+    send_self_check(&mut guest, SelfCheck::Passed).await;
+    assert_eq!(next(&mut pair).await, PairStatus::SelfCheckPassed);
+    pair.end().await;
+    assert_eq!(all_children(), []);
+}
+
+async fn a_front_door_that_dies_ends_the_pair() {
+    let (mut pair, mut guest) = start_intercepting().await;
+    send_self_check(&mut guest, SelfCheck::Passed).await;
+    assert_eq!(next(&mut pair).await, PairStatus::SelfCheckPassed);
+
+    let (front_door, _) = children()
+        .into_iter()
+        .find(|(_, command)| command.contains("__egress-front-door"))
+        .expect("the front door is running");
+    rustix::process::kill_process(
+        rustix::process::Pid::from_raw(front_door).unwrap(),
+        rustix::process::Signal::KILL,
+    )
+    .unwrap();
+    assert_eq!(next(&mut pair).await, PairStatus::Ended);
+
+    pair.end().await;
+    no_child_is_left().await;
+}
+
+async fn a_pair_that_refuses_its_bindings_runs_a_refusing_broker_and_no_front_door() {
+    let hosts = InterceptSet::new([InterceptBinding::new(BOUND, 443).unwrap()]).unwrap();
+    let (pair, guest) = start_with(
+        &launch(),
+        BuiltinPolicy::Open.compile(),
+        key(),
+        PairIntercepts::Refuse(hosts),
+    )
+    .await;
+    let mut pair = pair.unwrap();
+    let mut guest = guest.expect("the guest authenticated the session");
+
+    let commands: Vec<String> = children().into_iter().map(|(_, command)| command).collect();
+    assert_eq!(
+        commands,
+        [
+            format!("cw-egress __egress-broker --pod-uid {POD} --intercept-refuse "),
+            format!("cw-egress __egress-worker --pod-uid {POD} "),
+        ]
+    );
+    assert!(pair.front_door_key().is_none());
+
+    send_self_check(&mut guest, SelfCheck::Passed).await;
+    assert_eq!(next(&mut pair).await, PairStatus::SelfCheckPassed);
+    pair.end().await;
+    assert_eq!(all_children(), []);
 }

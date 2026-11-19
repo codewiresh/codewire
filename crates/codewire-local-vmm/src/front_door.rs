@@ -56,21 +56,13 @@ use std::os::fd::{FromRawFd as _, OwnedFd, RawFd};
 use std::time::Duration;
 
 use codewire_egress_front_door_bridge::{Ended, EnvironmentFrontDoor};
-use codewire_egress_policy::handoff::{HandoffError, HandoffReceiver};
+use codewire_egress_policy::handoff::HandoffError;
 use codewire_egress_policy::intercept::InterceptSet;
 use rustix::net::SocketType;
 use uuid::Uuid;
 
 use crate::broker_control::{ControlFrame, read_control_frame};
-pub(crate) use control::ControlChannel;
-mod control;
-
-#[cfg(target_os = "linux")]
-use crate::linux::confinement::{
-    install_denied_syscalls, install_deny_all_filesystem_domain, lock_process_privileges,
-};
-#[cfg(target_os = "linux")]
-use crate::linux::syscall_floor::DENIED_SYSCALL_FLOOR;
+pub(crate) use codewire_egress_front_door_bridge::control::ControlChannel;
 
 /// The control socket's descriptor in the front-door process.
 pub const FRONT_DOOR_CONTROL_FD: RawFd = 4;
@@ -173,37 +165,6 @@ const MAX_CONTROL_MESSAGE: usize = 6 + 32 * (1 + 255 + 2);
 /// How long the runner has to send the bindings.
 const BINDINGS_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// What a local front door refuses after it starts, beyond the shared
-/// floor. The process makes no connection, opens no file and starts nothing.
-#[cfg(target_os = "linux")]
-const FRONT_DOOR_DENIED_SYSCALLS: &[libc::c_long] = &[
-    libc::SYS_socket,
-    libc::SYS_connect,
-    libc::SYS_clone,
-    libc::SYS_clone3,
-    libc::SYS_name_to_handle_at,
-    libc::SYS_capset,
-    libc::SYS_setuid,
-    libc::SYS_setgid,
-    libc::SYS_setreuid,
-    libc::SYS_setregid,
-    libc::SYS_setresuid,
-    libc::SYS_setresgid,
-    libc::SYS_setfsuid,
-    libc::SYS_setfsgid,
-    libc::SYS_setgroups,
-];
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const FRONT_DOOR_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[libc::SYS_fork, libc::SYS_vfork];
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const FRONT_DOOR_ARCH_DENIED_SYSCALLS: &[libc::c_long] = &[];
-
-/// The shared floor and the front door's own denials.
-#[cfg(target_os = "linux")]
-fn front_door_denied_syscalls() -> Vec<libc::c_long> {
-    [DENIED_SYSCALL_FLOOR, FRONT_DOOR_DENIED_SYSCALLS].concat()
-}
-
 /// Why the front-door process stopped. Each names a fixed stage, so it can
 /// be written to the runner and logged.
 #[derive(Debug, thiserror::Error)]
@@ -285,7 +246,7 @@ async fn start_and_serve(
         .await
         .map_err(|_| FrontDoorProcessError::Control)?;
     let (successors, later) = tokio::sync::mpsc::channel(1);
-    let serve = door.serve(handoff, credentials, later);
+    let serve = door.serve(handoff, Some(credentials), later);
     tokio::pin!(serve);
     // Once the control channel closes or misbehaves, no successor can pair:
     // dropping the sender lets the front door end.
@@ -340,19 +301,12 @@ async fn receive_credentials(
     }
 }
 
-/// Confine the process for good: no new privileges, no filesystem, and a
-/// syscall filter that refuses new sockets, connections, processes and
-/// signals.
+/// Confine the process for good as every front door does on Linux: no new
+/// privileges, no filesystem, and a syscall filter that refuses new sockets,
+/// connections, processes and signals.
 #[cfg(target_os = "linux")]
 fn confine() -> std::io::Result<()> {
-    lock_process_privileges()
-        .and_then(|()| install_deny_all_filesystem_domain())
-        .and_then(|()| {
-            install_denied_syscalls(
-                &front_door_denied_syscalls(),
-                FRONT_DOOR_ARCH_DENIED_SYSCALLS,
-            )
-        })
+    codewire_egress_front_door_bridge::confine::confine_front_door()
 }
 
 /// Confine the process for good with Seatbelt's deny-all profile: no file,
@@ -429,14 +383,7 @@ async fn admitted_credentials(
 /// tag. Read blocking, within [`ROLE_TAG_TIMEOUT`], before anything is
 /// served.
 fn handoff_role_tagged(handoff: &OwnedFd) -> Result<(), DroppedSocket> {
-    // The receiver that reads the tag is dropped after it; the front door's
-    // own receiver starts at the first intercepted stream.
-    let mut receiver = rustix::io::fcntl_dupfd_cloexec(handoff, 0)
-        .ok()
-        .and_then(|duplicate| HandoffReceiver::new(duplicate).ok())
-        .ok_or(DroppedSocket::RoleTag)?;
-    receiver
-        .expect_role_tag(ROLE_TAG_TIMEOUT)
+    codewire_egress_front_door_bridge::handoff::expect_broker_role_tag(handoff, ROLE_TAG_TIMEOUT)
         .map_err(|error| match error {
             HandoffError::Closed => DroppedSocket::ReceivedDead,
             _ => DroppedSocket::RoleTag,
@@ -594,18 +541,5 @@ mod tests {
             front_door_serving_pairing(b"CWFD1 dropped 2 role_tag\n"),
             None
         );
-    }
-
-    #[test]
-    fn the_front_door_denies_the_shared_floor_and_its_own_calls() {
-        let denied = front_door_denied_syscalls();
-        for call in DENIED_SYSCALL_FLOOR.iter().chain([
-            &libc::SYS_socket,
-            &libc::SYS_connect,
-            &libc::SYS_clone,
-            &libc::SYS_clone3,
-        ]) {
-            assert!(denied.contains(call), "{call}");
-        }
     }
 }

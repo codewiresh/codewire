@@ -1,6 +1,7 @@
-//! The runner's control channel with a front-door process: one connected
+//! A supervisor's control channel with a front-door process: one connected
 //! Unix stream, framed by `codewire_egress_policy::handoff`, as the hand-off
-//! itself is, so there is one transport on Linux and macOS.
+//! itself is, so there is one transport on Linux and macOS. The local
+//! runner's (#3999) and cw-egress's (#4001) front doors both use it.
 
 use std::io;
 use std::os::fd::{BorrowedFd, OwnedFd};
@@ -11,14 +12,14 @@ use tokio::io::unix::AsyncFd;
 
 /// Both directions of one control socket. The sender and the receiver hold
 /// duplicates of the same socket, which is non-blocking.
-pub(crate) struct ControlChannel {
+pub struct ControlChannel {
     receiver: AsyncFd<HandoffReceiver>,
     sender: HandoffSender,
 }
 
 impl ControlChannel {
     /// Take a connected Unix stream socket; it is made non-blocking.
-    pub(crate) fn new(socket: OwnedFd) -> io::Result<Self> {
+    pub fn new(socket: OwnedFd) -> io::Result<Self> {
         rustix::io::ioctl_fionbio(&socket, true)?;
         let duplicate = rustix::io::fcntl_dupfd_cloexec(&socket, 0)?;
         let sender = HandoffSender::new(duplicate).map_err(not_a_stream)?;
@@ -31,7 +32,7 @@ impl ControlChannel {
 
     /// One frame of at most `max_len` bytes and `max_descriptors`
     /// descriptors. Any framing error leaves the channel unusable.
-    pub(crate) async fn receive(
+    pub async fn receive(
         &mut self,
         max_len: usize,
         max_descriptors: usize,
@@ -57,11 +58,7 @@ impl ControlChannel {
     }
 
     /// Send one frame, waiting while the socket is full.
-    pub(crate) async fn send(
-        &mut self,
-        body: &[u8],
-        descriptors: &[BorrowedFd<'_>],
-    ) -> io::Result<()> {
+    pub async fn send(&mut self, body: &[u8], descriptors: &[BorrowedFd<'_>]) -> io::Result<()> {
         loop {
             match self.sender.send_frame(body, descriptors) {
                 Ok(()) => return Ok(()),

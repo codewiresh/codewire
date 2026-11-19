@@ -46,7 +46,8 @@ struct Running {
     environment_id: Uuid,
     ca: Vec<u8>,
     handoff: HandoffSender,
-    host: FrontDoorHostSession,
+    /// The credential broker's side of the live session, once one paired.
+    host: Option<FrontDoorHostSession>,
     door: tokio::task::JoinHandle<Ended>,
     /// Where a successor broker's session reaches the front door.
     successors: tokio::sync::mpsc::Sender<tokio::net::UnixStream>,
@@ -61,6 +62,12 @@ impl Running {
     /// [`Self::start`], with `configure` applied to the front door's end of
     /// the hand-off socket before it serves.
     async fn start_with(hosts: &[&str], configure: impl FnOnce(&OwnedFd)) -> Self {
+        Self::serving(hosts, configure, true).await
+    }
+
+    /// A front door serving `hosts`, with a first credential session when
+    /// `paired`, as a local one always has.
+    async fn serving(hosts: &[&str], configure: impl FnOnce(&OwnedFd), paired: bool) -> Self {
         let environment_id = Uuid::new_v4();
         let door = EnvironmentFrontDoor::start(environment_id, GENERATION, intercepts(hosts, 443))
             .unwrap();
@@ -70,8 +77,13 @@ impl Running {
         let handoff = HandoffSender::new(handoff).unwrap();
         let (door_credentials, credentials) = tokio::net::UnixStream::pair().unwrap();
         let (successors, later) = tokio::sync::mpsc::channel(4);
-        let door = tokio::spawn(door.serve(door_handoff, door_credentials, later));
-        let host = open_host(credentials, environment_id).await;
+        let first = paired.then_some(door_credentials);
+        let door = tokio::spawn(door.serve(door_handoff, first, later));
+        let host = if paired {
+            Some(open_host(credentials, environment_id).await)
+        } else {
+            None
+        };
         Self {
             environment_id,
             ca,
@@ -165,10 +177,14 @@ impl Running {
     /// credential broker, and the response the guest read.
     async fn request(&mut self) -> (v1::CredentialBridgeRequest, StatusCode, Bytes) {
         let response = self.start_request().await;
-        let seen = received(&mut self.host).await;
-        answer(&self.host, &seen.request_id).await;
+        let seen = received(self.host()).await;
+        answer(self.host(), &seen.request_id).await;
         let (status, body) = bounded(response).await.unwrap();
         (seen, status, body)
+    }
+
+    fn host(&mut self) -> &mut FrontDoorHostSession {
+        self.host.as_mut().expect("a paired credential session")
     }
 
     /// A successor broker pairs: its session reaches the front door, which
@@ -302,20 +318,20 @@ async fn the_front_door_stops_when_the_broker_closes_the_handoff_socket() {
 async fn a_renewed_broker_keeps_interception_and_the_first_finishes_its_request() {
     let mut running = Running::start(&[BOUND]).await;
     let in_flight = running.start_request().await;
-    let first_seen = received(&mut running.host).await;
+    let first_seen = received(running.host()).await;
 
     let mut successor = running.successor().await;
     let next = running.start_request().await;
     let next_seen = received(&mut successor).await;
-    answer(&running.host, &first_seen.request_id).await;
+    answer(running.host(), &first_seen.request_id).await;
     assert_eq!(bounded(in_flight).await.unwrap().0, StatusCode::OK);
     answer(&successor, &next_seen.request_id).await;
     assert_eq!(bounded(next).await.unwrap().0, StatusCode::OK);
 
-    drop(std::mem::replace(&mut running.host, successor));
+    drop(running.host.replace(successor));
     let after = running.start_request().await;
-    let after_seen = received(&mut running.host).await;
-    answer(&running.host, &after_seen.request_id).await;
+    let after_seen = received(running.host()).await;
+    answer(running.host(), &after_seen.request_id).await;
     assert_eq!(
         bounded(after).await.unwrap(),
         (StatusCode::OK, Bytes::from("answered"))
@@ -334,7 +350,7 @@ async fn a_broker_gone_without_a_successor_leaves_the_front_door_for_the_next() 
     assert!(!running.door.is_finished());
     let (door_credentials, credentials) = tokio::net::UnixStream::pair().unwrap();
     running.successors.try_send(door_credentials).unwrap();
-    running.host = open_host(credentials, running.environment_id).await;
+    running.host = Some(open_host(credentials, running.environment_id).await);
     let (_, status, body) = running.request().await;
     assert_eq!((status, body), (StatusCode::OK, Bytes::from("answered")));
 }
@@ -348,7 +364,7 @@ async fn a_third_session_ends_the_oldest() {
     let _second = running.successor().await;
     let mut third = running.successor().await;
     assert!(matches!(
-        bounded(running.host.receive()).await,
+        bounded(running.host().receive()).await,
         Ok(None) | Err(_)
     ));
     let response = running.start_request().await;
@@ -459,4 +475,19 @@ async fn a_broker_that_stops_reading_acknowledgements_stops_the_front_door() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(matches!(running.door.await.unwrap(), Ended::Handoff(_)));
+}
+
+/// A hosted front door starts with no credential session (#4001): a request
+/// fails closed at the bridge rather than waiting, the front door carries
+/// on, and once a session pairs requests are served.
+#[tokio::test]
+async fn without_a_credential_session_a_request_fails_closed_until_one_pairs() {
+    let mut running = Running::serving(&[BOUND], |_| {}, false).await;
+    let (status, _) = bounded(running.start_request().await).await.unwrap();
+    assert_ne!(status, StatusCode::OK);
+    assert!(!running.door.is_finished());
+
+    running.host = Some(running.successor().await);
+    let (_, status, body) = running.request().await;
+    assert_eq!((status, body), (StatusCode::OK, Bytes::from("answered")));
 }

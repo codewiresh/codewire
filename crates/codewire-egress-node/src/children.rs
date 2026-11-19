@@ -1,5 +1,6 @@
 //! The child processes cw-egress starts from its own image (#4000): one
-//! confined broker and one confined worker for each admitted Pod.
+//! confined broker and one confined worker for each admitted Pod, and one
+//! confined front door for a Pod that intercepts (#4001).
 //!
 //! The supervisor starts a child with a command word as its first argument.
 //! `main` hands its arguments to [`run_child`] before it does anything else:
@@ -9,13 +10,22 @@
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-use codewire_egress_worker::broker::run_inherited_egress_broker;
+use codewire_egress_worker::broker::{BrokerIntercepts, run_inherited_egress_broker_intercepting};
 use codewire_egress_worker::hosted::{HOSTED_GENERATION, run_hosted_worker};
 use uuid::Uuid;
 
+use crate::front_door::run_inherited_front_door;
+
 pub const BROKER_WORD: &str = "__egress-broker";
 pub const WORKER_WORD: &str = "__egress-worker";
+pub const FRONT_DOOR_WORD: &str = "__egress-front-door";
 pub const POD_UID_FLAG: &str = "--pod-uid";
+/// After a broker's Pod UID: it hands intercepted dials to the Pod's front
+/// door.
+pub const INTERCEPT_HANDOFF_FLAG: &str = "--intercept-handoff";
+/// After a broker's Pod UID: it refuses intercepted dials, for a Pod whose
+/// bindings no front door serves.
+pub const INTERCEPT_REFUSE_FLAG: &str = "--intercept-refuse";
 
 /// Exit status of a child whose command line is not one the supervisor
 /// writes: the conventional status for a usage error.
@@ -23,8 +33,12 @@ const USAGE: u8 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Child {
-    Broker(Uuid),
+    Broker {
+        pod_uid: Uuid,
+        intercepts: BrokerIntercepts,
+    },
     Worker(Uuid),
+    FrontDoor(Uuid),
 }
 
 /// The child `arguments` name, `None` when they name none and the caller is
@@ -35,15 +49,32 @@ fn child(arguments: impl IntoIterator<Item = OsString>) -> Option<Result<Child, 
     let mut arguments = arguments.into_iter().skip(1);
     let word = arguments.next()?;
     let word = word.to_str().filter(|word| word.starts_with("__"))?;
-    let pod_uid = match (arguments.next(), arguments.next(), arguments.next()) {
-        (Some(flag), Some(pod_uid), None) if flag == POD_UID_FLAG => {
+    let pod_uid = match (arguments.next(), arguments.next()) {
+        (Some(flag), Some(pod_uid)) if flag == POD_UID_FLAG => {
             pod_uid.to_str().and_then(|text| Uuid::parse_str(text).ok())
         }
         _ => None,
     };
-    Some(match (word, pod_uid) {
-        (BROKER_WORD, Some(pod_uid)) => Ok(Child::Broker(pod_uid)),
-        (WORKER_WORD, Some(pod_uid)) => Ok(Child::Worker(pod_uid)),
+    let extra = match (arguments.next(), arguments.next()) {
+        (None, _) => Some(None),
+        (Some(flag), None) => Some(Some(flag)),
+        (Some(_), Some(_)) => None,
+    };
+    let broker_intercepts = |flag: Option<OsString>| match flag {
+        None => Some(BrokerIntercepts::Off),
+        Some(flag) if flag == INTERCEPT_HANDOFF_FLAG => Some(BrokerIntercepts::HandOff),
+        Some(flag) if flag == INTERCEPT_REFUSE_FLAG => Some(BrokerIntercepts::Refuse),
+        Some(_) => None,
+    };
+    Some(match (word, pod_uid, extra) {
+        (BROKER_WORD, Some(pod_uid), Some(flag)) => broker_intercepts(flag)
+            .map(|intercepts| Child::Broker {
+                pod_uid,
+                intercepts,
+            })
+            .ok_or(()),
+        (WORKER_WORD, Some(pod_uid), Some(None)) => Ok(Child::Worker(pod_uid)),
+        (FRONT_DOOR_WORD, Some(pod_uid), Some(None)) => Ok(Child::FrontDoor(pod_uid)),
         _ => Err(()),
     })
 }
@@ -64,12 +95,16 @@ pub fn run_child(arguments: impl IntoIterator<Item = OsString>) -> Option<ExitCo
     };
     let status = runtime.block_on(async {
         match child {
-            Child::Broker(pod_uid) => {
-                run_inherited_egress_broker(pod_uid, HOSTED_GENERATION, false)
-                    .await
-                    .map_err(|error| error.exit_code())
-            }
+            Child::Broker {
+                pod_uid,
+                intercepts,
+            } => run_inherited_egress_broker_intercepting(pod_uid, HOSTED_GENERATION, intercepts)
+                .await
+                .map_err(|error| error.exit_code()),
             Child::Worker(pod_uid) => run_hosted_worker(pod_uid)
+                .await
+                .map_err(|error| error.exit_code()),
+            Child::FrontDoor(pod_uid) => run_inherited_front_door(pod_uid)
                 .await
                 .map_err(|error| error.exit_code()),
         }
@@ -107,11 +142,49 @@ mod tests {
         let pod = Uuid::parse_str(POD).unwrap();
         assert_eq!(
             child(arguments(&["cw-egress", BROKER_WORD, POD_UID_FLAG, POD])),
-            Some(Ok(Child::Broker(pod)))
+            Some(Ok(Child::Broker {
+                pod_uid: pod,
+                intercepts: BrokerIntercepts::Off
+            }))
+        );
+        assert_eq!(
+            child(arguments(&[
+                "cw-egress",
+                BROKER_WORD,
+                POD_UID_FLAG,
+                POD,
+                INTERCEPT_HANDOFF_FLAG
+            ])),
+            Some(Ok(Child::Broker {
+                pod_uid: pod,
+                intercepts: BrokerIntercepts::HandOff
+            }))
+        );
+        assert_eq!(
+            child(arguments(&[
+                "cw-egress",
+                BROKER_WORD,
+                POD_UID_FLAG,
+                POD,
+                INTERCEPT_REFUSE_FLAG
+            ])),
+            Some(Ok(Child::Broker {
+                pod_uid: pod,
+                intercepts: BrokerIntercepts::Refuse
+            }))
         );
         assert_eq!(
             child(arguments(&["cw-egress", WORKER_WORD, POD_UID_FLAG, POD])),
             Some(Ok(Child::Worker(pod)))
+        );
+        assert_eq!(
+            child(arguments(&[
+                "cw-egress",
+                FRONT_DOOR_WORD,
+                POD_UID_FLAG,
+                POD
+            ])),
+            Some(Ok(Child::FrontDoor(pod)))
         );
     }
 
@@ -124,6 +197,53 @@ mod tests {
             &["cw-egress", BROKER_WORD, "--pod", POD],
             &["cw-egress", WORKER_WORD, POD_UID_FLAG, "not-a-uuid"],
             &["cw-egress", WORKER_WORD, POD_UID_FLAG, POD, "extra"],
+            // Only a broker intercepts, and only with one flag after its Pod.
+            &[
+                "cw-egress",
+                WORKER_WORD,
+                POD_UID_FLAG,
+                POD,
+                INTERCEPT_REFUSE_FLAG,
+            ],
+            &[
+                "cw-egress",
+                BROKER_WORD,
+                POD_UID_FLAG,
+                POD,
+                INTERCEPT_REFUSE_FLAG,
+                INTERCEPT_HANDOFF_FLAG,
+            ],
+            &[
+                "cw-egress",
+                WORKER_WORD,
+                POD_UID_FLAG,
+                POD,
+                INTERCEPT_HANDOFF_FLAG,
+            ],
+            &[
+                "cw-egress",
+                FRONT_DOOR_WORD,
+                POD_UID_FLAG,
+                POD,
+                INTERCEPT_HANDOFF_FLAG,
+            ],
+            &[
+                "cw-egress",
+                BROKER_WORD,
+                INTERCEPT_HANDOFF_FLAG,
+                POD_UID_FLAG,
+                POD,
+            ],
+            &["cw-egress", BROKER_WORD, POD_UID_FLAG, POD, "--intercept"],
+            &[
+                "cw-egress",
+                BROKER_WORD,
+                POD_UID_FLAG,
+                POD,
+                INTERCEPT_HANDOFF_FLAG,
+                INTERCEPT_HANDOFF_FLAG,
+            ],
+            &["cw-egress", FRONT_DOOR_WORD],
         ] {
             assert_eq!(child(arguments(refused)), Some(Err(())), "{refused:?}");
         }

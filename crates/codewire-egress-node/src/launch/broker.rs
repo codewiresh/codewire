@@ -1,20 +1,21 @@
 //! One Pod's egress broker, as a process.
 
-use std::os::fd::AsRawFd as _;
+use std::os::fd::{AsRawFd as _, OwnedFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 
 use codewire_confinement::spawn::{OwnImage, duplicate_inherited_descriptor};
 use codewire_egress_broker::ipc::BROKER_IPC_KEY_LEN;
 use codewire_egress_policy::host_addresses::HostAddressSet;
+use codewire_egress_policy::intercept::InterceptSet;
 use codewire_egress_policy::{CompiledPolicy, PolicyDigest};
 use codewire_egress_worker::broker::{
     EGRESS_BROKER_BOOTSTRAP_FD, EGRESS_BROKER_CONFINE_MESSAGE, EGRESS_BROKER_FIRST_SESSION_FD,
-    EGRESS_BROKER_HOST_ADDRESSES_FD, EGRESS_BROKER_INHERITED_SESSIONS,
+    EGRESS_BROKER_HANDOFF_FD, EGRESS_BROKER_HOST_ADDRESSES_FD, EGRESS_BROKER_INHERITED_SESSIONS,
     EGRESS_BROKER_PREPARED_MESSAGE, EGRESS_BROKER_READY_MESSAGE, EGRESS_BROKER_STATUS_MAX_BYTES,
     EgressBrokerStartupStatus, decode_egress_broker_startup_status, encode_egress_broker_bootstrap,
 };
 use codewire_egress_worker::broker_control::{
-    POLICY_ACK_TIMEOUT, encode_policy_frame, read_policy_ack,
+    POLICY_ACK_TIMEOUT, encode_intercept_frame, encode_policy_frame, read_policy_ack,
 };
 use codewire_egress_worker::host_addresses::encode_frame;
 use codewire_egress_worker::parent::{fresh_egress_broker_key, read_status_frame};
@@ -28,7 +29,7 @@ use super::StartError;
 use super::spawner::{Process, Spawner};
 use codewire_egress_worker::hosted::HOSTED_GENERATION;
 
-use crate::children::{BROKER_WORD, POD_UID_FLAG};
+use crate::children::{BROKER_WORD, INTERCEPT_HANDOFF_FLAG, INTERCEPT_REFUSE_FLAG, POD_UID_FLAG};
 
 /// A broker that is confined and enforcing its policy. Dropping it kills it.
 pub(super) struct Broker {
@@ -43,16 +44,42 @@ pub(super) struct BrokerSessions {
     pub(super) key: Zeroizing<[u8; BROKER_IPC_KEY_LEN]>,
 }
 
-/// Starts a broker for `pod_uid` from `image`. It refuses `refused`, the
-/// cluster's own addresses, from its first admission on.
+/// What a broker is started with.
+pub(super) struct BrokerSpec<'a> {
+    pub(super) pod_uid: Uuid,
+    pub(super) policy: &'a CompiledPolicy,
+    /// The cluster's own addresses, which it refuses from its first
+    /// admission on.
+    pub(super) refused: &'a HostAddressSet,
+    pub(super) intercepts: Intercepts<'a>,
+}
+
+/// What the broker does with the dials a Pod's bindings name (#4001).
+pub(super) enum Intercepts<'a> {
+    Off,
+    /// Hands them over on `end`, its end of the hand-off socket to the
+    /// Pod's front door.
+    HandOff {
+        end: OwnedFd,
+        hosts: &'a InterceptSet,
+    },
+    /// Refuses them: the Pod has no front door.
+    Refuse(&'a InterceptSet),
+}
+
+/// Starts a broker for `spec.pod_uid` from `image`.
 pub(super) async fn start(
     image: &OwnImage,
     spawner: &Spawner,
-    pod_uid: Uuid,
-    policy: &CompiledPolicy,
-    refused: &HostAddressSet,
+    spec: BrokerSpec<'_>,
     deadline: Instant,
 ) -> Result<(Broker, BrokerSessions), StartError> {
+    let BrokerSpec {
+        pod_uid,
+        policy,
+        refused,
+        intercepts,
+    } = spec;
     let (mut bootstrap, inherited_bootstrap) = inherited_pair()?;
     let (mut control, inherited_control) = inherited_pair()?;
     let mut endpoints = Vec::with_capacity(EGRESS_BROKER_INHERITED_SESSIONS + 1);
@@ -78,23 +105,51 @@ pub(super) async fn start(
             .zip(EGRESS_BROKER_FIRST_SESSION_FD..)
             .map(|(session, target)| (session.as_raw_fd(), target)),
     );
+    let pod = pod_uid.to_string();
+    let mut arguments = vec!["cw-egress", BROKER_WORD, POD_UID_FLAG, &pod];
+    let mut inherited_handoff = None;
+    let hosts = match intercepts {
+        Intercepts::Off => None,
+        Intercepts::HandOff { end, hosts } => {
+            let inherited =
+                duplicate_inherited_descriptor(end.as_raw_fd()).map_err(|_| StartError::Spawn)?;
+            descriptors.push((inherited.as_raw_fd(), EGRESS_BROKER_HANDOFF_FD));
+            inherited_handoff = Some(inherited);
+            arguments.push(INTERCEPT_HANDOFF_FLAG);
+            Some(hosts)
+        }
+        Intercepts::Refuse(hosts) => {
+            arguments.push(INTERCEPT_REFUSE_FLAG);
+            Some(hosts)
+        }
+    };
+    let intercepts = hosts
+        .map(encode_intercept_frame)
+        .transpose()
+        .map_err(|_| StartError::Bootstrap)?;
     let key = fresh_egress_broker_key();
     let record = encode_egress_broker_bootstrap(pod_uid, HOSTED_GENERATION, &key, policy)
         .map_err(|_| StartError::Bootstrap)?;
 
-    let pod = pod_uid.to_string();
     let command = image
-        .command(&["cw-egress", BROKER_WORD, POD_UID_FLAG, &pod], descriptors)
+        .command(&arguments, descriptors)
         .map_err(|_| StartError::Spawn)?;
     let process = spawner.spawn(command).await?;
-    // The child holds its own copies of its ends.
+    // The child holds its own copies of its ends. Once the hand-off end is
+    // gone here, only the broker and the front door hold the socket.
     drop(inherited_bootstrap);
     drop(inherited_control);
     drop(inherited_sessions);
+    drop(inherited_handoff);
 
     tokio::time::timeout_at(deadline, async {
         bootstrap.write_all(&record).await?;
-        control.write_all(&encode_frame(refused)).await
+        control.write_all(&encode_frame(refused)).await?;
+        // A broker that intercepts reads its bindings before it is prepared.
+        match &intercepts {
+            Some(frame) => control.write_all(frame).await,
+            None => Ok(()),
+        }
     })
     .await
     .map_err(|_| StartError::Timeout)?
