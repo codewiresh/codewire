@@ -84,3 +84,33 @@ Sign-in, sign-up and the other account pages sit on plain black
 `reference/fixtures/login-preview.html` and `reference/fixtures/signup.html`
 share `routes/auth.css`. `login-preview.html` is the same sign-in reached from
 the private-preview redirect: only its title and one fixed context line differ.
+
+## Safety panels
+
+The homepage's Safety section, "Not just a VM. Guardrails for your agent.",
+sits before Sessions. Two frosted panels share one row grid, so they are the
+same height side by side, and stack at 900 pixels and below. All values shown
+are made up.
+
+- **Credential proxy.** Example requests stream from the agent inside the VM,
+  across the VM boundary, to the destination. Each request is drawn twice, one
+  copy clipped above the boundary and one below it, so its `Authorization`
+  value changes from a stand-in to the API key exactly on the line.
+- **Network egress control.** Five steps run twice: a destination the example
+  policy allows, then one it refuses at the check, in the words
+  `cw policy check` prints. One band steps down the rows and the steps not yet
+  reached stay dim. Allowed is green and refused is red (`--ok` and `--no`,
+  the code samples' green and red). The refused run stops at the check.
+- The example agent's mark changes every three seconds in both panels, and a
+  button steps it by hand. The marks are the ones in the get-started box.
+- The panels draw only while they are on screen. With reduced motion they
+  hold one picture: three requests at rest and the allowed run finished.
+  Without JavaScript the same markup is a still picture: one request before
+  and after the boundary, and the five steps as a list.
+- The copy follows the documentation: a local VM enforces its network policy,
+  a hosted sandbox stores one without enforcing it yet, and keeping a key
+  outside the VM is a different guarantee from egress control.
+
+`public.js` reads the section's markup; `cargo test -p codewire-dashboard-web`
+pins what it reads. The acceptance journey is
+`docs/journeys/homepage-safety.md`.

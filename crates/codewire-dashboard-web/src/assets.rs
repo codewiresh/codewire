@@ -482,6 +482,33 @@ mod tests {
     }
 
     #[test]
+    fn homepage_safety_panels_keep_the_markup_their_script_reads() {
+        let home = include_str!("../templates/home.html");
+        // public.js pairs the example agent's names, by position, with the
+        // marks in the get-started box.
+        let marks = home
+            .split("<ul class=\"cw-handoff-marks\"")
+            .nth(1)
+            .and_then(|rest| rest.split("</ul>").next())
+            .unwrap();
+        let names = home
+            .split("data-proxy-agents=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap();
+        assert_eq!(marks.matches("<li>").count(), names.split(',').count());
+        // It times the egress steps by position: these five, in this order.
+        let kinds: Vec<_> = home
+            .split("class=\"cw-proxy-event\" data-kind=\"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap())
+            .collect();
+        assert_eq!(kinds, ["ask", "check", "open", "receive", "relay"]);
+        // Each request is drawn in both halves of the VM boundary.
+        assert_eq!(home.matches("class=\"cw-cross-req\"").count(), 2);
+    }
+
+    #[test]
     fn device_template_and_fixture_share_the_slot_contract() {
         let production = include_str!("../templates/device.html");
         let fixture =

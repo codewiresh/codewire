@@ -10,6 +10,7 @@ runs the same commands and holds the result to the same standard.
 | --- | --- |
 | [agent-quickstart.md](agent-quickstart.md) | Copy a setup prompt or follow the human walkthrough with the public TanStack Router and Vite example |
 | [public-controls.md](public-controls.md) | Public-site pill buttons and rounded segmented controls on the homepage and pricing page |
+| [homepage-safety.md](homepage-safety.md) | The homepage Safety section: the credential proxy and network egress control panels, their animation, reduced motion, no JavaScript, themes and widths |
 | [launch.md](launch.md) | The public-launch walk (#4370), step by step: what the launch asks of each step, which journey below holds it, and where the walk stands |
 | [local-vm-mac.md](local-vm-mac.md) | Local VMs on a Mac (#4370 step 11): install, create, shell, run, stop and start on macOS 27 and 26 |
 | [local-vm-upgrade.md](local-vm-upgrade.md) | Local VMs across an upgrade that changes the guest runtime ABI (#4980): a start moves a stopped environment onto the installed runtime, and old VM checkpoints say why they can't be restored and can be removed |

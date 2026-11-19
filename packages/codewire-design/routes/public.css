@@ -111,6 +111,16 @@
   --mark-out: -15px; --target-up: -24px; --target-half: -7.5px; --plate-down: -26px;
   --focus-offset: 2px; --focus-offset-logo: 4px;
   --toast-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  /* the safety panels: allowed and refused take the code samples' green and red */
+  --ok: var(--syn-str); --no: var(--syn-num);
+  --proxy-band: color-mix(in srgb, var(--ink) 6%, transparent);
+  --proxy-band-ok: color-mix(in srgb, var(--ok) 13%, transparent); --proxy-band-no: color-mix(in srgb, var(--no) 13%, transparent);
+  --proxy-band-out-wide: -12px; --proxy-band-out-narrow: -8px; --proxy-band-out: var(--proxy-band-out-wide); --proxy-lane-out: -7px;
+  --proxy-icon: 30px; --proxy-row: 112px; --proxy-wire: 30px; --proxy-wire-loop: 44px;
+  --proxy-gutter-wide: 176px; --proxy-gutter-narrow: 96px; --proxy-gutter: var(--proxy-gutter-wide);
+  --proxy-stage: 420px; --proxy-stage-narrow: 480px; --proxy-request: 440px;
+  --proxy-arrow: 8px; --proxy-arrow-out: -3.5px;
+  --proxy-mid: 50%; --proxy-focus-y: 0px; --proxy-focus-h: 0px;   /* the script sets these three */
 }
 @supports (width: round(1px, 1px)) { :root {
   --gap-snap: max(var(--base), round(var(--gap-fluid), var(--base)));
@@ -541,6 +551,116 @@ ul.body { margin: 0; padding: 0; list-style: none; row-gap: var(--gap); }
   .cw-handoff-meta p:last-child { margin-left: auto; }
   .cw-handoff-terminal > div { flex-direction: column; align-items: stretch; }
   .cw-handoff-terminal button { align-self: flex-end; }
+}
+
+/* Safety: two panels side by side, one row grid, so they are the same height. On the left, requests cross the VM boundary
+   and their credential changes on the line; on the right, the egress check, one step at a time. The script sets
+   data-proxy-live when it draws them; without it both are still pictures. */
+.cw-proxy-intro { margin-top: var(--space-xl); row-gap: var(--space-l); }
+.cw-proxy-intro > p { grid-column: 4 / -1; margin: 0; }
+.cw-proxy-intro > p:first-child { max-width: 46em; color: var(--grey); font: 400 var(--fs-lead)/var(--lh-body) var(--f-sans); }
+.cw-proxy-agent-choice { display: flex; align-items: center; gap: var(--space-s); color: var(--grey); font: 400 var(--fs-label)/var(--lh-label) var(--f-mono); }
+.cw-proxy-agent-pick { padding: var(--space-xs) var(--space-m); border: var(--space-hair) solid var(--handoff-disc-border); border-radius: var(--radius-pill); background: transparent; color: var(--ink); font: inherit; cursor: pointer; }
+.cw-proxy-agent-pick:hover { border-color: var(--ink); }
+.cw-proxy-agent-pick:focus-visible { outline: var(--focus-offset) solid var(--signal); outline-offset: var(--focus-offset); }
+.cw-proxy-pair { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: auto auto auto repeat(5, auto) auto; column-gap: var(--gap); align-items: stretch; }
+.cw-proxy-card { display: grid; grid-template-rows: subgrid; grid-row: span 9; min-width: 0; padding: var(--pad-y) var(--pad-x); }
+.cw-proxy-card-heading { padding-bottom: var(--space-xl); }
+.cw-proxy-card-heading > .label { margin: 0 0 var(--space-m); }
+.cw-proxy-card-heading h3 { max-width: 18em; margin: 0 0 var(--space-m); font: 500 var(--handoff-title)/var(--lh-d1) var(--f-sans); letter-spacing: var(--track-d1); }
+.cw-proxy-card-heading > p:last-child { max-width: 36em; margin: 0; color: var(--grey); font: 400 var(--fs-body)/var(--lh-body) var(--f-sans); }
+.cw-proxy-card figcaption { margin-top: var(--space-m); padding-top: var(--space-m); border-top: var(--space-hair) solid var(--rule); color: var(--grey); font: 400 var(--fs-small)/var(--lh-body) var(--f-sans); }
+.cw-proxy-note { grid-column: 1 / -1; max-width: 80em; margin: 0; color: var(--grey); font: 400 var(--fs-micro)/var(--lh-body) var(--f-mono); }
+.cw-proxy-icon { display: block; flex-shrink: 0; width: var(--proxy-icon); height: var(--proxy-icon); }
+.cw-proxy-icon svg { display: block; width: 100%; height: 100%; }
+.cw-proxy-agent-mark svg { animation: cw-proxy-agent-in .4s ease-out; }
+@keyframes cw-proxy-agent-in { from { opacity: 0; transform: scale(.8); } }
+.cw-proxy-actors strong, .cw-cross-actor strong { display: block; font: 500 var(--fs-small)/var(--lh-label) var(--f-sans); }
+.cw-proxy-actors small, .cw-cross-actor small { display: block; color: var(--grey); font: 400 var(--fs-micro)/var(--lh-label) var(--f-sans); }
+
+/* the egress check: the destination, three participants, and five steps. A step's text can differ between the allowed
+   run (a) and the refused one (b), before (0) and after (1) the check's verdict; the variants share one cell, so nothing
+   moves when they change. */
+.cw-proxy-figure { display: grid; grid-template-rows: subgrid; grid-row: span 8; min-width: 0; }
+.cw-proxy-target { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-m); align-items: baseline; min-width: 0; margin-bottom: var(--space-xl); padding: var(--space-m) 0; border-block: var(--space-hair) solid var(--rule); }
+.cw-proxy-target > p { grid-column: 1 / -1; margin: 0 0 var(--space-xs); color: var(--grey); font: 400 var(--fs-micro)/var(--lh-label) var(--f-mono); }
+.cw-proxy-target > code { font: 400 var(--fs-small)/var(--lh-body) var(--f-mono); overflow-wrap: anywhere; }
+.cw-proxy-target code i { font-style: normal; color: var(--grey); }
+.cw-proxy-verdict { font: 400 var(--fs-label)/var(--lh-body) var(--f-mono); text-align: right; }
+.cw-proxy-swap { display: grid; }
+.cw-proxy-swap > span { grid-area: 1 / 1; min-width: 0; visibility: hidden; }
+[data-proxy-phase="a0"] [data-when~="a0"], [data-proxy-phase="a1"] [data-when~="a1"], [data-proxy-phase="b0"] [data-when~="b0"], [data-proxy-phase="b1"] [data-when~="b1"] { visibility: visible; }
+.cw-proxy-ok { font-weight: 400; color: var(--ok); }
+.cw-proxy-no { color: var(--no); }
+.cw-proxy-actors { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; list-style: none; margin: 0 0 var(--space-l); padding: 0; }
+.cw-proxy-actors > li { display: flex; flex-direction: column; align-items: center; gap: var(--space-xs); min-width: 0; text-align: center; transition: opacity .3s; }
+[data-proxy-phase="b1"] .cw-proxy-actors > li:last-child { opacity: .3; }
+/* one band steps down the rows; the steps not reached yet stay dim, so each one arrives in turn */
+.cw-proxy-events { position: relative; display: grid; grid-template-rows: subgrid; grid-row: span 5; min-width: 0; list-style: none; margin: 0; padding: 0; }
+[data-proxy-live] .cw-proxy-events::before { content: ""; position: absolute; inset: 0 var(--proxy-band-out) auto; height: var(--proxy-focus-h); transform: translateY(var(--proxy-focus-y)); background: var(--proxy-band); pointer-events: none; transition: transform .4s cubic-bezier(.2, .7, .2, 1), height .4s cubic-bezier(.2, .7, .2, 1), background-color .3s; }
+[data-proxy-tone="ok"] .cw-proxy-events::before { background: var(--proxy-band-ok); }
+[data-proxy-tone="no"] .cw-proxy-events::before { background: var(--proxy-band-no); }
+.cw-proxy-event { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; align-content: space-between; gap: var(--space-s); min-width: 0; padding: var(--space-s) 0 var(--space-m); transition: opacity .3s; }
+[data-proxy-live] .cw-proxy-event { min-height: var(--proxy-row); }
+.cw-proxy-event[data-state="pending"] { opacity: .36; }
+.cw-proxy-number { color: var(--grey); font: 400 var(--fs-micro)/var(--lh-body) var(--f-mono); }
+.cw-proxy-event[data-state="current"] :is(.cw-proxy-number, .cw-proxy-message p) { color: var(--ink); }   /* on the band, grey would be too faint */
+.cw-proxy-message { min-width: 0; }
+.cw-proxy-message h4 { margin: 0; font: 500 var(--fs-body)/var(--lh-label) var(--f-sans); }
+.cw-proxy-message p { margin: var(--space-xs) 0 0; color: var(--grey); font: 400 var(--fs-small)/var(--lh-body) var(--f-sans); }
+.cw-proxy-message code { margin-top: var(--space-xs); color: var(--grey); font: 400 var(--fs-label)/var(--lh-body) var(--f-mono); overflow-wrap: anywhere; }
+/* a step's wire, drawn by the script between the participants' lanes; the lanes are ruled beside the wires only */
+.cw-proxy-wire { position: relative; grid-column: 1 / -1; min-width: 0; height: var(--proxy-wire); }
+.cw-proxy-event[data-kind="check"] .cw-proxy-wire { height: var(--proxy-wire-loop); }
+.cw-proxy-wire::before { content: ""; position: absolute; inset: var(--proxy-lane-out) 0; background: linear-gradient(var(--rule), var(--rule)) 16.6667% 0 / 1px 100% no-repeat, linear-gradient(var(--rule), var(--rule)) 50% 0 / 1px 100% no-repeat, linear-gradient(var(--rule), var(--rule)) 83.3333% 0 / 1px 100% no-repeat; pointer-events: none; }
+.cw-proxy-wire svg { position: relative; display: block; width: 100%; height: 100%; overflow: visible; }
+.cw-proxy-guide { fill: none; stroke: var(--grey); stroke-width: 1; opacity: .45; }
+.cw-proxy-active, .cw-proxy-arrow, .cw-proxy-stop { fill: none; stroke: var(--ink); stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
+.cw-proxy-packet { fill: var(--ink); stroke: var(--paper); stroke-width: 1; }
+.cw-proxy-event[data-tone="ok"] :is(.cw-proxy-active, .cw-proxy-arrow) { stroke: var(--ok); }
+.cw-proxy-event[data-tone="no"] :is(.cw-proxy-active, .cw-proxy-stop) { stroke: var(--no); }
+
+/* the credential proxy: a request is drawn twice, one copy clipped above the VM boundary and one below it, so its
+   Authorization value changes exactly on the line. Without the script the two halves show one request, before and after. */
+.cw-credential-figure { display: flex; flex-direction: column; grid-row: span 8; min-width: 0; border-top: var(--space-hair) solid var(--rule); }
+.cw-cross { position: relative; flex: 1; min-height: var(--proxy-stage); margin-top: var(--space-xl); }
+.cw-cross-actor { position: absolute; left: 0; display: flex; align-items: center; gap: var(--space-m); width: calc(var(--proxy-gutter) - var(--space-l)); min-width: 0; margin: 0; }
+.cw-cross-top { top: 0; }
+.cw-cross-mid { top: calc(var(--proxy-mid) + var(--space-l)); }
+.cw-cross-end { bottom: 0; }
+.cw-cross-edge { position: absolute; left: 0; bottom: calc(100% - var(--proxy-mid) + var(--space-s)); margin: 0; color: var(--grey); font: 400 var(--fs-micro)/var(--lh-label) var(--f-mono); }
+.cw-cross-line { position: absolute; inset: var(--proxy-mid) 0 auto; height: var(--space-hair); background: var(--ink); }
+.cw-cross-track { position: absolute; left: calc(var(--proxy-gutter) + (100% - var(--proxy-gutter)) / 2); top: 0; bottom: 0; width: var(--space-hair); background: var(--grey); opacity: .45; }
+.cw-cross-track::after { content: ""; position: absolute; left: var(--proxy-arrow-out); bottom: var(--space-hair); width: var(--proxy-arrow); height: var(--proxy-arrow); border: solid var(--grey); border-width: 0 var(--space-hair) var(--space-hair) 0; transform: rotate(45deg); }
+.cw-cross-half { position: absolute; left: var(--proxy-gutter); right: 0; display: grid; place-items: center; overflow: hidden; }
+.cw-cross-in { top: 0; height: var(--proxy-mid); }
+.cw-cross-out { top: var(--proxy-mid); bottom: 0; }
+.cw-cross-req { width: min(100%, var(--proxy-request)); margin: 0; padding: var(--space-l) var(--space-xl); border: var(--space-hair) solid var(--rule); background: var(--paper); color: var(--grey); font: 400 var(--fs-small)/var(--lh-body) var(--f-mono); overflow-wrap: anywhere; }
+.cw-cross-req span { display: block; }
+.cw-cross-req b { font-weight: 500; color: var(--ink); white-space: nowrap; }
+.cw-cross-req .cw-cross-key { color: var(--signal); }
+[data-proxy-live] .cw-cross-half { display: block; }
+[data-proxy-live] .cw-cross-req { position: absolute; left: 50%; top: 0; opacity: 0; will-change: transform; }
+@media (max-width: 1023px) {
+  .cw-cross { --proxy-gutter: var(--proxy-gutter-narrow); }
+  .cw-cross-actor { flex-direction: column; align-items: flex-start; gap: var(--space-xs); }
+  .cw-cross-req { padding: var(--space-m); }
+}
+@media (max-width: 900px) {
+  .cw-proxy-intro > p { grid-column: 1 / -1; }
+  .cw-proxy-pair, .cw-proxy-card, .cw-proxy-figure { display: block; }
+  .cw-proxy-card + .cw-proxy-card { margin-top: calc(var(--base) * 6); }
+  .cw-proxy-events { grid-template-rows: none; }
+  .cw-cross { flex: none; height: var(--proxy-stage-narrow); }
+}
+@media (max-width: 560px) {
+  .cw-proxy-events { --proxy-band-out: var(--proxy-band-out-narrow); }
+  .cw-proxy-actors strong, .cw-cross-actor strong { font-size: var(--fs-label); }
+  .cw-cross-req { padding: var(--space-s); font-size: var(--fs-label); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cw-proxy-events::before, .cw-proxy-event, .cw-proxy-actors > li { transition: none; }
+  .cw-proxy-agent-mark svg { animation: none; }
 }
 
 .cw-copy-fallback { position: fixed; inset: 0 auto auto 0; opacity: 0; }

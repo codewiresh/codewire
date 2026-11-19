@@ -247,6 +247,138 @@ void main() {
     const t = document.createElement('i'); t.className = 'tg'; t.setAttribute('aria-hidden', 'true'); t.innerHTML = TARGET; el.appendChild(t);
     if (el.dataset.plate) { const pl = document.createElement('i'); pl.className = 'pl'; pl.setAttribute('aria-hidden', 'true'); pl.textContent = el.dataset.plate.toUpperCase(); el.appendChild(pl); }
   });
+
+  /* ---------- safety: requests crossing the VM boundary, and the egress check one step at a time ---------- */
+  $$('[data-proxy-pair]').forEach((sec) => {
+    const figure = $('.cw-proxy-figure', sec), list = $('.cw-proxy-events', sec), cross = $('.cw-cross', sec), halves = $$('.cw-cross-half', sec);
+    if (!figure || !list || !cross || halves.length !== 2 || halves.some((half) => !$('.cw-cross-req', half))) return;
+    const motion = matchMedia('(prefers-reduced-motion: reduce)');
+    const clamp = (n) => Math.max(0, Math.min(1, n)), seg = (t, a, b) => clamp((t - a) / (b - a)), mod = (n, m) => ((n % m) + m) % m;
+    // the egress timeline runs twice: an allowed destination, then one refused at the check. With reduced motion the
+    // panels hold one picture, the allowed run finished
+    const ALLOWED_RUN = 13500, REFUSED_RUN = 9000, TOTAL = ALLOWED_RUN + REFUSED_RUN, STILL = ALLOWED_RUN - 200;
+    // milliseconds into a run: when each step's wire draws. A step stays current until the next one starts, so the check's
+    // verdict gets a beat of its own. The refused run ends at the check; its last three steps never start.
+    const TIMES = [[300, 2400], [2600, 4500], [5500, 8000], [8200, 10200], [10400, 12200]];
+    const REQUEST_EVERY = 3000, AGENT_EVERY = 3000;
+    const REQUESTS = ['POST /v1/responses', 'GET /v1/models', 'POST /v1/embeddings', 'POST /v1/files'];
+    let elapsed = 0, flow = 0, last = 0, frame = 0, visible = false, focused = -1, agent = 0, agentTime = 0, geo = null;
+
+    // a wire under each step, between the lanes of the two participants it joins: a guide, the stroke that draws over it,
+    // an arrowhead, the packet that rides the stroke, and on the check a cross for the refusal
+    const events = $$('.cw-proxy-event', list).map((li, index) => {
+      const wire = document.createElement('div'); wire.className = 'cw-proxy-wire'; wire.setAttribute('aria-hidden', 'true');
+      const svg = el('svg', {}, wire), kind = li.dataset.kind;
+      const guide = el('path', { class: 'cw-proxy-guide' }, svg), guideHead = el('path', { class: 'cw-proxy-guide' }, svg);
+      const path = el('path', { class: 'cw-proxy-active' }, svg), head = el('path', { class: 'cw-proxy-arrow' }, svg);
+      const stop = kind === 'check' ? el('path', { class: 'cw-proxy-stop' }, svg) : null;
+      const dot = el('rect', { class: 'cw-proxy-packet', x: -5, y: -3, width: 10, height: 6, rx: 2 }, svg);
+      li.appendChild(wire);
+      return { li, index, kind, wire, svg, guide, guideHead, path, head, stop, dot, length: 0 };
+    });
+
+    // requests stream down through the VM boundary. Each is drawn twice, one copy clipped above the line and one below,
+    // so its Authorization value changes exactly on the line. The page's own request is the first; the rest are copies.
+    const stack = [{ line: 0, copies: halves.map((half) => $('.cw-cross-req', half)) }], blank = stack[0].copies.map((copy) => copy.cloneNode(true));
+    const addRequest = () => stack.push({ line: 0, copies: blank.map((copy, i) => halves[i].appendChild(copy.cloneNode(true))) });
+    const measure = () => {
+      const h = cross.clientHeight, mid = Math.round(h / 2), probe = stack[0].copies[0], height = probe.offsetHeight, token = $('b', probe);
+      // at rest a request sits with the line just above its credential, in the gap between two lines of text
+      const rest = mid - token.offsetTop + Math.round((parseFloat(getComputedStyle(probe).lineHeight) - token.offsetHeight) / 2);
+      const gap = Math.max(height + 36, Math.min(height + 120, rest - 8, h - 24 - height - rest));
+      cross.style.setProperty('--proxy-mid', mid + 'px');
+      while (stack.length < Math.ceil((h + height) / gap) + 1) addRequest();
+      geo = { h, mid, height, rest, gap };
+    };
+    const stream = () => {
+      if (!geo) return;
+      const turn = flow / REQUEST_EVERY, part = turn % 1;
+      // each request lingers just after its credential has crossed, then moves on
+      const pos = turn - 0.8 * Math.sin(2 * Math.PI * part) / (2 * Math.PI), used = new Set();
+      for (let j = Math.floor(pos - (geo.h - geo.rest) / geo.gap) + 1; ; j++) {
+        const y = geo.rest + (pos - j) * geo.gap;
+        if (y <= -geo.height) break;
+        const item = stack[mod(j, stack.length)], line = mod(j, REQUESTS.length);
+        const opacity = String(Math.min(seg(y, -geo.height * 0.6, -geo.height * 0.1), 1 - seg(y, geo.h - geo.height - 10, geo.h - geo.height + 26)));
+        used.add(item);
+        if (item.line !== line) { item.line = line; item.copies.forEach((copy) => { copy.firstElementChild.textContent = REQUESTS[line]; }); }
+        item.copies.forEach((copy, i) => { copy.style.transform = `translate(-50%, ${y - i * geo.mid}px)`; copy.style.opacity = opacity; });
+      }
+      stack.forEach((item) => { if (!used.has(item)) item.copies.forEach((copy) => { copy.style.opacity = '0'; }); });
+    };
+
+    const paint = () => {
+      const second = elapsed >= ALLOWED_RUN, at = second ? elapsed - ALLOWED_RUN : elapsed, judged = at >= TIMES[1][1];
+      const tone = judged ? (second ? 'no' : 'ok') : '';
+      const step = Math.max(0, Math.min(second ? 1 : 4, TIMES.filter(([start]) => at >= start).length - 1));
+      figure.dataset.proxyPhase = (second ? 'b' : 'a') + (judged ? 1 : 0);
+      figure.dataset.proxyTone = tone;
+      if (step !== focused) {
+        focused = step;
+        list.style.setProperty('--proxy-focus-y', events[step].li.offsetTop + 'px');
+        list.style.setProperty('--proxy-focus-h', events[step].li.offsetHeight + 'px');
+      }
+      events.forEach((e) => {
+        const [start, end] = TIMES[e.index], p = second && e.index > 1 ? 0 : seg(at, start, end), halted = second && e.index === 1;
+        e.li.dataset.state = e.index < step ? 'done' : e.index === step ? 'current' : 'pending';
+        e.li.dataset.tone = e.index && e.index <= step ? tone : '';   // the wires drawn after the verdict take its colour
+        e.path.style.opacity = p > 0 ? '1' : '0';
+        e.path.style.strokeDasharray = p === 1 ? 'none' : String(e.length);
+        e.path.style.strokeDashoffset = String(e.length * (1 - p));
+        e.head.style.opacity = p === 1 && !halted ? '1' : '0';
+        if (e.stop) e.stop.style.opacity = p === 1 && halted ? '1' : '0';
+        e.dot.style.opacity = p > 0 && p < 1 ? '1' : '0';
+        if (p > 0 && p < 1) { const pt = e.path.getPointAtLength(e.length * p); e.dot.setAttribute('transform', `translate(${pt.x} ${pt.y})`); }
+      });
+      stream();
+    };
+    // each wire is drawn in its own pixels. The lanes are the participants' centres: a sixth, a half and five sixths across
+    const layout = () => {
+      events.forEach((e) => {
+        const w = e.wire.clientWidth, h = e.wire.clientHeight, self = e.kind === 'check';
+        const from = e.kind === 'receive' ? w * 5 / 6 : e.kind === 'ask' ? w / 6 : w / 2, to = e.kind === 'open' ? w * 5 / 6 : e.kind === 'relay' ? w / 6 : w / 2;
+        const d = self ? `M${w / 2} 5H${w / 2 + 35}Q${w / 2 + 43} 5 ${w / 2 + 43} 13V${h - 13}Q${w / 2 + 43} ${h - 5} ${w / 2 + 35} ${h - 5}H${w / 2}` : `M${from} ${h / 2}H${to}`;
+        const x = self ? w / 2 : to, y = self ? h - 5 : h / 2, arrow = self || to < from ? `M${x + 7} ${y - 4}l-7 4 7 4` : `M${x - 7} ${y - 4}l7 4-7 4`;
+        e.svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+        e.guide.setAttribute('d', d); e.path.setAttribute('d', d); e.guideHead.setAttribute('d', arrow); e.head.setAttribute('d', arrow);
+        if (e.stop) e.stop.setAttribute('d', `M${x + 12} ${y - 4.5}l9 9m0-9-9 9`);
+        e.length = e.path.getTotalLength();
+      });
+      focused = -1; measure(); paint();
+    };
+
+    // the example agent: the marks are the ones in the get-started box, shown one at a time in both panels
+    const choice = $('.cw-proxy-agent-choice', sec), pick = $('.cw-proxy-agent-pick', sec), slots = $$('.cw-proxy-agent-mark', sec);
+    const marks = $$('.cw-handoff-marks svg'), names = pick ? pick.dataset.proxyAgents.split(',') : [];
+    const rotates = marks.length > 1 && marks.length === names.length;
+    const showAgent = (index) => {
+      agent = mod(index, names.length); agentTime = 0;
+      slots.forEach((slot) => { const mark = marks[agent].cloneNode(true); $('title', mark)?.remove(); slot.replaceChildren(mark); });
+      pick.firstElementChild.textContent = names[agent];
+    };
+    if (rotates) { choice.hidden = false; pick.addEventListener('click', () => showAgent(agent + 1)); }
+
+    const tick = (now) => {
+      const dt = last ? Math.min(100, now - last) : 0; last = now;
+      elapsed = (elapsed + dt) % TOTAL; flow += dt; agentTime += dt;
+      if (rotates && agentTime > AGENT_EVERY) showAgent(agent + 1);
+      paint();
+      frame = requestAnimationFrame(tick);
+    };
+    // drawn only while the panels are on screen
+    const sync = () => {
+      cancelAnimationFrame(frame); frame = 0; last = 0;
+      if (motion.matches) { elapsed = STILL; flow = 0; paint(); }
+      else if (visible && !document.hidden) frame = requestAnimationFrame(tick);
+    };
+    sec.dataset.proxyLive = '';
+    new ResizeObserver(layout).observe(sec);
+    new IntersectionObserver((entries) => { visible = entries[0].isIntersecting; sync(); }).observe($('.cw-proxy-pair', sec));
+    document.addEventListener('visibilitychange', sync);
+    motion.addEventListener('change', sync);
+    document.fonts.ready.then(layout);
+    layout(); sync();
+  });
   // whole-pixel grid: integer column width and gutter, the spare pixels go to the margins (left gets the smaller half); N columns from --cols
   const fitGrid = () => {
     root.style.removeProperty('--col'); root.style.removeProperty('--ml'); root.style.removeProperty('--mr');
