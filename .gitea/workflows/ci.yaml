@@ -7,14 +7,15 @@ on:
     # this workflow like a pull request of the batch onto main, on untrusted
     # runners, and delivers nothing. Only a push to main is trusted.
     branches: [main, 'mq/**']
-  # Adding or removing a label (ci-full) starts a fresh run with the
-  # new labels; the concurrency group below cancels the superseded one.
+  # A label change starts no run (infra#2599): the merge queue's labels
+  # would otherwise cancel and restart a pull request's run each time. A
+  # ci-full label takes effect at the pull request's next push.
   # Closing or merging a pull request starts a run that does nothing, so the
   # same group cancels the pull request's run still in flight, which no one
   # needs any more and which holds metal guests main is waiting for.
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, labeled, unlabeled, closed]
+    types: [opened, synchronize, reopened, closed]
   workflow_dispatch:
     inputs:
       verification:

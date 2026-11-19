@@ -276,11 +276,11 @@ fj pr -R origin edit 456 labels --add ci-full
 ```
 
 Add it only when a hosted-only claim (credentials, permissions, scheduling,
-cache or timing) needs hosted evidence before merge. It applies to every later
+cache or timing) needs hosted evidence before merge. It applies from the next
 push until removed. Hosted Kind is off on the schedule and on dispatch until
 the owner revisits it (owner, 2026-10-25); it runs only on a `ci-full` pull
 request. The retired `kind-e2e` label and `[kind-e2e]` marker do nothing.
-Adding or removing a label starts a fresh run that supersedes the current one.
+Adding or removing a label starts no run (infra#2599); push to apply it.
 `scripts/ci/select/main-push-switch.sh` documents what a push to `main` runs
 and the conditions for restoring Kind and the release dry run to every push.
 

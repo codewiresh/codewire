@@ -5105,7 +5105,8 @@ if missing:
     raise SystemExit(f"required status contexts no workflow produces: {sorted(missing)}")
 PY
 
-# The workflow re-runs on label changes and no longer reduces a pull request.
+# A label change starts no run (infra#2599), and the workflow no longer reduces a
+# pull request.
 python3 - "$WORKFLOW" <<'PY'
 import sys
 import yaml
@@ -5113,7 +5114,7 @@ import yaml
 workflow = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 triggers = workflow.get("on", workflow.get(True))
 types = set(triggers["pull_request"].get("types", []))
-wanted = {"opened", "synchronize", "reopened", "labeled", "unlabeled", "closed"}
+wanted = {"opened", "synchronize", "reopened", "closed"}
 if types != wanted:
     raise SystemExit(f"pull_request types {sorted(types)} != {sorted(wanted)}")
 steps = workflow["jobs"]["verification-selection"]["steps"]
