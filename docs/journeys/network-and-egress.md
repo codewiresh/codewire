@@ -942,8 +942,11 @@ Issues: #3999 (local VMs; changes 8 and 11), #4001 (hosted Sandboxes).
     `CODEX_HOME` points, as the commands above do. A command that reads
     `~/.codex` in a local VM prints nothing and looks like a pass.
   - `CODEX_CA_CERTIFICATE` is set only with the Codex client selected and a CA
-    in the seed, and never over an image's own value (logged when skipped). A
-    CA added after boot isn't trusted by Codex until a restart.
+    in the seed, and never over an image's own value (logged when skipped). It
+    names `/run/codewire-host/ca-certificates.crt`, the image's roots followed
+    by the CA. A CA added after boot isn't trusted by Codex until a restart.
+    Without it, Codex's model call fails with "workspace routing discovery
+    failed" (#5447).
   - Every name under `chatgpt.com` on 443 is intercepted, because the egress
     broker sees only host and port. Other traffic to those names follows the
     network policy: a placeholder on a path the route does not serve is

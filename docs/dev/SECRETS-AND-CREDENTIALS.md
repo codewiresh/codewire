@@ -1337,10 +1337,16 @@ is exactly as described above. What exists today:
   and logged, and that tool's intercepted connections fail their TLS
   handshake. It also publishes `/run/codewire-host/ca-certificates.crt`, the
   image's own system bundle (read only from inside the image's root) followed
-  by the CA, which nothing names yet: the variables that would point other
-  tools at it replace a trust store rather than add to it. Nothing is
-  mounted over the image's trust store and its layer is never written. A
-  restored boot publishes from its own seed before the workspace thaws.
+  by the CA. While the Codex client is selected, `CODEX_CA_CERTIFICATE` names
+  that bundle, unless the image or project sets the name (kept and logged, as
+  for Node). Codex ignores the Node variable, and the bundle serves whether
+  Codex adds the file to its roots or replaces them with it. Without it, every
+  intercepted Codex request fails its handshake (#5447). Nothing else names
+  the bundle: `SSL_CERT_FILE` and the like replace a trust store for every
+  tool, so a CA the user adds after boot would silently stop being trusted.
+  Nothing is mounted over the image's trust store and its layer is never
+  written. A restored boot publishes from its own seed before the workspace
+  thaws.
 - **The agent's login.** Claude Code's login writer accepts this
   environment's placeholder as the access token; the broker delivering it is
   the next step, and until then the direct delivery exception below applies.

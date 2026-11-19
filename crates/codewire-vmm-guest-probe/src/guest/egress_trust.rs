@@ -8,11 +8,13 @@
 //!   the image or project set it ([`TRUST_ENVIRONMENT`]). It adds to Node's
 //!   own roots rather than replacing them, and covers Claude Code;
 //! - `ca-certificates.crt`, the image's own system bundle followed by the CA,
-//!   which nothing names yet. The variables that would point other tools at
-//!   it (`SSL_CERT_FILE` and the like) replace a trust store rather than add
-//!   to it, so a CA the user adds after boot would silently stop being
-//!   trusted; the GitHub interception step decides how Git and `gh` trust
-//!   the front door (cw-network, 2026-11-14, #3999).
+//!   which `CODEX_CA_CERTIFICATE` names while the Codex client is selected
+//!   ([`CODEX_TRUST_ENVIRONMENT`]). Codex ignores the Node variable, and the
+//!   bundle serves whether Codex adds the file to its roots or replaces them
+//!   with it (#5447). Nothing else names it: `SSL_CERT_FILE` and the like
+//!   replace every tool's trust store, so a CA the user adds after boot would
+//!   silently stop being trusted; the GitHub interception step decides how
+//!   Git and `gh` trust the front door (cw-network, 2026-11-14, #3999).
 //!
 //! Nothing is mounted over the image's own trust store and its layer is
 //! never written, so `update-ca-certificates` in the workspace keeps working
@@ -33,6 +35,7 @@ use std::os::fd::AsRawFd as _;
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
+use codewire_access::{ManagedCredentialClient, ManagedCredentialClients};
 use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
 
 use crate::EgressCaCertificate;
@@ -45,11 +48,17 @@ pub(super) const CONTAINER_EGRESS_CA_PATH: &str = "/run/codewire/container/egres
 pub(crate) const WORKSPACE_EGRESS_CA_PATH: &str = "/run/codewire-host/egress-ca.pem";
 /// The published bundle, in the control directory.
 pub(super) const CONTAINER_TRUST_BUNDLE_PATH: &str = "/run/codewire/container/ca-certificates.crt";
+/// The same bundle as the workspace sees it.
+pub(crate) const WORKSPACE_TRUST_BUNDLE_PATH: &str = "/run/codewire-host/ca-certificates.crt";
 /// What a boot with a CA sets for the workspace, unless the image or the
 /// project already sets the name: then that tool does not trust the front
 /// door, and its intercepted connections fail their TLS handshake.
 pub(crate) const TRUST_ENVIRONMENT: [(&str, &str); 1] =
     [("NODE_EXTRA_CA_CERTS", WORKSPACE_EGRESS_CA_PATH)];
+/// What a boot with a CA also sets while the Codex client is selected, on
+/// the same terms.
+pub(crate) const CODEX_TRUST_ENVIRONMENT: [(&str, &str); 1] =
+    [("CODEX_CA_CERTIFICATE", WORKSPACE_TRUST_BUNDLE_PATH)];
 /// A system bundle is a few hundred KiB; anything far larger is not one.
 const MAX_IMAGE_BUNDLE_BYTES: u64 = 4 * 1024 * 1024;
 const PUBLISHED_MODE: u32 = 0o444;
@@ -58,16 +67,23 @@ const RESOLVE_IN_IMAGE: ResolveFlags = ResolveFlags::IN_ROOT
     .union(ResolveFlags::NO_MAGICLINKS)
     .union(ResolveFlags::NO_XDEV);
 
-/// This boot's active plan with [`TRUST_ENVIRONMENT`] when it has a CA.
+/// This boot's active plan with [`TRUST_ENVIRONMENT`] when it has a CA, and
+/// [`CODEX_TRUST_ENVIRONMENT`] too while `clients` holds Codex.
 pub(super) fn with_trust_environment(
     plan: crate::workspace_plan::WorkspacePlan,
     certificate: Option<&EgressCaCertificate>,
+    clients: ManagedCredentialClients,
 ) -> Result<crate::workspace_plan::WorkspacePlan> {
     if certificate.is_none() {
         return Ok(plan);
     }
+    let codex: &[(&str, &str)] = if clients.contains(ManagedCredentialClient::Codex) {
+        &CODEX_TRUST_ENVIRONMENT
+    } else {
+        &[]
+    };
     let (plan, kept) = plan
-        .with_environment_defaults(&TRUST_ENVIRONMENT)
+        .with_environment_defaults(&[TRUST_ENVIRONMENT.as_slice(), codex].concat())
         .context("point the workspace at the egress CA")?;
     for name in kept {
         eprintln!(
@@ -179,6 +195,10 @@ mod tests {
         root
     }
 
+    fn codex() -> ManagedCredentialClients {
+        ManagedCredentialClients::from_profile_slots(["codex"]).unwrap()
+    }
+
     fn environment_of(plan: &crate::workspace_plan::WorkspacePlan, name: &str) -> Option<String> {
         let prefix = format!("{name}=");
         plan.environment
@@ -189,7 +209,12 @@ mod tests {
     #[test]
     fn a_boot_with_a_ca_points_node_at_it_and_nothing_else() {
         let plain = super::super::tests::test_workspace_plan();
-        let plan = with_trust_environment(plain.clone(), Some(&certificate())).unwrap();
+        let plan = with_trust_environment(
+            plain.clone(),
+            Some(&certificate()),
+            ManagedCredentialClients::default(),
+        )
+        .unwrap();
         assert_eq!(
             environment_of(&plan, "NODE_EXTRA_CA_CERTS").as_deref(),
             Some(WORKSPACE_EGRESS_CA_PATH)
@@ -199,6 +224,7 @@ mod tests {
             "REQUESTS_CA_BUNDLE",
             "CURL_CA_BUNDLE",
             "GIT_SSL_CAINFO",
+            "CODEX_CA_CERTIFICATE",
         ] {
             assert_eq!(
                 environment_of(&plan, replaced_store),
@@ -212,8 +238,37 @@ mod tests {
     #[test]
     fn a_boot_without_a_ca_keeps_the_plan_unchanged() {
         let plain = super::super::tests::test_workspace_plan();
-        let plan = with_trust_environment(plain.clone(), None).unwrap();
+        let plan = with_trust_environment(plain.clone(), None, codex()).unwrap();
         assert_eq!(plan.environment, plain.environment);
+    }
+
+    #[test]
+    fn a_boot_with_a_ca_and_codex_points_codex_at_the_bundle() {
+        let plain = super::super::tests::test_workspace_plan();
+        let plan = with_trust_environment(plain.clone(), Some(&certificate()), codex()).unwrap();
+        assert_eq!(
+            environment_of(&plan, "CODEX_CA_CERTIFICATE").as_deref(),
+            Some(WORKSPACE_TRUST_BUNDLE_PATH)
+        );
+        assert_eq!(
+            environment_of(&plan, "NODE_EXTRA_CA_CERTS").as_deref(),
+            Some(WORKSPACE_EGRESS_CA_PATH)
+        );
+        assert_eq!(plan.environment.len(), plain.environment.len() + 2);
+    }
+
+    #[test]
+    fn the_workspace_paths_are_the_published_files_under_run_codewire_host() {
+        for (container, workspace) in [
+            (CONTAINER_EGRESS_CA_PATH, WORKSPACE_EGRESS_CA_PATH),
+            (CONTAINER_TRUST_BUNDLE_PATH, WORKSPACE_TRUST_BUNDLE_PATH),
+        ] {
+            assert_eq!(
+                Path::new(container).file_name(),
+                Path::new(workspace).file_name()
+            );
+            assert!(workspace.starts_with("/run/codewire-host/"));
+        }
     }
 
     #[test]
@@ -222,10 +277,17 @@ mod tests {
         image
             .environment
             .push("NODE_EXTRA_CA_CERTS=/opt/corp.pem".to_owned());
-        let plan = with_trust_environment(image, Some(&certificate())).unwrap();
+        image
+            .environment
+            .push("CODEX_CA_CERTIFICATE=/opt/corp-bundle.pem".to_owned());
+        let plan = with_trust_environment(image, Some(&certificate()), codex()).unwrap();
         assert_eq!(
             environment_of(&plan, "NODE_EXTRA_CA_CERTS").as_deref(),
             Some("/opt/corp.pem")
+        );
+        assert_eq!(
+            environment_of(&plan, "CODEX_CA_CERTIFICATE").as_deref(),
+            Some("/opt/corp-bundle.pem")
         );
     }
 
