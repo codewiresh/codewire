@@ -1,5 +1,20 @@
 # Third-party provider marks
 
+## Developer tools
+
+`tools/rex.png` is Rex's official application mark, downloaded from
+[Superlogical](https://www.superlogical.com/rex-icon.png) on 17 November 2026.
+`tools/orca.svg` uses the unmodified paths from [Orca's official mark](https://orca.dev/logo.svg),
+with its fill set to `currentColor` so it follows the page theme. The docs keep
+the same artwork under `static/tools/`.
+
+`tools/pi.svg` is the five-rectangle mark from
+[Pi's repository](https://github.com/earendil-works/pi/blob/main/apps/p2/public/icons/favicon.svg),
+with monochrome fills for the page theme. Its `crispEdges` rendering and 4-by-4
+viewBox are retained in the homepage's inline marks.
+
+These marks identify the compatible tools. They do not imply endorsement.
+
 ## Google
 
 `icons.svg#icon-google` is Google's four-colour "G" mark, drawn with the

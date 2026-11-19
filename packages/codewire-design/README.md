@@ -85,6 +85,17 @@ Sign-in, sign-up and the other account pages sit on plain black
 share `routes/auth.css`. `login-preview.html` is the same sign-in reached from
 the private-preview redirect: only its title and one fixed context line differ.
 
+## Compatible tools
+
+The homepage's “Compatible with your tools” section links to the existing Rex
+and Orca plugin guides, running an agent in a persistent session, and the
+upstream pi-durable runtime. Four frosted cards share the public grid,
+registration marks and pill actions, with equal heights within each row.
+The agent card shows the supported tools' marks at the same size as the other
+cards, rotates while visible, and supports manual selection and pause.
+Reduced motion keeps it still. Rex and Orca documentation uses the same artwork.
+The acceptance journey is `docs/journeys/tool-compatibility.md`.
+
 ## Safety panels
 
 The homepage's Safety section, "Not just a VM. Guardrails for your agent.",

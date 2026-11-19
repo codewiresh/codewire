@@ -186,6 +186,42 @@ void main() {
     return c.getProgramParameter(pr, c.LINK_STATUS);
   };
   const NS_SVG = 'http://www.w3.org/2000/svg';
+  $$('[data-agent-picker]').forEach((picker) => {
+    const items = $$('.cw-tools-agent-list > li', picker);
+    const controls = $('.cw-tools-agent-controls', picker);
+    const toggle = $('[data-agent-toggle]', picker);
+    if (items.length < 2 || !controls || !toggle) return;
+    const motionPreference = matchMedia('(prefers-reduced-motion: reduce)');
+    let selected = 0, paused = motionPreference.matches, visible = false, hovering = false, focused = false, frame = 0, changedAt = 0;
+    const show = (index) => {
+      selected = (index + items.length) % items.length;
+      items.forEach((item, i) => { item.hidden = i !== selected; });
+    };
+    const tick = (now) => {
+      if (!changedAt) changedAt = now;
+      if (now - changedAt >= 4000) { show(selected + 1); changedAt = now; }
+      frame = requestAnimationFrame(tick);
+    };
+    const sync = () => {
+      cancelAnimationFrame(frame); frame = 0; changedAt = 0;
+      picker.dataset.rotation = paused || motionPreference.matches ? 'paused' : 'playing';
+      toggle.disabled = motionPreference.matches;
+      toggle.setAttribute('aria-label', paused || motionPreference.matches ? 'Play agent rotation' : 'Pause agent rotation');
+      if (!paused && !motionPreference.matches && visible && !hovering && !focused && !document.hidden) frame = requestAnimationFrame(tick);
+    };
+    controls.hidden = false;
+    $('[data-agent-previous]', picker).addEventListener('click', () => { paused = true; show(selected - 1); sync(); });
+    $('[data-agent-next]', picker).addEventListener('click', () => { paused = true; show(selected + 1); sync(); });
+    toggle.addEventListener('click', () => { paused = !paused; sync(); });
+    picker.addEventListener('pointerenter', () => { hovering = true; sync(); });
+    picker.addEventListener('pointerleave', () => { hovering = false; sync(); });
+    picker.addEventListener('focusin', () => { focused = true; sync(); });
+    picker.addEventListener('focusout', (event) => { focused = picker.contains(event.relatedTarget); sync(); });
+    document.addEventListener('visibilitychange', sync);
+    motionPreference.addEventListener('change', () => { if (motionPreference.matches) paused = true; sync(); });
+    new IntersectionObserver((entries) => { visible = entries[0].isIntersecting; sync(); }).observe(picker);
+    show(0); sync();
+  });
   const el = (tag, attrs, parent) => { const e = document.createElementNS(NS_SVG, tag); for (const k in attrs) { const v = attrs[k]; if ((k === 'fill' || k === 'stroke') && String(v).startsWith('var(')) e.style[k] = v; else e.setAttribute(k, v); } if (parent) parent.appendChild(e); return e; };
   const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
   const INK = 'var(--ink)', GREY = 'var(--grey)', SIG = 'var(--signal)', PAPER = 'var(--paper)';

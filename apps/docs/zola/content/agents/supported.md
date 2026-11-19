@@ -1,7 +1,7 @@
 ---
 title: Supported agents
 description: The coding agents Codewire runs as managed conversations, how each one signs in, what each supports, and how to run any other agent.
-updated: 2026-11-16
+updated: 2026-11-18
 weight: 1
 ---
 
@@ -37,13 +37,14 @@ as you, and also runs `--agent noel --model PROVIDER/ID`.
 
 ## Other agents
 
-Gemini CLI (`gemini`), Amp (`amp`) and Aider (`aider`) are installed in the
+Pi (`pi`), Gemini CLI (`gemini`), Amp (`amp`) and Aider (`aider`) are installed in the
 workspace image too, and any other agent can be installed in an environment.
 They run as terminal sessions:
 
 ```sh
 cw run --in ENV --name gemini --tty --detach -- gemini
 cw attach ENV --session gemini        # Ctrl-B, then d detaches
+cw run --in ENV --name pi --tty --detach -- pi
 ```
 
 They keep running when you disconnect, like every session, but Codewire does

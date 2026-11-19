@@ -102,6 +102,7 @@ def figure(match: re.Match[str]) -> str:
 
 
 def convert(body: str, canonical_by_source: dict[str, str], routes: set[str]) -> str:
+    body = re.sub(r'\{\{\s*tool_logo\(name="(?:rex|orca)"\)\s*\}\}', "", body)
     body = re.sub(
         r"\{%\s*agent_prompt\(\)\s*%\}(.*?)\{%\s*end\s*%\}",
         lambda match: match.group(1).strip(),

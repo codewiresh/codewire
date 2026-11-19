@@ -1,0 +1,5 @@
+{% if name == "rex" %}
+<img class="docs-tool-logo" src="/docs/tools/rex.png" width="48" height="48" alt="">
+{% elif name == "orca" %}
+{{ load_data(path="static/tools/orca.svg", format="plain") | replace(from="<svg ", to='<svg class="docs-tool-logo" aria-hidden="true" ') | safe }}
+{% endif %}

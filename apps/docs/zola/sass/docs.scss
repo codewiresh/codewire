@@ -75,6 +75,14 @@ html {
   height: 1.5625rem;
 }
 
+.docs-tool-logo {
+  display: block;
+  width: var(--avatar-size-lg);
+  height: var(--avatar-size-lg);
+  margin-block: var(--space-4);
+  color: var(--fg-primary);
+}
+
 .docs-brand-suffix {
   padding: 0.125rem 0.375rem;
   border: 1px solid var(--border-hover);

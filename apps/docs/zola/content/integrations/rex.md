@@ -1,13 +1,20 @@
 ---
 title: Rex
 description: Run commands, open shells and attach to sessions from Rex's command palette, and see each session's state with its pane.
-updated: 2026-11-14
+updated: 2026-11-18
 weight: 1
 aliases: ["/access/rex"]
 ---
 
+{{ tool_logo(name="rex") }}
+
 [Rex](https://superlogical.com) is a terminal multiplexer with a command
-palette. `cw setup rex` adds Codewire to it:
+palette. The Codewire plugin puts environments, commands and persistent
+sessions in that palette, beside the terminal where you already work.
+
+## Install the Codewire plugin
+
+With [Codewire installed](@/install.md), run this on the computer running Rex:
 
 ```sh
 cw setup rex

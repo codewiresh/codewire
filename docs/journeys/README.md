@@ -8,6 +8,7 @@ runs the same commands and holds the result to the same standard.
 
 | File | Journey |
 | --- | --- |
+| [tool-compatibility.md](tool-compatibility.md) | Homepage compatibility cards and the Rex/Orca plugin setup guides: branding, links, agent rotation, themes and mobile layout |
 | [agent-quickstart.md](agent-quickstart.md) | Copy a setup prompt or follow the human walkthrough with the public TanStack Router and Vite example |
 | [public-controls.md](public-controls.md) | Public-site pill buttons and rounded segmented controls on the homepage and pricing page |
 | [homepage-safety.md](homepage-safety.md) | The homepage Safety section: the credential proxy and network egress control panels, their animation, reduced motion, no JavaScript, themes and widths |

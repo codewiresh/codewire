@@ -1,12 +1,14 @@
 ---
 title: Orca
 description: Run each Orca workspace in its own Codewire environment, a local VM or a cloud sandbox, with the Codewire plugin, or connect Orca to an environment you already have over SSH.
-updated: 2026-11-14
+updated: 2026-11-18
 weight: 2
 aliases: ["/access/orca"]
 ---
 
-[Orca](https://www.onorca.dev) runs coding agents in parallel, each in its
+{{ tool_logo(name="orca") }}
+
+[Orca](https://orca.dev) runs coding agents in parallel, each in its
 own Git worktree. It works with Codewire in two ways: the Codewire plugin
 gives each new Orca workspace an environment of its own, and any environment
 you already have is an SSH host Orca can run on. Either way, Orca installs a
@@ -38,6 +40,8 @@ The plugin adds two choices under **Run on** when you create a workspace:
 **Codewire local VM** and **Codewire cloud sandbox**. Orca runs the plugin's
 commands on your computer as the workspace is created, put to sleep, woken and
 deleted.
+
+### Install the Codewire plugin
 
 To install it from a checkout of the Codewire repository, open Orca's
 **Settings → Plugins → Development folders**, add the `integrations/orca`

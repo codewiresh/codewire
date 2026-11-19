@@ -330,7 +330,8 @@ def verify_supply_chain(site_root: Path) -> None:
     for directory in ("content", "templates", "sass", "static"):
         scanned_paths.extend(path for path in (site_root / directory).rglob("*") if path.is_file())
     for path in scanned_paths:
-        text = path.read_text(encoding="utf-8")
+        # Preserve ASCII dependency markers in binary assets, including vendored PNGs.
+        text = path.read_bytes().decode("utf-8", errors="surrogateescape")
         if prohibited.search(text):
             fail(f"prohibited external dependency or dynamic runner in {path.relative_to(site_root)}")
 

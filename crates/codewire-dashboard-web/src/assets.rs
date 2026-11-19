@@ -59,6 +59,7 @@ pub(crate) const XTERM_WEB_LINKS_SCRIPT_PATH: &str = "/assets/codewire/addon-web
 pub(crate) const LOGO_PATH: &str = "/assets/codewire/logo-v1.svg";
 pub(crate) const BRAND_WORDMARK_PATH: &str = "/assets/codewire/brand-wordmark-v1.svg";
 pub(crate) const BRAND_ICON_PATH: &str = "/assets/codewire/brand-icon-v1.svg";
+const REX_ICON_PATH: &str = "/assets/codewire/tools/rex-v1.png";
 pub(crate) const CONSOLE_LOGO_PATH: &str = "/assets/codewire/console-logo-v1.svg";
 pub(crate) const ICONS_PATH: &str = "/assets/codewire/icons-v2.svg";
 pub(crate) const SCHIBSTED_GROTESK_LATIN_PATH: &str =
@@ -136,6 +137,7 @@ const BRAND_ICON: &str = include_str!("../../../packages/codewire-design/assets/
 const CONSOLE_LOGO: &str =
     include_str!("../../../packages/codewire-design/assets/console-logo.svg");
 const ICONS: &str = include_str!("../../../packages/codewire-design/assets/icons.svg");
+const REX_ICON: &[u8] = include_bytes!("../../../packages/codewire-design/assets/tools/rex.png");
 const SCHIBSTED_GROTESK_LATIN: &[u8] =
     include_bytes!("../assets/fonts/SchibstedGrotesk-latin-5.3.0.woff2");
 const SCHIBSTED_GROTESK_LATIN_EXT: &[u8] =
@@ -264,6 +266,7 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
     (BRAND_ICON_PATH, SVG, BRAND_ICON.as_bytes()),
     (CONSOLE_LOGO_PATH, SVG, CONSOLE_LOGO.as_bytes()),
     (ICONS_PATH, SVG, ICONS.as_bytes()),
+    (REX_ICON_PATH, "image/png", REX_ICON),
 ];
 
 const ASSET_PREFIX: &str = "/assets/codewire/";
@@ -462,6 +465,7 @@ mod tests {
                 ("theme.js", THEME_SCRIPT_PATH),
                 ("assets/brand-icon.svg", BRAND_ICON_PATH),
                 ("assets/brand-wordmark.svg", BRAND_WORDMARK_PATH),
+                ("assets/tools/rex.png", REX_ICON_PATH),
             ] {
                 normalized = normalized.replace(&format!("{prefix}{local}"), public);
             }
@@ -478,6 +482,14 @@ mod tests {
         assert_eq!(
             BRAND_ICON,
             include_str!("../../../apps/docs/zola/static/favicon.svg")
+        );
+        assert_eq!(
+            REX_ICON,
+            include_bytes!("../../../apps/docs/zola/static/tools/rex.png")
+        );
+        assert_eq!(
+            include_str!("../../../packages/codewire-design/assets/tools/orca.svg"),
+            include_str!("../../../apps/docs/zola/static/tools/orca.svg")
         );
     }
 
