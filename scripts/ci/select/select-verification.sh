@@ -1350,8 +1350,10 @@ if [ "$event_selected" = false ]; then
         select_token sdk_python
         recognized=true
         ;;
-      scripts/ci/release/package-sdk-rust.sh)
-        # The Rust SDK's packager runs with the crates it packages (#3511).
+      scripts/ci/release/package-sdk-rust.sh|scripts/ci/tests/test-package-sdk-rust.sh)
+        # The Rust SDK's packager runs with the crates it packages (#3511),
+        # and its kept-target test with the policy family.
+        select_token policy
         select_token rust
         select_token rust_pkg_codewire
         select_token rust_pkg_codewire_proto

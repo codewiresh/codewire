@@ -881,6 +881,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-resolve-cargo-target-dir.sh
   scripts/ci/tests/test-runner-no-bytecode.sh
   scripts/ci/tests/test-package-codewire-desktop.sh
+  scripts/ci/tests/test-package-sdk-rust.sh
   scripts/ci/tests/test-rust-toolchain.sh
   scripts/ci/tests/test-cargo-cache-capacity.sh
   scripts/ci/tests/test-ci-tool-downloads.sh

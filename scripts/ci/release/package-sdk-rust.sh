@@ -39,6 +39,28 @@ target="${CODEWIRE_SDK_PACKAGE_TARGET_DIR:-$work/target}"
 # the published crate carries them (stage-sdk-rust-source.sh).
 mkdir "$work/source"
 "$root/scripts/ci/release/stage-sdk-rust-source.sh" "$work/source"
+# A kept target (CI's) would verify against an earlier tree's crates, so
+# rebuild the two crates every time; their registry dependencies stay warm.
+# Two copies go stale. Cargo verifies codewire against codewire-proto from a
+# local registry in "$target/package", unpacked under CARGO_HOME's
+# registry/src/-<hash>/; a registry crate of one version is never unpacked
+# again, and the hash follows the target, so that copy is the first run's
+# forever. Its compiled crates are fingerprinted by that version too, and
+# `cargo package` stamps every file with one fixed mtime, so nothing looks
+# changed. Remove the unpacked copies of only these two crates from only
+# Cargo's local registries (folders named -<hash>), then clean the two crates
+# from the target. Cargo cleans only a folder tagged as a cache, and tags only
+# the folders it creates itself, not one made before its first build, as
+# CI's is.
+if [[ -d "$target" ]]; then
+  for unpacked in "${CARGO_HOME:-$HOME/.cargo}"/registry/src/-*/{codewire-proto,codewire}-"$version"; do
+    [[ -d "$unpacked" ]] && rm -rf -- "$unpacked"
+  done
+  [[ -f "$target/CACHEDIR.TAG" ]] ||
+    printf 'Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n# For information about cache directory tags see https://bford.info/cachedir/\n' \
+      >"$target/CACHEDIR.TAG"
+  (cd "$work/source" && cargo clean --locked -p codewire-proto -p codewire --target-dir "$target")
+fi
 (cd "$work/source" && cargo package --locked -p codewire-proto -p codewire --target-dir "$target")
 
 for crate in codewire-proto codewire; do
