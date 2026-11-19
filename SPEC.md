@@ -320,7 +320,9 @@ licence or advisory checks.
 Target, not shipped (#3223): the workspace image carries a graphical desktop
 as an inert layer: an X server that is also a VNC server (`Xvnc`), an XFCE
 session, `xdotool` and `scrot`, and the launcher that starts them, from the
-same dated package snapshot as the rest of the image. Nothing in the layer
+same dated package snapshot as the rest of the image. It also carries
+Chromium, Debian's open-source build from a dated, signed snapshot, with its
+sandbox always on, and Codewire's look for the desktop. Nothing in the layer
 runs or listens until an environment's desktop is started
 ([Desktop](#desktop)).
 
@@ -802,7 +804,8 @@ shared by everyone who may open a terminal there. The daemon starts it
 (`StartDesktop`, capability `desktop.vnc.v1`) as the durable session
 `codewire-desktop`: display `:1`, with its VNC listener on the workload's
 `127.0.0.1:5901` and nowhere else. Guest port 5901 is reserved: it can never
-be published, previewed or served to a Mesh Network. The desktop outlives
+be published, previewed or served to a Mesh Network. Nor can 9222, the port
+the image's Chromium uses when a launch turns its debugging on. The desktop outlives
 every viewer and ends with a stop of the desktop or of the environment.
 While it runs, every command,
 shell and session started in the environment gets `DISPLAY=:1`, so an agent
@@ -813,7 +816,7 @@ Nothing new listens outside the environment. There are two ways in, and both
 already admit a user:
 
 ```text
-cw vnc [ENV]
+cw desktop [ENV]
   -> ssh -N -L 127.0.0.1:PORT:127.0.0.1:5901 through the managed alias
   -> the system's VNC viewer on vnc://127.0.0.1:PORT
 
@@ -822,7 +825,7 @@ dashboard, a hosted Sandbox's page
   -> orchestration -> the daemon's ForwardTcp to 127.0.0.1:5901
 ```
 
-`cw vnc` works the same with `--local` and `--cloud`; `--status` and `--stop`
+`cw desktop` works the same with `--local` and `--cloud`; `--status` and `--stop`
 report and end the desktop. `codewire.v1.EnvironmentDesktopService` starts,
 reads and stops a hosted Sandbox's desktop for a caller with operator access;
 the supervisor's control protocol does the same for a local VM's owner. The

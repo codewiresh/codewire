@@ -28,7 +28,7 @@ The flag controls creation-time defaults, not generic local-VM port bindings.
 Internal ports must be distinct, in `1..65535`, and neither of the reserved
 ports: `2222`, the workspace daemon's SSH server, and `5901`, the
 environment desktop's VNC listener ([SANDBOX-DESKTOP.md](SANDBOX-DESKTOP.md),
-"The reserved port"). Labels must be distinct and contain 2–22 lowercase letters,
+"The reserved ports"). Labels must be distinct and contain 2–22 lowercase letters,
 digits or hyphens, with a letter or digit at either end. Empty access retains
 the platform's creator-only default. Effective inherited previews are checked
 before platform setup; database uniqueness remains the concurrency safeguard.

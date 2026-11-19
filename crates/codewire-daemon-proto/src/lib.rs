@@ -168,7 +168,7 @@ pub const WORKSPACE_SSH_PORT: u16 = 2222;
 /// this port instead, whether or not a desktop runs.
 pub const DESKTOP_VNC_PORT: u16 = 5901;
 /// What a refusal to publish or serve [`DESKTOP_VNC_PORT`] says. It names the
-/// path that works today; `cw vnc` replaces it here when that command ships.
+/// path that works today; `cw desktop` replaces it here when that command ships.
 pub const DESKTOP_VNC_PORT_REFUSAL: &str = "port 5901 is reserved for this environment's desktop and is never published; \
      reach it with an SSH local forward";
 

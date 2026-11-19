@@ -1,17 +1,17 @@
 # An environment's desktop
 
 This journey proves that a person can start, watch and control a graphical
-desktop inside an environment, with `cw vnc` and in the dashboard, and that
+desktop inside an environment, with `cw desktop` and in the dashboard, and that
 an agent in the environment draws on it and drives it. `SPEC.md` describes
 it in "7. Access paths" under "Desktop", and the contract is
 `docs/dev/SANDBOX-DESKTOP.md`. Issue #3223. The format is in
 [README.md](README.md).
 
 Every step is written first, as the owner's rule of 2026-11-15 (#3013)
-requires: a review refuses desktop code this file does not describe. None of
-it exists yet: there is no `cw vnc` command, no desktop in the workspace
-image and no Desktop panel until #3223's pull requests land. Every step reads
-"not yet observed".
+requires: a review refuses desktop code this file does not describe. Most of
+it does not exist yet: there is no `cw desktop` command, no browser in the
+workspace image and no Desktop panel until #3223's pull requests land. Every
+step reads "not yet observed".
 
 ## Where the journey stands
 
@@ -23,6 +23,8 @@ when both have been observed.
 | `desktop-image-inert` | not yet observed | not yet observed | not yet observed | not yet observed |
 | `desktop-cli` | not yet observed | not yet observed | not yet observed | not yet observed |
 | `desktop-agent` | not yet observed | not yet observed | not yet observed | not yet observed |
+| `desktop-look` | not yet observed | not yet observed | not yet observed | not yet observed |
+| `desktop-browser` | not yet observed | not yet observed | not yet observed | not yet observed |
 | `desktop-lifetime` | not yet observed | not yet observed | not yet observed | not yet observed |
 | `desktop-cli-refusals` | not yet observed | not yet observed | not yet observed | not yet observed |
 | `desktop-loopback-only` | not yet observed | not yet observed | not yet observed | not yet observed |
@@ -58,13 +60,13 @@ when both have been observed.
 
   ```sh
   cw create --name desk-walk --no-file --ttl 2h
-  cw exec --in desk-walk -- sh -c 'command -v Xvnc xfce4-session xdotool scrot'
+  cw exec --in desk-walk -- sh -c 'command -v Xvnc xfce4-session xdotool scrot chromium'
   cw exec --in desk-walk -- sh -c 'ps -eo comm | grep -E "Xvnc|xfce|xfwm" || echo none'
   cw exec --in desk-walk -- ss -ltn
   cw ls desk-walk
   ```
 
-- **Proof:** the four programs resolve; the process list prints `none`;
+- **Proof:** the five programs resolve; the process list prints `none`;
   `ss` shows no listener on 5901 or 6001; `cw ls` lists no
   `codewire-desktop` session; a command's environment has no `DISPLAY`
   (`cw exec --in desk-walk -- sh -c 'echo "${DISPLAY:-unset}"'` prints
@@ -73,20 +75,20 @@ when both have been observed.
   previous image and proves nothing here; check its digest first.
 - **Observed:** not yet observed.
 
-## `desktop-cli`: `cw vnc` shows the desktop
+## `desktop-cli`: `cw desktop` shows the desktop
 
-- **Entry points:** `cw vnc [ENV]`, `cw vnc --in ENV`, with `--no-open`;
+- **Entry points:** `cw desktop [ENV]`, `cw desktop --in ENV`, with `--no-open`;
   `--local` and `--cloud`. No command yet (#3223).
 - **States to exercise:**
   - a first start, which shows progress until the desktop runs;
-  - a second `cw vnc` while the desktop runs, which starts nothing;
+  - a second `cw desktop` while the desktop runs, which starts nothing;
   - `--no-open`, which prints the address and opens nothing;
   - a computer with no registered viewer, which gets the address and a
     one-line hint.
 - **Driving it:**
 
   ```sh
-  cw vnc desk-walk --no-open
+  cw desktop desk-walk --no-open
   ```
 
   It prints `vnc://127.0.0.1:PORT` and stays in the foreground. In a second
@@ -94,12 +96,12 @@ when both have been observed.
 
   ```sh
   head -c 11 < /dev/tcp/127.0.0.1/PORT
-  cw vnc desk-walk --status
+  cw desktop desk-walk --status
   cw ls desk-walk
   cw logs desk-walk --session codewire-desktop --tail 20
   ```
 
-  Then, without `--no-open`, `cw vnc desk-walk` opens the viewer. Open the
+  Then, without `--no-open`, `cw desktop desk-walk` opens the viewer. Open the
   desktop's terminal from its panel and type a line.
 
 - **Proof:**
@@ -109,19 +111,19 @@ when both have been observed.
     listening on port 5901;
   - the viewer shows an XFCE desktop with a panel, and the typed line
     appears in its terminal;
-  - `cw vnc desk-walk --status` before and after the second `cw vnc` names
-    the same start time;
+  - `cw desktop desk-walk --status` before and after the second
+    `cw desktop` names the same start time;
   - the viewer opens without asking for anything, on a Mac's built-in
-    viewer too: `cw vnc` gave it the password. With `--no-open`, the
+    viewer too: `cw desktop` gave it the password. With `--no-open`, the
     printed password lets a viewer of your own connect, and a wrong one is
     refused by the VNC server;
   - the password is nowhere it should not be: `--status` does not print it;
     `cw logs desk-walk --session codewire-desktop` does not contain it;
     inside the environment, neither `ps -eo args` nor the environment of a
     command started there contains it; on the computer, `ps` during
-    `cw vnc` shows no command line with it.
+    `cw desktop` shows no command line with it.
 - **Gotchas:** the `/dev/tcp` read needs `bash`. A viewer that connects is
-  not proof that `cw vnc` chose the environment you meant; compare the host
+  not proof that `cw desktop` chose the environment you meant; compare the host
   name the desktop's terminal prints with `cw info desk-walk`. The password
   searches need the password: take it from `--no-open`, and search for the
   exact eight characters. On the owner's Mac the viewer is opened in a
@@ -173,37 +175,118 @@ when both have been observed.
   watcher.
 - **Observed:** not yet observed.
 
+## `desktop-look`: a started desktop looks like Codewire
+
+- **Entry points:** any viewer of a desktop started for the first time in an
+  environment.
+- **States to exercise:**
+  - a first start in a fresh environment;
+  - a start after the user changed something (moved a panel item, set
+    another wallpaper), stopped the desktop and started it again;
+  - a viewer that resizes the desktop.
+- **Driving it:** start the desktop and look, then:
+
+  ```sh
+  cw exec --in desk-walk -- scrot /workspace/look.png
+  cw cp desk-walk:/workspace/look.png ./look.png
+  cw exec --in desk-walk -- xdotool search --class xfce4-terminal
+  ```
+
+- **Proof:**
+  - the picture shows the Codewire wordmark on a dark background, one dark
+    panel along the top with the applications menu, a terminal, Chromium,
+    the file manager and a clock, and one open terminal in the dashboard
+    terminal's colours whose prompt is in `/workspace`; no desktop icons,
+    no second panel;
+  - the terminal was there without anyone opening it: `xdotool search`
+    prints its window before any input was sent;
+  - a window opened from the panel has a dark frame and dark controls;
+  - after the user's change and a restart of the desktop, the change is
+    still there: the home keeps it;
+  - at another size the wallpaper still fills the screen and the wordmark
+    is whole.
+- **Gotchas:** an environment whose home already held a desktop's settings
+  shows those, by design; walk the first-start state in a new environment.
+- **Observed:** not yet observed.
+
+## `desktop-browser`: Chromium runs sandboxed, and an agent can drive it
+
+- **Entry points:** the panel's Chromium button; `chromium` in a terminal
+  or from `cw run`; an agent's browser automation.
+- **States to exercise:**
+  - Chromium opened from the panel;
+  - a launch with a debugging pipe, as an automation library makes;
+  - a launch that asks for the debugging port;
+  - a launch that asks for another debugging port, which is refused;
+  - the debugging port published, which is refused;
+  - an environment whose egress policy refuses the page asked for.
+- **Driving it:** with the desktop running and a viewer open:
+
+  ```sh
+  cw exec --in desk-walk -- chromium --version
+  cw run --in desk-walk -- sh -c 'chromium https://example.com & sleep 8'
+  cw exec --in desk-walk -- sh -c 'ps -eo args | grep "[c]hromium" | grep -c -- --no-sandbox'
+  cw exec --in desk-walk -- ss -ltn
+  cw run --in desk-walk -- sh -c 'chromium --remote-debugging-port=9222 --user-data-dir=/tmp/agent-profile about:blank & sleep 8'
+  cw exec --in desk-walk -- curl -s http://127.0.0.1:9222/json/version
+  cw exec --in desk-walk -- chromium --remote-debugging-port=9333 --user-data-dir=/tmp/other-profile about:blank
+  cw ports desk-walk --publish 9222
+  ```
+
+- **Proof:**
+  - the version is the one the image pins, and the viewer shows Chromium's
+    window, dark, with the page;
+  - no Chromium process has `--no-sandbox`: the count is 0. Where an
+    environment gives the workload no user namespaces, Chromium prints
+    that it has no usable sandbox and no window opens, and that is the
+    result to record, not a flag to add;
+  - after the first launch `ss` shows no new listener: debugging is off;
+  - after the launch that asked for it, `curl` inside the environment
+    prints the browser's version document from `127.0.0.1:9222`, and `ss`
+    shows that port on loopback only;
+  - the launch that asked for port 9333 exits non-zero at once with a
+    sentence that names 9222, and `ss` shows no listener on 9333;
+  - publishing 9222 is refused with the sentence that names the reserved
+    port, in the cloud and on a local VM, as 5901 is;
+  - under an egress policy that refuses the site, the page shows the
+    refusal and the policy's refusal log names the host.
+- **Gotchas:** a debugging port without `--user-data-dir` is ignored by
+  Chromium, so `curl` finding nothing may be the missing flag. Close the
+  agent's browser before reusing the profile directory. Do not sign in to
+  anything in a browser whose debugging is on.
+- **Observed:** not yet observed.
+
 ## `desktop-lifetime`: the desktop outlives its viewers and ends with the environment
 
-- **Entry points:** `cw vnc ENV`, `--status`, `--stop`; `cw stop` and
+- **Entry points:** `cw desktop ENV`, `--status`, `--stop`; `cw stop` and
   `cw start`.
 - **States to exercise:**
-  - the viewer closed and `cw vnc` left with Ctrl-C;
+  - the viewer closed and `cw desktop` left with Ctrl-C;
   - a reattach;
   - the environment stopped while a viewer is attached;
   - the environment started again;
   - an explicit stop, and a stop of a desktop that is not running.
 - **Driving it:**
   1. With the `desk-mark` window open, close the viewer and press Ctrl-C in
-     `cw vnc`. `cw vnc desk-walk --status`; then `cw vnc desk-walk` again.
+     `cw desktop`. `cw desktop desk-walk --status`; then `cw desktop desk-walk` again.
   2. With a viewer attached, `cw stop desk-walk` in a second terminal. Then
-     `cw start desk-walk`, `cw vnc desk-walk --status` and `cw vnc
+     `cw start desk-walk`, `cw desktop desk-walk --status` and `cw desktop
      desk-walk`.
-  3. `cw vnc desk-walk --stop`, then:
+  3. `cw desktop desk-walk --stop`, then:
 
      ```sh
-     cw vnc desk-walk --status
+     cw desktop desk-walk --status
      cw exec --in desk-walk -- ss -ltn
      cw exec --in desk-walk -- sh -c 'echo "${DISPLAY:-unset}"'
-     cw vnc desk-walk --stop
+     cw desktop desk-walk --stop
      ```
 
 - **Proof:**
   - after Ctrl-C, `--status` says running with the same start time, and the
     reattached viewer shows the `desk-mark` window as it was left;
-  - on the stop, the viewer disconnects and `cw vnc` prints that the
+  - on the stop, the viewer disconnects and `cw desktop` prints that the
     environment stopped, not an `ssh` exit status;
-  - after the start, `--status` says stopped, and the next `cw vnc` shows a
+  - after the start, `--status` says stopped, and the next `cw desktop` shows a
     fresh desktop with no `desk-mark` window, a later start time and a new
     password; a viewer offering the earlier password is refused;
   - after `--stop`, `--status` says stopped, nothing listens on 5901, a new
@@ -214,9 +297,9 @@ when both have been observed.
   nothing about the desktop.
 - **Observed:** not yet observed.
 
-## `desktop-cli-refusals`: what `cw vnc` says when it cannot
+## `desktop-cli-refusals`: what `cw desktop` says when it cannot
 
-- **Entry points:** `cw vnc ENV`, `--status`.
+- **Entry points:** `cw desktop ENV`, `--status`.
 - **States to exercise:** each line below is one state.
 - **Driving it and proof:** each refusal is one sentence naming the cause
   and the next command, exits non-zero, and starts no forward.
@@ -229,8 +312,12 @@ when both have been observed.
     differ.
   - `ssh` missing from `PATH` (run with a `PATH` that lacks it): one line
     naming OpenSSH.
-  - The desktop stopped from a second terminal (`cw vnc desk-walk --stop`)
-    while `cw vnc` holds a forward: `cw vnc` ends and says the desktop
+  - Display `:1` or port 5901 already held by another process in the
+    environment (start `nc -l 127.0.0.1 5901` there first): the start
+    fails, names the display and the port, and `--status` says stopped,
+    never running.
+  - The desktop stopped from a second terminal (`cw desktop desk-walk --stop`)
+    while `cw desktop` holds a forward: `cw desktop` ends and says the desktop
     ended.
   - A forward that asks for another host, with plain OpenSSH
     (`ssh -N -L 5999:192.0.2.1:80 cw-cloud-ID`, then a connection to port
@@ -243,7 +330,7 @@ when both have been observed.
 ## `desktop-loopback-only`: nothing new is reachable
 
 - **Entry points:** the environment's network, from inside and outside.
-- **States to exercise:** a running desktop with no `cw vnc` attached, and
+- **States to exercise:** a running desktop with no `cw desktop` attached, and
   with one.
 - **Driving it:**
 
@@ -259,20 +346,20 @@ when both have been observed.
   On Kind, from another Pod in the cluster, connect to the Sandbox Pod's
   address on 5901 and 6001. On a local VM, look for a listener on the
   computer with `ss -ltn` (Linux) or `lsof -iTCP -sTCP:LISTEN` (macOS)
-  before and during `cw vnc`.
+  before and during `cw desktop`.
 
 - **Proof:**
   - inside, 5901 is bound to `127.0.0.1` and `::1` only, and no X listener
     is on TCP at all;
   - `cw ports` lists no port for the desktop, and no preview URL serves it;
   - publishing 5901 is refused with one sentence that says the port is the
-    desktop's and names the way in (`cw vnc`; an SSH local forward until
+    desktop's and names the way in (`cw desktop`; an SSH local forward until
     that command ships), with the desktop running and with it stopped, in
     the cloud and on a local VM; publishing 5902 succeeds, and is removed
     afterwards; the create from the project file is refused with the same
     sentence;
   - the connection from another Pod is refused or times out on both ports;
-  - on the computer, the only new listener while `cw vnc` runs is
+  - on the computer, the only new listener while `cw desktop` runs is
     `127.0.0.1:PORT`, and it is gone after Ctrl-C.
 - **Gotchas:** a check from the Sandbox itself proves nothing about the
   network; it must come from outside the Pod. An environment that published
@@ -283,7 +370,7 @@ when both have been observed.
 
 ## `desktop-access`: who may open it
 
-- **Entry points:** `cw vnc`, the dashboard's Desktop panel, and
+- **Entry points:** `cw desktop`, the dashboard's Desktop panel, and
   `EnvironmentDesktopService` with an API key.
 - **States to exercise:**
   - the Sandbox's creator;
@@ -293,7 +380,7 @@ when both have been observed.
   - an API key bound to another organization.
 - **Driving it:** on Kind, with two more synthetic accounts in the
   creator's organization and one outside it. As each, run
-  `cw vnc desk-walk --status` and `cw vnc desk-walk --no-open`, and open the
+  `cw desktop desk-walk --status` and `cw desktop desk-walk --no-open`, and open the
   Sandbox's page.
 - **Proof:**
   - the creator and the admin both get a viewer, and each sees what the
@@ -329,7 +416,7 @@ when both have been observed.
   6. Set the browser to 390 px wide.
 - **Proof:**
   - the panel goes from stopped to starting to the desktop's picture, with
-    no reload, and `cw vnc desk-walk --status` agrees it is running;
+    no reload, and `cw desktop desk-walk --status` agrees it is running;
   - typed keys appear in the desktop's terminal; the pasted marker appears
     there; the copied text is on the computer's clipboard; after "Release
     keyboard" the Tab key moves focus through the page's controls;
@@ -355,7 +442,7 @@ when both have been observed.
 - **Entry points:** the Desktop panel with a viewer open.
 - **States to exercise:**
   - the Sandbox stopped from its page;
-  - the desktop stopped from the panel, and from `cw vnc --stop`;
+  - the desktop stopped from the panel, and from `cw desktop --stop`;
   - a sign-out in another tab;
   - the account disabled;
   - an orchestration rollout.

@@ -25,7 +25,7 @@ fn is_reserved_port(port: i32) -> bool {
 }
 
 /// Whether `port` is the desktop's, which no preview, published port or Mesh
-/// port may name (`docs/dev/SANDBOX-DESKTOP.md`, "The reserved port").
+/// port may name (`docs/dev/SANDBOX-DESKTOP.md`, "The reserved ports").
 pub(crate) fn is_desktop_port(port: i32) -> bool {
     port == i32::from(codewire_daemon_proto::DESKTOP_VNC_PORT)
 }
