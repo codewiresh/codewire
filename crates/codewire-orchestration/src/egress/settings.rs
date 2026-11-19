@@ -1,5 +1,9 @@
-//! The deployment settings for hosted egress (#4000). Both are read once at
+//! The deployment settings for hosted egress (#4000). All are read once at
 //! startup; a value that does not parse fails startup.
+
+use std::net::Ipv4Addr;
+
+use crate::sandbox::template::{GatewayPeer, HostedEgressTemplate};
 
 /// Serves `EgressService` when `true`. Off unless a deployment turns it on.
 pub const SWITCH: &str = "CODEWIRE_HOSTED_EGRESS_ENABLED";
@@ -9,6 +13,118 @@ pub const SWITCH: &str = "CODEWIRE_HOSTED_EGRESS_ENABLED";
 /// enforces an entry yet, so while hosted egress is on a non-empty list stops
 /// startup rather than look configured and do nothing.
 pub const PLATFORM_ALLOWS: &str = "CODEWIRE_EGRESS_PLATFORM_ALLOWS";
+
+/// The public gateway's proxy Pods, as the warm-pool admission policy reads
+/// them from the same ConfigMap.
+pub const GATEWAY_NAMESPACE: &str = "CODEWIRE_HOSTED_EGRESS_GATEWAY_NAMESPACE";
+pub const GATEWAY_NAME: &str = "CODEWIRE_HOSTED_EGRESS_GATEWAY_NAME";
+pub const GATEWAY_OWNER_NAMESPACE: &str = "CODEWIRE_HOSTED_EGRESS_GATEWAY_OWNER_NAMESPACE";
+pub const GATEWAY_PORT: &str = "CODEWIRE_HOSTED_EGRESS_GATEWAY_PORT";
+/// The gateway Service's ClusterIP, which deploy pins on the Service and
+/// asserts equal to this value (cw-security, 2026-11-19 on #4000).
+pub const GATEWAY_CLUSTER_IP: &str = "CODEWIRE_HOSTED_EGRESS_GATEWAY_CLUSTER_IP";
+/// The infra#1822 fence revision the cluster runs.
+pub const FENCE_REVISION: &str = "CODEWIRE_HOSTED_EGRESS_FENCE_REVISION";
+/// The cluster DNS Service's IPv4 address, for the self-check's DNS probe.
+pub const CLUSTER_DNS_IP: &str = "CODEWIRE_CLUSTER_DNS_IP";
+
+/// The Services in orchestration's own namespace a broker-mode Sandbox dials,
+/// each as Kubernetes names its Service-link variables: the Service's name
+/// and the port's.
+const STREAM_LINK: (&str, &str) = ("CODEWIRE_EGRESS", "STREAM");
+const BINDING_LINK: (&str, &str) = ("CODEWIRE_ORCHESTRATION_WORKSPACE_BINDING", "WORKSPACE_BIND");
+const DERP_LINK: (&str, &str) = ("CODEWIRE_DERP", "HTTPS");
+
+/// What every broker-mode template renders, or `None` while hosted egress is
+/// off (#4000, item 3). Read once at startup: with the switch on, a missing
+/// or malformed setting fails startup, named. The three in-namespace
+/// Services come from the Service links Kubernetes gives orchestration's Pod
+/// when it starts, so no Service is read through the API. A link that is
+/// absent leaves its address empty, and every broker-mode render then fails
+/// naming the Service (`TemplateOpts::validate_hosted_egress`); a Service
+/// created or re-created later is seen at orchestration's next rollout, and
+/// until then new Sandboxes fail closed.
+pub fn hosted_egress_template(derp_host: &str) -> anyhow::Result<Option<HostedEgressTemplate>> {
+    template_from(|key| std::env::var(key).ok(), derp_host)
+}
+
+fn template_from(
+    get: impl Fn(&str) -> Option<String>,
+    derp_host: &str,
+) -> anyhow::Result<Option<HostedEgressTemplate>> {
+    let value = |key: &str| {
+        get(key)
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+    };
+    let enabled = crate::confidential_storage::parse_bool(SWITCH, value(SWITCH).as_deref(), false)?;
+    if !enabled {
+        return Ok(None);
+    }
+    let required = |key: &str| {
+        value(key).ok_or_else(|| anyhow::anyhow!("{SWITCH} is on but {key} is not set"))
+    };
+    let ipv4 = |key: &str| -> anyhow::Result<Ipv4Addr> {
+        let raw = required(key)?;
+        raw.parse()
+            .map_err(|_| anyhow::anyhow!("{key} must be a bare IPv4 address, not {raw:?}"))
+    };
+    let port = |key: &str, raw: &str| -> anyhow::Result<u16> {
+        raw.parse::<u16>()
+            .ok()
+            .filter(|port| *port != 0)
+            .ok_or_else(|| anyhow::anyhow!("{key} must be a port, not {raw:?}"))
+    };
+    let fence_revision = required(FENCE_REVISION)?;
+    anyhow::ensure!(
+        fence_revision.bytes().all(|byte| byte.is_ascii_digit()),
+        "{FENCE_REVISION} must be the fence's revision number, not {fence_revision:?}"
+    );
+    anyhow::ensure!(
+        !derp_host.is_empty(),
+        "{SWITCH} is on but DERP_HOST is not set"
+    );
+    let gateway = GatewayPeer {
+        namespace: required(GATEWAY_NAMESPACE)?,
+        gateway_name: required(GATEWAY_NAME)?,
+        gateway_namespace: required(GATEWAY_OWNER_NAMESPACE)?,
+        port: port(GATEWAY_PORT, &required(GATEWAY_PORT)?)?,
+    };
+    // A link is its ClusterIP and the named port; one present but malformed
+    // fails startup, one absent leaves the address empty.
+    let link = |(service, port_name): (&str, &str)| -> anyhow::Result<Option<(Ipv4Addr, u16)>> {
+        let host_key = format!("{service}_SERVICE_HOST");
+        let port_key = format!("{service}_SERVICE_PORT_{port_name}");
+        match (value(&host_key), value(&port_key)) {
+            (None, None) => Ok(None),
+            (Some(host), Some(raw)) => {
+                let ip = host
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("{host_key} must be a ClusterIP, not {host:?}"))?;
+                Ok(Some((ip, port(&port_key, &raw)?)))
+            }
+            _ => anyhow::bail!("{host_key} and {port_key} must come together"),
+        }
+    };
+    let addr = |found: Option<(Ipv4Addr, u16)>| {
+        found
+            .map(|(ip, port)| format!("{ip}:{port}"))
+            .unwrap_or_default()
+    };
+    let derp = link(DERP_LINK)?;
+    Ok(Some(HostedEgressTemplate {
+        stream_addr: addr(link(STREAM_LINK)?),
+        binding_addr: addr(link(BINDING_LINK)?),
+        fence_revision,
+        gateway,
+        derp_tls_port: derp.map(|(_, port)| port).unwrap_or_default(),
+        gateway_addr: format!("{}:443", ipv4(GATEWAY_CLUSTER_IP)?),
+        derp_addr: derp
+            .map(|(ip, port)| format!("{derp_host}={ip}:{port}"))
+            .unwrap_or_default(),
+        cluster_dns_ip: ipv4(CLUSTER_DNS_IP)?.to_string(),
+    }))
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EgressSettings {
@@ -46,6 +162,157 @@ impl EgressSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::HashMap;
+
+    const DERP_HOST: &str = "derp.codewire-dev.sh";
+
+    /// A deployment with hosted egress on and every Service linked.
+    fn on() -> HashMap<&'static str, &'static str> {
+        HashMap::from([
+            (SWITCH, "true"),
+            (GATEWAY_NAMESPACE, "gateway-proxies"),
+            (GATEWAY_NAME, "public"),
+            (GATEWAY_OWNER_NAMESPACE, "gateway"),
+            (GATEWAY_PORT, "10443"),
+            (GATEWAY_CLUSTER_IP, "10.44.0.43"),
+            (FENCE_REVISION, "2"),
+            (CLUSTER_DNS_IP, "10.44.0.10"),
+            ("CODEWIRE_EGRESS_SERVICE_HOST", "10.44.0.89"),
+            ("CODEWIRE_EGRESS_SERVICE_PORT_STREAM", "8089"),
+            (
+                "CODEWIRE_ORCHESTRATION_WORKSPACE_BINDING_SERVICE_HOST",
+                "10.44.0.87",
+            ),
+            (
+                "CODEWIRE_ORCHESTRATION_WORKSPACE_BINDING_SERVICE_PORT_WORKSPACE_BIND",
+                "8087",
+            ),
+            ("CODEWIRE_DERP_SERVICE_HOST", "10.44.0.84"),
+            ("CODEWIRE_DERP_SERVICE_PORT_HTTPS", "8443"),
+        ])
+    }
+
+    fn read(values: &HashMap<&str, &str>) -> anyhow::Result<Option<HostedEgressTemplate>> {
+        template_from(|key| values.get(key).map(|v| (*v).to_owned()), DERP_HOST)
+    }
+
+    #[test]
+    fn off_renders_no_broker_mode_and_reads_nothing_else() {
+        assert_eq!(read(&HashMap::new()).unwrap(), None);
+        // A malformed value beside the switch off is never read.
+        assert_eq!(
+            read(&HashMap::from([(SWITCH, "false"), (CLUSTER_DNS_IP, "::1")])).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn on_renders_every_address_by_its_literal() {
+        assert_eq!(
+            read(&on()).unwrap(),
+            Some(HostedEgressTemplate {
+                stream_addr: "10.44.0.89:8089".into(),
+                binding_addr: "10.44.0.87:8087".into(),
+                fence_revision: "2".into(),
+                gateway: GatewayPeer {
+                    namespace: "gateway-proxies".into(),
+                    gateway_name: "public".into(),
+                    gateway_namespace: "gateway".into(),
+                    port: 10443,
+                },
+                derp_tls_port: 8443,
+                gateway_addr: "10.44.0.43:443".into(),
+                derp_addr: "derp.codewire-dev.sh=10.44.0.84:8443".into(),
+                cluster_dns_ip: "10.44.0.10".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_missing_or_malformed_setting_fails_startup_by_name() {
+        for key in [
+            GATEWAY_NAMESPACE,
+            GATEWAY_NAME,
+            GATEWAY_OWNER_NAMESPACE,
+            GATEWAY_PORT,
+            GATEWAY_CLUSTER_IP,
+            FENCE_REVISION,
+            CLUSTER_DNS_IP,
+        ] {
+            let mut values = on();
+            values.remove(key);
+            let error = read(&values).unwrap_err().to_string();
+            assert!(error.contains(key), "{key}: {error}");
+        }
+        for (key, bad) in [
+            // IPv4 literals only: no IPv6, no name, no port.
+            (CLUSTER_DNS_IP, "fd00::a"),
+            (CLUSTER_DNS_IP, "kube-dns.kube-system"),
+            (CLUSTER_DNS_IP, "10.44.0.10:53"),
+            (GATEWAY_CLUSTER_IP, "gateway.public"),
+            (GATEWAY_CLUSTER_IP, "fd00::43"),
+            (FENCE_REVISION, "two"),
+            (GATEWAY_PORT, "0"),
+            ("CODEWIRE_EGRESS_SERVICE_HOST", "codewire-egress"),
+            ("CODEWIRE_EGRESS_SERVICE_PORT_STREAM", "stream"),
+        ] {
+            let mut values = on();
+            values.insert(key, bad);
+            let error = read(&values).unwrap_err().to_string();
+            assert!(error.contains(key), "{key}={bad}: {error}");
+        }
+        let half = {
+            let mut values = on();
+            values.remove("CODEWIRE_DERP_SERVICE_PORT_HTTPS");
+            values
+        };
+        assert!(
+            read(&half)
+                .unwrap_err()
+                .to_string()
+                .contains("must come together")
+        );
+        assert!(
+            template_from(|key| on().get(key).map(|v| (*v).to_owned()), "")
+                .unwrap_err()
+                .to_string()
+                .contains("DERP_HOST")
+        );
+    }
+
+    #[test]
+    fn an_unlinked_service_leaves_its_address_empty_and_the_render_refuses_it() {
+        for (host, port, service) in [
+            (
+                "CODEWIRE_EGRESS_SERVICE_HOST",
+                "CODEWIRE_EGRESS_SERVICE_PORT_STREAM",
+                "codewire-egress",
+            ),
+            (
+                "CODEWIRE_ORCHESTRATION_WORKSPACE_BINDING_SERVICE_HOST",
+                "CODEWIRE_ORCHESTRATION_WORKSPACE_BINDING_SERVICE_PORT_WORKSPACE_BIND",
+                "codewire-orchestration-workspace-binding",
+            ),
+            (
+                "CODEWIRE_DERP_SERVICE_HOST",
+                "CODEWIRE_DERP_SERVICE_PORT_HTTPS",
+                "codewire-derp",
+            ),
+        ] {
+            let mut values = on();
+            values.remove(host);
+            values.remove(port);
+            let egress = read(&values).unwrap().unwrap();
+            let opts = crate::sandbox::template::TemplateOpts {
+                runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_COMMODITY.into(),
+                hosted_egress: Some(egress),
+                ..Default::default()
+            };
+            let error = opts.validate_hosted_egress().unwrap_err().to_string();
+            assert!(error.contains(service), "{service}: {error}");
+        }
+    }
 
     #[test]
     fn off_by_default_and_on_with_no_platform_allow() {

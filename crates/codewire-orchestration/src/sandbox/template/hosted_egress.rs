@@ -65,6 +65,12 @@ pub(super) fn mount_workspace(
     let env = ws["env"].as_array_mut().expect("workspace env");
     env.push(json!({ "name": "CODEWIRE_EGRESS_STREAM_ADDR", "value": egress.stream_addr }));
     env.push(json!({ "name": "CODEWIRE_WORKSPACE_BINDING_ADDR", "value": egress.binding_addr }));
+    // The daemon's platform path (#5039): every platform connection by
+    // address, none by name.
+    env.push(json!({ "name": "CODEWIRE_API_ADDR", "value": egress.gateway_addr }));
+    env.push(json!({ "name": "CODEWIRE_MESH_ADDR", "value": egress.gateway_addr }));
+    env.push(json!({ "name": "CODEWIRE_DERP_ADDR", "value": egress.derp_addr }));
+    env.push(json!({ "name": "CODEWIRE_CLUSTER_DNS_IP", "value": egress.cluster_dns_ip }));
 }
 
 /// The netstack as the only resolver: no cluster DNS, no search list.

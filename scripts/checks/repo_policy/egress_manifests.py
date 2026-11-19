@@ -283,8 +283,27 @@ resources:
 """
 
 
+# Orchestration takes the egress, binding and DERP Services' addresses for
+# broker-mode Sandboxes from the Service links Kubernetes gives its Pod (#4000).
+ORCHESTRATION_DEPLOYMENTS = (
+    "deployments/k8s/orchestration/deployment.yaml",
+    "deployments/helm/codewire/templates/orchestration.yaml",
+)
+
+
+def service_link_failures(text: str, where: str) -> list[str]:
+    """Orchestration's Pod keeps the Service links broker-mode rendering reads."""
+    if re.search(r"^\s*enableServiceLinks:\s*false\b", text, re.MULTILINE):
+        return [f"{where}: orchestration must keep enableServiceLinks on; broker-mode Sandboxes take three Services' addresses from it"]
+    return []
+
+
 def self_test() -> list[str]:
     failures: list[str] = []
+    if service_link_failures("spec:\n  enableServiceLinks: true\n", "fixture"):
+        failures.append("egress manifests self-test: kept Service links were refused")
+    if not service_link_failures("spec:\n      enableServiceLinks: false\n", "fixture"):
+        failures.append("egress manifests self-test: orchestration without Service links passed")
     if daemonset_failures(GOOD_DAEMONSET, "fixture"):
         failures.append("egress manifests self-test: the good DaemonSet was refused")
     if service_failures(GOOD_SERVICE, "fixture"):
@@ -371,6 +390,8 @@ def check_egress_manifests(args: argparse.Namespace) -> int:
     service = exactly_one(documents(read_text(SERVICE)), "Service", NAME, SERVICE, failures)
     policy = exactly_one(documents(read_text(NETWORK_POLICY)), "NetworkPolicy", NAME, NETWORK_POLICY, failures)
     failures.extend(component_failures(read_text(KUSTOMIZATION)))
+    for deployment in ORCHESTRATION_DEPLOYMENTS:
+        failures.extend(service_link_failures(read_text(deployment), deployment))
     # The pin, once set, is one digest-only images entry: overlays name the
     # registry and never set a digest or tag (egress-image-pin.py).
     pin = subprocess.run(

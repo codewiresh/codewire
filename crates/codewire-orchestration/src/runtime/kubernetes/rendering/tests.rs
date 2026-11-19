@@ -126,3 +126,92 @@ fn the_template_policy_the_lockdown_check_expects_is_every_templates() {
         None
     );
 }
+
+fn broker(fence_revision: &str) -> HostedEgressTemplate {
+    HostedEgressTemplate {
+        stream_addr: "10.44.0.89:8089".into(),
+        binding_addr: "10.44.0.87:8087".into(),
+        fence_revision: fence_revision.into(),
+        gateway: crate::sandbox::template::GatewayPeer {
+            namespace: "gateway-proxies".into(),
+            gateway_name: "public".into(),
+            gateway_namespace: "gateway".into(),
+            port: 10443,
+        },
+        derp_tls_port: 8443,
+        gateway_addr: "10.44.0.43:443".into(),
+        derp_addr: "derp.codewire-dev.sh=10.44.0.84:8443".into(),
+        cluster_dns_ip: "10.44.0.10".into(),
+    }
+}
+
+fn fence_of(template: &serde_json::Value) -> Option<&str> {
+    template
+        .pointer("/spec/podTemplate/metadata/annotations/codewire.sh~1egress-fence-revision")
+        .and_then(serde_json::Value::as_str)
+}
+
+/// With hosted egress on (#4000, item 3), every template on a VM runtime is
+/// broker-mode, and the fence revision the deployment configures is the one
+/// every pool and environment template carries.
+#[test]
+fn hosted_egress_on_makes_every_vm_template_broker_mode_with_the_configured_fence() {
+    use crate::sandbox::template::render_sandbox_template;
+    for revision in ["2", "3"] {
+        let config = KubernetesRenderConfig {
+            hosted_egress: Some(broker(revision)),
+            ..config()
+        };
+        let pool = config
+            .pool(WorkspaceShape {
+                cpu_millicores: 2000,
+                memory_mib: 4096,
+                disk_gib: 20,
+            })
+            .unwrap();
+        assert_eq!(pool.hosted_egress, Some(broker(revision)));
+        assert_eq!(
+            fence_of(&render_sandbox_template(NAMESPACE, &pool)),
+            Some(revision)
+        );
+        for isolation in [Isolation::Standard, Isolation::Confidential] {
+            let environment = config.environment(&intent(isolation)).unwrap();
+            environment.validate_hosted_egress().unwrap();
+            assert_eq!(
+                fence_of(&render_sandbox_template(NAMESPACE, &environment)),
+                Some(revision),
+                "{isolation:?}"
+            );
+        }
+    }
+    // Off, nothing is broker-mode.
+    let pool = config()
+        .pool(WorkspaceShape {
+            cpu_millicores: 2000,
+            memory_mib: 4096,
+            disk_gib: 20,
+        })
+        .unwrap();
+    assert_eq!(pool.hosted_egress, None);
+    assert_eq!(fence_of(&render_sandbox_template(NAMESPACE, &pool)), None);
+}
+
+#[test]
+fn a_runtime_that_is_not_a_vm_never_renders_broker_mode() {
+    let config = KubernetesRenderConfig {
+        hosted_egress: Some(broker("2")),
+        runtime_profile: crate::sandbox::template::RUNTIME_PROFILE_RUNC.into(),
+        allow_diagnostic_runtime: true,
+        ..config()
+    };
+    let opts = config.shape(
+        crate::sandbox::canonical_workspace_runtime_image(),
+        &config.runtime_spec(Isolation::Standard),
+        WorkspaceShape {
+            cpu_millicores: 2000,
+            memory_mib: 4096,
+            disk_gib: 20,
+        },
+    );
+    assert_eq!(opts.hosted_egress, None);
+}

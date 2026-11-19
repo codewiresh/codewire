@@ -3,13 +3,13 @@
   "kind": "SandboxTemplate",
   "metadata": {
     "annotations": {
-      "codewire.sh/pool-revision": "f778c1562e11f2820ee9b073c00fda387189a442e92809c07654f3af0b533d88"
+      "codewire.sh/pool-revision": "82ea4527774921ab91bb19d2c4d736d4439d55c1e4c48d2169570921b7b6c2d4"
     },
     "labels": {
       "app.kubernetes.io/managed-by": "codewire",
       "codewire.sh/type": "workspace-pool"
     },
-    "name": "cw-pool-1000m-4096mi-10gi-7bece3cf",
+    "name": "cw-pool-1000m-4096mi-10gi-2430ab65",
     "namespace": "dev-sandboxes"
   },
   "spec": {
@@ -194,12 +194,28 @@
                 "value": "10.44.0.87:8087"
               },
               {
+                "name": "CODEWIRE_API_ADDR",
+                "value": "10.44.0.43:443"
+              },
+              {
+                "name": "CODEWIRE_MESH_ADDR",
+                "value": "10.44.0.43:443"
+              },
+              {
+                "name": "CODEWIRE_DERP_ADDR",
+                "value": "derp.codewire-dev.sh=10.44.0.84:8443"
+              },
+              {
+                "name": "CODEWIRE_CLUSTER_DNS_IP",
+                "value": "10.44.0.10"
+              },
+              {
                 "name": "DOCKER_HOST",
                 "value": "unix:///var/run/docker/docker.sock"
               },
               {
                 "name": "CODEWIRE_WORKSPACE_POOL_REVISION",
-                "value": "f778c1562e11f2820ee9b073c00fda387189a442e92809c07654f3af0b533d88"
+                "value": "82ea4527774921ab91bb19d2c4d736d4439d55c1e4c48d2169570921b7b6c2d4"
               }
             ],
             "image": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111",

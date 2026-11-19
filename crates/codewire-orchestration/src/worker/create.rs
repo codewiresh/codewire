@@ -268,6 +268,9 @@ pub struct SandboxWorkerCfg {
     pub api_base_url: String,
     pub coordinator_url: String,
     pub derp_host: String,
+    /// What a broker-mode template renders, read at startup while hosted
+    /// egress is on; `None` off (#4000).
+    pub hosted_egress: Option<crate::sandbox::template::HostedEgressTemplate>,
     pub derp_port: String,
     pub stun_host: String,
     pub stun_port: String,
@@ -484,6 +487,8 @@ impl SandboxWorkerCfg {
             api_base_url: getenv("CODEWIRE_API_URL", ""),
             coordinator_url: getenv("CODEWIRE_COORDINATOR_URL", ""),
             derp_host: getenv("DERP_HOST", ""),
+            // Read by main, which can fail startup on a malformed value.
+            hosted_egress: None,
             derp_port: getenv("DERP_PORT", ""),
             stun_host: getenv("STUN_HOST", ""),
             stun_port: getenv("STUN_PORT", "3478"),
@@ -666,6 +671,7 @@ impl From<&SandboxWorkerCfg> for KubernetesRenderConfig {
             ingress_pod_name: cfg.ingress_pod_name.clone(),
             egress_bandwidth: cfg.egress_bandwidth.clone(),
             derp_host: cfg.derp_host.clone(),
+            hosted_egress: cfg.hosted_egress.clone(),
             derp_port: parse_derp_port(&cfg.derp_port),
             stun_host: cfg.stun_host.clone(),
             stun_port: parse_stun_port(&cfg.stun_port),

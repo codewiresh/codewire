@@ -336,6 +336,17 @@ pub struct HostedEgressTemplate {
     /// The DERP Pods' TLS port; the coordinator's DERP map carries the
     /// in-cluster address.
     pub derp_tls_port: u16,
+    /// The public gateway's pinned ClusterIP and port, `<ip>:443`: the
+    /// daemon's API and Mesh address (`CODEWIRE_API_ADDR`,
+    /// `CODEWIRE_MESH_ADDR`; the coordinator falls back to the API's).
+    pub gateway_addr: String,
+    /// `<derp hostname>=<codewire-derp ClusterIP>:<TLS port>`
+    /// (`CODEWIRE_DERP_ADDR`): the relay the daemon dials by address, with
+    /// the hostname as its TLS name.
+    pub derp_addr: String,
+    /// The cluster DNS Service's IPv4 address (`CODEWIRE_CLUSTER_DNS_IP`),
+    /// for the self-check's DNS probe; the Pod itself resolves nothing.
+    pub cluster_dns_ip: String,
 }
 
 /// The public gateway's proxy Pods: selected by the gateway that owns them,
@@ -501,7 +512,27 @@ impl TemplateOpts {
     /// Hosted egress renders a privileged TUN init container, which is root
     /// only inside a guest VM, so it is refused on any other runtime.
     pub fn validate_hosted_egress(&self) -> anyhow::Result<()> {
-        if self.hosted_egress.is_some() {
+        if let Some(egress) = &self.hosted_egress {
+            // An address left empty is a Service orchestration's Pod has no
+            // link to: the Pod could only fail, so nothing renders.
+            for (value, service) in [
+                (&egress.stream_addr, "codewire-egress"),
+                (
+                    &egress.binding_addr,
+                    "codewire-orchestration-workspace-binding",
+                ),
+                (&egress.derp_addr, "codewire-derp"),
+                (&egress.gateway_addr, "the public gateway"),
+            ] {
+                anyhow::ensure!(
+                    !value.is_empty(),
+                    "hosted egress is on but {service} has no address: deploy it, then roll orchestration out again"
+                );
+            }
+            anyhow::ensure!(
+                !egress.fence_revision.is_empty() && !egress.cluster_dns_ip.is_empty(),
+                "hosted egress is on without its fence revision or cluster DNS address"
+            );
             let profile = self.runtime_profile_spec().profile;
             anyhow::ensure!(
                 matches!(

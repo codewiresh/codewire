@@ -333,13 +333,14 @@ spec:
         variables.egressLabelled &&
         object.spec.podTemplate.metadata.labels['codewire.sh/egress'] == 'broker'
     - name: brokerEnvironment
-      expression: "['CODEWIRE_EGRESS_STREAM_ADDR', 'CODEWIRE_WORKSPACE_BINDING_ADDR']"
+      expression: "['CODEWIRE_EGRESS_STREAM_ADDR', 'CODEWIRE_WORKSPACE_BINDING_ADDR', 'CODEWIRE_API_ADDR', 'CODEWIRE_MESH_ADDR', 'CODEWIRE_DERP_ADDR', 'CODEWIRE_CLUSTER_DNS_IP']"
     - name: brokerAudiences
       expression: "['codewire.internal.egress.v1']"
     # Of those, the ones every broker-mode workspace must set: without the
-    # stream address the daemon serves without its self-check (cw-security).
+    # stream address the daemon serves without its self-check (cw-security),
+    # and without the others it reaches no platform service by address.
     - name: brokerRequiredEnvironment
-      expression: "['CODEWIRE_EGRESS_STREAM_ADDR', 'CODEWIRE_WORKSPACE_BINDING_ADDR']"
+      expression: "['CODEWIRE_EGRESS_STREAM_ADDR', 'CODEWIRE_WORKSPACE_BINDING_ADDR', 'CODEWIRE_API_ADDR', 'CODEWIRE_MESH_ADDR', 'CODEWIRE_DERP_ADDR', 'CODEWIRE_CLUSTER_DNS_IP']"
     # The VM RuntimeClasses the privileged TUN init may run under: it is root
     # only inside a guest. Unlike runtimeClasses, no overlay patches this.
     - name: vmRuntimeClasses
@@ -419,7 +420,7 @@ spec:
         (!has(e.valueFrom.fieldRef.apiVersion) || e.valueFrom.fieldRef.apiVersion == 'v1'))) ||
         variables.hostedEgress && c.name == 'workspace' && e.name in variables.brokerEnvironment &&
         dyn(e).all(k, k in ['name', 'value']) && has(e.value))))
-      message: a warm-pool template sets only the identity-free workspace and DinD variables (and, with hosted egress on, the workspace's two broker addresses), takes no environment source and reads only its own Pod UID
+      message: a warm-pool template sets only the identity-free workspace and DinD variables (and, with hosted egress on, the workspace's broker addresses), takes no environment source and reads only its own Pod UID
     - expression: >-
         variables.pod.containers.exists_one(c, c.name == 'workspace') &&
         variables.pod.containers.all(c, c.name != 'workspace' ||

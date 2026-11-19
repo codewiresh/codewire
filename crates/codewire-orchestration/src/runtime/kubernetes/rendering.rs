@@ -6,8 +6,8 @@ use crate::runtime::{Isolation, RenderingIntent, WorkspaceShape};
 use crate::sandbox::environment_template_name;
 use crate::sandbox::template::{
     CpuSharingRatio, CredentialRuntimeTemplateConfig, DOCKER_MODE_LOCAL_DIND_DIRECT,
-    RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RuntimeProfileSpec, TemplateOpts,
-    WORKSPACE_KEEPALIVE_COMMAND, render_template_network_policy,
+    HostedEgressTemplate, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL,
+    RuntimeProfileSpec, TemplateOpts, WORKSPACE_KEEPALIVE_COMMAND, render_template_network_policy,
     render_workspace_daemon_network_policy, runtime_profile_spec, validate_managed_runtime_profile,
 };
 use crate::sandbox::{
@@ -46,6 +46,9 @@ pub struct KubernetesRenderConfig {
     pub ingress_pod_name: String,
     pub egress_bandwidth: String,
     pub derp_host: String,
+    /// What a broker-mode template renders, read at startup while hosted
+    /// egress is on (`egress::settings::hosted_egress_template`); `None` off.
+    pub hosted_egress: Option<HostedEgressTemplate>,
     pub derp_port: i64,
     pub stun_host: String,
     pub stun_port: i64,
@@ -306,9 +309,14 @@ impl KubernetesRenderConfig {
             image_command,
             support_image: self.daemon_image.clone(),
             dind_image: self.dind_image.clone(),
-            // Hosted egress (#4000): rendered once the setting and the two
-            // Services' cluster addresses are read; off until then.
-            hosted_egress: None,
+            // Hosted egress (#4000): with the switch on, every template on a
+            // VM runtime profile is broker-mode. Another profile never is.
+            hosted_egress: self.hosted_egress.clone().filter(|_| {
+                matches!(
+                    runtime_spec.profile.as_str(),
+                    RUNTIME_PROFILE_COMMODITY | RUNTIME_PROFILE_CONFIDENTIAL
+                )
+            }),
             runtime_profile: runtime_spec.profile.clone(),
             docker_mode: runtime_spec.docker_mode.clone(),
             credential_runtime: self.credential_runtime.clone(),

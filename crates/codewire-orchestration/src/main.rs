@@ -607,6 +607,11 @@ async fn main() -> anyhow::Result<()> {
     .map(Arc::new);
 
     let mut sandbox_cfg = worker::create::SandboxWorkerCfg::from_env();
+    // With hosted egress on, every template on a VM runtime is broker-mode
+    // (#4000); a malformed setting stops startup here.
+    sandbox_cfg.hosted_egress =
+        codewire_orchestration::egress::settings::hosted_egress_template(&sandbox_cfg.derp_host)
+            .context("read the hosted egress settings")?;
     if kube.is_some()
         && let Err(error) = sandbox_cfg.require_workspace_binding_config()
     {
