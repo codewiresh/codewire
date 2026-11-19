@@ -17,9 +17,10 @@ window or a headed browser where someone can see it.
   there. It is a shared screen, not a private one.
 - Nothing runs or listens until it is started. An environment that never
   starts a desktop behaves exactly as before.
-- The VNC listener is on the workload's `127.0.0.1:5901` only. No Pod port,
-  preview URL, published port or Mesh port ever serves it: guest port 5901
-  is reserved against publishing ("The reserved port").
+- The VNC listener is on the workload's loopback only, port 5901 on
+  `127.0.0.1` and `::1`. No Pod port, preview URL, published port or Mesh
+  port ever serves it: guest port 5901 is reserved against publishing ("The
+  reserved port").
 - A viewer reaches it only through a path that already admitted them: an SSH
   local forward, or orchestration's desktop stream. Neither adds a credential.
 - The desktop delivers nothing to the workload. Provider credentials,
@@ -63,7 +64,29 @@ as any other tool is.
 
 The layer adds no service and no start-up hook. The built-image contract
 checks that a container started from the image has no `Xvnc` or XFCE process
-and nothing listening on 5901 or on an X display.
+and nothing listening on 5901 or on an X display. It then runs the launcher
+and checks that display `:1` and the XFCE panel come up, and that a stop
+leaves no process of the launcher's session and no endpoint behind.
+
+Sockets belong to a network namespace, which the containers of a Pod share,
+so the contract also holds the desktop to a closed list of endpoints. While
+it runs, the only ones it may add are:
+
+- the VNC listener, TCP 5901 on `127.0.0.1` and `::1`;
+- the X display's socket file. X clients have no TCP listener and no
+  abstract socket;
+- the session bus, a socket file in the launcher's private runtime
+  directory, never the stock address under `/tmp`;
+- the session manager's ICE socket, as a file and as an abstract socket. It
+  admits only a holder of the cookie in the user's ICE authority file, and
+  the session manager offers no way to turn the abstract one off.
+
+Any other TCP listener, UDP socket or named Unix socket fails the image. So
+does an SSH or GPG agent: the image's defaults for the session turn off the
+agents an XFCE session would start, and the session's programs keep the
+`SSH_AUTH_SOCK` they were given, so the desktop uses the workspace's agent
+and adds no key store of its own. A user can turn them back on in their own
+session settings.
 
 Every placement is headless and renders in software: there is no GPU.
 
@@ -89,8 +112,10 @@ a desktop belongs to an environment.
   printed.
 - That name is reserved. Launching a session called `codewire-desktop`
   through the session API is refused; stopping it there stops the desktop.
-- The X server runs with `-localhost -nolisten tcp`, at 1600 by 1000 and 24
-  bits, and lets a viewer resize it.
+- The X server runs with `-localhost -nolisten tcp -nolisten local`, at 1600
+  by 1000 and 24 bits, and lets a viewer resize it. X clients reach it
+  through its socket file only. Several viewers share it; a second one never
+  disconnects the first.
 - Lifetime: the desktop belongs to one run of the environment. It survives
   every viewer leaving, so an agent keeps working unobserved. It ends when it
   is stopped or the environment stops. After a daemon restart it reads as

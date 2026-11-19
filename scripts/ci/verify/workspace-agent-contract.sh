@@ -17,13 +17,24 @@ expected_pids_max="${CODEWIRE_EXPECTED_PIDS_MAX:-2048}"
 bin_root="${CODEWIRE_BIN_ROOT:-/usr/local/bin}"
 ssh_fixture_root="${CODEWIRE_SSH_FIXTURE_ROOT:-/opt/codewire/fixtures/openssh}"
 system_sbin_root="${CODEWIRE_SYSTEM_SBIN_ROOT:-/usr/sbin}"
+system_bin_root="${CODEWIRE_SYSTEM_BIN_ROOT:-/usr/bin}"
 interactive_shell="${CODEWIRE_INTERACTIVE_SHELL:-/bin/bash}"
 agents_root="${CODEWIRE_AGENTS_ROOT:-/opt/codewire/agents}"
 upgrade_root="${CODEWIRE_AGENT_UPGRADE_ROOT:-$agents_root/upgrade}"
+desktop_root="${CODEWIRE_DESKTOP_ROOT:-/opt/codewire/desktop}"
+proc_root="${CODEWIRE_PROC_ROOT:-/proc}"
+x11_socket_root="${CODEWIRE_X11_SOCKET_ROOT:-/tmp/.X11-unix}"
 
 emit_pid_evidence_on_failure() {
   status=$?
   trap - 0
+  # A check that fails after the desktop started must not leave it running.
+  # The wait reaps the launcher: where nothing else reaps, a killed launcher
+  # stays in the process table and still answers a signal.
+  if [ -n "${desktop_pid:-}" ]; then
+    kill -KILL -- "-$desktop_pid" 2>/dev/null || true
+    wait "$desktop_pid" 2>/dev/null || true
+  fi
   if [ "$status" -ne 0 ]; then
     for metric in pids.current pids.max; do
       value=unavailable
@@ -260,3 +271,153 @@ for terminal in xterm-kitty alacritty wezterm foot tmux-256color xterm-256color;
 done
 # Claude Code fills the terminal by default, as the image sets (#4332).
 test "${CLAUDE_CODE_NO_FLICKER-}" = 1
+
+# The desktop (docs/dev/SANDBOX-DESKTOP.md) is inert in the image, starts on
+# request, opens nothing but what the contract names, and leaves nothing
+# behind. Sockets are per network namespace, which a Pod's containers share,
+# so every endpoint the desktop adds is checked, not only its VNC port.
+desktop_fail() {
+  printf 'workspace image verification: desktop: %s\n' "$1" >&2
+  exit 1
+}
+# Every endpoint in this network namespace, one "<kind> <address>" per line:
+# TCP listeners, unconnected UDP sockets and named Unix sockets, abstract
+# ones (a leading "@") included, as /proc/net prints them.
+desktop_endpoints() {
+  for table in tcp tcp6; do
+    [ -r "$proc_root/net/$table" ] || continue
+    while read -r _slot local_address _remote state _rest; do
+      case "$state" in 0A) printf 'tcp %s\n' "$local_address" ;; esac
+    done <"$proc_root/net/$table"
+  done
+  for table in udp udp6; do
+    [ -r "$proc_root/net/$table" ] || continue
+    while read -r _slot local_address _remote state _rest; do
+      case "$state" in 07) printf 'udp %s\n' "$local_address" ;; esac
+    done <"$proc_root/net/$table"
+  done
+  [ -r "$proc_root/net/unix" ] || return 0
+  while read -r _number _references _protocol _flags _type _state _inode path; do
+    case "$path" in ''|Path) ;; *) printf 'unix %s\n' "$path" ;; esac
+  done <"$proc_root/net/unix"
+}
+# The endpoints that were not there before the start, read from $1.
+desktop_new_endpoints() {
+  desktop_endpoints | while IFS= read -r endpoint; do
+    case "$1" in
+      "$endpoint"|"$endpoint"$'\n'*|*$'\n'"$endpoint"|*$'\n'"$endpoint"$'\n'*) ;;
+      *) printf '%s\n' "$endpoint" ;;
+    esac
+  done
+}
+# Live processes as "<pid> <name>": the server and the session by name, and,
+# given the launcher's session ID, everything else still in that session. A
+# zombie awaiting its reaper is not one. A name may hold spaces and
+# parentheses, so the fields are read after its last ")".
+desktop_processes() {
+  for stat_file in "$proc_root"/[0-9]*/stat; do
+    [ -r "$stat_file" ] || continue
+    IFS= read -r stat_line <"$stat_file" || continue
+    name="${stat_line#*(}"
+    name="${name%)*}"
+    read -r state _parent _group session _rest <<EOF
+${stat_line##*) }
+EOF
+    case "$state" in Z) continue ;; esac
+    case "$name" in
+      Xvnc|xfce4-session) ;;
+      *) if [ -z "${1:-}" ] || [ "$session" != "$1" ]; then continue; fi ;;
+    esac
+    printf '%s %s\n' "${stat_line%% *}" "$name"
+  done
+}
+
+test -f "$desktop_root/start"
+test ! -L "$desktop_root/start"
+test -x "$desktop_root/start"
+test -f "$desktop_root/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml"
+invalid_desktop="$(find "$desktop_root" -xdev \( ! -uid 0 -o \( \( -type f -o -type d \) -perm /022 \) \) -print -quit)"
+test -z "$invalid_desktop"
+for tool in Xvnc dbus-daemon startxfce4 xfce4-session xfce4-terminal xdotool scrot xrandr; do
+  test -x "$system_bin_root/$tool" || desktop_fail "the image lacks $tool"
+done
+endpoints_before="$(desktop_endpoints)"
+case $'\n'"$endpoints_before"$'\n' in
+  *:170D$'\n'*|*$'\n'"unix $x11_socket_root/X1"$'\n'*) desktop_fail 'something listens before any start' ;;
+esac
+[ -z "$(desktop_processes)" ] || desktop_fail 'a desktop process runs before any start'
+
+desktop_work="$(mktemp -d)"
+# The launcher leads its own session, so its PID names every process it
+# starts. The agent socket is a marker: the session must hand it on unchanged.
+SSH_AUTH_SOCK="$desktop_work/workspace-agent" setsid "$desktop_root/start" >"$desktop_work/log" 2>&1 &
+desktop_pid=$!
+desktop_ready=false
+for _ in $(seq 150); do
+  if [ "$(DISPLAY=:1 xdotool getdisplaygeometry 2>/dev/null)" = '1600 1000' ] &&
+    [ -n "$(DISPLAY=:1 xdotool search --class xfce4-panel 2>/dev/null)" ]; then
+    desktop_ready=true
+    break
+  fi
+  kill -0 "$desktop_pid" 2>/dev/null || break
+  sleep 0.2
+done
+if [ "$desktop_ready" != true ]; then
+  while IFS= read -r line; do printf 'workspace image verification: desktop log: %s\n' "$line" >&2; done <"$desktop_work/log"
+  desktop_fail 'the display and its XFCE panel did not come up within 30 seconds'
+fi
+
+vnc_listens=false
+while IFS= read -r endpoint; do
+  case "$endpoint" in
+    '') ;;
+    'tcp 0100007F:170D'|'tcp 00000000000000000000000001000000:170D') vnc_listens=true ;;
+    "unix $x11_socket_root/X1") ;;
+    # The session bus and anything else in the launcher's private directory.
+    'unix /tmp/codewire-desktop.'??????/*) ;;
+    # The session manager's ICE socket, which admits only a holder of the
+    # cookie in the user's ICE authority file.
+    'unix /tmp/.ICE-unix/'[0-9]*|'unix @/tmp/.ICE-unix/'[0-9]*) ;;
+    tcp*:170D) desktop_fail "the VNC server listens beyond loopback: ${endpoint#tcp }" ;;
+    *) desktop_fail "the desktop opened an endpoint the contract does not name: $endpoint" ;;
+  esac
+done <<EOF
+$(desktop_new_endpoints "$endpoints_before")
+EOF
+[ "$vnc_listens" = true ] || desktop_fail 'nothing listens on 5901 while the desktop runs'
+
+session_shares_agent=false
+while read -r pid name; do
+  case "$name" in
+    ssh-agent|gpg-agent) desktop_fail "the session started its own $name" ;;
+    xfwm4|xfce4-panel|xfdesktop|Thunar)
+      agent_socket=
+      while IFS= read -r -d '' variable; do
+        case "$variable" in SSH_AUTH_SOCK=*) agent_socket="${variable#SSH_AUTH_SOCK=}" ;; esac
+      done <"$proc_root/$pid/environ"
+      [ "$agent_socket" = "$desktop_work/workspace-agent" ] ||
+        desktop_fail "$name does not use the workspace's SSH agent: SSH_AUTH_SOCK=$agent_socket"
+      session_shares_agent=true ;;
+  esac
+done <<EOF
+$(desktop_processes "$desktop_pid")
+EOF
+[ "$session_shares_agent" = true ] || desktop_fail 'no session process was found to check its SSH agent'
+
+DISPLAY=:1 scrot "$desktop_work/screen.png"
+test -s "$desktop_work/screen.png"
+kill -TERM -- "-$desktop_pid"
+desktop_gone=false
+for _ in $(seq 50); do
+  if [ -z "$(desktop_new_endpoints "$endpoints_before")" ] && [ -z "$(desktop_processes "$desktop_pid")" ] &&
+    [ ! -e "$x11_socket_root/X1" ]; then
+    desktop_gone=true
+    break
+  fi
+  sleep 0.2
+done
+if [ "$desktop_gone" != true ]; then
+  desktop_fail "the stop left something behind: $(desktop_new_endpoints "$endpoints_before" | tr '\n' ' ')$(desktop_processes "$desktop_pid" | tr '\n' ' ')"
+fi
+rm -rf "$desktop_work"
+printf 'workspace image verification: desktop contract passed\n'

@@ -116,6 +116,7 @@ case "$1" in
     [[ "${FAIL_SSH_FIND:-false}" = false ]] || exit 42
     expected_uid="${FAKE_SSH_EXPECTED_UID:-$FAKE_FIXTURE_UID}" ;;
   "$FAKE_AGENTS_ROOT") expected_uid="${FAKE_AGENTS_EXPECTED_UID:-$FAKE_FIXTURE_UID}" ;;
+  "$FAKE_DESKTOP_ROOT") expected_uid="${FAKE_DESKTOP_EXPECTED_UID:-$FAKE_FIXTURE_UID}" ;;
   *) exit 99 ;;
 esac
 # Host tests cannot chown files to root. Translate only the expected uid in the
@@ -142,14 +143,123 @@ for tool in cw docker dockerd docker-compose gh git go gopls hcloud kubectl atmo
   ln -s agent "$work/bin/$tool"
 done
 
+# The desktop: a launcher that "runs" by writing the tables the contract
+# reads, so no test run touches a real display or a port of this host.
+mkdir -p "$work/desktop/xdg/xfce4/xfconf/xfce-perchannel-xml" "$work/proc/net" "$work/x11"
+touch "$work/desktop/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml"
+cat >"$work/desktop/start" <<'EOF'
+#!/bin/sh
+[ "${FAKE_DESKTOP_START:-runs}" = runs ] || exit 1
+stop() {
+  case "${FAKE_DESKTOP_LINGERS:-false}" in
+    false) rm -rf "$FAKE_PROC_ROOT/4242" "$FAKE_PROC_ROOT/4243" "$FAKE_PROC_ROOT/4244" ;;
+    child) rm -rf "$FAKE_PROC_ROOT/4242" "$FAKE_PROC_ROOT/4243" ;;
+  esac
+  if [ "${FAKE_DESKTOP_LINGERS:-false}" != true ]; then
+    rm -rf "$FAKE_X11_ROOT/X1"
+    : >"$FAKE_PROC_ROOT/net/tcp"
+    : >"$FAKE_PROC_ROOT/net/udp"
+    : >"$FAKE_PROC_ROOT/net/unix"
+  fi
+  exit 0
+}
+trap stop TERM
+printf '%s\n' "$$" >"$FAKE_LAUNCHER_PID"
+# The server, the window manager and one more process, all in this launcher's
+# session, which setsid made this process lead.
+/usr/bin/mkdir -p "$FAKE_PROC_ROOT/4242" "$FAKE_PROC_ROOT/4243" "$FAKE_PROC_ROOT/4244"
+printf '4242 (Xvnc) S 1 %s %s 0\n' "$$" "$$" >"$FAKE_PROC_ROOT/4242/stat"
+printf '4243 (xfwm4) S 1 %s %s 0\n' "$$" "$$" >"$FAKE_PROC_ROOT/4243/stat"
+case "${FAKE_DESKTOP_AGENT_SOCKET:-inherited}" in
+  inherited) printf 'HOME=/home/codewire\0SSH_AUTH_SOCK=%s\0' "$SSH_AUTH_SOCK" ;;
+  replaced) printf 'SSH_AUTH_SOCK=/tmp/ssh-AbCdEf/agent.39\0' ;;
+esac >"$FAKE_PROC_ROOT/4243/environ"
+printf '4244 (%s) S 1 %s %s 0\n' "${FAKE_DESKTOP_HELPER:-dbus-daemon}" "$$" "$$" >"$FAKE_PROC_ROOT/4244/stat"
+printf '   0: %s 00000000:0000 0A\n' "${FAKE_DESKTOP_LISTEN:-0100007F:170D}" >"$FAKE_PROC_ROOT/net/tcp"
+{
+  printf 'Num RefCount Protocol Flags Type St Inode Path\n'
+  printf '0: 00000002 00000000 00010000 0001 01 11 %s/X1\n' "$FAKE_X11_ROOT"
+  printf '0: 00000002 00000000 00010000 0001 01 12 /tmp/codewire-desktop.AbCdEf/bus\n'
+  printf '0: 00000002 00000000 00010000 0001 01 13 /tmp/.ICE-unix/4245\n'
+  printf '0: 00000002 00000000 00010000 0001 01 14 @/tmp/.ICE-unix/4245\n'
+  printf '0: 00000003 00000000 00000000 0001 03 15\n'
+} >"$FAKE_PROC_ROOT/net/unix"
+case "${FAKE_DESKTOP_EXTRA:-none}" in
+  none) ;;
+  tcp) printf '   1: 0100007F:1F90 00000000:0000 0A\n' >>"$FAKE_PROC_ROOT/net/tcp" ;;
+  udp) printf '   1: 00000000:14E9 00000000:0000 07\n' >"$FAKE_PROC_ROOT/net/udp" ;;
+  bus-in-tmp) printf '0: 00000002 00000000 00010000 0001 01 16 /tmp/dbus-AbCdEfGhIj\n' >>"$FAKE_PROC_ROOT/net/unix" ;;
+  abstract-bus) printf '0: 00000002 00000000 00010000 0001 01 16 @/tmp/dbus-AbCdEfGhIj\n' >>"$FAKE_PROC_ROOT/net/unix" ;;
+esac
+: >"$FAKE_X11_ROOT/X1"
+while :; do sleep 0.1; done
+EOF
+cat >"$work/bin/xdotool" <<'EOF'
+#!/bin/sh
+[ "${DISPLAY:-}" = :1 ] && [ -e "$FAKE_X11_ROOT/X1" ] || exit 1
+case "$*" in
+  getdisplaygeometry) printf '1600 1000\n' ;;
+  'search --class xfce4-panel') printf '4194305\n' ;;
+  *) exit 99 ;;
+esac
+EOF
+cat >"$work/bin/scrot" <<'EOF'
+#!/bin/sh
+[ "${DISPLAY:-}" = :1 ] && [ "$#" -eq 1 ] || exit 99
+printf 'synthetic picture\n' >"$1"
+EOF
+chmod +x "$work/desktop/start" "$work/bin/xdotool" "$work/bin/scrot"
+chmod -R go-w "$work/desktop"
+for tool in Xvnc dbus-daemon startxfce4 xfce4-session xfce4-terminal xrandr; do
+  ln -s agent "$work/bin/$tool"
+done
+# Whatever a contract run found, it leaves no launcher running behind it.
+assert_no_launcher() {
+  local pid
+  [[ -s "$work/launcher.pid" ]] || return 0
+  pid="$(<"$work/launcher.pid")"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    fail "the contract left its desktop running: $1"
+  fi
+  rm -f "$work/launcher.pid"
+}
+reset_desktop() {
+  rm -rf "$work/proc/4242" "$work/proc/4243" "$work/proc/4244" "$work/x11/X1"
+  : >"$work/proc/net/tcp"
+  : >"$work/proc/net/udp"
+  # One socket that was there before any desktop: it is never the desktop's.
+  printf '0: 00000002 00000000 00010000 0001 01 9 /run/earlier.sock\n' >"$work/proc/net/unix"
+}
+reset_desktop
+# Another session's process, with a name that holds a space and a
+# parenthesis: never the desktop's, however the contract parses it.
+/usr/bin/mkdir "$work/proc/11"
+printf '11 (Web) Content) S 1 11 11 0\n' >"$work/proc/11/stat"
+
 run_contract() {
   env PATH="$work/bin:$PATH" \
     CODEWIRE_CGROUP_ROOT="$work/cgroup" \
     CODEWIRE_BIN_ROOT="$work/bin" \
     CODEWIRE_SSH_FIXTURE_ROOT="$work/ssh" \
     CODEWIRE_SYSTEM_SBIN_ROOT="$work/system-sbin" \
+    CODEWIRE_SYSTEM_BIN_ROOT="$work/bin" \
     CODEWIRE_INTERACTIVE_SHELL="$work/interactive-bash" \
     CODEWIRE_AGENTS_ROOT="$work/agents" \
+    CODEWIRE_DESKTOP_ROOT="$work/desktop" \
+    CODEWIRE_PROC_ROOT="$work/proc" \
+    CODEWIRE_X11_SOCKET_ROOT="$work/x11" \
+    FAKE_DESKTOP_ROOT="$work/desktop" \
+    FAKE_DESKTOP_EXPECTED_UID="${FAKE_DESKTOP_EXPECTED_UID:-$fixture_uid}" \
+    FAKE_PROC_ROOT="$work/proc" \
+    FAKE_X11_ROOT="$work/x11" \
+    FAKE_DESKTOP_START="${FAKE_DESKTOP_START:-runs}" \
+    FAKE_DESKTOP_LISTEN="${FAKE_DESKTOP_LISTEN:-0100007F:170D}" \
+    FAKE_DESKTOP_LINGERS="${FAKE_DESKTOP_LINGERS:-false}" \
+    FAKE_LAUNCHER_PID="$work/launcher.pid" \
+    FAKE_DESKTOP_EXTRA="${FAKE_DESKTOP_EXTRA:-none}" \
+    FAKE_DESKTOP_HELPER="${FAKE_DESKTOP_HELPER:-dbus-daemon}" \
+    FAKE_DESKTOP_AGENT_SOCKET="${FAKE_DESKTOP_AGENT_SOCKET:-inherited}" \
     FAKE_AGENTS_ROOT="$work/agents" \
     FAKE_AGENTS_EXPECTED_UID="${FAKE_AGENTS_EXPECTED_UID:-$fixture_uid}" \
     FAKE_INTERACTIVE_FLAGS="${FAKE_INTERACTIVE_FLAGS:-imBHc}" \
@@ -226,6 +336,59 @@ for bin_failure in wrong-uid wrong-gid group-write other-write symlink stat-erro
   fi
   chmod go-w "$work/bin"
 done
+
+grep -Fxq 'workspace image verification: desktop contract passed' "$work/success.out" ||
+  fail 'the desktop was not checked'
+[[ ! -e "$work/proc/4242" && ! -s "$work/proc/net/tcp" ]] || fail 'the desktop check left its desktop running'
+assert_no_launcher 'a passing run'
+for desktop_failure in missing-launcher missing-defaults writable-launcher wrong-owner missing-tool \
+  running-before listening-before display-before start-fails all-interfaces another-listener a-udp-socket \
+  bus-in-tmp abstract-bus ssh-agent gpg-agent agent-replaced lingers leaves-a-child; do
+  reset_desktop
+  (
+    case "$desktop_failure" in
+      missing-launcher) chmod -x "$work/desktop/start" ;;
+      missing-defaults) rm "$work/desktop/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml" ;;
+      writable-launcher) chmod o+w "$work/desktop/start" ;;
+      wrong-owner) FAKE_DESKTOP_EXPECTED_UID=$((fixture_uid + 1)) ;;
+      missing-tool) rm "$work/bin/Xvnc" ;;
+      running-before)
+        /usr/bin/mkdir "$work/proc/7"
+        printf '7 (xfce4-session) S 1 7 7 0\n' >"$work/proc/7/stat" ;;
+      listening-before) printf '   0: 0100007F:170D 00000000:0000 0A\n' >"$work/proc/net/tcp" ;;
+      display-before)
+        printf '0: 00000002 00000000 00010000 0001 01 10 %s/X1\n' "$work/x11" >>"$work/proc/net/unix" ;;
+      start-fails) FAKE_DESKTOP_START=fails ;;
+      all-interfaces) FAKE_DESKTOP_LISTEN=00000000:170D ;;
+      another-listener) FAKE_DESKTOP_EXTRA=tcp ;;
+      a-udp-socket) FAKE_DESKTOP_EXTRA=udp ;;
+      bus-in-tmp) FAKE_DESKTOP_EXTRA=bus-in-tmp ;;
+      abstract-bus) FAKE_DESKTOP_EXTRA=abstract-bus ;;
+      ssh-agent) FAKE_DESKTOP_HELPER=ssh-agent ;;
+      gpg-agent) FAKE_DESKTOP_HELPER=gpg-agent ;;
+      agent-replaced) FAKE_DESKTOP_AGENT_SOCKET=replaced ;;
+      lingers) FAKE_DESKTOP_LINGERS=true ;;
+      leaves-a-child) FAKE_DESKTOP_LINGERS=child ;;
+    esac
+    if run_contract >"$work/desktop-failure.out" 2>"$work/desktop-failure.err"; then
+      fail "a broken desktop layer was accepted: $desktop_failure"
+    fi
+    # The checks before the desktop's passed, so the failure is the desktop's.
+    grep -Fxq 'bwrap test-version' "$work/desktop-failure.out" ||
+      fail "desktop failure $desktop_failure came from an earlier check"
+  )
+  assert_no_launcher "$desktop_failure"
+  chmod 0755 "$work/desktop/start"
+  touch "$work/desktop/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml"
+  [[ -e "$work/bin/Xvnc" ]] || ln -s agent "$work/bin/Xvnc"
+  rm -rf "$work/proc/7"
+done
+reset_desktop
+# A zombie that still names the server is not a running desktop.
+/usr/bin/mkdir "$work/proc/9"
+printf '9 (Xvnc) Z 1 9 9 0\n' >"$work/proc/9/stat"
+run_contract >"$work/zombie.out" 2>"$work/zombie.err" || fail 'a desktop process awaiting its reaper failed the contract'
+rm -rf "$work/proc/9"
 
 if FAKE_CODEWIRE_GID=1001 run_contract >"$work/process-gid.out" 2>"$work/process-gid.err"; then
   fail 'process GID drift was accepted'

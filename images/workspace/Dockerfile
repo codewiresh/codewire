@@ -374,6 +374,20 @@ RUN install -d -m 0755 /usr/local/libexec/codewire && \
 COPY --chown=0:0 --chmod=0755 images/workspace/docker-cli/docker /usr/local/bin/docker
 RUN docker --version
 
+# An environment's desktop (docs/dev/SANDBOX-DESKTOP.md). The layer is inert:
+# no package here starts a service, and only the environment daemon runs the
+# launcher. The XFCE parts are named one by one because the xfce4 metapackage
+# also brings an audio plugin and its sound server. It sits after the agents,
+# whose layers stay cached, and before `cw`, which changes with every commit.
+RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
+    apt-get-with-retry update && apt-get-with-retry install -y --no-install-recommends \
+      tigervnc-standalone-server=1.13.1+dfsg-2build2 tigervnc-common=1.13.1+dfsg-2build2 \
+      xfce4-session=4.18.3-1build2 \
+      xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf thunar xfce4-terminal \
+      adwaita-icon-theme dbus-x11 fonts-dejavu-core scrot x11-xserver-utils xdotool && \
+    rm -rf /var/lib/apt/lists/*
+COPY --chown=0:0 --chmod=0755 images/workspace/desktop/ /opt/codewire/desktop/
+
 # Keep the source-built CLI after the moving developer tools. The final image proves
 # and exposes the exact binary built from this source tree.
 COPY --from=stock-ssh-fixture /out/ /opt/codewire/fixtures/openssh/

@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# An environment's desktop: the X and VNC server on display :1, a session bus
+# of its own, then an XFCE session on both (docs/dev/SANDBOX-DESKTOP.md).
+#
+# The environment daemon runs this as the durable session `codewire-desktop`
+# and stops it by ending its process group. Nothing in the image runs it by
+# itself. It ends when any of the three ends, so a desktop is never a bare
+# screen with no session, nor a session with no screen.
+set -euo pipefail
+
+readonly display=:1
+readonly rfb_port=5901
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+readonly here
+
+# A local VM's /run is root-owned, so the session's runtime directory lives
+# under /tmp, which every placement gives the workload user. It is private
+# (0700) and holds the session bus's socket.
+runtime_dir=$(mktemp -d /tmp/codewire-desktop.XXXXXX)
+readonly runtime_dir
+export XDG_RUNTIME_DIR=$runtime_dir
+# The image's defaults for the session come first: they keep it from starting
+# an SSH or GPG agent of its own, so the desktop uses the workspace's. The
+# settings service is started by the bus, so this is set before the bus is.
+export XDG_CONFIG_DIRS="$here/xdg:${XDG_CONFIG_DIRS:-/etc/xdg}"
+
+server=''
+bus=''
+session=''
+finish() {
+  for pid in $session $bus $server; do
+    kill "$pid" 2>/dev/null || true
+  done
+  wait 2>/dev/null || true
+  rm -rf "$runtime_dir"
+}
+trap finish EXIT
+trap 'exit 143' TERM INT HUP
+
+# Loopback only, and no password: the paths that reach this listener have
+# already admitted the viewer, and guest port 5901 is never published. X
+# clients connect through the socket file alone: no TCP, and no abstract
+# socket, which anything in the network namespace could open.
+Xvnc "$display" \
+  -localhost -nolisten tcp -nolisten local -rfbport "$rfb_port" \
+  -SecurityTypes None \
+  -geometry 1600x1000 -depth 24 -AcceptSetDesktopSize \
+  -AlwaysShared &
+server=$!
+
+# The display is ready when this server holds its lock and its socket exists.
+# A socket alone may be another X server's, already on :1; ours then exits.
+ready=false
+for _ in $(seq 100); do
+  if ! kill -0 "$server" 2>/dev/null; then
+    echo "codewire-desktop: the X server did not start; display $display or port $rfb_port may be in use" >&2
+    exit 1
+  fi
+  if [[ -S /tmp/.X11-unix/X1 && "$(tr -d ' \n' </tmp/.X1-lock 2>/dev/null)" == "$server" ]]; then
+    ready=true
+    break
+  fi
+  sleep 0.1
+done
+if [[ "$ready" != true ]]; then
+  echo "codewire-desktop: the X server did not open display $display within 10 seconds" >&2
+  exit 1
+fi
+export DISPLAY=$display
+
+# The bus listens on a socket file in the private runtime directory. The
+# stock session configuration would put it under /tmp, as a socket file or an
+# abstract socket depending on the build.
+dbus-daemon --session --nofork --nopidfile --address="unix:path=$runtime_dir/bus" &
+bus=$!
+for _ in $(seq 50); do
+  [[ -S "$runtime_dir/bus" ]] && break
+  kill -0 "$bus" 2>/dev/null || break
+  sleep 0.1
+done
+if [[ ! -S "$runtime_dir/bus" ]]; then
+  echo 'codewire-desktop: the session bus did not start' >&2
+  exit 1
+fi
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
+
+XDG_SESSION_TYPE=x11 startxfce4 &
+session=$!
+
+wait -n "$server" "$bus" "$session"

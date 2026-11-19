@@ -262,8 +262,8 @@ when both have been observed.
   before and during `cw vnc`.
 
 - **Proof:**
-  - inside, 5901 is bound to `127.0.0.1` only, and no X listener is on TCP
-    at all;
+  - inside, 5901 is bound to `127.0.0.1` and `::1` only, and no X listener
+    is on TCP at all;
   - `cw ports` lists no port for the desktop, and no preview URL serves it;
   - publishing 5901 is refused with one sentence that says the port is the
     desktop's and names the way in (`cw vnc`; an SSH local forward until

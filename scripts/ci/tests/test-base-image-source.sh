@@ -88,6 +88,13 @@ grep -qF 'download openssh-server=1:9.6p1-3ubuntu13.20 libwrap0=7.6.q-33' "$work
 # Codex's Linux sandbox needs the system bubblewrap, from the same snapshot.
 grep -qF '      bubblewrap=0.9.0-1ubuntu0.3 ' "$workspace_dockerfile" ||
   fail 'workspace image does not install the pinned bubblewrap for the Codex sandbox'
+# The desktop's server and session come from the same snapshot, pinned.
+grep -qF '      tigervnc-standalone-server=1.13.1+dfsg-2build2 tigervnc-common=1.13.1+dfsg-2build2 ' \
+  "$workspace_dockerfile" || fail 'workspace image does not install the pinned VNC server for the desktop'
+grep -qF '      xfce4-session=4.18.3-1build2 ' "$workspace_dockerfile" ||
+  fail 'workspace image does not install the pinned desktop session'
+grep -qxF 'COPY --chown=0:0 --chmod=0755 images/workspace/desktop/ /opt/codewire/desktop/' \
+  "$workspace_dockerfile" || fail 'workspace image does not install the desktop launcher and its defaults root-owned'
 grep -qF 'APT::Update::Error-Mode=any' "$workspace_dockerfile" ||
   fail 'SSH artifact preparation tolerates partial package-index failures'
 # shellcheck disable=SC2016 # Match the literal package loop, not this test's environment.
@@ -151,7 +158,7 @@ for path in sys.argv[1:]:
 print(count)
 PY
 )" || fail 'an APT helper RUN does not keep the apt snapshot cache out of its layer'
-[[ "$apt_runs" == 5 ]] || fail "expected five APT helper RUN steps (base 1, workspace 3, cw-runtime 1), found $apt_runs"
+[[ "$apt_runs" == 6 ]] || fail "expected six APT helper RUN steps (base 1, workspace 4, cw-runtime 1), found $apt_runs"
 # The cache host is CI configuration; no image input may name it.
 if git -C "$ROOT" grep -nIE 'apt-snapshot-cache|forgejo-runner-control|svc\.cluster\.local' -- \
     images scripts/ci/images "${tracked_dockerfiles[@]}" docker-bake.hcl; then
