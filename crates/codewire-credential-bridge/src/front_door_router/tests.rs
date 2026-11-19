@@ -230,7 +230,12 @@ fn a_frame_outside_the_pinned_capabilities_is_answered() {
     router.guest(&request("a"), now);
     assert_eq!(
         router.guest(&body("a"), now),
-        GuestRoute::Answer(failure("a"), Refusal::OutsidePin)
+        GuestRoute::Cancel {
+            answer: failure("a"),
+            upstream: OLD,
+            cancel: Box::new(super::cancel("a".into(), Kind::Http)),
+            refusal: Refusal::OutsidePin,
+        }
     );
     let upgrade = guest(Guest::Upgrade(v1::CredentialBridgeUpgrade {
         request_id: "s".into(),
@@ -454,4 +459,42 @@ fn a_frame_of_the_other_kind_for_a_live_id_is_dropped_and_the_id_stays_served() 
     );
     assert_eq!(router.guest(&body("a"), now), GuestRoute::Forward(1));
     assert_eq!(router.host(1, &response_end("a"), now), HostRoute::Forward);
+}
+
+/// A live request's own frame outside the pin ends that request: answered
+/// once, cancelled on its upstream, and the upstream's late answer dropped
+/// without ending it (#4909, cw-security).
+#[test]
+fn a_live_ids_frame_outside_the_pin_answers_once_and_cancels_its_upstream() {
+    let now = Instant::now();
+    let mut router = FrontDoorRouter::new(vec![CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR.into()]);
+    router.guest(&ready(), now);
+    router.set_current(Some(OLD));
+    router.guest(&request("a"), now);
+    router.guest(&request("b"), now);
+    let GuestRoute::Cancel {
+        answer: answered,
+        upstream,
+        cancel: cancelled,
+        ..
+    } = router.guest(&body("a"), now)
+    else {
+        panic!("not cancelled");
+    };
+    assert_eq!((answered, upstream), (failure("a"), OLD));
+    assert_eq!(*cancelled, super::cancel("a".into(), Kind::Http));
+    // Its upstream's late answer is dropped, and the upstream serves on.
+    assert_eq!(
+        router.host(OLD, &response_end("a"), now),
+        HostRoute::Drop(Refusal::FinishedId)
+    );
+    assert_eq!(
+        router.host(OLD, &response_end("b"), now),
+        HostRoute::Forward
+    );
+    // The id is not answered or forwarded again.
+    assert_eq!(
+        router.guest(&body("a"), now),
+        GuestRoute::Drop(Refusal::FinishedId)
+    );
 }

@@ -1919,6 +1919,10 @@ routes, across epochs as well. It does so as follows:
   pin. A frame for an id finished within the last 60 seconds is dropped and
   counted, since it races that id's answer. That memory is capped by count
   as well as time, and an id it forgot is treated as never opened.
+- **A live request's own frame outside the pin ends that request:** it is
+  answered once, its upstream is sent a `Cancel` (a socket's reset), and the
+  upstream's later frames for it are dropped for 60 seconds without ending
+  that upstream; one later still ends it, failing closed.
 - **Responses stay with their upstream.** A response for an id its upstream
   doesn't own is dropped, and that upstream is ended: its open ids get the
   error response, and the session continues on the others.

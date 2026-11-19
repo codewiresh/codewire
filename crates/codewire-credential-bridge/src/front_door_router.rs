@@ -94,6 +94,15 @@ pub enum GuestRoute<U> {
     Answer(v1::CredentialBridgeHostMessage, Refusal),
     /// Drop it unanswered.
     Drop(Refusal),
+    /// The router has ended this live id: answer the front door with
+    /// `answer`, and send `upstream` the `cancel` (a request's Cancel, a
+    /// socket's reset). Its later frames from that upstream are dropped.
+    Cancel {
+        answer: v1::CredentialBridgeHostMessage,
+        upstream: U,
+        cancel: Box<v1::CredentialBridgeGuestMessage>,
+        refusal: Refusal,
+    },
     /// The envelope cannot be read safely: end the session.
     End,
 }
@@ -103,6 +112,9 @@ pub enum GuestRoute<U> {
 pub enum HostRoute {
     /// Send the message, unchanged, to the front door.
     Forward,
+    /// Drop it: a late frame for an id the router cancelled on this
+    /// upstream, which has already been answered.
+    Drop(Refusal),
     /// The upstream broke the protocol: end it, and send the front door
     /// these answers for the ids it held.
     EndUpstream(Vec<v1::CredentialBridgeHostMessage>, Refusal),
@@ -170,6 +182,8 @@ pub struct FrontDoorRouter<U> {
     ready_seen: bool,
     live: HashMap<String, Live<U>>,
     finished: Finished,
+    /// Ids the router cancelled, with the upstream still finishing them.
+    cancelled: HashMap<String, U>,
 }
 
 impl<U: Copy + Eq + Hash> FrontDoorRouter<U> {
@@ -181,6 +195,7 @@ impl<U: Copy + Eq + Hash> FrontDoorRouter<U> {
             ready_seen: false,
             live: HashMap::new(),
             finished: Finished::default(),
+            cancelled: HashMap::new(),
         }
     }
 
@@ -311,8 +326,22 @@ impl<U: Copy + Eq + Hash> FrontDoorRouter<U> {
             if live.kind != kind {
                 return GuestRoute::Drop(Refusal::UnknownId);
             }
+            // A live id's own frame outside the pin ends its request: it is
+            // answered once, finished, and cancelled on its upstream, whose
+            // later frames for it are dropped (#4909, cw-security).
             if outside_pin {
-                return GuestRoute::Answer(answer(id, kind), Refusal::OutsidePin);
+                let upstream = live.upstream;
+                let cancel = Box::new(cancel(id.clone(), kind));
+                self.finish(id.clone(), now);
+                self.cancelled
+                    .retain(|cancelled, _| self.finished.ids.contains(cancelled));
+                self.cancelled.insert(id.clone(), upstream);
+                return GuestRoute::Cancel {
+                    answer: answer(id, kind),
+                    upstream,
+                    cancel,
+                    refusal: Refusal::OutsidePin,
+                };
             }
             let upstream = live.upstream;
             if closes {
@@ -334,6 +363,15 @@ impl<U: Copy + Eq + Hash> FrontDoorRouter<U> {
 
     /// Route one host message from `upstream`.
     pub fn host(&mut self, upstream: U, message: &[u8], now: Instant) -> HostRoute {
+        if let Some((_, Some(id))) = envelope(message)
+            && self.cancelled.get(&id) == Some(&upstream)
+        {
+            // Remembered only while the id is still among the finished.
+            if self.finished.contains(&id, now) {
+                return HostRoute::Drop(Refusal::FinishedId);
+            }
+            self.cancelled.remove(&id);
+        }
         let owned = envelope(message).and_then(|(field, id)| {
             let id = id?;
             let live = self.live.get(&id)?;
@@ -423,6 +461,22 @@ fn host_kind(field: u32) -> Option<Kind> {
             Some(Kind::Socket)
         }
         _ => None,
+    }
+}
+
+/// What tells an upstream the router ended `id`: a request's Cancel, a
+/// socket's reset.
+fn cancel(id: String, kind: Kind) -> v1::CredentialBridgeGuestMessage {
+    use v1::credential_bridge_guest_message::Payload;
+    let payload = match kind {
+        Kind::Http => Payload::Cancel(v1::CredentialBridgeCancel { request_id: id }),
+        Kind::Socket => Payload::StreamClose(v1::CredentialBridgeStreamClose {
+            request_id: id,
+            kind: v1::CredentialBridgeStreamCloseKind::Reset as i32,
+        }),
+    };
+    v1::CredentialBridgeGuestMessage {
+        payload: Some(payload),
     }
 }
 
