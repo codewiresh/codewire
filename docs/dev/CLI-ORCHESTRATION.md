@@ -107,6 +107,62 @@ sessions requiring those unavailable values; launch a new session with fresh
 overrides. Environment-owned application projections continue to use their
 existing source and delivery contracts.
 
+### Stopping a session, and stopping its environment
+
+These rules hold in every placement: a trusted host, a local VM and a cloud
+Sandbox (#5471, #5472).
+
+- **A session owns its Unix session.** The daemon starts each session's
+  process as the leader of a new Unix session (`setsid`), as a trusted host's
+  daemon always has. The session's processes are every process whose session
+  ID is that leader's: its process group, and every group a shell's job
+  control makes inside it, so `pnpm dev &` in an interactive shell is one of
+  them. A process that starts its own Unix session on purpose (`setsid`, a
+  daemonizing server) or runs elsewhere (a `docker run -d` container) is not
+  the session's, and a stop leaves it running. A per-session cgroup is not
+  used: a Sandbox's daemon has no delegated cgroup to divide.
+- **A stop signals only that session's processes.** The daemon signals the
+  leader it spawned and still holds unreaped, and the members of its session
+  ID through pidfds. It never signals by name, never process group or session
+  0 or 1, and never its own group or session.
+- **A stop ends them within a bound.** `cw stop ENV --session NAME` sends TERM
+  to the session's processes and KILL 2 s later in a guest (250 ms on a
+  trusted host, `host_process::TERM_GRACE`), and settles within 4 s of the
+  stop, inside the 5 s a stop is given. The session then ends `Stopped`. If a
+  process has not gone by the bound, it still ends `Stopped`, with cleanup
+  unknown, and says which. A session never stays `Stopping`.
+- **A lost reply names a real command.** When a stop's reply is lost, the
+  answer is "the session's outcome is unknown; run `cw ls ENV` to see how it
+  ended, then try again". There is no "refresh" step.
+- **A requested environment stop stops its sessions.** On the SIGTERM an
+  environment's stop sends it, the daemon stops every live session as above
+  and records it `Stopped`, "stopped with the environment", before it exits.
+- **A machine that stopped without warning ends them too.** The daemon
+  records each session's launch under the kernel's boot ID
+  (`/proc/sys/kernel/random/boot_id`). On start, a session recorded live
+  under another boot ID ends `Interrupted`, "ended when the environment's
+  machine stopped", with cleanup confirmed: a new boot proves none of its
+  processes remain. A boot ID that can't be read or isn't a UUID, now or in
+  the record, counts as the current boot. A session recorded under the
+  current boot ID, when only the daemon restarted, still ends `Interrupted`,
+  with cleanup unknown where
+  the daemon runs a trusted host or a platform-managed tree, since its
+  processes may have outlived the daemon. Where cleanup is unknown, the
+  message says the old processes may still be running, and that
+  `cw stop ENV` then `cw start ENV` ends them.
+- **A restart keeps the name.** A session that ended, however it ended and
+  with cleanup confirmed, restarts under its name with
+  `cw restart ENV --session NAME`. Confirmed cleanup only makes a session
+  restartable: nothing restarts it on its own, including in a fork or a
+  snapshot's restore, which boots under a new boot ID. `cw run --name NAME` never replaces a
+  session. When NAME has ended, an interactive `cw` asks "restart it?",
+  default yes, and restarts it. A non-interactive `cw` prints the exact
+  `cw restart` command and exits non-zero. A session still running or
+  stopping is never replaced (owner, 2026-11-19: "cw run should probably ask
+  if you want a restart"; #5471).
+- **No message says "fenced".** A restart or stop `cw` refuses says why, and
+  what to run instead.
+
 ## Orchestrator and workers on a host
 
 ```sh

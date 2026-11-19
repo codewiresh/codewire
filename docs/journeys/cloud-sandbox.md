@@ -399,26 +399,43 @@ server it belongs to and says what it can do, instead of asking for a URL.
     and replacing a failed Pod, as one `cw --local start` recovers a local VM
     in `error` (#4953); not walked yet;
   - a start the cluster has no room for, which ends with a "no capacity"
-    message (not walked yet).
+    message (not walked yet);
+  - a named session running at the stop, in a Sandbox with and without a
+    secret project, restarted by its name after the start (#5471);
+  - `cw run --name` with that name after the start, at a terminal and in a
+    script (#5471).
 - **Driving it:**
 
   ```sh
   cw exec --in walk sh -c 'echo marker-1 > /workspace/marker'
+  cw --cloud run --in walk --name play --detach -- sleep 86400
   cw --cloud stop walk
   cw --cloud ls
   cw --cloud start walk
   cw --cloud ls
+  cw --cloud ls walk
   cw exec --in walk cat /workspace/marker
+  cw --cloud restart walk --session play
+  cw --cloud run --in walk --name play --detach -- sleep 86400 </dev/null
   ```
 
 - **Proof:**
   - after the stop, `cw ls` shows `walk` as `stopped`;
   - after the start, `cw ls` shows it as `running`;
-  - the last command prints the marker written before the stop. A file that
-    survives is the proof; "running" alone is not.
+  - the marker command prints the marker written before the stop. A file that
+    survives is the proof; "running" alone is not;
+  - `cw ls walk` shows `play` as `Stopped`, "stopped with the environment",
+    with and without a secret project, and never "cleanup is unknown";
+  - `cw restart walk --session play` brings `play` back as `Running` under
+    the same name;
+  - the last `cw run --name play`, with no terminal, refuses because `play` is
+    running and names it; once `play` has ended, it prints the exact
+    `cw restart` command and exits non-zero. At a terminal it asks "restart
+    it?" instead. No message says "fenced".
 - **Gotchas:**
   - Only files under `/workspace` and `/home/codewire` survive a stop.
-    Processes and sessions do not.
+    Processes do not; a session's record and name do, and it can be
+    restarted.
   - `cw start` returns once the sandbox is usable, so the next command needs
     no wait.
 - **Observed:**
@@ -427,6 +444,56 @@ server it belongs to and says what it can do, instead of asking for a URL.
     start took 8 s and `cw ls` showed `running`; the marker written before
     the stop was read back unchanged. Evidence: the pull
     request that added this section.
+  - Named sessions, before the fix, Dev, 2026-11-19 (codewire-79), the Dev
+    smoke identity with `cw` v0.4.24 (#5471). Without a secret project,
+    `play` came back `Interrupted`, "the environment daemon restarted", and
+    `cw restart` worked. With a secret project, it came back with cleanup
+    unknown, and `cw restart` answered "Session cleanup is unknown; restart is
+    fenced". The kernel boot ID inside the Sandbox changed across the stop and
+    start.
+  - Named sessions with the fix: not yet observed.
+
+## `sandbox-session-stop`: stopping a session ends every process it started
+
+Issue: #5472.
+
+- **Entry points:** `cw stop SANDBOX --session NAME`.
+- **States to exercise:**
+  - a session whose command runs directly (`sleep`);
+  - a session whose command leaves a child running (`sh -c 'sleep 86400; true'`),
+    as `pnpm dev` leaves `node`;
+  - a session that ignores TERM (`sh -c 'trap "" TERM; sleep 86400'`);
+  - an interactive shell with a background job: `cw shell walk --name sh`,
+    then `sleep 86400 &` in it, then the stop from another terminal;
+  - another session in the same Sandbox, still `Running` after each stop.
+- **Driving it:**
+
+  ```sh
+  cw --cloud run --in walk --name forks --detach -- sh -c 'sleep 86400; true'
+  cw --cloud stop walk --session forks
+  cw --cloud ls walk
+  cw exec --in walk ps -eo pid,ppid,pgid,args
+  ```
+
+- **Proof:**
+  - each stop returns within 5 s, and `cw ls walk` shows the session
+    `Stopped`, never `Stopping`;
+  - `ps` shows no `sleep 86400` left from the stopped session, the background
+    job's included, and the other session's process and the daemon are
+    untouched;
+  - no answer says "refresh sessions".
+- **Gotchas:**
+  - A process the session moved out of its group on purpose (`setsid`, a
+    daemonizing server, a `docker run -d` container) is not the session's,
+    and keeps running after the stop.
+- **Observed:**
+  - Before the fix, Dev, 2026-11-19 (codewire-79), the Dev smoke identity with
+    `cw` v0.4.24 (#5472): the direct `sleep` stopped in 2 s. The forking and
+    TERM-ignoring sessions answered "Environment session outcome is unknown;
+    refresh sessions before trying again" after 7 s and stayed `Stopping`
+    for over 3 minutes. Their `sleep` was re-parented to PID 1 and still
+    running.
+  - With the fix: not yet observed.
 
 ## `sandbox-start-list`: a starting sandbox's page shows one list of steps
 

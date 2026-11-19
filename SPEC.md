@@ -108,7 +108,10 @@ managed agent conversation. The environment owns it, so it outlives the client
 that launched it; session names are unique within an environment, and output is
 retained across disconnects and across a stop and start
 ([docs/dev/CLI-ORCHESTRATION.md](docs/dev/CLI-ORCHESTRATION.md),
-[docs/dev/TERMINAL-RETENTION.md](docs/dev/TERMINAL-RETENTION.md)).
+[docs/dev/TERMINAL-RETENTION.md](docs/dev/TERMINAL-RETENTION.md)). Stopping a
+session ends it and every process it started, within a stated bound. Stopping
+the environment stops its sessions; after a start, each one is restarted under
+its own name with `cw restart ENV --session NAME`.
 
 A **managed agent** (`cw run --agent codex|claude`, and `--agent noel` on a
 trusted Linux host) is a conversation Codewire drives through the agent's own
