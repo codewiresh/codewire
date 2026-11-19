@@ -35,7 +35,11 @@ version="$(cd "$root" && cargo metadata --locked --no-deps --format-version 1 |
   fail "codewire and codewire-proto must share one MAJOR.MINOR.PATCH version, not: $version"
 
 target="${CODEWIRE_SDK_PACKAGE_TARGET_DIR:-$work/target}"
-(cd "$root" && cargo package --locked -p codewire-proto -p codewire --target-dir "$target")
+# codewire-proto's protos are staged beside it in a copy of HEAD's tree, as
+# the published crate carries them (stage-sdk-rust-source.sh).
+mkdir "$work/source"
+"$root/scripts/ci/release/stage-sdk-rust-source.sh" "$work/source"
+(cd "$work/source" && cargo package --locked -p codewire-proto -p codewire --target-dir "$target")
 
 for crate in codewire-proto codewire; do
   file="$target/package/$crate-$version.crate"

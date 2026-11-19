@@ -193,12 +193,16 @@ jobs:
 
       # codewire depends on codewire-proto at the same version, so one
       # command publishes both, in that order, each built from its packaged
-      # sources first.
+      # sources first. They are published from the staged copy the package
+      # check builds, where codewire-proto's protos sit beside it.
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.token.outputs.token }}
           VERSION: ${{ inputs.version }}
         run: |
+          mkdir "$RUNNER_TEMP/sdk-source"
+          scripts/ci/release/stage-sdk-rust-source.sh "$RUNNER_TEMP/sdk-source"
+          cd "$RUNNER_TEMP/sdk-source"
           cargo publish --locked -p codewire-proto -p codewire
           echo "codewire-proto and codewire $VERSION are on crates.io." >>"$GITHUB_STEP_SUMMARY"
 

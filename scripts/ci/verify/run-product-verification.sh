@@ -780,6 +780,8 @@ run_repo_rules() {
   python3 scripts/checks/repo_checks.py license-map
   python3 scripts/checks/repo_checks.py egress-manifests --self-test
   python3 scripts/checks/repo_checks.py egress-manifests
+  python3 scripts/checks/repo_checks.py tracked-symlinks --self-test
+  python3 scripts/checks/repo_checks.py tracked-symlinks
   python3 scripts/checks/repo_checks.py kind-suite-rows --self-test
   python3 scripts/checks/repo_checks.py kind-suite-rows
   python3 scripts/checks/repo_checks.py journey-paths --self-test

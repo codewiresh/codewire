@@ -116,6 +116,10 @@ def main() -> None:
         fail("the crates-io job must read no secret")
     if "cargo publish --locked -p codewire-proto -p codewire" not in crates_steps:
         fail("the crates-io job must publish codewire-proto, then codewire, from the lock")
+    publish = next(step for step in crates["steps"] if step.get("name") == "Publish")["run"]
+    staged = 'scripts/ci/release/stage-sdk-rust-source.sh "$RUNNER_TEMP/sdk-source"'
+    if staged not in publish or publish.index(staged) > publish.index("cargo publish"):
+        fail("the crates-io job must publish from the staged sources, where codewire-proto's protos are")
 
     package = json.loads((ROOT / "libs/sdk-ts/package.json").read_text())
     if package["repository"]["url"] != "git+https://github.com/codewiresh/codewire.git":

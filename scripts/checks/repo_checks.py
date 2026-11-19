@@ -7,6 +7,7 @@ from repo_policy.shared import ROOT, argparse
 from repo_policy.design_tokens import check_design_tokens
 from repo_policy.edge_routing import check_connect_edge_routing
 from repo_policy.egress_manifests import check_egress_manifests
+from repo_policy.tracked_symlinks import check_tracked_symlinks
 from repo_policy.hosted_overlay_contract import check_hosted_overlay_contract
 from repo_policy.idp_security import check_idp_signing_kek_isolation
 from repo_policy.journey_paths import check_journey_paths
@@ -116,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
     egress_manifests_parser = subparsers.add_parser("egress-manifests")
     egress_manifests_parser.add_argument("--self-test", action="store_true")
     egress_manifests_parser.set_defaults(func=check_egress_manifests)
+
+    tracked_symlinks_parser = subparsers.add_parser("tracked-symlinks")
+    tracked_symlinks_parser.add_argument("--self-test", action="store_true")
+    tracked_symlinks_parser.set_defaults(func=check_tracked_symlinks)
     kind_suite_rows_parser = subparsers.add_parser("kind-suite-rows")
     kind_suite_rows_parser.add_argument("--self-test", action="store_true")
     kind_suite_rows_parser.set_defaults(func=check_kind_suite_rows)

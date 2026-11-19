@@ -60,11 +60,19 @@ fn main() {
     // not know, `debug_redact` among them, and the generated `Debug` would
     // then print the fields it marks.
     //
-    // `proto` here is a link to the repository's `proto/`; `cargo package`
-    // copies the files it reaches, so a crate from crates.io compiles the same
-    // sources from its own copy (#3511).
-    let mut compiler =
-        protox::Compiler::new([manifest_dir.join("proto")]).expect("open the proto root");
+    // In the workspace the protos are the repository's `proto/`. A crate from
+    // crates.io carries its own copy under `proto/` beside this file, which
+    // packaging stages there (`stage-sdk-rust-source.sh`, #3511), so it
+    // compiles the same sources. The repository keeps no link
+    // here: Flux's checkout of an older commit and the cw runtime source
+    // capsule both broke on one.
+    let packaged = manifest_dir.join("proto");
+    let proto_root = if packaged.is_dir() {
+        packaged
+    } else {
+        manifest_dir.join("../../proto")
+    };
+    let mut compiler = protox::Compiler::new([proto_root]).expect("open the proto root");
     compiler.include_source_info(true).include_imports(true);
     compiler
         .open_files(protos)
