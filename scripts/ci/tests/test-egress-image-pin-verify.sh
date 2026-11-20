@@ -29,6 +29,15 @@ git -C "$repo" config commit.gpgsign false
 mkdir -p "$repo/scripts/ci/images" "$repo/scripts/ci/trust" "$repo/deployments/k8s/egress"
 install -m 755 "$ROOT/scripts/ci/images/egress-image-pin.py" "$repo/scripts/ci/images/"
 install -m 644 "$ROOT/deployments/k8s/egress/kustomization.yaml" "$repo/deployments/k8s/egress/"
+# The fixture starts from the component with no pin, whatever main pins now
+# (#5550 pinned main's): its images block, always last, is cut off.
+python3 - "$repo/deployments/k8s/egress/kustomization.yaml" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+path.write_text(path.read_text().split("\nimages:\n", 1)[0].rstrip("\n") + "\n")
+PY
+! grep -q '^images:' "$repo/deployments/k8s/egress/kustomization.yaml" || fail 'the fixture component still pins an image'
 printf 'synthetic public key\n' >"$repo/scripts/ci/trust/codewire-runtime-signing.pub"
 cat >"$repo/scripts/ci/images/verify-runtime-image-signatures.sh" <<'MOCK'
 #!/usr/bin/env bash
