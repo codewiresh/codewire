@@ -93,6 +93,16 @@ async function review(page: Page) {
   return dialog;
 }
 
+// A press waits for its own answer. The route reads `state` only when the
+// request arrives, and the status may still show the previous press's text, so
+// a change made too early answers this press instead of the next one.
+async function checkStatus(dialog: Locator, state: { observations: number }) {
+  const answered = state.observations;
+  await dialog.getByRole("button", { name: "Check resize status" }).click();
+  await expect.poll(() => state.observations).toBeGreaterThan(answered);
+  await expect(dialog.locator("[data-resize-content]")).toHaveAttribute("aria-busy", "false");
+}
+
 test("reviews consequences and resolves only a matching operation observation", { tag: "@mobile" }, async ({ page }) => {
   const state = await transport(page);
   const opened = await open(page);
@@ -127,17 +137,17 @@ test("reviews consequences and resolves only a matching operation observation", 
   await expectReadOnly(dialog);
   await expect(dialog.getByRole("button", { name: "Done", exact: true })).toBeFocused();
   state.observationUnavailable = true;
-  await dialog.getByRole("button", { name: "Check resize status" }).click();
+  await checkStatus(dialog, state);
   await expect(dialog.locator("[data-resize-status]")).toContainText("stays locked");
   await expectReadOnly(dialog);
   state.observationUnavailable = false;
   state.foreign = true;
   state.operationState = "completed";
-  await dialog.getByRole("button", { name: "Check resize status" }).click();
+  await checkStatus(dialog, state);
   await expect(dialog.locator("[data-resize-status]")).toContainText("stays locked");
   expect(await page.evaluate((key) => sessionStorage.getItem(key), storageKey)).not.toBeNull();
   state.foreign = false;
-  await dialog.getByRole("button", { name: "Check resize status" }).click();
+  await checkStatus(dialog, state);
   await expect(dialog.locator("[data-resize-status]")).toContainText("Resize completed");
   expect(await page.evaluate((key) => sessionStorage.getItem(key), storageKey)).toBeNull();
   await expect(page.locator('[data-sandbox-action="stop"]')).toBeEnabled();
