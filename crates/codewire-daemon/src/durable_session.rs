@@ -773,7 +773,12 @@ impl SessionEngine {
             }
         }
         // A guest's daemon shuts down as its environment stops: it ends its
-        // ordinary sessions and records them stopped with it (#5471).
+        // ordinary sessions and records them stopped with it (#5471). This
+        // assumes nothing restarts a guest's daemon alone while its
+        // environment runs: its workspace container has no liveness probe, a
+        // runtime update keeps the daemon's processes, and the Pod's start
+        // script restarts the daemon only after it exits on its own. Whoever
+        // adds such a restart must keep it from reaching this stop.
         #[cfg(unix)]
         if self.inner.config.host.is_none() && self.owns_session_processes() {
             let ids = lock(&self.inner.active).keys().cloned().collect::<Vec<_>>();

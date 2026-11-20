@@ -197,7 +197,9 @@ pub(super) fn require_clean_previous(
     if let Some(receipt) = &receipt
         && !receipt.clean()
     {
-        anyhow::bail!("previous guest peer cleanup is unknown; restart is fenced");
+        anyhow::bail!(
+            "the previous agent's cleanup is unknown; it is not restarted while its processes may still be running. Stopping and starting the environment ends them, and then it can be restarted"
+        );
     }
     Ok(receipt)
 }

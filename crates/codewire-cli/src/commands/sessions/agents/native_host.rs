@@ -321,13 +321,15 @@ async fn wait_clean_driver(
         check_launch_generation(&view, expected_launch_generation)?;
         if !peer.cleanup_unknown && peer.finished_at.is_some() && session_is_terminal(&view) {
             if view.cleanup_unknown {
-                anyhow::bail!("durable driver cleanup is unknown; restart is fenced");
+                anyhow::bail!(
+                    "the agent driver's cleanup is unknown; it is not restarted while its driver may still be running"
+                );
             }
             return Ok(view);
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "managed shutdown is not confirmed; guardian custody is retained and restart is fenced"
+                "the agent's shutdown is not confirmed, so its custody is kept; it is not restarted while its driver may still be running"
             );
         }
         tokio::time::sleep(QUERY_INTERVAL).await;

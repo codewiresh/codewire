@@ -515,7 +515,9 @@ impl Driver {
         };
         let reason = match status {
             Some(status) => format!("{reason} (native agent {status})"),
-            None => format!("{reason}; native peer cleanup is unknown; restart is fenced"),
+            None => format!(
+                "{reason}; the agent's cleanup is unknown; it is not restarted while its processes may still be running. Stopping and starting the environment ends them, and then it can be restarted"
+            ),
         };
         self.state.last_error = (!cleanup_confirmed).then(|| reason.clone());
         self.state.active_message_id = None;

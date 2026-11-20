@@ -2458,7 +2458,7 @@ async fn run_agent_driver_inner(args: AgentDriverArgs, platform: bool) -> anyhow
         // the control plane proved absent; `adopt` retired its pointer.
         anyhow::ensure!(
             clean.is_some() || (platform && platform_control::resumed(&environment, &driver_id)?),
-            "previous guest peer custody is missing; restart is fenced"
+            "the previous agent's custody record is missing; it is not restarted while its processes may still be running. Stopping and starting the environment ends them, and then it can be restarted"
         );
     }
     let state = DriverState {
@@ -3341,7 +3341,7 @@ impl Driver {
                 let error = if peer.stop().await.is_some() {
                     error
                 } else {
-                    error.context("native startup cleanup is unknown; restart is fenced")
+                    error.context("the agent's startup cleanup is unknown; it is not restarted while its processes may still be running. Stopping and starting the environment ends them, and then it can be restarted")
                 };
                 return self.startup_failed(error).await;
             }
@@ -4688,7 +4688,9 @@ impl Driver {
         let cleanup_confirmed = status.is_some();
         let reason = match status {
             Some(status) => format!("{reason} (native agent {status})"),
-            None => format!("{reason}; native peer cleanup is unknown; restart is fenced"),
+            None => format!(
+                "{reason}; the agent's cleanup is unknown; it is not restarted while its processes may still be running. Stopping and starting the environment ends them, and then it can be restarted"
+            ),
         };
         if self.config.agent == AgentKind::Noel {
             self.set_aside_unknown(&reason).await;

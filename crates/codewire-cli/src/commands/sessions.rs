@@ -1203,7 +1203,10 @@ pub(crate) async fn handle_restart_command(
         "request and generation flags require --member or a managed platform session"
     );
     if session.cleanup_unknown {
-        anyhow::bail!("session cleanup is unknown; restart is fenced");
+        anyhow::bail!(
+            "{}",
+            cleanup_unknown_refusal(&SessionPlace::of(&target), &session_reference(&session))
+        );
     }
     if matches!(target, EnvironmentSessionTarget::NativeLocal { .. }) && managed_session(&session) {
         let restarted = agents::restart_native_managed(&target, &session).await?;
@@ -1789,10 +1792,16 @@ async fn launch_run(
         Ok(sessions) => sessions,
         Err(error) => return Err(stopped_environment_sessions(&target).await.unwrap_or(error)),
     };
+    let mut restart = None;
     let name = match args.name.take() {
         Some(name) => {
             if let Some(existing) = sessions.iter().find(|session| session.name == name) {
-                return Err(duplicate_session_name(&place, existing));
+                // An ended session is offered for restart at a terminal; a
+                // script is told the command (owner, 2026-11-19, #5471).
+                if !(can_ask && offer_restart(&place, existing, &command)?) {
+                    return Err(duplicate_session_name(&place, existing));
+                }
+                restart = Some(existing.session_id.clone());
             }
             name
         }
@@ -1810,24 +1819,32 @@ async fn launch_run(
     // A restart can begin after the list above (#4342). The launch is made
     // again only after a restart: when the gate refused it while starting, or
     // the daemon answered that it was still starting. Neither makes a session.
-    let session = target
-        .through_restart(|| {
-            target.launch(
-                command.clone(),
-                working_dir.clone(),
-                env_overrides.clone(),
-                pty,
-                name.clone(),
-                parent_session_id.clone(),
-                0,
-            )
-        })
-        .await?;
+    let session = match &restart {
+        Some(session_id) => target.restart(session_id).await?,
+        None => {
+            target
+                .through_restart(|| {
+                    target.launch(
+                        command.clone(),
+                        working_dir.clone(),
+                        env_overrides.clone(),
+                        pty,
+                        name.clone(),
+                        parent_session_id.clone(),
+                        0,
+                    )
+                })
+                .await?
+        }
+    };
     if matches!(args.output, OutputFormat::Json) {
         println!("{}", serde_json::to_string_pretty(&session)?);
         return Ok(());
     }
-    let started = place.started(&session, agent);
+    let started = match restart {
+        Some(_) => place.restarted(&session),
+        None => place.started(&session, agent),
+    };
     if args.detach {
         let style = caps.stdout_style();
         println!("{} {started}", style.status(crate::output::Status::Done));
@@ -1954,6 +1971,16 @@ impl SessionPlace {
         )
     }
 
+    /// `Restarted session app/coding · local VM`.
+    fn restarted(&self, session: &EnvironmentSessionView) -> String {
+        format!(
+            "Restarted session {}/{} · {}",
+            self.environment,
+            session_reference(session),
+            self.location
+        )
+    }
+
     /// The key named here is the one [`AttachNavigationDecoder`] detaches
     /// on: a lowercase `d`, like the other prefix keys (#3185).
     fn detach_hint(&self, session: &EnvironmentSessionView, style: crate::output::Style) -> String {
@@ -1976,6 +2003,9 @@ fn session_reference(session: &EnvironmentSessionView) -> String {
     })
 }
 
+/// The refusal of a `--name` an existing session holds. It starts with its
+/// own words, not the environment's name, which the error report would
+/// capitalize ("U5471a", #5471).
 fn duplicate_session_name(
     place: &SessionPlace,
     existing: &EnvironmentSessionView,
@@ -1983,17 +2013,68 @@ fn duplicate_session_name(
     let name = &existing.name;
     let environment = &place.environment;
     let placement = place.placement;
-    if session_is_terminal(existing) {
+    let state = existing.state.to_lowercase();
+    if existing.cleanup_unknown {
+        anyhow::anyhow!("{}", cleanup_unknown_refusal(place, name))
+    } else if session_is_terminal(existing) {
         anyhow::anyhow!(
-            "{environment} already has a session named {name} ({}); `--name` never reuses one: restart it with `cw {placement}restart {environment} --session {name}`, or choose another --name",
-            existing.state.to_lowercase()
+            "a session named {name} already exists in {environment} ({state}); `--name` never reuses one: restart it with `cw {placement}restart {environment} --session {name}`, or choose another --name"
         )
     } else {
         anyhow::anyhow!(
-            "{environment} already has a session named {name} ({}); `--name` never reuses one: attach with `cw {placement}attach {environment} --session {name}`, or choose another --name",
-            existing.state.to_lowercase()
+            "a session named {name} already exists in {environment} ({state}); `--name` never reuses one: attach with `cw {placement}attach {environment} --session {name}`, or choose another --name"
         )
     }
+}
+
+/// Why a session whose cleanup is unknown cannot be restarted, and what ends
+/// its processes so it can be (#5471).
+fn cleanup_unknown_refusal(place: &SessionPlace, name: &str) -> String {
+    let environment = &place.environment;
+    let placement = place.placement;
+    if place.location == "host" {
+        format!(
+            "session {name}'s processes may still be running on this host, so it is not restarted; end them, then run `cw restart {environment} --session {name}`"
+        )
+    } else {
+        format!(
+            "session {name}'s processes may still be running from before {environment}'s daemon restarted, so it is not restarted; `cw {placement}stop {environment}` then `cw {placement}start {environment}` ends them, and then `cw {placement}restart {environment} --session {name}` starts it again"
+        )
+    }
+}
+
+/// Asks whether to restart the session that already holds a `--name`, when
+/// it has ended and can be: the owner's "cw run should probably ask if you
+/// want a restart" (2026-11-19, #5471). Default yes. A running or stopping
+/// session, a managed conversation, or one whose cleanup is unknown is never
+/// offered.
+fn offer_restart(
+    place: &SessionPlace,
+    existing: &EnvironmentSessionView,
+    command: &[String],
+) -> anyhow::Result<bool> {
+    use std::io::{BufRead as _, Write as _};
+    if !session_is_terminal(existing) || existing.cleanup_unknown || managed_session(existing) {
+        return Ok(false);
+    }
+    let own = crate::commands::progress::terminal_text(&existing.command.join(" "));
+    let differs = if existing.command.as_slice() == command {
+        String::new()
+    } else {
+        " It runs its own command, not the one given here.".to_owned()
+    };
+    let mut stderr = std::io::stderr().lock();
+    write!(
+        stderr,
+        "A session named {} already exists in {} ({}), running `{own}`.{differs} Restart it? [Y/n]: ",
+        session_reference(existing),
+        place.environment,
+        existing.state.to_lowercase(),
+    )?;
+    stderr.flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "" | "y" | "Y" | "yes" | "YES"))
 }
 
 /// A session name from the command's file name: `npm` for `npm test`,
@@ -3857,11 +3938,22 @@ mod run_output_tests {
         let place = SessionPlace::of(&local_vm("app"));
         assert_eq!(
             duplicate_session_name(&place, &session("coding", "Running")).to_string(),
-            "app already has a session named coding (running); `--name` never reuses one: attach with `cw --local attach app --session coding`, or choose another --name"
+            "a session named coding already exists in app (running); `--name` never reuses one: attach with `cw --local attach app --session coding`, or choose another --name"
         );
         assert_eq!(
             duplicate_session_name(&place, &session("coding", "Exited")).to_string(),
-            "app already has a session named coding (exited); `--name` never reuses one: restart it with `cw --local restart app --session coding`, or choose another --name"
+            "a session named coding already exists in app (exited); `--name` never reuses one: restart it with `cw --local restart app --session coding`, or choose another --name"
+        );
+        let mut unknown = session("coding", "Interrupted");
+        unknown.cleanup_unknown = true;
+        assert_eq!(
+            duplicate_session_name(&place, &unknown).to_string(),
+            "session coding's processes may still be running from before app's daemon restarted, so it is not restarted; `cw --local stop app` then `cw --local start app` ends them, and then `cw --local restart app --session coding` starts it again"
+        );
+        assert!(
+            !duplicate_session_name(&place, &unknown)
+                .to_string()
+                .contains("fenced")
         );
     }
 }

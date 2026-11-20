@@ -29,7 +29,10 @@ cw run --in app --name dev --detach -- python3 -m http.server 8080
 
 `--name` names the session; without it, the session is named after the
 command (`python3`, then `python3-2`). A name is never reused in an
-environment, so a script can rely on it.
+environment, so a script can rely on it. When `--name` names a session that
+has ended, `cw run` at a terminal asks whether to restart it, under its own
+command; in a script, or with `--yes`, it prints the `cw restart` command
+and exits non-zero. A session that is still running is never replaced.
 
 ## Type into a session without attaching
 

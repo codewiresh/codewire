@@ -405,7 +405,7 @@ fn current_peer(
 ) -> anyhow::Result<(DriverState, guest_peer::PeerReceipt)> {
     let state = driver_state(driver)?.context("guest driver has not established peer custody")?;
     let peer = guest_peer::current_receipt(&driver.dir, environment.id(), &driver.id, session_id)?
-        .context("guest peer custody is missing; stop/restart is fenced")?;
+        .context("the agent's custody record is missing; it is not stopped or restarted while its processes may still be running. Stopping and starting the environment ends them")?;
     if state.started_at != peer.identity.driver_started_at {
         anyhow::bail!("guest peer custody belongs to another driver instance");
     }
@@ -532,7 +532,7 @@ pub(super) fn complete_shutdown(
         None
     } else {
         Some(sanitize_error(error.unwrap_or(
-            "guest peer cleanup is unknown; restart is fenced",
+            "the agent's cleanup is unknown; it is not restarted while its processes may still be running. Stopping and starting the environment ends them, and then it can be restarted",
         )))
     };
     write_private_json(&path, &record)
