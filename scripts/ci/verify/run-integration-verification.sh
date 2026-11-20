@@ -1367,6 +1367,13 @@ database_lane_orchestration_hosts() {
       'api::terminal::ticket_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  # #3586: a terminal or SSH-proxy socket ends when its credential is lost.
+  counted_suite "socket revocation matrix" socket-revocation \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::socket_fence::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "preset projection matrix" preset-projection \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

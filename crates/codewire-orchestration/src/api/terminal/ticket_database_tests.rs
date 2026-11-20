@@ -63,6 +63,7 @@ impl SignedIn {
             ticket,
         )
         .await
+        .map(|(user, _)| user)
     }
 
     async fn remove(self) {

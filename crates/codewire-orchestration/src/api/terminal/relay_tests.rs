@@ -639,3 +639,40 @@ async fn prelaunch_queue_overflow_retains_start_and_drains_accepted_session() {
     daemon.output.send(Ok(None)).await.unwrap();
     assert!(relay.await.unwrap());
 }
+
+/// #3586: a revoked credential ends a one-off terminal through the browser
+/// close's own path: the browser closes with 1008 "access revoked", the
+/// daemon's input is dropped, and the relay waits for the run's actual exit.
+#[tokio::test]
+async fn a_revocation_closes_the_browser_drops_input_and_waits_for_the_exit() {
+    let daemon = daemon();
+    let (_browser, mut input, mut output, probe) = browser();
+    let (revoke, revoked) = tokio::sync::oneshot::channel::<()>();
+    let relay = tokio::spawn(async move {
+        relay_terminal_until(
+            &mut output,
+            &mut input,
+            async { Ok(daemon.session) },
+            limits(),
+            async {
+                let _ = revoked.await;
+            },
+        )
+        .await
+    });
+    revoke.send(()).unwrap();
+    daemon.lifetime.wait_dropped().await;
+    assert!(!relay.is_finished(), "waits for the run's exit");
+    assert_eq!(probe.close_codes(), vec![1008]);
+    assert!(matches!(
+        &probe.state.lock().unwrap().sent[..],
+        [Message::Close(Some(frame))] if frame.reason == "access revoked"
+    ));
+    daemon
+        .output
+        .send(frame(DaemonRunOutput::Exit(130)))
+        .await
+        .unwrap();
+    daemon.output.send(Ok(None)).await.unwrap();
+    assert!(relay.await.unwrap());
+}

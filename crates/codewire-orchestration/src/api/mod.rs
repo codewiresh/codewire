@@ -41,6 +41,7 @@ mod runtime_lease_test_support;
 pub mod secret_projects;
 pub mod secrets;
 pub mod snapshots;
+pub(crate) mod socket_fence;
 pub mod ssh_proxy;
 pub mod terminal;
 pub mod trust_report;

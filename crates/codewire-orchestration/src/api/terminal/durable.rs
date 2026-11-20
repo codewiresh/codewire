@@ -19,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codewire_daemon_bridge::drain::Restart;
 use codewire_daemon_proto::daemon::v1;
-use codewire_server_core::auth::{SESSION_COOKIE_NAME, authenticate, hash_session_token};
+use codewire_server_core::auth::{SESSION_COOKIE_NAME, hash_session_token};
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -30,6 +30,7 @@ use crate::api::environment_daemon::{
     attach_environment_daemon_session_core, get_environment_daemon_session_core,
 };
 use crate::api::proxy::resolve_running_sandbox_target;
+use crate::api::socket_fence::{SocketAdmission, access_revoked_close, site};
 use crate::runtime::Placement;
 
 const PROTOCOL: &str = "codewire.durable-terminal.v1";
@@ -211,19 +212,22 @@ pub(super) async fn websocket(
             );
         }
     };
+    // `browser_cookie` admitted only the one canonical cookie, so these
+    // headers authenticate exactly as it did.
+    let headers = request.headers().clone();
     let (mut parts, _) = request.into_parts();
     let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
         Ok(ws) => ws,
         Err(error) => return error.into_response(),
     };
     let attachment = timeout(ADMISSION_TIMEOUT, async {
-        let user = authenticate(&state.auth, Some(&cookie), None)
+        let admission = SocketAdmission::headers(&state.auth, &headers)
             .await
             .map_err(|_| StatusCode::UNAUTHORIZED)?;
         // An account cookie can change between inventory and upgrade. Never
         // attach a previous account's saved shell under the successor account,
         // even if both accounts can operate this environment.
-        require_account(&coordinates.account_id, &user.user_id)?;
+        require_account(&coordinates.account_id, &admission.user.user_id)?;
         // Match the dashboard's two-factor setup boundary without reading
         // factor secrets: an enabled factor, or setup skipped by this same
         // unexpired browser session.
@@ -234,7 +238,7 @@ pub(super) async fn websocket(
                     AND s.two_factor_setup_skipped_at IS NOT NULL) \
              FROM users AS u WHERE u.id = $1 AND u.enabled",
         )
-        .bind(&user.user_id)
+        .bind(&admission.user.user_id)
         .bind(hash_session_token(&cookie))
         .fetch_optional(&state.pool)
         .await
@@ -243,9 +247,17 @@ pub(super) async fn websocket(
         if !eligible {
             return Err(StatusCode::FORBIDDEN);
         }
-        let target = resolve_running_sandbox_target(&state, &user, &org_id, &env_id)
+        let target = resolve_running_sandbox_target(&state, &admission.user, &org_id, &env_id)
             .await
             .map_err(|(status, _)| status)?;
+        let (user, revoked) = admission
+            .fence(
+                &state.auth,
+                &state.pool,
+                &state.revocation,
+                site("terminal", &target.environment_id),
+            )
+            .await?;
         let runtime = state
             .runtime
             .as_deref()
@@ -284,11 +296,12 @@ pub(super) async fn websocket(
             },
         )
         .await
+        .map(|attachment| (attachment, revoked))
         .map_err(|error| error.into_response().status())
     })
     .await;
-    let attachment = match attachment {
-        Ok(Ok(attachment)) => attachment,
+    let (attachment, revoked) = match attachment {
+        Ok(Ok(admitted)) => admitted,
         Ok(Err(status)) => return terminal_error(status, "terminal session is unavailable"),
         Err(_) => {
             return terminal_error(
@@ -322,8 +335,12 @@ pub(super) async fn websocket(
                     &stats,
                 ) => end,
                 () = restart => End::Restarting,
+                () = revoked.into_future() => End::Revoked,
             };
-            if !matches!(end, End::PeerClosed | End::Complete | End::Restarting) {
+            if !matches!(
+                end,
+                End::PeerClosed | End::Complete | End::Restarting | End::Revoked
+            ) {
                 let stats = stats.into_inner().unwrap_or_default();
                 tracing::warn!(
                     environment_id = %env_id,
@@ -342,20 +359,8 @@ pub(super) async fn websocket(
                     "browser terminal relay ended abnormally"
                 );
             }
-            // 1012 is "service restart": the browser may attach again.
-            let (code, reason) = match end {
-                End::PeerClosed | End::Complete => (1000, "terminal detached"),
-                End::Restarting => (1012, "server restarting; attach again"),
-                _ => (1008, "terminal detached"),
-            };
-            let _ = timeout(
-                IO_TIMEOUT,
-                browser_output.send(Message::Close(Some(CloseFrame {
-                    code,
-                    reason: reason.into(),
-                }))),
-            )
-            .await;
+            // The browser may already be gone; the viewer has ended either way.
+            let _ = timeout(IO_TIMEOUT, browser_output.send(close_for(end))).await;
         })
 }
 
@@ -497,6 +502,31 @@ enum End {
     /// This replica reached its drain deadline (#4426). The saved shell keeps
     /// running; the browser attaches to it again through the next replica.
     Restarting,
+    /// The credential that admitted the browser was lost (#3586). The saved
+    /// shell keeps running.
+    Revoked,
+}
+
+/// The close the browser gets for `end`. 1012 is "service restart": the
+/// browser may attach again. A revocation detaches only the viewer; the saved
+/// shell runs on.
+fn close_for(end: End) -> Message {
+    match end {
+        End::PeerClosed | End::Complete => detach(1000),
+        End::Restarting => Message::Close(Some(CloseFrame {
+            code: 1012,
+            reason: "server restarting; attach again".into(),
+        })),
+        End::Revoked => access_revoked_close(),
+        _ => detach(1008),
+    }
+}
+
+fn detach(code: u16) -> Message {
+    Message::Close(Some(CloseFrame {
+        code,
+        reason: "terminal detached".into(),
+    }))
 }
 
 impl End {
@@ -510,6 +540,7 @@ impl End {
             Self::DaemonInputStalled => "daemon_input_stalled",
             Self::DaemonClosed => "daemon_closed",
             Self::Restarting => "restarting",
+            Self::Revoked => "revoked",
         }
     }
 }

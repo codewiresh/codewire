@@ -15,7 +15,7 @@ use codewire_daemon_bridge::client::{
     DaemonRunSender, DaemonRunSession, DaemonRunStart,
 };
 use codewire_server_core::AppError;
-use codewire_server_core::auth::{AuthUser, CredentialContext, SESSION_COOKIE_NAME, authenticate};
+use codewire_server_core::auth::{AuthUser, CredentialContext};
 use codewire_server_core::org_deletion::{
     acquire_environment_runtime_mutation_lease, mark_organization_mutation_resolution_required,
     release_organization_mutation_lease,
@@ -29,6 +29,7 @@ use super::ApiState;
 use super::environment_daemon::environment_daemon_bridge_client_core;
 use super::prepare::plain_error;
 use super::proxy::resolve_running_sandbox_target;
+use super::socket_fence::{SocketAdmission, SocketRevoked, site};
 use crate::runtime::{ClaimReadiness, Placement, RuntimeDriver};
 
 const MSG_TYPE_STDIN: u8 = 0x00;
@@ -150,8 +151,8 @@ pub async fn terminal_websocket(
         Ok(query) => query,
         Err(error) => return error.into_response(),
     };
-    let user = match authenticate_socket_request(&state, &headers, &query.ticket).await {
-        Ok(user) => user,
+    let admission = match admit_socket_request(&state, &headers, &query.ticket).await {
+        Ok(admission) => admission,
         Err(response) => return response,
     };
     let (mut parts, _body) = request.into_parts();
@@ -160,9 +161,22 @@ pub async fn terminal_websocket(
         Err(rejection) => return rejection.into_response(),
     };
 
-    let target = match resolve_running_sandbox_target(&state, &user, &org_id, &env_id).await {
-        Ok(target) => target,
-        Err((status, msg)) => return terminal_error(status, msg),
+    let target =
+        match resolve_running_sandbox_target(&state, &admission.user, &org_id, &env_id).await {
+            Ok(target) => target,
+            Err((status, msg)) => return terminal_error(status, msg),
+        };
+    let (user, revoked) = match admission
+        .fence(
+            &state.auth,
+            &state.pool,
+            &state.revocation,
+            site("terminal", &target.environment_id),
+        )
+        .await
+    {
+        Ok(fenced) => fenced,
+        Err(status) => return terminal_error(status, "terminal access was revoked"),
     };
 
     let Some(runtime) = state.runtime.as_deref() else {
@@ -210,15 +224,29 @@ pub async fn terminal_websocket(
                 settle_terminal_lease(&failed_pool, &failed_lease, true).await;
             });
         })
-        .on_upgrade(move |socket| terminal_session(socket, client, pool, lease.id))
+        .on_upgrade(move |socket| terminal_session(socket, client, pool, lease.id, revoked))
 }
 
+/// The user a socket request admits, for a caller that only authenticates.
 #[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
 pub(crate) async fn authenticate_socket_request(
     state: &ApiState,
     headers: &HeaderMap,
     ticket: &str,
 ) -> Result<AuthUser, Response> {
+    admit_socket_request(state, headers, ticket)
+        .await
+        .map(|admission| admission.user)
+}
+
+/// A socket request's user and the credential that admitted it, to register
+/// on the revocation fence.
+#[expect(clippy::result_large_err, reason = "the error is the HTTP response")]
+pub(crate) async fn admit_socket_request(
+    state: &ApiState,
+    headers: &HeaderMap,
+    ticket: &str,
+) -> Result<SocketAdmission, Response> {
     if !ticket.is_empty() {
         return admit_ticket(
             &state.pool,
@@ -227,6 +255,7 @@ pub(crate) async fn authenticate_socket_request(
             ticket,
         )
         .await
+        .map(|(user, session_id)| SocketAdmission::ticket(user, session_id))
         .map_err(|refused| match refused {
             TicketRefused::Invalid => terminal_error(
                 StatusCode::UNAUTHORIZED,
@@ -239,9 +268,7 @@ pub(crate) async fn authenticate_socket_request(
         });
     }
 
-    let session_token = session_cookie(headers);
-    let bearer = bearer_token(headers);
-    authenticate(&state.auth, session_token, bearer)
+    SocketAdmission::headers(&state.auth, headers)
         .await
         .map_err(|err| {
             if err.is_forbidden() {
@@ -257,13 +284,15 @@ async fn terminal_session(
     client: DaemonClient,
     pool: sqlx::PgPool,
     lease_id: String,
+    revoked: SocketRevoked,
 ) {
     let (mut browser_output, mut browser_input) = socket.split();
-    let proven = relay_terminal(
+    let proven = relay_terminal_until(
         &mut browser_output,
         &mut browser_input,
         client.start_run(terminal_start()),
         TerminalLimits::default(),
+        revoked.into_future(),
     )
     .await;
     settle_terminal_lease(&pool, &lease_id, proven).await;
@@ -359,6 +388,8 @@ enum TerminalEnd {
     InputLimit,
     DaemonFailure,
     Natural,
+    /// The credential that admitted the socket was lost (#3586).
+    Revoked,
 }
 
 #[derive(Default)]
@@ -422,6 +453,7 @@ fn browser_message<E>(
     }
 }
 
+#[cfg(test)]
 async fn relay_terminal<Tx, Rx, E, F, S>(
     browser_output: &mut Tx,
     browser_input: &mut Rx,
@@ -434,7 +466,35 @@ where
     F: Future<Output = Result<S, DaemonClientError>> + Send,
     S: TerminalSession,
 {
+    relay_terminal_until(
+        browser_output,
+        browser_input,
+        start,
+        limits,
+        std::future::pending(),
+    )
+    .await
+}
+
+/// Relays a one-off terminal until it ends or `revoked` completes. A
+/// revocation ends it through the same path as a browser close: the browser
+/// is closed, the daemon's input dropped, and the run's exit awaited.
+async fn relay_terminal_until<Tx, Rx, E, F, S, R>(
+    browser_output: &mut Tx,
+    browser_input: &mut Rx,
+    start: F,
+    limits: TerminalLimits,
+    revoked: R,
+) -> bool
+where
+    Tx: Sink<Message> + Unpin + Send,
+    Rx: Stream<Item = Result<Message, E>> + Unpin + Send,
+    F: Future<Output = Result<S, DaemonClientError>> + Send,
+    S: TerminalSession,
+    R: Future<Output = ()> + Send,
+{
     tokio::pin!(start);
+    tokio::pin!(revoked);
     let mut pending = PendingInputs::default();
     let start_deadline = tokio::time::Instant::now() + limits.start;
     let attachment = loop {
@@ -449,6 +509,7 @@ where
                 }
             }
             result = &mut start => break Ok(result),
+            () = &mut revoked => break Err(TerminalEnd::Revoked),
             _ = tokio::time::sleep_until(start_deadline) => {
                 break Err(TerminalEnd::DaemonFailure);
             }
@@ -481,6 +542,7 @@ where
             Browser(Option<Result<Message, E>>),
             Input(Result<Result<(), DaemonClientError>, tokio::time::error::Elapsed>),
             Output(Result<Option<DaemonRunOutput>, DaemonClientError>),
+            Revoked,
         }
         let event = tokio::select! {
             message = browser_input.next() => Event::Browser(message),
@@ -489,6 +551,7 @@ where
                 tokio::time::timeout(limits.io, input.send_input(message)).await
             }, if !pending.frames.is_empty() => Event::Input(sent),
             message = output.next_output() => Event::Output(message),
+            () = &mut revoked => Event::Revoked,
         };
         match event {
             Event::Browser(message) => {
@@ -496,6 +559,7 @@ where
                     break (end, None, true);
                 }
             }
+            Event::Revoked => break (TerminalEnd::Revoked, None, true),
             Event::Input(Ok(Ok(()))) => pending.pop(),
             Event::Input(_) => break (TerminalEnd::DaemonFailure, None, true),
             Event::Output(Ok(Some(
@@ -634,6 +698,7 @@ async fn close_browser<Tx: Sink<Message> + Unpin>(
                 let (code, reason) = match end {
                     TerminalEnd::Natural => (1000, "session ended"),
                     TerminalEnd::InputLimit => (1009, "terminal input limit exceeded"),
+                    TerminalEnd::Revoked => (1008, "access revoked"),
                     _ => (1011, "terminal unavailable"),
                 };
                 let _ = browser_output
@@ -681,7 +746,7 @@ async fn admit_ticket(
     secret: &str,
     replays: &TerminalTicketReplayCache,
     ticket: &str,
-) -> Result<AuthUser, TicketRefused> {
+) -> Result<(AuthUser, String), TicketRefused> {
     let claims = redeem_ticket(secret, ticket).ok_or(TicketRefused::Invalid)?;
     // Single-use (#2505 L3): the nonce is unique per issue and the cache
     // entry dies with the ticket's own `exp`, so a ticket replayed from
@@ -706,12 +771,13 @@ async fn admit_ticket(
         TicketRefused::Unavailable
     })?;
     let is_admin = is_admin.ok_or(TicketRefused::Invalid)?;
-    Ok(AuthUser {
+    let user = AuthUser {
         user_id: claims.user_id,
         org_id: None,
         is_admin,
         via_api_key: false,
-    })
+    };
+    Ok((user, claims.session_id))
 }
 
 fn issue_ticket(secret: &str, user_id: &str, session_id: &str) -> anyhow::Result<String> {
@@ -759,29 +825,6 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         diff |= a ^ b;
     }
     diff == 0
-}
-
-fn session_cookie(headers: &HeaderMap) -> Option<&str> {
-    let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
-    for pair in raw.split(';') {
-        let pair = pair.trim_start();
-        if let Some(value) = pair.strip_prefix(SESSION_COOKIE_NAME) {
-            let value = value.trim_start();
-            if let Some(value) = value.strip_prefix('=') {
-                return Some(value.trim_end_matches(|c: char| c.is_whitespace()));
-            }
-        }
-    }
-    None
-}
-
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
-    let raw = headers
-        .get(axum::http::header::AUTHORIZATION)?
-        .to_str()
-        .ok()?;
-    raw.strip_prefix("Bearer ")
-        .or_else(|| raw.strip_prefix("bearer "))
 }
 
 fn hex_lower(bytes: &[u8]) -> String {

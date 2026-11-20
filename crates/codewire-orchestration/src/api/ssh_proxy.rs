@@ -27,7 +27,10 @@ use uuid::Uuid;
 use super::ApiState;
 use super::prepare::{json_response, plain_error};
 use super::proxy::{resolve_running_sandbox_target, resolve_running_sandbox_target_for_role};
-use super::terminal::{authenticate_socket_request, require_sandbox_claim_ready};
+use super::socket_fence::{SocketRevoked, access_revoked_close, site};
+use super::terminal::{
+    admit_socket_request, authenticate_socket_request, require_sandbox_claim_ready,
+};
 use crate::runtime::{Placement, RuntimeDriver, RuntimeStream};
 use crate::worker::workspace_binding::environment_daemon_credential;
 
@@ -56,8 +59,8 @@ pub async fn ssh_proxy_websocket(
     request: Request<Body>,
 ) -> Response {
     let headers = request.headers().clone();
-    let user = match authenticate_socket_request(&state, &headers, &query.ticket).await {
-        Ok(user) => user,
+    let admission = match admit_socket_request(&state, &headers, &query.ticket).await {
+        Ok(admission) => admission,
         Err(response) => return response,
     };
     let (mut parts, _body) = request.into_parts();
@@ -66,9 +69,22 @@ pub async fn ssh_proxy_websocket(
         Err(rejection) => return rejection.into_response(),
     };
 
-    let target = match resolve_running_sandbox_target(&state, &user, &org_id, &env_id).await {
-        Ok(target) => target,
-        Err((status, msg)) => return ssh_error(status, msg),
+    let target =
+        match resolve_running_sandbox_target(&state, &admission.user, &org_id, &env_id).await {
+            Ok(target) => target,
+            Err((status, msg)) => return ssh_error(status, msg),
+        };
+    let (user, revoked) = match admission
+        .fence(
+            &state.auth,
+            &state.pool,
+            &state.revocation,
+            site("ssh_proxy", &target.environment_id),
+        )
+        .await
+    {
+        Ok(fenced) => fenced,
+        Err(status) => return ssh_error(status, r#"{"error":"access revoked"}"#),
     };
 
     let Some(runtime) = state.runtime.clone() else {
@@ -112,7 +128,7 @@ pub async fn ssh_proxy_websocket(
     );
 
     ws.protocols(["ssh"]).on_upgrade(move |socket| {
-        ssh_proxy_session(socket, stream, attempt_id, target.environment_id)
+        ssh_proxy_session(socket, stream, attempt_id, target.environment_id, revoked)
     })
 }
 
@@ -218,15 +234,30 @@ async fn ssh_proxy_session(
     stream: RuntimeStream,
     attempt_id: String,
     env_id: String,
+    revoked: SocketRevoked,
 ) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (tcp_tx, mut tcp_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let (ws_to_tcp_tx, mut ws_to_tcp_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
+    // This task owns the socket's sink, so it sends the close on a
+    // revocation; its end then ends the session and drops the SSH stream.
     let mut tcp_read_task = tokio::spawn(async move {
-        while let Some(bytes) = tcp_rx.recv().await {
-            if ws_tx.send(Message::Binary(bytes.into())).await.is_err() {
-                return;
+        let mut revoked = revoked.into_future();
+        loop {
+            tokio::select! {
+                biased;
+                () = &mut revoked => {
+                    // The client may already be gone; the session ends either way.
+                    let _ = ws_tx.send(access_revoked_close()).await;
+                    return;
+                }
+                next = tcp_rx.recv() => {
+                    let Some(bytes) = next else { break };
+                    if ws_tx.send(Message::Binary(bytes.into())).await.is_err() {
+                        return;
+                    }
+                }
             }
         }
         let _ = ws_tx
