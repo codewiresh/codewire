@@ -9,13 +9,13 @@ The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-18.
+Updated 2026-11-20.
 
 | ID | Dev | Production |
 | --- | --- | --- |
 | `access-ticket` | not yet observed | not yet observed |
 | `access-streams` | not yet observed | not yet observed |
-| `access-tailnet` | not yet observed | not yet observed |
+| `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
 
 ## `access-ticket`: a terminal ticket from a session that has ended
 
@@ -184,3 +184,24 @@ Issue: #3586, its third step (cw-security, 2026-11-18). A launch item (owner,
   - each wrote `stream.revoked` with the surface `tailnet`; the revoked
     token's new `cw shell` and `cw exec` were refused; after the account was
     enabled again, a new sign-in and shell worked at once.
+
+  Partly observed on Dev, 2026-11-20, source adc886de2 (the
+  `promote-dev` that rolled out; the coordinator's image matched its
+  `release.json`), with a `cw` built from main 911a51f01, as the Dev smoke
+  identity (`scripts/runtime/dev/with-dev-smoke-auth.sh`) and a second
+  API key it created for the walk, on a Sandbox made for the walk:
+  - a plain `cw exec` signed in with the second key, and one with the
+    smoke identity's own key, each printing the time every 0.2 s;
+  - the second key deleted at 09:07:18.458: its exec's last line arrived
+    within a second, it ended with "Access revoked" at 09:07:19.760, and
+    the coordinator logged that client's session ending at 09:07:19.161
+    with `CredentialRevoked(ApiKey)`. The other exec kept printing;
+  - a new `cw exec` with the deleted key was refused at its first call;
+    one with the smoke identity's key worked.
+
+  A sign-out (`cw logout`) and an account disable are observed on Kind
+  (2026-11-18, above), not on Dev: they need a person's own sign-in rather
+  than the smoke identity's key. Not yet observed on Dev: the
+  `stream.revoked` audit event, read here only as the coordinator's log
+  line. The deleted key's refusal reads `List orgs:
+  session expired or invalid`, which names an internal call.
