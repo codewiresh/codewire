@@ -131,6 +131,49 @@ impl AccessProfiles {
         self.with_default(&owner, profile).await
     }
 
+    /// One page of a profile's revisions, newest first, each with when it was
+    /// made in Unix milliseconds; whether the profile is the default; and the
+    /// next page's token, empty after the oldest revision (#4717).
+    pub async fn list_revisions(
+        &self,
+        user: &AuthUser,
+        id: &str,
+        page_size: i32,
+        page_token: &str,
+    ) -> AppResult<(Vec<(AccessProfile, i64)>, bool, String)> {
+        let owner = personal_owner(user)?;
+        let limit = match page_size {
+            0 => 50,
+            1..=100 => page_size as u32,
+            _ => return Err(invalid_profile()),
+        };
+        let before = if page_token.is_empty() {
+            None
+        } else {
+            let revision = page_token.parse::<u64>().map_err(|_| invalid_profile())?;
+            positive_revision(revision)?;
+            Some(revision)
+        };
+        // One extra row determines whether another page really exists.
+        let (mut revisions, is_default) = self
+            .profiles
+            .list_revisions(&owner, &profile_id(id)?, before, limit + 1)
+            .await
+            .map_err(profile_error)?;
+        let next = if revisions.len() > limit as usize {
+            revisions.truncate(limit as usize);
+            revisions
+                .last()
+                .expect("positive page size")
+                .0
+                .revision
+                .to_string()
+        } else {
+            String::new()
+        };
+        Ok((revisions, is_default, next))
+    }
+
     pub async fn create(
         &self,
         user: &AuthUser,

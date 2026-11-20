@@ -4,13 +4,15 @@
 
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
 import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import type { Timestamp } from "@bufbuild/protobuf/wkt";
+import { file_google_protobuf_timestamp } from "@bufbuild/protobuf/wkt";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file codewire/v1/access_profile.proto.
  */
 export const file_codewire_v1_access_profile: GenFile = /*@__PURE__*/
-  fileDesc("CiBjb2Rld2lyZS92MS9hY2Nlc3NfcHJvZmlsZS5wcm90bxILY29kZXdpcmUudjEiRAoSQWNjZXNzUHJvZmlsZUVudHJ5EhcKD2NhcGFiaWxpdHlfc2xvdBgBIAEoCRIVCg1jcmVkZW50aWFsX2lkGAIgASgJIoEBCg1BY2Nlc3NQcm9maWxlEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAkSEAoIcmV2aXNpb24YAyABKAQSMAoHZW50cmllcxgEIAMoCzIfLmNvZGV3aXJlLnYxLkFjY2Vzc1Byb2ZpbGVFbnRyeRISCgppc19kZWZhdWx0GAUgASgIIkIKGUxpc3RBY2Nlc3NQcm9maWxlc1JlcXVlc3QSEQoJcGFnZV9zaXplGAEgASgFEhIKCnBhZ2VfdG9rZW4YAiABKAkiagoaTGlzdEFjY2Vzc1Byb2ZpbGVzUmVzcG9uc2USMwoPYWNjZXNzX3Byb2ZpbGVzGAEgAygLMhouY29kZXdpcmUudjEuQWNjZXNzUHJvZmlsZRIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkidgoXR2V0QWNjZXNzUHJvZmlsZVJlcXVlc3QSGwoRYWNjZXNzX3Byb2ZpbGVfaWQYASABKAlIABIOCgRuYW1lGAIgASgJSAASFQoIcmV2aXNpb24YAyABKARIAYgBAUIKCghzZWxlY3RvckILCglfcmV2aXNpb24iTgoYR2V0QWNjZXNzUHJvZmlsZVJlc3BvbnNlEjIKDmFjY2Vzc19wcm9maWxlGAEgASgLMhouY29kZXdpcmUudjEuQWNjZXNzUHJvZmlsZSJcChpDcmVhdGVBY2Nlc3NQcm9maWxlUmVxdWVzdBIMCgRuYW1lGAEgASgJEjAKB2VudHJpZXMYAiADKAsyHy5jb2Rld2lyZS52MS5BY2Nlc3NQcm9maWxlRW50cnkiUQobQ3JlYXRlQWNjZXNzUHJvZmlsZVJlc3BvbnNlEjIKDmFjY2Vzc19wcm9maWxlGAEgASgLMhouY29kZXdpcmUudjEuQWNjZXNzUHJvZmlsZSKEAQoaVXBkYXRlQWNjZXNzUHJvZmlsZVJlcXVlc3QSGQoRYWNjZXNzX3Byb2ZpbGVfaWQYASABKAkSGQoRZXhwZWN0ZWRfcmV2aXNpb24YAiABKAQSMAoHZW50cmllcxgDIAMoCzIfLmNvZGV3aXJlLnYxLkFjY2Vzc1Byb2ZpbGVFbnRyeSJRChtVcGRhdGVBY2Nlc3NQcm9maWxlUmVzcG9uc2USMgoOYWNjZXNzX3Byb2ZpbGUYASABKAsyGi5jb2Rld2lyZS52MS5BY2Nlc3NQcm9maWxlIncKGlJlbmFtZUFjY2Vzc1Byb2ZpbGVSZXF1ZXN0EhkKEWFjY2Vzc19wcm9maWxlX2lkGAEgASgJEhkKEWV4cGVjdGVkX3JldmlzaW9uGAIgASgEEhUKDWV4cGVjdGVkX25hbWUYAyABKAkSDAoEbmFtZRgEIAEoCSJRChtSZW5hbWVBY2Nlc3NQcm9maWxlUmVzcG9uc2USMgoOYWNjZXNzX3Byb2ZpbGUYASABKAsyGi5jb2Rld2lyZS52MS5BY2Nlc3NQcm9maWxlIlIKGkRlbGV0ZUFjY2Vzc1Byb2ZpbGVSZXF1ZXN0EhkKEWFjY2Vzc19wcm9maWxlX2lkGAEgASgJEhkKEWV4cGVjdGVkX3JldmlzaW9uGAIgASgEIh0KG0RlbGV0ZUFjY2Vzc1Byb2ZpbGVSZXNwb25zZSI7Ch5TZXREZWZhdWx0QWNjZXNzUHJvZmlsZVJlcXVlc3QSGQoRYWNjZXNzX3Byb2ZpbGVfaWQYASABKAkiVQofU2V0RGVmYXVsdEFjY2Vzc1Byb2ZpbGVSZXNwb25zZRIyCg5hY2Nlc3NfcHJvZmlsZRgBIAEoCzIaLmNvZGV3aXJlLnYxLkFjY2Vzc1Byb2ZpbGUidQofRW52aXJvbm1lbnRBY2Nlc3NQcm9maWxlQmluZGluZxIWCg5lbnZpcm9ubWVudF9pZBgBIAEoCRIZChFhY2Nlc3NfcHJvZmlsZV9pZBgCIAEoCRIfChdhY2Nlc3NfcHJvZmlsZV9yZXZpc2lvbhgDIAEoBCI8CiJHZXRFbnZpcm9ubWVudEFjY2Vzc1Byb2ZpbGVSZXF1ZXN0EhYKDmVudmlyb25tZW50X2lkGAEgASgJIowBCiNHZXRFbnZpcm9ubWVudEFjY2Vzc1Byb2ZpbGVSZXNwb25zZRI9CgdiaW5kaW5nGAEgASgLMiwuY29kZXdpcmUudjEuRW52aXJvbm1lbnRBY2Nlc3NQcm9maWxlQmluZGluZxImCh5wZXJzb25hbF9jcmVkZW50aWFsc19jb25maXJtZWQYAiABKAgyjgcKFEFjY2Vzc1Byb2ZpbGVTZXJ2aWNlEmoKEkxpc3RBY2Nlc3NQcm9maWxlcxImLmNvZGV3aXJlLnYxLkxpc3RBY2Nlc3NQcm9maWxlc1JlcXVlc3QaJy5jb2Rld2lyZS52MS5MaXN0QWNjZXNzUHJvZmlsZXNSZXNwb25zZSIDkAIBEmQKEEdldEFjY2Vzc1Byb2ZpbGUSJC5jb2Rld2lyZS52MS5HZXRBY2Nlc3NQcm9maWxlUmVxdWVzdBolLmNvZGV3aXJlLnYxLkdldEFjY2Vzc1Byb2ZpbGVSZXNwb25zZSIDkAIBEmgKE0NyZWF0ZUFjY2Vzc1Byb2ZpbGUSJy5jb2Rld2lyZS52MS5DcmVhdGVBY2Nlc3NQcm9maWxlUmVxdWVzdBooLmNvZGV3aXJlLnYxLkNyZWF0ZUFjY2Vzc1Byb2ZpbGVSZXNwb25zZRJoChNVcGRhdGVBY2Nlc3NQcm9maWxlEicuY29kZXdpcmUudjEuVXBkYXRlQWNjZXNzUHJvZmlsZVJlcXVlc3QaKC5jb2Rld2lyZS52MS5VcGRhdGVBY2Nlc3NQcm9maWxlUmVzcG9uc2USaAoTUmVuYW1lQWNjZXNzUHJvZmlsZRInLmNvZGV3aXJlLnYxLlJlbmFtZUFjY2Vzc1Byb2ZpbGVSZXF1ZXN0GiguY29kZXdpcmUudjEuUmVuYW1lQWNjZXNzUHJvZmlsZVJlc3BvbnNlEmgKE0RlbGV0ZUFjY2Vzc1Byb2ZpbGUSJy5jb2Rld2lyZS52MS5EZWxldGVBY2Nlc3NQcm9maWxlUmVxdWVzdBooLmNvZGV3aXJlLnYxLkRlbGV0ZUFjY2Vzc1Byb2ZpbGVSZXNwb25zZRJ0ChdTZXREZWZhdWx0QWNjZXNzUHJvZmlsZRIrLmNvZGV3aXJlLnYxLlNldERlZmF1bHRBY2Nlc3NQcm9maWxlUmVxdWVzdBosLmNvZGV3aXJlLnYxLlNldERlZmF1bHRBY2Nlc3NQcm9maWxlUmVzcG9uc2UShQEKG0dldEVudmlyb25tZW50QWNjZXNzUHJvZmlsZRIvLmNvZGV3aXJlLnYxLkdldEVudmlyb25tZW50QWNjZXNzUHJvZmlsZVJlcXVlc3QaMC5jb2Rld2lyZS52MS5HZXRFbnZpcm9ubWVudEFjY2Vzc1Byb2ZpbGVSZXNwb25zZSIDkAIBQrUBCg9jb20uY29kZXdpcmUudjFCEkFjY2Vzc1Byb2ZpbGVQcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z");
+  fileDesc("CiBjb2Rld2lyZS92MS9hY2Nlc3NfcHJvZmlsZS5wcm90bxILY29kZXdpcmUudjEiRAoSQWNjZXNzUHJvZmlsZUVudHJ5EhcKD2NhcGFiaWxpdHlfc2xvdBgBIAEoCRIVCg1jcmVkZW50aWFsX2lkGAIgASgJIoEBCg1BY2Nlc3NQcm9maWxlEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAkSEAoIcmV2aXNpb24YAyABKAQSMAoHZW50cmllcxgEIAMoCzIfLmNvZGV3aXJlLnYxLkFjY2Vzc1Byb2ZpbGVFbnRyeRISCgppc19kZWZhdWx0GAUgASgIIkIKGUxpc3RBY2Nlc3NQcm9maWxlc1JlcXVlc3QSEQoJcGFnZV9zaXplGAEgASgFEhIKCnBhZ2VfdG9rZW4YAiABKAkiagoaTGlzdEFjY2Vzc1Byb2ZpbGVzUmVzcG9uc2USMwoPYWNjZXNzX3Byb2ZpbGVzGAEgAygLMhouY29kZXdpcmUudjEuQWNjZXNzUHJvZmlsZRIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkidgoXR2V0QWNjZXNzUHJvZmlsZVJlcXVlc3QSGwoRYWNjZXNzX3Byb2ZpbGVfaWQYASABKAlIABIOCgRuYW1lGAIgASgJSAASFQoIcmV2aXNpb24YAyABKARIAYgBAUIKCghzZWxlY3RvckILCglfcmV2aXNpb24iTgoYR2V0QWNjZXNzUHJvZmlsZVJlc3BvbnNlEjIKDmFjY2Vzc19wcm9maWxlGAEgASgLMhouY29kZXdpcmUudjEuQWNjZXNzUHJvZmlsZSJcChpDcmVhdGVBY2Nlc3NQcm9maWxlUmVxdWVzdBIMCgRuYW1lGAEgASgJEjAKB2VudHJpZXMYAiADKAsyHy5jb2Rld2lyZS52MS5BY2Nlc3NQcm9maWxlRW50cnkiUQobQ3JlYXRlQWNjZXNzUHJvZmlsZVJlc3BvbnNlEjIKDmFjY2Vzc19wcm9maWxlGAEgASgLMhouY29kZXdpcmUudjEuQWNjZXNzUHJvZmlsZSKEAQoaVXBkYXRlQWNjZXNzUHJvZmlsZVJlcXVlc3QSGQoRYWNjZXNzX3Byb2ZpbGVfaWQYASABKAkSGQoRZXhwZWN0ZWRfcmV2aXNpb24YAiABKAQSMAoHZW50cmllcxgDIAMoCzIfLmNvZGV3aXJlLnYxLkFjY2Vzc1Byb2ZpbGVFbnRyeSJRChtVcGRhdGVBY2Nlc3NQcm9maWxlUmVzcG9uc2USMgoOYWNjZXNzX3Byb2ZpbGUYASABKAsyGi5jb2Rld2lyZS52MS5BY2Nlc3NQcm9maWxlIncKGlJlbmFtZUFjY2Vzc1Byb2ZpbGVSZXF1ZXN0EhkKEWFjY2Vzc19wcm9maWxlX2lkGAEgASgJEhkKEWV4cGVjdGVkX3JldmlzaW9uGAIgASgEEhUKDWV4cGVjdGVkX25hbWUYAyABKAkSDAoEbmFtZRgEIAEoCSJRChtSZW5hbWVBY2Nlc3NQcm9maWxlUmVzcG9uc2USMgoOYWNjZXNzX3Byb2ZpbGUYASABKAsyGi5jb2Rld2lyZS52MS5BY2Nlc3NQcm9maWxlIlIKGkRlbGV0ZUFjY2Vzc1Byb2ZpbGVSZXF1ZXN0EhkKEWFjY2Vzc19wcm9maWxlX2lkGAEgASgJEhkKEWV4cGVjdGVkX3JldmlzaW9uGAIgASgEIh0KG0RlbGV0ZUFjY2Vzc1Byb2ZpbGVSZXNwb25zZSI7Ch5TZXREZWZhdWx0QWNjZXNzUHJvZmlsZVJlcXVlc3QSGQoRYWNjZXNzX3Byb2ZpbGVfaWQYASABKAkiVQofU2V0RGVmYXVsdEFjY2Vzc1Byb2ZpbGVSZXNwb25zZRIyCg5hY2Nlc3NfcHJvZmlsZRgBIAEoCzIaLmNvZGV3aXJlLnYxLkFjY2Vzc1Byb2ZpbGUiZQohTGlzdEFjY2Vzc1Byb2ZpbGVSZXZpc2lvbnNSZXF1ZXN0EhkKEWFjY2Vzc19wcm9maWxlX2lkGAEgASgJEhEKCXBhZ2Vfc2l6ZRgCIAEoBRISCgpwYWdlX3Rva2VuGAMgASgJInsKFUFjY2Vzc1Byb2ZpbGVSZXZpc2lvbhIyCg5hY2Nlc3NfcHJvZmlsZRgBIAEoCzIaLmNvZGV3aXJlLnYxLkFjY2Vzc1Byb2ZpbGUSLgoKY3JlYXRlZF9hdBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAidAoiTGlzdEFjY2Vzc1Byb2ZpbGVSZXZpc2lvbnNSZXNwb25zZRI1CglyZXZpc2lvbnMYASADKAsyIi5jb2Rld2lyZS52MS5BY2Nlc3NQcm9maWxlUmV2aXNpb24SFwoPbmV4dF9wYWdlX3Rva2VuGAIgASgJInUKH0Vudmlyb25tZW50QWNjZXNzUHJvZmlsZUJpbmRpbmcSFgoOZW52aXJvbm1lbnRfaWQYASABKAkSGQoRYWNjZXNzX3Byb2ZpbGVfaWQYAiABKAkSHwoXYWNjZXNzX3Byb2ZpbGVfcmV2aXNpb24YAyABKAQiPAoiR2V0RW52aXJvbm1lbnRBY2Nlc3NQcm9maWxlUmVxdWVzdBIWCg5lbnZpcm9ubWVudF9pZBgBIAEoCSKMAQojR2V0RW52aXJvbm1lbnRBY2Nlc3NQcm9maWxlUmVzcG9uc2USPQoHYmluZGluZxgBIAEoCzIsLmNvZGV3aXJlLnYxLkVudmlyb25tZW50QWNjZXNzUHJvZmlsZUJpbmRpbmcSJgoecGVyc29uYWxfY3JlZGVudGlhbHNfY29uZmlybWVkGAIgASgIMpMIChRBY2Nlc3NQcm9maWxlU2VydmljZRJqChJMaXN0QWNjZXNzUHJvZmlsZXMSJi5jb2Rld2lyZS52MS5MaXN0QWNjZXNzUHJvZmlsZXNSZXF1ZXN0GicuY29kZXdpcmUudjEuTGlzdEFjY2Vzc1Byb2ZpbGVzUmVzcG9uc2UiA5ACARJkChBHZXRBY2Nlc3NQcm9maWxlEiQuY29kZXdpcmUudjEuR2V0QWNjZXNzUHJvZmlsZVJlcXVlc3QaJS5jb2Rld2lyZS52MS5HZXRBY2Nlc3NQcm9maWxlUmVzcG9uc2UiA5ACARJoChNDcmVhdGVBY2Nlc3NQcm9maWxlEicuY29kZXdpcmUudjEuQ3JlYXRlQWNjZXNzUHJvZmlsZVJlcXVlc3QaKC5jb2Rld2lyZS52MS5DcmVhdGVBY2Nlc3NQcm9maWxlUmVzcG9uc2USaAoTVXBkYXRlQWNjZXNzUHJvZmlsZRInLmNvZGV3aXJlLnYxLlVwZGF0ZUFjY2Vzc1Byb2ZpbGVSZXF1ZXN0GiguY29kZXdpcmUudjEuVXBkYXRlQWNjZXNzUHJvZmlsZVJlc3BvbnNlEmgKE1JlbmFtZUFjY2Vzc1Byb2ZpbGUSJy5jb2Rld2lyZS52MS5SZW5hbWVBY2Nlc3NQcm9maWxlUmVxdWVzdBooLmNvZGV3aXJlLnYxLlJlbmFtZUFjY2Vzc1Byb2ZpbGVSZXNwb25zZRJoChNEZWxldGVBY2Nlc3NQcm9maWxlEicuY29kZXdpcmUudjEuRGVsZXRlQWNjZXNzUHJvZmlsZVJlcXVlc3QaKC5jb2Rld2lyZS52MS5EZWxldGVBY2Nlc3NQcm9maWxlUmVzcG9uc2USdAoXU2V0RGVmYXVsdEFjY2Vzc1Byb2ZpbGUSKy5jb2Rld2lyZS52MS5TZXREZWZhdWx0QWNjZXNzUHJvZmlsZVJlcXVlc3QaLC5jb2Rld2lyZS52MS5TZXREZWZhdWx0QWNjZXNzUHJvZmlsZVJlc3BvbnNlEoIBChpMaXN0QWNjZXNzUHJvZmlsZVJldmlzaW9ucxIuLmNvZGV3aXJlLnYxLkxpc3RBY2Nlc3NQcm9maWxlUmV2aXNpb25zUmVxdWVzdBovLmNvZGV3aXJlLnYxLkxpc3RBY2Nlc3NQcm9maWxlUmV2aXNpb25zUmVzcG9uc2UiA5ACARKFAQobR2V0RW52aXJvbm1lbnRBY2Nlc3NQcm9maWxlEi8uY29kZXdpcmUudjEuR2V0RW52aXJvbm1lbnRBY2Nlc3NQcm9maWxlUmVxdWVzdBowLmNvZGV3aXJlLnYxLkdldEVudmlyb25tZW50QWNjZXNzUHJvZmlsZVJlc3BvbnNlIgOQAgFCtQEKD2NvbS5jb2Rld2lyZS52MUISQWNjZXNzUHJvZmlsZVByb3RvUAFaQWdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS92MTtjb2Rld2lyZXYxogIDQ1hYqgILQ29kZXdpcmUuVjHKAgtDb2Rld2lyZVxWMeICF0NvZGV3aXJlXFYxXEdQQk1ldGFkYXRh6gIMQ29kZXdpcmU6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp]);
 
 /**
  * An opaque credential reference for one supported capability. No provider
@@ -406,6 +408,88 @@ export const SetDefaultAccessProfileResponseSchema: GenMessage<SetDefaultAccessP
   messageDesc(file_codewire_v1_access_profile, 15);
 
 /**
+ * Every revision of one of the owner's profiles, newest first (#4717). Another
+ * owner's profile, or none, is NOT_FOUND, as GetAccessProfile answers.
+ *
+ * @generated from message codewire.v1.ListAccessProfileRevisionsRequest
+ */
+export type ListAccessProfileRevisionsRequest = Message<"codewire.v1.ListAccessProfileRevisionsRequest"> & {
+  /**
+   * @generated from field: string access_profile_id = 1;
+   */
+  accessProfileId: string;
+
+  /**
+   * 0 means 50; at most 100.
+   *
+   * @generated from field: int32 page_size = 2;
+   */
+  pageSize: number;
+
+  /**
+   * Opaque; from the previous response's next_page_token.
+   *
+   * @generated from field: string page_token = 3;
+   */
+  pageToken: string;
+};
+
+/**
+ * Describes the message codewire.v1.ListAccessProfileRevisionsRequest.
+ * Use `create(ListAccessProfileRevisionsRequestSchema)` to create a new message.
+ */
+export const ListAccessProfileRevisionsRequestSchema: GenMessage<ListAccessProfileRevisionsRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_access_profile, 16);
+
+/**
+ * One immutable revision: that revision's entries, with the profile's current
+ * name and default mark, which are not part of a revision, and when the
+ * revision was made.
+ *
+ * @generated from message codewire.v1.AccessProfileRevision
+ */
+export type AccessProfileRevision = Message<"codewire.v1.AccessProfileRevision"> & {
+  /**
+   * @generated from field: codewire.v1.AccessProfile access_profile = 1;
+   */
+  accessProfile?: AccessProfile | undefined;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp created_at = 2;
+   */
+  createdAt?: Timestamp | undefined;
+};
+
+/**
+ * Describes the message codewire.v1.AccessProfileRevision.
+ * Use `create(AccessProfileRevisionSchema)` to create a new message.
+ */
+export const AccessProfileRevisionSchema: GenMessage<AccessProfileRevision> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_access_profile, 17);
+
+/**
+ * @generated from message codewire.v1.ListAccessProfileRevisionsResponse
+ */
+export type ListAccessProfileRevisionsResponse = Message<"codewire.v1.ListAccessProfileRevisionsResponse"> & {
+  /**
+   * @generated from field: repeated codewire.v1.AccessProfileRevision revisions = 1;
+   */
+  revisions: AccessProfileRevision[];
+
+  /**
+   * @generated from field: string next_page_token = 2;
+   */
+  nextPageToken: string;
+};
+
+/**
+ * Describes the message codewire.v1.ListAccessProfileRevisionsResponse.
+ * Use `create(ListAccessProfileRevisionsResponseSchema)` to create a new message.
+ */
+export const ListAccessProfileRevisionsResponseSchema: GenMessage<ListAccessProfileRevisionsResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_access_profile, 18);
+
+/**
  * Exact selection, not an access grant or proof that a runtime is ready.
  *
  * @generated from message codewire.v1.EnvironmentAccessProfileBinding
@@ -432,7 +516,7 @@ export type EnvironmentAccessProfileBinding = Message<"codewire.v1.EnvironmentAc
  * Use `create(EnvironmentAccessProfileBindingSchema)` to create a new message.
  */
 export const EnvironmentAccessProfileBindingSchema: GenMessage<EnvironmentAccessProfileBinding> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_access_profile, 16);
+  messageDesc(file_codewire_v1_access_profile, 19);
 
 /**
  * @generated from message codewire.v1.GetEnvironmentAccessProfileRequest
@@ -449,7 +533,7 @@ export type GetEnvironmentAccessProfileRequest = Message<"codewire.v1.GetEnviron
  * Use `create(GetEnvironmentAccessProfileRequestSchema)` to create a new message.
  */
 export const GetEnvironmentAccessProfileRequestSchema: GenMessage<GetEnvironmentAccessProfileRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_access_profile, 17);
+  messageDesc(file_codewire_v1_access_profile, 20);
 
 /**
  * @generated from message codewire.v1.GetEnvironmentAccessProfileResponse
@@ -473,7 +557,7 @@ export type GetEnvironmentAccessProfileResponse = Message<"codewire.v1.GetEnviro
  * Use `create(GetEnvironmentAccessProfileResponseSchema)` to create a new message.
  */
 export const GetEnvironmentAccessProfileResponseSchema: GenMessage<GetEnvironmentAccessProfileResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_access_profile, 18);
+  messageDesc(file_codewire_v1_access_profile, 21);
 
 /**
  * AccessProfileService manages the authenticated user's personal platform
@@ -539,6 +623,14 @@ export const AccessProfileService: GenService<{
     methodKind: "unary";
     input: typeof SetDefaultAccessProfileRequestSchema;
     output: typeof SetDefaultAccessProfileResponseSchema;
+  },
+  /**
+   * @generated from rpc codewire.v1.AccessProfileService.ListAccessProfileRevisions
+   */
+  listAccessProfileRevisions: {
+    methodKind: "unary";
+    input: typeof ListAccessProfileRevisionsRequestSchema;
+    output: typeof ListAccessProfileRevisionsResponseSchema;
   },
   /**
    * @generated from rpc codewire.v1.AccessProfileService.GetEnvironmentAccessProfile

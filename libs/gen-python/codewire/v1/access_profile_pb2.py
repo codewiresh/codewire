@@ -22,9 +22,10 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
+from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n codewire/v1/access_profile.proto\x12\x0b\x63odewire.v1\"b\n\x12\x41\x63\x63\x65ssProfileEntry\x12\'\n\x0f\x63\x61pability_slot\x18\x01 \x01(\tR\x0e\x63\x61pabilitySlot\x12#\n\rcredential_id\x18\x02 \x01(\tR\x0c\x63redentialId\"\xa9\x01\n\rAccessProfile\x12\x0e\n\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n\x04name\x18\x02 \x01(\tR\x04name\x12\x1a\n\x08revision\x18\x03 \x01(\x04R\x08revision\x12\x39\n\x07\x65ntries\x18\x04 \x03(\x0b\x32\x1f.codewire.v1.AccessProfileEntryR\x07\x65ntries\x12\x1d\n\nis_default\x18\x05 \x01(\x08R\tisDefault\"W\n\x19ListAccessProfilesRequest\x12\x1b\n\tpage_size\x18\x01 \x01(\x05R\x08pageSize\x12\x1d\n\npage_token\x18\x02 \x01(\tR\tpageToken\"\x89\x01\n\x1aListAccessProfilesResponse\x12\x43\n\x0f\x61\x63\x63\x65ss_profiles\x18\x01 \x03(\x0b\x32\x1a.codewire.v1.AccessProfileR\x0e\x61\x63\x63\x65ssProfiles\x12&\n\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\x97\x01\n\x17GetAccessProfileRequest\x12,\n\x11\x61\x63\x63\x65ss_profile_id\x18\x01 \x01(\tH\x00R\x0f\x61\x63\x63\x65ssProfileId\x12\x14\n\x04name\x18\x02 \x01(\tH\x00R\x04name\x12\x1f\n\x08revision\x18\x03 \x01(\x04H\x01R\x08revision\x88\x01\x01\x42\n\n\x08selectorB\x0b\n\t_revision\"]\n\x18GetAccessProfileResponse\x12\x41\n\x0e\x61\x63\x63\x65ss_profile\x18\x01 \x01(\x0b\x32\x1a.codewire.v1.AccessProfileR\raccessProfile\"k\n\x1a\x43reateAccessProfileRequest\x12\x12\n\x04name\x18\x01 \x01(\tR\x04name\x12\x39\n\x07\x65ntries\x18\x02 \x03(\x0b\x32\x1f.codewire.v1.AccessProfileEntryR\x07\x65ntries\"`\n\x1b\x43reateAccessProfileResponse\x12\x41\n\x0e\x61\x63\x63\x65ss_profile\x18\x01 \x01(\x0b\x32\x1a.codewire.v1.AccessProfileR\raccessProfile\"\xb0\x01\n\x1aUpdateAccessProfileRequest\x12*\n\x11\x61\x63\x63\x65ss_profile_id\x18\x01 \x01(\tR\x0f\x61\x63\x63\x65ssProfileId\x12+\n\x11\x65xpected_revision\x18\x02 \x01(\x04R\x10\x65xpectedRevision\x12\x39\n\x07\x65ntries\x18\x03 \x03(\x0b\x32\x1f.codewire.v1.AccessProfileEntryR\x07\x65ntries\"`\n\x1bUpdateAccessProfileResponse\x12\x41\n\x0e\x61\x63\x63\x65ss_profile\x18\x01 \x01(\x0b\x32\x1a.codewire.v1.AccessProfileR\raccessProfile\"\xae\x01\n\x1aRenameAccessProfileRequest\x12*\n\x11\x61\x63\x63\x65ss_profile_id\x18\x01 \x01(\tR\x0f\x61\x63\x63\x65ssProfileId\x12+\n\x11\x65xpected_revision\x18\x02 \x01(\x04R\x10\x65xpectedRevision\x12#\n\rexpected_name\x18\x03 \x01(\tR\x0c\x65xpectedName\x12\x12\n\x04name\x18\x04 \x01(\tR\x04name\"`\n\x1bRenameAccessProfileResponse\x12\x41\n\x0e\x61\x63\x63\x65ss_profile\x18\x01 \x01(\x0b\x32\x1a.codewire.v1.AccessProfileR\raccessProfile\"u\n\x1a\x44\x65leteAccessProfileRequest\x12*\n\x11\x61\x63\x63\x65ss_profile_id\x18\x01 \x01(\tR\x0f\x61\x63\x63\x65ssProfileId\x12+\n\x11\x65xpected_revision\x18\x02 \x01(\x04R\x10\x65xpectedRevision\"\x1d\n\x1b\x44\x65leteAccessProfileResponse\"L\n\x1eSetDefaultAccessProfileRequest\x12*\n\x11\x61\x63\x63\x65ss_profile_id\x18\x01 \x01(\tR\x0f\x61\x63\x63\x65ssProfileId\"d\n\x1fSetDefaultAccessProfileResponse\x12\x41\n\x0e\x61\x63\x63\x65ss_profile\x18\x01 \x01(\x0b\x32\x1a.codewire.v1.AccessProfileR\raccessProfile\"\xac\x01\n\x1f\x45nvironmentAccessProfileBinding\x12%\n\x0e\x65nvironment_id\x18\x01 \x01(\tR\renvironmentId\x12*\n\x11\x61\x63\x63\x65ss_profile_id\x18\x02 \x01(\tR\x0f\x61\x63\x63\x65ssProfileId\x12\x36\n\x17\x61\x63\x63\x65ss_profile_revision\x18\x03 \x01(\x04R\x15\x61\x63\x63\x65ssProfileRevision\"K\n\"GetEnvironmentAccessProfileRequest\x12%\n\x0e\x65nvironment_id\x18\x01 \x01(\tR\renvironmentId\"\xb3\x01\n#GetEnvironmentAccessProfileResponse\x12\x46\n\x07\x62inding\x18\x01 \x01(\x0b\x32,.codewire.v1.EnvironmentAccessProfileBindingR\x07\x62inding\x12\x44\n\x1epersonal_credentials_confirmed\x18\x02 \x01(\x08R\x1cpersonalCredentialsConfirmed2\x8e\x07\n\x14\x41\x63\x63\x65ssProfileService\x12j\n\x12ListAccessProfiles\x12&.codewire.v1.ListAccessProfilesRequest\x1a\'.codewire.v1.ListAccessProfilesResponse\"\x03\x90\x02\x01\x12\x64\n\x10GetAccessProfile\x12$.codewire.v1.GetAccessProfileRequest\x1a%.codewire.v1.GetAccessProfileResponse\"\x03\x90\x02\x01\x12h\n\x13\x43reateAccessProfile\x12\'.codewire.v1.CreateAccessProfileRequest\x1a(.codewire.v1.CreateAccessProfileResponse\x12h\n\x13UpdateAccessProfile\x12\'.codewire.v1.UpdateAccessProfileRequest\x1a(.codewire.v1.UpdateAccessProfileResponse\x12h\n\x13RenameAccessProfile\x12\'.codewire.v1.RenameAccessProfileRequest\x1a(.codewire.v1.RenameAccessProfileResponse\x12h\n\x13\x44\x65leteAccessProfile\x12\'.codewire.v1.DeleteAccessProfileRequest\x1a(.codewire.v1.DeleteAccessProfileResponse\x12t\n\x17SetDefaultAccessProfile\x12+.codewire.v1.SetDefaultAccessProfileRequest\x1a,.codewire.v1.SetDefaultAccessProfileResponse\x12\x85\x01\n\x1bGetEnvironmentAccessProfile\x12/.codewire.v1.GetEnvironmentAccessProfileRequest\x1a\x30.codewire.v1.GetEnvironmentAccessProfileResponse\"\x03\x90\x02\x01\x42\xb5\x01\n\x0f\x63om.codewire.v1B\x12\x41\x63\x63\x65ssProfileProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n codewire/v1/access_profile.proto\x12\x0b\x63odewire.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"b\n\x12\x41\x63\x63\x65ssProfileEntry\x12\'\n\x0f\x63\x61pability_slot\x18\x01 \x01(\tR\x0e\x63\x61pabilitySlot\x12#\n\rcredential_id\x18\x02 \x01(\tR\x0c\x63redentialId\"\xa9\x01\n\rAccessProfile\x12\x0e\n\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n\x04name\x18\x02 \x01(\tR\x04name\x12\x1a\n\x08revision\x18\x03 \x01(\x04R\x08revision\x12\x39\n\x07\x65ntries\x18\x04 \x03(\x0b\x32\x1f.codewire.v1.AccessProfileEntryR\x07\x65ntries\x12\x1d\n\nis_default\x18\x05 \x01(\x08R\tisDefault\"W\n\x19ListAccessProfilesRequest\x12\x1b\n\tpage_size\x18\x01 \x01(\x05R\x08pageSize\x12\x1d\n\npage_token\x18\x02 \x01(\tR\tpageToken\"\x89\x01\n\x1aListAccessProfilesResponse\x12\x43\n\x0f\x61\x63\x63\x65ss_profiles\x18\x01 \x03(\x0b\x32\x1a.codewire.v1.AccessProfileR\x0e\x61\x63\x63\x65ssProfiles\x12&\n\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\x97\x01\n\x17GetAccessProfileRequest\x12,\n\x11\x61\x63\x63\x65ss_profile_id\x18\x01 \x01(\tH\x00R\x0f\x61\x63\x63\x65ssProfileId\x12\x14\n\x04name\x18\x02 \x01(\tH\x00R\x04name\x12\x1f\n\x08revision\x18\x03 \x01(\x04H\x01R\x08revision\x88\x01\x01\x42\n\n\x08selectorB\x0b\n\t_revision\"]\n\x18GetAccessProfileResponse\x12\x41\n\x0e\x61\x63\x63\x65ss_profile\x18\x01 \x01(\x0b\x32\x1a.codewire.v1.AccessProfileR\raccessProfile\"k\n\x1a\x43reateAccessProfileRequest\x12\x12\n\x04name\x18\x01 \x01(\tR\x04name\x12\x39\n\x07\x65ntries\x18\x02 \x03(\x0b\x32\x1f.codewire.v1.AccessProfileEntryR\x07\x65ntries\"`\n\x1b\x43reateAccessProfileResponse\x12\x41\n\x0e\x61\x63\x63\x65ss_profile\x18\x01 \x01(\x0b\x32\x1a.codewire.v1.AccessProfileR\raccessProfile\"\xb0\x01\n\x1aUpdateAccessProfileRequest\x12*\n\x11\x61\x63\x63\x65ss_profile_id\x18\x01 \x01(\tR\x0f\x61\x63\x63\x65ssProfileId\x12+\n\x11\x65xpected_revision\x18\x02 \x01(\x04R\x10\x65xpectedRevision\x12\x39\n\x07\x65ntries\x18\x03 \x03(\x0b\x32\x1f.codewire.v1.AccessProfileEntryR\x07\x65ntries\"`\n\x1bUpdateAccessProfileResponse\x12\x41\n\x0e\x61\x63\x63\x65ss_profile\x18\x01 \x01(\x0b\x32\x1a.codewire.v1.AccessProfileR\raccessProfile\"\xae\x01\n\x1aRenameAccessProfileRequest\x12*\n\x11\x61\x63\x63\x65ss_profile_id\x18\x01 \x01(\tR\x0f\x61\x63\x63\x65ssProfileId\x12+\n\x11\x65xpected_revision\x18\x02 \x01(\x04R\x10\x65xpectedRevision\x12#\n\rexpected_name\x18\x03 \x01(\tR\x0c\x65xpectedName\x12\x12\n\x04name\x18\x04 \x01(\tR\x04name\"`\n\x1bRenameAccessProfileResponse\x12\x41\n\x0e\x61\x63\x63\x65ss_profile\x18\x01 \x01(\x0b\x32\x1a.codewire.v1.AccessProfileR\raccessProfile\"u\n\x1a\x44\x65leteAccessProfileRequest\x12*\n\x11\x61\x63\x63\x65ss_profile_id\x18\x01 \x01(\tR\x0f\x61\x63\x63\x65ssProfileId\x12+\n\x11\x65xpected_revision\x18\x02 \x01(\x04R\x10\x65xpectedRevision\"\x1d\n\x1b\x44\x65leteAccessProfileResponse\"L\n\x1eSetDefaultAccessProfileRequest\x12*\n\x11\x61\x63\x63\x65ss_profile_id\x18\x01 \x01(\tR\x0f\x61\x63\x63\x65ssProfileId\"d\n\x1fSetDefaultAccessProfileResponse\x12\x41\n\x0e\x61\x63\x63\x65ss_profile\x18\x01 \x01(\x0b\x32\x1a.codewire.v1.AccessProfileR\raccessProfile\"\x8b\x01\n!ListAccessProfileRevisionsRequest\x12*\n\x11\x61\x63\x63\x65ss_profile_id\x18\x01 \x01(\tR\x0f\x61\x63\x63\x65ssProfileId\x12\x1b\n\tpage_size\x18\x02 \x01(\x05R\x08pageSize\x12\x1d\n\npage_token\x18\x03 \x01(\tR\tpageToken\"\x95\x01\n\x15\x41\x63\x63\x65ssProfileRevision\x12\x41\n\x0e\x61\x63\x63\x65ss_profile\x18\x01 \x01(\x0b\x32\x1a.codewire.v1.AccessProfileR\raccessProfile\x12\x39\n\ncreated_at\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tcreatedAt\"\x8e\x01\n\"ListAccessProfileRevisionsResponse\x12@\n\trevisions\x18\x01 \x03(\x0b\x32\".codewire.v1.AccessProfileRevisionR\trevisions\x12&\n\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\xac\x01\n\x1f\x45nvironmentAccessProfileBinding\x12%\n\x0e\x65nvironment_id\x18\x01 \x01(\tR\renvironmentId\x12*\n\x11\x61\x63\x63\x65ss_profile_id\x18\x02 \x01(\tR\x0f\x61\x63\x63\x65ssProfileId\x12\x36\n\x17\x61\x63\x63\x65ss_profile_revision\x18\x03 \x01(\x04R\x15\x61\x63\x63\x65ssProfileRevision\"K\n\"GetEnvironmentAccessProfileRequest\x12%\n\x0e\x65nvironment_id\x18\x01 \x01(\tR\renvironmentId\"\xb3\x01\n#GetEnvironmentAccessProfileResponse\x12\x46\n\x07\x62inding\x18\x01 \x01(\x0b\x32,.codewire.v1.EnvironmentAccessProfileBindingR\x07\x62inding\x12\x44\n\x1epersonal_credentials_confirmed\x18\x02 \x01(\x08R\x1cpersonalCredentialsConfirmed2\x93\x08\n\x14\x41\x63\x63\x65ssProfileService\x12j\n\x12ListAccessProfiles\x12&.codewire.v1.ListAccessProfilesRequest\x1a\'.codewire.v1.ListAccessProfilesResponse\"\x03\x90\x02\x01\x12\x64\n\x10GetAccessProfile\x12$.codewire.v1.GetAccessProfileRequest\x1a%.codewire.v1.GetAccessProfileResponse\"\x03\x90\x02\x01\x12h\n\x13\x43reateAccessProfile\x12\'.codewire.v1.CreateAccessProfileRequest\x1a(.codewire.v1.CreateAccessProfileResponse\x12h\n\x13UpdateAccessProfile\x12\'.codewire.v1.UpdateAccessProfileRequest\x1a(.codewire.v1.UpdateAccessProfileResponse\x12h\n\x13RenameAccessProfile\x12\'.codewire.v1.RenameAccessProfileRequest\x1a(.codewire.v1.RenameAccessProfileResponse\x12h\n\x13\x44\x65leteAccessProfile\x12\'.codewire.v1.DeleteAccessProfileRequest\x1a(.codewire.v1.DeleteAccessProfileResponse\x12t\n\x17SetDefaultAccessProfile\x12+.codewire.v1.SetDefaultAccessProfileRequest\x1a,.codewire.v1.SetDefaultAccessProfileResponse\x12\x82\x01\n\x1aListAccessProfileRevisions\x12..codewire.v1.ListAccessProfileRevisionsRequest\x1a/.codewire.v1.ListAccessProfileRevisionsResponse\"\x03\x90\x02\x01\x12\x85\x01\n\x1bGetEnvironmentAccessProfile\x12/.codewire.v1.GetEnvironmentAccessProfileRequest\x1a\x30.codewire.v1.GetEnvironmentAccessProfileResponse\"\x03\x90\x02\x01\x42\xb5\x01\n\x0f\x63om.codewire.v1B\x12\x41\x63\x63\x65ssProfileProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -36,46 +37,54 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_ACCESSPROFILESERVICE'].methods_by_name['ListAccessProfiles']._serialized_options = b'\220\002\001'
   _globals['_ACCESSPROFILESERVICE'].methods_by_name['GetAccessProfile']._loaded_options = None
   _globals['_ACCESSPROFILESERVICE'].methods_by_name['GetAccessProfile']._serialized_options = b'\220\002\001'
+  _globals['_ACCESSPROFILESERVICE'].methods_by_name['ListAccessProfileRevisions']._loaded_options = None
+  _globals['_ACCESSPROFILESERVICE'].methods_by_name['ListAccessProfileRevisions']._serialized_options = b'\220\002\001'
   _globals['_ACCESSPROFILESERVICE'].methods_by_name['GetEnvironmentAccessProfile']._loaded_options = None
   _globals['_ACCESSPROFILESERVICE'].methods_by_name['GetEnvironmentAccessProfile']._serialized_options = b'\220\002\001'
-  _globals['_ACCESSPROFILEENTRY']._serialized_start=49
-  _globals['_ACCESSPROFILEENTRY']._serialized_end=147
-  _globals['_ACCESSPROFILE']._serialized_start=150
-  _globals['_ACCESSPROFILE']._serialized_end=319
-  _globals['_LISTACCESSPROFILESREQUEST']._serialized_start=321
-  _globals['_LISTACCESSPROFILESREQUEST']._serialized_end=408
-  _globals['_LISTACCESSPROFILESRESPONSE']._serialized_start=411
-  _globals['_LISTACCESSPROFILESRESPONSE']._serialized_end=548
-  _globals['_GETACCESSPROFILEREQUEST']._serialized_start=551
-  _globals['_GETACCESSPROFILEREQUEST']._serialized_end=702
-  _globals['_GETACCESSPROFILERESPONSE']._serialized_start=704
-  _globals['_GETACCESSPROFILERESPONSE']._serialized_end=797
-  _globals['_CREATEACCESSPROFILEREQUEST']._serialized_start=799
-  _globals['_CREATEACCESSPROFILEREQUEST']._serialized_end=906
-  _globals['_CREATEACCESSPROFILERESPONSE']._serialized_start=908
-  _globals['_CREATEACCESSPROFILERESPONSE']._serialized_end=1004
-  _globals['_UPDATEACCESSPROFILEREQUEST']._serialized_start=1007
-  _globals['_UPDATEACCESSPROFILEREQUEST']._serialized_end=1183
-  _globals['_UPDATEACCESSPROFILERESPONSE']._serialized_start=1185
-  _globals['_UPDATEACCESSPROFILERESPONSE']._serialized_end=1281
-  _globals['_RENAMEACCESSPROFILEREQUEST']._serialized_start=1284
-  _globals['_RENAMEACCESSPROFILEREQUEST']._serialized_end=1458
-  _globals['_RENAMEACCESSPROFILERESPONSE']._serialized_start=1460
-  _globals['_RENAMEACCESSPROFILERESPONSE']._serialized_end=1556
-  _globals['_DELETEACCESSPROFILEREQUEST']._serialized_start=1558
-  _globals['_DELETEACCESSPROFILEREQUEST']._serialized_end=1675
-  _globals['_DELETEACCESSPROFILERESPONSE']._serialized_start=1677
-  _globals['_DELETEACCESSPROFILERESPONSE']._serialized_end=1706
-  _globals['_SETDEFAULTACCESSPROFILEREQUEST']._serialized_start=1708
-  _globals['_SETDEFAULTACCESSPROFILEREQUEST']._serialized_end=1784
-  _globals['_SETDEFAULTACCESSPROFILERESPONSE']._serialized_start=1786
-  _globals['_SETDEFAULTACCESSPROFILERESPONSE']._serialized_end=1886
-  _globals['_ENVIRONMENTACCESSPROFILEBINDING']._serialized_start=1889
-  _globals['_ENVIRONMENTACCESSPROFILEBINDING']._serialized_end=2061
-  _globals['_GETENVIRONMENTACCESSPROFILEREQUEST']._serialized_start=2063
-  _globals['_GETENVIRONMENTACCESSPROFILEREQUEST']._serialized_end=2138
-  _globals['_GETENVIRONMENTACCESSPROFILERESPONSE']._serialized_start=2141
-  _globals['_GETENVIRONMENTACCESSPROFILERESPONSE']._serialized_end=2320
-  _globals['_ACCESSPROFILESERVICE']._serialized_start=2323
-  _globals['_ACCESSPROFILESERVICE']._serialized_end=3233
+  _globals['_ACCESSPROFILEENTRY']._serialized_start=82
+  _globals['_ACCESSPROFILEENTRY']._serialized_end=180
+  _globals['_ACCESSPROFILE']._serialized_start=183
+  _globals['_ACCESSPROFILE']._serialized_end=352
+  _globals['_LISTACCESSPROFILESREQUEST']._serialized_start=354
+  _globals['_LISTACCESSPROFILESREQUEST']._serialized_end=441
+  _globals['_LISTACCESSPROFILESRESPONSE']._serialized_start=444
+  _globals['_LISTACCESSPROFILESRESPONSE']._serialized_end=581
+  _globals['_GETACCESSPROFILEREQUEST']._serialized_start=584
+  _globals['_GETACCESSPROFILEREQUEST']._serialized_end=735
+  _globals['_GETACCESSPROFILERESPONSE']._serialized_start=737
+  _globals['_GETACCESSPROFILERESPONSE']._serialized_end=830
+  _globals['_CREATEACCESSPROFILEREQUEST']._serialized_start=832
+  _globals['_CREATEACCESSPROFILEREQUEST']._serialized_end=939
+  _globals['_CREATEACCESSPROFILERESPONSE']._serialized_start=941
+  _globals['_CREATEACCESSPROFILERESPONSE']._serialized_end=1037
+  _globals['_UPDATEACCESSPROFILEREQUEST']._serialized_start=1040
+  _globals['_UPDATEACCESSPROFILEREQUEST']._serialized_end=1216
+  _globals['_UPDATEACCESSPROFILERESPONSE']._serialized_start=1218
+  _globals['_UPDATEACCESSPROFILERESPONSE']._serialized_end=1314
+  _globals['_RENAMEACCESSPROFILEREQUEST']._serialized_start=1317
+  _globals['_RENAMEACCESSPROFILEREQUEST']._serialized_end=1491
+  _globals['_RENAMEACCESSPROFILERESPONSE']._serialized_start=1493
+  _globals['_RENAMEACCESSPROFILERESPONSE']._serialized_end=1589
+  _globals['_DELETEACCESSPROFILEREQUEST']._serialized_start=1591
+  _globals['_DELETEACCESSPROFILEREQUEST']._serialized_end=1708
+  _globals['_DELETEACCESSPROFILERESPONSE']._serialized_start=1710
+  _globals['_DELETEACCESSPROFILERESPONSE']._serialized_end=1739
+  _globals['_SETDEFAULTACCESSPROFILEREQUEST']._serialized_start=1741
+  _globals['_SETDEFAULTACCESSPROFILEREQUEST']._serialized_end=1817
+  _globals['_SETDEFAULTACCESSPROFILERESPONSE']._serialized_start=1819
+  _globals['_SETDEFAULTACCESSPROFILERESPONSE']._serialized_end=1919
+  _globals['_LISTACCESSPROFILEREVISIONSREQUEST']._serialized_start=1922
+  _globals['_LISTACCESSPROFILEREVISIONSREQUEST']._serialized_end=2061
+  _globals['_ACCESSPROFILEREVISION']._serialized_start=2064
+  _globals['_ACCESSPROFILEREVISION']._serialized_end=2213
+  _globals['_LISTACCESSPROFILEREVISIONSRESPONSE']._serialized_start=2216
+  _globals['_LISTACCESSPROFILEREVISIONSRESPONSE']._serialized_end=2358
+  _globals['_ENVIRONMENTACCESSPROFILEBINDING']._serialized_start=2361
+  _globals['_ENVIRONMENTACCESSPROFILEBINDING']._serialized_end=2533
+  _globals['_GETENVIRONMENTACCESSPROFILEREQUEST']._serialized_start=2535
+  _globals['_GETENVIRONMENTACCESSPROFILEREQUEST']._serialized_end=2610
+  _globals['_GETENVIRONMENTACCESSPROFILERESPONSE']._serialized_start=2613
+  _globals['_GETENVIRONMENTACCESSPROFILERESPONSE']._serialized_end=2792
+  _globals['_ACCESSPROFILESERVICE']._serialized_start=2795
+  _globals['_ACCESSPROFILESERVICE']._serialized_end=3838
 # @@protoc_insertion_point(module_scope)

@@ -1364,6 +1364,73 @@ async fn each_user_has_one_default_that_moves_explicitly_and_is_never_deleted() 
     db.finish(result).await
 }
 
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn revisions_list_newest_first_in_pages_for_their_owner_only() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let user = db.user("revisions-user").await?;
+        let stranger = db.user("revisions-stranger").await?;
+        let store = db.store(Arc::new(SyntheticKek::default()));
+        let codex = store
+            .create(
+                &user,
+                registration("Revisions", Kind::OAuth),
+                &value(OLD_VALUE),
+            )
+            .await?;
+        let profiles = profiles(&db);
+        let first = profiles
+            .create(&user, name("history"), entries(&codex.metadata.id))
+            .await?;
+        profiles
+            .update(&user, &first.id, 1, BTreeMap::new())
+            .await?;
+        profiles
+            .update(&user, &first.id, 2, entries(&codex.metadata.id))
+            .await?;
+        let is_default = profiles.default_profile(&user).await? == Some(first.id.clone());
+
+        // Two of three, newest first, then the rest from where the page ended.
+        let (page, default) = profiles.list_revisions(&user, &first.id, None, 2).await?;
+        ensure!(default == is_default);
+        let numbers = |page: &[(AccessProfile, i64)]| {
+            page.iter().map(|(p, _)| p.revision).collect::<Vec<_>>()
+        };
+        ensure!(numbers(&page) == vec![3, 2]);
+        let (rest, _) = profiles
+            .list_revisions(&user, &first.id, Some(2), 2)
+            .await?;
+        ensure!(numbers(&rest) == vec![1]);
+
+        // Each revision carries its own entries, and the times never run
+        // backwards.
+        let all = [page, rest].concat();
+        for (profile, _) in &all {
+            ensure!(
+                *profile
+                    == profiles
+                        .get_revision(&user, &first.id, profile.revision)
+                        .await?
+            );
+        }
+        ensure!(all[0].0.entries == entries(&codex.metadata.id));
+        ensure!(all[1].0.entries.is_empty());
+        ensure!(all.windows(2).all(|pair| pair[0].1 >= pair[1].1));
+
+        // Another owner's profile is not found, and a page has a size.
+        ensure!(
+            profiles.list_revisions(&stranger, &first.id, None, 2).await == Err(Error::NotFound)
+        );
+        ensure!(
+            profiles.list_revisions(&user, &first.id, None, 0).await == Err(Error::InvalidInput)
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
 /// Without a binding the account's GitHub connection is the only grant, and
 /// a missing grant is decided from the locked row as a profile's GitHub
 /// choice is (#5057): no current connection needs reconnecting, and a current

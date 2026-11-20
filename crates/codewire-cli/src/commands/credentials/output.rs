@@ -886,6 +886,20 @@ impl AccessProfileView {
             revision_created_at_unix_ms: None,
         }
     }
+
+    /// One revision of a cloud profile, with when the profile and this
+    /// revision were made (#4717 C7).
+    pub(in crate::commands) fn cloud_revision(
+        profile: &rpc::AccessProfile,
+        profile_created_at_unix_ms: u64,
+        revision_created_at_unix_ms: u64,
+    ) -> Self {
+        Self {
+            profile_created_at_unix_ms: Some(profile_created_at_unix_ms),
+            revision_created_at_unix_ms: Some(revision_created_at_unix_ms),
+            ..Self::cloud(profile)
+        }
+    }
 }
 
 /// Each credential's name, as a profile shows what it holds: its kind and
@@ -955,17 +969,31 @@ pub(in crate::commands) fn print_local_profile_revisions(
         .iter()
         .map(AccessProfileView::revision)
         .collect::<Vec<_>>();
+    print_profile_revisions(&views, names, output)
+}
+
+/// One profile's revisions in either placement, oldest first.
+pub(in crate::commands) fn print_profile_revisions(
+    views: &[AccessProfileView],
+    names: &Names,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
     match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&views)?),
-        OutputFormat::Text => {
-            let rows: Vec<[String; 2]> = views
-                .iter()
-                .map(|view| [view.revision.to_string(), view.holds(names)])
-                .collect();
-            print!("{}", table(["REVISION", "CREDENTIALS"], &rows));
-        }
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(views)?),
+        OutputFormat::Text => print!("{}", format_revisions_text(views, names)),
     }
     Ok(())
+}
+
+pub(in crate::commands) fn format_revisions_text(
+    views: &[AccessProfileView],
+    names: &Names,
+) -> String {
+    let rows: Vec<[String; 2]> = views
+        .iter()
+        .map(|view| [view.revision.to_string(), view.holds(names)])
+        .collect();
+    table(["REVISION", "CREDENTIALS"], &rows)
 }
 
 pub(in crate::commands) fn print_profile_views(

@@ -22,6 +22,7 @@ observed**.
 | `cred-claude-sign-in` | observed, #4798 at f5657302c, 2026-11-15 (steps 1–4; the plan and `/usage`, step 5, not yet observed) | login file observed, #4868 at b4541bf05, 2026-11-15 (steps 1–3 and the file; `claude -p`, `/status` and `/usage` not yet observed: the guest had no network, #4948) | link screen and paste prompt observed, v0.4.18, 2026-11-14; a completed sign-in not yet observed |
 | `cred-ssh-key` | not yet observed | not yet observed | not yet observed |
 | `cred-sign-in-screen` | partly observed, #4885 at aea6abdb8, 2026-11-16 (steps 1 and 2 for Claude and Codex at a pty; GitHub, `cw login`, piped, `TERM=dumb` and SSH not yet observed) | not yet observed | not yet observed |
+| `profile-revisions` | not yet observed | not yet observed | not yet observed |
 | `profile-default` | not yet observed | not yet observed | not yet observed |
 | `cred-delivery-diagnosis` | observed, #5237 at a8c2d9625, 2026-11-17 (the token, no-profile and stopped states; the sign-in and older-guest states not yet observed) | not yet observed | local VMs only |
 | `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, the early replacements on that build plus their change, and `main` at 4cae0f601 through the smoke, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | observed, #5286: main's tree at 57b68c6be (#5295 and #5312), 2026-11-18, with a name resolving only to private addresses; the provider came back at the regular replacement, not the early ones (a sign-in's token host not walked) | local VMs only |
@@ -475,7 +476,45 @@ Issues: #4850, #4717 (C2). The screens are the approved screens 3 and 4.
   - GitHub, `cw login`, piped, `TERM=dumb`, over SSH, the cloud placement and
     the Mac: not yet observed.
 
-## 9. `profile-default`: the default profile a create uses
+## 9. `profile-revisions`: a profile's revisions, listed
+
+- **Entry points:** `cw credentials --local --profile NAME revisions` and
+  `cw credentials --cloud --profile NAME revisions`, each with `--output
+  json`.
+- **States to exercise:**
+  - a profile with one revision;
+  - a profile changed twice, so three revisions;
+  - a profile name that does not exist, which exits non-zero in both.
+- **Driving it:** with a throwaway `HOME` and a synthetic credential named
+  `parity-revisions`, for each placement:
+
+  ```sh
+  cw credentials --PLACEMENT --profile parity-revisions set codex parity-revisions
+  cw credentials --PLACEMENT --profile parity-revisions unset codex
+  cw credentials --PLACEMENT --profile parity-revisions set codex parity-revisions
+  cw credentials --PLACEMENT --profile parity-revisions revisions
+  cw credentials --PLACEMENT --profile parity-revisions revisions --output json
+  cw credentials --PLACEMENT --profile parity-missing revisions
+  ```
+
+  Then delete the profile and the credential.
+- **Proof:** both placements print revisions 1, 2 and 3 oldest first, in
+  the columns REVISION and CREDENTIALS, what each held by kind and name.
+  Revisions 1 and 3 hold "Codex: parity-revisions". Revision 2 holds "none
+  yet" locally, and in the cloud only "GitHub: account connection", which
+  every cloud profile includes. IDs appear only in `--output json`, whose
+  rows have the same fields in both, except that a cloud row has
+  `github_connection` and no `owner`. One revision is shown with `--profile
+  parity-revisions get --revision 2`.
+- **Gotchas:**
+  - The cloud walk needs a `cw login` session, not an organization API key.
+    Profiles are personal, and the service refuses organization keys.
+  - A cloud build from before #4887 refuses `revisions` with "cloud
+    profiles have no revision list yet" ("platform history listing is not
+    supported" before #5183). Check the CLI and Dev's source.
+- **Observed:** not yet observed.
+
+## 10. `profile-default`: the default profile a create uses
 
 - **Entry points:** `cw credentials --local profiles default NAME` and
   `cw credentials --cloud profiles default NAME`; `cw credentials
@@ -529,7 +568,7 @@ Issues: #4850, #4717 (C2). The screens are the approved screens 3 and 4.
     walk's last profile stays until another is made the default.
 - **Observed:** not yet observed.
 
-## 10. `cred-delivery-diagnosis`: see why a credential didn't reach a local VM
+## 11. `cred-delivery-diagnosis`: see why a credential didn't reach a local VM
 
 Issue: #4882. The rules are in `docs/dev/SECRETS-AND-CREDENTIALS.md`,
 "Diagnosing delivery in a local VM". Local VMs only: a hosted Sandbox's daemon
@@ -620,7 +659,7 @@ lines are in its Pod log.
     - not yet observed: the sign-in state (`claude_login=Written` beside a
       `claude-login` lease), and a VM on the guest from before the update.
 
-## 11. `cred-provider-unresolved`: a provider's name doesn't resolve when a local VM starts
+## 12. `cred-provider-unresolved`: a provider's name doesn't resolve when a local VM starts
 
 Issue: #5286. The rules are in `docs/dev/SECRETS-AND-CREDENTIALS.md`, "A
 provider that can't be looked up when a local VM starts". Local VMs only: a
@@ -734,7 +773,7 @@ hosted Sandbox's broker is the platform's.
     `a_forced_refresh_is_not_begun_toward_a_provider_with_no_address`,
     `a_github_app_refresh_is_not_begun_toward_an_endpoint_with_no_address`).
 
-## 12. `cred-file-store`: a Linux root that keeps its credentials inside itself
+## 13. `cred-file-store`: a Linux root that keeps its credentials inside itself
 
 The spec is
 [Linux file store](../dev/SECRETS-AND-CREDENTIALS.md#linux-file-store-5255).
@@ -796,7 +835,7 @@ The spec is
   before #5552 both routes answered `CredentialUnavailable` within
   milliseconds. The other states are not yet observed.
 
-## 13. `cred-same-name`: one name for a credential of each provider
+## 14. `cred-same-name`: one name for a credential of each provider
 
 Issue: #4928. The rules are in `docs/dev/SECRETS-AND-CREDENTIALS.md`,
 "Credential names". The owner labels credentials by account: a Claude
@@ -851,7 +890,7 @@ sign-in and a Codex sign-in both named after their email address.
   - Names are case-insensitive: `Walk` and `walk` are the same name in one
     provider.
 
-## 14. `cred-wording`: the words every step shows
+## 15. `cred-wording`: the words every step shows
 
 Issue: #4938. The words are in `docs/GLOSSARY.md`, "Words users see:
 credentials", from the approved credentials screens; cw-web walks the

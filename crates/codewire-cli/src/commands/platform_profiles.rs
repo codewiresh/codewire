@@ -184,12 +184,7 @@ async fn handle_profile(
             );
             Ok(())
         }
-        CredentialProfileCommand::Revisions(args) => {
-            let _ = args;
-            anyhow::bail!(
-                "cloud profiles have no revision list yet; use --profile=NAME get --revision REVISION"
-            )
-        }
+        CredentialProfileCommand::Revisions(args) => print_revisions(client, args).await,
     }
 }
 
@@ -212,6 +207,98 @@ pub(super) fn platform_authentication_kind(
     } else {
         anyhow::bail!("Codewire returned a credential kind this cw doesn't know; upgrade cw")
     }
+}
+
+/// Every revision of one profile, following the service's pages, oldest first
+/// as the local listing prints them. The service pages newest first.
+/// `--profile P revisions`: every revision of the profile, oldest first (#4717 C7).
+async fn print_revisions(
+    client: &CodewireClient,
+    args: super::credential_profile_args::CredentialProfileSelectorArgs,
+) -> anyhow::Result<()> {
+    if args.revision.is_some() {
+        anyhow::bail!("use --profile=NAME get --revision REVISION to inspect one revision");
+    }
+    let profile = resolve_profile(client, &args.profile, None).await?;
+    let revisions = list_revisions(client, &profile.id).await?;
+    let credentials = super::platform_credentials::list_all(client).await?;
+    super::credentials::output::print_profile_revisions(
+        &revision_views(&revisions)?,
+        &super::credentials::output::cloud_names(&credentials),
+        args.output,
+    )
+}
+
+async fn list_revisions(
+    client: &CodewireClient,
+    id: &str,
+) -> anyhow::Result<Vec<rpc::AccessProfileRevision>> {
+    let mut revisions = Vec::new();
+    let mut page_token = String::new();
+    let mut cursors = BTreeSet::new();
+    loop {
+        let page = client
+            .list_access_profile_revisions(rpc::ListAccessProfileRevisionsRequest {
+                access_profile_id: id.to_owned(),
+                page_size: 100,
+                page_token,
+                ..Default::default()
+            })
+            .await?;
+        revisions.extend(page.revisions);
+        if page.next_page_token.is_empty() {
+            revisions.reverse();
+            return Ok(revisions);
+        }
+        anyhow::ensure!(
+            cursors.insert(page.next_page_token.clone()),
+            "Codewire returned a repeated revision page"
+        );
+        page_token = page.next_page_token;
+    }
+}
+
+/// Cloud revisions as the local `revisions` shows its own: the same columns
+/// and JSON fields (#4717). The profile was created with its first revision.
+fn revision_views(
+    revisions: &[rpc::AccessProfileRevision],
+) -> anyhow::Result<Vec<super::credentials::output::AccessProfileView>> {
+    let created_at = |revision: &rpc::AccessProfileRevision| -> anyhow::Result<u64> {
+        let at = revision
+            .created_at
+            .as_option()
+            .context("Codewire returned a revision without its time")?;
+        u64::try_from(at.seconds)
+            .ok()
+            .and_then(|seconds| seconds.checked_mul(1000))
+            .and_then(|ms| ms.checked_add(u64::try_from(at.nanos / 1_000_000).ok()?))
+            .context("Codewire returned a revision time before 1970")
+    };
+    let profile_created_at = match revisions.iter().find(|revision| {
+        revision
+            .access_profile
+            .as_option()
+            .is_some_and(|p| p.revision == 1)
+    }) {
+        Some(first) => created_at(first)?,
+        None => 0,
+    };
+    revisions
+        .iter()
+        .map(|revision| {
+            let profile = revision
+                .access_profile
+                .as_option()
+                .context("Codewire returned a revision without its profile")?;
+            Ok(
+                super::credentials::output::AccessProfileView::cloud_revision(
+                    profile,
+                    profile_created_at,
+                    created_at(revision)?,
+                ),
+            )
+        })
+        .collect()
 }
 
 pub(super) async fn list_profiles(
@@ -725,19 +812,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn organization_scope_and_unsupported_history_fail_before_network() {
+    async fn organization_scope_and_one_revision_of_the_history_fail_before_network() {
         let server = MockServer::start().await;
         assert!(
             resolve_profile(&client(&server), "organization/work", None)
                 .await
                 .is_err()
         );
+        // The history lists every revision (#4717); one revision is `get`'s.
         assert!(
             handle_profile(
                 &client(&server),
                 CredentialProfileCommand::Revisions(CredentialProfileSelectorArgs {
                     profile: "work".into(),
-                    revision: None,
+                    revision: Some(2),
                     output: OutputFormat::Json,
                 })
             )
@@ -854,5 +942,121 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["c", "a", "b", "d"]
         );
+    }
+
+    fn revision(number: u64, seconds: i64, entries: &[(&str, &str)]) -> rpc::AccessProfileRevision {
+        rpc::AccessProfileRevision {
+            access_profile: Some(rpc::AccessProfile {
+                id: PROFILE.into(),
+                name: "work".into(),
+                revision: number,
+                entries: entries
+                    .iter()
+                    .map(|(slot, credential)| rpc::AccessProfileEntry {
+                        capability_slot: (*slot).into(),
+                        credential_id: (*credential).into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .into(),
+            created_at: Some(rpc::Timestamp::from_unix(seconds, 250_000_000)).into(),
+            ..Default::default()
+        }
+    }
+
+    /// Cloud revisions print as the local `revisions` does: the revision
+    /// first, then what each held by name, and in JSON the profile with the
+    /// profile's creation time taken from its first revision (#4717).
+    #[test]
+    fn cloud_revisions_render_as_the_local_revisions_do() {
+        let views = revision_views(&[
+            revision(2, 1_794_614_400, &[]),
+            revision(1, 1_794_614_300, &[("codex", CREDENTIAL)]),
+        ])
+        .unwrap();
+        let json = serde_json::to_value(&views).unwrap();
+        assert_eq!(
+            json[1],
+            serde_json::json!({
+                "id": PROFILE,
+                "placement": "cloud",
+                "name": "work",
+                "revision": 1,
+                "is_default": false,
+                "entries": {"codex": CREDENTIAL},
+                "github_connection": true,
+                "profile_created_at_unix_ms": 1_794_614_300_250_u64,
+                "revision_created_at_unix_ms": 1_794_614_300_250_u64,
+            })
+        );
+        assert_eq!(json[0]["revision"], 2);
+        assert_eq!(json[0]["entries"], serde_json::json!({}));
+        assert_eq!(json[0]["profile_created_at_unix_ms"], 1_794_614_300_250_u64);
+        assert_eq!(
+            json[0]["revision_created_at_unix_ms"],
+            1_794_614_400_250_u64
+        );
+        let names = [(CREDENTIAL.to_owned(), "Codex: work key".to_owned())].into();
+        let text = super::super::credentials::output::format_revisions_text(&views, &names);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].starts_with("REVISION"), "{text}");
+        assert!(lines[1].starts_with('2'), "{text}");
+        assert!(lines[1].contains("GitHub: account connection"), "{text}");
+        assert!(lines[2].starts_with('1'), "{text}");
+        assert!(
+            lines[2].contains("Codex: work key, GitHub: account connection"),
+            "{text}"
+        );
+        assert!(
+            !text.contains(PROFILE) && !text.contains(CREDENTIAL),
+            "{text}"
+        );
+    }
+
+    /// The service pages newest first; the CLI follows every page and prints
+    /// oldest first, as the local listing does (#4717).
+    #[tokio::test]
+    async fn cloud_revisions_follow_every_page_and_list_oldest_first() {
+        let server = MockServer::start().await;
+        let request = |page_token: &str| rpc::ListAccessProfileRevisionsRequest {
+            access_profile_id: PROFILE.into(),
+            page_size: 100,
+            page_token: page_token.into(),
+            ..Default::default()
+        };
+        let page = |revisions: Vec<rpc::AccessProfileRevision>, next: &str| {
+            rpc::ListAccessProfileRevisionsResponse {
+                revisions,
+                next_page_token: next.into(),
+                ..Default::default()
+            }
+        };
+        let service = "AccessProfileService";
+        let name = "ListAccessProfileRevisions";
+        unary(
+            &server,
+            service,
+            name,
+            request(""),
+            page(vec![revision(3, 30, &[]), revision(2, 20, &[])], "2"),
+        )
+        .await;
+        unary(
+            &server,
+            service,
+            name,
+            request("2"),
+            page(vec![revision(1, 10, &[])], ""),
+        )
+        .await;
+
+        let revisions = list_revisions(&client(&server), PROFILE).await.unwrap();
+        let numbers: Vec<u64> = revisions
+            .iter()
+            .map(|r| r.access_profile.as_option().unwrap().revision)
+            .collect();
+        assert_eq!(numbers, vec![1, 2, 3]);
     }
 }

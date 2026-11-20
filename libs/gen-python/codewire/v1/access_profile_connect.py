@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .access_profile_pb2 import CreateAccessProfileRequest, CreateAccessProfileResponse, DeleteAccessProfileRequest, DeleteAccessProfileResponse, GetAccessProfileRequest, GetAccessProfileResponse, GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse, ListAccessProfilesRequest, ListAccessProfilesResponse, RenameAccessProfileRequest, RenameAccessProfileResponse, SetDefaultAccessProfileRequest, SetDefaultAccessProfileResponse, UpdateAccessProfileRequest, UpdateAccessProfileResponse
+from .access_profile_pb2 import CreateAccessProfileRequest, CreateAccessProfileResponse, DeleteAccessProfileRequest, DeleteAccessProfileResponse, GetAccessProfileRequest, GetAccessProfileResponse, GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse, ListAccessProfileRevisionsRequest, ListAccessProfileRevisionsResponse, ListAccessProfilesRequest, ListAccessProfilesResponse, RenameAccessProfileRequest, RenameAccessProfileResponse, SetDefaultAccessProfileRequest, SetDefaultAccessProfileResponse, UpdateAccessProfileRequest, UpdateAccessProfileResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -54,6 +54,9 @@ class AccessProfileService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def set_default_access_profile(self, request: SetDefaultAccessProfileRequest, ctx: RequestContext[SetDefaultAccessProfileRequest, SetDefaultAccessProfileResponse]) -> SetDefaultAccessProfileResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def list_access_profile_revisions(self, request: ListAccessProfileRevisionsRequest, ctx: RequestContext[ListAccessProfileRevisionsRequest, ListAccessProfileRevisionsResponse]) -> ListAccessProfileRevisionsResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def get_environment_access_profile(self, request: GetEnvironmentAccessProfileRequest, ctx: RequestContext[GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse]) -> GetEnvironmentAccessProfileResponse:
@@ -142,6 +145,16 @@ class AccessProfileServiceASGIApplication(ConnectASGIApplication[AccessProfileSe
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.set_default_access_profile,
+                ),
+                "/codewire.v1.AccessProfileService/ListAccessProfileRevisions": Endpoint.unary(
+                    method=MethodInfo(
+                        name="ListAccessProfileRevisions",
+                        service_name="codewire.v1.AccessProfileService",
+                        input=ListAccessProfileRevisionsRequest,
+                        output=ListAccessProfileRevisionsResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.list_access_profile_revisions,
                 ),
                 "/codewire.v1.AccessProfileService/GetEnvironmentAccessProfile": Endpoint.unary(
                     method=MethodInfo(
@@ -335,6 +348,28 @@ class AccessProfileServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def list_access_profile_revisions(
+        self,
+        request: ListAccessProfileRevisionsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListAccessProfileRevisionsResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListAccessProfileRevisions",
+                service_name="codewire.v1.AccessProfileService",
+                input=ListAccessProfileRevisionsRequest,
+                output=ListAccessProfileRevisionsResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
     async def get_environment_access_profile(
         self,
         request: GetEnvironmentAccessProfileRequest,
@@ -377,6 +412,9 @@ class AccessProfileServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def set_default_access_profile(self, request: SetDefaultAccessProfileRequest, ctx: RequestContext[SetDefaultAccessProfileRequest, SetDefaultAccessProfileResponse]) -> SetDefaultAccessProfileResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def list_access_profile_revisions(self, request: ListAccessProfileRevisionsRequest, ctx: RequestContext[ListAccessProfileRevisionsRequest, ListAccessProfileRevisionsResponse]) -> ListAccessProfileRevisionsResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def get_environment_access_profile(self, request: GetEnvironmentAccessProfileRequest, ctx: RequestContext[GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse]) -> GetEnvironmentAccessProfileResponse:
@@ -463,6 +501,16 @@ class AccessProfileServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.set_default_access_profile,
+                ),
+                "/codewire.v1.AccessProfileService/ListAccessProfileRevisions": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="ListAccessProfileRevisions",
+                        service_name="codewire.v1.AccessProfileService",
+                        input=ListAccessProfileRevisionsRequest,
+                        output=ListAccessProfileRevisionsResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.list_access_profile_revisions,
                 ),
                 "/codewire.v1.AccessProfileService/GetEnvironmentAccessProfile": EndpointSync.unary(
                     method=MethodInfo(
@@ -648,6 +696,27 @@ class AccessProfileServiceClientSync(ConnectClientSync):
             ),
             headers=headers,
             timeout_ms=timeout_ms,
+        )
+    def list_access_profile_revisions(
+        self,
+        request: ListAccessProfileRevisionsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListAccessProfileRevisionsResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListAccessProfileRevisions",
+                service_name="codewire.v1.AccessProfileService",
+                input=ListAccessProfileRevisionsRequest,
+                output=ListAccessProfileRevisionsResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
         )
     def get_environment_access_profile(
         self,

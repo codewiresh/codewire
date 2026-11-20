@@ -4,14 +4,17 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use buffa_types::Timestamp;
 use codewire_proto::codewire::v1::{
-    AccessProfile, AccessProfileEntry, AccessProfileService, CreateAccessProfileRequest,
-    CreateAccessProfileResponse, DeleteAccessProfileRequest, DeleteAccessProfileResponse,
-    EnvironmentAccessProfileBinding, GetAccessProfileRequest, GetAccessProfileResponse,
-    GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse,
-    ListAccessProfilesRequest, ListAccessProfilesResponse, RenameAccessProfileRequest,
-    RenameAccessProfileResponse, SetDefaultAccessProfileRequest, SetDefaultAccessProfileResponse,
-    UpdateAccessProfileRequest, UpdateAccessProfileResponse, get_access_profile_request,
+    AccessProfile, AccessProfileEntry, AccessProfileRevision, AccessProfileService,
+    CreateAccessProfileRequest, CreateAccessProfileResponse, DeleteAccessProfileRequest,
+    DeleteAccessProfileResponse, EnvironmentAccessProfileBinding, GetAccessProfileRequest,
+    GetAccessProfileResponse, GetEnvironmentAccessProfileRequest,
+    GetEnvironmentAccessProfileResponse, ListAccessProfileRevisionsRequest,
+    ListAccessProfileRevisionsResponse, ListAccessProfilesRequest, ListAccessProfilesResponse,
+    RenameAccessProfileRequest, RenameAccessProfileResponse, SetDefaultAccessProfileRequest,
+    SetDefaultAccessProfileResponse, UpdateAccessProfileRequest, UpdateAccessProfileResponse,
+    get_access_profile_request,
 };
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::connect::{auth_user, rpc_app_error};
@@ -222,6 +225,42 @@ impl AccessProfileService for ProfileConnectService {
         .await?;
         connectrpc::Response::ok(SetDefaultAccessProfileResponse {
             access_profile: Some(proto_profile(profile, true)).into(),
+            ..Default::default()
+        })
+    }
+
+    async fn list_access_profile_revisions(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, ListAccessProfileRevisionsRequest>,
+    ) -> ServiceResult<ListAccessProfileRevisionsResponse> {
+        let user = account_user(&ctx)?;
+        let request = request.view();
+        let (revisions, is_default, next_page_token) = bounded(
+            &ctx,
+            self.request_bound,
+            self.profiles.list_revisions(
+                &user,
+                request.access_profile_id,
+                request.page_size,
+                request.page_token,
+            ),
+        )
+        .await?;
+        connectrpc::Response::ok(ListAccessProfileRevisionsResponse {
+            revisions: revisions
+                .into_iter()
+                .map(|(profile, created_at_unix_ms)| AccessProfileRevision {
+                    access_profile: Some(proto_profile(profile, is_default)).into(),
+                    created_at: Some(Timestamp::from_unix(
+                        created_at_unix_ms.div_euclid(1000),
+                        (created_at_unix_ms.rem_euclid(1000) * 1_000_000) as i32,
+                    ))
+                    .into(),
+                    ..Default::default()
+                })
+                .collect(),
+            next_page_token,
             ..Default::default()
         })
     }

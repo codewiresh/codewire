@@ -24,6 +24,7 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::model::{parse_auth_kind, parse_ssh_public_key, parse_status};
+mod revisions;
 
 /// Closed errors: database messages, catalog input and source chains never escape.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -262,19 +263,7 @@ impl PlatformAccessProfileStore {
         load_profile(tx, owner, &id, None, false).await
     }
 
-    /// Historical entries remain metadata-only references, even after an unbound
-    /// retired credential is deleted. Runtime admission revalidates every entry.
-    pub async fn get_revision(
-        &self,
-        owner: &Owner,
-        id: &AccessProfileId,
-        revision: u64,
-    ) -> Result<AccessProfile, Error> {
-        generation(revision)?;
-        self.read_revision(owner, id, Some(revision)).await
-    }
-
-    async fn read_revision(
+    pub(super) async fn read_revision(
         &self,
         owner: &Owner,
         id: &AccessProfileId,

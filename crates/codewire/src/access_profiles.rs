@@ -84,6 +84,17 @@ impl CodewireClient {
             .map_err(ClientError::from)
     }
 
+    pub async fn list_access_profile_revisions(
+        &self,
+        request: ListAccessProfileRevisionsRequest,
+    ) -> Result<ListAccessProfileRevisionsResponse, ClientError> {
+        self.access_profiles
+            .list_access_profile_revisions_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
     pub async fn get_environment_access_profile(
         &self,
         request: GetEnvironmentAccessProfileRequest,

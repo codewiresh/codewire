@@ -1,3 +1,6 @@
+import datetime
+
+from google.protobuf import timestamp_pb2 as _timestamp_pb2
 from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
@@ -131,6 +134,32 @@ class SetDefaultAccessProfileResponse(_message.Message):
     ACCESS_PROFILE_FIELD_NUMBER: _ClassVar[int]
     access_profile: AccessProfile
     def __init__(self, access_profile: _Optional[_Union[AccessProfile, _Mapping]] = ...) -> None: ...
+
+class ListAccessProfileRevisionsRequest(_message.Message):
+    __slots__ = ("access_profile_id", "page_size", "page_token")
+    ACCESS_PROFILE_ID_FIELD_NUMBER: _ClassVar[int]
+    PAGE_SIZE_FIELD_NUMBER: _ClassVar[int]
+    PAGE_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    access_profile_id: str
+    page_size: int
+    page_token: str
+    def __init__(self, access_profile_id: _Optional[str] = ..., page_size: _Optional[int] = ..., page_token: _Optional[str] = ...) -> None: ...
+
+class AccessProfileRevision(_message.Message):
+    __slots__ = ("access_profile", "created_at")
+    ACCESS_PROFILE_FIELD_NUMBER: _ClassVar[int]
+    CREATED_AT_FIELD_NUMBER: _ClassVar[int]
+    access_profile: AccessProfile
+    created_at: _timestamp_pb2.Timestamp
+    def __init__(self, access_profile: _Optional[_Union[AccessProfile, _Mapping]] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+
+class ListAccessProfileRevisionsResponse(_message.Message):
+    __slots__ = ("revisions", "next_page_token")
+    REVISIONS_FIELD_NUMBER: _ClassVar[int]
+    NEXT_PAGE_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    revisions: _containers.RepeatedCompositeFieldContainer[AccessProfileRevision]
+    next_page_token: str
+    def __init__(self, revisions: _Optional[_Iterable[_Union[AccessProfileRevision, _Mapping]]] = ..., next_page_token: _Optional[str] = ...) -> None: ...
 
 class EnvironmentAccessProfileBinding(_message.Message):
     __slots__ = ("environment_id", "access_profile_id", "access_profile_revision")

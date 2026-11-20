@@ -1,7 +1,7 @@
 ---
 title: Secrets and credentials
 description: cw secrets for application secrets and cw credentials for provider credentials and profiles.
-updated: 2026-11-17
+updated: 2026-11-20
 weight: 5
 aliases: ["/cli/secrets-and-credentials"]
 ---
@@ -148,7 +148,8 @@ cw credentials --cloud --profile NAME get [--revision N]
 cw credentials --cloud --profile NAME list
 cw credentials --cloud --profile NAME generate ssh --name NAME    # generate and set in one step
 cw credentials --cloud --profile NAME delete [-y]         # asks first at a terminal
-cw credentials --local --profile NAME revisions                   # local storage
+cw credentials --cloud --profile NAME revisions                   # every revision, oldest first
+cw credentials --local --profile NAME revisions                   # the same for local storage
 cw credentials --cloud profiles list                               # alias: ls; the default first
 cw credentials --cloud profiles default NAME                       # make NAME your default
 cw credentials --local profiles list                               # the same for local storage

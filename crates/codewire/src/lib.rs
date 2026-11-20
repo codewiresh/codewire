@@ -124,13 +124,14 @@ pub use codewire_proto::codewire::v1::{
     WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse,
 };
 pub use codewire_proto::codewire::v1::{
-    AccessProfile, AccessProfileEntry, CreateAccessProfileRequest, CreateAccessProfileResponse,
-    DeleteAccessProfileRequest, DeleteAccessProfileResponse, EnvironmentAccessProfileBinding,
-    GetAccessProfileRequest, GetAccessProfileResponse, GetEnvironmentAccessProfileRequest,
-    GetEnvironmentAccessProfileResponse, ListAccessProfilesRequest, ListAccessProfilesResponse,
-    RenameAccessProfileRequest, RenameAccessProfileResponse, SetDefaultAccessProfileRequest,
-    SetDefaultAccessProfileResponse, UpdateAccessProfileRequest, UpdateAccessProfileResponse,
-    get_access_profile_request,
+    AccessProfile, AccessProfileEntry, AccessProfileRevision, CreateAccessProfileRequest,
+    CreateAccessProfileResponse, DeleteAccessProfileRequest, DeleteAccessProfileResponse,
+    EnvironmentAccessProfileBinding, GetAccessProfileRequest, GetAccessProfileResponse,
+    GetEnvironmentAccessProfileRequest, GetEnvironmentAccessProfileResponse,
+    ListAccessProfileRevisionsRequest, ListAccessProfileRevisionsResponse,
+    ListAccessProfilesRequest, ListAccessProfilesResponse, RenameAccessProfileRequest,
+    RenameAccessProfileResponse, SetDefaultAccessProfileRequest, SetDefaultAccessProfileResponse,
+    UpdateAccessProfileRequest, UpdateAccessProfileResponse, get_access_profile_request,
 };
 pub use codewire_proto::codewire::v1::{
     AddApiKeyCredentialRequest, AddApiKeyCredentialResponse,

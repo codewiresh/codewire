@@ -78,6 +78,12 @@ class AccessProfileFixture:
         profile.is_default = True
         return pb.SetDefaultAccessProfileResponse(access_profile=profile)
 
+    # The generated application needs every method of the service; this SDK
+    # doesn't list revisions (#4717 C7 is the CLI's), so the fixture refuses.
+    def list_access_profile_revisions(self, request, ctx):
+        self.record("ListAccessProfileRevisions", request, ctx)
+        raise ConnectError(Code.UNIMPLEMENTED, "not used by these tests")
+
     def get_environment_access_profile(self, request, ctx):
         self.record("GetEnvironmentAccessProfile", request, ctx)
         if request.environment_id == "unbound":
