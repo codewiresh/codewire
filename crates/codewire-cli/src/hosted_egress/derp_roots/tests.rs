@@ -30,8 +30,19 @@ fn kubelet_mount() -> tempfile::TempDir {
     mount
 }
 
+/// Read `mount` as the platform's own mount: the tests below lay one out in
+/// a plain directory, which the real check refuses.
 fn read(mount: &Path) -> anyhow::Result<PlatformRoots> {
-    derp_extra_roots(true, false, mount, BUNDLE)
+    extra_roots_from(true, false, mount, BUNDLE, |_| Ok(true))
+}
+
+fn open_directory(path: &Path) -> OwnedFd {
+    rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -43,16 +54,90 @@ fn the_kubelets_mount_is_read_and_its_links_followed_inside_it() {
 #[test]
 fn a_measured_workspace_or_a_daemon_outside_broker_mode_reads_no_bundle() {
     let mount = kubelet_mount();
+    for (broker, measured) in [(true, true), (false, false)] {
+        assert!(
+            extra_roots_from(broker, measured, mount.path(), BUNDLE, |_| Ok(true))
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+/// #5523: with nothing mounted at the path, a valid bundle put there, owned
+/// by a user the reader accepts, is not read, and the start goes on.
+#[test]
+fn a_bundle_planted_in_a_plain_directory_is_ignored() {
+    let planted = kubelet_mount();
+    assert_eq!(read(planted.path()).unwrap().len(), 1, "a valid bundle");
     assert!(
-        derp_extra_roots(true, true, mount.path(), BUNDLE)
+        derp_extra_roots(true, false, planted.path(), BUNDLE)
             .unwrap()
             .is_empty()
     );
+}
+
+/// On a path that is not the platform's mount nothing is inspected further,
+/// so what would stop the start on the mount does not stop it here.
+#[test]
+fn only_the_platforms_mount_is_held_to_the_fatal_checks() {
+    let writable = kubelet_mount();
+    chmod(writable.path(), 0o777);
+    assert!(read(writable.path()).is_err(), "fatal on the mount");
     assert!(
-        derp_extra_roots(false, false, mount.path(), BUNDLE)
+        extra_roots_from(true, false, writable.path(), BUNDLE, |_| Ok(false))
             .unwrap()
             .is_empty()
     );
+    let malformed = tempfile::tempdir().unwrap();
+    std::fs::write(malformed.path().join(BUNDLE), "not a certificate").unwrap();
+    chmod(&malformed.path().join(BUNDLE), 0o444);
+    chmod(malformed.path(), 0o755);
+    assert!(read(malformed.path()).is_err(), "fatal on the mount");
+    assert!(
+        extra_roots_from(true, false, malformed.path(), BUNDLE, |_| Ok(false))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_mount_root_is_told_from_a_directory_inside_a_filesystem() {
+    assert!(is_mount_root(&open_directory(Path::new("/"))).unwrap());
+    let plain = tempfile::tempdir().unwrap();
+    let plain = open_directory(plain.path());
+    assert!(!is_mount_root(&plain).unwrap());
+    // The temporary directory is writable, so its filesystem is not
+    // read-only either.
+    assert!(!is_read_only(&plain).unwrap());
+    assert!(!platform_mount(&plain).unwrap());
+}
+
+/// The positive side of the real check, on whatever read-only mounts this
+/// machine has (`/sys`, in a container; often none on a workstation).
+#[test]
+fn a_read_only_mount_root_is_the_platforms_kind_of_mount() {
+    let mounts = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
+    for line in mounts.lines() {
+        let mut fields = line.split(' ');
+        let (Some(point), Some(options)) = (fields.nth(4), fields.next()) else {
+            continue;
+        };
+        if !options.split(',').any(|option| option == "ro") || point.contains('\\') {
+            continue;
+        }
+        let Ok(directory) = rustix::fs::open(
+            point,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) else {
+            continue;
+        };
+        // A mount hidden under a later one opens as the later one.
+        if !is_read_only(&directory).unwrap() {
+            continue;
+        }
+        assert!(platform_mount(&directory).unwrap(), "{point}");
+    }
 }
 
 #[test]

@@ -3,8 +3,24 @@
 //! read-only by the platform. A root here lets a certificate verify for the
 //! relay the daemon dials, so the workload must not be able to add one.
 //!
-//! It is read once, at the daemon's start, from the fixed platform path.
-//! The mount directory is opened without following a link; the file is
+//! It is read once, at the daemon's start, from the fixed platform path,
+//! and only when that path is a read-only mount of its own, as the platform's
+//! ConfigMap volume is (#5523). Where nothing is mounted, as on Dev and
+//! Production, a directory and file put at the path are not read, whoever
+//! owns them: the path is logged as ignored and the daemon starts with no
+//! extra root, so a relay that needs one is refused as unverified.
+//!
+//! Root with `CAP_SYS_ADMIN` in the hosted guest can mount over the path, as
+//! it can restart or replace the daemon. That is within the Sandbox's own
+//! trust boundary and accepted: a planted root only affects that Sandbox's
+//! own relay TLS, whose traffic is encrypted end to end and whose relay is
+//! dialled at a fixed in-cluster address. The mount check stops the
+//! platform's trust being widened by accident, by a non-root process or a
+//! stray file; it does not keep a tenant from attacking itself.
+//!
+//! On the platform's mount every other check is fatal, because a broken
+//! platform mount should be loud. The directory is opened without following
+//! a link; the file is
 //! opened beneath it with `openat2`, so the kubelet's `..data` link resolves
 //! only inside the mount and one that leaves it is refused. Both must be
 //! owned by root or the daemon's own user and writable by no one else, and
@@ -19,7 +35,9 @@ use std::path::Path;
 
 use anyhow::{Context as _, bail};
 use codewire_tailnet::platform_dial::PlatformRoots;
-use rustix::fs::{Mode, OFlags, ResolveFlags, Stat};
+use rustix::fs::{
+    AtFlags, Mode, OFlags, ResolveFlags, Stat, StatVfsMountFlags, StatxAttributes, StatxFlags,
+};
 use rustix::io::Errno;
 
 /// A bundle is a few certificates; anything far larger is not one.
@@ -33,6 +51,19 @@ pub(crate) fn derp_extra_roots(
     measured: bool,
     mount: &Path,
     file: &str,
+) -> anyhow::Result<PlatformRoots> {
+    extra_roots_from(broker, measured, mount, file, platform_mount)
+}
+
+/// [`derp_extra_roots`], with `platform_mount` deciding whether the opened
+/// directory is the platform's own mount. Tests lay a mount out in a plain
+/// directory and pass the decision in.
+fn extra_roots_from(
+    broker: bool,
+    measured: bool,
+    mount: &Path,
+    file: &str,
+    platform_mount: impl FnOnce(&OwnedFd) -> anyhow::Result<bool>,
 ) -> anyhow::Result<PlatformRoots> {
     if !broker || measured {
         return Ok(Vec::new());
@@ -48,6 +79,15 @@ pub(crate) fn derp_extra_roots(
             return Err(error).with_context(|| format!("open {}", mount.display()));
         }
     };
+    if !platform_mount(&directory)
+        .with_context(|| format!("inspect the extra roots directory {}", mount.display()))?
+    {
+        tracing::warn!(
+            path = %mount.display(),
+            "the DERP relay's extra roots path is not a read-only mount of its own; nothing there is read"
+        );
+        return Ok(Vec::new());
+    }
     platform_owned(&rustix::fs::fstat(&directory)?)
         .with_context(|| format!("the extra roots directory {}", mount.display()))?;
     let opened = rustix::fs::openat2(
@@ -91,6 +131,30 @@ fn bundle_or_none(opened: Result<OwnedFd, Errno>) -> Result<Option<OwnedFd>, Err
         }
         Err(error) => Err(error),
     }
+}
+
+/// Whether `directory` is the root of a mount and that mount is read-only:
+/// what a ConfigMap volume is, and what a directory made in the container's
+/// own filesystem is not. A kernel that does not report mount roots answers
+/// no, so nothing is read.
+fn platform_mount(directory: &OwnedFd) -> anyhow::Result<bool> {
+    Ok(is_mount_root(directory)? && is_read_only(directory)?)
+}
+
+fn is_mount_root(directory: &OwnedFd) -> anyhow::Result<bool> {
+    let stat = rustix::fs::statx(directory, "", AtFlags::EMPTY_PATH, StatxFlags::empty())
+        .context("statx")?;
+    Ok(stat
+        .stx_attributes_mask
+        .contains(StatxAttributes::MOUNT_ROOT)
+        && stat.stx_attributes.contains(StatxAttributes::MOUNT_ROOT))
+}
+
+fn is_read_only(directory: &OwnedFd) -> anyhow::Result<bool> {
+    Ok(rustix::fs::fstatvfs(directory)
+        .context("fstatvfs")?
+        .f_flag
+        .contains(StatVfsMountFlags::RDONLY))
 }
 
 /// Owned by root or this process's user, and writable by no one else.
