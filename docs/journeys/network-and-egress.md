@@ -1519,6 +1519,9 @@ Issue: #4000.
   - a Sandbox whose egress routing is changed after it starts: one of its
     rules removed, the default route moved off the egress path, or IPv6
     turned back on by a privileged container;
+  - a Sandbox started on a VM runtime whose containers have no TUN device
+    of their own, and one where a symbolic link or another device was left
+    at the TUN device's path before its egress setup ran;
   - a new `cw-egress` version rolled out while one Sandbox has nothing
     open, a second is in the middle of a long download, and a third has an
     open terminal or SSH session;
@@ -1545,6 +1548,14 @@ Issue: #4000.
   - IPv6 is off in the Sandbox from its start. Turned back on by a
     privileged container, its packets are still dropped on the host side,
     and the next self-check fails with `routing`;
+  - a broker-mode Sandbox on a VM runtime starts although its containers
+    come with no `/dev/net/tun`: its egress setup makes the device itself,
+    in a memory-backed volume only that setup and the workspace container
+    mount, owned by the workspace user alone, and the daemon attaches to
+    the TUN through it (not yet observed);
+  - a symbolic link or a device other than the TUN left at that path is
+    removed and replaced, never followed or opened, and a device that still
+    isn't the TUN when opened fails the Sandbox's start (not yet observed);
   - on a test cluster with the Sandbox's lockdown left out, the same
     self-check reports that its direct connection got through and the
     Sandbox reads `FAILED_CLOSED`. Without this nothing shows the check

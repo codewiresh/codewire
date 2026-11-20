@@ -104,6 +104,50 @@ with the workspace storage work.
 See `docs/dev/SANDBOX-DAEMON.md` for the daemon, Docker boundary, and
 validation details.
 
+## Hosted Egress Setup
+
+A broker-mode Sandbox (hosted egress, #4000) renders only on a VM runtime
+profile, `commodity` or `confidential`. Its egress path is set up inside the
+guest before the workload starts, by one init container, `hosted-egress-tun`.
+
+- **What it runs:** exactly the support image's own
+  `/usr/local/bin/cw __hosted-egress-tun --owner-uid <workspace uid>`, with no
+  other arguments, environment or inputs. It never runs the daemon volume's
+  `cw`, which the workspace can write.
+- **What it holds, and when:** it is privileged inside the guest, and only for
+  the setup. It is an init container, so it exits before the workload starts.
+  The workspace container is not privileged. It runs as the workspace uid and
+  keeps the runtime's default capability set, so `sudo` in a hosted workspace
+  yields root with those capabilities and no others. The VM is what contains
+  it. Admission pins this container by name, image, command and mount in
+  every layer: the warm-pool template policy, the pool member's first-bind
+  isolation, and the cluster's policy.
+- **The TUN device** (specified before its code, which follows in its own
+  change): a Kata container has no `/dev/net/tun`, though the guest kernel has
+  TUN built in. So the Pod carries one more volume, `egress-devnet`:
+  - an `emptyDir` with `medium: Memory` and `sizeLimit: 1Mi`, a tmpfs inside
+    the guest. It is never disk-backed: that would be the node's filesystem
+    shared into the VM, and a device node must never be written there;
+  - mounted at exactly `/dev/net`, with no subPath or propagation, by
+    `hosted-egress-tun` and the workspace container only.
+- **The node:** the init trusts nothing at the path, because the workspace can
+  write the volume.
+  - It removes whatever is at `/dev/net/tun`. Removing a symbolic link removes
+    the link, never its target.
+  - It creates the node afresh as character device 10:200.
+  - It opens the node without following a link, and checks on the open
+    descriptor that it is character device 10:200 before any ioctl. Anything
+    else fails the Pod.
+  - It gives the node mode 0600, owned by the workspace uid, through that
+    descriptor.
+  - Only then does it create the persistent TUN `cwegress0` for the workspace
+    uid, and make the routing.
+- **What the workload gains:** nothing it couldn't already have. Root in a
+  hosted workspace can make device nodes, and the guest lets an unprivileged
+  process open this one. Opening it attaches only the interface made for the
+  daemon's uid. What a Sandbox can reach is still decided outside the guest,
+  by `cw-egress` and the cluster's fence.
+
 ## Kata Agent Policy Init Data
 
 `commodity` and `confidential` can render Codewire-owned Kata init-data on the
