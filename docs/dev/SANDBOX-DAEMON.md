@@ -204,6 +204,10 @@ tailnet above: another node, keys and coordinator.
 - Members reach each other. A member's peer stream may subscribe to up to
   64 other members of its own network: Mesh derives the target from the
   subscriber's own network, so another network's node is never addressed.
+  A subscription lasts as long as its subscriber's stream. A member that
+  stops and starts again reaches its subscribers without their subscribing
+  again (#5642). A subscription ends with its subscriber's stream, its node's
+  removal or its network's deletion.
   The daemon serves `cw network connect NODE PORT` on its owner-only socket
   `/codewire/run/daemon/mesh.sock`: one request line, then a TCP stream to
   that member's port. A member serves only its application ports there.

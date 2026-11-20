@@ -378,6 +378,42 @@ mod nats_tests {
         .await;
     }
 
+    /// #5642 across replicas: B on one replica subscribes to A on the other.
+    /// A's session ends (a Sandbox stopped), B is told, and A's next session
+    /// with a new key reaches B without B subscribing again.
+    #[tokio::test]
+    #[ignore = "requires NATS_URL pointing at a JetStream-enabled NATS server"]
+    async fn a_target_that_ends_and_returns_on_another_replica_reaches_its_subscriber() {
+        let r = replicas().await;
+        let network = format!("net-{}", Uuid::new_v4());
+        let target = member(&network, "target");
+        let mut subscriber = open(&r.a, &member(&network, "subscriber"));
+        let first = open(&r.b, &target);
+        send_node(&r.a, &subscriber, 0x11);
+        send_node(&r.b, &first, 0x33);
+        eventually(|| r.a.registry().remote.peers.contains_key(&target.peer_id)).await;
+        add_tunnel(
+            &r.a,
+            subscriber.peer.peer_id,
+            target.peer_id,
+            MeshCoordinateRole::Peer,
+        )
+        .unwrap();
+        next(&mut subscriber, update_with(0x33)).await;
+
+        deregister(&r.b, target.peer_id, first.session_id);
+        let gone = target.peer_id;
+        next(
+            &mut subscriber,
+            move |event| matches!(event, CoordinateEvent::Remove(id) if *id == gone),
+        )
+        .await;
+
+        let second = open(&r.b, &target);
+        send_node(&r.b, &second, 0x77);
+        next(&mut subscriber, update_with(0x77)).await;
+    }
+
     #[tokio::test]
     #[ignore = "requires NATS_URL pointing at a JetStream-enabled NATS server"]
     async fn a_node_holds_one_session_across_replicas_and_partners_see_it_move() {

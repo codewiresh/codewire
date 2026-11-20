@@ -71,6 +71,8 @@ Issue: #3350.
   cw run --in mesh-walk-c --name probe --no-tty -- sh -c 'printf "GET / HTTP/1.0\r\n\r\n" | cw network connect mesh-walk-a 8000 | head -1'
   cw stop mesh-walk-a
   cw start mesh-walk-a
+  cw run --in mesh-walk-a --name server --detach -- python3 -m http.server 8000
+  cw run --in mesh-walk-b --name probe --no-tty -- sh -c 'printf "GET / HTTP/1.0\r\n\r\n" | cw network connect mesh-walk-a 8000 | head -1'
   cw --cloud network delete mesh-walk --org ORG_ID --yes
   ```
 
@@ -85,6 +87,10 @@ Issue: #3350.
     environment that joined a Mesh network";
   - after the stop, `mesh-walk-a` reads `reported offline` within 45 s, and
     after the start it is online again under the same node name;
+  - after the start, the probe from the unchanged `mesh-walk-b` prints
+    `HTTP/1.0 200 OK` again, without `mesh-walk-b` restarting: its
+    subscription to `mesh-walk-a` outlived `mesh-walk-a`'s session, so Mesh
+    sent it the new node (#5642);
   - after the revoke, `cw info mesh-walk-b` reads `(revoked by a network
     owner)` and its probe fails;
   - deleting the Mesh Network is refused while it has nodes, and succeeds

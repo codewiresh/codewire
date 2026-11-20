@@ -822,35 +822,47 @@ fn update_node(state: &MeshCoordinateState, peer_id: Uuid, session_id: Uuid, nod
     send_updates(peer_id, updates.1);
 }
 
-/// Removes every subscription edge touching `peer_id` and returns the other
-/// ends on this replica to tell, and the removed edges this replica wrote.
+/// Ends `peer_id`'s own subscriptions, and returns the other ends on this
+/// replica to tell that it is gone and the removed edges this replica wrote.
+/// Other members' subscriptions to `peer_id` stay, and those members are told
+/// too: a subscription is its subscriber's, so a target that ends and registers
+/// again (a Sandbox stopped and started) reaches its subscribers as it reaches
+/// one made before it registered (#5642).
 fn remove_tunnels(
     registry: &mut Registry,
     peer_id: Uuid,
 ) -> (Vec<mpsc::Sender<CoordinateEvent>>, Vec<(Uuid, Uuid)>) {
-    let touches = |(dial, target): &(Uuid, Uuid)| *dial == peer_id || *target == peer_id;
+    let own = |(dial, _): &(Uuid, Uuid)| *dial == peer_id;
     let local = registry
         .tunnels
         .iter()
-        .filter(|edge| touches(edge))
+        .filter(|edge| own(edge))
         .copied()
         .collect::<Vec<_>>();
     let remote = registry
         .remote
         .tunnels
         .keys()
-        .filter(|edge| touches(edge))
+        .filter(|edge| own(edge))
         .copied()
         .collect::<Vec<_>>();
-    let mut updates = Vec::new();
-    for (dial, target) in local.iter().chain(&remote) {
-        registry.tunnels.remove(&(*dial, *target));
-        registry.remote.tunnels.remove(&(*dial, *target));
-        let recipient = if *dial == peer_id { *target } else { *dial };
-        if let Some(peer) = registry.peers.get(&recipient) {
-            updates.push(peer.tx.clone());
-        }
+    for edge in local.iter().chain(&remote) {
+        registry.tunnels.remove(edge);
+        registry.remote.tunnels.remove(edge);
     }
+    let subscribers = registry
+        .tunnels
+        .iter()
+        .chain(registry.remote.tunnels.keys())
+        .filter(|(_, target)| *target == peer_id)
+        .map(|(dial, _)| *dial);
+    let targets = local.iter().chain(&remote).map(|(_, target)| *target);
+    let updates = targets
+        .chain(subscribers)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .filter_map(|recipient| registry.peers.get(&recipient).map(|peer| peer.tx.clone()))
+        .collect();
     (updates, local)
 }
 
@@ -1389,6 +1401,78 @@ mod tests {
         };
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].id, target_node.id);
+    }
+
+    /// #5642: a subscription is its subscriber's. When the target's session
+    /// ends (a Sandbox stopped), the subscriber is told it is gone and keeps
+    /// the subscription, so the target's next registration reaches it without
+    /// a new subscription. A member of another network registering under the
+    /// same node name never does, and the subscriber's own end takes the
+    /// subscription with it.
+    #[tokio::test]
+    async fn a_subscription_outlives_its_targets_session_and_gets_its_next_one() {
+        fn member(network_id: &str, name: &str) -> AuthorizedPeer {
+            AuthorizedPeer {
+                peer_id: stable_peer_id(network_id, "peer", name),
+                network_id: network_id.to_owned(),
+                node_name: Some(name.to_owned()),
+                role: MeshCoordinateRole::Peer,
+                environment: None,
+            }
+        }
+        fn node_with_key(byte: u8) -> Node {
+            Node {
+                key: NodePublic::from_raw([byte; 32]),
+                ..node()
+            }
+        }
+        async fn next(rx: &mut mpsc::Receiver<CoordinateEvent>) -> CoordinateEvent {
+            tokio::time::timeout(Duration::from_secs(30), rx.recv())
+                .await
+                .expect("an event within the hang guard")
+                .expect("the event channel stays open")
+        }
+        let state = MeshCoordinateState::new();
+        let (b, a) = (member("network-n", "b"), member("network-n", "a"));
+        let (b_tx, mut b_rx) = mpsc::channel(8);
+        let b_session = register(&state, &b, b_tx).unwrap().0;
+        let (a_tx, _a_rx) = mpsc::channel(8);
+        let first = register(&state, &a, a_tx).unwrap().0;
+        update_node(&state, a.peer_id, first, node_with_key(0x11));
+        add_tunnel(&state, b.peer_id, a.peer_id, MeshCoordinateRole::Peer).unwrap();
+        let CoordinateEvent::Update(nodes) = next(&mut b_rx).await else {
+            panic!("the subscription delivers the target's node");
+        };
+        assert_eq!(nodes[0].key, NodePublic::from_raw([0x11; 32]));
+
+        // A stops: B is told, and keeps its subscription.
+        deregister(&state, a.peer_id, first);
+        assert!(matches!(next(&mut b_rx).await, CoordinateEvent::Remove(id) if id == a.peer_id));
+        assert!(state.registry().tunnels.contains(&(b.peer_id, a.peer_id)));
+
+        // A node of the same name in another network is another member.
+        let elsewhere = member("network-m", "a");
+        let (other_tx, _other_rx) = mpsc::channel(8);
+        let other = register(&state, &elsewhere, other_tx).unwrap().0;
+        update_node(&state, elsewhere.peer_id, other, node_with_key(0x44));
+        assert!(
+            b_rx.try_recv().is_err(),
+            "another network's member reached B"
+        );
+
+        // A starts again with a new key: B gets it without subscribing again.
+        let (a_tx, _a_rx) = mpsc::channel(8);
+        let second = register(&state, &a, a_tx).unwrap().0;
+        update_node(&state, a.peer_id, second, node_with_key(0x33));
+        let CoordinateEvent::Update(nodes) = next(&mut b_rx).await else {
+            panic!("A's next registration reaches its subscriber");
+        };
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].key, NodePublic::from_raw([0x33; 32]));
+
+        // B's own end takes its subscription.
+        deregister(&state, b.peer_id, b_session);
+        assert!(!state.registry().tunnels.contains(&(b.peer_id, a.peer_id)));
     }
 
     #[tokio::test]
