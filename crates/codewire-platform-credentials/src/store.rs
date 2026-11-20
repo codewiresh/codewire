@@ -25,6 +25,7 @@ mod interception_ca;
 #[cfg(feature = "interception-ca")]
 pub use interception_ca::{
     CA_VALIDITY, InterceptedPod, InterceptionCa, LeafRefusal, MAX_LEAF_HOSTS, MAX_LEAF_LIFETIME,
+    UnboundInterceptionCa,
 };
 
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);

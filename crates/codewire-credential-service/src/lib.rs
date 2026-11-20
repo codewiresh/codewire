@@ -21,6 +21,8 @@ mod authority;
 #[cfg(feature = "enrollment")]
 pub mod delegation;
 #[cfg(feature = "enrollment")]
+pub mod interception;
+#[cfg(feature = "enrollment")]
 pub mod mutation;
 mod objects;
 mod projection;

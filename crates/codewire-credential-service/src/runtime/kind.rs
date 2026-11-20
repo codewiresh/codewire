@@ -150,6 +150,7 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
             repositories,
             bridge,
             keepalive,
+            None,
             async {
                 let signal = tokio::select! {
                     value = terminate.recv() => value,

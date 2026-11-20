@@ -64,6 +64,7 @@ pub use refresh::{
 #[cfg(feature = "interception-ca")]
 pub use store::{
     CA_VALIDITY, InterceptedPod, InterceptionCa, LeafRefusal, MAX_LEAF_HOSTS, MAX_LEAF_LIFETIME,
+    UnboundInterceptionCa,
 };
 pub use store::{
     CredentialMetadataReader, OwnedCredentials, PlatformCredentialStore,

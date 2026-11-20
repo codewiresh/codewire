@@ -64,6 +64,9 @@ pub struct CredentialServiceConfig {
     /// This service's own namespace, from the downward API: the server
     /// namespace it shares with orchestration, the only credential relay.
     pub(super) relay_namespace: String,
+    /// The namespace hosted Sandbox Pods run in, which the interception CA
+    /// check and sweep read Pods from (#5030). `None` leaves both off.
+    pub(super) sandbox_namespace: Option<String>,
 }
 
 /// Where the credential-service's key-encryption keys come from.
@@ -195,8 +198,27 @@ impl CredentialServiceConfig {
             keks,
             oauth_keepalive: oauth_keepalive_config(&lookup)?,
             relay_namespace,
+            sandbox_namespace: sandbox_namespace(&lookup)?,
         })
     }
+}
+
+const SANDBOX_NAMESPACE: &str = "CREDENTIAL_SANDBOX_NAMESPACE";
+
+/// The sandbox namespace when set: a Kubernetes namespace name, from this
+/// service's own configuration, never from a request.
+fn sandbox_namespace(
+    lookup: &impl Fn(&str) -> Option<OsString>,
+) -> Result<Option<String>, RuntimeError> {
+    let Some(value) = lookup(SANDBOX_NAMESPACE) else {
+        return Ok(None);
+    };
+    value
+        .into_string()
+        .ok()
+        .filter(|namespace| crate::objects::valid_name(namespace, true))
+        .map(Some)
+        .ok_or(RuntimeError::Configuration(SANDBOX_NAMESPACE))
 }
 
 const KEEPALIVE_ENABLED: &str = "CREDENTIAL_OAUTH_KEEPALIVE_ENABLED";
@@ -414,6 +436,27 @@ mod tests {
             partial.remove(name);
             assert!(
                 CredentialServiceConfig::from_lookup(|name| partial.get(name).cloned()).is_err()
+            );
+        }
+    }
+
+    /// The interception CA's sandbox namespace is optional, and a namespace
+    /// name when set (#5030).
+    #[test]
+    fn the_sandbox_namespace_is_optional_and_a_namespace_name() {
+        let config =
+            CredentialServiceConfig::from_lookup(|name| inputs().get(name).cloned()).unwrap();
+        assert_eq!(config.sandbox_namespace, None);
+        let mut values = inputs();
+        values.insert(SANDBOX_NAMESPACE, "prod-sandboxes".into());
+        let config =
+            CredentialServiceConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
+        assert_eq!(config.sandbox_namespace.as_deref(), Some("prod-sandboxes"));
+        for malformed in ["", "Sandboxes", "a.b", "-sandboxes", "sandboxes-"] {
+            values.insert(SANDBOX_NAMESPACE, malformed.into());
+            assert!(
+                CredentialServiceConfig::from_lookup(|name| values.get(name).cloned()).is_err(),
+                "sandbox namespace {malformed:?} was accepted"
             );
         }
     }

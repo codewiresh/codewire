@@ -252,6 +252,14 @@ async fn run_connected(
         .map_err(|_| RuntimeError::Provider)?,
     ));
     let store = authorities.credential_store(pool.clone());
+    // Unbound Pods' interception CAs are forgotten once their Pod leaves the
+    // cluster; only with a sandbox namespace configured (#5030).
+    let interception_sweep = config.sandbox_namespace.as_ref().map(|_| {
+        Arc::new(crate::interception::InterceptionCaSweep::new(
+            store.clone(),
+            crate::interception::KubernetesPods::new(client.clone()),
+        ))
+    });
     // Idle rotating OAuth credentials are refreshed by this same process,
     // through the same journal, transport and App owner as on-demand refresh.
     let keepalive = config.oauth_keepalive.map(|keepalive| {
@@ -319,6 +327,7 @@ async fn run_connected(
         repositories,
         bridge,
         keepalive,
+        interception_sweep,
         shutdown,
     )
     .await
@@ -334,6 +343,12 @@ async fn revocation_transport(
             .map_err(|_| RuntimeError::Provider)?,
     ))
 }
+
+/// The interception CA sweep as this service runs it.
+type InterceptionSweep = crate::interception::InterceptionCaSweep<
+    Arc<codewire_platform_credentials::PlatformCredentialStore>,
+    crate::interception::KubernetesPods,
+>;
 
 struct Listeners {
     public: std::net::SocketAddr,
@@ -354,6 +369,7 @@ async fn serve_owned<A, U>(
     repositories: Arc<GithubRepositoryOwner>,
     bridge: PlatformCredentialBridgeService<A, U>,
     keepalive: Option<Arc<OAuthKeepAlive>>,
+    interception_sweep: Option<Arc<InterceptionSweep>>,
     shutdown: impl Future<Output = Result<(), RuntimeError>> + Send,
 ) -> Result<(), RuntimeError>
 where
@@ -429,6 +445,9 @@ where
         if let Some(keepalive) = &keepalive {
             keepalive.start();
         }
+        if let Some(sweep) = &interception_sweep {
+            sweep.start();
+        }
         tokio::select! {
             biased;
             result = shutdown => result,
@@ -448,6 +467,9 @@ where
     if let Some(keepalive) = &keepalive {
         keepalive.start_shutdown();
     }
+    if let Some(sweep) = &interception_sweep {
+        sweep.start_shutdown();
+    }
     stop.cancel();
     let (mutation_result, (), bridge_result, (), ()) = tokio::join!(
         mutation.shutdown(),
@@ -457,6 +479,9 @@ where
             // A keep-alive refresh past `begin` reaches its terminal outcome.
             if let Some(keepalive) = &keepalive {
                 keepalive.shutdown().await;
+            }
+            if let Some(sweep) = &interception_sweep {
+                sweep.shutdown().await;
             }
         },
         async {

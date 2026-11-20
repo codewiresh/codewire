@@ -2083,10 +2083,21 @@ signer outage (#5032).
   Codewire's interceptable-host table, which covers one label only. A leaf is
   serverAuth only, never a CA, and lives at most an hour, never past its CA.
   An unbound Pod gets none.
+- **The Pod check.** Before a CA is created, the credential service reads the
+  Pod by name in the sandbox namespace (`CREDENTIAL_SANDBOX_NAMESPACE`, its own
+  setting, never a request's). It must be the named UID, carry
+  `codewire.sh/egress=broker`, and not be terminating. A missing Pod or another
+  UID is a denial; an unanswered read is unavailable, and worth a retry.
 - **Gone with the Pod.** The binding's release deletes the row in the same
-  transaction. A sweep removes the row of an unbound Pod that has been absent
-  from the cluster for longer than a grace period. The credential service's
-  role can insert and read rows, but delete none.
+  transaction. Every 5 minutes, a sweep reads each unbound row's Pod by the
+  namespace and name stored with it. It forgets the row 10 minutes after the
+  first sweep that found the Pod absent. Absent means only a definite
+  not-found, or another UID at that name. An API error, timeout or refusal
+  neither starts nor advances that clock, because a wrongly forgotten CA
+  strands a live Sandbox's interception (cw-test-health, #5030). Without
+  `CREDENTIAL_SANDBOX_NAMESPACE`, the check refuses as unavailable and no sweep
+  runs. The credential service's role can insert and read rows, but delete
+  none.
 - **Never logged:** no key, envelope or leaf key appears in a log or an error.
 
 ### Provider matrix

@@ -245,6 +245,7 @@ impl Running {
             repositories,
             bridge,
             None,
+            None,
             async move {
                 stopped.cancelled().await;
                 Ok(())
@@ -349,6 +350,7 @@ async fn startup_failure(private_occupied: bool) -> Result<()> {
                 None,
             )),
             bridge.clone(),
+            None,
             None,
             std::future::pending(),
         )

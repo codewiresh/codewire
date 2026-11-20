@@ -299,6 +299,14 @@ pub struct InterceptedPod<'a> {
     pub name: &'a str,
 }
 
+/// An unbound Pod's CA row, as the sweep reads it: the Pod to look for.
+#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
+pub struct UnboundInterceptionCa {
+    pub pod_uid: String,
+    pub pod_namespace: String,
+    pub pod_name: String,
+}
+
 /// The stored row's public part.
 #[derive(sqlx::FromRow)]
 struct CaRow {
@@ -392,6 +400,18 @@ impl PlatformCredentialStore {
             not_before: timestamp(row.not_before)?,
             not_after: timestamp(row.not_after)?,
         })
+    }
+
+    /// Every row whose Pod has no environment yet: the Pods the sweep checks
+    /// for. A bound Pod's row is deleted by its binding's release instead.
+    pub async fn unbound_interception_cas(&self) -> Result<Vec<UnboundInterceptionCa>, Error> {
+        sqlx::query_as(
+            "SELECT pod_uid, pod_namespace, pod_name FROM platform_interception_cas \
+             WHERE environment_id IS NULL ORDER BY created_at",
+        )
+        .fetch_all(&self.reader.pool)
+        .await
+        .map_err(database_error)
     }
 
     /// The sweep's delete, for a Pod gone from the cluster: removes its row
