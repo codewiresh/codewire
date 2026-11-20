@@ -14,10 +14,14 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use codewire_confinement::spawn::OwnImage;
+use codewire_egress_front_door_bridge::FRONT_DOOR_SESSION_ROLE_TAG;
 use codewire_egress_node::children::run_child;
-use codewire_egress_node::front_door::protocol::LeafRefusal;
+use codewire_egress_node::front_door::protocol::{LeafRefusal, SessionRefusal};
+use codewire_egress_node::front_door_session::{Attached, SessionEnd, SessionOpener};
 use codewire_egress_node::interception::{FrontDoorSpec, PairIntercepts};
-use codewire_egress_node::launch::{ProcessLaunch, ProcessPair, StartError};
+use codewire_egress_node::launch::{
+    HandError, ProcessLaunch, ProcessPair, StartError, hand_session,
+};
 use codewire_egress_node::supervisor::{
     Launch as _, Pair as _, PairSpec, PairStatus, SelfCheckProbe,
 };
@@ -40,6 +44,14 @@ type Test = fn() -> Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Each test counts this process's children, so they run one at a time.
 const TESTS: &[(&str, Test)] = &[
+    (
+        "a_front_door_is_kept_in_sessions_and_each_ended_one_is_reopened",
+        || Box::pin(a_front_door_is_kept_in_sessions_and_each_ended_one_is_reopened()),
+    ),
+    (
+        "a_confined_front_door_admits_only_a_tagged_stream_socket_as_a_session",
+        || Box::pin(a_confined_front_door_admits_only_a_tagged_stream_socket_as_a_session()),
+    ),
     (
         "a_pair_is_two_children_of_the_image_that_take_a_new_policy_and_end_together",
         || Box::pin(a_pair_is_two_children_of_the_image_that_take_a_new_policy_and_end_together()),
@@ -195,6 +207,7 @@ async fn start_with(
         .start(PairSpec {
             trust: codewire_network_session::EgressTrust::None,
             pod_uid: POD,
+            pod_name: "sandbox".into(),
             stream: accepted,
             key: key(),
             policy,
@@ -464,6 +477,137 @@ async fn start_intercepting() -> (ProcessPair, GuestSession<TcpStream>) {
 }
 
 const BOUND: &str = "api.openai.com";
+
+/// A socket pair whose far end opens with `tag`, as the supervisor writes
+/// it; our end.
+fn tagged(tag: Option<u8>) -> (std::os::fd::OwnedFd, tokio::net::UnixStream) {
+    use std::io::Write as _;
+    let (ours, theirs) = codewire_egress_policy::handoff::stream_pair().unwrap();
+    let mut ours = std::os::unix::net::UnixStream::from(ours);
+    if let Some(tag) = tag {
+        ours.write_all(&[tag]).unwrap();
+    }
+    ours.set_nonblocking(true).unwrap();
+    (theirs, tokio::net::UnixStream::from_std(ours).unwrap())
+}
+
+/// Orchestration's side of one session: what it sends the front door.
+type ToFrontDoor = tokio::sync::mpsc::Sender<Result<Vec<u8>, SessionEnd>>;
+
+/// Hands each session it opens to the test.
+#[derive(Debug)]
+struct Opener {
+    sessions: std::sync::Mutex<tokio::sync::mpsc::UnboundedSender<ToFrontDoor>>,
+}
+
+impl SessionOpener for Opener {
+    fn open<'a>(
+        &'a self,
+        _pod_uid: &'a str,
+        _pod_name: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Attached, SessionEnd>> + Send + 'a>> {
+        Box::pin(async move {
+            let (to_orchestration, _from_front_door) = tokio::sync::mpsc::channel(1);
+            let (to_front_door, from_orchestration) = tokio::sync::mpsc::channel(1);
+            self.sessions.lock().unwrap().send(to_front_door).unwrap();
+            // Nothing the front door sends is read here; the channel stays
+            // open as long as this session.
+            std::mem::forget(_from_front_door);
+            Ok(Attached {
+                to_orchestration,
+                from_orchestration,
+            })
+        })
+    }
+}
+
+/// With an opener, the pair hands its confined front door a session, which
+/// the front door takes: a session it dropped would end the task, then the
+/// front door, then the pair. When orchestration ends a session, another is
+/// opened.
+async fn a_front_door_is_kept_in_sessions_and_each_ended_one_is_reopened() {
+    let (opened, mut sessions) = tokio::sync::mpsc::unbounded_channel();
+    let launch = launch().with_front_door_sessions(std::sync::Arc::new(Opener {
+        sessions: std::sync::Mutex::new(opened),
+    }));
+    let front_door = FrontDoorSpec {
+        environment_id: Uuid::from_u128(0x6f1c_2a0e_8b4d_4e2a_9c3f_1d2e_3f4a_5b6c),
+        generation: 1,
+        intercepts: InterceptSet::new([InterceptBinding::new(BOUND, 443).unwrap()]).unwrap(),
+    };
+    let (pair, guest) = start_with(
+        &launch,
+        BuiltinPolicy::Open.compile(),
+        key(),
+        PairIntercepts::FrontDoor(front_door),
+    )
+    .await;
+    let (mut pair, mut guest) = (pair.unwrap(), guest.unwrap());
+    assert!(pair.front_door_sessions().is_none(), "the task holds them");
+
+    let first = tokio::time::timeout(PATIENCE, sessions.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    send_self_check(&mut guest, SelfCheck::Passed).await;
+    assert_eq!(next(&mut pair).await, PairStatus::SelfCheckPassed);
+    // Still serving: a dropped session would have ended the pair by now.
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), pair.status())
+            .await
+            .is_err(),
+        "the pair goes on"
+    );
+
+    drop(first);
+    let _second = tokio::time::timeout(PATIENCE, sessions.recv())
+        .await
+        .unwrap()
+        .expect("an ended session is opened again");
+    pair.end().await;
+    assert_eq!(all_children(), []);
+}
+
+/// Under its real syscall filter, the front door takes a session only as a
+/// connected stream socket opening with the session role tag. Anything else
+/// is answered with its code and closed.
+async fn a_confined_front_door_admits_only_a_tagged_stream_socket_as_a_session() {
+    let (mut pair, mut guest) = start_intercepting().await;
+    let mut sessions = pair
+        .front_door_sessions()
+        .expect("no opener drives this launch's sessions");
+
+    let (theirs, _served) = tagged(Some(FRONT_DOOR_SESSION_ROLE_TAG));
+    hand_session(&mut sessions, theirs, PATIENCE)
+        .await
+        .expect("a tagged session is served");
+    for tag in [Some(b'X'), None] {
+        let (theirs, mut ours) = tagged(tag);
+        assert_eq!(
+            hand_session(&mut sessions, theirs, PATIENCE).await,
+            Err(HandError::Dropped(SessionRefusal::Tag)),
+            "{tag:?}"
+        );
+        let mut byte = [0_u8; 1];
+        let closed = tokio::time::timeout(PATIENCE, ours.read(&mut byte)).await;
+        assert_eq!(closed.unwrap().unwrap(), 0, "a dropped session is closed");
+    }
+    let (datagram, _other) = std::os::unix::net::UnixDatagram::pair().unwrap();
+    assert_eq!(
+        hand_session(
+            &mut sessions,
+            std::os::fd::OwnedFd::from(datagram),
+            PATIENCE
+        )
+        .await,
+        Err(HandError::Dropped(SessionRefusal::Kind))
+    );
+
+    send_self_check(&mut guest, SelfCheck::Passed).await;
+    assert_eq!(next(&mut pair).await, PairStatus::SelfCheckPassed);
+    pair.end().await;
+    assert_eq!(all_children(), []);
+}
 
 /// A leaf for `spki`, the front door's key, from a CA standing in for the
 /// credential service's signer.

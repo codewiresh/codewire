@@ -56,6 +56,7 @@ async fn bounded<F: Future>(future: F) -> F::Output {
 /// control socket, its task, and whether it has confined itself.
 struct Running {
     control: ControlChannel,
+    sessions: ControlChannel,
     door: JoinHandle<Result<(), FrontDoorProcessError>>,
     confined: Arc<AtomicBool>,
 }
@@ -63,10 +64,12 @@ struct Running {
 impl Running {
     fn start() -> Self {
         let (supervisor, child) = stream_pair().unwrap();
+        let (sessions, sessions_child) = stream_pair().unwrap();
         let confined = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&confined);
         let door = tokio::spawn(crate::front_door::run(
             ControlChannel::new(child).unwrap(),
+            ControlChannel::new(sessions_child).unwrap(),
             POD,
             move || {
                 flag.store(true, Ordering::SeqCst);
@@ -75,6 +78,7 @@ impl Running {
         ));
         Self {
             control: ControlChannel::new(supervisor).unwrap(),
+            sessions: ControlChannel::new(sessions).unwrap(),
             door,
             confined,
         }
@@ -332,4 +336,95 @@ async fn a_front_door_refuses_bindings_off_443_before_it_confines() {
         Err(FrontDoorProcessError::Startup(FrontDoorStage::Bindings))
     ));
     assert!(!running.confined.load(Ordering::SeqCst));
+}
+
+/// A front door brought to serving, and its broker.
+async fn serving() -> (Running, Broker) {
+    let mut running = Running::start();
+    prepare(&mut running.control, &spec(), deadline(), || Ok(()))
+        .await
+        .unwrap();
+    let (door_end, broker) = Broker::new();
+    take_handoff(&mut running.control, door_end, deadline())
+        .await
+        .unwrap();
+    (running, broker)
+}
+
+/// A socket pair whose far end opens with `tag`, as the supervisor writes
+/// it; our end.
+fn tagged(tag: Option<u8>) -> (OwnedFd, tokio::net::UnixStream) {
+    use std::io::Write as _;
+    let (ours, theirs) = stream_pair().unwrap();
+    let mut ours = std::os::unix::net::UnixStream::from(ours);
+    if let Some(tag) = tag {
+        ours.write_all(&[tag]).unwrap();
+    }
+    ours.set_nonblocking(true).unwrap();
+    (theirs, tokio::net::UnixStream::from_std(ours).unwrap())
+}
+
+/// The front door takes a session only as a connected stream socket that
+/// opens with the session role tag; anything else is answered with its code
+/// and closed. A frame other than a session's ends the front door.
+#[tokio::test]
+async fn a_session_is_admitted_only_as_a_tagged_stream_socket() {
+    use codewire_egress_front_door_bridge::FRONT_DOOR_SESSION_ROLE_TAG;
+    use tokio::io::AsyncReadExt as _;
+
+    let (mut running, _broker) = serving().await;
+    let (theirs, _ours) = tagged(Some(FRONT_DOOR_SESSION_ROLE_TAG));
+    hand_session(&mut running.sessions, theirs, WAIT)
+        .await
+        .expect("a tagged session is served");
+
+    for (tag, why) in [
+        (Some(b'X'), SessionRefusal::Tag),
+        (None, SessionRefusal::Tag),
+    ] {
+        let (theirs, mut ours) = tagged(tag);
+        assert_eq!(
+            hand_session(&mut running.sessions, theirs, WAIT).await,
+            Err(HandError::Dropped(why)),
+            "{tag:?}"
+        );
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            bounded(ours.read(&mut byte)).await.unwrap(),
+            0,
+            "a dropped session is closed"
+        );
+    }
+    let (datagram, _other) = std::os::unix::net::UnixDatagram::pair().unwrap();
+    assert_eq!(
+        hand_session(&mut running.sessions, OwnedFd::from(datagram), WAIT).await,
+        Err(HandError::Dropped(SessionRefusal::Kind))
+    );
+
+    // A frame other than a session's ends the front door, even with one
+    // well-formed socket beside it.
+    let (theirs, _ours) = tagged(Some(FRONT_DOOR_SESSION_ROLE_TAG));
+    running
+        .sessions
+        .send(b"CWHF1 other\n", &[theirs.as_fd()])
+        .await
+        .unwrap();
+    let ended = bounded(running.door).await.unwrap();
+    assert!(
+        matches!(ended, Err(FrontDoorProcessError::Ended(_))),
+        "{ended:?}"
+    );
+}
+
+/// Its sessions socket gone, the front door ends rather than serving on
+/// with every request failing closed.
+#[tokio::test]
+async fn a_front_door_whose_sessions_socket_closes_ends() {
+    let (running, _broker) = serving().await;
+    drop(running.sessions);
+    let ended = bounded(running.door).await.unwrap();
+    assert!(
+        matches!(ended, Err(FrontDoorProcessError::Ended(_))),
+        "{ended:?}"
+    );
 }

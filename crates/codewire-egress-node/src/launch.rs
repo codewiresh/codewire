@@ -26,13 +26,21 @@ use codewire_egress_worker::worker::NetworkWorkerStartupFailure;
 use thiserror::Error;
 use tokio::time::Instant;
 
+use std::sync::Arc;
+
+use codewire_egress_front_door_bridge::control::ControlChannel;
+use tokio::task::JoinHandle;
+
 use crate::front_door::protocol::{FrontDoorStage, LeafRefusal};
+use crate::front_door_session::{self, SessionOpener};
 use crate::interception::PairIntercepts;
 use crate::supervisor::{Launch, Pair, PairSpec, PairStatus};
 
 mod broker;
 mod front_door;
 mod spawner;
+
+pub use front_door::{HandError, hand_session};
 mod worker;
 
 /// How long a pair has to start: two processes confining themselves and the
@@ -77,6 +85,9 @@ pub struct ProcessLaunch {
     image: OwnImage,
     spawner: spawner::Spawner,
     refused: HostAddressSet,
+    /// Opens each front door's credential sessions. Without one, the front
+    /// door's sessions socket is left for its caller to take.
+    sessions: Option<Arc<dyn SessionOpener>>,
 }
 
 impl ProcessLaunch {
@@ -88,7 +99,15 @@ impl ProcessLaunch {
             image,
             spawner: spawner::Spawner::start()?,
             refused,
+            sessions: None,
         })
+    }
+
+    /// Keeps each front door supplied with sessions that `opener` opens.
+    #[must_use]
+    pub fn with_front_door_sessions(mut self, opener: Arc<dyn SessionOpener>) -> Self {
+        self.sessions = Some(opener);
+        self
     }
 }
 
@@ -103,6 +122,10 @@ pub struct ProcessPair {
     broker_gone: bool,
     worker: worker::Worker,
     front_door: Option<front_door::FrontDoor>,
+    /// Keeps the front door supplied with sessions. It owns the front door's
+    /// sessions socket, so its end closes that socket, which ends the front
+    /// door and so the pair.
+    session_task: Option<JoinHandle<()>>,
 }
 
 impl Launch for ProcessLaunch {
@@ -158,11 +181,25 @@ impl Launch for ProcessLaunch {
             deadline,
         )
         .await?;
+        let session_task = match (front_door.as_mut(), &self.sessions) {
+            (Some(door), Some(opener)) => door.take_sessions().map(|mut sessions| {
+                let opener = Arc::clone(opener);
+                let pod_uid = spec.pod_uid.to_string();
+                let pod_name = spec.pod_name;
+                tokio::spawn(async move {
+                    let error =
+                        front_door_session::run(&*opener, &pod_uid, &pod_name, &mut sessions).await;
+                    tracing::warn!(%error, "a front door's sessions ended its pair");
+                })
+            }),
+            _ => None,
+        };
         Ok(ProcessPair {
             broker,
             broker_gone: false,
             worker,
             front_door,
+            session_task,
         })
     }
 }
@@ -175,6 +212,15 @@ impl ProcessPair {
         self.front_door
             .as_ref()
             .map(front_door::FrontDoor::public_key_spki)
+    }
+
+    /// The front door's sessions socket, when no session opener drives it:
+    /// for a caller that hands sessions itself. `None` once taken, or
+    /// without a front door.
+    pub fn front_door_sessions(&mut self) -> Option<ControlChannel> {
+        self.front_door
+            .as_mut()
+            .and_then(front_door::FrontDoor::take_sessions)
     }
 
     /// Has the front door serve `leaves`, DER certificates for its key, from
@@ -215,6 +261,9 @@ impl Pair for ProcessPair {
     }
 
     async fn end(self) {
+        if let Some(task) = &self.session_task {
+            task.abort();
+        }
         self.worker.end().await;
         self.broker.end().await;
         if let Some(front_door) = self.front_door {

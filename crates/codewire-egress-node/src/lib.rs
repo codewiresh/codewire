@@ -20,6 +20,8 @@ pub mod children;
 pub mod drain;
 #[cfg(target_os = "linux")]
 pub mod front_door;
+#[cfg(target_os = "linux")]
+pub mod front_door_session;
 pub mod interception;
 #[cfg(target_os = "linux")]
 pub mod launch;

@@ -23,7 +23,8 @@ use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES, CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
 };
 use futures::stream::BoxStream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio_util::sync::CancellationToken;
 use tonic::Status;
 use uuid::Uuid;
 
@@ -76,7 +77,40 @@ pub fn binding_ready(environment_id: Uuid, generation: u64) -> Vec<u8> {
 #[derive(Default)]
 pub struct FrontDoorEpochs {
     slots: Mutex<HashMap<BindingKey, Slot>>,
+    /// The live session of each Pod, by its UID: at most one.
+    sessions: Mutex<HashMap<String, LiveSession>>,
     next: AtomicU64,
+}
+
+struct LiveSession {
+    id: u64,
+    stop: CancellationToken,
+    ended: watch::Receiver<()>,
+}
+
+/// A front-door session's place as its Pod's one live session, freed on
+/// drop unless a newer session has taken it.
+pub struct SessionPlace {
+    epochs: Arc<FrontDoorEpochs>,
+    pod_uid: String,
+    id: u64,
+    _ended: watch::Sender<()>,
+}
+
+impl Drop for SessionPlace {
+    fn drop(&mut self) {
+        let mut sessions = self
+            .epochs
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if sessions
+            .get(&self.pod_uid)
+            .is_some_and(|live| live.id == self.id)
+        {
+            sessions.remove(&self.pod_uid);
+        }
+    }
 }
 
 struct Slot {
@@ -117,6 +151,53 @@ impl FrontDoorEpochs {
             key,
             id,
         }
+    }
+
+    /// Make a session that `stop` ends its Pod's one live session. An older
+    /// one is stopped and counted, and this returns once it has let go of
+    /// its epoch, or after `wait`: a `cw-egress` restarted before its old
+    /// session stalled out is served, not refused `ALREADY_EXISTS`.
+    pub async fn take_session(
+        self: &Arc<Self>,
+        pod_uid: &str,
+        stop: CancellationToken,
+        wait: std::time::Duration,
+    ) -> SessionPlace {
+        let (place, older) = self.place_session(pod_uid, stop);
+        if let Some(mut older) = older {
+            tracing::info!(
+                outcome = "front_door_session_replaced",
+                "a newer front-door session replaced its Pod's older one"
+            );
+            let _ =
+                tokio::time::timeout(wait, async { while older.changed().await.is_ok() {} }).await;
+        }
+        place
+    }
+
+    fn place_session(
+        self: &Arc<Self>,
+        pod_uid: &str,
+        stop: CancellationToken,
+    ) -> (SessionPlace, Option<watch::Receiver<()>>) {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let (ended_sender, ended) = watch::channel(());
+        let older = self
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(pod_uid.to_owned(), LiveSession { id, stop, ended });
+        let older = older.map(|older| {
+            older.stop.cancel();
+            older.ended
+        });
+        let place = SessionPlace {
+            epochs: Arc::clone(self),
+            pod_uid: pod_uid.to_owned(),
+            id,
+            _ended: ended_sender,
+        };
+        (place, older)
     }
 
     /// The binding's current epoch, if one is admitted on this process, and

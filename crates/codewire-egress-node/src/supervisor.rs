@@ -40,6 +40,9 @@ pub const SELF_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// What a pair is started with.
 pub struct PairSpec {
     pub pod_uid: Uuid,
+    /// The Pod's name, as its admission gave it: its front-door session
+    /// names the Pod by it and its UID.
+    pub pod_name: String,
     /// The guest's stream. The worker takes it; the supervisor never reads
     /// or writes it.
     pub stream: TcpStream,

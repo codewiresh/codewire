@@ -13,8 +13,9 @@ use super::StartError;
 use super::spawner::{Process, Spawner};
 use crate::children::{FRONT_DOOR_WORD, POD_UID_FLAG};
 use crate::front_door::protocol::{
-    Bindings, CONFINE, FRONT_DOOR_CONTROL_FD, HANDOFF, INSTALLED, MAX_CONTROL_MESSAGE, PREPARED,
-    READY, SERVING, decode_failed, decode_refused, encode_bindings, encode_leaves,
+    Bindings, CONFINE, CREDENTIALS, FRONT_DOOR_CONTROL_FD, FRONT_DOOR_SESSIONS_FD, HANDOFF,
+    INSTALLED, MAX_CONTROL_MESSAGE, PREPARED, READY, SERVING, SESSION_SERVING, SessionRefusal,
+    decode_failed, decode_refused, decode_session_dropped, encode_bindings, encode_leaves,
 };
 use crate::interception::FrontDoorSpec;
 
@@ -25,7 +26,41 @@ const INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub(super) struct FrontDoor {
     process: Process,
     control: ControlChannel,
+    /// Taken once, by whatever hands the front door its credential sessions.
+    sessions: Option<ControlChannel>,
     spki: Vec<u8>,
+}
+
+/// Why a credential session was not handed over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum HandError {
+    #[error("the front door dropped the session: {}", .0.code())]
+    Dropped(SessionRefusal),
+    #[error("the front door's sessions socket closed, misbehaved or did not answer")]
+    Control,
+}
+
+/// Hands the front door one credential session, `socket`, already tagged,
+/// and waits for its answer within `timeout`.
+pub async fn hand_session(
+    sessions: &mut ControlChannel,
+    socket: OwnedFd,
+    timeout: std::time::Duration,
+) -> Result<(), HandError> {
+    let deadline = Instant::now() + timeout;
+    tokio::time::timeout_at(deadline, sessions.send(CREDENTIALS, &[socket.as_fd()]))
+        .await
+        .map_err(|_| HandError::Control)?
+        .map_err(|_| HandError::Control)?;
+    drop(socket);
+    let (answer, _) = tokio::time::timeout_at(deadline, sessions.receive(MAX_CONTROL_MESSAGE, 0))
+        .await
+        .map_err(|_| HandError::Control)?
+        .map_err(|_| HandError::Control)?;
+    if answer == SESSION_SERVING {
+        return Ok(());
+    }
+    Err(decode_session_dropped(&answer).map_or(HandError::Control, HandError::Dropped))
 }
 
 /// Starts a front door for `pod_uid` from `image` and waits until it is
@@ -38,21 +73,28 @@ pub(super) async fn start(
     deadline: Instant,
 ) -> Result<FrontDoor, StartError> {
     let (parent, child) = stream_pair().map_err(|_| StartError::Spawn)?;
+    let (sessions_parent, sessions_child) = stream_pair().map_err(|_| StartError::Spawn)?;
     let inherited =
         duplicate_inherited_descriptor(child.as_raw_fd()).map_err(|_| StartError::Spawn)?;
+    let inherited_sessions = duplicate_inherited_descriptor(sessions_child.as_raw_fd())
+        .map_err(|_| StartError::Spawn)?;
     let pod = pod_uid.to_string();
     let command = image
         .command(
             &["cw-egress", FRONT_DOOR_WORD, POD_UID_FLAG, &pod],
-            vec![(inherited.as_raw_fd(), FRONT_DOOR_CONTROL_FD)],
+            vec![
+                (inherited.as_raw_fd(), FRONT_DOOR_CONTROL_FD),
+                (inherited_sessions.as_raw_fd(), FRONT_DOOR_SESSIONS_FD),
+            ],
         )
         .map_err(|_| StartError::Spawn)?;
     let process = spawner.spawn(command).await?;
-    // The child holds its own copy of its end.
-    drop(inherited);
-    drop(child);
+    // The child holds its own copies of its ends.
+    drop((inherited, inherited_sessions));
+    drop((child, sessions_child));
 
     let mut control = ControlChannel::new(parent).map_err(|_| StartError::Spawn)?;
+    let sessions = ControlChannel::new(sessions_parent).map_err(|_| StartError::Spawn)?;
     let spki = prepare(&mut control, spec, deadline, || {
         super::require_image(image, &process)
     })
@@ -60,6 +102,7 @@ pub(super) async fn start(
     Ok(FrontDoor {
         process,
         control,
+        sessions: Some(sessions),
         spki,
     })
 }
@@ -123,6 +166,11 @@ pub(super) async fn install<C: AsRef<[u8]>>(
 impl FrontDoor {
     pub(super) fn public_key_spki(&self) -> &[u8] {
         &self.spki
+    }
+
+    /// The front door's sessions socket, once.
+    pub(super) fn take_sessions(&mut self) -> Option<ControlChannel> {
+        self.sessions.take()
     }
 
     pub(super) async fn take_handoff(

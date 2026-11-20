@@ -108,3 +108,59 @@ async fn another_binding_never_finds_an_epoch() {
         assert!(epochs.current(&other).is_none(), "{other:?}");
     }
 }
+
+/// #4001: a Pod has one live session. A newer one stops the older, and
+/// takes its place only once the older has let go; the older's end frees
+/// nothing of the newer's.
+#[tokio::test]
+async fn a_newer_session_for_a_pod_stops_the_older_and_waits_for_it() {
+    let wait = std::time::Duration::from_secs(30);
+    let epochs = Arc::new(FrontDoorEpochs::default());
+    let first_stop = CancellationToken::new();
+    let first = epochs.take_session("pod-a", first_stop.clone(), wait).await;
+
+    let second_stop = CancellationToken::new();
+    let taking = tokio::spawn({
+        let epochs = Arc::clone(&epochs);
+        let stop = second_stop.clone();
+        async move { epochs.take_session("pod-a", stop, wait).await }
+    });
+    first_stop.cancelled().await;
+    tokio::task::yield_now().await;
+    assert!(!taking.is_finished(), "it waits while the older holds on");
+    drop(first);
+    let second = tokio::time::timeout(wait, taking).await.unwrap().unwrap();
+    assert!(!second_stop.is_cancelled());
+
+    // The older's place is gone without taking the newer's with it, and a
+    // newer one still waits on it.
+    let third_stop = CancellationToken::new();
+    let taking = tokio::spawn({
+        let epochs = Arc::clone(&epochs);
+        async move { epochs.take_session("pod-a", third_stop, wait).await }
+    });
+    second_stop.cancelled().await;
+    drop(second);
+    let _third = tokio::time::timeout(wait, taking).await.unwrap().unwrap();
+
+    // Another Pod's session is its own.
+    let other_stop = CancellationToken::new();
+    let _other = epochs.take_session("pod-b", other_stop.clone(), wait).await;
+    assert!(!other_stop.is_cancelled());
+}
+
+/// A newer session that an older one never lets go of joins anyway once its
+/// wait is over.
+#[tokio::test(start_paused = true)]
+async fn a_newer_session_waits_for_the_older_only_so_long() {
+    let epochs = Arc::new(FrontDoorEpochs::default());
+    let wait = std::time::Duration::from_secs(5);
+    let _held = epochs
+        .take_session("pod-a", CancellationToken::new(), wait)
+        .await;
+    let started = tokio::time::Instant::now();
+    let _newer = epochs
+        .take_session("pod-a", CancellationToken::new(), wait)
+        .await;
+    assert!(started.elapsed() >= wait);
+}

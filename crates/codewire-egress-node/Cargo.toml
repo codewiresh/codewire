@@ -19,6 +19,7 @@ harness = false
 
 [dependencies]
 codewire-confinement = { workspace = true }
+codewire-daemon-proto = { workspace = true }
 codewire-egress-broker = { workspace = true }
 codewire-egress-front-door = { workspace = true }
 codewire-egress-front-door-bridge = { workspace = true }

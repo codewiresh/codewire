@@ -174,6 +174,7 @@ impl<L: Launch> Pod<L> {
             Ok(enforcing) => {
                 let spec = PairSpec {
                     pod_uid,
+                    pod_name: pod_name.clone(),
                     stream,
                     key,
                     policy: enforcing.policy.clone(),

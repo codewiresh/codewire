@@ -10,6 +10,7 @@
 //! session follows its binding across epoch renewals (`session`).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use codewire_proto::codewire::internal::v1::__buffa::oneof::front_door_session_request::Frame as RequestFrame;
 use codewire_proto::codewire::internal::v1::__buffa::oneof::front_door_session_response::Frame as ResponseFrame;
@@ -68,6 +69,12 @@ impl EgressServiceState {
             pod_uid: guest.uid.clone(),
             generation: u64::try_from(binding.operation_generation).map_err(|_| denied())?,
         };
+        // A newer session for the Pod replaces an older one, which only the
+        // Pod's own node can have opened (`guest_on_node` above).
+        let stop = CancellationToken::new();
+        let place = front_doors
+            .take_session(&key.pod_uid, stop.clone(), REPLACE_WAIT)
+            .await;
         let first = session::join(front_doors, &key)
             .await
             .map_err(|status| answer(&status))?;
@@ -86,16 +93,17 @@ impl EgressServiceState {
             })
             .boxed();
         let (output, outgoing) = mpsc::channel(1);
-        let stop = CancellationToken::new();
-        tokio::spawn(
-            session::Session {
-                front_doors: Arc::clone(front_doors),
-                key,
-                output,
-                stop: stop.clone(),
-            }
-            .run(first, frames),
-        );
+        let session = session::Session {
+            front_doors: Arc::clone(front_doors),
+            key,
+            output,
+            stop: stop.clone(),
+        };
+        tokio::spawn(async move {
+            // Held until the session has let go of its upstreams.
+            let _place = place;
+            session.run(first, frames).await;
+        });
         let bridge = |frame| FrontDoorSessionResponse {
             frame: Some(ResponseFrame::Bridge(frame)),
             ..Default::default()
@@ -119,6 +127,10 @@ impl EgressServiceState {
         connectrpc::Response::stream_ok(stream)
     }
 }
+
+/// How long a newer session waits for the older one it replaces to let go
+/// of the epoch before joining it anyway.
+const REPLACE_WAIT: Duration = Duration::from_secs(5);
 
 fn not_open() -> ConnectError {
     ConnectError::failed_precondition("a front-door session starts with its open frame")

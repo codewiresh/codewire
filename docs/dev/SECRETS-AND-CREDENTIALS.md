@@ -1931,8 +1931,8 @@ door's way into the credential broker, beside a Sandbox's loopback ingress.
 It is served only while hosted interception is on
 (`CODEWIRE_HOSTED_INTERCEPTION_ENABLED`, which needs hosted egress on);
 otherwise it answers `UNIMPLEMENTED` to an authenticated caller, and no relay
-epoch takes a session. Its only client is `cw-egress` (**The client** below,
-not yet built):
+epoch takes a session. Its only client is `cw-egress` (**The client**
+below):
 
 - **Who opens it:** only `cw-egress`, with its own projected token (audience
   `codewire.internal.egress-node.v1`, its ServiceAccount and namespace), for
@@ -2017,7 +2017,8 @@ not yet built):
 - **Not yet:** a joined session that is idle holds its epoch's place until the
   epoch ends; the broker's own idle end (120 seconds with no open request or
   socket) follows.
-- **The client** (not yet built). `cw-egress` keeps one session open for each
+- **The client** (`codewire-egress-node`'s `front_door_session`). `cw-egress`
+  keeps one session open for each
   Pod whose front door runs, from the front door's start until the Pod's
   egress pair ends:
   - **Opening.** It reads its token again for every open, never caching it,
@@ -2025,7 +2026,16 @@ not yet built):
     admission. After `attached` it writes the credential-session tag on its
     own end of a fresh socket pair, then hands the front door the other end;
     the front door admits only a connected stream socket whose tag arrives
-    within 2 seconds, so nothing from the network decides that read.
+    within 2 seconds, so nothing from the network decides that read. The
+    hand-off has its own socket, at descriptor 5 in the front door, which
+    carries nothing else: `CWHF1 credentials` with that one descriptor,
+    answered `CWHF1 session serving` or `CWHF1 session dropped` and a fixed
+    code (`kind`, `tag` or `busy`). The front door's syscall filter doesn't
+    change: it already receives the descriptors it is handed, and its own
+    denials are pinned by a test. A sessions socket that closes or carries
+    anything else ends the front door, so the Pod's egress pair restarts
+    rather than serving on with no session; a `busy` answer, which one relay
+    at a time never causes, ends the pair too.
   - **Relaying.** Toward the front door, each `bridge` payload is written
     unchanged. Toward orchestration, the front door's bytes are cut into
     whole frames, each one `bridge` message; a length of zero or over the
@@ -2045,7 +2055,8 @@ not yet built):
     next backoff. `UNAVAILABLE`, `ALREADY_EXISTS` and a transport error take
     that backoff. `PERMISSION_DENIED`, `FAILED_PRECONDITION` and
     `INVALID_ARGUMENT` wait 60 seconds, and `UNIMPLEMENTED` 5 minutes. Every
-    wait is fully jittered, and each refusal is logged at most once per
+    wait but the healthy reopen is drawn from the upper half of its interval,
+    so none comes out near zero, and each refusal is logged at most once per
     interval and counted.
   - **A second session for the same Pod**, from the same node: orchestration
     ends the first, counted, and the second takes its place in the epoch
@@ -2228,8 +2239,9 @@ and the per-Pod CA (#5051). Open: the placeholder keys and their failed-read
 refusal (#5017, #5087), the bindings and the switch (#5013, #5023), the relay
 session and its router (#5021, #5439, #5056), the CA's ensure, leaf signing
 and sweep (#5170, #5071), and the idle end (#5125). Then the gates on the
-switch: delivery following the front door, one per-client host selection
-for local and hosted, and `cw-egress` reopening an ended session. The journey is `agent-hosted` in
+switch: delivery following the front door, and one per-client host selection
+for local and hosted. `cw-egress` keeps each front door's session open and
+reopens it (**The client** above). The journey is `agent-hosted` in
 `docs/journeys/network-and-egress.md`.
 
 ### Hosted interception CA (not yet served)

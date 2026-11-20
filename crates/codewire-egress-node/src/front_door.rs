@@ -10,6 +10,7 @@
 //! handshake fails closed. Its control socket's protocol is [`protocol`].
 
 pub mod protocol;
+mod sessions;
 
 use std::io;
 use std::os::fd::OwnedFd;
@@ -25,9 +26,9 @@ use codewire_egress_worker::worker::inherited_std_unix_stream;
 use uuid::Uuid;
 
 use protocol::{
-    CONFINE, FRONT_DOOR_CONTROL_FD, FrontDoorStage, HANDOFF, INSTALLED, LeafRefusal,
-    MAX_CONTROL_MESSAGE, PREPARED, SERVING, decode_bindings, decode_leaves, failed_message,
-    ready_message, refused_message,
+    CONFINE, FRONT_DOOR_CONTROL_FD, FRONT_DOOR_SESSIONS_FD, FrontDoorStage, HANDOFF, INSTALLED,
+    LeafRefusal, MAX_CONTROL_MESSAGE, PREPARED, SERVING, decode_bindings, decode_leaves,
+    failed_message, ready_message, refused_message,
 };
 
 /// How long each step of the supervisor's start may take: its whole start
@@ -59,6 +60,7 @@ impl FrontDoorProcessError {
                 FrontDoorStage::Confinement => 83,
                 FrontDoorStage::Start => 84,
                 FrontDoorStage::Handoff => 85,
+                FrontDoorStage::Sessions => 88,
             },
             Self::Control => 86,
             Self::Ended(_) => 87,
@@ -66,17 +68,24 @@ impl FrontDoorProcessError {
     }
 }
 
-/// The `__egress-front-door` child: its inherited control socket, then
-/// [`run`] with the real confinement.
+/// The `__egress-front-door` child: its inherited control and sessions
+/// sockets, then [`run`] with the real confinement.
 pub async fn run_inherited_front_door(pod_uid: Uuid) -> Result<(), FrontDoorProcessError> {
-    let control = inherited_std_unix_stream(FRONT_DOOR_CONTROL_FD)
+    let control = inherited_channel(FRONT_DOOR_CONTROL_FD)
+        .map_err(|()| FrontDoorProcessError::Startup(FrontDoorStage::Control))?;
+    let sessions = inherited_channel(FRONT_DOOR_SESSIONS_FD)
+        .map_err(|()| FrontDoorProcessError::Startup(FrontDoorStage::Sessions))?;
+    run(control, sessions, pod_uid, confine).await
+}
+
+/// An inherited descriptor, admitted only as a connected Unix stream and
+/// made close-on-exec, before anything is confined.
+fn inherited_channel(descriptor: std::os::fd::RawFd) -> Result<ControlChannel, ()> {
+    let socket = inherited_std_unix_stream(descriptor)
         .map(OwnedFd::from)
-        .map_err(|_| FrontDoorProcessError::Startup(FrontDoorStage::Control))?;
-    rustix::io::fcntl_setfd(&control, rustix::io::FdFlags::CLOEXEC)
-        .map_err(|_| FrontDoorProcessError::Startup(FrontDoorStage::Control))?;
-    let control = ControlChannel::new(control)
-        .map_err(|_| FrontDoorProcessError::Startup(FrontDoorStage::Control))?;
-    run(control, pod_uid, confine).await
+        .map_err(|_| ())?;
+    rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC).map_err(|_| ())?;
+    ControlChannel::new(socket).map_err(|_| ())
 }
 
 /// No other thread may exist: the syscall filter binds only the calling
@@ -90,10 +99,11 @@ fn confine() -> io::Result<()> {
 /// [`confine`] in the process; a test runs it in its own process without.
 pub(crate) async fn run(
     mut control: ControlChannel,
+    mut sessions: ControlChannel,
     pod_uid: Uuid,
     confine: impl FnOnce() -> io::Result<()>,
 ) -> Result<(), FrontDoorProcessError> {
-    let result = start_and_serve(&mut control, pod_uid, confine).await;
+    let result = start_and_serve(&mut control, &mut sessions, pod_uid, confine).await;
     if let Err(FrontDoorProcessError::Startup(stage)) = &result {
         // The supervisor may already be gone; the exit status says the same.
         let _ = control.send(&failed_message(*stage), &[]).await;
@@ -103,6 +113,7 @@ pub(crate) async fn run(
 
 async fn start_and_serve(
     control: &mut ControlChannel,
+    sessions: &mut ControlChannel,
     pod_uid: Uuid,
     confine: impl FnOnce() -> io::Result<()>,
 ) -> Result<(), FrontDoorProcessError> {
@@ -134,15 +145,18 @@ async fn start_and_serve(
     let handoff = receive_handoff(control).await?;
     send(control, SERVING).await?;
 
-    // Credential sessions come from cw-egress's front-door session, which
-    // no frame carries yet: until one does, each request fails closed at the
-    // bridge. The sender lives as long as the control socket.
-    let (sessions, later) = tokio::sync::mpsc::channel::<tokio::net::UnixStream>(1);
+    // Credential sessions come from cw-egress's front-door session, on
+    // their own socket: until one is admitted, each request fails closed at
+    // the bridge. Either socket ending ends the front door, so a pair whose
+    // sessions are gone restarts rather than serving on with none.
+    let (successors, later) = tokio::sync::mpsc::channel::<tokio::net::UnixStream>(1);
     let serve = door.serve(handoff, None, later);
     tokio::pin!(serve);
     let follow = async {
-        let _sessions = sessions;
-        follow_leaves(control, &leaves).await;
+        tokio::select! {
+            () = follow_leaves(control, &leaves) => {}
+            () = sessions::follow_sessions(sessions, successors) => {}
+        }
     };
     let ended = tokio::select! {
         ended = &mut serve => ended,

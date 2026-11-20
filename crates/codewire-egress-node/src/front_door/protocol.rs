@@ -19,6 +19,14 @@
 //!
 //! A failure before serving is [`failed_message`] with a fixed stage. Any
 //! other frame, or the socket closing, ends the front door.
+//!
+//! A second socket, at [`FRONT_DOOR_SESSIONS_FD`], carries only credential
+//! sessions, so their answers never meet a leaves install's. Once serving,
+//! the supervisor sends [`CREDENTIALS`] with exactly one descriptor, its end
+//! of a socket pair whose other end the supervisor has already tagged
+//! [`FRONT_DOOR_SESSION_ROLE_TAG`](codewire_egress_front_door_bridge::FRONT_DOOR_SESSION_ROLE_TAG).
+//! The front door answers [`SESSION_SERVING`], or [`session_dropped_message`]
+//! with a fixed code. Any other frame, or this socket closing, ends it too.
 
 use std::os::fd::RawFd;
 
@@ -31,6 +39,8 @@ use uuid::Uuid;
 
 /// The control socket's descriptor in the front-door process.
 pub const FRONT_DOOR_CONTROL_FD: RawFd = 4;
+/// The sessions socket's descriptor in the front-door process.
+pub const FRONT_DOOR_SESSIONS_FD: RawFd = 5;
 /// The largest frame either side sends: the framing's own bound.
 pub const MAX_CONTROL_MESSAGE: usize = codewire_egress_policy::handoff::FRAME_MAX_LEN;
 
@@ -43,6 +53,9 @@ pub const SERVING: &[u8] = b"CWHF1 serving\n";
 pub const LEAVES: &[u8] = b"CWHF1 leaves\n";
 pub const INSTALLED: &[u8] = b"CWHF1 installed\n";
 const REFUSED_PREFIX: &[u8] = b"CWHF1 refused ";
+pub const CREDENTIALS: &[u8] = b"CWHF1 credentials\n";
+pub const SESSION_SERVING: &[u8] = b"CWHF1 session serving\n";
+const SESSION_DROPPED_PREFIX: &[u8] = b"CWHF1 session dropped ";
 const FAILED_PREFIX: &[u8] = b"CWHF1 failed ";
 
 /// The most leaves one frame carries: what one install takes.
@@ -161,6 +174,42 @@ pub fn decode_refused(message: &[u8]) -> Option<LeafRefusal> {
         .find(|why| why.code().as_bytes() == code)
 }
 
+/// Why a front door dropped a credential session's socket, and closed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionRefusal {
+    /// Not a connected Unix stream socket.
+    Kind,
+    /// No session role tag within its time, or another byte.
+    Tag,
+    /// The last session handed over isn't served yet.
+    Busy,
+}
+
+impl SessionRefusal {
+    const ALL: [Self; 3] = [Self::Kind, Self::Tag, Self::Busy];
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Kind => "kind",
+            Self::Tag => "tag",
+            Self::Busy => "busy",
+        }
+    }
+}
+
+pub fn session_dropped_message(why: SessionRefusal) -> Vec<u8> {
+    [SESSION_DROPPED_PREFIX, why.code().as_bytes(), b"\n"].concat()
+}
+
+pub fn decode_session_dropped(message: &[u8]) -> Option<SessionRefusal> {
+    let code = message
+        .strip_prefix(SESSION_DROPPED_PREFIX)?
+        .strip_suffix(b"\n")?;
+    SessionRefusal::ALL
+        .into_iter()
+        .find(|why| why.code().as_bytes() == code)
+}
+
 /// Where a front door's start failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrontDoorStage {
@@ -171,16 +220,19 @@ pub enum FrontDoorStage {
     Confinement,
     Start,
     Handoff,
+    /// The sessions socket is missing or not a connected Unix stream.
+    Sessions,
 }
 
 impl FrontDoorStage {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Control,
         Self::Bindings,
         Self::Admission,
         Self::Confinement,
         Self::Start,
         Self::Handoff,
+        Self::Sessions,
     ];
 
     pub const fn code(self) -> &'static str {
@@ -191,6 +243,7 @@ impl FrontDoorStage {
             Self::Confinement => "confinement",
             Self::Start => "start",
             Self::Handoff => "handoff",
+            Self::Sessions => "sessions",
         }
     }
 }
@@ -276,7 +329,14 @@ mod tests {
         for stage in FrontDoorStage::ALL {
             assert_eq!(decode_failed(&failed_message(stage)), Some(stage));
         }
+        for why in SessionRefusal::ALL {
+            assert_eq!(
+                decode_session_dropped(&session_dropped_message(why)),
+                Some(why)
+            );
+        }
         assert_eq!(decode_refused(b"CWHF1 refused other\n"), None);
         assert_eq!(decode_failed(b"CWHF1 failed control"), None);
+        assert_eq!(decode_session_dropped(b"CWHF1 session dropped kind"), None);
     }
 }

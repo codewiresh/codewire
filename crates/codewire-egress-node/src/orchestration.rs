@@ -271,6 +271,8 @@ impl Orchestration {
     }
 }
 
+#[cfg(target_os = "linux")]
+mod front_door;
 mod report;
 
 pub use report::{Enforcement, RECORDS_PER_CALL, wire_record};

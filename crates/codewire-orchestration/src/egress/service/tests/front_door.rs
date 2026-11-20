@@ -854,6 +854,33 @@ async fn a_live_requests_frame_outside_the_pin_is_answered_once_and_cancelled_up
     );
 }
 
+/// #4001: a newer session for the same Pod replaces the older one, which
+/// only that Pod's node could have opened. The older ends and lets go of its
+/// upstream, and the newer joins the epoch rather than being refused
+/// `ALREADY_EXISTS`, so a restarted cw-egress is served at once.
+#[tokio::test]
+async fn a_newer_session_for_the_same_pod_replaces_the_older() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (_epoch, mut asked) = epoch(&front_doors, key());
+    let (first_joined, first) = upstream();
+    let (second_joined, mut second) = upstream();
+    tokio::spawn(async move {
+        for joined in [first_joined, second_joined] {
+            let Join { reply } = asked.recv().await.unwrap();
+            assert!(reply.send(Ok(joined)).is_ok());
+        }
+    });
+    let mut older = Live::start(app_for(&front_doors)).await;
+    older.attached().await;
+    let mut newer = Live::start(app_for(&front_doors)).await;
+    bounded(first.ended.cancelled()).await;
+    newer.attached().await;
+    while bounded(older.next()).await.is_some() {}
+    newer.send_message(&ready()).await;
+    newer.send_message(&request("r1")).await;
+    assert_eq!(bounded(second.guests.recv()).await.unwrap(), request("r1"));
+}
+
 /// A Cancel for an upstream that has gone still answers its id once, and
 /// that upstream's other requests are answered and finished as when a
 /// forward to it fails; the session goes on (#4001).

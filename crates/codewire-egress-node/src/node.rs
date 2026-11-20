@@ -86,6 +86,8 @@ async fn serve(settings: NodeSettings, image: OwnImage) -> ExitCode {
         roots: settings.orchestration_roots,
         token_path: settings.node_token_path,
     });
+    // Each front door's credential sessions come from orchestration (#4001).
+    let launch = launch.with_front_door_sessions(Arc::clone(&orchestration) as _);
     let (reporter, reporting) = Reporter::start(Arc::clone(&orchestration));
     let signals = Signals::default();
     let (admitted, streams) = mpsc::channel(ADMITTED_QUEUE);

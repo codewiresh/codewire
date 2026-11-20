@@ -2058,6 +2058,7 @@ name = "codewire-egress-node"
 version = "0.1.0"
 dependencies = [
  "codewire-confinement",
+ "codewire-daemon-proto",
  "codewire-egress-broker",
  "codewire-egress-front-door",
  "codewire-egress-front-door-bridge",
