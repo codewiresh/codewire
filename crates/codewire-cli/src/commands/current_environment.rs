@@ -516,6 +516,7 @@ mod tests {
                 state: state.into(),
                 restarted: false,
                 failed: None,
+                stop_reason: None,
                 daemon_health: String::new(),
                 id: VM_ID.into(),
             },

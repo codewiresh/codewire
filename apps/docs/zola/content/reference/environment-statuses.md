@@ -1,7 +1,7 @@
 ---
 title: Environment statuses
 description: The states cw info and the dashboard report for an environment.
-updated: 2026-10-26
+updated: 2026-11-12
 weight: 3
 ---
 
@@ -25,6 +25,11 @@ same word in lowercase, with `destroying` as "deleting…" and `destroyed` as
 | `destroying`, `destroyed` | Deletion in progress or done. | Protected environments refuse deletion. |
 | `error` | The last operation failed; `cw info` shows the error code. | `cw daemon status ENV` and `repair`, or stop and start; for a local VM see [Troubleshooting](@/reference/troubleshooting.md). |
 | `unknown` | The state could not be read. | Retry; `cw ls` marks an environment whose sessions it cannot read as unavailable. |
+
+A cloud sandbox the platform stopped says why: `cw ls` and the dashboard show
+`stopped (credit)` when its organization ran out of credit, and `cw info`
+shows `StopReason: credit`. A sandbox someone stopped shows `stopped`, and
+`cw info` shows `StopReason: user`.
 
 `cw ls --state STATE` filters by state, and `cw prune` removes
 hosted environments stuck in `error`, `creating` or `pending`.

@@ -78,6 +78,9 @@ const (
 	// EnvironmentServiceExtendEnvironmentTtlProcedure is the fully-qualified name of the
 	// EnvironmentService's ExtendEnvironmentTtl RPC.
 	EnvironmentServiceExtendEnvironmentTtlProcedure = "/codewire.v1.EnvironmentService/ExtendEnvironmentTtl"
+	// EnvironmentServiceSetEnvironmentIdleStopProcedure is the fully-qualified name of the
+	// EnvironmentService's SetEnvironmentIdleStop RPC.
+	EnvironmentServiceSetEnvironmentIdleStopProcedure = "/codewire.v1.EnvironmentService/SetEnvironmentIdleStop"
 	// EnvironmentServiceGetEnvironmentTrustReportProcedure is the fully-qualified name of the
 	// EnvironmentService's GetEnvironmentTrustReport RPC.
 	EnvironmentServiceGetEnvironmentTrustReportProcedure = "/codewire.v1.EnvironmentService/GetEnvironmentTrustReport"
@@ -137,6 +140,9 @@ type EnvironmentServiceClient interface {
 	UnprotectEnvironment(context.Context, *connect.Request[v1.UnprotectEnvironmentRequest]) (*connect.Response[v1.UnprotectEnvironmentResponse], error)
 	CancelEnvironmentDeletion(context.Context, *connect.Request[v1.CancelEnvironmentDeletionRequest]) (*connect.Response[v1.CancelEnvironmentDeletionResponse], error)
 	ExtendEnvironmentTtl(context.Context, *connect.Request[v1.ExtendEnvironmentTtlRequest]) (*connect.Response[v1.ExtendEnvironmentTtlResponse], error)
+	// Changes how long the environment may have no activity before it is
+	// stopped. It never stops, starts or restarts the environment.
+	SetEnvironmentIdleStop(context.Context, *connect.Request[v1.SetEnvironmentIdleStopRequest]) (*connect.Response[v1.SetEnvironmentIdleStopResponse], error)
 	GetEnvironmentTrustReport(context.Context, *connect.Request[v1.GetEnvironmentTrustReportRequest]) (*connect.Response[v1.GetEnvironmentTrustReportResponse], error)
 	// The SSH host public key the daemon of the environment's currently bound
 	// Pod recorded, for the client's known_hosts. A released or replaced Pod's
@@ -261,6 +267,12 @@ func NewEnvironmentServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(environmentServiceMethods.ByName("ExtendEnvironmentTtl")),
 			connect.WithClientOptions(opts...),
 		),
+		setEnvironmentIdleStop: connect.NewClient[v1.SetEnvironmentIdleStopRequest, v1.SetEnvironmentIdleStopResponse](
+			httpClient,
+			baseURL+EnvironmentServiceSetEnvironmentIdleStopProcedure,
+			connect.WithSchema(environmentServiceMethods.ByName("SetEnvironmentIdleStop")),
+			connect.WithClientOptions(opts...),
+		),
 		getEnvironmentTrustReport: connect.NewClient[v1.GetEnvironmentTrustReportRequest, v1.GetEnvironmentTrustReportResponse](
 			httpClient,
 			baseURL+EnvironmentServiceGetEnvironmentTrustReportProcedure,
@@ -353,6 +365,7 @@ type environmentServiceClient struct {
 	unprotectEnvironment          *connect.Client[v1.UnprotectEnvironmentRequest, v1.UnprotectEnvironmentResponse]
 	cancelEnvironmentDeletion     *connect.Client[v1.CancelEnvironmentDeletionRequest, v1.CancelEnvironmentDeletionResponse]
 	extendEnvironmentTtl          *connect.Client[v1.ExtendEnvironmentTtlRequest, v1.ExtendEnvironmentTtlResponse]
+	setEnvironmentIdleStop        *connect.Client[v1.SetEnvironmentIdleStopRequest, v1.SetEnvironmentIdleStopResponse]
 	getEnvironmentTrustReport     *connect.Client[v1.GetEnvironmentTrustReportRequest, v1.GetEnvironmentTrustReportResponse]
 	getEnvironmentHostKey         *connect.Client[v1.GetEnvironmentHostKeyRequest, v1.GetEnvironmentHostKeyResponse]
 	getEnvironmentDaemonStatus    *connect.Client[v1.GetEnvironmentDaemonStatusRequest, v1.GetEnvironmentDaemonStatusResponse]
@@ -441,6 +454,11 @@ func (c *environmentServiceClient) ExtendEnvironmentTtl(ctx context.Context, req
 	return c.extendEnvironmentTtl.CallUnary(ctx, req)
 }
 
+// SetEnvironmentIdleStop calls codewire.v1.EnvironmentService.SetEnvironmentIdleStop.
+func (c *environmentServiceClient) SetEnvironmentIdleStop(ctx context.Context, req *connect.Request[v1.SetEnvironmentIdleStopRequest]) (*connect.Response[v1.SetEnvironmentIdleStopResponse], error) {
+	return c.setEnvironmentIdleStop.CallUnary(ctx, req)
+}
+
 // GetEnvironmentTrustReport calls codewire.v1.EnvironmentService.GetEnvironmentTrustReport.
 func (c *environmentServiceClient) GetEnvironmentTrustReport(ctx context.Context, req *connect.Request[v1.GetEnvironmentTrustReportRequest]) (*connect.Response[v1.GetEnvironmentTrustReportResponse], error) {
 	return c.getEnvironmentTrustReport.CallUnary(ctx, req)
@@ -520,6 +538,9 @@ type EnvironmentServiceHandler interface {
 	UnprotectEnvironment(context.Context, *connect.Request[v1.UnprotectEnvironmentRequest]) (*connect.Response[v1.UnprotectEnvironmentResponse], error)
 	CancelEnvironmentDeletion(context.Context, *connect.Request[v1.CancelEnvironmentDeletionRequest]) (*connect.Response[v1.CancelEnvironmentDeletionResponse], error)
 	ExtendEnvironmentTtl(context.Context, *connect.Request[v1.ExtendEnvironmentTtlRequest]) (*connect.Response[v1.ExtendEnvironmentTtlResponse], error)
+	// Changes how long the environment may have no activity before it is
+	// stopped. It never stops, starts or restarts the environment.
+	SetEnvironmentIdleStop(context.Context, *connect.Request[v1.SetEnvironmentIdleStopRequest]) (*connect.Response[v1.SetEnvironmentIdleStopResponse], error)
 	GetEnvironmentTrustReport(context.Context, *connect.Request[v1.GetEnvironmentTrustReportRequest]) (*connect.Response[v1.GetEnvironmentTrustReportResponse], error)
 	// The SSH host public key the daemon of the environment's currently bound
 	// Pod recorded, for the client's known_hosts. A released or replaced Pod's
@@ -640,6 +661,12 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 		connect.WithSchema(environmentServiceMethods.ByName("ExtendEnvironmentTtl")),
 		connect.WithHandlerOptions(opts...),
 	)
+	environmentServiceSetEnvironmentIdleStopHandler := connect.NewUnaryHandler(
+		EnvironmentServiceSetEnvironmentIdleStopProcedure,
+		svc.SetEnvironmentIdleStop,
+		connect.WithSchema(environmentServiceMethods.ByName("SetEnvironmentIdleStop")),
+		connect.WithHandlerOptions(opts...),
+	)
 	environmentServiceGetEnvironmentTrustReportHandler := connect.NewUnaryHandler(
 		EnvironmentServiceGetEnvironmentTrustReportProcedure,
 		svc.GetEnvironmentTrustReport,
@@ -744,6 +771,8 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 			environmentServiceCancelEnvironmentDeletionHandler.ServeHTTP(w, r)
 		case EnvironmentServiceExtendEnvironmentTtlProcedure:
 			environmentServiceExtendEnvironmentTtlHandler.ServeHTTP(w, r)
+		case EnvironmentServiceSetEnvironmentIdleStopProcedure:
+			environmentServiceSetEnvironmentIdleStopHandler.ServeHTTP(w, r)
 		case EnvironmentServiceGetEnvironmentTrustReportProcedure:
 			environmentServiceGetEnvironmentTrustReportHandler.ServeHTTP(w, r)
 		case EnvironmentServiceGetEnvironmentHostKeyProcedure:
@@ -833,6 +862,10 @@ func (UnimplementedEnvironmentServiceHandler) CancelEnvironmentDeletion(context.
 
 func (UnimplementedEnvironmentServiceHandler) ExtendEnvironmentTtl(context.Context, *connect.Request[v1.ExtendEnvironmentTtlRequest]) (*connect.Response[v1.ExtendEnvironmentTtlResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.ExtendEnvironmentTtl is not implemented"))
+}
+
+func (UnimplementedEnvironmentServiceHandler) SetEnvironmentIdleStop(context.Context, *connect.Request[v1.SetEnvironmentIdleStopRequest]) (*connect.Response[v1.SetEnvironmentIdleStopResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.SetEnvironmentIdleStop is not implemented"))
 }
 
 func (UnimplementedEnvironmentServiceHandler) GetEnvironmentTrustReport(context.Context, *connect.Request[v1.GetEnvironmentTrustReportRequest]) (*connect.Response[v1.GetEnvironmentTrustReportResponse], error) {

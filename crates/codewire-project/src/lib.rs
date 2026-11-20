@@ -13,6 +13,7 @@ use thiserror::Error;
 pub use codewire_access::AccessProfileReference;
 
 pub mod create_input;
+mod idle_stop;
 mod normalize;
 mod overrides;
 mod platform_projection;
@@ -28,6 +29,11 @@ mod selection_tests;
 #[cfg(test)]
 mod yaml_tests;
 
+pub use idle_stop::{
+    IDLE_STOP_FIELD, IDLE_STOP_ON_SECONDS, MAX_IDLE_STOP_SECONDS, MIN_IDLE_STOP_SECONDS,
+    format_idle_stop, idle_stop_notice, idle_stop_words, parse_idle_stop,
+    validate_idle_stop_seconds,
+};
 pub use overrides::{ProjectYamlFile, merge_project_files};
 pub use platform_projection::{
     PlatformProjectionSelection, PlatformProjectionSelectionError,
@@ -113,6 +119,9 @@ pub enum ProjectError {
 pub struct ProjectDocument {
     pub spec: ProjectSpec,
     pub local: LocalProjectIntent,
+    /// `idle_stop` in seconds, 0 for off; `None` when the file does not say.
+    /// A setting of a cloud environment, so never part of `spec` (#3384).
+    pub idle_stop_seconds: Option<i32>,
     working_directory_explicit: bool,
 }
 
@@ -496,6 +505,8 @@ struct RawProject {
     mounts: Vec<RawMountBlock>,
     #[serde(default)]
     workspace: Option<RawWorkspaceBlock>,
+    #[serde(default)]
+    idle_stop: Option<idle_stop::IdleStopValue>,
 }
 
 #[derive(Debug, Default, Deserialize)]

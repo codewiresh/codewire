@@ -56,6 +56,9 @@ pub struct CreateEnvironmentBody {
     pub preset_id: Option<String>,
     pub name: Option<String>,
     pub ttl_seconds: Option<i32>,
+    /// Its own idle stop in seconds, 0 for off; `None` takes the default
+    /// (#3384). Never part of `project_spec`.
+    pub idle_stop_seconds: Option<i32>,
     pub isolation_tier: String,
     pub project_spec: codewire_project::ProjectSpec,
     pub expected_profile_revision: Option<u64>,
@@ -789,10 +792,10 @@ async fn insert_environment(
                 (org_id, created_by, preset_id, type, name,
                  cpu_millicores, memory_mb, disk_gb, isolation_tier, ttl_seconds,
                  shutdown_at, project_spec, source_snapshot_id,
-                 runtime_backend, host_id, create_request_id)
+                 runtime_backend, host_id, create_request_id, idle_stop_seconds)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                  CASE WHEN $11::int IS NOT NULL THEN NOW() + make_interval(secs => $11::int) END,
-                 $12, $13, $14, $15, $16)
+                 $12, $13, $14, $15, $16, $17)
              RETURNING *
          )
          SELECT {ENV_SELECT_COLS}
@@ -822,16 +825,22 @@ async fn insert_environment(
     )
     .await?;
     let host_id = placed_host(&mut transaction, &p, source_snapshot_id.is_some()).await?;
-    if let Some(snapshot_id) = source_snapshot_id {
-        admit_source_snapshot(
-            &mut transaction,
-            p.org_id,
-            &p.user.user_id,
-            snapshot_id,
-            p.disk_gb,
-        )
-        .await?;
-    }
+    let snapshot_idle_stop = match source_snapshot_id {
+        Some(snapshot_id) => {
+            admit_source_snapshot(
+                &mut transaction,
+                p.org_id,
+                &p.user.user_id,
+                snapshot_id,
+                p.disk_gb,
+            )
+            .await?
+        }
+        None => None,
+    };
+    // The create's own, else its snapshot's, else off (owner, 2026-11-19:
+    // "not on by default").
+    let idle_stop_seconds = p.body.idle_stop_seconds.or(snapshot_idle_stop).unwrap_or(0);
     let row = sqlx::query(&sql)
         .bind(p.org_id)
         .bind(&p.user.user_id)
@@ -849,6 +858,7 @@ async fn insert_environment(
         .bind(backend.as_str())
         .bind(host_id.as_deref())
         .bind(p.body.request_id.as_deref())
+        .bind(idle_stop_seconds)
         .fetch_one(&mut *transaction)
         .await
         .map_err(insert_refused)?;
@@ -942,15 +952,17 @@ fn validate_source_snapshot_request(
 /// A snapshot is private to its creator, so another member's reads as absent.
 /// The share lock holds off a delete until this create commits, and a use of a
 /// snapshot counts toward its expiry in the transaction that authorizes it.
+/// Admitted, it answers the idle stop its source had when it was captured,
+/// which a fork takes unless its create names one (#3384).
 pub(crate) async fn admit_source_snapshot(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     org_id: &str,
     user_id: &str,
     snapshot_id: &str,
     disk_gib: i32,
-) -> AppResult<()> {
-    let row: Option<(String, Option<i64>)> = sqlx::query_as(
-        "SELECT state, size_bytes FROM hosted_snapshots
+) -> AppResult<Option<i32>> {
+    let row: Option<(String, Option<i64>, Option<i32>)> = sqlx::query_as(
+        "SELECT state, size_bytes, idle_stop_seconds FROM hosted_snapshots
           WHERE id = $1 AND org_id = $2 AND created_by = $3
           FOR SHARE",
     )
@@ -959,7 +971,7 @@ pub(crate) async fn admit_source_snapshot(
     .bind(user_id)
     .fetch_optional(&mut **transaction)
     .await?;
-    let Some((snapshot_state, size_bytes)) = row else {
+    let Some((snapshot_state, size_bytes, idle_stop_seconds)) = row else {
         return Err(coded(
             StatusCode::NOT_FOUND,
             "snapshot_not_found",
@@ -984,7 +996,7 @@ pub(crate) async fn admit_source_snapshot(
         .bind(snapshot_id)
         .execute(&mut **transaction)
         .await?;
-    Ok(())
+    Ok(idle_stop_seconds)
 }
 
 /// A network on create must be a hosted Mesh network name, and this platform
@@ -1310,6 +1322,9 @@ pub(crate) async fn create_environment_core(
         body.project_spec.resources.disk_gib,
         body.ttl_seconds,
     )?;
+    if let Some(idle_stop_seconds) = body.idle_stop_seconds {
+        super::environments::validate_idle_stop_seconds(idle_stop_seconds)?;
+    }
 
     let dispatch_ambiguous = AtomicBool::new(false);
     // The admitted operation outlives a dropped request, so it owns its inputs.

@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse, GetEnvironmentProjectSpecRequest, GetEnvironmentProjectSpecResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, ResizeEnvironmentRequest, ResizeEnvironmentResponse, RetryEnvironmentSetupRequest, RetryEnvironmentSetupResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
+from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse, GetEnvironmentProjectSpecRequest, GetEnvironmentProjectSpecResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, ResizeEnvironmentRequest, ResizeEnvironmentResponse, RetryEnvironmentSetupRequest, RetryEnvironmentSetupResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, SetEnvironmentIdleStopRequest, SetEnvironmentIdleStopResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -78,6 +78,9 @@ class EnvironmentService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def extend_environment_ttl(self, request: ExtendEnvironmentTtlRequest, ctx: RequestContext[ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse]) -> ExtendEnvironmentTtlResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def set_environment_idle_stop(self, request: SetEnvironmentIdleStopRequest, ctx: RequestContext[SetEnvironmentIdleStopRequest, SetEnvironmentIdleStopResponse]) -> SetEnvironmentIdleStopResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def get_environment_trust_report(self, request: GetEnvironmentTrustReportRequest, ctx: RequestContext[GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse]) -> GetEnvironmentTrustReportResponse:
@@ -276,6 +279,16 @@ class EnvironmentServiceASGIApplication(ConnectASGIApplication[EnvironmentServic
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.extend_environment_ttl,
+                ),
+                "/codewire.v1.EnvironmentService/SetEnvironmentIdleStop": Endpoint.unary(
+                    method=MethodInfo(
+                        name="SetEnvironmentIdleStop",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=SetEnvironmentIdleStopRequest,
+                        output=SetEnvironmentIdleStopResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.set_environment_idle_stop,
                 ),
                 "/codewire.v1.EnvironmentService/GetEnvironmentTrustReport": Endpoint.unary(
                     method=MethodInfo(
@@ -735,6 +748,26 @@ class EnvironmentServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def set_environment_idle_stop(
+        self,
+        request: SetEnvironmentIdleStopRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetEnvironmentIdleStopResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetEnvironmentIdleStop",
+                service_name="codewire.v1.EnvironmentService",
+                input=SetEnvironmentIdleStopRequest,
+                output=SetEnvironmentIdleStopResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def get_environment_trust_report(
         self,
         request: GetEnvironmentTrustReportRequest,
@@ -1009,6 +1042,9 @@ class EnvironmentServiceSync(Protocol):
     def extend_environment_ttl(self, request: ExtendEnvironmentTtlRequest, ctx: RequestContext[ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse]) -> ExtendEnvironmentTtlResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def set_environment_idle_stop(self, request: SetEnvironmentIdleStopRequest, ctx: RequestContext[SetEnvironmentIdleStopRequest, SetEnvironmentIdleStopResponse]) -> SetEnvironmentIdleStopResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def get_environment_trust_report(self, request: GetEnvironmentTrustReportRequest, ctx: RequestContext[GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse]) -> GetEnvironmentTrustReportResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -1203,6 +1239,16 @@ class EnvironmentServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.extend_environment_ttl,
+                ),
+                "/codewire.v1.EnvironmentService/SetEnvironmentIdleStop": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="SetEnvironmentIdleStop",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=SetEnvironmentIdleStopRequest,
+                        output=SetEnvironmentIdleStopResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.set_environment_idle_stop,
                 ),
                 "/codewire.v1.EnvironmentService/GetEnvironmentTrustReport": EndpointSync.unary(
                     method=MethodInfo(
@@ -1642,6 +1688,25 @@ class EnvironmentServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.EnvironmentService",
                 input=ExtendEnvironmentTtlRequest,
                 output=ExtendEnvironmentTtlResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def set_environment_idle_stop(
+        self,
+        request: SetEnvironmentIdleStopRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetEnvironmentIdleStopResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetEnvironmentIdleStop",
+                service_name="codewire.v1.EnvironmentService",
+                input=SetEnvironmentIdleStopRequest,
+                output=SetEnvironmentIdleStopResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

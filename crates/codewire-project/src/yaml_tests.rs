@@ -44,6 +44,7 @@ mounts:
 workspace:
   vm_only: [node_modules, '**/target']
   path_mode: mount
+idle_stop: 1h30m
 "#,
         digest = "0".repeat(64)
     )
@@ -99,6 +100,7 @@ fn keys_follow_the_schema_order_and_omit_empty_values() {
             "network",
             "mounts",
             "workspace",
+            "idle_stop",
         ]
     );
     assert!(yaml.contains("cpu: \"2\"\n"), "{yaml}");
@@ -219,4 +221,38 @@ fn environment_values_that_look_like_other_types_round_trip() {
     let document = ProjectDocument::new(spec, LocalProjectIntent::default(), true);
     let (yaml, parsed) = reparse(&document);
     assert_eq!(parsed.spec.environment, document.spec.environment, "{yaml}");
+}
+
+/// `idle_stop` is a setting of the environment, so it stays out of the spec a
+/// cloud environment stores (#3384).
+#[test]
+fn idle_stop_is_read_beside_the_spec_and_written_back() {
+    let document = parse_project_yaml("idle_stop: 30m\n").unwrap();
+    assert_eq!(document.idle_stop_seconds, Some(1800));
+    assert_eq!(document.spec, ProjectSpec::default());
+    assert!(
+        !String::from_utf8(document.canonical_json().unwrap())
+            .unwrap()
+            .contains("idle"),
+    );
+    let (yaml, parsed) = reparse(&document);
+    assert!(yaml.ends_with("idle_stop: 30m\n"), "{yaml}");
+    assert_eq!(parsed, document);
+
+    assert_eq!(
+        parse_project_yaml("idle_stop: off\n")
+            .unwrap()
+            .idle_stop_seconds,
+        Some(0)
+    );
+    assert_eq!(
+        parse_project_yaml("version: 1\n")
+            .unwrap()
+            .idle_stop_seconds,
+        None
+    );
+    let error = parse_project_yaml("idle_stop: 2m\n")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("idle_stop"), "{error}");
 }

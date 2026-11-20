@@ -23,6 +23,12 @@ pub struct Environment {
     pub error_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    /// Why a stopped environment was stopped: user, credit or idle (#3384).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    /// Seconds with no activity before a cloud sandbox stops; 0 never does.
+    #[serde(default)]
+    pub idle_stop_seconds: i32,
     pub recoverable: bool,
     pub state_changed_at: String,
     pub retry_count: i32,
@@ -374,6 +380,10 @@ pub struct CreateEnvironmentRequest {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<i32>,
+    /// Seconds with no activity before the sandbox stops, 0 for off; `None`
+    /// takes the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_stop_seconds: Option<i32>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub isolation_tier: String,
     pub project_spec: codewire_project::ProjectSpec,

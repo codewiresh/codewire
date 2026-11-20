@@ -814,6 +814,27 @@ impl EnvironmentClient {
         })
     }
 
+    pub async fn set_environment_idle_stop(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+        idle_stop_seconds: i32,
+    ) -> anyhow::Result<StatusResponse> {
+        let response = self
+            .inner
+            .set_environment_idle_stop(rpc::SetEnvironmentIdleStopRequest {
+                org_id: org_id.to_string(),
+                environment_id: environment_id.to_string(),
+                idle_stop_seconds,
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        Ok(StatusResponse {
+            status: response.status,
+        })
+    }
+
     pub async fn extend_environment_ttl(
         &self,
         org_id: &str,
@@ -1455,6 +1476,8 @@ fn environment_from_proto(value: rpc::Environment) -> anyhow::Result<Environment
         desired_state: desired_state.to_string(),
         error_reason: empty_to_none(value.error_reason),
         error_code: empty_to_none(value.error_code),
+        stop_reason: empty_to_none(value.stop_reason),
+        idle_stop_seconds: value.idle_stop_seconds,
         recoverable: value.recoverable,
         state_changed_at: value
             .state_changed_at

@@ -104,8 +104,12 @@ export interface EnvironmentData {
   disk_gb: number;
   /** A failure a program can act on: `no_capacity` when no node had room. */
   error_code?: string | null;
+  /** Why a stopped environment stopped: `user`, `credit` or `idle` (#3384). */
+  stop_reason?: string | null;
   error_reason?: string | null;
   id: string;
+  /** Seconds with no activity after which it stops itself; 0 is off (#3384). */
+  idle_stop_seconds?: number | null;
   isolation_tier: IsolationTier;
   memory_mb: number;
   name?: string | null;

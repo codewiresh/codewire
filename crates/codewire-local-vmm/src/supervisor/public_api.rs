@@ -280,6 +280,10 @@ const ENVIRONMENT_FIELDS: &[FieldSemantics] = &[
     // API (`EnvironmentNetworkPolicy` there); this public view leaves the
     // hosted one absent (#4000).
     field(38, "network_policy", ZERO),
+    // A local VM is stopped only by its user; there is no reason to report.
+    field(39, "stop_reason", ZERO),
+    // A local VM never stops itself for being idle (#3384).
+    field(40, "idle_stop_seconds", ZERO),
 ];
 
 const PUBLIC_MESSAGE_SEMANTICS: &[MessageSemantics] = &[
@@ -601,6 +605,10 @@ const ENVIRONMENT_RPC_SEMANTICS: &[RpcSemantics] = &[
     ),
     rpc(
         proto::ENVIRONMENT_SERVICE_EXTEND_ENVIRONMENT_TTL_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_SET_ENVIRONMENT_IDLE_STOP_SPEC,
         RpcBehavior::UnimplementedPlatformOnly,
     ),
     rpc(
@@ -2415,6 +2423,14 @@ impl proto::EnvironmentService for SupervisorRpc {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, proto::ExtendEnvironmentTtlRequest>,
     ) -> ServiceResult<proto::ExtendEnvironmentTtlResponse> {
+        unsupported()
+    }
+
+    async fn set_environment_idle_stop(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::SetEnvironmentIdleStopRequest>,
+    ) -> ServiceResult<proto::SetEnvironmentIdleStopResponse> {
         unsupported()
     }
 

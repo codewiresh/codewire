@@ -44,6 +44,12 @@ pub struct Environment {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_reason: Option<String>,
     pub error_code: Option<String>,
+    /// Why a stopped environment was stopped: user, credit or idle (#3384).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    /// Seconds with no activity after which it stops itself, 0 for off
+    /// (#3384).
+    pub idle_stop_seconds: i32,
     pub recoverable: bool,
     pub state_changed_at: String,
     pub retry_count: i32,
@@ -151,14 +157,14 @@ pub(crate) fn compute_preview_url(
 /// create handler's `WITH ins AS (...)` CTE can reuse them.
 pub(crate) const ENV_SELECT_COLS: &str = concat!(
     r#"e.id, e.org_id, e.created_by, e.preset_id, e.type, e.name,
-    e.state, e.desired_state, e.error_reason, e.error_code, e.recoverable, e.state_changed_at, e.retry_count,
+    e.state, e.desired_state, e.error_reason, e.error_code, e.stop_reason, e.recoverable, e.state_changed_at, e.retry_count,
     e.environment_operation_generation,
     jsonb_build_object('secrets',COALESCE(e.project_spec->'secrets','{}'::jsonb),
                        'credentials',e.project_spec->'credentials') AS source_spec,
     ab.profile_id AS source_profile_id, ab.profile_revision AS source_profile_revision,
     COALESCE(b.setup_phase, 0) AS setup_phase, COALESCE(b.setup_complete, false) AS setup_complete,
     COALESCE(b.setup_error, '') AS setup_error,
-    e.ttl_seconds, e.shutdown_at,
+    e.ttl_seconds, e.shutdown_at, e.idle_stop_seconds,
     e.cpu_millicores, e.memory_mb, e.disk_gb, e.isolation_tier,
     e.total_running_seconds,
     e.created_at, e.started_at, e.stopped_at, e.destroyed_at,
@@ -209,6 +215,8 @@ pub(crate) fn scan_environment(row: &PgRow) -> Result<Environment, sqlx::Error> 
         desired_state: row.try_get("desired_state")?,
         error_reason: row.try_get("error_reason")?,
         error_code: row.try_get("error_code")?,
+        stop_reason: row.try_get("stop_reason")?,
+        idle_stop_seconds: row.try_get("idle_stop_seconds")?,
         recoverable: row.try_get("recoverable")?,
         state_changed_at: format_time(row.try_get("state_changed_at")?),
         retry_count: row.try_get("retry_count")?,
@@ -1127,7 +1135,7 @@ pub(crate) async fn stop_environment_core(
 
             let lifecycle = crate::lifecycle::Service::for_pool(state.pool.clone());
             if lifecycle
-                .set_desired_state(&env.id, "stopped")
+                .request_stop(&env.id, crate::lifecycle::StopReason::User)
                 .await
                 .is_err()
             {
@@ -1446,6 +1454,50 @@ mod admission;
 pub(crate) use admission::{QuotaRequest, check_credit_in, check_not_suspended_in, check_quota_in};
 #[cfg(test)]
 use admission::{evaluate_credit, evaluate_quota};
+/// An idle stop the platform accepts: 0 (off), or five minutes to seven days.
+pub(crate) fn validate_idle_stop_seconds(seconds: i32) -> AppResult<()> {
+    codewire_project::validate_idle_stop_seconds(seconds).map_err(|error| AppError::Validation {
+        errors: vec![codewire_server_core::ValidationIssue {
+            path: Cow::Borrowed("/idle_stop_seconds"),
+            message: Cow::Owned(error.to_string()),
+        }],
+    })
+}
+
+/// Sets how long the environment may have no activity before it is stopped.
+/// It only records the setting: the environment keeps running, or stays
+/// stopped, as it was.
+pub(crate) async fn set_environment_idle_stop_core(
+    state: &ApiState,
+    user: &AuthUser,
+    org_id: &str,
+    env_id: &str,
+    idle_stop_seconds: i32,
+) -> AppResult<StatusResponse> {
+    require_org_member(&state.pool, user, org_id).await?;
+    require_environment_access(&state.pool, user, env_id, org_id, "owner", "access denied").await?;
+    validate_idle_stop_seconds(idle_stop_seconds)?;
+
+    run_organization_database_mutation(&state.pool, org_id, async {
+        let lifecycle = crate::lifecycle::Service::for_pool(state.pool.clone());
+        match lifecycle.set_idle_stop(env_id, idle_stop_seconds).await {
+            Err(_) => Err(coded(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "failed to set the idle stop",
+            )),
+            Ok(false) => Err(coded(
+                StatusCode::BAD_REQUEST,
+                "invalid_state",
+                "environment is already destroyed or not found",
+            )),
+            Ok(true) => Ok(StatusResponse {
+                status: "idle_stop_set",
+            }),
+        }
+    })
+    .await
+}
 
 #[cfg(test)]
 mod access_database_tests;
@@ -1622,6 +1674,8 @@ mod tests {
             isolation_tier: "standard".into(),
             error_reason: None,
             error_code: None,
+            stop_reason: None,
+            idle_stop_seconds: 0,
             recoverable: true,
             state_changed_at: "2026-06-12T00:00:00Z".into(),
             retry_count: 0,

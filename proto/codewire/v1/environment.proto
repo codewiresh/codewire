@@ -45,6 +45,9 @@ service EnvironmentService {
   rpc UnprotectEnvironment(UnprotectEnvironmentRequest) returns (UnprotectEnvironmentResponse);
   rpc CancelEnvironmentDeletion(CancelEnvironmentDeletionRequest) returns (CancelEnvironmentDeletionResponse);
   rpc ExtendEnvironmentTtl(ExtendEnvironmentTtlRequest) returns (ExtendEnvironmentTtlResponse);
+  // Changes how long the environment may have no activity before it is
+  // stopped. It never stops, starts or restarts the environment.
+  rpc SetEnvironmentIdleStop(SetEnvironmentIdleStopRequest) returns (SetEnvironmentIdleStopResponse);
   rpc GetEnvironmentTrustReport(GetEnvironmentTrustReportRequest) returns (GetEnvironmentTrustReportResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
@@ -168,6 +171,13 @@ message Environment {
   // The network policy the environment selects, and what enforces it
   // (#4000). Unset while the deployment's platform network policies are off.
   EnvironmentNetworkPolicy network_policy = 38;
+  // Why a stopped environment was stopped: user when a person stopped it,
+  // credit when its organization ran out of credit, idle when it had no
+  // activity for its idle timeout. Empty unless it is stopping or stopped.
+  string stop_reason = 39;
+  // Seconds with no activity after which the environment stops itself,
+  // keeping its disk (#3384). 0 is off; otherwise 300 to 604800.
+  int32 idle_stop_seconds = 40;
 }
 
 // NetworkAttachmentState is how far an environment's Mesh network
@@ -262,6 +272,10 @@ message CreateEnvironmentRequest {
   // environment the first request created, and creates nothing. Empty: no
   // retry protection.
   string request_id = 35;
+  // Stop the environment, keeping its disk, after this many seconds with no
+  // activity (#3384): 0 is off, otherwise 300 to 604800. Absent: a fork takes
+  // its snapshot's timeout, and any other create is off.
+  optional int32 idle_stop_seconds = 36;
 }
 
 // An environment's placement (#3609). Exactly one field is set.
@@ -523,6 +537,16 @@ message ExtendEnvironmentTtlRequest {
 }
 
 message ExtendEnvironmentTtlResponse {
+  string status = 1;
+}
+
+message SetEnvironmentIdleStopRequest {
+  string org_id = 1;
+  string environment_id = 2;
+  // 0 never stops it; otherwise 300 to 604800.
+  int32 idle_stop_seconds = 3;
+}
+message SetEnvironmentIdleStopResponse {
   string status = 1;
 }
 

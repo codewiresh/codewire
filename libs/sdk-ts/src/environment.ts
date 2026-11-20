@@ -44,6 +44,8 @@ export class Environment implements EnvironmentData {
   readonly state: string;
   readonly desired_state: string;
   readonly error_code: string | undefined;
+  readonly stop_reason: string | undefined;
+  readonly idle_stop_seconds: number;
   readonly error_reason: string | undefined;
   readonly isolation_tier: IsolationTier;
   readonly protected: boolean;
@@ -90,6 +92,8 @@ export class Environment implements EnvironmentData {
     this.state = data.state;
     this.desired_state = data.desired_state;
     this.error_code = data.error_code ?? undefined;
+    this.stop_reason = data.stop_reason ?? undefined;
+    this.idle_stop_seconds = data.idle_stop_seconds ?? 0;
     this.error_reason = data.error_reason ?? undefined;
     this.isolation_tier = data.isolation_tier;
     this.protected = data.protected;

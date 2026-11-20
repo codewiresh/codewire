@@ -633,6 +633,10 @@ func createEnvironmentRequest(orgID string, body CreateEnvironmentBody) (*codewi
 	if err != nil {
 		return nil, err
 	}
+	idleStop, err := int32FromInt64("idle_stop_seconds", body.IdleStopSeconds)
+	if err != nil {
+		return nil, err
+	}
 	isolation, err := toProtoIsolationTier(body.IsolationTier)
 	if err != nil {
 		return nil, err
@@ -651,7 +655,7 @@ func createEnvironmentRequest(orgID string, body CreateEnvironmentBody) (*codewi
 	}
 	return &codewirev1.CreateEnvironmentRequest{
 		OrgId: orgID, PresetId: copyStringPointer(body.PresetId), Name: copyStringPointer(body.Name),
-		TtlSeconds: ttl, IsolationTier: isolation, ProjectSpec: projectSpec,
+		TtlSeconds: ttl, IdleStopSeconds: idleStop, IsolationTier: isolation, ProjectSpec: projectSpec,
 		ExpectedProfileRevision:    copyUint64Pointer(body.ExpectedProfileRevision),
 		ConfirmPersonalCredentials: body.ConfirmPersonalCredentials, ConfirmPersonalSecrets: body.ConfirmPersonalSecrets,
 		OmitApplicationPreviews: body.OmitApplicationPreviews,
@@ -728,8 +732,9 @@ func fromProtoEnvironment(environment *codewirev1.Environment) (EnvironmentData,
 		CpuMillicores: int64(environment.GetCpuMillicores()), CreatedAt: valueOrEmpty(createdAt),
 		CreatedBy: environment.GetCreatedBy(), DeletionGraceUntil: deletionGraceUntil,
 		DeletionRequestedAt: deletionRequestedAt, DesiredState: environmentDesiredState(environment.GetDesiredState()),
-		DestroyedAt: destroyedAt, DiskGb: int64(environment.GetDiskGb()), ErrorCode: stringPointer(environment.GetErrorCode()), ErrorReason: stringPointer(environment.GetErrorReason()),
-		Id: environment.GetId(), IsolationTier: isolation,
+		DestroyedAt: destroyedAt, DiskGb: int64(environment.GetDiskGb()), ErrorCode: stringPointer(environment.GetErrorCode()), ErrorReason: stringPointer(environment.GetErrorReason()), StopReason: stringPointer(environment.GetStopReason()),
+		IdleStopSeconds: int64(environment.GetIdleStopSeconds()),
+		Id:              environment.GetId(), IsolationTier: isolation,
 		MemoryMb: int64(environment.GetMemoryMb()), Name: stringPointer(environment.GetName()),
 		Network: stringPointer(environment.GetNetwork()), OrgId: environment.GetOrgId(), Ports: ports,
 		NetworkState:        networkAttachmentState(environment.GetNetworkState()),
@@ -1190,7 +1195,7 @@ func ensureEnvironmentConverterCoverage() error {
 		messages := codewirev1.File_codewire_v1_environment_proto.Messages()
 		environmentCoverageErr = ensureDescriptorCoverage("environment", messages.ByName("Environment"), map[protoreflect.FieldNumber]protoreflect.Name{
 			1: "id", 2: "org_id", 3: "created_by", 4: "preset_id", 5: "type", 6: "name", 7: "state", 8: "desired_state", 9: "error_reason", 10: "recoverable", 11: "state_changed_at", 12: "retry_count", 13: "setup_phase", 14: "setup_complete", 15: "setup_error", 16: "ttl_seconds", 17: "shutdown_at", 18: "cpu_millicores", 19: "memory_mb", 20: "disk_gb", 21: "total_running_seconds", 22: "created_at", 23: "started_at", 24: "stopped_at", 25: "destroyed_at", 26: "protected", 27: "deletion_requested_at", 28: "deletion_grace_until", 29: "preset_name", 30: "network", 31: "ports", 32: "isolation_tier",
-			33: "operation_generation", 34: "source_selection", 35: "network_state", 36: "network_failure", 37: "error_code", 38: "network_policy",
+			33: "operation_generation", 34: "source_selection", 35: "network_state", 36: "network_failure", 37: "error_code", 38: "network_policy", 39: "stop_reason", 40: "idle_stop_seconds",
 		})
 		if environmentCoverageErr != nil {
 			return
@@ -1199,7 +1204,7 @@ func ensureEnvironmentConverterCoverage() error {
 			// The SDK always names its organization by org_id, so organization (32) stays unset.
 			// It offers no placement on a host, which is a preview (#3609), and sends no
 			// request ID, so placement (34) and request_id (35) stay unset too.
-			1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds", 24: "isolation_tier", 25: "project_spec", 26: "expected_profile_revision", 27: "confirm_personal_credentials", 28: "confirm_personal_secrets", 29: "omit_application_previews", 30: "network", 31: "source_snapshot_id", 32: "organization", 33: "network_policy", 34: "placement", 35: "request_id",
+			1: "org_id", 2: "preset_id", 3: "name", 7: "ttl_seconds", 24: "isolation_tier", 25: "project_spec", 26: "expected_profile_revision", 27: "confirm_personal_credentials", 28: "confirm_personal_secrets", 29: "omit_application_previews", 30: "network", 31: "source_snapshot_id", 32: "organization", 33: "network_policy", 34: "placement", 35: "request_id", 36: "idle_stop_seconds",
 		})
 		if environmentCoverageErr != nil {
 			return

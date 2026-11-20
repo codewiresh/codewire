@@ -24,8 +24,15 @@ impl ProjectDocument {
         Self {
             spec,
             local,
+            idle_stop_seconds: None,
             working_directory_explicit,
         }
+    }
+
+    /// The same document with `idle_stop` set: seconds, 0 for off.
+    pub fn with_idle_stop(mut self, seconds: Option<i32>) -> Self {
+        self.idle_stop_seconds = seconds;
+        self
     }
 
     /// The document as codewire.yaml, in the schema's key order. A host port
@@ -127,6 +134,7 @@ impl ProjectDocument {
                     path_mode: local.path_mode.map(WorkspacePathMode::as_str),
                 }
             }),
+            idle_stop: self.idle_stop_seconds.map(crate::format_idle_stop),
         };
         // Long one-line values, such as a pinned image or a known_hosts
         // line, stay on one line; text with newlines is a literal block.
@@ -198,6 +206,8 @@ struct YamlProject<'a> {
     mounts: Vec<YamlMount<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace: Option<YamlWorkspace<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idle_stop: Option<String>,
 }
 
 #[derive(Serialize)]

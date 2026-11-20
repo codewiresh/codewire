@@ -622,6 +622,12 @@ async fn handle_platform_env_command_with_created(
         EnvCommand::Create(_) => unreachable!("handled before the organization listing"),
         EnvCommand::Update(mut args) => {
             let policy = args.policy.take();
+            let idle_stop = args
+                .idle_stop
+                .take()
+                .as_deref()
+                .map(codewire_project::parse_idle_stop)
+                .transpose()?;
             let output = args.output;
             let environment = args.environment.clone();
             let sources_changed = args.clear_secrets
@@ -630,7 +636,7 @@ async fn handle_platform_env_command_with_created(
                 || args.user_secrets.is_some()
                 || args.org_secrets
                 || args.profile.is_some();
-            if sources_changed || policy.is_none() {
+            if sources_changed || (policy.is_none() && idle_stop.is_none()) {
                 sources::update_platform_sources(&platform, &environment_client, &org_id, args)
                     .await?;
             }
@@ -644,6 +650,15 @@ async fn handle_platform_env_command_with_created(
                     output,
                 )
                 .await?;
+            }
+            if let Some(idle_stop_seconds) = idle_stop {
+                let environment_id =
+                    resolve_environment_id(&environment_client, &org_id, &environment).await?;
+                let response = environment_client
+                    .set_environment_idle_stop(&org_id, &environment_id, idle_stop_seconds)
+                    .await
+                    .context("set idle stop")?;
+                print_env_idle_stop_status(&environment, &response, idle_stop_seconds, output)?;
             }
         }
         EnvCommand::Info(args) => {
@@ -1480,6 +1495,9 @@ pub(crate) struct UnifiedEnvironmentListEntry {
     /// A create the platform ended; `state` is then `failed` (#4482).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) failed: Option<FailedCreate>,
+    /// Why a stopped cloud sandbox was stopped: user, credit or idle (#3384).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) stop_reason: Option<String>,
     pub(crate) daemon_health: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) id: String,
@@ -2577,13 +2595,19 @@ pub(crate) fn env_create_request_from_source(
         .context("invalid --ttl duration")?;
     let preset_id = trimmed_optional(args.preset_id.clone());
     let mut provenance = project_file::Provenance::new(source.clone());
-    let mut project_spec = match source.path() {
+    let (mut project_spec, file_idle_stop) = match source.path() {
         Some(_) => {
             let document = sources::load_platform_document(&source.paths())?;
             provenance.unused_fields = document.unused_fields;
-            document.spec
+            (document.spec, document.idle_stop_seconds)
         }
-        None => codewire_project::ProjectSpec::default(),
+        None => (codewire_project::ProjectSpec::default(), None),
+    };
+    let idle_stop_seconds = match args.idle_stop.as_deref() {
+        Some(value) => {
+            Some(codewire_project::parse_idle_stop(value).context("invalid --idle-stop")?)
+        }
+        None => file_idle_stop,
     };
     if let Some(preset) = &args.preset_slug {
         project_spec.preset = preset.trim().to_owned();
@@ -2659,6 +2683,7 @@ pub(crate) fn env_create_request_from_source(
             preset_id,
             name: trimmed_optional(args.name.clone()),
             ttl_seconds,
+            idle_stop_seconds,
             isolation_tier: args.isolation.clone().unwrap_or_default(),
             project_spec,
             ..Default::default()
@@ -3591,6 +3616,34 @@ pub(crate) fn format_env_status_text(environment_ref: &str, response: &StatusRes
         environment_ref,
         trimmed_str(&response.status).unwrap_or("unknown")
     )
+}
+
+pub(crate) fn print_env_idle_stop_status(
+    environment_ref: &str,
+    response: &StatusResponse,
+    idle_stop_seconds: i32,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    match output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(response)?),
+        OutputFormat::Text => print!(
+            "{}",
+            format_env_idle_stop_text(environment_ref, idle_stop_seconds)
+        ),
+    }
+    Ok(())
+}
+
+/// The confirmation of `cw update ENV --idle-stop`.
+pub(crate) fn format_env_idle_stop_text(environment_ref: &str, idle_stop_seconds: i32) -> String {
+    if idle_stop_seconds == 0 {
+        format!("Environment {environment_ref}: idle stop off; it runs until stopped.\n")
+    } else {
+        format!(
+            "Environment {environment_ref}: stops, keeping its disk, after {} with no activity.\n",
+            codewire_project::format_idle_stop(idle_stop_seconds)
+        )
+    }
 }
 
 pub(crate) fn print_env_extend_status(

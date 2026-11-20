@@ -1070,6 +1070,12 @@ pub(crate) struct EnvCreateArgs {
     ttl: Option<String>,
     #[arg(
         long,
+        value_name = "DURATION",
+        help = "Stop the cloud sandbox, keeping its disk, after this long with no activity: 5m to 7d, on (6h) or off; overrides codewire.yaml idle_stop (default off)"
+    )]
+    idle_stop: Option<String>,
+    #[arg(
+        long,
         value_name = "CPU",
         help = "CPU cores (for example 2, 0.5, or 500m)"
     )]
@@ -1295,6 +1301,12 @@ pub(crate) struct EnvUpdateArgs {
         help = "Select the network policy for outbound connections: open, locked, or a policy from `cw policy`; on a cloud environment, hosted-default clears the selection. Unrelated to Mesh networks"
     )]
     policy: Option<policy::PolicyName>,
+    #[arg(
+        long,
+        value_name = "DURATION",
+        help = "Stop the cloud sandbox, keeping its disk, after this long with no activity: 5m to 7d, on (6h) or off; takes effect without a restart"
+    )]
+    idle_stop: Option<String>,
     #[arg(short, long, help = "Apply without the confirmation prompt")]
     yes: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]

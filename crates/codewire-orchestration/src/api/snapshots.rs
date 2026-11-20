@@ -115,8 +115,11 @@ async fn insert_snapshot(
         ));
     }
     let inserted = sqlx::query_as::<_, SnapshotRow>(&format!(
-        "INSERT INTO hosted_snapshots (org_id, created_by, source_environment_id, name)
-         VALUES ($1, $2, $3, $4)
+        "INSERT INTO hosted_snapshots
+             (org_id, created_by, source_environment_id, name, idle_stop_seconds)
+         -- The source's idle stop as it is now, which a fork takes (#3384).
+         VALUES ($1, $2, $3, $4,
+                 (SELECT idle_stop_seconds FROM environments WHERE id = $3))
          ON CONFLICT (org_id, created_by, name) DO NOTHING
          RETURNING {COLUMNS}"
     ))

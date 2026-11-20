@@ -1575,6 +1575,10 @@ pub(crate) async fn handle_native_environment_update(
     globals: &Globals,
     args: EnvUpdateArgs,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        args.idle_stop.is_none(),
+        "--idle-stop applies to cloud sandboxes; a local VM is never stopped for being idle"
+    );
     sources::validate_update_args(&args)?;
     let mut supervisor = native_boot_client().await?;
     if let Some(policy) = args.policy.as_deref() {
@@ -4230,6 +4234,9 @@ fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> anyhow::Res
     }
     if args.ttl.is_some() {
         unsupported.push("--ttl");
+    }
+    if args.idle_stop.is_some() {
+        unsupported.push("--idle-stop");
     }
     if args.isolation.is_some() {
         unsupported.push("--isolation");

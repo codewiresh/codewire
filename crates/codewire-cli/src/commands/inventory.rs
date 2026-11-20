@@ -481,6 +481,7 @@ pub(crate) fn local_entry(
             state: native_state_label(environment.state).to_owned(),
             restarted: false,
             failed: None,
+            stop_reason: None,
             daemon_health: if environment.state == EnvironmentState::Running as i32 {
                 "ready".into()
             } else {
@@ -523,6 +524,7 @@ pub(crate) fn cloud_entry(
             },
             restarted: environment.error_code.as_deref() == Some("sandbox_restarted"),
             failed,
+            stop_reason: environment.stop_reason.clone(),
             daemon_health: daemon_health.to_owned(),
             id: environment.id.clone(),
         },
@@ -578,6 +580,7 @@ fn host_entry(
             state: environment.state,
             restarted: false,
             failed: None,
+            stop_reason: None,
             daemon_health,
             id: environment.id,
         },
@@ -1163,7 +1166,8 @@ fn format_environment_inventory_at(
 }
 
 /// A listing's STATE cell. A sandbox that came back after its Pod failed says so,
-/// because its processes went with the old Pod (#3772).
+/// because its processes went with the old Pod (#3772). A sandbox the platform
+/// stopped says why; one a person stopped needs no reason (#3384).
 ///
 /// A create the platform ended says when, because a new environment may
 /// already carry its name (#4482).
@@ -1176,6 +1180,8 @@ fn state_cell(entry: &UnifiedEnvironmentListEntry, now: chrono::DateTime<chrono:
         )
     } else if entry.restarted {
         format!("{} (restarted)", display_str(&entry.state))
+    } else if let Some(reason @ ("idle" | "credit")) = entry.stop_reason.as_deref() {
+        format!("{} ({reason})", display_str(&entry.state))
     } else {
         display_str(&entry.state).to_owned()
     }
@@ -1239,6 +1245,7 @@ mod tests {
             state: state.into(),
             restarted: false,
             failed: None,
+            stop_reason: None,
             daemon_health: String::new(),
             id: format!(
                 "{name}-{}-id",
@@ -1849,6 +1856,27 @@ mod tests {
         // Not an error: the outcome only fails for a location that could
         // not be listed.
         assert!(inventory_outcome(&[]).is_ok());
+    }
+
+    #[test]
+    fn a_platform_stop_says_why_in_the_state_cell_and_json() {
+        let mut stopped = list("app", "platform", "sandbox", "stopped");
+        stopped.stop_reason = Some("user".into());
+        assert_eq!(state_cell(&stopped, chrono::Utc::now()), "stopped");
+        for reason in ["idle", "credit"] {
+            stopped.stop_reason = Some(reason.into());
+            assert_eq!(
+                state_cell(&stopped, chrono::Utc::now()),
+                format!("stopped ({reason})")
+            );
+            let json = serde_json::to_value(&stopped).unwrap();
+            // Scripts reading the state still see the state.
+            assert_eq!(json["state"], "stopped");
+            assert_eq!(json["stop_reason"], reason);
+        }
+        stopped.stop_reason = None;
+        let quiet = serde_json::to_value(&stopped).unwrap();
+        assert!(quiet.get("stop_reason").is_none(), "{quiet}");
     }
 
     #[test]

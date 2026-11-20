@@ -783,6 +783,14 @@ async function runTests() {
   }));
   assert(refusedEnvironment.error_code === "no_capacity", "environment error codes are retained");
   assert(convertedEnvironment.error_code === undefined, "an environment without a failure has no error code");
+  const idleStopped = fromProtoEnvironment(create(EnvironmentSchema, {
+    ...environment("env_idle", EnvironmentState.STOPPED),
+    stopReason: "idle",
+    idleStopSeconds: 21_600,
+  }));
+  assert(idleStopped.stop_reason === "idle", "a stop reason is retained");
+  assert(idleStopped.idle_stop_seconds === 21_600, "an idle stop is retained");
+  assert(convertedEnvironment.stop_reason === undefined, "a running environment has no stop reason");
 
   const attachedEnvironment = fromProtoEnvironment(create(EnvironmentSchema, {
     ...environment("env_attached", EnvironmentState.RUNNING),
@@ -1561,7 +1569,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 182;
+  const expectedAssertions = 185;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

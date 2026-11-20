@@ -49,6 +49,8 @@ async fn refuse_org_key_personal_secrets(
 #[derive(Debug)]
 pub(super) struct PlatformDocument {
     pub(super) spec: codewire_project::ProjectSpec,
+    /// `idle_stop`, which a create sends beside the spec.
+    pub(super) idle_stop_seconds: Option<i32>,
     /// Settings only a local VM uses, accepted and left out.
     pub(super) unused_fields: Vec<&'static str>,
 }
@@ -85,22 +87,30 @@ pub(super) fn load_platform_document(paths: &[&Path]) -> anyhow::Result<Platform
     }
     Ok(PlatformDocument {
         spec: document.spec,
+        idle_stop_seconds: document.idle_stop_seconds,
         unused_fields,
     })
+}
+
+/// Whether the update changes the environment's secret or credential sources.
+pub(super) fn changes_sources(args: &EnvUpdateArgs) -> bool {
+    args.clear_secrets
+        || args.clear_profile
+        || args.secrets.is_some()
+        || args.user_secrets.is_some()
+        || args.org_secrets
+        || args.profile.is_some()
 }
 
 pub(super) fn validate_update_args(args: &EnvUpdateArgs) -> anyhow::Result<()> {
     trimmed_required(&args.environment, "environment")?;
     anyhow::ensure!(
-        args.clear_secrets
-            || args.clear_profile
-            || args.secrets.is_some()
-            || args.user_secrets.is_some()
-            || args.org_secrets
-            || args.profile.is_some()
-            || args.policy.is_some(),
-        "select a change with --secrets, --user-secrets, --org-secrets, --profile, --clear-secrets, --clear-profile, or --policy"
+        changes_sources(args) || args.policy.is_some() || args.idle_stop.is_some(),
+        "select a change with --secrets, --user-secrets, --org-secrets, --profile, --clear-secrets, --clear-profile, --policy, or --idle-stop"
     );
+    if let Some(idle_stop) = &args.idle_stop {
+        codewire_project::parse_idle_stop(idle_stop)?;
+    }
     anyhow::ensure!(
         !(args.clear_secrets
             && (args.secrets.is_some() || args.user_secrets.is_some() || args.org_secrets)),
@@ -789,5 +799,20 @@ mod tests {
         assert!(validate_update_args(&update_args(&[])).is_err());
         assert!(validate_update_args(&update_args(&["--secrets="])).is_err());
         assert!(validate_update_args(&update_args(&["--profile="])).is_err());
+    }
+
+    /// `--idle-stop` is a change of its own, and does not touch the sources
+    /// (#3384).
+    #[test]
+    fn idle_stop_is_an_update_without_a_source_change() {
+        let args = update_args(&["--idle-stop", "30m"]);
+        validate_update_args(&args).unwrap();
+        assert!(!changes_sources(&args));
+        validate_update_args(&update_args(&["--idle-stop", "off"])).unwrap();
+        let error = validate_update_args(&update_args(&["--idle-stop", "soon"])).unwrap_err();
+        assert!(error.to_string().contains("idle_stop"), "{error}");
+        let both = update_args(&["--idle-stop", "1h", "--clear-profile"]);
+        validate_update_args(&both).unwrap();
+        assert!(changes_sources(&both));
     }
 }

@@ -1683,6 +1683,39 @@ fn env_create_accepts_mesh_bootstrap_flags() {
     env_create_request_from_args(&args).unwrap();
 }
 
+/// `idle_stop` in codewire.yaml is sent beside the spec, and `--idle-stop`
+/// wins over it (#3384).
+#[test]
+fn env_create_sends_the_idle_stop_from_the_file_or_the_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("codewire.yaml");
+    std::fs::write(&file, "image: workspace\nidle_stop: 2h\n").unwrap();
+    let file = file.to_str().unwrap();
+    let request = |extra: &[&str]| {
+        let mut argv = vec!["cw", "create", "--cloud", "--file", file];
+        argv.extend_from_slice(extra);
+        let (_, _, EnvCommand::Create(args)) = env_operation(Cli::try_parse_from(argv).unwrap())
+        else {
+            panic!("expected env create command");
+        };
+        env_create_request_from_args(&args)
+    };
+    let from_file = request(&[]).unwrap();
+    assert_eq!(from_file.idle_stop_seconds, Some(7200));
+    assert_eq!(from_file.project_spec.image, "workspace");
+    assert_eq!(request(&["--idle-stop", "30m"]).unwrap().idle_stop_seconds, Some(1800));
+    assert_eq!(request(&["--idle-stop", "off"]).unwrap().idle_stop_seconds, Some(0));
+    assert_eq!(request(&["--idle-stop", "on"]).unwrap().idle_stop_seconds, Some(6 * 3600));
+    let error = format!("{:#}", request(&["--idle-stop", "1m"]).unwrap_err());
+    assert!(error.contains("invalid --idle-stop") && error.contains("from 5m to 7d"), "{error}");
+
+    let cli = Cli::try_parse_from(["cw", "create", "--image", "workspace"]).unwrap();
+    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
+        panic!("expected env create command");
+    };
+    assert_eq!(env_create_request_from_args(&args).unwrap().idle_stop_seconds, None);
+}
+
 #[test]
 fn env_create_requires_canonical_agent_ids() {
     let cli = Cli::try_parse_from(["cw", "create", "--coding-agent", "kimi-code"]).unwrap();
@@ -2749,6 +2782,24 @@ fn format_env_info_text_uses_go_style_labels() {
     assert!(text.contains("Network:       mesh-dev\n"));
     assert!(text.contains("TTL:           3600s\n"));
     assert!(text.contains("Protected:     yes\n"));
+    assert!(text.contains("IdleStop:      off\n"));
+    environment.idle_stop_seconds = 5400;
+    assert!(format_env_info_text(&environment).contains("IdleStop:      1h30m\n"));
+    // A local VM is never stopped for being idle, so says nothing of it.
+    environment.environment_type = "vm".to_string();
+    assert!(!format_env_info_text(&environment).contains("IdleStop"));
+}
+
+#[test]
+fn the_idle_stop_confirmation_says_what_happens() {
+    assert_eq!(
+        format_env_idle_stop_text("app", 1800),
+        "Environment app: stops, keeping its disk, after 30m with no activity.\n"
+    );
+    assert_eq!(
+        format_env_idle_stop_text("app", 0),
+        "Environment app: idle stop off; it runs until stopped.\n"
+    );
 }
 
 #[test]

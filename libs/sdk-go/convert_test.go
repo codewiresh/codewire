@@ -344,6 +344,23 @@ func TestEnvironmentErrorCodeRoundTrips(t *testing.T) {
 	}
 }
 
+func TestEnvironmentStopReasonRoundTrips(t *testing.T) {
+	stopped, err := fromProtoEnvironment(&codewirev1.Environment{StopReason: "idle", IdleStopSeconds: 1800})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if valueOrEmpty(stopped.StopReason) != "idle" || stopped.IdleStopSeconds != 1800 {
+		t.Fatalf("stop reason changed: %+v", stopped)
+	}
+	running, err := fromProtoEnvironment(&codewirev1.Environment{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if running.StopReason != nil {
+		t.Fatalf("an environment that is not stopped reports no reason: %+v", running)
+	}
+}
+
 func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	empty := ""
 	zero := int64(0)
@@ -352,7 +369,7 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	profileRevision := uint64(9_007_199_254_741_009)
 	platform := ProjectStoragePlacementPlatform
 	request, err := createEnvironmentRequest("org_1", CreateEnvironmentBody{
-		Name: &empty, PresetId: &empty, IsolationTier: &confidential, TtlSeconds: &zero,
+		Name: &empty, PresetId: &empty, IsolationTier: &confidential, TtlSeconds: &zero, IdleStopSeconds: &zero,
 		ExpectedProfileRevision: &profileRevision, ConfirmPersonalCredentials: true, ConfirmPersonalSecrets: true,
 		ProjectSpec: ProjectSpec{
 			SchemaVersion: 1, WorkingDirectory: destination,
@@ -367,7 +384,7 @@ func TestCreateEnvironmentRequestPreservesOwnedNestedValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create environment request: %v", err)
 	}
-	if request.PresetId == nil || request.Name == nil || request.TtlSeconds == nil || request.ProjectSpec == nil || request.ExpectedProfileRevision == nil {
+	if request.PresetId == nil || request.Name == nil || request.TtlSeconds == nil || request.IdleStopSeconds == nil || request.ProjectSpec == nil || request.ExpectedProfileRevision == nil {
 		t.Errorf("request lost scalar presence: %#v", request)
 	}
 	if len(request.GetProjectSpec().GetAgents().GetTools()) != 1 || len(request.GetProjectSpec().GetApplicationPorts()) != 1 || len(request.GetProjectSpec().GetRepositories()) != 1 {

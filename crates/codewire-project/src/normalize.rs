@@ -63,6 +63,11 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
             vm_only,
             path_mode,
         },
+        idle_stop_seconds: raw
+            .idle_stop
+            .as_ref()
+            .map(crate::idle_stop::IdleStopValue::seconds)
+            .transpose()?,
         working_directory_explicit,
     };
     document.spec.validate()?;

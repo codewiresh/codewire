@@ -56,6 +56,7 @@ mod tests {
     mod default_access_profile;
     mod egress_lockdown_refusal;
     mod environment_error_code;
+    mod environment_idle_stop;
     mod environment_mesh;
     mod environment_quota_defaults;
     mod environment_source_snapshot;
@@ -99,9 +100,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced), 0002 to 0040.
+    // (which equals the 41-migration history it replaced), 0002 to 0041.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "b260f0f7a76ec3b70676a12c1a324f225ab55be92efc856327503950a24fa685";
+        "16b5bdd6835ab510c7a8c2560f7ec770311a7ddaeb73f7305eedcf08a26f7a86";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -203,6 +204,8 @@ mod tests {
     const APPLIED_FEEDBACK_NOTICES_CHECKSUM: &str = "cbfb4f2e53aeb19849895c40c8b5bdfebcfe6be83f94ee1253d4142cd22559196a179d23c48622d79b905c9397550dee";
     // SHA-384 of 0040_feedback_reply_email.sql (#5466).
     const APPLIED_FEEDBACK_REPLY_EMAIL_CHECKSUM: &str = "a0a973be7d99d2d72279b838c343ccf25386c66f0069f1cee4d96ec6a830e4407f764f16fc4a7f897ddfd9aa2a7ad6d5";
+    // SHA-384 of 0041_environment_idle_stop.sql (#3384).
+    const APPLIED_ENVIRONMENT_IDLE_STOP_CHECKSUM: &str = "b62bff004fd3a1a59d3c50c2b2a403b85a967154ece6180b4b02dba2079b2d0a1a0044f8a395180fa1c2a15a5bb3d07d";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1324,6 +1327,7 @@ mod tests {
             (38, APPLIED_PLATFORM_PLACEHOLDER_KEYS_CHECKSUM),
             (39, APPLIED_FEEDBACK_NOTICES_CHECKSUM),
             (40, APPLIED_FEEDBACK_REPLY_EMAIL_CHECKSUM),
+            (41, APPLIED_ENVIRONMENT_IDLE_STOP_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1354,10 +1358,11 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 40
+                first.len() == 41
                     && first.iter().map(|migration| migration.0).eq([
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-                        22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40
+                        22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+                        41
                     ])
                     && first.iter().all(|migration| migration.2)
             );

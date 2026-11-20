@@ -20,7 +20,7 @@ mod leadership;
 pub(crate) use leadership::{LeaderPass, Leadership};
 
 use super::WorkerContext;
-use crate::lifecycle::{PgLifecycleStore, Service};
+use crate::lifecycle::{PgLifecycleStore, Service, StopReason};
 use crate::runtime::{Placement, RuntimeDriver, RuntimeProbe};
 use crate::worker::activity_authority::{ActivityAuthority, is_authority_lost};
 
@@ -362,7 +362,7 @@ async fn stop_credit_exhausted_environments(ctx: &WorkerContext) {
             environment_id = id,
             "reconciler: stopping a sandbox whose organization ran out of credit"
         );
-        if let Err(e) = svc.set_desired_state(&id, "stopped").await {
+        if let Err(e) = svc.request_stop(&id, StopReason::Credit).await {
             tracing::error!(environment_id = id, error = %e, "reconciler: set desired_state=stopped for credit exhaustion");
             continue;
         }

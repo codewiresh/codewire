@@ -46,7 +46,8 @@ use crate::api::environments::{
     Environment, EnvironmentPort, ListEnvironmentsQuery, StartOutcomeCore,
     cancel_environment_deletion_core, delete_environment_core, extend_environment_ttl_core,
     get_environment_core, list_environments_core, protect_environment_core, require_org_member,
-    start_environment_core, stop_environment_core, unprotect_environment_core,
+    set_environment_idle_stop_core, start_environment_core, stop_environment_core,
+    unprotect_environment_core,
 };
 use crate::api::host_key::{RecordedHostKeys, get_environment_host_key_core};
 use crate::api::logs::{
@@ -484,6 +485,28 @@ impl proto::EnvironmentService for EnvironmentConnectService {
         .await
         .map_err(|error| environment_rpc_error(&error, &ctx))?;
         connectrpc::Response::ok(proto::ExtendEnvironmentTtlResponse {
+            status: result.status.into(),
+            ..Default::default()
+        })
+    }
+
+    async fn set_environment_idle_stop(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::SetEnvironmentIdleStopRequest>,
+    ) -> ServiceResult<proto::SetEnvironmentIdleStopResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let result = set_environment_idle_stop_core(
+            &self.state,
+            &user,
+            request.org_id,
+            request.environment_id,
+            request.idle_stop_seconds,
+        )
+        .await
+        .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto::SetEnvironmentIdleStopResponse {
             status: result.status.into(),
             ..Default::default()
         })
@@ -1001,6 +1024,7 @@ fn proto_create_request(
         preset_id: body.preset_id,
         name: body.name,
         ttl_seconds: body.ttl_seconds,
+        idle_stop_seconds: body.idle_stop_seconds,
         isolation_tier: match body.isolation_tier.as_str() {
             "confidential" => proto::IsolationTier::Confidential,
             "" | "standard" => proto::IsolationTier::Standard,
@@ -1117,6 +1141,8 @@ fn proto_environment(
         desired_state: proto_desired_state(&environment.desired_state)?.into(),
         error_reason: environment.error_reason.unwrap_or_default(),
         error_code: environment.error_code.unwrap_or_default(),
+        stop_reason: environment.stop_reason.unwrap_or_default(),
+        idle_stop_seconds: environment.idle_stop_seconds,
         recoverable: environment.recoverable,
         state_changed_at: Some(proto_timestamp(&environment.state_changed_at)?).into(),
         retry_count: environment.retry_count,

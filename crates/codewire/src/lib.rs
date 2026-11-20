@@ -112,8 +112,9 @@ pub use codewire_proto::codewire::v1::{
     RestartSessionRequest, RestartSessionResponse, RevokeEnvironmentAccessRequest,
     RevokeEnvironmentAccessResponse, RunRequest, RunResize, RunResponse, RunResponseView, RunStart,
     SecretMetadata, SecretProject, SendSessionInputRequest, SendSessionInputResponse,
-    SetProjectSecretRequest, SetProjectSecretResponse, SetSecretRequest, SetSecretResponse,
-    SetUserSecretRequest, SetUserSecretResponse, StartEnvironmentRequest, StartEnvironmentResponse,
+    SetEnvironmentIdleStopRequest, SetEnvironmentIdleStopResponse, SetProjectSecretRequest,
+    SetProjectSecretResponse, SetSecretRequest, SetSecretResponse, SetUserSecretRequest,
+    SetUserSecretResponse, StartEnvironmentRequest, StartEnvironmentResponse,
     StopEnvironmentRequest, StopEnvironmentResponse, StopSessionRequest, StopSessionResponse,
     StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest,
     StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse,
@@ -1095,6 +1096,17 @@ impl CodewireClient {
     ) -> Result<ExtendEnvironmentTtlResponse, ClientError> {
         self.environments
             .extend_environment_ttl_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn set_environment_idle_stop(
+        &self,
+        request: SetEnvironmentIdleStopRequest,
+    ) -> Result<SetEnvironmentIdleStopResponse, ClientError> {
+        self.environments
+            .set_environment_idle_stop_with_options(request, self.auth_options().await?)
             .await
             .map(|response| response.into_owned())
             .map_err(ClientError::from)

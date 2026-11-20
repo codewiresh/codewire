@@ -350,6 +350,7 @@ class TransportTestCase(unittest.TestCase):
                 "preset_name": "Python",
                 "network": "net_1",
                 "operation_generation": 0,
+                "idle_stop_seconds": 0,
                 "ports": [
                     {
                         "id": "port_1",

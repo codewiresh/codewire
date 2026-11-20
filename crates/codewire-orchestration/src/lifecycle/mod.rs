@@ -109,6 +109,11 @@ pub trait LifecycleStore {
         env_id: &str,
         desired_state: &str,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+    fn request_stop(
+        &self,
+        env_id: &str,
+        reason: StopReason,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
     fn clear_deletion_grace(
         &self,
         env_id: &str,
@@ -159,6 +164,11 @@ pub trait LifecycleStore {
         &self,
         env_id: &str,
         additional_seconds: i32,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+    fn set_idle_stop(
+        &self,
+        env_id: &str,
+        idle_stop_seconds: i32,
     ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
 }
 
@@ -245,7 +255,7 @@ impl Service<PgLifecycleStore> {
         .await?;
         let entry = if isolation_tier == "confidential" {
             let changed = sqlx::query(
-                "UPDATE environments SET desired_state = 'started', error_reason = CASE WHEN error_code IN ('no_capacity', 'sandbox_stopped', 'sandbox_replacing', 'sandbox_restarted') THEN NULL ELSE error_reason END, error_code = NULL, state_changed_at = NOW() WHERE id = $1 AND org_id = $2 AND state = 'stopped'",
+                "UPDATE environments SET desired_state = 'started', stop_reason = NULL, error_reason = CASE WHEN error_code IN ('no_capacity', 'sandbox_stopped', 'sandbox_replacing', 'sandbox_restarted') THEN NULL ELSE error_reason END, error_code = NULL, state_changed_at = NOW() WHERE id = $1 AND org_id = $2 AND state = 'stopped'",
             )
             .bind(env_id)
             .bind(org_id)
@@ -262,7 +272,7 @@ impl Service<PgLifecycleStore> {
             }
         } else {
             let changed = sqlx::query(
-                "UPDATE environments SET desired_state = 'started', error_reason = CASE WHEN error_code IN ('no_capacity', 'sandbox_stopped', 'sandbox_replacing', 'sandbox_restarted') THEN NULL ELSE error_reason END, error_code = NULL, state_changed_at = NOW() WHERE id = $1 AND org_id = $2",
+                "UPDATE environments SET desired_state = 'started', stop_reason = NULL, error_reason = CASE WHEN error_code IN ('no_capacity', 'sandbox_stopped', 'sandbox_replacing', 'sandbox_restarted') THEN NULL ELSE error_reason END, error_code = NULL, state_changed_at = NOW() WHERE id = $1 AND org_id = $2",
             )
             .bind(env_id)
             .bind(org_id)
@@ -288,8 +298,8 @@ impl Service<PgLifecycleStore> {
     pub async fn retry_confidential_start(&self, env_id: &str, org_id: &str) -> anyhow::Result<()> {
         let mut tx = self.store.pool.begin().await?;
         let changed = sqlx::query(
-            r#"UPDATE environments SET state = 'pending', desired_state = 'started', error_reason = NULL, error_code = NULL,
-               retry_count = retry_count + 1, state_changed_at = NOW()
+            r#"UPDATE environments SET state = 'pending', desired_state = 'started', stop_reason = NULL,
+               error_reason = NULL, error_code = NULL, retry_count = retry_count + 1, state_changed_at = NOW()
                WHERE id = $1 AND org_id = $2 AND state = 'error'"#,
         )
         .bind(env_id)
@@ -417,6 +427,14 @@ impl<S: LifecycleStore> Service<S> {
             .map_err(|e| anyhow::anyhow!("set desired state to {desired}: {e:#}"))
     }
 
+    /// Sets desired state `stopped` and records why (#3384).
+    pub async fn request_stop(&self, env_id: &str, reason: StopReason) -> anyhow::Result<()> {
+        self.store
+            .request_stop(env_id, reason)
+            .await
+            .map_err(|e| anyhow::anyhow!("request stop ({}): {e:#}", reason.as_str()))
+    }
+
     pub async fn clear_deletion_grace(&self, env_id: &str) -> anyhow::Result<()> {
         self.store
             .clear_deletion_grace(env_id)
@@ -524,6 +542,19 @@ impl<S: LifecycleStore> Service<S> {
             .map_err(|e| anyhow::anyhow!("extend ttl: {e:#}"))
     }
 
+    /// Records the environment's own idle stop (#3384); false when it is
+    /// destroyed or gone.
+    pub async fn set_idle_stop(
+        &self,
+        env_id: &str,
+        idle_stop_seconds: i32,
+    ) -> anyhow::Result<bool> {
+        self.store
+            .set_idle_stop(env_id, idle_stop_seconds)
+            .await
+            .map_err(|e| anyhow::anyhow!("set idle stop: {e:#}"))
+    }
+
     /// Mirrors `PrepareStop`: Ok(true) → proceed with the stop.
     pub async fn prepare_stop(&self, snap: &Snapshot) -> anyhow::Result<bool> {
         match snap.state.as_str() {
@@ -606,6 +637,25 @@ impl<S: LifecycleStore> Service<S> {
             ("resized", "resizing") => Ok(Action::Resize),
             ("destroyed", _) => Ok(Action::Destroy),
             _ => Ok(Action::Unhandled),
+        }
+    }
+}
+
+/// Why a sandbox was stopped, as `environments.stop_reason` (#3384). A stop
+/// records it with desired state `stopped`; a start clears it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    /// A person stopped it.
+    User,
+    /// Its organization ran out of credit.
+    Credit,
+}
+
+impl StopReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Credit => "credit",
         }
     }
 }
@@ -1166,6 +1216,28 @@ impl LifecycleStore for PgLifecycleStore {
         Ok(())
     }
 
+    async fn request_stop(&self, env_id: &str, reason: StopReason) -> anyhow::Result<()> {
+        let reason = reason.as_str();
+        self.exec_logged(
+            env_id,
+            sqlx::query(
+                r#"UPDATE environments SET desired_state = 'stopped', stop_reason = $2,
+                   state_changed_at = NOW()
+                   WHERE id = $1"#,
+            )
+            .bind(env_id)
+            .bind(reason),
+            LogEntry {
+                phase: "lifecycle_intent",
+                status: "completed",
+                message: format!("desired state -> stopped ({reason})"),
+                metadata: serde_json::json!({ "kind": "desired_state", "desired_state": "stopped", "stop_reason": reason }),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn clear_deletion_grace(&self, env_id: &str) -> anyhow::Result<()> {
         self.exec_logged(
             env_id,
@@ -1451,6 +1523,30 @@ impl LifecycleStore for PgLifecycleStore {
             .await?;
         Ok(rows > 0)
     }
+
+    async fn set_idle_stop(&self, env_id: &str, idle_stop_seconds: i32) -> anyhow::Result<bool> {
+        let rows = self
+            .exec_logged(
+                env_id,
+                sqlx::query(
+                    r#"UPDATE environments SET idle_stop_seconds = $1
+                       WHERE id = $2 AND state NOT IN ('destroyed', 'destroying')"#,
+                )
+                .bind(idle_stop_seconds)
+                .bind(env_id),
+                LogEntry {
+                    phase: "lifecycle_intent",
+                    status: "completed",
+                    message: format!("idle stop set to {idle_stop_seconds}s"),
+                    metadata: serde_json::json!({
+                        "kind": "idle_stop",
+                        "idle_stop_seconds": idle_stop_seconds,
+                    }),
+                },
+            )
+            .await?;
+        Ok(rows > 0)
+    }
 }
 
 #[cfg(test)]
@@ -1528,6 +1624,9 @@ mod tests {
         async fn set_desired_state(&self, _: &str, _: &str) -> anyhow::Result<()> {
             Ok(())
         }
+        async fn request_stop(&self, _: &str, _: StopReason) -> anyhow::Result<()> {
+            Ok(())
+        }
         async fn clear_deletion_grace(&self, _: &str) -> anyhow::Result<()> {
             Ok(())
         }
@@ -1574,6 +1673,9 @@ mod tests {
             Ok(true)
         }
         async fn extend_ttl(&self, _: &str, _: i32) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn set_idle_stop(&self, _: &str, _: i32) -> anyhow::Result<bool> {
             Ok(true)
         }
     }

@@ -115,23 +115,28 @@ type EnvironmentData struct {
 	NetworkFailure *string `json:"network_failure,omitempty"`
 	// NetworkPolicy is what the environment selects and what enforces it; nil
 	// while the deployment's platform network policies are off.
-	NetworkPolicy       *EnvironmentNetworkPolicy   `json:"network_policy,omitempty"`
-	OrgId               string                      `json:"org_id"`
-	OperationGeneration uint64                      `json:"operation_generation"`
-	Ports               *[]EnvironmentPort          `json:"ports,omitempty"`
-	PresetId            *string                     `json:"preset_id,omitempty"`
-	PresetName          *string                     `json:"preset_name,omitempty"`
-	Protected           bool                        `json:"protected"`
-	Recoverable         bool                        `json:"recoverable"`
-	RetryCount          int64                       `json:"retry_count"`
-	SetupComplete       bool                        `json:"setup_complete"`
-	SetupError          *string                     `json:"setup_error,omitempty"`
-	SetupPhase          int64                       `json:"setup_phase"`
-	ShutdownAt          *string                     `json:"shutdown_at,omitempty"`
-	StartedAt           *string                     `json:"started_at,omitempty"`
-	State               string                      `json:"state"`
-	StateChangedAt      string                      `json:"state_changed_at"`
-	StoppedAt           *string                     `json:"stopped_at,omitempty"`
+	NetworkPolicy       *EnvironmentNetworkPolicy `json:"network_policy,omitempty"`
+	OrgId               string                    `json:"org_id"`
+	OperationGeneration uint64                    `json:"operation_generation"`
+	Ports               *[]EnvironmentPort        `json:"ports,omitempty"`
+	PresetId            *string                   `json:"preset_id,omitempty"`
+	PresetName          *string                   `json:"preset_name,omitempty"`
+	Protected           bool                      `json:"protected"`
+	Recoverable         bool                      `json:"recoverable"`
+	RetryCount          int64                     `json:"retry_count"`
+	SetupComplete       bool                      `json:"setup_complete"`
+	SetupError          *string                   `json:"setup_error,omitempty"`
+	SetupPhase          int64                     `json:"setup_phase"`
+	ShutdownAt          *string                   `json:"shutdown_at,omitempty"`
+	StartedAt           *string                   `json:"started_at,omitempty"`
+	State               string                    `json:"state"`
+	StateChangedAt      string                    `json:"state_changed_at"`
+	StoppedAt           *string                   `json:"stopped_at,omitempty"`
+	// IdleStopSeconds is how long it may have no activity before it is
+	// stopped, keeping its disk; 0 never.
+	IdleStopSeconds int64 `json:"idle_stop_seconds"`
+	// StopReason says why a stopped environment was stopped: user, credit or idle.
+	StopReason          *string                     `json:"stop_reason,omitempty"`
 	SourceSelection     *EnvironmentSourceSelection `json:"source_selection,omitempty"`
 	TotalRunningSeconds int64                       `json:"total_running_seconds"`
 	TtlSeconds          *int64                      `json:"ttl_seconds,omitempty"`
@@ -191,9 +196,13 @@ type EnvironmentResizeOperation struct {
 
 // CreateEnvironmentBody configures environment creation.
 type CreateEnvironmentBody struct {
-	PresetId                   *string     `json:"preset_id,omitempty"`
-	Name                       *string     `json:"name,omitempty"`
-	TtlSeconds                 *int64      `json:"ttl_seconds,omitempty"`
+	PresetId   *string `json:"preset_id,omitempty"`
+	Name       *string `json:"name,omitempty"`
+	TtlSeconds *int64  `json:"ttl_seconds,omitempty"`
+	// IdleStopSeconds stops the sandbox, keeping its disk, after this many
+	// seconds with no activity: 0 never does, otherwise 300 to 604800. Nil
+	// takes the default.
+	IdleStopSeconds            *int64      `json:"idle_stop_seconds,omitempty"`
 	IsolationTier              *string     `json:"isolation_tier,omitempty"`
 	ProjectSpec                ProjectSpec `json:"project_spec"`
 	ExpectedProfileRevision    *uint64     `json:"expected_profile_revision,omitempty"`

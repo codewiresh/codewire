@@ -64,6 +64,27 @@ pub(crate) fn format_env_info_text(environment: &Environment) -> String {
     if let Some(stopped_at) = environment.stopped_at.as_deref().and_then(trimmed_str) {
         output.push_str(&format!("StoppedAt:     {stopped_at}\n"));
     }
+    if let Some(stop_reason) = environment.stop_reason.as_deref() {
+        output.push_str(&format!("StopReason:    {stop_reason}\n"));
+    }
+    if environment.stop_reason.as_deref() == Some("idle") {
+        let name = environment
+            .name
+            .as_deref()
+            .and_then(trimmed_str)
+            .unwrap_or(&environment.id);
+        output.push_str(&format!(
+            "Notice:        {}\n",
+            codewire_project::idle_stop_notice(name, environment.idle_stop_seconds)
+        ));
+    }
+    // Only a cloud sandbox stops itself for being idle (#3384).
+    if environment.environment_type == "sandbox" {
+        output.push_str(&format!(
+            "IdleStop:      {}\n",
+            codewire_project::format_idle_stop(environment.idle_stop_seconds)
+        ));
+    }
     if let Some(shutdown_at) = environment.shutdown_at.as_deref().and_then(trimmed_str) {
         output.push_str(&format!("ShutdownAt:    {shutdown_at}\n"));
     }

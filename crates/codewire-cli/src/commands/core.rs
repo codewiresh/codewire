@@ -565,6 +565,7 @@ pub(crate) fn env_create_request_from_init_args(
         no_local_file: false,
         spec: None,
         ttl: args.ttl.clone(),
+        idle_stop: None,
         cpu: args.cpu.clone(),
         memory: args.memory.map(|value| value.to_string()),
         disk: args.disk.map(|value| value.to_string()),
