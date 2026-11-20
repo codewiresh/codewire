@@ -3,7 +3,12 @@
 # boundaries other repositories own, before it merges, so a change one of them
 # would refuse fails here and not at the next promotion or admission:
 #   1. deploy main's hosted guards (render.py check-source-policy);
-#   2. the sandbox Kyverno policy of every cluster the infrastructure
+#   2. the placeholder check every Dev promotion makes, on Dev's effective
+#      workloads as deploy main would render this tree (render.py
+#      check-source-placeholders). A source value no release replaces, or the
+#      netstack resolver moved out of its rule, stopped every Dev promotion on
+#      2026-11-19 after #5460;
+#   3. the sandbox Kyverno policy of every cluster the infrastructure
 #      repository gives one, over the Pods the tree's sandbox goldens render
 #      (kyverno-pods-from-goldens.py, beside this script). There must be at
 #      least two, Dev and Production; this tree does not name them.
@@ -65,6 +70,13 @@ printf '[check-policy-drift] deploy hosted guards (codewire/deploy main)\n'
 if ! python3 -I -B "$deploy/scripts/render.py" check-source-policy \
   --source-directory "$source_tree" --deploy-directory "$deploy"; then
   printf '[check-policy-drift] REFUSED by codewire/deploy scripts/hosted_policy: land the deploy pull request that admits this change first, then rerun.\n' >&2
+  failed=1
+fi
+
+printf '[check-policy-drift] Dev promotion placeholder check (codewire/deploy main)\n'
+if ! python3 -I -B "$deploy/scripts/render.py" check-source-placeholders \
+  --source-directory "$source_tree" --deploy-directory "$deploy"; then
+  printf '[check-policy-drift] REFUSED by codewire/deploy scripts/render.py: Dev'"'"'s next promotion would refuse this tree. Land the deploy pull request that admits the value first, or keep the value inside the rule deploy allows, then rerun.\n' >&2
   failed=1
 fi
 

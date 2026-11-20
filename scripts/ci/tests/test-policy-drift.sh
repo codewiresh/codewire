@@ -114,11 +114,19 @@ for cluster in example-dev example-prod; do
 done
 cat >"$work/deploy/scripts/render.py" <<'PY'
 import os, sys
-assert sys.argv[1:] == ["check-source-policy", "--source-directory", sys.argv[3], "--deploy-directory", sys.argv[5]]
-if os.environ.get("FAKE_GUARD_REFUSES"):
-    print("render error: hosted policy refused the source:\n  dev: workloads: synthetic", file=sys.stderr)
-    sys.exit(1)
-print("hosted policy passed for every environment at hosted commit " + "a" * 40)
+assert sys.argv[2:] == ["--source-directory", sys.argv[3], "--deploy-directory", sys.argv[5]]
+if sys.argv[1] == "check-source-policy":
+    if os.environ.get("FAKE_GUARD_REFUSES"):
+        print("render error: hosted policy refused the source:\n  dev: workloads: synthetic", file=sys.stderr)
+        sys.exit(1)
+    print("hosted policy passed for every environment at hosted commit " + "a" * 40)
+elif sys.argv[1] == "check-source-placeholders":
+    if os.environ.get("FAKE_PLACEHOLDER_REFUSES"):
+        print("render error: Dev effective workloads contain source placeholders: 192.0.2.1", file=sys.stderr)
+        sys.exit(1)
+    print("Dev effective workloads hold no source placeholder at hosted commit " + "a" * 40)
+else:
+    sys.exit(f"unexpected render.py command {sys.argv[1]}")
 PY
 # The fake kyverno refuses every deny-* case, admits every pass-* case, and
 # flips one named case when told to.
@@ -156,7 +164,13 @@ rm "$work/source/crates/codewire-orchestration/tests/fixtures/sandbox"
 mv "$work/elsewhere" "$work/source/crates/codewire-orchestration/tests/fixtures/sandbox"
 
 FAKE_GUARD_REFUSES=1 run_check && fail 'a deploy guard refusal passed'
-grep -q 'REFUSED by codewire/deploy' "$work/out" || fail 'the deploy refusal does not name deploy'
+grep -q 'REFUSED by codewire/deploy scripts/hosted_policy' "$work/out" || fail 'the deploy refusal does not name deploy'
+grep -q 'Dev effective workloads hold no source placeholder' "$work/out" ||
+  fail 'a hosted guard refusal skipped the placeholder check'
+FAKE_PLACEHOLDER_REFUSES=1 run_check && fail 'a tree Dev'"'"'s next promotion refuses passed'
+grep -q "REFUSED by codewire/deploy scripts/render.py: Dev's next promotion would refuse this tree" "$work/out" ||
+  fail 'the placeholder refusal does not say which check refused'
+grep -q 'contain source placeholders: 192.0.2.1' "$work/out" || fail 'the placeholder refusal hides what deploy found'
 
 # Deploy turning hosted egress on while a golden is still exempt is refused,
 # in every spelling a deploy overlay uses (#4000). The check fails closed: a
