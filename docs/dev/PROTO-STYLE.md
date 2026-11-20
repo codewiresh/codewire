@@ -103,6 +103,7 @@ a bad field name; rename before first release instead.
 | `codewire.console.v1` | FILE | Breaking allowed with same-PR client flips |
 | `codewire.admin.v1` | FILE | Internal discipline, coordinate in-repo |
 | `codewire.internal.v1` | FILE | Coordinate atomic in-repo changes |
+| `daemon.v1`, `broker.v1` (`libs/daemon-proto`) | FILE, strict | Additive only; no preimage ledger and no lint gate |
 
 During the prelaunch clean cutover, an intentional break must list the exact
 pre-change SHA-256 digest and path in
@@ -112,6 +113,14 @@ append-only: only entries added relative to the checked base authorize that
 exact change, historical replacements return to strict Buf checking, and a
 deleted contract cannot be recreated. This mechanism keeps no compatibility
 shim.
+
+The daemon and broker contract in `libs/daemon-proto` is checked the same way
+against the same base, but strictly: the preimage ledger covers only
+`proto/codewire/`, so no entry can authorize a break there. Orchestration and
+daemons of different versions speak it during a rollout, so it evolves
+additively, and a contract that must change shape takes a new package version
+(`daemon.v2`) beside the old one until no supported daemon speaks the old one.
+Its existing lint findings are not gated.
 
 CI compares against the exact event base, including a previous main tip outside
 the current ancestry after a history repair. If that object is absent locally,

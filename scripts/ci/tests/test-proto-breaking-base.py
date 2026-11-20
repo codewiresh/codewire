@@ -211,6 +211,60 @@ class BufPreimageTests(GitFixture):
         # Comparing to HEAD's parent would wrongly accept this rewritten deletion.
         policy.run_breaking(self.anchor)
 
+    def daemon_contract(self, fields_by_commit):
+        """A repository with the daemon contract's real buf.yaml, one commit per entry."""
+        source = self.work / "daemon-source"
+        source.mkdir()
+        self.git(source, "init", "-q", "-b", "main")
+        (source / "proto/codewire/v1").mkdir(parents=True)
+        (source / "proto/codewire/v1/neutral.proto").write_text(
+            'syntax = "proto3";\npackage codewire.v1;\nmessage Neutral { string id = 1; }\n')
+        config = source / policy.DAEMON_PROTO_CONFIG
+        config.parent.mkdir(parents=True)
+        config.write_text((ROOT / policy.DAEMON_PROTO_CONFIG).read_text())
+        schema = source / policy.DAEMON_PROTO / "daemon/v1/fixture.proto"
+        commits = []
+        for fields in fields_by_commit:
+            if fields is None:
+                if schema.exists():
+                    schema.unlink()
+            else:
+                schema.parent.mkdir(parents=True, exist_ok=True)
+                schema.write_text('syntax = "proto3";\npackage daemon.v1;\nmessage Info { '
+                                  + " ".join(fields) + " }\n")
+            self.git(source, "add", "-A")
+            self.git(source, "commit", "--allow-empty", "-qm", f"synthetic {len(commits)}")
+            commits.append(self.git(source, "rev-parse", "HEAD").stdout.strip())
+        patch = mock.patch.object(policy, "ROOT", source)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return commits
+
+    def buf(self):
+        buf = os.environ.get("BUF")
+        if not buf:
+            self.skipTest("BUF is not set; Contracts verification sets it")
+        return buf
+
+    def test_the_daemon_contract_refuses_a_deleted_field(self):
+        buf = self.buf()
+        base, _ = self.daemon_contract([["uint32 protocol_version = 1;", "string name = 2;"],
+                                        ["string name = 2;"]])
+        with self.assertRaises(subprocess.CalledProcessError) as error:
+            policy.run_daemon_contract_breaking(buf, base)
+        self.assertEqual(error.exception.returncode, 100)
+
+    def test_the_daemon_contract_accepts_an_added_field(self):
+        buf = self.buf()
+        base, _ = self.daemon_contract([["uint32 protocol_version = 1;"],
+                                        ["uint32 protocol_version = 1;", "string name = 2;"]])
+        policy.run_daemon_contract_breaking(buf, base)
+
+    def test_a_base_without_the_daemon_contract_has_nothing_to_compare(self):
+        buf = self.buf()
+        base, _ = self.daemon_contract([None, ["uint32 protocol_version = 1;"]])
+        policy.run_daemon_contract_breaking(buf, base)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

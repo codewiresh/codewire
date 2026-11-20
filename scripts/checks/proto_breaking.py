@@ -24,6 +24,14 @@ CODEWIRE_PREFIX = "proto/codewire/"
 # by digest (v0.3.388, blob d00c63f9).
 LOCAL_RUNTIME_PROTO = ROOT / "crates/codewire-local-vmm/proto"
 LOCAL_RUNTIME_OLDEST = ROOT / "scripts/checks/contracts/local-runtime-oldest"
+# The private daemon and broker contract. Orchestration and daemons of
+# different versions speak it during a rollout, so each change is checked
+# against the base like the public one. Its buf.yaml is a workspace of this
+# module and the canonical proto/ module it imports; the input is the module
+# directory, with imports excluded. Its lint findings predate this check and
+# are not gated here.
+DAEMON_PROTO = "libs/daemon-proto/proto"
+DAEMON_PROTO_CONFIG = "libs/daemon-proto/buf.yaml"
 LOCAL_RUNTIME_OLDEST_SHA256 = {
     "codewire/local/v1/control.proto": (
         "393379d7818f6f6e5f760796ee9477698bf5ac6331d6d78a5b4a11eb66448ef6"
@@ -209,7 +217,7 @@ def base_preimages(base_sha: str) -> set[Preimage]:
     return parse_preimages(git_output("show", f"{base_sha}:{relative}"))
 
 
-def run_breaking(base_sha: str, merge_base: bool = False) -> None:
+def run_breaking(base_sha: str, merge_base: bool = False) -> str:
     resolved_base = resolve_base(base_sha)
     if merge_base:
         resolved_base = merge_base_of_head(resolved_base)
@@ -250,6 +258,18 @@ def run_breaking(base_sha: str, merge_base: bool = False) -> None:
         command.extend(["--path", path])
     # Buf fetches the comparison tree with Git. Join its automatic maintenance
     # before returning so verification owns the complete process family.
+    subprocess.run(command, cwd=ROOT / "proto", check=True, env=git_environment())
+    print(
+        "proto breaking policy: OK "
+        f"({sum(mode == 'delete' for mode, _, _ in active)} reviewed deletion(s), "
+        f"{sum(mode == 'replace' for mode, _, _ in active)} reviewed replacement(s), "
+        "all others strict)"
+    )
+    return resolved_base
+
+
+def git_environment() -> dict[str, str]:
+    """This environment, with Git's automatic maintenance joined, not detached."""
     environment = os.environ.copy()
     try:
         config_count = int(environment.get("GIT_CONFIG_COUNT") or "0")
@@ -262,13 +282,32 @@ def run_breaking(base_sha: str, merge_base: bool = False) -> None:
         environment[f"GIT_CONFIG_VALUE_{config_count}"] = "false"
         config_count += 1
     environment["GIT_CONFIG_COUNT"] = str(config_count)
-    subprocess.run(command, cwd=ROOT / "proto", check=True, env=environment)
-    print(
-        "proto breaking policy: OK "
-        f"({sum(mode == 'delete' for mode, _, _ in active)} reviewed deletion(s), "
-        f"{sum(mode == 'replace' for mode, _, _ in active)} reviewed replacement(s), "
-        "all others strict)"
+    return environment
+
+
+def run_daemon_contract_breaking(buf: str, base: str) -> None:
+    """Breaking-check the daemon and broker contract against BASE."""
+    present = subprocess.run(
+        ["git", "-C", str(ROOT), "cat-file", "-e", f"{base}:{DAEMON_PROTO}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
+    if present.returncode != 0:
+        print(f"daemon contract: {DAEMON_PROTO} is new since the base; nothing to compare")
+        return
+    subprocess.run(
+        [
+            buf, "breaking", DAEMON_PROTO,
+            "--config", DAEMON_PROTO_CONFIG,
+            "--exclude-imports",
+            "--against", f".git#commit={base},subdir={DAEMON_PROTO}",
+            "--against-config", DAEMON_PROTO_CONFIG,
+        ],
+        cwd=ROOT,
+        check=True,
+        env=git_environment(),
+    )
+    print("daemon contract: no breaking change against the base")
 
 
 def run_local_runtime_compatibility(buf: str) -> None:
@@ -417,10 +456,11 @@ def main() -> int:
         else:
             if not args.base_sha:
                 parser.error("--base-sha is required unless --self-test is used")
-            run_breaking(args.base_sha, merge_base=args.merge_base)
+            base = run_breaking(args.base_sha, merge_base=args.merge_base)
             buf = os.environ.get("BUF") or shutil.which("buf")
             if not buf:
                 raise PolicyError("buf executable not found")
+            run_daemon_contract_breaking(buf, base)
             run_local_runtime_compatibility(buf)
     except (PolicyError, subprocess.CalledProcessError) as error:
         print(f"proto breaking policy: {error}", file=sys.stderr)

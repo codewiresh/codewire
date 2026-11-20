@@ -1215,6 +1215,17 @@ if [ "$event_selected" = false ]; then
         ;;
     esac
 
+    # Every protobuf contract is breaking-checked against its base, including
+    # the daemon and broker contract (libs/daemon-proto), which orchestration
+    # and daemons of different versions speak during a rollout. This adds
+    # Contracts alone; each path still classifies through the other cases.
+    case "$path" in
+      *.proto|libs/daemon-proto/buf.yaml)
+        select_token contracts
+        select_token contracts_proto
+        ;;
+    esac
+
     case "$path" in
       proto/codewire/v1/*.proto)
         # The SDKs hand-own adapters and descriptor-coverage checks for most
