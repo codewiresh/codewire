@@ -1,6 +1,8 @@
 //! `FrontDoorSession` (#4001): the Pod is checked before any relay work, the
 //! session joins only its live binding's current epoch, and the epoch's
-//! refusals reach cw-egress by their code alone.
+//! refusals reach cw-egress by their code alone. Once attached, the session
+//! checks the front door's Ready, routes requests by id across the epochs of
+//! a renewal, and ends only with cw-egress, its token or a broken frame.
 
 use base64::engine::general_purpose::STANDARD;
 use futures::StreamExt as _;
@@ -10,13 +12,15 @@ use tonic::Status;
 use uuid::Uuid;
 
 use super::*;
-use crate::front_door::{BindingKey, FrontDoorEpochs, Join, Joined, Registration};
+use crate::front_door::{
+    self as registry, BindingKey, FrontDoorEpochs, Join, Joined, Registration,
+};
 use crate::worker::environment_auth::WorkspaceCredentialScope;
+use codewire_daemon_proto::codewire::bridge::v1;
+use prost::Message as _;
 
 const ENVIRONMENT: &str = "4b0f9a3e-2c41-4d7a-9a51-6f1f8d2b7c10";
 const GENERATION: i64 = 5;
-const GUEST_FRAME: &[u8] = b"\0\0\0\x03one";
-const HOST_FRAME: &[u8] = b"\0\0\0\x03two";
 
 struct Bound;
 
@@ -114,32 +118,6 @@ fn refused(messages: &[Value]) -> &str {
 }
 
 #[tokio::test]
-async fn a_session_joins_its_pods_current_epoch_and_carries_frames_unchanged() {
-    let front_doors = Arc::new(FrontDoorEpochs::default());
-    let (_epoch, mut asked) = epoch(&front_doors, key());
-    let epoch = tokio::spawn(async move {
-        let Join { frames, reply } = asked.recv().await.unwrap();
-        let joined = Joined {
-            frames: futures::stream::iter([Ok(HOST_FRAME.to_vec())]).boxed(),
-            session: CancellationToken::new().drop_guard(),
-        };
-        assert!(reply.send(Ok(joined)).is_ok());
-        frames.collect::<Vec<_>>().await
-    });
-    let messages = session(
-        app_with(&Cluster::healthy(), Arc::new(Bound), Some(front_doors)),
-        &[open(), bridge(GUEST_FRAME)],
-    )
-    .await;
-    assert_eq!(messages[0], json!({"attached": {}}), "{messages:?}");
-    assert_eq!(messages[1], bridge(HOST_FRAME), "{messages:?}");
-    assert_eq!(refused(&messages), "none", "{messages:?}");
-    let guest = epoch.await.unwrap();
-    assert_eq!(guest.len(), 1);
-    assert_eq!(guest[0].as_ref().unwrap(), GUEST_FRAME);
-}
-
-#[tokio::test]
 async fn a_pod_on_another_node_is_refused_before_any_relay_work() {
     let cluster = Cluster::healthy().with(|cluster| {
         cluster.edit_guest(|pod| pod.spec.as_mut().unwrap().node_name = Some("runtime-b".into()));
@@ -179,40 +157,6 @@ async fn an_unbound_pod_is_refused_and_no_epoch_is_asked() {
     .await;
     assert_eq!(refused(&messages), "permission_denied", "{messages:?}");
     assert!(asked.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn a_session_opens_first_and_only_once() {
-    let front_doors = Arc::new(FrontDoorEpochs::default());
-    let (_epoch, mut asked) = epoch(&front_doors, key());
-    let app = || {
-        app_with(
-            &Cluster::healthy(),
-            Arc::new(Bound),
-            Some(Arc::clone(&front_doors)),
-        )
-    };
-    let messages = session(app(), &[bridge(GUEST_FRAME)]).await;
-    assert_eq!(refused(&messages), "failed_precondition", "{messages:?}");
-    assert!(asked.try_recv().is_err());
-
-    // A second open reaches the epoch as the end of the guest's frames.
-    let epoch = tokio::spawn(async move {
-        let Join { frames, reply } = asked.recv().await.unwrap();
-        let joined = Joined {
-            frames: futures::stream::empty().boxed(),
-            session: CancellationToken::new().drop_guard(),
-        };
-        assert!(reply.send(Ok(joined)).is_ok());
-        frames.collect::<Vec<_>>().await
-    });
-    session(app(), &[open(), bridge(GUEST_FRAME), open()]).await;
-    let guest = epoch.await.unwrap();
-    assert_eq!(guest[0].as_ref().unwrap(), GUEST_FRAME);
-    assert_eq!(
-        guest[1].as_ref().unwrap_err().code(),
-        tonic::Code::FailedPrecondition
-    );
 }
 
 #[tokio::test]
@@ -302,75 +246,610 @@ async fn an_unlabelled_or_ending_pod_is_refused_before_any_relay_work() {
     }
 }
 
-#[tokio::test]
-async fn the_relays_session_ends_when_cw_egress_stops_reading() {
-    let front_doors = Arc::new(FrontDoorEpochs::default());
-    let (_epoch, mut asked) = epoch(&front_doors, key());
-    let session_ended = CancellationToken::new();
-    let ended = session_ended.clone();
+/// One upstream as the relay hands it over, and the test's ends of it.
+struct Upstream {
+    guests: mpsc::Receiver<Vec<u8>>,
+    host: mpsc::Sender<Result<Vec<u8>, Status>>,
+    ended: CancellationToken,
+}
+
+fn upstream() -> (Joined, Upstream) {
+    let (guest, guests) = mpsc::channel(8);
+    let (host, hosts) = mpsc::channel(8);
+    let ended = CancellationToken::new();
+    let joined = Joined {
+        capabilities: vec![
+            codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR.into(),
+            codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM.into(),
+        ],
+        guest,
+        host: tokio_stream::wrappers::ReceiverStream::new(hosts).boxed(),
+        session: ended.clone().drop_guard(),
+    };
+    (
+        joined,
+        Upstream {
+            guests,
+            host,
+            ended,
+        },
+    )
+}
+
+/// An epoch that answers its first join with `joined`.
+fn serving(mut asked: mpsc::Receiver<Join>, joined: Joined) {
     tokio::spawn(async move {
-        let Join { reply, .. } = asked.recv().await.unwrap();
-        let joined = Joined {
-            // A session that would serve for ever.
-            frames: futures::stream::pending().boxed(),
-            session: session_ended.drop_guard(),
-        };
+        let Join { reply } = asked.recv().await.unwrap();
         assert!(reply.send(Ok(joined)).is_ok());
     });
-    let request = Request::post("/codewire.internal.v1.EgressService/FrontDoorSession")
-        .header("content-type", "application/connect+json")
-        .header(AUTHORIZATION, format!("Bearer {}", token()))
-        .body(Body::from({
-            let payload = serde_json::to_vec(&open()).unwrap();
-            let mut body = vec![0_u8];
-            body.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
-            body.extend_from_slice(&payload);
-            body
-        }))
-        .unwrap();
-    let response = app_with(&Cluster::healthy(), Arc::new(Bound), Some(front_doors))
-        .oneshot(request)
+}
+
+fn ready() -> Vec<u8> {
+    registry::binding_ready(key().environment_id, key().generation)
+}
+
+fn request(id: &str) -> Vec<u8> {
+    v1::CredentialBridgeGuestMessage {
+        payload: Some(v1::credential_bridge_guest_message::Payload::Request(
+            v1::CredentialBridgeRequest {
+                request_id: id.into(),
+                ..Default::default()
+            },
+        )),
+    }
+    .encode_to_vec()
+}
+
+fn request_body(id: &str) -> Vec<u8> {
+    v1::CredentialBridgeGuestMessage {
+        payload: Some(v1::credential_bridge_guest_message::Payload::RequestBody(
+            v1::CredentialBridgeRequestBody {
+                request_id: id.into(),
+                ..Default::default()
+            },
+        )),
+    }
+    .encode_to_vec()
+}
+
+fn response_end(id: &str) -> Vec<u8> {
+    v1::CredentialBridgeHostMessage {
+        payload: Some(v1::credential_bridge_host_message::Payload::ResponseEnd(
+            v1::CredentialBridgeResponseEnd {
+                request_id: id.into(),
+            },
+        )),
+    }
+    .encode_to_vec()
+}
+
+fn framed_bridge(message: &[u8]) -> Value {
+    bridge(&registry::framed(message).unwrap())
+}
+
+/// A session cw-egress drives frame by frame.
+struct Live {
+    input: mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
+    body: Body,
+    buffer: Vec<u8>,
+}
+
+impl Live {
+    async fn start(app: axum::Router) -> Self {
+        let (input, frames) = mpsc::channel(8);
+        let request = Request::post("/codewire.internal.v1.EgressService/FrontDoorSession")
+            .header("content-type", "application/connect+json")
+            .header(AUTHORIZATION, format!("Bearer {}", token()))
+            .body(Body::from_stream(
+                tokio_stream::wrappers::ReceiverStream::new(frames),
+            ))
+            .unwrap();
+        let live = Self {
+            input,
+            body: Body::empty(),
+            buffer: Vec::new(),
+        };
+        live.send(&open()).await;
+        let response = app.oneshot(request).await.unwrap();
+        Self {
+            body: response.into_body(),
+            ..live
+        }
+    }
+
+    async fn send(&self, frame: &Value) {
+        let payload = serde_json::to_vec(frame).unwrap();
+        let mut envelope = vec![0_u8];
+        envelope.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
+        envelope.extend_from_slice(&payload);
+        self.input.send(Ok(envelope)).await.unwrap();
+    }
+
+    async fn send_message(&self, message: &[u8]) {
+        self.send(&framed_bridge(message)).await;
+    }
+
+    /// The next message, or `None` once the stream has ended.
+    async fn next(&mut self) -> Option<Value> {
+        loop {
+            if self.buffer.len() >= 5 && self.buffer.len() >= 5 + frame_len(&self.buffer) {
+                let length = frame_len(&self.buffer);
+                let message = serde_json::from_slice(&self.buffer[5..5 + length]).unwrap();
+                self.buffer.drain(..5 + length);
+                return Some(message);
+            }
+            match self.body.frame().await {
+                Some(Ok(frame)) => {
+                    if let Ok(data) = frame.into_data() {
+                        self.buffer.extend_from_slice(&data);
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// The attached frame and the Open, whose capabilities are returned.
+    async fn attached(&mut self) -> Vec<String> {
+        assert_eq!(self.next().await.unwrap(), json!({"attached": {}}));
+        let open = self.next().await.unwrap();
+        let frame = STANDARD.decode(open["bridge"].as_str().unwrap()).unwrap();
+        let open =
+            v1::CredentialBridgeHostMessage::decode(registry::frame_message(&frame).unwrap())
+                .unwrap();
+        let Some(v1::credential_bridge_host_message::Payload::Open(open)) = open.payload else {
+            panic!("the Open comes first");
+        };
+        assert_eq!(open.environment_id, ENVIRONMENT);
+        assert_eq!(
+            open.environment_generation,
+            u64::try_from(GENERATION).unwrap()
+        );
+        open.capabilities
+    }
+}
+
+async fn bounded<F: std::future::Future>(future: F) -> F::Output {
+    tokio::time::timeout(Duration::from_secs(5), future)
         .await
-        .unwrap();
-    let mut body = response.into_body();
-    // The attached frame arrives; then cw-egress goes away.
-    let first = tokio::time::timeout(Duration::from_secs(5), body.frame())
-        .await
-        .unwrap();
-    assert!(first.is_some());
-    assert!(!ended.is_cancelled());
-    drop(body);
-    tokio::time::timeout(Duration::from_secs(5), ended.cancelled())
-        .await
-        .expect("the relay's session ended with the stream");
+        .expect("bounded")
+}
+
+fn app_for(front_doors: &Arc<FrontDoorEpochs>) -> axum::Router {
+    app_with(
+        &Cluster::healthy(),
+        Arc::new(Bound),
+        Some(Arc::clone(front_doors)),
+    )
 }
 
 #[tokio::test]
-async fn a_relay_that_fails_mid_session_ends_it_cleanly() {
+async fn a_session_opens_its_epoch_writes_the_open_and_consumes_the_ready() {
     let front_doors = Arc::new(FrontDoorEpochs::default());
-    let (_epoch, mut asked) = epoch(&front_doors, key());
-    tokio::spawn(async move {
-        let Join { reply, .. } = asked.recv().await.unwrap();
-        let joined = Joined {
-            frames: futures::stream::iter([
-                Ok(HOST_FRAME.to_vec()),
-                Err(Status::unavailable("broker detail")),
-            ])
-            .boxed(),
-            session: CancellationToken::new().drop_guard(),
-        };
-        assert!(reply.send(Ok(joined)).is_ok());
-    });
-    let messages = session(
-        app_with(&Cluster::healthy(), Arc::new(Bound), Some(front_doors)),
-        &[open()],
-    )
-    .await;
-    assert_eq!(messages[1], bridge(HOST_FRAME), "{messages:?}");
-    assert_eq!(refused(&messages), "unavailable", "{messages:?}");
+    let (_epoch, asked) = epoch(&front_doors, key());
+    let (joined, mut upstream) = upstream();
+    serving(asked, joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    assert_eq!(
+        live.attached().await.len(),
+        2,
+        "the first upstream's capabilities"
+    );
+    live.send_message(&ready()).await;
+    live.send_message(&request("r1")).await;
+    assert_eq!(
+        bounded(upstream.guests.recv()).await.unwrap(),
+        request("r1"),
+        "the front door's Ready is consumed, never forwarded"
+    );
+    upstream.host.send(Ok(response_end("r1"))).await.unwrap();
+    assert_eq!(
+        bounded(live.next()).await.unwrap(),
+        framed_bridge(&response_end("r1"))
+    );
+}
+
+#[tokio::test]
+async fn a_renewal_moves_new_requests_to_the_successor_and_drains_the_old_epoch() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (_old_epoch, old_asked) = epoch(&front_doors, key());
+    let (old_joined, mut old) = upstream();
+    serving(old_asked, old_joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    live.attached().await;
+    live.send_message(&ready()).await;
+    live.send_message(&request("old")).await;
+    assert_eq!(bounded(old.guests.recv()).await.unwrap(), request("old"));
+
+    // The successor is admitted while "old" is still in flight.
+    let (_new_epoch, new_asked) = epoch(&front_doors, key());
+    let (new_joined, mut new) = upstream();
+    serving(new_asked, new_joined);
+    live.send_message(&request("new")).await;
+    assert_eq!(
+        bounded(new.guests.recv()).await.unwrap(),
+        request("new"),
+        "the successor's first frame is the new request: the front door's Ready is not sent again"
+    );
+    // The old request's later frames still follow it.
+    live.send_message(&request_body("old")).await;
+    assert_eq!(
+        bounded(old.guests.recv()).await.unwrap(),
+        request_body("old")
+    );
+    assert!(!old.ended.is_cancelled());
+    old.host.send(Ok(response_end("old"))).await.unwrap();
+    assert_eq!(
+        bounded(live.next()).await.unwrap(),
+        framed_bridge(&response_end("old"))
+    );
+    // Drained, the old upstream is closed; the session goes on.
+    bounded(old.ended.cancelled()).await;
+    new.host.send(Ok(response_end("new"))).await.unwrap();
+    assert_eq!(
+        bounded(live.next()).await.unwrap(),
+        framed_bridge(&response_end("new"))
+    );
+    assert!(!new.ended.is_cancelled());
+}
+
+#[tokio::test]
+async fn a_session_must_start_with_its_bindings_ready() {
+    let other = registry::binding_ready(key().environment_id, key().generation + 1);
+    for (case, first) in [
+        ("another generation", registry::framed(&other).unwrap()),
+        (
+            "a request before Ready",
+            registry::framed(&request("r1")).unwrap(),
+        ),
+        ("a bad length", b"\0\0\0\x09short".to_vec()),
+    ] {
+        let front_doors = Arc::new(FrontDoorEpochs::default());
+        let (_epoch, asked) = epoch(&front_doors, key());
+        let (joined, mut upstream) = upstream();
+        serving(asked, joined);
+        let mut live = Live::start(app_for(&front_doors)).await;
+        live.attached().await;
+        live.send(&bridge(&first)).await;
+        let end = bounded(live.next()).await.unwrap();
+        assert_eq!(end["error"]["code"], "invalid_argument", "{case}: {end}");
+        bounded(upstream.ended.cancelled()).await;
+        assert!(
+            upstream.guests.try_recv().is_err(),
+            "{case}: nothing was forwarded"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_front_door_that_never_sends_ready_is_ended() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (_epoch, asked) = epoch(&front_doors, key());
+    let (joined, upstream) = upstream();
+    serving(asked, joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    live.attached().await;
+    let end = live.next().await.unwrap();
+    assert_eq!(end["error"]["code"], "invalid_argument", "{end}");
+    upstream.ended.cancelled().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cw_egress_that_takes_no_frame_ends_its_session() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (_epoch, asked) = epoch(&front_doors, key());
+    let (joined, mut upstream) = upstream();
+    serving(asked, joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    live.attached().await;
+    live.send_message(&ready()).await;
+    for id in ["a", "b", "c"] {
+        live.send_message(&request(id)).await;
+        upstream.guests.recv().await.unwrap();
+    }
+    // Idle for longer than the bound with nothing to send: not a stall.
+    tokio::time::sleep(super::super::front_door::STALL * 3).await;
+    assert!(!upstream.ended.is_cancelled());
+    // Now cw-egress reads nothing while the broker answers.
+    for id in ["a", "b", "c"] {
+        let _ = upstream.host.send(Ok(response_end(id))).await;
+    }
+    upstream.ended.cancelled().await;
+}
+
+#[tokio::test]
+async fn the_session_and_its_upstreams_end_when_cw_egress_goes() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (_epoch, asked) = epoch(&front_doors, key());
+    let (joined, upstream) = upstream();
+    serving(asked, joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    live.attached().await;
+    assert!(!upstream.ended.is_cancelled());
+    drop(live);
+    bounded(upstream.ended.cancelled()).await;
+}
+
+#[tokio::test]
+async fn an_upstream_that_fails_answers_its_requests_and_the_session_goes_on() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (_epoch, asked) = epoch(&front_doors, key());
+    let (joined, mut upstream) = upstream();
+    serving(asked, joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    live.attached().await;
+    live.send_message(&ready()).await;
+    live.send_message(&request("r1")).await;
+    bounded(upstream.guests.recv()).await.unwrap();
+    upstream
+        .host
+        .send(Err(Status::unavailable("broker detail")))
+        .await
+        .unwrap();
+    let answer = bounded(live.next()).await.unwrap();
+    let failure = v1::CredentialBridgeHostMessage {
+        payload: Some(
+            v1::credential_bridge_host_message::Payload::ResponseFailure(
+                v1::CredentialBridgeResponseFailure {
+                    request_id: "r1".into(),
+                    reason: v1::CredentialBridgeFailureReason::Unavailable as i32,
+                    refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
+                },
+            ),
+        ),
+    };
+    assert_eq!(answer, framed_bridge(&failure.encode_to_vec()));
     assert!(
-        !serde_json::to_string(&messages)
+        !serde_json::to_string(&answer)
             .unwrap()
             .contains("broker detail")
+    );
+    // With no epoch left, a new request is answered, and the session stays.
+    live.send_message(&request("r2")).await;
+    let refused = bounded(live.next()).await.unwrap();
+    assert!(refused.get("bridge").is_some(), "{refused}");
+}
+
+#[tokio::test]
+async fn a_second_open_ends_the_session() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (_epoch, asked) = epoch(&front_doors, key());
+    let (joined, _upstream) = upstream();
+    serving(asked, joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    live.attached().await;
+    live.send(&open()).await;
+    let end = bounded(live.next()).await.unwrap();
+    assert_eq!(end["error"]["code"], "failed_precondition", "{end}");
+}
+
+#[tokio::test]
+async fn a_frame_before_open_is_refused_and_no_epoch_is_asked() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (_epoch, mut asked) = epoch(&front_doors, key());
+    let messages = session(app_for(&front_doors), &[framed_bridge(&ready())]).await;
+    assert_eq!(refused(&messages), "failed_precondition", "{messages:?}");
+    assert!(asked.try_recv().is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_successor_whose_join_fails_is_tried_again_after_a_backoff() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (_old_epoch, old_asked) = epoch(&front_doors, key());
+    let (old_joined, mut old) = upstream();
+    serving(old_asked, old_joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    live.attached().await;
+    live.send_message(&ready()).await;
+    // The successor's first join fails.
+    let (_new_epoch, mut new_asked) = epoch(&front_doors, key());
+    let (new_joined, mut new) = upstream();
+    live.send_message(&request("a")).await;
+    let Join { reply } = new_asked.recv().await.unwrap();
+    assert!(reply.send(Err(Status::unavailable("busy"))).is_ok());
+    assert_eq!(
+        old.guests.recv().await.unwrap(),
+        request("a"),
+        "the old epoch still serves"
+    );
+    // Within the backoff, nothing asks the successor again.
+    live.send_message(&request("b")).await;
+    assert_eq!(old.guests.recv().await.unwrap(), request("b"));
+    assert!(new_asked.try_recv().is_err(), "no retry inside the backoff");
+    // After it, the successor is joined and takes the next request.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    live.send_message(&request("c")).await;
+    let Join { reply } = new_asked.recv().await.unwrap();
+    assert!(reply.send(Ok(new_joined)).is_ok());
+    assert_eq!(new.guests.recv().await.unwrap(), request("c"));
+    assert!(
+        old.guests.try_recv().is_err(),
+        "the old epoch gets nothing new"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_idle_session_follows_a_renewal_without_ending() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (old_registration, old_asked) = epoch(&front_doors, key());
+    let (old_joined, old) = upstream();
+    serving(old_asked, old_joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    live.attached().await;
+    live.send_message(&ready()).await;
+    // The successor is admitted, then the old epoch ends, with nothing sent.
+    let (_new_epoch, new_asked) = epoch(&front_doors, key());
+    let (new_joined, mut new) = upstream();
+    serving(new_asked, new_joined);
+    drop(old_registration);
+    drop(old.host);
+    // Well past the no-epoch bound, the quiet session is still open.
+    assert!(
+        tokio::time::timeout(super::super::front_door::NO_EPOCH * 3, live.next())
+            .await
+            .is_err(),
+        "the session did not end"
+    );
+    live.send_message(&request("r")).await;
+    assert_eq!(new.guests.recv().await.unwrap(), request("r"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_session_with_no_epoch_left_ends_so_cw_egress_reads_the_binding_again() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (epoch_registration, asked) = epoch(&front_doors, key());
+    let (joined, upstream) = upstream();
+    serving(asked, joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    live.attached().await;
+    live.send_message(&ready()).await;
+    // The binding moves on: its epoch ends and none follows.
+    drop(epoch_registration);
+    drop(upstream.host);
+    let end = live.next().await.unwrap();
+    assert_eq!(end["error"]["code"], "unavailable", "{end}");
+}
+
+#[tokio::test]
+async fn a_third_epoch_waits_until_the_draining_one_is_gone() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (_a_epoch, a_asked) = epoch(&front_doors, key());
+    let (a_joined, mut a) = upstream();
+    serving(a_asked, a_joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    live.attached().await;
+    live.send_message(&ready()).await;
+    live.send_message(&request("a")).await;
+    assert_eq!(bounded(a.guests.recv()).await.unwrap(), request("a"));
+    let (_b_epoch, b_asked) = epoch(&front_doors, key());
+    let (b_joined, mut b) = upstream();
+    serving(b_asked, b_joined);
+    live.send_message(&request("b")).await;
+    assert_eq!(bounded(b.guests.recv()).await.unwrap(), request("b"));
+    // A third epoch while "a" still drains: new requests stay on B.
+    let (_c_epoch, c_asked) = epoch(&front_doors, key());
+    let (c_joined, mut c) = upstream();
+    serving(c_asked, c_joined);
+    live.send_message(&request("b2")).await;
+    assert_eq!(bounded(b.guests.recv()).await.unwrap(), request("b2"));
+    assert!(c.guests.try_recv().is_err());
+    // Once "a" has drained, the third is joined.
+    a.host.send(Ok(response_end("a"))).await.unwrap();
+    assert_eq!(
+        bounded(live.next()).await.unwrap(),
+        framed_bridge(&response_end("a"))
+    );
+    bounded(a.ended.cancelled()).await;
+    live.send_message(&request("c")).await;
+    assert_eq!(bounded(c.guests.recv()).await.unwrap(), request("c"));
+}
+
+#[tokio::test]
+async fn a_request_for_an_upstream_that_has_gone_is_answered_and_finished() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (_epoch, asked) = epoch(&front_doors, key());
+    let (joined, upstream) = upstream();
+    serving(asked, joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    live.attached().await;
+    live.send_message(&ready()).await;
+    // The upstream stops taking frames: its broker leg has gone.
+    drop(upstream.guests);
+    live.send_message(&request("r1")).await;
+    let failure = v1::CredentialBridgeHostMessage {
+        payload: Some(
+            v1::credential_bridge_host_message::Payload::ResponseFailure(
+                v1::CredentialBridgeResponseFailure {
+                    request_id: "r1".into(),
+                    reason: v1::CredentialBridgeFailureReason::Unavailable as i32,
+                    refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
+                },
+            ),
+        ),
+    };
+    assert_eq!(
+        bounded(live.next()).await.unwrap(),
+        framed_bridge(&failure.encode_to_vec())
+    );
+    // The id is finished: a late frame for it races that answer and is dropped.
+    live.send_message(&request_body("r1")).await;
+    live.send_message(&request("r2")).await;
+    let next = bounded(live.next()).await.unwrap();
+    let frame = STANDARD.decode(next["bridge"].as_str().unwrap()).unwrap();
+    let message =
+        v1::CredentialBridgeHostMessage::decode(registry::frame_message(&frame).unwrap()).unwrap();
+    assert!(
+        matches!(
+            message.payload,
+            Some(v1::credential_bridge_host_message::Payload::ResponseFailure(ref failure))
+                if failure.request_id == "r2"
+        ),
+        "{message:?}"
+    );
+}
+
+/// A live request's own frame outside the session's pin ends that request
+/// once: cw-egress reads its answer, its upstream gets the Cancel, and the
+/// upstream's late answer is dropped while the session serves on (#4909).
+#[tokio::test]
+async fn a_live_requests_frame_outside_the_pin_is_answered_once_and_cancelled_upstream() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (_epoch, asked) = epoch(&front_doors, key());
+    let (mut joined, mut upstream) = upstream();
+    // The pin is what the first upstream serves: no streamed request body.
+    joined.capabilities.retain(|capability| {
+        capability == codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR
+    });
+    serving(asked, joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    live.attached().await;
+    live.send_message(&ready()).await;
+    live.send_message(&request("r1")).await;
+    assert_eq!(
+        bounded(upstream.guests.recv()).await.unwrap(),
+        request("r1")
+    );
+
+    live.send_message(&request_body("r1")).await;
+    let failure = v1::CredentialBridgeHostMessage {
+        payload: Some(
+            v1::credential_bridge_host_message::Payload::ResponseFailure(
+                v1::CredentialBridgeResponseFailure {
+                    request_id: "r1".into(),
+                    reason: v1::CredentialBridgeFailureReason::Unavailable as i32,
+                    refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
+                },
+            ),
+        ),
+    };
+    assert_eq!(
+        bounded(live.next()).await.unwrap(),
+        framed_bridge(&failure.encode_to_vec())
+    );
+    let cancel = v1::CredentialBridgeGuestMessage {
+        payload: Some(v1::credential_bridge_guest_message::Payload::Cancel(
+            v1::CredentialBridgeCancel {
+                request_id: "r1".into(),
+            },
+        )),
+    };
+    assert_eq!(
+        bounded(upstream.guests.recv()).await.unwrap(),
+        cancel.encode_to_vec(),
+        "the body is never forwarded; the upstream is told to stop"
+    );
+
+    // The upstream's late answer for r1 is dropped, and it serves on.
+    upstream.host.send(Ok(response_end("r1"))).await.unwrap();
+    live.send_message(&request("r2")).await;
+    assert_eq!(
+        bounded(upstream.guests.recv()).await.unwrap(),
+        request("r2")
+    );
+    upstream.host.send(Ok(response_end("r2"))).await.unwrap();
+    assert_eq!(
+        bounded(live.next()).await.unwrap(),
+        framed_bridge(&response_end("r2")),
+        "r1 is answered once"
     );
 }

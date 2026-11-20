@@ -18,7 +18,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
+use codewire_daemon_proto::codewire::bridge::v1;
+use codewire_daemon_proto::{
+    CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES, CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+};
 use futures::stream::BoxStream;
 use tokio::sync::{mpsc, oneshot};
 use tonic::Status;
@@ -34,20 +37,39 @@ pub struct BindingKey {
     pub generation: u64,
 }
 
-/// A front-door session asking an epoch to open its broker stream.
+/// A front-door session asking an epoch for one upstream stream.
 pub struct Join {
-    /// The guest's frames, each one framed message.
-    pub frames: BoxStream<'static, Result<Vec<u8>, Status>>,
     pub reply: oneshot::Sender<Result<Joined, Status>>,
 }
 
-/// A joined broker stream: the host's frames, starting with the Open the
-/// relay writes from the broker's capabilities. It ends with its epoch.
+/// One upstream: an epoch's `FrontDoorBridge` stream, already opened with
+/// its binding's Ready. Messages cross unframed and unparsed. It ends with
+/// its epoch.
 pub struct Joined {
-    pub frames: BoxStream<'static, Result<Vec<u8>, Status>>,
-    /// Ends the session when dropped, so it never outlives the stream
-    /// cw-egress reads.
+    /// Exactly what the broker listed for this stream.
+    pub capabilities: Vec<String>,
+    /// Guest messages toward the broker.
+    pub guest: mpsc::Sender<Vec<u8>>,
+    /// Host messages from the broker.
+    pub host: BoxStream<'static, Result<Vec<u8>, Status>>,
+    /// Ends the upstream when dropped.
     pub session: tokio_util::sync::DropGuard,
+}
+
+/// The Ready of a binding, unframed: what the relay opens every upstream
+/// with, and what the front door's own first frame must equal byte for byte.
+pub fn binding_ready(environment_id: Uuid, generation: u64) -> Vec<u8> {
+    use prost::Message as _;
+    v1::CredentialBridgeGuestMessage {
+        payload: Some(v1::credential_bridge_guest_message::Payload::Ready(
+            v1::CredentialBridgeReady {
+                protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                environment_id: environment_id.to_string(),
+                environment_generation: generation,
+            },
+        )),
+    }
+    .encode_to_vec()
 }
 
 /// The live epochs a front-door session may join, one current per binding.
@@ -97,13 +119,14 @@ impl FrontDoorEpochs {
         }
     }
 
-    /// The binding's current epoch, if one is admitted on this process.
-    pub fn current(&self, key: &BindingKey) -> Option<mpsc::Sender<Join>> {
+    /// The binding's current epoch, if one is admitted on this process, and
+    /// its id: a newer epoch has a greater one.
+    pub fn current(&self, key: &BindingKey) -> Option<(u64, mpsc::Sender<Join>)> {
         self.slots
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(key)
-            .map(|slot| slot.joins.clone())
+            .map(|slot| (slot.id, slot.joins.clone()))
     }
 }
 

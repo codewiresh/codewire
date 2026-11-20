@@ -55,16 +55,33 @@ async fn the_newest_epoch_of_a_binding_is_current_until_it_ends() {
     assert!(epochs.current(&key()).is_none());
     let (first_joins, _first) = mpsc::channel(1);
     let first = epochs.register(key(), first_joins.clone());
-    assert!(epochs.current(&key()).unwrap().same_channel(&first_joins));
+    assert!(epochs.current(&key()).unwrap().1.same_channel(&first_joins));
 
+    let first_id = epochs.current(&key()).unwrap().0;
     // A successor admitted during the renewal replaces it at once.
     let (second_joins, _second) = mpsc::channel(1);
     let second = epochs.register(key(), second_joins.clone());
-    assert!(epochs.current(&key()).unwrap().same_channel(&second_joins));
+    assert!(
+        epochs
+            .current(&key())
+            .unwrap()
+            .1
+            .same_channel(&second_joins)
+    );
+    assert!(
+        epochs.current(&key()).unwrap().0 > first_id,
+        "a newer epoch has a greater id"
+    );
 
     // The draining epoch ending leaves its successor current.
     drop(first);
-    assert!(epochs.current(&key()).unwrap().same_channel(&second_joins));
+    assert!(
+        epochs
+            .current(&key())
+            .unwrap()
+            .1
+            .same_channel(&second_joins)
+    );
     drop(second);
     assert!(epochs.current(&key()).is_none());
 }

@@ -1814,8 +1814,7 @@ door's way into the credential broker, beside a Sandbox's loopback ingress.
 It is served only while hosted interception is on
 (`CODEWIRE_HOSTED_INTERCEPTION_ENABLED`, which needs hosted egress on);
 otherwise it answers `UNIMPLEMENTED` to an authenticated caller, and no relay
-epoch takes a session. No `cw-egress` calls it yet, and interception stays
-off until the relay holds one session across epoch renewals:
+epoch takes a session. No `cw-egress` calls it yet:
 
 - **Who opens it:** only `cw-egress`, with its own projected token (audience
   `codewire.internal.egress-node.v1`, its ServiceAccount and namespace), for
@@ -1830,33 +1829,67 @@ off until the relay holds one session across epoch renewals:
   broker admitted most recently for that binding (environment, Pod UID and
   generation) opens the broker's `FrontDoorBridge` with its own relay token,
   the daemon's workspace authorization and the epoch's handle; none of them
-  reach `EgressService`. During a renewal, a session opened after the
-  successor is admitted joins the successor, never the epoch that is
-  draining. Orchestration answers `attached`, then the host Open, which lists
-  exactly the capabilities the broker listed for that stream.
+  reach `EgressService`. Orchestration answers `attached`, then the host Open,
+  which lists exactly the capabilities the broker listed for that first
+  stream; they are pinned for the session.
+- **One session across renewals.** The session holds cw-egress's stream for
+  its whole life while the relay epochs behind it renew; each epoch it joins
+  is an upstream. New requests go to the binding's current epoch, joined at the
+  session's next frame after it is admitted, and every later frame of a request follows it to
+  the upstream it opened on. So a renewal ends no request in flight, unless
+  the epoch that request started on expires first. An older upstream is
+  closed once it holds no request. A session holds at most two upstreams, so
+  a third epoch waits until the draining one is gone. A successor listing
+  fewer capabilities than the pin is not used, and one whose join fails is
+  tried again after 1 second, doubling to 30. At most 256 requests are open
+  at once, and an id over 128 bytes is a malformed envelope. The routing is
+  `codewire-credential-bridge`'s `front_door_router`, which the
+  platform-profile carrier shares:
+  - an id opens once, and cannot be opened again while it is live or within
+    60 seconds of finishing;
+  - a frame for an id never opened, or forgotten, gets the bridge's own error
+    answer for that id;
+  - a frame racing a finished request's answer is dropped;
+  - at most 4,096 finished ids are remembered;
+  - a response for an id an upstream does not hold ends that upstream, and its
+    requests get the error answer;
+  - a frame needing a capability outside the pin is answered.
+
+  Only a bad frame, an unreadable envelope or a second Ready ends the
+  session. The session reads each message's frame type and `request_id`,
+  never a payload, and refusals are counted by reason with no id.
 - **Ready.** The broker reads a stream's Ready before it answers, and the
   front door sends its own only after the Open written from that answer. So
   the relay opens each upstream with the Ready of the binding it
   authenticated: the protocol version, the environment id and the
   generation, never anything the front door claims. The front door's own
-  Ready, its first frame, must equal it byte for byte. It is consumed, and a
-  mismatch, any frame before it, or none within 30 seconds ends the session.
-  The broker still checks the Ready against the workspace authorization.
+  Ready, its first frame, is checked once per session and must equal it byte
+  for byte. It is consumed, never sent upstream, including after a renewal;
+  a mismatch, any frame before it, or none within 30 seconds ends the
+  session, counted by a fixed class. So a `cw-egress` on another bridge
+  protocol version fails every hosted front-door session closed: cw-egress
+  and orchestration roll out together. The broker still checks the Ready
+  against the workspace authorization.
 - **The frames** are carried unchanged: each `bridge` field is exactly one
   front-door.v1 frame, a four-byte big-endian length and then that many
   protobuf bytes, at most the bridge's maximum message size. Orchestration
   reads only that length and refuses a length of zero, over the maximum, or
   not equal to the bytes that follow, which ends that session. Injection,
   redaction, refresh and every authority check stay in the broker.
-- **Bounds.** A session's frames toward the broker hold a stream budget of
-  their own inside the environment's. A `cw-egress` that takes no frame for
-  30 seconds ends only its session; one whose socket is out of credit is not
-  stalled, since the broker then sends nothing. The loopback session keeps
-  serving either way.
-- **It ends with its epoch,** or when the token `cw-egress` opened it with
-  expires, so the epoch's reuse limits above bound it. `cw-egress` opens a new
-  session for the next epoch. An epoch serves one session at a time; a second
-  is `ALREADY_EXISTS`.
+- **Bounds.** Each upstream's frames toward the broker hold a stream budget
+  of their own inside the environment's, and a broker that takes none for 30
+  seconds ends that upstream. A `cw-egress` that takes no frame for 30 seconds
+  ends its session; one whose socket is out of credit is not stalled, since
+  the broker then sends nothing. The loopback session keeps serving either
+  way.
+- **It ends** when cw-egress closes it, when the token cw-egress opened it
+  with expires, or on a stall. With no epoch left, new requests get the error
+  answer. After 60 seconds with no epoch and no upstream, the session ends
+  `UNAVAILABLE`, so cw-egress opens it again and the Pod's binding is read
+  again: after an unbind or a new generation, this binding's epochs do not
+  return. Each upstream ends with
+  its epoch, so the epoch's reuse limits above bound everything sent on it.
+  An epoch serves one upstream at a time; a second is `ALREADY_EXISTS`.
 - **`UNAVAILABLE` means no epoch is running for the Pod's current binding on
   this process yet:** the environment is not admitted, a rebind is replacing
   its relay, or this is not the orchestration replica whose relay holds it.
