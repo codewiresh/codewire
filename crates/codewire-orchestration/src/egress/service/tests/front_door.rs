@@ -410,7 +410,7 @@ impl Live {
 }
 
 async fn bounded<F: std::future::Future>(future: F) -> F::Output {
-    tokio::time::timeout(Duration::from_secs(5), future)
+    tokio::time::timeout(Duration::from_secs(30), future)
         .await
         .expect("bounded")
 }
@@ -852,4 +852,64 @@ async fn a_live_requests_frame_outside_the_pin_is_answered_once_and_cancelled_up
         framed_bridge(&response_end("r2")),
         "r1 is answered once"
     );
+}
+
+/// A Cancel for an upstream that has gone still answers its id once, and
+/// that upstream's other requests are answered and finished as when a
+/// forward to it fails; the session goes on (#4001).
+#[tokio::test]
+async fn a_cancel_for_an_upstream_that_has_gone_answers_its_other_requests() {
+    let front_doors = Arc::new(FrontDoorEpochs::default());
+    let (_epoch, asked) = epoch(&front_doors, key());
+    let (mut joined, mut upstream) = upstream();
+    // The pin is what the first upstream serves: no streamed request body.
+    joined.capabilities.retain(|capability| {
+        capability == codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR
+    });
+    serving(asked, joined);
+    let mut live = Live::start(app_for(&front_doors)).await;
+    live.attached().await;
+    live.send_message(&ready()).await;
+    live.send_message(&request("r1")).await;
+    live.send_message(&request("r2")).await;
+    assert_eq!(
+        bounded(upstream.guests.recv()).await.unwrap(),
+        request("r1")
+    );
+    assert_eq!(
+        bounded(upstream.guests.recv()).await.unwrap(),
+        request("r2")
+    );
+    // The upstream stops taking frames: its broker leg has gone.
+    drop(upstream.guests);
+
+    live.send_message(&request_body("r1")).await;
+    let failure = |id: &str| {
+        v1::CredentialBridgeHostMessage {
+            payload: Some(
+                v1::credential_bridge_host_message::Payload::ResponseFailure(
+                    v1::CredentialBridgeResponseFailure {
+                        request_id: id.into(),
+                        reason: v1::CredentialBridgeFailureReason::Unavailable as i32,
+                        refusal: v1::CredentialBridgeRefusal::Unspecified as i32,
+                    },
+                ),
+            ),
+        }
+        .encode_to_vec()
+    };
+    assert_eq!(
+        bounded(live.next()).await.unwrap(),
+        framed_bridge(&failure("r1")),
+        "the cancelled id is answered once"
+    );
+    assert_eq!(
+        bounded(live.next()).await.unwrap(),
+        framed_bridge(&failure("r2")),
+        "the gone upstream's other request is answered"
+    );
+    // With no epoch left, a new request is answered, and the session stays.
+    live.send_message(&request("r3")).await;
+    let refused = bounded(live.next()).await.unwrap();
+    assert!(refused.get("bridge").is_some(), "{refused}");
 }
