@@ -398,7 +398,7 @@ age_mark "$base" 400 30
 check "$base" || fail 'a stopped hung server failed the check'
 ! server_running "$base" || fail "the hung server still runs: $(cat "$hang/stderr"; cat "$base/server-check.log" 2>/dev/null)"
 [[ "$(grep -c -- '^--stop-server ' "$hang/fake/calls")" == 1 ]] ||
-  fail '--stop-server was not tried once first'
+  fail "--stop-server was not tried once first: count=$(grep -c -- '^--stop-server ' "$hang/fake/calls") calls=[$(tr '\n' ';' <"$hang/fake/calls")] stderr=[$(tr '\n' ';' <"$hang/stderr")] log=[$(tr '\n' ';' 2>/dev/null <"$base/server-check.log")]"
 grep -Eq "^CODEWIRE_LOCAL_RUST_CACHE state=restarted reason=server-hung at=[0-9TZ:-]+ pid=[0-9]+ clients=3 stalled=[0-9]+s by=TERM\$" \
   "$hang/stderr" || fail "restart status: $(cat "$hang/stderr")"
 server_running "$hang/other" || fail 'another server was stopped'
