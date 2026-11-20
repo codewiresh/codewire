@@ -87,7 +87,9 @@ enum Delivery {
 #[derive(Clone, Debug)]
 pub struct SentEmail {
     pub to: String,
+    pub reply_to: Option<String>,
     pub subject: String,
+    /// Empty for a plain-text email.
     pub html: String,
     pub text: String,
 }
@@ -203,17 +205,40 @@ impl EmailClient {
     /// Delivers one email in the Codewire layout, with its HTML and
     /// plain-text parts, through the selected transport.
     pub async fn send(&self, to: &str, email: &Email) -> Result<()> {
-        self.send_parts(to, &email.subject, &email.html(), &email.text())
+        self.send_parts(to, None, &email.subject, Some(&email.html()), &email.text())
             .await
     }
 
-    async fn send_parts(&self, to: &str, subject: &str, html: &str, text: &str) -> Result<()> {
+    /// Delivers one plain-text email, with no HTML part, for text that is
+    /// not Codewire's own (#5466). `reply_to`, when given, must be one plain
+    /// address, like `to`.
+    pub async fn send_plain(
+        &self,
+        to: &str,
+        reply_to: Option<&str>,
+        subject: &str,
+        text: &str,
+    ) -> Result<()> {
+        self.send_parts(to, reply_to, subject, None, text).await
+    }
+
+    async fn send_parts(
+        &self,
+        to: &str,
+        reply_to: Option<&str>,
+        subject: &str,
+        html: Option<&str>,
+        text: &str,
+    ) -> Result<()> {
         match self.delivery.as_ref() {
             Delivery::Disabled => bail!("transactional email delivery is not configured"),
             Delivery::Ses(delivery) => {
                 validate_mailbox(to, "recipient")?;
+                if let Some(reply_to) = reply_to {
+                    validate_mailbox(reply_to, "reply-to")?;
+                }
                 validate_subject(subject)?;
-                let body = ses_email_payload(&delivery.from, to, subject, html, text)?;
+                let body = ses_email_payload(&delivery.from, to, reply_to, subject, html, text)?;
                 let request = signed_ses_request(
                     &delivery.client,
                     &delivery.credentials,
@@ -231,11 +256,15 @@ impl EmailClient {
             #[cfg(feature = "test-support")]
             Delivery::Recording(outbox) => {
                 validate_mailbox(to, "recipient")?;
+                if let Some(reply_to) = reply_to {
+                    validate_mailbox(reply_to, "reply-to")?;
+                }
                 validate_subject(subject)?;
                 outbox.0.lock().expect("outbox lock").push(SentEmail {
                     to: to.to_owned(),
+                    reply_to: reply_to.map(str::to_owned),
                     subject: subject.to_owned(),
-                    html: html.to_owned(),
+                    html: html.unwrap_or_default().to_owned(),
                     text: text.to_owned(),
                 });
                 Ok(())
@@ -464,11 +493,24 @@ fn ses_http_client() -> Result<reqwest::Client> {
 fn ses_email_payload(
     from: &str,
     to: &str,
+    reply_to: Option<&str>,
     subject: &str,
-    html: &str,
+    html: Option<&str>,
     text: &str,
 ) -> Result<Vec<u8>> {
-    serde_json::to_vec(&serde_json::json!({
+    let mut body = serde_json::json!({
+        "Text": {
+            "Data": text,
+            "Charset": "UTF-8",
+        },
+    });
+    if let Some(html) = html {
+        body["Html"] = serde_json::json!({
+            "Data": html,
+            "Charset": "UTF-8",
+        });
+    }
+    let mut payload = serde_json::json!({
         "FromEmailAddress": from,
         "Destination": {
             "ToAddresses": [to],
@@ -479,20 +521,14 @@ fn ses_email_payload(
                     "Data": subject,
                     "Charset": "UTF-8",
                 },
-                "Body": {
-                    "Html": {
-                        "Data": html,
-                        "Charset": "UTF-8",
-                    },
-                    "Text": {
-                        "Data": text,
-                        "Charset": "UTF-8",
-                    },
-                },
+                "Body": body,
             },
         },
-    }))
-    .context("serialize SES email")
+    });
+    if let Some(reply_to) = reply_to {
+        payload["ReplyToAddresses"] = serde_json::json!([reply_to]);
+    }
+    serde_json::to_vec(&payload).context("serialize SES email")
 }
 
 fn signed_ses_request(
@@ -836,8 +872,9 @@ mod tests {
         let payload = ses_email_payload(
             "hello@example.invalid",
             "owner@example.com",
+            None,
             "Review your Codewire request",
-            "<p>review</p>",
+            Some("<p>review</p>"),
             "review",
         )
         .unwrap();
@@ -859,6 +896,30 @@ mod tests {
         assert_eq!(
             value["Content"]["Simple"]["Body"]["Text"],
             serde_json::json!({"Data": "review", "Charset": "UTF-8"})
+        );
+        assert!(value.get("ReplyToAddresses").is_none());
+    }
+
+    #[test]
+    fn a_plain_payload_has_no_html_part_and_names_its_reply_to() {
+        let payload = ses_email_payload(
+            "hello@example.invalid",
+            "owner@example.com",
+            Some("sender@example.com"),
+            "Codewire feedback 1",
+            None,
+            "line one\nBcc: someone@example.com",
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+
+        assert_eq!(
+            value["ReplyToAddresses"],
+            serde_json::json!(["sender@example.com"])
+        );
+        assert_eq!(
+            value["Content"]["Simple"]["Body"],
+            serde_json::json!({"Text": {"Data": "line one\nBcc: someone@example.com", "Charset": "UTF-8"}})
         );
     }
 

@@ -386,17 +386,17 @@ review, and links to Admin → Manage account access. At most 10 an hour; the
 (SES) and never delays or fails a sign-up. The rules are in
 [AUTH-POLICY](dev/AUTH-POLICY.md#the-operators-sign-up-notice).
 
-Not yet built (#5466): the IdP also emails the operator each piece of
-feedback sent with `cw feedback`. Orchestration, which stores the feedback,
-holds no mail credential: in the same transaction it writes an outbox row
-naming only the feedback, and the IdP sends it, as it sends organization
-invitations, with up to three attempts. The IdP only reads `feedback` and
-sends and records `feedback_notices`; it writes no feedback. The email is
-plain text, from the fixed sender, with the subject `Codewire feedback
-<id>`. Its body names the sender, with "(verified)" or "(not verified)"
-beside the address, or "Anonymous", their organization, what `cw` attached
-and the time, then the message as sent, without control characters other
-than line breaks and tabs and without Unicode direction overrides and
+The IdP also emails the operator each piece of feedback sent with `cw
+feedback` (#5466). Orchestration, which stores the feedback, holds no mail
+credential: in the same transaction it writes an outbox row naming only the
+feedback, and the IdP sends it, as it sends organization invitations, with
+up to three attempts. The IdP only reads `feedback` and sends and records
+`feedback_notices`; it writes no feedback. The email is plain text, from the
+fixed sender, with the subject `Codewire feedback <id>`. Its body names the
+sender, with "(verified)" or "(not verified)" beside the address, or
+"Anonymous", their organization, what `cw` attached and the time, then the
+message as sent, without control characters other than line breaks and tabs
+and without Unicode line and paragraph separators, direction overrides and
 isolates, never longer than feedback's stored maximum (10 KB), and links to
 Admin → Feedback on the configured `FRONTEND_URL`. Reply-To is the signed-in
 account's verified email address, only when it is one plain address;
@@ -413,7 +413,7 @@ message, a name or an address, and never fails the submit.
 
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
-| `CODEWIRE_OPERATOR_EMAIL` | No | Where the IdP sends the operator's sign-up notice. Unset or empty sends none, the default. Any value that is not one email address stops the IdP at startup. | `operator@example.com` |
+| `CODEWIRE_OPERATOR_EMAIL` | No | Where the IdP sends the operator's sign-up notices and feedback emails. Unset or empty sends neither, the default. Any value that is not one email address stops the IdP at startup. | `operator@example.com` |
 
 ## Browser origins
 

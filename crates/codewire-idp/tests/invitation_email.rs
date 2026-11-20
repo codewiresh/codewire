@@ -20,6 +20,11 @@ use codewire_idp::invitation_email::{
 };
 use sqlx::PgPool;
 
+// The operator's feedback email (#5466) is idp's other outbox; it shares
+// this binary's disposable databases.
+#[path = "invitation_email/feedback_notice.rs"]
+mod feedback_notice;
+
 /// The configured frontend URL; the email's button goes to its `/login`.
 const FRONTEND: &str = "https://app.codewire.test";
 

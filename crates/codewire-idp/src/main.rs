@@ -255,6 +255,16 @@ async fn serve() -> anyhow::Result<()> {
         )),
         &idp_cfg.frontend_url,
     );
+    // The operator's email for each piece of feedback orchestration stored
+    // (#5466).
+    codewire_idp::feedback_notice::spawn(
+        pool.clone(),
+        std::sync::Arc::new(codewire_idp::feedback_notice::EmailFeedbackMailer(
+            email.clone(),
+        )),
+        idp_cfg.operator_email.clone(),
+        &idp_cfg.frontend_url,
+    );
     let two_factor_replacement = codewire_idp::two_factor::replacement_router(
         pool.clone(),
         cfg.session_secret.clone(),

@@ -28,6 +28,7 @@ pub mod device_authorizations;
 pub mod device_verification;
 pub mod email_password;
 mod expired_rows;
+pub mod feedback_notice;
 pub mod invitation_email;
 pub mod invitation_link;
 pub mod jwk;

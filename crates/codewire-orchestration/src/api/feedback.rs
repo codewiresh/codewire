@@ -1,5 +1,6 @@
 //! Feedback sent with `cw feedback` (#4061): validating and storing it under
-//! its abuse limits, and the platform-admin list.
+//! its abuse limits, and the platform-admin list. Each stored piece also
+//! queues the operator's email (#5466), which idp sends.
 //!
 //! Anyone may send feedback. A signed-in sender's row records their user and,
 //! when they name one they belong to, their current organization; an
@@ -321,9 +322,18 @@ pub async fn submit_feedback(
     .fetch_one(&mut *transaction)
     .await
     .map_err(storage_error)?;
+    let id: String = row.try_get("id").map_err(storage_error)?;
+    // The operator's email (#5466) is sent by idp, which holds the mail
+    // credential: this row names only the feedback, and idp reads the rest
+    // when it sends.
+    sqlx::query("INSERT INTO feedback_notices (feedback_id) VALUES ($1)")
+        .bind(&id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
     transaction.commit().await.map_err(storage_error)?;
     Ok(StoredFeedback {
-        id: row.try_get("id").map_err(storage_error)?,
+        id,
         created_at: row.try_get("created_at").map_err(storage_error)?,
         signed_in: user_id.is_some(),
     })

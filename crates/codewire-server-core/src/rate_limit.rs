@@ -185,6 +185,17 @@ pub const OPERATOR_NOTICE: Limit = Limit {
     per_user: false,
 };
 
+/// The operator's feedback emails (#5466), counted like
+/// [`OPERATOR_NOTICE`] but apart from it, so sign-ups never use up
+/// feedback's emails or the other way round.
+pub const OPERATOR_FEEDBACK_NOTICE: Limit = Limit {
+    name: "operator_feedback_notice",
+    key_prefix: "operator_feedback_notice",
+    window_secs: 3_600,
+    default_max: 10,
+    per_user: false,
+};
+
 /// Every named limit, in the order an admin sees them.
 pub const LIMITS: &[Limit] = &[
     SANDBOX_CREATE,

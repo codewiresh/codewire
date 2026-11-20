@@ -173,6 +173,19 @@ async fn db_a_row_records_the_sender_and_only_what_was_attached() -> anyhow::Res
             .fetch_one(&db.pool)
             .await?;
         anyhow::ensure!(total == 3, "total {total}");
+        // Each stored piece, and nothing refused, queues one operator email
+        // (#5466), naming only the feedback.
+        let unqueued: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM feedback f \
+              WHERE (SELECT count(*) FROM feedback_notices n \
+                      WHERE n.feedback_id = f.id AND n.status = 'pending') <> 1",
+        )
+        .fetch_one(&db.pool)
+        .await?;
+        let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM feedback_notices")
+            .fetch_one(&db.pool)
+            .await?;
+        anyhow::ensure!(unqueued == 0 && queued == 3, "queued {queued}");
         Ok(())
     }
     .await;
