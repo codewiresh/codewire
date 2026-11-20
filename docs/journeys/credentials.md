@@ -165,6 +165,27 @@ only what differs.
   (#5443). Not yet observed. A second connection under another name is
   refused, saying "GitHub is already connected as NAME" and how to
   reconnect it.
+- **No App installation:** with the Codewire GitHub App installed on no
+  account the approving GitHub login can use, both placements stop after the
+  approval, save nothing, and say the same sentence (in the cloud after the
+  `enroll platform OAuth credential:` label, until #4631):
+
+  ```text
+  the Codewire GitHub App is not installed on any account this GitHub login can use; install it, choose the accounts and repositories, then connect again: https://github.com/apps/codewire-sh/installations/new
+  ```
+
+  The link is the install page of the App the connection uses: locally the
+  Codewire App's, which `cw` carries; in the cloud the one the server sends
+  for its own App, which on Dev and Production is the Codewire App, so the
+  line is the same. A server that sends no link, or one that isn't exactly a
+  GitHub App install page, gets the sentence without the `: LINK` ending,
+  never another App's link. After installing it there, the same
+  `connect github` succeeds. In the cloud it never says "acknowledgement is
+  unknown" for this (#5479). A
+  Codewire server whose GitHub App settings are missing refuses before any
+  code with "GitHub App authorization is not configured on this Codewire
+  server; no platform credential was changed; ask an administrator to finish
+  the GitHub App setup" (#5303). Not yet observed.
 - **Ctrl-C:** pressed after approving the device code and before the save,
   it saves nothing and says so ("canceled; no credential was changed").
   Not yet observed.

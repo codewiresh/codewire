@@ -235,10 +235,14 @@ async fn a_github_failure_after_the_approval_is_marked_issued() {
         error.downcast_ref::<IssuedButNotSaved>().is_some(),
         "{error:#}"
     );
-    assert!(
-        error
-            .to_string()
-            .starts_with("the Codewire GitHub App is not installed on any account"),
+    // The cloud client says this same sentence for the service's
+    // CREDENTIAL_GITHUB_INSTALLATION_REQUIRED, with the server's own App's
+    // link; locally it is always the Codewire App's.
+    assert_eq!(
+        error.to_string(),
+        "the Codewire GitHub App is not installed on any account this GitHub login can use; \
+         install it, choose the accounts and repositories, then connect again: \
+         https://github.com/apps/codewire-sh/installations/new",
         "{error:#}"
     );
     // A cancel before the approval issued nothing.
@@ -366,4 +370,47 @@ fn a_blocking_lookup_is_unavailable_at_the_bound_and_does_not_hold_the_exit() {
         exiting.elapsed()
     );
     assert!(openai.0.lock().unwrap().is_empty());
+}
+
+/// The client accepts a server's install link only for a slug the broker
+/// would accept as a configured App's (`docs/dev/SECRETS-AND-CREDENTIALS.md`):
+/// the two rules live in crates that can't share code, so this pins them.
+#[test]
+fn the_client_install_link_rule_is_the_broker_app_slug_rule() {
+    use codewire_credential_broker::provider_oauth::github::GitHubDeviceLoginConfig;
+    let longest = "a".repeat(100);
+    let overlong = "a".repeat(101);
+    for slug in [
+        "codewire-sh",
+        "codewire-synthetic",
+        "a",
+        "0",
+        "a-b-c",
+        "a--b",
+        longest.as_str(),
+        overlong.as_str(),
+        "",
+        "-a",
+        "a-",
+        "-",
+        "Codewire",
+        "code_wire",
+        "code.wire",
+        "a/b",
+        "a b",
+        "a\n",
+        "a\u{1b}[31m",
+        "caf\u{e9}",
+        "a%2Fb",
+        "a?b",
+        "a#b",
+    ] {
+        let broker = GitHubDeviceLoginConfig::new("Iv1.synthetic".into(), slug.into());
+        let url = format!("https://github.com/apps/{slug}/installations/new");
+        let client = codewire_client::GithubAppInstallUrl::parse(&url);
+        assert_eq!(broker.is_ok(), client.is_some(), "{slug:?}");
+        if let Ok(config) = broker {
+            assert_eq!(client.unwrap().as_str(), config.install_url());
+        }
+    }
 }

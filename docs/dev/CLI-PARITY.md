@@ -10,7 +10,7 @@ A gap is fixed with one implementation that both placements call, where only
 the store differs: the local credential authority (the operating system's
 protected store) or the platform credential service. Never a second copy.
 
-## Where it stands (2026-11-18)
+## Where it stands (2026-11-19)
 
 The tables below are the audit as it ran on 2026-11-15. Since then:
 
@@ -24,7 +24,11 @@ The tables below are the audit as it ran on 2026-11-15. Since then:
   - C6: `delete` and `revoke` revoke first and say what the provider still
     holds (#4908, #4966, #4991), and the dashboard's GitHub disconnect does
     the same (#5252);
-  - C8, a local default profile (#4924).
+  - C8, a local default profile (#4924);
+  - `connect github` with the Codewire GitHub App installed on no account
+    the approving login can use says so, with the install link of the App
+    the connection uses and to connect again, in the same sentence in both
+    placements (#5479; the cloud not yet observed).
 - **Open:**
   - C6's local placement asking OpenAI itself (#4982);
   - C7, the cloud's profile revisions;
@@ -233,6 +237,8 @@ Terms used below:
 | Enrol, protocol | The CLI runs `provider_oauth::github` | The credential service runs `provider_oauth::github` | same |
 | Enrol, screens | One plain line | Link screen, browser, success screen | gap: C2, plus #4850 for the screen |
 | Second connection | Reconnects the existing one in place | Refused (one per user); the client shows "acknowledgement is unknown" | gap: C3 |
+| No App installation | After the approval: "the Codewire GitHub App is not installed on any account this GitHub login can use; install it, choose the accounts and repositories, then connect again: https://github.com/apps/codewire-sh/installations/new". Nothing saved | The service refuses the approved login (`CREDENTIAL_GITHUB_INSTALLATION_REQUIRED`, with its own App's install link as `install_url`) and the client says the same sentence with that link, or without a link when none or a malformed one arrives, after the `enroll platform OAuth credential:` label every cloud GitHub refusal carries until #4631 | same (#5479); before it the cloud said "acknowledgement is unknown" |
+| App not set up on the server | Doesn't arise: `cw` carries the App's public identity | Refused before any code: "GitHub App authorization is not configured on this Codewire server; no platform credential was changed; ask an administrator to finish the GitHub App setup" (`CREDENTIAL_GITHUB_APP_NOT_CONFIGURED`) | intended: only the cloud depends on server settings; the server's own check is #5303 |
 | Store | Local authority | Platform credential service | intended: two stores |
 | Profile, default | In every profile; `set github` refused; no default profile | The same; has a default profile | the GitHub rule is the same; the default is gap C8 |
 | Delivery | Broker GitHub route: git over HTTPS and `gh` | The same route | same |

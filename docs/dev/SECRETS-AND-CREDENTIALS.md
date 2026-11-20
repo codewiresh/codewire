@@ -1068,6 +1068,23 @@ the dashboard's explicit origin. The dashboard separately links to the App's
 installation/repository-access screen. If the authorized account has no matching
 installation, no credential is saved: install the App for the account or
 organization, then return to Codewire and start a fresh authorization attempt.
+`cw credentials --cloud connect github` meets the same check after the device
+approval, as `CREDENTIAL_GITHUB_INSTALLATION_REQUIRED`. That refusal's
+ErrorInfo carries the server's own install link as metadata `install_url`:
+exactly `https://github.com/apps/SLUG/installations/new`, built from the
+service's `CREDENTIAL_GITHUB_APP_SLUG`, which must be lowercase letters,
+digits and inner hyphens, at most 100 characters, or the service refuses to
+start. Every reader of `install_url` accepts only that exact form (`https`,
+host `github.com`, no port, user, query or fragment, and a slug under the same
+rule). Today the only reader is the CLI; the dashboard builds its link from
+its own slug and ignores the metadata. The CLI prints the local path's
+sentence with it: the App isn't installed on any account this
+GitHub login can use; install it, choose the accounts and repositories, then
+connect again. Without the metadata, or with any other value, it prints that
+sentence without a link and never the value it received. It never substitutes
+the Codewire App's link, because a self-hosted server's App is its own
+(#5479). The local `cw` carries the Codewire App's public identity, so its
+sentence always ends with that App's link.
 A **Setup URL** is optional. If one is set, it must name the credentials page
 of the production dashboard origin of whichever deployment owns that App
 (`<public-origin>/settings/credentials/`), never another environment's:

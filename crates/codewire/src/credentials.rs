@@ -279,6 +279,53 @@ impl CodewireClient {
     }
 }
 
+/// What a GitHub connect says when the GitHub App is installed on no account
+/// the approving GitHub login can use: the service's
+/// `CREDENTIAL_GITHUB_INSTALLATION_REQUIRED`, and the local CLI's own check.
+/// One sentence for both placements (`docs/journeys/credentials.md`,
+/// `cred-github`), ending with the install page of the App the connection
+/// uses when there is one to name.
+pub fn github_app_not_installed(install_url: Option<&GithubAppInstallUrl>) -> String {
+    const SENTENCE: &str = "the Codewire GitHub App is not installed on any account this GitHub login can use; \
+         install it, choose the accounts and repositories, then connect again";
+    match install_url {
+        Some(install_url) => format!("{SENTENCE}: {}", install_url.as_str()),
+        None => SENTENCE.to_owned(),
+    }
+}
+
+/// GitHub's page for installing one GitHub App, accepted only as exactly
+/// `https://github.com/apps/SLUG/installations/new`. A server names its own
+/// App with it, so nothing else it sends may reach a terminal as a link
+/// (`docs/dev/SECRETS-AND-CREDENTIALS.md`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GithubAppInstallUrl(String);
+
+impl GithubAppInstallUrl {
+    pub fn parse(value: &str) -> Option<Self> {
+        let slug = value
+            .strip_prefix("https://github.com/apps/")?
+            .strip_suffix("/installations/new")?;
+        valid_github_app_slug(slug).then(|| Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The credential broker's App slug rule, which the service enforces on its
+/// configured slug; a `codewire-cli` test pins the two together.
+fn valid_github_app_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 100
+        && !slug.starts_with('-')
+        && !slug.ends_with('-')
+        && slug
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
 /// A committed GitHub connection, and the GitHub App installations that have
 /// not yet granted the permissions Codewire needs. Those are reported once,
 /// at connect time, and never stored.
@@ -312,35 +359,50 @@ fn github_enrollment_unknown() -> ClientError {
     )
 }
 
-/// Before any challenge the service refuses a second GitHub connection
-/// definitely, having asked GitHub nothing. Every other early close stays
-/// uncertain.
+/// Before any challenge the service refuses a second GitHub connection, a
+/// server without its GitHub App settings, or a new name that starts with a
+/// provider id and `/` (#4928), definitely, having asked GitHub nothing. Every
+/// other early close stays uncertain.
 fn github_enrollment_refusal(error: connectrpc::ConnectError) -> ClientError {
     let error = ClientError::from(error);
-    let already_connected = error.code() == ErrorCode::AlreadyExists
-        && error.error_info().is_some_and(|info| {
-            info.domain() == "codewire.sh" && info.reason() == "CREDENTIAL_GITHUB_ALREADY_CONNECTED"
-        });
-    if already_connected {
-        ClientError::new(
-            ErrorCode::AlreadyExists,
-            "GitHub is already connected for this account; no platform credential was changed",
-        )
-    } else {
-        github_enrollment_unknown()
+    match (error.code(), codewire_reason(&error)) {
+        (ErrorCode::AlreadyExists, Some("CREDENTIAL_GITHUB_ALREADY_CONNECTED")) => {
+            ClientError::new(
+                ErrorCode::AlreadyExists,
+                "GitHub is already connected for this account; no platform credential was changed",
+            )
+        }
+        (ErrorCode::FailedPrecondition, Some("CREDENTIAL_GITHUB_APP_NOT_CONFIGURED")) => {
+            ClientError::new(
+                ErrorCode::FailedPrecondition,
+                "GitHub App authorization is not configured on this Codewire server; no platform credential was changed; ask an administrator to finish the GitHub App setup",
+            )
+        }
+        (ErrorCode::InvalidArgument, Some("CREDENTIAL_NAME_RESERVES_PROVIDER")) => {
+            ClientError::new(ErrorCode::InvalidArgument, GITHUB_NAME_RESERVES_PROVIDER)
+        }
+        _ => github_enrollment_unknown(),
     }
+}
+
+/// A new name that `PROVIDER/NAME` would read as another credential.
+const GITHUB_NAME_RESERVES_PROVIDER: &str = "a credential's name can't start with anthropic/, openai/, github/ or ssh/, which reads as a provider; choose another name; no platform credential was changed";
+
+fn codewire_reason(error: &ClientError) -> Option<&str> {
+    error
+        .error_info()
+        .filter(|info| info.domain() == "codewire.sh")
+        .map(ErrorInfo::reason)
 }
 
 /// A known terminal reason after a verified challenge is safe to render using
 /// our own fixed text. Every other close remains an uncertain publication: no
-/// peer-supplied message or provider diagnostic crosses this boundary.
+/// peer-supplied message or provider diagnostic crosses this boundary. The one
+/// peer-supplied value that does is the installation refusal's `install_url`,
+/// and only in the exact form `GithubAppInstallUrl::parse` accepts.
 fn github_enrollment_terminal_error(error: connectrpc::ConnectError) -> ClientError {
     let error = ClientError::from(error);
-    let reason = error
-        .error_info()
-        .filter(|info| info.domain() == "codewire.sh")
-        .map(ErrorInfo::reason);
-    match (error.code(), reason) {
+    match (error.code(), codewire_reason(&error)) {
         (ErrorCode::FailedPrecondition, Some("CREDENTIAL_ENROLLMENT_FAILED")) => ClientError::new(
             ErrorCode::FailedPrecondition,
             "isolated GitHub enrollment did not complete; no platform credential was stored",
@@ -355,6 +417,16 @@ fn github_enrollment_terminal_error(error: connectrpc::ConnectError) -> ClientEr
             ClientError::new(
                 ErrorCode::FailedPrecondition,
                 "GitHub enrollment did not reach platform publication; no platform credential was stored",
+            )
+        }
+        (ErrorCode::FailedPrecondition, Some("CREDENTIAL_GITHUB_INSTALLATION_REQUIRED")) => {
+            let install_url = error
+                .error_info()
+                .and_then(|info| info.metadata().get("install_url"))
+                .and_then(|value| GithubAppInstallUrl::parse(value));
+            ClientError::new(
+                ErrorCode::FailedPrecondition,
+                github_app_not_installed(install_url.as_ref()),
             )
         }
         _ => github_enrollment_unknown(),
@@ -629,14 +701,24 @@ mod tests {
     }
 
     fn github_terminal_error(code: &str, reason: &str, domain: &str) -> Vec<u8> {
-        let detail = connectrpc::ErrorDetail::from_message(
-            "google.rpc.ErrorInfo",
-            &GoogleErrorInfo {
-                reason: reason.into(),
-                domain: domain.into(),
-                ..Default::default()
-            },
-        );
+        github_terminal_error_with(code, reason, domain, &[])
+    }
+
+    fn github_terminal_error_with(
+        code: &str,
+        reason: &str,
+        domain: &str,
+        metadata: &[(&str, &str)],
+    ) -> Vec<u8> {
+        let mut info = GoogleErrorInfo {
+            reason: reason.into(),
+            domain: domain.into(),
+            ..Default::default()
+        };
+        for (key, value) in metadata {
+            info.metadata.insert((*key).into(), (*value).into());
+        }
+        let detail = connectrpc::ErrorDetail::from_message("google.rpc.ErrorInfo", &info);
         serde_json::to_vec(&serde_json::json!({
             "error": {
                 "code": code,
@@ -808,7 +890,21 @@ mod tests {
             ),
             (
                 "failed_precondition",
+                "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED",
+                "codewire.sh",
+                ErrorCode::FailedPrecondition,
+                NOT_INSTALLED_WITHOUT_LINK,
+            ),
+            (
+                "failed_precondition",
                 "CREDENTIAL_ENROLLMENT_FAILED",
+                "untrusted.invalid",
+                ErrorCode::Unknown,
+                "GitHub enrollment acknowledgement is unknown; reconcile the credential by name before retrying",
+            ),
+            (
+                "failed_precondition",
+                "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED",
                 "untrusted.invalid",
                 ErrorCode::Unknown,
                 "GitHub enrollment acknowledgement is unknown; reconcile the credential by name before retrying",
@@ -846,6 +942,154 @@ mod tests {
             assert!(!error.message().contains("private provider"));
             assert!(error.reason().is_none());
             server.verify().await;
+        }
+    }
+
+    const NOT_INSTALLED_WITHOUT_LINK: &str = "the Codewire GitHub App is not installed on any account this GitHub login can use; install it, choose the accounts and repositories, then connect again";
+
+    /// The installation refusal after the challenge, carrying `metadata`.
+    async fn github_installation_refusal(metadata: &[(&str, &str)]) -> ClientError {
+        let server = MockServer::start().await;
+        let mut body = frame(github_challenge("https://github.com/login/device"));
+        let terminal = github_terminal_error_with(
+            "failed_precondition",
+            "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED",
+            "codewire.sh",
+            metadata,
+        );
+        stream_at_terminal(
+            &server,
+            "/codewire.v1.CredentialMutationService/EnrollGithub",
+            &mut body,
+            &terminal,
+        )
+        .await;
+        let error = client(&server)
+            .enroll_github(
+                EnrollGithubRequest {
+                    name: "work".into(),
+                    ..Default::default()
+                },
+                |_| true,
+            )
+            .await
+            .unwrap_err();
+        server.verify().await;
+        assert_eq!(error.code(), ErrorCode::FailedPrecondition);
+        assert!(error.reason().is_none());
+        error
+    }
+
+    #[tokio::test]
+    async fn github_installation_refusal_links_the_servers_own_app() {
+        let link = "https://github.com/apps/codewire-synthetic/installations/new";
+        let error = github_installation_refusal(&[("install_url", link)]).await;
+        assert_eq!(
+            error.message(),
+            format!("{NOT_INSTALLED_WITHOUT_LINK}: {link}")
+        );
+        // The server names no App: the sentence, and never Codewire's link.
+        let error = github_installation_refusal(&[]).await;
+        assert_eq!(error.message(), NOT_INSTALLED_WITHOUT_LINK);
+    }
+
+    #[tokio::test]
+    async fn github_installation_refusal_never_shows_a_malformed_link() {
+        let overlong = format!(
+            "https://github.com/apps/{}/installations/new",
+            "a".repeat(101)
+        );
+        for (key, value) in [
+            (
+                "install_url",
+                "http://github.com/apps/codewire-sh/installations/new",
+            ),
+            (
+                "install_url",
+                "https://evil.example/apps/codewire-sh/installations/new",
+            ),
+            (
+                "install_url",
+                "https://github.com.evil.example/apps/codewire-sh/installations/new",
+            ),
+            (
+                "install_url",
+                "https://github.com:443/apps/codewire-sh/installations/new",
+            ),
+            (
+                "install_url",
+                "https://user@github.com/apps/codewire-sh/installations/new",
+            ),
+            (
+                "install_url",
+                "https://github.com/apps/codewire-sh/installations/new?next=x",
+            ),
+            (
+                "install_url",
+                "https://github.com/apps/codewire-sh/installations/new#x",
+            ),
+            (
+                "install_url",
+                "https://github.com/apps/codewire-sh/installations/new/",
+            ),
+            (
+                "install_url",
+                "https://github.com/apps/codewire-sh/extra/installations/new",
+            ),
+            (
+                "install_url",
+                "https://github.com/apps/codewire-sh/installations/select_target",
+            ),
+            (
+                "install_url",
+                "HTTPS://GITHUB.COM/apps/codewire-sh/installations/new",
+            ),
+            (
+                "install_url",
+                "https://github.com/apps/Codewire/installations/new",
+            ),
+            (
+                "install_url",
+                "https://github.com/apps/code_wire/installations/new",
+            ),
+            (
+                "install_url",
+                "https://github.com/apps/-codewire/installations/new",
+            ),
+            ("install_url", "https://github.com/apps//installations/new"),
+            (
+                "install_url",
+                "https://github.com/apps/code%2Fwire/installations/new",
+            ),
+            (
+                "install_url",
+                "https://github.com/apps/codewire-sh/installations/new\n",
+            ),
+            (
+                "install_url",
+                " https://github.com/apps/codewire-sh/installations/new",
+            ),
+            (
+                "install_url",
+                "https://github.com/apps/code\u{1b}[31mwire/installations/new",
+            ),
+            (
+                "install_url",
+                "\u{1b}]8;;https://evil.example\u{7}https://github.com/apps/codewire-sh/installations/new",
+            ),
+            ("install_url", overlong.as_str()),
+            ("install_url", ""),
+            (
+                "url",
+                "https://github.com/apps/codewire-sh/installations/new",
+            ),
+        ] {
+            let error = github_installation_refusal(&[(key, value)]).await;
+            assert_eq!(
+                error.message(),
+                NOT_INSTALLED_WITHOUT_LINK,
+                "{key}={value:?}"
+            );
         }
     }
 
@@ -910,6 +1154,173 @@ mod tests {
                 );
             }
             server.verify().await;
+        }
+    }
+
+    /// The closed reasons the credential service's mutation wire sends, each
+    /// with its Connect code, read from the service's own `error` function so
+    /// that a reason added there can't reach this client unclassified.
+    fn service_mutation_reasons() -> Vec<(&'static str, String)> {
+        const WIRE: &str = include_str!("../../codewire-credential-service/src/mutation/wire.rs");
+        let between = |start: &str, end: &str| -> &'static str {
+            let (_, rest) = WIRE.split_once(start).expect("the service's match moved");
+            rest.split_once(end).expect("the service's match moved").0
+        };
+        let codes = between("let (code, message) = match error {", "\n    };");
+        let reasons = between("let reason = match error {", "_ => \"\",");
+        let pairs: Vec<_> = reasons
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("Error::"))
+            .map(|arm| {
+                let (variant, reason) = arm.split_once(" => ").expect("one arm per line");
+                let (_, after) = codes
+                    .split_once(&format!("Error::{variant} =>"))
+                    .unwrap_or_else(|| panic!("{variant} has no code"));
+                let (_, code) = after.split_once("ConnectCode::").expect("a Connect code");
+                let code: String = code
+                    .chars()
+                    .take_while(char::is_ascii_alphanumeric)
+                    .collect();
+                (reason.trim_end_matches(',').trim_matches('"'), code)
+            })
+            .collect();
+        assert!(pairs.len() >= 10, "read {pairs:?}");
+        pairs
+    }
+
+    /// `FailedPrecondition` as the Connect wire spells it.
+    fn wire_code(code: &str) -> String {
+        code.chars()
+            .enumerate()
+            .fold(String::new(), |mut wire, (index, c)| {
+                if c.is_ascii_uppercase() && index > 0 {
+                    wire.push('_');
+                }
+                wire.push(c.to_ascii_lowercase());
+                wire
+            })
+    }
+
+    #[tokio::test]
+    async fn github_enrollment_classifies_every_reason_the_service_sends() {
+        const UNKNOWN: Option<(ErrorCode, &str)> = None;
+        // What the person reads for each reason, before the device challenge
+        // and after it. UNKNOWN is a decision, never a default: the service
+        // can't tell (uncertain, cleanup), the person reconciles first
+        // (revision), or EnrollGithub never sends it (Claude).
+        let expected = [
+            ("CREDENTIAL_REVISION_CHANGED", UNKNOWN, UNKNOWN),
+            (
+                "CREDENTIAL_ENROLLMENT_FAILED",
+                UNKNOWN,
+                Some((
+                    ErrorCode::FailedPrecondition,
+                    "isolated GitHub enrollment did not complete; no platform credential was stored",
+                )),
+            ),
+            (
+                "CREDENTIAL_ENROLLMENT_UNSUPPORTED",
+                UNKNOWN,
+                Some((
+                    ErrorCode::FailedPrecondition,
+                    "isolated GitHub enrollment output is unsupported; no platform credential was stored",
+                )),
+            ),
+            (
+                "CREDENTIAL_ENROLLMENT_NOT_PUBLISHED",
+                UNKNOWN,
+                Some((
+                    ErrorCode::FailedPrecondition,
+                    "GitHub enrollment did not reach platform publication; no platform credential was stored",
+                )),
+            ),
+            (
+                "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED",
+                UNKNOWN,
+                Some((ErrorCode::FailedPrecondition, NOT_INSTALLED_WITHOUT_LINK)),
+            ),
+            (
+                "CREDENTIAL_GITHUB_ALREADY_CONNECTED",
+                Some((
+                    ErrorCode::AlreadyExists,
+                    "GitHub is already connected for this account; no platform credential was changed",
+                )),
+                UNKNOWN,
+            ),
+            (
+                "CREDENTIAL_GITHUB_APP_NOT_CONFIGURED",
+                Some((
+                    ErrorCode::FailedPrecondition,
+                    "GitHub App authorization is not configured on this Codewire server; no platform credential was changed; ask an administrator to finish the GitHub App setup",
+                )),
+                UNKNOWN,
+            ),
+            ("CREDENTIAL_ENROLLMENT_CLEANUP_FAILED", UNKNOWN, UNKNOWN),
+            ("CREDENTIAL_MUTATION_UNCERTAIN", UNKNOWN, UNKNOWN),
+            ("CREDENTIAL_CLAUDE_SIGN_IN_CODE_INVALID", UNKNOWN, UNKNOWN),
+            ("CREDENTIAL_CLAUDE_SIGN_IN_EXPIRED", UNKNOWN, UNKNOWN),
+            // After the challenge the service names a new credential after the
+            // GitHub login, which has no `/`, so only the requested name can
+            // reserve a provider.
+            (
+                "CREDENTIAL_NAME_RESERVES_PROVIDER",
+                Some((ErrorCode::InvalidArgument, GITHUB_NAME_RESERVES_PROVIDER)),
+                UNKNOWN,
+            ),
+        ];
+        let sent = service_mutation_reasons();
+        assert_eq!(
+            sent.iter()
+                .map(|(reason, _)| *reason)
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected
+                .iter()
+                .map(|(reason, ..)| *reason)
+                .collect::<std::collections::BTreeSet<_>>(),
+            "classify every reason the credential service sends, before and after the challenge"
+        );
+        for (reason, code) in sent {
+            let (_, before, after) = expected
+                .iter()
+                .find(|(expected, ..)| *expected == reason)
+                .unwrap();
+            for (challenged, rendered) in [(false, before), (true, after)] {
+                let server = MockServer::start().await;
+                let mut body = if challenged {
+                    frame(github_challenge("https://github.com/login/device"))
+                } else {
+                    Vec::new()
+                };
+                let terminal = github_terminal_error(&wire_code(&code), reason, "codewire.sh");
+                stream_at_terminal(
+                    &server,
+                    "/codewire.v1.CredentialMutationService/EnrollGithub",
+                    &mut body,
+                    &terminal,
+                )
+                .await;
+                let error = client(&server)
+                    .enroll_github(
+                        EnrollGithubRequest {
+                            name: "work".into(),
+                            ..Default::default()
+                        },
+                        |_| true,
+                    )
+                    .await
+                    .unwrap_err();
+                let (expected_code, expected_message) = rendered.unwrap_or((
+                    ErrorCode::Unknown,
+                    "GitHub enrollment acknowledgement is unknown; reconcile the credential by name before retrying",
+                ));
+                assert_eq!(
+                    (error.code(), error.message()),
+                    (expected_code, expected_message),
+                    "{reason} ({code}), challenged: {challenged}"
+                );
+                assert!(error.reason().is_none());
+                server.verify().await;
+            }
         }
     }
 

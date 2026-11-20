@@ -15,12 +15,33 @@ use connectrpc::{RequestContext, ServiceRequest, ServiceResult, ServiceStream};
 
 use super::{CredentialMutationOwner, Error};
 
+/// The ErrorInfo metadata key of the configured GitHub App's install page on
+/// `CREDENTIAL_GITHUB_INSTALLATION_REQUIRED` (`docs/dev/SECRETS-AND-CREDENTIALS.md`).
+const INSTALL_URL: &str = "install_url";
+
 pub(super) fn router(owner: Arc<CredentialMutationOwner>) -> connectrpc::Router {
-    connectrpc::Router::new().add_service(Arc::new(Service { owner }))
+    connectrpc::Router::new().add_service(Arc::new(Service::new(owner)))
 }
 
 struct Service {
     owner: Arc<CredentialMutationOwner>,
+    github_install_url: Option<Arc<str>>,
+}
+
+impl Service {
+    fn new(owner: Arc<CredentialMutationOwner>) -> Self {
+        Self {
+            github_install_url: owner.github_app_install_url().map(Arc::from),
+            owner,
+        }
+    }
+
+    /// [`error`] for the GitHub calls, which name the configured App's
+    /// install page when it isn't installed.
+    fn github_error(&self) -> impl Fn(Error) -> connectrpc::ConnectError + Send + 'static {
+        let install_url = self.github_install_url.clone();
+        move |failure| error_with_install_url(failure, install_url.as_deref())
+    }
 }
 
 fn authority(
@@ -93,6 +114,7 @@ impl CredentialMutationService for Service {
         request: ServiceRequest<'_, proto::EnrollGithubRequest>,
     ) -> ServiceResult<ServiceStream<proto::EnrollGithubResponse>> {
         let request = request.to_owned_message();
+        let github_error = self.github_error();
         let events = self
             .owner
             .enroll_github(
@@ -101,11 +123,14 @@ impl CredentialMutationService for Service {
                 request.credential_id,
                 request.expected_revocation_generation,
             )
-            .map_err(error)?;
-        let stream = futures::stream::unfold(events, |mut events| async {
-            let message = events.receiver.recv().await?;
-            Some((message.map_err(error), events))
-        });
+            .map_err(&github_error)?;
+        let stream = futures::stream::unfold(
+            (events, github_error),
+            |(mut events, github_error)| async move {
+                let message = events.receiver.recv().await?;
+                Some((message.map_err(&github_error), (events, github_error)))
+            },
+        );
         connectrpc::Response::stream_ok(stream)
     }
 
@@ -126,7 +151,7 @@ impl CredentialMutationService for Service {
                 request.expected_revocation_generation,
             )
             .await
-            .map_err(error)?;
+            .map_err(self.github_error())?;
         connectrpc::Response::ok(proto::CompleteGithubAppAuthorizationResponse {
             credential: Some(credential(metadata)).into(),
             pending_permissions,
@@ -385,6 +410,12 @@ pub(super) fn credential(metadata: CredentialMetadata) -> proto::Credential {
 }
 
 fn error(error: Error) -> connectrpc::ConnectError {
+    error_with_install_url(error, None)
+}
+
+/// `install_url`, built by the service from its validated App slug, rides
+/// only on `CREDENTIAL_GITHUB_INSTALLATION_REQUIRED`.
+fn error_with_install_url(error: Error, install_url: Option<&str>) -> connectrpc::ConnectError {
     let (code, message) = match error {
         Error::InvalidInput => (
             ConnectCode::InvalidArgument,
@@ -478,6 +509,12 @@ fn error(error: Error) -> connectrpc::ConnectError {
         Error::NameReservesProvider => "CREDENTIAL_NAME_RESERVES_PROVIDER",
         _ => "",
     };
+    let metadata = match (error, install_url) {
+        (Error::GitHubInstallationRequired, Some(install_url)) => {
+            [(INSTALL_URL.to_owned(), install_url.to_owned())].into()
+        }
+        _ => Default::default(),
+    };
     wire_error(&ConnectError {
         code,
         message: message.to_owned(),
@@ -487,7 +524,7 @@ fn error(error: Error) -> connectrpc::ConnectError {
             vec![ConnectErrorDetail::ErrorInfo(ErrorInfo {
                 reason: reason.into(),
                 domain: ERROR_INFO_DOMAIN.into(),
-                metadata: Default::default(),
+                metadata,
             })]
         },
     })
@@ -563,18 +600,87 @@ mod tests {
                 connectrpc::ErrorCode::InvalidArgument,
             ),
         ] {
-            let wire = error(failure);
-            assert_eq!(wire.code, code);
-            assert_eq!(wire.details.len(), 1);
-            let detail = &wire.details[0];
-            assert!(detail.debug.is_none());
-            let bytes = STANDARD_NO_PAD
-                .decode(detail.value.as_deref().unwrap())
-                .unwrap();
-            let info = codewire_proto::google::rpc::ErrorInfo::decode_from_slice(&bytes).unwrap();
-            assert_eq!(info.domain, ERROR_INFO_DOMAIN);
-            assert_eq!(info.reason, reason);
-            assert!(info.metadata.is_empty());
+            for install_url in [None, Some(SYNTHETIC_INSTALL_URL)] {
+                let wire = error_with_install_url(failure, install_url);
+                assert_eq!(wire.code, code);
+                let info = error_info(&wire);
+                assert_eq!(info.domain, ERROR_INFO_DOMAIN);
+                assert_eq!(info.reason, reason);
+                let expected = match (failure, install_url) {
+                    (Error::GitHubInstallationRequired, Some(url)) => vec![(INSTALL_URL, url)],
+                    _ => Vec::new(),
+                };
+                assert_eq!(metadata(&info), expected, "{reason}");
+            }
+            assert!(error_info(&error(failure)).metadata.is_empty());
         }
+    }
+
+    const SYNTHETIC_INSTALL_URL: &str =
+        "https://github.com/apps/codewire-synthetic/installations/new";
+
+    fn error_info(wire: &connectrpc::ConnectError) -> codewire_proto::google::rpc::ErrorInfo {
+        assert_eq!(wire.details.len(), 1);
+        let detail = &wire.details[0];
+        assert!(detail.debug.is_none());
+        let bytes = STANDARD_NO_PAD
+            .decode(detail.value.as_deref().unwrap())
+            .unwrap();
+        codewire_proto::google::rpc::ErrorInfo::decode_from_slice(&bytes).unwrap()
+    }
+
+    fn metadata(info: &codewire_proto::google::rpc::ErrorInfo) -> Vec<(&str, &str)> {
+        info.metadata
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect()
+    }
+
+    /// The service as `router` builds it, over an owner whose GitHub App is
+    /// `codewire-synthetic`, or that has none. No database is reached.
+    async fn service(github_slug: Option<&str>) -> Service {
+        use codewire_credential_broker::provider_oauth::claude::ClaudeSignIn;
+        use codewire_credential_broker::provider_oauth::codex::CodexDeviceLogin;
+        use codewire_credential_broker::provider_oauth::github::{
+            GitHubDeviceLogin, GitHubDeviceLoginConfig,
+        };
+        use codewire_platform_credentials::PlatformCredentialStore;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://synthetic:synthetic@127.0.0.1:1/synthetic")
+            .unwrap();
+        pool.close().await;
+        let device = Arc::new(crate::mutation::tests::support::DeviceProvider::default());
+        let github_login = github_slug.map(|slug| {
+            GitHubDeviceLogin::new(
+                GitHubDeviceLoginConfig::new("Iv1.synthetic".into(), slug.into()).unwrap(),
+                device.clone(),
+            )
+        });
+        let store = Arc::new(PlatformCredentialStore::new(
+            pool.clone(),
+            Arc::new(codewire_protected_store::secret_envelope::TestKekProvider),
+            codewire_access::builtin_provider_catalog(),
+        ));
+        Service::new(Arc::new(CredentialMutationOwner::new(
+            pool,
+            store,
+            CodexDeviceLogin::new(device.clone()),
+            ClaudeSignIn::new(device),
+            github_login,
+            None,
+        )))
+    }
+
+    #[tokio::test]
+    async fn the_installation_refusal_names_the_configured_app() {
+        let wire = (service(Some("codewire-synthetic")).await.github_error())(
+            Error::GitHubInstallationRequired,
+        );
+        let info = error_info(&wire);
+        assert_eq!(info.reason, "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED");
+        assert_eq!(metadata(&info), [(INSTALL_URL, SYNTHETIC_INSTALL_URL)]);
+        // Without an App there is no page to name.
+        let wire = (service(None).await.github_error())(Error::GitHubInstallationRequired);
+        assert!(error_info(&wire).metadata.is_empty());
     }
 }

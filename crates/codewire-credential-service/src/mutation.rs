@@ -165,6 +165,15 @@ impl CredentialMutationOwner {
         wire::router(self.clone())
     }
 
+    /// The configured GitHub App's install page, which the wire attaches to
+    /// `CREDENTIAL_GITHUB_INSTALLATION_REQUIRED` (#5479).
+    fn github_app_install_url(&self) -> Option<String> {
+        self.shared
+            .github_login
+            .as_ref()
+            .map(GitHubDeviceLogin::install_url)
+    }
+
     /// Stop admission and cancel drivers synchronously. No issued mutation
     /// task is aborted; the caller must still await `shutdown` to prove drain.
     pub fn start_shutdown(&self) {

@@ -219,11 +219,13 @@ async fn github_device_login_with(
     keys.stop_keys();
     login.finish(approved?).await.map_err(|error| {
         let error = match error {
-            DeviceLoginError::InstallationRequired => anyhow::anyhow!(
-                "the Codewire GitHub App is not installed on any account this GitHub login can use; \
-                 install it, choose the accounts and repositories, then connect again: {}",
-                codewire_github_app_install_url()
-            ),
+            DeviceLoginError::InstallationRequired => {
+                let install_url =
+                    codewire_client::GithubAppInstallUrl::parse(&codewire_github_app_install_url());
+                anyhow::anyhow!(codewire_client::github_app_not_installed(
+                    install_url.as_ref()
+                ))
+            }
             error => anyhow::Error::new(error).context("complete the GitHub device login"),
         };
         anyhow::Error::new(IssuedButNotSaved(error))

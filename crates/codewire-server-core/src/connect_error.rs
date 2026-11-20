@@ -115,7 +115,8 @@ pub struct ErrorInfo {
     pub reason: String,
     /// Always [`ERROR_INFO_DOMAIN`].
     pub domain: String,
-    /// `hint` and `request_id` keys, each present only when it exists.
+    /// `hint` and `request_id` keys, each present only when it exists, and
+    /// any key a reason defines for itself (`install_url`).
     pub metadata: BTreeMap<String, String>,
 }
 

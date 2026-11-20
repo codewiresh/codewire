@@ -482,6 +482,23 @@ async fn github_device_login_maps_provider_outcomes_and_bounds_the_flow_by_expir
 }
 
 #[test]
+fn a_github_app_install_url_names_the_configured_app() {
+    let config = GitHubDeviceLoginConfig::new(
+        "Iv1.synthetic-client".to_owned(),
+        "codewire-synthetic".to_owned(),
+    )
+    .unwrap();
+    assert_eq!(
+        config.install_url(),
+        "https://github.com/apps/codewire-synthetic/installations/new"
+    );
+    assert_eq!(
+        super::github::codewire_github_app_install_url(),
+        "https://github.com/apps/codewire-sh/installations/new"
+    );
+}
+
+#[test]
 fn the_built_in_codewire_github_app_identity_is_valid() {
     use super::github::{CODEWIRE_GITHUB_APP_CLIENT_ID, CODEWIRE_GITHUB_APP_SLUG};
     assert!(

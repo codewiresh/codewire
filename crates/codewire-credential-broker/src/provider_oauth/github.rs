@@ -41,7 +41,7 @@ pub(crate) const CODEWIRE_GITHUB_APP_SLUG: &str = "codewire-sh";
 /// GitHub's page for installing the Codewire App on a personal account or an
 /// organization and choosing its repositories.
 pub fn codewire_github_app_install_url() -> String {
-    format!("https://github.com/apps/{CODEWIRE_GITHUB_APP_SLUG}/installations/new")
+    codewire_github_app().install_url()
 }
 
 /// The Codewire GitHub App, for a client that holds no App secret.
@@ -76,6 +76,16 @@ impl GitHubDeviceLoginConfig {
 
     pub(crate) fn app_slug(&self) -> &str {
         &self.app_slug
+    }
+
+    /// GitHub's page for installing this App and choosing its repositories:
+    /// exactly `https://github.com/apps/SLUG/installations/new`, from the
+    /// slug [`Self::new`] validated.
+    pub fn install_url(&self) -> String {
+        format!(
+            "https://github.com/apps/{}/installations/new",
+            self.app_slug
+        )
     }
 }
 
@@ -136,6 +146,11 @@ impl GitHubDeviceLogin {
         upstream: Arc<dyn BrokerUpstreamTransport>,
     ) -> Self {
         Self { config, upstream }
+    }
+
+    /// The install page of the App this login authorizes against.
+    pub fn install_url(&self) -> String {
+        self.config.install_url()
     }
 
     /// Ask GitHub for a user code. Nothing is stored and nothing needs

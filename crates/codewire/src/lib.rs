@@ -196,7 +196,7 @@ pub use config::{
     DEFAULT_UNARY_TIMEOUT, DeploymentCa, DeploymentCaError,
 };
 pub use connectrpc::ErrorCode;
-pub use credentials::GithubEnrollment;
+pub use credentials::{GithubAppInstallUrl, GithubEnrollment, github_app_not_installed};
 pub use error::{ClientError, ErrorInfo, ValidationError};
 pub use feedback::{
     FeedbackClient, FeedbackPlacement, SubmitFeedbackRequest, SubmitFeedbackResponse,
