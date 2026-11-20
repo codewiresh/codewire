@@ -28,6 +28,7 @@ mod placeholder;
 mod platform;
 mod profile_rows;
 mod provider_revocation;
+mod refresh_staging;
 mod repository;
 mod revocation;
 mod service;
@@ -85,6 +86,9 @@ pub use provider_revocation::{
     LocalRevocationSpawnError, REVOCATION_LEASE_PROTOCOL_VERSION, RevocationLeaseChannelError,
     read_leased_material, run_revocation_executor,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use refresh_staging::testing as refresh_staging_testing;
+pub use refresh_staging::{RefreshStagingStore, RefreshStagingWrite};
 pub use repository::{
     GitHubLoginRenewer, GitHubLoginState, LocalCredentialRepositoryLeaseClient, LocalRepositoryGit,
     LocalRepositoryGitProcessSpawner, LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner,
@@ -2900,7 +2904,7 @@ fn ensure_authority_identity(
 /// generation, only while the refresh's execution deadline holds and only if
 /// that entry is still empty. An error does not say whether the write took
 /// effect; the refresh journal reconciles either outcome.
-pub(crate) fn stage_refreshed_material<S: ProtectedStore>(
+pub(crate) fn stage_refreshed_material<S: ProtectedStore + ?Sized>(
     store: &S,
     entry_id: &ProtectedEntryId,
     material: &ProtectedValue,

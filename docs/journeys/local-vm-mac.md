@@ -8,7 +8,7 @@ walk observed on macOS 27 and on macOS 26. The format is in
 
 ## Where it stands
 
-Updated 2026-11-18.
+Updated 2026-11-19.
 
 | ID | macOS 27 | macOS 26 |
 | --- | --- | --- |
@@ -17,6 +17,7 @@ Updated 2026-11-18.
 | `mac-vm-cached-image` | observed on a development build of #5036 (e42e2f457) | not yet observed |
 | `mac-vm-mesh-ingress` | not yet observed | not yet observed |
 | `mac-vm-intercept` | boots observed on #4916 on #5124 (268f2709e), 5 of 5; serving partly observed on a scratch merge with the placeholder seed (245992e87) | not yet observed |
+| `mac-vm-refresh-refused` | not yet observed (#5537) | not yet observed (#5537) |
 
 ## Before the walk
 
@@ -316,3 +317,31 @@ Issues: #3999, #4916.
     #4916, 2026-11-15: `native_front_door` passed. The real process ran
     under Seatbelt (`sandbox_check` = 1), reported its CA, and terminated
     TLS for a handed-over stream.
+
+## 6. `mac-vm-refresh-refused`: a sign-in due for refresh is refused before Start
+
+Issues: #5537, #5539. The rule is in
+[SECRETS-AND-CREDENTIALS.md](../dev/SECRETS-AND-CREDENTIALS.md), "Children".
+
+- **Entry points:** a Claude, Codex or GitHub sign-in in a VM's credential
+  profile; the guest's next request, or a host checkout's `git`, once the
+  sign-in's access token is due for refresh.
+- **States to exercise:** a due Claude or Codex sign-in, and a due GitHub
+  login on a host checkout.
+- **Driving it:** the broker's Seatbelt profile only reads the keychain, so
+  the broker can't keep a refreshed bundle there. It refuses the refresh
+  before Start and never asks the provider. A synthetic Claude sign-in from
+  the featured smoke build (#5374) is due on its first use. Walk it with a
+  throwaway `HOME` and keychain, as in [Before the walk](#before-the-walk).
+- **Proof:**
+  - The due Claude or Codex sign-in's request is denied, and a due GitHub
+    login stops `git` with `this credential store cannot keep a refreshed
+    GitHub login`.
+  - `brokers.log` shows no broker ending, and the credential stays at
+    material generation 1 with no refresh row in the journal: the provider
+    was never asked.
+- **Gotchas:** this lasts until #5539 lets the authority stage the bundle, or
+  a recorded run shows the broker's staged write working inside its Seatbelt
+  profile (tracked on #5537). Until then, a Mac VM's sign-in works only until
+  its access token is due, about 8 hours for a Claude sign-in.
+- **Observed:** not yet observed.

@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use clap::Args;
-use codewire_local_credentials::{AuthorityProtectedStore, FILE_STORE_DIRECTORY};
+use codewire_local_credentials::{
+    AuthorityProtectedStore, FILE_STORE_DIRECTORY, RefreshStagingStore, RefreshStagingWrite,
+};
 #[cfg(target_os = "linux")]
 use codewire_protected_store::ConnectedOsProtectedStore;
 use codewire_protected_store::{
@@ -187,6 +189,34 @@ impl ProtectedStore for OpenedChildStore {
 
     fn delete(&self, _: &ProtectedEntryId) -> Result<(), ProtectedStoreError> {
         Err(ProtectedStoreError::AccessDenied)
+    }
+}
+
+/// The one write a child makes (#5537): a started refresh's bundle, into the
+/// entry its [`RefreshStagingWrite`] names, staged in the store this child
+/// opened. `put` and `delete` above still refuse everything. Only Secret
+/// Service takes it. A `file` store does not, since the broker's Landlock
+/// domain only reads it, and neither does a keychain until a staged write is
+/// recorded working inside the broker's Seatbelt profile, which allows only
+/// reads of it. Their refresh is refused before Start (#5539).
+impl RefreshStagingStore for OpenedChildStore {
+    fn can_stage_refresh(&self) -> bool {
+        match self {
+            Self::Selected(_) => false,
+            #[cfg(target_os = "linux")]
+            Self::SecretService(_) => true,
+        }
+    }
+
+    fn stage_refresh(
+        &self,
+        write: RefreshStagingWrite,
+        material: &ProtectedValue,
+    ) -> Result<(), ProtectedStoreError> {
+        if !self.can_stage_refresh() {
+            return Err(ProtectedStoreError::AccessDenied);
+        }
+        write.stage(self.store(), material)
     }
 }
 

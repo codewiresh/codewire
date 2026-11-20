@@ -410,6 +410,27 @@ pub(crate) struct StartedRepositoryRefresh {
     execution_deadline_unix_ms: u64,
 }
 
+impl crate::refresh_staging::StartedRefreshPermit for StartedRepositoryRefresh {
+    type Reservation = RepositoryRefreshReservation;
+
+    fn into_staged(
+        self,
+    ) -> Result<
+        (
+            codewire_protected_store::ProtectedEntryId,
+            u64,
+            Self::Reservation,
+        ),
+        crate::LocalCredentialError,
+    > {
+        let entry_id = crate::protected_entry_id(
+            &self.reservation.credential_id,
+            self.reservation.next_material_generation,
+        )?;
+        Ok((entry_id, self.execution_deadline_unix_ms, self.reservation))
+    }
+}
+
 pub(crate) enum RepositoryRefreshBegin {
     Reserved(RepositoryRefreshReservation),
     /// Another owner has refreshed, or is refreshing now (`wait`): lease the
@@ -508,20 +529,14 @@ impl LocalCredentialRepositoryLeaseClient {
         protected_store: S,
     ) -> Result<(), RepositoryLeaseChannelError>
     where
-        S: ProtectedStore + Clone + 'static,
+        S: crate::RefreshStagingStore + Clone + 'static,
     {
-        let reservation = started.reservation;
-        let entry_id = crate::protected_entry_id(
-            &reservation.credential_id,
-            reservation.next_material_generation,
-        )
-        .map_err(|_| RepositoryLeaseChannelError::InvalidResponse)?;
-        let deadline = started.execution_deadline_unix_ms;
-        let stored = tokio::task::spawn_blocking(move || {
-            crate::stage_refreshed_material(&protected_store, &entry_id, &material, deadline)
-        })
-        .await
-        .map_err(|_| RepositoryLeaseChannelError::Unavailable)?;
+        let (write, reservation) = crate::RefreshStagingWrite::from_started(started)
+            .map_err(|_| RepositoryLeaseChannelError::InvalidResponse)?;
+        let stored =
+            tokio::task::spawn_blocking(move || protected_store.stage_refresh(write, &material))
+                .await
+                .map_err(|_| RepositoryLeaseChannelError::Unavailable)?;
         if stored.is_err() {
             return Err(RepositoryLeaseChannelError::Unavailable);
         }

@@ -127,6 +127,7 @@ fn exit_kind(error: &anyhow::Error) -> &'static str {
                 Lease::InvalidResponse => "lease.invalid_response",
                 Lease::RefreshInProgress => "lease.refresh_in_progress",
                 Lease::StaleRefresh => "lease.stale_refresh",
+                Lease::StoreReadOnly => "lease.store_read_only",
             };
         }
         if cause.is::<tokio::time::error::Elapsed>() {

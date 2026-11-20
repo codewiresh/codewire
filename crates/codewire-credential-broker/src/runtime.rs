@@ -305,6 +305,10 @@ pub enum BrokerRefreshError {
     InProgress,
     #[error("credential refresh generation changed")]
     Stale,
+    /// The broker's store cannot keep a refreshed bundle, so the refresh is
+    /// refused before Start and the provider is never asked (#5537).
+    #[error("credential refresh cannot be stored by this broker")]
+    StoreReadOnly,
 }
 
 /// Stable upstream failures safe to map back to the guest.
@@ -2571,9 +2575,9 @@ fn publication_failure() -> BrokerRequestError {
 
 fn map_refresh_error(error: BrokerRefreshError) -> BrokerRequestError {
     match error {
-        BrokerRefreshError::InvalidRequest | BrokerRefreshError::Denied => {
-            BrokerRequestError::Denied
-        }
+        BrokerRefreshError::InvalidRequest
+        | BrokerRefreshError::Denied
+        | BrokerRefreshError::StoreReadOnly => BrokerRequestError::Denied,
         BrokerRefreshError::Unavailable
         | BrokerRefreshError::InvalidResponse
         | BrokerRefreshError::InProgress
@@ -2896,6 +2900,9 @@ mod tests {
         /// The authority refuses the commit and keeps its owner, as a local
         /// authority does until the lease channel closes.
         refuse_commit: bool,
+        /// The broker's store cannot stage a refreshed bundle, as a local
+        /// broker on a `file` store (#5537).
+        store_read_only: bool,
     }
 
     #[async_trait]
@@ -2947,6 +2954,9 @@ mod tests {
             request: BrokerCredentialRefreshRequest,
         ) -> Result<BrokerRefreshAdmission<Self::RefreshReservation>, BrokerRefreshError> {
             self.begin_count.fetch_add(1, Ordering::Relaxed);
+            if self.store_read_only {
+                return Err(BrokerRefreshError::StoreReadOnly);
+            }
             if let Some(material) = self.recovered_material.lock().unwrap().take() {
                 let observed = self
                     .authority
@@ -3607,6 +3617,7 @@ mod tests {
                 begin_control: None,
                 deny_login: Arc::new(AtomicBool::new(false)),
                 refuse_commit: false,
+                store_read_only: false,
             },
             OAuthSyntheticUpstream {
                 refresh_status,
@@ -5058,6 +5069,27 @@ mod tests {
         );
         assert!(refresh_active.load(Ordering::Acquire));
         assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+        assert_eq!(state.commit_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 0);
+    }
+
+    /// A broker whose store cannot stage the refreshed bundle never asks the
+    /// provider: the refresh is refused before Start, so the stored refresh
+    /// token is never spent, and the request is denied without ending the
+    /// epoch (#5537).
+    #[tokio::test]
+    async fn a_store_that_cannot_stage_refuses_the_refresh_before_any_provider_request() {
+        let (mut broker, state) =
+            oauth_broker(StatusCode::OK, Vec::new(), "unused".into(), Duration::ZERO);
+        Arc::get_mut(&mut broker.leases).unwrap().store_read_only = true;
+        assert!(matches!(
+            broker.execute(request()).await,
+            Err(BrokerRequestError::Denied)
+        ));
+        assert_eq!(state.begin_count.load(Ordering::Relaxed), 1);
+        assert_eq!(broker.leases.start_count.load(Ordering::Acquire), 0);
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.response_count.load(Ordering::Relaxed), 0);
         assert_eq!(state.commit_count.load(Ordering::Relaxed), 0);
         assert_eq!(state.failure_count.load(Ordering::Relaxed), 0);
     }

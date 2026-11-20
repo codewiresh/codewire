@@ -95,6 +95,20 @@ impl TestProtectedStore {
     }
 }
 
+impl crate::RefreshStagingStore for TestProtectedStore {
+    fn can_stage_refresh(&self) -> bool {
+        true
+    }
+
+    fn stage_refresh(
+        &self,
+        write: crate::RefreshStagingWrite,
+        material: &ProtectedValue,
+    ) -> Result<(), ProtectedStoreError> {
+        write.stage(self, material)
+    }
+}
+
 impl ProtectedStore for TestProtectedStore {
     fn persistence(&self) -> ProtectedStorePersistence {
         ProtectedStorePersistence::ProcessLifetime

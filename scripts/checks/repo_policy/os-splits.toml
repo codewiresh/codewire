@@ -112,7 +112,8 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/commands/credential_authority.rs" = { group = "credentials", count = 39 }
 "crates/codewire-cli/src/commands/credential_authority/ssh.rs" = { group = "credentials", count = 17 }
 "crates/codewire-cli/src/commands/credential_broker.rs" = { group = "credentials", count = 14 }
-"crates/codewire-cli/src/commands/credential_child_store.rs" = { group = "credentials", count = 17 }
+"crates/codewire-cli/src/commands/credential_child_store.rs" = { group = "credentials", count = 18 }
+"crates/codewire-cli/src/commands/credential_child_store/tests.rs" = { group = "credentials", count = 1 }
 "crates/codewire-cli/src/commands/credential_input.rs" = { group = "credentials", count = 4 }
 "crates/codewire-cli/src/commands/credential_repository.rs" = { group = "credentials", count = 20 }
 "crates/codewire-cli/src/commands/credential_repository/ssh.rs" = { group = "credentials", count = 6 }

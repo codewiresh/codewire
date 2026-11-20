@@ -3032,7 +3032,18 @@ deletes them. cw-security agreed this design on #5255 (2026-11-18).
   repository executor's command line, on Linux as on macOS
   (`--protected-store`, and for `file` its `protected-v1` directory), and a
   child opens exactly that store, read-only: a child's store refuses every
-  write, since the authority alone writes. A `file` store's children get no
+  write, since the authority alone writes. The one exception is a refresh the
+  authority recorded as started (#5537). The child stages the refreshed bundle
+  itself, once, in exactly that credential's next material generation, only
+  into an empty entry and before the refresh's execution deadline. So a
+  rotated refresh token is kept even when the commit's reply is lost, and the
+  refresh journal reconciles either outcome. Only a Secret Service store
+  takes that write. A child whose store cannot refuses the refresh before
+  Start (`store_read_only`), so the provider is never asked for a token it
+  could not keep: a `file` store, which the broker's Landlock domain only
+  reads, and a macOS keychain, whose broker's Seatbelt profile allows only
+  reads of it, until a staged write is recorded working inside that profile.
+  #5539 moves staging to the authority. A `file` store's children get no
   session bus address (`DBUS_SESSION_BUS_ADDRESS`); a GitHub repository
   executor keeps `XDG_RUNTIME_DIR` for its runtime directory. A Secret Service
   root's children keep the bus address their authority has.
@@ -3040,7 +3051,8 @@ deletes them. cw-security agreed this design on #5255 (2026-11-18).
   allowing reading files and listing directories beneath that
   `protected-v1` directory, and nothing else: no write, and no other path.
   Seccomp is unchanged. As on macOS, the broker only reads the store; the
-  authority writes it.
+  authority writes it, apart from a started refresh's staged generation on a
+  Secret Service store (above).
 - **Admission.** A `cw` that admits an already running authority uses the
   configured store, so a `file` root is never reopened on Secret Service.
 

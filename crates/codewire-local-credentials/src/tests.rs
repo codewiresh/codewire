@@ -79,11 +79,11 @@ impl TestProtectedStore {
         state.put_times_out = false;
     }
 
-    fn entry_count(&self) -> usize {
+    pub(crate) fn entry_count(&self) -> usize {
         self.state.lock().expect("store lock").entries.len()
     }
 
-    fn entry_values(&self) -> Vec<Vec<u8>> {
+    pub(crate) fn entry_values(&self) -> Vec<Vec<u8>> {
         self.state
             .lock()
             .expect("store lock")

@@ -40,6 +40,10 @@ url = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }
 
+[features]
+# A refresh commit through a real authority, for testing a child's store.
+test-support = []
+
 [build-dependencies]
 codewire-prost-debug-redact = { workspace = true }
 tonic-prost-build = { workspace = true }

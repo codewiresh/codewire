@@ -16,7 +16,7 @@ use codewire_access::{
     CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CapabilitySlot, CredentialId, DerivedGrant,
     EnvironmentAccessBinding, EnvironmentId, GrantPermission,
 };
-use codewire_protected_store::{ProtectedStore, ProtectedValue};
+use codewire_protected_store::{ProtectedEntryId, ProtectedStore, ProtectedValue};
 use hyper_util::rt::TokioIo;
 use thiserror::Error;
 use tokio::net::UnixStream;
@@ -109,6 +109,20 @@ pub struct StartedBrokerCredentialRefresh {
     execution_deadline_unix_ms: u64,
 }
 
+impl crate::refresh_staging::StartedRefreshPermit for StartedBrokerCredentialRefresh {
+    type Reservation = BrokerCredentialRefreshReservation;
+
+    fn into_staged(
+        self,
+    ) -> Result<(ProtectedEntryId, u64, Self::Reservation), crate::LocalCredentialError> {
+        let entry_id = crate::protected_entry_id(
+            &self.reservation.grant.credential_id,
+            self.reservation.next_material_generation,
+        )?;
+        Ok((entry_id, self.execution_deadline_unix_ms, self.reservation))
+    }
+}
+
 /// Material-free result of one exact authority lease decision. This recent
 /// local ring is intentionally bounded and process-lifetime; #1922 owns the
 /// final durable local/platform audit persistence contract.
@@ -188,6 +202,10 @@ pub enum BrokerLeaseChannelError {
     RefreshInProgress,
     #[error("credential refresh generation changed")]
     StaleRefresh,
+    /// The broker's store cannot stage a refreshed bundle, so the refresh is
+    /// refused before Start and the provider is never asked (#5537).
+    #[error("credential refresh cannot be stored by this broker")]
+    StoreReadOnly,
 }
 
 /// Client for one authority-created, environment-generation-bound channel.
@@ -432,7 +450,15 @@ where
         operation: BrokerOperationId,
         route: BrokerRouteId,
         material_generation: u64,
-    ) -> Result<BrokerCredentialRefreshAdmission, BrokerLeaseChannelError> {
+    ) -> Result<BrokerCredentialRefreshAdmission, BrokerLeaseChannelError>
+    where
+        S: crate::RefreshStagingStore,
+    {
+        // A refreshed bundle this broker could not stage would be lost after
+        // the provider rotated the refresh token, so it is never asked for.
+        if !self.protected_store.can_stage_refresh() {
+            return Err(BrokerLeaseChannelError::StoreReadOnly);
+        }
         if refresh_id.is_nil()
             || request_id.is_nil()
             || grant.credential_revocation_generation == 0
@@ -540,15 +566,16 @@ where
         &mut self,
         started: StartedBrokerCredentialRefresh,
         material: ProtectedValue,
-    ) -> Result<(), BrokerLeaseChannelError> {
-        let permit = started.reservation;
+    ) -> Result<(), BrokerLeaseChannelError>
+    where
+        S: crate::RefreshStagingStore,
+    {
+        let (write, permit) = crate::RefreshStagingWrite::from_started(started)
+            .map_err(|_| BrokerLeaseChannelError::InvalidResponse)?;
         self.validate_refresh_channel(&permit)?;
         if permit.next_material_generation != permit.current_material_generation.saturating_add(1) {
             return Err(BrokerLeaseChannelError::InvalidResponse);
         }
-        let entry_id =
-            protected_entry_id(&permit.grant.credential_id, permit.next_material_generation)
-                .map_err(|_| BrokerLeaseChannelError::InvalidResponse)?;
         let operation_permit = Arc::clone(&self.protected_store_operations)
             .acquire_owned()
             .await
@@ -558,12 +585,7 @@ where
             let _operation_permit = operation_permit;
             // Capacity waits cannot extend the bounded execution window. Once
             // the blocking write begins, shutdown drains it before recovery.
-            crate::stage_refreshed_material(
-                &store,
-                &entry_id,
-                &material,
-                started.execution_deadline_unix_ms,
-            )
+            store.stage_refresh(write, &material)
         })
         .await
         .map_err(|_| BrokerLeaseChannelError::Unavailable)?;
@@ -1611,6 +1633,20 @@ mod tests {
         fn fail_next_put_after_effect(&self) {
             self.fail_next_put_after_effect
                 .store(true, Ordering::Release);
+        }
+    }
+
+    impl crate::RefreshStagingStore for TestProtectedStore {
+        fn can_stage_refresh(&self) -> bool {
+            true
+        }
+
+        fn stage_refresh(
+            &self,
+            write: crate::RefreshStagingWrite,
+            material: &ProtectedValue,
+        ) -> Result<(), ProtectedStoreError> {
+            write.stage(self, material)
         }
     }
 

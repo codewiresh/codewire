@@ -697,7 +697,14 @@ The spec is
   - a `protected-v1` file or directory with the wrong mode or owner:
     refused, not repaired;
   - a local VM started from a `file` root: its broker serves a lease from
-    the file store.
+    the file store;
+  - a sign-in due for refresh in a VM from a `file` root (#5537): the
+    broker can't keep a refreshed bundle, since it only reads `protected-v1`,
+    so it refuses the refresh before Start and never asks the provider. A
+    due Claude or Codex sign-in's request is denied, and a due GitHub login
+    stops `git` with `this credential store cannot keep a refreshed GitHub
+    login`. #5539 lets a `file` root refresh, by the authority staging the
+    bundle.
 - **Driving it:** Linux only, with a throwaway `HOME`, synthetic credentials
   named `parity-file-*`, and no session bus for the `file` states (unset
   `DBUS_SESSION_BUS_ADDRESS`). The Secret Service states run only in the
@@ -722,6 +729,9 @@ The spec is
     and the mode stays 0644.
   - Removing the throwaway `HOME` leaves no Codewire entry in the private
     keyring.
+  - The due sign-in's request is denied, `brokers.log` shows no broker
+    ending, the credential stays at material generation 1, and the journal
+    has no refresh row: the provider was never asked.
 - **Gotchas:** entries are plaintext: never walk it with a real credential.
 - **Observed:** partly, on a Linux local VM (x86_64, KVM), 2026-11-20, with
   `cw` from main 22bcc705e (#5552) and the guest runtime of main 8f3a2d502,

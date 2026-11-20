@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use codewire_credential_bridge::MANAGED_GITHUB_GIT_PREFIX;
-use codewire_protected_store::ProtectedStore;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::{UnixListener, UnixStream};
@@ -60,6 +59,10 @@ pub enum RepositoryExecutorError {
     GitUnavailable,
     #[error("repository executor filesystem operation failed")]
     Filesystem,
+    /// The login is due, but this store cannot keep a refreshed one, so the
+    /// provider is never asked (#5537).
+    #[error("this credential store cannot keep a refreshed GitHub login")]
+    RefreshUnstorable,
 }
 
 /// A stored GitHub login as host Git sees it.
@@ -109,7 +112,7 @@ pub async fn run_local_repository_executor<S>(
     github_login: &dyn GitHubLoginRenewer,
 ) -> Result<(), RepositoryExecutorError>
 where
-    S: ProtectedStore + Clone + 'static,
+    S: crate::RefreshStagingStore + Clone + 'static,
 {
     config
         .validate()
@@ -146,6 +149,11 @@ where
         attempts += 1;
         if attempts > MAX_GITHUB_LOGIN_ATTEMPTS {
             return Err(RepositoryExecutorError::LeaseUnavailable);
+        }
+        // A refreshed login this store could not keep would be lost after the
+        // provider rotated its refresh token, so it is never asked for.
+        if !protected_store.can_stage_refresh() {
+            return Err(RepositoryExecutorError::RefreshUnstorable);
         }
         match leases
             .begin_github_refresh(&lease)
