@@ -11,7 +11,7 @@ yet; its owner adds it. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-17.
+Updated 2026-11-20.
 
 | ID | Owner | Dev | Production |
 | --- | --- | --- | --- |
@@ -21,7 +21,8 @@ Updated 2026-11-17.
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-cw-knows-its-server` | cw-identity | partly observed 2026-11-17 (#5202) | not yet observed |
 | `sandbox-attach-stays` | cw-direct-udp | observed 2026-11-18 (#5120) | not yet observed |
-| `sandbox-stop-start` | cw-cleanup | observed 2026-11-14 | not yet observed |
+| `sandbox-stop-start` | cw-cleanup | observed 2026-11-14; named sessions 2026-11-20 (#5494), `cw run --name` on an ended session not yet (#5497) | not yet observed |
+| `sandbox-session-stop` | cw-cleanup | observed 2026-11-20 (#5490) | not yet observed |
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
 | `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
 | `sandbox-setup-retry` | cw-snapshots | observed in part 2026-11-16 (CLI only) | not yet observed |
@@ -451,7 +452,16 @@ server it belongs to and says what it can do, instead of asking for a URL.
     unknown, and `cw restart` answered "Session cleanup is unknown; restart is
     fenced". The kernel boot ID inside the Sandbox changed across the stop and
     start.
-  - Named sessions with the fix: not yet observed.
+  - Named sessions with the fix, Dev, 2026-11-20 (codewire-79), the Dev smoke
+    identity with `cw` v0.4.24, Dev at source cd34a5cf97 with its daemon image
+    rolled out (#5494). With and without a secret project, the stop took 5 to
+    7 s and the start 7 to 9 s, including sign-in; the marker came back, the
+    boot ID changed, and `play` showed `Stopped`, "stopped with the
+    environment", with cleanup known. `cw restart walk --session play` brought
+    it back `Running` under the same session ID. `cw run --name play` while it
+    ran refused and named the attach command. The ended-session offer and the
+    wording without "fenced" are in #5497, not yet released: not yet observed.
+    Evidence: the walk comment on #5471.
 
 ## `sandbox-session-stop`: stopping a session ends every process it started
 
@@ -463,8 +473,9 @@ Issue: #5472.
   - a session whose command leaves a child running (`sh -c 'sleep 86400; true'`),
     as `pnpm dev` leaves `node`;
   - a session that ignores TERM (`sh -c 'trap "" TERM; sleep 86400'`);
-  - an interactive shell with a background job: `cw shell walk --name sh`,
-    then `sleep 86400 &` in it, then the stop from another terminal;
+  - an interactive shell with a background job:
+    `cw --cloud run --in walk --name sh -t -- bash`, then `sleep 86400 &` in
+    it, then the stop from another terminal (`cw shell` takes no `--name`);
   - a command that starts a child and exits:
     `cw run --in walk --name bg --detach -- sh -c 'sleep 86400 & echo started'`,
     and the same with `nohup sleep 86400 &`;
@@ -503,7 +514,19 @@ Issue: #5472.
     for over 3 minutes. Their `sleep` was re-parented to PID 1 and still
     running. `sh -c 'sleep 86400 & echo started'` stayed `Running` after
     `sh` exited, its `sleep` re-parented to PID 1.
-  - With the fix: not yet observed.
+  - With the fix, Dev, 2026-11-20 (codewire-79), the Dev smoke identity with
+    `cw` v0.4.24, Dev at source cd34a5cf97 with its daemon image rolled out
+    (#5490, which landed in #5494's commit). Each session ran in a Unix
+    session of its own, never in the Sandbox's session 1. The direct,
+    forking and TERM-ignoring sessions, and an interactive `bash` with
+    `sleep 86400 &` in its own process group, each stopped in about 3.5 s
+    including sign-in, and showed `Stopped`. No `sleep` of theirs was left,
+    the background job's included; `keep` and the daemon were untouched, and
+    no answer said "refresh sessions". `bg` and its `nohup` variant ended
+    `Exited` with status 0, their last line "[cw] Ended 1 process left running
+    after the command exited (pid N `sleep`) …"; the `setsid` child was still
+    running, and its session's end named nothing. Evidence: the walk
+    comment on #5472.
 
 ## `sandbox-start-list`: a starting sandbox's page shows one list of steps
 
