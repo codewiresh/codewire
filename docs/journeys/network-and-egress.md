@@ -1428,6 +1428,9 @@ arguments hold no real token, and the hosted sign-in exception is not used
   - a Sandbox claimed from the warm pool;
   - the credential service unreachable for longer than a certificate's
     life;
+  - a front-door session ended by `cw-egress`'s token expiry, and reopened;
+  - orchestration refusing the session: hosted interception off there, or the
+    Pod denied;
   - bindings no front door can serve: an exact name on a port other than
     443, and a suffix;
   - a credential added to a running Sandbox, changing its bound hosts.
@@ -1458,6 +1461,11 @@ arguments hold no real token, and the hosted sign-in exception is not used
     an intercepted host fails closed and the Sandbox's status shows it.
     Its other egress is unaffected, and interception returns by itself
     when the service does;
+  - a front-door session that ends at `cw-egress`'s token expiry is
+    reopened within seconds, and the next intercepted request is served;
+  - while orchestration refuses the session, every intercepted request fails
+    closed and the Sandbox's other egress works; once it accepts, they are
+    served again without a restart;
   - an exact name the front door can't serve is refused on its bound port
     as `intercept_unavailable` and never dialled, while other egress works;
     a suffix binding leaves the Sandbox with no egress through `cw-egress`;

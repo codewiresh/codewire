@@ -1857,7 +1857,8 @@ door's way into the credential broker, beside a Sandbox's loopback ingress.
 It is served only while hosted interception is on
 (`CODEWIRE_HOSTED_INTERCEPTION_ENABLED`, which needs hosted egress on);
 otherwise it answers `UNIMPLEMENTED` to an authenticated caller, and no relay
-epoch takes a session. No `cw-egress` calls it yet:
+epoch takes a session. Its only client is `cw-egress` (**The client** below,
+not yet built):
 
 - **Who opens it:** only `cw-egress`, with its own projected token (audience
   `codewire.internal.egress-node.v1`, its ServiceAccount and namespace), for
@@ -1942,6 +1943,43 @@ epoch takes a session. No `cw-egress` calls it yet:
 - **Not yet:** a joined session that is idle holds its epoch's place until the
   epoch ends; the broker's own idle end (120 seconds with no open request or
   socket) follows.
+- **The client** (not yet built). `cw-egress` keeps one session open for each
+  Pod whose front door runs, from the front door's start until the Pod's
+  egress pair ends:
+  - **Opening.** It reads its token again for every open, never caching it,
+    and sends `open` with the Pod's name and UID from that Pod's own
+    admission. After `attached` it writes the credential-session tag on its
+    own end of a fresh socket pair, then hands the front door the other end;
+    the front door admits only a connected stream socket whose tag arrives
+    within 2 seconds, so nothing from the network decides that read.
+  - **Relaying.** Toward the front door, each `bridge` payload is written
+    unchanged. Toward orchestration, the front door's bytes are cut into
+    whole frames, each one `bridge` message; a length of zero or over the
+    bridge's maximum ends the relay. It holds at most one frame each way and
+    reads no further until that frame is taken, and when either side ends,
+    the other is ended at once. The relay parses nothing else, the front
+    door's Ready included, and logs only fixed reasons and counts.
+  - **One at a time.** When a session ends, its socket closes and the front
+    door drains it; only then is the next one opened. So the front door holds
+    at most the session draining and the new one.
+  - **Reopening.** A Sandbox can end its own session by what it sends, so
+    the reopen rate is bounded: the backoff starts at 1 second, doubles to a
+    cap of 30, and resets only once a session has stayed attached for 60
+    seconds. A clean end of a session that stayed that long, as at the
+    token's expiry, reopens within 2 seconds, at a random point, so a node's
+    sessions don't all return at once; an earlier end of any kind takes the
+    next backoff. `UNAVAILABLE`, `ALREADY_EXISTS` and a transport error take
+    that backoff. `PERMISSION_DENIED`, `FAILED_PRECONDITION` and
+    `INVALID_ARGUMENT` wait 60 seconds, and `UNIMPLEMENTED` 5 minutes. Every
+    wait is fully jittered, and each refusal is logged at most once per
+    interval and counted.
+  - **A second session for the same Pod**, from the same node: orchestration
+    ends the first, counted, and the second takes its place in the epoch
+    rather than getting `ALREADY_EXISTS`. One from another node is refused
+    before any relay work, as above. So a `cw-egress` restarted before its
+    old session stalled out is served at once.
+  - **Meanwhile,** with no session attached, the front door fails every
+    intercepted request closed and the Sandbox's other egress carries on.
 
 **A local VM on a platform profile (not yet served, #4909).** Such a VM has
 no local credential engine: its confined local relay forwards the guest's
