@@ -86,9 +86,11 @@ fi
 # cluster policy has to admit it. This fails closed: any line under deploy's
 # hosted/ that names the switch counts as on unless that same line sets it
 # false, so a JSON patch (path: /data/CODEWIRE_HOSTED_EGRESS_ENABLED, its
-# value on the next line) counts as on whatever its value.
+# value on the next line) counts as on whatever its value. A whole-line
+# comment sets nothing, so it doesn't count: an overlay that opts into
+# cw-egress may say the switch is still off (deploy#311).
 exempt="$(python3 -I -B "$here/kyverno-pods-from-goldens.py" --hosted-egress-only)"
-mentions="$(grep -rhs 'CODEWIRE_HOSTED_EGRESS_ENABLED' "$deploy/hosted" || true)"
+mentions="$(grep -rhs 'CODEWIRE_HOSTED_EGRESS_ENABLED' "$deploy/hosted" | grep -vE '^[[:space:]]*#' || true)"
 if [[ -n "$exempt" && -n "$mentions" ]] &&
   grep -qvE "CODEWIRE_HOSTED_EGRESS_ENABLED(:[[:space:]]*|=)[\"']?false[\"']?[[:space:]]*$" <<<"$mentions"; then
   printf '[check-policy-drift] REFUSED: codewire/deploy main turns hosted egress on, but these sandbox goldens are still HOSTED_EGRESS in kyverno-pods-from-goldens.py: %s. Move them into HOSTED in this tree.\n' \

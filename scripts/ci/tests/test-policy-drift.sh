@@ -179,13 +179,19 @@ grep -q 'contain source placeholders: 192.0.2.1' "$work/out" || fail 'the placeh
 mkdir -p "$work/deploy/hosted/overlays/dev"
 for spelling in 'data:\n  CODEWIRE_HOSTED_EGRESS_ENABLED: "true"\n' 'CODEWIRE_HOSTED_EGRESS_ENABLED=true\n' \
   '- op: replace\n  path: /data/CODEWIRE_HOSTED_EGRESS_ENABLED\n  value: "true"\n' \
-  '- op: replace\n  path: /data/CODEWIRE_HOSTED_EGRESS_ENABLED\n  value: "false"\n'; do
+  '- op: replace\n  path: /data/CODEWIRE_HOSTED_EGRESS_ENABLED\n  value: "false"\n' \
+  '# CODEWIRE_HOSTED_EGRESS_ENABLED stays off\ndata:\n  CODEWIRE_HOSTED_EGRESS_ENABLED: "true"\n' \
+  'data:\n  CODEWIRE_HOSTED_EGRESS_ENABLED: "true" # on\n'; do
   printf '%b' "$spelling" >"$work/deploy/hosted/overlays/dev/hosted-egress"
   run_check && fail 'hosted egress on with an exempt golden passed'
   grep -q 'still HOSTED_EGRESS in kyverno-pods-from-goldens.py: warm-pool-broker-sandboxtemplate' "$work/out" ||
     fail 'the exempt golden is not named'
 done
-for spelling in 'data:\n  CODEWIRE_HOSTED_EGRESS_ENABLED: "false"\n' "CODEWIRE_HOSTED_EGRESS_ENABLED='false'\n"; do
+# A comment naming the switch sets nothing (deploy#311's opt-in says it is
+# still off).
+for spelling in 'data:\n  CODEWIRE_HOSTED_EGRESS_ENABLED: "false"\n' "CODEWIRE_HOSTED_EGRESS_ENABLED='false'\n" \
+  '# no broker-mode Pod dials it until CODEWIRE_HOSTED_EGRESS_ENABLED turns on\n' \
+  '  # CODEWIRE_HOSTED_EGRESS_ENABLED: "true" once Dev walks\n'; do
   printf '%b' "$spelling" >"$work/deploy/hosted/overlays/dev/hosted-egress"
   run_check || { cat "$work/out" >&2; fail 'hosted egress off refused an exempt golden'; }
 done
