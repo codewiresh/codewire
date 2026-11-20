@@ -67,36 +67,36 @@ impl FileProtectedStore {
     }
 
     fn open_directory(&self, create: bool) -> Result<Option<OwnedFd>, ProtectedStoreError> {
-        let parent = self
-            .directory
-            .parent()
-            .ok_or(ProtectedStoreError::Unavailable)?;
-        let name = self
-            .directory
-            .file_name()
-            .ok_or(ProtectedStoreError::Unavailable)?;
-        let parent = rustix::fs::openat(
-            CWD,
-            parent,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|_| ProtectedStoreError::Unavailable)?;
-        if create {
+        const FLAGS: OFlags = OFlags::RDONLY
+            .union(OFlags::DIRECTORY)
+            .union(OFlags::NOFOLLOW)
+            .union(OFlags::CLOEXEC);
+        let directory = if create {
+            let parent = self
+                .directory
+                .parent()
+                .ok_or(ProtectedStoreError::Unavailable)?;
+            let name = self
+                .directory
+                .file_name()
+                .ok_or(ProtectedStoreError::Unavailable)?;
+            let parent = rustix::fs::openat(CWD, parent, FLAGS, Mode::empty())
+                .map_err(|_| ProtectedStoreError::Unavailable)?;
             match rustix::fs::mkdirat(&parent, name, DIRECTORY_MODE) {
                 Ok(()) | Err(Errno::EXIST) => {}
                 Err(_) => return Err(ProtectedStoreError::Unavailable),
             }
-        }
-        let directory = match rustix::fs::openat(
-            &parent,
-            name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) {
-            Ok(directory) => directory,
-            Err(Errno::NOENT) if !create => return Ok(None),
-            Err(_) => return Err(ProtectedStoreError::AccessDenied),
+            rustix::fs::openat(&parent, name, FLAGS, Mode::empty())
+                .map_err(|_| ProtectedStoreError::AccessDenied)?
+        } else {
+            // A read or a delete never opens the parent: a credential
+            // broker's Landlock domain admits only reads beneath this
+            // directory, and refuses listing the parent (#5255).
+            match rustix::fs::openat(CWD, &self.directory, FLAGS, Mode::empty()) {
+                Ok(directory) => directory,
+                Err(Errno::NOENT) => return Ok(None),
+                Err(_) => return Err(ProtectedStoreError::AccessDenied),
+            }
         };
         let stat = rustix::fs::fstat(&directory).map_err(|_| ProtectedStoreError::Unavailable)?;
         if FileType::from_raw_mode(stat.st_mode) != FileType::Directory

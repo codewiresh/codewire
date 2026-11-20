@@ -6,6 +6,10 @@ use std::path::Path;
 
 use anyhow::Context as _;
 
+/// The entry a probe's file store holds as the authority writes it: a 0600
+/// file named for this id.
+const PROBE_STORE_ENTRY: &str = "local/credentials/probe/material-v1";
+
 const MINIMUM_BROKER_LANDLOCK_ABI: i32 = 4;
 const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;
 const LANDLOCK_RULE_PATH_BENEATH: libc::c_int = 1;
@@ -199,11 +203,25 @@ pub(crate) async fn run_local_credential_broker_confinement_probe(
     Ok(())
 }
 
-/// The probe's file store holds an entry `probe-entry`, and its parent a
-/// file `probe-sibling`: the entry and the listing are readable, and nothing
-/// else is, the store's directory included for writing.
+/// The probe's file store holds an entry `probe-entry`, the stored entry
+/// [`PROBE_STORE_ENTRY`], and its parent a file `probe-sibling`: the entries
+/// and the listing are readable, the stored one through the broker's own
+/// store, and nothing else is, the store's directory included for writing.
 fn verify_file_store_reads_only(directory: &Path) -> anyhow::Result<()> {
+    use codewire_protected_store::{ProtectedEntryId, ProtectedStore as _};
+
     let denied = |result: io::Result<()>| matches!(result, Err(error) if error.raw_os_error() == Some(libc::EACCES));
+    let store = super::credential_child_store::ChildStore::File {
+        directory: directory.to_path_buf(),
+    }
+    .open()?;
+    let entry = ProtectedEntryId::parse(PROBE_STORE_ENTRY).context("probe entry id")?;
+    anyhow::ensure!(
+        store
+            .get(&entry)
+            .is_ok_and(|value| value.is_some_and(|value| !value.expose_secret().is_empty())),
+        "broker filesystem confinement denied its own store's read"
+    );
     anyhow::ensure!(
         std::fs::read(directory.join("probe-entry")).is_ok_and(|value| !value.is_empty()),
         "broker filesystem confinement denied its file store"
