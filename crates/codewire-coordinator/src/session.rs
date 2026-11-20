@@ -4,6 +4,7 @@
 //! fanout, heartbeat cadence, and teardown live here.
 
 use std::future::Future;
+use std::net::IpAddr;
 use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -27,7 +28,9 @@ use super::{
 };
 use codewire_server_core::revocation::Revocation;
 
+mod addresses;
 mod fenced;
+use addresses::{AddressHolders, AddressRefusal};
 use fenced::RemoteClients;
 pub(crate) use fenced::{ClientNodeMessage, FencedClient, Revocations};
 
@@ -54,6 +57,8 @@ pub(crate) enum SessionOutput {
     CredentialRevoked,
     /// The session's node key could not be bound to it; the session ends.
     NodeKeyRefused(Refusal),
+    /// The session's node carried an address it may not; the session ends.
+    AddressRefused(AddressRefusal),
 }
 
 /// The outcome of re-checking a client's access to its environment.
@@ -132,6 +137,8 @@ enum PeerEnd {
     CredentialRevoked(Revocation),
     /// The node key the peer announced was refused.
     NodeKeyRefused(Refusal),
+    /// The address the peer announced was refused (#5561).
+    AddressRefused(AddressRefusal),
     /// A newer session of the same principal took the node key over.
     Retired,
     /// A session that pings went quiet for [`SESSION_SILENCE_LIMIT`].
@@ -221,6 +228,10 @@ struct PeerSession {
     fenced: Option<FencedClient>,
     /// An environment session's clients from other replicas, fenced here.
     remote_clients: RemoteClients,
+    /// A client's address, pinned by its first node.
+    address: Option<IpAddr>,
+    /// Which client holds each address an environment's session forwards.
+    address_holders: AddressHolders,
 }
 
 impl PeerSession {
@@ -332,6 +343,8 @@ impl PeerSession {
             revocations,
             fenced,
             remote_clients: RemoteClients::default(),
+            address: None,
+            address_holders: AddressHolders::default(),
         })
     }
 
@@ -383,14 +396,30 @@ impl PeerSession {
     }
 
     /// Sends one peer event; a closed channel or transport ends the session.
+    /// An environment's session forwards each address from one client at a
+    /// time.
     async fn forward<Sink: SessionSink>(
-        &self,
+        &mut self,
         sink: &mut Sink,
         event: Option<PeerEvent>,
         source: &'static str,
     ) -> Turn {
         let Some(event) = event else {
             return ControlFlow::Break(None);
+        };
+        let event = match (event, self.peer.kind) {
+            (PeerEvent::Update(nodes), PeerKind::Sidecar) => {
+                let nodes = self.address_holders.admit(self.env_id, nodes);
+                if nodes.is_empty() {
+                    return ControlFlow::Continue(());
+                }
+                PeerEvent::Update(nodes)
+            }
+            (PeerEvent::Remove(id), PeerKind::Sidecar) => {
+                self.address_holders.release(id);
+                PeerEvent::Remove(id)
+            }
+            (event, _) => event,
         };
         event.log_send(
             self.env_id,
@@ -535,6 +564,17 @@ impl PeerSession {
         }
         match input {
             Some(SessionInput::Node(node)) => {
+                if let Err(refusal) =
+                    addresses::check(self.peer.kind, self.env_id, &node, &mut self.address)
+                {
+                    addresses::count_refusal(
+                        self.env_id,
+                        self.peer.peer_id,
+                        None,
+                        refusal.message(),
+                    );
+                    return ControlFlow::Break(Some(PeerEnd::AddressRefused(refusal)));
+                }
                 self.claim_node_key(&node).await?;
                 self.node_key.observe(node.key).await;
                 let admission = self.revocations.carry(self.fenced.as_ref());
@@ -608,6 +648,7 @@ impl PeerSession {
             Some(PeerEnd::AccessRevoked) => Some(SessionOutput::AccessRevoked),
             Some(PeerEnd::CredentialRevoked(_)) => Some(SessionOutput::CredentialRevoked),
             Some(PeerEnd::NodeKeyRefused(refusal)) => Some(SessionOutput::NodeKeyRefused(refusal)),
+            Some(PeerEnd::AddressRefused(refusal)) => Some(SessionOutput::AddressRefused(refusal)),
             _ => None,
         };
         if let Some(reason) = reason {

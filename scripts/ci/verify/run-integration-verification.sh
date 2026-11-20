@@ -2535,6 +2535,13 @@ run_nats() {
   listed_run "coordinator generated cross-replica smoke" "$logfile" NATS_URL="$NATS_URL" -- \
     cargo_ci test --profile ci -p codewire-coordinator --lib \
       generated_protocol_cross_replica_fanout_round_trips_over_nats -- --ignored --nocapture
+  # #5561: a holder on another replica keeps its tailnet address, and its
+  # removal over NATS releases it.
+  logfile="$RUN_DIR/coordinator-remote-address-holder.log"
+  listed_run "coordinator remote address holder" "$logfile" NATS_URL="$NATS_URL" -- \
+    cargo_ci test --profile ci -p codewire-coordinator --lib \
+      session::tests::a_remote_holders_removal_over_nats_releases_its_address -- --exact \
+      --ignored --nocapture
   # Mesh replicas sharing their live registry through one KV bucket (#3542).
   logfile="$RUN_DIR/mesh-shared-registry.log"
   listed_run "Mesh shared registry" "$logfile" NATS_URL="$NATS_URL" -- \

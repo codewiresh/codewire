@@ -438,6 +438,9 @@ impl SessionSink for ConnectSink {
                 Err(ConnectError::permission_denied(CREDENTIAL_REVOKED))
             }
             SessionOutput::NodeKeyRefused(refusal) => Err(node_key_refused(refusal)),
+            SessionOutput::AddressRefused(refusal) => {
+                Err(ConnectError::invalid_argument(refusal.message()))
+            }
             output => {
                 let response = session_output_to_proto(output);
                 if let Err(err) = &response {
@@ -479,6 +482,9 @@ fn session_output_to_proto(output: SessionOutput) -> Result<CoordinateResponse, 
             return Err(ConnectError::permission_denied(CREDENTIAL_REVOKED));
         }
         SessionOutput::NodeKeyRefused(refusal) => return Err(node_key_refused(refusal)),
+        SessionOutput::AddressRefused(refusal) => {
+            return Err(ConnectError::invalid_argument(refusal.message()));
+        }
     };
     Ok(CoordinateResponse {
         msg,

@@ -993,3 +993,246 @@ async fn a_reconnect_to_another_replica_retires_the_session_on_the_first() {
             .unwrap();
     }
 }
+
+/// #5561: a client node whose address is refused ends the client's session
+/// and never reaches its environment.
+#[tokio::test]
+async fn a_client_node_with_a_refused_address_ends_its_session() {
+    use codewire_tailnet::node::Prefix;
+
+    let peers = Arc::new(PeerRegistry::default());
+    let sidecar_id = Uuid::new_v4();
+    let (sidecar_tx, mut sidecar_out, _sidecar_task) =
+        spawn_session(peers.clone(), sidecar_id, None, PeerKind::Sidecar);
+    assert!(matches!(
+        next_output(&mut sidecar_out).await,
+        SessionOutput::DerpMap(_)
+    ));
+    sidecar_tx
+        .send(SessionInput::Node(sample_node(sidecar_id, 1)))
+        .unwrap();
+
+    let refused = |id: Uuid, addresses: Vec<Prefix>| Node {
+        addresses,
+        ..sample_node(id, 2)
+    };
+    let cases = |id: Uuid| {
+        let own = prefix_from_uuid(&id);
+        [
+            vec![own, prefix_from_uuid(&Uuid::new_v4())],
+            vec![Prefix::new(own.addr(), 64)],
+            vec![Prefix::new("fd00::1".parse().unwrap(), 128)],
+            vec![prefix_from_uuid(&sidecar_id)],
+        ]
+    };
+    for index in 0..4 {
+        let client_id = Uuid::new_v4();
+        let (client_tx, mut client_out, client_task) =
+            spawn_session(peers.clone(), client_id, Some(sidecar_id), PeerKind::Client);
+        assert!(matches!(
+            next_output(&mut client_out).await,
+            SessionOutput::DerpMap(_)
+        ));
+        let _environment = next_output(&mut client_out).await;
+        let addresses = cases(client_id)[index].clone();
+        client_tx
+            .send(SessionInput::Node(refused(client_id, addresses.clone())))
+            .unwrap();
+        assert!(
+            matches!(
+                next_output(&mut client_out).await,
+                SessionOutput::AddressRefused(_)
+            ),
+            "{addresses:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(5), client_task)
+            .await
+            .expect("the refused session ends")
+            .unwrap();
+    }
+
+    // A second address later in the session ends it the same way.
+    let client_id = Uuid::new_v4();
+    let (client_tx, mut client_out, client_task) =
+        spawn_session(peers.clone(), client_id, Some(sidecar_id), PeerKind::Client);
+    let _derp = next_output(&mut client_out).await;
+    let _environment = next_output(&mut client_out).await;
+    client_tx
+        .send(SessionInput::Node(sample_node(client_id, 2)))
+        .unwrap();
+    // A refused session's teardown removes it, though its node never came.
+    let nodes = loop {
+        match next_output(&mut sidecar_out).await {
+            SessionOutput::Peer(PeerEvent::Remove(_)) => {}
+            output => break expect_peer_update(output),
+        }
+    };
+    assert_eq!(
+        nodes.iter().map(|node| node.id).collect::<Vec<_>>(),
+        [client_id],
+        "no refused node reached the environment"
+    );
+    client_tx
+        .send(SessionInput::Node(refused(
+            client_id,
+            vec![prefix_from_uuid(&Uuid::new_v4())],
+        )))
+        .unwrap();
+    assert!(matches!(
+        next_output(&mut client_out).await,
+        SessionOutput::AddressRefused(AddressRefusal::Changed)
+    ));
+    tokio::time::timeout(Duration::from_secs(5), client_task)
+        .await
+        .expect("the refused session ends")
+        .unwrap();
+    match next_output(&mut sidecar_out).await {
+        SessionOutput::Peer(PeerEvent::Remove(id)) => assert_eq!(id, client_id),
+        other => panic!("expected the client's removal, got {other:?}"),
+    }
+}
+
+/// #5561: a second client announcing an address another client holds is not
+/// forwarded to the environment while the holder is there; once the holder
+/// leaves, it is.
+#[tokio::test]
+async fn a_second_client_announcing_a_held_address_is_not_forwarded() {
+    let peers = Arc::new(PeerRegistry::default());
+    let sidecar_id = Uuid::new_v4();
+    let holder_id = Uuid::new_v4();
+    let squatter_id = Uuid::new_v4();
+    let (sidecar_tx, mut sidecar_out, _sidecar_task) =
+        spawn_session(peers.clone(), sidecar_id, None, PeerKind::Sidecar);
+    let _derp = next_output(&mut sidecar_out).await;
+    sidecar_tx
+        .send(SessionInput::Node(sample_node(sidecar_id, 1)))
+        .unwrap();
+    let (holder_tx, mut holder_out, _holder_task) =
+        spawn_session(peers.clone(), holder_id, Some(sidecar_id), PeerKind::Client);
+    let (squatter_tx, mut squatter_out, _squatter_task) = spawn_session(
+        peers.clone(),
+        squatter_id,
+        Some(sidecar_id),
+        PeerKind::Client,
+    );
+    for out in [&mut holder_out, &mut squatter_out] {
+        let _derp = next_output(out).await;
+        let _environment = next_output(out).await;
+    }
+
+    let holder = sample_node(holder_id, 2);
+    holder_tx.send(SessionInput::Node(holder.clone())).unwrap();
+    let nodes = expect_peer_update(next_output(&mut sidecar_out).await);
+    assert_eq!(
+        nodes.iter().map(|node| node.id).collect::<Vec<_>>(),
+        [holder_id]
+    );
+
+    let squatter = Node {
+        addresses: holder.addresses.clone(),
+        ..sample_node(squatter_id, 3)
+    };
+    squatter_tx
+        .send(SessionInput::Node(squatter.clone()))
+        .unwrap();
+    // The registry sends both local clients; only the holder goes on.
+    let nodes = expect_peer_update(next_output(&mut sidecar_out).await);
+    assert_eq!(
+        nodes.iter().map(|node| node.id).collect::<Vec<_>>(),
+        [holder_id]
+    );
+
+    drop(holder_tx);
+    match next_output(&mut sidecar_out).await {
+        SessionOutput::Peer(PeerEvent::Remove(id)) => assert_eq!(id, holder_id),
+        other => panic!("expected the holder's removal, got {other:?}"),
+    }
+    squatter_tx.send(SessionInput::Node(squatter)).unwrap();
+    let nodes = expect_peer_update(next_output(&mut sidecar_out).await);
+    assert_eq!(
+        nodes.iter().map(|node| node.id).collect::<Vec<_>>(),
+        [squatter_id]
+    );
+}
+
+/// #5561: a holder on another replica keeps its address against a local
+/// client announcing it, and its removal over NATS releases the address.
+#[tokio::test]
+#[ignore = "requires NATS_URL pointing at a JetStream-enabled NATS server"]
+async fn a_remote_holders_removal_over_nats_releases_its_address() {
+    let nats_url =
+        std::env::var("NATS_URL").expect("set NATS_URL to a JetStream-enabled NATS server");
+    let mut replicas = Vec::new();
+    for _ in 0..2 {
+        let client = async_nats::connect(&nats_url).await.unwrap();
+        replicas.push(SessionContext {
+            peers: Arc::new(PeerRegistry::default()),
+            coordination: Some(CoordinationPlane::setup(client, 1).await.unwrap()),
+            derp_map: crate::test_derp_map(),
+            revocations: crate::test_revocations(),
+        });
+    }
+    let env_id = Uuid::new_v4();
+    let (holder_id, squatter_id) = (Uuid::new_v4(), Uuid::new_v4());
+    let user = || Principal::User(USER.into());
+
+    let (sidecar_tx, mut sidecar_out, _sidecar_task) = spawn_on(
+        replicas[0].clone(),
+        env_id,
+        None,
+        PeerKind::Sidecar,
+        Principal::Environment(env_id),
+    );
+    let _derp = next_peer_event(&mut sidecar_out).await;
+    sidecar_tx
+        .send(SessionInput::Node(sample_node(env_id, 1)))
+        .unwrap();
+    let (holder_tx, mut holder_out, _holder_task) = spawn_on(
+        replicas[1].clone(),
+        holder_id,
+        Some(env_id),
+        PeerKind::Client,
+        user(),
+    );
+    let _derp = next_peer_event(&mut holder_out).await;
+    let holder = sample_node(holder_id, 2);
+    holder_tx.send(SessionInput::Node(holder.clone())).unwrap();
+    assert_eq!(
+        update_ids(next_peer_event(&mut sidecar_out).await),
+        [holder_id]
+    );
+
+    let (squatter_tx, mut squatter_out, _squatter_task) = spawn_on(
+        replicas[0].clone(),
+        squatter_id,
+        Some(env_id),
+        PeerKind::Client,
+        user(),
+    );
+    let _derp = next_peer_event(&mut squatter_out).await;
+    let squatter = Node {
+        addresses: holder.addresses.clone(),
+        ..sample_node(squatter_id, 3)
+    };
+    squatter_tx
+        .send(SessionInput::Node(squatter.clone()))
+        .unwrap();
+    // A refused node is left out; a heartbeat comes before anything else.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    while let Ok(output) = sidecar_out.try_recv() {
+        if let SessionOutput::Peer(PeerEvent::Update(nodes)) = output {
+            assert!(
+                nodes.iter().all(|node| node.id != squatter_id),
+                "the squatter's node reached the environment"
+            );
+        }
+    }
+
+    drop(holder_tx);
+    expect_removal(&mut sidecar_out, holder_id).await;
+    squatter_tx.send(SessionInput::Node(squatter)).unwrap();
+    assert_eq!(
+        update_ids(next_peer_event(&mut sidecar_out).await),
+        [squatter_id]
+    );
+}

@@ -14,6 +14,7 @@ use codewire_proto::codewire::internal::v1::{
     CoordinateHello as Hello, CoordinateNode as Node, CoordinateRequest, CoordinateResponse,
     CoordinatorServiceClient, coordinate_request, coordinate_response,
 };
+use codewire_tailnet::node::prefix_from_uuid;
 use connectrpc::client::{ClientConfig, HttpClient};
 use connectrpc::{ConnectError, ErrorCode};
 use hmac::{Hmac, Mac};
@@ -265,8 +266,12 @@ impl Harness {
         assert!(Uuid::parse_str(&assigned_user.id).is_ok());
         assert_ne!(assigned_user.id, user_node.id);
 
+        // An environment announces the address of its id (AUTH-POLICY.md,
+        // "Addresses").
+        let environment = Uuid::parse_str(RUNNING_ENV_ID).expect("environment id");
         let sidecar_node = Node {
             id: RUNNING_ENV_ID.into(),
+            addresses: vec![prefix_from_uuid(&environment).to_string()],
             ..sample_node(0x21, 0x22)
         };
         sidecar
