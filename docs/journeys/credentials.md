@@ -28,6 +28,7 @@ observed**.
 | `cred-file-store` | partly observed, #5552 on main 22bcc705e, 2026-11-20 (a local VM from a `file` root: its broker serves a lease on the intercepted and the loopback route, and `list` names the file store; the other states not yet observed) | the macOS file store; not part of this check | local stores only |
 | `cred-same-name` | not yet observed (#4928) | not yet observed (#4928) | not yet observed (#4928) |
 | `cred-wording` | not yet observed | not yet observed | not yet observed |
+| `cred-pickers` | not yet observed | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -266,7 +267,7 @@ Issues: #4945 (the command), #4714 (local).
 - **Help:** `cw credentials connect --help` and the guided picker
   ("What do you want to connect?") list `Claude (sign-in)  your subscription;
   shows your plan and usage` and `Claude (token)  your subscription; lasts a
-  year, for automation, model requests only`, after Codex and GitHub.
+  year, for automation, model requests only`, after Codex and GitHub (step 15).
 - **Profile:** `set anthropic NAME`.
 - **Use:** `claude -p "hi"`. Expect Claude Code in its token form
   (`CLAUDE_CODE_OAUTH_TOKEN` set to Codewire's placeholder, no token on
@@ -831,3 +832,45 @@ dashboard's half.
   exceptions it names; a word outside those files is caught only by the
   walk.
 - **Observed:** not yet observed.
+
+## 15. `cred-pickers`: what each guided picker offers
+
+Issues: #5446 (the rule and its test), #4985 (the four `connect` rows), #4717
+(the approved credentials screens). The owner's report on #5446, a `connect`
+picker with only Codex and GitHub, came from an installed v0.4.18; v0.4.22 is
+the first release with the four rows.
+
+- **Entry points:** `cw credentials --local|--cloud connect` and `add` with
+  no provider, and `cw credentials --local|--cloud --profile P set` with no
+  slot, at a terminal. The placement may also follow the subcommand
+  (`cw credentials connect --local`).
+- **States to exercise:** each placement; no credentials yet and some
+  already saved (the pickers hide nothing); Esc at a picker, which changes
+  nothing.
+- **Driving it:**
+  - `connect` with no provider. Expect "What do you want to connect?" with
+    four rows, label then detail, in this order, in both placements:
+    `Codex  sign in with your ChatGPT account`, `GitHub  sign in with your
+    GitHub account`, `Claude (sign-in)  your subscription; shows your plan
+    and usage` and `Claude (token)  your subscription; lasts a year, for
+    automation, model requests only`. Pick Claude (sign-in), give a name,
+    and it connects as step 6 shows.
+  - `add` with no provider. Expect "Which provider?" with `OpenAI API key`,
+    `Anthropic API key` and `SSH private key`, in that order, in both
+    placements. API keys are under `add`, not `connect`; `add
+    claude-subscription`, the alias of `connect claude-token` (#4945), is
+    not a row.
+  - `--profile P set` with no slot. Expect "Which provider should this
+    profile use?" with `codex`, `openai`, `anthropic` and `ssh`: every slot
+    but GitHub's, which every profile includes.
+- **Proof:** each picker shows exactly the rows above, in that order, in
+  both placements, and picking Claude (sign-in) ends in `✓ Claude (sign-in)
+  connected as ACCOUNT`. `cargo test -p codewire-cli picker` holds each
+  picker's rows to the set its command accepts in each placement, and fails
+  when a provider is accepted but not offered.
+- **Gotchas:** walk a released `cw`, the one the owner installs, and record
+  its `cw --version`: no release before v0.4.22 has the Claude (token) row,
+  and v0.4.18 and v0.4.20 show only Codex and GitHub locally.
+  Locally, walk only against a private keyring, as "Before the walk" says.
+- **Observed:** not yet observed. The walk on a Mac and in the cloud, on a
+  released `cw` (v0.4.22 or later), is still to do.

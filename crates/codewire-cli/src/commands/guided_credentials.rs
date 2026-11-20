@@ -4,7 +4,8 @@ use codewire_access::{AccessProfileName, CredentialStatus, ProviderId};
 use codewire_client::{self as rpc, CodewireClient};
 
 use super::credential_input::{
-    execute_credential_operation, resolve_credential_operation, supported_profile_slot,
+    ADD_PROVIDERS, PROFILE_SLOTS, execute_credential_operation, resolve_credential_operation,
+    supported_profile_slot,
 };
 use super::guided::{self, Choice};
 use super::storage_placement::StoragePlacement;
@@ -43,17 +44,9 @@ pub(super) async fn complete(
         CredentialsCommand::Add(a) => {
             a.guided = was_missing || storage_missing;
             if a.provider.is_none() {
-                let providers = [
-                    ("openai", "OpenAI API key"),
-                    ("anthropic", "Anthropic API key"),
-                    ("ssh", "SSH private key"),
-                ];
-                let choices = providers
-                    .iter()
-                    .map(|(_, label)| Choice::new(*label, ""))
-                    .collect::<Vec<_>>();
+                let choices = ADD_PROVIDERS.map(|(_, _, label)| Choice::new(label, ""));
                 a.provider = Some(
-                    providers[guided::choose("Which provider?", &choices)?]
+                    ADD_PROVIDERS[guided::choose("Which provider?", &choices)?]
                         .0
                         .into(),
                 );
@@ -79,28 +72,7 @@ pub(super) async fn complete(
         CredentialsCommand::Connect(a) => {
             a.guided = was_missing || storage_missing;
             if a.provider.is_none() {
-                let providers = [
-                    (
-                        CredentialConnectProviderArg::Codex,
-                        "Codex",
-                        "sign in with your ChatGPT account",
-                    ),
-                    (
-                        CredentialConnectProviderArg::Github,
-                        "GitHub",
-                        "sign in with your GitHub account",
-                    ),
-                    (
-                        CredentialConnectProviderArg::Claude,
-                        "Claude (sign-in)",
-                        "your subscription; shows your plan and usage",
-                    ),
-                    (
-                        CredentialConnectProviderArg::ClaudeToken,
-                        "Claude (token)",
-                        "your subscription; lasts a year, for automation, model requests only",
-                    ),
-                ];
+                let providers = connect_rows();
                 let choices = providers
                     .iter()
                     .map(|(_, label, detail)| Choice::new(*label, *detail))
@@ -117,7 +89,7 @@ pub(super) async fn complete(
             fill_name(&mut a.name)?;
         }
         CredentialsCommand::Set(a) if a.slot.is_none() => {
-            let slots = ["codex", "openai", "anthropic", "ssh"];
+            let slots = set_slots();
             let choices = slots
                 .iter()
                 .map(|slot| Choice::new(*slot, ""))
@@ -135,6 +107,49 @@ pub(super) async fn complete(
         complete_profile(globals, args, placement).await?;
     }
     Ok(())
+}
+
+/// The `connect` picker's rows: each provider `connect` takes, with its
+/// label and detail, as the approved credentials screen 2 shows them
+/// (owner, 2026-11-15, #4717). The rows are clap's own providers in their
+/// declared order, and the match is exhaustive, so a provider can't be
+/// added to `connect` without its row (#5446). `connect` takes the same
+/// providers in both placements.
+fn connect_rows() -> Vec<(CredentialConnectProviderArg, &'static str, &'static str)> {
+    CredentialConnectProviderArg::value_variants()
+        .iter()
+        .map(|&provider| {
+            let (label, detail) = match provider {
+                CredentialConnectProviderArg::Codex => {
+                    ("Codex", "sign in with your ChatGPT account")
+                }
+                CredentialConnectProviderArg::Github => {
+                    ("GitHub", "sign in with your GitHub account")
+                }
+                CredentialConnectProviderArg::Claude => (
+                    "Claude (sign-in)",
+                    "your subscription; shows your plan and usage",
+                ),
+                CredentialConnectProviderArg::ClaudeToken => (
+                    "Claude (token)",
+                    "your subscription; lasts a year, for automation, model requests only",
+                ),
+            };
+            (provider, label, detail)
+        })
+        .collect()
+}
+
+/// The `set` picker's rows: every slot `set` takes, in [`PROFILE_SLOTS`]'s
+/// order. `set` takes each slot a profile has but GitHub's, which every
+/// profile includes and both placements refuse to set
+/// (`GITHUB_ALWAYS_INCLUDED`); a slot added to profiles is offered here
+/// without a second list (#5446).
+fn set_slots() -> Vec<&'static str> {
+    PROFILE_SLOTS
+        .into_iter()
+        .filter(|slot| *slot != "github")
+        .collect()
 }
 
 fn fill_name(name: &mut Option<String>) -> anyhow::Result<()> {
@@ -575,6 +590,7 @@ pub(super) async fn choose_profile_reference(
 
 #[cfg(test)]
 mod tests {
+    use super::super::credential_input::{PROVIDER_WORDS_FOR_TESTS, profile_set_credential};
     use super::*;
 
     #[test]
@@ -605,6 +621,128 @@ mod tests {
             panic!("credentials");
         };
         assert!(!missing(&args));
+    }
+
+    /// Each picker shows the rows, in the order, it showed before #5446.
+    #[test]
+    fn each_picker_keeps_its_rows_and_their_order() {
+        let connect = connect_rows()
+            .into_iter()
+            .map(|(provider, label, detail)| (word(provider), label, detail))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            connect,
+            [
+                (
+                    "codex".to_owned(),
+                    "Codex",
+                    "sign in with your ChatGPT account"
+                ),
+                (
+                    "github".to_owned(),
+                    "GitHub",
+                    "sign in with your GitHub account"
+                ),
+                (
+                    "claude".to_owned(),
+                    "Claude (sign-in)",
+                    "your subscription; shows your plan and usage"
+                ),
+                (
+                    "claude-token".to_owned(),
+                    "Claude (token)",
+                    "your subscription; lasts a year, for automation, model requests only"
+                ),
+            ]
+        );
+        assert_eq!(
+            ADD_PROVIDERS.map(|(provider, _, label)| (provider, label)),
+            [
+                ("openai", "OpenAI API key"),
+                ("anthropic", "Anthropic API key"),
+                ("ssh", "SSH private key"),
+            ]
+        );
+        assert_eq!(set_slots(), ["codex", "openai", "anthropic", "ssh"]);
+    }
+
+    /// `connect` takes, in either placement, exactly the providers its
+    /// picker offers (#5446).
+    #[test]
+    fn the_connect_picker_offers_every_provider_connect_takes() {
+        let offered = connect_rows()
+            .into_iter()
+            .map(|(provider, ..)| word(provider))
+            .collect::<Vec<_>>();
+        for placement in ["--local", "--cloud"] {
+            for provider in PROVIDER_WORDS_FOR_TESTS {
+                let taken = match Cli::try_parse_from([
+                    "cw",
+                    "credentials",
+                    placement,
+                    "connect",
+                    provider,
+                ]) {
+                    Ok(Cli {
+                        command:
+                            Command::Credentials(CredentialsArgs {
+                                command: CredentialsCommand::Connect(args),
+                                ..
+                            }),
+                        ..
+                    }) => args.provider.map(word),
+                    _ => None,
+                };
+                assert_eq!(
+                    taken.is_some(),
+                    offered.iter().any(|row| row == provider),
+                    "{placement} connect {provider}"
+                );
+                if let Some(taken) = taken {
+                    assert_eq!(taken, provider);
+                }
+            }
+        }
+    }
+
+    /// `set` takes, in either placement, exactly the slots its picker
+    /// offers: clap takes a profile's slots, and the shared check both
+    /// placements run refuses GitHub's (#5446).
+    #[test]
+    fn the_set_picker_offers_every_slot_set_takes() {
+        let offered = set_slots();
+        for placement in ["--local", "--cloud"] {
+            for slot in PROVIDER_WORDS_FOR_TESTS {
+                let taken = match Cli::try_parse_from([
+                    "cw",
+                    "credentials",
+                    placement,
+                    "--profile=work",
+                    "set",
+                    slot,
+                    "selected-credential",
+                ]) {
+                    Ok(Cli {
+                        command:
+                            Command::Credentials(CredentialsArgs {
+                                command: CredentialsCommand::Set(args),
+                                ..
+                            }),
+                        ..
+                    }) => profile_set_credential(&args).is_ok(),
+                    _ => false,
+                };
+                assert_eq!(taken, offered.contains(&slot), "{placement} set {slot}");
+            }
+        }
+    }
+
+    fn word(provider: CredentialConnectProviderArg) -> String {
+        provider
+            .to_possible_value()
+            .expect("every connect provider has a word")
+            .get_name()
+            .to_owned()
     }
 
     #[test]

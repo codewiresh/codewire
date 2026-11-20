@@ -43,8 +43,8 @@ use super::credential_input::connect::{
 #[cfg(test)]
 use super::credential_input::supported_profile_slot;
 use super::credential_input::{
-    CredentialName, CredentialOperation, GITHUB_ALWAYS_INCLUDED, ParsedProfileSelector,
-    SSH_PUBLIC_KEY_GITHUB_HINT, admit_name, name_taken, parse_profile_selector,
+    AddKind, CredentialName, CredentialOperation, GITHUB_ALWAYS_INCLUDED, ParsedProfileSelector,
+    SSH_PUBLIC_KEY_GITHUB_HINT, add_kind, admit_name, name_taken, parse_profile_selector,
     profile_set_credential, profile_slot_for, prompt_credential_material, read_ssh_import,
     settle_name, slot_provider, validate_ssh_generation, validate_ssh_import,
 };
@@ -858,7 +858,7 @@ async fn add_credential(
         )
         .await;
     }
-    if args.provider.as_deref() == Some("ssh") {
+    if args.provider.as_deref().and_then(add_kind) == Some(AddKind::SshKey) {
         let name = validate_ssh_import(&args)?;
         let records = store_wait::waiting_on_store(false, client.list_credentials()).await?;
         admit_name("ssh", &name, &records, None, local_kind)?;
@@ -1466,10 +1466,10 @@ fn optional_profile_by_name<'a>(
 
 fn api_key_enrollment_kind(provider: &str) -> anyhow::Result<CredentialAuthKind> {
     match provider {
-        "openai" | "anthropic" => Ok(CredentialAuthKind::ApiKey),
         "claude-subscription" => {
             anyhow::bail!("use `connect claude-token --name NAME` for a Claude (token)")
         }
+        _ if add_kind(provider) == Some(AddKind::ApiKey) => Ok(CredentialAuthKind::ApiKey),
         _ => anyhow::bail!(output::refusal::add_unsupported(provider)),
     }
 }
@@ -2415,6 +2415,37 @@ mod tests {
         }
         for provider in ["codex", "github", "ssh", "unknown"] {
             assert!(api_key_enrollment_kind(provider).is_err());
+        }
+    }
+
+    /// `add` on this computer takes exactly the providers its picker
+    /// offers (#5446). An SSH key is taken only through `add_kind`, which
+    /// reads the list the picker is built from; an API key goes through
+    /// `api_key_enrollment_kind` too, whose own arm could take a provider
+    /// the picker lacks. Every API key offered is one the catalog takes.
+    #[test]
+    fn the_add_picker_offers_every_provider_local_add_takes() {
+        use crate::commands::credential_input::{ADD_PROVIDERS, PROVIDER_WORDS_FOR_TESTS};
+        let catalog = builtin_provider_catalog();
+        for provider in PROVIDER_WORDS_FOR_TESTS {
+            let offered = ADD_PROVIDERS
+                .iter()
+                .find(|(word, ..)| *word == provider)
+                .map(|(_, kind, _)| *kind);
+            let api_key = api_key_enrollment_kind(provider).is_ok();
+            assert_eq!(
+                api_key,
+                offered == Some(AddKind::ApiKey),
+                "--local add {provider}"
+            );
+            if api_key {
+                let id = ProviderId::parse(provider).unwrap();
+                assert!(
+                    catalog.get(&id).is_some_and(|definition| definition
+                        .supports_authentication_kind(CredentialAuthKind::ApiKey)),
+                    "{provider} takes no API key"
+                );
+            }
         }
     }
 

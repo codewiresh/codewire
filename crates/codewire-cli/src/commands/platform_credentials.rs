@@ -7,10 +7,10 @@ use super::credential_input::connect::{
     claude_token_rotate_refusal, provider_id, provider_label, read_claude_token,
 };
 use super::credential_input::{
-    CredentialName, NameLookup, NameReading, NamedCredential, ParsedCredentialSelector,
-    SSH_PUBLIC_KEY_GITHUB_HINT, admit_name, admit_new_name, name_taken, parse_credential_selector,
-    prompt_credential_material, read_ssh_import, settle_name, validate_ssh_generation,
-    validate_ssh_import,
+    AddKind, CredentialName, NameLookup, NameReading, NamedCredential, ParsedCredentialSelector,
+    SSH_PUBLIC_KEY_GITHUB_HINT, add_kind, admit_name, admit_new_name, name_taken,
+    parse_credential_selector, prompt_credential_material, read_ssh_import, settle_name,
+    validate_ssh_generation, validate_ssh_import,
 };
 use super::credentials::output::save_refusal::{Answer, Kind, Save, save_error};
 use super::login_screen;
@@ -120,7 +120,7 @@ async fn handle_with_receipt(
             delete_credential(client, current, args.yes).await
         }
         CredentialsCommand::Add(args) => {
-            if args.provider.as_deref() == Some("ssh") {
+            if args.provider.as_deref().and_then(add_kind) == Some(AddKind::SshKey) {
                 return import_ssh(client, &args, execution).await;
             }
             if args.provider.as_deref() == Some(CLAUDE_SUBSCRIPTION) {
@@ -949,7 +949,7 @@ fn validate_key_arguments(args: &CredentialAddArgs) -> anyhow::Result<()> {
         "--key-file is only valid for add ssh"
     );
     anyhow::ensure!(
-        matches!(args.provider.as_deref(), Some("openai" | "anthropic")),
+        args.provider.as_deref().and_then(add_kind) == Some(AddKind::ApiKey),
         super::credentials::output::refusal::add_unsupported(
             args.provider.as_deref().unwrap_or("that provider")
         )
@@ -1431,6 +1431,35 @@ mod tests {
             guided: false,
         };
         assert!(validate_key_arguments(&args).is_err());
+    }
+
+    /// `add` in the cloud takes exactly the providers its picker offers
+    /// (#5446). An SSH key is taken only through `add_kind`, which reads the
+    /// list the picker is built from; an API key goes through
+    /// `validate_key_arguments` too, which could take a provider the picker
+    /// lacks.
+    #[test]
+    fn the_add_picker_offers_every_provider_cloud_add_takes() {
+        use crate::commands::credential_input::{ADD_PROVIDERS, PROVIDER_WORDS_FOR_TESTS};
+        for provider in PROVIDER_WORDS_FOR_TESTS {
+            let offered = ADD_PROVIDERS
+                .iter()
+                .find(|(word, ..)| *word == provider)
+                .map(|(_, kind, _)| *kind);
+            let args = CredentialAddArgs {
+                provider: Some(provider.into()),
+                name: Some("work".into()),
+                account_hint: None,
+                expires_at: None,
+                key_file: None,
+                guided: false,
+            };
+            assert_eq!(
+                validate_key_arguments(&args).is_ok(),
+                offered == Some(AddKind::ApiKey),
+                "--cloud add {provider}"
+            );
+        }
     }
 
     #[test]

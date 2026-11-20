@@ -203,6 +203,22 @@ cw credentials --cloud --profile=work set ssh work-ssh
 There is no `github` slot: the account's GitHub connection is part of every
 profile, and `set github` is refused.
 
+At a terminal, `connect` and `add` with no provider, and `set` with no slot,
+ask with a guided picker. Each picker offers exactly what its command takes,
+in that placement, and nothing it refuses; both placements take the same set,
+so their pickers are the same rows in the same order. A test holds each
+picker's rows to its command's accepted set in each placement, so a provider
+or kind can't be added to a command without its row (#5446):
+
+- `connect` asks "What do you want to connect?": Codex, GitHub, Claude
+  (sign-in) and Claude (token), as the approved credentials screens show
+  them (owner, 2026-11-15, #4717). API keys are not `connect` rows.
+- `add` asks "Which provider?": OpenAI API key, Anthropic API key and SSH
+  private key. `add claude-subscription`, the one-release alias of
+  `connect claude-token`, is not a row.
+- `set` asks "Which provider should this profile use?": codex, openai,
+  anthropic and ssh, every slot but GitHub's.
+
 ```sh
 ```
 

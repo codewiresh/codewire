@@ -779,6 +779,55 @@ pub(super) fn expiry_arg(value: &str) -> Result<u64, String> {
 /// The slots a profile has.
 pub(super) const PROFILE_SLOTS: [&str; 5] = ["codex", "openai", "github", "anthropic", "ssh"];
 
+/// What `cw credentials add` takes for a provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AddKind {
+    ApiKey,
+    SshKey,
+}
+
+/// The providers `cw credentials add` takes, the same in both placements,
+/// each with its row in the guided picker, in the picker's order. Both
+/// placements accept a provider only through [`add_kind`], so this list is
+/// the whole accepted set, and the picker is built from it (#5446).
+///
+/// `claude-subscription`, the one-release alias of `connect claude-token`
+/// (#4945), is deliberately not here: it is hidden, both placements turn it
+/// into that `connect` before they ask this list, and the guided pickers
+/// offer Claude under `connect`.
+pub(super) const ADD_PROVIDERS: [(&str, AddKind, &str); 3] = [
+    ("openai", AddKind::ApiKey, "OpenAI API key"),
+    ("anthropic", AddKind::ApiKey, "Anthropic API key"),
+    ("ssh", AddKind::SshKey, "SSH private key"),
+];
+
+/// What `add` takes for `provider`, or `None` when `add` refuses it.
+pub(super) fn add_kind(provider: &str) -> Option<AddKind> {
+    ADD_PROVIDERS
+        .iter()
+        .find(|(word, ..)| *word == provider)
+        .map(|(_, kind, _)| *kind)
+}
+
+/// Words a credentials command might be given as a provider or a slot:
+/// every word some command takes, the hidden alias, and words none takes.
+/// The picker tests check each placement's acceptance over these (#5446).
+#[cfg(test)]
+pub(super) const PROVIDER_WORDS_FOR_TESTS: [&str; 12] = [
+    "codex",
+    "openai",
+    "github",
+    "anthropic",
+    "ssh",
+    "claude",
+    "claude-token",
+    "claude-subscription",
+    "mistral",
+    "gemini",
+    "google",
+    "unknown",
+];
+
 /// How a credentials command names one credential.
 pub(super) const SELECTOR_HELP: &str =
     "Credential name, PROVIDER/NAME (anthropic, openai, github or ssh), name:NAME or id:UUID";
