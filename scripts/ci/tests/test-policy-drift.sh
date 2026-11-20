@@ -45,9 +45,22 @@ for name in pass-warm-pool-sandboxtemplate pass-warm-pool-subfolder-sandboxtempl
   pass-warm-pool-broker-sandboxtemplate pass-environment-broker-sandboxtemplate \
   pass-confidential-broker-sandboxtemplate \
   deny-mount-registry deny-mount-renamed deny-mount-script deny-runc deny-dind-digest \
-  deny-privileged-workspace; do
+  deny-privileged-workspace deny-devnet-disk; do
   grep -qw -- "$name" <<<"$cases" || fail "the builder made no $name case"
 done
+# The disk-backed control is the broker Pod with only its device volume changed.
+python3 -I - "$work/pods" <<'PY'
+import json, pathlib, sys
+pods = pathlib.Path(sys.argv[1])
+deny = json.loads((pods / "deny-devnet-disk.json").read_text())
+good = json.loads((pods / "pass-warm-pool-broker-sandboxtemplate.json").read_text())
+devnet = [v for v in deny["spec"]["volumes"] if v["name"] == "egress-devnet"]
+assert devnet == [{"name": "egress-devnet", "emptyDir": {}}], devnet
+for pod in (deny, good):
+    pod["metadata"]["name"] = ""
+    pod["spec"]["volumes"] = [v for v in pod["spec"]["volumes"] if v["name"] != "egress-devnet"]
+assert deny == good, "deny-devnet-disk differs from the broker Pod beyond its device volume"
+PY
 python3 -I - "$work/pods" "$REGISTRY" <<'PY'
 import json, pathlib, re, sys
 pods = pathlib.Path(sys.argv[1])

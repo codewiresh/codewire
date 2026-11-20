@@ -12,7 +12,7 @@ Cases named pass-* are the hosted sandbox templates as a real render would
 carry them: the placeholder registry becomes the hosted one, a `:golden` tag
 an exact digest, and each DinD image the policy's own approved image of the
 same version. They must be admitted. deny-* cases are single mutations of
-the warm-pool template the policy must refuse; they prove the CLI evaluates the
+a warm-pool template the policy must refuse; they prove the CLI evaluates the
 policy's foreach, regex and hash rules rather than passing everything.
 """
 
@@ -149,8 +149,8 @@ def cases(goldens: pathlib.Path, policy_text: str, registry: str) -> dict[str, d
 
     built = {f"pass-{stem}": pod(load(stem), f"pass-{stem}", dind, registry) for stem in HOSTED}
 
-    def mutated(name: str, change) -> None:
-        case = pod(load("warm-pool-sandboxtemplate"), name, dind, registry)
+    def mutated(name: str, change, stem: str = "warm-pool-sandboxtemplate") -> None:
+        case = pod(load(stem), name, dind, registry)
         change(case)
         built[name] = case
 
@@ -168,6 +168,12 @@ def cases(goldens: pathlib.Path, policy_text: str, registry: str) -> dict[str, d
     mutated("deny-privileged-workspace",
             lambda case: container(case, "workspace").setdefault("securityContext", {}).update(
                 privileged=True))
+    # #4000: the TUN device's volume disk-backed, a device node on the node's
+    # own filesystem. The broker Pod is otherwise exactly its golden.
+    mutated("deny-devnet-disk",
+            lambda case: next(volume for volume in case["spec"]["volumes"]
+                              if volume["name"] == "egress-devnet").__setitem__("emptyDir", {}),
+            "warm-pool-broker-sandboxtemplate")
     return built
 
 

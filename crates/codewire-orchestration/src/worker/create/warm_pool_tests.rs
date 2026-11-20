@@ -990,6 +990,77 @@ fn a_broker_mode_pool_member_is_admitted_only_with_hosted_egress() {
             "{key}"
         );
     }
+    // ...and one more mount beside the TUN device's is refused too.
+    let mut extra = spec.clone();
+    extra["initContainers"][tun]["volumeMounts"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "name": "codewire-bin", "mountPath": "/codewire" }));
+    assert_eq!(
+        pool_member_isolated(&extra, &wanted),
+        Err(format!("/initContainers/{tun}/securityContext"))
+    );
+    // The TUN device's volume is memory-backed exactly as rendered: a node
+    // written to a disk-backed emptyDir would sit on the node's filesystem.
+    let devnet = spec["volumes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|volume| volume["name"] == "egress-devnet")
+        .expect("the TUN device's volume");
+    for shape in [
+        json!({}),
+        json!({ "medium": "Memory" }),
+        json!({ "medium": "Memory", "sizeLimit": "1Gi" }),
+    ] {
+        let mut disk = spec.clone();
+        disk["volumes"][devnet]["emptyDir"] = shape.clone();
+        assert_eq!(
+            pool_member_isolated(&disk, &wanted),
+            Err(format!("/volumes/{devnet}")),
+            "{shape}"
+        );
+    }
+    // It is mounted at exactly /dev/net, by the workspace container and the
+    // TUN init only.
+    let workspace = container_index(&spec, "containers", "workspace");
+    let mount = spec["containers"][workspace]["volumeMounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|mount| mount["name"] == "egress-devnet")
+        .expect("the workspace's TUN device mount");
+    for changed_mount in [
+        json!({ "name": "egress-devnet", "mountPath": "/dev/net", "subPath": "x" }),
+        json!({ "name": "egress-devnet", "mountPath": "/dev" }),
+        json!({ "name": "egress-devnet", "mountPath": "/dev/net", "mountPropagation": "HostToContainer" }),
+    ] {
+        let mut changed = spec.clone();
+        changed["containers"][workspace]["volumeMounts"][mount] = changed_mount.clone();
+        assert_eq!(
+            pool_member_isolated(&changed, &wanted),
+            Err(format!("/containers/{workspace}/volumeMounts/{mount}")),
+            "{changed_mount}"
+        );
+    }
+    let dind = container_index(&spec, "containers", "dind");
+    let mut shared = spec.clone();
+    let position = shared["containers"][dind]["volumeMounts"]
+        .as_array()
+        .map_or(0, Vec::len);
+    shared["containers"][dind]["volumeMounts"] = json!(
+        shared["containers"][dind]["volumeMounts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .chain([json!({ "name": "egress-devnet", "mountPath": "/dev/net" })])
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        pool_member_isolated(&shared, &wanted),
+        Err(format!("/containers/{dind}/volumeMounts/{position}"))
+    );
     // ...and only as an init container.
     let mut moved = spec.clone();
     let container = moved["initContainers"].as_array_mut().unwrap().remove(tun);

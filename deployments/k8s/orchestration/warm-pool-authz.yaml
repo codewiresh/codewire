@@ -685,7 +685,10 @@ spec:
         (variables.pod.runtimeClassName in variables.vmRuntimeClasses ||
         variables.environmentTemplate && variables.pod.runtimeClassName == 'confidential') &&
         has(c.command) && c.command == ['/usr/local/bin/cw', '__hosted-egress-tun', '--owner-uid', '1000'] &&
-        !has(c.args) && !has(c.env) && !has(c.envFrom) && !has(c.volumeMounts) && !has(c.volumeDevices) &&
+        !has(c.args) && !has(c.env) && !has(c.envFrom) && !has(c.volumeDevices) &&
+        has(c.volumeMounts) && size(c.volumeMounts) == 1 &&
+        dyn(c.volumeMounts[0]).all(k, k in ['name', 'mountPath']) &&
+        c.volumeMounts[0].name == 'egress-devnet' && c.volumeMounts[0].mountPath == '/dev/net' &&
         c.image.matches('^[^@ ]+@sha256:[0-9a-f]{64}$') &&
         c.image.split('@')[0] in variables.daemonRepositories &&
         (variables.volumes.exists(v, v.name == 'codewire-bin' && has(v.image) &&
@@ -694,7 +697,24 @@ spec:
         variables.pod.initContainers.exists(i, i.name == 'codewire-daemon-init' && i.image == c.image))))) &&
         (!variables.hostedEgress || has(variables.pod.initContainers) &&
         variables.pod.initContainers.exists(c, c.name == 'hosted-egress-tun'))
-      message: hosted-egress-tun runs only as an init container with hosted egress on, under a VM runtime class (confidential only outside pools), exactly its command with nothing added, from the deployment's daemon image, the one codewire-bin is filled from; every broker-mode template has it
+      message: hosted-egress-tun runs only as an init container with hosted egress on, under a VM runtime class (confidential only outside pools), exactly its command with nothing added and the TUN device's volume its one mount, from the deployment's daemon image, the one codewire-bin is filled from; every broker-mode template has it
+    # The TUN device's volume (#4000): a Kata container has no /dev/net/tun,
+    # so the TUN init makes the node here. Memory-backed exactly as rendered,
+    # since a disk-backed emptyDir is the node's filesystem shared into the
+    # VM; mounted at exactly /dev/net by the TUN init and the workspace
+    # container only; and only with hosted egress on, where every broker-mode
+    # template has it. Container names are unique across both lists.
+    - expression: >-
+        variables.volumes.all(v, v.name != 'egress-devnet' ||
+        variables.hostedEgress && dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) &&
+        dyn(v.emptyDir).all(k, k in ['medium', 'sizeLimit']) &&
+        has(v.emptyDir.medium) && v.emptyDir.medium == 'Memory' &&
+        has(v.emptyDir.sizeLimit) && string(v.emptyDir.sizeLimit) == '1Mi') &&
+        variables.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name != 'egress-devnet' ||
+        (c.name == 'workspace' || c.name == 'hosted-egress-tun') &&
+        dyn(m).all(k, k in ['name', 'mountPath']) && m.mountPath == '/dev/net')) &&
+        (!variables.hostedEgress || variables.volumes.exists(v, v.name == 'egress-devnet'))
+      message: the TUN device's volume egress-devnet is an emptyDir with medium Memory and sizeLimit 1Mi, only with hosted egress on, mounted at exactly /dev/net by hosted-egress-tun and the workspace container only; every broker-mode template has it
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

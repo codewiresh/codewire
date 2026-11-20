@@ -16,10 +16,12 @@ mod dind;
 mod encoding;
 mod hosted_egress;
 /// The hosted-egress TUN init container, which runs as root from the support
-/// image; the bind's isolation check admits it only while hosted egress is on.
+/// image, and its device volume; the bind's isolation check admits them only
+/// while hosted egress is on.
 pub(crate) use hosted_egress::{
-    TUN_INIT_COMMAND as HOSTED_EGRESS_TUN_COMMAND,
-    TUN_INIT_CONTAINER as HOSTED_EGRESS_TUN_CONTAINER,
+    DEVNET_VOLUME as HOSTED_EGRESS_DEVNET_VOLUME, TUN_INIT_COMMAND as HOSTED_EGRESS_TUN_COMMAND,
+    TUN_INIT_CONTAINER as HOSTED_EGRESS_TUN_CONTAINER, devnet_mount as hosted_egress_devnet_mount,
+    devnet_volume as hosted_egress_devnet_volume,
 };
 mod naming;
 mod network;

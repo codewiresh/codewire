@@ -2,8 +2,11 @@
 //! container makes the guest's egress path before the workload starts (#4000;
 //! `designs/hosted-egress.md`, "The Sandbox side").
 //!
-//! It creates the persistent TUN `cwegress0`, owned by the workspace user so
-//! the daemon attaches it without privilege, then makes the routing and reads
+//! It makes `/dev/net/tun` afresh in the Pod's memory-backed `egress-devnet`
+//! volume, since a Kata container has none, and checks the opened node is the
+//! TUN (`codewire_vmm_guest_probe::tun`). It then creates the persistent TUN
+//! `cwegress0`, owned by the workspace user so the daemon attaches it without
+//! privilege, then makes the routing and reads
 //! it back (`codewire_network_session::hosted::routing::configure`: IPv6 off,
 //! the TUN's address and link, the Pod table and its three rules, and the main
 //! default into the TUN). It fails on the first error, so a wrong rule is

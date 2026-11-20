@@ -306,6 +306,10 @@
                 "readOnly": true
               },
               {
+                "mountPath": "/dev/net",
+                "name": "egress-devnet"
+              },
+              {
                 "mountPath": "/var/run/secrets/codewire/workspace-binding",
                 "name": "workspace-binding-identity",
                 "readOnly": true
@@ -479,7 +483,13 @@
               "privileged": true,
               "runAsGroup": 0,
               "runAsUser": 0
-            }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/dev/net",
+                "name": "egress-devnet"
+              }
+            ]
           },
           {
             "command": [
@@ -575,6 +585,13 @@
                 }
               ]
             }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "1Mi"
+            },
+            "name": "egress-devnet"
           },
           {
             "name": "workspace-egress-identity",

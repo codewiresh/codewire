@@ -3,13 +3,13 @@
   "kind": "SandboxTemplate",
   "metadata": {
     "annotations": {
-      "codewire.sh/pool-revision": "82ea4527774921ab91bb19d2c4d736d4439d55c1e4c48d2169570921b7b6c2d4"
+      "codewire.sh/pool-revision": "3760403ac102bdd15958312b4271ce850d99d20b6562b67e64911d8372df889b"
     },
     "labels": {
       "app.kubernetes.io/managed-by": "codewire",
       "codewire.sh/type": "workspace-pool"
     },
-    "name": "cw-pool-1000m-4096mi-10gi-2430ab65",
+    "name": "cw-pool-1000m-4096mi-10gi-aef3717c",
     "namespace": "dev-sandboxes"
   },
   "spec": {
@@ -215,7 +215,7 @@
               },
               {
                 "name": "CODEWIRE_WORKSPACE_POOL_REVISION",
-                "value": "82ea4527774921ab91bb19d2c4d736d4439d55c1e4c48d2169570921b7b6c2d4"
+                "value": "3760403ac102bdd15958312b4271ce850d99d20b6562b67e64911d8372df889b"
               }
             ],
             "image": "registry.example.invalid/codewire/workspace@sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -315,6 +315,10 @@
                 "mountPath": "/var/run/secrets/codewire/egress",
                 "name": "workspace-egress-identity",
                 "readOnly": true
+              },
+              {
+                "mountPath": "/dev/net",
+                "name": "egress-devnet"
               },
               {
                 "mountPath": "/var/run/secrets/codewire/workspace-binding",
@@ -490,7 +494,13 @@
               "privileged": true,
               "runAsGroup": 0,
               "runAsUser": 0
-            }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/dev/net",
+                "name": "egress-devnet"
+              }
+            ]
           },
           {
             "command": [
@@ -586,6 +596,13 @@
                 }
               ]
             }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "1Mi"
+            },
+            "name": "egress-devnet"
           },
           {
             "name": "workspace-egress-identity",

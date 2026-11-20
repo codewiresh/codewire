@@ -233,13 +233,18 @@ fn single_source(object: &Value) -> Option<(&str, &Value)> {
 }
 
 /// The hosted-egress TUN init as rendered: the support image's own `cw` with
-/// its one command, nothing appended to it and nothing mounted over it.
+/// its one command, nothing appended to it, and the TUN device's volume its
+/// only mount.
 fn tun_init_pinned(container: &Value) -> bool {
     container.get("command")
         == Some(&serde_json::json!(
             crate::sandbox::template::HOSTED_EGRESS_TUN_COMMAND
         ))
-        && ["args", "env", "envFrom", "volumeMounts", "volumeDevices"]
+        && container.get("volumeMounts")
+            == Some(&serde_json::json!([
+                crate::sandbox::template::hosted_egress_devnet_mount()
+            ]))
+        && ["args", "env", "envFrom", "volumeDevices"]
             .iter()
             .all(|key| absent_or_empty(container.get(*key)))
 }
@@ -319,6 +324,14 @@ pub(crate) fn pool_member_isolated(
         let Some((kind, source)) = single_source(volume) else {
             return Err(at);
         };
+        // The TUN device's volume is memory-backed, exactly as rendered: a
+        // device node must never be written to the node's own disk.
+        if name == Some(crate::sandbox::template::HOSTED_EGRESS_DEVNET_VOLUME)
+            && (!hosted_egress
+                || volume != &crate::sandbox::template::hosted_egress_devnet_volume())
+        {
+            return Err(at);
+        }
         match kind {
             "emptyDir" | "configMap" => {}
             // The workspace claim, which `volume_matches` resolves by UID.
@@ -416,6 +429,21 @@ pub(crate) fn pool_member_isolated(
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if token_volumes.contains(volume) && name != "workspace" {
+                    return Err(format!("{at}/volumeMounts/{position}"));
+                }
+                // (b) The TUN device's volume only at /dev/net, as rendered,
+                // in the TUN init and the workspace container.
+                if volume == crate::sandbox::template::HOSTED_EGRESS_DEVNET_VOLUME
+                    && (mount != &crate::sandbox::template::hosted_egress_devnet_mount()
+                        || !matches!(
+                            (field, name),
+                            ("containers", "workspace")
+                                | (
+                                    "initContainers",
+                                    crate::sandbox::template::HOSTED_EGRESS_TUN_CONTAINER
+                                )
+                        ))
+                {
                     return Err(format!("{at}/volumeMounts/{position}"));
                 }
             }

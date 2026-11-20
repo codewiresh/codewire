@@ -332,9 +332,52 @@ fn the_tun_init_runs_the_images_own_cw_and_mounts_nothing() {
             "1000"
         ])
     );
-    for key in ["args", "env", "envFrom", "volumeMounts", "volumeDevices"] {
+    for key in ["args", "env", "envFrom", "volumeDevices"] {
         assert!(tun.get(key).is_none(), "the TUN init sets {key}: {tun}");
     }
+    // Its one mount is the TUN device's memory-backed volume.
+    let devnet = json!({ "name": "egress-devnet", "mountPath": "/dev/net" });
+    assert_eq!(tun["volumeMounts"], json!([devnet]));
+    let volumes: Vec<&Value> = spec["volumes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|volume| volume["name"] == "egress-devnet")
+        .collect();
+    assert_eq!(
+        volumes,
+        [&json!({
+            "name": "egress-devnet",
+            "emptyDir": { "medium": "Memory", "sizeLimit": "1Mi" },
+        })]
+    );
+    // Mounted by the TUN init and the workspace container, and nothing else.
+    let mounters: Vec<&str> = spec["initContainers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(spec["containers"].as_array().unwrap())
+        .filter(|container| {
+            container["volumeMounts"]
+                .as_array()
+                .is_some_and(|mounts| mounts.iter().any(|mount| mount["name"] == "egress-devnet"))
+        })
+        .map(|container| container["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(mounters, [hosted_egress::TUN_INIT_CONTAINER, "workspace"]);
+    let workspace = spec["containers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|container| container["name"] == "workspace")
+        .unwrap();
+    assert!(
+        workspace["volumeMounts"]
+            .as_array()
+            .unwrap()
+            .contains(&devnet),
+        "{workspace}"
+    );
     assert!(
         spec["containers"]
             .as_array()

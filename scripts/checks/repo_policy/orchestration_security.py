@@ -359,13 +359,28 @@ HOSTED_EGRESS_FRAGMENTS = [
     "(variables.pod.runtimeClassName in variables.vmRuntimeClasses || "
     "variables.environmentTemplate && variables.pod.runtimeClassName == 'confidential') && "
     f"has(c.command) && c.command == {HOSTED_EGRESS_TUN_COMMAND} && "
-    "!has(c.args) && !has(c.env) && !has(c.envFrom) && !has(c.volumeMounts) && !has(c.volumeDevices) && "
+    "!has(c.args) && !has(c.env) && !has(c.envFrom) && !has(c.volumeDevices) && "
+    "has(c.volumeMounts) && size(c.volumeMounts) == 1 && "
+    "dyn(c.volumeMounts[0]).all(k, k in ['name', 'mountPath']) && "
+    "c.volumeMounts[0].name == 'egress-devnet' && c.volumeMounts[0].mountPath == '/dev/net' && "
     "c.image.matches('^[^@ ]+@sha256:[0-9a-f]{64}$') && "
     "c.image.split('@')[0] in variables.daemonRepositories && "
     "(variables.volumes.exists(v, v.name == 'codewire-bin' && has(v.image) && has(v.image.reference) && "
     "v.image.reference == c.image) || "
     "variables.environmentTemplate && variables.pod.runtimeClassName == 'confidential' && "
     "variables.pod.initContainers.exists(i, i.name == 'codewire-daemon-init' && i.image == c.image)))))",
+    # The TUN device's volume: memory-backed exactly as rendered, only with
+    # the switch on and always then, mounted at exactly /dev/net by the TUN
+    # init and the workspace container only.
+    "variables.volumes.all(v, v.name != 'egress-devnet' || "
+    "variables.hostedEgress && dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) && "
+    "dyn(v.emptyDir).all(k, k in ['medium', 'sizeLimit']) && "
+    "has(v.emptyDir.medium) && v.emptyDir.medium == 'Memory' && "
+    "has(v.emptyDir.sizeLimit) && string(v.emptyDir.sizeLimit) == '1Mi') && "
+    "variables.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name != 'egress-devnet' || "
+    "(c.name == 'workspace' || c.name == 'hosted-egress-tun') && "
+    "dyn(m).all(k, k in ['name', 'mountPath']) && m.mountPath == '/dev/net')) && "
+    "(!variables.hostedEgress || variables.volumes.exists(v, v.name == 'egress-devnet'))",
     # The broker arm's privilege: root only for the TUN init, mount-workspace
     # ordered before it, and dind from the official DinD image; no added
     # capability or escalation anywhere.
@@ -1655,6 +1670,12 @@ def check_orchestration_authz(args: argparse.Namespace) -> int:
                                                            "variables.pod.containers.all(c, c.name != 'hosted-egress-tun') &&", "")),
             ("a broker peer with any labels", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
                                                      "size(t.podSelector.matchLabels) == size(b) - 2 &&", "")),
+            ("a disk-backed TUN device volume", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                       "v.emptyDir.medium == 'Memory' &&", "true &&")),
+            ("the TUN device volume in any container", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                              "(c.name == 'workspace' || c.name == 'hosted-egress-tun') &&", "true &&")),
+            ("the TUN init with any mount", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
+                                                   "c.volumeMounts[0].name == 'egress-devnet' &&", "true &&")),
             ("the TUN init on any runtime", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,
                                                    "variables.pod.runtimeClassName in variables.vmRuntimeClasses", "true")),
             ("a diagnostic VM class", edited("ValidatingAdmissionPolicy", WARM_POOL_TEMPLATE_POLICY,

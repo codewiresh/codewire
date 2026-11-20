@@ -56,6 +56,7 @@ ENVIRONMENT = "a warm-pool template sets only the identity-free workspace"
 EGRESS = "with hosted egress on, a template's egress names only the broker peers"
 PRIVILEGE = "with hosted egress on, the Pod runs as 1000:1000"
 TUN = "hosted-egress-tun runs only as an init container"
+DEVNET = "the TUN device's volume egress-devnet is an emptyDir with medium Memory"
 RUNTIME = "warm-pool members run under the commodity runtime"
 KEEPS_BROKER = "orchestration never takes broker mode"
 NO_PARAM = "failed to configure binding: no params found"
@@ -372,7 +373,38 @@ def cases(today: dict, broker: dict) -> list[tuple[str, dict | None, str, dict, 
         ("on, malformed repository: the broker golden",
          ON | {"CODEWIRE_HOSTED_EGRESS_DAEMON_REPOSITORY": REPOSITORY + "@sha256:" + "2" * 64}, "create", broker, TUN),
         ("missing param: today's golden", None, "create", today, NO_PARAM),
+        # The TUN device's volume (#4000): memory-backed exactly as rendered,
+        # and only at /dev/net in the TUN init and the workspace container.
+        ("on: the TUN device's volume disk-backed", ON, "create", mutate(
+            broker, lambda t: devnet(t).__setitem__("emptyDir", {"sizeLimit": "1Mi"})), DEVNET),
+        ("on: the TUN device's volume larger", ON, "create", mutate(
+            broker, lambda t: devnet(t).__setitem__("emptyDir", {"medium": "Memory", "sizeLimit": "1Gi"})), DEVNET),
+        ("on: no TUN device's volume", ON, "create", mutate(broker, without_devnet), DEVNET),
+        ("on: the TUN device's volume in dind", ON, "create", mutate(
+            broker, lambda t: container(t, "dind").setdefault("volumeMounts", []).append(
+                {"name": "egress-devnet", "mountPath": "/dev/net"})), DEVNET),
+        ("on: the TUN device's volume at another path", ON, "create", mutate(
+            broker, lambda t: devnet_mount(container(t, "workspace")).__setitem__("mountPath", "/dev")), DEVNET),
+        ("on: the TUN device's volume with a subPath", ON, "create", mutate(
+            broker, lambda t: devnet_mount(container(t, "workspace")).__setitem__("subPath", "x")), DEVNET),
+        ("off: the TUN device's volume without the switch", OFF, "create", mutate(
+            today, lambda t: pod(t)["volumes"].append(
+                {"name": "egress-devnet", "emptyDir": {"medium": "Memory", "sizeLimit": "1Mi"}})), DEVNET),
     ]
+
+
+def devnet(t: dict) -> dict:
+    return next(v for v in pod(t)["volumes"] if v["name"] == "egress-devnet")
+
+
+def devnet_mount(c: dict) -> dict:
+    return next(m for m in c["volumeMounts"] if m["name"] == "egress-devnet")
+
+
+def without_devnet(t: dict) -> None:
+    # The mounts stay, so the TUN init's own rule passes and this one is
+    # what refuses a broker template with no device volume.
+    pod(t)["volumes"] = [v for v in pod(t)["volumes"] if v["name"] != "egress-devnet"]
 
 
 def wait_for(cluster: Cluster, probe: dict, rule: str) -> None:
