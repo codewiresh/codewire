@@ -4,26 +4,77 @@ package codewire_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	codewire "codewire.sh/sdk-go"
 )
 
 func ptr[T any](v T) *T { return &v }
 
-func TestE2E_FirstPartyEnv(t *testing.T) {
+// removeAndWait deletes env and waits until it is destroyed: delete returns
+// before then, and a preset an environment still uses cannot be deleted.
+func removeAndWait(t *testing.T, ctx context.Context, client *codewire.Client, env *codewire.Environment) {
+	t.Helper()
+	if err := env.Remove(ctx); err != nil {
+		t.Errorf("remove %s: %v", env.Id, err)
+		return
+	}
+	for deadline := time.Now().Add(5 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Second) {
+		current, err := client.Environments.Get(ctx, env.Id)
+		var apiErr *codewire.Error
+		if errors.As(err, &apiErr) && apiErr.StatusCode == 404 {
+			return
+		}
+		if err != nil {
+			t.Errorf("get %s: %v", env.Id, err)
+			return
+		}
+		if current.State == "destroyed" {
+			return
+		}
+	}
+	t.Errorf("environment %s was not destroyed within 5 minutes", env.Id)
+}
+
+// Presets belong to an organization, so the test makes its own and deletes it
+// after: the account it runs as has none to begin with.
+func TestE2E_PresetEnv(t *testing.T) {
 	client := codewire.New("")
 	ctx := context.Background()
 
+	suffix := make([]byte, 4)
+	if _, err := rand.Read(suffix); err != nil {
+		t.Fatalf("slug: %v", err)
+	}
+	slug := "sdk-e2e-" + hex.EncodeToString(suffix)
+	preset, err := client.Presets.Create(ctx, codewire.CreatePresetBody{
+		Name:        slug,
+		Slug:        &slug,
+		ProjectSpec: codewire.ProjectSpec{SchemaVersion: 1, Image: "python:3.12-slim", WorkingDirectory: "/workspace"},
+	})
+	if err != nil {
+		t.Fatalf("create preset: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := client.Presets.Delete(ctx, preset.Id); err != nil {
+			t.Errorf("delete preset %s: %v", preset.Id, err)
+		}
+	})
+
 	env, err := client.Environments.Create(ctx, codewire.CreateEnvironmentBody{
-		ProjectSpec: codewire.ProjectSpec{SchemaVersion: 1, Preset: "python", WorkingDirectory: "/workspace"},
+		ProjectSpec: codewire.ProjectSpec{SchemaVersion: 1, Preset: slug, WorkingDirectory: "/workspace"},
 	}, codewire.CreateOptions{Wait: true})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	defer env.Remove(ctx)
+	// Runs before the preset's delete: cleanups run last first.
+	t.Cleanup(func() { removeAndWait(t, ctx, client, env) })
 
 	result, err := env.Exec(ctx, codewire.ExecBody{
 		Command: &[]string{"python3", "--version"},
