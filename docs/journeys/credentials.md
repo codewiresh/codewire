@@ -410,6 +410,12 @@ Issues: #4850, #4717 (C2). The screens are the approved screens 3 and 4.
      second one ends `cw` at once (exit 130) with the terminal as it was.
   3. `cw login` at a terminal: its three stdout lines are unchanged, the
      link is clickable, and the hint and the waiting line are on stderr.
+     The server's sign-in page must be an `https://` link, or `http://` to
+     `127.0.0.1` or `[::1]` as written (a local Kind cluster); any other,
+     an `http://` LAN address or a look-alike such as
+     `http://127.0.0.1.example.com/` included, stops `cw login` with `the
+     server sent a sign-in page that isn't a plain https link; nothing was
+     opened`, and nothing is opened (#5422; not yet observed against Kind).
   4. Each again piped and with `TERM=dumb`: the plain URL, no hint, no
      waiting line, no escape sequences, and keys aren't read.
 - **Proof:** pty output with escapes shown holds the OSC 8 hyperlink around

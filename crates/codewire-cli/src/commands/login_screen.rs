@@ -141,10 +141,42 @@ pub(super) fn hyperlink(url: &str) -> String {
     format!("\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\")
 }
 
-/// A link a terminal may be handed: `https://`, with no control character or
-/// space that could end the escape sequence or hide part of the link.
+/// A link a terminal may be handed: `https://`, or `http://` to the loopback
+/// address a local Kind cluster serves on (#5422), with no control character
+/// or space that could end the escape sequence or hide part of the link.
 pub(super) fn safe_link(url: &str) -> bool {
-    url.starts_with("https://") && !url.chars().any(|c| c.is_control() || c.is_whitespace())
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
+    url.starts_with("https://") || (url.starts_with("http://") && loopback_link(url))
+}
+
+/// `127.0.0.1` or `[::1]`, read from the parsed link. The authority as
+/// written must be exactly that host and an optional port, so a link whose
+/// text names another host or a user (`127.0.0.1.example.com`,
+/// `127.0.0.1@example.com`) or spells the address another way (`0x7f.0.0.1`,
+/// `2130706433`) is refused: the person reads the host the browser opens.
+fn loopback_link(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let loopback = match parsed.host() {
+        Some(url::Host::Ipv4(address)) => address == std::net::Ipv4Addr::LOCALHOST,
+        Some(url::Host::Ipv6(address)) => address == std::net::Ipv6Addr::LOCALHOST,
+        Some(url::Host::Domain(_)) | None => false,
+    };
+    let (Some(host), Some(rest)) = (parsed.host_str(), url.strip_prefix("http://")) else {
+        return false;
+    };
+    let written = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    loopback
+        && match written.strip_prefix(host) {
+            Some("") => true,
+            Some(port) => port.strip_prefix(':').is_some_and(|port| {
+                !port.starts_with('0') && port.parse::<u16>().ok() == parsed.port_or_known_default()
+            }),
+            None => false,
+        }
 }
 
 /// The device-code lines under the link screen of a device flow (Codex,
@@ -381,11 +413,32 @@ mod tests {
     }
 
     /// A link from a server is handed to the terminal only when it is a
-    /// plain https link.
+    /// plain https link, or plain http to the loopback address (#5422).
     #[test]
-    fn only_a_plain_https_link_becomes_a_hyperlink() {
+    fn only_a_plain_https_or_loopback_http_link_becomes_a_hyperlink() {
         for unsafe_link in [
             "http://example.test/a",
+            "http://127.0.0.1.example.com/device",
+            "http://127.0.0.1@example.com/device",
+            "http://user@127.0.0.1/device",
+            "http://user:pass@127.0.0.1/device",
+            "http://example.com/#127.0.0.1",
+            "http://example.com/?next=http://127.0.0.1/",
+            "http://192.168.1.10/device",
+            "http://10.0.0.1:8080/device",
+            "http://127.0.0.2/device",
+            "http://2130706433/device",
+            "http://0x7f.0.0.1/device",
+            "http://0177.0.0.1/device",
+            "http://127.1/device",
+            "http://[0:0:0:0:0:0:0:1]/device",
+            "http://[::ffff:127.0.0.1]/device",
+            "http://127.0.0.1:080/device",
+            "http://localhost/device",
+            "http://localhost:8080/device",
+            "HTTP://127.0.0.1/device",
+            "http://127.0.0.1/device b",
+            "http://127.0.0.1/\x1b]8;;https://evil.test\x1b\\",
             "javascript:alert(1)",
             "https://example.test/a\x1b]8;;https://evil.test\x1b\\",
             "https://example.test/a b",
@@ -394,9 +447,27 @@ mod tests {
             assert!(!safe_link(unsafe_link), "{unsafe_link:?}");
             assert_eq!(hyperlink(unsafe_link), unsafe_link);
         }
-        assert!(safe_link(
-            "https://codewire-dev.sh/device?user_code=ABCD-1234"
-        ));
+        for link in [
+            "https://codewire-dev.sh/device?user_code=ABCD-1234",
+            "http://127.0.0.1/device?user_code=ABCD-1234",
+            "http://127.0.0.1:8080/device?user_code=ABCD-1234",
+            "http://127.0.0.1",
+            "http://[::1]/device",
+            "http://[::1]:8080/device#code",
+            "http://127.0.0.1:80/device",
+        ] {
+            assert!(safe_link(link), "{link:?}");
+            assert!(hyperlink(link).starts_with("\x1b]8;;"), "{link:?}");
+        }
+    }
+
+    /// Loopback is the only plain-http exception: the same link on any other
+    /// host is still refused.
+    #[test]
+    fn plain_http_is_refused_everywhere_but_loopback() {
+        assert!(safe_link("http://127.0.0.1:8080/device"));
+        assert!(!safe_link("http://example.com/device"));
+        assert!(!safe_link("http://example.com:8080/device"));
     }
 
     #[test]
