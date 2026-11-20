@@ -86,6 +86,14 @@ impl SshEnrollmentWorkers {
         result
     }
 
+    #[cfg(test)]
+    pub(super) fn probe(&self) -> SshEnrollmentProbe {
+        SshEnrollmentProbe {
+            permits: Arc::clone(&self.permits),
+            shutdown: self.shutdown.subscribe(),
+        }
+    }
+
     pub(super) async fn shutdown(&self) {
         self.shutdown.send_replace(true);
         if let Ok(permits) = Arc::clone(&self.permits)
@@ -94,6 +102,31 @@ impl SshEnrollmentWorkers {
         {
             drop(permits);
         }
+    }
+}
+
+/// What a test sees of the enrollment workers, so it waits on the
+/// authority's own state instead of a wall clock: how many requests hold a
+/// worker, and when shutdown has closed publication.
+#[cfg(test)]
+pub(crate) struct SshEnrollmentProbe {
+    permits: Arc<tokio::sync::Semaphore>,
+    shutdown: watch::Receiver<bool>,
+}
+
+#[cfg(test)]
+impl SshEnrollmentProbe {
+    /// Requests admitted to a worker and not yet finished.
+    pub(crate) fn admitted(&self) -> usize {
+        MAX_SSH_ENROLLMENT_WORKERS as usize - self.permits.available_permits()
+    }
+
+    /// Returns once shutdown has closed publication: every admitted
+    /// enrollment fails its publication check from then on.
+    pub(crate) async fn stopping(&mut self) {
+        // An error means the workers are gone with the server, so nothing
+        // can publish any more either.
+        let _ = self.shutdown.wait_for(|stopping| *stopping).await;
     }
 }
 

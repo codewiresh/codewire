@@ -85,6 +85,8 @@ use profiles::{
 pub(crate) use repository::REPOSITORY_PREPARATION_TIMEOUT;
 use repository::{PreparedRepository, RepositoryProcessManager, cleanup_repository_ssh_runtimes};
 #[cfg(test)]
+pub(crate) use ssh_enrollment::SshEnrollmentProbe;
+#[cfg(test)]
 use ssh_enrollment::{MAX_SSH_ENROLLMENT_WORKERS, validate_ssh_expiry_at};
 use ssh_enrollment::{
     SSH_ENROLLMENT_DEADLINE, SshEnrollmentWorkers, ssh_enrollment_check,
@@ -138,6 +140,8 @@ pub async fn serve_os_local_credential_authority_with_process_spawners(
             platform_connector: Some(platform_connector),
             #[cfg(test)]
             listening: None,
+            #[cfg(test)]
+            ssh_enrollment: None,
         },
     )
     .await
@@ -267,6 +271,9 @@ pub(crate) struct AuthorityRuntimeAdapters {
     /// instead of guessing with a wall clock.
     #[cfg(test)]
     pub listening: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Tests watch SSH enrollment admission and shutdown here.
+    #[cfg(test)]
+    pub ssh_enrollment: Option<tokio::sync::oneshot::Sender<SshEnrollmentProbe>>,
 }
 
 pub(crate) async fn serve_until_with_process_spawners<S, F>(
@@ -303,6 +310,8 @@ where
         platform_connector,
         #[cfg(test)]
         listening,
+        #[cfg(test)]
+        ssh_enrollment,
     } = adapters;
     let authority_root = config.root.clone();
     let socket_dir = config.socket_dir.clone();
@@ -348,6 +357,11 @@ where
     ));
     let _repository_shutdown = repositories.shutdown_on_drop();
     let ssh_enrollment_workers = SshEnrollmentWorkers::new();
+    #[cfg(test)]
+    if let Some(ssh_enrollment) = ssh_enrollment {
+        // A test that dropped its receiver isn't watching; serving goes on.
+        let _ = ssh_enrollment.send(ssh_enrollment_workers.probe());
+    }
     let service = AuthorityRpc {
         authority,
         brokers: Arc::clone(&brokers),

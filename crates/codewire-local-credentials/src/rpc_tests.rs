@@ -550,6 +550,44 @@ async fn start_server_with_repository_spawner(
     .await
 }
 
+/// `start_server`, also handing back the probe of the SSH enrollment workers.
+async fn start_server_with_ssh_probe(
+    config: AuthorityRuntimeConfig,
+    store: TestProtectedStore,
+) -> (
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<(), AuthorityRuntimeError>>,
+    crate::service::SshEnrollmentProbe,
+) {
+    let (probe_tx, probe_rx) = oneshot::channel();
+    let (shutdown, server) = start_listening_authority(
+        config,
+        store,
+        catalog(),
+        crate::service::AuthorityRuntimeAdapters {
+            ssh_enrollment: Some(probe_tx),
+            ..Default::default()
+        },
+    )
+    .await;
+    let probe = probe_rx
+        .await
+        .expect("the authority sends its SSH enrollment probe");
+    (shutdown, server, probe)
+}
+
+/// Waits until `count` SSH enrollments hold a worker. The bound only turns a
+/// request that never arrives into a failure; it is not a timing guess.
+async fn wait_for_ssh_admission(probe: &crate::service::SshEnrollmentProbe, count: usize) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while probe.admitted() < count {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{count} SSH enrollments were not admitted"));
+}
+
 /// The start helpers return only once the authority listens, so one connect
 /// either succeeds or reports why.
 async fn connect_when_ready(config: &AuthorityRuntimeConfig) -> LocalCredentialClient {
@@ -879,7 +917,8 @@ async fn shutdown_cancels_ssh_enrollment_waiting_before_publication() {
     let config = runtime_config(&temp);
     let store = TestProtectedStore::default();
     let put_block = store.block_puts();
-    let (shutdown, server) = start_server(config.clone(), store.clone()).await;
+    let (shutdown, server, mut probe) =
+        start_server_with_ssh_probe(config.clone(), store.clone()).await;
     let mut first_client = connect_when_ready(&config).await;
     let mut first = tokio::spawn(async move {
         first_client
@@ -894,8 +933,14 @@ async fn shutdown_cancels_ssh_enrollment_waiting_before_publication() {
             .generate_ssh_credential("cancelled-ssh".into(), None)
             .await
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The second enrollment holds a worker, so it was admitted before
+    // shutdown; it can reach publication only after the first's put, which
+    // stays blocked until shutdown has closed publication.
+    wait_for_ssh_admission(&probe, 2).await;
     shutdown.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(30), probe.stopping())
+        .await
+        .expect("shutdown did not close SSH enrollment publication");
     drop(put_block);
     server.await.unwrap().unwrap();
     let _ = first.await;
@@ -914,7 +959,8 @@ async fn ninth_concurrent_ssh_enrollment_fails_fast_without_queued_material() {
     let config = runtime_config(&temp);
     let store = TestProtectedStore::default();
     let put_block = store.block_puts();
-    let (shutdown, server) = start_server(config.clone(), store.clone()).await;
+    let (shutdown, server, probe) =
+        start_server_with_ssh_probe(config.clone(), store.clone()).await;
     let mut clients = Vec::new();
     for _ in 0..9 {
         clients.push(connect_when_ready(&config).await);
@@ -935,7 +981,7 @@ async fn ninth_concurrent_ssh_enrollment_fails_fast_without_queued_material() {
                 .await
         }));
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_ssh_admission(&probe, 8).await;
 
     let error = clients
         .pop()
