@@ -315,13 +315,84 @@ impl AppBuilder {
     }
 }
 
-/// The standard request [`TraceLayer`] with [`RequestSpan`], for a server
-/// that does not use [`AppBuilder`].
-pub fn request_trace_layer() -> TraceLayer<
-    tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>,
-    RequestSpan,
-> {
-    TraceLayer::new_for_http().make_span_with(RequestSpan)
+/// The standard request tracing, for a server that does not use
+/// [`AppBuilder`]: the [`RequestSpan`] around each request until its response
+/// starts, and tower-http's request log lines inside it.
+///
+/// The span ends when the handler has answered, before the response body is
+/// sent, so a streamed response holds no span open and nothing its body does
+/// later joins the request's trace: a session that lasts hours is a trace of
+/// its setup (docs/CONFIGURATION.md, "Tracing"). A handler that wants a
+/// bounded stream's work in the trace instruments that stream itself.
+pub fn request_trace_layer() -> RequestTraceLayer {
+    RequestTraceLayer
+}
+
+/// See [`request_trace_layer`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RequestTraceLayer;
+
+impl<S> tower::Layer<S> for RequestTraceLayer {
+    type Service = RequestTrace<
+        tower_http::trace::Trace<
+            S,
+            tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>,
+            CallersSpan,
+        >,
+    >;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        RequestTrace {
+            inner: TraceLayer::new_for_http()
+                .make_span_with(CallersSpan)
+                .layer(inner),
+        }
+    }
+}
+
+/// Runs each request's handler inside its [`RequestSpan`], and drops the span
+/// with the handler's future: when the response starts.
+#[derive(Clone, Debug)]
+pub struct RequestTrace<S> {
+    inner: S,
+}
+
+impl<S, B> tower::Service<http::Request<B>> for RequestTrace<S>
+where
+    S: tower::Service<http::Request<B>>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = tracing::instrument::Instrumented<S::Future>;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: http::Request<B>) -> Self::Future {
+        use tower_http::trace::MakeSpan as _;
+        use tracing::Instrument as _;
+
+        let span = RequestSpan.make_span(&request);
+        let response = span.in_scope(|| self.inner.call(request));
+        response.instrument(span)
+    }
+}
+
+/// Gives tower-http's [`TraceLayer`] no span of its own. Its log lines for a
+/// request and for the start of its response are written inside the caller's
+/// span, the [`RequestSpan`]; the layer would otherwise keep a span of its
+/// own alive until the response body ended.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CallersSpan;
+
+impl<B> tower_http::trace::MakeSpan<B> for CallersSpan {
+    fn make_span(&mut self, _request: &http::Request<B>) -> tracing::Span {
+        tracing::Span::none()
+    }
 }
 
 /// The per-request span: tower-http's default `request` span at the same
@@ -415,6 +486,8 @@ async fn mark_never_shared_cached(
     resp
 }
 
+#[cfg(test)]
+mod request_trace_tests;
 #[cfg(test)]
 mod tests;
 

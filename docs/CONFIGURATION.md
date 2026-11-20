@@ -591,6 +591,14 @@ environment, such as an automatic stop, sends a signal, so that work is one
 trace with its activities. The volume therefore follows requests and actions,
 not the number of running environments.
 
+A request's span covers the request until its response starts, in every
+service. A response that is streamed afterwards, such as a command's output,
+an attached session, a followed log or a watch, holds no span open, and
+nothing its stream does later joins the trace. The trace of a session that
+lasts hours is the trace of setting it up, and it can be read as soon as the
+session is established. A 5xx response still writes its `response failed`
+line inside the request span.
+
 Codewire's spans are at `DEBUG` level, so at the default `RUST_LOG=info` they
 do not appear in the JSON logs.
 

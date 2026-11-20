@@ -1489,8 +1489,6 @@ mod tests {
             .unwrap();
             let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(response.status(), http::StatusCode::OK);
-            // The response body owns the request span until it ends.
-            drop(response);
             let probe = http::Request::get("/healthz")
                 .body(axum::body::Body::empty())
                 .unwrap();
@@ -1559,6 +1557,83 @@ mod tests {
                 "{traceparent}"
             );
             assert!(traceparent.contains(&child.span_context.span_id().to_string()));
+        }
+
+        /// A streamed response through the real layers: its server span is
+        /// exported when the response starts, while the body is still open,
+        /// and a statement its body runs later joins no trace. A session
+        /// that lasts hours is therefore a trace of its setup.
+        #[tokio::test]
+        async fn a_streamed_responses_trace_ends_when_the_response_starts() {
+            use tower::ServiceExt as _;
+            use tracing_subscriber::layer::SubscriberExt as _;
+
+            let collected = Collected::default();
+            let exporter = super::super::otel::Exporter::with_processor(
+                "orchestration",
+                opentelemetry_sdk::trace::SimpleSpanProcessor::new(collected.clone()),
+            );
+            let subscriber = tracing_subscriber::registry().with(exporter.layers());
+            let _default = tracing::subscriber::set_default(subscriber);
+            let _export_active = EXPORT_ACTIVE_TESTS.lock().await;
+            EXPORT_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
+            let relay_release = release.clone();
+            let app = crate::AppBuilder::new("test")
+                .with_routes(axum::Router::new().route(
+                    "/codewire.v1.ExecService/StreamExec",
+                    axum::routing::post(move || {
+                        let release = relay_release.clone();
+                        async move {
+                            tracing::debug!(
+                                target: "sqlx::query",
+                                summary = "SELECT setup",
+                                elapsed_secs = 0.001_f64,
+                            );
+                            axum::body::Body::from_stream(futures::stream::once(async move {
+                                release.notified().await;
+                                tracing::debug!(
+                                    target: "sqlx::query",
+                                    summary = "SELECT relay",
+                                    elapsed_secs = 0.001_f64,
+                                );
+                                Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(
+                                    b"done",
+                                ))
+                            }))
+                        }
+                    }),
+                ))
+                .into_router();
+
+            let request = http::Request::post("/codewire.v1.ExecService/StreamExec")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), http::StatusCode::OK);
+            exporter.provider().force_flush().unwrap();
+            let names = || -> Vec<String> {
+                let spans = collected.0.lock().unwrap();
+                spans.iter().map(|span| span.name.to_string()).collect()
+            };
+            // The body has not been read, and the trace is complete.
+            assert_eq!(
+                names(),
+                [
+                    "postgresql SELECT",
+                    "POST /codewire.v1.ExecService/StreamExec"
+                ]
+            );
+
+            release.notify_one();
+            let body = axum::body::to_bytes(response.into_body(), 16)
+                .await
+                .unwrap();
+            assert_eq!(&body[..], b"done");
+            exporter.provider().force_flush().unwrap();
+            EXPORT_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(names().len(), 2, "{:?}", names());
         }
 
         /// A Temporal activity as the worker runs it: the SDK's `RunActivity`
