@@ -315,7 +315,10 @@ here="$(dirname "$0")"
 printf '%s %s\n' "$*" "${SCCACHE_SERVER_UDS:-}" >>"$here/calls"
 case "${1:-}" in
   --version) printf 'sccache 0.17.0\n' ;;
-  --show-stats) [[ ! -e "$here/stats-unanswered" ]] && cat "$here/stats" ;;
+  --show-stats)
+    # stats-answer-once: answer this read, then stop answering.
+    if [[ -e "$here/stats-answer-once" ]]; then rm -f -- "$here/stats-answer-once"; cat "$here/stats"; exit 0; fi
+    [[ ! -e "$here/stats-unanswered" ]] && cat "$here/stats" ;;
   --stop-server) : >"$SCCACHE_SERVER_UDS.stop" ;;
   --dist-status) printf '{"Disabled":"disabled"}\n' ;;
   *) exit 64 ;;
@@ -413,6 +416,19 @@ age_mark "$base" 400 30
 check "$base" || fail 'a killed hung server failed the check'
 ! server_running "$base" || fail "the TERM-proof hung server still runs: $(cat "$hang/stderr"; cat "$base/server-check.log" 2>/dev/null)"
 grep -Fq ' by=KILL' "$hang/stderr" || fail "kill status: $(cat "$hang/stderr")"
+
+# The re-read after the stall answers nothing (a busy host outran its bound,
+# #5588): that is no progress, so the hung server is still stopped.
+base="$hang/reread"
+start_server "$base" 2 --ignore-stop
+check "$base"
+age_mark "$base" 400 30
+: >"$hang/fake/stats-answer-once"
+: >"$hang/fake/stats-unanswered"
+check "$base" || fail 'a hung server whose re-read did not answer failed the check'
+rm -f -- "$hang/fake/stats-unanswered" "$hang/fake/stats-answer-once"
+! server_running "$base" || fail "a hung server whose re-read did not answer still runs: $(cat "$hang/stderr"; cat "$base/server-check.log" 2>/dev/null)"
+grep -Fq 'state=restarted reason=server-hung' "$hang/stderr" || fail "re-read restart status: $(cat "$hang/stderr")"
 
 # One pass over /proc/net/unix can miss the listening socket while sockets
 # change elsewhere; while the socket file exists the helper reads again, so a

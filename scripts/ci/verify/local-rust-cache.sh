@@ -292,8 +292,11 @@ local_rust_cache_observe_server() {
       if local_rust_cache_server_compiling "$pid"; then
         local_rust_cache_note_server "$base" "state=kept reason=compiling pid=$pid"
         since="$now"
+      # Only a count that answers, and differs, is progress: a read that
+      # does not answer (a busy host can outrun its bound) has shown none, as
+      # above. Reading it as changed kept a hung server (#5588).
       elif again="$(local_rust_cache_server_progress "$base" "$sccache_bin")" || again='';
-          [[ "$again" != "$answered" ]]; then
+          [[ -n "$again" && "$again" != "$answered" ]]; then
         local_rust_cache_note_server "$base" "state=kept reason=progress-changed pid=$pid answered=${answered:-none} then=${again:-none}"
         since="$now"
       else
