@@ -807,6 +807,38 @@ daemon's `ForwardTcp`, which applies the same rule again, and refuses every
 forward when the VM's runtime predates it. The server refuses remote
 forwards, and the managed block turns agent and X11 forwarding off.
 
+A Unix-socket forward (`ssh -L LOCAL.sock:REMOTE.sock`, OpenSSH's
+`direct-streamlocal@openssh.com`) reaches the socket at `REMOTE.sock` as a
+process of the workload user would (#5608). It is served on the same
+connections as TCP forwards, each of which may also open a shell, and never
+on a smaller grant. The target is an absolute path of at most 107 bytes;
+relative paths, abstract names (`@…`) and remote socket forwards
+(`ssh -R`) are refused. The whole lookup and the connect run as the workload
+user, with its uid, gid and groups, inside the workload's own filesystem, so
+the kernel's permission checks are the workload user's and the server's peer
+credentials name it. Any socket that user can reach is reachable, the
+environment's Docker socket included: a client forwarding it drives that
+Docker, which is root inside the environment. A hosted Sandbox's SSH server,
+which runs as the workload user, connects itself; a local VM's supervisor
+opens the guest daemon's `ForwardUnix`, which resolves the path within the
+workload's root and connects on a thread that holds the workload user's
+credentials and no capability, used once; a failure to take them refuses the
+forward. A VM whose runtime predates `ForwardUnix` refuses every socket
+forward. Each forward, opened or refused, is logged with the reason and its
+target path escaped and bounded.
+
+The platform's own sockets in the workload are refused, by identity, not by
+name: each one's device and inode are recorded as it is bound, and a target
+that resolves to one of them, through a symlink or a hard link included, is
+refused, naming it; so is any target that resolves under the platform's own
+directories (`/codewire`, and `/run/codewire` and its `/run/codewire-*`
+siblings), whatever its identity. The path is opened, checked and connected
+through the same open file, so it cannot change in between. This refusal is
+not a boundary against someone with a shell, who reaches the same sockets from
+inside. It keeps a forward from being the supported way to carry the
+environment's brokered credentials to another machine, and keeps tools that
+forward sockets on their own from doing it by accident (#3068).
+
 ### Terminal
 
 `cw shell ENV` opens a PTY session through the daemon; `cw attach` reattaches
