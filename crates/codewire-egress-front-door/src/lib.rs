@@ -42,7 +42,10 @@ use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
-pub use ca::{BACKDATE, CA_VALIDITY, CaError, EnvironmentCa, LEAF_VALIDITY, MAX_BOUND_HOSTS};
+pub use ca::{
+    BACKDATE, CA_VALIDITY, CaError, EnvironmentCa, LEAF_VALIDITY, MAX_BOUND_HOSTS,
+    MAX_CACHED_LEAVES,
+};
 pub use hyper::body::Incoming;
 pub use rustls::sign::CertifiedKey;
 pub use signed::SignedLeaves;
@@ -79,6 +82,12 @@ pub type UpgradeOutcome = Result<(Response<()>, Box<dyn Duplex>), Response<Respo
 pub trait Duplex: AsyncRead + AsyncWrite + Send + Unpin + 'static {}
 
 impl<T> Duplex for T where T: AsyncRead + AsyncWrite + Send + Unpin + 'static {}
+
+/// The address the egress broker admitted for an intercepted dial, on each
+/// request of a connection accepted with [`FrontDoor::accept_to`]. The front
+/// door sets it; nothing a client sends can (#3999).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InterceptedDestination(pub std::net::IpAddr);
 
 /// Where decrypted requests go. The front door has already checked that each
 /// request is for `host`, in origin form, and not a tunnel.
@@ -228,11 +237,22 @@ pub trait LeafSource: Send + Sync + 'static {
     /// The canonical host `host` names and its current leaf, or
     /// [`CaError::UnboundHost`] when this source signs nothing for it.
     fn leaf(&self, host: &str) -> Result<(String, Arc<CertifiedKey>), CaError>;
+
+    /// Whether this source would sign for `host`, without minting anything.
+    /// A source that cannot tell says yes and leaves the refusal to
+    /// [`Self::leaf`].
+    fn signs(&self, _host: &str) -> bool {
+        true
+    }
 }
 
 impl LeafSource for EnvironmentCa {
     fn leaf(&self, host: &str) -> Result<(String, Arc<CertifiedKey>), CaError> {
         EnvironmentCa::leaf(self, host)
+    }
+
+    fn signs(&self, host: &str) -> bool {
+        EnvironmentCa::signs(self, host)
     }
 }
 
@@ -247,8 +267,9 @@ impl<L: LeafSource> LeafSource for Arc<L> {
 /// Which host a connection must be for.
 #[derive(Clone, Copy)]
 enum Expected<'a> {
-    /// The host the broker attributed the dial to.
-    Bound(&'a str),
+    /// One of the bound names the broker found for the dialled address: the
+    /// one it attributed the dial to first, then the others leased there.
+    Bound(&'a [&'a str]),
     /// Whichever host the ClientHello names, if the leaf source signs for it.
     Named,
 }
@@ -292,7 +313,27 @@ impl<B: Backend, L: LeafSource> FrontDoor<B, L> {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let result = self.accept_inner(stream, Expected::Bound(bound_host)).await;
+        self.accept_to(stream, &[bound_host], None).await
+    }
+
+    /// [`Self::accept`] for a dial the broker attributed to `bound_hosts[0]`,
+    /// whose address other bound names also hold, `bound_hosts[1..]`: the
+    /// connection is served for whichever of them its ClientHello names
+    /// (#3999). Each request carries `destination`, the address the egress
+    /// broker admitted for the dial, as an [`InterceptedDestination`].
+    pub async fn accept_to<S>(
+        &self,
+        stream: S,
+        bound_hosts: &[&str],
+        destination: Option<std::net::IpAddr>,
+    ) -> Result<Accepted<S>, FrontDoorError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let bound_host = bound_hosts.first().copied().unwrap_or_default();
+        let result = self
+            .accept_inner(stream, Expected::Bound(bound_hosts), destination)
+            .await;
         match &result {
             Ok(Accepted::Served(served)) => tracing::debug!(
                 host = bound_host,
@@ -320,7 +361,7 @@ impl<B: Backend, L: LeafSource> FrontDoor<B, L> {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let result = self.accept_inner(stream, Expected::Named).await;
+        let result = self.accept_inner(stream, Expected::Named, None).await;
         // The server name is peer input, so it is not logged.
         match &result {
             Ok(Accepted::Served(served)) => tracing::debug!(
@@ -342,6 +383,7 @@ impl<B: Backend, L: LeafSource> FrontDoor<B, L> {
         &self,
         mut stream: S,
         expected: Expected<'_>,
+        destination: Option<std::net::IpAddr>,
     ) -> Result<Accepted<S>, FrontDoorError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -352,10 +394,23 @@ impl<B: Backend, L: LeafSource> FrontDoor<B, L> {
         let Ok(permit) = self.permits.clone().try_acquire_owned() else {
             return Err(FrontDoorError::AtCapacity);
         };
-        // A bound host's leaf comes first, so a host this door never signs
-        // for is refused before anything is read.
-        let bound = match expected {
-            Expected::Bound(host) => Some(self.leaf(host)?),
+        // A dial attributed to a host this door never signs for is refused
+        // before anything is read; a leaf is minted only once the ClientHello
+        // names a host it is for.
+        let bound: Option<Vec<&str>> = match expected {
+            Expected::Bound(hosts) => {
+                let attributed = hosts.first().ok_or(FrontDoorError::UnboundHost)?;
+                if !self.leaves.signs(attributed) {
+                    return Err(FrontDoorError::UnboundHost);
+                }
+                Some(
+                    hosts
+                        .iter()
+                        .copied()
+                        .filter(|host| self.leaves.signs(host))
+                        .collect(),
+                )
+            }
             Expected::Named => None,
         };
 
@@ -382,10 +437,15 @@ impl<B: Backend, L: LeafSource> FrontDoor<B, L> {
         };
         let chosen = match (name, bound) {
             (Err(reason), _) => Err(reason),
-            (Ok(name), Some((host, leaf))) if name.eq_ignore_ascii_case(host.as_bytes()) => {
-                Ok((host, leaf))
+            (Ok(name), Some(hosts)) => {
+                match hosts
+                    .iter()
+                    .find(|host| name.eq_ignore_ascii_case(host.as_bytes()))
+                {
+                    Some(host) => Ok(self.leaf(host)?),
+                    None => Err(HandBackReason::OtherServerName),
+                }
             }
-            (Ok(_), Some(_)) => Err(HandBackReason::OtherServerName),
             (Ok(name), None) => Ok(self.named_leaf(&name)?),
         };
         let (host, leaf) = match chosen {
@@ -418,6 +478,7 @@ impl<B: Backend, L: LeafSource> FrontDoor<B, L> {
         let http2 = tls.get_ref().1.alpn_protocol() == Some(b"h2".as_slice());
         let connection = serve::Connection::new(
             host,
+            destination,
             self.backend.clone(),
             self.stop.child_token(),
             self.config.websocket_idle_timeout,

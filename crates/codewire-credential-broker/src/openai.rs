@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use av_credential_proxy::{
@@ -81,6 +82,7 @@ impl OpenAiApiKeyAdapter {
                 MAX_REQUEST_BYTES,
             )?,
             chatgpt_base: ChatGptBase::Codex,
+            pinned: None,
         })
     }
 
@@ -95,6 +97,7 @@ impl OpenAiApiKeyAdapter {
         let ValidatedOpenAiRequest {
             request,
             chatgpt_base,
+            ..
         } = request;
         // A path on chatgpt.com never reaches the API with a key.
         if chatgpt_base != ChatGptBase::Codex {
@@ -121,6 +124,7 @@ impl OpenAiApiKeyAdapter {
                 target,
                 headers,
                 body,
+                pinned: None,
                 response: PreparedOpenAiResponse::transparent(
                     redaction,
                     self.route.max_response_bytes,
@@ -190,8 +194,7 @@ impl OpenAiChatGptOAuthAdapter {
         headers: HeaderMap,
         body: Vec<u8>,
     ) -> Result<ValidatedOpenAiRequest, CredentialBrokerError> {
-        let lowered = path.to_ascii_lowercase();
-        if lowered.contains("%2f") || lowered.contains("%5c") {
+        if encoded_separator(path) {
             return Err(CredentialBrokerError::RequestDenied);
         }
         let request =
@@ -205,6 +208,42 @@ impl OpenAiChatGptOAuthAdapter {
         Ok(ValidatedOpenAiRequest {
             request,
             chatgpt_base: ChatGptBase::Origin,
+            pinned: None,
+        })
+    }
+
+    /// Admit a front-door request to `host`, an origin Codex's account
+    /// routing named and this session recorded (#3999), dialled at `pinned`,
+    /// the address the egress broker admitted for it. Only Codex's model
+    /// path is served there, and the path is checked as
+    /// [`Self::validate_front_door`] checks it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn validate_routed(
+        &self,
+        host: &str,
+        pinned: SocketAddr,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        headers: HeaderMap,
+        body: Vec<u8>,
+    ) -> Result<ValidatedOpenAiRequest, CredentialBrokerError> {
+        if encoded_separator(path) {
+            return Err(CredentialBrokerError::RequestDenied);
+        }
+        let request =
+            TransparentRequest::admit(method, path, query, headers, body, MAX_REQUEST_BYTES)?;
+        let base = ChatGptBase::Routed(format!("https://{host}"));
+        let target = request
+            .target(&base.url())
+            .map_err(|_| CredentialBrokerError::RequestDenied)?;
+        if target.path() != path || !crate::network::routed_path(target.path()) {
+            return Err(CredentialBrokerError::RequestDenied);
+        }
+        Ok(ValidatedOpenAiRequest {
+            request,
+            chatgpt_base: base,
+            pinned: Some(pinned),
         })
     }
 
@@ -216,8 +255,9 @@ impl OpenAiChatGptOAuthAdapter {
         let ValidatedOpenAiRequest {
             request,
             chatgpt_base,
+            pinned,
         } = request;
-        let target = request.target(chatgpt_base.url())?;
+        let target = request.target(&chatgpt_base.url())?;
         let source = CodexOAuthAccessToken {
             material: credential.access_token(),
         };
@@ -253,7 +293,7 @@ impl OpenAiChatGptOAuthAdapter {
                 authorization.as_bytes(),
                 account_id,
             ]),
-            ChatGptBase::Origin => RedactionSet::new([
+            ChatGptBase::Origin | ChatGptBase::Routed(_) => RedactionSet::new([
                 credential.access_token().as_bytes(),
                 authorization.as_bytes(),
             ]),
@@ -263,6 +303,7 @@ impl OpenAiChatGptOAuthAdapter {
             target,
             headers,
             body,
+            pinned,
             response: PreparedOpenAiResponse::transparent(redaction, self.route.max_response_bytes),
         })
     }
@@ -274,41 +315,68 @@ impl OpenAiChatGptOAuthAdapter {
 pub struct ValidatedOpenAiRequest {
     request: TransparentRequest,
     chatgpt_base: ChatGptBase,
+    /// The address to dial instead of resolving the target's name: set only
+    /// by [`OpenAiChatGptOAuthAdapter::validate_routed`].
+    pinned: Option<SocketAddr>,
 }
 
 impl ValidatedOpenAiRequest {
     /// The request as the environment sent it, every header kept, aimed at
     /// its `chatgpt.com` path: for a front-door request that carries no
     /// placeholder, which is forwarded without a lease (#3999).
-    pub(crate) fn into_forwarded(
-        self,
-    ) -> Result<(Method, Url, HeaderMap, Vec<u8>), CredentialBrokerError> {
-        let target = self.request.target(self.chatgpt_base.url())?;
+    pub(crate) fn into_forwarded(self) -> Result<ForwardedOpenAiRequest, CredentialBrokerError> {
+        let target = self.request.target(&self.chatgpt_base.url())?;
         let TransparentRequest {
             method,
             headers,
             body,
             ..
         } = self.request;
-        Ok((method, target, headers, body))
+        Ok(ForwardedOpenAiRequest {
+            method,
+            target,
+            headers,
+            body,
+            pinned: self.pinned,
+        })
     }
 }
 
+/// A front-door request forwarded as the environment sent it.
+pub(crate) struct ForwardedOpenAiRequest {
+    pub(crate) method: Method,
+    pub(crate) target: Url,
+    pub(crate) headers: HeaderMap,
+    pub(crate) body: Vec<u8>,
+    pub(crate) pinned: Option<SocketAddr>,
+}
+
+/// Whether `path` holds an encoded slash or backslash, in any case, which
+/// survives URL resolution and a server may decode into another path.
+fn encoded_separator(path: &str) -> bool {
+    let lowered = path.to_ascii_lowercase();
+    lowered.contains("%2f") || lowered.contains("%5c")
+}
+
 /// What a ChatGPT-login request's path is relative to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ChatGptBase {
     /// The loopback route: under Codex's base, `/backend-api/codex`.
     Codex,
     /// A front-door request: the origin, its path already checked against
     /// the paths Codex sends its credential to.
     Origin,
+    /// A front-door request to the origin Codex's account routing named:
+    /// `https://` and that recorded host, its path Codex's model path.
+    Routed(String),
 }
 
 impl ChatGptBase {
-    fn url(self) -> &'static str {
+    fn url(&self) -> String {
         match self {
-            Self::Codex => CHATGPT_CODEX_BASE_URL,
-            Self::Origin => CHATGPT_ORIGIN,
+            Self::Codex => CHATGPT_CODEX_BASE_URL.to_owned(),
+            Self::Origin => CHATGPT_ORIGIN.to_owned(),
+            Self::Routed(origin) => origin.clone(),
         }
     }
 }
@@ -327,10 +395,25 @@ pub struct PreparedOpenAiRequest {
     target: Url,
     headers: HeaderMap,
     body: Vec<u8>,
+    pinned: Option<SocketAddr>,
     response: PreparedOpenAiResponse,
 }
 
 impl PreparedOpenAiRequest {
+    /// The address the transport must dial for a routed origin (#3999).
+    pub(crate) fn pinned(&self) -> Option<SocketAddr> {
+        self.pinned
+    }
+
+    /// The account id this plan sends with a Codex sign-in: the credential's
+    /// own, which the environment's request never sets (#3999).
+    pub(crate) fn account_id(&self) -> Option<String> {
+        self.headers
+            .get("chatgpt-account-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    }
+
     /// Consume the plan into the fields required by the broker-owned upstream
     /// HTTP transport and its response redactor.
     pub fn into_parts(self) -> (Method, Url, HeaderMap, Vec<u8>, PreparedOpenAiResponse) {

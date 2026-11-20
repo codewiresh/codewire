@@ -1,15 +1,19 @@
 //! A request's session entry, which the runner the admitting host called
 //! chose, reaching request validation (#3999).
 
+use std::net::IpAddr;
+use std::sync::Arc;
+
 use codewire_daemon_proto::codewire::bridge::v1;
 
 use super::claude_token::CLAUDE_TOKEN_ROUTE;
+use super::routed::FrontDoorSession;
 use super::{
     BrokerHttpResponse, BrokerLeaseProvider, BrokerRequestBodyStream, BrokerRequestError,
     BrokerUpstreamTransport, OpenAiBroker, ValidatedGuestRequest,
 };
 use crate::bridge::BridgeEntry;
-use crate::network::RouteHost;
+use crate::network::{RouteHost, routed_host};
 use crate::network_policy;
 
 impl<P, U> OpenAiBroker<P, U>
@@ -23,23 +27,37 @@ where
     /// It is then served by the swap rule (`runtime/swap.rs`): this
     /// environment's placeholder is replaced with the leased credential,
     /// anything else is forwarded untouched, and a placeholder beside another
-    /// credential is refused. The only way in from outside this crate is the
+    /// credential is refused. `session` holds this front-door session's
+    /// routing (#3999). The only way in from outside this crate is the
     /// front-door bridge runner.
+    pub(crate) async fn execute_front_door_in(
+        &self,
+        request: v1::CredentialBridgeRequest,
+        session: &Arc<FrontDoorSession>,
+    ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        self.execute_on(BridgeEntry::FrontDoor, request, None, Some(session))
+            .await
+    }
+
+    /// [`Self::execute_front_door_in`] on a session of its own, which has
+    /// recorded no routing.
+    #[cfg(test)]
     pub(crate) async fn execute_front_door(
         &self,
         request: v1::CredentialBridgeRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
-        self.execute_on(BridgeEntry::FrontDoor, request, None).await
+        self.execute_front_door_in(request, &Arc::default()).await
     }
 
-    /// [`Self::execute_front_door`] for a request whose body streams: only a
-    /// request to one of GitHub's two hosts.
+    /// [`Self::execute_front_door_in`] for a request whose body streams: only
+    /// a request to one of GitHub's two hosts.
     pub(crate) async fn execute_front_door_streamed(
         &self,
         request: v1::CredentialBridgeRequest,
         body: BrokerRequestBodyStream,
+        session: &Arc<FrontDoorSession>,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
-        self.execute_on(BridgeEntry::FrontDoor, request, Some(body))
+        self.execute_on(BridgeEntry::FrontDoor, request, Some(body), Some(session))
             .await
     }
 
@@ -48,6 +66,7 @@ where
         entry: BridgeEntry,
         request: v1::CredentialBridgeRequest,
         body: Option<BrokerRequestBodyStream>,
+        session: Option<&Arc<FrontDoorSession>>,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         let request = ValidatedGuestRequest::parse(entry, request, body.is_some())?;
         let slot = request.slot.clone();
@@ -69,7 +88,8 @@ where
         }
         let result = match body {
             body if request.intercepted_host.is_some() => {
-                self.execute_intercepted(request, body).await
+                let session = session.ok_or(BrokerRequestError::InvalidRequest)?;
+                self.execute_intercepted(request, body, session).await
             }
             None => self.execute_validated(request).await,
             Some(body) => self.execute_github(request, Some(body)).await,
@@ -109,7 +129,12 @@ where
         &self,
         request: ValidatedGuestRequest,
         body: Option<BrokerRequestBodyStream>,
+        session: &Arc<FrontDoorSession>,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        // Only Codex's model call goes to a routed origin.
+        if request.routed.is_some() && request.slot.as_str() != "codex" {
+            return Err(BrokerRequestError::InvalidRequest);
+        }
         match (request.slot.as_str(), request.intercepted_host) {
             ("github", Some(host @ (RouteHost::GitHub | RouteHost::GitHubApi))) => {
                 self.execute_github_intercepted(host, request, body).await
@@ -119,35 +144,55 @@ where
                 self.execute_claude_token(request).await
             }
             ("anthropic", _) => self.execute_swap(request).await,
-            ("codex", Some(RouteHost::ChatGpt)) => self.execute_codex_swap(request).await,
+            ("codex", Some(RouteHost::ChatGpt)) => self.execute_codex_swap(request, session).await,
             _ => Err(BrokerRequestError::InvalidRequest),
         }
     }
 }
 
-/// The host a request on `entry` was intercepted for, checked before any
-/// credential lease. A loopback request names none: the environment controls
-/// every field of it. A front-door request must name one of its route's hosts.
+/// The host a request on `entry` was intercepted for, and for a name under a
+/// routed suffix its dial, checked before any credential lease. A loopback
+/// request names neither, nor an admitted address: the environment controls
+/// every field of it. A front-door request must name one of its route's
+/// hosts, or for Codex a name under a routed suffix, which takes the
+/// ChatGPT host's route and is served only at its session's recorded origin.
 /// Claude's token route exists only behind the front door: a loopback
 /// request for it is refused.
-pub(super) fn intercepted_host(
+pub(super) fn intercepted(
     entry: BridgeEntry,
     request: &v1::CredentialBridgeRequest,
-) -> Result<Option<RouteHost>, BrokerRequestError> {
+) -> Result<(Option<RouteHost>, Option<super::routed::RoutedDial>), BrokerRequestError> {
+    let invalid = BrokerRequestError::InvalidRequest;
+    let destination = match request.destination_ip.as_str() {
+        "" => None,
+        _ if entry == BridgeEntry::Loopback => return Err(invalid),
+        address => Some(address.parse::<IpAddr>().map_err(|_| invalid)?),
+    };
     match entry {
         BridgeEntry::Loopback
             if request.intercepted_host.is_empty() && request.route != CLAUDE_TOKEN_ROUTE =>
         {
-            Ok(None)
+            Ok((None, None))
         }
-        BridgeEntry::Loopback => Err(BrokerRequestError::InvalidRequest),
-        BridgeEntry::FrontDoor => RouteHost::intercepted(
-            &request.capability_slot,
-            &request.route,
-            &request.intercepted_host,
-        )
-        .map(Some)
-        .ok_or(BrokerRequestError::InvalidRequest),
+        BridgeEntry::Loopback => Err(invalid),
+        BridgeEntry::FrontDoor => {
+            let host = request.intercepted_host.as_str();
+            if let Some(bound) =
+                RouteHost::intercepted(&request.capability_slot, &request.route, host)
+            {
+                return Ok((Some(bound), None));
+            }
+            if (request.capability_slot.as_str(), request.route.as_str()) == ("codex", "openai-api")
+                && routed_host(host)
+            {
+                let dial = super::routed::RoutedDial {
+                    host: host.to_owned(),
+                    destination,
+                };
+                return Ok((Some(RouteHost::ChatGpt), Some(dial)));
+            }
+            Err(invalid)
+        }
     }
 }
 

@@ -58,7 +58,7 @@ impl Enforcing {
                 interception,
                 ..
             } => {
-                match &interception {
+                match interception.as_ref() {
                     Interception::RefuseHosts { why, .. } => tracing::warn!(
                         %pod_uid,
                         reason = why.code(),

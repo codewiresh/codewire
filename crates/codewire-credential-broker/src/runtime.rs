@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -84,6 +85,8 @@ mod http_tests;
 #[cfg(feature = "local")]
 mod local;
 mod openai_serve;
+mod routed;
+pub(crate) use routed::FrontDoorSession;
 mod swap;
 pub(crate) mod upgrade;
 mod upstream;
@@ -333,6 +336,8 @@ pub struct BrokerUpstreamRequest {
     body: Vec<u8>,
     /// A streamed GitHub Git request body; `body` is then empty.
     body_stream: Option<BrokerRequestBodyStream>,
+    /// See [`Self::pinned`].
+    pinned: Option<SocketAddr>,
 }
 
 /// A guest's streamed request body (#4280), fed from its bridge frames under
@@ -349,6 +354,7 @@ impl BrokerUpstreamRequest {
             headers,
             body,
             body_stream: None,
+            pinned: None,
         }
     }
 
@@ -367,6 +373,14 @@ impl BrokerUpstreamRequest {
 
     pub fn into_parts(self) -> (Method, Url, HeaderMap, Vec<u8>) {
         (self.method, self.target, self.headers, self.body)
+    }
+
+    /// The address a transport must dial instead of resolving the target's
+    /// name: set only for a front-door request to an origin Codex's account
+    /// routing named and the egress broker admitted (#3999). A transport
+    /// re-checks it with [`crate::network::admit_pinned`] before it dials.
+    pub fn pinned(&self) -> Option<SocketAddr> {
+        self.pinned
     }
 }
 
@@ -1445,7 +1459,8 @@ where
         &self,
         request: v1::CredentialBridgeRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
-        self.execute_on(BridgeEntry::Loopback, request, None).await
+        self.execute_on(BridgeEntry::Loopback, request, None, None)
+            .await
     }
 
     /// Execute a request whose body streams: only a GitHub Git POST, and only
@@ -1455,7 +1470,7 @@ where
         request: v1::CredentialBridgeRequest,
         body: BrokerRequestBodyStream,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
-        self.execute_on(BridgeEntry::Loopback, request, Some(body))
+        self.execute_on(BridgeEntry::Loopback, request, Some(body), None)
             .await
     }
 
@@ -1692,6 +1707,7 @@ where
                 headers,
                 body,
                 body_stream,
+                pinned: None,
             }),
         )
         .await
@@ -1703,6 +1719,7 @@ where
         &self,
         prepared: crate::PreparedOpenAiRequest,
     ) -> Result<(BrokerUpstreamResponse, crate::PreparedOpenAiResponse), BrokerRequestError> {
+        let pinned = prepared.pinned();
         let (method, target, headers, body, response_policy) = prepared.into_parts();
         let upstream = timing::timed(
             Phase::Provider,
@@ -1712,6 +1729,7 @@ where
                 headers,
                 body,
                 body_stream: None,
+                pinned,
             }),
         )
         .await
@@ -2239,6 +2257,7 @@ where
             headers,
             body: std::mem::take(&mut *body),
             body_stream: None,
+            pinned: None,
         })
         .await
         .map_err(|error| {
@@ -2365,6 +2384,9 @@ struct ValidatedGuestRequest {
     /// Set only on a front-door session, whose credential the swap rule
     /// handles (#3999).
     intercepted_host: Option<RouteHost>,
+    /// A front-door request to a name under a routed suffix, served only at
+    /// the origin its session recorded (#3999, `runtime/routed.rs`).
+    routed: Option<routed::RoutedDial>,
 }
 
 impl ValidatedGuestRequest {
@@ -2385,7 +2407,7 @@ impl ValidatedGuestRequest {
         {
             return Err(BrokerRequestError::InvalidRequest);
         }
-        let intercepted_host = entry::intercepted_host(entry, &request)?;
+        let (intercepted_host, routed) = entry::intercepted(entry, &request)?;
         if !matches!(
             (request.capability_slot.as_str(), request.route.as_str()),
             ("codex" | "openai", "openai-api")
@@ -2442,6 +2464,7 @@ impl ValidatedGuestRequest {
             headers,
             body: request.body,
             intercepted_host,
+            routed,
         })
     }
 }
@@ -3698,6 +3721,7 @@ mod tests {
             }],
             body: br#"{"input":"hello"}"#.to_vec(),
             intercepted_host: String::new(),
+            destination_ip: String::new(),
             streamed_body: false,
             intercept_decision: Vec::new(),
         }
@@ -3721,6 +3745,7 @@ mod tests {
                 headers,
                 body: br#"{"input":"hello"}"#.to_vec(),
                 body_stream: None,
+                pinned: None,
             }
         }
 

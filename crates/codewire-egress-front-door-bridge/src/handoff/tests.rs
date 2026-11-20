@@ -15,6 +15,7 @@ fn header() -> InterceptedStreamHeader {
         destination_ip: Ipv4Addr::new(192, 0, 2, 7),
         stream_id: 9,
         environment_id: "0b0c3a52-5d4e-4f4d-9a36-1b2c3d4e5f60".to_owned(),
+        aliases: Vec::new(),
     }
 }
 

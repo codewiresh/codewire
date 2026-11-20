@@ -11,7 +11,9 @@
 use std::io;
 use std::time::Duration;
 
-use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet, MAX_INTERCEPT_BINDINGS};
+use codewire_egress_policy::intercept::{
+    InterceptBinding, InterceptSet, InterceptSuffix, MAX_INTERCEPT_BINDINGS, MAX_INTERCEPT_SUFFIXES,
+};
 use codewire_egress_policy::{
     CompiledPolicy, MAX_POLICY_DOCUMENT_BYTES, PolicyDigest, PolicyDocument,
 };
@@ -26,6 +28,8 @@ const POLICY_FRAME_MAGIC: [u8; 4] = *b"CWPR";
 const POLICY_ACK_MAGIC: [u8; 4] = *b"CWPA";
 const INTERCEPT_FRAME_MAGIC: [u8; 4] = *b"CWIR";
 const FRAME_VERSION: u8 = 1;
+/// Version 2 adds the suffixes after the exact bindings (#3999).
+const INTERCEPT_FRAME_VERSION: u8 = 2;
 const DIGEST_LEN: usize = 32;
 /// How long the runner waits for the broker to acknowledge a replacement.
 pub const POLICY_ACK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -39,56 +43,94 @@ pub enum ControlFrame {
 }
 
 /// An interception frame: magic, version, the binding count, then each
-/// binding's hostname length (one byte), hostname and big-endian port.
-/// A set or hostname too large for its one-byte count is refused.
+/// binding's hostname length (one byte), hostname and big-endian port; then
+/// the suffix count and each suffix the same way. A set or name too large for
+/// its one-byte count is refused.
 pub fn encode_intercept_frame(intercepts: &InterceptSet) -> io::Result<Vec<u8>> {
     let too_large = || io::Error::new(io::ErrorKind::InvalidInput, "interception set too large");
     let mut frame = vec![];
     frame.extend_from_slice(&INTERCEPT_FRAME_MAGIC);
-    frame.push(FRAME_VERSION);
-    frame.push(u8::try_from(intercepts.len()).map_err(|_| too_large())?);
-    for binding in intercepts.bindings() {
-        let hostname = binding.hostname().as_bytes();
-        frame.push(u8::try_from(hostname.len()).map_err(|_| too_large())?);
-        frame.extend_from_slice(hostname);
-        frame.extend_from_slice(&binding.port().to_be_bytes());
-    }
+    frame.push(INTERCEPT_FRAME_VERSION);
+    let mut push = |names: Vec<(&str, u16)>| -> io::Result<()> {
+        frame.push(u8::try_from(names.len()).map_err(|_| too_large())?);
+        for (name, port) in names {
+            frame.push(u8::try_from(name.len()).map_err(|_| too_large())?);
+            frame.extend_from_slice(name.as_bytes());
+            frame.extend_from_slice(&port.to_be_bytes());
+        }
+        Ok(())
+    };
+    push(
+        intercepts
+            .bindings()
+            .iter()
+            .map(|binding| (binding.hostname(), binding.port()))
+            .collect(),
+    )?;
+    push(
+        intercepts
+            .suffixes()
+            .iter()
+            .map(|suffix| (suffix.suffix(), suffix.port()))
+            .collect(),
+    )?;
     Ok(frame)
 }
 
 async fn read_intercept_frame_after_magic<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> io::Result<InterceptSet> {
-    let mut header = [0_u8; 2];
-    reader.read_exact(&mut header).await?;
-    if header[0] != FRAME_VERSION {
+    if reader.read_u8().await? != INTERCEPT_FRAME_VERSION {
         return Err(invalid("interception frame has an unknown version"));
     }
-    let count = usize::from(header[1]);
-    if count > MAX_INTERCEPT_BINDINGS {
-        return Err(invalid("interception frame exceeds its bound"));
-    }
-    let mut bindings = Vec::with_capacity(count);
-    for _ in 0..count {
-        let length = usize::from(reader.read_u8().await?);
-        let mut hostname = vec![0_u8; length];
-        reader.read_exact(&mut hostname).await?;
-        let port = reader.read_u16().await?;
-        let hostname = std::str::from_utf8(&hostname)
-            .map_err(|_| invalid("interception hostname is not text"))?;
-        let binding = InterceptBinding::new(hostname, port)
-            .map_err(|_| invalid("interception binding is invalid"))?;
-        // Only canonical names travel; anything else was not ours.
-        if binding.hostname() != hostname {
-            return Err(invalid("interception hostname is not canonical"));
-        }
-        bindings.push(binding);
-    }
-    let set = InterceptSet::new(bindings).map_err(|_| invalid("interception set is invalid"))?;
-    if set.len() != count {
+    let bindings = read_names(reader, MAX_INTERCEPT_BINDINGS, |name, port| {
+        InterceptBinding::new(name, port)
+            .map(|binding| (binding.hostname() == name).then_some(binding))
+    })
+    .await?;
+    let suffixes = read_names(reader, MAX_INTERCEPT_SUFFIXES, |name, port| {
+        InterceptSuffix::new(name, port).map(|suffix| (suffix.suffix() == name).then_some(suffix))
+    })
+    .await?;
+    let (binding_count, suffix_count) = (bindings.len(), suffixes.len());
+    let set = InterceptSet::with_suffixes(bindings, suffixes)
+        .map_err(|_| invalid("interception set is invalid"))?;
+    if set.len() != binding_count || set.suffixes().len() != suffix_count {
         return Err(invalid("interception frame repeats a binding"));
     }
     Ok(set)
+}
+
+/// One counted list of names and ports, each made by `make`: `Ok(None)` for
+/// a name it would canonicalize differently, which was not sent by us.
+async fn read_names<R, T, E>(
+    reader: &mut R,
+    maximum: usize,
+    make: impl Fn(&str, u16) -> Result<Option<T>, E>,
+) -> io::Result<Vec<T>>
+where
+    R: AsyncRead + Unpin,
+{
+    let count = usize::from(reader.read_u8().await?);
+    if count > maximum {
+        return Err(invalid("interception frame exceeds its bound"));
+    }
+    let mut names = Vec::with_capacity(count);
+    for _ in 0..count {
+        let length = usize::from(reader.read_u8().await?);
+        let mut name = vec![0_u8; length];
+        reader.read_exact(&mut name).await?;
+        let port = reader.read_u16().await?;
+        let name =
+            std::str::from_utf8(&name).map_err(|_| invalid("interception hostname is not text"))?;
+        match make(name, port) {
+            Ok(Some(made)) => names.push(made),
+            // Only canonical names travel; anything else was not ours.
+            Ok(None) => return Err(invalid("interception hostname is not canonical")),
+            Err(_) => return Err(invalid("interception binding is invalid")),
+        }
+    }
+    Ok(names)
 }
 
 fn invalid(reason: &str) -> io::Error {

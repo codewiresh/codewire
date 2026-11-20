@@ -211,6 +211,7 @@ fn request(
         headers,
         body: body.to_vec(),
         intercepted_host: String::new(),
+        destination_ip: String::new(),
         streamed_body: false,
         intercept_decision: Vec::new(),
     }
@@ -460,6 +461,7 @@ async fn application_only_none_transport_never_dials_a_provider() {
         headers: HeaderMap::new(),
         body: vec![],
         body_stream: None,
+        pinned: None,
     };
     assert_eq!(
         transport.execute(request).await.err(),

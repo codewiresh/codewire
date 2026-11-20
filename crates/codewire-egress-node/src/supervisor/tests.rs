@@ -166,7 +166,7 @@ fn bound(environment: &str, revision: u32, policy: CompiledPolicy) -> Assignment
             policy,
         },
         platform: platform(),
-        interception: Interception::Off,
+        interception: Box::new(Interception::Off),
     }
 }
 
@@ -200,7 +200,7 @@ fn intercepting(interception: Interception) -> Assignment {
         operation_generation,
         policy,
         platform,
-        interception,
+        interception: Box::new(interception),
     }
 }
 
@@ -847,7 +847,7 @@ async fn a_change_to_a_pairs_front_door_ends_the_pair() {
                 policy: locked(),
             },
             platform,
-            interception: Interception::On(first),
+            interception: Box::new(Interception::On(first)),
         }))
         .unwrap();
     assert_eq!(pod.next().await, enforced(2, &locked()));

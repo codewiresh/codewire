@@ -1063,6 +1063,7 @@ mod tests {
             capability_slot: "codex".to_owned(),
             route: "openai-api".to_owned(),
             intercepted_host: String::new(),
+            destination_ip: String::new(),
             streamed_body: false,
             intercept_decision: Vec::new(),
         };
@@ -1080,6 +1081,8 @@ mod tests {
         let intercepted = bridge_v1::CredentialBridgeGuestMessage {
             payload: Some(Guest::Request(bridge_v1::CredentialBridgeRequest {
                 intercepted_host: "api.openai.com".to_owned(),
+                // An older peer skips the admitted address too (#3999).
+                destination_ip: "192.0.2.7".to_owned(),
                 ..request
             })),
         };

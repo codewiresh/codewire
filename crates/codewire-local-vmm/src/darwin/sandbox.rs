@@ -168,6 +168,7 @@ mod tests {
                 destination_ip: std::net::Ipv4Addr::new(192, 0, 2, 7),
                 stream_id: 1,
                 environment_id: "0f8c2f6e-2c1e-4a8e-9c55-3b1f0f7d9a11".into(),
+                aliases: Vec::new(),
             };
             sender
                 .send_intercepted_stream(&header, handed.as_fd())

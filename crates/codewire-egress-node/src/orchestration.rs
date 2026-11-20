@@ -54,7 +54,8 @@ pub enum Assignment {
         operation_generation: i64,
         policy: AssignedPolicy,
         platform: Vec<PlatformAllow>,
-        interception: Interception,
+        /// Boxed: with its route table it outweighs the rest of the variant.
+        interception: Box<Interception>,
     },
 }
 
@@ -118,7 +119,7 @@ pub fn assignment(assignment: &EgressAssignment) -> Result<Assignment, Assignmen
                     policy,
                 },
                 platform,
-                interception: interception(bound),
+                interception: Box::new(interception(bound)),
             })
         }
     }

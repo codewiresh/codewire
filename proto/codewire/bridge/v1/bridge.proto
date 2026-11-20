@@ -189,6 +189,12 @@ message CredentialBridgeRequest {
   // for a GitHub Git POST on an epoch whose Open lists "request-body-stream";
   // every other request carries its whole body here, at most 4 MiB.
   bool streamed_body = 10;
+  // The address, in text form, that the egress broker admitted for a
+  // front-door request's dial. Set by a front door; the host dials it only
+  // for a name under a bound suffix whose routing it recorded. Empty on every
+  // other session, which refuses a request that sets it before any credential
+  // lease.
+  string destination_ip = 11;
   // The egress broker's signed record of whether a rule of the network
   // policy allows the host this request's connection was intercepted for
   // (#3999): 76 bytes, copied unread from the hand-off header of the stream

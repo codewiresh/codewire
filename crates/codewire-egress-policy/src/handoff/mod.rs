@@ -32,13 +32,20 @@
 //!
 //! | bytes  | field                                         |
 //! |--------|-----------------------------------------------|
-//! | 0–1    | version, 1                                    |
+//! | 0–1    | version, 2                                    |
 //! | 2–3    | hostname length N (1..=253)                   |
 //! | 4–5    | port (non-zero)                               |
 //! | 6–9    | the IPv4 address the guest dialled            |
 //! | 10–17  | stream id, unique per broker run              |
 //! | 18–19  | environment id length M (36: a canonical UUID) |
 //! | 20..   | hostname (N bytes, lowercase ASCII), then the environment id (M bytes) |
+//! | then   | alias count A (0..=6), then A aliases, each a length byte (1..=253) and the name |
+//!
+//! The aliases are the other bound names an active lease holds at the
+//! dialled address (#3999). Names can share an address, and the broker sees
+//! no TLS server name, so the receiver serves whichever of the hostname and
+//! the aliases the client's server name is, and nothing else. Version 1 had
+//! no aliases; the broker and the front door are one build.
 //!
 //! The descriptor is a byte stream, not necessarily TCP: a receiver never
 //! reads its peer address. It checks the binding against its own interception
@@ -57,13 +64,18 @@ use thiserror::Error;
 
 /// The body of the first frame on a hand-off socket.
 pub const HANDOFF_ROLE_TAG: &[u8] = b"H";
-pub const HANDOFF_VERSION: u16 = 1;
+pub const HANDOFF_VERSION: u16 = 2;
 pub const HANDOFF_FIXED_LEN: usize = 20;
 pub const HANDOFF_MAX_HOSTNAME_LEN: usize = 253;
 /// An environment id is a canonical UUID.
 pub const HANDOFF_ENVIRONMENT_ID_LEN: usize = 36;
-pub const HANDOFF_MAX_LEN: usize =
-    HANDOFF_FIXED_LEN + HANDOFF_MAX_HOSTNAME_LEN + HANDOFF_ENVIRONMENT_ID_LEN;
+/// The most aliases one header carries.
+pub const HANDOFF_MAX_ALIASES: usize = crate::intercept::MAX_INTERCEPT_ALIASES;
+pub const HANDOFF_MAX_LEN: usize = HANDOFF_FIXED_LEN
+    + HANDOFF_MAX_HOSTNAME_LEN
+    + HANDOFF_ENVIRONMENT_ID_LEN
+    + 1
+    + HANDOFF_MAX_ALIASES * (1 + HANDOFF_MAX_HOSTNAME_LEN);
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum HandoffError {

@@ -179,6 +179,7 @@ impl Broker {
         let header = InterceptedStreamHeader {
             version: HANDOFF_VERSION,
             hostname: host.to_owned(),
+            aliases: Vec::new(),
             port: 443,
             destination_ip: std::net::Ipv4Addr::new(192, 0, 2, 1),
             stream_id: self.next_stream,

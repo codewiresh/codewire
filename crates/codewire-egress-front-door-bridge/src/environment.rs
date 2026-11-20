@@ -86,7 +86,8 @@ impl EnvironmentFrontDoor {
             .map(|binding| binding.hostname())
             .collect();
         names.dedup();
-        let ca = EnvironmentCa::generate(names)?;
+        let suffixes = intercepts.suffixes().iter().map(|suffix| suffix.suffix());
+        let ca = EnvironmentCa::generate_with_suffixes(names, suffixes)?;
         Self::with_leaves(environment_id, environment_generation, intercepts, ca)
     }
 
@@ -96,7 +97,8 @@ impl EnvironmentFrontDoor {
     }
 }
 
-/// The bindings a front door may serve: at least one, each on 443.
+/// The bindings a front door may serve: at least one, each name and suffix
+/// on 443.
 fn check_intercepts(intercepts: &InterceptSet) -> Result<(), StartError> {
     if intercepts.is_empty() {
         return Err(StartError::NoBindings);
@@ -105,6 +107,10 @@ fn check_intercepts(intercepts: &InterceptSet) -> Result<(), StartError> {
         .bindings()
         .iter()
         .any(|binding| binding.port() != INTERCEPT_PORT)
+        || intercepts
+            .suffixes()
+            .iter()
+            .any(|suffix| suffix.port() != INTERCEPT_PORT)
     {
         return Err(StartError::Port);
     }
@@ -248,6 +254,16 @@ impl<L: LeafSource> EnvironmentFrontDoor<L> {
             tracing::warn!(stream_id, outcome = "unbound_host");
             return;
         }
+        // The other bound names at the dialled address, of which the client
+        // may have asked for any (#3999); only this front door's own count.
+        let mut names = vec![header.hostname.clone()];
+        names.extend(
+            header
+                .aliases
+                .iter()
+                .filter(|alias| self.intercepts.binds(alias, header.port))
+                .cloned(),
+        );
         let stream = match unix_stream(stream) {
             Ok(stream) => stream,
             Err(error) => {
@@ -258,7 +274,9 @@ impl<L: LeafSource> EnvironmentFrontDoor<L> {
         let door = Arc::clone(&self.door);
         streams.spawn(async move {
             let host = header.hostname;
-            match door.accept(stream, &host).await {
+            let destination = std::net::IpAddr::V4(header.destination_ip);
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            match door.accept_to(stream, &names, Some(destination)).await {
                 Ok(Accepted::Served(_)) => {}
                 // No hand-back: the guest dialled a bound address, so another
                 // server name is refused, not passed. Dropping closes it.

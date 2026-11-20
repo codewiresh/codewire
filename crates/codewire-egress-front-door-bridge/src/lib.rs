@@ -44,9 +44,13 @@ use codewire_credential_bridge::{
     intercepted_host_route, refusal_response,
 };
 use codewire_egress_front_door::{
-    Backend, BoxError, FrontDoorRefusal, Incoming, ResponseBody, UpgradeOutcome,
+    Backend, BoxError, FrontDoorRefusal, Incoming, InterceptedDestination, ResponseBody,
+    UpgradeOutcome,
 };
 use codewire_egress_policy::check::CheckDestination;
+use codewire_egress_policy::intercept::{
+    InterceptBinding, InterceptError, InterceptSet, InterceptSuffix,
+};
 use http::header::{HOST, HeaderName};
 use http::{HeaderMap, Request, Response, Uri};
 use http_body_util::combinators::BoxBody;
@@ -145,12 +149,18 @@ pub enum RouteTableError {
     HostRoute,
     #[error("two routes share a host and a stripped prefix")]
     Duplicate,
+    #[error("a route suffix must be one of the table's own hosts")]
+    Suffix,
 }
 
-/// Validated host routes.
+/// Validated host routes, and suffix routes for the names strictly under
+/// one of their hosts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RouteTable {
     routes: Vec<HostRoute>,
+    /// Routes whose `host` is a suffix: they serve a name strictly under it
+    /// that no exact route names (#3999).
+    suffixes: Vec<HostRoute>,
 }
 
 impl RouteTable {
@@ -160,39 +170,34 @@ impl RouteTable {
     where
         I: IntoIterator<Item = HostRoute>,
     {
-        let mut table: Vec<HostRoute> = Vec::new();
-        for route in routes {
-            if table.len() == MAX_ROUTES {
-                return Err(RouteTableError::Count);
-            }
-            if !canonical_host(&route.host) {
-                return Err(RouteTableError::Host);
-            }
-            // A host that selects its own route covers every path and adds
-            // no prefix: a prefix there would send its requests to a route
-            // the bridge then picks by host anyway, under another path.
-            let by_host = intercepted_host_route(&route.host).is_some();
-            if by_host && (!route.selected_by_host() || route.strip_prefix != "/") {
-                return Err(RouteTableError::HostRoute);
-            }
-            if !plain_prefix(&route.strip_prefix) || (!by_host && !plain_prefix(&route.add_prefix))
-            {
-                return Err(RouteTableError::Prefix);
-            }
-            if !by_host && !route_prefixes().contains(&route.add_prefix.as_str()) {
-                return Err(RouteTableError::UnknownRoute);
-            }
-            if table.iter().any(|existing| {
-                existing.host == route.host && existing.strip_prefix == route.strip_prefix
-            }) {
-                return Err(RouteTableError::Duplicate);
-            }
-            table.push(route);
-        }
-        if table.is_empty() {
+        let routes = checked(routes, 0)?;
+        if routes.is_empty() {
             return Err(RouteTableError::Count);
         }
-        Ok(Self { routes: table })
+        Ok(Self {
+            routes,
+            suffixes: Vec::new(),
+        })
+    }
+
+    /// This table, also routing any name strictly under each suffix route's
+    /// host that no exact route names (#3999). Each suffix must be one of
+    /// this table's hosts, so the CA's name constraint already covers it.
+    pub fn with_suffixes<I>(self, suffixes: I) -> Result<Self, RouteTableError>
+    where
+        I: IntoIterator<Item = HostRoute>,
+    {
+        let suffixes = checked(suffixes, self.routes.len())?;
+        if suffixes
+            .iter()
+            .any(|suffix| !self.routes.iter().any(|route| route.host == suffix.host))
+        {
+            return Err(RouteTableError::Suffix);
+        }
+        Ok(Self {
+            routes: self.routes,
+            suffixes,
+        })
     }
 
     /// The routes the credential bridge serves today: the Anthropic API on
@@ -242,11 +247,49 @@ impl RouteTable {
             ])
             .chain(github),
         )
+        .and_then(|table| {
+            // Codex's account routing can name an origin under chatgpt.com;
+            // the broker serves only the one it recorded, on Codex's path.
+            table.with_suffixes([HostRoute::new(CHATGPT_HOST, "/", CODEX_PREFIX)])
+        })
         .expect("the built-in routes are valid")
     }
 
     pub fn routes(&self) -> &[HostRoute] {
         &self.routes
+    }
+
+    /// The suffix routes: each serves a name strictly under its host.
+    pub fn suffix_routes(&self) -> &[HostRoute] {
+        &self.suffixes
+    }
+
+    /// Each suffix once, in table order: what the front door's CA also signs
+    /// under.
+    pub fn suffixes(&self) -> Vec<&str> {
+        let mut suffixes: Vec<&str> = Vec::new();
+        for route in &self.suffixes {
+            if !suffixes.contains(&route.host.as_str()) {
+                suffixes.push(&route.host);
+            }
+        }
+        suffixes
+    }
+
+    /// What a boot binds for this table on 443: every host, and every name
+    /// under each suffix.
+    pub fn intercepts(&self) -> Result<InterceptSet, InterceptError> {
+        let bindings = self
+            .hosts()
+            .into_iter()
+            .map(|host| InterceptBinding::new(host, INTERCEPT_PORT))
+            .collect::<Result<Vec<_>, _>>()?;
+        let suffixes = self
+            .suffixes()
+            .into_iter()
+            .map(|suffix| InterceptSuffix::new(suffix, INTERCEPT_PORT))
+            .collect::<Result<Vec<_>, _>>()?;
+        InterceptSet::with_suffixes(bindings, suffixes)
     }
 
     /// Each host once, in table order: what the front door's CA binds.
@@ -270,10 +313,21 @@ impl RouteTable {
         if !plain_request_path(path) {
             return Err(malformed);
         }
-        let (route, rest) = self
-            .routes
-            .iter()
-            .filter(|route| route.host == host)
+        // A name an exact route names never falls to a suffix route.
+        let exact = self.routes.iter().any(|route| route.host == host);
+        let candidates: Vec<&HostRoute> = if exact {
+            self.routes
+                .iter()
+                .filter(|route| route.host == host)
+                .collect()
+        } else {
+            self.suffixes
+                .iter()
+                .filter(|route| strictly_under(host, &route.host))
+                .collect()
+        };
+        let (route, rest) = candidates
+            .into_iter()
             .filter_map(|route| below(path, &route.strip_prefix).map(|rest| (route, rest)))
             .max_by_key(|(route, _)| route.strip_prefix.len())
             .ok_or(Refusal::PathNotServed)?;
@@ -318,9 +372,14 @@ impl CredentialRouteBackend {
             Ok(request) => request,
             Err(refusal) => return refused(refusal, host),
         };
+        // The front door sets it from the hand-off, never from the request.
+        let destination = request
+            .extensions()
+            .get::<InterceptedDestination>()
+            .map(|destination| destination.0);
         boxed(
             self.bridge
-                .respond_intercepted(host, request.map(Body::new))
+                .respond_intercepted_to(host, destination, request.map(Body::new))
                 .await,
         )
     }
@@ -387,6 +446,51 @@ impl Backend for CredentialRouteBackend {
             host,
         )
     }
+}
+
+/// `routes` checked one by one, none sharing a host and stripped prefix, and
+/// at most [`MAX_ROUTES`] together with `already` routes held elsewhere.
+fn checked<I>(routes: I, already: usize) -> Result<Vec<HostRoute>, RouteTableError>
+where
+    I: IntoIterator<Item = HostRoute>,
+{
+    let mut table: Vec<HostRoute> = Vec::new();
+    for route in routes {
+        if already + table.len() == MAX_ROUTES {
+            return Err(RouteTableError::Count);
+        }
+        if !canonical_host(&route.host) {
+            return Err(RouteTableError::Host);
+        }
+        // A host that selects its own route covers every path and adds
+        // no prefix: a prefix there would send its requests to a route
+        // the bridge then picks by host anyway, under another path.
+        let by_host = intercepted_host_route(&route.host).is_some();
+        if by_host && (!route.selected_by_host() || route.strip_prefix != "/") {
+            return Err(RouteTableError::HostRoute);
+        }
+        if !plain_prefix(&route.strip_prefix) || (!by_host && !plain_prefix(&route.add_prefix)) {
+            return Err(RouteTableError::Prefix);
+        }
+        if !by_host && !route_prefixes().contains(&route.add_prefix.as_str()) {
+            return Err(RouteTableError::UnknownRoute);
+        }
+        if table.iter().any(|existing| {
+            existing.host == route.host && existing.strip_prefix == route.strip_prefix
+        }) {
+            return Err(RouteTableError::Duplicate);
+        }
+        table.push(route);
+    }
+    Ok(table)
+}
+
+/// Whether `host` is a name strictly under `suffix`: `a.chatgpt.com` is
+/// under `chatgpt.com`, `xchatgpt.com` is not.
+fn strictly_under(host: &str, suffix: &str) -> bool {
+    host.strip_suffix(suffix)
+        .and_then(|label| label.strip_suffix('.'))
+        .is_some_and(|label| !label.is_empty())
 }
 
 /// The policy crate's canonical names, taken as they are, as the front

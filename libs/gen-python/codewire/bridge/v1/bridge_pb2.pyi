@@ -214,7 +214,7 @@ class CredentialBridgeReady(_message.Message):
     def __init__(self, protocol_version: _Optional[int] = ..., environment_id: _Optional[str] = ..., environment_generation: _Optional[int] = ...) -> None: ...
 
 class CredentialBridgeRequest(_message.Message):
-    __slots__ = ("request_id", "method", "path", "query", "headers", "body", "capability_slot", "route", "intercepted_host", "streamed_body", "intercept_decision")
+    __slots__ = ("request_id", "method", "path", "query", "headers", "body", "capability_slot", "route", "intercepted_host", "streamed_body", "destination_ip", "intercept_decision")
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     METHOD_FIELD_NUMBER: _ClassVar[int]
     PATH_FIELD_NUMBER: _ClassVar[int]
@@ -225,6 +225,7 @@ class CredentialBridgeRequest(_message.Message):
     ROUTE_FIELD_NUMBER: _ClassVar[int]
     INTERCEPTED_HOST_FIELD_NUMBER: _ClassVar[int]
     STREAMED_BODY_FIELD_NUMBER: _ClassVar[int]
+    DESTINATION_IP_FIELD_NUMBER: _ClassVar[int]
     INTERCEPT_DECISION_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     method: str
@@ -236,8 +237,9 @@ class CredentialBridgeRequest(_message.Message):
     route: str
     intercepted_host: str
     streamed_body: bool
+    destination_ip: str
     intercept_decision: bytes
-    def __init__(self, request_id: _Optional[str] = ..., method: _Optional[str] = ..., path: _Optional[str] = ..., query: _Optional[str] = ..., headers: _Optional[_Iterable[_Union[CredentialHttpHeader, _Mapping]]] = ..., body: _Optional[bytes] = ..., capability_slot: _Optional[str] = ..., route: _Optional[str] = ..., intercepted_host: _Optional[str] = ..., streamed_body: _Optional[bool] = ..., intercept_decision: _Optional[bytes] = ...) -> None: ...
+    def __init__(self, request_id: _Optional[str] = ..., method: _Optional[str] = ..., path: _Optional[str] = ..., query: _Optional[str] = ..., headers: _Optional[_Iterable[_Union[CredentialHttpHeader, _Mapping]]] = ..., body: _Optional[bytes] = ..., capability_slot: _Optional[str] = ..., route: _Optional[str] = ..., intercepted_host: _Optional[str] = ..., streamed_body: _Optional[bool] = ..., destination_ip: _Optional[str] = ..., intercept_decision: _Optional[bytes] = ...) -> None: ...
 
 class CredentialBridgeRequestBody(_message.Message):
     __slots__ = ("request_id", "data")

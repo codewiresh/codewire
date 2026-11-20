@@ -220,6 +220,7 @@ where
                 headers: without_framing(&headers),
                 body,
                 body_stream: None,
+                pinned: None,
             }),
         )
         .await

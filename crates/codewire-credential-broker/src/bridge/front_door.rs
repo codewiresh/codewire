@@ -18,6 +18,7 @@ use super::{
     AdmittedCredentialBridge, BrokerBridgeError, BrokerRequestExecutor,
     CredentialBridgeResponseSink, CredentialBridgeTransport, run_managed_bridge,
 };
+use crate::runtime::FrontDoorSession;
 use crate::{
     BrokerHttpResponse, BrokerLeaseProvider, BrokerRequestBodyStream, BrokerRequestError,
     BrokerUpstreamTransport, OpenAiBroker,
@@ -223,15 +224,28 @@ where
     U: BrokerUpstreamTransport + 'static,
     B: CredentialBridgeTransport,
 {
-    let broker = Arc::new(FrontDoorExecutor(broker));
+    let broker = Arc::new(FrontDoorExecutor::new(broker));
     run_managed_bridge(broker, bridge.bridge, idle).await
 }
 
 /// A front-door session's executor: its HTTP requests take the front-door
 /// validation, and only it serves WebSocket handshakes. SSH, projections and
 /// logins keep the trait's denial, since only a daemon inside an environment
-/// asks for them.
-pub(crate) struct FrontDoorExecutor<P, U>(pub(crate) Arc<OpenAiBroker<P, U>>);
+/// asks for them. It holds this session's routing, made fresh for each
+/// session and gone with it (#3999).
+pub(crate) struct FrontDoorExecutor<P, U> {
+    broker: Arc<OpenAiBroker<P, U>>,
+    session: Arc<FrontDoorSession>,
+}
+
+impl<P, U> FrontDoorExecutor<P, U> {
+    pub(crate) fn new(broker: Arc<OpenAiBroker<P, U>>) -> Self {
+        Self {
+            broker,
+            session: Arc::default(),
+        }
+    }
+}
 
 #[async_trait]
 impl<P, U> BrokerRequestExecutor for FrontDoorExecutor<P, U>
@@ -243,7 +257,9 @@ where
         &self,
         request: v1::CredentialBridgeRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
-        self.0.execute_front_door(request).await
+        self.broker
+            .execute_front_door_in(request, &self.session)
+            .await
     }
 
     async fn execute_streamed_request(
@@ -251,11 +267,13 @@ where
         request: v1::CredentialBridgeRequest,
         body: BrokerRequestBodyStream,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
-        self.0.execute_front_door_streamed(request, body).await
+        self.broker
+            .execute_front_door_streamed(request, body, &self.session)
+            .await
     }
 
     async fn wait_for_active_operations(&self) -> Result<(), BrokerRequestError> {
-        self.0.wait_for_active_operations().await
+        self.broker.wait_for_active_operations().await
     }
 
     fn serves_upgrades(&self) -> bool {
@@ -266,10 +284,10 @@ where
         &self,
         upgrade: v1::CredentialBridgeUpgrade,
     ) -> Result<crate::runtime::upgrade::BrokerUpgradeOutcome, BrokerRequestError> {
-        self.0.execute_front_door_upgrade(upgrade).await
+        self.broker.execute_front_door_upgrade(upgrade).await
     }
 
     async fn socket_grant_holds(&self, grant: &crate::runtime::upgrade::SocketGrant) -> bool {
-        self.0.socket_grant_holds(grant).await
+        self.broker.socket_grant_holds(grant).await
     }
 }

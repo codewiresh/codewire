@@ -291,6 +291,7 @@ where
                 headers,
                 body,
                 body_stream: None,
+                pinned: None,
             }),
         )
         .await

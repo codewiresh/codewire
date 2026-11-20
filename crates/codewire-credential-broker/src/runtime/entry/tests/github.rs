@@ -38,6 +38,7 @@ fn github(
         }
         .into(),
         intercepted_host: host.into(),
+        destination_ip: String::new(),
         streamed_body: false,
         intercept_decision: Vec::new(),
     }
@@ -411,7 +412,11 @@ async fn a_forwarded_body_streams_whole_whatever_its_size() {
         request.streamed_body = true;
         let (status, _, _) = collect(
             broker
-                .execute_front_door_streamed(request, streamed(vec![chunk.clone(); 5]))
+                .execute_front_door_streamed(
+                    request,
+                    streamed(vec![chunk.clone(); 5]),
+                    &Arc::default(),
+                )
                 .await
                 .unwrap(),
         )
@@ -451,7 +456,7 @@ async fn a_credentialed_api_body_keeps_its_bound_and_a_git_post_streams() {
         body.extend_from_slice(b"\"}");
         async move {
             let response = broker
-                .execute_front_door_streamed(request, streamed(vec![body]))
+                .execute_front_door_streamed(request, streamed(vec![body]), &Arc::default())
                 .await
                 .unwrap();
             let (status, _, _) = collect(response).await;
@@ -487,7 +492,11 @@ async fn a_credentialed_api_body_keeps_its_bound_and_a_git_post_streams() {
     push.streamed_body = true;
     let (status, _, _) = collect(
         broker
-            .execute_front_door_streamed(push, streamed(vec![vec![b'p'; 1024 * 1024]; 6]))
+            .execute_front_door_streamed(
+                push,
+                streamed(vec![vec![b'p'; 1024 * 1024]; 6]),
+                &Arc::default(),
+            )
             .await
             .unwrap(),
     )

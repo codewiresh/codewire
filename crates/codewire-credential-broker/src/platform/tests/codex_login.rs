@@ -447,6 +447,7 @@ fn proxied_request() -> codewire_daemon_proto::codewire::bridge::v1::CredentialB
         ],
         body: br#"{"input":"hello"}"#.to_vec(),
         intercepted_host: String::new(),
+        destination_ip: String::new(),
         streamed_body: false,
         intercept_decision: Vec::new(),
     }

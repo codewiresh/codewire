@@ -47,6 +47,7 @@ fn anthropic_request() -> BrokerUpstreamRequest {
         headers: anthropic_headers(),
         body: anthropic_body(true),
         body_stream: None,
+        pinned: None,
     }
 }
 
@@ -116,6 +117,7 @@ async fn anthropic_exact_routes_filter_real_injection_and_complete_stream_or_cou
                     headers,
                     body,
                     body_stream: None,
+                    pinned: None,
                 })
                 .await
                 .unwrap();
@@ -329,6 +331,7 @@ async fn openai_api_retains_real_redaction_with_a_distinct_marker() {
             headers,
             body,
             body_stream: None,
+            pinned: None,
         })
         .await
         .unwrap();
@@ -378,6 +381,7 @@ async fn openai_and_chatgpt_route_and_account_negatives_remain_closed() {
             )]),
             body: br#"{"input":"hello"}"#.to_vec(),
             body_stream: None,
+            pinned: None,
         };
         if codex {
             request.headers.insert(
@@ -516,6 +520,7 @@ fn exact_api_request(family: &str) -> BrokerUpstreamRequest {
             ]),
             body: br#"{"model":"codewire-synthetic","input":"Return the synthetic smoke marker.","stream":true}"#.to_vec(),
             body_stream: None,
+            pinned: None,
         },
         "anthropic" => anthropic_request(),
         _ => panic!("unknown test family"),
@@ -960,6 +965,7 @@ fn transparent_openai_request(method: Method, target: &str) -> BrokerUpstreamReq
         headers,
         body: Vec::new(),
         body_stream: None,
+        pinned: None,
     }
 }
 

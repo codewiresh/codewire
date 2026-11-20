@@ -45,6 +45,23 @@ where
         lease: P::Lease,
         provider_request: ValidatedOpenAiRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        self.serve_openai_for_account(request_id, slot, operation, route, lease, provider_request)
+            .await
+            .map(|(response, _)| response)
+    }
+
+    /// [`Self::serve_openai`], also giving the account id the broker sent
+    /// with a Codex sign-in, the credential's own and never one the
+    /// environment named (#3999).
+    pub(super) async fn serve_openai_for_account(
+        &self,
+        request_id: Uuid,
+        slot: &CapabilitySlot,
+        operation: BrokerOperationId,
+        route: BrokerRouteId,
+        lease: P::Lease,
+        provider_request: ValidatedOpenAiRequest,
+    ) -> Result<(BrokerHttpResponse, Option<String>), BrokerRequestError> {
         let (prepared, retry) = self
             .prepare_openai(
                 request_id,
@@ -55,6 +72,7 @@ where
                 provider_request,
             )
             .await?;
+        let account = prepared.account_id();
         let (mut upstream, mut response_policy) = self.execute_prepared(prepared).await?;
         if upstream.status() == StatusCode::UNAUTHORIZED
             && let Some(retry) = retry
@@ -67,7 +85,7 @@ where
                 (upstream, response_policy) = self.execute_prepared(prepared).await?;
             }
         }
-        redacted_openai(upstream, response_policy)
+        Ok((redacted_openai(upstream, response_policy)?, account))
     }
 
     /// `provider_request` with `lease`'s credential in it, and what a 401

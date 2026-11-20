@@ -183,6 +183,7 @@ where
                 headers: without_framing(&request.headers),
                 body: request.body,
                 body_stream,
+                pinned: None,
             }),
         )
         .await

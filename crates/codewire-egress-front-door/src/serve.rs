@@ -2,6 +2,7 @@
 
 use std::convert::Infallible;
 use std::future::Future;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -19,13 +20,16 @@ use tokio_util::task::TaskTracker;
 
 use crate::splice::splice;
 use crate::{
-    Backend, FrontDoorRefusal, HEADER_READ_TIMEOUT, MAX_CONCURRENT_STREAMS, MAX_HEADER_BYTES,
-    ResponseBody, Served,
+    Backend, FrontDoorRefusal, HEADER_READ_TIMEOUT, InterceptedDestination, MAX_CONCURRENT_STREAMS,
+    MAX_HEADER_BYTES, ResponseBody, Served,
 };
 
 /// One TLS connection's state, shared by its requests.
 pub(crate) struct Connection<B> {
     host: String,
+    /// The address the egress broker admitted for this connection's dial,
+    /// put on each request as an [`InterceptedDestination`].
+    destination: Option<IpAddr>,
     backend: Arc<B>,
     /// Ends this connection's request tasks and splices; a child of the
     /// front door's, so closing the front door ends it too.
@@ -48,6 +52,7 @@ pub(crate) enum Route {
 impl<B: Backend> Connection<B> {
     pub(crate) fn new(
         host: String,
+        destination: Option<IpAddr>,
         backend: Arc<B>,
         stop: CancellationToken,
         websocket_idle_timeout: Duration,
@@ -55,6 +60,7 @@ impl<B: Backend> Connection<B> {
     ) -> Arc<Self> {
         Arc::new(Self {
             host,
+            destination,
             backend,
             stop,
             splices: TaskTracker::new(),
@@ -120,6 +126,13 @@ impl<B: Backend> Connection<B> {
 
     async fn handle(self: Arc<Self>, mut request: Request<Incoming>) -> Response<ResponseBody> {
         self.requests.fetch_add(1, Ordering::Relaxed);
+        // Set here, never from the request, so a client cannot name one.
+        request.extensions_mut().remove::<InterceptedDestination>();
+        if let Some(destination) = self.destination {
+            request
+                .extensions_mut()
+                .insert(InterceptedDestination(destination));
+        }
         let route = match route(&mut request, &self.host, self.port) {
             Ok(route) => route,
             Err(refusal) => {

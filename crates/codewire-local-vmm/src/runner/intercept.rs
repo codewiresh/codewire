@@ -8,7 +8,7 @@
 
 use codewire_access::CredentialPlaceholder;
 use codewire_egress_front_door_bridge::RouteTable;
-use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
+use codewire_egress_policy::intercept::InterceptSet;
 use codewire_vmm_guest_probe::{EgressCaCertificate, PlaceholderSlot, SeedPlaceholders};
 
 use super::RunnerError;
@@ -160,8 +160,6 @@ impl super::RunningVm {
     }
 }
 
-const HTTPS_PORT: u16 = 443;
-
 /// The length of each boot secret.
 pub(crate) const BOOT_SECRET_BYTES: usize = 32;
 
@@ -253,7 +251,9 @@ impl FrontDoorFailure {
 }
 
 /// The names a boot binds: none unless `intercept`, else every host the
-/// front door routes for `clients`, on 443. Claude's token host is bound for
+/// front door routes for `clients`, and every name strictly under each of
+/// its suffixes (Codex's routed origin under chatgpt.com, #3999), on 443.
+/// Claude's token host is bound for
 /// a Claude sign-in only. GitHub's hosts are never bound from here: a
 /// placeholder outside GitHub's route has to be refused on that route first
 /// (#5087; cw-security's condition on #5149), so GitHub stays on its
@@ -265,11 +265,9 @@ pub(crate) fn boot_intercepts(
     if !intercept {
         return InterceptSet::default();
     }
-    let routes = RouteTable::for_clients(clients.without_github());
-    let bindings = routes.hosts().into_iter().map(|host| {
-        InterceptBinding::new(host, HTTPS_PORT).expect("the front door routes canonical hosts")
-    });
-    InterceptSet::new(bindings).expect("the front door routes at most MAX_ROUTES hosts")
+    RouteTable::for_clients(clients.without_github())
+        .intercepts()
+        .expect("the front door routes at most MAX_ROUTES canonical hosts and suffixes")
 }
 
 /// The boot's front door and the CA certificate the guest trusts, or

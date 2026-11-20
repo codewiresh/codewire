@@ -18,6 +18,7 @@ fn header() -> InterceptedStreamHeader {
         destination_ip: Ipv4Addr::new(160, 79, 104, 10),
         stream_id: 7,
         environment_id: ENVIRONMENT.into(),
+        aliases: Vec::new(),
     }
 }
 
@@ -64,21 +65,89 @@ fn assert_closed(peer: &StdUnixStream) {
 #[test]
 fn header_round_trips_with_the_documented_layout() {
     let bytes = header().encode().unwrap();
-    assert_eq!(&bytes[0..2], &[1, 0]);
+    assert_eq!(&bytes[0..2], &[2, 0]);
     assert_eq!(&bytes[2..4], &(17_u16).to_le_bytes());
     assert_eq!(&bytes[4..6], &443_u16.to_le_bytes());
     assert_eq!(&bytes[6..10], &[160, 79, 104, 10]);
     assert_eq!(&bytes[10..18], &7_u64.to_le_bytes());
     assert_eq!(&bytes[18..20], &(36_u16).to_le_bytes());
     assert_eq!(&bytes[20..37], b"api.anthropic.com");
+    assert_eq!(&bytes[37..73], ENVIRONMENT.as_bytes());
+    assert_eq!(&bytes[73..], &[0], "no aliases");
     assert_eq!(InterceptedStreamHeader::decode(&bytes).unwrap(), header());
+
+    // The other bound names at the address follow, each length-prefixed.
+    let shared = InterceptedStreamHeader {
+        hostname: "chatgpt.com".into(),
+        aliases: vec!["routed.chatgpt.com".into(), "a.chatgpt.com".into()],
+        ..header()
+    };
+    let bytes = shared.encode().unwrap();
+    let names_at = 20 + "chatgpt.com".len() + 36;
+    assert_eq!(bytes[names_at], 2);
+    assert_eq!(bytes[names_at + 1], 18);
+    assert_eq!(&bytes[names_at + 2..names_at + 20], b"routed.chatgpt.com");
+    assert_eq!(InterceptedStreamHeader::decode(&bytes).unwrap(), shared);
+    let most = InterceptedStreamHeader {
+        aliases: (0..HANDOFF_MAX_ALIASES)
+            .map(|index| format!("{index}.{}", "a".repeat(251)))
+            .collect(),
+        hostname: "b".repeat(253),
+        ..header()
+    };
+    let bytes = most.encode().unwrap();
+    assert_eq!(bytes.len(), HANDOFF_MAX_LEN);
+    assert_eq!(InterceptedStreamHeader::decode(&bytes).unwrap(), most);
+}
+
+#[test]
+fn malformed_aliases_are_refused() {
+    let good = InterceptedStreamHeader {
+        aliases: vec!["routed.chatgpt.com".into()],
+        ..header()
+    }
+    .encode()
+    .unwrap();
+    let names_at = 20 + 17 + 36;
+    let mut too_many = good[..names_at].to_vec();
+    too_many.push(u8::try_from(HANDOFF_MAX_ALIASES + 1).unwrap());
+    let mut empty_name = good[..names_at].to_vec();
+    empty_name.extend_from_slice(&[1, 0]);
+    let mut upper = good.clone();
+    upper[names_at + 2] = b'R';
+    let mut short = good.clone();
+    short[names_at + 1] = 19;
+    let mut trailing = good.clone();
+    trailing.push(b'x');
+    for bad in [too_many, empty_name, upper, short, trailing] {
+        assert_eq!(
+            InterceptedStreamHeader::decode(&bad),
+            Err(HandoffError::Malformed)
+        );
+    }
+    for bad in [
+        InterceptedStreamHeader {
+            aliases: vec!["Upper.Example.com".into()],
+            ..header()
+        },
+        InterceptedStreamHeader {
+            aliases: vec![String::new()],
+            ..header()
+        },
+        InterceptedStreamHeader {
+            aliases: vec!["a.example.com".into(); HANDOFF_MAX_ALIASES + 1],
+            ..header()
+        },
+    ] {
+        assert_eq!(bad.encode(), Err(HandoffError::Malformed));
+    }
 }
 
 #[test]
 fn malformed_headers_are_refused() {
     let good = header().encode().unwrap();
     let mut version = good.clone();
-    version[0] = 2;
+    version[0] = 1;
     assert_eq!(
         InterceptedStreamHeader::decode(&version),
         Err(HandoffError::Version)
@@ -110,7 +179,8 @@ fn malformed_headers_are_refused() {
         Err(HandoffError::Malformed)
     );
     let mut upper_id = good.clone();
-    let id_at = upper_id.len() - 36;
+    // The environment id ends right before the alias count.
+    let id_at = upper_id.len() - 37;
     upper_id[id_at] = b'F';
     assert_eq!(
         InterceptedStreamHeader::decode(&upper_id),

@@ -24,7 +24,7 @@ use thiserror::Error;
 
 use crate::host_addresses::HostAddressSet;
 use crate::hostname::{canonical_hostname, protected_name};
-use crate::intercept::InterceptSet;
+use crate::intercept::{InterceptSet, MAX_INTERCEPT_ALIASES};
 use crate::{
     CompiledPolicy, DecisionAction, DecisionReason, EgressRequest, PolicyDecision, PolicyDigest,
     PolicyError, RouteClass,
@@ -284,6 +284,9 @@ pub struct TcpInterception {
     port: u16,
     route_class: RouteClass,
     hostname: String,
+    /// The other bound names an active lease holds at the address, which the
+    /// guest may equally have asked for (#3999).
+    aliases: Vec<String>,
     lease_expires_at: LeaseInstant,
     policy_digest: PolicyDigest,
 }
@@ -303,6 +306,15 @@ impl TcpInterception {
 
     pub fn hostname(&self) -> &str {
         &self.hostname
+    }
+
+    /// The other bound names an active lease holds at this address, in the
+    /// table's name order, at most [`MAX_INTERCEPT_ALIASES`]. Names can share
+    /// an address, as a provider's routed origin can share its main host's,
+    /// and only the TLS server name a receiver reads tells which the guest
+    /// asked for (#3999).
+    pub fn aliases(&self) -> &[String] {
+        &self.aliases
     }
 
     pub fn lease_expires_at(&self) -> LeaseInstant {
@@ -978,11 +990,21 @@ impl EgressLeaseTable {
             return Ok(Some(TcpVerdict::Refused(self.refuse(reason, decision))));
         }
         if let Some(lease) = bound.iter().find(|lease| lease.is_active(now)) {
+            let mut aliases: Vec<String> = Vec::new();
+            for other in bound.iter().filter(|other| other.is_active(now)) {
+                if other.name != lease.name
+                    && !aliases.contains(&other.name)
+                    && aliases.len() < MAX_INTERCEPT_ALIASES
+                {
+                    aliases.push(other.name.clone());
+                }
+            }
             return Ok(Some(TcpVerdict::Intercepted(TcpInterception {
                 address,
                 port,
                 route_class,
                 hostname: lease.name.clone(),
+                aliases,
                 lease_expires_at: lease.expires_at,
                 policy_digest: self.policy.digest(),
             })));
@@ -2887,6 +2909,129 @@ rules:
             intercepted(verdict(&mut table, PUBLIC_V4, 443, at(1))).hostname(),
             BOUND
         );
+    }
+
+    // #3999: suffix bindings and shared addresses.
+
+    use crate::intercept::InterceptSuffix;
+
+    const SUFFIX: &str = "chatgpt.com";
+    const ROUTED: &str = "routed.chatgpt.com";
+
+    fn bind_suffix(table: &mut EgressLeaseTable, now: LeaseInstant) {
+        let set = InterceptSet::with_suffixes(
+            [InterceptBinding::new(SUFFIX, 443).unwrap()],
+            [InterceptSuffix::new(SUFFIX, 443).unwrap()],
+        )
+        .unwrap();
+        table.replace_intercepts(set, std::iter::empty::<((), &TcpAdmission)>(), now);
+    }
+
+    /// Every name under a bound suffix resolves without an allow rule and is
+    /// intercepted on the suffix's port, as an exact binding is (judge_dns,
+    /// intercept_verdict); a name beside the suffix is not.
+    #[test]
+    fn a_name_under_a_bound_suffix_resolves_and_its_dial_is_intercepted() {
+        let mut table = EgressLeaseTable::new(named_policy());
+        bind_suffix(&mut table, at(0));
+        let query = allowed(
+            table
+                .authorize_dns_query(ROUTED, RouteClass::General)
+                .unwrap(),
+        );
+        assert_eq!(query.decision().reason_code(), "intercept-binding");
+        resolve(&mut table, ROUTED, PUBLIC_V4, 60, at(0));
+        let interception = intercepted(verdict(&mut table, PUBLIC_V4, 443, at(1)));
+        assert_eq!(interception.hostname(), ROUTED);
+        assert!(interception.aliases().is_empty());
+        // Not on another port, and not a name that merely ends the same way.
+        let other_port = refused(verdict(&mut table, PUBLIC_V4, 80, at(1)));
+        assert_eq!(other_port.decision().reason, DecisionReason::DefaultDeny);
+        assert_eq!(
+            denied(
+                table
+                    .authorize_dns_query("xchatgpt.com", RouteClass::General)
+                    .unwrap()
+            )
+            .reason,
+            DecisionReason::DefaultDeny
+        );
+    }
+
+    /// A deny rule naming a subname beats the suffix (deny_beats_interception),
+    /// for its dial and for its DNS.
+    #[test]
+    fn a_deny_rule_beats_a_suffix_binding() {
+        let open = "  - id: open\n    action: allow\n    protocols: [tcp]\n    ports: [443]\n    cidrs: [0.0.0.0/0]\n    route_classes: [general]\n";
+        let mut table = EgressLeaseTable::new(rules(&format!(
+            "  - id: deny-routed\n    action: deny\n    protocols: [tcp]\n    destinations: [routed.chatgpt.com]\n    route_classes: [general]\n{open}"
+        )));
+        bind_suffix(&mut table, at(0));
+        resolve(&mut table, ROUTED, PUBLIC_V4, 60, at(0));
+        let refusal = refused(verdict(&mut table, PUBLIC_V4, 443, at(1)));
+        assert_eq!(refusal.decision().reason, DecisionReason::RuleDeny);
+        assert_eq!(refusal.decision().rule_id.as_deref(), Some("deny-routed"));
+
+        let mut table = EgressLeaseTable::new(rules(&format!(
+            "  - id: deny-routed\n    action: deny\n    protocols: [dns, tcp]\n    destinations: [routed.chatgpt.com]\n    route_classes: [general]\n{open}"
+        )));
+        bind_suffix(&mut table, at(0));
+        assert_eq!(
+            denied(
+                table
+                    .authorize_dns_query(ROUTED, RouteClass::General)
+                    .unwrap()
+            )
+            .reason,
+            DecisionReason::RuleDeny
+        );
+        // The suffix itself still resolves.
+        allowed(
+            table
+                .authorize_dns_query(SUFFIX, RouteClass::General)
+                .unwrap(),
+        );
+    }
+
+    /// Names sharing an address are all named on its interception: the one
+    /// the dial is attributed to, and the others as aliases, so the receiver
+    /// can serve whichever the client asked for. Only active leases count.
+    #[test]
+    fn a_shared_address_names_every_bound_name_leased_there() {
+        let mut table = EgressLeaseTable::new(named_policy());
+        bind_suffix(&mut table, at(0));
+        resolve(&mut table, SUFFIX, PUBLIC_V4, 60, at(0));
+        resolve(&mut table, ROUTED, PUBLIC_V4, 60, at(0));
+        resolve(&mut table, "allowed.example.com", PUBLIC_V4, 60, at(0));
+        let interception = intercepted(verdict(&mut table, PUBLIC_V4, 443, at(1)));
+        assert_eq!(interception.hostname(), SUFFIX);
+        assert_eq!(interception.aliases(), [ROUTED]);
+
+        // An alias whose lease lapsed is not named.
+        let mut table = EgressLeaseTable::new(named_policy());
+        bind_suffix(&mut table, at(0));
+        resolve(&mut table, ROUTED, PUBLIC_V4, 1, at(0));
+        resolve(&mut table, SUFFIX, PUBLIC_V4, MAX_DNS_TTL_SECONDS, at(0));
+        let lapsed = at(u64::from(MIN_NAME_BOUND_LEASE_SECONDS) + 1);
+        let interception = intercepted(verdict(&mut table, PUBLIC_V4, 443, lapsed));
+        assert_eq!(interception.hostname(), SUFFIX);
+        assert!(interception.aliases().is_empty());
+
+        // At most MAX_INTERCEPT_ALIASES others.
+        let mut table = EgressLeaseTable::new(named_policy());
+        bind_suffix(&mut table, at(0));
+        resolve(&mut table, SUFFIX, PUBLIC_V4, 60, at(0));
+        for index in 0..MAX_INTERCEPT_ALIASES + 2 {
+            resolve(
+                &mut table,
+                &format!("r{index}.chatgpt.com"),
+                PUBLIC_V4,
+                60,
+                at(0),
+            );
+        }
+        let interception = intercepted(verdict(&mut table, PUBLIC_V4, 443, at(1)));
+        assert_eq!(interception.aliases().len(), MAX_INTERCEPT_ALIASES);
     }
 
     #[test]

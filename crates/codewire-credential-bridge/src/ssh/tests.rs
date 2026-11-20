@@ -164,6 +164,7 @@ fn http_request(request_id: String) -> v1::CredentialBridgeRequest {
         headers: Vec::new(),
         body: b"{}".to_vec(),
         intercepted_host: String::new(),
+        destination_ip: String::new(),
         streamed_body: false,
         intercept_decision: Vec::new(),
     }

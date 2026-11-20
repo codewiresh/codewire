@@ -1169,6 +1169,7 @@ mod tests {
             ]),
             body: serde_json::to_vec(body).unwrap(),
             body_stream: None,
+            pinned: None,
         }
     }
 
@@ -1201,6 +1202,7 @@ mod tests {
             ]),
             body: serde_json::to_vec(body).unwrap(),
             body_stream: None,
+            pinned: None,
         }
     }
 
@@ -1834,6 +1836,7 @@ with original_open(path, 'rb') as receipt:
             headers,
             body,
             body_stream: None,
+            pinned: None,
         };
         let (status, upstream_headers, upstream_body) = SyntheticOpenAiSmokeTransport
             .execute(request)
@@ -2506,6 +2509,7 @@ with original_open(path, 'rb') as receipt:
                 headers,
                 body,
                 body_stream: None,
+                pinned: None,
             })
             .await
             .unwrap_or_else(|_| panic!("fixture rejected the request"))

@@ -226,6 +226,7 @@ impl InterceptHandoff for StreamHandoff {
             destination_ip: destination,
             stream_id,
             environment_id: self.environment_id.clone(),
+            aliases: interception.aliases().to_vec(),
         };
         // Held before it is sent, so its acknowledgement always finds it.
         let copy = front_door

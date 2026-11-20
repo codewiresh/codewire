@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use base64::Engine as _;
 
+use super::super::routed::Carried;
 use super::*;
 use crate::CommitFailure;
 use crate::bridge::AdmittedCredentialBridge;
@@ -136,6 +137,7 @@ impl Case {
             capability_slot: self.slot.into(),
             route: self.route.into(),
             intercepted_host: intercepted_host.into(),
+            destination_ip: String::new(),
             streamed_body: false,
             intercept_decision: Vec::new(),
         }
@@ -207,6 +209,13 @@ struct Recorded {
     /// A real transport's answer never changes; a test sets this only to
     /// reach a check that stands behind an earlier one.
     served_asks: Arc<AtomicUsize>,
+    /// The workspace origin the upstream's `accounts/check` reply names for
+    /// the sign-in's account.
+    routing: Option<&'static str>,
+    /// Each outbound request's pinned address, in order.
+    pinned: Arc<Mutex<Vec<Option<std::net::SocketAddr>>>>,
+    /// The credential every lease names, when a test changes it.
+    credential: Arc<Mutex<Option<&'static str>>>,
 }
 
 /// One planned lease.
@@ -239,6 +248,7 @@ impl Recorded {
                 codex_login_environment: self.codex_login_environment,
                 claude_login_environment: self.claude_login_environment,
                 login_leases: Arc::clone(&self.login_leases),
+                credential: Arc::clone(&self.credential),
             },
             Upstream {
                 outbound: Arc::clone(&self.outbound),
@@ -249,6 +259,8 @@ impl Recorded {
                 forwarded: Arc::clone(&self.forwarded),
                 unserved_slot: self.unserved_slot,
                 served_asks: Arc::clone(&self.served_asks),
+                routing: self.routing,
+                pinned: Arc::clone(&self.pinned),
             },
         )
         .unwrap()
@@ -279,6 +291,7 @@ struct Authority {
     codex_login_environment: Option<Uuid>,
     claude_login_environment: Option<Uuid>,
     login_leases: Arc<AtomicUsize>,
+    credential: Arc<Mutex<Option<&'static str>>>,
 }
 
 #[async_trait]
@@ -324,6 +337,11 @@ impl BrokerLeaseProvider for Authority {
         lease.placeholder_failed = self.placeholder_failed;
         if kind == CredentialAuthKind::OAuth && slot.as_str() == "codex" {
             lease.material = codex_sign_in();
+        }
+        if let Some(credential) = *self.credential.lock().unwrap() {
+            let credential = codewire_access::CredentialId::parse(credential).unwrap();
+            lease.metadata.id = credential.clone();
+            lease.grant.credential_id = credential;
         }
         match planned {
             LeasePlan::OtherCredential => {
@@ -432,6 +450,8 @@ struct Upstream {
     forwarded: Arc<AtomicUsize>,
     unserved_slot: Option<&'static str>,
     served_asks: Arc<AtomicUsize>,
+    routing: Option<&'static str>,
+    pinned: Arc<Mutex<Vec<Option<std::net::SocketAddr>>>>,
 }
 
 #[async_trait]
@@ -450,6 +470,7 @@ impl BrokerUpstreamTransport for Upstream {
         &self,
         mut request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        self.pinned.lock().unwrap().push(request.pinned());
         if let Some(hold) = &self.hold {
             hold.notified().await;
         }
@@ -461,6 +482,9 @@ impl BrokerUpstreamTransport for Upstream {
                 body.extend_from_slice(&chunk.map_err(|_| BrokerUpstreamError::Protocol)?);
             }
         }
+        let routing = self
+            .routing
+            .filter(|_| target.path() == super::super::routed::ACCOUNTS_CHECK_PATH);
         let echoed = headers
             .get("x-api-key")
             .or_else(|| headers.get("authorization"))
@@ -486,7 +510,20 @@ impl BrokerUpstreamTransport for Upstream {
         ));
         let mut reply_headers =
             HeaderMap::from_iter([(http::header::CONTENT_TYPE, HeaderValue::from_static(media))]);
-        let reply_body = if self.echo_credential {
+        let reply_body = if let Some(origin) = routing {
+            Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "accounts": [
+                        {"id": SIGN_IN_ACCOUNT, "workspace_backend_origin": origin,
+                            "account_routing_override": "us", "structure": "workspace"},
+                        {"id": OTHER_ACCOUNT, "workspace_backend_origin": OTHER_ORIGIN,
+                            "account_routing_override": "us", "structure": "workspace"},
+                    ],
+                    "account_ordering": [SIGN_IN_ACCOUNT, OTHER_ACCOUNT],
+                }))
+                .unwrap(),
+            )
+        } else if self.echo_credential {
             reply_headers.insert("x-echo", HeaderValue::from_bytes(&echoed).unwrap());
             let mut body = b"{\"echo\":\"".to_vec();
             body.extend_from_slice(&echoed);
@@ -1266,7 +1303,7 @@ async fn the_front_door_runner_serves_the_frames_a_loopback_session_refuses() {
 async fn the_front_door_open_lists_what_its_executor_serves() {
     use tokio::io::AsyncReadExt as _;
 
-    let executor = FrontDoorExecutor(Arc::new(Recorded::default().broker()));
+    let executor = FrontDoorExecutor::new(Arc::new(Recorded::default().broker()));
     let (mut front_door_end, broker_end) = tokio::net::UnixStream::pair().unwrap();
     let _transport = FrontDoorTransport::open(broker_end, Uuid::new_v4(), GENERATION)
         .await
@@ -1290,7 +1327,7 @@ async fn the_front_door_open_lists_what_its_executor_serves() {
 #[tokio::test]
 async fn a_front_door_session_denies_every_operation_but_an_http_request() {
     let recorded = Recorded::default();
-    let executor = FrontDoorExecutor(Arc::new(recorded.broker()));
+    let executor = FrontDoorExecutor::new(Arc::new(recorded.broker()));
     assert!(matches!(
         executor
             .execute_ssh(
@@ -2248,3 +2285,423 @@ async fn beside_the_front_door_a_claude_lease_without_a_placeholder_delivers_not
 
 mod github;
 mod upgrade;
+
+// ---------------------------------------------------------------------------
+// Codex's routed origin (#3999 change 11)
+
+const ROUTED: &str = "routed.chatgpt.com";
+// Any public address the broker would dial; this one is on the repository's
+// public-address list.
+const ADMITTED: &str = "1.1.1.1";
+const MODEL: &str = "/backend-api/codex/responses";
+/// The account `codex()` names, which the routing reply lists beside the
+/// sign-in's with an origin of its own.
+const OTHER_ACCOUNT: &str = "guest-named-account";
+const OTHER_ORIGIN: &str = "https://other.chatgpt.com";
+const OTHER: &str = "other.chatgpt.com";
+
+fn routed_broker(routing: &'static str) -> Recorded {
+    Recorded {
+        placeholder: Some(OURS),
+        codex_sign_in: true,
+        routing: Some(routing),
+        ..Recorded::default()
+    }
+}
+
+/// Codex's routing discovery carrying `credential` and naming `account`.
+fn accounts_check_naming(credential: &str, account: &str) -> v1::CredentialBridgeRequest {
+    let mut request = codex(
+        "GET",
+        super::super::routed::ACCOUNTS_CHECK_PATH,
+        Some(credential.to_owned()),
+    );
+    for header in &mut request.headers {
+        if header.name == "chatgpt-account-id" {
+            header.value = account.as_bytes().to_vec();
+        }
+    }
+    request
+}
+
+/// Codex's routing discovery with this environment's placeholder, naming
+/// its own account, as Codex sends it.
+fn accounts_check() -> v1::CredentialBridgeRequest {
+    accounts_check_naming(&format!("Bearer {OURS}"), SIGN_IN_ACCOUNT)
+}
+
+/// A front-door request to `host`, as the front door names its admitted
+/// address.
+fn routed(
+    host: &str,
+    path: &str,
+    credential: Option<String>,
+    destination: &str,
+) -> v1::CredentialBridgeRequest {
+    let mut request = codex("POST", path, credential);
+    request.intercepted_host = host.into();
+    request.destination_ip = destination.into();
+    request
+}
+
+/// Serves `request`, an `accounts/check`, on `session` and reads its reply
+/// to the end.
+async fn discover_with(
+    broker: &OpenAiBroker<Authority, Upstream>,
+    session: &Arc<FrontDoorSession>,
+    request: v1::CredentialBridgeRequest,
+) {
+    let response = broker
+        .execute_front_door_in(request, session)
+        .await
+        .unwrap();
+    assert_eq!(collect(response).await.0, StatusCode::OK);
+}
+
+async fn discover(broker: &OpenAiBroker<Authority, Upstream>, session: &Arc<FrontDoorSession>) {
+    discover_with(broker, session, accounts_check()).await;
+}
+
+/// Once a session's `accounts/check` names a workspace origin under
+/// chatgpt.com, Codex's model call there is served: swapped for the sign-in,
+/// or forwarded untouched, and either way dialled at the admitted address.
+#[tokio::test]
+async fn the_recorded_origin_is_served_at_its_admitted_address() {
+    let recorded = routed_broker("https://routed.chatgpt.com");
+    let broker = recorded.broker();
+    let session = Arc::new(FrontDoorSession::default());
+    discover(&broker, &session).await;
+    assert_eq!(session.recorded(Carried::Swapped).as_deref(), Some(ROUTED));
+    let admitted: std::net::SocketAddr = format!("{ADMITTED}:443").parse().unwrap();
+
+    let response = broker
+        .execute_front_door_in(
+            routed(ROUTED, MODEL, Some(format!("Bearer {OURS}")), ADMITTED),
+            &session,
+        )
+        .await
+        .unwrap();
+    assert_eq!(collect(response).await.0, StatusCode::OK);
+    let outbound = recorded.outbound();
+    let sent = outbound.last().unwrap();
+    assert_eq!(sent.1, format!("https://{ROUTED}{MODEL}"));
+    assert!(header(sent, "authorization")[0].starts_with(b"Bearer ey"));
+    assert_eq!(
+        header(sent, "chatgpt-account-id"),
+        [SIGN_IN_ACCOUNT.as_bytes()]
+    );
+    assert!(sent.2.iter().all(|(_, value)| !contains(value, OURS)));
+    assert_eq!(
+        recorded.pinned.lock().unwrap().last(),
+        Some(&Some(admitted))
+    );
+
+    // The user's own login discovers its routing too, into its own record.
+    discover_with(
+        &broker,
+        &session,
+        accounts_check_naming("Bearer users-own", SIGN_IN_ACCOUNT),
+    )
+    .await;
+    assert_eq!(
+        session.recorded(Carried::Forwarded).as_deref(),
+        Some(ROUTED)
+    );
+    let leases = recorded.leases();
+    let response = broker
+        .execute_front_door_in(
+            routed(ROUTED, MODEL, Some("Bearer users-own".into()), ADMITTED),
+            &session,
+        )
+        .await
+        .unwrap();
+    assert_eq!(collect(response).await.0, StatusCode::OK);
+    assert_eq!(
+        recorded.leases(),
+        leases,
+        "a foreign credential takes no lease"
+    );
+    let outbound = recorded.outbound();
+    let sent = outbound.last().unwrap();
+    assert_eq!(sent.1, format!("https://{ROUTED}{MODEL}"));
+    assert_eq!(header(sent, "authorization"), [&b"Bearer users-own"[..]]);
+    assert_eq!(
+        recorded.pinned.lock().unwrap().last(),
+        Some(&Some(admitted))
+    );
+    // The routing reply itself went to chatgpt.com, resolved as ever.
+    assert_eq!(recorded.pinned.lock().unwrap()[0], None);
+}
+
+/// Under the suffix, only the recorded origin's model path at an address the
+/// broker would dial is served: another name, another path, no or a
+/// protected address, an encoded separator, or another session's origin is
+/// refused before any lease, with nothing sent.
+#[tokio::test]
+async fn nothing_else_under_the_suffix_is_served() {
+    let recorded = routed_broker("https://routed.chatgpt.com");
+    let broker = recorded.broker();
+    let session = Arc::new(FrontDoorSession::default());
+    discover(&broker, &session).await;
+    let (leases, sent) = (recorded.leases(), recorded.outbound().len());
+    let ours = || Some(format!("Bearer {OURS}"));
+    for (request, on) in [
+        (
+            routed("other.chatgpt.com", MODEL, ours(), ADMITTED),
+            &session,
+        ),
+        (
+            routed(ROUTED, "/backend-api/wham/usage", ours(), ADMITTED),
+            &session,
+        ),
+        (
+            routed(ROUTED, "/backend-api/codex/%2fx", ours(), ADMITTED),
+            &session,
+        ),
+        (
+            routed(ROUTED, "/backend-api/codex/%2e%2e/x", ours(), ADMITTED),
+            &session,
+        ),
+        (routed(ROUTED, MODEL, ours(), ""), &session),
+        (routed(ROUTED, MODEL, ours(), "10.0.0.1"), &session),
+        (routed(ROUTED, MODEL, ours(), "127.0.0.1"), &session),
+        (routed(ROUTED, MODEL, ours(), "169.254.169.254"), &session),
+    ] {
+        let path = request.path.clone();
+        assert!(
+            broker.execute_front_door_in(request, on).await.is_err(),
+            "{path}"
+        );
+    }
+    let stale = Arc::new(FrontDoorSession::default());
+    assert!(
+        broker
+            .execute_front_door_in(routed(ROUTED, MODEL, ours(), ADMITTED), &stale)
+            .await
+            .is_err(),
+        "another session never recorded this origin"
+    );
+    assert_eq!(recorded.leases(), leases);
+    assert_eq!(recorded.outbound().len(), sent);
+}
+
+/// A routing reply that names NO_CONSTRAINT, chatgpt.com itself or an origin
+/// outside the list records nothing, so nothing under the suffix is served.
+#[tokio::test]
+async fn a_reply_naming_no_routed_origin_records_nothing() {
+    for routing in [
+        "NO_CONSTRAINT",
+        "https://chatgpt.com",
+        "https://evil.example.com",
+    ] {
+        let recorded = routed_broker(routing);
+        let broker = recorded.broker();
+        let session = Arc::new(FrontDoorSession::default());
+        discover(&broker, &session).await;
+        assert_eq!(session.recorded(Carried::Swapped), None, "{routing}");
+        assert!(
+            broker
+                .execute_front_door_in(
+                    routed(ROUTED, MODEL, Some(format!("Bearer {OURS}")), ADMITTED),
+                    &session
+                )
+                .await
+                .is_err()
+        );
+    }
+}
+
+/// The environment controls every field of a loopback request, so one that
+/// names an admitted address is refused before any lease.
+#[tokio::test]
+async fn a_loopback_request_naming_an_admitted_address_is_refused_before_any_lease() {
+    let recorded = routed_broker("https://routed.chatgpt.com");
+    let mut request = cases()[0].request("");
+    request.destination_ip = ADMITTED.into();
+    assert!(matches!(
+        recorded.broker().execute(request).await,
+        Err(BrokerRequestError::InvalidRequest)
+    ));
+    assert_eq!(recorded.leases(), 0);
+    assert!(recorded.outbound().is_empty());
+}
+
+/// (a) A swapped `accounts/check` is read for the credential's own account,
+/// the one the broker sent, whatever account the environment named.
+#[tokio::test]
+async fn a_swapped_reply_is_read_for_the_credentials_own_account() {
+    let recorded = routed_broker("https://routed.chatgpt.com");
+    let broker = recorded.broker();
+    let session = Arc::new(FrontDoorSession::default());
+    discover_with(
+        &broker,
+        &session,
+        accounts_check_naming(&format!("Bearer {OURS}"), OTHER_ACCOUNT),
+    )
+    .await;
+    assert_eq!(session.recorded(Carried::Swapped).as_deref(), Some(ROUTED));
+    assert_eq!(session.recorded(Carried::Forwarded), None);
+}
+
+/// (b) An origin recorded from a forwarded reply never admits a swapped
+/// model call.
+#[tokio::test]
+async fn a_forwarded_record_never_admits_a_swapped_model_call() {
+    let recorded = routed_broker("https://routed.chatgpt.com");
+    let broker = recorded.broker();
+    let session = Arc::new(FrontDoorSession::default());
+    discover_with(
+        &broker,
+        &session,
+        accounts_check_naming("Bearer users-own", OTHER_ACCOUNT),
+    )
+    .await;
+    assert_eq!(session.recorded(Carried::Forwarded).as_deref(), Some(OTHER));
+    let (leases, sent) = (recorded.leases(), recorded.outbound().len());
+    for host in [OTHER, ROUTED] {
+        assert!(
+            broker
+                .execute_front_door_in(
+                    routed(host, MODEL, Some(format!("Bearer {OURS}")), ADMITTED),
+                    &session
+                )
+                .await
+                .is_err(),
+            "{host}"
+        );
+    }
+    assert_eq!(recorded.leases(), leases);
+    assert_eq!(recorded.outbound().len(), sent);
+}
+
+/// (c) An origin recorded from a swapped reply never admits a forwarded
+/// model call.
+#[tokio::test]
+async fn a_swapped_record_never_admits_a_forwarded_model_call() {
+    let recorded = routed_broker("https://routed.chatgpt.com");
+    let broker = recorded.broker();
+    let session = Arc::new(FrontDoorSession::default());
+    discover(&broker, &session).await;
+    assert_eq!(session.recorded(Carried::Swapped).as_deref(), Some(ROUTED));
+    let (leases, sent) = (recorded.leases(), recorded.outbound().len());
+    for credential in [Some("Bearer users-own".to_owned()), None] {
+        assert!(
+            broker
+                .execute_front_door_in(routed(ROUTED, MODEL, credential, ADMITTED), &session)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(recorded.leases(), leases);
+    assert_eq!(recorded.outbound().len(), sent);
+}
+
+/// (d) A placeholder that proves after its lease not to be ours is not
+/// forwarded to a routed origin the swapped record alone admits.
+#[tokio::test]
+async fn a_placeholder_not_ours_is_not_forwarded_on_the_swapped_record() {
+    let recorded = routed_broker("https://routed.chatgpt.com");
+    let broker = recorded.broker();
+    let session = Arc::new(FrontDoorSession::default());
+    discover(&broker, &session).await;
+    let sent = recorded.outbound().len();
+    assert!(matches!(
+        broker
+            .execute_front_door_in(
+                routed(ROUTED, MODEL, Some(format!("Bearer {THEIRS}")), ADMITTED),
+                &session
+            )
+            .await,
+        Err(BrokerRequestError::Denied)
+    ));
+    assert_eq!(recorded.outbound().len(), sent, "nothing is sent");
+    // With the forwarded record naming the same origin, it is forwarded.
+    discover_with(
+        &broker,
+        &session,
+        accounts_check_naming("Bearer users-own", SIGN_IN_ACCOUNT),
+    )
+    .await;
+    let response = broker
+        .execute_front_door_in(
+            routed(ROUTED, MODEL, Some(format!("Bearer {THEIRS}")), ADMITTED),
+            &session,
+        )
+        .await
+        .unwrap();
+    assert_eq!(collect(response).await.0, StatusCode::OK);
+    let outbound = recorded.outbound();
+    assert_eq!(
+        header(outbound.last().unwrap(), "authorization"),
+        [format!("Bearer {THEIRS}").as_bytes()]
+    );
+}
+
+/// A front-door session refuses an admitted address that is not one address
+/// in text form, before any lease.
+#[tokio::test]
+async fn a_malformed_destination_ip_on_a_front_door_session_is_refused() {
+    for malformed in [
+        "not-an-address",
+        "300.1.1.1",
+        "1.1.1.1:443",
+        " 1.1.1.1",
+        "[::1]",
+        "1.1.1",
+    ] {
+        let recorded = routed_broker("https://routed.chatgpt.com");
+        for host in [ROUTED, "chatgpt.com"] {
+            let refused = recorded
+                .broker()
+                .execute_front_door(routed(
+                    host,
+                    MODEL,
+                    Some(format!("Bearer {OURS}")),
+                    malformed,
+                ))
+                .await;
+            assert!(
+                matches!(refused, Err(BrokerRequestError::InvalidRequest)),
+                "{host} {malformed:?}"
+            );
+        }
+        assert_eq!(recorded.leases(), 0, "{malformed:?}");
+        assert!(recorded.outbound().is_empty(), "{malformed:?}");
+    }
+}
+
+/// When the credential behind this environment's placeholder changes, the
+/// origin recorded for the old one no longer admits a model call: the
+/// request is refused with nothing sent, and the record is cleared until
+/// the next routing reply.
+#[tokio::test]
+async fn a_new_credential_never_goes_to_the_old_credentials_routed_origin() {
+    let recorded = routed_broker("https://routed.chatgpt.com");
+    let broker = recorded.broker();
+    let session = Arc::new(FrontDoorSession::default());
+    discover(&broker, &session).await;
+    assert_eq!(session.recorded(Carried::Swapped).as_deref(), Some(ROUTED));
+    *recorded.credential.lock().unwrap() = Some("33333333-3333-4333-8333-333333333333");
+    let sent = recorded.outbound().len();
+    assert!(matches!(
+        broker
+            .execute_front_door_in(
+                routed(ROUTED, MODEL, Some(format!("Bearer {OURS}")), ADMITTED),
+                &session
+            )
+            .await,
+        Err(BrokerRequestError::Denied)
+    ));
+    assert_eq!(recorded.outbound().len(), sent);
+    assert_eq!(session.recorded(Carried::Swapped), None);
+    // The next routing reply, read for the new credential, admits it again.
+    discover(&broker, &session).await;
+    let response = broker
+        .execute_front_door_in(
+            routed(ROUTED, MODEL, Some(format!("Bearer {OURS}")), ADMITTED),
+            &session,
+        )
+        .await
+        .unwrap();
+    assert_eq!(collect(response).await.0, StatusCode::OK);
+}

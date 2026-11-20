@@ -394,7 +394,106 @@ fn the_defaults_bind_three_hosts() {
         defaults.hosts(),
         ["api.anthropic.com", "api.openai.com", "chatgpt.com"]
     );
-    EnvironmentCa::generate(defaults.hosts()).expect("the CA binds every default host");
+    assert_eq!(defaults.suffixes(), ["chatgpt.com"]);
+    EnvironmentCa::generate_with_suffixes(defaults.hosts(), defaults.suffixes())
+        .expect("the CA binds every default host and suffix");
+    let intercepts = defaults.intercepts().unwrap();
+    for host in [
+        "api.anthropic.com",
+        "api.openai.com",
+        "chatgpt.com",
+        "routed.chatgpt.com",
+    ] {
+        assert!(intercepts.binds(host, 443), "{host}");
+        assert!(!intercepts.binds(host, 80), "{host}");
+    }
+    assert!(!intercepts.binds("routed.anthropic.com", 443));
+}
+
+/// A name strictly under the `chatgpt.com` suffix maps whole to the Codex
+/// route, as `chatgpt.com` does; no other name falls to a suffix route.
+#[test]
+fn a_subname_under_a_suffix_maps_as_its_suffix_does() {
+    let defaults = RouteTable::defaults();
+    for (host, uri, rewritten) in [
+        (
+            "routed.chatgpt.com",
+            "/backend-api/codex/responses",
+            Ok("/v1/backend-api/codex/responses".to_owned()),
+        ),
+        (
+            "a.b.chatgpt.com",
+            "/backend-api/codex/responses",
+            Ok("/v1/backend-api/codex/responses".to_owned()),
+        ),
+        (
+            "xchatgpt.com",
+            "/backend-api/codex/responses",
+            Err(StatusCode::NOT_FOUND),
+        ),
+        (
+            "routed.anthropic.com",
+            "/v1/messages",
+            Err(StatusCode::NOT_FOUND),
+        ),
+        (
+            "routed.api.openai.com",
+            "/v1/responses",
+            Err(StatusCode::NOT_FOUND),
+        ),
+    ] {
+        assert_eq!(rewrite(&defaults, host, uri), rewritten, "{host}{uri}");
+    }
+    let exact = RouteTable::new([HostRoute::new("chatgpt.com", "/", "/v1")]).unwrap();
+    assert_eq!(
+        exact
+            .clone()
+            .with_suffixes([HostRoute::new("other.example.com", "/", "/v1")]),
+        Err(RouteTableError::Suffix)
+    );
+    assert_eq!(
+        rewrite(&exact, "routed.chatgpt.com", "/backend-api/codex/responses"),
+        Err(StatusCode::NOT_FOUND),
+        "without the suffix route a subname is unrouted"
+    );
+}
+
+/// A request for a subname reaches the bridge naming that subname and the
+/// address its dial was admitted to; one without an admitted address names
+/// none.
+#[tokio::test]
+async fn a_subname_request_carries_its_admitted_destination() {
+    let mut host = Host::start().await;
+    let backend = host.backend(RouteTable::defaults());
+    let admitted = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 7));
+    let mut request = Request::post("/backend-api/codex/responses")
+        .header(HOST, "routed.chatgpt.com")
+        .body(Full::new(Bytes::from_static(b"{}")))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(codewire_egress_front_door::InterceptedDestination(admitted));
+    let (seen, _) = through_backend(&mut host, &backend, "routed.chatgpt.com", request).await;
+    assert_eq!(
+        (
+            seen.capability_slot.as_str(),
+            seen.path.as_str(),
+            seen.intercepted_host.as_str(),
+            seen.destination_ip.as_str()
+        ),
+        (
+            "codex",
+            "/backend-api/codex/responses",
+            "routed.chatgpt.com",
+            "192.0.2.7"
+        )
+    );
+    let request = Request::get("/backend-api/wham/usage")
+        .header(HOST, "chatgpt.com")
+        .body(Full::default())
+        .unwrap();
+    let (seen, _) = through_backend(&mut host, &backend, "chatgpt.com", request).await;
+    assert_eq!(seen.destination_ip, "");
 }
 
 /// Claude's token host is routed, and so bound, only when the Anthropic

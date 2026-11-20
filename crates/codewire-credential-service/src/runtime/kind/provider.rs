@@ -1871,6 +1871,7 @@ mod tests {
                 headers,
                 body: serde_json::to_vec(&body).unwrap(),
                 intercepted_host: String::new(),
+                destination_ip: String::new(),
                 streamed_body: false,
                 intercept_decision: Vec::new(),
             }

@@ -181,6 +181,7 @@ impl Harness {
             headers: Vec::new(),
             body,
             intercepted_host: String::new(),
+            destination_ip: String::new(),
             streamed_body: streamed,
             intercept_decision: Vec::new(),
         }))

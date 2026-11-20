@@ -15,7 +15,7 @@
 //! credential to.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -30,6 +30,7 @@ use http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use tokio::time::Instant;
 
 use super::anthropic_route::anthropic_operation;
+use super::routed::{self, ACCOUNTS_CHECK_PATH, Carried, FrontDoorSession};
 use super::{
     BrokerHttpResponse, BrokerLeaseProvider, BrokerRequestError, BrokerResponseBody,
     BrokerUpstreamBody, BrokerUpstreamRequest, BrokerUpstreamTransport, OPENAI_OPERATION,
@@ -116,30 +117,124 @@ where
 
     /// A front-door Codex request to `chatgpt.com` under the swap rule. Only a
     /// ChatGPT sign-in is swapped in; a key never goes to `chatgpt.com`.
+    ///
+    /// A name under a routed suffix is served only at the origin `session`
+    /// recorded for the kind of credential the request carries, on Codex's
+    /// model path, dialled at its admitted address: checked before any lease
+    /// (`runtime/routed.rs`). An `accounts/check` reply served at
+    /// `chatgpt.com` records the origin it names: swapped, for the account
+    /// the broker itself sent; forwarded, for the one the environment named.
     pub(super) async fn execute_codex_swap(
         &self,
         request: ValidatedGuestRequest,
+        session: &Arc<FrontDoorSession>,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         let presented = match Presented::of(&request.headers) {
             Presented::Conflict => return Ok(credential_conflict_response()),
             Presented::Foreign => None,
             Presented::Placeholder(placeholder) => Some(placeholder),
         };
-        let provider_request = self
-            .oauth_adapter
-            .validate_front_door(
+        let carried = match presented {
+            Some(_) => Carried::Swapped,
+            None => Carried::Forwarded,
+        };
+        // Codex names its account in every request; a forwarded reply's
+        // entry is found by it, a swapped one's by the credential's own.
+        let named_account = request
+            .headers
+            .get("chatgpt-account-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let records = request.routed.is_none()
+            && request.method == http::Method::GET
+            && request.path == ACCOUNTS_CHECK_PATH;
+        let routed = request.routed.clone();
+        let path = request.path.clone();
+        let provider_request = match &routed {
+            None => self.oauth_adapter.validate_front_door(
                 &request.method,
                 &request.path,
                 request.query.as_deref(),
                 request.headers,
                 request.body,
-            )
-            .map_err(map_adapter_error)?;
-        let Some(presented) = presented else {
-            return self.forward_chatgpt(provider_request).await;
+            ),
+            Some(dial) => {
+                let pinned = session
+                    .recorded_origin_admits(carried, &dial.host, &path, dial.destination)
+                    .ok()
+                    .flatten()
+                    .ok_or(BrokerRequestError::Denied)?;
+                self.oauth_adapter.validate_routed(
+                    &dial.host,
+                    pinned,
+                    &request.method,
+                    &request.path,
+                    request.query.as_deref(),
+                    request.headers,
+                    request.body,
+                )
+            }
+        }
+        .map_err(map_adapter_error)?;
+        // A placeholder that proves not to be ours is forwarded at a routed
+        // origin only as the forwarded record allows, never on the swapped
+        // record's say.
+        let forward_allowed = || {
+            routed.as_ref().is_none_or(|dial| {
+                session
+                    .recorded_origin_admits(Carried::Forwarded, &dial.host, &path, dial.destination)
+                    .is_ok_and(|admitted| admitted.is_some())
+            })
         };
-        if self.placeholders.known_foreign(&request.slot, &presented) {
-            return self.forward_chatgpt(provider_request).await;
+        let (response, served) = self
+            .serve_codex_front_door(
+                request.request_id,
+                &request.slot,
+                presented,
+                provider_request,
+                forward_allowed,
+                (session, routed.is_some()),
+            )
+            .await?;
+        if !records || !response.status().is_success() {
+            return Ok(response);
+        }
+        let (carried, account) = match served {
+            Served::Swapped { account } => (Carried::Swapped, account),
+            Served::Forwarded => (Carried::Forwarded, named_account),
+        };
+        let (status, headers, body) = response.into_parts();
+        Ok(BrokerHttpResponse::new(
+            status,
+            headers,
+            routed::recording(body, Arc::clone(session), carried, account),
+        ))
+    }
+
+    /// [`Self::execute_codex_swap`] once the request is admitted: forwarded
+    /// untouched unless it presents this environment's placeholder, and
+    /// then only while `forward_allowed`. `(session, routed)` is the
+    /// session and whether the request is to a routed origin, admitted on
+    /// the session's swapped record: a lease for another credential than
+    /// that record was read for clears it, and refuses a routed request.
+    async fn serve_codex_front_door(
+        &self,
+        request_id: uuid::Uuid,
+        slot: &CapabilitySlot,
+        presented: Option<CredentialPlaceholder>,
+        provider_request: ValidatedOpenAiRequest,
+        forward_allowed: impl Fn() -> bool,
+        (session, routed): (&FrontDoorSession, bool),
+    ) -> Result<(BrokerHttpResponse, Served), BrokerRequestError> {
+        let forwarded = |response: BrokerHttpResponse| (response, Served::Forwarded);
+        let Some(presented) = presented else {
+            return self.forward_chatgpt(provider_request).await.map(forwarded);
+        };
+        if self.placeholders.known_foreign(slot, &presented) {
+            if !forward_allowed() {
+                return Err(BrokerRequestError::Denied);
+            }
+            return self.forward_chatgpt(provider_request).await.map(forwarded);
         }
         let operation = BrokerOperationId::parse(OPENAI_OPERATION)
             .map_err(|_| BrokerRequestError::InvalidRequest)?;
@@ -147,36 +242,31 @@ where
             BrokerRouteId::parse(OPENAI_ROUTE).map_err(|_| BrokerRequestError::InvalidRequest)?;
         let lease = self
             .leases
-            .lease_operation(
-                request.request_id,
-                request.slot.clone(),
-                operation.clone(),
-                route.clone(),
-            )
+            .lease_operation(request_id, slot.clone(), operation.clone(), route.clone())
             .await
             .map_err(map_lease_error)?;
-        validate_http_lease_coordinates(&lease, &request.slot, &operation, &route)?;
-        self.placeholders
-            .remember(&request.slot, lease.placeholder());
+        validate_http_lease_coordinates(&lease, slot, &operation, &route)?;
+        self.placeholders.remember(slot, lease.placeholder());
         if !lease
             .placeholder()
             .is_some_and(|ours| ours.ct_eq(&presented))
         {
             drop(lease);
-            return self.forward_chatgpt(provider_request).await;
+            if !forward_allowed() {
+                return Err(BrokerRequestError::Denied);
+            }
+            return self.forward_chatgpt(provider_request).await.map(forwarded);
         }
         if lease.credential_metadata().authentication_kind != CredentialAuthKind::OAuth {
             return Err(BrokerRequestError::Denied);
         }
-        self.serve_openai(
-            request.request_id,
-            &request.slot,
-            operation,
-            route,
-            lease,
-            provider_request,
-        )
-        .await
+        if session.credential_changed(&lease.credential_metadata().id) && routed {
+            return Err(BrokerRequestError::Denied);
+        }
+        let (response, account) = self
+            .serve_openai_for_account(request_id, slot, operation, route, lease, provider_request)
+            .await?;
+        Ok((response, Served::Swapped { account }))
     }
 
     /// A front-door Codex request that carries no placeholder of this
@@ -186,14 +276,15 @@ where
         &self,
         provider_request: ValidatedOpenAiRequest,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
-        let (method, target, headers, body) = provider_request
+        let forwarded = provider_request
             .into_forwarded()
             .map_err(map_adapter_error)?;
         self.forward(
-            method,
-            target,
-            &headers,
-            body,
+            forwarded.method,
+            forwarded.target,
+            &forwarded.headers,
+            forwarded.body,
+            forwarded.pinned,
             crate::openai::MAX_RESPONSE_BYTES,
         )
         .await
@@ -214,6 +305,7 @@ where
             target,
             &headers,
             body,
+            None,
             crate::anthropic::MAX_RESPONSE_BYTES,
         )
         .await
@@ -227,6 +319,7 @@ where
         target: url::Url,
         headers: &HeaderMap,
         body: Vec<u8>,
+        pinned: Option<std::net::SocketAddr>,
         max_bytes: usize,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         let response = timing::timed(
@@ -237,6 +330,7 @@ where
                 headers: without_framing(headers),
                 body,
                 body_stream: None,
+                pinned,
             }),
         )
         .await
@@ -251,6 +345,14 @@ where
             forwarded_body(body, max_bytes),
         ))
     }
+}
+
+/// How a front-door Codex request was served.
+enum Served {
+    /// With the credential swapped in, which sent `account`.
+    Swapped { account: Option<String> },
+    /// As the environment sent it.
+    Forwarded,
 }
 
 /// Each slot's placeholder as its last lease named it, so a value that is

@@ -55,16 +55,25 @@ async fn frames_round_trip_and_a_wrong_digest_or_unknown_frame_is_refused() {
 
 #[tokio::test]
 async fn interception_frames_round_trip_and_bad_ones_are_refused() {
-    use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
-    let set = InterceptSet::new([
-        InterceptBinding::new("api.anthropic.com", 443).unwrap(),
-        InterceptBinding::new("github.com", 443).unwrap(),
-    ])
+    use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet, InterceptSuffix};
+    let set = InterceptSet::with_suffixes(
+        [
+            InterceptBinding::new("api.anthropic.com", 443).unwrap(),
+            InterceptBinding::new("github.com", 443).unwrap(),
+        ],
+        [InterceptSuffix::new("chatgpt.com", 443).unwrap()],
+    )
     .unwrap();
     let frame = encode_intercept_frame(&set).unwrap();
     assert!(matches!(
         read_control_frame(&mut frame.as_slice()).await.unwrap(),
         ControlFrame::ReplaceIntercepts(read) if read == set
+    ));
+    let exact = InterceptSet::new([InterceptBinding::new("github.com", 443).unwrap()]).unwrap();
+    let exact_frame = encode_intercept_frame(&exact).unwrap();
+    assert!(matches!(
+        read_control_frame(&mut exact_frame.as_slice()).await.unwrap(),
+        ControlFrame::ReplaceIntercepts(read) if read == exact && read.suffixes().is_empty()
     ));
     let empty = encode_intercept_frame(&InterceptSet::default()).unwrap();
     assert!(matches!(
@@ -72,33 +81,59 @@ async fn interception_frames_round_trip_and_bad_ones_are_refused() {
         ControlFrame::ReplaceIntercepts(read) if read.is_empty()
     ));
 
-    let mut version = frame.clone();
-    version[4] = 2;
-    assert!(read_control_frame(&mut version.as_slice()).await.is_err());
+    // Version 1 had no suffixes; the runner and broker are one build.
+    for other in [1, 3] {
+        let mut version = frame.clone();
+        version[4] = other;
+        assert!(read_control_frame(&mut version.as_slice()).await.is_err());
+    }
     let mut too_many = frame[..5].to_vec();
     too_many.push(33);
     assert!(read_control_frame(&mut too_many.as_slice()).await.is_err());
+    let mut too_many_suffixes = exact_frame[..exact_frame.len() - 1].to_vec();
+    too_many_suffixes.push(9);
+    assert!(
+        read_control_frame(&mut too_many_suffixes.as_slice())
+            .await
+            .is_err()
+    );
     let truncated = &frame[..frame.len() - 1];
     assert!(read_control_frame(&mut &truncated[..]).await.is_err());
     // A name the binding would canonicalize differently was not sent by us.
     let mut upper = frame.clone();
     upper[7] = b'A';
     assert!(read_control_frame(&mut upper.as_slice()).await.is_err());
+    let mut upper_suffix = frame.clone();
+    let at = upper_suffix.len() - 2 - "chatgpt.com".len();
+    upper_suffix[at] = b'C';
+    assert!(
+        read_control_frame(&mut upper_suffix.as_slice())
+            .await
+            .is_err()
+    );
     // A repeated binding is refused, not silently collapsed.
-    let one = InterceptSet::new([InterceptBinding::new("github.com", 443).unwrap()]).unwrap();
-    let single = encode_intercept_frame(&one).unwrap();
-    let mut repeated = single[..5].to_vec();
+    let binding = &exact_frame[6..exact_frame.len() - 1];
+    let mut repeated = exact_frame[..5].to_vec();
     repeated.push(2);
-    repeated.extend_from_slice(&single[6..]);
-    repeated.extend_from_slice(&single[6..]);
+    repeated.extend_from_slice(binding);
+    repeated.extend_from_slice(binding);
+    repeated.push(0);
     assert!(read_control_frame(&mut repeated.as_slice()).await.is_err());
-    // A protected name cannot be bound.
+    // A protected name cannot be bound, nor a one-label suffix.
     let mut protected = frame[..5].to_vec();
     protected.push(1);
     protected.push(9);
     protected.extend_from_slice(b"localhost");
     protected.extend_from_slice(&443_u16.to_be_bytes());
+    protected.push(0);
     assert!(read_control_frame(&mut protected.as_slice()).await.is_err());
+    let mut top_level = frame[..5].to_vec();
+    top_level.push(0);
+    top_level.push(1);
+    top_level.push(3);
+    top_level.extend_from_slice(b"com");
+    top_level.extend_from_slice(&443_u16.to_be_bytes());
+    assert!(read_control_frame(&mut top_level.as_slice()).await.is_err());
 }
 
 #[tokio::test]

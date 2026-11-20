@@ -459,15 +459,28 @@ impl CredentialBridge {
     /// environment intercepted for `host`. Only a front-door session's host
     /// accepts the host it names; a loopback session refuses the request.
     pub async fn respond_intercepted(&self, host: &str, request: Request<Body>) -> Response<Body> {
-        self.respond_for(Some(host), request).await
+        self.respond_intercepted_to(host, None, request).await
+    }
+
+    /// [`Self::respond_intercepted`], naming `destination`, the address the
+    /// egress broker admitted for the dial (#3999). The host dials it only for
+    /// a name under a bound suffix whose routing it recorded.
+    pub async fn respond_intercepted_to(
+        &self,
+        host: &str,
+        destination: Option<std::net::IpAddr>,
+        request: Request<Body>,
+    ) -> Response<Body> {
+        self.respond_for(Some((host, destination)), request).await
     }
 
     async fn respond_for(
         &self,
-        intercepted_host: Option<&str>,
+        intercepted: Option<(&str, Option<std::net::IpAddr>)>,
         request: Request<Body>,
     ) -> Response<Body> {
-        let (request, body) = match self.prepare_guest_request(intercepted_host, request).await {
+        let intercepted_host = intercepted.map(|(host, _)| host);
+        let (request, body) = match self.prepare_guest_request(intercepted, request).await {
             Ok(prepared) => prepared,
             Err((refusal, provider)) => {
                 return refusal_response(refusal, provider, intercepted_host);
@@ -809,10 +822,11 @@ impl CredentialBridge {
     /// refusal names the provider once the request's route is known.
     async fn prepare_guest_request(
         &self,
-        intercepted_host: Option<&str>,
+        intercepted: Option<(&str, Option<std::net::IpAddr>)>,
         request: Request<Body>,
     ) -> Result<(v1::CredentialBridgeRequest, Option<Body>), (Refusal, Option<RefusalProvider>)>
     {
+        let (intercepted_host, destination) = intercepted.unzip();
         let classified = match intercepted_host {
             Some(host) => classify_intercepted_request(
                 host,
@@ -842,8 +856,13 @@ impl CredentialBridge {
                 )
             })?,
             body: Vec::new(),
-            // Only a front-door session names the host it intercepted.
+            // Only a front-door session names the host it intercepted, and
+            // the address its dial was admitted to.
             intercepted_host: intercepted_host.unwrap_or_default().to_owned(),
+            destination_ip: destination
+                .flatten()
+                .map(|address| address.to_string())
+                .unwrap_or_default(),
             streamed_body: false,
             intercept_decision: Vec::new(),
         };

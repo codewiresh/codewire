@@ -323,6 +323,7 @@ async fn the_front_door_process_reports_its_ca_and_serves_a_handed_over_stream()
         destination_ip: Ipv4Addr::new(192, 0, 2, 1),
         stream_id: 1,
         environment_id: environment_id.to_string(),
+        aliases: Vec::new(),
     };
     handoff
         .send_intercepted_stream(&header, handed.as_fd())

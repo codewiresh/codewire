@@ -43,6 +43,11 @@ const CHATGPT_FRONT_DOOR_PREFIXES: [&str; 4] = [
     "/backend-api/ps/",
 ];
 const CHATGPT_FRONT_DOOR_PATHS: [&str; 1] = ["/backend-api/accounts/verified_access"];
+/// The fixed suffixes under which Codex's account routing may name its model
+/// origin (#3999): the egress broker intercepts every name under each on
+/// 443, and a front-door request is served there only on Codex's model path,
+/// at the origin this session recorded, dialled at the admitted address.
+pub(crate) const ROUTED_SUFFIXES: [&str; 1] = [CHATGPT_HOST];
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The whole-request bound for a request with a whole body. A streamed GitHub
 /// Git request has none: its bridge bounds it by idle time instead (#4280).
@@ -310,6 +315,20 @@ fn base_client_builder() -> reqwest::ClientBuilder {
         .connect_timeout(CONNECT_TIMEOUT)
 }
 
+/// A client that reaches `host` only at `address`, already admitted. TLS
+/// still verifies the certificate for `host`, so an address that does not
+/// serve that name fails the handshake (#3999).
+fn pinned_client(
+    builder: reqwest::ClientBuilder,
+    host: &str,
+    address: SocketAddr,
+) -> Result<reqwest::Client, BrokerUpstreamError> {
+    builder
+        .resolve_to_addrs(host, &[address])
+        .build()
+        .map_err(|_| BrokerUpstreamError::Protocol)
+}
+
 /// Everything about the provider client except its pinned addresses.
 fn client_builder(reuse: ConnectionReuse) -> reqwest::ClientBuilder {
     let builder =
@@ -347,15 +366,37 @@ impl BrokerUpstreamTransport for ProviderHttpsTransport {
         mut request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
         let body_stream = request.take_body_stream();
+        let pinned = request.pinned();
         let (method, target, headers, body) = request.into_parts();
-        validate_target(&target, &method, &self.selected)?;
+        let validate: fn(&url::Url, &Method, &BTreeSet<HttpProvider>) -> _ = if pinned.is_some() {
+            validate_pinned_target
+        } else {
+            validate_target
+        };
+        validate(&target, &method, &self.selected)?;
         self.refuse_unresolved(&target)?;
+        // A routed origin was never resolved here: dial the address the
+        // broker admitted for it, checked again, on a client of its own.
+        let pinned_client = match pinned {
+            None => None,
+            Some(pinned) => {
+                let address = admit_pinned(pinned.ip())?;
+                let host = target
+                    .host_str()
+                    .ok_or(BrokerUpstreamError::DestinationDenied)?;
+                Some(pinned_client(
+                    client_builder(ConnectionReuse::PerRequest),
+                    host,
+                    address,
+                )?)
+            }
+        };
+        let client = pinned_client.as_ref().unwrap_or(&self.client);
         let is_refresh = (target.host_str() == Some(OPENAI_AUTH_HOST)
             && target.path() == OPENAI_TOKEN_PATH)
             || (target.host_str() == Some(CLAUDE_TOKEN_HOST) && target.path() == CLAUDE_TOKEN_PATH);
         let provider_host = provider_host(&target);
-        let request = self
-            .client
+        let request = client
             .request(method.clone(), target.as_str())
             .headers(headers);
         let request = match body_stream {
@@ -367,7 +408,7 @@ impl BrokerUpstreamTransport for ProviderHttpsTransport {
             .send()
             .await
             .map_err(|error| request_failed(provider_host, is_refresh, error))?;
-        validate_target(response.url(), &method, &self.selected)?;
+        validate(response.url(), &method, &self.selected)?;
         upstream_response(response)
     }
 
@@ -567,6 +608,7 @@ fn provider_host(target: &url::Url) -> &'static str {
         Some(CLAUDE_TOKEN_HOST) => CLAUDE_TOKEN_HOST,
         Some(GITHUB_API_HOST) => GITHUB_API_HOST,
         Some(GITHUB_GIT_HOST) => GITHUB_GIT_HOST,
+        Some(host) if routed_host(host) => "chatgpt-routed-origin",
         _ => "other",
     }
 }
@@ -806,6 +848,62 @@ fn validate_github_forward_target(
         return Err(BrokerUpstreamError::DestinationDenied);
     }
     Ok(())
+}
+
+/// Whether `host` is canonical and strictly under one of
+/// [`ROUTED_SUFFIXES`]: `a.chatgpt.com`, never `chatgpt.com` or
+/// `xchatgpt.com`.
+pub(crate) fn routed_host(host: &str) -> bool {
+    let canonical =
+        InterceptBinding::new(host, OPENAI_PORT).is_ok_and(|binding| binding.hostname() == host);
+    canonical
+        && ROUTED_SUFFIXES.iter().any(|suffix| {
+            host.strip_suffix(suffix)
+                .and_then(|label| label.strip_suffix('.'))
+                .is_some_and(|label| !label.is_empty())
+        })
+}
+
+/// The only path served at a routed origin: Codex's model path.
+pub(crate) fn routed_path(path: &str) -> bool {
+    path.starts_with(CHATGPT_CODEX_BASE_PATH)
+}
+
+/// `address` on the provider port, if the provider transport would ever dial
+/// it: the one check every pinned dial passes, the broker's own, whatever
+/// process named the address (#3999).
+pub(crate) fn admit_pinned(address: IpAddr) -> Result<SocketAddr, BrokerUpstreamError> {
+    let admitted = admit_resolved_addresses([SocketAddr::new(address, OPENAI_PORT)])?;
+    admitted
+        .into_iter()
+        .next()
+        .ok_or(BrokerUpstreamError::DestinationDenied)
+}
+
+/// The destination check for a request dialled at a pinned address: only a
+/// routed origin under [`ROUTED_SUFFIXES`] on Codex's model path, for a Codex
+/// sign-in. A pin means routed; a bound host is never dialled at an address
+/// a request named, so anything else is refused, not handed to
+/// [`validate_target`] (#3999).
+fn validate_pinned_target(
+    target: &url::Url,
+    method: &Method,
+    selected: &BTreeSet<HttpProvider>,
+) -> Result<(), BrokerUpstreamError> {
+    let routed = target.host_str().is_some_and(routed_host)
+        && selected.contains(&HttpProvider::CodexOAuth)
+        && transparent_method(method)
+        && routed_path(target.path())
+        && target.scheme() == "https"
+        && target.port_or_known_default() == Some(OPENAI_PORT)
+        && target.fragment().is_none()
+        && target.username().is_empty()
+        && target.password().is_none();
+    if routed {
+        Ok(())
+    } else {
+        Err(BrokerUpstreamError::DestinationDenied)
+    }
 }
 
 /// A `chatgpt.com` path a Codex request may reach: under Codex's base, or
@@ -2218,5 +2316,163 @@ mod tests {
             validate_response_headers(&headers),
             Err(BrokerUpstreamError::ResourceLimit)
         );
+    }
+
+    /// A routed origin is a canonical name strictly under the fixed suffix,
+    /// reached only on Codex's model path at a pinned address the broker
+    /// itself would dial (#3999).
+    #[test]
+    fn a_routed_origin_is_admitted_only_pinned_on_codex_s_model_path() {
+        for routed in ["routed.chatgpt.com", "a.b.chatgpt.com"] {
+            assert!(routed_host(routed), "{routed}");
+        }
+        for other in [
+            "chatgpt.com",
+            "xchatgpt.com",
+            "ROUTED.chatgpt.com",
+            "routed.chatgpt.com.",
+            "routed.chatgpt.com.evil.test",
+            "routed.api.openai.com",
+            "*.chatgpt.com",
+        ] {
+            assert!(!routed_host(other), "{other}");
+        }
+        let public = IpAddr::from([162, 159, 140, 245]);
+        assert_eq!(admit_pinned(public), Ok(SocketAddr::new(public, 443)));
+        for protected in [
+            IpAddr::from([10, 0, 0, 1]),
+            IpAddr::from([127, 0, 0, 1]),
+            IpAddr::from([169, 254, 169, 254]),
+            IpAddr::from([100, 64, 0, 1]),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ] {
+            assert_eq!(
+                admit_pinned(protected),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{protected}"
+            );
+        }
+        let codex = BTreeSet::from([HttpProvider::CodexOAuth]);
+        let target = |url: &str| url::Url::parse(url).unwrap();
+        assert!(
+            validate_pinned_target(
+                &target("https://routed.chatgpt.com/backend-api/codex/responses"),
+                &Method::POST,
+                &codex,
+            )
+            .is_ok()
+        );
+        for denied in [
+            "https://routed.chatgpt.com/backend-api/wham/usage",
+            "https://routed.chatgpt.com/",
+            "https://routed.chatgpt.com:8443/backend-api/codex/responses",
+            "http://routed.chatgpt.com/backend-api/codex/responses",
+            "https://user@routed.chatgpt.com/backend-api/codex/responses",
+            "https://routed.example.com/backend-api/codex/responses",
+        ] {
+            assert_eq!(
+                validate_pinned_target(&target(denied), &Method::POST, &codex),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{denied}"
+            );
+        }
+        // Without a pin, or for a key, a routed origin is no destination.
+        let routed_target = target("https://routed.chatgpt.com/backend-api/codex/responses");
+        assert_eq!(
+            validate_target(&routed_target, &Method::POST, &codex),
+            Err(BrokerUpstreamError::DestinationDenied)
+        );
+        assert_eq!(
+            validate_pinned_target(
+                &routed_target,
+                &Method::POST,
+                &BTreeSet::from([HttpProvider::OpenAiApiKey])
+            ),
+            Err(BrokerUpstreamError::DestinationDenied)
+        );
+        // A pin means routed: a bound host is never dialled at a named
+        // address, even on a path its own check admits.
+        for bound in [
+            "https://chatgpt.com/backend-api/codex/responses",
+            "https://chatgpt.com/backend-api/wham/usage",
+            "https://api.openai.com/v1/responses",
+        ] {
+            assert_eq!(
+                validate_pinned_target(&target(bound), &Method::POST, &codex),
+                Err(BrokerUpstreamError::DestinationDenied),
+                "{bound}"
+            );
+        }
+    }
+
+    /// The pinned dial still verifies the routed name's certificate: an
+    /// address that answers with a certificate for another name, even one
+    /// the client's roots sign, fails before any request is sent.
+    #[tokio::test]
+    async fn a_pinned_address_presenting_another_name_s_certificate_fails() {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let routed = "routed.chatgpt.com";
+        for (presented, connects) in [(routed, true), ("other.example.com", false)] {
+            let leaf_key = KeyPair::generate().unwrap();
+            let leaf = CertificateParams::new(vec![presented.to_owned()])
+                .unwrap()
+                .signed_by(&leaf_key, &ca, &ca_key)
+                .unwrap();
+            let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![leaf.der().clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(leaf_key.serialize_der().into()),
+            )
+            .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let Ok(mut tls) = acceptor.accept(stream).await else {
+                    return false;
+                };
+                let mut request = [0_u8; 1024];
+                let _ = tls.read(&mut request).await;
+                let _ = tls
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .await;
+                true
+            });
+            let client = pinned_client(
+                client_builder(ConnectionReuse::PerRequest)
+                    .add_root_certificate(reqwest::Certificate::from_der(ca.der()).unwrap()),
+                routed,
+                address,
+            )
+            .unwrap();
+            let sent = client
+                .get(format!(
+                    "https://{routed}:{}/backend-api/codex/responses",
+                    address.port()
+                ))
+                .send()
+                .await;
+            assert_eq!(sent.is_ok(), connects, "{presented}: {sent:?}");
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(30), server)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                connects,
+                "{presented}"
+            );
+        }
     }
 }

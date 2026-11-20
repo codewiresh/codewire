@@ -41,6 +41,7 @@ const WAIT: Duration = Duration::from_secs(60);
 #[derive(Clone, Debug)]
 struct Seen {
     host: String,
+    destination: Option<crate::InterceptedDestination>,
     method: Method,
     uri: Uri,
     version: Version,
@@ -72,6 +73,7 @@ impl Fake {
     fn record(&self, host: &str, parts: http::request::Parts, body: Bytes) {
         self.seen.lock().unwrap().push(Seen {
             host: host.to_owned(),
+            destination: parts.extensions.get().copied(),
             method: parts.method,
             uri: parts.uri,
             version: parts.version,
@@ -442,6 +444,64 @@ fn leaves_chain_to_the_ca_name_only_their_host_and_are_cached() {
     assert_eq!(ca.leaf(OTHER).err(), Some(CaError::UnboundHost));
 }
 
+/// A bound suffix lets the CA mint for any exact, canonical name strictly
+/// under it (#3999), naming only that name, and nothing beside it: not the
+/// suffix's siblings, not a name that merely ends the same way, and never a
+/// suffix that is not one of the bound hosts.
+#[test]
+fn a_bound_suffix_mints_an_exact_leaf_for_each_subname_and_nothing_else() {
+    let ca = EnvironmentCa::generate_with_suffixes([BOUND, SECOND], [BOUND]).unwrap();
+    assert_eq!(ca.bound_suffixes(), [BOUND]);
+    let routed = format!("routed.{BOUND}");
+    let (host, key) = ca.leaf(&routed).unwrap();
+    assert_eq!(host, routed);
+    let (_, leaf) = X509Certificate::from_der(&key.cert[0]).unwrap();
+    let names = leaf.subject_alternative_name().unwrap().unwrap();
+    assert_eq!(
+        names.value.general_names,
+        [GeneralName::DNSName(routed.as_str())]
+    );
+    let (_, again) = ca.leaf(&routed).unwrap();
+    assert!(Arc::ptr_eq(&key, &again), "cached per name");
+    assert_eq!(ca.leaf(BOUND).unwrap().0, BOUND);
+    for refused in [
+        format!("routed.{SECOND}"),
+        format!("x{BOUND}"),
+        format!("ROUTED.{BOUND}"),
+        format!("routed.{BOUND}."),
+        format!(".{BOUND}"),
+        format!("*.{BOUND}"),
+        OTHER.to_owned(),
+    ] {
+        assert_eq!(
+            ca.leaf(&refused).err(),
+            Some(CaError::UnboundHost),
+            "{refused}"
+        );
+    }
+    assert_eq!(
+        EnvironmentCa::generate_with_suffixes([BOUND], [SECOND]).err(),
+        Some(CaError::InvalidSuffix)
+    );
+    // Without the suffix, a subname is unbound as before.
+    let exact = EnvironmentCa::generate([BOUND]).unwrap();
+    assert_eq!(exact.leaf(&routed).err(), Some(CaError::UnboundHost));
+}
+
+/// A guest chooses the subnames it dials, so the leaf cache is bounded; the
+/// bound hosts' leaves are never the ones dropped.
+#[test]
+fn the_leaf_cache_is_bounded_and_keeps_the_bound_hosts() {
+    let ca = EnvironmentCa::generate_with_suffixes([BOUND], [BOUND]).unwrap();
+    let (_, bound) = ca.leaf(BOUND).unwrap();
+    for index in 0..crate::ca::MAX_CACHED_LEAVES * 2 {
+        ca.leaf(&format!("routed-{index}.{BOUND}")).unwrap();
+    }
+    assert!(ca.cached_leaves() <= crate::ca::MAX_CACHED_LEAVES);
+    let (_, again) = ca.leaf(BOUND).unwrap();
+    assert!(Arc::ptr_eq(&bound, &again), "the bound host's leaf is kept");
+}
+
 /// Signs a leaf for `san` with the CA's key, outside what it would mint, and
 /// connects a client that trusts only the CA.
 async fn connect_to_leaf(
@@ -630,6 +690,131 @@ async fn a_named_accept_serves_the_host_its_client_hello_names() {
     }
     let hosts: Vec<String> = backend.seen().into_iter().map(|seen| seen.host).collect();
     assert_eq!(hosts, [BOUND, SECOND]);
+}
+
+/// A subname under a bound suffix is served under its own name (#3999), and
+/// each of its requests carries the address the broker admitted; a
+/// connection accepted without one carries none.
+#[tokio::test]
+async fn a_subname_is_served_with_the_admitted_destination() {
+    let backend = Arc::new(Fake::default());
+    let ca = EnvironmentCa::generate_with_suffixes([BOUND], [BOUND]).unwrap();
+    let door: Door = Arc::new(FrontDoor::new(
+        ca,
+        backend.clone(),
+        FrontDoorConfig::default(),
+    ));
+    let routed = format!("routed.{BOUND}");
+    let admitted = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
+    for (host, destination) in [(routed.as_str(), Some(admitted)), (BOUND, None)] {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let accepting = door.clone();
+        let name = host.to_owned();
+        let outcome: Outcome = tokio::spawn(async move {
+            accepting
+                .accept_to(server, &[name.as_str()], destination)
+                .await
+        });
+        let tls = TlsConnector::from(client_config(door.ca(), &[b"http/1.1"]))
+            .connect(named(host), client)
+            .await
+            .expect("handshake");
+        let mut sender = http1(tls).await;
+        let request = Request::get("/backend-api/codex/responses")
+            .header(HOST, host)
+            .body(Full::default())
+            .unwrap();
+        let response = sender.send_request(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(sender);
+        assert_eq!(served(outcome).await.requests, 1);
+    }
+    let seen = backend.seen();
+    assert_eq!(seen[0].host, routed);
+    assert_eq!(
+        seen[0].destination,
+        Some(crate::InterceptedDestination(admitted))
+    );
+    assert_eq!(seen[1].host, BOUND);
+    assert_eq!(seen[1].destination, None);
+}
+
+/// A dial the broker attributed to one bound name, whose address another
+/// bound name shares (#3999), is served for whichever of them the client
+/// asks for, and for no other name.
+#[tokio::test]
+async fn a_shared_address_is_served_for_the_name_the_client_asked_for() {
+    let backend = Arc::new(Fake::default());
+    let ca = EnvironmentCa::generate_with_suffixes([BOUND, SECOND], [BOUND]).unwrap();
+    let door: Door = Arc::new(FrontDoor::new(
+        ca,
+        backend.clone(),
+        FrontDoorConfig::default(),
+    ));
+    let routed = format!("routed.{BOUND}");
+    let shared = [BOUND, routed.as_str()];
+    for asked in [routed.as_str(), BOUND] {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let accepting = door.clone();
+        let names: Vec<String> = shared.iter().map(|name| (*name).to_owned()).collect();
+        let outcome: Outcome = tokio::spawn(async move {
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            accepting.accept_to(server, &names, None).await
+        });
+        let tls = TlsConnector::from(client_config(door.ca(), &[b"http/1.1"]))
+            .connect(named(asked), client)
+            .await
+            .expect("handshake");
+        let mut sender = http1(tls).await;
+        let request = Request::get("/backend-api/codex/responses")
+            .header(HOST, asked)
+            .body(Full::default())
+            .unwrap();
+        assert_eq!(
+            sender.send_request(request).await.unwrap().status(),
+            StatusCode::OK
+        );
+        drop(sender);
+        assert_eq!(served(outcome).await.requests, 1);
+    }
+    let hosts: Vec<String> = backend.seen().into_iter().map(|seen| seen.host).collect();
+    assert_eq!(hosts, [routed.as_str(), BOUND]);
+
+    // A bound name the address does not hold is not served there.
+    let (mut client, server) = tokio::io::duplex(64 * 1024);
+    let accepting = door.clone();
+    let names: Vec<String> = shared.iter().map(|name| (*name).to_owned()).collect();
+    let outcome: Outcome = tokio::spawn(async move {
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        accepting.accept_to(server, &names, None).await
+    });
+    client
+        .write_all(&client_hello(door.ca(), named(SECOND)))
+        .await
+        .unwrap();
+    let (_, _, reason) = handed_back(outcome).await;
+    assert_eq!(reason, HandBackReason::OtherServerName);
+}
+
+/// A name longer than a common name may be is named by its subject
+/// alternative name alone.
+#[test]
+fn a_long_subname_s_leaf_names_it_only_as_its_alternative_name() {
+    let ca = EnvironmentCa::generate_with_suffixes([BOUND], [BOUND]).unwrap();
+    // Over 64 bytes, in labels of at most 63.
+    let long = format!("{}.{}.{BOUND}", "a".repeat(40), "b".repeat(40));
+    assert!(long.len() > 64);
+    let (_, key) = ca.leaf(&long).unwrap();
+    let (_, leaf) = X509Certificate::from_der(&key.cert[0]).unwrap();
+    assert_eq!(leaf.subject().iter_common_name().count(), 0);
+    let names = leaf.subject_alternative_name().unwrap().unwrap();
+    assert_eq!(
+        names.value.general_names,
+        [GeneralName::DNSName(long.as_str())]
+    );
+    let (_, key) = ca.leaf(BOUND).unwrap();
+    let (_, leaf) = X509Certificate::from_der(&key.cert[0]).unwrap();
+    assert_eq!(leaf.subject().iter_common_name().count(), 1);
 }
 
 #[tokio::test]

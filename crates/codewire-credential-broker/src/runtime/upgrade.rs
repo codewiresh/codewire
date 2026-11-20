@@ -26,7 +26,7 @@ use super::{
     map_lease_error, map_upstream_error, timing, validate_http_lease_coordinates,
 };
 use crate::bridge::BridgeEntry;
-use crate::openai::ValidatedOpenAiRequest;
+use crate::openai::{ForwardedOpenAiRequest, ValidatedOpenAiRequest};
 use crate::transparent::without_framing;
 use crate::{BrokerCredentialLease as _, PreparedOpenAiRequest, PreparedOpenAiResponse};
 
@@ -135,6 +135,8 @@ where
                 capability_slot: upgrade.capability_slot,
                 route: upgrade.route,
                 intercepted_host: upgrade.intercepted_host,
+                // An upgrade frame names no admitted address (#3999).
+                destination_ip: String::new(),
                 streamed_body: false,
                 intercept_decision: upgrade.intercept_decision,
             },
@@ -298,6 +300,7 @@ where
                 headers: handshake_request(&headers, handshake),
                 body: Vec::new(),
                 body_stream: None,
+                pinned: None,
             }),
         )
         .await
@@ -321,7 +324,15 @@ where
         provider_request: ValidatedOpenAiRequest,
         handshake: &HeaderMap,
     ) -> Result<BrokerUpgradeOutcome, BrokerRequestError> {
-        let (method, target, headers, _body) = provider_request
+        // A handshake names no admitted address, so it is never pinned; the
+        // transport refuses a routed name it would have to resolve (#3999).
+        let ForwardedOpenAiRequest {
+            method,
+            target,
+            headers,
+            pinned,
+            ..
+        } = provider_request
             .into_forwarded()
             .map_err(map_adapter_error)?;
         let upgraded = timing::timed(
@@ -332,6 +343,7 @@ where
                 headers: handshake_request(&headers, handshake),
                 body: Vec::new(),
                 body_stream: None,
+                pinned,
             }),
         )
         .await

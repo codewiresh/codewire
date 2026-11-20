@@ -62,15 +62,20 @@ impl Running {
     /// [`Self::start`], with `configure` applied to the front door's end of
     /// the hand-off socket before it serves.
     async fn start_with(hosts: &[&str], configure: impl FnOnce(&OwnedFd)) -> Self {
-        Self::serving(hosts, configure, true).await
+        Self::serving(intercepts(hosts, 443), configure, true).await
     }
 
-    /// A front door serving `hosts`, with a first credential session when
+    /// A front door for exactly `bound`, with `configure` applied as
+    /// [`Self::start_with`] does.
+    async fn start_binding(bound: InterceptSet, configure: impl FnOnce(&OwnedFd)) -> Self {
+        Self::serving(bound, configure, true).await
+    }
+
+    /// A front door serving `bound`, with a first credential session when
     /// `paired`, as a local one always has.
-    async fn serving(hosts: &[&str], configure: impl FnOnce(&OwnedFd), paired: bool) -> Self {
+    async fn serving(bound: InterceptSet, configure: impl FnOnce(&OwnedFd), paired: bool) -> Self {
         let environment_id = Uuid::new_v4();
-        let door = EnvironmentFrontDoor::start(environment_id, GENERATION, intercepts(hosts, 443))
-            .unwrap();
+        let door = EnvironmentFrontDoor::start(environment_id, GENERATION, bound).unwrap();
         let ca = door.ca_certificate_der().to_vec();
         let (door_handoff, handoff) = stream_pair().unwrap();
         configure(&door_handoff);
@@ -102,6 +107,17 @@ impl Running {
         port: u16,
         environment_id: &str,
     ) -> tokio::net::UnixStream {
+        self.hand_over_named(hostname, &[], port, environment_id)
+    }
+
+    /// [`Self::hand_over`] for an address `aliases` also hold.
+    fn hand_over_named(
+        &mut self,
+        hostname: &str,
+        aliases: &[&str],
+        port: u16,
+        environment_id: &str,
+    ) -> tokio::net::UnixStream {
         let (guest, handed) = std::os::unix::net::UnixStream::pair().unwrap();
         let header = InterceptedStreamHeader {
             version: codewire_egress_policy::handoff::HANDOFF_VERSION,
@@ -110,6 +126,7 @@ impl Running {
             destination_ip: Ipv4Addr::new(192, 0, 2, 1),
             stream_id: self.next_stream,
             environment_id: environment_id.to_owned(),
+            aliases: aliases.iter().map(|alias| (*alias).to_owned()).collect(),
         };
         self.next_stream += 1;
         self.handoff
@@ -150,7 +167,18 @@ impl Running {
     /// with the status and body the guest read, once a broker answers.
     async fn start_request(&mut self) -> tokio::task::JoinHandle<(StatusCode, Bytes)> {
         let stream = self.own_stream(BOUND);
-        let tls = self.tls(stream, BOUND).await.expect("handshake");
+        self.start_request_through(stream, BOUND, "/v1/responses")
+            .await
+    }
+
+    /// [`Self::start_request`] for `server_name` and `path` through `stream`.
+    async fn start_request_through(
+        &mut self,
+        stream: tokio::net::UnixStream,
+        server_name: &'static str,
+        path: &'static str,
+    ) -> tokio::task::JoinHandle<(StatusCode, Bytes)> {
+        let tls = self.tls(stream, server_name).await.expect("handshake");
         let (mut sender, connection) =
             bounded(hyper::client::conn::http1::handshake(TokioIo::new(tls)))
                 .await
@@ -159,8 +187,8 @@ impl Running {
         tokio::spawn(async move {
             let response = sender
                 .send_request(
-                    Request::post("/v1/responses")
-                        .header("host", BOUND)
+                    Request::post(path)
+                        .header("host", server_name)
                         .header("content-type", "application/json")
                         .body(Full::new(Bytes::from_static(b"{}")))
                         .unwrap(),
@@ -173,14 +201,26 @@ impl Running {
         })
     }
 
-    /// One request through a fresh handed-over stream: what reached the
-    /// credential broker, and the response the guest read.
-    async fn request(&mut self) -> (v1::CredentialBridgeRequest, StatusCode, Bytes) {
-        let response = self.start_request().await;
+    /// One request for `server_name` and `path` through `stream`: what
+    /// reached the credential broker, and the response the guest read.
+    async fn request_through(
+        &mut self,
+        stream: tokio::net::UnixStream,
+        server_name: &'static str,
+        path: &'static str,
+    ) -> (v1::CredentialBridgeRequest, StatusCode, Bytes) {
+        let response = self.start_request_through(stream, server_name, path).await;
         let seen = received(self.host()).await;
         answer(self.host(), &seen.request_id).await;
         let (status, body) = bounded(response).await.unwrap();
         (seen, status, body)
+    }
+
+    /// One request through a fresh handed-over stream: what reached the
+    /// credential broker, and the response the guest read.
+    async fn request(&mut self) -> (v1::CredentialBridgeRequest, StatusCode, Bytes) {
+        let stream = self.own_stream(BOUND);
+        self.request_through(stream, BOUND, "/v1/responses").await
     }
 
     fn host(&mut self) -> &mut FrontDoorHostSession {
@@ -291,6 +331,38 @@ async fn a_stream_for_another_environment_or_an_unbound_host_is_closed() {
 
 /// No hand-back: the guest dialled a bound address, so a ClientHello naming
 /// any other server is refused and the stream closed.
+/// A stream the broker attributed to chatgpt.com, whose address a routed
+/// name under its suffix also holds, is served for the name the client asks
+/// for (#3999): the credential broker sees that name and the admitted
+/// address. An alias this front door does not bind is never served.
+#[tokio::test]
+async fn a_shared_address_is_served_for_the_bound_name_the_client_asks_for() {
+    let bound = RouteTable::defaults().intercepts().unwrap();
+    let mut running = Running::start_binding(bound, |_| {}).await;
+    let environment_id = running.environment_id.to_string();
+    let stream = running.hand_over_named(
+        "chatgpt.com",
+        &["routed.chatgpt.com"],
+        INTERCEPT_PORT,
+        &environment_id,
+    );
+    let (seen, status, _) = running
+        .request_through(stream, "routed.chatgpt.com", "/backend-api/codex/responses")
+        .await;
+    assert_eq!(seen.intercepted_host, "routed.chatgpt.com");
+    assert_eq!(seen.destination_ip, "192.0.2.1");
+    assert_eq!(seen.path, "/backend-api/codex/responses");
+    assert_eq!(status, StatusCode::OK);
+
+    let stream = running.hand_over_named(
+        "chatgpt.com",
+        &["unbound.example.com"],
+        INTERCEPT_PORT,
+        &environment_id,
+    );
+    assert!(running.tls(stream, "unbound.example.com").await.is_err());
+}
+
 #[tokio::test]
 async fn a_client_hello_for_another_name_is_closed() {
     let mut running = Running::start(&[BOUND, "api.anthropic.com"]).await;
@@ -423,6 +495,7 @@ async fn a_protocol_error_on_the_hand_off_stops_the_front_door() {
         destination_ip: Ipv4Addr::new(192, 0, 2, 1),
         stream_id: 1,
         environment_id: running.environment_id.to_string(),
+        aliases: Vec::new(),
     };
     running
         .handoff
@@ -482,7 +555,7 @@ async fn a_broker_that_stops_reading_acknowledgements_stops_the_front_door() {
 /// on, and once a session pairs requests are served.
 #[tokio::test]
 async fn without_a_credential_session_a_request_fails_closed_until_one_pairs() {
-    let mut running = Running::serving(&[BOUND], |_| {}, false).await;
+    let mut running = Running::serving(intercepts(&[BOUND], 443), |_| {}, false).await;
     let (status, _) = bounded(running.start_request().await).await.unwrap();
     assert_ne!(status, StatusCode::OK);
     assert!(!running.door.is_finished());

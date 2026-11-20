@@ -369,6 +369,7 @@ async fn try_send(
             ],
             body: BODY.to_vec(),
             intercepted_host: String::new(),
+            destination_ip: String::new(),
             streamed_body: false,
             intercept_decision: Vec::new(),
         })
