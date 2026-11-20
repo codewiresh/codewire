@@ -470,6 +470,29 @@ one of the four cases applies to its user, grant or key. A sign-out ends only
 the streams its own session admitted, so another machine's stream keeps
 running.
 
+An organization whose deletion has started, or has failed, admits no new
+stream or connection into its environments (#3586). The refusal comes after
+the caller's own access check, which answers as it does today, so only a
+caller who would otherwise be admitted learns why: they are told the
+organization is being deleted. A failed deletion refuses the same way, with
+the same words, until it is retried to the end. Every way into an
+environment, and whether it is refused:
+- **Refused:** exec, file, attach and log-follow streams; the dashboard's
+  terminal; the SSH proxy; the tailnet client session; the port proxy and
+  the preview of a port shared with the organization; and the operations
+  that reach a running Sandbox through its daemon (a repair, a runtime
+  update).
+- **Not yet:** a public port's preview, which has no caller to check and
+  ends when the deletion stops the environment; a Mesh Dial into the
+  organization's networks, with the Mesh step; and the desktop viewer's
+  WebSocket, which joins this rule when it lands (#5574).
+
+A tailnet client session already open ends at the coordinator's next
+re-check, within 60 seconds, since that re-check is the same admission. Any
+other stream already open keeps running until the deletion stops its
+environment; ending it at once is the next step, the `membership` kind
+(`private-docs: designs/stream-revocation.md`, "Next").
+
 The database records each loss in `credential_revocations`:
 - **Writers:** only database code. Triggers on `users`, `sessions`,
   `oidc_access_tokens` and `api_keys` write it, and the refresh-token reuse

@@ -16,6 +16,7 @@ Updated 2026-11-20.
 | `access-ticket` | not yet observed | not yet observed |
 | `access-streams` | not yet observed | not yet observed |
 | `access-websockets` | not yet observed | not yet observed |
+| `access-org-deleting` | not yet observed | not yet observed |
 | `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
 
 ## `access-ticket`: a terminal ticket from a session that has ended
@@ -181,6 +182,39 @@ Issue: #3586, after its tailnet steps. Not yet observed.
     `access-tailnet` covers; set `CW_SSH_TRANSPORT=websocket` to walk this
     one.
 - **Observed:** not yet observed.
+
+## `access-org-deleting`: no new stream into an organization being deleted
+
+Issue: #3586, ahead of the `membership` step (cw-security, 2026-11-20,
+comment 123530). Not yet observed.
+
+- **Entry points:** `cw exec`, `cw shell` (tailnet and
+  `CW_SSH_TRANSPORT=websocket`), the dashboard's terminal and `cw logs
+  --follow`, into an environment of an organization whose deletion has
+  started.
+- **States to exercise:**
+  - a member signed in with a browser session or `cw login`, and the
+    organization's owner, after `cw org delete` has started and before it
+    finishes: each new stream is refused;
+  - the same streams into another organization of the same user: they open;
+  - someone who is not a member: refused as today (`organization not found`
+    or `environment not found`), never told the organization is being
+    deleted;
+  - a deletion that failed: new streams stay refused, with the same words,
+    until it is retried to the end;
+  - a stream opened before the deletion started: a tailnet `cw shell` ends
+    within 60 seconds, at the coordinator's re-check; a
+    `CW_SSH_TRANSPORT=websocket` shell keeps running until the deletion stops
+    its environment.
+- **Driving it:** a walk organization with one running Sandbox and two
+  members. Open a tailnet `cw shell` and a `CW_SSH_TRANSPORT=websocket cw
+  shell` as the second member, then start `cw org delete` as the owner, and at once try a new `cw exec`, `cw shell`, terminal and
+  `cw logs --follow` as each.
+- **Proof:** every new stream is refused with a message that the
+  organization is being deleted, and none reaches the Sandbox; the tailnet
+  shell opened before ends within 60 seconds and the WebSocket one keeps
+  printing until the deletion stops the Sandbox; another organization's
+  streams are unaffected.
 
 ## `access-tailnet`: a tailnet shell or exec when its authority is lost
 
