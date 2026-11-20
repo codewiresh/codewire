@@ -2161,6 +2161,8 @@ if [ "$event_selected" = false ]; then
       scripts/runtime/tests/test-kill-test-round.sh|\
       scripts/runtime/agent-sandbox/drop-crd-conversion.sh|\
       scripts/runtime/tests/test-drop-crd-conversion.sh|\
+      scripts/runtime/dev/run-sdk-go-e2e.sh|\
+      scripts/runtime/tests/test-run-sdk-go-e2e.sh|\
       scripts/runtime/dev/run-sdk-rust-e2e.sh|\
       scripts/runtime/tests/test-run-sdk-rust-e2e.sh|\
       scripts/runtime/tests/test-with-dev-smoke-auth.sh)

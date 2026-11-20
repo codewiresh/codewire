@@ -1411,6 +1411,7 @@ run_dev_smoke_script_tests() {
   scripts/runtime/tests/test-provider-openai-smoke.sh
   python3 -B scripts/runtime/tests/test-provider-openai-workload.py
   scripts/runtime/tests/test-secrets-credentials-acceptance-runner.sh
+  scripts/runtime/tests/test-run-sdk-go-e2e.sh
   scripts/runtime/tests/test-run-sdk-rust-e2e.sh
   python3 -B scripts/runtime/tests/test-native-mesh-listener.py
 STEPS

@@ -1774,6 +1774,11 @@ run_paths_case sdk_rust_runner pull_request refs/pull/3511/head false \
   'policy dev_smoke_script_tests security security_js' \
   scripts/runtime/dev/run-sdk-rust-e2e.sh \
   scripts/runtime/tests/test-run-sdk-rust-e2e.sh
+# So is the Go SDK's (#5109).
+run_paths_case sdk_go_runner pull_request refs/pull/5109/head false \
+  'policy dev_smoke_script_tests security security_js' \
+  scripts/runtime/dev/run-sdk-go-e2e.sh \
+  scripts/runtime/tests/test-run-sdk-go-e2e.sh
 run_paths_case retired_sdk_examples pull_request refs/pull/1512/head false \
   'policy' \
   libs/sdk-examples/run-claude/README.md \
