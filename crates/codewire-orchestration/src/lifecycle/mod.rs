@@ -1062,6 +1062,13 @@ impl LifecycleStore for PgLifecycleStore {
                        USING target
                        WHERE selection.environment_id = target.id
                        RETURNING selection.environment_id
+                   ), removed_placeholder_key AS (
+                       -- A destroyed environment's placeholder key serves
+                       -- nothing, so it goes with the destroy (#4001).
+                       DELETE FROM platform_placeholder_keys placeholder_key
+                       USING target
+                       WHERE placeholder_key.environment_id = target.id
+                       RETURNING placeholder_key.environment_id
                    )
                    UPDATE environments env
                    SET state = 'destroyed',

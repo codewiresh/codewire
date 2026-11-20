@@ -1436,7 +1436,8 @@ arguments hold no real token, and the hosted sign-in exception is not used
     Pod denied;
   - bindings no front door can serve: an exact name on a port other than
     443, and a suffix;
-  - a credential added to a running Sandbox, changing its bound hosts.
+  - a credential added to a running Sandbox, changing its bound hosts;
+  - a Sandbox destroyed after its first intercepted call.
 - **Driving it:** no command yet (#4001).
 - **Proof:**
   - each row of the table above holds;
@@ -1480,7 +1481,9 @@ arguments hold no real token, and the hosted sign-in exception is not used
     as `intercept_unavailable` and never dialled, while other egress works;
     a suffix binding leaves the Sandbox with no egress through `cw-egress`;
   - after a change to the bound hosts, the new set is intercepted and a
-    host no longer bound is ordinary egress again.
+    host no longer bound is ordinary egress again;
+  - once a Sandbox is destroyed, its environment's placeholder key row is
+    gone, and every other environment's key is unchanged.
 - **Gotchas:**
   - The search for the real token is done by its holder, without
     printing it; the tool is owned by #3999.

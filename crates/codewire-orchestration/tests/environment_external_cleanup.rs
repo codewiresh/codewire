@@ -445,6 +445,81 @@ async fn a_live_workspace_binding_blocks_the_marker() {
     cleanup(&pool, &fixture).await;
 }
 
+/// One sealed placeholder key row for `env_id`, as the credential service
+/// stores it on the environment's first hosted lease (#4001).
+async fn insert_placeholder_key(pool: &PgPool, env_id: &str) {
+    sqlx::query(
+        r#"INSERT INTO platform_placeholder_keys
+               (environment_id, kek_provider, key_name, key_version, wrapped_dek,
+                wrapped_format, ciphertext, nonce, format)
+           VALUES ($1, 'openbao-transit', 'codewire-credentials', 1, '\x01', 1,
+                   decode(repeat('00', 48), 'hex'), decode(repeat('00', 12), 'hex'), 1)"#,
+    )
+    .bind(env_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn placeholder_keys(pool: &PgPool, env_id: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM platform_placeholder_keys WHERE environment_id = $1")
+        .bind(env_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// A destroyed environment's placeholder key goes in the statement that marks
+/// it destroyed (#4001). A destroy whose preconditions fail keeps it, and
+/// another environment's key is never touched.
+#[tokio::test]
+async fn the_destroy_marker_deletes_its_own_placeholder_key_and_no_other() {
+    let Some(pool) = pool().await else { return };
+    let fixture = seed(&pool, "destroying").await;
+    let other = seed_running_environment(&pool, &fixture, "other").await;
+    insert_placeholder_key(&pool, &fixture.env_id).await;
+    insert_placeholder_key(&pool, &other).await;
+    let pod = Uuid::new_v4().to_string();
+    insert_live_binding(&pool, &fixture.env_id, &pod).await;
+
+    assert_cleanup_refused(&pool, &fixture.env_id, proof(&pool).await).await;
+    assert_eq!(placeholder_keys(&pool, &fixture.env_id).await, 1);
+
+    sqlx::query(
+        "UPDATE sandbox_workspace_bindings SET released_at = GREATEST(now(), bound_at) \
+          WHERE pod_uid = $1",
+    )
+    .bind(&pod)
+    .execute(&pool)
+    .await
+    .unwrap();
+    Service::<PgLifecycleStore>::for_pool(pool.clone())
+        .complete_external_cleanup(&fixture.env_id, false, proof(&pool).await)
+        .await
+        .unwrap();
+    assert!(cleanup_marked(&pool, &fixture.env_id).await);
+    assert_eq!(placeholder_keys(&pool, &fixture.env_id).await, 0);
+    assert_eq!(placeholder_keys(&pool, &other).await, 1);
+
+    cleanup(&pool, &fixture).await;
+}
+
+/// A historical destroyed row verified now loses its key the same way.
+#[tokio::test]
+async fn a_verified_historical_destroy_deletes_its_placeholder_key() {
+    let Some(pool) = pool().await else { return };
+    let fixture = seed(&pool, "destroyed").await;
+    insert_placeholder_key(&pool, &fixture.env_id).await;
+
+    Service::<PgLifecycleStore>::for_pool(pool.clone())
+        .complete_external_cleanup(&fixture.env_id, true, proof(&pool).await)
+        .await
+        .unwrap();
+    assert_eq!(placeholder_keys(&pool, &fixture.env_id).await, 0);
+
+    cleanup(&pool, &fixture).await;
+}
+
 #[tokio::test]
 async fn ambiguous_dispatch_on_another_environment_does_not_block_cleanup() {
     let Some(pool) = pool().await else { return };

@@ -1633,10 +1633,15 @@ or one whose credentials come from the platform, carries none.
 - **Hosted (#4001).** The same derivation, under one key per environment in
   `platform_placeholder_keys`:
   - Created by the credential service on that environment's first lease while
-    hosted placeholders are on. Its row goes when the environment's row is
-    deleted, by the foreign key's cascade. A destroyed environment keeps its
-    row until its environment row is purged: the broker has no `DELETE`, and
-    nothing else deletes a key earlier.
+    hosted placeholders are on. **Kept until the environment is destroyed:**
+    orchestration's destroy statement deletes the row in the transaction that
+    marks the environment destroyed, joined to that statement's own target. So
+    only an environment that statement marks destroyed, with no live binding
+    and no active dispatch, loses its key, and no other environment's key is
+    touched. The broker has no `DELETE`. A lease already in the credential
+    service when the destroy commits can still insert the key once more,
+    because the environment's row outlives its destroy; nothing reads that
+    row, and the foreign key's cascade removes it with the environment's row.
   - Sealed like credential material: a DEK wrapped by the credential-material
     KEK, scoped to the environment's organization.
     The envelope's associated data names the environment, so a sealed key
@@ -2218,9 +2223,8 @@ and the per-Pod CA (#5051). Open: the placeholder keys and their failed-read
 refusal (#5017, #5087), the bindings and the switch (#5013, #5023), the relay
 session and its router (#5021, #5439, #5056), the CA's ensure, leaf signing
 and sweep (#5170, #5071), and the idle end (#5125). Then the gates on the
-switch: a destroyed environment's key deleted, delivery following the front
-door, one per-client host selection for local and hosted, and `cw-egress`
-reopening an ended session. The journey is `agent-hosted` in
+switch: delivery following the front door, one per-client host selection
+for local and hosted, and `cw-egress` reopening an ended session. The journey is `agent-hosted` in
 `docs/journeys/network-and-egress.md`.
 
 ### Hosted interception CA (not yet served)
