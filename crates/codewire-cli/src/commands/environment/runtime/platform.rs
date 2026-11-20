@@ -25,6 +25,23 @@ fn identity(value: &CwPayloadIdentity) -> rpc::EnvironmentCwRuntimeIdentity {
     }
 }
 
+/// The most a cloud runtime update can upload: the public edge in front of
+/// the API resets a larger request body (#5566), so a larger release is
+/// refused before any of it is sent.
+const CLOUD_UPLOAD_LIMIT_BYTES: u64 = 100_000_000;
+
+fn refuse_over_upload_limit(environment: &str, size: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        size <= CLOUD_UPLOAD_LIMIT_BYTES,
+        "this cw is {:.1} MB, and a cloud runtime update uploads at most {} MB; \
+         to pick up the current release, restart the sandbox instead: \
+         `cw --cloud stop {environment}`, then `cw --cloud start {environment}`",
+        size as f64 / 1_000_000.0,
+        CLOUD_UPLOAD_LIMIT_BYTES / 1_000_000,
+    );
+    Ok(())
+}
+
 fn expected(
     info: &rpc::GetEnvironmentCwRuntimeResponse,
     generation: u64,
@@ -141,6 +158,7 @@ pub(super) async fn handle(globals: &Globals, command: EnvRuntimeCommand) -> any
                     .context("platform release directory is required")?,
                 &args.target_sha256,
             )?;
+            refuse_over_upload_limit(&args.environment, source.identity.size)?;
             let info = status(&client, &org_id, &id).await?;
             let expected = expected(
                 &info,

@@ -1,7 +1,7 @@
 ---
 title: Environments
 description: ls, info, create, start, stop, restart, rm, update, ports, local-https, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh, setup rex, checkpoint and preset.
-updated: 2026-11-19
+updated: 2026-11-20
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -402,7 +402,10 @@ After an upgrade, local VMs keep running on the `cw` that started them.
 `cw --local access ENV` inspects a local environment's access profile.
 `cw runtime info|update|rollback|observe|cancel ENV` selects the `cw` that
 runs inside a running environment without restarting it; `info` shows the
-bootstrap and current selection.
+bootstrap and current selection. A cloud `update` uploads the release, and
+the edge in front of the API takes at most 100 MB, so a larger `cw` is
+refused before anything is sent. To pick up the current release, stop and
+start the sandbox (`cw --cloud stop ENV`, then `cw --cloud start ENV`).
 
 ## cw use, cw current
 

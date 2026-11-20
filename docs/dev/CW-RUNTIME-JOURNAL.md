@@ -54,6 +54,16 @@ disk until it is checked and handed to the sandbox. It is staged under one
 directory the server makes for itself, so the server can run with a
 read-only root filesystem.
 
+The public edge in front of the API resets a request body over about 100 MB
+(observed on Dev, #5566), well under the server's 512 MiB, so no real `cw`
+can be delivered this way yet. Until a hosted update stops carrying the
+upload (#5566), `cw --cloud runtime update` refuses a release over 100 MB
+before it sends anything. The refusal names the release's size and the
+limit, and says how to pick up the current release instead: stop and start
+the sandbox, which re-pins `/codewire/bin/cw` to the current release. A `cw`
+an earlier update or rollback selected still comes first
+([SANDBOX-DAEMON.md](SANDBOX-DAEMON.md), "Which `cw` a sandbox runs").
+
 - **The mount.** Orchestration's Pod mounts an `emptyDir` at
   `/var/lib/codewire-orchestration/staging`, on disk, not in memory, with
   `sizeLimit: 2Gi`. The path is fixed, and `CODEWIRE_CW_RUNTIME_STAGING`

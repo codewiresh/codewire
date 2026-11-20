@@ -354,3 +354,21 @@ fn exact_generation_pending_and_legacy_guards_preserve_selection_tuple() {
     info.supported_image = false;
     assert!(expected(&info, u64::MAX).is_err());
 }
+
+/// A release over the edge's limit is refused before any upload, naming its
+/// size, the limit and the restart that picks up the current release (#5566).
+#[test]
+fn an_update_over_the_cloud_upload_limit_is_refused_before_it_uploads() {
+    // The static musl release that Dev's edge reset at about 100 MB.
+    let message = refuse_over_upload_limit("app", 181_391_904)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        message,
+        "this cw is 181.4 MB, and a cloud runtime update uploads at most 100 MB; \
+         to pick up the current release, restart the sandbox instead: \
+         `cw --cloud stop app`, then `cw --cloud start app`"
+    );
+    refuse_over_upload_limit("app", CLOUD_UPLOAD_LIMIT_BYTES).unwrap();
+    assert!(refuse_over_upload_limit("app", CLOUD_UPLOAD_LIMIT_BYTES + 1).is_err());
+}
