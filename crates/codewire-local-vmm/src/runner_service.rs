@@ -418,6 +418,7 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
             runner,
             generation_access: None,
             running: None,
+            interception: None,
             generation,
             state: v1::EnvironmentState::Stopped,
             error_code: None,
@@ -570,6 +571,8 @@ struct RunnerState {
     // ownership. During startup its guard stays on the StartVm future stack.
     generation_access: Option<GenerationAccessGuard>,
     running: Option<RunningVm>,
+    /// What the running boot started with (#4912), from its supervisor.
+    interception: Option<v1::Interception>,
     generation: u64,
     state: v1::EnvironmentState,
     error_code: Option<&'static str>,
@@ -581,23 +584,6 @@ struct RunnerState {
 }
 
 impl RunnerState {
-    fn info(&self) -> v1::RunnerInfo {
-        v1::RunnerInfo {
-            environment_id: self.environment_id.to_string(),
-            state: self.state as i32,
-            generation: self.generation,
-            artifact_generation: self.artifact_generation.clone(),
-            error_code: self.error_code.unwrap_or_default().to_owned(),
-            exit: self.reported_exit(),
-            egress_unavailable: self.egress_unavailable(),
-            interception: self.interception(),
-            cw_runtime_catalog_generation: self
-                .cw_runtime_catalog_generation()
-                .unwrap_or_default()
-                .to_owned(),
-        }
-    }
-
     fn cw_runtime_catalog_generation(&self) -> Option<&str> {
         self.running
             .as_ref()
@@ -920,6 +906,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let cw_runtime_catalog_generation = parse_cw_runtime_catalog_generation(&request)?;
         let cw_runtime_moved_from_generation = parse_cw_runtime_moved_from_generation(&request)?;
         let managed_credential_clients = parse_managed_credential_clients(&request)?;
+        let interception = start_request::parse_interception(&request)?;
         #[cfg(target_os = "linux")]
         let checkpoint = checkpoint::parse_checkpoint_boot(&request)?;
         let daemon_ready_timeout = daemon_ready_timeout(setup.is_some());
@@ -1206,6 +1193,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         state.state = v1::EnvironmentState::Running;
         state.error_code = None;
         state.running = Some(running);
+        state.interception = interception;
         state.generation_access = Some(generation_access);
         if let Err(error) = self.events.publish(
             v1::EnvironmentState::Running,
@@ -1830,6 +1818,7 @@ mod tests {
                 runner,
                 generation_access: None,
                 running: None,
+                interception: None,
                 generation: 1,
                 state: v1::EnvironmentState::Starting,
                 error_code: None,

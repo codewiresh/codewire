@@ -15,6 +15,7 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::control::v1;
 use crate::diagnostic_log::{self, DiagnosticLog, LogField};
 use crate::supervisor_config::EGRESS_INTERCEPT_SWITCH;
 /// Enough to tell `on\n` from anything longer.
@@ -75,18 +76,65 @@ pub(crate) fn read_switch(root: &Path) -> InterceptSwitch {
 /// is enough, every boot still records what it used.
 static WARNED_UNRECOGNIZED: AtomicBool = AtomicBool::new(false);
 
+/// Why a switched-on boot does not intercept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Skipped {
+    NoCredentialBroker,
+    PlatformCredentials,
+    AuthorityPredatesBootSecrets,
+}
+
+impl Skipped {
+    /// Its name in the supervisor's log.
+    fn name(self) -> &'static str {
+        match self {
+            Self::NoCredentialBroker => "no_credential_broker",
+            Self::PlatformCredentials => "platform_credentials",
+            Self::AuthorityPredatesBootSecrets => "authority_predates_boot_secrets",
+        }
+    }
+
+    fn reason(self) -> v1::InterceptionReason {
+        match self {
+            Self::NoCredentialBroker => v1::InterceptionReason::NoCredentials,
+            Self::PlatformCredentials => v1::InterceptionReason::PlatformCredentials,
+            Self::AuthorityPredatesBootSecrets => v1::InterceptionReason::CredentialServiceOutdated,
+        }
+    }
+}
+
+/// What one boot starts with (#4912): its runner reports it while the boot
+/// runs, so `cw info` and the start result can say it.
+fn interception(switch: InterceptSwitch, skipped: Option<Skipped>) -> v1::Interception {
+    let (state, reason) = match (switch.intercepts(), skipped) {
+        (false, _) => (
+            v1::InterceptionState::Off,
+            v1::InterceptionReason::Unspecified,
+        ),
+        (true, None) => (
+            v1::InterceptionState::Intercepted,
+            v1::InterceptionReason::Unspecified,
+        ),
+        (true, Some(skipped)) => (v1::InterceptionState::NotIntercepted, skipped.reason()),
+    };
+    v1::Interception {
+        state: state as i32,
+        reason: reason as i32,
+    }
+}
+
 /// Read the switch for one boot of `broker`'s environment, log what the boot
-/// starts with, and say whether it intercepts. The front door serves only
+/// starts with, and say what it starts with. The front door serves only
 /// through the boot's local credential broker, so a boot with no broker, or
 /// one whose credentials come from the platform, whose relay does not pair
 /// yet, does not intercept: its agent hosts are reached as they would be with
-/// the switch off, and the log says why.
+/// the switch off, and the log and the boot's report say why.
 pub(super) fn for_boot(
     root: &Path,
     log: Option<&DiagnosticLog>,
     broker: &super::CredentialBrokerEnsureRequest,
     authority_carries_boot_secrets: bool,
-) -> bool {
+) -> v1::Interception {
     let switch = read_switch(root);
     if switch == InterceptSwitch::Unrecognized && !WARNED_UNRECOGNIZED.swap(true, Ordering::Relaxed)
     {
@@ -104,11 +152,15 @@ pub(super) fn for_boot(
         Some(reason) => diagnostic_log::record(
             log,
             "egress_intercept",
-            &[generation, switch_name, ("skipped", LogField::Name(reason))],
+            &[
+                generation,
+                switch_name,
+                ("skipped", LogField::Name(reason.name())),
+            ],
         ),
         None => diagnostic_log::record(log, "egress_intercept", &[generation, switch_name]),
     }
-    switch.intercepts() && skipped.is_none()
+    interception(switch, skipped)
 }
 
 /// Why a switched-on boot does not intercept, if it doesn't. A boot whose
@@ -119,15 +171,15 @@ fn skipped(
     has_broker: bool,
     platform: bool,
     authority_carries_boot_secrets: bool,
-) -> Option<&'static str> {
+) -> Option<Skipped> {
     if !switch.intercepts() {
         None
     } else if !has_broker {
-        Some("no_credential_broker")
+        Some(Skipped::NoCredentialBroker)
     } else if platform {
-        Some("platform_credentials")
+        Some(Skipped::PlatformCredentials)
     } else if !authority_carries_boot_secrets {
-        Some("authority_predates_boot_secrets")
+        Some(Skipped::AuthorityPredatesBootSecrets)
     } else {
         None
     }
@@ -140,21 +192,59 @@ mod tests {
     #[test]
     fn a_boot_intercepts_only_through_a_local_credential_broker() {
         use InterceptSwitch::{Off, On, Unrecognized};
+        let name = |skipped: Option<Skipped>| skipped.map(Skipped::name);
         assert_eq!(skipped(On, true, false, true), None);
         assert_eq!(
-            skipped(On, false, false, true),
+            name(skipped(On, false, false, true)),
             Some("no_credential_broker")
         );
-        assert_eq!(skipped(On, false, true, true), Some("no_credential_broker"));
-        assert_eq!(skipped(On, true, true, true), Some("platform_credentials"));
         assert_eq!(
-            skipped(On, true, false, false),
+            name(skipped(On, false, true, true)),
+            Some("no_credential_broker")
+        );
+        assert_eq!(
+            name(skipped(On, true, true, true)),
+            Some("platform_credentials")
+        );
+        assert_eq!(
+            name(skipped(On, true, false, false)),
             Some("authority_predates_boot_secrets")
         );
         for switch in [Off, Unrecognized] {
             for (has_broker, platform) in [(true, false), (false, false), (true, true)] {
                 assert_eq!(skipped(switch, has_broker, platform, false), None);
             }
+        }
+    }
+
+    /// The boot's report says what its log says (#4912): off for an
+    /// unrecognized switch too, and each skip as its reason.
+    #[test]
+    fn a_boot_reports_what_it_starts_with() {
+        use InterceptSwitch::{Off, On, Unrecognized};
+        use v1::{InterceptionReason as Reason, InterceptionState as State};
+        let report = |switch, skipped| {
+            let interception = interception(switch, skipped);
+            (
+                State::try_from(interception.state).unwrap(),
+                Reason::try_from(interception.reason).unwrap(),
+            )
+        };
+        assert_eq!(report(Off, None), (State::Off, Reason::Unspecified));
+        assert_eq!(
+            report(Unrecognized, None),
+            (State::Off, Reason::Unspecified)
+        );
+        assert_eq!(report(On, None), (State::Intercepted, Reason::Unspecified));
+        for (skip, reason) in [
+            (Skipped::NoCredentialBroker, Reason::NoCredentials),
+            (Skipped::PlatformCredentials, Reason::PlatformCredentials),
+            (
+                Skipped::AuthorityPredatesBootSecrets,
+                Reason::CredentialServiceOutdated,
+            ),
+        ] {
+            assert_eq!(report(On, Some(skip)), (State::NotIntercepted, reason));
         }
     }
 

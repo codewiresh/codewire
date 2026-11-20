@@ -326,6 +326,38 @@ pub(crate) fn render_next(next: &str, style: Style) -> String {
     format!("\n{} {}\n", style.status(Status::Next), terminal_text(next))
 }
 
+/// What a running VM's agents hold, on its own line under `Credentials`
+/// (#4912), marked `!` only when it needs action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CredentialsNote {
+    attention: bool,
+    text: String,
+}
+
+impl CredentialsNote {
+    pub(crate) fn plain(text: String) -> Self {
+        Self {
+            attention: false,
+            text,
+        }
+    }
+
+    pub(crate) fn attention(text: String) -> Self {
+        Self {
+            attention: true,
+            text,
+        }
+    }
+
+    pub(crate) fn render(&self, style: Style) -> String {
+        if self.attention {
+            format!("{} {}", style.status(Status::Attention), self.text)
+        } else {
+            self.text.clone()
+        }
+    }
+}
+
 /// A create, start or restart result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LifecycleSummary {
@@ -334,6 +366,9 @@ pub(crate) struct LifecycleSummary {
     pub(crate) location: VmLocation,
     pub(crate) allocation: Allocation,
     pub(crate) credentials: SourceRef,
+    /// What a running local VM's agents hold; none for a cloud environment
+    /// or a VM that isn't running.
+    pub(crate) credentials_note: Option<CredentialsNote>,
     pub(crate) secrets: SourceRef,
     pub(crate) network: NetworkRef,
     /// The network policy a local create selects and where the choice came
@@ -418,6 +453,9 @@ impl LifecycleSummary {
         ];
         for (label, value) in rows {
             out.push_str(&format!("  {label:<13}{value}\n"));
+            if let (Some(note), "Credentials:") = (&self.credentials_note, label) {
+                out.push_str(&format!("  {:<13}{}\n", "", note.render(style)));
+            }
         }
         if let Some(policy) = &self.policy {
             out.push_str(&format!("  {:<13}{}\n", "Policy:", terminal_text(policy)));
@@ -489,6 +527,7 @@ mod tests {
                 placement: SourcePlacement::Platform,
                 name: "work".to_owned(),
             },
+            credentials_note: None,
             secrets: SourceRef::Named {
                 placement: SourcePlacement::Platform,
                 name: "app-dev".to_owned(),
@@ -569,6 +608,28 @@ mod tests {
             summary().render(PLAIN),
             "✓ Environment app started · local VM\n  2 vCPU · 4 GiB RAM · 40 GiB disk\n\n  Credentials: platform:work\n  Secrets:     platform:app-dev\n  Network:     cloud:work\n\n→ cw --local run claude --in app\n"
         );
+    }
+
+    /// What a running VM's agents hold goes under its credentials, marked
+    /// `!` only when it needs action (#4912).
+    #[test]
+    fn a_credentials_note_goes_under_the_credentials_row() {
+        let note = |note| LifecycleSummary {
+            credentials_note: Some(note),
+            ..summary()
+        };
+        let plain = note(CredentialsNote::plain(
+            "placeholders only: agents never hold your tokens".to_owned(),
+        ));
+        assert!(plain.render(PLAIN).contains(
+            "  Credentials: platform:work\n               placeholders only: agents never hold your tokens\n  Secrets:"
+        ));
+        let attention = note(CredentialsNote::attention(
+            "agents can't reach their providers; restart the VM".to_owned(),
+        ));
+        assert!(attention.render(PLAIN).contains(
+            "  Credentials: platform:work\n               ! agents can't reach their providers; restart the VM\n"
+        ));
     }
 
     #[test]

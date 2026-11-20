@@ -59,12 +59,15 @@ pub(super) fn format_native_environment(
             );
         }
     }
-    output.push_str(&view.error.line(style));
+    output.push_str(&view.error.line());
     for row in attention {
         output.push_str(&format!("Attention:   {row}\n"));
     }
     output.push_str(&format!("Generation:  {}\n", view.generation));
-    output.push_str(&sources::format_source_view(view.source_selection.as_ref()));
+    output.push_str(&sources::format_source_view(
+        view.source_selection.as_ref(),
+        &view.error.credentials_note(style),
+    ));
     output
 }
 

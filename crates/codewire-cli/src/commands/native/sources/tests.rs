@@ -472,7 +472,7 @@ fn source_inspection_is_value_free_and_reports_missing_metadata_honestly() {
     let environment = environment(&selected);
     let view = source_view(&environment).unwrap().unwrap();
     let json = serde_json::to_string(&view).unwrap();
-    let text = format_source_view(Some(&view));
+    let text = format_source_view(Some(&view), &[]);
     for output in [&json, &text] {
         assert!(output.contains(PROJECT_ID));
         assert!(output.contains(PROFILE_ID));
@@ -485,7 +485,7 @@ fn source_inspection_is_value_free_and_reports_missing_metadata_honestly() {
         assert!(!output.contains("npm start"));
     }
     assert!(source_view(&v1::Environment::default()).unwrap().is_none());
-    assert!(format_source_view(None).contains("metadata unavailable"));
+    assert!(format_source_view(None, &[]).contains("metadata unavailable"));
 }
 
 #[test]
@@ -496,7 +496,7 @@ fn source_inspection_prints_plain_values() {
         platform: None,
     };
     assert_eq!(
-        format_source_view(Some(&empty)),
+        format_source_view(Some(&empty), &[]),
         "Secrets:     none\nCredentials: none\n"
     );
     let selected = SourceView {
@@ -513,9 +513,32 @@ fn source_inspection_prints_plain_values() {
         platform: None,
     };
     assert_eq!(
-        format_source_view(Some(&selected)),
+        format_source_view(Some(&selected), &[]),
         "Secrets:     platform:id:app\nUser secrets: local\nOrg secrets: platform organization\n\
          Credentials: work (local:work, revision 3)\n"
+    );
+}
+
+/// What a running VM's agents hold goes under the Credentials row, and takes
+/// the label when there is no row (#4912).
+#[test]
+fn the_credentials_note_goes_under_its_row() {
+    let empty = SourceView {
+        secrets: SecretBindings::default(),
+        credentials: None,
+        platform: None,
+    };
+    let note = [
+        "! agents can't reach their providers; restart the VM".to_owned(),
+        "→ cw --local restart app".to_owned(),
+    ];
+    assert_eq!(
+        format_source_view(Some(&empty), &note),
+        "Secrets:     none\nCredentials: none\n             ! agents can't reach their providers; restart the VM\n             → cw --local restart app\n"
+    );
+    assert_eq!(
+        format_source_view(None, &note),
+        "Sources:     metadata unavailable\nCredentials: ! agents can't reach their providers; restart the VM\n             → cw --local restart app\n"
     );
 }
 

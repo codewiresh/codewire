@@ -1840,7 +1840,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/verify/linux-vmm-kernel/*|\
       scripts/ci/tests/test-linux-vmm-kernel.py|\
       scripts/ci/verify/smoke-local-vmm-cloud-hypervisor.sh|\
-      scripts/ci/verify/smoke-native-local-environment.sh|\
+      scripts/ci/verify/smoke-native-local-environment.sh|scripts/ci/verify/lib/native-smoke-interception.sh|\
       scripts/ci/verify/stock-ssh-workload.sh)
         select_token transport
         select_token transport_pkg_codewire_local_vmm

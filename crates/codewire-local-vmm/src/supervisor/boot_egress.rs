@@ -8,6 +8,7 @@ use codewire_local_credentials::{AuthorityFeature, BootSecretPurpose, BrokerBoot
 use uuid::Uuid;
 
 use super::{Supervisor, SupervisorError, egress_intercept};
+use crate::control::v1;
 use crate::network_policy_store::SelectedPolicy;
 use crate::runner_service::RunnerClient;
 
@@ -21,6 +22,9 @@ pub(super) struct BootEgress {
     /// Whether the boot intercepts agent hosts (#3999): the per-host switch
     /// is on and the boot has a local credential broker to pair with.
     pub(super) intercept: bool,
+    /// What the boot starts with, and why not when the switch is on but it
+    /// does not intercept, for its runner to report (#4912).
+    pub(super) interception: v1::Interception,
 }
 
 impl Supervisor {
@@ -55,7 +59,7 @@ impl Supervisor {
                 .canonical_json()
                 .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?,
         };
-        let intercept = egress_intercept::for_boot(
+        let interception = egress_intercept::for_boot(
             &self.config.root,
             self.log.as_deref(),
             broker,
@@ -64,7 +68,8 @@ impl Supervisor {
         Ok(BootEgress {
             network_policy,
             network_policy_document,
-            intercept,
+            intercept: interception.state == v1::InterceptionState::Intercepted as i32,
+            interception,
         })
     }
 }

@@ -24,7 +24,7 @@ met by a base-URL route.
 
 ## Where the walk stands
 
-Updated 2026-11-19. A hosted Sandbox is recorded on Dev and on Production
+Updated 2026-11-20. A hosted Sandbox is recorded on Dev and on Production
 separately.
 
 | ID | Issue | Linux local VM | macOS local VM | Dev | Production |
@@ -636,8 +636,13 @@ request adds.
   ```
 
 - **Proof:**
-  - the switch is read once at each boot; the boot's recorded state and the
-    supervisor's log both say whether interception was on;
+  - the switch is read once at each boot; the boot's recorded state, the
+    supervisor's log and `cw --local info` all say whether interception was
+    on. With it on, `cw --local info` shows `placeholders only: agents never
+    hold your tokens` on the line under its `Credentials` row, and so do the
+    start and create results; `--output json` carries
+    `"interception": {"state": "intercepted"}` (#4912). With the switch off
+    nothing is under the row, and the JSON says `{"state": "off"}`;
   - **the guest trusts the boot's certificate authority, from the seed**
     (#4809, #4884). With the switch on, the boot's seed carries the
     authority's certificate, the guest publishes it as a read-only file, and
@@ -659,8 +664,11 @@ request adds.
     connect within the limit, the start fails with the reason; it never
     reports started with requests left hanging;
   - a VM whose credentials come from the platform starts without
-    interception: its recorded state reads interception off, and the
-    supervisor's log gives the reason (`skipped=platform_credentials`). Its
+    interception: its recorded state reads interception off, the
+    supervisor's log gives the reason (`skipped=platform_credentials`), and
+    `cw --local info` shows `no placeholders: they come from the platform`
+    under its `Credentials` row, with `{"state": "not_intercepted", "reason":
+    "platform_credentials"}` in its JSON. Its
     seed carries no authority and no placeholders, so the guest sets no
     `NODE_EXTRA_CA_CERTS`, and its agents use today's routes. It never boots
     trusting an authority that nothing serves. This holds until the
@@ -675,7 +683,10 @@ request adds.
   - a VM started while a credential authority older than boot secrets runs
     starts without interception, as with the switch off, and the
     supervisor's log gives the reason
-    (`skipped=authority_predates_boot_secrets`). It never reports
+    (`skipped=authority_predates_boot_secrets`). `cw --local info` says no
+    placeholders because the credential service running is from an earlier
+    cw, and to stop the local VMs so cw replaces it, then start this one
+    (`"reason": "credential_service_outdated"`). It never reports
     interception on when its broker could not pair;
   - **a restore with interception on at both ends is allowed, and the
     restored boot trusts its own new authority** (#4809, #4884). The trust
@@ -695,14 +706,13 @@ request adds.
     profile's revision, not to a boot. A fork is another environment: it
     gets other placeholders, and its running agents must restart.
   - With the switch on and no agent credential selected, nothing is
-    intercepted and the VM is as with the switch off.
+    intercepted and the VM is as with the switch off, except that
+    `cw --local info` shows `no placeholders: none are selected` under its
+    `Credentials` row (`"reason": "no_credentials"`).
   - Known limit, tracked on #3999: a restore gives the VM a new certificate
     authority, and a running process cannot reload the one it trusts. Agents
     that were running at the checkpoint must be restarted after a restore
     before they reach an intercepted host again.
-  - Known limit, tracked on #3999: `cw info` and the start output do not
-    say whether a VM's boot is intercepted. Only the recorded state and the
-    supervisor's log do.
   - macOS: the front door confines itself with a Seatbelt profile that
     denies everything (no file, no new socket, no process), where Linux
     uses Landlock and seccomp (#4916). The walk is the same on both; a Mac
@@ -726,6 +736,22 @@ request adds.
   broker and the front door; and after a stop and start the VM holds the
   same placeholder and is served again. Not yet observed: the owner's
   Claude sign-in, the other states above, and any run on macOS.
+
+  What `cw` shows (#4912), Linux local VM (x86_64, KVM), 2026-11-20, by the
+  same smoke with and without `--egress-interception`. The tree was `main`
+  at 6557aa7e8 with #5512, the `smoke-credential-claude` step and this
+  change on top; the host `cw`, the helpers and the workspace image were
+  built from it. Both runs passed whole.
+  - With the switch on, at each of the two boots: `cw --local info
+    --output json` carried `"interception": {"state": "intercepted"}`, and
+    the text had `placeholders only: agents never hold your tokens` under
+    its `Credentials` row.
+  - With the front door killed: `{"state": "lost"}` and `! agents can't
+    reach their providers; restart the VM` under the row, with the VM
+    still running.
+  - With the switch off: `{"state": "off"}` and nothing under the row.
+  - The other three states are proved by unit tests only: credentials from
+    the platform, none selected, and an older credential service.
 
 ## `agent-vm-platform-profile`: a local VM on a platform profile is intercepted through the delegation
 
@@ -1311,8 +1337,8 @@ Issues: #3999, #4001.
     with the stage, after which the next broker pairs;
   - **a front door that ended is shown** (#5216, the `lost` state of
     #4912). Once it has ended without a stop being asked for,
-    `cw --local info NAME` shows
-    `Credentials: ! agents can't reach their providers; restart the VM`,
+    `cw --local info NAME` shows, under its `Credentials` row,
+    `! agents can't reach their providers; restart the VM`,
     then `→ cw --local restart NAME` (`->` where `cw` draws ASCII, such
     as under `TERM=dumb`), and `--output json` carries
     `"interception": {"state": "lost"}`. `cw doctor` names the VM with the

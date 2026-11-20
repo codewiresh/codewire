@@ -44,6 +44,33 @@ pub(super) fn parse_cw_runtime_moved_from_generation(
     Ok(Some(generation.clone()))
 }
 
+/// The boot's interception as its supervisor decided it (#4912): intercepted
+/// exactly when `intercept` is set, a reason only beside not intercepted,
+/// and never lost, which only the runner says. Absent from an older
+/// supervisor.
+pub(super) fn parse_interception(
+    request: &v1::StartVmRequest,
+) -> Result<Option<v1::Interception>, Status> {
+    use v1::{InterceptionReason as Reason, InterceptionState as State};
+    let Some(interception) = request.interception else {
+        return Ok(None);
+    };
+    let reason = Reason::try_from(interception.reason);
+    let valid = match (State::try_from(interception.state), reason) {
+        (Ok(State::Intercepted), Ok(Reason::Unspecified)) => request.intercept,
+        (Ok(State::Off), Ok(Reason::Unspecified)) => !request.intercept,
+        (Ok(State::NotIntercepted), Ok(reason)) => {
+            !request.intercept && reason != Reason::Unspecified
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(Some(interception))
+    } else {
+        Err(Status::invalid_argument("invalid interception"))
+    }
+}
+
 pub(super) fn parse_setup_binding(
     request: &v1::StartVmRequest,
 ) -> Result<Option<SetupBinding>, Status> {
@@ -261,6 +288,66 @@ pub(super) fn daemon_ready_timeout(has_setup: bool) -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A boot's interception agrees with `intercept`, carries a reason only
+    /// when not intercepted, and is never lost (#4912); one that disagrees is
+    /// refused as invalid_argument. An older supervisor sends none, and the
+    /// boot starts as before: nothing is kept to report.
+    #[test]
+    fn a_boot_interception_agrees_with_intercept() {
+        use v1::{InterceptionReason as Reason, InterceptionState as State};
+        let request = |intercept: bool, interception: Option<(State, i32)>| v1::StartVmRequest {
+            intercept,
+            interception: interception.map(|(state, reason)| v1::Interception {
+                state: state as i32,
+                reason,
+            }),
+            ..v1::StartVmRequest::default()
+        };
+        let unspecified = Reason::Unspecified as i32;
+        let platform = Reason::PlatformCredentials as i32;
+        for intercept in [false, true] {
+            assert_eq!(parse_interception(&request(intercept, None)).unwrap(), None);
+        }
+        for (intercept, interception) in [
+            (true, (State::Intercepted, unspecified)),
+            (false, (State::Off, unspecified)),
+            (false, (State::NotIntercepted, platform)),
+            (false, (State::NotIntercepted, Reason::NoCredentials as i32)),
+            (
+                false,
+                (
+                    State::NotIntercepted,
+                    Reason::CredentialServiceOutdated as i32,
+                ),
+            ),
+        ] {
+            let parsed = parse_interception(&request(intercept, Some(interception))).unwrap();
+            assert_eq!(
+                parsed.map(|parsed| parsed.state),
+                Some(interception.0 as i32)
+            );
+        }
+        for (intercept, interception) in [
+            (false, (State::Intercepted, unspecified)),
+            (true, (State::Off, unspecified)),
+            (true, (State::NotIntercepted, platform)),
+            (false, (State::NotIntercepted, unspecified)),
+            (true, (State::Intercepted, platform)),
+            (false, (State::Off, platform)),
+            (true, (State::Lost, unspecified)),
+            (false, (State::Lost, unspecified)),
+            (false, (State::Unspecified, unspecified)),
+            (false, (State::NotIntercepted, 99)),
+        ] {
+            let refused = parse_interception(&request(intercept, Some(interception))).unwrap_err();
+            assert_eq!(
+                refused.code(),
+                tonic::Code::InvalidArgument,
+                "{intercept} {interception:?}"
+            );
+        }
+    }
 
     #[test]
     fn a_move_names_another_catalog_beside_one() {

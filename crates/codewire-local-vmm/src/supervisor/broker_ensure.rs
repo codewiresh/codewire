@@ -2,16 +2,25 @@
 //! authority, carrying the boot's secrets from its runner (#3999).
 
 use codewire_local_credentials::EnvironmentBrokerRuntime as AuthorityBrokerRuntime;
-use codewire_local_credentials::LocalCredentialControlClient;
+use codewire_local_credentials::{AuthorityFeature, LocalCredentialControlClient};
 
-use super::{
-    CredentialBrokerEnsureRequest, SupervisorError, authority_applies_network_policy,
-    credential_control_error,
-};
+use super::{CredentialBrokerEnsureRequest, SupervisorError, credential_control_error};
+use crate::supervisor_config::OUTDATED_CREDENTIAL_SERVICE;
+
+/// Whether an authority at `authority_protocol` may be asked for a broker
+/// under this answer (#4926). One from before the rule ignores the answer
+/// and serves GitHub, which is only right when the policy allows GitHub.
+fn authority_applies_network_policy(authority_protocol: u32, allows_github: bool) -> bool {
+    allows_github || AuthorityFeature::NetworkPolicyGithub.served_by(authority_protocol)
+}
 
 /// What a user reads when the running credential authority cannot apply a
 /// network policy to the GitHub connection (#4926).
-const AUTHORITY_PREDATES_NETWORK_POLICY_GITHUB: &str = "this environment's network policy does not allow GitHub, and the local credential service that is running is from an earlier cw, which would use the GitHub connection anyway; stop your local VMs so cw replaces that service, or select a network policy that allows github.com and api.github.com";
+fn authority_predates_network_policy_github() -> String {
+    format!(
+        "this environment's network policy does not allow GitHub, which would be used anyway: {OUTDATED_CREDENTIAL_SERVICE}, or select a network policy that allows github.com and api.github.com"
+    )
+}
 
 pub(super) async fn ensure_credential_broker(
     request: CredentialBrokerEnsureRequest,
@@ -44,7 +53,7 @@ pub(super) async fn ensure_credential_broker(
             .stop_environment_broker(&request.environment_id, None)
             .await;
         return Err(SupervisorError::NetworkPolicySelection(
-            AUTHORITY_PREDATES_NETWORK_POLICY_GITHUB.to_owned(),
+            authority_predates_network_policy_github(),
         ));
     }
     client
@@ -63,4 +72,21 @@ pub(super) async fn ensure_credential_broker(
         )
         .await
         .map_err(credential_control_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #4926: an authority from before the rule keeps serving across a cw
+    /// update and would ignore a "no". It is asked for a broker only when the
+    /// policy allows GitHub anyway.
+    #[test]
+    fn an_authority_from_before_the_rule_is_not_asked_to_refuse_github() {
+        let since = AuthorityFeature::NetworkPolicyGithub.since();
+        assert!(authority_applies_network_policy(since, false));
+        assert!(authority_applies_network_policy(since, true));
+        assert!(authority_applies_network_policy(since - 1, true));
+        assert!(!authority_applies_network_policy(since - 1, false));
+    }
 }

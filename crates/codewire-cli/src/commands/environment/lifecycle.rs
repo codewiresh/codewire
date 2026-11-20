@@ -68,6 +68,7 @@ pub(crate) fn cloud_summary(
             environment.disk_gb,
         ),
         credentials,
+        credentials_note: None,
         secrets,
         network,
         policy: None,

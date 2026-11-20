@@ -1223,6 +1223,13 @@ message StartVmRequest {
   // runner uses it only to say, when the start fails, whether that broker
   // ever came for the generation's daemon access.
   bool credential_broker = 29;
+
+  // What this boot starts with (#4912): intercepted exactly when intercept
+  // is set, otherwise off or not intercepted with its reason; never lost.
+  // The runner reports it in RunnerInfo while the boot runs, as lost once
+  // its front door ends unasked. Absent from an older supervisor: the
+  // runner then reports only lost.
+  Interception interception = 30;
 }
 
 message SeedCredentialPlaceholder {

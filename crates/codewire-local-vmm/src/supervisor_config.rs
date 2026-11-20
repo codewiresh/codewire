@@ -157,6 +157,10 @@ pub(crate) fn unsupported_protocol_message(actual: u32) -> String {
 }
 /// The switch's file name in the native root.
 pub(crate) const EGRESS_INTERCEPT_SWITCH: &str = "egress-intercept";
+/// What a user reads when the local credential authority that is running
+/// is too old for what this cw asks of it, and how to replace it: one
+/// sentence for each refusal, so they never drift (#4926, #4912).
+pub const OUTDATED_CREDENTIAL_SERVICE: &str = "the local credential service that is running is from an earlier cw; stop your local VMs so cw replaces that service";
 const NATIVE_SUPERVISOR_CONFIG_DIGEST_DOMAIN: &[u8] =
     b"codewire.native-supervisor.runtime-config.sha256.v1";
 

@@ -89,6 +89,8 @@ pub(super) fn local_summary(
             environment.disk_bytes,
         ),
         credentials: environment_credentials(environment, spec.as_ref()),
+        credentials_note: super::error_view::InterceptionView::of(environment)
+            .and_then(super::error_view::InterceptionView::note),
         secrets,
         network: network_ref(environment.mesh.as_ref()),
         policy: None,
@@ -819,6 +821,7 @@ impl CreateContext {
             location: VmLocation::Local,
             allocation: Allocation::local(vcpus, memory_mib, disk_bytes),
             credentials: self.credentials.clone(),
+            credentials_note: None,
             secrets: self.secrets.clone(),
             network: self.network.clone(),
             policy: Some(self.policy.text()),

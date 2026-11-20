@@ -5901,18 +5901,6 @@ async fn credential_broker_rpc_quarantines_an_unsafe_runner_before_authority_use
     runner_server.await.unwrap();
 }
 
-/// #4926: an authority from before the rule keeps serving across a cw
-/// update and would ignore a "no". It is asked for a broker only when the
-/// policy allows GitHub anyway.
-#[test]
-fn an_authority_from_before_the_rule_is_not_asked_to_refuse_github() {
-    let since = AuthorityFeature::NetworkPolicyGithub.since();
-    assert!(authority_applies_network_policy(since, false));
-    assert!(authority_applies_network_policy(since, true));
-    assert!(authority_applies_network_policy(since - 1, true));
-    assert!(!authority_applies_network_policy(since - 1, false));
-}
-
 /// #4926: the credential broker never sees the network policy, so the
 /// request that starts it carries the policy's answer for GitHub, from the
 /// selection the environment's egress broker enforces.

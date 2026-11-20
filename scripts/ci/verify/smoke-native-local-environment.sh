@@ -17,6 +17,8 @@ readonly STOCK_SSH_WORKLOAD_SOURCE="$SCRIPT_DIRECTORY/stock-ssh-workload.sh"
 # through it (#5220).
 # shellcheck source=scripts/ci/verify/lib/local-smoke-isolation.sh
 source "$SCRIPT_DIRECTORY/lib/local-smoke-isolation.sh"
+# shellcheck source=scripts/ci/verify/lib/native-smoke-interception.sh
+source "$SCRIPT_DIRECTORY/lib/native-smoke-interception.sh"
 SMOKE_ARGUMENTS=("$@")
 
 CW_BIN=''
@@ -1363,33 +1365,6 @@ for entry in os.listdir("/proc"):
 PY
 }
 
-require_boot_intercepts() {
-  # The current boot intercepts and its front door is paired. The
-  # supervisor's log spans boots, so this boot's decision is one more than
-  # were there before; the runner's log starts again at each boot, so a
-  # pairing in it is this boot's.
-  local label="$1" decisions decision paired=0 front_doors
-  jq -e '.intercept == true' "$STATE_ROOT/engine/vms/$ENVIRONMENT_ID/state.json" >/dev/null ||
-    die "$label: the VM's recorded state does not say it intercepts"
-  decisions="$(grep -Ec ' event=egress_intercept( |$)' "$STATE_ROOT/logs/supervisor.log" || true)"
-  [[ "$decisions" -gt "$INTERCEPT_DECISIONS_SEEN" ]] ||
-    die "$label: the supervisor logged no interception decision for this boot"
-  INTERCEPT_DECISIONS_SEEN="$decisions"
-  decision="$(grep -E ' event=egress_intercept( |$)' "$STATE_ROOT/logs/supervisor.log" | tail -n 1)"
-  [[ "$decision" == *' switch=on'* && "$decision" != *' skipped='* ]] ||
-    die "$label: the supervisor did not turn interception on for this boot: ${decision:-no decision logged}"
-  # Up to a minute, for a loaded host; a boot that paired does not wait.
-  for _attempt in {1..300}; do
-    paired="$(grep -Ec ' event=front_door_pairing( .*)? outcome=paired( |$)' \
-      "$STATE_ROOT/logs/runner-$ENVIRONMENT_ID.log" || true)"
-    [[ "$paired" -ge 1 ]] && break
-    sleep 0.2
-  done
-  [[ "$paired" -ge 1 ]] || die "$label: the runner recorded no front-door pairing"
-  front_doors="$(front_door_children | wc -l)"
-  [[ "$front_doors" -eq 1 ]] || die "$label: the runner has $front_doors front-door processes"
-}
-
 # What the guest sends: the request Claude Code makes with this credential
 # form, a bearer token taken from ANTHROPIC_AUTH_TOKEN, to the provider's own
 # host, trusting what NODE_EXTRA_CA_CERTS names. Prints one JSON object: the
@@ -1477,7 +1452,7 @@ run_egress_interception_smoke() {
 
   log 'interception: the placeholder beside another credential is refused'
   intercepted_request conflict
-  jq -e '.status == 400 and (.body | fromjson | .error.code) == "credential_conflict"' \
+  jq -e '.status == 400 and .body == "Codewire: this request carries the Codewire placeholder and another credential; send only one.\n"' \
     "$LAST_STDOUT" >/dev/null ||
     die "a placeholder beside another credential was not refused: $(head -c 600 "$LAST_STDOUT")"
 
@@ -1498,9 +1473,8 @@ run_egress_interception_smoke() {
     die "a request with no front door did not end at once with a closed connection: $(head -c 600 "$LAST_STDOUT")"
   [[ "$(front_door_children | wc -l)" -eq 0 ]] ||
     die 'a front door was running when the request was refused'
-  run_cw info --local "$NAME" --output json
-  jq -e '.state == "running"' "$LAST_STDOUT" >/dev/null ||
-    die 'the VM did not keep running without its front door'
+  require_info_interception 'front door killed' lost \
+    "! agents can't reach their providers; restart the VM"
 
   log 'interception: a stop and start brings it back with the same placeholder'
   restart_failed_environment 'front door'
@@ -3728,6 +3702,7 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   elif [[ "$EGRESS_INTERCEPTION" -eq 1 ]]; then
     run_egress_interception_smoke
   else
+    require_info_interception 'switch off' off ''
     run_application_secret_smoke
     if [[ "$MANAGED_AGENT_SESSIONS" -eq 1 ]]; then
       log 'checking actual guest managed sessions and parent continuation'

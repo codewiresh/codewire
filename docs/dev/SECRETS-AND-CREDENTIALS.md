@@ -1546,9 +1546,32 @@ is exactly as described above. What exists today:
   Only the runner's end, or the front door's exit, ends it for the boot. A
   boot whose credentials come from the platform, that has no local
   credential broker, or whose running credential authority predates boot
-  secrets, does not intercept, and the supervisor's log says why. On macOS
-  a boot with the switch on is refused and names the file, until the front
-  door is confined there.
+  secrets, does not intercept, and the supervisor's log and `cw` say why
+  (below). On macOS a boot with the switch on is refused and names the
+  file, until the front door is confined there.
+- **What `cw` shows (#4912).** The supervisor sends the boot's decision to
+  its runner with the start, and the runner reports it while the boot runs.
+  `cw --local info` shows it on its own line under the `Credentials` row
+  that names the profile, and so do the results of `cw start`, `cw restart`
+  and `cw create`.
+  `--output json` carries it as `"interception": {"state", "reason"}`, the
+  shape a hosted Sandbox will report too (#4001). A stopped VM, or a boot an
+  older supervisor started, has none.
+  - `intercepted`: `placeholders only: agents never hold your tokens`.
+  - `not_intercepted` with `platform_credentials`: `no placeholders: they
+    come from the platform`, until a platform profile's boot intercepts
+    (#4909).
+  - `not_intercepted` with `no_credentials`: `no placeholders: none are
+    selected`.
+  - `not_intercepted` with `credential_service_outdated`: `no placeholders:
+    the local credential service that is running is from an earlier cw; stop
+    your local VMs so cw replaces that service, then start this one`. That is
+    the sentence #4926's refusal uses, from one constant.
+  - `off`, with the switch off: no line, only JSON, until interception is
+    the default (D3).
+  - `lost`, once the front door has ended without a stop being asked for:
+    `! agents can't reach their providers; restart the VM`, then
+    `→ cw --local restart NAME` (#5216).
 - **The pairing secret.** A broker pairs by presenting 32 random bytes the
   runner mints for the boot, held only in its memory, compared in constant
   time; the daemon token, which the guest knows, is refused. The supervisor
@@ -2106,7 +2129,8 @@ below):
 no local credential engine: its confined local relay forwards the guest's
 bridge to the platform's broker over the owner-local delegation channel, one
 delegation epoch at a time. Today the supervisor starts it without
-interception, and its log says `skipped=platform_credentials` ("Agent host
+interception, its log says `skipped=platform_credentials`, and `cw --local
+info` says `no placeholders: they come from the platform` ("Agent host
 interception" above). Once this carrier is served, the same front-door
 session crosses the delegation instead, and these rules hold:
 

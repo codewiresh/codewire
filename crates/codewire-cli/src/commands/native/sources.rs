@@ -1193,12 +1193,22 @@ pub(super) fn source_view(environment: &v1::Environment) -> anyhow::Result<Optio
     }))
 }
 
-pub(super) fn format_source_view(view: Option<&SourceView>) -> String {
+/// `credentials_note` goes on its own lines under the `Credentials` row:
+/// what a running VM's agents hold (#4912).
+pub(super) fn format_source_view(view: Option<&SourceView>, credentials_note: &[String]) -> String {
     use crate::commands::progress::terminal_text;
     use codewire_project::StoragePlacement;
 
+    let under = credentials_note
+        .iter()
+        .map(|line| format!("             {line}\n"))
+        .collect::<String>();
     let Some(view) = view else {
-        return "Sources:     metadata unavailable\n".to_owned();
+        // No row to put the note under, so its first line takes the label.
+        return format!(
+            "Sources:     metadata unavailable\n{}",
+            under.replacen("             ", "Credentials: ", 1)
+        );
     };
     let secrets = &view.secrets;
     let mut output = format!(
@@ -1228,6 +1238,7 @@ pub(super) fn format_source_view(view: Option<&SourceView>) -> String {
     } else {
         output.push_str("Credentials: none\n");
     }
+    output.push_str(&under);
     if let Some(platform) = &view.platform {
         output.push_str(&format!(
             "Source server: {}\nSource org: {}\nSource account: {}\n",

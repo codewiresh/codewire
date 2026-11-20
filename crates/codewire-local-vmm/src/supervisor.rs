@@ -177,13 +177,6 @@ fn platform_github_askable(authority_protocol: u32) -> Result<(), &'static str> 
     }
 }
 
-/// Whether an authority at `authority_protocol` may be asked for a broker
-/// under this answer (#4926). One from before the rule ignores the answer
-/// and serves GitHub, which is only right when the policy allows GitHub.
-fn authority_applies_network_policy(authority_protocol: u32, allows_github: bool) -> bool {
-    allows_github || AuthorityFeature::NetworkPolicyGithub.served_by(authority_protocol)
-}
-
 async fn request_runner_shutdown_and_observe(
     client: &mut RunnerClient,
     environment_id: Uuid,
@@ -4538,6 +4531,7 @@ impl Supervisor {
         let start_request = v1::StartVmRequest {
             network_policy_document: egress.network_policy_document,
             intercept: egress.intercept,
+            interception: Some(egress.interception),
             credential_placeholders,
             credential_broker: broker_request.enabled,
             cw_runtime_catalog_generation: expected_cw_runtime_generation.clone(),
