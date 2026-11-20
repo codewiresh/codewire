@@ -15,8 +15,7 @@ use axum::response::{IntoResponse as _, Response as AxumResponse};
 use buffa_types::{Duration as ProtoDuration, Timestamp};
 use codewire_daemon::client::{
     DAEMON_MINIMUM_PROTOCOL_VERSION, DAEMON_PROTOCOL_VERSION,
-    SessionAttachment as PrivateSessionAttachment, SessionClient, SessionClientError,
-    v1 as daemon_v1,
+    SessionAttachment as PrivateSessionAttachment, SessionClient, v1 as daemon_v1,
 };
 use codewire_daemon_bridge::client::{DaemonClient, DaemonClientError};
 use codewire_daemon_bridge::exec::ExecBackend;
@@ -32,7 +31,9 @@ use tonic::Request as TonicRequest;
 use super::*;
 
 mod file_errors;
+mod session_error;
 use file_errors::local_file_error;
+use session_error::local_session_error;
 
 const PRIVATE_SUPERVISOR_ROUTE: &str = "/codewire.local.v1.LocalSupervisorService/{*method}";
 const PUBLIC_ENVIRONMENT_ROUTE: &str = "/codewire.v1.EnvironmentService/{*method}";
@@ -1421,44 +1422,6 @@ impl BridgeAttachment for LocalSessionAttachment {
             .get(session_id)
             .await
             .map_err(local_session_error)
-    }
-}
-
-fn local_session_error(error: SessionClientError) -> connectrpc::ConnectError {
-    match error {
-        SessionClientError::Status(status) => match status.code() {
-            tonic::Code::NotFound => {
-                connectrpc::ConnectError::not_found("local environment session was not found")
-            }
-            tonic::Code::InvalidArgument => connectrpc::ConnectError::invalid_argument(
-                "local environment session request is invalid",
-            ),
-            tonic::Code::Unimplemented | tonic::Code::FailedPrecondition => {
-                connectrpc::ConnectError::failed_precondition(
-                    "local environment daemon does not support this session operation",
-                )
-            }
-            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Cancelled => {
-                connectrpc::ConnectError::unavailable(
-                    "local environment session transport was lost",
-                )
-            }
-            _ => connectrpc::ConnectError::internal("local environment session request failed"),
-        },
-        SessionClientError::NotReady { .. } | SessionClientError::MissingCapability { .. } => {
-            connectrpc::ConnectError::failed_precondition(
-                "local environment daemon is not ready for sessions",
-            )
-        }
-        SessionClientError::Connect | SessionClientError::RequestClosed => {
-            connectrpc::ConnectError::unavailable("local environment session transport was lost")
-        }
-        SessionClientError::InvalidEndpoint
-        | SessionClientError::InvalidCredential
-        | SessionClientError::MissingSessionRecord
-        | SessionClientError::InvalidForwardFrame => {
-            connectrpc::ConnectError::internal("local environment session request failed")
-        }
     }
 }
 

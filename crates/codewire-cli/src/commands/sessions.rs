@@ -4,10 +4,12 @@ use base64::Engine as _;
 use codewire_client::hosted_shell::{InputNotice, InputStream, restart};
 #[cfg(unix)]
 pub(crate) mod agents;
+mod attach_mode;
 mod entry;
 mod exec;
 mod navigation;
 mod reattach;
+use attach_mode::{attaches_interactively, session_is_terminal};
 pub(crate) mod setup;
 
 pub(crate) use entry::{handle_environment_run_command, handle_environment_shell_command};
@@ -2524,7 +2526,7 @@ async fn attach_session_until_detached(
                     attachment,
                     output_offset,
                     &mut input_stream,
-                    session.pty,
+                    attaches_interactively(&session),
                     plain,
                     true,
                     &mut screen,
@@ -2579,7 +2581,7 @@ async fn attach_session_until_detached(
                             attachment,
                             output_offset,
                             &mut input_stream,
-                            session.pty,
+                            attaches_interactively(&session),
                             plain,
                             true,
                             &mut screen,
@@ -2892,13 +2894,6 @@ async fn attach_platform_environment_session(
             }
         }
     }
-}
-
-fn session_is_terminal(session: &EnvironmentSessionView) -> bool {
-    matches!(
-        session.state.as_str(),
-        "Stopped" | "Exited" | "Failed" | "Interrupted"
-    )
 }
 
 pub(crate) fn ensure_environment_session_succeeded(

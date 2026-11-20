@@ -2426,11 +2426,14 @@ run_application_secret_pty() {
     {
       printf 'test -t 0 && test -t 1 && /bin/sh /workspace/fixtures/app-secrets-check.sh %s %s %s %s && printf "app-secret-pty-ok\\n" || exit 77\nexit\n' \
         "$expected" "$personal_expected" "$collision_expected" "$phase"
-      # Keep the checked-in PTY/detach path, but wait for the exact guest
-      # receipt instead of guessing when the console hop has completed.
+      # The shell's own `exit` ends the session, and `cw shell` with it.
+      # Input stays open until the exact guest receipt, so nothing guesses
+      # when the console hop has completed. A plain `cw shell` sends every
+      # key to the session, Ctrl-B included, so a Ctrl-B d sent after the
+      # receipt was only stray input, and it reached a session that had
+      # already exited (#5584).
       for ((attempt = 0; attempt < 400; attempt++)); do
         if rg -q $'^app-secret-pty-ok\r?$' "$pty_log" 2>/dev/null; then
-          printf '\002d' || true
           exit 0
         fi
         sleep 0.05
