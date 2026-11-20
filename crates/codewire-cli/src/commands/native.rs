@@ -36,7 +36,9 @@ mod info_text;
 mod lifecycle;
 mod local_https;
 mod ports;
+mod profile;
 mod sources;
+pub(crate) use profile::require_native_agent_profile;
 
 pub(crate) use lifecycle::{
     NativeCreated, local_vm_credentials, network_ref, print_native_created,
@@ -1655,6 +1657,7 @@ pub(crate) async fn handle_native_environment_update(
         updated.id == environment.id,
         "native environment identity changed after the source operation"
     );
+    profile::print_withheld(&profile::withheld_credentials(&updated).await);
     print_native_environment(&updated, args.output)
 }
 
@@ -2013,75 +2016,6 @@ fn native_environment_name_for_id<'a>(
                 "native environment {expected_id} no longer exists; a reused name cannot replace it"
             )
         })
-}
-
-/// Managed guests use a selected typed proxy, never the host agent's login.
-/// A local VM qualifies a managed agent by the rule hosted Sandboxes use
-/// ([`codewire_access::ManagedCredentialClients::managed_agent_client`]), over
-/// the slots its selected profile pinned: a platform profile's slots as the
-/// environment captured them, a local profile's from its exact revision. The
-/// VM's native Codex home is configured for the client the rule picks, so a
-/// profile with only the OpenAI API-key slot runs Codex through that route, as
-/// a hosted managed Codex agent does.
-pub(crate) async fn require_native_agent_profile(
-    environment_id: &str,
-    agent: codewire_access::ManagedAgent,
-) -> anyhow::Result<()> {
-    let environment_id = uuid::Uuid::parse_str(environment_id)?.to_string();
-    let environment = native_environments()
-        .await?
-        .into_iter()
-        .find(|environment| environment.id == environment_id)
-        .context("the managed native environment no longer exists")?;
-    let spec = sources::project_from_environment(&environment)?;
-    let selected = spec
-        .credentials
-        .context("managed VM agents require a selected credential profile")?;
-    let clients = if selected.profile.starts_with("platform:") {
-        pinned_platform_clients(&environment)?
-    } else {
-        let profile_id = codewire_access::AccessProfileId::parse(environment.access_profile_id)?;
-        let mut credentials = connect_local_credential_authority().await?;
-        let bound = credentials
-            .get_profile_revision(&profile_id, environment.access_profile_revision)
-            .await?;
-        codewire_access::ManagedCredentialClients::from_profile_slots(
-            bound.profile.entries.keys().map(|slot| slot.as_str()),
-        )?
-    };
-    require_managed_agent_client(clients, agent)
-}
-
-/// The client slots a platform-profile environment pinned when its sources
-/// were selected. They name provider identities only, never credentials.
-fn pinned_platform_clients(
-    environment: &v1::Environment,
-) -> anyhow::Result<codewire_access::ManagedCredentialClients> {
-    let authority = environment
-        .platform_source_authority
-        .as_ref()
-        .context("the native environment's platform profile has no pinned selection")?;
-    Ok(
-        codewire_access::ManagedCredentialClients::from_profile_slots(
-            authority.profile_slots.iter().map(String::as_str),
-        )?,
-    )
-}
-
-fn require_managed_agent_client(
-    clients: codewire_access::ManagedCredentialClients,
-    agent: codewire_access::ManagedAgent,
-) -> anyhow::Result<()> {
-    if clients.managed_agent_client(agent).is_none() {
-        let provider = match agent {
-            codewire_access::ManagedAgent::Codex => "Codex or OpenAI",
-            codewire_access::ManagedAgent::Claude => "Anthropic",
-        };
-        anyhow::bail!(
-            "the native environment's selected credential profile has no {provider} provider"
-        );
-    }
-    Ok(())
 }
 
 pub(crate) async fn handle_native_environment_access(args: EnvAccessArgs) -> anyhow::Result<()> {
@@ -4409,6 +4343,7 @@ fn native_status(status: tonic::Status) -> anyhow::Error {
 
 #[cfg(test)]
 mod tests {
+    use super::profile::{pinned_platform_clients, require_managed_agent_client};
     use super::*;
 
     const PLAIN_STYLE: crate::output::Style =

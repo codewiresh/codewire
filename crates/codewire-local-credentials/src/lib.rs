@@ -14,6 +14,7 @@
 #![allow(clippy::unwrap_used)]
 
 mod admission;
+use admission::derive_local_environment_grants;
 mod boot_secrets;
 mod broker_channel;
 mod broker_log;
@@ -128,9 +129,8 @@ use codewire_access::{
     AccessProfileScope, BrokerOperationId, BrokerRouteId,
     CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CapabilitySlot, CredentialAuthKind,
     CredentialId, CredentialMetadata, CredentialPlaceholder, CredentialStatus, DerivedGrant,
-    EnvironmentAccessBinding, EnvironmentId, GrantContext, GrantPermission, GrantPlacement, Owner,
-    OwnerId, Placement, ProviderCatalog, ProviderId, SshPublicKeyMetadata, derive_grants,
-    validate_profile_entries,
+    EnvironmentAccessBinding, EnvironmentId, GrantPermission, Owner, OwnerId, Placement,
+    ProviderCatalog, ProviderId, SshPublicKeyMetadata, validate_profile_entries,
 };
 use codewire_protected_store::ProtectedStoreBackend;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3563,45 +3563,6 @@ fn load_environment_access_binding(
         return Err(LocalCredentialError::CorruptMetadata);
     }
     Ok(record)
-}
-
-fn derive_local_environment_grants(
-    connection: &Connection,
-    binding: &EnvironmentAccessBinding,
-    environment_generation: u64,
-    owner_id: &OwnerId,
-    catalog: &ProviderCatalog,
-) -> Result<Vec<DerivedGrant>, LocalCredentialError> {
-    let profile =
-        load_profile_revision(connection, &binding.profile_id, binding.profile_revision)?.profile;
-    let credentials = load_ready_credential_metadata(connection)?;
-    let context = GrantContext {
-        environment_id: binding.environment_id.clone(),
-        environment_generation,
-        placement: GrantPlacement::Local,
-        user_id: owner_id.clone(),
-        organization_id: None,
-        allow_personal_credentials: false,
-        authorized_credentials: profile
-            .entries
-            .values()
-            .cloned()
-            .chain(if profile.includes_github() {
-                active_github_connection(connection)?
-            } else {
-                None
-            })
-            .collect::<BTreeSet<_>>(),
-    };
-    derive_grants(
-        &context,
-        binding,
-        &profile,
-        &credentials,
-        catalog,
-        unix_seconds()?,
-    )
-    .map_err(Into::into)
 }
 
 /// Whether the store already holds a GitHub connection in any state.

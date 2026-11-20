@@ -210,8 +210,9 @@ pub enum WithheldReason {
     NeedsReconnect,
 }
 
-/// Admit every profile entry, or fail the whole selection. Local and
-/// platform-to-local admission of one exact selection uses this form.
+/// Admit every profile entry, or fail the whole selection. Platform-to-local
+/// admission of one exact selection uses this form; a local profile, like a
+/// hosted one, uses [`derive_available_grants`] (#5545).
 pub fn derive_grants(
     context: &GrantContext,
     binding: &EnvironmentAccessBinding,

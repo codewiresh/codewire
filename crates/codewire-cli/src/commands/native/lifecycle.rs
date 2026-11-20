@@ -313,12 +313,17 @@ pub(crate) async fn start_native_environment(
             return Err(lifecycle_failure("start", &environment.name, stage, error, true).await);
         }
     };
+    let withheld = super::profile::withheld_credentials(&started).await;
     match output {
-        OutputFormat::Json => print_native_environment(&started, output),
+        OutputFormat::Json => {
+            super::profile::print_withheld(&withheld);
+            print_native_environment(&started, output)
+        }
         OutputFormat::Text => {
             let mut summary = local_summary(&started, Outcome::Started, secrets);
-            // The move is part of the result, so it comes before the next step.
-            let next = moved.as_ref().and_then(|_| summary.next.take());
+            // The move and the credentials its agents can't use are part of
+            // the result, so they come before the next step.
+            let next = summary.next.take();
             print_summary(&summary, &caps);
             if let Some(moved) = &moved {
                 println!(
@@ -326,6 +331,7 @@ pub(crate) async fn start_native_environment(
                     runtime_move_line(&started.name, moved, caps.stdout_style())
                 );
             }
+            super::profile::print_withheld(&withheld);
             if let Some(next) = next {
                 print!("{}", render_next(&next, caps.stdout_style()));
             }
@@ -821,31 +827,37 @@ impl CreateContext {
     }
 }
 
-/// Prints the summary of a created environment; JSON keeps its shape.
-pub(crate) fn print_native_created(
+/// Prints the summary of a created environment, then on stderr any profile
+/// credential its agents can't use (#5545); JSON keeps its shape.
+pub(crate) async fn print_native_created(
     created: &NativeCreated,
     output: OutputFormat,
     caps: &Capabilities,
 ) -> anyhow::Result<()> {
+    let withheld = super::profile::withheld_credentials(&created.environment).await;
     match output {
         OutputFormat::Json => {
             let view = NativeEnvironmentView::try_from(&created.environment)?;
             let result = created.configuration.add_to(serde_json::to_value(&view)?);
             println!("{}", serde_json::to_string_pretty(&result)?);
-            Ok(())
+            super::profile::print_withheld(&withheld);
         }
         OutputFormat::Text => {
-            print_summary(
-                &local_summary(
-                    &created.environment,
-                    Outcome::Created,
-                    created.secrets.clone(),
-                ),
-                caps,
+            let mut summary = local_summary(
+                &created.environment,
+                Outcome::Created,
+                created.secrets.clone(),
             );
-            Ok(())
+            // The credentials its agents can't use come before the next step.
+            let next = summary.next.take();
+            print_summary(&summary, caps);
+            super::profile::print_withheld(&withheld);
+            if let Some(next) = next {
+                print!("{}", render_next(&next, caps.stdout_style()));
+            }
         }
     }
+    Ok(())
 }
 
 /// A created local environment and its secrets reference, named while the

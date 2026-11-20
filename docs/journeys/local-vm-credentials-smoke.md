@@ -12,7 +12,7 @@ person walks are in [credentials.md](credentials.md). The format is in
 
 ## Where it stands
 
-Updated 2026-11-18. Every step not listed as observed is **not yet
+Updated 2026-11-20. Every step not listed as observed is **not yet
 observed**.
 
 | ID | Linux local VM | Run by |
@@ -92,7 +92,7 @@ and Codex sign-ins are synthetic, served by synthetic providers on loopback.
 - **Entry points:** `cw credentials --local` (generate, connect or add),
   `--profile P set`, `cw create --local --profile local:P`.
 - **States to exercise:** in use; revoked while the VM runs; after a stop and
-  start.
+  start with the credential still revoked (#5545); after re-enrolment.
 - **Driving it:** enrol the credential, select it in a profile, create a VM
   with that profile, then in the guest:
   - `ssh`: sign with the key through the agent;
@@ -108,7 +108,19 @@ and Codex sign-ins are synthetic, served by synthetic providers on loopback.
   value the broker swapped in, revoke makes the next request fail with the
   broker's refusal and no provider call, and the request works again after
   stop, start and re-enrolment.
-- **Observed:** not yet observed.
+  - The start with the credential still revoked succeeds (#5545). It prints,
+    before its next step, exactly `KIND 'NAME' in profile PROFILE is revoked;
+    agents in this VM can't use it.` and the command that fixes it. The VM's
+    other capabilities keep working, and the revoked one's request is still
+    refused.
+  - Re-enrolling the same credential serves the next request, with no stop
+    or start in between.
+- **Observed:** `claude`, 2026-11-20, with #5541, #5512 and #5545 on a
+  local tree: every state above passed, including the start with the sign-in
+  still revoked. The start printed `Claude (sign-in) 'native-broker-claude'
+  in profile native-claude is revoked; agents in this VM can't use it.` and
+  its reconnect command, and the request after re-enrolling was answered
+  without a restart. `ssh`, `github` and `codex` not yet observed.
 
 ## 3. `smoke-attach-restart`: attach across a restart
 

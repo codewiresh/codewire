@@ -1951,12 +1951,9 @@ fn environment_bindings_pin_revisions_survive_restart_and_guard_deletion() {
     authority
         .revoke_credential(&second.metadata.id)
         .expect("revoke selected credential");
-    assert!(matches!(
-        authority.evaluate_environment_grants(&environment_id, 9),
-        Err(LocalCredentialError::Access(
-            AccessError::CredentialInactive { .. }
-        ))
-    ));
+    // A revoked credential withholds only its own capability (#5545).
+    let grants = authority.evaluate_environment_grants(&environment_id, 9);
+    assert_eq!(grants.expect("withheld, not refused"), Vec::new());
     assert_eq!(
         authority.delete_environment_access_binding(
             &environment_id,
@@ -4026,3 +4023,4 @@ fn move_default_away(authority: &LocalCredentialAuthority<TestProtectedStore>) {
 mod credential_names;
 mod refresh_commit;
 mod refresh_crash;
+mod withheld_grants;

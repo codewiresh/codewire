@@ -2,16 +2,20 @@
 //! environment's placeholder share: the grant for one slot, and the
 //! credential it selects once that credential is usable now.
 
+use std::collections::BTreeSet;
+
 use codewire_access::{
-    CapabilitySlot, CredentialStatus, DerivedGrant, EnvironmentId, GrantPermission,
+    AccessError, CapabilitySlot, CredentialStatus, DerivedGrant, EnvironmentAccessBinding,
+    EnvironmentId, GrantContext, GrantPermission, GrantPlacement, OwnerId, ProviderCatalog,
+    WithheldReason, derive_available_grants,
 };
 use codewire_protected_store::ProtectedStore;
 use rusqlite::Connection;
 
 use crate::{
     InternalCredentialRecord, LocalCredentialAuthority, LocalCredentialError, MaterialState,
-    derive_local_environment_grants, load_environment_access_binding, load_internal_credential,
-    unix_seconds,
+    active_github_connection, load_environment_access_binding, load_internal_credential,
+    load_profile_revision, load_ready_credential_metadata, unix_seconds,
 };
 
 impl<S: ProtectedStore> LocalCredentialAuthority<S> {
@@ -40,7 +44,9 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         Ok((grant, record))
     }
 
-    /// The grant the environment's current binding derives for `slot`.
+    /// The grant the environment's current binding derives for `slot`. A slot
+    /// whose credential is withheld (revoked, expired or needing reconnect)
+    /// is refused as that credential is, and only that slot (#5545).
     fn environment_slot_grant_at(
         &self,
         connection: &Connection,
@@ -49,16 +55,28 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         slot: &CapabilitySlot,
     ) -> Result<DerivedGrant, LocalCredentialError> {
         let binding = load_environment_access_binding(connection, environment_id)?.binding;
-        derive_local_environment_grants(
+        let mut available = derive_local_available_grants(
             connection,
             &binding,
             environment_generation,
             &self.owner_id,
             &self.catalog,
-        )?
-        .into_iter()
-        .find(|grant| grant.capability_slot == *slot)
-        .ok_or(LocalCredentialError::CredentialOperationLeaseDenied)
+        )?;
+        // The refusal a whole-selection derivation gave this slot before.
+        if let Some(withheld) = available.reconnect_required.remove(slot) {
+            let credential = withheld.credential;
+            return Err(LocalCredentialError::Access(match withheld.reason {
+                WithheldReason::Expired => AccessError::CredentialExpired { credential },
+                WithheldReason::Revoked | WithheldReason::NeedsReconnect => {
+                    AccessError::CredentialInactive { credential }
+                }
+            }));
+        }
+        available
+            .grants
+            .into_iter()
+            .find(|grant| grant.capability_slot == *slot)
+            .ok_or(LocalCredentialError::CredentialOperationLeaseDenied)
     }
 }
 
@@ -82,4 +100,66 @@ fn load_granted_credential(
         return Err(LocalCredentialError::CredentialInactive);
     }
     Ok(record)
+}
+
+/// The grants an environment's binding derives now. A profile credential that
+/// was revoked, expired or needs reconnecting withholds only its own
+/// capability, as in a hosted Sandbox (#5545): a local VM is the user's own
+/// machine, so one such credential never refuses the rest.
+pub(crate) fn derive_local_environment_grants(
+    connection: &Connection,
+    binding: &EnvironmentAccessBinding,
+    environment_generation: u64,
+    owner_id: &OwnerId,
+    catalog: &ProviderCatalog,
+) -> Result<Vec<DerivedGrant>, LocalCredentialError> {
+    derive_local_available_grants(
+        connection,
+        binding,
+        environment_generation,
+        owner_id,
+        catalog,
+    )
+    .map(|available| available.grants)
+}
+
+/// [`derive_local_environment_grants`] with the capabilities it withholds and
+/// why.
+fn derive_local_available_grants(
+    connection: &Connection,
+    binding: &EnvironmentAccessBinding,
+    environment_generation: u64,
+    owner_id: &OwnerId,
+    catalog: &ProviderCatalog,
+) -> Result<codewire_access::AvailableGrants, LocalCredentialError> {
+    let profile =
+        load_profile_revision(connection, &binding.profile_id, binding.profile_revision)?.profile;
+    let credentials = load_ready_credential_metadata(connection)?;
+    let context = GrantContext {
+        environment_id: binding.environment_id.clone(),
+        environment_generation,
+        placement: GrantPlacement::Local,
+        user_id: owner_id.clone(),
+        organization_id: None,
+        allow_personal_credentials: false,
+        authorized_credentials: profile
+            .entries
+            .values()
+            .cloned()
+            .chain(if profile.includes_github() {
+                active_github_connection(connection)?
+            } else {
+                None
+            })
+            .collect::<BTreeSet<_>>(),
+    };
+    derive_available_grants(
+        &context,
+        binding,
+        &profile,
+        &credentials,
+        catalog,
+        unix_seconds()?,
+    )
+    .map_err(Into::into)
 }

@@ -1194,6 +1194,30 @@ selected credential that no longer exists still refuses the whole runtime:
 bound credentials cannot be deleted, so that is integrity damage.
 Platform-to-local launches still admit their exact selection as a whole.
 
+A local VM is the user's own machine, and the same holds there (#5545). A
+profile credential that was revoked, expired or needs reconnecting withholds
+only its own capability: `cw create --local`, `cw start --local` and
+`cw update --local` with that profile succeed, its requests are refused as
+they are while the VM runs, and every other capability keeps working. Each
+of those commands prints one line on stderr per withheld credential, for
+example `Claude (sign-in) 'walk' in profile work is revoked; agents in this
+VM can't use it.`, then the fix: a sign-in is reconnected under its own name
+(`cw credentials --local connect claude --name walk`), and any other
+credential is replaced in the profile (`cw credentials --local --profile work
+set SLOT NAME`). An expired one `has expired` and a failed one `needs
+reconnecting`. Reconnecting the same credential restores it on the next
+request, with no stop or start (observed for a Claude sign-in withheld at
+start, #5545). What the VM set up at start keeps its form until the next
+start: with its Anthropic slot withheld, Claude Code starts in its API-key
+form, and starts in its sign-in form again after a start.
+
+A withheld capability's request is answered today with Codewire's generic
+refusal, not the specific one a hosted Sandbox gives: 403, `Codewire-Refusal:
+denied`, and the body `Codewire: this request was refused.` with no `Fix:`
+line. A hosted Sandbox answers `credential_revoked`, `credential_expired` or
+`credential_needs_reconnect` (below). Giving a local VM the same answers is
+#5593.
+
 The credential service's broker evaluates a hosted Sandbox's authority once per
 bridge epoch: one runtime authority resolve and the grant evaluation. The
 epoch's leases reuse that decision for at most 60 seconds from the start of its

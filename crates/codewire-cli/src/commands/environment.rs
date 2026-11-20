@@ -1529,7 +1529,7 @@ async fn handle_unified_environment_create(
                 else {
                     return Ok(());
                 };
-                print_native_created(&created, output, &caps)?;
+                print_native_created(&created, output, &caps).await?;
                 print_created_https(&created.environment.name, output).await;
                 Ok(())
             }
