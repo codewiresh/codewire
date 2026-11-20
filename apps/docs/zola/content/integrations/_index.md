@@ -17,6 +17,7 @@ gives each new workspace its own local VM or cloud sandbox.
 | To | Use |
 | --- | --- |
 | run commands and attach to sessions from Rex's command palette | [Install the Rex plugin](@/integrations/rex.md#install-the-codewire-plugin) |
+| keep Rex sessions running inside an environment | [Run a Rex server in an environment](@/integrations/rex.md#run-a-rex-server-in-an-environment) |
 | run Orca workspaces in environments, or connect Orca to one | [Install the Orca plugin](@/integrations/orca.md#install-the-codewire-plugin) |
 | open shells and agents in environments from herdr | [herdr](@/integrations/herdr.md) |
 

@@ -12,6 +12,7 @@ runs the same commands and holds the result to the same standard.
 | [agent-quickstart.md](agent-quickstart.md) | Copy a setup prompt or follow the human walkthrough with the public TanStack Router and Vite example |
 | [public-controls.md](public-controls.md) | Public-site pill buttons and rounded segmented controls on the homepage and pricing page |
 | [homepage-safety.md](homepage-safety.md) | The homepage Safety section: the credential proxy and network egress control panels, their animation, reduced motion, no JavaScript, themes and widths |
+| [rex-server.md](rex-server.md) | A Rex server inside a cloud environment or a local VM: Rex's own install over the `cw setup ssh` host, the server as a named session, the SSH forward from the computer's Rex, and what survives a lost forward and a stop |
 | [launch.md](launch.md) | The public-launch walk (#4370), step by step: what the launch asks of each step, which journey below holds it, and where the walk stands |
 | [nix-install.md](nix-install.md) | Installing `cw` with Nix (#5399): `nix run` and `nix profile install` from the public flake, the released bytes, `cw upgrade` deferring to Nix, and a release moving the flake. Written first; only the local half of a wrong hash's refusal is observed |
 | [homebrew-install.md](homebrew-install.md) | Installing `cw` with Homebrew (#5407): `brew trust` and `brew install` from the tap, the released bytes, Homebrew's own checks, `cw upgrade` deferring to Homebrew, and a release moving the tap. Linux x86_64 observed; macOS not yet observed |
