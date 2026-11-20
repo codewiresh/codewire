@@ -993,6 +993,7 @@ pub(crate) async fn take_user_rate_limit(
     }
 }
 
+#[tracing::instrument(level = "debug", name = "delete_environment", skip_all, fields(environment_id = %env_id))]
 pub(crate) async fn delete_environment_core(
     state: &ApiState,
     user: &AuthUser,
@@ -1091,6 +1092,7 @@ pub(crate) async fn delete_environment_core(
     .await
 }
 
+#[tracing::instrument(level = "debug", name = "stop_environment", skip_all, fields(environment_id = %env_id))]
 pub(crate) async fn stop_environment_core(
     state: &ApiState,
     user: &AuthUser,

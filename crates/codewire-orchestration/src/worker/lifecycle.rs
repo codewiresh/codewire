@@ -268,6 +268,7 @@ async fn destroy_template_hint(
 }
 
 /// Mirrors `HandleEnvironmentStop`.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %payload.environment_id))]
 pub async fn handle_environment_stop(
     ctx: &WorkerContext,
     payload: &JobPayload,
@@ -1050,6 +1051,7 @@ pub async fn handle_environment_start(
 }
 
 /// Mirrors `HandleEnvironmentDestroy`.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %payload.environment_id))]
 pub async fn handle_environment_destroy(
     ctx: &WorkerContext,
     payload: &JobPayload,
@@ -1225,6 +1227,7 @@ pub async fn handle_environment_destroy(
 }
 
 /// Mirrors `HandleEnvironmentReconcile`.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %payload.environment_id))]
 pub async fn handle_environment_reconcile(
     ctx: &WorkerContext,
     payload: &JobPayload,

@@ -1424,6 +1424,7 @@ async fn release_absent_binding(
 /// pointer, inside the caller's generation fence. A present Pod refuses with
 /// [`BoundPodPresent`] and changes nothing, so the caller retries after its
 /// deletion. Idempotent: no live binding releases nothing.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %authority.environment_id()))]
 pub(crate) async fn release_workspace_binding(
     runtime: &dyn RuntimeDriver,
     authority: &ActivityAuthority,

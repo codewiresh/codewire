@@ -490,6 +490,7 @@ impl ConfidentialStorageManager {
     /// gone (Program #2238 B2c). A stopped confidential environment then
     /// authorizes no guest, so no VM booted from its last init-data receives
     /// its key until the next start authorizes again. Idempotent.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
     pub async fn revoke_init_data(&self, environment_id: &str) -> anyhow::Result<()> {
         validate_environment_id(environment_id)?;
         if let Err(error) = self
@@ -506,6 +507,7 @@ impl ConfidentialStorageManager {
     /// Delete both key copies after the caller has proved that Sandbox, PVC
     /// and PV resources are absent. Every provider operation
     /// is idempotent, so Temporal retries resume safely.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
     pub async fn delete_after_storage_absent(&self, environment_id: &str) -> anyhow::Result<()> {
         validate_environment_id(environment_id)?;
         let manifest_uri = self.metadata.mark_deleting(environment_id).await?;

@@ -91,6 +91,7 @@ async fn wait_for_source_restart_pods_absent(
     .await
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %claim.environment_id))]
 pub(super) async fn wait_for_workspace_suspension(
     client: &SandboxClient,
     claim: &ClaimRef,

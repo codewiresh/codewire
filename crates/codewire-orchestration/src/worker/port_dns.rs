@@ -142,6 +142,7 @@ pub(crate) async fn delete_port_dns_records(
 /// start cannot commit between external truth and durable truth. The update
 /// also compares the record ID, preserving a concurrently-created replacement
 /// record if a standalone port-DNS workflow was already in flight.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env_id))]
 pub(crate) async fn delete_port_dns_records_authoritative(
     ctx: &WorkerContext,
     env_id: &str,

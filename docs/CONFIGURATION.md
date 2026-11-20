@@ -538,6 +538,20 @@ and crosses Temporal inside the signal and activity inputs. No other service
 exports traces, whatever its environment says; billing, idp, coordinator and
 the other services only log.
 
+A stop and a delete are traced the same way, so the slow step of either can be
+read from its trace: the handler (`stop_environment`, `delete_environment`),
+the Temporal signal, the stop or destroy activity, and under it each step a
+user waits on. For a stop these are scaling the workspace to zero, the wait
+until its Pod is gone, releasing the workspace binding, and removing the
+access objects and the port DNS records. For a delete they are removing the
+port DNS records, tearing down the environment's Kubernetes objects with the
+wait until none is left, and releasing the binding. A confidential
+environment adds the step that revokes or deletes its keys, and an
+environment on a host adds the wait for the host's answer. Each span carries
+`environment_id` and nothing else. A stop or delete the platform starts by
+itself, such as one for exhausted credit or an expired environment, is one
+trace too, from the reconciler's signal.
+
 Whether or not tracing is on, the dashboard answers every signed-in `GET` page
 with `Server-Timing: total;dur=MS`, the milliseconds this server took from the
 request to its response (#5206). A page that marks its own phases keeps them

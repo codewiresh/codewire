@@ -303,6 +303,7 @@ impl Change {
 /// the VM and generation from the host's last report of it. Stop and start
 /// end as the cluster's do; destroy ends with the external cleanup marker,
 /// which needs the host's word that the VM is absent.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %authority.environment_id()))]
 pub(crate) async fn change(
     pool: &PgPool,
     authority: &ActivityAuthority,

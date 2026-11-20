@@ -3694,6 +3694,7 @@ impl SandboxClient {
     /// Request suspension only for the current exact Claim-owned Sandbox.
     /// This does not certify controller completion or Pod absence; callers
     /// obtain that separate, opaque identity from the suspension observer.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %claim_opts.environment_id))]
     pub async fn suspend_workspace(
         &self,
         claim_opts: &ClaimOpts,
@@ -4066,6 +4067,7 @@ impl SandboxClient {
     }
 
     /// Remove the environment's access objects.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env_id))]
     pub async fn delete_access_stack(&self, env_id: &str) -> anyhow::Result<()> {
         let services = self.services();
         delete_dynamic(&services, &workspace_daemon_service_name(env_id)).await?;
@@ -4106,6 +4108,7 @@ impl SandboxClient {
     /// PVC carrying the recorded workspace PVC UID, so a restore-born PVC
     /// that the fork has not adopted yet (no owner, no environment label) is
     /// deleted and proven absent too.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env_id))]
     pub async fn delete_environment_resources_with_recorded_storage(
         &self,
         env_id: &str,
