@@ -18,15 +18,27 @@ const LONG_GRACE: Duration = Duration::from_secs(20);
 /// `script` under `sh`, leading its own process group as a session command
 /// does, and the pids it prints, one per line, before it settles.
 async fn spawn_group(script: &str, pids: usize) -> (Child, Vec<i32>) {
-    let mut child = Command::new("/bin/sh")
+    let mut command = Command::new("/bin/sh");
+    command
         .args(["-c", script])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0)
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
+        .kill_on_drop(true);
+    // A test run can inherit an ignored signal, SIGHUP under `nohup`, and a
+    // shell cannot stop ignoring one that was ignored when it started. These
+    // tests end the leader with the two signals reset here.
+    // SAFETY: the closure runs between fork and exec and calls only
+    // `signal`, which is async-signal-safe.
+    unsafe {
+        command.pre_exec(|| {
+            libc::signal(libc::SIGHUP, libc::SIG_DFL);
+            libc::signal(libc::SIGTERM, libc::SIG_DFL);
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut printed = Vec::new();
     while printed.len() < pids {
