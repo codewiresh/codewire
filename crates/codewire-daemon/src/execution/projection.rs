@@ -16,6 +16,8 @@ pub(super) struct LaunchRendezvous {
     path: PathBuf,
     device: u64,
     inode: u64,
+    /// Keeps SSH socket forwards off it (#5608).
+    _platform: crate::platform_sockets::PlatformSocket,
     context: ProjectionContext,
     bridge: CredentialBridge,
     override_names: std::collections::BTreeSet<String>,
@@ -105,14 +107,15 @@ impl PreparedProcess {
         };
         // Never remove pre-existing objects. Unique socket path and validated
         // private parent are independent of request-provided work directories.
-        let listener = UnixListener::bind(&socket)?;
+        let (listener, platform) =
+            crate::platform_sockets::bind(&socket, "the credential bridge's launch socket")?;
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
-        let metadata = fs::symlink_metadata(&socket)?;
         prepared.launch = Some(LaunchRendezvous {
             listener,
             path: socket,
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            device: platform.device(),
+            inode: platform.inode(),
+            _platform: platform,
             context,
             bridge: bridge.clone(),
             override_names: environment.override_names.clone(),

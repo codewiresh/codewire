@@ -124,6 +124,8 @@ struct SocketGuard {
     path: PathBuf,
     device: u64,
     inode: u64,
+    /// Keeps SSH socket forwards off it (#5608).
+    _platform: crate::platform_sockets::PlatformSocket,
 }
 
 impl CredentialBridge {
@@ -363,13 +365,15 @@ impl CredentialBridge {
             .then(|| SshIngress::prepare(config))
             .transpose()?;
         remove_stale_socket(&config.ingress_socket)?;
-        let listener = UnixListener::bind(&config.ingress_socket)?;
-        let metadata = std::fs::symlink_metadata(&config.ingress_socket)?;
-        use std::os::unix::fs::MetadataExt as _;
+        let (listener, platform) = crate::platform_sockets::bind(
+            &config.ingress_socket,
+            "the credential bridge's socket",
+        )?;
         let socket = SocketGuard {
             path: config.ingress_socket.clone(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            device: platform.device(),
+            inode: platform.inode(),
+            _platform: platform,
         };
         std::fs::set_permissions(
             &config.ingress_socket,

@@ -19,7 +19,7 @@ use super::*;
 // Every wait bounded by this ends on its event: an accept, an EOF, a close,
 // a child's exit or a count reaching zero. The bound only turns a hang into a
 // failure; 10 s failed while a slow CI slot stalled I/O (#3239).
-const HANG_GUARD: Duration = Duration::from_secs(120);
+pub(super) const HANG_GUARD: Duration = Duration::from_secs(120);
 
 /// Process sessions are not under test.
 struct NoSessions;
@@ -36,7 +36,7 @@ impl SshSessionRunner for NoSessions {
     }
 }
 
-struct AcceptAllKeys;
+pub(super) struct AcceptAllKeys;
 
 impl client::Handler for AcceptAllKeys {
     type Error = russh::Error;
@@ -50,7 +50,7 @@ impl client::Handler for AcceptAllKeys {
 }
 
 /// A workspace SSH server whose connections each get `forwarding()`.
-async fn gateway(
+pub(super) async fn gateway(
     forwarding: impl Fn() -> Option<Forwarding> + Send + 'static,
 ) -> (SocketAddr, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -94,7 +94,7 @@ fn dialing_except(
     move || Some(Forwarding::new(dialer.clone(), platform.clone()))
 }
 
-async fn connect(addr: SocketAddr) -> client::Handle<AcceptAllKeys> {
+pub(super) async fn connect(addr: SocketAddr) -> client::Handle<AcceptAllKeys> {
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     stream.set_nodelay(true).unwrap();
     let mut handle =
@@ -106,7 +106,7 @@ async fn connect(addr: SocketAddr) -> client::Handle<AcceptAllKeys> {
     handle
 }
 
-async fn open(
+pub(super) async fn open(
     client: &client::Handle<AcceptAllKeys>,
     host: &str,
     port: u16,
@@ -119,7 +119,7 @@ async fn open(
     .expect("the forward was answered")
 }
 
-fn open_failure_code(result: Result<Channel<client::Msg>, russh::Error>) -> u32 {
+pub(super) fn open_failure_code(result: Result<Channel<client::Msg>, russh::Error>) -> u32 {
     match result {
         Err(russh::Error::ChannelOpenFailure(failure)) => failure.code(),
         Err(other) => panic!("expected an open failure, got {other}"),
@@ -128,7 +128,7 @@ fn open_failure_code(result: Result<Channel<client::Msg>, russh::Error>) -> u32 
 }
 
 /// Echoes each connection until its end of stream, then closes it.
-async fn echo_server() -> SocketAddr {
+pub(super) async fn echo_server() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -776,7 +776,7 @@ async fn many_sequential_forwards_leave_no_tasks_or_connections() {
 
 /// The host's OpenSSH client, as `cw setup ssh`'s users and VS Code run it.
 #[cfg(target_os = "linux")]
-fn openssh(gateway: SocketAddr) -> tokio::process::Command {
+pub(super) fn openssh(gateway: SocketAddr) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("/usr/bin/ssh");
     command
         .env_clear()

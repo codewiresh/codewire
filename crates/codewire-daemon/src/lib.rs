@@ -37,6 +37,8 @@ pub mod login_cleanup;
 pub mod platform_managed;
 pub mod platform_refusal;
 #[cfg(unix)]
+pub mod platform_sockets;
+#[cfg(unix)]
 mod private_files;
 pub mod recent_log;
 pub mod server;
@@ -47,6 +49,8 @@ pub mod snapshot_clearing;
 #[cfg(target_os = "linux")]
 pub mod ssh_known_hosts;
 pub mod stop_evidence;
+#[cfg(unix)]
+pub mod unix_forward;
 #[cfg(unix)]
 pub mod workspace_defaults;
 

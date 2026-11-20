@@ -1,7 +1,7 @@
 ---
 title: SSH and VS Code
 description: Use OpenSSH, scp, sftp and rsync with any environment, forward ports, and open an environment in VS Code.
-updated: 2026-10-26
+updated: 2026-11-20
 weight: 2
 aliases: ["/guides/ssh-and-vscode"]
 ---
@@ -107,6 +107,25 @@ bridge on port 38081, which answers provider requests with your credentials,
 and the daemon's SSH and API ports. So VS Code, which forwards every port it
 sees listening, never publishes them on your machine.
 Reverse forwards (`ssh -R`) and agent and X11 forwarding are not available.
+
+### Unix sockets
+
+A local forward can also reach a Unix socket in a hosted sandbox, by its
+absolute path:
+
+```sh
+ssh -N -L "$PWD/app.sock:/home/codewire/app.sock" cw-cloud-my-app
+ssh -W /home/codewire/app.sock cw-cloud-my-app
+```
+
+The connection is made as the sandbox's user, so it reaches any socket that
+user can, and a server that checks its caller's credentials sees that user.
+That includes the sandbox's Docker socket: forwarding
+`/run/docker/docker.sock` lets programs on your machine drive the sandbox's
+Docker, which is root inside the sandbox. The platform's own sockets, such
+as the credential bridge's, are refused, however the path reaches them. The
+target must be an absolute path of at most 107 bytes; relative paths and
+abstract names are refused. A local VM refuses socket forwards for now.
 
 ## VS Code
 

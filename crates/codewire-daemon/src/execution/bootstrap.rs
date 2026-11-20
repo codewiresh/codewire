@@ -42,6 +42,8 @@ pub(crate) struct StartupProjectionIngress {
     path: PathBuf,
     device: u64,
     inode: u64,
+    /// Keeps SSH socket forwards off it (#5608).
+    _platform: crate::platform_sockets::PlatformSocket,
     environment_id: [u8; 16],
     generation: u64,
     selection: [u8; 32],
@@ -60,13 +62,14 @@ impl StartupProjectionIngress {
         let path = runc
             .process_directory
             .join(BOOTSTRAP_PROJECTION_SOCKET_NAME);
-        let listener = UnixListener::bind(&path)?;
-        let metadata = fs::symlink_metadata(&path)?;
+        let (listener, platform) =
+            crate::platform_sockets::bind(&path, "the credential bridge's startup socket")?;
         let ingress = Self {
             listener,
             path,
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            device: platform.device(),
+            inode: platform.inode(),
+            _platform: platform,
             environment_id: *identity.environment_id.as_bytes(),
             generation: identity.environment_generation,
             selection: selection.selection_sha256,

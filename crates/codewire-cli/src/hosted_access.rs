@@ -23,6 +23,7 @@ use codewire_daemon::access::WorkspaceAccessGrant;
 use codewire_daemon::app_ports::AppPortsSender;
 use codewire_daemon::hosted_state::HostedStatePaths;
 use codewire_daemon::local_transport::LocalDaemonConnector;
+use codewire_daemon::platform_sockets::PlatformSocket;
 use codewire_daemon_proto::{WORKSPACE_SSH_PORT, WORKSPACE_TAILNET_UDP_PORT};
 use codewire_workspace_access::daemon::DaemonSessionClient;
 use codewire_workspace_access::daemon_access::{
@@ -219,12 +220,13 @@ pub(crate) async fn serve(
             // `cw network connect` in the workspace reaches other members
             // through this owner-only socket.
             match bind_mesh_socket(&paths) {
-                Ok(listener) => {
-                    tokio::spawn(daemon_mesh::serve_connect(
-                        listener,
-                        membership,
-                        shutdown.clone(),
-                    ));
+                Ok((listener, platform)) => {
+                    let serve = daemon_mesh::serve_connect(listener, membership, shutdown.clone());
+                    // Recorded while served, so SSH socket forwards refuse it.
+                    tokio::spawn(async move {
+                        let _platform = platform;
+                        serve.await
+                    });
                 }
                 Err(error) => {
                     tracing::warn!(error = %error, "workspace Mesh connect socket unavailable");
@@ -319,8 +321,11 @@ async fn record_host_key_then_start(
 }
 
 /// Bind the Mesh connect socket in the owner-only state directory, owner
-/// read and write only, replacing a socket a previous daemon left.
-fn bind_mesh_socket(paths: &HostedStatePaths) -> std::io::Result<tokio::net::UnixListener> {
+/// read and write only, replacing a socket a previous daemon left. It is one
+/// of the platform's sockets, which SSH socket forwards refuse (#5608).
+fn bind_mesh_socket(
+    paths: &HostedStatePaths,
+) -> std::io::Result<(tokio::net::UnixListener, PlatformSocket)> {
     use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
     paths.prepare()?;
     // `HOSTED_DAEMON_MESH_SOCKET` below the state directory.
@@ -335,9 +340,9 @@ fn bind_mesh_socket(paths: &HostedStatePaths) -> std::io::Result<tokio::net::Uni
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    let listener = tokio::net::UnixListener::bind(&path)?;
+    let bound = codewire_daemon::platform_sockets::bind(&path, "the daemon's Mesh socket")?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(listener)
+    Ok(bound)
 }
 
 /// Replace the application ports with each renewed grant's set.

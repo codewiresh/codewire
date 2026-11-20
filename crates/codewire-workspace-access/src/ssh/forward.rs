@@ -36,6 +36,7 @@
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -182,6 +183,16 @@ pub trait ForwardDialer: Send + Sync + 'static {
     /// Connect to the first of `target`'s addresses that accepts. The handler
     /// bounds the whole dial by [`FORWARD_DIAL_TIMEOUT`].
     async fn dial(&self, target: &ForwardTarget) -> Result<Box<dyn ForwardIo>, ForwardDialError>;
+
+    /// Connect to the Unix socket at `path`, an absolute path whose shape
+    /// [`codewire_daemon::unix_forward::target`] admitted, as the workload
+    /// user and in the workload's filesystem (#5608). The handler bounds it
+    /// by [`FORWARD_DIAL_TIMEOUT`]. A dialer that cannot refuses every one.
+    async fn dial_unix(&self, _path: &Path) -> Result<Box<dyn ForwardIo>, ForwardDialError> {
+        Err(ForwardDialError::Prohibited(
+            "this environment's runtime does not forward Unix sockets".to_owned(),
+        ))
+    }
 }
 
 /// Dials the target's loopback addresses from this process.
@@ -215,6 +226,26 @@ impl ForwardDialer for WorkloadLoopbackDialer {
             "nothing in the environment accepted a connection to {target} ({})",
             failures.join("; ")
         )))
+    }
+
+    /// This process runs as the workload user in the workload's filesystem,
+    /// so it connects itself, refusing the platform's own sockets.
+    #[cfg(target_os = "linux")]
+    async fn dial_unix(&self, path: &Path) -> Result<Box<dyn ForwardIo>, ForwardDialError> {
+        use codewire_daemon::unix_forward::{UnixForwardError, connect};
+        let path = path.to_owned();
+        let stream = tokio::task::spawn_blocking(move || connect(&path))
+            .await
+            .map_err(|error| ForwardDialError::ConnectFailed(format!("{error}")))?
+            .map_err(|error| match error {
+                UnixForwardError::Refused(reason) => ForwardDialError::Prohibited(reason),
+                UnixForwardError::Failed(reason) => ForwardDialError::ConnectFailed(reason),
+            })?;
+        stream
+            .set_nonblocking(true)
+            .and_then(|()| tokio::net::UnixStream::from_std(stream))
+            .map(|stream| Box::new(stream) as Box<dyn ForwardIo>)
+            .map_err(|error| ForwardDialError::ConnectFailed(format!("{error}")))
     }
 }
 
@@ -269,16 +300,75 @@ impl Forwarding {
                 return None;
             }
         };
+        let shown = target.to_string();
+        let dialer = self.dialer.clone();
+        self.start(key, channel, reply, ended, shown, async move {
+            dialer.dial(&target).await
+        })
+        .await
+    }
+
+    /// Answer one `direct-streamlocal@openssh.com` open (#5608) as
+    /// [`Self::open`] answers a TCP one: refuse a path of the wrong shape at
+    /// once, otherwise dial it in the background, sharing this connection's
+    /// forward slots with TCP forwards.
+    pub(super) async fn open_unix(
+        &self,
+        key: SshSessionKey,
+        channel: Channel<server::Msg>,
+        path: &str,
+        reply: server::ChannelOpenHandle,
+        ended: &CancellationToken,
+    ) -> Option<CancellationToken> {
+        let shown = codewire_daemon::unix_forward::shown(path);
+        let target = match codewire_daemon::unix_forward::target(path) {
+            Ok(target) => target,
+            Err(refusal) => {
+                refuse_target(
+                    key,
+                    reply,
+                    ChannelOpenFailure::AdministrativelyProhibited,
+                    refusal.to_string(),
+                    &shown,
+                )
+                .await;
+                return None;
+            }
+        };
+        let dialer = self.dialer.clone();
+        self.start(key, channel, reply, ended, shown, async move {
+            dialer.dial_unix(&target).await
+        })
+        .await
+    }
+
+    /// Take a forward slot, then dial and pump in the background; `shown`
+    /// is the target as the log names it.
+    async fn start(
+        &self,
+        key: SshSessionKey,
+        channel: Channel<server::Msg>,
+        reply: server::ChannelOpenHandle,
+        ended: &CancellationToken,
+        shown: String,
+        dial: impl Future<Output = Result<Box<dyn ForwardIo>, ForwardDialError>> + Send + 'static,
+    ) -> Option<CancellationToken> {
         let Ok(slot) = self.slots.clone().try_acquire_owned() else {
             let reason = format!(
                 "too many forwarded connections on this SSH connection \
                  (at most {MAX_FORWARDS_PER_CONNECTION}); close some and retry"
             );
-            refuse(key, reply, ChannelOpenFailure::ResourceShortage, reason).await;
+            refuse_target(
+                key,
+                reply,
+                ChannelOpenFailure::ResourceShortage,
+                reason,
+                &shown,
+            )
+            .await;
             return None;
         };
         let stop = ended.child_token();
-        let dialer = self.dialer.clone();
         let close_grace = self.close_grace;
         let (task_stop, connection) = (stop.clone(), ended.clone());
         tokio::spawn(async move {
@@ -286,7 +376,7 @@ impl Forwarding {
             let _finished = task_stop.clone().drop_guard();
             let _slot = slot;
             let dialed = tokio::select! {
-                dialed = tokio::time::timeout(FORWARD_DIAL_TIMEOUT, dialer.dial(&target)) => dialed,
+                dialed = tokio::time::timeout(FORWARD_DIAL_TIMEOUT, dial) => dialed,
                 // The connection ended while dialing; dropping the reply
                 // refuses the channel.
                 () = task_stop.cancelled() => return,
@@ -294,30 +384,37 @@ impl Forwarding {
             let io = match dialed {
                 Ok(Ok(io)) => io,
                 Ok(Err(error)) => {
-                    refuse(key, reply, error.code(), error.to_string()).await;
+                    refuse_target(key, reply, error.code(), error.to_string(), &shown).await;
                     return;
                 }
                 Err(_) => {
                     let reason = format!(
-                        "connecting to {target} in the environment timed out after {}s",
+                        "connecting to {shown} in the environment timed out after {}s",
                         FORWARD_DIAL_TIMEOUT.as_secs()
                     );
-                    refuse(key, reply, ChannelOpenFailure::ConnectFailed, reason).await;
+                    refuse_target(
+                        key,
+                        reply,
+                        ChannelOpenFailure::ConnectFailed,
+                        reason,
+                        &shown,
+                    )
+                    .await;
                     return;
                 }
             };
             reply.accept().await;
-            tracing::debug!(
+            tracing::info!(
                 connection = key.connection,
                 channel = %key.channel,
-                port = target.port(),
+                target = shown,
                 "workspace SSH forward opened"
             );
             let reason = pump_forward(channel, io, &task_stop, &connection, close_grace).await;
             tracing::debug!(
                 connection = key.connection,
                 channel = %key.channel,
-                port = target.port(),
+                target = shown,
                 reason,
                 "workspace SSH forward ended"
             );
@@ -345,9 +442,21 @@ async fn refuse(
     code: ChannelOpenFailure,
     reason: String,
 ) {
+    refuse_target(key, reply, code, reason, "").await;
+}
+
+/// [`refuse`], logging the target the channel named, escaped and bounded.
+async fn refuse_target(
+    key: SshSessionKey,
+    reply: server::ChannelOpenHandle,
+    code: ChannelOpenFailure,
+    reason: String,
+    shown: &str,
+) {
     tracing::info!(
         connection = key.connection,
         channel = %key.channel,
+        target = shown,
         reason,
         "workspace SSH forward refused"
     );
@@ -454,3 +563,6 @@ async fn pump_forward(
 #[cfg(test)]
 #[path = "forward/tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "forward/unix_tests.rs"]
+mod unix_tests;

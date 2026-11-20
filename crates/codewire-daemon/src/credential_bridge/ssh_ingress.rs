@@ -25,7 +25,7 @@ pub(super) struct SshIngress {
 
 impl SshIngress {
     pub(super) fn prepare(config: &CredentialBridgeConfig) -> io::Result<Self> {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        use std::os::unix::fs::PermissionsExt as _;
 
         let path = config
             .ingress_socket
@@ -50,12 +50,13 @@ impl SshIngress {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        let listener = UnixListener::bind(&path)?;
-        let metadata = std::fs::symlink_metadata(&path)?;
+        let (listener, platform) =
+            crate::platform_sockets::bind(&path, "the credential bridge's SSH agent socket")?;
         let socket = Arc::new(SocketGuard {
             path,
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            device: platform.device(),
+            inode: platform.inode(),
+            _platform: platform,
         });
         std::fs::set_permissions(&socket.path, std::fs::Permissions::from_mode(0o600))?;
         chown_socket(&socket.path, config.ingress_uid, config.ingress_gid)?;

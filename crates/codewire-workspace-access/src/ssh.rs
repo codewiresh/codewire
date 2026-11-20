@@ -1096,6 +1096,37 @@ where
         Ok(())
     }
 
+    /// `ssh -L LOCAL.sock:REMOTE.sock` and `ssh -W REMOTE.sock` (#5608): a
+    /// Unix socket in the workload, on the same connections and slots as TCP
+    /// forwards.
+    async fn channel_open_direct_streamlocal(
+        &mut self,
+        channel: Channel<server::Msg>,
+        socket_path: &str,
+        reply: server::ChannelOpenHandle,
+        _session: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        let key = SshSessionKey {
+            connection: self.connection,
+            channel: channel.id(),
+        };
+        let Some(forwarding) = &self.forwarding else {
+            forward::refuse_unavailable(key, reply).await;
+            return Ok(());
+        };
+        self.channels.retain(
+            |_, state| !matches!(state, SshChannelState::Forward { stop } if stop.is_cancelled()),
+        );
+        if let Some(stop) = forwarding
+            .open_unix(key, channel, socket_path, reply, &self.ended)
+            .await
+        {
+            self.channels
+                .insert(key.channel, SshChannelState::Forward { stop });
+        }
+        Ok(())
+    }
+
     async fn pty_request(
         &mut self,
         channel: ChannelId,
