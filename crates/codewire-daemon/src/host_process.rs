@@ -137,12 +137,19 @@ impl OwnedProcessGroup {
         // session. No group TERM follows: it would reach every one of them a
         // second time, and many servers take a second TERM as "quit now"
         // and skip their graceful shutdown.
+        let leader_exited = matches!(self.exit_status(), Ok(Some(_)));
         let term = self.signal_leader(libc::SIGTERM);
         let (term, members) = match scan_session_members(self.pid, libc::SIGTERM).await {
             Ok(members) => (term, members),
             Err(error) => (term.and(Err(error)), Vec::new()),
         };
-        tokio::time::sleep(self.term_grace).await;
+        // The grace is for processes to finish a write. A leader that had
+        // exited, in a session the scan found no member of, leaves none, and
+        // none can start: so a command that exits alone ends at once, not
+        // after a guest's 2 s grace.
+        if !(leader_exited && members.is_empty() && term.is_ok()) {
+            tokio::time::sleep(self.term_grace).await;
+        }
         // Always send KILL before reaping, even if TERM already ended the
         // leader: shell children may still hold stdin/stdout or ignore TERM.
         // The leader first: a live one, such as a shell that trapped TERM,
@@ -394,5 +401,77 @@ impl Drop for OwnedProcessGroup {
         if self.armed {
             let _ = self.signal(libc::SIGKILL);
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use tokio::process::Command;
+
+    /// The grace in a test that must not wait it out: long enough that a
+    /// loaded test host cannot mistake a slow end for it.
+    const LONG_GRACE: Duration = Duration::from_secs(60);
+
+    /// `script` under `sh`, leading its own session as a session command does.
+    fn spawn_session(script: &str) -> tokio::process::Child {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        // SAFETY: setsid is async-signal-safe and takes no arguments.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        command.spawn().unwrap()
+    }
+
+    /// A command that exits leaving nothing in its session ends without the
+    /// grace: there is no process to give it to.
+    #[tokio::test]
+    async fn a_leader_that_exits_alone_ends_without_the_grace() {
+        let mut child = spawn_session("exit 0");
+        let mut group =
+            OwnedProcessGroup::new(child.id().unwrap(), LONG_GRACE, LONG_GRACE).unwrap();
+        tokio::time::timeout(LONG_GRACE, group.wait_for_exit())
+            .await
+            .unwrap()
+            .unwrap();
+        let ended = tokio::time::timeout(LONG_GRACE / 2, group.terminate())
+            .await
+            .expect("an exited leader alone does not wait the grace")
+            .unwrap();
+        assert!(ended.is_empty());
+        assert_eq!(child.wait().await.unwrap().code(), Some(0));
+    }
+
+    /// A process the command left running still gets its TERM and the whole
+    /// grace before KILL.
+    #[tokio::test]
+    async fn a_process_left_running_still_gets_the_grace() {
+        let grace = Duration::from_millis(300);
+        let mut child = spawn_session("sleep 60 & exit 0");
+        let mut group = OwnedProcessGroup::new(child.id().unwrap(), grace, LONG_GRACE).unwrap();
+        tokio::time::timeout(LONG_GRACE, group.wait_for_exit())
+            .await
+            .unwrap()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let ended = tokio::time::timeout(LONG_GRACE, group.terminate())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(started.elapsed() >= grace);
+        assert_eq!(ended.len(), 1, "{ended:?}");
+        assert_eq!(ended[0].name, "sleep");
+        child.wait().await.unwrap();
     }
 }

@@ -136,7 +136,8 @@ Sandbox (#5471, #5472).
 - **A session ends when its command exits.** When the leader exits, the
   session ends with its exit status, and the processes it left running in
   the session are ended as a stop ends them, `nohup` and `disown` jobs
-  included. That end records one line, in the session's status and as the
+  included; a command that leaves nothing running ends at once, without
+  the grace. That end records one line, in the session's status and as the
   last line of its output: "Ended 1 process left running after the command
   exited (pid 42 `sleep`). To keep a server running, run it in its own
   named session, or start it with setsid; nohup alone is not enough." A

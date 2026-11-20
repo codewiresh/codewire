@@ -676,14 +676,30 @@ async fn retain(
         .await
         .unwrap()
         .session_id;
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while engine.get(&session).await.unwrap().state != v1::SessionLifecycleState::Exited as i32
-        {
+    // Wait for the end, whichever it is, so a session that ends otherwise
+    // says how rather than running out the wait.
+    let ended = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let record = engine.get(&session).await.unwrap();
+            let live = [
+                v1::SessionLifecycleState::Starting,
+                v1::SessionLifecycleState::Running,
+                v1::SessionLifecycleState::Stopping,
+            ];
+            if !live.iter().any(|state| *state as i32 == record.state) {
+                break record;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .unwrap();
+    .expect("the finished child's session ends");
+    assert_eq!(
+        ended.state,
+        v1::SessionLifecycleState::Exited as i32,
+        "{}",
+        ended.status_message
+    );
     let origin = Origin {
         version: 1,
         environment_id: Uuid::new_v4().to_string(),
