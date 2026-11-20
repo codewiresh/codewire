@@ -494,7 +494,24 @@ policy's default. A placeholder on a path the route does not serve is refused
 before any lease, whatever the policy. Every other request to that host
 follows the policy as if the host were not intercepted:
 a rule that allows it lets it through untouched, and without one it is
-refused and counted. A deny rule on the host refuses everything to it. A
+refused and counted. That answer is for the host the forward would dial, the
+route's own provider origin, never a name the request gives. The credential
+broker that serves or forwards these requests never sees the policy. On a
+local VM the supervisor, which holds the policy, gives the broker its answer
+for each bound host when it starts. Nothing the front door or the request
+carries can change it, an absent answer is a refusal, and a policy edit
+restarts the broker with the new answer. On hosted, nobody gives an answer:
+the broker runs in the platform, where an untouched forward would leave past
+the Sandbox's own policy and cw-egress, so by its own rule it refuses every
+such request, whatever the policy, until one can leave through the Sandbox's
+own egress. A refused request gets the same answer whether it carried no
+credential, the user's own key or another environment's placeholder, and
+nothing is dialled; one with no placeholder-shaped value is refused before
+any lease (#5555). Not yet built: today such a request to `api.anthropic.com`,
+`platform.claude.com` or `chatgpt.com`, or a WebSocket upgrade to one, is
+forwarded untouched whatever the policy. GitHub's hosts already send nothing
+unless the policy allows them (#4926). A deny rule on the host refuses
+everything to it. A
 selected credential acts on the user's own account at its provider, which no
 network policy limits. The managed GitHub credential is the exception: it is
 served only where a rule allows the GitHub hosts, because its grant cannot be

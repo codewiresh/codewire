@@ -108,11 +108,13 @@ is now their one home, and `AGENTS.md` points here.
     user's own `claude /login`) carries no Codewire value, so it follows
     the network policy, as every such request on an intercepted host does
     (#3999; `agent-own-key`): it's forwarded untouched where the policy
-    allows the host, and refused otherwise. That's the rule. Until the
-    egress broker's signed policy decision exists, the forward is
-    unconditional: with interception switched on, untouched forwards to
-    `platform.claude.com` don't yet follow a `locked` policy (the bound-host
-    rule, #3999). A request carrying
+    allows the host, and refused otherwise. That's the rule. Until #5555
+    lands, the forward is unconditional on every bound host but GitHub's:
+    with interception switched on, an untouched forward to
+    `api.anthropic.com`, `platform.claude.com` or `chatgpt.com`, or a
+    WebSocket upgrade to one, doesn't yet follow `locked`. GitHub's hosts
+    already send nothing unless the policy allows them (#4926). A request
+    carrying
     a placeholder or managed value anywhere else is refused, never
     forwarded. A sign-in that can't be used is answered `invalid_grant`,
     and a passing failure `temporarily_unavailable`, so a short outage
@@ -1630,7 +1632,8 @@ with #4971.
 | `body_too_large` | 413 | a body over 4 MiB on a host that doesn't stream, or a GitHub API request over 4 MiB that carries the placeholder | "Codewire: this request's body is over the 4 MiB Codewire forwards to HOST." |
 | `busy` | 503 | the bridge's limits on requests or WebSockets in flight | "Codewire: too many requests are in flight; try again." |
 | `upstream_failed` | 502, or 504 when no answer came in time | PROVIDER couldn't be reached, or answered in a way Codewire won't pass on. In a local VM that includes a provider whose name did not resolve when the VM's credential broker started (#5286) | "Codewire: PROVIDER couldn't be reached; try again." |
-| `name_not_allowed` | 403 | a request on an intercepted host without a Codewire value, which the network policy refuses (design 3a) | "Codewire: this environment's network policy doesn't allow this request to HOST." The owner's `cw policy log` (#5058) shows it; until that exists, no fix line |
+| `name_not_allowed` | 403 | a request on an intercepted host without a Codewire value, which the network policy refuses (design 3a) | "Codewire: this environment's network policy doesn't allow this request to HOST." Fix: to send it, select a network policy with a rule that allows HOST on port 443. The owner's `cw policy log` will show it once #5058 lands |
+| `selected_credential_only` | 403 | in a hosted Sandbox, a request on an intercepted host that carries none of the Sandbox's placeholders: the user's own key, another environment's placeholder, or no credential. It is never sent, whatever the network policy, until such a request can leave through the Sandbox's own egress (#5555, not yet built) | "Codewire: in a hosted Sandbox, requests to HOST must carry the Sandbox's Codewire credential." No fix line |
 | `unavailable` | 503 | the request can't be checked against the network policy now: the signed policy decision is missing or doesn't match | "Codewire: this request to HOST can't be checked against the network policy right now; try again." |
 
 A response that has already started when its stream fails can't change its
@@ -2021,6 +2024,13 @@ takes effect at a Sandbox's next start, never during its life.
 - **The sign-in exception ends.** With the switch on, the two hosted rows of
   [Direct delivery exceptions](#direct-delivery-exceptions) no longer apply:
   no real Codex or Claude sign-in token is written into the Sandbox (#4002).
+- **Own keys** (#5555, not yet built). A request to a bound host that carries
+  none of the Sandbox's placeholders (the user's own key, another
+  Sandbox's placeholder, or no credential) is refused
+  `selected_credential_only` before anything is sent, whatever the network
+  policy, until such a request can leave through the Sandbox's own egress.
+  The credential service would otherwise send it from the platform's side,
+  past the Sandbox's policy and `cw-egress`.
 - **Off is today.** With the switch off, every hosted path is exactly as
   before.
 

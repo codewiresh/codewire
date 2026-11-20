@@ -1222,7 +1222,11 @@ Issues: #3999, #4001.
     a policy that allows the host;
   - **an assigned agent under `locked`** (#5215): `claude -p` with the
     selected credential, and `curl` to the provider's host with another key,
-    and to another host.
+    and to another host;
+  - **a hosted Sandbox with interception on** (#5555): the user's own key
+    and a request with no credential, under `open` and under `locked`;
+  - a policy edit on a running local VM that adds, then removes, a rule
+    allowing the provider's host.
 - **Driving it:** no command yet (#3999, #4001). For the `locked` state:
   `cw --local update NAME --policy locked`, then in the VM
   `claude -p 'Reply with ok.'`,
@@ -1249,7 +1253,13 @@ Issues: #3999, #4001.
     refused. `cw --local policy list` says `locked  built-in · nothing,
     except the model providers of credentials you selected`, and `cw info`
     says the same under its network policy line. Not yet: that the `curl`
-    with another key is refused (#5215).
+    with another key is refused (#5215, #5555);
+  - **in a hosted Sandbox with interception on** (#5555), the user's own
+    key and a request with no credential are both refused
+    `selected_credential_only` with nothing sent, under every policy, and
+    the placeholder is served. Not yet built;
+  - after a policy edit, the next request follows the new policy: allowed
+    once a rule allows the host, refused once it is removed.
 - **Gotchas:**
   - Only a request carrying this environment's placeholder is swapped. The
     reply to any other request is passed back as the provider sent it.
