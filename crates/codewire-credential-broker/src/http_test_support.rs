@@ -21,6 +21,7 @@ pub(crate) struct Lease {
     pub material: Zeroizing<Vec<u8>>,
     pub reads: Arc<AtomicUsize>,
     pub placeholder: Option<CredentialPlaceholder>,
+    pub placeholder_failed: bool,
     /// The material's generation; a refreshed sign-in has a later one.
     pub material_generation: u64,
 }
@@ -69,6 +70,7 @@ impl Lease {
             material: Zeroizing::new(TOKEN.to_vec()),
             reads: Arc::new(AtomicUsize::new(0)),
             placeholder: None,
+            placeholder_failed: false,
             material_generation: 2,
         }
     }
@@ -93,5 +95,8 @@ impl BrokerCredentialLease for Lease {
     }
     fn placeholder(&self) -> Option<&CredentialPlaceholder> {
         self.placeholder.as_ref()
+    }
+    fn placeholder_failed(&self) -> bool {
+        self.placeholder_failed
     }
 }

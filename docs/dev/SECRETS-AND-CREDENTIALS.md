@@ -1602,14 +1602,21 @@ or one whose credentials come from the platform, carries none.
     agents hold one that matches nothing.
   - A lease that derives a placeholder reads and opens the key itself and
     drops it once the placeholder is derived. Its bridge epoch keeps the
-    derived placeholder, which is not secret, so later leases of that epoch
-    read no key. Nothing keeps a key, in a process or across leases (see
+    derived placeholder, which is not secret, in its epoch placeholder cache
+    (`EpochPlaceholders`): scoped to that epoch, holding derived values only,
+    keyed by exactly the derivation's inputs (so a rebind within the epoch
+    derives again), and deciding no admission. Later leases of that epoch read
+    no key. Nothing keeps a key, in a process or across leases (see
     [Invariants](#invariants)).
-  - A key that cannot be read or created leaves the lease without a
-    placeholder; a placeholder never decides admission. The failure is logged
-    at warn with the environment and one closed reason (`NotFound`,
-    `ProviderUnavailable` or `CorruptRecord`), and labels the request's timing
-    line (`placeholder`), never with the row or a provider's error.
+  - A key that cannot be read or created marks the lease's placeholder
+    failed. A placeholder never decides admission, but the front door's swap
+    refuses a request whose lease failed, whatever value it presents, since it
+    can tell neither this environment's placeholder nor a foreign one; the
+    failure is never remembered, so each request reads the key again until it
+    can. It is logged at warn with the environment and one closed reason
+    (`NotFound`, `ProviderUnavailable` or `CorruptRecord`), and labels the
+    request's timing line (`placeholder`), never with the row or a provider's
+    error.
   - Off by default: until the credential service's optional
     `CREDENTIAL_HOSTED_PLACEHOLDERS_ENABLED` is `true` (it accepts only `true`
     or `false`), hosted leases carry none, and no key is created or read. With

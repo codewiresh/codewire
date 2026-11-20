@@ -147,3 +147,27 @@ fn a_hosted_lease_derives_the_shared_known_answer() {
     );
     assert_eq!(placeholder.as_str(), known_answer::PLACEHOLDER);
 }
+
+// The epoch's placeholder cache is keyed by exactly the derivation's inputs:
+// a rebind to another profile revision derives again within the epoch, and a
+// new generation of the same binding reuses (#4001 step C3).
+#[test]
+fn the_epoch_cache_key_follows_the_binding_revision_not_the_generation() {
+    use codewire_access::{AccessProfileId, EnvironmentId, GrantProfile, known_answer};
+    let grant = |generation: u64, revision: u64| DerivedGrant {
+        environment_id: EnvironmentId::parse(known_answer::ENVIRONMENT).unwrap(),
+        environment_generation: generation,
+        profile: Some(GrantProfile {
+            id: AccessProfileId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+            revision,
+        }),
+        capability_slot: CapabilitySlot::parse(known_answer::SLOT).unwrap(),
+        credential_id: CredentialId::parse(known_answer::CREDENTIAL).unwrap(),
+        credential_revocation_generation: 1,
+        expires_at_unix: None,
+        permissions: Default::default(),
+    };
+    let inputs = super::super::placeholder_inputs;
+    assert_eq!(inputs(&grant(1, 5)), inputs(&grant(2, 5)));
+    assert_ne!(inputs(&grant(1, 5)), inputs(&grant(1, 6)));
+}

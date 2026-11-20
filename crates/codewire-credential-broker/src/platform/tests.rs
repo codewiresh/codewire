@@ -1336,6 +1336,7 @@ fn a_platform_lease_carries_no_placeholder() {
         permission: fake.permission.clone(),
         material: ProtectedValue::from_slice(b"synthetic-platform-material").unwrap(),
         placeholder: None,
+        placeholder_failed: false,
     };
     assert!(BrokerCredentialLease::placeholder(&lease).is_none());
 }

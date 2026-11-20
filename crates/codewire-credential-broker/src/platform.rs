@@ -17,6 +17,7 @@
 pub mod bridge;
 mod decision;
 pub mod keepalive;
+mod placeholders;
 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
 mod ssh;
 
@@ -48,6 +49,8 @@ use crate::{
 };
 pub use decision::AUTHORITY_DECISION_REUSE;
 use decision::EpochDecision;
+pub(crate) use placeholders::EpochPlaceholders;
+use placeholders::placeholder_inputs;
 
 /// Exact Pod identity established by a trusted runtime authenticator.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -341,36 +344,6 @@ pub struct PlatformBrokerLeaseProvider<A> {
     ssh: Option<ssh::Epoch>,
 }
 
-/// One hosted epoch's derived placeholders, each by the inputs it is derived
-/// from (#4001). A placeholder is not a secret: it is worthless outside its
-/// environment. The key it is derived under is never kept: a lease that finds
-/// none here reads and opens the key, derives, and drops it. So the key is
-/// read once per epoch and credential, not on every request.
-#[derive(Default)]
-pub(crate) struct EpochPlaceholders(
-    std::sync::Mutex<std::collections::HashMap<PlaceholderInputs, CredentialPlaceholder>>,
-);
-
-/// Environment, environment generation, capability slot and credential.
-type PlaceholderInputs = (String, u64, String, String);
-
-impl EpochPlaceholders {
-    fn get(&self, inputs: &PlaceholderInputs) -> Option<CredentialPlaceholder> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(inputs)
-            .cloned()
-    }
-
-    fn insert(&self, inputs: PlaceholderInputs, placeholder: CredentialPlaceholder) {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(inputs, placeholder);
-    }
-}
-
 /// One process-wide budget of concurrent leases, shared by every epoch of one
 /// bridge service. A slot covers exactly one lease: its record read, any
 /// authority evaluation it runs or waits for (or its full per-request checks),
@@ -444,6 +417,7 @@ pub struct PlatformCredentialLease {
     permission: GrantPermission,
     material: ProtectedValue,
     placeholder: Option<CredentialPlaceholder>,
+    placeholder_failed: bool,
 }
 
 impl BrokerCredentialLease for PlatformCredentialLease {
@@ -464,6 +438,9 @@ impl BrokerCredentialLease for PlatformCredentialLease {
     }
     fn placeholder(&self) -> Option<&CredentialPlaceholder> {
         self.placeholder.as_ref()
+    }
+    fn placeholder_failed(&self) -> bool {
+        self.placeholder_failed
     }
 }
 
@@ -743,7 +720,10 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         if let Some(placeholders) = &self.placeholders
             && matches!(self.session.identity, RuntimeIdentity::Hosted { .. })
         {
-            lease.placeholder = self.placeholder(placeholders, &lease.grant).await;
+            match self.placeholder(placeholders, &lease.grant).await {
+                Some(placeholder) => lease.placeholder = Some(placeholder),
+                None => lease.placeholder_failed = true,
+            }
         }
         Ok(lease)
     }
@@ -752,22 +732,17 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
     /// the one this epoch already derived, or one derived now under the
     /// environment's key, which is read for this lease alone and dropped here.
     ///
-    /// A key that cannot be read or created leaves the lease without one, as
-    /// a local lease is before its authority loads its key: a placeholder
-    /// never decides whether a lease is admitted. That failure is logged at
-    /// warn with the environment and one closed reason, and labels the
-    /// request's timing line, so a missing placeholder is never silent.
+    /// A key that cannot be read or created gives none, and the lease is
+    /// marked failed: a placeholder never decides whether a lease is admitted,
+    /// but the front door's swap refuses a request whose lease failed (#4001
+    /// step C3). That failure is logged at warn with the environment and one
+    /// closed reason, and labels the request's timing line.
     async fn placeholder(
         &self,
         placeholders: &EpochPlaceholders,
         grant: &DerivedGrant,
     ) -> Option<CredentialPlaceholder> {
-        let inputs = (
-            grant.environment_id.as_str().to_owned(),
-            grant.environment_generation,
-            grant.capability_slot.as_str().to_owned(),
-            grant.credential_id.as_str().to_owned(),
-        );
+        let inputs = placeholder_inputs(grant);
         if let Some(placeholder) = placeholders.get(&inputs) {
             timing::placeholder(PlaceholderUse::Reused);
             return Some(placeholder);
@@ -917,6 +892,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                 permission: after.permission,
                 material,
                 placeholder: None,
+                placeholder_failed: false,
             })
         }
         .await;

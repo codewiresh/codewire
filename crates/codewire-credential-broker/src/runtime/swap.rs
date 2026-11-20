@@ -87,6 +87,13 @@ where
             .await
             .map_err(map_lease_error)?;
         validate_http_lease_coordinates(&lease, &request.slot, &operation, &request.route)?;
+        if lease.placeholder_failed() {
+            // This environment's key could not be read, so neither ours nor a
+            // foreign value can be told: refused, and never remembered, so
+            // every request reads the key again until it can (#4001 step C3).
+            drop(lease);
+            return Err(BrokerRequestError::AuthorityUnavailable);
+        }
         self.placeholders
             .remember(&request.slot, lease.placeholder());
         if !lease

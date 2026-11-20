@@ -320,6 +320,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                 permission: admission.permission,
                 material,
                 placeholder: None,
+                placeholder_failed: false,
             });
         }
     }

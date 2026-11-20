@@ -98,6 +98,13 @@ pub trait BrokerCredentialLease: Sized {
     fn placeholder(&self) -> Option<&CredentialPlaceholder> {
         None
     }
+    /// Whether this lease was due a placeholder and its environment's key
+    /// could not be read (#4001 step C3). The swap rule cannot then tell this
+    /// environment's placeholder from a foreign value, so it refuses the
+    /// request rather than forward a placeholder untouched.
+    fn placeholder_failed(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(any(test, feature = "local"))]

@@ -169,6 +169,8 @@ struct Recorded {
     outbound: Arc<Mutex<Vec<Outbound>>>,
     /// The placeholder every lease carries.
     placeholder: Option<&'static str>,
+    /// Every lease was due a placeholder whose key could not be read.
+    placeholder_failed: bool,
     /// The upstream echoes the credential it received in a reply header and
     /// the body.
     echo_credential: bool,
@@ -227,6 +229,7 @@ impl Recorded {
             Authority {
                 leases: Arc::clone(&self.leases),
                 placeholder: self.placeholder,
+                placeholder_failed: self.placeholder_failed,
                 deny: self.deny,
                 codex_sign_in: self.codex_sign_in,
                 denied: self.denied,
@@ -266,6 +269,7 @@ impl Recorded {
 struct Authority {
     leases: Arc<AtomicUsize>,
     placeholder: Option<&'static str>,
+    placeholder_failed: bool,
     deny: bool,
     codex_sign_in: bool,
     denied: Option<&'static str>,
@@ -316,6 +320,7 @@ impl BrokerLeaseProvider for Authority {
         lease.placeholder = self
             .placeholder
             .map(|value| codewire_access::CredentialPlaceholder::parse(value).unwrap());
+        lease.placeholder_failed = self.placeholder_failed;
         if kind == CredentialAuthKind::OAuth && slot.as_str() == "codex" {
             lease.material = codex_sign_in();
         }
@@ -889,6 +894,38 @@ async fn a_lease_without_a_placeholder_swaps_nothing() {
             .windows(crate::http_test_support::TOKEN.len())
             .any(|window| window == crate::http_test_support::TOKEN)
     }));
+}
+
+/// A lease whose placeholder key could not be read refuses the request, for
+/// this environment's placeholder and a foreign value alike, and is never
+/// remembered: held past the cache's 60 s window, every request takes a lease
+/// and is refused, and nothing is sent upstream (#4001 step C3).
+#[tokio::test(start_paused = true)]
+async fn a_failed_key_read_refuses_every_request_across_the_window() {
+    let recorded = Recorded {
+        placeholder_failed: true,
+        ..Recorded::default()
+    };
+    let broker = recorded.broker();
+    let mut sent = 0;
+    for wait in [0, 30, 31, 1] {
+        tokio::time::advance(std::time::Duration::from_secs(wait)).await;
+        for presented in [OURS, THEIRS] {
+            let answer = broker
+                .execute_front_door(anthropic(
+                    "api.anthropic.com",
+                    &[("authorization", format!("Bearer {presented}"))],
+                ))
+                .await;
+            sent += 1;
+            assert!(
+                matches!(answer, Err(BrokerRequestError::AuthorityUnavailable)),
+                "refused, never forwarded"
+            );
+        }
+    }
+    assert_eq!(recorded.leases(), sent);
+    assert!(recorded.outbound().is_empty());
 }
 
 /// A placeholder that is not this environment's costs one lease, not one per
