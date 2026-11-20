@@ -670,8 +670,9 @@ repositories. The dashboard and `cw credentials --cloud connect github` tell
 users to choose **Only select repositories**: the App requests exactly Contents
 (read and write) and Pull requests (read and write), plus Metadata (read), so
 a connection can read, push to and open pull requests in every repository the
-installation covers, and a Sandbox using it can do the same through the managed
-route. Authorization returns to this dashboard's explicitly selected,
+installation covers that the signed-in GitHub user can also reach (GitHub
+gives a user token only what both can reach), and a Sandbox using it can do
+the same through the managed route. Authorization returns to this dashboard's explicitly selected,
 registered callback. The isolated credential service exchanges the
 callback code, verifies the GitHub user and that this exact App is installed,
 and names the credential from the verified GitHub username. There is no
@@ -709,6 +710,15 @@ difference. A day GitHub cannot be read ends in a warning and the line
   first user or organization installation's settings page; the CLI prints
   each one and, at a terminal, opens the first in the browser as `cw login`
   does.
+- **What local connect says it can reach:** local `cw credentials connect
+  github` names each account its `/user/installations` answer lists. The
+  signed-in user's own account (its login equal to the verified login,
+  ignoring letter case, as GitHub does) keeps the installation's selection:
+  `LOGIN (all repositories)` or `LOGIN (selected repositories)`. Any other
+  account, another user's or an organization's, is named only as
+  `repositories you can access in ACCOUNT`: that installation's selection is
+  its owner's choice, and this sign-in reaches only what the user can already
+  reach there. No repository list is read for it (#5443).
 - **The credentials page** checks live on every render, so it shows the
   status for as long as GitHub holds the earlier grant and stops once the
   owner accepts: "GitHub is waiting for you to accept Codewire's updated

@@ -1,7 +1,7 @@
 ---
 title: Security model
 description: What isolates an environment, where secrets and credentials live, and what each placement does not protect.
-updated: 2026-11-16
+updated: 2026-11-20
 weight: 4
 aliases: ["/security"]
 ---
@@ -103,7 +103,8 @@ from a profile, or revoking it, stops its use in running environments.
 The Codewire GitHub App requests Contents (read and write), Pull requests
 (read and write) and Metadata (read). An environment that uses your GitHub
 connection, and the agents in it, can read, push to and open pull requests in
-every repository the installation covers. Install the App with **Only select
+every repository the installation covers that your GitHub account can also
+reach. Install the App with **Only select
 repositories** to keep that reach small; your GitHub token never enters the
 environment.
 

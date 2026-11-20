@@ -1,7 +1,7 @@
 ---
 title: Git repositories
 description: Create environments from private GitHub repositories through the Codewire GitHub App or an SSH key, without a token in the environment.
-updated: 2026-11-16
+updated: 2026-11-20
 weight: 3
 aliases: ["/guides/private-repositories"]
 ---
@@ -23,7 +23,7 @@ Both end on GitHub's installation screen for the Codewire GitHub App. Choose
 asks for Contents (read and write), Pull requests (read and write) and
 Metadata (read): an environment that uses your connection, and the agents in
 it, can read, push to and open pull requests in every repository the
-installation covers. Change the selection on GitHub at any time; the next
+installation covers that your GitHub account can also reach. Change the selection on GitHub at any time; the next
 request uses it. The credentials page tells you when an installation is
 waiting for you to accept updated permissions.
 

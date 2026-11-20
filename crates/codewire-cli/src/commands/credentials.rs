@@ -22,6 +22,7 @@ use crate::config::OsEnv;
 
 pub(in crate::commands) mod confirm;
 mod delete;
+mod github_reach;
 mod names;
 pub(in crate::commands) mod output;
 mod store_notice;
@@ -513,6 +514,8 @@ impl ConnectStore for LocalConnectStore<'_> {
             .then(|| ProtectedValue::from_slice(approval.material.expose_secret()).ok())
             .flatten();
         let name = target.name.clone();
+        // The verified GitHub login, to tell its own account from others'.
+        let verified_login = approval.account_hint.clone();
         let saved = store_wait::waiting_on_store(
             matches!(format, OutputFormat::Json),
             publish_oauth_connection(
@@ -572,7 +575,10 @@ impl ConnectStore for LocalConnectStore<'_> {
             }
         }
         if matches!(target.provider, CredentialConnectProviderArg::Github) {
-            eprintln!("{}", github_reach_summary(&approval.reach));
+            eprintln!(
+                "{}",
+                github_reach::github_reach_summary(verified_login.as_deref(), &approval.reach)
+            );
             report_github_pending(approval.reach.iter().filter_map(|installation| {
                 let pending = installation.pending_permissions.as_ref()?;
                 Some((
@@ -679,36 +685,6 @@ fn valid_github_installation(account: &str, installation_id: u64) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
         && installation_id > 0
-}
-
-/// What the Codewire GitHub App can reach for this login, and where to change
-/// it. GitHub decides access per installation, not per Codewire credential.
-fn github_reach_summary(
-    reach: &[codewire_credential_broker::GitHubAppInstallationReach],
-) -> String {
-    let accounts = reach
-        .iter()
-        .map(|installation| {
-            let scope = if installation.all_repositories {
-                "all repositories"
-            } else {
-                "selected repositories"
-            };
-            format!("{} ({scope})", installation.account)
-        })
-        .collect::<Vec<_>>();
-    let reach = if accounts.is_empty() {
-        "Codewire can read, push to and open pull requests in repositories where the Codewire GitHub App is installed.".to_owned()
-    } else {
-        format!(
-            "Codewire can read, push to and open pull requests in repositories of: {}.",
-            accounts.join(", ")
-        )
-    };
-    format!(
-        "{reach}\nTo add an account or organization, or choose repositories, open {} and choose \"Only select repositories\".",
-        codewire_credential_broker::provider_oauth::github::codewire_github_app_install_url()
-    )
 }
 
 struct OAuthConnectionTarget {
@@ -2903,32 +2879,6 @@ mod tests {
         let (notices, open) = github_pending_follow_up([("octo/evil", 1, User)], true);
         assert!(notices.is_empty());
         assert_eq!(open, None);
-    }
-
-    #[test]
-    fn github_reach_names_each_installation_and_the_install_page() {
-        use codewire_credential_broker::GitHubAppInstallationReach;
-        let summary = github_reach_summary(&[
-            GitHubAppInstallationReach {
-                account: "codewiresh".into(),
-                all_repositories: true,
-                pending_permissions: None,
-            },
-            GitHubAppInstallationReach {
-                account: "noeljackson".into(),
-                all_repositories: false,
-                pending_permissions: None,
-            },
-        ]);
-        assert_eq!(
-            summary,
-            "Codewire can read, push to and open pull requests in repositories of: codewiresh (all repositories), noeljackson (selected repositories).\n\
-             To add an account or organization, or choose repositories, open \
-             https://github.com/apps/codewire-sh/installations/new and choose \"Only select repositories\"."
-        );
-        assert!(github_reach_summary(&[]).starts_with(
-            "Codewire can read, push to and open pull requests in repositories where the Codewire GitHub App is installed."
-        ));
     }
 
     /// The local default speaks the cloud's sentences with the placement

@@ -1119,7 +1119,8 @@ no process-wide or persistent material or decision cache; the
 The Codewire GitHub App requests Contents (read and write), Pull requests
 (read and write) and Metadata (read). An environment that uses a GitHub
 connection can read, push to and open pull requests in every repository the
-installation covers; the token never enters the environment. Codewire never
+installation covers that the signed-in GitHub user can also reach; the token
+never enters the environment. Codewire never
 persists, injects or falls back to a raw forge token.
 
 ## 9. Configuration for self-hosting

@@ -9,7 +9,7 @@ surface proves nothing about another. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-19. Every step not listed as observed is **not yet
+Updated 2026-11-20. Every step not listed as observed is **not yet
 observed**.
 
 | ID | Linux local VM | Mac local VM | Hosted Sandbox (Dev) |
@@ -154,7 +154,14 @@ only what differs.
   ```
 
   then `✓ GitHub connected as LOGIN`. The copy key and the waiting line
-  under the code come with #4885. A second connection under another name is
+  under the code come with #4885. Locally, the next line names what the
+  sign-in can reach: your own account as `LOGIN (all repositories)` or
+  `LOGIN (selected repositories)`, and every other account where the App is
+  installed, another person's or an organization's, only as "repositories
+  you can access in ACCOUNT", never with that installation's own selection.
+  Walk it with a login that is a collaborator on one repository of another
+  user's account where that user installed the App on all repositories
+  (#5443). Not yet observed. A second connection under another name is
   refused, saying "GitHub is already connected as NAME" and how to
   reconnect it.
 - **Ctrl-C:** pressed after approving the device code and before the save,
