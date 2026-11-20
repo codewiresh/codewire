@@ -14,6 +14,8 @@ streams itself and flushes their records before the kubelet kills it.
 
 from __future__ import annotations
 
+import ipaddress
+
 from .kubernetes import documents, exactly_one
 from .shared import *
 
@@ -29,12 +31,17 @@ PRIVATE_V4 = (
     "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
     "192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
 )
-# IPv4-mapped, NAT64, Teredo and 6to4 addresses reach IPv4, private ranges
-# and metadata included (cw-security on #5344).
+# NAT64, Teredo and 6to4 addresses reach IPv4, private ranges and metadata
+# included (cw-security on #5344). IPv4-mapped addresses are not here: a
+# socket that dials one sends IPv4, which PRIVATE_V4 already holds, and
+# Kubernetes refuses one in an ipBlock (ipblock_failures).
 PRIVATE_V6 = (
-    "::1/128", "::ffff:0:0/96", "64:ff9b::/96", "64:ff9b:1::/48", "2001::/32", "2002::/16",
+    "::1/128", "64:ff9b::/96", "64:ff9b:1::/48", "2001::/32", "2002::/16",
     "fc00::/7", "fe80::/10", "ff00::/8",
 )
+# Every NetworkPolicy deploy applies from here; each ipBlock must pass the
+# API server's own validation (ipblock_failures).
+NETWORK_POLICY_ROOT = "deployments/k8s"
 NAME = "codewire-egress"
 DRAIN_SETTING = "CODEWIRE_EGRESS_DRAIN_SECONDS"
 # What cw-egress needs after the deadline to flush records and exit.
@@ -154,6 +161,45 @@ def network_policy_failures(document: str, label: str = NETWORK_POLICY) -> list[
     for cidr in PRIVATE_V4 + PRIVATE_V6:
         if cidr not in excepted:
             failures.append(f"{label}: egress must except {cidr}")
+    failures.extend(ipblock_failures(document, label))
+    return failures
+
+
+def ipblock_failures(document: str, label: str) -> list[str]:
+    """Each ipBlock as the API server validates it: a CIDR in canonical
+    form, never IPv4-mapped IPv6, and each except a strict subset of its
+    cidr in the same family. Dev refused the first delivery of cw-egress on
+    the mapped range (codewire#4000), which no offline schema catches."""
+    failures: list[str] = []
+    blocks = re.findall(
+        r"^(\s*)(?:- )?ipBlock:\s*\n((?:\1\s+.*\n?)*)", without_comments(document), re.MULTILINE
+    )
+    for _, block in blocks:
+        cidr_values = re.findall(r"^\s*cidr:\s*['\"]?([^'\"\s]+)", block, re.MULTILINE)
+        excepts = re.findall(r"^\s*- ['\"]?([0-9A-Fa-f:.]+/[0-9]+)['\"]?\s*$", block, re.MULTILINE)
+        if len(cidr_values) != 1:
+            failures.append(f"{label}: an ipBlock must have exactly one cidr")
+            continue
+        parsed: dict[str, ipaddress.IPv4Network | ipaddress.IPv6Network] = {}
+        for value in cidr_values + excepts:
+            try:
+                network = ipaddress.ip_network(value)
+            except ValueError:
+                failures.append(f"{label}: {value} is not a CIDR in canonical form")
+                continue
+            if isinstance(network, ipaddress.IPv6Network) and network.network_address.ipv4_mapped is not None:
+                failures.append(f"{label}: {value} is IPv4-mapped IPv6, which Kubernetes refuses in an ipBlock")
+                continue
+            parsed[value] = network
+        outer = parsed.get(cidr_values[0])
+        if outer is None:
+            continue
+        for value in excepts:
+            inner = parsed.get(value)
+            if inner is None:
+                continue
+            if inner.version != outer.version or not inner.subnet_of(outer) or inner == outer:
+                failures.append(f"{label}: except {value} must be a strict subset of cidr {cidr_values[0]}")
     return failures
 
 
@@ -264,7 +310,6 @@ GOOD_POLICY = """spec:
             cidr: ::/0
             except:
               - ::1/128
-              - ::ffff:0:0/96
               - 64:ff9b::/96
               - 64:ff9b:1::/48
               - 2001::/32
@@ -358,7 +403,10 @@ def self_test() -> list[str]:
             "CGNAT opened": ("              - 100.64.0.0/10\n", ""),
             "IPv6 local opened": ("              - fc00::/7\n", ""),
             "NAT64 opened": ("              - 64:ff9b::/96\n", ""),
-            "IPv4-mapped opened": ("              - ::ffff:0:0/96\n", ""),
+            "an IPv4-mapped except": ("              - ::1/128\n", "              - ::1/128\n              - ::ffff:0:0/96\n"),
+            "an IPv4-mapped cidr": ("cidr: ::/0", "cidr: ::ffff:0:0/96"),
+            "an except outside its cidr": ("              - 10.0.0.0/8\n", "              - 10.0.0.0/8\n              - fc00::/7\n"),
+            "a non-canonical CIDR": ("              - 10.0.0.0/8\n", "              - 10.0.0.1/8\n"),
             "6to4 opened": ("              - 2002::/16\n", ""),
             "Teredo opened": ("              - 2001::/32\n", ""),
             "IPv6 multicast opened": ("              - ff00::/8\n", ""),
@@ -407,6 +455,14 @@ def check_egress_manifests(args: argparse.Namespace) -> int:
         failures.extend(service_failures(service))
     if policy is not None:
         failures.extend(network_policy_failures(policy))
+    # Every other NetworkPolicy deploy applies holds the same ipBlock rules.
+    for path in sorted((ROOT / NETWORK_POLICY_ROOT).rglob("*.yaml")):
+        relative = str(path.relative_to(ROOT))
+        if relative == NETWORK_POLICY:
+            continue
+        for document in documents(path.read_text(encoding="utf-8")):
+            if re.search(r"^kind: NetworkPolicy\s*$", document, re.MULTILINE):
+                failures.extend(ipblock_failures(document, relative))
     if report("egress manifests", failures):
         return 1
     print("egress manifests: OK")

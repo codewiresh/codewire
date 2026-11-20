@@ -71,9 +71,10 @@ spec:
             cidr: ::/0
             except:
               - ::1/128
-              # IPv4-mapped, NAT64, Teredo and 6to4 addresses reach IPv4,
-              # private ranges and metadata included.
-              - ::ffff:0:0/96
+              # NAT64, Teredo and 6to4 addresses reach IPv4, private ranges
+              # and metadata included. IPv4-mapped addresses (::ffff:0:0/96)
+              # need no entry, and Kubernetes refuses one: a socket that
+              # dials one sends IPv4, which the rule above already holds.
               - 64:ff9b::/96
               - 64:ff9b:1::/48
               - 2001::/32
