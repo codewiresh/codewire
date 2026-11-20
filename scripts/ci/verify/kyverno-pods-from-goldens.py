@@ -36,21 +36,16 @@ HOSTED = (
     "warm-pool-subfolder-sandboxtemplate",
     "identity-free-sandboxtemplate",
     "confidential-sandboxtemplate",
-)
-# Rendered for local Kind only (runc), which the shared policy refuses.
-LOCAL_ONLY = ("identity-free-sandboxtemplate-runc",)
-# Rendered only while a cluster runs hosted egress (#4000), which none does
-# yet: the shared policy still refuses the broker Pod's privileged TUN init.
-# Each moves into HOSTED in the change that turns hosted egress on, so policy
-# drift then requires every cluster's policy to admit it. Forgetting is
-# refused: while this names any golden, check-policy-drift.sh fails every tree
-# once codewire/deploy main sets CODEWIRE_HOSTED_EGRESS_ENABLED to true.
-HOSTED_EGRESS = (
+    # The broker-mode templates a cluster renders while it runs hosted egress
+    # (#4000): the warm pool's, and the per-environment one, standard and
+    # confidential (#5002). Every cluster's policy must admit them, whether
+    # or not that cluster has turned hosted egress on yet.
     "warm-pool-broker-sandboxtemplate",
-    # A broker-mode per-environment template, standard and confidential (#5002).
     "environment-broker-sandboxtemplate",
     "confidential-broker-sandboxtemplate",
 )
+# Rendered for local Kind only (runc), which the shared policy refuses.
+LOCAL_ONLY = ("identity-free-sandboxtemplate-runc",)
 PLACEHOLDER_REGISTRY = "registry.example.invalid/"
 # A host, with an optional port and no scheme or path.
 REGISTRY = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?$")
@@ -142,7 +137,7 @@ def cases(goldens: pathlib.Path, policy_text: str, registry: str) -> dict[str, d
         raise Refused("the goldens directory is not a directory of the tree")
     templates = sorted(path.name.removesuffix(".golden.json")
                        for path in goldens.glob("*sandboxtemplate*.golden.json"))
-    unknown = sorted(set(templates) - set(HOSTED) - set(LOCAL_ONLY) - set(HOSTED_EGRESS))
+    unknown = sorted(set(templates) - set(HOSTED) - set(LOCAL_ONLY))
     if unknown:
         raise Refused(f"unclassified SandboxTemplate goldens: {', '.join(unknown)}")
     missing = sorted(set(HOSTED) - set(templates))
@@ -177,10 +172,6 @@ def cases(goldens: pathlib.Path, policy_text: str, registry: str) -> dict[str, d
 
 
 def main(argv: list[str]) -> int:
-    if argv == ["--hosted-egress-only"]:
-        # The exempt goldens, one per line, for check-policy-drift.sh.
-        print("\n".join(HOSTED_EGRESS))
-        return 0
     if len(argv) != 4:
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         return 2

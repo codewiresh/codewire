@@ -42,6 +42,8 @@ EOF
 cases="$(python3 -I -B "$BUILDER" "$GOLDENS" "$work/policy.yaml" "$REGISTRY" "$work/pods")"
 for name in pass-warm-pool-sandboxtemplate pass-warm-pool-subfolder-sandboxtemplate \
   pass-identity-free-sandboxtemplate pass-confidential-sandboxtemplate \
+  pass-warm-pool-broker-sandboxtemplate pass-environment-broker-sandboxtemplate \
+  pass-confidential-broker-sandboxtemplate \
   deny-mount-registry deny-mount-renamed deny-mount-script deny-runc deny-dind-digest \
   deny-privileged-workspace; do
   grep -qw -- "$name" <<<"$cases" || fail "the builder made no $name case"
@@ -66,9 +68,6 @@ assert hosted, "no image names the hosted registry"
 warm = json.loads((pods / "deny-mount-script.json").read_text())
 mount = next(c for c in warm["spec"]["initContainers"] if c["name"] == "mount-workspace")
 assert mount["command"][-1] == "true"
-# A template rendered only while hosted egress is on is classified, not built,
-# until the change that turns hosted egress on moves it into HOSTED (#4000).
-assert not (pods / "pass-warm-pool-broker-sandboxtemplate.json").exists()
 PY
 
 # A SandboxTemplate golden nobody classified, or a hosted one gone, is refused.
@@ -171,31 +170,6 @@ FAKE_PLACEHOLDER_REFUSES=1 run_check && fail 'a tree Dev'"'"'s next promotion re
 grep -q "REFUSED by codewire/deploy scripts/render.py: Dev's next promotion would refuse this tree" "$work/out" ||
   fail 'the placeholder refusal does not say which check refused'
 grep -q 'contain source placeholders: 192.0.2.1' "$work/out" || fail 'the placeholder refusal hides what deploy found'
-
-# Deploy turning hosted egress on while a golden is still exempt is refused,
-# in every spelling a deploy overlay uses (#4000). The check fails closed: a
-# JSON patch names the key on one line and its value on the next, so it
-# counts as on whatever that value is.
-mkdir -p "$work/deploy/hosted/overlays/dev"
-for spelling in 'data:\n  CODEWIRE_HOSTED_EGRESS_ENABLED: "true"\n' 'CODEWIRE_HOSTED_EGRESS_ENABLED=true\n' \
-  '- op: replace\n  path: /data/CODEWIRE_HOSTED_EGRESS_ENABLED\n  value: "true"\n' \
-  '- op: replace\n  path: /data/CODEWIRE_HOSTED_EGRESS_ENABLED\n  value: "false"\n' \
-  '# CODEWIRE_HOSTED_EGRESS_ENABLED stays off\ndata:\n  CODEWIRE_HOSTED_EGRESS_ENABLED: "true"\n' \
-  'data:\n  CODEWIRE_HOSTED_EGRESS_ENABLED: "true" # on\n'; do
-  printf '%b' "$spelling" >"$work/deploy/hosted/overlays/dev/hosted-egress"
-  run_check && fail 'hosted egress on with an exempt golden passed'
-  grep -q 'still HOSTED_EGRESS in kyverno-pods-from-goldens.py: warm-pool-broker-sandboxtemplate' "$work/out" ||
-    fail 'the exempt golden is not named'
-done
-# A comment naming the switch sets nothing (deploy#311's opt-in says it is
-# still off).
-for spelling in 'data:\n  CODEWIRE_HOSTED_EGRESS_ENABLED: "false"\n' "CODEWIRE_HOSTED_EGRESS_ENABLED='false'\n" \
-  '# no broker-mode Pod dials it until CODEWIRE_HOSTED_EGRESS_ENABLED turns on\n' \
-  '  # CODEWIRE_HOSTED_EGRESS_ENABLED: "true" once Dev walks\n'; do
-  printf '%b' "$spelling" >"$work/deploy/hosted/overlays/dev/hosted-egress"
-  run_check || { cat "$work/out" >&2; fail 'hosted egress off refused an exempt golden'; }
-done
-rm -r "$work/deploy/hosted"
 
 FAKE_FLIP=pass-confidential-sandboxtemplate run_check && fail 'an inadmissible Pod passed'
 grep -q 'REFUSED by infrastructure clusters/example-dev/' "$work/out" || fail 'the infra refusal does not name the policy'
