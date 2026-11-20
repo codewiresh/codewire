@@ -83,13 +83,35 @@ name="$(basename "$output")"
 inner='
 set -euo pipefail
 printf "Server = https://archive.archlinux.org/repos/%s/\$repo/os/\$arch\n" "$SNAPSHOT" > /etc/pacman.d/mirrorlist
+# The archive can stall for minutes (cli-release 65835: "Operation too slow.
+# Less than 1 bytes/sec transferred the last 10 seconds"). pacman gives up
+# after 10 s of that, so its own stall abort is off and each call is bounded
+# here instead, and retried. Files already fetched stay in the pacman cache,
+# so a retry fetches only what is missing, and pacman still checks every
+# package signature as it installs it (#5619).
+sed -i "/^\[options\]/a DisableDownloadTimeout" /etc/pacman.conf
+grep -qx DisableDownloadTimeout /etc/pacman.conf
+# SIGINT, not the default SIGTERM of timeout: pacman removes its db.lck on INT
+# but leaves it on TERM, which made every retry fail at once on the lock (shown
+# in the pinned image). A lock left anyway is stale: nothing else here runs
+# pacman.
+fetch() {
+  local try
+  for try in 1 2 3; do
+    rm -f /var/lib/pacman/db.lck
+    timeout -s INT -k 30 900 pacman "$@" --noconfirm --noprogressbar >/dev/null && return 0
+    echo "build-runtime-kernel: pacman $1 failed (try $try of 3)" >&2
+    [ "$try" = 3 ] || sleep $((try * 20))
+  done
+  return 1
+}
 # The keyring package populates the local keyring on install; give it one.
 pacman-key --init >/dev/null 2>&1
-pacman -Syuu --noconfirm --noprogressbar >/dev/null
+fetch -Syuu
 # shellcheck disable=SC2086 # word lists
-pacman -S --noconfirm --needed --noprogressbar $TOOLS >/dev/null
+fetch -S --needed $TOOLS
 for pinned in $PACKAGES; do
-  pacman -S --noconfirm --needed --noprogressbar "${pinned%%=*}" >/dev/null
+  fetch -S --needed "${pinned%%=*}"
   installed="$(pacman -Q "${pinned%%=*}" | cut -d" " -f2)"
   [ "$installed" = "${pinned#*=}" ] || { echo "build-runtime-kernel: ${pinned%%=*} is $installed, pinned ${pinned#*=}" >&2; exit 1; }
 done
