@@ -446,7 +446,12 @@ fn api_key_client_errors_keep_cli_display_semantics() {
         codewire_client::ErrorCode::Unauthenticated,
         "unauthorized",
     ));
-    assert_eq!(unauthenticated.to_string(), "session expired or invalid");
+    assert!(
+        unauthenticated
+            .downcast_ref::<crate::error_report::CredentialRefused>()
+            .is_some(),
+        "{unauthenticated:#}"
+    );
 
     let not_found = display_client_error(codewire_client::ClientError::new(
         codewire_client::ErrorCode::NotFound,

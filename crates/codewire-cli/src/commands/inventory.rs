@@ -11,6 +11,8 @@ use super::*;
 use crate::config::selection::{EnvironmentSelection, SelectionLocation};
 use crate::output::{Allocation, Capabilities, NetworkRef, OutputMode, SourceRef, Status, Style};
 
+mod failure;
+
 /// Where an inventory row runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Location {
@@ -260,19 +262,11 @@ pub(crate) async fn environment_inventory(
                 LocationStatus::NotConfigured("the local VM runtime is not set up".to_owned()),
             ),
             Err(error) => {
-                let refusal = error
+                let recovery = error
                     .chain()
-                    .find_map(codewire_local_vmm::supervisor_client::supervisor_refusal);
-                match refusal.and_then(|refusal| Some((refusal.summary(), refusal.recovery()?))) {
-                    Some((summary, recovery)) => {
-                        inventory.report(Location::Local, LocationStatus::Unavailable(summary));
-                        inventory.recoveries.push((Location::Local, recovery));
-                    }
-                    None => inventory.report(
-                        Location::Local,
-                        LocationStatus::Unavailable(format!("{error:#}")),
-                    ),
-                }
+                    .find_map(codewire_local_vmm::supervisor_client::supervisor_refusal)
+                    .and_then(|refusal| Some((refusal.summary(), refusal.recovery()?)));
+                inventory.report_failure(Location::Local, recovery, &error);
             }
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -297,10 +291,10 @@ pub(crate) async fn environment_inventory(
                     Location::Cloud,
                     LocationStatus::NotConfigured(super::NO_ORGANIZATION.to_owned()),
                 ),
-                Err(error) => inventory.report(
-                    Location::Cloud,
-                    LocationStatus::Unavailable(format!("{error:#}")),
-                ),
+                Err(error) => {
+                    let recovery = crate::error_report::refused_recovery(&error);
+                    inventory.report_failure(Location::Cloud, recovery, &error);
+                }
             },
             Err(error) => {
                 let reason = cloud_not_configured(&error);

@@ -143,7 +143,14 @@ Issue: #3586, its third step (cw-security, 2026-11-18). A launch item (owner,
     running;
   - the API key behind a tailnet exec is disabled: that exec ends;
   - the account is disabled: every tailnet connection of the account ends;
-  - a new `cw shell` with the revoked credential is refused;
+  - a new `cw shell` with the revoked credential is refused, in words that
+    name the credential (#5559): with a saved sign-in (not yet observed),
+    `Not signed in: your saved sign-in is no longer accepted`, then
+    `→ cw login`; with `CODEWIRE_API_KEY` set (observed on Dev,
+    2026-11-20, below), `The API key in CODEWIRE_API_KEY is no longer
+    accepted`, then `→ set CODEWIRE_API_KEY to a current key, or unset it
+    and run cw login`. No internal step (such as `list orgs`) is named, and
+    `cw ls` shows that step in place of a retry;
   - a credential that only expires: its connection keeps running;
   - **on the Sandbox, the removed client's SSH connection closes at once**
     (#3586, after its third step): its shell's processes end when the peer
@@ -169,7 +176,10 @@ Issue: #3586, its third step (cw-security, 2026-11-18). A launch item (owner,
      "Access revoked".
   4. Disable the account: B's lines stop and its shell ends. Enable the
      account afterwards; a new `cw login` and `cw shell` work at once.
-  5. With the copy of A's revoked sign-in, run `cw shell <sandbox>`: refused.
+  5. With the copy of A's revoked sign-in, run `cw shell <sandbox>`: refused,
+     with `Not signed in: your saved sign-in is no longer accepted`. With the
+     disabled key in `CODEWIRE_API_KEY`, `cw exec <sandbox> -- true`: refused,
+     naming the key (both not yet observed).
 - **Proof:** the last line each stream printed lies within 30 seconds of its
   revocation, a `stream.revoked` audit event with the surface `tailnet` for
   each, and the surviving streams still printing at the end of their step.
@@ -216,5 +226,11 @@ Issue: #3586, its third step (cw-security, 2026-11-18). A launch item (owner,
   (2026-11-18, above), not on Dev: they need a person's own sign-in rather
   than the smoke identity's key. Not yet observed on Dev: the
   `stream.revoked` audit event, read here only as the coordinator's log
-  line. The deleted key's refusal reads `List orgs:
-  session expired or invalid`, which names an internal call.
+  line. The deleted key's refusal read `List orgs:
+  session expired or invalid`, which named an internal call. With a `cw`
+  built with #5559's change (2026-11-20, the same Dev source, the smoke
+  identity's deleted test key), `cw exec` printed `x The API key in
+  CODEWIRE_API_KEY is no longer accepted` and `-> set CODEWIRE_API_KEY to a
+  current key, or unset it and run cw login`, and `cw ls` printed `! Cloud
+  environments could not be listed: the API key in CODEWIRE_API_KEY is no
+  longer accepted` with the same step and no retry.

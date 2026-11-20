@@ -30,6 +30,62 @@ pub(crate) fn with_next_step(error: anyhow::Error, step: impl Into<String>) -> a
     error.context(NextStep(step.into()))
 }
 
+/// A credential the platform refused (#5559): the API key in
+/// `CODEWIRE_API_KEY` when one is set, since it takes precedence, otherwise
+/// the saved sign-in. Its sentence stands alone; the internal steps around it
+/// (`list orgs`) name nothing the user can act on.
+#[derive(Debug)]
+pub(crate) struct CredentialRefused {
+    api_key: bool,
+}
+
+impl fmt::Display for CredentialRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.api_key {
+            "the API key in CODEWIRE_API_KEY is no longer accepted"
+        } else {
+            "not signed in: your saved sign-in is no longer accepted"
+        })
+    }
+}
+
+impl std::error::Error for CredentialRefused {}
+
+impl CredentialRefused {
+    /// Carried here rather than as a [`NextStep`] context, so every display
+    /// of the error starts with its sentence.
+    fn step(&self) -> &'static str {
+        if self.api_key {
+            "set CODEWIRE_API_KEY to a current key, or unset it and run cw login"
+        } else {
+            "cw login"
+        }
+    }
+}
+
+/// A refused credential's sentence and next step, for a caller that shows
+/// a failure in its own shape.
+pub(crate) fn refused_recovery(error: &anyhow::Error) -> Option<(String, String)> {
+    let refused = error.downcast_ref::<CredentialRefused>()?;
+    Some((refused.to_string(), refused.step().to_owned()))
+}
+
+/// The error for a request the platform answered `unauthenticated`.
+pub(crate) fn credential_refused() -> anyhow::Error {
+    let api_key =
+        std::env::var(crate::config::CODEWIRE_API_KEY_ENV).is_ok_and(|key| !key.trim().is_empty());
+    refused(api_key)
+}
+
+fn refused(api_key: bool) -> anyhow::Error {
+    anyhow::Error::new(CredentialRefused { api_key })
+}
+
+#[cfg(test)]
+pub(crate) fn refused_for_tests(api_key: bool) -> anyhow::Error {
+    refused(api_key)
+}
+
 /// Prints a failed command's error on stderr in the one shape. With
 /// `--output json` it prints the chain alone, as before, with no mark.
 pub fn report_error(error: &anyhow::Error) {
@@ -43,13 +99,23 @@ pub fn report_error(error: &anyhow::Error) {
 
 /// The next step `error` carries, wherever it sits in the chain.
 pub(crate) fn next_step(error: &anyhow::Error) -> Option<String> {
-    error.downcast_ref::<NextStep>().map(|next| next.0.clone())
+    error
+        .downcast_ref::<NextStep>()
+        .map(|next| next.0.clone())
+        .or_else(|| {
+            error
+                .downcast_ref::<CredentialRefused>()
+                .map(|refused| refused.step().to_owned())
+        })
 }
 
 /// `error`'s chain as one sentence, joined by ": ", without its next step.
 /// A caller that rebuilds an error from this text attaches the step again
 /// with [`with_next_step`].
 pub(crate) fn sentence(error: &anyhow::Error) -> String {
+    if let Some(refused) = error.downcast_ref::<CredentialRefused>() {
+        return refused.to_string();
+    }
     // A context shows in the chain as its own Display, so the step is found
     // through the error (which reaches every context) and its one layer is
     // left out of the sentence.
@@ -135,6 +201,21 @@ mod tests {
         assert_eq!(
             render(&error, Style::new(false, Charset::Ascii)),
             "x Cw whoami failed: not signed in\n-> cw login\n"
+        );
+    }
+
+    #[test]
+    fn a_refused_credential_names_which_and_none_of_the_steps_around_it() {
+        let sign_in = refused(false).context("list orgs");
+        assert_eq!(
+            render(&sign_in, PLAIN),
+            "✗ Not signed in: your saved sign-in is no longer accepted\n→ cw login\n"
+        );
+        let api_key = refused(true).context("list orgs");
+        assert_eq!(
+            render(&api_key, PLAIN),
+            "✗ The API key in CODEWIRE_API_KEY is no longer accepted\n\
+             → set CODEWIRE_API_KEY to a current key, or unset it and run cw login\n"
         );
     }
 
