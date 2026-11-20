@@ -43,6 +43,7 @@ const WINDOW: Duration = Duration::from_secs(60 * 60);
 const MAX_CLI_VERSION_CHARS: usize = 64;
 const MAX_PLATFORM_CHARS: usize = 32;
 const MAX_ENVIRONMENT_ID_CHARS: usize = 128;
+const MAX_REPLY_EMAIL_CHARS: usize = 254;
 
 /// The label the address-hash key is derived under from the service's
 /// session secret, so it is never the secret itself nor another service's
@@ -112,8 +113,9 @@ impl Placement {
     }
 }
 
-/// One submission as the caller sent it.
-#[derive(Clone, Debug, Default)]
+/// One submission as the caller sent it. Its `Debug` leaves out the reply
+/// address, which is personal data.
+#[derive(Clone, Default)]
 pub struct NewFeedback<'a> {
     pub message: &'a str,
     pub cli_version: &'a str,
@@ -122,6 +124,23 @@ pub struct NewFeedback<'a> {
     pub placement: Option<Placement>,
     pub environment_id: Option<&'a str>,
     pub org_id: Option<&'a str>,
+    /// An address an anonymous sender gives for a reply (#5466).
+    pub reply_email: Option<&'a str>,
+}
+
+impl std::fmt::Debug for NewFeedback<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewFeedback")
+            .field("message", &self.message)
+            .field("cli_version", &self.cli_version)
+            .field("os", &self.os)
+            .field("arch", &self.arch)
+            .field("placement", &self.placement)
+            .field("environment_id", &self.environment_id)
+            .field("org_id", &self.org_id)
+            .field("reply_email", &self.reply_email.map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 /// The stored row's identity.
@@ -199,6 +218,17 @@ fn environment_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
+/// One plain email address, by the rule `CODEWIRE_OPERATOR_EMAIL` follows:
+/// at most 254 printable ASCII characters, one '@', a dotted domain.
+fn reply_email(address: &str) -> bool {
+    address.len() <= MAX_REPLY_EMAIL_CHARS
+        && address.matches('@').count() == 1
+        && address
+            .split_once('@')
+            .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'))
+        && address.chars().all(|c| c.is_ascii_graphic())
+}
+
 /// Field checks, before any database access. They match the table's
 /// constraints, so a refusal names the field instead of failing an insert.
 pub fn validate(feedback: &NewFeedback<'_>) -> AppResult<()> {
@@ -236,6 +266,15 @@ pub fn validate(feedback: &NewFeedback<'_>) -> AppResult<()> {
         errors.push(issue(
             "/environment_id",
             "must be 1 to 128 letters, digits, '.', '_' or '-', starting with a letter or digit",
+        ));
+    }
+    if feedback
+        .reply_email
+        .is_some_and(|address| !reply_email(address))
+    {
+        errors.push(issue(
+            "/reply_email",
+            "must be one email address, such as you@example.com",
         ));
     }
     if errors.is_empty() {
@@ -280,6 +319,15 @@ pub async fn submit_feedback(
     feedback: &NewFeedback<'_>,
 ) -> Result<StoredFeedback, SubmitFeedbackError> {
     validate(feedback)?;
+    if user.is_some() && feedback.reply_email.is_some() {
+        return Err(AppError::Validation {
+            errors: vec![issue(
+                "/reply_email",
+                "only feedback sent without signing in gives a reply address; an answer goes to your account's address",
+            )],
+        }
+        .into());
+    }
     let organization_id = sender_organization(pool, user, feedback.org_id).await?;
     let address_hash = address.map(|address| key.hash(address));
     let user_id = user.map(|user| user.user_id.as_str());
@@ -306,8 +354,8 @@ pub async fn submit_feedback(
     let row = sqlx::query(
         r#"INSERT INTO feedback
                (user_id, organization_id, message, cli_version, os, arch,
-                placement, environment_id, client_address_hash)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                placement, environment_id, client_address_hash, reply_email)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
            RETURNING id, created_at"#,
     )
     .bind(user_id)
@@ -319,6 +367,7 @@ pub async fn submit_feedback(
     .bind(feedback.placement.map(Placement::as_str))
     .bind(feedback.environment_id)
     .bind(address_hash)
+    .bind(feedback.reply_email)
     .fetch_one(&mut *transaction)
     .await
     .map_err(storage_error)?;
@@ -565,6 +614,15 @@ mod tests {
                 .collect(),
             Err(other) => panic!("unexpected error {other:?}"),
         }
+    }
+
+    #[test]
+    fn debug_output_redacts_the_reply_address() {
+        let mut given = feedback("answer me");
+        given.reply_email = Some("walker@example.test");
+        let debug = format!("{given:?}");
+        assert!(!debug.contains("walker@example.test"), "{debug}");
+        assert!(debug.contains("answer me"), "{debug}");
     }
 
     #[test]

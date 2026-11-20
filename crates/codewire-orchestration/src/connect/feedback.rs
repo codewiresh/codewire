@@ -64,6 +64,7 @@ impl FeedbackService for FeedbackConnectService {
             placement,
             environment_id: request.environment_id,
             org_id: request.org_id,
+            reply_email: request.reply_email,
         };
         let stored = submit_feedback(&self.pool, &self.key, user.as_ref(), address, &feedback)
             .await

@@ -111,8 +111,9 @@ pub struct Claimed {
 }
 
 /// One piece of feedback as the email shows it. The sender's fields are
-/// `None` for anonymous feedback.
-#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
+/// `None` for anonymous feedback. Its `Debug` leaves out the reply address,
+/// which is personal data.
+#[derive(Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct Feedback {
     pub id: String,
     pub created_at: DateTime<Utc>,
@@ -126,6 +127,31 @@ pub struct Feedback {
     pub sender_verified: Option<bool>,
     pub sender_name: Option<String>,
     pub organization: Option<String>,
+    /// The address an anonymous sender gave for a reply, unverified.
+    pub reply_email: Option<String>,
+}
+
+impl std::fmt::Debug for Feedback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Feedback")
+            .field("id", &self.id)
+            .field("created_at", &self.created_at)
+            .field("message", &self.message)
+            .field("cli_version", &self.cli_version)
+            .field("os", &self.os)
+            .field("arch", &self.arch)
+            .field("placement", &self.placement)
+            .field("environment_id", &self.environment_id)
+            .field("sender_email", &self.sender_email)
+            .field("sender_verified", &self.sender_verified)
+            .field("sender_name", &self.sender_name)
+            .field("organization", &self.organization)
+            .field(
+                "reply_email",
+                &self.reply_email.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 /// The email for one piece of feedback.
@@ -182,10 +208,18 @@ pub fn feedback_notice(feedback: &Feedback, feedback_url: &str) -> Notice {
     let id = shown_line(&feedback.id);
     let mut reply_to = None;
     let (from, reply) = match &feedback.sender_email {
-        None => (
-            "Anonymous".to_owned(),
-            "Sent without signing in, so there is no address to reply to.".to_owned(),
-        ),
+        None => match feedback.reply_email.as_deref().map(shown_line) {
+            // Shown, never a Reply-To, and never mailed by Codewire: nobody
+            // has checked that it is the sender's (cw-security, #5466).
+            Some(address) if !address.is_empty() => (
+                format!("Anonymous, reply address {address} (given with the feedback, not verified)"),
+                "Nobody has checked this address; don't share account or billing details in a reply.".to_owned(),
+            ),
+            _ => (
+                "Anonymous".to_owned(),
+                "Sent without signing in, so there is no address to reply to.".to_owned(),
+            ),
+        },
         Some(address) => {
             let verified = feedback.sender_verified == Some(true);
             let shown = shown_line(address);
@@ -404,7 +438,7 @@ pub async fn load(pool: &PgPool, feedback_id: &str) -> Result<Option<Feedback>, 
         r#"SELECT f.id, f.created_at, f.message, f.cli_version, f.os, f.arch, f.placement,
                   f.environment_id, u.email AS sender_email,
                   u.email_verified AS sender_verified, u.name AS sender_name,
-                  o.name AS organization
+                  o.name AS organization, f.reply_email
              FROM feedback f
              LEFT JOIN users u ON u.id = f.user_id
              LEFT JOIN organizations o ON o.id = f.organization_id
@@ -561,9 +595,21 @@ mod tests {
             sender_verified: Some(true),
             sender_name: Some("Ada".into()),
             organization: Some("Acme".into()),
+            reply_email: None,
         };
         overrides(&mut feedback);
         feedback
+    }
+
+    #[test]
+    fn debug_output_redacts_the_reply_address() {
+        let given = feedback(|f| {
+            f.sender_email = None;
+            f.reply_email = Some("walker@example.test".into());
+        });
+        let debug = format!("{given:?}");
+        assert!(!debug.contains("walker@example.test"), "{debug}");
+        assert!(debug.contains("feedback-synthetic"), "{debug}");
     }
 
     #[test]
@@ -588,6 +634,43 @@ mod tests {
              --\n\
              All feedback: https://app.codewire.test/admin/feedback/\n\
              You got this email because this address is the operator address of a Codewire server.\n"
+        );
+    }
+
+    /// An anonymous sender's reply address is shown, marked and warned
+    /// about, and is never the Reply-To (cw-security, #5466).
+    #[test]
+    fn an_anonymous_reply_address_is_shown_but_never_the_reply_to() {
+        let notice = feedback_notice(
+            &feedback(|f| {
+                f.sender_email = None;
+                f.sender_verified = None;
+                f.sender_name = None;
+                f.organization = None;
+                f.reply_email = Some("walker@example.test\r\nBcc: eve@example.test".into());
+            }),
+            URL,
+        );
+        assert_eq!(notice.reply_to, None);
+        assert!(notice.text.contains(
+            "From: Anonymous, reply address walker@example.test Bcc: eve@example.test (given with the feedback, not verified)\n"
+        ));
+        assert!(notice.text.contains(
+            "Nobody has checked this address; don't share account or billing details in a reply.\n"
+        ));
+        let plain = feedback_notice(
+            &feedback(|f| {
+                f.sender_email = None;
+                f.sender_verified = None;
+                f.reply_email = Some("walker@example.test".into());
+            }),
+            URL,
+        );
+        assert_eq!(plain.reply_to, None);
+        assert!(
+            plain.text.contains(
+                "reply address walker@example.test (given with the feedback, not verified)"
+            )
         );
     }
 

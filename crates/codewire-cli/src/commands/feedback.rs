@@ -16,6 +16,7 @@ use crate::output::{Capabilities, OutputMode, run_message_input};
 /// enforces the same limit.
 pub(crate) const MAX_FEEDBACK_BYTES: usize = 10 * 1024;
 const MAX_ENVIRONMENT_ID_BYTES: usize = 128;
+const MAX_REPLY_EMAIL_BYTES: usize = 254;
 
 pub(crate) const FEEDBACK_LONG_ABOUT: &str = "Send a message to the Codewire team.
 
@@ -34,7 +35,9 @@ No logs, files, environment contents or settings are sent. Do not paste
 secrets into the message.
 
 Signed in, the feedback records your account and your current organization.
-Signed out, or with --anonymous, it records neither. Your network address is
+Signed out, or with --anonymous, it records neither; cw then asks for an
+email address to answer you at, which you may leave empty (--email ADDRESS
+gives it without asking). Your network address is
 never stored: only a keyed hash of it, which limits how much one address can
 send. Only Codewire's platform admins can read feedback.
 
@@ -58,6 +61,12 @@ pub(crate) struct FeedbackArgs {
         help = "An environment the feedback is about; only its ID is sent"
     )]
     environment: Option<String>,
+    #[arg(
+        long,
+        value_name = "ADDRESS",
+        help = "Not signed in: an email address to answer you at"
+    )]
+    email: Option<String>,
     #[arg(short, long, help = "Send without asking for confirmation")]
     yes: bool,
     #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text, help = "Output format")]
@@ -126,6 +135,26 @@ fn checked_environment_id(id: &str) -> anyhow::Result<String> {
         "--environment must be an environment ID: letters, digits, '.', '_' or '-'"
     );
     Ok(id.to_owned())
+}
+
+/// The same rule the server applies to a reply address: one plain address,
+/// at most 254 printable ASCII characters with one '@' and a dotted domain.
+fn reply_email_valid(address: &str) -> bool {
+    address.len() <= MAX_REPLY_EMAIL_BYTES
+        && address.matches('@').count() == 1
+        && address
+            .split_once('@')
+            .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'))
+        && address.chars().all(|c| c.is_ascii_graphic())
+}
+
+fn checked_reply_email(address: &str) -> anyhow::Result<String> {
+    let address = address.trim();
+    anyhow::ensure!(
+        reply_email_valid(address),
+        "--email must be one email address, such as you@example.com"
+    );
+    Ok(address.to_owned())
 }
 
 /// Local or cloud: the explicit flag, else where the selected environment
@@ -300,6 +329,7 @@ fn request(
     message: String,
     placement: FeedbackPlacement,
     environment_id: Option<String>,
+    reply_email: Option<String>,
     sender: &Sender,
 ) -> SubmitFeedbackRequest {
     SubmitFeedbackRequest {
@@ -316,6 +346,7 @@ fn request(
             } => Some(id.clone()),
             _ => None,
         },
+        reply_email,
         ..Default::default()
     }
 }
@@ -332,13 +363,34 @@ fn summary(sender: &Sender, request: &SubmitFeedbackRequest) -> String {
     if let Some(id) = &request.environment_id {
         attached.push(format!("environment {id}"));
     }
+    let reply = request
+        .reply_email
+        .as_deref()
+        .map(|address| format!("  Reply to  {}\n", terminal_text(address)))
+        .unwrap_or_default();
     format!(
-        "Feedback for the Codewire team at {}\n  From      {}\n  Attached  {}\n  Message   {} bytes\n",
+        "Feedback for the Codewire team at {}\n  From      {}\n{reply}  Attached  {}\n  Message   {} bytes\n",
         terminal_text(sender.server_url()),
         terminal_text(&sender.describe()),
         terminal_text(&attached.join(", ")),
         request.message.len()
     )
+}
+
+/// Not signed in, at a terminal and without --email or --yes, asks for an
+/// address to answer the sender at; an empty answer gives none.
+fn ask_reply_email() -> anyhow::Result<Option<String>> {
+    let answer = super::guided::text("Email address for a reply (optional)", None, |value| {
+        let value = value.trim();
+        if value.is_empty() || reply_email_valid(value) {
+            Ok(())
+        } else {
+            Err("Enter one email address, such as you@example.com, or leave it empty".into())
+        }
+    })
+    .map_err(|_| anyhow::anyhow!("canceled; no feedback sent"))?;
+    let answer = answer.trim();
+    Ok((!answer.is_empty()).then(|| answer.to_owned()))
 }
 
 pub(crate) async fn handle_feedback_command(
@@ -373,6 +425,7 @@ pub(crate) async fn handle_feedback_command(
         }
     };
     let message = checked_message(&raw)?;
+    let given_email = args.email.as_deref().map(checked_reply_email).transpose()?;
 
     let sender = resolve_sender(globals, &paths, &env, args.anonymous).await?;
     let selected = selection::load(&paths.mesh_data_dir)
@@ -380,7 +433,20 @@ pub(crate) async fn handle_feedback_command(
         .flatten()
         .map(|selected| selected.location);
     let placement = feedback_placement(globals.placement, selected);
-    let request = request(message, placement, environment_id, &sender);
+    let interactive = !args.yes
+        && matches!(args.output, OutputFormat::Text)
+        && stdin_is_terminal
+        && super::guided::available(OutputFormat::Text);
+    let reply_email = match (&sender, given_email) {
+        (Sender::SignedIn { .. }, Some(_)) => anyhow::bail!(
+            "--email is only for feedback sent without signing in; an answer goes to your account's address. Nothing was sent"
+        ),
+        (Sender::SignedIn { .. }, None) => None,
+        (Sender::Anonymous { .. }, Some(address)) => Some(address),
+        (Sender::Anonymous { .. }, None) if interactive => ask_reply_email()?,
+        (Sender::Anonymous { .. }, None) => None,
+    };
+    let request = request(message, placement, environment_id, reply_email, &sender);
 
     eprint!("{}", summary(&sender, &request));
     if !args.yes {
@@ -420,7 +486,7 @@ pub(crate) async fn handle_feedback_command(
                 "signed_in": response.signed_in,
             }))?
         ),
-        OutputFormat::Text => println!("Feedback sent ({}). Thank you.", response.id),
+        OutputFormat::Text => println!("Thanks, we read every message."),
     }
     Ok(())
 }
@@ -509,6 +575,7 @@ mod tests {
             "hello".into(),
             FeedbackPlacement::FEEDBACK_PLACEMENT_CLOUD,
             Some("env-1".into()),
+            None,
             &sender,
         );
         assert_eq!(request.org_id, None);
@@ -528,6 +595,42 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Message   5 bytes\n"), "{text}");
+        assert!(!text.contains("Reply to"), "{text}");
+    }
+
+    /// An anonymous sender's reply address (#5466) is checked by the
+    /// server's rule, sent as given, and shown before sending.
+    #[test]
+    fn a_reply_address_is_one_plain_address_and_is_shown() {
+        assert_eq!(
+            checked_reply_email(" walker@example.test ").unwrap(),
+            "walker@example.test"
+        );
+        for bad in [
+            "",
+            "walker",
+            "walker@example",
+            "a@b@example.test",
+            "a b@example.test",
+            "walker@example.test\nBcc: eve@example.test",
+        ] {
+            assert!(checked_reply_email(bad).is_err(), "{bad:?}");
+        }
+        assert!(checked_reply_email(&format!("{}@example.test", "a".repeat(250))).is_err());
+        let sender = Sender::Anonymous {
+            server_url: "https://codewire.example".into(),
+            chosen: false,
+        };
+        let request = request(
+            "hello".into(),
+            FeedbackPlacement::FEEDBACK_PLACEMENT_UNSPECIFIED,
+            None,
+            Some("walker@example.test".into()),
+            &sender,
+        );
+        assert_eq!(request.reply_email.as_deref(), Some("walker@example.test"));
+        let text = summary(&sender, &request);
+        assert!(text.contains("  Reply to  walker@example.test\n"), "{text}");
     }
 
     #[test]
@@ -545,6 +648,7 @@ mod tests {
         let request = request(
             "hi".into(),
             FeedbackPlacement::FEEDBACK_PLACEMENT_UNSPECIFIED,
+            None,
             None,
             &sender,
         );
@@ -568,6 +672,7 @@ mod tests {
             "Do not paste\nsecrets",
             "Only Codewire's platform admins can read feedback",
             "--yes sends without asking",
+            "--email ADDRESS",
         ] {
             assert!(FEEDBACK_LONG_ABOUT.contains(fragment), "{fragment}");
         }

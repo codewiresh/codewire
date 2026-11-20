@@ -163,6 +163,38 @@ async fn db_a_row_records_the_sender_and_only_what_was_attached() -> anyhow::Res
             submit(&db, None, None, &anonymous_org).await,
             Err(SubmitFeedbackError::Rejected(AppError::Validation { .. }))
         ));
+        // An anonymous sender may give a reply address (#5466); a signed-in
+        // one may not, and only one plain address is taken.
+        let mut with_address = feedback("anonymous, answer me");
+        with_address.reply_email = Some("walker@example.test");
+        let given = submit(&db, None, None, &with_address).await.unwrap();
+        let stored_address: Option<String> =
+            sqlx::query_scalar("SELECT reply_email FROM feedback WHERE id = $1")
+                .bind(&given.id)
+                .fetch_one(&db.pool)
+                .await?;
+        anyhow::ensure!(stored_address.as_deref() == Some("walker@example.test"));
+        anyhow::ensure!(matches!(
+            submit(&db, Some(&user), None, &with_address).await,
+            Err(SubmitFeedbackError::Rejected(AppError::Validation { .. }))
+        ));
+        for bad in [
+            "walker",
+            "walker@example",
+            "a@b@example.test",
+            "walker@example.test\r\nBcc: eve@example.test",
+            "a b@example.test",
+        ] {
+            let mut bad_address = feedback("anonymous, bad address");
+            bad_address.reply_email = Some(bad);
+            anyhow::ensure!(
+                matches!(
+                    submit(&db, None, None, &bad_address).await,
+                    Err(SubmitFeedbackError::Rejected(AppError::Validation { .. }))
+                ),
+                "{bad:?} accepted"
+            );
+        }
         // Validation runs before anything is stored.
         let oversized = "x".repeat(MAX_MESSAGE_BYTES + 1);
         anyhow::ensure!(matches!(
@@ -172,7 +204,7 @@ async fn db_a_row_records_the_sender_and_only_what_was_attached() -> anyhow::Res
         let total: i64 = sqlx::query_scalar("SELECT count(*) FROM feedback")
             .fetch_one(&db.pool)
             .await?;
-        anyhow::ensure!(total == 3, "total {total}");
+        anyhow::ensure!(total == 4, "total {total}");
         // Each stored piece, and nothing refused, queues one operator email
         // (#5466), naming only the feedback.
         let unqueued: i64 = sqlx::query_scalar(
@@ -185,7 +217,72 @@ async fn db_a_row_records_the_sender_and_only_what_was_attached() -> anyhow::Res
         let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM feedback_notices")
             .fetch_one(&db.pool)
             .await?;
-        anyhow::ensure!(unqueued == 0 && queued == 3, "queued {queued}");
+        anyhow::ensure!(unqueued == 0 && queued == 4, "queued {queued}");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// Everything logged while it is the thread's subscriber, at every level.
+#[derive(Clone, Default)]
+struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_reply_address_reaches_no_log() -> anyhow::Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        const GIVEN: &str = "walker-log-canary@example.test";
+        const MALFORMED: &str = "walker-log-canary@example";
+        const UNSTORABLE: &str = "walker-log-canary-unstorable@example.test";
+        // A row this database refuses, so the storage failure is logged with
+        // PostgreSQL's error, whose detail holds the failing row.
+        sqlx::raw_sql(&format!(
+            "ALTER TABLE feedback ADD CONSTRAINT synthetic_refusal \
+             CHECK (reply_email IS DISTINCT FROM '{UNSTORABLE}')"
+        ))
+        .execute(&db.pool)
+        .await?;
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        let _logging = tracing::subscriber::set_default(subscriber);
+        // Stored, refused for a signed-in sender, refused as malformed, and
+        // failed in storage.
+        let mut with_address = feedback("anonymous, answer me");
+        with_address.reply_email = Some(GIVEN);
+        submit(&db, None, None, &with_address).await.unwrap();
+        let user = session("feedback-log-user");
+        anyhow::ensure!(submit(&db, Some(&user), None, &with_address).await.is_err());
+        let mut malformed = feedback("anonymous, bad address");
+        malformed.reply_email = Some(MALFORMED);
+        anyhow::ensure!(submit(&db, None, None, &malformed).await.is_err());
+        let mut unstorable = feedback("anonymous, not stored");
+        unstorable.reply_email = Some(UNSTORABLE);
+        anyhow::ensure!(submit(&db, None, None, &unstorable).await.is_err());
+        let logs = String::from_utf8(captured.0.lock().unwrap().clone())?;
+        anyhow::ensure!(
+            logs.contains("feedback: storage failed") && logs.contains("synthetic_refusal"),
+            "the storage failure is logged: {logs}"
+        );
+        anyhow::ensure!(
+            !logs.contains("walker-log-canary"),
+            "a reply address was logged: {logs}"
+        );
         Ok(())
     }
     .await;

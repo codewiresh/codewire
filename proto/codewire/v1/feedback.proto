@@ -45,6 +45,12 @@ message SubmitFeedbackRequest {
   // must be a member, and an API key may name only its own organization (an
   // API key with none set records its own). Refused for anonymous senders.
   optional string org_id = 7;
+  // An email address an anonymous sender gives so the team can answer them:
+  // one plain address of at most 254 printable ASCII characters. It is stored
+  // as given, unverified, and never mailed by the server. Refused for
+  // signed-in senders, whose answer goes to their account's address. It is
+  // personal data, so Debug output redacts it.
+  optional string reply_email = 8 [debug_redact = true];
 }
 
 message SubmitFeedbackResponse {

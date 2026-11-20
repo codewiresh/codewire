@@ -19,7 +19,7 @@ FEEDBACK_PLACEMENT_LOCAL: FeedbackPlacement
 FEEDBACK_PLACEMENT_CLOUD: FeedbackPlacement
 
 class SubmitFeedbackRequest(_message.Message):
-    __slots__ = ("message", "cli_version", "os", "arch", "placement", "environment_id", "org_id")
+    __slots__ = ("message", "cli_version", "os", "arch", "placement", "environment_id", "org_id", "reply_email")
     MESSAGE_FIELD_NUMBER: _ClassVar[int]
     CLI_VERSION_FIELD_NUMBER: _ClassVar[int]
     OS_FIELD_NUMBER: _ClassVar[int]
@@ -27,6 +27,7 @@ class SubmitFeedbackRequest(_message.Message):
     PLACEMENT_FIELD_NUMBER: _ClassVar[int]
     ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    REPLY_EMAIL_FIELD_NUMBER: _ClassVar[int]
     message: str
     cli_version: str
     os: str
@@ -34,7 +35,8 @@ class SubmitFeedbackRequest(_message.Message):
     placement: FeedbackPlacement
     environment_id: str
     org_id: str
-    def __init__(self, message: _Optional[str] = ..., cli_version: _Optional[str] = ..., os: _Optional[str] = ..., arch: _Optional[str] = ..., placement: _Optional[_Union[FeedbackPlacement, str]] = ..., environment_id: _Optional[str] = ..., org_id: _Optional[str] = ...) -> None: ...
+    reply_email: str
+    def __init__(self, message: _Optional[str] = ..., cli_version: _Optional[str] = ..., os: _Optional[str] = ..., arch: _Optional[str] = ..., placement: _Optional[_Union[FeedbackPlacement, str]] = ..., environment_id: _Optional[str] = ..., org_id: _Optional[str] = ..., reply_email: _Optional[str] = ...) -> None: ...
 
 class SubmitFeedbackResponse(_message.Message):
     __slots__ = ("id", "created_at", "signed_in")

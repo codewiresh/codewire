@@ -319,3 +319,110 @@ async fn feedback_deleted_with_its_account_is_never_emailed() {
     assert_eq!(db.notice("from-leaving").await, None);
     db.drop().await;
 }
+
+/// An anonymous sender's reply address goes to the operator in the body, as
+/// one email, and Codewire never mails the address itself (cw-security,
+/// #5466).
+#[tokio::test]
+async fn a_reply_address_is_shown_to_the_operator_and_never_mailed() {
+    let Some(db) = TestDatabase::create("feedback_reply").await else {
+        return;
+    };
+    db.feedback("with-reply", None, "answer me").await;
+    sqlx::query("UPDATE feedback SET reply_email = 'walker@example.test' WHERE id = 'with-reply'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let mailer = Mailer::working();
+    run_pass(&db.pool, &mailer, Some(OPERATOR), FRONTEND)
+        .await
+        .unwrap();
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1, "exactly one email");
+    let (to, reply_to, subject, text) = &sent[0];
+    assert_eq!(to, OPERATOR);
+    assert_eq!(*reply_to, None);
+    assert_eq!(subject, "Codewire feedback with-reply");
+    assert!(text.contains(
+        "From: Anonymous, reply address walker@example.test (given with the feedback, not verified)\n"
+    ));
+    assert!(text.contains("Nobody has checked this address;"));
+    db.drop().await;
+}
+
+/// Everything logged while it is the thread's subscriber, at every level.
+#[derive(Clone, Default)]
+struct Captured(std::sync::Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_reply_address_is_in_the_email_and_in_no_log() {
+    let Some(db) = TestDatabase::create("feedback_reply_log").await else {
+        return;
+    };
+    const GIVEN: &str = "walker-log-canary@example.test";
+    for id in ["reply-sent", "reply-fails"] {
+        db.feedback(id, None, "answer me").await;
+        sqlx::query("UPDATE feedback SET reply_email = $1 WHERE id = $2")
+            .bind(GIVEN)
+            .bind(id)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("DELETE FROM feedback_notices WHERE feedback_id = 'reply-fails'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    let _logging = tracing::subscriber::set_default(subscriber);
+    // One sent, then one whose provider fails every attempt.
+    let mailer = Mailer::working();
+    run_pass(&db.pool, &mailer, Some(OPERATOR), FRONTEND)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO feedback_notices (feedback_id) VALUES ('reply-fails')")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let failing = Mailer {
+        available: true,
+        failing: true,
+        ..Mailer::default()
+    };
+    for _ in 0..MAX_ATTEMPTS {
+        run_pass(&db.pool, &failing, Some(OPERATOR), FRONTEND)
+            .await
+            .unwrap();
+        db.make_notices_due().await;
+    }
+    assert_eq!(
+        db.notice("reply-fails").await,
+        Some(("failed".into(), MAX_ATTEMPTS))
+    );
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].3.contains(GIVEN), "the email shows the address");
+    let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("sent feedback email"), "{logs}");
+    assert!(logs.contains("feedback email not sent"), "{logs}");
+    assert!(
+        !logs.contains("walker-log-canary"),
+        "a reply address was logged: {logs}"
+    );
+    db.drop().await;
+}

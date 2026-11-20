@@ -1,7 +1,7 @@
 ---
 title: cw itself
 description: version, install, upgrade, doctor, feedback, config and completion.
-updated: 2026-11-17
+updated: 2026-11-19
 weight: 8
 aliases: ["/cli/cw"]
 ---
@@ -141,7 +141,7 @@ Native local VM orphans: none
 ## cw feedback
 
 ```sh
-cw feedback "MESSAGE" [--anonymous] [--environment ID] [--yes] [-o json]
+cw feedback "MESSAGE" [--anonymous] [--email ADDRESS] [--environment ID] [--yes] [-o json]
 cw feedback                      # at a terminal: type the message
 some-command | cw feedback --yes # from a script: the message on stdin
 ```
@@ -166,9 +166,11 @@ No logs, files, environment contents or settings are sent. Do not paste
 secrets into the message.
 
 Signed in, the feedback records your account and your current organization;
-signed out, or with `--anonymous`, it records neither. A sign-in that no
-longer works is refused rather than sent anonymously: run `cw login`, or send
-with `--anonymous`.
+signed out, or with `--anonymous`, it records neither. Then `cw` asks for an
+email address to answer you at, which you may leave empty; `--email ADDRESS`
+gives it without asking. A signed-in answer goes to your account's address, so
+`--email` is refused when signed in. A sign-in that no longer works is refused
+rather than sent anonymously: run `cw login`, or send with `--anonymous`.
 
 Sending is limited to 10 messages an hour for an account, 5 an hour
 anonymously from one address, and a ceiling for everyone together. A refusal
@@ -178,6 +180,7 @@ for what is stored and who reads it.
 | Flag | Meaning |
 | --- | --- |
 | `--anonymous` | Send without your account or organization |
+| `--email ADDRESS` | Not signed in: an email address to answer you at |
 | `--environment ID` | An environment the feedback is about; only its ID is sent |
 | `-y`, `--yes` | Send without asking |
 | `-o json` | Print the stored feedback's ID as JSON |
@@ -193,7 +196,7 @@ Feedback for the Codewire team at https://codewire.sh
   From      alice@example.com, organization Acme
   Attached  cw 0.4.3, linux x86_64, cloud
   Message   34 bytes
-Feedback sent (5f0c9a2e-0d7b-4c1e-9a43-2b8f6f3d1c11). Thank you.
+Thanks, we read every message.
 ```
 
 ## cw config

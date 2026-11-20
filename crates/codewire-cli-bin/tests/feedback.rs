@@ -203,10 +203,7 @@ async fn feedback_sends_signed_in_or_anonymously_and_only_what_it_shows() {
     )
     .await;
     assert!(output.status.success(), "{}", text(&output.stderr));
-    assert_eq!(
-        text(&output.stdout),
-        format!("Feedback sent ({FEEDBACK_ID}). Thank you.\n")
-    );
+    assert_eq!(text(&output.stdout), "Thanks, we read every message.\n");
     assert!(
         text(&output.stderr)
             .contains("From      anonymous (--anonymous): no account or organization\n")
@@ -238,9 +235,82 @@ async fn feedback_sends_signed_in_or_anonymously_and_only_what_it_shows() {
             .contains("From      anonymous (not signed in): no account or organization\n")
     );
     assert_eq!(state.lock().unwrap().submitted.len(), 3);
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .submitted
+            .last()
+            .unwrap()
+            .1
+            .reply_email,
+        None,
+        "--yes asks for no reply address"
+    );
+
+    // Not signed in, with --email (#5466): the address is checked, shown and
+    // sent; signed in, --email is refused and nothing is sent.
+    let output = cw(
+        root.path(),
+        &url,
+        false,
+        "",
+        &[
+            "feedback",
+            "answer me",
+            "--email",
+            "walker@example.test",
+            "--yes",
+        ],
+    )
+    .await;
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert!(text(&output.stderr).contains("  Reply to  walker@example.test\n"));
+    assert_eq!(
+        state
+            .lock()
+            .unwrap()
+            .submitted
+            .last()
+            .unwrap()
+            .1
+            .reply_email
+            .as_deref(),
+        Some("walker@example.test")
+    );
+    for (signed_in, address, refusal) in [
+        (false, "walker", "--email must be one email address"),
+        (
+            true,
+            "walker@example.test",
+            "--email is only for feedback sent without signing in",
+        ),
+    ] {
+        let before = state.lock().unwrap().submitted.len();
+        let output = cw(
+            root.path(),
+            &url,
+            signed_in,
+            "",
+            &["feedback", "answer me", "--email", address, "--yes"],
+        )
+        .await;
+        assert!(!output.status.success());
+        assert!(
+            text(&output.stderr).contains(refusal),
+            "{}",
+            text(&output.stderr)
+        );
+        assert_eq!(
+            state.lock().unwrap().submitted.len(),
+            before,
+            "nothing sent"
+        );
+    }
     {
         let state = state.lock().unwrap();
-        let (authorization, request) = state.submitted.last().unwrap();
+        // The third submission: the script's, before the --email cases.
+        let (authorization, request) = &state.submitted[2];
         assert_eq!(authorization, &None);
         assert_eq!(request.message, "from a script");
     }
@@ -272,7 +342,7 @@ async fn feedback_sends_signed_in_or_anonymously_and_only_what_it_shows() {
     }
     assert_eq!(
         state.lock().unwrap().submitted.len(),
-        3,
+        4,
         "nothing more was sent"
     );
 
@@ -430,6 +500,9 @@ async fn a_message_typed_in_the_terminal_is_sent_with_ctrl_d_or_canceled() {
         let mut process = Pty::spawn(&url, &["feedback", "--anonymous"], root.path());
         process.expect("Ctrl-D send");
         process.send(b"draft\x04");
+        // Not signed in, cw asks for a reply address; Enter leaves it empty.
+        process.expect("Email address for a reply (optional)");
+        process.send(b"\r");
         process.expect("Send this feedback?");
         // Down to Cancel, then Enter.
         process.send(b"\x1b[B");
@@ -445,12 +518,15 @@ async fn a_message_typed_in_the_terminal_is_sent_with_ctrl_d_or_canceled() {
         process.send("first line\rsecond, é\r".as_bytes());
         process.expect("second, é");
         process.send(b"\x04");
+        process.expect("Email address for a reply (optional)");
+        process.send(b"walker@example.test\r");
+        process.expect("Reply to  walker@example.test");
         process.expect("Message   21 bytes");
         process.expect("Send this feedback?");
         process.send(b"\r");
         let output = process.finish(true);
         assert!(
-            output.contains(&format!("Feedback sent ({FEEDBACK_ID}). Thank you.")),
+            output.contains("Thanks, we read every message."),
             "{output}"
         );
         let state = state.lock().unwrap();
@@ -458,6 +534,7 @@ async fn a_message_typed_in_the_terminal_is_sent_with_ctrl_d_or_canceled() {
         let (authorization, request) = &state.submitted[0];
         assert_eq!(authorization, &None);
         assert_eq!(request.message, "first line\nsecond, é");
+        assert_eq!(request.reply_email.as_deref(), Some("walker@example.test"));
     })
     .await
     .unwrap();

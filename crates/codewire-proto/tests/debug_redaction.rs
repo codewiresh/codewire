@@ -185,6 +185,7 @@ fn cases() -> BTreeMap<&'static str, Check> {
         "codewire.v1.SetSecretRequest" => v1::SetSecretRequest,
         "codewire.v1.SetUserSecretRequest" => v1::SetUserSecretRequest,
         "codewire.v1.StartClaudeSignInResponse" => v1::StartClaudeSignInResponse,
+        "codewire.v1.SubmitFeedbackRequest" => v1::SubmitFeedbackRequest,
     }
 }
 
