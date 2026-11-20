@@ -522,13 +522,34 @@ connection, and it ends in the same four cases (#3586):
   access away, never grant or widen it. Once every replica sends it, a remote
   client node without it is refused. Who may publish those subjects is
   limited by the NATS accounts (infra#2620).
-- **The environment's side:** a client chooses its own tailnet addresses,
-  and the coordinator passes them on, so an address another client held can
-  be announced again by a different one. The environment's daemon therefore
-  records each tailnet SSH connection, before its session runs anything,
-  with the node key of the peer that held the connection's address in the
-  peer set it last applied; a connection from an address no peer holds is
-  closed at once. When the daemon applies a peer set in which that key no
+- **Addresses** (#5561): a client chooses its own tailnet address, and the
+  coordinator checks it. A client node must carry exactly one address, an
+  IPv6 host address (`/128`) under Codewire's prefix `fd7a:115c:a1e0::/48`
+  that is not its environment's own; an environment's own node must carry
+  the address derived from the environment's id. Every `cw` release, from
+  the first (v0.3.391), announces one such address derived from a fresh
+  id, so the rule needs no version gate. Any other node is refused and its
+  session ends with `invalid_argument`. A client keeps the address of its
+  first node for its session's life: a later node with another address
+  ends the session the same way. The environment's session forwards an
+  address to the environment from one client node at a time: the first
+  live holder keeps it; a node with the same node key replaces it (a
+  reconnect, whose new node can arrive before the old one's removal); a
+  node with another key announcing it is not forwarded while the holder is
+  there. A node key is public, and the coordinator sees no proof that a
+  session holds its private half, so the same key means the same user only
+  through its binding: a key is bound to the first user and environment
+  that announced it, and another user's session announcing it is refused
+  before its node reaches any peer (`docs/dev/DERP-STUN.md`, "Coordinator
+  sessions and node keys"). Each refused or unforwarded node is counted
+  and logged with the environment and both peer ids, never a credential. The daemon's own rule stays behind this:
+  an address two nodes claim belongs to neither.
+- **The environment's side:** an address one client held can be announced
+  by a different client once the first leaves the peer set, so the
+  environment's daemon records each tailnet SSH connection, before its
+  session runs anything, with the node key of the peer that held the
+  connection's address in the peer set it last applied; a connection from
+  an address no peer holds is closed at once. When the daemon applies a peer set in which that key no
   longer holds that address, IPv4 or IPv6, it closes the connection at once,
   and none from any other peer. The shell or exec on it ends then, with its
   processes, as for a client that vanished, rather than when SSH's
@@ -536,6 +557,11 @@ connection, and it ends in the same four cases (#3586):
   daemon applies: a client absent from one has lost its connections, even
   if a later set holds it again. A client announced again under a new
   session keeps its node key and addresses, so its connections stay.
+- **Not yet:** after an environment's session moves to another replica, it
+  learns the clients on other replicas as they announce again, so the first
+  of them to announce an address holds it. That lets one admitted client
+  keep another off the environment until it leaves; it grants nothing.
+  Coordinator-assigned addresses would close it (#5563).
 
 The terminal and SSH-proxy WebSockets, Mesh sessions, and removal from an
 organization don't end a stream yet. Expiry ends no tailnet connection

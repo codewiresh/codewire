@@ -174,7 +174,11 @@ Issue: #3586, its third step (cw-security, 2026-11-18). A launch item (owner,
   revocation, a `stream.revoked` audit event with the surface `tailnet` for
   each, and the surviving streams still printing at the end of their step.
   The expiry case, the dropped NATS remove and a rejoin refused at the hello
-  are the coordinator's tests.
+  are the coordinator's tests, as are a client's address checks (#5561): a
+  node with another address shape, or the environment's own address, ends
+  its session, and a second client announcing a held address is not
+  forwarded while the first keeps working. A walk cannot drive them, since
+  `cw` announces only its own address.
 - **Gotchas:**
   - the two coordinator replicas matter in Production, not on a one-replica
     Kind cluster; the dropped-publish case is a test, not a walk;
