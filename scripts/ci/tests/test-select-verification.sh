@@ -1780,6 +1780,22 @@ run_paths_case retired_sdk_examples pull_request refs/pull/1512/head false \
   libs/sdk-examples/run-claude/go/main.go \
   libs/sdk-examples/run-claude/python/run_claude.py \
   libs/sdk-examples/run-claude/typescript/run_claude.ts
+# The SDK examples (#5109) build with their SDK's family; a lockfile also
+# runs the JavaScript supply-chain scan.
+run_paths_case sdk_examples_go pull_request refs/pull/5109/head false \
+  'go_consumer_interop go_support policy sdk_go' \
+  libs/sdk-examples/quickstart/go/main.go \
+  libs/sdk-examples/quickstart/go/go.mod \
+  libs/sdk-examples/quickstart/go/go.sum
+run_paths_case sdk_examples_typescript pull_request refs/pull/5109/head false \
+  'policy sdk_ts security security_js' \
+  libs/sdk-examples/quickstart/typescript/quickstart.ts \
+  libs/sdk-examples/quickstart/typescript/package.json \
+  libs/sdk-examples/quickstart/typescript/package-lock.json
+run_paths_case sdk_examples_python pull_request refs/pull/5109/head false \
+  'policy sdk_python' libs/sdk-examples/quickstart/python/quickstart.py
+run_paths_case sdk_examples_docs pull_request refs/pull/5109/head false \
+  'docs policy' libs/sdk-examples/README.md libs/sdk-examples/quickstart/README.md
 run_paths_case retired_cli_assets pull_request refs/pull/1513/head false \
   'policy security security_js' \
   apps/cli/.env.example \

@@ -26,8 +26,11 @@ for path in "${retired_paths[@]}"; do
   fi
 done
 
+# The SDK examples (#5109) are their own modules, one per example, built from
+# the workspace like the retired run-claude example was.
 expected_modules="$(cat <<'EOF'
 libs/gen-go/go.mod
+libs/sdk-examples/quickstart/go/go.mod
 libs/sdk-go/go.mod
 tests/contract/go.mod
 EOF
@@ -62,7 +65,7 @@ fi
 
 actual_modules="$(repository_go_modules "$ROOT")"
 if [ "$actual_modules" != "$expected_modules" ]; then
-  echo 'Go module ownership differs from the accepted three-module boundary' >&2
+  echo 'Go module ownership differs from the accepted module boundary' >&2
   diff -u <(printf '%s\n' "$expected_modules") <(printf '%s\n' "$actual_modules") >&2 || true
   exit 1
 fi

@@ -601,6 +601,7 @@ ios-clean:
 # Targets here mirror what the old separate codewiresh/sdk Makefile exposed.
 
 .PHONY: test-sdk test-sdk-go test-sdk-python test-sdk-ts \
+        test-sdk-examples test-sdk-examples-go test-sdk-examples-python test-sdk-examples-ts \
         sdk-e2e sdk-e2e-go sdk-e2e-python sdk-e2e-ts sdk-e2e-rust
 
 test-sdk: test-sdk-go test-sdk-python test-sdk-ts
@@ -610,6 +611,22 @@ test-sdk-go:
 
 test-sdk-ts:
 	cd libs/sdk-ts && npm ci --silent --install-links --ignore-scripts && npm run typecheck && npm test
+
+# The SDK examples (#5109) build and typecheck offline here; make sdk-e2e-*
+# runs them against a server.
+test-sdk-examples: test-sdk-examples-go test-sdk-examples-python test-sdk-examples-ts
+
+test-sdk-examples-go:
+	cd libs/sdk-examples/quickstart/go && GOWORK=off go build -o /dev/null . && GOWORK=off go vet .
+
+test-sdk-examples-python:
+	python3 -c 'import ast, sys; [ast.parse(open(p).read(), p) for p in sys.argv[1:]]' \
+	  libs/sdk-examples/quickstart/python/quickstart.py
+
+test-sdk-examples-ts:
+	cd libs/sdk-ts && npm ci --silent --install-links --ignore-scripts && npm run build --silent
+	cd libs/sdk-examples/quickstart/typescript && npm ci --silent --install-links --ignore-scripts && \
+	  ./node_modules/.bin/tsc --noEmit -p .
 
 test-sdk-python:
 	cd libs/sdk-python && \
@@ -625,14 +642,20 @@ sdk-e2e: sdk-e2e-go sdk-e2e-python sdk-e2e-ts sdk-e2e-rust
 
 sdk-e2e-go:
 	cd libs/sdk-go && go test -tags e2e -run TestE2E -v -timeout 10m
+	cd libs/sdk-examples/quickstart/go && go run .
 
 sdk-e2e-python: test-sdk-python
 	cd libs/sdk-python && \
 	  PYTHONPATH="$(CURDIR)/libs/gen-python$${PYTHONPATH:+:$$PYTHONPATH}" \
 	  .venv/bin/python -m unittest e2e_test -v
+	PYTHONPATH="$(CURDIR)/libs/gen-python$${PYTHONPATH:+:$$PYTHONPATH}" \
+	  libs/sdk-python/.venv/bin/python libs/sdk-examples/quickstart/python/quickstart.py
 
 sdk-e2e-ts:
 	cd libs/sdk-ts && npm ci --silent --install-links --ignore-scripts && ./node_modules/.bin/tsx src/e2e.ts
+	cd libs/sdk-ts && npm run build --silent
+	cd libs/sdk-examples/quickstart/typescript && npm ci --silent --install-links --ignore-scripts && \
+	  CODEWIRE_API_URL="$$CODEWIRE_SERVER_URL" ./node_modules/.bin/tsx quickstart.ts
 
 sdk-e2e-rust:
 	cargo run --locked -p codewire --example quickstart

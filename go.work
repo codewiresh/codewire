@@ -2,6 +2,7 @@ go 1.27.3
 
 use (
 	./libs/gen-go
+	./libs/sdk-examples/quickstart/go
 	./libs/sdk-go
 	./tests/contract
 )

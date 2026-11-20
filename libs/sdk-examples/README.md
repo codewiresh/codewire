@@ -1,0 +1,16 @@
+# SDK examples
+
+Runnable programs, one task each, for the Codewire SDKs. Until the SDKs are
+installed from their releases (#3512), each example builds from this
+repository.
+
+| Example | Go | Python | TypeScript | Rust |
+| --- | --- | --- | --- | --- |
+| [Quickstart](quickstart/): create an environment, run a command, write and read back a file, delete it | [go](quickstart/go/main.go) | [python](quickstart/python/quickstart.py) | [typescript](quickstart/typescript/quickstart.ts) | [rust](../../crates/codewire/examples/quickstart.rs) |
+
+The Rust examples live with the crate, as Cargo expects
+(`cargo run -p codewire --example quickstart`).
+
+Every example deletes the environment it creates, even when a step fails.
+`make test-sdk-examples` builds and typechecks them all without a server, and
+`make sdk-e2e` runs them against one with the SDK end-to-end suites.

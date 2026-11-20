@@ -1319,10 +1319,12 @@ run_standard() {
 run_sdk_go() {
   (cd libs/sdk-go && GOWORK=off go build ./... && GOWORK=off go vet ./... \
     && GOWORK=off go test ./... -count=1 -timeout 60s)
+  make test-sdk-examples-go
 }
 
 run_sdk_ts() {
   make test-sdk-ts
+  make test-sdk-examples-ts
   local package_work
   package_work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-sdk-ts-package.XXXXXX")"
   scripts/ci/release/package-sdk-ts.sh "$package_work"
@@ -1332,6 +1334,7 @@ run_sdk_ts() {
 
 run_sdk_python() {
   local repository_root="$PWD"
+  make test-sdk-examples-python
   local package_work sdist wheel
   package_work="$(mktemp -d "${TMPDIR:-/tmp}/codewire-sdk-python-package.XXXXXX")"
   python3 -m venv .venv-sdk

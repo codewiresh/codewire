@@ -1392,6 +1392,24 @@ if [ "$event_selected" = false ]; then
         # The policy guard fails if this source tree is reintroduced.
         recognized=true
         ;;
+      libs/sdk-examples/*/go/*)
+        # The SDK examples (#5109) build and run with their SDK's family.
+        select_token sdk_go
+        select_token go_support
+        recognized=true
+        ;;
+      libs/sdk-examples/*/typescript/*)
+        select_token sdk_ts
+        recognized=true
+        ;;
+      libs/sdk-examples/*/python/*)
+        select_token sdk_python
+        recognized=true
+        ;;
+      libs/sdk-examples/*.md)
+        select_token docs
+        recognized=true
+        ;;
     esac
 
     case "$path" in
@@ -1417,7 +1435,9 @@ if [ "$event_selected" = false ]; then
         ;;
       apps/dashboard/package.json|\
       packages/*/package.json|\
-      libs/sdk-ts/package.json|libs/sdk-ts/package-lock.json)
+      libs/sdk-ts/package.json|libs/sdk-ts/package-lock.json|\
+      libs/sdk-examples/*/typescript/package.json|\
+      libs/sdk-examples/*/typescript/package-lock.json)
         select_js_security
         recognized=true
         ;;

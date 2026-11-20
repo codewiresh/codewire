@@ -156,7 +156,13 @@ def check_go_source_classification(_args: argparse.Namespace) -> int:
             "public Go SDK",
             re.compile(r"^libs/sdk-go/.*\.go$"),
         ),
+        (
+            "public Go SDK examples",
+            re.compile(r"^libs/sdk-examples/[a-z0-9-]+/go/[a-z0-9_]+\.go$"),
+        ),
     ]
+    # A runnable SDK example is its own module's main package (#5109).
+    example_main = re.compile(r"^libs/sdk-examples/[a-z0-9-]+/go/main\.go$")
     findings: list[str] = []
     counts = {name: 0 for name, _pattern in categories}
 
@@ -175,7 +181,7 @@ def check_go_source_classification(_args: argparse.Namespace) -> int:
             continue
         counts[category[0]] += 1
         package = package_name(rel)
-        if package == "main":
+        if package == "main" and not example_main.search(rel):
             findings.append(f"{rel}: package main is not an accepted Go consumer surface")
 
     if findings:
