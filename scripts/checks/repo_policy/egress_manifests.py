@@ -48,6 +48,17 @@ DRAIN_SETTING = "CODEWIRE_EGRESS_DRAIN_SECONDS"
 EXIT_MARGIN_SECONDS = 30
 STREAM_PORT = "8089"
 PER_NODE_FIELDS = ("hostNetwork", "hostPID", "hostIPC")
+# cw-egress runs unprivileged (#4000): its image names no user, so the Pod
+# names one, and its projected token (0440) is readable through the Pod's
+# group.
+UNPRIVILEGED = (
+    ("runAsNonRoot", "true"), ("runAsUser", "65532"), ("runAsGroup", "65532"),
+    ("fsGroup", "65532"), ("fsGroupChangePolicy", "OnRootMismatch"),
+)
+# The ports cw-egress serves. It has no probe endpoint yet, so every probe
+# and declared port is the stream port.
+SERVED_PORTS = (STREAM_PORT, "stream")
+PROBES = ("readinessProbe", "livenessProbe", "startupProbe")
 PER_NODE_KEYS = ("hostPort", "hostPath")
 
 
@@ -106,6 +117,20 @@ def daemonset_failures(document: str, label: str = DAEMONSET) -> list[str]:
         failures.append(f"{label}: maxSurge must be 1, so the new Pod starts beside the old one")
     if only(strategy, "maxUnavailable", f"{label} updateStrategy", failures) not in (None, "0"):
         failures.append(f"{label}: maxUnavailable must be 0, so the old Pod stops only once the new one is Ready")
+    for key, wanted in UNPRIVILEGED:
+        if values(document, key) != [wanted]:
+            failures.append(
+                f"{label}: {key} must be {wanted}, so cw-egress runs unprivileged and reads its token "
+                "through the Pod's group"
+            )
+    if values(document, "containerPort") != [STREAM_PORT]:
+        failures.append(f"{label}: cw-egress serves only the stream port {STREAM_PORT}; declare no other")
+    if not values(nested(document, "readinessProbe"), "port"):
+        failures.append(f"{label}: a readiness probe on the stream port lets a surge rollout wait for the new Pod")
+    for probe in PROBES:
+        unserved = [port for port in values(nested(document, probe), "port") if port not in SERVED_PORTS]
+        if unserved:
+            failures.append(f"{label}: {probe} targets {unserved}, which cw-egress doesn't serve")
     grace = only(document, "terminationGracePeriodSeconds", label, failures)
     drains = env_values(document, DRAIN_SETTING)
     if len(drains) != 1:
@@ -240,12 +265,24 @@ spec:
   template:
     spec:
       terminationGracePeriodSeconds: 1830
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: egress
+          ports:
+            - containerPort: 8089
+              name: stream
           env:
             - name: CODEWIRE_EGRESS_DRAIN_SECONDS
               value: "1800"
+          readinessProbe:
+            tcpSocket:
+              port: stream
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
             seccompProfile:
               type: RuntimeDefault
 """
@@ -368,6 +405,18 @@ def self_test() -> list[str]:
         "the host network": ("    spec:\n", "    spec:\n      hostNetwork: true\n"),
         "a host port": ("          env:\n", "          ports:\n            - containerPort: 8089\n              hostPort: 8089\n          env:\n"),
         "a host path": ("      containers:\n", "      volumes:\n        - name: lock\n          hostPath:\n            path: /run/cw-egress\n      containers:\n"),
+        "no user": ("            runAsUser: 65532\n", ""),
+        "the root user": ("runAsUser: 65532", "runAsUser: 0"),
+        "no group": ("            runAsGroup: 65532\n", ""),
+        "the root group": ("runAsGroup: 65532", "runAsGroup: 0"),
+        "root allowed": ("runAsNonRoot: true", "runAsNonRoot: false"),
+        "no fsGroup": ("        fsGroup: 65532\n", ""),
+        "an fsGroup the token isn't shared with": ("fsGroup: 65532", "fsGroup: 1000"),
+        "a recursive relabel on every start": ("fsGroupChangePolicy: OnRootMismatch", "fsGroupChangePolicy: Always"),
+        "an unserved port": ("              name: stream\n", "              name: stream\n            - containerPort: 8098\n              name: http\n"),
+        "no readiness probe": ("          readinessProbe:\n            tcpSocket:\n              port: stream\n", ""),
+        "a readiness probe on an unserved port": ("tcpSocket:\n              port: stream", "httpGet:\n              path: /readyz\n              port: 8098"),
+        "a liveness probe on an unserved port": ("          securityContext:\n            runAsNonRoot", "          livenessProbe:\n            httpGet:\n              path: /healthz\n              port: http\n          securityContext:\n            runAsNonRoot"),
     }
     for name, (old, new) in refused_daemonsets.items():
         if GOOD_DAEMONSET.count(old) != 1:

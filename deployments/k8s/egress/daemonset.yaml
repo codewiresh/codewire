@@ -56,6 +56,13 @@ spec:
       # The drain below plus 30 s, so cw-egress cuts the last streams and
       # flushes their records itself before the kubelet kills it.
       terminationGracePeriodSeconds: 1830
+      # The image names no user, so the Pod runs as 65532, and the projected
+      # token (0440) is readable through this group. cw-egress needs no root:
+      # it holds no capability, its ports are above 1024 and it writes no
+      # file (#4000).
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: egress
           # The component's images entry pins this to a signed digest; no
@@ -65,9 +72,6 @@ spec:
             - containerPort: 8089
               protocol: TCP
               name: stream
-            # Probes and metrics. The PodMonitor scrapes the port named http.
-            - containerPort: 8098
-              name: http
           envFrom:
             - configMapRef:
                 name: codewire-config
@@ -96,14 +100,15 @@ spec:
             - name: orchestration-roots
               mountPath: /run/codewire-orchestration-internal-roots
               readOnly: true
+          # Ready once it accepts streams, so a surge rollout's new Pod takes
+          # them before the old one drains. cw-egress serves no probe endpoint
+          # yet, so there is no liveness probe: a TCP one passes whenever the
+          # socket is open and catches only an exit, which restarts the
+          # container anyway. Each probe's connect and close logs "a guest
+          # stream sent no valid hello" at info, once per period (#4000).
           readinessProbe:
-            httpGet:
-              path: /readyz
-              port: http
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: http
+            tcpSocket:
+              port: stream
           resources:
             requests:
               cpu: 100m
@@ -114,6 +119,8 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
             capabilities:
               drop: ["ALL"]
             seccompProfile:
