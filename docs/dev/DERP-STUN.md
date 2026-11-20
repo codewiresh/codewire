@@ -144,7 +144,11 @@ Region 1 ("cw"):
 
 Workspace daemons use the same DERPMap: the coordinator sends it when the
 daemon's node session opens, and the daemon takes its relay and STUN nodes from
-it, falling back to DERP on the coordinator's origin.
+it, falling back to DERP on the coordinator's origin. A broker-mode daemon
+(hosted egress, #4000) has no fallback: it dials only the deployment's relay,
+and a missing map is refused (`broker_no_derp_map`), because the coordinator's
+address there is the platform gateway, which serves only the coordinators'
+streams.
 
 **Why two nodes?** Tailscale's magicsock selects `preferred_derp` based on STUN latency. If STUN runs on the same node as DERP, STUN latency competes with DERP latency and can steal `preferred_derp` to a non-relay region. Separating them (STUNPort=-1 on relay, STUNOnly on STUN) keeps `preferred_derp=1` stable.
 

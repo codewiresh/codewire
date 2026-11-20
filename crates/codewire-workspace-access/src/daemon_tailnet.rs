@@ -743,8 +743,9 @@ impl RefusalPacing {
 
 /// The tailnet's DERP relay: the map's first node, else DERP on the
 /// coordinator's origin. A broker-mode daemon dials only the deployment's own
-/// relay, at its configured address; with no map, DERP on the coordinator's
-/// origin at the coordinator's address.
+/// relay, at its configured address, and refuses a missing map: DERP on the
+/// coordinator's origin would go to the platform gateway, which serves only
+/// the coordinators' streams (#4000).
 async fn connect_derp(
     platform: Option<&DaemonPlatform>,
     derp_map: Option<&serde_json::Value>,
@@ -779,10 +780,7 @@ async fn connect_derp(
                 .ok_or_else(|| BrokerRefusal::NoDeploymentRelay(platform.derp_host.clone()))?;
             (target, platform.derp)
         }
-        None => (
-            derp_target_from_origin(grant.coordinator_url())?,
-            platform.coordinator,
-        ),
+        None => return Err(BrokerRefusal::NoDerpMap.into()),
     };
     // Whether the relay's certificate is verified must not hang on the
     // coordinator's map: a node on another port, or marked for tests, is

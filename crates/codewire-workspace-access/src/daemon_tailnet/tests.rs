@@ -1126,6 +1126,21 @@ async fn a_broker_daemon_dials_only_its_deployments_verified_relay() {
         let (class, _) = refused(serde_json::json!({"Regions": {"1": {"Nodes": [node]}}})).await;
         assert_eq!(class, "broker_relay_unverified");
     }
+    // No map: never DERP on the coordinator's origin, which would go to the
+    // platform gateway.
+    let error = connect_derp(
+        Some(&platform),
+        None,
+        &grant,
+        &StaticSecret::random_from_rng(OsRng),
+    )
+    .await
+    .err()
+    .expect("refused");
+    let refusal = error
+        .downcast_ref::<BrokerRefusal>()
+        .expect("a typed refusal");
+    assert_eq!(refusal.class(), "broker_no_derp_map");
     assert!(dialled.lock().unwrap().is_empty());
 }
 

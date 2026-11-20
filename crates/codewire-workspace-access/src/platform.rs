@@ -37,6 +37,14 @@ pub enum BrokerRefusal {
     NoDeploymentRelay(String),
     #[error("the DERP map's node {0} would be dialled without verifying its certificate")]
     UnverifiedRelay(String),
+    /// The coordinator's first response carried no DERP map. A broker-mode
+    /// daemon then has no relay to dial: DERP on the coordinator's origin
+    /// would go to the platform gateway, which serves only the coordinators'
+    /// streams (#4000).
+    #[error(
+        "the coordinator sent no DERP map, and a broker-mode daemon dials no relay but the deployment's"
+    )]
+    NoDerpMap,
 }
 
 impl BrokerRefusal {
@@ -45,6 +53,7 @@ impl BrokerRefusal {
             Self::EndpointNotLiteral(_) => "broker_endpoint_not_literal",
             Self::NoDeploymentRelay(_) => "broker_no_deployment_relay",
             Self::UnverifiedRelay(_) => "broker_relay_unverified",
+            Self::NoDerpMap => "broker_no_derp_map",
         }
     }
 }
