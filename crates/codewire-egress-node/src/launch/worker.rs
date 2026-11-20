@@ -41,6 +41,7 @@ pub(super) struct WorkerSpec {
     pub(super) pod_uid: Uuid,
     pub(super) key: NetworkKey,
     pub(super) policy_digest: PolicyDigest,
+    pub(super) trust: EgressTrust,
     /// The guest's stream. The worker takes it; this process keeps no copy.
     pub(super) stream: TcpStream,
 }
@@ -67,7 +68,7 @@ pub(super) async fn start(
         network_key: spec.key,
         broker_key: *sessions.key,
         policy_digest: spec.policy_digest,
-        trust: EgressTrust::None,
+        trust: spec.trust,
     })
     .map_err(|_| StartError::Bootstrap)?;
 

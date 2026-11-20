@@ -295,6 +295,7 @@ impl Harness {
         let (events, reported) = mpsc::channel(16);
         self.admit
             .send(AdmittedStream {
+                trust: codewire_network_session::EgressTrust::None,
                 pod_uid,
                 pod_name: format!("sandbox-{pod_uid}"),
                 peer,

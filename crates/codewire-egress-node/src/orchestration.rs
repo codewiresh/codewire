@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use codewire_egress_policy::{CompiledPolicy, PolicyDigest, PolicyDocument};
+use codewire_network_session::{EgressTrust, MAX_EGRESS_TRUST_BYTES};
 use codewire_proto::codewire::internal::v1::__buffa::oneof::egress_assignment::Binding;
 use codewire_proto::codewire::internal::v1::{
     AdmitRequest, EgressAssignment, EgressServiceClient, WatchAssignmentRequest,
@@ -131,6 +132,19 @@ pub struct Admitted {
     pub pod_uid: String,
     pub pod_name: String,
     pub assignment: Result<Assignment, AssignmentError>,
+    /// The guest's trust frame: the Pod's interception CA, or none (#4001).
+    pub trust: EgressTrust,
+}
+
+/// The trust frame for the CA `Admit` returned: none when it is empty, or
+/// `None` for one the frame cannot carry, which refuses the stream rather
+/// than start the guest on a trust it would keep for the Pod's life (#5006).
+fn trust(ca_certificate_der: &[u8]) -> Option<EgressTrust> {
+    match ca_certificate_der {
+        [] => Some(EgressTrust::None),
+        der if der.len() <= MAX_EGRESS_TRUST_BYTES => Some(EgressTrust::Ca(der.to_vec())),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Error)]
@@ -215,10 +229,12 @@ impl Orchestration {
             .as_option()
             .ok_or(AssignmentError::Missing)
             .and_then(assignment);
+        let trust = trust(&response.ca_certificate_der).ok_or(CallError::Refused)?;
         Ok(Admitted {
             pod_uid: response.pod_uid.clone(),
             pod_name: response.pod_name.clone(),
             assignment,
+            trust,
         })
     }
 
@@ -267,6 +283,14 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn the_admitted_ca_is_the_trust_frame_and_one_it_cannot_carry_refuses_the_stream() {
+        // `EgressTrust` has no `Debug`, so it can't be printed by a failure.
+        assert!(trust(&[]) == Some(EgressTrust::None));
+        assert!(trust(b"synthetic-ca") == Some(EgressTrust::Ca(b"synthetic-ca".to_vec())));
+        assert!(trust(&vec![1; MAX_EGRESS_TRUST_BYTES + 1]).is_none());
+    }
 
     fn platform() -> Vec<WireAllow> {
         vec![WireAllow {

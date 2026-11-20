@@ -193,6 +193,7 @@ async fn start_with(
     });
     let pair = launch
         .start(PairSpec {
+            trust: codewire_network_session::EgressTrust::None,
             pod_uid: POD,
             stream: accepted,
             key: key(),

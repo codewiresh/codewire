@@ -932,7 +932,7 @@ fn canonical_token(token: &[u8]) -> bool {
 
 /// Orchestration's projected relay token, reread for every epoch so kubelet's
 /// rotation reaches the next admission.
-async fn read_relay_token(path: &std::path::Path) -> Result<Zeroizing<String>, ()> {
+pub(crate) async fn read_relay_token(path: &std::path::Path) -> Result<Zeroizing<String>, ()> {
     let file = tokio::fs::File::open(path).await.map_err(|_| ())?;
     let metadata = file.metadata().await.map_err(|_| ())?;
     if !metadata.is_file() || metadata.len() > MAX_TOKEN_BYTES as u64 {

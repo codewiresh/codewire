@@ -44,6 +44,7 @@ impl Admits for Fake {
             Err(CallError::Refused)
         } else {
             Ok(Admitted {
+                trust: codewire_network_session::EgressTrust::None,
                 pod_uid: POD.to_string(),
                 pod_name: "workspace".into(),
                 assignment: Ok(Assignment::Unbound {

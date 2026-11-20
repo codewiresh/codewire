@@ -17,10 +17,20 @@ use crate::workspace_binding::PgBindingStore;
 pub mod admission;
 pub mod assignment;
 pub mod gateway_check;
+pub mod interception_ca;
 pub mod lockdown;
 pub mod reports;
 pub mod service;
 pub mod settings;
+
+/// What hosted interception takes from the rest of orchestration (#4001).
+#[derive(Default)]
+pub struct InterceptionInputs {
+    /// The credential relay's admitted epochs, which front-door sessions join.
+    pub front_doors: Option<Arc<crate::front_door::FrontDoorEpochs>>,
+    /// The credential service's private origin, which makes each Pod's CA.
+    pub credential_broker: Option<String>,
+}
 
 /// The service's state when hosted egress is on; `None` when it is off, and
 /// then nothing serves `EgressService`. cw-egress runs in orchestration's own
@@ -32,8 +42,12 @@ pub fn service_state(
     pool: PgPool,
     server_namespace: &str,
     sandbox_namespace: &str,
-    front_doors: Option<Arc<crate::front_door::FrontDoorEpochs>>,
+    interception: InterceptionInputs,
 ) -> anyhow::Result<Option<Arc<service::EgressServiceState>>> {
+    let InterceptionInputs {
+        front_doors,
+        credential_broker,
+    } = interception;
     if !settings.enabled {
         return Ok(None);
     }
@@ -44,6 +58,23 @@ pub fn service_state(
         "hosted egress needs POD_NAMESPACE, the namespace cw-egress runs in"
     );
     let attestation: Arc<dyn RuntimeAttestation> = runtime;
+    // An intercepting sandbox's admission carries its CA certificate, which
+    // only the credential service can make (#4001).
+    let interception_cas = match (settings.interception, credential_broker) {
+        (false, _) => None,
+        (true, None) => anyhow::bail!("hosted interception needs the platform credential runtime"),
+        (true, Some(origin)) => Some(Arc::new(interception_ca::RelayInterceptionCas {
+            broker: codewire_tls::ClientTlsEndpoint::new(
+                origin,
+                std::path::PathBuf::from(
+                    crate::worker::credential_relay::CREDENTIAL_RELAY_BROKER_ROOTS_FILE,
+                ),
+            )?,
+            relay_token: std::path::PathBuf::from(
+                codewire_daemon_proto::CREDENTIAL_RELAY_TOKEN_PATH,
+            ),
+        }) as Arc<dyn interception_ca::InterceptionCaSource>),
+    };
     Ok(Some(Arc::new(service::EgressServiceState {
         attestation,
         bindings: Arc::new(PgBindingStore::connect_lazy(database_url)?),
@@ -55,6 +86,7 @@ pub fn service_state(
         intercepts: assignment::interception_bindings(settings.interception)?,
         starts: Default::default(),
         front_doors,
+        interception_cas,
     })))
 }
 
@@ -76,7 +108,14 @@ pub fn mount(
         api.pool.clone(),
         &api.sandbox_cfg.pod_namespace,
         &api.sandbox_cfg.sandbox_namespace,
-        front_doors,
+        InterceptionInputs {
+            front_doors,
+            credential_broker: api
+                .sandbox_cfg
+                .credential_runtime
+                .as_ref()
+                .map(|runtime| runtime.broker_https_origin()),
+        },
     )?;
     Ok(match state {
         Some(state) => {
@@ -125,7 +164,7 @@ mod tests {
             pool(),
             "",
             "",
-            None,
+            InterceptionInputs::default(),
         )
         .unwrap();
         assert!(state.is_none());
@@ -137,7 +176,18 @@ mod tests {
             enabled: true,
             interception: false,
         };
-        assert!(service_state(on(), None, "postgres://unused", pool(), "dev", "sb", None).is_err());
+        assert!(
+            service_state(
+                on(),
+                None,
+                "postgres://unused",
+                pool(),
+                "dev",
+                "sb",
+                InterceptionInputs::default()
+            )
+            .is_err()
+        );
         // Startup builds the state without calling Kubernetes.
         let client = kube::Client::new(
             tower::service_fn(|_: axum::http::Request<kube::client::Body>| async {
@@ -160,7 +210,7 @@ mod tests {
                 pool(),
                 " ",
                 "sb",
-                None
+                InterceptionInputs::default(),
             )
             .is_err()
         );
@@ -172,26 +222,44 @@ mod tests {
                 pool(),
                 "dev",
                 "sb",
-                None
+                InterceptionInputs::default(),
             )
             .unwrap()
-            .is_some_and(|state| state.intercepts.is_empty())
+            .is_some_and(|state| state.intercepts.is_empty() && state.interception_cas.is_none())
         );
-        let intercepting = settings::EgressSettings {
+        let intercepting = || settings::EgressSettings {
             enabled: true,
             interception: true,
         };
+        // An intercepting admission carries a CA only the credential service
+        // can make, so interception needs its runtime.
+        assert!(
+            service_state(
+                intercepting(),
+                Some(runtime.clone()),
+                "postgres://unused",
+                pool(),
+                "dev",
+                "sb",
+                InterceptionInputs::default(),
+            )
+            .is_err()
+        );
         let state = service_state(
-            intercepting,
+            intercepting(),
             Some(runtime),
             "postgres://unused",
             pool(),
             "dev",
             "sb",
-            None,
+            InterceptionInputs {
+                front_doors: None,
+                credential_broker: Some("https://credentials.codewire.test".into()),
+            },
         )
         .unwrap()
         .unwrap();
         assert!(!state.intercepts.is_empty());
+        assert!(state.interception_cas.is_some());
     }
 }

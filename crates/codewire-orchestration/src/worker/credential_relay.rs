@@ -51,6 +51,7 @@ mod front_door;
 
 use budget::{EnvironmentBudget, Limits};
 use connection::DaemonTarget;
+pub(crate) use epoch::read_relay_token;
 use epoch::{BrokerEndpoint, EpochConfig};
 
 /// Between passes over the live bindings.

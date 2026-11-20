@@ -151,6 +151,7 @@ impl Launch for ProcessLaunch {
                 pod_uid: spec.pod_uid,
                 key: spec.key,
                 policy_digest: spec.policy.digest(),
+                trust: spec.trust,
                 stream: spec.stream,
             },
             sessions,

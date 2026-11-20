@@ -164,6 +164,7 @@ impl<L: Launch> Pod<L> {
             stream,
             key,
             assignment,
+            trust,
             changes,
             events,
         } = admitted;
@@ -177,6 +178,7 @@ impl<L: Launch> Pod<L> {
                     key,
                     policy: enforcing.policy.clone(),
                     intercepts: enforcing.intercepts.clone(),
+                    trust,
                 };
                 tokio::select! {
                     () = self.stop.cancelled() => Err(End::Told),

@@ -2293,13 +2293,22 @@ How the CA above reaches `cw-egress`, and how its front door gets leaves
 (#4001 N2). `cw-egress` holds only leaves and their keys, never a CA key or a
 credential, and never serves under a CA it made itself.
 
-- **The CA at admission.** At every `Admit`, bound or not, orchestration
-  calls the credential service's `EnsureInterceptionCa` with its relay
-  identity, for the Pod `Admit` authenticated. It returns the certificate,
-  which `AdmitResponse.ca_certificate_der` carries for the stream's trust
-  frame, so a later bind changes nothing the guest sees. The field is empty
-  when interception is off or the CA can't be made, and that stream then
-  intercepts nothing. `EnsureInterceptionCa` is the one method that takes
+- **The CA at admission.** At every `Admit` of a Pod that intercepts, bound
+  or not, orchestration calls the credential service's
+  `EnsureInterceptionCa` with its relay identity, for the Pod `Admit`
+  authenticated. It returns the certificate, which
+  `AdmitResponse.ca_certificate_der` carries and `cw-egress` sends unchanged
+  as the stream's trust frame, so a later bind changes nothing the guest
+  sees. A bound Pod intercepts when its binding recorded that at its first
+  bind (C5); an unbound warm member when the switch is on, as its first bind
+  will record. Until the binding stores that decision (#5496), a bound Pod
+  is decided by the switch too. The field is empty only for a Pod that does
+  not intercept. An
+  intercepting Pod whose CA can't be had is refused `UNAVAILABLE`, never
+  admitted with an empty frame: the guest keeps its first session's trust
+  for the Pod's life (#5006), so an empty one would refuse every later
+  session that carries the CA. It redials instead, and `cw-egress` likewise
+  refuses a stream whose certificate the frame cannot carry. `EnsureInterceptionCa` is the one method that takes
   orchestration's relay token alone; every other method still demands the
   whole chain below. It is rate-limited per caller (the relay Pod) and per
   Pod, since the Pod check's API reads cost even when the Pod is real

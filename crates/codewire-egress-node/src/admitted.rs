@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 
 use codewire_egress_policy::PolicyDigest;
 use codewire_egress_policy::record::EgressRecord;
+use codewire_network_session::EgressTrust;
 use codewire_network_session::NetworkKey;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
@@ -27,6 +28,9 @@ pub struct AdmittedStream {
     pub key: NetworkKey,
     /// The assignment `Admit` returned.
     pub assignment: Assignment,
+    /// The guest's trust frame from `Admit`: the Pod's interception CA, the
+    /// same for its life, or none.
+    pub trust: EgressTrust,
     /// The latest assignment from `WatchAssignment`, starting as
     /// `assignment`. One that does not parse arrives as its error; a closed
     /// channel means the Pod ended.

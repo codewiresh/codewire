@@ -182,6 +182,7 @@ async fn admit_one<A: Admits>(
         stream,
         key,
         assignment,
+        trust: admission.trust,
         changes: assignment_changes,
         events,
     };

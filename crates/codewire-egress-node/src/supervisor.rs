@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codewire_egress_policy::{CompiledPolicy, PolicyDigest};
+use codewire_network_session::EgressTrust;
 use codewire_network_session::NetworkKey;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -48,6 +49,8 @@ pub struct PairSpec {
     /// runs its front door, and its broker hands that door the dials it
     /// intercepts, or it has none and its broker refuses them (#4001).
     pub intercepts: PairIntercepts,
+    /// The trust frame the worker sends the guest first.
+    pub trust: EgressTrust,
 }
 
 /// One of the two ways a guest tries to get round its egress path when it

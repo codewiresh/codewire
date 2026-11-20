@@ -73,6 +73,9 @@ pub struct EgressServiceState {
     /// `None` while hosted interception is off: `FrontDoorSession` answers
     /// UNIMPLEMENTED to an authenticated caller.
     pub front_doors: Option<Arc<crate::front_door::FrontDoorEpochs>>,
+    /// The CA certificates of intercepting sandboxes, when interception is
+    /// on (#4001).
+    pub interception_cas: Option<Arc<dyn super::interception_ca::InterceptionCaSource>>,
 }
 
 mod front_door;
@@ -373,6 +376,39 @@ impl EgressServiceState {
     }
 
     /// Orchestration's own record of whether `guest` is bound, and to what.
+    /// Whether `guest`'s streams intercept. Hosted interception is decided
+    /// once per Pod, at its first bind, and recorded on the binding (C5,
+    /// #5468); an unbound warm member has no decision yet, and the setting,
+    /// which its first bind will record, decides. Until the binding carries
+    /// that decision (#5496), the setting decides for a bound Pod too.
+    fn intercepts(&self, _binding: Option<&LiveBinding>) -> bool {
+        !self.intercepts.is_empty()
+    }
+
+    /// The guest's interception CA certificate, or nothing when it does not
+    /// intercept. An intercepting guest whose certificate can't be had is
+    /// refused rather than admitted with an empty trust frame: the guest
+    /// keeps the trust of its first session for the Pod's life (#5006), so an
+    /// empty one would refuse every later session that carries the CA. It
+    /// redials instead.
+    async fn interception_ca(
+        &self,
+        guest: &GuestPod,
+        binding: Option<&LiveBinding>,
+    ) -> Result<Vec<u8>, ConnectError> {
+        if !self.intercepts(binding) {
+            return Ok(Vec::new());
+        }
+        let source = self
+            .interception_cas
+            .as_ref()
+            .ok_or_else(|| unavailable("get the interception CA", "no source"))?;
+        source
+            .ensure(&guest.uid, &guest.name)
+            .await
+            .map_err(|error| unavailable("get the interception CA", error))
+    }
+
     async fn live_binding(&self, guest: &GuestPod) -> Result<Option<LiveBinding>, ConnectError> {
         self.bindings
             .live_binding(&guest.uid, &guest.namespace, &guest.name)
@@ -658,11 +694,13 @@ impl EgressService for EgressConnectService {
         if let Some(binding) = &binding {
             self.state.lockdown_applied(&guest, &facts, binding).await?;
         }
+        let ca_certificate_der = self.state.interception_ca(&guest, binding.as_ref()).await?;
         let assignment = self.state.assignment_of(binding).await?;
         connectrpc::Response::ok(AdmitResponse {
             pod_uid: guest.uid,
             pod_name: guest.name,
             assignment: Some(self.state.proto(&assignment)).into(),
+            ca_certificate_der,
             ..Default::default()
         })
     }

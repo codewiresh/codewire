@@ -81,6 +81,11 @@ message AdmitResponse {
   // orchestration reads it by name and refuses it unless the UID matches
   // and it is on the caller's node.
   string pod_name = 3;
+  // The Pod's interception CA certificate in DER, when its streams intercept
+  // (#4001): the same for the Pod's life, sent unchanged as the guest's trust
+  // frame. Empty when they do not. An intercepting Pod whose CA cannot be had
+  // is refused UNAVAILABLE, never admitted with this empty.
+  bytes ca_certificate_der = 4;
 }
 
 message WatchAssignmentRequest {

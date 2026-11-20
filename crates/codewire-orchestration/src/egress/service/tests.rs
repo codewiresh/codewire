@@ -339,6 +339,7 @@ fn state(
         intercepts: Default::default(),
         starts: Default::default(),
         front_doors,
+        interception_cas: None,
     }
 }
 
@@ -432,6 +433,80 @@ async fn a_broker_mode_guest_on_the_callers_node_is_admitted_with_its_assignment
         body["assignment"]["platformAllows"][0]["host"],
         "codewire-dev.sh"
     );
+}
+
+/// An interception CA source that answers as told and counts its asks.
+struct Cas {
+    certificate: Option<Vec<u8>>,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::egress::interception_ca::InterceptionCaSource for Cas {
+    async fn ensure(
+        &self,
+        pod_uid: &str,
+        pod_name: &str,
+    ) -> Result<Vec<u8>, crate::egress::interception_ca::CaUnavailable> {
+        assert_eq!((pod_uid, pod_name), (GUEST_UID, GUEST));
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.certificate
+            .clone()
+            .ok_or(crate::egress::interception_ca::CaUnavailable::Refused)
+    }
+}
+
+/// Admit, with interception on or off and `cas` as the CA source.
+async fn admit_intercepting(interception: bool, cas: &Arc<Cas>) -> (StatusCode, Value) {
+    let cluster = Cluster::healthy();
+    let mut state = state(&cluster, Arc::new(Unbound), None);
+    state.intercepts = crate::egress::assignment::interception_bindings(interception).unwrap();
+    state.interception_cas =
+        Some(Arc::clone(cas)
+            as Arc<
+                dyn crate::egress::interception_ca::InterceptionCaSource,
+            >);
+    let app = codewire_server_core::connect::connect_router(egress_router(Arc::new(state)));
+    call_app(app, "Admit", admit_body()).await
+}
+
+#[tokio::test]
+async fn an_intercepting_guest_is_admitted_with_its_ca_certificate() {
+    let cas = Arc::new(Cas {
+        certificate: Some(b"synthetic-ca-der".to_vec()),
+        asked: Default::default(),
+    });
+    let (status, body) = admit_intercepting(true, &cas).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    use base64::Engine as _;
+    assert_eq!(
+        body["caCertificateDer"],
+        base64::engine::general_purpose::STANDARD.encode(b"synthetic-ca-der")
+    );
+    assert_eq!(cas.asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn an_intercepting_guest_whose_ca_cannot_be_had_is_refused_never_admitted_without_one() {
+    let cas = Arc::new(Cas {
+        certificate: None,
+        asked: Default::default(),
+    });
+    let (status, body) = admit_intercepting(true, &cas).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(body.get("caCertificateDer").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn a_guest_that_does_not_intercept_carries_no_ca_and_asks_for_none() {
+    let cas = Arc::new(Cas {
+        certificate: Some(b"synthetic-ca-der".to_vec()),
+        asked: Default::default(),
+    });
+    let (status, body) = admit_intercepting(false, &cas).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.get("caCertificateDer").is_none(), "{body}");
+    assert_eq!(cas.asked.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -661,6 +736,7 @@ rules:
         intercepts: Default::default(),
         starts: Default::default(),
         front_doors: None,
+        interception_cas: None,
     };
     let bound = Assignment::Bound {
         environment_id: "env".into(),
@@ -707,6 +783,7 @@ async fn interception_reaches_only_a_bound_sandbox_and_only_when_switched_on() {
             intercepts: crate::egress::assignment::interception_bindings(interception).unwrap(),
             starts: Default::default(),
             front_doors: None,
+            interception_cas: None,
         }
     };
     let bound = Assignment::Bound {
@@ -816,6 +893,7 @@ fn watch(cluster: &Arc<Cluster>, expires_in: Duration) -> Watch {
             intercepts: Default::default(),
             starts: Default::default(),
             front_doors: None,
+            interception_cas: None,
         }),
         caller: Caller {
             namespace: SERVER.into(),

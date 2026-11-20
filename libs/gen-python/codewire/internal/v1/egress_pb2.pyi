@@ -38,14 +38,16 @@ class AdmitRequest(_message.Message):
     def __init__(self, guest_token: _Optional[str] = ..., peer_ip: _Optional[str] = ...) -> None: ...
 
 class AdmitResponse(_message.Message):
-    __slots__ = ("pod_uid", "assignment", "pod_name")
+    __slots__ = ("pod_uid", "assignment", "pod_name", "ca_certificate_der")
     POD_UID_FIELD_NUMBER: _ClassVar[int]
     ASSIGNMENT_FIELD_NUMBER: _ClassVar[int]
     POD_NAME_FIELD_NUMBER: _ClassVar[int]
+    CA_CERTIFICATE_DER_FIELD_NUMBER: _ClassVar[int]
     pod_uid: str
     assignment: EgressAssignment
     pod_name: str
-    def __init__(self, pod_uid: _Optional[str] = ..., assignment: _Optional[_Union[EgressAssignment, _Mapping]] = ..., pod_name: _Optional[str] = ...) -> None: ...
+    ca_certificate_der: bytes
+    def __init__(self, pod_uid: _Optional[str] = ..., assignment: _Optional[_Union[EgressAssignment, _Mapping]] = ..., pod_name: _Optional[str] = ..., ca_certificate_der: _Optional[bytes] = ...) -> None: ...
 
 class WatchAssignmentRequest(_message.Message):
     __slots__ = ("pod_uid", "pod_name")
