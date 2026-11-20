@@ -58,6 +58,13 @@ pub(crate) async fn handle_exec_command(globals: &Globals, args: ExecArgs) -> an
             let tailnet = match connected {
                 Ok(tailnet) => tailnet,
                 Err(error) => {
+                    let error = match crate::commands::refusal::coordinator_answer(&error) {
+                        Some(answer) if !crate::commands::refusal::is_refusal(&answer) => {
+                            return Err(answer);
+                        }
+                        Some(answer) => answer,
+                        None => error,
+                    };
                     return Err(crate::commands::explain_by_state(
                         &client,
                         &org_id,

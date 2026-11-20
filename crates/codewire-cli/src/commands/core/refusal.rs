@@ -75,6 +75,29 @@ pub(crate) fn state_error(name: &str, state: Option<EnvironmentState>) -> Option
     ))
 }
 
+/// The coordinator's own answer, when reaching an environment's tailnet failed
+/// because the coordinator refused this client rather than because the way
+/// there broke: the refusal as the API's errors are shown, without the
+/// transport steps it surfaced through. `None` for any other failure, which a
+/// retry may fix and which keeps its chain.
+pub(crate) fn coordinator_answer(error: &anyhow::Error) -> Option<anyhow::Error> {
+    let refused = error.chain().find_map(|cause| {
+        match cause.downcast_ref::<codewire_client::CoordinatorError>() {
+            Some(codewire_client::CoordinatorError::Connect(refused)) => Some(refused),
+            _ => None,
+        }
+    })?;
+    matches!(
+        refused.code,
+        ErrorCode::PermissionDenied
+            | ErrorCode::Unauthenticated
+            | ErrorCode::FailedPrecondition
+            | ErrorCode::NotFound
+            | ErrorCode::InvalidArgument
+    )
+    .then(|| crate::environment_client::display_client_error(refused.clone().into()))
+}
+
 /// `error` from reaching a cloud environment, explained by what the lookup
 /// `found` (its name and state), or `None` when the lookup failed. A running
 /// environment keeps `error`. A failed lookup keeps it too, unless the server
@@ -122,6 +145,50 @@ mod tests {
             "bad session name",
         ));
         assert!(!is_refusal(&other));
+    }
+
+    /// How the tailnet connect surfaces the coordinator's answer: under the
+    /// transport steps that carried it.
+    fn through_tailnet(answer: connectrpc::ConnectError) -> anyhow::Error {
+        anyhow::Error::new(codewire_client::CoordinatorError::Connect(answer))
+            .context("connect typed coordinator")
+            .context("fetch coordinator DERP map")
+            .context("reach the environment over its tailnet")
+    }
+
+    #[test]
+    fn the_coordinators_answer_is_shown_without_the_steps_it_came_through() {
+        let deleting = coordinator_answer(&through_tailnet(
+            connectrpc::ConnectError::failed_precondition("organization is being deleted"),
+        ))
+        .expect("a refusal is the coordinator's answer");
+        assert_eq!(deleting.to_string(), "organization is being deleted");
+        assert!(!is_refusal(&deleting));
+
+        let missing = coordinator_answer(&through_tailnet(connectrpc::ConnectError::not_found(
+            "organization not found",
+        )))
+        .expect("not found is an answer");
+        assert_eq!(missing.to_string(), "organization not found");
+
+        // Not running stays the typed refusal that the state lookup explains.
+        let stopped = coordinator_answer(&through_tailnet(
+            connectrpc::ConnectError::failed_precondition(NOT_RUNNING),
+        ))
+        .expect("not running is an answer");
+        assert!(is_refusal(&stopped));
+    }
+
+    #[test]
+    fn a_broken_way_there_keeps_its_steps() {
+        for broken in [
+            connectrpc::ConnectError::unavailable("connection refused"),
+            connectrpc::ConnectError::deadline_exceeded("timed out"),
+            connectrpc::ConnectError::internal("internal error"),
+        ] {
+            assert!(coordinator_answer(&through_tailnet(broken)).is_none());
+        }
+        assert!(coordinator_answer(&anyhow::anyhow!("no host key is recorded")).is_none());
     }
 
     /// exec's connect error, or a refusal, explained by the state found.
