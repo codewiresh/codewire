@@ -63,7 +63,12 @@ read-only root filesystem.
 - **The private directory.** At startup, before it serves, the server
   creates `<mount>/cw-runtime` with mode 0700 if it is absent. It opens it
   with `O_DIRECTORY | O_NOFOLLOW` and requires it to be owned by the
-  server's own uid, with mode exactly 0700.
+  server's own uid, with mode exactly 0700. One exception is corrected
+  instead of refused: the server's own directory at 02700 and empty. That
+  is what a crash between making the directory and setting its mode leaves
+  below the setgid mount root, and since the `emptyDir` survives a container
+  restart, refusing it would refuse every restart until the Pod is replaced
+  (#5548 review).
 - **Refusal to start.** The server exits with
   `cw runtime staging unavailable` when:
   - the mount is absent;

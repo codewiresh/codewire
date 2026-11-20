@@ -111,7 +111,7 @@ fn startup_refuses_a_private_directory_another_user_owns() {
 
 #[test]
 fn startup_refuses_a_private_directory_whose_mode_is_not_exactly_0700() {
-    for wrong in [0o750, 0o705, 0o770, 0o777, 0o2700, 0o1700, 0o500] {
+    for wrong in [0o750, 0o705, 0o770, 0o777, 0o2770, 0o1700, 0o500] {
         let mount = tempfile::tempdir().unwrap();
         let private = mount.path().join("cw-runtime");
         fs::create_dir(&private).unwrap();
@@ -123,6 +123,44 @@ fn startup_refuses_a_private_directory_whose_mode_is_not_exactly_0700() {
         );
         assert_eq!(mode(&private), wrong, "a found directory is never repaired");
     }
+}
+
+#[test]
+fn startup_corrects_only_the_empty_02700_a_crash_before_fchmod_leaves() {
+    // Exactly what a crash between mkdirat and fchmod leaves below the
+    // mount's setgid root: the server's own, 02700 and empty. Every restart
+    // would refuse it until the Pod is replaced, so it is corrected.
+    let mount = tempfile::tempdir().unwrap();
+    let private = mount.path().join("cw-runtime");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o2700)).unwrap();
+    let staging = Staging::open(mount.path()).unwrap();
+    assert_eq!(mode(&private), 0o700);
+    assert_eq!(staging.path(), private);
+
+    // Holding anything, it is not what that crash leaves, and is refused as found.
+    let mount = tempfile::tempdir().unwrap();
+    let private = mount.path().join("cw-runtime");
+    fs::create_dir(&private).unwrap();
+    fs::write(private.join("stray"), b"stray").unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o2700)).unwrap();
+    assert_eq!(
+        Staging::open(mount.path()).err(),
+        Some(StagingUnavailable::Mode)
+    );
+    assert_eq!(mode(&private), 0o2700);
+    assert!(private.join("stray").exists());
+
+    // Another user's 02700 is refused as theirs, never corrected.
+    let mount = tempfile::tempdir().unwrap();
+    let private = mount.path().join("cw-runtime");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o2700)).unwrap();
+    assert_eq!(
+        Staging::open_as(mount.path(), euid().wrapping_add(1)).err(),
+        Some(StagingUnavailable::Owner)
+    );
+    assert_eq!(mode(&private), 0o2700);
 }
 
 #[test]

@@ -14,7 +14,9 @@ services image:
 - drops every capability and adds none;
 - runs under the runtime's default seccomp profile, on the container or its Pod;
 - has a read-only root filesystem. A path a service writes is an emptyDir
-  mounted exactly there.
+  mounted exactly there;
+- never sets CODEWIRE_CW_RUNTIME_STAGING, which moves orchestration's cw
+  runtime staging off its mount and exists only for tests and local runs.
 
 The renders are those test-deploy-helm-chart.py compares: Production's source
 tree (the service directories composed, as Production's overlay builds on
@@ -46,6 +48,9 @@ K8S = ROOT / "deployments/k8s"
 SOURCE_VALUES = ROOT / "scripts/ci/tests/fixtures/helm-chart-values-source.yaml"
 
 WORKLOAD_KINDS = {"Deployment", "DaemonSet", "StatefulSet"}
+# Moves orchestration's cw runtime staging off its emptyDir; tests and local
+# runs only (docs/dev/CW-RUNTIME-JOURNAL.md, "Where an upload is staged").
+STAGING_OVERRIDE = "CODEWIRE_CW_RUNTIME_STAGING"
 SERVICES_IMAGES = {"services", "codewire-services"}
 
 _SERVICES = (
@@ -149,6 +154,8 @@ def violations(workload: dict[str, Any]) -> list[str]:
             found.append(f"{label}: seccompProfile is not RuntimeDefault on the container or its Pod")
         if context.get("readOnlyRootFilesystem") is not True:
             found.append(f"{label}: readOnlyRootFilesystem is not true")
+        if any(variable.get("name") == STAGING_OVERRIDE for variable in container.get("env") or []):
+            found.append(f"{label}: sets {STAGING_OVERRIDE}")
     return found
 
 
@@ -230,6 +237,9 @@ class HardeningRules(unittest.TestCase):
             # so its root is read-only like every other service's.
             ("codewire-orchestration", lambda pod: container(pod).pop("readOnlyRootFilesystem"),
              "readOnlyRootFilesystem is not true"),
+            ("codewire-orchestration", lambda pod: pod["containers"][0].setdefault("env", []).append(
+                {"name": "CODEWIRE_CW_RUNTIME_STAGING", "value": "/tmp/staging"}),
+             "sets CODEWIRE_CW_RUNTIME_STAGING"),
             ("codewire-credential-service", lambda pod: pod["containers"][0].pop("securityContext"),
              "allowPrivilegeEscalation is not false"),
             # An init container joins its Pod's attack surface too.

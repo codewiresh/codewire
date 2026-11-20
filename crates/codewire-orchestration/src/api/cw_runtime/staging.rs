@@ -101,8 +101,11 @@ impl Staging {
             return Err(StagingUnavailable::Owner);
         }
         // A directory made below the mount's setgid root inherits setgid.
-        // Only one this server just made is corrected; any other is refused.
-        if created {
+        // One this server just made is corrected, and so is one it made
+        // before a crash between mkdirat and fchmod left it 02700 and empty:
+        // the emptyDir outlives the container, so refusing that would refuse
+        // every restart until the Pod is replaced. Any other mode is refused.
+        if created || inherited_setgid_only(&directory, &metadata)? {
             rfs::fchmod(&directory, Mode::from_raw_mode(0o700))
                 .map_err(|_| StagingUnavailable::Private)?;
         }
@@ -145,6 +148,25 @@ impl Staging {
     pub(super) fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// Whether `directory`, already checked to be this server's, is exactly what
+/// a crash between its mkdirat and fchmod leaves: mode 02700 and empty.
+fn inherited_setgid_only(
+    directory: &File,
+    metadata: &std::fs::Metadata,
+) -> Result<bool, StagingUnavailable> {
+    if metadata.mode() & 0o7777 != 0o2700 {
+        return Ok(false);
+    }
+    let mut entries = rfs::Dir::read_from(directory).map_err(|_| StagingUnavailable::Private)?;
+    for entry in &mut entries {
+        let entry = entry.map_err(|_| StagingUnavailable::Private)?;
+        if !matches!(entry.file_name().to_bytes(), b"." | b"..") {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn mount_path(value: Option<OsString>) -> PathBuf {
