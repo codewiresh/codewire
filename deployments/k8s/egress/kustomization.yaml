@@ -18,3 +18,7 @@ resources:
   - daemonset.yaml
   - service.yaml
   - network-policy.yaml
+
+images:
+  - name: git.example.com/codewire/egress
+    digest: sha256:ee558eb753df9cfb48988bd0ac033dcd2c5081e0ba19c20c53286e24f23b50da
