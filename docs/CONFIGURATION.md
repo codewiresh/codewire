@@ -368,7 +368,7 @@ The dashboard header's Support button writes an email to this address with the s
 
 The dashboard's public `/updates` page lists the posts of one site in a Liminal CMS, newest first, and the console sidebar links it above Documentation. The dashboard reads `GET /api/v1/posts` with the site's key at most once every five minutes, keeps the last list it read while the CMS is down, and cleans each post's HTML again before showing it. Images load only from `LIMINAL_MEDIA_ORIGIN`, the one image host the page's Content-Security-Policy admits; without it posts show no images. Without both `LIMINAL_ORIGIN` and `LIMINAL_API_KEY` there is no page and no link.
 
-The dashboard writes no logs. Each read of the CMS is one `updates.read` trace span instead, exported when the dashboard's trace export is on (`OTEL_EXPORTER_OTLP_ENDPOINT`). Its `outcome` is `ok`, `timeout`, `connect`, `status` (with `http.response.status_code`), `too_large`, `parse` or `request`; it never carries the key, a URL or the response.
+Each read of the CMS is one `updates.read` trace span, exported when the dashboard's trace export is on (`OTEL_EXPORTER_OTLP_ENDPOINT`). Its `outcome` is `ok`, `timeout`, `connect`, `status` (with `http.response.status_code`), `too_large`, `parse` or `request`. A failed read also writes one JSON warning to the dashboard's standard output with the same two fields, so a deployment without trace export still records why. Neither ever carries the key, a URL or the response. That warning is the dashboard's only log line: its log filter admits the Updates reader at `WARN` and nothing else, whatever `RUST_LOG` says (#5409).
 
 | Variable | Required | Meaning | Example |
 |---|---|---|---|

@@ -198,10 +198,16 @@ impl From<reqwest::Error> for ReadFailure {
     }
 }
 
+/// The one module the dashboard writes logs from, and the level it logs at
+/// (#5409); `main` hands this to `obs::init_traces_with_logs_from`.
+pub(crate) const LOG_TARGET: (&str, tracing::Level) = (module_path!(), tracing::Level::WARN);
+
 /// One read of Liminal inside an `updates.read` span whose `outcome` (and
-/// `http.response.status_code`, for a status failure) says how it went. The
-/// dashboard writes no logs, so this exported span is its only record of a
-/// failed read (codewire-server-core's `obs` exports Codewire DEBUG spans).
+/// `http.response.status_code`, for a status failure) says how it went;
+/// codewire-server-core's `obs` exports Codewire DEBUG spans where trace
+/// export is on. A failed read also writes one warning carrying the same two
+/// fields, the dashboard's only log line, so a deployment without trace
+/// export still records why.
 pub(crate) async fn read_traced(updates: &Updates) -> Result<Vec<UpdatePost>, ReadFailure> {
     let span = tracing::debug_span!(
         "updates.read",
@@ -213,11 +219,21 @@ pub(crate) async fn read_traced(updates: &Updates) -> Result<Vec<UpdatePost>, Re
         Ok(_) => {
             span.record("outcome", "ok");
         }
+        Err(ReadFailure::Status(status)) => {
+            span.record("outcome", "status");
+            span.record("http.response.status_code", status);
+            tracing::warn!(
+                outcome = "status",
+                http.response.status_code = status,
+                "the Updates page could not read Liminal and keeps its last posts"
+            );
+        }
         Err(failure) => {
             span.record("outcome", failure.outcome());
-            if let ReadFailure::Status(status) = failure {
-                span.record("http.response.status_code", status);
-            }
+            tracing::warn!(
+                outcome = failure.outcome(),
+                "the Updates page could not read Liminal and keeps its last posts"
+            );
         }
     }
     read

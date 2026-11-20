@@ -48,6 +48,11 @@ mod view;
 use axum::Router;
 
 pub use config::{Config, RuntimeMode};
+
+/// The targets the dashboard writes logs for, each at its level and above,
+/// for `codewire_server_core::obs::init_traces_with_logs_from`. Nothing else
+/// in the dashboard, or in a library it uses, writes a log line.
+pub const LOG_TARGETS: &[(&str, tracing::Level)] = &[updates_connect::LOG_TARGET];
 use state::AppState;
 
 /// Build the dashboard router without starting a listener.

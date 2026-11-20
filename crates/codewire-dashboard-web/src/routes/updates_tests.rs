@@ -202,10 +202,16 @@ async fn without_a_liminal_site_there_is_no_page() {
     );
 }
 
-/// The `updates.read` spans a test opened: whether trace export would build
-/// each one, and the fields recorded on it.
+type FieldMap = std::collections::BTreeMap<&'static str, String>;
+
+/// The `updates.read` spans a test opened (whether trace export would build
+/// each one, and the fields recorded on it), and the events the dashboard's
+/// logged target emitted (each one's level and fields).
 #[derive(Default)]
-struct ReadSpans(std::sync::Mutex<Vec<(bool, std::collections::BTreeMap<&'static str, String>)>>);
+struct ReadSpans {
+    spans: std::sync::Mutex<Vec<(bool, FieldMap)>>,
+    logged: std::sync::Mutex<Vec<(tracing::Level, FieldMap)>>,
+}
 
 struct CaptureReadSpans(Arc<ReadSpans>);
 
@@ -223,10 +229,11 @@ impl tracing::field::Visit for Fields<'_> {
 impl tracing::Subscriber for CaptureReadSpans {
     fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
         metadata.name() == "updates.read"
+            || (metadata.is_event() && metadata.target() == crate::LOG_TARGETS[0].0)
     }
     fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        let mut spans = self.0.0.lock().unwrap();
-        let mut fields = std::collections::BTreeMap::new();
+        let mut spans = self.0.spans.lock().unwrap();
+        let mut fields = FieldMap::new();
         attributes.record(&mut Fields(&mut fields));
         spans.push((
             codewire_server_core::obs::exports_span(attributes.metadata()),
@@ -235,18 +242,26 @@ impl tracing::Subscriber for CaptureReadSpans {
         tracing::span::Id::from_u64(spans.len() as u64)
     }
     fn record(&self, span: &tracing::span::Id, values: &tracing::span::Record<'_>) {
-        let mut spans = self.0.0.lock().unwrap();
+        let mut spans = self.0.spans.lock().unwrap();
         let index = usize::try_from(span.into_u64()).unwrap() - 1;
         values.record(&mut Fields(&mut spans[index].1));
     }
     fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, _: &tracing::Event<'_>) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut fields = FieldMap::new();
+        event.record(&mut Fields(&mut fields));
+        self.0
+            .logged
+            .lock()
+            .unwrap()
+            .push((*event.metadata().level(), fields));
+    }
     fn enter(&self, _: &tracing::span::Id) {}
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
 #[tokio::test]
-async fn each_read_records_its_outcome_on_an_exported_span() {
+async fn each_read_records_its_outcome_on_an_exported_span_and_a_failure_in_the_log() {
     let spans = Arc::new(ReadSpans::default());
     let _capture = tracing::subscriber::set_default(CaptureReadSpans(spans.clone()));
     let upstream = serve(
@@ -297,7 +312,7 @@ async fn each_read_records_its_outcome_on_an_exported_span() {
         (true, fields)
     };
     assert_eq!(
-        *spans.0.lock().unwrap(),
+        *spans.spans.lock().unwrap(),
         vec![
             fields("ok", None),
             fields("status", Some("503")),
@@ -306,5 +321,32 @@ async fn each_read_records_its_outcome_on_an_exported_span() {
             fields("connect", None),
         ],
         "one exported span per read, recording only its outcome and Liminal's status"
+    );
+
+    let warning = |outcome: &str, status: Option<&str>| {
+        let (_, mut fields) = fields(outcome, status);
+        fields.insert(
+            "message",
+            "the Updates page could not read Liminal and keeps its last posts".to_owned(),
+        );
+        (tracing::Level::WARN, fields)
+    };
+    assert_eq!(
+        crate::LOG_TARGETS,
+        &[(
+            "codewire_dashboard_web::updates_connect",
+            tracing::Level::WARN
+        )],
+        "the dashboard logs its Updates reader's warnings and nothing else"
+    );
+    assert_eq!(
+        *spans.logged.lock().unwrap(),
+        vec![
+            warning("status", Some("503")),
+            warning("parse", None),
+            warning("timeout", None),
+            warning("connect", None),
+        ],
+        "one warning per failed read, carrying only its outcome and Liminal's status"
     );
 }

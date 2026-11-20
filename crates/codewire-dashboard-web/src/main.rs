@@ -1,5 +1,5 @@
 use anyhow::Context as _;
-use codewire_dashboard_web::{Config, RuntimeMode, app};
+use codewire_dashboard_web::{Config, LOG_TARGETS, RuntimeMode, app};
 
 fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
@@ -15,11 +15,12 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run(config: Config) -> anyhow::Result<()> {
-    // Trace export only: the dashboard writes no logs, and without
-    // OTEL_EXPORTER_OTLP_ENDPOINT this installs nothing.
-    let traces = codewire_server_core::obs::init_traces_only(
+    // Trace export when OTEL_EXPORTER_OTLP_ENDPOINT is set, and logs from
+    // LOG_TARGETS only.
+    let traces = codewire_server_core::obs::init_traces_with_logs_from(
         "dashboard",
         std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok().as_deref(),
+        LOG_TARGETS,
     )?;
     let listen_addr = config.listen_addr;
     let listener = tokio::net::TcpListener::bind(listen_addr)

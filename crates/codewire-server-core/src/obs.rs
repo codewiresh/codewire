@@ -9,8 +9,12 @@
 //!   exported over OTLP/gRPC. Trace export is a per-service opt-in in code:
 //!   the shared services image compiles the feature into every binary, and a
 //!   service that calls [`init`] stays log-only whatever its environment says.
-//! - [`init_traces_only`]: trace export without a log layer, for a server that
-//!   has never written logs (the dashboard).
+//! - [`init_traces_with_logs_from`]: the same trace export, with JSON logs
+//!   from a fixed list of targets only, each at its own level, whatever
+//!   `RUST_LOG` says. It is for the dashboard, which logs nothing else: its
+//!   only log line is a failed read of the Updates page's CMS (#5409). Its
+//!   other modules and every library it uses stay silent, so a library that
+//!   logs a URL, a header or a page's content cannot put it in the log.
 //!
 //! When trace export is on, the standard `OTEL_TRACES_SAMPLER` and
 //! `OTEL_TRACES_SAMPLER_ARG` choose the sampler (default
@@ -69,7 +73,7 @@ pub fn init_logs() {
 
     tracing_subscriber::registry()
         .with(log_filter())
-        .with(json_log_layer())
+        .with(json_log_layer_to(std::io::stdout))
         .try_init()
         .ok();
 }
@@ -79,28 +83,57 @@ pub fn init_logs() {
 /// is on. Keep the returned guard alive for the life of the process and call
 /// [`TracingGuard::shutdown`] on the way out so queued spans are flushed.
 pub fn init_with_traces(cfg: &ServiceConfig) -> anyhow::Result<TracingGuard> {
-    init_service(&cfg.name, cfg.otlp_endpoint.as_deref(), true)
+    init_service(&cfg.name, cfg.otlp_endpoint.as_deref(), Logs::All)
 }
 
-/// Trace export only, with no log layer: when `otlp_endpoint` is `None`
-/// (or the feature is absent) this installs nothing at all.
-pub fn init_traces_only(
+/// [`init_with_traces`]' trace export, with JSON logs written only for
+/// `log_targets`, each at its level and above, whatever `RUST_LOG` says.
+/// A target names a module path and everything under it.
+pub fn init_traces_with_logs_from(
     service_name: &str,
     otlp_endpoint: Option<&str>,
+    log_targets: &'static [(&'static str, tracing::Level)],
 ) -> anyhow::Result<TracingGuard> {
-    init_service(service_name, otlp_endpoint, false)
+    init_service(service_name, otlp_endpoint, Logs::Only(log_targets))
+}
+
+/// Which log lines a process writes.
+#[derive(Clone, Copy)]
+enum Logs {
+    /// Every target, at `RUST_LOG`'s level (default `info`).
+    All,
+    /// Only these targets, each at its level and above.
+    Only(&'static [(&'static str, tracing::Level)]),
+}
+
+fn log_layer<S>(logs: Logs) -> Box<dyn tracing_subscriber::Layer<S> + Send + Sync>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    log_layer_to(logs, std::io::stdout)
+}
+
+fn log_layer_to<S, W>(logs: Logs, writer: W) -> Box<dyn tracing_subscriber::Layer<S> + Send + Sync>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    W: for<'w> tracing_subscriber::fmt::MakeWriter<'w> + Send + Sync + 'static,
+{
+    use tracing_subscriber::Layer as _;
+
+    match logs {
+        Logs::All => json_log_layer_to(writer).with_filter(log_filter()).boxed(),
+        Logs::Only(targets) => json_log_layer_to(writer)
+            .with_filter(targets.iter().fold(
+                tracing_subscriber::filter::Targets::new(),
+                |filter, &(target, level)| filter.with_target(target, level),
+            ))
+            .boxed(),
+    }
 }
 
 fn log_filter() -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
-}
-
-fn json_log_layer<S>() -> impl tracing_subscriber::Layer<S>
-where
-    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-{
-    json_log_layer_to(std::io::stdout)
 }
 
 fn json_log_layer_to<S, W>(writer: W) -> impl tracing_subscriber::Layer<S>
@@ -128,7 +161,7 @@ fn logged_span(metadata: &tracing::Metadata<'_>) -> bool {
 fn init_service(
     service_name: &str,
     otlp_endpoint: Option<&str>,
-    logs: bool,
+    logs: Logs,
 ) -> anyhow::Result<TracingGuard> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -137,11 +170,9 @@ fn init_service(
 
     #[cfg(feature = "otel")]
     if let Some(endpoint) = endpoint {
-        use tracing_subscriber::Layer as _;
-
         let exporter = otel::Exporter::build(service_name, endpoint)?;
         let installed = tracing_subscriber::registry()
-            .with(logs.then(|| json_log_layer().with_filter(log_filter())))
+            .with(log_layer(logs))
             .with(exporter.layers())
             .try_init()
             .is_ok();
@@ -165,23 +196,31 @@ fn init_service(
         });
     }
 
-    if logs {
-        tracing_subscriber::registry()
-            .with(log_filter())
-            .with(json_log_layer())
-            .try_init()
-            .ok();
-        let reason = if cfg!(feature = "otel") {
-            "OTEL_EXPORTER_OTLP_ENDPOINT is unset"
-        } else {
-            "this build has no otel feature"
-        };
-        tracing::info!(
-            service = service_name,
-            otlp_export = false,
-            reason,
-            "OpenTelemetry trace export is off"
-        );
+    match logs {
+        Logs::All => {
+            tracing_subscriber::registry()
+                .with(log_filter())
+                .with(json_log_layer_to(std::io::stdout))
+                .try_init()
+                .ok();
+            let reason = if cfg!(feature = "otel") {
+                "OTEL_EXPORTER_OTLP_ENDPOINT is unset"
+            } else {
+                "this build has no otel feature"
+            };
+            tracing::info!(
+                service = service_name,
+                otlp_export = false,
+                reason,
+                "OpenTelemetry trace export is off"
+            );
+        }
+        Logs::Only(_) => {
+            tracing_subscriber::registry()
+                .with(log_layer(logs))
+                .try_init()
+                .ok();
+        }
     }
     let _ = endpoint;
     Ok(TracingGuard::default())
@@ -768,7 +807,23 @@ mod otel {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+
+    /// A log writer the test reads back.
+    #[derive(Clone, Default)]
+    struct Lines(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Lines {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn an_empty_trace_context_serializes_to_nothing() {
@@ -812,20 +867,8 @@ mod tests {
 
     #[test]
     fn a_stripe_sdk_span_never_puts_its_payload_in_a_log_line() {
-        use std::sync::{Arc, Mutex};
         use tracing_subscriber::layer::SubscriberExt as _;
 
-        #[derive(Clone, Default)]
-        struct Lines(Arc<Mutex<Vec<u8>>>);
-        impl std::io::Write for Lines {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
         let lines = Lines::default();
         let writer = lines.clone();
         let subscriber =
@@ -843,13 +886,49 @@ mod tests {
         assert_eq!(line["spans"][0]["route"], "stripe", "{text}");
     }
 
+    /// The dashboard's list writes its Updates reader's warnings and nothing
+    /// else: not that module's lower levels, not its sibling modules, not a
+    /// library, not Codewire's shared crates.
+    #[test]
+    fn a_target_list_logs_only_its_targets_at_their_levels() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let lines = Lines::default();
+        let writer = lines.clone();
+        let subscriber = tracing_subscriber::registry().with(log_layer_to(
+            Logs::Only(&[(
+                "codewire_dashboard_web::updates_connect",
+                tracing::Level::WARN,
+            )]),
+            move || writer.clone(),
+        ));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "codewire_dashboard_web::updates_connect", outcome = "timeout", "kept");
+            tracing::info!(target: "codewire_dashboard_web::updates_connect", "below its level");
+            tracing::error!(target: "codewire_dashboard_web::routes::public", "a sibling module");
+            tracing::error!(target: "codewire_dashboard_web", "the crate root");
+            tracing::error!(target: "codewire_server_core::obs", "a shared crate");
+            tracing::error!(target: "hyper::proto", "a library");
+            tracing::error!(target: "reqwest::connect", "another library");
+        });
+        let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+        let logged: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(logged.len(), 1, "{text}");
+        assert_eq!(logged[0]["fields"]["message"], "kept", "{text}");
+        assert_eq!(logged[0]["fields"]["outcome"], "timeout", "{text}");
+        assert_eq!(logged[0]["level"], "WARN", "{text}");
+    }
+
     /// Without an endpoint the initializer installs no exporter, whatever the
     /// build's features, and nothing becomes a carrier.
     #[tokio::test]
     async fn init_without_an_endpoint_installs_no_exporter() {
-        let guard = init_traces_only("test", None).unwrap();
+        let guard = init_traces_with_logs_from("test", None, &[]).unwrap();
         assert!(!guard.exporting());
-        let guard_blank = init_traces_only("test", Some("  ")).unwrap();
+        let guard_blank = init_traces_with_logs_from("test", Some("  "), &[]).unwrap();
         assert!(!guard_blank.exporting());
         let span = tracing::info_span!("probe");
         let _entered = span.enter();
