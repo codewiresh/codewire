@@ -1292,14 +1292,17 @@ run_standard_family() {
 }
 
 run_standard_in_order() {
-  local family
+  local family started
   for family in "$@"; do
     echo "[standard] $family: start"
+    started=$SECONDS
     # Not a condition: a family called on the left of || runs without
     # errexit, so a failed command inside it, such as three failed design
     # fixtures before passing audits, left the family green (run 44624).
     run_standard_family "$family"
-    echo "[standard] $family: finish"
+    # Each family's own time: a lane's log is printed whole at its end, so
+    # without it only the lane's total shows (infra#1534, step D1).
+    echo "[standard] $family: finish (elapsed_seconds=$((SECONDS - started)))"
   done
 }
 
