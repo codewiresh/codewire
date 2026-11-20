@@ -21,7 +21,7 @@ Updated 2026-11-20.
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-cw-knows-its-server` | cw-identity | partly observed 2026-11-17 (#5202) | not yet observed |
 | `sandbox-attach-stays` | cw-direct-udp | observed 2026-11-18 (#5120) | not yet observed |
-| `sandbox-stop-start` | cw-cleanup | observed 2026-11-14; named sessions 2026-11-20 (#5494), `cw run --name` on an ended session not yet (#5497) | not yet observed |
+| `sandbox-stop-start` | cw-cleanup | observed 2026-11-14; named sessions and `cw run --name` 2026-11-20 (#5494, #5497) | not yet observed |
 | `sandbox-session-stop` | cw-cleanup | observed 2026-11-20 (#5490) | not yet observed |
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
 | `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
@@ -459,9 +459,18 @@ server it belongs to and says what it can do, instead of asking for a URL.
     boot ID changed, and `play` showed `Stopped`, "stopped with the
     environment", with cleanup known. `cw restart walk --session play` brought
     it back `Running` under the same session ID. `cw run --name play` while it
-    ran refused and named the attach command. The ended-session offer and the
-    wording without "fenced" are in #5497, not yet released: not yet observed.
-    Evidence: the walk comment on #5471.
+    ran refused and named the attach command. Evidence: the walk comment on
+    #5471.
+  - `cw run --name` on an ended session, Dev, 2026-11-20 (codewire-79), the
+    Dev smoke identity with `cw` built from main at 7c141784b6 (#5497), Dev at
+    source a2d07a4737. After a stop and start left `play` `Stopped`: with no
+    terminal, `cw run --name play` exited 1 with "A session named play already
+    exists in w20f (stopped); `--name` never reuses one: restart it with `cw
+    --cloud restart w20f --session play`, or choose another --name". At a
+    terminal it asked "Restart it? [Y/n]", and `y` brought `play` back
+    `Running` under the same session ID, exit 0. With `play` running it
+    refused and named the attach command. No message said "fenced". Evidence:
+    the walk comment on #5471.
 
 ## `sandbox-session-stop`: stopping a session ends every process it started
 
