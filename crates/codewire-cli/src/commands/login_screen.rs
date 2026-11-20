@@ -281,10 +281,36 @@ fn platform_copy(url: &str) {
 /// fully detached, so nothing it prints reaches a prompt.
 pub(super) fn open_sign_in_link(sign_in: SignInScreen<'_>, url: &str) {
     show_link(sign_in, url);
-    if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+    if SYNTHETIC_SIGN_IN {
+        eprintln!("{SYNTHETIC_SIGN_IN_NOTE}");
+    }
+    if opens_browser_here() {
         // The link above is the way there when no browser starts.
         let _ = super::platform_commands::open_browser(url);
     }
+}
+
+/// A build with the non-shipping `local-broker-synthetic-smoke` feature
+/// answers its sign-ins in process, so it never opens a provider's page:
+/// loading it alone would reach the provider with the person's own cookies
+/// (#5592).
+const SYNTHETIC_SIGN_IN: bool = cfg!(feature = "local-broker-synthetic-smoke");
+const SYNTHETIC_SIGN_IN_NOTE: &str =
+    "This test build answers the sign-in itself; don't open the link.";
+
+/// Whether this process starts the browser for a sign-in: at a terminal,
+/// and not in a synthetic build.
+pub(super) fn opens_browser_here() -> bool {
+    opens_browser(
+        SYNTHETIC_SIGN_IN,
+        std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
+    )
+}
+
+/// Whether a sign-in starts the browser: only at a terminal, and never in a
+/// synthetic build.
+fn opens_browser(synthetic: bool, at_terminal: bool) -> bool {
+    at_terminal && !synthetic
 }
 
 /// The Claude sign-in page, in both placements: the authorize link, then
@@ -357,6 +383,21 @@ mod tests {
 
     const URL: &str = "https://claude.com/cai/oauth/authorize?code=true&state=s";
     const PLAIN: Style = Style::new(false, Charset::Unicode);
+
+    /// A sign-in opens the browser only at a terminal, and a synthetic build
+    /// never opens it, so its connect never loads a provider's real page
+    /// (#5592).
+    #[test]
+    fn a_synthetic_build_never_opens_the_browser() {
+        assert!(opens_browser(false, true));
+        assert!(!opens_browser(false, false));
+        assert!(!opens_browser(true, true));
+        assert!(!opens_browser(true, false));
+        assert_eq!(
+            SYNTHETIC_SIGN_IN,
+            cfg!(feature = "local-broker-synthetic-smoke")
+        );
+    }
 
     #[test]
     fn the_title_names_the_provider_the_name_and_the_store() {

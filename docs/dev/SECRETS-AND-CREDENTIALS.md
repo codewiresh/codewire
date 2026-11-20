@@ -1412,7 +1412,10 @@ when it confirmed it (#4717). Nothing retries.
   with no `--features` (`scripts/ci/release/package-cw-release.sh`). Release
   admission refuses a `cw` built with the feature: `cw_release.py`'s
   `check_build_inputs` refuses a dep-info that lists the feature's module
-  (#4986).
+  (#4986). A build with the feature never starts a browser for a sign-in:
+  `cw credentials --local connect` prints the link with a note that the build
+  answers it, and neither it nor its GitHub follow-up opens a page, so no
+  provider page is loaded with the person's own cookies (#5592).
 
 ### Transparent provider routes
 

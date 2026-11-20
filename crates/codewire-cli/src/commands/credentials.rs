@@ -1,6 +1,5 @@
 #[cfg(test)]
 use std::collections::BTreeMap;
-use std::io::IsTerminal as _;
 
 use anyhow::Context as _;
 #[cfg(test)]
@@ -594,12 +593,12 @@ impl ConnectStore for LocalConnectStore<'_> {
 
 /// After a GitHub connect, name each installation that has not yet granted
 /// what Codewire needs and, at a terminal, open the first one's settings page
-/// to accept it, the way `cw login` opens its page (#2712). Elsewhere the
-/// printed link is the way there.
+/// to accept it, the way `cw login` opens its page (#2712). Elsewhere, and
+/// in a synthetic build (#5592), the printed link is the way there.
 pub(crate) fn report_github_pending<'a>(
     pending: impl IntoIterator<Item = (&'a str, u64, codewire_credential_broker::GitHubAccountKind)>,
 ) {
-    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let interactive = super::login_screen::opens_browser_here();
     let (notices, open) = github_pending_follow_up(pending, interactive);
     for notice in notices {
         eprintln!("{notice}");
