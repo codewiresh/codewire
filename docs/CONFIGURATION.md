@@ -578,4 +578,12 @@ trace with its activities. The volume therefore follows requests and actions,
 not the number of running environments.
 
 Codewire's spans are at `DEBUG` level, so at the default `RUST_LOG=info` they
-do not appear in the JSON logs, which are the same whether or not export is on.
+do not appear in the JSON logs.
+
+While export is on, a log line written inside an exported span ends with two
+more members, `trace_id` and `span_id`: the ids that span has in the trace
+store, as 32 and 16 lowercase hex digits. A line about a failed request
+therefore leads to its trace. A line written outside an exported span has
+neither: a background loop's line, a line in a trace the sampler dropped, and
+every line of a service that does not export. While export is off, every line
+is byte for byte what it was.

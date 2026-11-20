@@ -41,6 +41,10 @@
 //! or user content: instrumented functions record identifiers such as
 //! `environment_id` only.
 //!
+//! While export is on, a log line written inside an exported span ends with
+//! that span's `trace_id` and `span_id`. Every other line, and every line
+//! while export is off, is unchanged (docs/CONFIGURATION.md, "Tracing").
+//!
 //! Without an endpoint (or without the feature) nothing is installed beyond
 //! the log layer, and the `DEBUG` spans are disabled at their callsites.
 
@@ -145,10 +149,51 @@ where
 
     tracing_subscriber::fmt::layer()
         .json()
-        .with_target(true)
-        .with_current_span(false)
+        .event_format(WithTraceIds(
+            tracing_subscriber::fmt::format()
+                .json()
+                .with_target(true)
+                .with_current_span(false),
+        ))
         .with_writer(writer)
         .with_filter(tracing_subscriber::filter::filter_fn(logged_span))
+}
+
+/// Writes each log line as `F` does. A line written inside an exported span
+/// then ends with two more members, that span's `trace_id` and `span_id`, so
+/// the line leads to its trace (docs/CONFIGURATION.md, "Tracing"). Any other
+/// line is `F`'s own bytes, as is every line without the `otel` feature.
+struct WithTraceIds<F>(F);
+
+impl<S, N, F> tracing_subscriber::fmt::FormatEvent<S, N> for WithTraceIds<F>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    N: for<'w> tracing_subscriber::fmt::FormatFields<'w> + 'static,
+    F: tracing_subscriber::fmt::FormatEvent<S, N>,
+{
+    fn format_event(
+        &self,
+        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std::fmt::Result {
+        #[cfg(feature = "otel")]
+        if let Some((trace_id, span_id)) = otel::exported_span_ids() {
+            use tracing_subscriber::fmt::format::Writer;
+
+            let mut writer = writer;
+            let mut line = String::new();
+            self.0.format_event(ctx, Writer::new(&mut line), event)?;
+            return match line.strip_suffix("}\n") {
+                Some(members) => writeln!(
+                    writer,
+                    r#"{members},"trace_id":"{trace_id}","span_id":"{span_id}"}}"#
+                ),
+                None => writer.write_str(&line),
+            };
+        }
+        self.0.format_event(ctx, writer, event)
+    }
 }
 
 /// Keeps a library span whose fields hold request bodies out of every log
@@ -389,7 +434,7 @@ mod otel {
 
     use opentelemetry::propagation::{Extractor, Injector};
     use opentelemetry::trace::{
-        Link, SpanContext, SpanKind, TraceContextExt as _, TraceId, Tracer as _,
+        Link, SpanContext, SpanId, SpanKind, TraceContextExt as _, TraceId, Tracer as _,
     };
     use opentelemetry::{Context, Key, KeyValue, Value};
     use opentelemetry_sdk::Resource;
@@ -511,6 +556,18 @@ mod otel {
         } else {
             format!("codewire-{service_name}")
         }
+    }
+
+    /// The ids of the exported span this thread is inside, if any. The span
+    /// layer makes an entered span's context current, so the innermost
+    /// exported span answers, even from under a span that layer never built.
+    /// A span the sampler dropped answers nothing: its ids lead to no trace.
+    pub(super) fn exported_span_ids() -> Option<(TraceId, SpanId)> {
+        let context = Context::current();
+        let span = context.span();
+        let span_context = span.span_context();
+        (span_context.is_valid() && span_context.is_sampled())
+            .then(|| (span_context.trace_id(), span_context.span_id()))
     }
 
     /// Which spans the OpenTelemetry layer builds: Codewire's own and
@@ -886,6 +943,51 @@ mod tests {
         assert_eq!(line["spans"][0]["route"], "stripe", "{text}");
     }
 
+    /// A log line without its leading timestamp, which two layers never share.
+    fn after_timestamp(line: &str) -> &str {
+        line.strip_prefix(r#"{"timestamp":""#)
+            .and_then(|rest| rest.split_once('"'))
+            .expect("a JSON log line starts with its timestamp")
+            .1
+    }
+
+    /// With nothing exported, the log layer writes what the plain JSON layer
+    /// wrote before a line could carry trace ids, byte for byte.
+    #[test]
+    fn a_log_line_outside_an_exported_span_is_unchanged() {
+        use tracing_subscriber::Layer as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let (lines, plain) = (Lines::default(), Lines::default());
+        let (writer, plain_writer) = (lines.clone(), plain.clone());
+        let subscriber = tracing_subscriber::registry()
+            .with(json_log_layer_to(move || writer.clone()))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_target(true)
+                    .with_current_span(false)
+                    .with_writer(move || plain_writer.clone())
+                    .with_filter(tracing_subscriber::filter::filter_fn(logged_span)),
+            );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("outside any span");
+            let _request = tracing::info_span!("request", environment_id = "env-1").entered();
+            tracing::warn!(outcome = "timeout", "inside a span nothing exports");
+        });
+        let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+        let plain_text = String::from_utf8(plain.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(text.lines().count(), 2, "{text}");
+        assert_eq!(
+            text.lines().map(after_timestamp).collect::<Vec<_>>(),
+            plain_text.lines().map(after_timestamp).collect::<Vec<_>>(),
+        );
+        assert!(
+            text.ends_with("}\n") && !text.contains("trace_id"),
+            "{text}"
+        );
+    }
+
     /// The dashboard's list writes its Updates reader's warnings and nothing
     /// else: not that module's lower levels, not its sibling modules, not a
     /// library, not Codewire's shared crates.
@@ -1206,6 +1308,61 @@ mod tests {
                     .expect("the signal carries its trace")
                     .ends_with("-01")
             );
+        }
+
+        /// A log line written inside an exported span ends with that span's
+        /// ids, also from under a span the span layer never builds. A line
+        /// in a background loop's span, which is dropped, has none, and
+        /// neither has a line outside any span.
+        #[tokio::test]
+        async fn a_log_line_inside_an_exported_span_ends_with_its_ids() {
+            use tracing_subscriber::layer::SubscriberExt as _;
+
+            let collected = Collected::default();
+            let exporter = super::super::otel::Exporter::with_processor(
+                "orchestration",
+                opentelemetry_sdk::trace::SimpleSpanProcessor::new(collected.clone()),
+            );
+            let lines = Lines::default();
+            let writer = lines.clone();
+            let subscriber = tracing_subscriber::registry()
+                .with(json_log_layer_to(move || writer.clone()))
+                .with(exporter.layers());
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::info!("outside any span");
+                {
+                    let _probe = tracing::debug_span!("probe_environment").entered();
+                    tracing::warn!("in a background loop");
+                }
+                let _request = tracing::info_span!("request", otel.kind = "server").entered();
+                tracing::warn!(outcome = "timeout", "in a request");
+                let _library = tracing::info_span!(target: "hyper::client", "connect").entered();
+                tracing::warn!("under a library span");
+            });
+            exporter.provider().force_flush().unwrap();
+
+            let spans = collected.0.lock().unwrap().clone();
+            let names: Vec<&str> = spans.iter().map(|span| span.name.as_ref()).collect();
+            assert_eq!(names, ["request"], "only the request is exported");
+            let ids = format!(
+                r#","trace_id":"{}","span_id":"{}"}}"#,
+                spans[0].span_context.trace_id(),
+                spans[0].span_context.span_id(),
+            );
+            let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+            let logged: Vec<&str> = text.lines().collect();
+            assert_eq!(logged.len(), 4, "{text}");
+            assert!(!logged[0].contains("trace_id"), "{text}");
+            assert!(!logged[1].contains("trace_id"), "{text}");
+            for line in &logged[2..] {
+                assert!(line.ends_with(&ids), "{line} does not end with {ids}");
+                // The rest of the line is the formatter's own, and it is
+                // still one JSON object.
+                let line: serde_json::Value = serde_json::from_str(line).unwrap();
+                assert_eq!(line["level"], "WARN", "{text}");
+                assert_eq!(line["trace_id"].as_str().map(str::len), Some(32), "{text}");
+                assert_eq!(line["span_id"].as_str().map(str::len), Some(16), "{text}");
+            }
         }
 
         #[test]
