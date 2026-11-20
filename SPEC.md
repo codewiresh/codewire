@@ -810,22 +810,31 @@ forwards, and the managed block turns agent and X11 forwarding off.
 A Unix-socket forward (`ssh -L LOCAL.sock:REMOTE.sock`, OpenSSH's
 `direct-streamlocal@openssh.com`) reaches the socket at `REMOTE.sock` as a
 process of the workload user would (#5608). It is served on the same
-connections as TCP forwards, each of which may also open a shell, and never
-on a smaller grant. The target is an absolute path of at most 107 bytes;
-relative paths, abstract names (`@…`) and remote socket forwards
-(`ssh -R`) are refused. The whole lookup and the connect run as the workload
-user, with its uid, gid and groups, inside the workload's own filesystem, so
-the kernel's permission checks are the workload user's and the server's peer
-credentials name it. Any socket that user can reach is reachable, the
-environment's Docker socket included: a client forwarding it drives that
-Docker, which is root inside the environment. A hosted Sandbox's SSH server,
-which runs as the workload user, connects itself; a local VM's supervisor
-opens the guest daemon's `ForwardUnix`, which resolves the path within the
-workload's root and connects on a thread that holds the workload user's
-credentials and no capability, used once; a failure to take them refuses the
-forward. A VM whose runtime predates `ForwardUnix` refuses every socket
-forward. Each forward, opened or refused, is logged with the reason and its
-target path escaped and bounded.
+connections as TCP forwards, each of which may also open a shell, and never on
+a smaller grant. The target is an absolute path of at most 107 bytes; relative
+paths, abstract names (`@…`) and remote socket forwards (`ssh -R`) are
+refused. The whole lookup and the connect run as the workload user, with its
+uid, gid and groups, inside the workload's own filesystem, so the kernel's
+permission checks are the workload user's and the server's peer credentials
+name it. Any socket that user can reach is reachable, the environment's Docker
+socket included: a client forwarding it drives that Docker, which is root
+inside the environment. A hosted Sandbox's SSH server, which runs as the
+workload user, connects itself; a local VM's supervisor opens the guest
+daemon's `ForwardUnix`, which makes the connection from a workload process: a
+helper started the way every workload process is, so it has the workload
+user's identity, capabilities and namespaces and sees the container's own
+mounts, with no terminal, a fixed working directory and none of the secrets
+ordinary workload processes are given. The root daemon never changes its own
+credentials. Once connected, the helper relays the forward's bytes over its
+standard input and output, so they pass through a workload process, and no
+descriptor crosses to the root daemon. Since the workload controls that
+helper, the daemon trusts nothing it says: it accepts one status line, bounded
+in bytes and in time, from a fixed set of codes, and tells the client and the
+log only its own words; and it kills the helper's process group when the
+status does not come within the forward's ten seconds, when the forward closes
+and when the connection ends. A VM whose runtime predates `ForwardUnix`
+refuses every socket forward. Each forward, opened or refused, is logged with
+the reason and its target path escaped and bounded.
 
 The platform's own sockets in the workload are refused, by identity, not by
 name: each one's device and inode are recorded as it is bound, and a target
@@ -837,7 +846,9 @@ through the same open file, so it cannot change in between. This refusal is
 not a boundary against someone with a shell, who reaches the same sockets from
 inside. It keeps a forward from being the supported way to carry the
 environment's brokered credentials to another machine, and keeps tools that
-forward sockets on their own from doing it by accident (#3068).
+forward sockets on their own from doing it by accident (#3068). On a local VM
+the helper makes this check, and since the workload controls the helper it is
+advice there, which is all it is meant to be.
 
 ### Terminal
 

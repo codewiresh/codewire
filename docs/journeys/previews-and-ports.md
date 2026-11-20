@@ -159,8 +159,9 @@ Issue: #5608. Spec: `SPEC.md` "Port forwarding over SSH". Code:
   - a target under `/codewire` or `/run/codewire` that is not registered;
   - a target that is not a socket, a relative path, an abstract name
     (`@name`), a path over 107 bytes, and `ssh -R` with a socket;
-  - on a local VM: a socket only root may open, and a VM whose runtime
-    predates `ForwardUnix`;
+  - on a local VM: a socket on a mount only the container sees (its `/tmp`),
+    a socket only root may open, and a VM whose runtime predates
+    `ForwardUnix`;
   - 256 forwards open at once, TCP and Unix together, then one more (a test
     in `forward/tests.rs`, since a walk can't hold that many);
   - Rex: `rex server install ssh://cw-cloud-NAME`, then
@@ -220,8 +221,9 @@ Issue: #5608. Spec: `SPEC.md` "Port forwarding over SSH". Code:
   - `.bashrc` (not a socket), `./peer.sock` (relative), the long path and
     `/codewire/bin/cw` (the platform's directory) are refused, each with its
     reason; `ssh -R` exits with "remote port forwarding failed". On a local
-    VM the root-only socket is refused for permission, and an old runtime
-    refuses with a reason naming the runtime.
+    VM a socket under the container's `/tmp` is reached, the root-only socket
+    is refused for permission, and an old runtime refuses with a reason
+    naming the runtime.
   - The environment's log has one line per forward, opened or refused, with
     the target path escaped and the reason.
   - `rex -S NAME server status` connects, with the Rex server on its own
