@@ -3,7 +3,7 @@
 # pinned digest of the delivered commit, with a main-CI-verified signature
 # naming a source that commit contains, and fails closed on everything else:
 # another digest, no pin, a missing or unsigned image, a signature from outside
-# the commit's history, or malformed input.
+# the commit's history, a verifier or git call that hangs, or malformed input.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -35,6 +35,7 @@ cat >"$repo/scripts/ci/images/verify-runtime-image-signatures.sh" <<'MOCK'
 set -euo pipefail
 [[ "$1" == --egress && $# -eq 3 ]] || exit 64
 printf '%s\n' "$2" >>"${FAKE_VERIFY_CALLS:?}"
+[[ -z "${FAKE_VERIFY_HANG:-}" ]] || exec sleep 30
 [[ -n "${FAKE_SIGNED_SOURCES:-}" ]] || { echo 'no valid signature' >&2; exit 1; }
 printf 'not a commit\n'
 printf '%s\n' $FAKE_SIGNED_SOURCES
@@ -91,5 +92,45 @@ CODEWIRE_IMAGE_REGISTRY='' refuse no-registry 'not a registry host' --commit "$p
 CODEWIRE_IMAGE_REGISTRY='registry.example.invalid/x' refuse bad-registry 'not a registry host' \
   --commit "$pinned" --digest "$DIGEST"
 [[ ! -s "$FAKE_VERIFY_CALLS" ]] || fail 'malformed input reached the verifier'
+
+# A hung verifier or git call is a refusal, not a traceback. The tool runs with
+# the timeout of the call meant to hang (the verifier, or git merge-base) cut to
+# one second, so the hang is real but short; every other call keeps its limit.
+real_git="$(command -v git)"
+mkdir -p "$work/hung-git"
+cat >"$work/hung-git/git" <<MOCK
+#!/usr/bin/env bash
+for arg in "\$@"; do [[ "\$arg" == merge-base ]] && exec sleep 30; done
+exec "$real_git" "\$@"
+MOCK
+chmod 0755 "$work/hung-git/git"
+# hurried CALL ARGS...: run the tool with ARGS, cutting to one second only the
+# timeout of the subprocess whose command line contains CALL.
+hurried() {
+  python3 - "$repo/scripts/ci/images/egress-image-pin.py" "$@" <<'PY'
+import importlib.util, subprocess, sys
+tool_path, call, *args = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("egress_image_pin", tool_path)
+tool = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tool)
+run = subprocess.run
+subprocess.run = lambda command, *a, timeout, **k: run(
+    command, *a, timeout=1 if call in " ".join(command) else timeout, **k)
+raise SystemExit(tool.main(args))
+PY
+}
+for hang in 'verifier verify-runtime-image-signatures.sh --egress' 'git merge-base --is-ancestor'; do
+  expected="${hang#* }" hang="${hang%% *}"
+  : >"$FAKE_VERIFY_CALLS"
+  if [[ "$hang" == verifier ]]; then
+    FAKE_VERIFY_HANG=1 hurried "$expected" verify --commit "$pinned" --digest "$DIGEST" >"$work/hang.out" 2>"$work/hang.err" &&
+      fail "hung $hang: the check passed"
+  else
+    PATH="$work/hung-git:$PATH" hurried "$expected" verify --commit "$pinned" --digest "$DIGEST" \
+      >"$work/hang.out" 2>"$work/hang.err" && fail "hung $hang: the check passed"
+  fi
+  grep -q "$expected.* took over [0-9]* s$" "$work/hang.err" || fail "hung $hang: the refusal does not say why: $(cat "$work/hang.err")"
+  ! grep -Fq Traceback "$work/hang.err" || fail "hung $hang: a traceback, not a refusal"
+done
 
 printf '[test-egress-image-pin-verify] the trusted pin check passes only a pinned, main-CI-signed digest\n'

@@ -53,10 +53,16 @@ class PinError(RuntimeError):
     pass
 
 
+def run(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+    """Run `command`; one that outlives `timeout` seconds is a refusal, never a traceback."""
+    try:
+        return subprocess.run(command, capture_output=True, text=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise PinError(f"{Path(command[0]).name} {' '.join(command[1:])} took over {timeout} s") from None
+
+
 def git(*args: str) -> str:
-    completed = subprocess.run(
-        ["git", "-C", str(ROOT), *args], capture_output=True, text=True, check=False, timeout=120
-    )
+    completed = run(["git", "-C", str(ROOT), *args], 120)
     if completed.returncode != 0:
         raise PinError(f"git {' '.join(args)} failed: {completed.stderr.strip()}")
     return completed.stdout
@@ -93,10 +99,10 @@ def fingerprint(sha: str) -> str:
     sha = commit(sha)
     with tempfile.TemporaryDirectory(prefix="codewire-egress-pin-") as temporary:
         plan = Path(temporary) / "plan.json"
-        completed = subprocess.run(
+        completed = run(
             [sys.executable, str(ROOT / "scripts/ci/plan/planner.py"), "--repository", str(ROOT),
              "--target-base", sha, "--head", sha, "--trusted-policy", sha, "--output", str(plan)],
-            capture_output=True, text=True, check=False, timeout=600,
+            600,
         )
         if completed.returncode != 0:
             raise PinError(f"the planner failed at {sha}: {completed.stderr.strip()[-400:]}")
@@ -108,9 +114,7 @@ def fingerprint(sha: str) -> str:
 
 def contains(sha: str, source: str) -> bool:
     """Whether `sha` contains `source`; an unknown commit is not contained."""
-    completed = subprocess.run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor", source, sha],
-                               capture_output=True, text=True, check=False, timeout=120)
-    return completed.returncode == 0
+    return run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor", source, sha], 120).returncode == 0
 
 
 def verify(sha: str, digest: str, registry: str) -> str:
@@ -126,11 +130,7 @@ def verify(sha: str, digest: str, registry: str) -> str:
     if pin != digest:
         raise PinError(f"{digest} is delivered, but {sha} pins {pin}")
     reference = f"{registry}/codewire/egress@{digest}"
-    try:
-        completed = subprocess.run([str(VERIFIER), "--egress", reference, str(PUBLIC_KEY)],
-                                   capture_output=True, text=True, check=False, timeout=600)
-    except subprocess.TimeoutExpired:
-        raise PinError(f"verifying {reference} took over 600 s") from None
+    completed = run([str(VERIFIER), "--egress", reference, str(PUBLIC_KEY)], 600)
     if completed.returncode != 0:
         raise PinError(f"{reference} is missing or has no valid main-CI-verified signature: "
                        f"{completed.stderr.strip()[-400:]}")
