@@ -25,7 +25,7 @@ observed**.
 | `profile-default` | not yet observed | not yet observed | not yet observed |
 | `cred-delivery-diagnosis` | not yet observed | not yet observed | local VMs only |
 | `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, the early replacements on that build plus their change, and `main` at 4cae0f601 through the smoke, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | observed, #5286: main's tree at 57b68c6be (#5295 and #5312), 2026-11-18, with a name resolving only to private addresses; the provider came back at the regular replacement, not the early ones (a sign-in's token host not walked) | local VMs only |
-| `cred-file-store` | not yet observed (#5255) | the macOS file store; not part of this check | local stores only |
+| `cred-file-store` | partly observed, #5552 on main 22bcc705e, 2026-11-20 (a local VM from a `file` root: its broker serves a lease on the intercepted and the loopback route, and `list` names the file store; the other states not yet observed) | the macOS file store; not part of this check | local stores only |
 | `cred-same-name` | not yet observed (#4928) | not yet observed (#4928) | not yet observed (#4928) |
 | `cred-wording` | not yet observed | not yet observed | not yet observed |
 
@@ -723,7 +723,15 @@ The spec is
   - Removing the throwaway `HOME` leaves no Codewire entry in the private
     keyring.
 - **Gotchas:** entries are plaintext: never walk it with a real credential.
-- **Observed:** not yet observed.
+- **Observed:** partly, on a Linux local VM (x86_64, KVM), 2026-11-20, with
+  `cw` from main 22bcc705e (#5552) and the guest runtime of main 8f3a2d502,
+  a throwaway `HOME` with no session bus and one synthetic Anthropic API key.
+  `list` printed the file-store line, and a local VM from the `file` root
+  was served a lease: with interception on, the placeholder request reached
+  Anthropic with the stored key swapped in (Anthropic's own 401 for an
+  invalid key), and with it off, the loopback route did the same. On main
+  before #5552 both routes answered `CredentialUnavailable` within
+  milliseconds. The other states are not yet observed.
 
 ## 13. `cred-same-name`: one name for a credential of each provider
 
