@@ -31,10 +31,14 @@ fi
 # still merge textually into one Cargo refuses (b34cf2bb: a bare "base64" once
 # main locked two). Check every lockfile of the merge itself before merging.
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-git -C "$root" fetch -q origin "refs/pull/$pr/head"
-head="$(git -C "$root" rev-parse FETCH_HEAD)"
-git -C "$root" fetch -q origin main
-base="$(git -C "$root" rev-parse FETCH_HEAD)"
+# Every session shares the canonical checkout, so FETCH_HEAD and
+# refs/remotes/origin/main move under a concurrent fetch: the pull request's
+# head and main go into refs of this run's own, removed on exit.
+refs="refs/queue-pr/$$"
+trap 'git -C "$root" update-ref -d "$refs/head" 2>/dev/null || true; git -C "$root" update-ref -d "$refs/main" 2>/dev/null || true' EXIT
+git -C "$root" fetch -q --no-write-fetch-head origin "+refs/pull/$pr/head:$refs/head" "+refs/heads/main:$refs/main"
+head="$(git -C "$root" rev-parse --verify "$refs/head^{commit}")"
+base="$(git -C "$root" rev-parse --verify "$refs/main^{commit}")"
 if ! tree="$(git -C "$root" merge-tree --write-tree "$base" "$head")"; then
   printf 'queue-pr.sh: #%s does not merge cleanly with main\n' "$pr" >&2
   exit 1
@@ -50,5 +54,11 @@ done < <(git -C "$root" ls-tree -r --name-only "$tree" | grep -E '(^|/)([A-Za-z0
 
 fj pr -R origin edit "$pr" title "$subject" >/dev/null
 fj pr -R origin edit "$pr" labels -a merge-queue >/dev/null
+# fj can print nothing and change nothing: the label is read back.
+# Exactly merge-queue: merge-queue-solo alone queues nothing.
+if ! fj pr -R origin view "$pr" labels 2>/dev/null | tr -s ', \t' '\n' | grep -qxF merge-queue; then
+  printf 'queue-pr.sh: #%s does not carry the merge-queue label after adding it; run this again\n' "$pr" >&2
+  exit 1
+fi
 printf 'queue-pr.sh: #%s is queued as "%s (#%s)"; the merge queue lands it once Required verification is green and codewire-review-bot approved its head\n' \
   "$pr" "$subject" "$pr"

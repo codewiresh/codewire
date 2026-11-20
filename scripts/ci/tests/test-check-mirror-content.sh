@@ -475,10 +475,12 @@ if merge_pr 42 'fix: safe title' >"$work/merge-refused.out" 2>&1; then
 fi
 grep -qF 'queue it: scripts/dev/queue-pr.sh 42 "fix: safe title"' "$work/merge-refused.out" ||
   fail "a refused merge did not name the queue: $(cat "$work/merge-refused.out")"
-# queue-pr.sh: the same checks, then the title and the label, one call each.
+# queue-pr.sh: the same checks, then the title and the label, one call each,
+# then the label read back (fj can print nothing and change nothing).
 cat >"$work/merge-bin/fj" <<'SH'
 #!/usr/bin/env bash
 { printf '%s\0' "$@"; printf '\n'; } >>"${MERGE_TEST_ARGS:?}"
+case "$*" in *' view '*' labels') printf '%s\n' "${FAKE_LABELS-merge-queue}" ;; esac
 SH
 cp "$ROOT/scripts/dev/queue-pr.sh" "$merge_repo/scripts/dev/"
 queue_pr() { PATH="$work/merge-bin:$PATH" bash "$merge_repo/scripts/dev/queue-pr.sh" "$@"; }
@@ -488,9 +490,18 @@ import sys
 from pathlib import Path
 calls = [line.split(b'\0')[:-1] for line in Path(sys.argv[1]).read_bytes().split(b'\n')[:-1]]
 assert calls == [[b'pr', b'-R', b'origin', b'edit', b'42', b'title', b'fix: safe title'],
-                 [b'pr', b'-R', b'origin', b'edit', b'42', b'labels', b'-a', b'merge-queue']], calls
+                 [b'pr', b'-R', b'origin', b'edit', b'42', b'labels', b'-a', b'merge-queue'],
+                 [b'pr', b'-R', b'origin', b'view', b'42', b'labels']], calls
 PYTEST
 grep -qF '#42 is queued as "fix: safe title (#42)"' "$work/queue.out" || fail "queue-pr.sh did not say what it queued"
+rm "$MERGE_TEST_ARGS"
+# A label that did not stick fails, and says to run it again; merge-queue-solo
+# alone queues nothing.
+if FAKE_LABELS='merge-queue-solo' queue_pr 42 'fix: safe title' >"$work/queue-unlabelled.out" 2>&1; then
+  fail 'queue-pr.sh reported a PR queued whose merge-queue label did not stick'
+fi
+grep -qF '#42 does not carry the merge-queue label after adding it; run this again' "$work/queue-unlabelled.out" ||
+  fail "queue-pr.sh did not say the label did not stick: $(cat "$work/queue-unlabelled.out")"
 rm "$MERGE_TEST_ARGS"
 if queue_pr 42 wip >/dev/null 2>&1 || queue_pr 43 'feat: access' >/dev/null 2>&1; then
   fail 'queue-pr.sh queued a placeholder title or a merge Cargo refuses'
