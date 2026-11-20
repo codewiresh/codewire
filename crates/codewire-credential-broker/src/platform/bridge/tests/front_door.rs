@@ -11,7 +11,9 @@ use tonic::metadata::BinaryMetadataValue;
 use super::*;
 
 /// The handle an admitted epoch's response carries.
-fn handle_of(response: &Response<Streaming<v1::CredentialBridgeHostMessage>>) -> Vec<u8> {
+pub(super) fn handle_of(
+    response: &Response<Streaming<v1::CredentialBridgeHostMessage>>,
+) -> Vec<u8> {
     let values: Vec<_> = response
         .metadata()
         .get_all_bin(CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER)

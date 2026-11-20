@@ -13,8 +13,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use codewire_credential_broker::platform::bridge::{
+    InterceptionCaError, InterceptionCas, LeafRequest, SignedLeaf,
+};
 use codewire_platform_credentials::{
-    InterceptedPod, PlatformCredentialError, PlatformCredentialStore, UnboundInterceptionCa,
+    InterceptedPod, LeafRefusal, PlatformCredentialError, PlatformCredentialStore,
+    UnboundInterceptionCa,
 };
 use k8s_openapi::api::core::v1::Pod;
 use tokio::time::Instant;
@@ -328,6 +332,85 @@ where
         self.absent_since
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The interception CAs as the bridge service serves them (#4001): the Pod
+/// check, then the store, which alone holds the keys.
+pub struct PlatformInterceptionCas<R> {
+    pods: SandboxPods<R>,
+    store: Arc<PlatformCredentialStore>,
+}
+
+impl<R: PodReader> PlatformInterceptionCas<R> {
+    pub fn new(pods: SandboxPods<R>, store: Arc<PlatformCredentialStore>) -> Self {
+        Self { pods, store }
+    }
+}
+
+#[async_trait]
+impl<R: PodReader + 'static> InterceptionCas for PlatformInterceptionCas<R> {
+    async fn ensure(&self, pod_uid: &str, pod_name: &str) -> Result<Vec<u8>, InterceptionCaError> {
+        let checked = self
+            .pods
+            .check(pod_uid, pod_name)
+            .await
+            .map_err(pod_refusal)?;
+        self.store
+            .ensure_interception_ca(checked.intercepted())
+            .await
+            .map_err(store_error)
+    }
+
+    async fn sign(&self, request: LeafRequest<'_>) -> Result<SignedLeaf, InterceptionCaError> {
+        let ca = self
+            .store
+            .open_interception_ca(request.pod_uid, request.environment_id)
+            .await
+            .map_err(store_error)?;
+        // The leaf ends at the earlier of its lifetime and its CA's end. Taken
+        // before signing, whole seconds down, this is never later than the
+        // certificate's own notAfter.
+        let requested_end = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| InterceptionCaError::Unavailable)?
+            .saturating_add(request.lifetime)
+            .as_secs();
+        let certificate_der = ca
+            .sign_leaf(request.public_key, request.hosts, request.lifetime)
+            .map_err(leaf_refusal)?;
+        let ca_end = u64::try_from(ca.not_after().unix_timestamp())
+            .map_err(|_| InterceptionCaError::Unavailable)?;
+        Ok(SignedLeaf {
+            certificate_der,
+            not_after_unix: requested_end.min(ca_end),
+        })
+    }
+}
+
+/// A Pod that isn't the one named, live and broker-mode is a denial; only an
+/// unanswered read is worth a retry.
+fn pod_refusal(refusal: PodRefusal) -> InterceptionCaError {
+    match refusal {
+        PodRefusal::NotFoundOrOtherUid | PodRefusal::NotBrokerMode | PodRefusal::Terminating => {
+            InterceptionCaError::Denied
+        }
+        PodRefusal::Unavailable => InterceptionCaError::Unavailable,
+    }
+}
+
+/// No row for that Pod and environment, or a released binding, is a denial.
+fn store_error(error: PlatformCredentialError) -> InterceptionCaError {
+    match error {
+        PlatformCredentialError::NotFound => InterceptionCaError::Denied,
+        _ => InterceptionCaError::Unavailable,
+    }
+}
+
+fn leaf_refusal(refusal: LeafRefusal) -> InterceptionCaError {
+    match refusal {
+        LeafRefusal::InvalidPublicKey => InterceptionCaError::InvalidKey,
+        _ => InterceptionCaError::Unavailable,
     }
 }
 

@@ -51,6 +51,11 @@ use crate::platform_test_support::{TIMEOUT, registration, value};
 
 type Client = CredentialBrokerServiceClient<Channel>;
 const BROKER_PATH: &str = "/broker.v1.CredentialBrokerService/CredentialBridge";
+/// The interception CA's methods, which only the private listener serves.
+const INTERCEPTION_PATHS: [&str; 2] = [
+    "/broker.v1.CredentialBrokerService/EnsureInterceptionCa",
+    "/broker.v1.CredentialBrokerService/SignInterceptionLeaves",
+];
 
 struct Identity {
     _directory: TempDir,
@@ -438,6 +443,22 @@ async fn real_private_tls_authentication_and_readiness_follow_current_projected_
     let running = Running::start(addresses.release(identity.files()?)?, &h, bridge.clone());
     let result = async {
         running.ready(StatusCode::OK).await?;
+        let public = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()?;
+        for path in INTERCEPTION_PATHS {
+            let response = public
+                .post(format!("http://{}{path}", running.public))
+                .header("content-type", "application/grpc")
+                .send()
+                .await?;
+            ensure!(
+                response.status() == StatusCode::NOT_FOUND,
+                "{path} answered {} on the public listener",
+                response.status()
+            );
+        }
         let endpoint = identity.endpoint(running.private)?;
         let mut original = Client::new(endpoint.connect().await?);
         denied_private_call(&mut original, false).await?;

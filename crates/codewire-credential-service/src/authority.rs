@@ -9,7 +9,7 @@ use codewire_access::{
     builtin_provider_catalog,
 };
 use codewire_credential_broker::platform::bridge::{
-    PlatformBridgeAuthenticationError, PlatformBridgeAuthenticator,
+    PlatformBridgeAuthenticationError, PlatformBridgeAuthenticator, RelayCaller,
 };
 use codewire_credential_broker::platform::{
     PlatformPodIdentity, PlatformRuntimeAuthority, PlatformRuntimeError, PlatformRuntimeSession,
@@ -246,6 +246,42 @@ impl PlatformBridgeAuthenticator for KubernetesPlatformBridgeAuthenticator {
         .await
         .map_err(|_| PlatformBridgeAuthenticationError::Unavailable)?
     }
+
+    /// The relay TokenReview alone: orchestration's service account, in the
+    /// shared server namespace, not expired. A workspace authorization is
+    /// refused here rather than ignored, so a relay-only call can never be
+    /// mistaken for a workspace's.
+    async fn authenticate_relay(
+        &self,
+        metadata: &MetadataMap,
+    ) -> Result<RelayCaller, PlatformBridgeAuthenticationError> {
+        let headers = relay_authentication_headers(metadata)?;
+        tokio::time::timeout(AUTHORITY_TIMEOUT, async {
+            let relay = self
+                .relay_verifier
+                .authenticate(&headers)
+                .await
+                .map_err(authentication_error)?;
+            relay_caller(&relay, &self.relay_namespace).map_err(runtime_auth_error)
+        })
+        .await
+        .map_err(|_| PlatformBridgeAuthenticationError::Unavailable)?
+    }
+}
+
+/// A verified relay identity as the caller of a relay-only method.
+fn relay_caller(relay: &VerifiedPodIdentity, relay_namespace: &str) -> Result<RelayCaller, Error> {
+    verified_shape(relay)?;
+    if relay.purpose() != PodIdentityPurpose::CredentialRelay
+        || !valid_name(relay_namespace, true)
+        || relay.namespace() != relay_namespace
+        || relay.expires_at_unix() <= unix_now()?
+    {
+        return Err(Error::Denied);
+    }
+    Ok(RelayCaller {
+        pod_uid: platform_pod(relay)?.uid,
+    })
 }
 
 /// Captures the original verified Pod identities, finite deadline and exact
@@ -780,6 +816,23 @@ fn authentication_headers(
     ))
 }
 
+/// Exactly one relay bearer, and no workspace authorization in either form.
+fn relay_authentication_headers(
+    metadata: &MetadataMap,
+) -> Result<HeaderMap, PlatformBridgeAuthenticationError> {
+    let denied = PlatformBridgeAuthenticationError::Unauthenticated;
+    if metadata.contains_key(ASCII_WORKSPACE_AUTHORIZATION)
+        || metadata.get_bin(WORKSPACE_AUTHORIZATION).is_some()
+    {
+        return Err(denied);
+    }
+    let mut relay = metadata.get_all("authorization").iter();
+    match (relay.next(), relay.next()) {
+        (Some(value), None) => canonical_headers(value.as_encoded_bytes()),
+        _ => Err(denied),
+    }
+}
+
 fn canonical_headers(bytes: &[u8]) -> Result<HeaderMap, PlatformBridgeAuthenticationError> {
     let denied = PlatformBridgeAuthenticationError::Unauthenticated;
     let token = bytes.strip_prefix(b"Bearer ").ok_or(denied)?;
@@ -840,4 +893,57 @@ pub(crate) fn unix_now() -> Result<u64, Error> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .map_err(|_| Error::Unavailable)
+}
+
+#[cfg(test)]
+mod relay_only_tests {
+    use tonic::metadata::{BinaryMetadataValue, MetadataValue};
+
+    use super::*;
+
+    const RELAY: &str = "Bearer aaaa.bbbb.cccc";
+
+    fn relay_metadata() -> MetadataMap {
+        let mut metadata = MetadataMap::new();
+        metadata.insert("authorization", MetadataValue::from_static(RELAY));
+        metadata
+    }
+
+    #[test]
+    fn a_relay_only_call_carries_exactly_one_relay_bearer_and_no_workspace() {
+        assert!(relay_authentication_headers(&relay_metadata()).is_ok());
+
+        let mut workspace = relay_metadata();
+        workspace.insert_bin(
+            WORKSPACE_AUTHORIZATION,
+            BinaryMetadataValue::from_bytes(b"Bearer dddd.eeee.ffff"),
+        );
+        let mut ascii = relay_metadata();
+        ascii.insert(
+            ASCII_WORKSPACE_AUTHORIZATION,
+            MetadataValue::from_static("Bearer dddd.eeee.ffff"),
+        );
+        let mut twice = relay_metadata();
+        twice.append("authorization", MetadataValue::from_static(RELAY));
+        let mut malformed = MetadataMap::new();
+        malformed.insert(
+            "authorization",
+            MetadataValue::from_static("Bearer not-a-jwt"),
+        );
+        for (name, metadata) in [
+            ("a workspace authorization", workspace),
+            ("its ASCII lookalike", ascii),
+            ("two relay bearers", twice),
+            ("a malformed bearer", malformed),
+            ("no bearer", MetadataMap::new()),
+        ] {
+            assert!(
+                matches!(
+                    relay_authentication_headers(&metadata),
+                    Err(PlatformBridgeAuthenticationError::Unauthenticated)
+                ),
+                "{name}"
+            );
+        }
+    }
 }

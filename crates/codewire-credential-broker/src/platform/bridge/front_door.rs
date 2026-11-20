@@ -60,6 +60,11 @@ impl EpochHandle {
         BinaryMetadataValue::from_bytes(&self.0)
     }
 
+    /// The handle's SHA-256: which epoch, without holding the handle.
+    pub(super) fn digest(&self) -> [u8; 32] {
+        <sha2::Sha256 as sha2::Digest>::digest(self.0).into()
+    }
+
     /// The handle's bytes, for a delegation's admission answer only.
     pub(super) fn to_vec(&self) -> Vec<u8> {
         self.0.to_vec()
@@ -206,16 +211,7 @@ impl Registry {
             .slots
             .lock()
             .map_err(|_| Status::unavailable("credential broker unavailable"))?;
-        let slot = slots
-            .iter()
-            .filter(|slot| slot.scope == *scope)
-            .fold(None, |found, slot| {
-                // Every candidate is compared, so the time taken does not
-                // depend on which one matches.
-                let matches = slot.handle.matches(presented);
-                found.or(matches.then_some(slot))
-            })
-            .ok_or_else(handle_refused)?;
+        let slot = find(&slots, scope, presented)?;
         if slot
             .occupied
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -236,6 +232,51 @@ impl Registry {
             generation: slot.generation,
         })
     }
+
+    /// The bounds of the binding's epoch whose handle is `presented`, found
+    /// as [`Self::claim`] finds it, without taking its front-door place or a
+    /// stream permit: the leaf signer only reads them (#4001). A binding with
+    /// no admitted epoch yet is UNAVAILABLE, so the caller retries; a handle
+    /// matching none of its epochs is PERMISSION_DENIED.
+    pub(super) fn bounds(
+        &self,
+        environment_id: Uuid,
+        generation: u64,
+        presented: &EpochHandle,
+    ) -> Result<EpochBounds, Status> {
+        let slots = self
+            .slots
+            .lock()
+            .map_err(|_| Status::unavailable("credential broker unavailable"))?;
+        let scope = FrontDoorScope::Binding {
+            environment_id,
+            generation,
+        };
+        if !slots.iter().any(|slot| slot.scope == scope) {
+            return Err(Status::unavailable(
+                "the binding's epoch is not admitted yet",
+            ));
+        }
+        find(&slots, &scope, presented).map(|slot| slot.bounds)
+    }
+}
+
+/// The slot in `scope` whose handle is `presented`.
+fn find<'a>(
+    slots: &'a [Slot],
+    scope: &FrontDoorScope,
+    presented: &EpochHandle,
+) -> Result<&'a Slot, Status> {
+    slots
+        .iter()
+        .filter(|slot| slot.scope == *scope)
+        .fold(None, |found, slot| {
+            // Every candidate is compared, so the time taken does not
+            // depend on which one matches.
+            let matches = slot.handle.matches(presented);
+            found.or(matches.then_some(slot))
+        })
+        .ok_or_else(handle_refused)
 }
 
 #[cfg(test)]

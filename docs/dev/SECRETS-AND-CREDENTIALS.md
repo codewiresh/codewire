@@ -2221,6 +2221,55 @@ signer outage (#5032).
   none.
 - **Never logged:** no key, envelope or leaf key appears in a log or an error.
 
+### Hosted interception leaves (not yet served)
+
+How the CA above reaches `cw-egress`, and how its front door gets leaves
+(#4001 N2). `cw-egress` holds only leaves and their keys, never a CA key or a
+credential, and never serves under a CA it made itself.
+
+- **The CA at admission.** At every `Admit`, bound or not, orchestration
+  calls the credential service's `EnsureInterceptionCa` with its relay
+  identity, for the Pod `Admit` authenticated. It returns the certificate,
+  which `AdmitResponse.ca_certificate_der` carries for the stream's trust
+  frame, so a later bind changes nothing the guest sees. The field is empty
+  when interception is off or the CA can't be made, and that stream then
+  intercepts nothing. `EnsureInterceptionCa` is the one method that takes
+  orchestration's relay token alone; every other method still demands the
+  whole chain below. It is rate-limited per caller (the relay Pod) and per
+  Pod, since the Pod check's API reads cost even when the Pod is real
+  (cw-security, #5071).
+- **Where.** Both methods are on `broker.v1.CredentialBrokerService`, served
+  only on the credential service's private TLS listener.
+- **Asking for leaves.** `cw-egress`'s half of the node calls
+  `EgressService.SignInterceptionLeaves` with the Pod and the front door's
+  P-256 public key, and nothing that names a host. Orchestration
+  authenticates the caller as every `EgressService` method does: a bound Pod
+  on the caller's node, with interception on. It then asks the credential
+  service through that Pod's current relay epoch, authenticated exactly as a
+  front-door stream is: the relay token, the Pod's workspace authorization,
+  then the epoch's handle. So the environment and Pod UID come only from that
+  authentication, and orchestration's own identity alone gets no leaf. Before
+  the epoch is admitted, the call answers `UNAVAILABLE`.
+- **Which hosts.** Only those in Codewire's interceptable-host table that
+  the route of a credential this session is authorized for reaches; a caller
+  cannot name one. A session with no such credential, and so an unbound Pod,
+  gets none. Suffix wildcards stay refused until the table carries suffix
+  bindings. The key must be a P-256 public key.
+- **Lifetime.** A leaf ends with its epoch, after an hour, or with its CA,
+  whichever comes first. `renew_at_unix` is its half-life. A rebind reissues
+  the leaves on the next call. One live set per Pod, epoch, key and host set:
+  a repeated call returns that set until `renew_at_unix`, and a grant that
+  changes mid-epoch gets a new one at once.
+- **Rates.** Per Pod, each limit is 10 calls per 60 seconds; per relay Pod,
+  which every Sandbox admission on that orchestration replica shares, 600, so
+  a burst of starts fits. Each is held in memory by each credential-service
+  replica, so the effective bound is the replica count (two) times that. Shared limits replace them if replicas grow past a
+  handful (cw-security, #4001).
+- **Records.** Each issuance records the Pod UID, the key's SHA-256
+  fingerprint, the hosts and the expiry, and nothing secret.
+- **Failing closed.** A signer that cannot issue answers `UNAVAILABLE`, and
+  `cw-egress` refuses those hosts with the reason `interception_unavailable`.
+
 ### Provider matrix
 
 | Provider | Operations |

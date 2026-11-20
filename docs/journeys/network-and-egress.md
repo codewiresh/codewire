@@ -1428,6 +1428,9 @@ arguments hold no real token, and the hosted sign-in exception is not used
   - a Sandbox claimed from the warm pool;
   - the credential service unreachable for longer than a certificate's
     life;
+  - a Sandbox's leaves (`SECRETS-AND-CREDENTIALS.md`, "Hosted interception
+    leaves"): before its bind, after it, across a `cw-egress` restart and a
+    move to another node, and with the credential service stopped;
   - a front-door session ended by `cw-egress`'s token expiry, and reopened;
   - orchestration refusing the session: hosted interception off there, or the
     Pod denied;
@@ -1458,9 +1461,16 @@ arguments hold no real token, and the hosted sign-in exception is not used
   - no CA key is on a node: `cw-egress` holds only certificates for the
     hosts the Sandbox's credentials bind, each valid for at most an hour;
   - with the credential service unreachable past a certificate's life,
-    an intercepted host fails closed and the Sandbox's status shows it.
+    an intercepted host fails closed, its refusals are recorded as
+    `intercept_unavailable`, and the Sandbox's status shows it.
     Its other egress is unaffected, and interception returns by itself
     when the service does;
+  - an unbound Sandbox's front door has its CA but no leaf; once bound, its
+    leaves name exactly its binding's hosts and end within an hour;
+  - the CA certificate's digest inside the Sandbox is the same before and
+    after a move to another node;
+  - a canary leaf key is found in no log of `cw-egress`, orchestration or
+    the credential service;
   - a front-door session that ends at `cw-egress`'s token expiry is
     reopened within seconds, and the next intercepted request is served;
   - while orchestration refuses the session, every intercepted request fails

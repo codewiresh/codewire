@@ -5,6 +5,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use av_credential_proxy::tunnel_ip_allowed;
 use codewire_access::HttpProvider;
+#[cfg(feature = "platform")]
+use codewire_access::{AvailableGrants, FRONT_DOOR_HOSTS};
 use codewire_egress_policy::intercept::InterceptBinding;
 use futures::StreamExt as _;
 use http::{HeaderMap, Method};
@@ -612,6 +614,28 @@ impl RouteHost {
         }
     }
 
+    /// The hosts these grants reach that the front door serves exactly: the
+    /// only hosts an interception leaf names (#4001). A suffix entry gets no
+    /// leaf until suffix bindings exist.
+    #[cfg(feature = "platform")]
+    pub(crate) fn interceptable(grants: &AvailableGrants) -> BTreeSet<&'static str> {
+        grants
+            .grants
+            .iter()
+            .flat_map(|grant| {
+                grant.permissions.iter().flat_map(|permission| {
+                    Self::of_route(grant.capability_slot.as_str(), permission.route.as_str())
+                })
+            })
+            .map(|route_host| route_host.as_str())
+            .filter(|host| {
+                FRONT_DOOR_HOSTS
+                    .iter()
+                    .any(|served| !served.suffix && served.host == *host)
+            })
+            .collect()
+    }
+
     /// The host a front-door request on this slot and route names, taken as
     /// it is: a name the egress policy could bind for interception on the
     /// provider port (exact and canonical, so nothing to lowercase or strip;
@@ -967,6 +991,58 @@ mod upgrade_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "platform")]
+    fn grants(pairs: &[(&str, &str)]) -> AvailableGrants {
+        use codewire_access::{
+            BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialId, DerivedGrant,
+            EnvironmentId, GrantPermission,
+        };
+        AvailableGrants {
+            grants: pairs
+                .iter()
+                .map(|(slot, route)| DerivedGrant {
+                    environment_id: EnvironmentId::parse("synthetic-environment").unwrap(),
+                    environment_generation: 3,
+                    profile: None,
+                    capability_slot: CapabilitySlot::parse(*slot).unwrap(),
+                    credential_id: CredentialId::parse("11111111-1111-4111-8111-111111111111")
+                        .unwrap(),
+                    credential_revocation_generation: 7,
+                    expires_at_unix: None,
+                    permissions: BTreeSet::from([GrantPermission {
+                        operation: BrokerOperationId::parse("responses").unwrap(),
+                        route: BrokerRouteId::parse(*route).unwrap(),
+                    }]),
+                })
+                .collect(),
+            reconnect_required: Default::default(),
+            ungranted_github: codewire_access::UngrantedGitHub::None,
+        }
+    }
+
+    #[cfg(feature = "platform")]
+    #[test]
+    fn leaves_name_only_front_door_hosts_the_sessions_grants_reach() {
+        assert!(RouteHost::interceptable(&grants(&[])).is_empty());
+        assert_eq!(
+            RouteHost::interceptable(&grants(&[("anthropic", "anthropic-api")])),
+            BTreeSet::from(["api.anthropic.com"])
+        );
+        assert_eq!(
+            RouteHost::interceptable(&grants(&[("codex", "openai-api")])),
+            BTreeSet::from(["api.openai.com", "chatgpt.com"])
+        );
+        // GitHub's hosts are a route's, but the front door doesn't serve them.
+        assert!(
+            RouteHost::interceptable(&grants(&[
+                ("github", "github-api"),
+                ("github", "github-https"),
+                ("ssh", "ssh-agent"),
+            ]))
+            .is_empty()
+        );
+    }
 
     /// `DestinationDenied` means nothing was sent (#3999): a request-builder
     /// error maps to it, and an error from sending never does.

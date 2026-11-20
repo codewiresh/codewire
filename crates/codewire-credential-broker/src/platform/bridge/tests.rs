@@ -6,6 +6,7 @@
 mod authenticated;
 mod front_door;
 mod front_door_delegation;
+mod interception_rpcs;
 mod rotation;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -96,6 +97,23 @@ impl PlatformBridgeAuthenticator for Authenticator {
             _ => Err(PlatformBridgeAuthenticationError::Unauthenticated),
         }
     }
+
+    /// Only `x-synthetic-relay: relay-allow`, the stand-in for a relay token
+    /// presented alone.
+    async fn authenticate_relay(
+        &self,
+        metadata: &MetadataMap,
+    ) -> Result<RelayCaller, PlatformBridgeAuthenticationError> {
+        match metadata
+            .get("x-synthetic-relay")
+            .and_then(|value| value.to_str().ok())
+        {
+            Some("relay-allow") => Ok(RelayCaller {
+                pod_uid: Uuid::from_u128(1),
+            }),
+            _ => Err(PlatformBridgeAuthenticationError::Unauthenticated),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -156,6 +174,7 @@ type Client = CredentialBrokerServiceClient<Channel>;
 struct Fixture {
     service: Service,
     authenticator: Arc<Authenticator>,
+    cas: Arc<interception_rpcs::RecordingCas>,
     kek: Arc<CountingKek>,
     upstream: Upstream,
     endpoint: String,
@@ -228,6 +247,7 @@ impl Fixture {
         });
         let kek = Arc::new(CountingKek::default());
         let upstream = Upstream::default();
+        let cas = Arc::new(interception_rpcs::RecordingCas::default());
         let store = Arc::new(PlatformCredentialStore::new(
             pool.clone(),
             kek.clone(),
@@ -241,7 +261,9 @@ impl Fixture {
             streams,
             leases,
         )
-        .with_front_door_idle(idle);
+        .with_front_door_idle(idle)
+        .with_interception_cas(cas.clone())
+        .unwrap();
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
@@ -261,6 +283,7 @@ impl Fixture {
         Self {
             service,
             authenticator,
+            cas,
             kek,
             upstream,
             endpoint,

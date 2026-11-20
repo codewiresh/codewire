@@ -184,6 +184,22 @@ impl CredentialBrokerService for SyntheticBroker {
         Ok(response)
     }
 
+    async fn ensure_interception_ca(
+        &self,
+        _request: Request<codewire_daemon_proto::broker::v1::EnsureInterceptionCaRequest>,
+    ) -> Result<Response<codewire_daemon_proto::broker::v1::EnsureInterceptionCaResponse>, Status>
+    {
+        Err(Status::unimplemented("not used by these relay tests"))
+    }
+
+    async fn sign_interception_leaves(
+        &self,
+        _request: Request<codewire_daemon_proto::broker::v1::SignInterceptionLeavesRequest>,
+    ) -> Result<Response<codewire_daemon_proto::broker::v1::SignInterceptionLeavesResponse>, Status>
+    {
+        Err(Status::unimplemented("not used by these relay tests"))
+    }
+
     async fn credential_bridge(
         &self,
         request: Request<Streaming<v1::CredentialBridgeGuestMessage>>,

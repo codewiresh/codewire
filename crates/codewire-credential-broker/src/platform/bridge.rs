@@ -21,6 +21,10 @@ use codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
 use codewire_daemon_proto::broker::v1::credential_broker_service_server::{
     CredentialBrokerService, CredentialBrokerServiceServer,
 };
+use codewire_daemon_proto::broker::v1::{
+    EnsureInterceptionCaRequest, EnsureInterceptionCaResponse, SignInterceptionLeavesRequest,
+    SignInterceptionLeavesResponse,
+};
 use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_platform_credentials::{
     EpochMaterialCache, PlatformAccessProfileStore, PlatformCredentialStore,
@@ -49,6 +53,8 @@ use crate::{
 mod front_door;
 pub use front_door::FrontDoorScope;
 use front_door::{EpochBounds, EpochHandle, Registry as FrontDoorRegistry};
+mod interception;
+pub use interception::{InterceptionCaError, InterceptionCas, LeafRequest, SignedLeaf};
 
 /// A joined front-door stream with nothing in flight ends after this long;
 /// cw-egress opens another on demand (#4963).
@@ -130,6 +136,22 @@ pub trait PlatformBridgeAuthenticator: Send + Sync {
         &self,
         metadata: &MetadataMap,
     ) -> Result<Arc<Self::Authority>, PlatformBridgeAuthenticationError>;
+
+    /// Orchestration's relay token alone, for `EnsureInterceptionCa` and
+    /// nothing else (#4001); every other method takes [`Self::authenticate`].
+    /// Refused unless an authenticator serves it.
+    async fn authenticate_relay(
+        &self,
+        _metadata: &MetadataMap,
+    ) -> Result<RelayCaller, PlatformBridgeAuthenticationError> {
+        Err(PlatformBridgeAuthenticationError::Unauthenticated)
+    }
+}
+
+/// The orchestration Pod a relay-only call came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RelayCaller {
+    pub pod_uid: Uuid,
 }
 
 struct ServiceState<A, U> {
@@ -149,6 +171,8 @@ struct ServiceState<A, U> {
     shutdown: CancellationToken,
     /// Admitted epochs a front-door stream may join (#4001, #4909).
     front_doors: Arc<FrontDoorRegistry>,
+    /// The interception CAs, where this service holds them (#4001).
+    interception: Option<Arc<interception::Interception>>,
     front_door_idle: std::time::Duration,
     #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
     ssh: Option<Arc<super::ssh::Service>>,
@@ -214,6 +238,7 @@ where
                 workers: TaskTracker::new(),
                 shutdown: CancellationToken::new(),
                 front_doors: Arc::default(),
+                interception: None,
                 front_door_idle: FRONT_DOOR_IDLE,
                 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
                 ssh: None,
@@ -262,6 +287,21 @@ where
             return Err(PlatformRuntimeError::Denied);
         }
         state.github_app_authorization = Some(owner);
+        Ok(self)
+    }
+
+    /// Serve the interception CAs' methods from `cas` (#4001). Without it they
+    /// answer UNAVAILABLE. Explicit trusted composition only, before cloning
+    /// or serving.
+    pub fn with_interception_cas(
+        mut self,
+        cas: Arc<dyn InterceptionCas>,
+    ) -> Result<Self, PlatformRuntimeError> {
+        let state = Arc::get_mut(&mut self.state).ok_or(PlatformRuntimeError::Denied)?;
+        if state.interception.is_some() || state.shutdown.is_cancelled() {
+            return Err(PlatformRuntimeError::Denied);
+        }
+        state.interception = Some(Arc::new(interception::Interception::new(cas)));
         Ok(self)
     }
 
@@ -737,6 +777,70 @@ where
 {
     type CredentialBridgeStream = ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>;
     type FrontDoorBridgeStream = ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>;
+
+    /// The one method that takes the relay token alone.
+    async fn ensure_interception_ca(
+        &self,
+        request: Request<EnsureInterceptionCaRequest>,
+    ) -> Result<Response<EnsureInterceptionCaResponse>, Status> {
+        let interception = self.state.interception.clone().ok_or_else(unavailable)?;
+        let (metadata, _, request) = request.into_parts();
+        let caller = self
+            .state
+            .authenticator
+            .authenticate_relay(&metadata)
+            .await
+            .map_err(PlatformBridgeAuthenticationError::status)?;
+        interception
+            .ensure(caller.pod_uid, &request)
+            .await
+            .map(Response::new)
+    }
+
+    async fn sign_interception_leaves(
+        &self,
+        request: Request<SignInterceptionLeavesRequest>,
+    ) -> Result<Response<SignInterceptionLeavesResponse>, Status> {
+        let interception = self.state.interception.clone().ok_or_else(unavailable)?;
+        let (metadata, _, request) = request.into_parts();
+        // The relay token and the workspace authorization, then the epoch's
+        // handle, as a front-door stream presents them.
+        let authority = self
+            .state
+            .authenticator
+            .authenticate(&metadata)
+            .await
+            .map_err(PlatformBridgeAuthenticationError::status)?;
+        let session = authority.current_session().await.map_err(runtime_status)?;
+        let pod_uid = interception::workspace_pod_uid(&session).ok_or_else(denied)?;
+        let environment_id =
+            Uuid::parse_str(session.context.environment_id.as_str()).map_err(|_| denied())?;
+        let generation = session.context.environment_generation;
+        let presented = EpochHandle::presented(&metadata).ok_or_else(denied)?;
+        let bounds = self
+            .state
+            .front_doors
+            .bounds(environment_id, generation, &presented)?;
+        let grants = self
+            .state
+            .profiles
+            .evaluate_grants(&session.context)
+            .await
+            .map_err(|_| unavailable())?;
+        let hosts = crate::network::RouteHost::interceptable(&grants);
+        interception
+            .sign(interception::LeavesFor {
+                pod_uid,
+                environment_id,
+                generation,
+                epoch_digest: presented.digest(),
+                epoch_expires_at_unix: bounds.expires_at_unix,
+                public_key: &request.leaf_public_key,
+                hosts: &hosts,
+            })
+            .await
+            .map(Response::new)
+    }
 
     async fn credential_bridge(
         &self,

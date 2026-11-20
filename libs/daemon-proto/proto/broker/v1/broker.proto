@@ -35,4 +35,49 @@ service CredentialBrokerService {
   // list the front-door operations served
   // (x-codewire-credential-bridge-capabilities).
   rpc FrontDoorBridge(stream codewire.bridge.v1.CredentialBridgeGuestMessage) returns (stream codewire.bridge.v1.CredentialBridgeHostMessage);
+
+  // The interception CA of a hosted Pod, made at its first call and the same
+  // for the Pod's life (#4001). The one method that takes the relay token
+  // alone: orchestration calls it at every egress admission, bound or not.
+  // The Pod is checked live in the sandbox namespace: that UID at that name,
+  // in broker egress mode, not terminating. Another or missing Pod, or one
+  // whose binding was released, is PERMISSION_DENIED. Rate-limited per caller
+  // and per Pod (RESOURCE_EXHAUSTED). Returns the certificate only.
+  rpc EnsureInterceptionCa(EnsureInterceptionCaRequest) returns (EnsureInterceptionCaResponse);
+
+  // Leaves under the Pod's interception CA for a front door's key (#4001).
+  // The caller presents the same relay and workspace authorization as an
+  // epoch's CredentialBridge, then that epoch's handle, checked in that order
+  // as FrontDoorBridge checks them, without taking the epoch's stream. The
+  // environment and Pod come only from that authentication; the hosts only
+  // from the interceptable hosts this session's credentials reach, none for
+  // a session with none. UNAVAILABLE before the epoch is admitted or while
+  // the signer cannot sign. A repeated call for the same Pod, epoch and key
+  // returns the same leaves until renew_at_unix.
+  rpc SignInterceptionLeaves(SignInterceptionLeavesRequest) returns (SignInterceptionLeavesResponse);
+}
+
+message EnsureInterceptionCaRequest {
+  string pod_uid = 1;
+  string pod_name = 2;
+}
+
+message EnsureInterceptionCaResponse {
+  bytes ca_certificate_der = 1;
+}
+
+message SignInterceptionLeavesRequest {
+  // The front door's ECDSA P-256 public key, as a DER SubjectPublicKeyInfo.
+  bytes leaf_public_key = 1;
+}
+
+message InterceptionLeaf {
+  bytes certificate_der = 1;
+  repeated string hosts = 2;
+}
+
+message SignInterceptionLeavesResponse {
+  repeated InterceptionLeaf leaves = 1;
+  // Half the leaves' lifetime; ask again at or after it.
+  int64 renew_at_unix = 2;
 }

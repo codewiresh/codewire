@@ -310,7 +310,7 @@ async fn run_connected(
     ));
     let bridge = PlatformCredentialBridgeService::new(
         Arc::new(authorities.kubernetes_authenticator(
-            client,
+            client.clone(),
             pool.clone(),
             config.relay_namespace.clone(),
         )),
@@ -333,6 +333,20 @@ async fn run_connected(
         bridge
     };
     let bridge = ssh::configure(bridge, &config.runtime_directory)?;
+    // Without a sandbox namespace no Pod can be checked, so the interception
+    // CAs' methods answer UNAVAILABLE (#4001).
+    let bridge = match &config.sandbox_namespace {
+        Some(namespace) => bridge
+            .with_interception_cas(Arc::new(crate::interception::PlatformInterceptionCas::new(
+                crate::interception::SandboxPods::new(
+                    crate::interception::KubernetesPods::new(client.clone()),
+                    namespace.clone(),
+                ),
+                store.clone(),
+            )))
+            .map_err(|_| RuntimeError::Configuration("interception CAs"))?,
+        None => bridge,
+    };
     // Revoking a credential also asks its provider, each over a transport
     // that admits only that one request (#4717); GitHub's needs the App.
     let revocation = RevocationTransports {
