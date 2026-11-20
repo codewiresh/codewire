@@ -8,7 +8,7 @@ walk observed on macOS 27 and on macOS 26. The format is in
 
 ## Where it stands
 
-Updated 2026-11-19.
+Updated 2026-11-20.
 
 | ID | macOS 27 | macOS 26 |
 | --- | --- | --- |
@@ -18,6 +18,7 @@ Updated 2026-11-19.
 | `mac-vm-mesh-ingress` | not yet observed | not yet observed |
 | `mac-vm-intercept` | boots observed on #4916 on #5124 (268f2709e), 5 of 5; serving partly observed on a scratch merge with the placeholder seed (245992e87) | not yet observed |
 | `mac-vm-refresh` | not yet observed (#5539) | not yet observed (#5539) |
+| `local-vm-git-mounted` | not yet observed ([local-vm-git.md](local-vm-git.md), #5478) | not yet observed |
 
 ## Before the walk
 

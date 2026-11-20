@@ -523,8 +523,12 @@ pub async fn run_daemon() -> Result<()> {
     // The environment's own live mounts below /workspace: file requests
     // resolve beneath them from their own roots (#4102).
     // Each with its mount ID now, so a file request reaches only that mount.
+    let shares = load_direct_share_plan(&seed)?;
+    let has_shares = shares
+        .as_ref()
+        .is_some_and(|shares| !shares.mounts().is_empty());
     let mount_roots = codewire_daemon::files::declared_mounts(
-        load_direct_share_plan(&seed)?
+        shares
             .map(|shares| {
                 shares
                     .mounts()
@@ -618,6 +622,16 @@ pub async fn run_daemon() -> Result<()> {
         &codex_home,
         config.interception.is_some(),
     );
+    // A share's files can belong to someone other than the workload user, so
+    // the workload user's Git trusts the shares' repositories (#5478). It runs
+    // as that user once the workspace container does, and never blocks the
+    // boot; a VM without a share leaves Git's configuration alone.
+    if has_shares {
+        let config = config.clone();
+        tokio::spawn(async move {
+            codewire_daemon::shared_repositories::trust_shared_repositories(&config).await;
+        });
+    }
     let publisher = publisher.map(|cache| Arc::new(std::sync::Mutex::new(cache)));
     // PID 1 signals a resume from a VM checkpoint once it has reseeded and
     // the runner has written the restored boot's seed.

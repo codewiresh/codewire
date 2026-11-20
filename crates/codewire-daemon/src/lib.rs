@@ -44,6 +44,8 @@ pub mod recent_log;
 pub mod server;
 pub mod service;
 pub mod session;
+#[cfg(unix)]
+pub mod shared_repositories;
 #[cfg(target_os = "linux")]
 pub mod snapshot_clearing;
 #[cfg(target_os = "linux")]

@@ -173,8 +173,8 @@ skills:
 
         # The guest's own git reads the checkouts; apk's mirror is allowed HTTPS.
         self.guest("for n in 1 2 3; do apk add --quiet --no-cache git && exit 0; sleep 3; done; exit 1", timeout=300)
-        heads = self.guest("git -c safe.directory='*' -C /workspace/gitea rev-parse HEAD; "
-                           "git -c safe.directory='*' -C /workspace/github rev-parse HEAD").stdout.split()
+        heads = self.guest("git -C /workspace/gitea rev-parse HEAD; "
+                           "git -C /workspace/github rev-parse HEAD").stdout.split()
         assert heads == [self.gitea[1], GITHUB[1]], heads
         self.check("repositories at their pinned commits")
 

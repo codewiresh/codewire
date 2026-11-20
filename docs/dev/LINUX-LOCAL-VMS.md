@@ -393,6 +393,46 @@ inside the VM run on your machine, as you, the next time you use git in that
 folder. Mount only folders whose contents you trust the VM with, and use
 `--path-mode clone` for code you don't trust.
 
+**Git trusts the shares' repositories (#5478).** A share's files can belong
+to someone other than the workload user. On a Mac they appear as root's, and
+on Linux as the host user's uid. So Git would refuse every mounted repository
+with "dubious ownership". At every boot of a local VM whose direct-share plan
+has at least one share, the guest daemon writes `safe.directory = *` to a file
+the product owns, `~/.codewire/gitconfig`. It then adds one `include.path` line
+for that file to the workload user's global Git config, only if the line is
+missing (`git config --global --fixed-value`). The rules:
+
+- **As the workload user.** The write runs as the workload user, through the
+  workload's own launch path (`PreparedProcess`, runc), in the environment a
+  launched session gets, so a project's `HOME` or `GIT_CONFIG_GLOBAL` is
+  honoured. It never runs from the root guest daemon directly: Git follows
+  a symlinked `~/.gitconfig`, and root would write its target.
+- **Global scope only.** Never a system file and never root's config. Root's
+  Git keeps refusing a repository the workload controls, so nothing the
+  platform runs as root trusts one. Under a `sudo` the workload runs
+  itself, Git's own rule still trusts a repository owned by the user who
+  ran sudo (`SUDO_UID`), with or without this. The product's line never
+  reaches root (observed on #5659's walk).
+- **Why `*` and not the share paths.** The image's Git (2.43) ignores a
+  trailing `/*`, so exact paths would leave submodules, worktrees and a folder
+  holding several repositories refused. What `*` trusts beyond the shares is
+  a repository the workload user doesn't own: inside a local VM, root's or
+  one made through sudo or Docker. The workload user is the least privileged
+  principal there, so trusting those gains nobody anything. This holds only
+  in a single-user local VM; it is not a pattern for a hosted Sandbox or any
+  shared machine (cw-security, #5478).
+- **The user's own lines stay.** A user's own `safe.directory` lines are never
+  changed, reordered or removed. The product's line lives only in its own
+  file, which is rewritten whole at every boot.
+- **An image without Git at boot.** An image may get Git only later, for
+  example through `apk add git`. Without `git`, the line is appended
+  directly to the file Git reads as global: `GIT_CONFIG_GLOBAL`, or else
+  `~/.gitconfig`. The Git installed later then trusts the shares too.
+- **Failure.** The guest daemon starts before the workspace container, so
+  the write is retried for up to 60 seconds. If it still fails, the daemon's
+  recent log says so and the boot goes on. A VM without a share leaves Git's
+  configuration alone.
+
 A direct mount (`mounts:` with `mode: direct`) shares a host directory live
 through virtiofsd. Admission binds the directory's device, inode, mount,
 owner and filesystem. Every start reopens the path without following a

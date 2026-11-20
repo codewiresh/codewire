@@ -21,6 +21,7 @@ runs the same commands and holds the result to the same standard.
 | [local-vm-credentials-smoke.md](local-vm-credentials-smoke.md) | The automated local VM credentials and proxy smoke (#5220): a profile added after create, each credential type through the proxy and revoked, attach across a restart, an upgrade with the previous release's authority or VM in place, and the proxy down |
 | [local-vm-limits.md](local-vm-limits.md) | Limits inside a local VM (#5384, #5464): a workload that forks without end is refused by the guest, and the VM stays up; `sudo` works with Docker on and refuses with `--no-docker` |
 | [local-vm-docker.md](local-vm-docker.md) | Docker in a local VM (#5418): `docker exec` runs in the container it names, also after the VM is stopped and started |
+| [local-vm-git.md](local-vm-git.md) | Git in a local VM's mounted folder (#5478): a mounted checkout, its nested repositories and submodules work with nothing set by hand, and a user's own `safe.directory` lines stay |
 | [invitations.md](invitations.md) | Invite a teammate by email, who accepts, is listed and can be removed, within the invitation limits |
 | [self-hosted.md](self-hosted.md) | The self-hosted walk (#4121): install, the first admin, invite links and sign-up without an invite |
 | [node-reboot.md](node-reboot.md) | Production keeps serving through one node's drain or reboot, and a sandbox on that node says why it restarted (#3542, #4461, #3772) |

@@ -193,7 +193,9 @@ These follow the Linux contract and messages:
   mount. Read-only mounts refuse every write; a symlink inside a mount
   resolves in the guest, never on the Mac; hard links cannot cross mounts.
   The guest sees shared files as owned by root, and files it creates belong
-  to you on the Mac. Because Virtualization.framework shares a directory by
+  to you on the Mac. Git still works in a shared repository: the guest
+  trusts the shares' repositories for the workload user
+  ([LINUX-LOCAL-VMS.md](LINUX-LOCAL-VMS.md), "Direct mounts", #5478). Because Virtualization.framework shares a directory by
   path, the runner and helper check the admitted device and inode before and
   after VM start. A source that is moved, removed or replaced while stopped
   fails start with `start_direct_share_changed`; put the original directory
