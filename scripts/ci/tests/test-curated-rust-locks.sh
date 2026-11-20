@@ -266,4 +266,75 @@ compile_run "$TMP/compile3.log" || compile_fail "the default run failed: $(cat "
 grep -qxF "check $compile_root/target/curated-one $compile_root/target/curated/one/Cargo.toml held" \
   "$TMP/compile.calls" || compile_fail 'the default run did not stage under the checkout target folder'
 
-printf 'curated Rust workspace lock fixtures: stale and root drift rejected; current derp and cold-cache forms green; compile-all-targets stages each workspace afresh at one path under its target folder, locked\n'
+# Under a shared jobserver the two root clippy builds and the curated checks
+# run at once, each in its own target folder; each build's output is printed
+# whole, and the first failure is the exit status (infra#1534, step A).
+# Without one they run one after another and stop at the first failure.
+timed_cargo="$EXEC_TMP/timed-cargo"
+cat >"$timed_cargo" <<'EOF'
+#!/usr/bin/env bash
+# Records when each build starts and ends, with its target folder; a clippy
+# build takes a second, and FAIL_ALL_FEATURES fails the all-features one.
+set -euo pipefail
+case "$*" in
+  *--all-features*) build=all-features ;;
+  clippy*) build=default ;;
+  check*) build=curated ;;
+  *) exit 0 ;;
+esac
+printf 'start %s %s %s\n' "$build" "$CARGO_TARGET_DIR" "$(date +%s.%N)" >>"$COMPILE_CALLS"
+[ "$build" = curated ] || sleep 1
+printf 'end %s %s\n' "$build" "$(date +%s.%N)" >>"$COMPILE_CALLS"
+printf 'fake %s output\n' "$build"
+[ "$build" != all-features ] || exit "${FAIL_ALL_FEATURES:-0}"
+EOF
+chmod +x "$timed_cargo"
+timed_run() {
+  # timed_run LOG [FAIL_ALL_FEATURES] [CARGO_MAKEFLAGS]: one run with the timed
+  # Cargo, under a fake shared jobserver unless the third argument is empty.
+  : >"$TMP/compile.calls"
+  CARGO_TARGET_DIR="$targets" COMPILE_CALLS="$TMP/compile.calls" CARGO_BIN="$timed_cargo" \
+    CURATED_RUST_MANIFEST_DIR="$compile_root/manifests" FAIL_ALL_FEATURES="${2:-0}" \
+    CARGO_MAKEFLAGS="${3---jobserver-auth=3,4}" \
+    "$compile_root/scripts/ci/verify/compile-all-targets.sh" >"$1" 2>&1
+}
+cp "$ROOT/scripts/ci/verify/compile-all-targets.sh" "$compile_root/scripts/ci/verify/"
+timed_run "$TMP/compile-timed.log" || compile_fail "the timed run failed: $(cat "$TMP/compile-timed.log")"
+grep -qE "^start default $targets [0-9.]+\$" "$TMP/compile.calls" ||
+  compile_fail 'default-features clippy did not build in the target folder'
+grep -qE "^start all-features $targets/all-features [0-9.]+\$" "$TMP/compile.calls" ||
+  compile_fail 'all-features clippy did not build in its own target folder'
+# Every build starts before the first clippy build ends.
+first_end="$(awk '$1 == "end" && $2 != "curated" { print $3 }' "$TMP/compile.calls" | sort -n | head -1)"
+last_start="$(awk '$1 == "start" { print $4 }' "$TMP/compile.calls" | sort -n | tail -1)"
+awk -v start="$last_start" -v end="$first_end" 'BEGIN { exit !(start < end) }' ||
+  compile_fail "the builds ran one after another: $(cat "$TMP/compile.calls")"
+for build in default all-features curated; do
+  grep -qxF "fake $build output" "$TMP/compile-timed.log" || compile_fail "the $build output was not printed"
+done
+grep -qxF '[compile-all-targets] every Rust target compiles' "$TMP/compile-timed.log" ||
+  compile_fail 'a green run did not say every target compiles'
+status=0
+timed_run "$TMP/compile-fail.log" 3 || status=$?
+[ "$status" = 3 ] || compile_fail "a failing all-features build exited $status, not 3"
+grep -qF '[compile-all-targets] root clippy (all features): finish (status=3' "$TMP/compile-fail.log" ||
+  compile_fail 'the failing build was not reported'
+grep -qxF 'fake default output' "$TMP/compile-fail.log" || compile_fail 'the other builds were not printed'
+if grep -qF 'every Rust target compiles' "$TMP/compile-fail.log"; then
+  compile_fail 'a failing run said every target compiles'
+fi
+# Without a shared jobserver: one after another, in order, each in its folder.
+timed_run "$TMP/compile-serial.log" 0 '' || compile_fail "the serial run failed: $(cat "$TMP/compile-serial.log")"
+[ "$(awk '{ print $1, $2 }' "$TMP/compile.calls" | tr '\n' ' ')" = \
+  'start default end default start all-features end all-features start curated end curated ' ] ||
+  compile_fail "without a jobserver the builds did not run one after another: $(cat "$TMP/compile.calls")"
+grep -qE "^start all-features $targets/all-features [0-9.]+\$" "$TMP/compile.calls" ||
+  compile_fail 'without a jobserver all-features did not build in its own target folder'
+status=0
+timed_run "$TMP/compile-serial-fail.log" 3 '' || status=$?
+[ "$status" = 3 ] || compile_fail "a failing serial all-features build exited $status, not 3"
+if grep -qF 'start curated' "$TMP/compile.calls"; then
+  compile_fail 'a serial run went on after a failing build'
+fi
+
+printf 'curated Rust workspace lock fixtures: stale and root drift rejected; current derp and cold-cache forms green; compile-all-targets stages each workspace afresh at one path under its target folder, locked, and runs its three builds in their own folders, at once under a shared jobserver\n'

@@ -30,8 +30,15 @@ expected_vmm_tests = ['clippy', '--locked', '-p', 'codewire-local-vmm', '-p', 'c
 expected_bin_tests = ['clippy', '--locked', '-p', 'codewire-cli-bin', '--tests',
                       '--target', 'aarch64-apple-darwin', '--', '-D', 'warnings']
 expected_cli = ['clippy', '--locked', '-p', 'codewire-cli-bin', '--bin', 'cw',
-                '--target', 'aarch64-apple-darwin', '--target', 'x86_64-apple-darwin',
-                '--', '-D', 'warnings']
+                '--target', 'aarch64-apple-darwin', '--', '-D', 'warnings']
+# Without a shared jobserver, one cw check for both targets, after the others.
+expected_cli_both = ['clippy', '--locked', '-p', 'codewire-cli-bin', '--bin', 'cw',
+                     '--target', 'aarch64-apple-darwin', '--target', 'x86_64-apple-darwin',
+                     '--', '-D', 'warnings']
+# Under one, the x86_64 cw runs beside the aarch64 checks, in its own target folder.
+jobserver = dict(CARGO_MAKEFLAGS='--jobserver-auth=3,4')
+expected_cli_x86_64 = ['clippy', '--locked', '-p', 'codewire-cli-bin', '--bin', 'cw',
+                       '--target', 'x86_64-apple-darwin', '--', '-D', 'warnings']
 with tempfile.TemporaryDirectory(prefix='codewire-darwin-cross-') as temporary:
     root = Path(temporary)
     binary = root / 'bin'
@@ -107,6 +114,8 @@ else:
                            dict(tool='cargo', args=expected_vmm_tests)], records
     records, _ = run(dict(DARWIN_FIXTURE_CHECK_STATUS='46'), status=46)
     assert records[-1] == dict(tool='cargo', args=expected_check)
+    x86_64 = [dict(tool='cargo-zigbuild', args=expected_cli_x86_64),
+              dict(tool='cargo', args=expected_cli_x86_64)]
     records, result = run(arguments=['--cli'])
     assert records == [dict(tool='uname', args=['-s']),
                        dict(tool='zig', args=['version']),
@@ -115,12 +124,30 @@ else:
                        dict(tool='cargo', args=expected_cli_tests),
                        dict(tool='cargo-zigbuild', args=expected_bin_tests),
                        dict(tool='cargo', args=expected_bin_tests),
-                       dict(tool='cargo-zigbuild', args=expected_cli),
-                       dict(tool='cargo', args=expected_cli)], records
-    assert 'macOS cw for aarch64 and x86_64' in result.stdout, result.stdout
-    # A failing test check stops before the cw check and is the exit status.
+                       dict(tool='cargo-zigbuild', args=expected_cli_both),
+                       dict(tool='cargo', args=expected_cli_both)], records
     records, _ = run(dict(DARWIN_FIXTURE_CHECK_STATUS='46'), status=46, arguments=['--cli'])
     assert records[-1] == dict(tool='cargo', args=expected_cli_tests), records
+    records, result = run(jobserver, arguments=['--cli'])
+    # The x86_64 cw runs once, beside the aarch64 checks; those keep their order.
+    assert [r for r in records if r['args'] == expected_cli_x86_64] == x86_64, records
+    assert [r for r in records if r['args'] != expected_cli_x86_64] == [
+        dict(tool='uname', args=['-s']),
+        dict(tool='zig', args=['version']),
+        dict(tool='cargo-zigbuild', args=['--version']),
+        dict(tool='cargo-zigbuild', args=expected_cli_tests),
+        dict(tool='cargo', args=expected_cli_tests),
+        dict(tool='cargo-zigbuild', args=expected_bin_tests),
+        dict(tool='cargo', args=expected_bin_tests),
+        dict(tool='cargo-zigbuild', args=expected_cli),
+        dict(tool='cargo', args=expected_cli)], records
+    assert 'macOS cw for aarch64 and x86_64' in result.stdout, result.stdout
+    # A failing test check stops the aarch64 checks before their cw check and
+    # is the exit status; the x86_64 cw still finishes.
+    records, _ = run(dict(jobserver, DARWIN_FIXTURE_CHECK_STATUS='46'), status=46, arguments=['--cli'])
+    aarch64 = [r for r in records if r['args'] != expected_cli_x86_64]
+    assert aarch64[-1] == dict(tool='cargo', args=expected_cli_tests), records
+    assert [r for r in records if r['args'] == expected_cli_x86_64] == x86_64, records
     run(arguments=['--features', 'synthetic'], status=1)
     run(arguments=['--cli', '--features', 'synthetic'], status=1)
     run(dict(DARWIN_FIXTURE_HOST='Darwin'), status=1, arguments=['--cli'])
