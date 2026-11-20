@@ -339,7 +339,8 @@ def check(text, ci_text):
     blocks = jobs(text)
     need(list(blocks) == ["pending", "release-selection", "build-runtime-linux", "build-helper-darwin", "sign-helper",
                           "pack-runtime", "build-darwin", "sign-darwin", "build-linux-musl", "build-linux-gnu",
-                          "build-release", "package-release", "propose-nix-release-pin"], "unexpected job set")
+                          "build-release", "package-release", "propose-nix-release-pin",
+                          "update-homebrew-tap"], "unexpected job set")
     runtime, darwin = blocks.get("build-runtime-linux", ""), blocks.get("build-darwin", "")
     pack = blocks.get("pack-runtime", "")
     linux_builds = {target: blocks.get(job, "") for job, target in LINUX_BUILDS}
@@ -642,6 +643,27 @@ def check(text, ci_text):
     for capability in CAPABILITIES + MACOS_SIGNING:
         if capability not in ("enable-openid-connect", "fetch-openbao-"):
             need(capability not in nix_pin, f"the Nix pin proposal holds capability {capability}")
+    # The Homebrew tap (#5407): dispatched only after publication is
+    # confirmed, by a job whose one capability is the tap App's key.
+    tap = blocks.get("update-homebrew-tap", "")
+    need("    needs: [release-selection, package-release]\n    runs-on: " + TRUSTED_LIGHT
+         + "\n    enable-openid-connect: true\n" in tap,
+         "the Homebrew tap is moved before publication or off a protected runner")
+    need(not re.search(r"^    if:", tap, re.M), "the Homebrew tap can be skipped")
+    need("          persist-credentials: false\n" in tap and "GITEA_TOKEN" not in tap,
+         "the Homebrew tap job holds the job token")
+    need("'codewire-source-cli-homebrew-tap-schedule' || 'codewire-source-cli-homebrew-tap' }}" in tap
+         and "'openbao-codewire-source-cli-homebrew-tap-schedule' || 'openbao-codewire-source-cli-homebrew-tap' }}" in tap,
+         "the Homebrew tap job does not read the tap App's role")
+    need(tap.count("fetch-openbao-") == 1 and "scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh" in tap
+         and 'scripts/ci/release/dispatch-homebrew-tap.sh "$RELEASE_TAG"' in tap,
+         "the Homebrew tap job does not read exactly the tap App's key")
+    need(tap.count("mint-github-app-token") == 1, "the Homebrew tap job does not mint exactly one App token")
+    need(re.findall(r"HOMEBREW_TAP_\w+", tap) == ["HOMEBREW_TAP_TOKEN_FILE"],
+         "the Homebrew tap job sets the dispatch's settings")
+    for capability in CAPABILITIES + MACOS_SIGNING:
+        if capability not in ("enable-openid-connect", "fetch-openbao-", "mint-github-app-token"):
+            need(capability not in tap, f"the Homebrew tap job holds capability {capability}")
     # Every run ends by reading the public channel as cw upgrade does (#4492).
     offered = dict(steps(package)).get("Confirm cw upgrade offers this release", "")
     need("        if:" not in offered, "the offered check is conditional")
@@ -756,6 +778,22 @@ MUTATIONS = {
     "Nix pin with the job token": lambda t: t.replace(
         "          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}\n        run: |\n          set -euo pipefail\n          bot_work=",
         "          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}\n          GITEA_TOKEN: ${{ github.token }}\n        run: |\n          set -euo pipefail\n          bot_work=", 1),
+    "Homebrew tap before publication": lambda t: t.replace(
+        "    needs: [release-selection, package-release]\n    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}\n    enable-openid-connect: true\n    # The tap",
+        "    needs: [release-selection]\n    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}\n    enable-openid-connect: true\n    # The tap", 1),
+    "Homebrew tap with the mirror's App": lambda t: t.replace(
+        "'codewire-source-cli-homebrew-tap-schedule' || 'codewire-source-cli-homebrew-tap' }}",
+        "'codewire-source-cli-github-mirror-schedule' || 'codewire-source-cli-github-mirror' }}", 1),
+    "Homebrew tap with the release signing key": lambda t: t.replace(
+        '          HOMEBREW_TAP_TOKEN_FILE="$tap_work/token" \\\n',
+        '          scripts/ci/setup/fetch-openbao-release-signing-key.sh "$tap_work/key"\n'
+        '          HOMEBREW_TAP_TOKEN_FILE="$tap_work/token" \\\n', 1),
+    "Homebrew tap with a shorter wait": lambda t: t.replace(
+        '          HOMEBREW_TAP_TOKEN_FILE="$tap_work/token" \\\n',
+        '          HOMEBREW_TAP_WAIT_SECONDS=60 HOMEBREW_TAP_TOKEN_FILE="$tap_work/token" \\\n', 1),
+    "Homebrew tap skipped": lambda t: t.replace(
+        "    name: Move the Homebrew tap to the release\n",
+        "    name: Move the Homebrew tap to the release\n    if: false\n", 1),
     "global OIDC": lambda t: t.replace("\n\nenv:\n", "\n\nenable-openid-connect: true\n\nenv:\n", 1),
     "OIDC in build": lambda t: t.replace("    runs-on: " + TRUSTED_LIGHT + "\n    timeout-minutes: 30\n",
                                          "    runs-on: " + TRUSTED_LIGHT + "\n    enable-openid-connect: true\n"

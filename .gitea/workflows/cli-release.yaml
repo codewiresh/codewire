@@ -1324,3 +1324,36 @@ jobs:
           scripts/ci/setup/fetch-openbao-release-pin-bot-token.sh "$bot_work/token"
           RELEASE_PIN_BOT_TOKEN_FILE="$bot_work/token" \
             scripts/ci/release/propose-nix-release-pin.sh "$RELEASE_TAG"
+
+  update-homebrew-tap:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's one capability is the Homebrew tap App's key it reads by OIDC.
+    name: Move the Homebrew tap to the release
+    needs: [release-selection, package-release]
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
+    # The tap's own run checks the formula with Homebrew on Linux and macOS
+    # (docs/dev/CLI-HOMEBREW-INSTALL.md); this job waits for it.
+    timeout-minutes: 50
+    env:
+      CODEWIRE_OPENBAO_ADDR: ${{ vars.CODEWIRE_OPENBAO_ADDR }}
+      OPENBAO_GITHUB_ROLE: ${{ github.event_name == 'schedule' && 'codewire-source-cli-homebrew-tap-schedule' || 'codewire-source-cli-homebrew-tap' }}
+      OPENBAO_GITHUB_AUDIENCE: ${{ github.event_name == 'schedule' && 'openbao-codewire-source-cli-homebrew-tap-schedule' || 'openbao-codewire-source-cli-homebrew-tap' }}
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Dispatch the tap's formula update with its App
+        env:
+          RELEASE_TAG: ${{ needs.release-selection.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          tap_work="$(mktemp -d "$RUNNER_TEMP/homebrew-tap-app.XXXXXX")"
+          trap 'find "$tap_work" -type f -exec shred -u {} +; rm -rf "$tap_work"' EXIT
+          scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh \
+            "$tap_work/app-id" "$tap_work/installation-id" "$tap_work/private-key"
+          scripts/ci/release/mint-github-app-token.sh \
+            "$tap_work/app-id" "$tap_work/installation-id" "$tap_work/private-key" "$tap_work/token"
+          HOMEBREW_TAP_TOKEN_FILE="$tap_work/token" \
+            scripts/ci/release/dispatch-homebrew-tap.sh "$RELEASE_TAG"

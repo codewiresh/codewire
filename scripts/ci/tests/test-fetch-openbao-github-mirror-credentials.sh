@@ -33,7 +33,8 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$output" && -n "$url" ]]
 case "$url" in
-  https://git.example.invalid/*audience=openbao-codewire-source-github-mirror)
+  https://git.example.invalid/*audience=openbao-codewire-source-github-mirror | \
+  https://git.example.invalid/*audience=openbao-codewire-source-cli-homebrew-tap)
     jq -n --arg value "${FAKE_FORGEJO_JWT:?}" '{value:$value}' >"$output"
     ;;
   https://openbao.example.invalid/v1/auth/forgejo-jwt/login)
@@ -45,6 +46,9 @@ case "$url" in
       --arg privateKey "${FAKE_PRIVATE_KEY:?}" \
       '{data:{data:{appId:$appId,installationId:$installationId,privateKey:$privateKey}}}' \
       >"$output"
+    ;;
+  https://openbao.example.invalid/v1/platform/data/ci/codewire/homebrew-tap)
+    jq -n '{data:{data:{appId:"24680",installationId:"13579",privateKey:"synthetic-tap-private-key"}}}' >"$output"
     ;;
   *) exit 91 ;;
 esac
@@ -85,6 +89,21 @@ done
 [[ "$(grep -Fc -- '--connect-timeout 10 --max-time 30' "$FAKE_CURL_CALLS")" -eq 3 ]] ||
   fail 'OIDC or OpenBao request lacks the reviewed network deadline'
 
+# The Homebrew tap's role reads the tap App's document and nothing else; the
+# mirror's role never reads it.
+OPENBAO_GITHUB_ROLE=codewire-source-cli-homebrew-tap OPENBAO_GITHUB_AUDIENCE=openbao-codewire-source-cli-homebrew-tap \
+  "$FETCHER" "$work/output/tap-app" "$work/output/tap-installation" "$work/output/tap-key" >/dev/null
+[[ "$(<"$work/output/tap-app")|$(<"$work/output/tap-installation")|$(<"$work/output/tap-key")" == \
+  '24680|13579|synthetic-tap-private-key' ]] || fail "the tap's role did not write the tap App's tuple"
+[[ "$(grep -c 'platform/data/ci/codewire/' "$FAKE_CURL_CALLS")" -eq 2 ]] &&
+  grep -q 'platform/data/ci/codewire/homebrew-tap' "$FAKE_CURL_CALLS" &&
+  [[ "$(grep -c 'platform/data/ci/codewire/github-mirror' "$FAKE_CURL_CALLS")" -eq 1 ]] ||
+  fail 'a role read another App'\''s document'
+if OPENBAO_GITHUB_ROLE=codewire-source-cli-homebrew-tap OPENBAO_GITHUB_AUDIENCE=openbao-codewire-source-github-mirror \
+    "$FETCHER" "$work/output/mixed-app" "$work/output/mixed-installation" "$work/output/mixed-key" >/dev/null 2>&1; then
+  fail "the tap's role was accepted with the mirror's audience"
+fi
+
 calls_before="$(wc -l <"$FAKE_CURL_CALLS")"
 if OPENBAO_GITHUB_ROLE=unapproved "$FETCHER" \
     "$work/output/no-app" "$work/output/no-installation" "$work/output/no-key" \
@@ -100,21 +119,23 @@ fi
 for identity in 'GITHUB_EVENT_NAME=workflow_dispatch GITHUB_ACTOR=noel GITHUB_RUN_ATTEMPT=1' \
     'GITHUB_EVENT_NAME=schedule GITHUB_ACTOR=forgejo-actions GITHUB_RUN_ATTEMPT=2' \
     'GITHUB_EVENT_NAME=schedule GITHUB_ACTOR=forgejo-actions GITHUB_RUN_ATTEMPT=1'; do
-  calls_before="$(wc -l <"$FAKE_CURL_CALLS")"
-  # shellcheck disable=SC2086 # Each identity is three assignments.
-  env $identity GITHUB_REF=refs/heads/main GITHUB_REPOSITORY=codewire/codewire \
-    OPENBAO_GITHUB_ROLE=codewire-source-cli-github-mirror-schedule OPENBAO_GITHUB_AUDIENCE=openbao-codewire-source-cli-github-mirror-schedule \
-    "$FETCHER" "$work/output/schedule-app" "$work/output/schedule-installation" "$work/output/schedule-key" >"$work/schedule-guard.out" 2>&1 && guarded=0 || guarded=$?
-  if [[ "$identity" == *GITHUB_RUN_ATTEMPT=1 && "$identity" == *schedule* ]]; then
-    ! grep -Fq "only the release schedule's first attempt" "$work/schedule-guard.out" ||
-      fail "the schedule's first attempt was refused a schedule role"
-  else
-    [[ "$guarded" -ne 0 ]] || fail "a schedule role was read under $identity"
-    grep -Fq "only the release schedule's first attempt" "$work/schedule-guard.out" ||
-      fail "a schedule role under $identity was not refused by the guard: $(cat "$work/schedule-guard.out")"
-    [[ "$(wc -l <"$FAKE_CURL_CALLS")" -eq "$calls_before" ]] ||
-      fail "a schedule role under $identity reached a request"
-  fi
+  for app in github-mirror homebrew-tap; do
+    calls_before="$(wc -l <"$FAKE_CURL_CALLS")"
+    # shellcheck disable=SC2086 # Each identity is three assignments.
+    env $identity GITHUB_REF=refs/heads/main GITHUB_REPOSITORY=codewire/codewire \
+      OPENBAO_GITHUB_ROLE="codewire-source-cli-$app-schedule" OPENBAO_GITHUB_AUDIENCE="openbao-codewire-source-cli-$app-schedule" \
+      "$FETCHER" "$work/output/schedule-app" "$work/output/schedule-installation" "$work/output/schedule-key" >"$work/schedule-guard.out" 2>&1 && guarded=0 || guarded=$?
+    if [[ "$identity" == *GITHUB_RUN_ATTEMPT=1 && "$identity" == *schedule* ]]; then
+      ! grep -Fq "only the release schedule's first attempt" "$work/schedule-guard.out" ||
+        fail "the schedule's first attempt was refused a schedule role"
+    else
+      [[ "$guarded" -ne 0 ]] || fail "a schedule role was read under $identity"
+      grep -Fq "only the release schedule's first attempt" "$work/schedule-guard.out" ||
+        fail "a schedule role under $identity was not refused by the guard: $(cat "$work/schedule-guard.out")"
+      [[ "$(wc -l <"$FAKE_CURL_CALLS")" -eq "$calls_before" ]] ||
+        fail "a schedule role under $identity reached a request"
+    fi
+  done
 done
 
 printf '[test-fetch-openbao-github-mirror-credentials] exact-role private-file contract passed\n'

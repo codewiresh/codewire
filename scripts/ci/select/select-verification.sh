@@ -2566,6 +2566,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/propose-nix-release-pin.sh|scripts/ci/tests/test-propose-nix-release-pin.sh|\
       scripts/ci/setup/fetch-openbao-release-pin-bot-token.sh|\
       scripts/ci/tests/test-fetch-openbao-release-pin-bot-token.sh|\
+      scripts/ci/release/dispatch-homebrew-tap.sh|scripts/ci/tests/test-dispatch-homebrew-tap.sh|\
       scripts/ci/tests/test-package-cw-release.py|\
       scripts/ci/release/local_runtime_parts.py|scripts/ci/release/local_runtime_sources.py|\
       scripts/ci/release/local-runtime-sources.json|scripts/ci/release/build-runtime-kernel.sh|\

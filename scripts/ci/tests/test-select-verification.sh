@@ -2016,6 +2016,7 @@ run_paths_case cw_release_delivery_shell pull_request refs/pull/2255/head false 
   scripts/ci/setup/fetch-openbao-release-pin-bot-token.sh \
   scripts/ci/tests/test-fetch-openbao-release-pin-bot-token.sh \
   scripts/ci/release/propose-nix-release-pin.sh scripts/ci/tests/test-propose-nix-release-pin.sh \
+  scripts/ci/release/dispatch-homebrew-tap.sh scripts/ci/tests/test-dispatch-homebrew-tap.sh \
   scripts/ci/setup/fetch-openbao-release-signing-key.sh \
   scripts/ci/tests/test-fetch-openbao-release-signing-key.sh \
   scripts/ci/release/sign-macos-cw.sh scripts/ci/setup/fetch-openbao-macos-signing.sh \

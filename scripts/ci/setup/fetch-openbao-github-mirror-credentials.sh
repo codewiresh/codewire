@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Exchange this exact protected Forgejo workflow's OIDC token for one OpenBao
-# role and write the GitHub App tuple directly to private files.
+# role and write that role's GitHub App tuple directly to private files: the
+# GitHub mirror's App, or the Homebrew tap's (docs/dev/CLI-HOMEBREW-INSTALL.md).
 set -euo pipefail
 
 fail() {
@@ -18,15 +19,21 @@ readonly private_key_file="$3"
 
 : "${ACTIONS_ID_TOKEN_REQUEST_URL:?Forgejo OIDC request URL is required}"
 : "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?Forgejo OIDC request token is required}"
-: "${OPENBAO_GITHUB_ROLE:?OpenBao GitHub mirror role is required}"
-: "${OPENBAO_GITHUB_AUDIENCE:?OpenBao GitHub mirror audience is required}"
+: "${OPENBAO_GITHUB_ROLE:?OpenBao GitHub App role is required}"
+: "${OPENBAO_GITHUB_AUDIENCE:?OpenBao GitHub App audience is required}"
 
+# Each approved role reads exactly one App's document.
 case "${OPENBAO_GITHUB_ROLE}|${OPENBAO_GITHUB_AUDIENCE}" in
   codewire-source-github-mirror\|openbao-codewire-source-github-mirror | \
   codewire-source-cli-github-mirror\|openbao-codewire-source-cli-github-mirror | \
-  codewire-source-cli-github-mirror-schedule\|openbao-codewire-source-cli-github-mirror-schedule) ;;
-  *) fail 'OpenBao role and audience are not an approved GitHub mirror pair' ;;
+  codewire-source-cli-github-mirror-schedule\|openbao-codewire-source-cli-github-mirror-schedule)
+    document=github-mirror ;;
+  codewire-source-cli-homebrew-tap\|openbao-codewire-source-cli-homebrew-tap | \
+  codewire-source-cli-homebrew-tap-schedule\|openbao-codewire-source-cli-homebrew-tap-schedule)
+    document=homebrew-tap ;;
+  *) fail 'OpenBao role and audience are not an approved GitHub App pair' ;;
 esac
+readonly document
 # A schedule role is read only by the release schedule's own first attempt
 # (#2892).
 # shellcheck source=scripts/ci/setup/release-run-identity.sh
@@ -91,7 +98,7 @@ chmod 0600 "$work/openbao.token"
 chmod 0600 "$work/openbao.curl"
 curl --config "$work/openbao.curl" "${curl_bounds[@]}" \
   --output "$work/github.json" \
-  "$openbao_addr/v1/platform/data/ci/codewire/github-mirror"
+  "$openbao_addr/v1/platform/data/ci/codewire/$document"
 
 jq -er '.data.data.appId | strings | select(length > 0)' \
   "$work/github.json" >"$work/app-id"
