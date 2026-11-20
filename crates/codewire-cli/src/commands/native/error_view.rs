@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::commands::collaboration::trimmed_str;
 use crate::commands::environment::progress::format_duration;
+use crate::output::{Status, Style};
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct ErrorView {
@@ -91,12 +92,13 @@ impl ErrorView {
         }
     }
 
-    /// The `Error:` line, then the `Egress:` line, each only when it applies.
-    pub(crate) fn line(&self) -> String {
-        self.line_at(SystemTime::now())
+    /// The `Error:` line, then the `Egress:` and `Credentials:` lines, each
+    /// only when it applies, with `style`'s glyphs and colour.
+    pub(crate) fn line(&self, style: Style) -> String {
+        self.line_at(SystemTime::now(), style)
     }
 
-    fn line_at(&self, now: SystemTime) -> String {
+    fn line_at(&self, now: SystemTime, style: Style) -> String {
         let mut lines = self.error_line();
         if let Some(egress) = self.egress_unavailable {
             let since =
@@ -110,7 +112,9 @@ impl ErrorView {
         }
         if self.interception.is_some() {
             lines.push_str(&format!(
-                "Credentials: ! agents can't reach their providers; restart the VM\n             → cw --local restart {name}\n",
+                "Credentials: {attention} agents can't reach their providers; restart the VM\n             {next} cw --local restart {name}\n",
+                attention = style.status(Status::Attention),
+                next = style.status(Status::Next),
                 name = self.name,
             ));
         }
@@ -141,6 +145,9 @@ impl ErrorView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::Charset;
+
+    const PLAIN: Style = Style::new(false, Charset::Unicode);
 
     fn shown(error_code: &str, exit: Option<(Option<i32>, &str)>) -> ErrorView {
         ErrorView::of(&v1::Environment {
@@ -160,19 +167,19 @@ mod tests {
                 "egress_broker_exit",
                 Some((Some(72), "egress_broker_protocol"))
             )
-            .line(),
+            .line(PLAIN),
             "Error:       egress_broker_exit (exited 72: egress_broker_protocol)\n"
         );
         assert_eq!(
-            shown("vmm_exit", Some((Some(1), ""))).line(),
+            shown("vmm_exit", Some((Some(1), ""))).line(PLAIN),
             "Error:       vmm_exit (exited 1)\n"
         );
         assert_eq!(
-            shown("network_worker_exit", Some((None, ""))).line(),
+            shown("network_worker_exit", Some((None, ""))).line(PLAIN),
             "Error:       network_worker_exit (ended by a signal)\n"
         );
         assert_eq!(
-            shown("runner_exit", None).line(),
+            shown("runner_exit", None).line(PLAIN),
             "Error:       runner_exit\n"
         );
     }
@@ -180,7 +187,7 @@ mod tests {
     #[test]
     fn no_error_shows_no_line_and_no_exit() {
         let view = shown("", Some((Some(72), "egress_broker_protocol")));
-        assert_eq!(view.line(), "");
+        assert_eq!(view.line(PLAIN), "");
         assert_eq!(view.runner_exit, None);
         assert_eq!(serde_json::to_value(&view).unwrap(), serde_json::json!({}));
     }
@@ -216,7 +223,7 @@ mod tests {
             since_unix_ms: 1_700_000_000_000,
         })));
         assert_eq!(
-            view.line_at(since + Duration::from_secs(130)),
+            view.line_at(since + Duration::from_secs(130), PLAIN),
             "Egress:      unavailable for 2m 10s (the egress broker is past its deadline; requests are refused until it answers, or `cw --local stop app` then `cw --local start app` restarts it)\n"
         );
         assert_eq!(
@@ -226,7 +233,7 @@ mod tests {
             })
         );
         let answered = ErrorView::of(&environment(None));
-        assert_eq!(answered.line_at(since), "");
+        assert_eq!(answered.line_at(since, PLAIN), "");
         assert_eq!(
             serde_json::to_value(&answered).unwrap(),
             serde_json::json!({})
@@ -249,8 +256,12 @@ mod tests {
         };
         let view = ErrorView::of(&environment(Some(v1::InterceptionState::Lost)));
         assert_eq!(
-            view.line_at(UNIX_EPOCH),
+            view.line_at(UNIX_EPOCH, PLAIN),
             "Credentials: ! agents can't reach their providers; restart the VM\n             → cw --local restart app\n"
+        );
+        assert_eq!(
+            view.line_at(UNIX_EPOCH, Style::new(false, Charset::Ascii)),
+            "Credentials: ! agents can't reach their providers; restart the VM\n             -> cw --local restart app\n"
         );
         assert_eq!(
             serde_json::to_value(&view).unwrap(),
@@ -258,7 +269,7 @@ mod tests {
         );
         for other in [None, Some(v1::InterceptionState::Intercepted)] {
             let view = ErrorView::of(&environment(other));
-            assert_eq!(view.line_at(UNIX_EPOCH), "", "{other:?}");
+            assert_eq!(view.line_at(UNIX_EPOCH, PLAIN), "", "{other:?}");
             assert_eq!(serde_json::to_value(&view).unwrap(), serde_json::json!({}));
         }
     }

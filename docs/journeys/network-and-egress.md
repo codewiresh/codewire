@@ -49,7 +49,7 @@ separately.
 | `agent-github` | #3999 | no command yet | partly observed 2026-11-19, v0.4.24 (read only) | n/a | n/a |
 | `no-token-at-rest` | #3999 (#4897), #4001 | no command yet | no command yet | no command yet | no command yet |
 | `agent-own-key` | #3999, #4001 | no command yet | no command yet | no command yet | no command yet |
-| `agent-fail-closed` | #3999, #4001 | partly observed 2026-11-18, source 582326b40 (the smoke) | no command yet | no command yet | no command yet |
+| `agent-fail-closed` | #3999, #4001 | partly observed 2026-11-19, source 911a51f01 (the ended front door shown) and 2026-11-18, source 582326b40 (the smoke) | no command yet | no command yet | no command yet |
 | `agent-switch-off` | #3999 | no command yet | no command yet | n/a | n/a |
 | `agent-hosted` | #4001 | n/a | n/a | no command yet | no command yet |
 | `hosted-enforcement` | #4000 | n/a | n/a | no command yet | no command yet |
@@ -1303,7 +1303,8 @@ Issues: #3999, #4001.
     #4912). Once it has ended without a stop being asked for,
     `cw --local info NAME` shows
     `Credentials: ! agents can't reach their providers; restart the VM`,
-    then `→ cw --local restart NAME`, and `--output json` carries
+    then `→ cw --local restart NAME` (`->` where `cw` draws ASCII, such
+    as under `TERM=dumb`), and `--output json` carries
     `"interception": {"state": "lost"}`. `cw doctor` names the VM with the
     same step. A front door the runner stops, for a stop or a restart, is
     not shown.
@@ -1325,8 +1326,7 @@ Issues: #3999, #4001.
   run shows the guest's request ended at once, not the broker's refusal
   record, #5058); other destinations still following the policy; the
   credential broker killed; either one missing when the environment
-  starts; and the ended front door shown by `cw --local info` and
-  `cw doctor` (#5216).
+  starts.
 
   Also observed, on a macOS local VM (v0.4.24, 2026-11-19, #5216): SIGTERM
   to the front door by its PID ended it within 2 s, and the VM stayed
@@ -1335,6 +1335,23 @@ Issues: #3999, #4001.
   ended it: Claude Code retries a refused connection silently. The
   connection fails at once; the agent does not, which is why the ended
   front door must show in `cw --local info` and `cw doctor`.
+
+  The ended front door shown (#5216), on a Linux local VM (x86_64, KVM),
+  2026-11-19: host `cw` built from main 911a51f01, with the guest runtime
+  of main 8f3a2d502 (no guest change between the two), a synthetic
+  Anthropic API key and the switch on. Before, `cw --local info` had no
+  such line and `cw doctor` said `local VM egress ok`. SIGTERM to the
+  front door by its PID ended it within 0.1 s (`event=front_door_exited
+  signal=15`) and the VM kept running. Then `cw --local info lp-walk`
+  showed `Credentials: ! agents can't reach their providers; restart the
+  VM` and the restart line, `--output json` carried `"interception":
+  {"state": "lost"}`, and `cw doctor`'s `local VM egress` check warned
+  "agents can't reach their providers in lp-walk", naming
+  `cw --local restart NAME`. `curl` from the VM to the intercepted host
+  failed in 26 ms (exit 7). `cw --local restart lp-walk` took 15 s, after
+  which neither line showed and a new front door was paired. Under
+  `TERM=dumb` that build's restart line drew `→` where the rest of `cw`
+  drew `->`; the line now takes `cw`'s own glyphs.
 
 ## `agent-switch-off`: with interception off, a local VM behaves as today
 
