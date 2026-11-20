@@ -453,8 +453,8 @@ introspection instead of offline ID-token validation.
 
 Disablement is checked when Codewire authenticates a new request or begins a
 new stream. A stream already admitted ends when the authority that admitted it
-is lost (#3586). An exec, file, attach or log-follow stream ends in four
-cases:
+is lost (#3586). An exec, file, attach or log-follow stream, and the
+dashboard's terminal or the SSH proxy's WebSocket, ends in four cases:
 
 - its user is disabled, which covers suspension and account deletion;
 - the browser session that admitted it is deleted before it expired: a
@@ -495,9 +495,27 @@ The database records each loss in `credential_revocations`:
   `unavailable`.
 
 A revoked Connect stream ends with `permission_denied`, "access revoked". A
-WebSocket closes with code 1008. Each writes a `stream.revoked` audit event
-naming the user, the kind of loss, the surface and the environment, never a
-credential or the stream's contents.
+WebSocket closes with code 1008, "access revoked". Each writes a
+`stream.revoked` audit event naming the user, the kind of loss, the surface
+and the environment, never a credential or the stream's contents.
+
+A WebSocket is admitted by the credential its handshake carried, and that is
+the credential whose loss ends it:
+- **The dashboard's terminal:** a terminal ticket names the browser session
+  that minted it, so the ticket's session admits the socket; a durable
+  terminal's own session cookie admits it. The surface is `terminal`.
+- **The SSH proxy:** the API key or OAuth access token that `cw shell
+  --stdio` sends as its bearer token admits it, or a terminal ticket's
+  session. The surface is `ssh_proxy`.
+- **The check it re-reads:** once, when the socket registers, the same
+  authentication that admitted it; for a ticket, which can be redeemed once
+  only, the ticket's session still live and its user still enabled. After
+  that the registration holds only the credential's id or hash and its
+  user, never the bearer token or the cookie.
+- **What ending a durable terminal ends:** the socket and the viewer close;
+  the durable session's processes run on in the Sandbox, and the revoked
+  credential cannot attach to it again. A one-off terminal's shell ends with
+  its socket, as it does on any close.
 
 `cw shell` and `cw exec` reach a hosted environment over its tailnet by
 default. The client's `Coordinate` session with the coordinator carries that
@@ -569,8 +587,7 @@ connection, and it ends in the same four cases (#3586):
   keep another off the environment until it leaves; it grants nothing.
   Coordinator-assigned addresses would close it (#5563).
 
-The terminal and SSH-proxy WebSockets, Mesh sessions, and removal from an
-organization don't end a stream yet. Expiry ends no tailnet connection
+Mesh sessions and removal from an organization don't end a stream yet. Expiry ends no tailnet connection
 either (#3827).
 
 ## Account suspension

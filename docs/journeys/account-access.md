@@ -15,6 +15,7 @@ Updated 2026-11-20.
 | --- | --- | --- |
 | `access-ticket` | not yet observed | not yet observed |
 | `access-streams` | not yet observed | not yet observed |
+| `access-websockets` | not yet observed | not yet observed |
 | `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
 
 ## `access-ticket`: a terminal ticket from a session that has ended
@@ -67,7 +68,7 @@ Issue: #3586, its first step (cw-security, 2026-11-16).
 ## `access-streams`: a stream already open when its authority is lost
 
 Issue: #3586, its second step (cw-security, 2026-11-16). The dashboard's
-terminal and the SSH proxy follow in the next step.
+terminal and the SSH proxy are `access-websockets`.
 
 - **Entry points:** streams through the API, signed in with an OAuth token
   from `cw login` or an API key: `cw shell` with
@@ -102,8 +103,8 @@ terminal and the SSH proxy follow in the next step.
   their step. The expiry case and the browser-session case are the database
   tests', since a walk can't wait out a credential's lifetime.
 - **Gotchas:**
-  - the dashboard's terminal, the SSH proxy and Mesh sessions aren't covered
-    yet, so they outlive every case here;
+  - Mesh sessions aren't covered yet, so they outlive every case here; the
+    dashboard's terminal and the SSH proxy are `access-websockets`;
   - plain `cw shell` and `cw exec` on a hosted Sandbox run over its tailnet,
     which the coordinator's `Coordinate` session carries; `access-tailnet`
     covers them. On 2026-11-18 a tailnet `cw shell` kept running 35 s after
@@ -128,6 +129,58 @@ terminal and the SSH proxy follow in the next step.
     `admin.account.disabled`);
   - enabled again: the old browser session had ended, and a new `cw login`
     and shell worked at once.
+
+## `access-websockets`: the dashboard's terminal and the SSH proxy when their authority is lost
+
+Issue: #3586, after its tailnet steps. Not yet observed.
+
+- **Entry points:** the dashboard's terminal on a Sandbox page, durable or
+  not, opened from a browser session; and the SSH proxy's WebSocket, which
+  `cw shell --stdio` (OpenSSH's `ProxyCommand` after `cw setup ssh`) uses
+  with `CW_SSH_TRANSPORT=websocket`, or when the tailnet cannot connect,
+  signed in with an OAuth token from `cw login` or an API key.
+- **States to exercise:**
+  - the browser session behind a terminal signs out, from that browser or
+    from Settings → Sessions: that terminal closes with "access revoked",
+    and a terminal opened from another browser keeps running;
+  - the OAuth token behind an SSH-proxy session is revoked by `cw logout`,
+    and the API key behind another is disabled: each ends;
+  - the account is disabled: every terminal and SSH-proxy session of the
+    account ends;
+  - a credential that only expires: its socket keeps running.
+- **Driving it:** a running Sandbox of the walk account, two browsers (or a
+  browser and a private window) signed in as it, and throwaway `HOME`s for
+  `cw`.
+  1. In the first browser open two terminals: the Sandbox page's terminal,
+     which is durable and admitted by the session cookie, and the
+     standalone terminal page, admitted by a terminal ticket. In the second
+     browser open the Sandbox page's terminal. Run
+     `while :; do date -u +%T.%N; sleep 0.2; done` in each.
+  2. In a `HOME` signed in with `cw login`, run `cw setup ssh`, then
+     `CW_SSH_TRANSPORT=websocket ssh cw-<sandbox>` and the same loop. With
+     an API key in `CODEWIRE_API_KEY`, open a second one the same way.
+  3. Sign the first browser out: both its terminals stop printing and close
+     with "access revoked"; the second browser's terminal keeps printing.
+     Sign the first browser in again and open the Sandbox page's terminal:
+     the durable shell's loop is still running, and its lines resume.
+  4. Run `cw logout` in the `HOME`: its `ssh` ends. Disable the API key in
+     Settings: the other `ssh` ends.
+  5. Disable the account: the second browser's terminal closes. Enable it
+     afterwards; a new sign-in and terminal work at once.
+- **Proof:** the last line each socket printed lies within 30 seconds of
+  its revocation, the browser's terminal shows the close as "access
+  revoked" (code 1008), and a `stream.revoked` audit event names the kind
+  of loss and the surface, `terminal` or `ssh_proxy`. The surviving
+  terminal is still printing at the end of its step, and the durable
+  terminal's loop was still running when a fresh sign-in attached to it;
+  the one-off terminal's shell ended with its socket. The expiry case and a
+  ticket whose session signs out before it is redeemed are the database
+  tests' (`access-ticket` covers redemption).
+- **Gotchas:**
+  - with the tailnet up, `cw shell --stdio` takes the tailnet, which
+    `access-tailnet` covers; set `CW_SSH_TRANSPORT=websocket` to walk this
+    one.
+- **Observed:** not yet observed.
 
 ## `access-tailnet`: a tailnet shell or exec when its authority is lost
 
