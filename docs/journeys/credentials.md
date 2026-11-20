@@ -23,7 +23,7 @@ observed**.
 | `cred-ssh-key` | not yet observed | not yet observed | not yet observed |
 | `cred-sign-in-screen` | partly observed, #4885 at aea6abdb8, 2026-11-16 (steps 1 and 2 for Claude and Codex at a pty; GitHub, `cw login`, piped, `TERM=dumb` and SSH not yet observed) | not yet observed | not yet observed |
 | `profile-default` | not yet observed | not yet observed | not yet observed |
-| `cred-delivery-diagnosis` | not yet observed | not yet observed | local VMs only |
+| `cred-delivery-diagnosis` | observed, #5237 at a8c2d9625, 2026-11-17 (the token, no-profile and stopped states; the sign-in and older-guest states not yet observed) | not yet observed | local VMs only |
 | `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, the early replacements on that build plus their change, and `main` at 4cae0f601 through the smoke, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | observed, #5286: main's tree at 57b68c6be (#5295 and #5312), 2026-11-18, with a name resolving only to private addresses; the provider came back at the regular replacement, not the early ones (a sign-in's token host not walked) | local VMs only |
 | `cred-file-store` | partly observed, #5552 on main 22bcc705e, 2026-11-20 (a local VM from a `file` root: its broker serves a lease on the intercepted and the loopback route, and `list` names the file store; the other states not yet observed) | the macOS file store; not part of this check | local stores only |
 | `cred-same-name` | not yet observed (#4928) | not yet observed (#4928) | not yet observed (#4928) |
@@ -541,16 +541,18 @@ lines are in its Pod log.
   DIAG_TOKEN="sk-ant-oat01-$(head -c 96 /dev/urandom | base64 | tr -dc A-Za-z0-9 | head -c 95)"
   printf '%s' "$DIAG_TOKEN" | cw credentials --local connect claude-token --name diag-token
   cw credentials --local --profile diag-profile set anthropic diag-token
-  cw --local create diag-env --profile local:diag-profile
+  cw --local create --name diag-env --profile local:diag-profile --yes
   cw --local exec --in diag-env -- claude -p hi
   cw --local daemon logs diag-env
-  cw --local create diag-bare --no-profile
+  cw --local create --name diag-bare --no-profile
   cw --local daemon logs diag-bare
   cw --local stop diag-env
   cw --local daemon logs diag-env
   ```
 
-  In a fresh store `diag-profile` becomes the default profile
+  A create that selects a profile shows its sources and asks before it
+  submits them; `--yes` answers that where there is no terminal. In a fresh
+  store `diag-profile` becomes the default profile
   (`profile-default`), so `diag-bare` needs its `--no-profile`. The sign-in
   state uses the profile from `cred-claude-sign-in` in place of
   `diag-profile`. Afterwards remove `diag-env`, `diag-bare`, `diag-profile`
@@ -566,10 +568,11 @@ lines are in its Pod log.
     request with the decision `admitted`, at the environment's current
     generation, after Anthropic refused the token.
   - `diag-bare` lists no lease, and none of `diag-env`'s.
-  - The whole output holds no part of the synthetic token, no credential
-    name and no credential id: `grep -c -F -e diag-token -e
-    "${DIAG_TOKEN:13:12}"` over it prints 0. Record the count, never the
-    token.
+  - The three `daemon logs` outputs hold no part of the synthetic token, no
+    credential name and no credential id: `grep -c -F -e diag-token -e
+    "${DIAG_TOKEN:13:12}"` over them prints 0. Record the count, never the
+    token. `cw`'s own connect and profile lines name `diag-token`; no output
+    of any step holds the token.
   - The stopped VM's output says the VM is not running where the guest
     daemon lines were, and still lists `diag-env`'s leases.
 - **Gotchas:**
@@ -578,6 +581,23 @@ lines are in its Pod log.
   - Lease decisions live in the authority's memory: after it restarts the
     part is empty until the VM asks again.
   - A VM started before the update keeps its older guest until it restarts.
+- **Observed:**
+  - Linux local VM, #5237 at a8c2d9625, 2026-11-17, a `cw` and a runtime
+    built from that commit, a throwaway `HOME` and Secret Service, both VMs
+    with `--cpu 2 --memory 4GB`; the outputs are on #5237:
+    - the token: `claude -p hi` exited 1 with Anthropic's "401 OAuth access
+      token is invalid"; `daemon logs` showed the three headings, six
+      `guest: ` lines (the logins cleared, onboarding prepared) and four
+      lease lines, `slot=anthropic operation=messages route=anthropic-api
+      decision=admitted credential=selected` at generation 1;
+    - no profile: six `guest: ` lines, and "no lease decisions recorded for
+      this environment since the credential authority started";
+    - stopped: "guest daemon log unavailable: the VM is not running", with
+      the same four lease lines;
+    - the count over the three `daemon logs` outputs was 0, and no step's
+      output held the token;
+    - not yet observed: the sign-in state (`claude_login=Written` beside a
+      `claude-login` lease), and a VM on the guest from before the update.
 
 ## 11. `cred-provider-unresolved`: a provider's name doesn't resolve when a local VM starts
 

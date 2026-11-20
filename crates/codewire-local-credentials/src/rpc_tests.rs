@@ -2268,6 +2268,28 @@ async fn authority_launches_one_generation_bound_broker_and_stops_it_exactly() {
     assert_eq!(audit.len(), 2);
     assert!(audit[0].sequence > audit[1].sequence);
 
+    // The supervisor's material-free client reads one environment's
+    // decisions, and none of another's.
+    let mut control = LocalCredentialControlClient::connect(&config)
+        .await
+        .unwrap();
+    let named = control
+        .environment_lease_audit(&environment_id, 8)
+        .await
+        .unwrap();
+    assert_eq!(named.events, audit);
+    assert!(!named.crowded);
+    let other = EnvironmentId::parse(uuid::Uuid::new_v4().to_string()).unwrap();
+    let none = control.environment_lease_audit(&other, 8).await.unwrap();
+    assert!(none.events.is_empty());
+    assert!(!none.crowded);
+    assert!(
+        control
+            .environment_lease_audit(&environment_id, 0)
+            .await
+            .is_err()
+    );
+
     assert_eq!(
         control
             .stop_environment_broker(&environment_id, Some(22))

@@ -26,6 +26,7 @@ use zeroize::Zeroizing;
 
 pub const HOSTED_WORKSPACE_AUTHORIZATION: &str = "x-codewire-workspace-authorization-bin";
 
+mod daemon_log;
 mod desktop;
 mod forward;
 mod hosted;

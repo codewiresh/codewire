@@ -23,14 +23,15 @@ use workload_secrets::{
     resolved_workload_secret_from_proto, secret_project_from_proto, workload_secret_from_proto,
     workload_secret_list_from_proto,
 };
+mod audit;
 mod grants;
 mod profiles;
 mod provider_revocation;
 mod store_probe;
 
+pub use audit::EnvironmentLeaseAudit;
 pub use grants::EnvironmentGrants;
 
-use crate::broker_channel::MAX_BROKER_LEASE_AUDIT_LIST_LIMIT;
 use crate::control::v1::local_credential_authority_service_client::LocalCredentialAuthorityServiceClient;
 use crate::control::v1::{self, CredentialAuthenticationKind};
 use crate::repository::{MAX_GIT_BUNDLE_BYTES, valid_git_selector};
@@ -307,38 +308,6 @@ impl LocalCredentialClient {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-    }
-
-    /// Return newest-first, process-lifetime broker lease decisions. The
-    /// bounded local ring contains identifiers and policy metadata only.
-    pub async fn list_recent_broker_lease_audit_events(
-        &mut self,
-        limit: usize,
-    ) -> Result<Vec<BrokerLeaseAuditEvent>, Status> {
-        if !(1..=MAX_BROKER_LEASE_AUDIT_LIST_LIMIT).contains(&limit) {
-            return Err(Status::invalid_argument("invalid broker audit list limit"));
-        }
-        let response = self
-            .inner
-            .list_recent_broker_lease_audit_events(v1::ListRecentBrokerLeaseAuditEventsRequest {
-                limit: limit as u32,
-            })
-            .await?
-            .into_inner();
-        let events = response
-            .events
-            .into_iter()
-            .map(broker_lease_audit_event_from_proto)
-            .collect::<Result<Vec<_>, _>>()?;
-        if events
-            .windows(2)
-            .any(|pair| pair[0].sequence <= pair[1].sequence)
-        {
-            return Err(Status::data_loss(
-                "local credential authority returned invalid broker audit ordering",
-            ));
-        }
-        Ok(events)
     }
 
     pub async fn connect(config: &AuthorityRuntimeConfig) -> Result<Self, AuthorityRuntimeError> {

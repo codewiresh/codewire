@@ -888,6 +888,17 @@ counts the slots the VM pinned when its sources were selected.
 your keyring. Over SSH or on a headless host, make sure a session bus and a
 Secret Service run for your user.
 
+**A credential or a sign-in never reaches the VM** (Claude Code says "Not
+logged in", or an agent has no key): run `cw --local daemon logs ENV` while the
+VM is still running. Under `# guest daemon` are the guest daemon's recent
+lines, each starting `guest: `; a login it checked reads `claude_login=` or
+`codex_login=` and a state such as `Written`, `Denied` or `Unavailable`. Under
+`# credential leases` is what the credential authority decided each time the
+VM asked: the operation, the route and `admitted`, `denied` or `unavailable`.
+No lease line means the VM never asked. The guest's lines are kept in the VM's
+memory and the leases in the authority's, so a stop or a restart clears them.
+A VM started before the `cw` update that brought this needs one restart.
+
 **A stop takes a few seconds**: `cw stop` gives every process in the VM
 SIGTERM and up to 5 seconds to exit, kills what is left, and then unmounts the
 VM's disks cleanly. A process that ignores SIGTERM makes the stop take about

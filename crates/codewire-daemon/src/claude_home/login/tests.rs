@@ -1216,6 +1216,65 @@ fn the_task_writes_at_start_logs_only_states_and_stops() {
     }
 }
 
+/// What a local VM's `cw --local daemon logs` reads is this buffer, filled by
+/// the formatter the guest daemon installs: a delivered login leaves its
+/// closed states there and nothing of the token, the placeholder, the
+/// credential's id or the home.
+#[test]
+fn the_recent_log_a_host_reads_holds_states_and_no_seeded_token() {
+    let fixture = Fixture::new();
+    let recent_log = crate::recent_log::RecentLog::new();
+    let buffer = recent_log.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || buffer.writer())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let script = Arc::new(Script {
+            answers: Mutex::new(vec![
+                Ok(opened(CREDENTIAL, 1, ACCESS, (unix_now() + 28_800) * 1_000)),
+                Err(LoginFailure::Denied),
+            ]),
+            fallback: LoginFailure::Unavailable,
+            calls: Default::default(),
+        });
+        let (stop, stopped) = watch::channel(false);
+        let task = tokio::spawn(run_claude_login_writer(
+            fixture.writer(),
+            script.clone(),
+            Duration::from_millis(50),
+            stopped,
+        ));
+        eventually(|| fixture.credentials().exists()).await;
+        eventually(|| !fixture.credentials().exists()).await;
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+    });
+    let log = String::from_utf8(recent_log.snapshot()).unwrap();
+    assert!(log.contains("claude_login=Written"), "{log}");
+    assert!(log.contains("claude_login=Denied"), "{log}");
+    let home = fixture.home().to_string_lossy().into_owned();
+    for secret in [
+        ACCESS,
+        // The token's body without its public prefix.
+        "synthetic-claude-access",
+        "codewire-managed-no-refresh-token-",
+        home.as_str(),
+        CREDENTIAL,
+    ] {
+        assert!(!log.contains(secret), "{secret} in {log}");
+    }
+}
+
 /// A start removes what a crash or a revocation left beside the store: a
 /// write in progress and a set-aside copy of Codewire's login. A set-aside
 /// store of the user's own stays, and so does every other file.

@@ -56,6 +56,8 @@ pub struct DaemonServiceImpl {
     /// workspace's new repositories for Claude Code there
     /// (`claude_home::WorkspaceTrust`).
     before_launch: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    /// A local guest daemon's recent log, which `ReadDaemonLog` returns.
+    recent_log: Option<crate::recent_log::RecentLog>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -137,7 +139,14 @@ impl DaemonServiceImpl {
             app_ports: None,
             workload_sockets,
             before_launch: None,
+            recent_log: None,
         }
+    }
+
+    /// The same service, answering `ReadDaemonLog` from `recent_log`.
+    pub fn with_recent_log(mut self, recent_log: crate::recent_log::RecentLog) -> Self {
+        self.recent_log = Some(recent_log);
+        self
     }
 
     /// The same service looking for the desktop at `layout`, where a test
@@ -249,6 +258,20 @@ impl DaemonService for DaemonServiceImpl {
             state: self.runtime_state.state as i32,
             message: self.runtime_state.message.clone(),
             diagnostics,
+        }))
+    }
+
+    async fn read_daemon_log(
+        &self,
+        request: Request<v1::ReadDaemonLogRequest>,
+    ) -> Result<Response<v1::ReadDaemonLogResponse>, Status> {
+        self.authorize(&request)?;
+        let recent_log = self
+            .recent_log
+            .as_ref()
+            .ok_or_else(|| Status::unimplemented("this daemon keeps no recent log"))?;
+        Ok(Response::new(v1::ReadDaemonLogResponse {
+            data: recent_log.snapshot(),
         }))
     }
 

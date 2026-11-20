@@ -1716,13 +1716,15 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         &self,
         request: Request<v1::ListRecentBrokerLeaseAuditEventsRequest>,
     ) -> Result<Response<v1::ListRecentBrokerLeaseAuditEventsResponse>, Status> {
-        let limit = usize::try_from(request.into_inner().limit)
+        let request = request.into_inner();
+        let limit = usize::try_from(request.limit)
             .ok()
             .filter(|limit| (1..=MAX_BROKER_LEASE_AUDIT_LIST_LIMIT).contains(limit))
             .ok_or_else(|| Status::invalid_argument("invalid broker audit list limit"))?;
+        let environment = request.environment_id.map(environment_id).transpose()?;
         let events = self
             .broker_audit
-            .recent(limit)
+            .recent_for(environment.as_ref(), limit)
             .await
             .into_iter()
             .map(broker_lease_audit_event_to_proto)

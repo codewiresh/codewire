@@ -6,7 +6,6 @@
 //! the broker reads the exact protected value from the OS store after the
 //! authority has rederived and admitted the operation.
 
-use std::collections::VecDeque;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -15,9 +14,8 @@ pub use crate::refresh_commit::UnpublishedRefresh;
 use crate::refresh_commit::send_commit;
 pub(crate) use crate::refresh_commit::{refresh_commit_material, refresh_commit_status};
 use codewire_access::{
-    AccessProfileId, BrokerOperationId, BrokerRouteId,
-    CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CapabilitySlot, CredentialId, DerivedGrant,
-    EnvironmentAccessBinding, EnvironmentId, GrantPermission,
+    BrokerOperationId, BrokerRouteId, CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS,
+    CapabilitySlot, DerivedGrant, EnvironmentAccessBinding, EnvironmentId, GrantPermission,
 };
 use codewire_protected_store::{ProtectedStore, ProtectedValue};
 use hyper_util::rt::TokioIo;
@@ -42,6 +40,7 @@ use crate::{
     PlatformCredentialConnector, deny_generic_ssh_lease, protected_entry_id,
 };
 
+mod audit;
 mod delegation;
 mod login;
 mod observed_stream;
@@ -68,6 +67,8 @@ async fn projection_permit(
         .map_err(|_| busy())?
         .map_err(|_| busy())
 }
+pub use audit::{BrokerLeaseAuditDecision, BrokerLeaseAuditEvent};
+pub(crate) use audit::{BrokerLeaseAuditLog, MAX_BROKER_LEASE_AUDIT_LIST_LIMIT};
 pub use delegation::{LocalCredentialDelegationClient, LocalCredentialDelegationOutput};
 pub use projection::LocalEnvironmentProjectionBinding;
 pub(crate) use ssh::LocalSshOperationRuntime;
@@ -80,8 +81,6 @@ const MAX_BROKER_DELEGATION_RPC_MESSAGE_BYTES: usize =
     codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES + 8;
 const MAX_BROKER_LEASE_RPC_CONCURRENCY: usize = 16;
 const MAX_BROKER_PROTECTED_STORE_OPERATIONS: usize = 1;
-pub(crate) const MAX_RECENT_BROKER_LEASE_AUDIT_EVENTS: usize = 4_096;
-pub(crate) const MAX_BROKER_LEASE_AUDIT_LIST_LIMIT: usize = 256;
 pub const BROKER_LEASE_PROTOCOL_VERSION: u32 = 9;
 
 /// Result of exact refresh admission. Recovery completes durable bookkeeping;
@@ -110,70 +109,6 @@ pub struct BrokerCredentialRefreshReservation {
 pub struct StartedBrokerCredentialRefresh {
     reservation: BrokerCredentialRefreshReservation,
     execution_deadline_unix_ms: u64,
-}
-
-/// Material-free result of one exact authority lease decision. This recent
-/// local ring is intentionally bounded and process-lifetime; #1922 owns the
-/// final durable local/platform audit persistence contract.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BrokerLeaseAuditDecision {
-    Admitted,
-    Denied,
-    Unavailable,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BrokerLeaseAuditEvent {
-    pub sequence: u64,
-    pub observed_at_unix_ms: u64,
-    pub environment_id: EnvironmentId,
-    pub environment_generation: u64,
-    pub request_id: Uuid,
-    pub capability_slot: CapabilitySlot,
-    pub operation: BrokerOperationId,
-    pub route: BrokerRouteId,
-    pub decision: BrokerLeaseAuditDecision,
-    pub credential_id: Option<CredentialId>,
-    pub profile_id: Option<AccessProfileId>,
-    pub profile_revision: Option<u64>,
-    pub credential_revocation_generation: Option<u64>,
-}
-
-#[derive(Default)]
-pub(crate) struct BrokerLeaseAuditLog {
-    state: Mutex<BrokerLeaseAuditState>,
-}
-
-#[derive(Default)]
-struct BrokerLeaseAuditState {
-    next_sequence: u64,
-    events: VecDeque<BrokerLeaseAuditEvent>,
-}
-
-impl BrokerLeaseAuditLog {
-    async fn record(&self, mut event: BrokerLeaseAuditEvent) {
-        let mut state = self.state.lock().await;
-        state.next_sequence = state.next_sequence.saturating_add(1).max(1);
-        event.sequence = state.next_sequence;
-        event.observed_at_unix_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| u64::try_from(duration.as_millis()).ok())
-            .unwrap_or(0);
-        state.events.push_front(event);
-        state.events.truncate(MAX_RECENT_BROKER_LEASE_AUDIT_EVENTS);
-    }
-
-    pub(crate) async fn recent(&self, limit: usize) -> Vec<BrokerLeaseAuditEvent> {
-        self.state
-            .lock()
-            .await
-            .events
-            .iter()
-            .take(limit.min(MAX_BROKER_LEASE_AUDIT_LIST_LIMIT))
-            .cloned()
-            .collect()
-    }
 }
 
 /// Stable failures safe to retain outside the credential-bearing broker.
@@ -1500,8 +1435,8 @@ mod tests {
     use std::sync::{Arc, Condvar, Mutex as StdMutex};
 
     use codewire_access::{
-        AccessProfileName, CapabilityPolicy, CredentialAuthKind, EnvironmentAccessBinding,
-        ProviderCatalog, ProviderDefinition, ProviderId,
+        AccessProfileName, CapabilityPolicy, CredentialAuthKind, CredentialId,
+        EnvironmentAccessBinding, ProviderCatalog, ProviderDefinition, ProviderId,
     };
     use codewire_protected_store::{
         ProtectedEntryId, ProtectedStoreError, ProtectedStorePersistence, ProtectedValue,
@@ -3382,40 +3317,5 @@ mod tests {
         );
         drop(client);
         server.abort();
-    }
-
-    #[tokio::test]
-    async fn recent_lease_audit_ring_is_bounded_and_newest_first() {
-        let audit = BrokerLeaseAuditLog::default();
-        for _ in 0..(MAX_RECENT_BROKER_LEASE_AUDIT_EVENTS + 3) {
-            audit
-                .record(BrokerLeaseAuditEvent {
-                    sequence: 0,
-                    observed_at_unix_ms: 0,
-                    environment_id: EnvironmentId::parse("environment").unwrap(),
-                    environment_generation: 1,
-                    request_id: Uuid::new_v4(),
-                    capability_slot: CapabilitySlot::codex(),
-                    operation: BrokerOperationId::parse("responses").unwrap(),
-                    route: BrokerRouteId::parse("openai-api").unwrap(),
-                    decision: BrokerLeaseAuditDecision::Denied,
-                    credential_id: None,
-                    profile_id: None,
-                    profile_revision: None,
-                    credential_revocation_generation: None,
-                })
-                .await;
-        }
-        assert_eq!(
-            audit.state.lock().await.events.len(),
-            MAX_RECENT_BROKER_LEASE_AUDIT_EVENTS
-        );
-        let recent = audit.recent(16).await;
-        assert_eq!(recent.len(), 16);
-        assert!(
-            recent
-                .windows(2)
-                .all(|pair| pair[0].sequence > pair[1].sequence)
-        );
     }
 }

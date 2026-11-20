@@ -69,8 +69,8 @@ pub use broker_process::{
     LocalBrokerProcessSpawner, LocalBrokerSpawnError, ProviderLookup,
 };
 pub use client::{
-    AuthorityInfo, EnvironmentGrants, LocalCredentialClient, LocalCredentialControlClient,
-    PreparedGitRepository, SpawnedAuthority,
+    AuthorityInfo, EnvironmentGrants, EnvironmentLeaseAudit, LocalCredentialClient,
+    LocalCredentialControlClient, PreparedGitRepository, SpawnedAuthority,
 };
 pub use control::v1::{
     ProviderRevocation as LocalProviderRevocation,

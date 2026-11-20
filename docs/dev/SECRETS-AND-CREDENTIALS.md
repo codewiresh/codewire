@@ -1876,12 +1876,12 @@ Released v0.4.22 and earlier fail the VM's create or start instead, with
 ending `CW_BROKER_EXIT stage=provider.resolve` (#5286). The journey step is
 `cred-provider-unresolved` in `docs/journeys/credentials.md`.
 
-### Diagnosing delivery in a local VM (in progress, #4882)
+### Diagnosing delivery in a local VM
 
 `cw --local daemon logs ENV` is the one place to see why a credential did not
-reach a local VM. It is gaining two parts beside the supervisor's operation
-lines; until they ship it prints the operation lines only. Each part has a
-heading line, and a part that cannot be read says why in one line instead.
+reach a local VM (#4882). It prints three parts: the supervisor's operation
+lines, the guest daemon's recent log and the credential leases. Each part has
+a heading line, and a part that cannot be read says why in one line instead.
 
 - **Guest daemon.** The guest daemon keeps its most recent log lines in
   memory, at most 32 KiB with the oldest dropped first, and nowhere else: not

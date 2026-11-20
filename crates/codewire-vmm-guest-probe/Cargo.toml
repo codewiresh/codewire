@@ -45,6 +45,7 @@ tar = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-vsock = { workspace = true, features = ["tonic014"] }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 codewire-egress-front-door = { workspace = true }

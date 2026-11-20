@@ -185,6 +185,7 @@ where
         None,
         None,
         None,
+        None,
         incoming,
         shutdown,
     )
@@ -247,6 +248,7 @@ where
         )),
         None,
         None,
+        None,
         incoming,
         shutdown,
     )
@@ -289,6 +291,7 @@ where
         )),
         None,
         None,
+        None,
         incoming,
         shutdown,
     )
@@ -317,6 +320,7 @@ where
         None,
         None,
         Some(rotations),
+        None,
         incoming,
         shutdown,
     )
@@ -347,6 +351,7 @@ where
         config,
         DaemonRuntimeState::ready(),
         Some(logins),
+        None,
         None,
         None,
         None,
@@ -386,6 +391,7 @@ where
         None,
         Some((app_ports, pod_uid)),
         None,
+        None,
         incoming,
         shutdown,
     )
@@ -399,12 +405,14 @@ where
 /// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Direct delivery exceptions").
 /// With `rotations`, the guest can rotate the daemon's token and credential
 /// bridge identity when the VM resumes from a VM checkpoint
-/// ([`crate::auth_rotation`]).
+/// ([`crate::auth_rotation`]). `ReadDaemonLog` answers from `recent_log`,
+/// which the caller's log subscriber fills.
 #[cfg(target_os = "linux")]
 pub async fn serve_native_grpc_with_incoming<I, IO, IE, F>(
     config: Config,
     codex_home: crate::codex_home::CodexHome,
     rotations: Option<crate::auth_rotation::RotationRequests>,
+    recent_log: crate::recent_log::RecentLog,
     incoming: I,
     shutdown: F,
 ) -> Result<()>
@@ -428,6 +436,7 @@ where
         None,
         None,
         rotations,
+        Some(recent_log),
         incoming,
         shutdown,
     )
@@ -479,6 +488,8 @@ async fn serve<I, IO, IE, F>(
     bound: Option<(crate::app_ports::AppPortsSender, &str)>,
     // A local guest daemon's token and bridge identity rotations.
     rotations: Option<crate::auth_rotation::RotationRequests>,
+    // A local guest daemon's recent log.
+    recent_log: Option<crate::recent_log::RecentLog>,
     incoming: I,
     shutdown: F,
 ) -> Result<()>
@@ -536,6 +547,9 @@ where
     }
     if let Some(app_ports) = app_ports {
         implementation = implementation.with_app_ports(app_ports);
+    }
+    if let Some(recent_log) = recent_log {
+        implementation = implementation.with_recent_log(recent_log);
     }
     #[cfg(target_os = "linux")]
     if let Some(trust) = workspace_trust {

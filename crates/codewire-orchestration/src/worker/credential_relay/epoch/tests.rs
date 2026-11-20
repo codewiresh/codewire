@@ -107,6 +107,7 @@ daemon_service! {
     set_app_ports(daemon_v1::SetAppPortsRequest) -> daemon_v1::SetAppPortsResponse,
     get_capabilities(daemon_v1::GetCapabilitiesRequest) -> daemon_v1::GetCapabilitiesResponse,
     get_health(daemon_v1::GetHealthRequest) -> daemon_v1::GetHealthResponse,
+    read_daemon_log(daemon_v1::ReadDaemonLogRequest) -> daemon_v1::ReadDaemonLogResponse,
     launch_session(daemon_v1::LaunchSessionRequest) -> daemon_v1::LaunchSessionResponse,
     list_sessions(daemon_v1::ListSessionsRequest) -> daemon_v1::ListSessionsResponse,
     get_session(daemon_v1::GetSessionRequest) -> daemon_v1::GetSessionResponse,

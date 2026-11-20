@@ -10,6 +10,12 @@ service DaemonService {
   rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
   rpc GetHealth(GetHealthRequest) returns (GetHealthResponse);
 
+  // A local guest daemon's recent log lines, which it keeps in memory only
+  // (docs/dev/SECRETS-AND-CREDENTIALS.md, "Diagnosing delivery in a local
+  // VM"). UNIMPLEMENTED from a daemon that keeps none: every hosted daemon,
+  // and a guest older than this call.
+  rpc ReadDaemonLog(ReadDaemonLogRequest) returns (ReadDaemonLogResponse);
+
   // Private native host lifecycle operation, not a workload launch. Enabled
   // only by the trusted Local+Runc guest configuration. No command, environment,
   // source selector, or application projection crosses this boundary.
@@ -337,6 +343,14 @@ message GetCapabilitiesResponse {
 }
 
 message GetHealthRequest {}
+
+message ReadDaemonLogRequest {}
+
+message ReadDaemonLogResponse {
+  // Whole lines, oldest first, at most 32 KiB. The text is the daemon's own:
+  // a reader outside the guest must not trust it with a terminal.
+  bytes data = 1;
+}
 
 message PoweroffGuestRequest {}
 

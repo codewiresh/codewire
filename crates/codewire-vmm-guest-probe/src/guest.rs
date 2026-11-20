@@ -63,6 +63,7 @@ use codewire_network_session::{
 };
 
 mod bootstrap;
+mod daemon_log;
 use bootstrap::runtime_path_environment;
 use bootstrap::with_boot_selection;
 mod egress_trust;
@@ -516,6 +517,7 @@ pub async fn run_daemon() -> Result<()> {
         std::env::vars_os().next().is_none(),
         "guest daemon refuses an ambient environment"
     );
+    let recent_log = daemon_log::install()?;
     let seed = read_seed_from_discovered_disk()?;
     let plan = load_active_workspace_plan()?;
     // The environment's own live mounts below /workspace: file requests
@@ -641,6 +643,7 @@ pub async fn run_daemon() -> Result<()> {
         config,
         codex_home,
         Some(rotations),
+        recent_log,
         HostOnlyIncoming::new(listener.incoming()),
         shutdown_signal(),
     );

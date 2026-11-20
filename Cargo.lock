@@ -1877,6 +1877,7 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "zeroize",
 ]
@@ -2727,6 +2728,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-vsock",
+ "tracing-subscriber",
  "uuid",
  "x509-parser",
  "zeroize",

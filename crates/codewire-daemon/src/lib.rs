@@ -38,6 +38,7 @@ pub mod platform_managed;
 pub mod platform_refusal;
 #[cfg(unix)]
 mod private_files;
+pub mod recent_log;
 pub mod server;
 pub mod service;
 pub mod session;

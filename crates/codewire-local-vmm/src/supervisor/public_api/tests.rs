@@ -450,32 +450,6 @@ fn daemon_status_projection_never_reflects_guest_controlled_text() {
 }
 
 #[test]
-fn daemon_logs_render_only_trusted_journal_fields() {
-    let sentinel = "guest-output-and-token-sentinel";
-    let operation = OperationRecord {
-        operation_id: Uuid::new_v4(),
-        request_id: Uuid::new_v4(),
-        environment_id: Some(Uuid::new_v4()),
-        kind: OperationKind::Create,
-        phase: OperationPhase::Completed,
-        checkpoint: 7,
-        payload: serde_json::json!({"name": sentinel}),
-        result: Some(serde_json::json!({"message": sentinel})),
-        error_code: None,
-        created_unix_ms: 1_000,
-        updated_unix_ms: 2_000,
-    };
-
-    let logs = String::from_utf8(trusted_daemon_logs(&[operation]).unwrap()).unwrap();
-    assert!(logs.contains("time_unix_ms=2000"));
-    assert!(logs.contains("kind=create"));
-    assert!(logs.contains("phase=completed"));
-    assert!(logs.contains("stage=OPERATION_STAGE_COMPLETED"));
-    assert!(!logs.contains(sentinel));
-    assert!(logs.len() <= MAXIMUM_DAEMON_LOG_BYTES);
-}
-
-#[test]
 fn public_resize_identity_and_resources_round_trip_through_the_durable_operation() {
     let environment = super::super::tests::project_environment();
     let private_environment = environment.proto(false);
@@ -636,7 +610,17 @@ async fn real_uds_connect_client_shares_the_owner_only_supervisor_endpoint() {
         .unwrap()
         .unwrap()
         .to_owned_message();
-    assert!(daemon_logs.data.is_empty());
+    // A stopped VM with no operations and no credential authority: each part
+    // says why it has nothing, and no authority is started to ask.
+    assert_eq!(
+        String::from_utf8(daemon_logs.data).unwrap(),
+        "# operations\n\
+         no operations recorded\n\
+         # guest daemon\n\
+         guest daemon log unavailable: the VM is not running\n\
+         # credential leases\n\
+         credential leases unavailable: the credential authority is not running\n"
+    );
 
     let repair_error = client
         .repair_environment_daemon(proto::RepairEnvironmentDaemonRequest {

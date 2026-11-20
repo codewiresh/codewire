@@ -1458,6 +1458,13 @@ mod tests {
 
     #[tonic::async_trait]
     impl DaemonService for RecordingDaemon {
+        async fn read_daemon_log(
+            &self,
+            _request: Request<v1::ReadDaemonLogRequest>,
+        ) -> Result<Response<v1::ReadDaemonLogResponse>, Status> {
+            Err(Status::unimplemented("fixture unused log RPC"))
+        }
+
         async fn poweroff_guest(
             &self,
             _request: Request<v1::PoweroffGuestRequest>,

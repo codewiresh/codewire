@@ -30,6 +30,7 @@ use tonic::Request as TonicRequest;
 
 use super::*;
 
+mod daemon_logs;
 mod file_errors;
 mod session_error;
 use file_errors::local_file_error;
@@ -44,7 +45,6 @@ const ACCEPT_POST: &str =
     "application/connect+json, application/connect+proto, application/json, application/proto";
 const GIB: u64 = 1024 * 1024 * 1024;
 const DAEMON_REPAIR_TIMEOUT: Duration = Duration::from_secs(180);
-const MAXIMUM_DAEMON_LOG_BYTES: usize = 64 * 1024;
 const REQUIRED_LOCAL_DAEMON_CAPABILITIES: &[&str] = &[
     "attach.v1",
     "credential_bridge.v1",
@@ -896,22 +896,6 @@ impl SupervisorRpc {
         Ok(project_daemon_status(&capabilities, &health))
     }
 
-    async fn public_daemon_logs(
-        &self,
-        org_id: &str,
-        environment_id: &str,
-    ) -> Result<Vec<u8>, connectrpc::ConnectError> {
-        let (_, environment) = self.public_environment(org_id, environment_id).await?;
-        let environment_id = parse_coordinate(&environment.id, "environment_id")?;
-        let operations = self
-            .operation_reader
-            .lock()
-            .await
-            .recent_environment_operations(environment_id)
-            .map_err(|_| local_internal())?;
-        trusted_daemon_logs(&operations)
-    }
-
     async fn wait_for_terminal_operation(
         &self,
         operation_id: Uuid,
@@ -1041,30 +1025,6 @@ fn daemon_state_message(state: proto::EnvironmentDaemonState) -> &'static str {
             "local environment daemon bundle is incompatible"
         }
     }
-}
-
-fn trusted_daemon_logs(
-    operations: &[OperationRecord],
-) -> Result<Vec<u8>, connectrpc::ConnectError> {
-    let mut output = Vec::new();
-    for operation in operations {
-        let stage = operation_stage(operation).map_err(local_status)?;
-        let line = format!(
-            "time_unix_ms={} operation={} kind={} phase={} checkpoint={} stage={} error={}\n",
-            operation.updated_unix_ms,
-            operation.operation_id,
-            operation.kind.as_str(),
-            operation.phase.as_str(),
-            operation.checkpoint,
-            stage.as_str_name(),
-            operation.error_code.as_deref().unwrap_or("-"),
-        );
-        if output.len().saturating_add(line.len()) > MAXIMUM_DAEMON_LOG_BYTES {
-            break;
-        }
-        output.extend_from_slice(line.as_bytes());
-    }
-    Ok(output)
 }
 
 #[derive(Clone)]
