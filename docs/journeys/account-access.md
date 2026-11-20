@@ -163,8 +163,8 @@ Issue: #3586, its third step (cw-security, 2026-11-18). A launch item (owner,
      shell ends with "Access revoked". B's shell and the exec keep printing.
      On the Sandbox (from B's shell, in a second window),
      `pgrep -fc 'while :; do date'` counts the three loops (A, B and the
-     exec) before, and two within seconds of the sign-out (not yet
-     observed).
+     exec) before, and two within about 20 seconds of the sign-out (not
+     yet observed).
   3. In Settings, disable the API key: the exec's lines stop and it ends with
      "Access revoked".
   4. Disable the account: B's lines stop and its shell ends. Enable the

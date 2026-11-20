@@ -542,21 +542,27 @@ connection, and it ends in the same four cases (#3586):
   that announced it, and another user's session announcing it is refused
   before its node reaches any peer (`docs/dev/DERP-STUN.md`, "Coordinator
   sessions and node keys"). Each refused or unforwarded node is counted
-  and logged with the environment and both peer ids, never a credential. The daemon's own rule stays behind this:
-  an address two nodes claim belongs to neither.
+  and logged with the environment and both peer ids, never a credential.
+  The daemon's own rule stays behind this: an address two nodes claim
+  belongs to neither.
 - **The environment's side:** an address one client held can be announced
   by a different client once the first leaves the peer set, so the
   environment's daemon records each tailnet SSH connection, before its
   session runs anything, with the node key of the peer that held the
   connection's address in the peer set it last applied; a connection from
-  an address no peer holds is closed at once. When the daemon applies a peer set in which that key no
-  longer holds that address, IPv4 or IPv6, it closes the connection at once,
-  and none from any other peer. The shell or exec on it ends then, with its
-  processes, as for a client that vanished, rather than when SSH's
-  keepalive gives up (up to 60 seconds). The rule is about each set the
-  daemon applies: a client absent from one has lost its connections, even
-  if a later set holds it again. A client announced again under a new
-  session keeps its node key and addresses, so its connections stay.
+  an address no peer holds is closed at once. When the daemon applies a
+  peer set in which another key holds that address, IPv4 or IPv6, it closes
+  the connection at once; when no key has held it for 20 seconds, it closes
+  it then. It closes none from any other peer. The shell or exec on it ends
+  with its processes, as for a client that vanished, rather than when SSH's
+  keepalive gives up (up to 60 seconds). The wait grants nothing, since no
+  packet reaches a client while its key does not hold its address. It
+  keeps two ordinary moments from ending a live shell: a client's
+  reconnect, whose old node's removal can reach the daemon before its new
+  node (#5120), and the daemon's own coordinator session starting again,
+  whose first sets hold only the peers replayed so far. A client announced
+  again under a new session keeps its node key and addresses, so its
+  connections stay.
 - **Not yet:** after an environment's session moves to another replica, it
   learns the clients on other replicas as they announce again, so the first
   of them to announce an address holds it. That lets one admitted client

@@ -55,6 +55,9 @@ use crate::daemon_access::{
 use crate::peer_relay::{CallBudget, PeerRelayAllocator, PeerRelayBackend};
 use crate::platform::{BrokerRefusal, DaemonPlatform};
 
+mod peer_connections;
+use peer_connections::PeerConnections;
+
 /// Wait between coordinator connection attempts.
 pub const COORDINATOR_RETRY_DELAY: Duration = Duration::from_secs(5);
 /// A broker-mode refusal (a name where an address belongs, a map without
@@ -521,6 +524,7 @@ pub struct DaemonTailnet {
     conn: Arc<Conn>,
     relay: Option<PeerRelayAllocator>,
     relay_reconciler: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    ssh_connections: Arc<PeerConnections>,
 }
 
 impl DaemonTailnet {
@@ -556,6 +560,10 @@ impl PeerDataPlane for DaemonTailnet {
             peer_count = nodes.len(),
             "workspace tailnet peer update received"
         );
+        // Before the data plane, so a new peer's first connection finds its
+        // key and a removed one's are closed as its packets stop.
+        self.ssh_connections
+            .apply(nodes, &self.conn.node().addresses);
         if let Err(error) = self.conn.update_peers(nodes) {
             tracing::warn!(error = %error, "apply workspace tailnet peer update failed");
         }
@@ -674,6 +682,7 @@ pub async fn connect_daemon_tailnet(
         conn: Arc::new(conn),
         relay,
         relay_reconciler: std::sync::Mutex::new(None),
+        ssh_connections: Arc::default(),
     })
 }
 
@@ -927,8 +936,11 @@ pub async fn run(
                     break;
                 };
                 let ssh = ssh.clone();
+                let connections = tailnet.ssh_connections.clone();
                 tokio::spawn(async move {
-                    ssh.runners.serve_stream(ssh.config, stream, "tailnet").await;
+                    let peer = stream.peer_addr().ip();
+                    let serve = ssh.runners.serve_stream(ssh.config, stream, "tailnet");
+                    connections.serve(peer, serve).await;
                 });
             }
         }

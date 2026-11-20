@@ -754,6 +754,81 @@ mod app_ports {
         assert_eq!(answer(&client, api).await.as_deref(), Some("api"));
         let _ = stop.send(true);
     }
+
+    /// One round trip on a connection to the daemon's echo, within a short
+    /// bound.
+    async fn echoes(stream: &mut TailnetStream) -> bool {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            stream.write_all(b"ping").await.ok()?;
+            stream.flush().await.ok()?;
+            let mut reply = [0u8; 4];
+            stream.read_exact(&mut reply).await.ok()?;
+            (&reply == b"ping").then_some(())
+        })
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    }
+
+    /// The daemon's tailnet SSH connection from a client stays while the
+    /// client is announced again under a new session, and ends as soon as a
+    /// peer set gives its address to another key, through `apply_peers`
+    /// (#3586; AUTH-POLICY.md, "The environment's side"; the wait after a
+    /// plain removal is `peer_connections`' to test, on paused time). Its end
+    /// is seen on the daemon's side: once the client loses its address,
+    /// nothing the daemon sends reaches it.
+    #[tokio::test]
+    async fn a_clients_ssh_connection_ends_when_its_address_is_given_to_another_key() {
+        let (daemon, client) = tailnet_pair();
+        let tailnet = DaemonTailnet {
+            conn: daemon.clone(),
+            relay: None,
+            relay_reconciler: StdMutex::new(None),
+            ssh_connections: Arc::default(),
+        };
+        let client_node = client.node();
+        tailnet.apply_peers(std::slice::from_ref(&client_node));
+        let mut listener = daemon.listen("tcp", ":22").await.unwrap();
+        let connections = tailnet.ssh_connections.clone();
+        let (served, ended) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let mut stream = listener.accept().await.unwrap();
+            let peer = stream.peer_addr().ip();
+            connections
+                .serve(peer, async move {
+                    let _served = served;
+                    let mut buffer = [0u8; 4];
+                    while stream.read_exact(&mut buffer).await.is_ok() {
+                        if stream.write_all(&buffer).await.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .await;
+        });
+        let mut stream = client
+            .dial_context_tcp(SocketAddr::new(IpAddr::V6(DAEMON_IP), 22))
+            .await
+            .unwrap();
+        assert!(echoes(&mut stream).await);
+
+        let mut again = client_node;
+        again.id = Uuid::new_v4();
+        tailnet.apply_peers(std::slice::from_ref(&again));
+        assert!(echoes(&mut stream).await, "a re-announced client keeps it");
+
+        let taken = Node {
+            id: Uuid::new_v4(),
+            key: NodePublic::from_raw([0x77; 32]),
+            ..again
+        };
+        tailnet.apply_peers(&[taken]);
+        tokio::time::timeout(Duration::from_secs(30), ended)
+            .await
+            .expect("the connection ends once another key holds its address")
+            .unwrap_err();
+    }
 }
 
 /// Orchestration answering relay allocations the way Dev does, in about

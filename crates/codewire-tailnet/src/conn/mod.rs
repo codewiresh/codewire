@@ -1065,7 +1065,7 @@ fn route_key(peers: &HashMap<[u8; 32], Peer>, dst: IpAddr) -> Option<[u8; 32]> {
 /// a single host address, while nodes publish their own addresses through the
 /// coordinator; so a broader prefix would make a peer the route for traffic
 /// that is not its own, and an address two nodes claim belongs to neither.
-fn allowed_ips(nodes: &[Node], own: &[Prefix]) -> Vec<Vec<Prefix>> {
+pub fn allowed_ips(nodes: &[Node], own: &[Prefix]) -> Vec<Vec<Prefix>> {
     let is_host = |prefix: &Prefix| match prefix.addr() {
         IpAddr::V4(_) => prefix.bits() == 32,
         IpAddr::V6(_) => prefix.bits() == 128,
