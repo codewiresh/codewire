@@ -363,6 +363,44 @@ detail; this section states the contract.
   port; ports 2222, 5901 and 9222 are reserved
   ([docs/dev/SANDBOX-PREVIEWS.md](docs/dev/SANDBOX-PREVIEWS.md)).
 
+Target, not shipped (#5602): a third managed runtime profile, `standard`,
+runs the environment in a VM that Codewire's own runtime starts inside the
+Pod: the supervisor, Cloud Hypervisor and guest that run a local VM
+([section 5](#5-local-vms-and-trusted-hosts)). Kata is not involved.
+
+- **The Pod** holds one container, `workspace`, running Codewire's runtime
+  image at a pinned digest on the node's ordinary container runtime. It does
+  not run as root, has no capabilities and no privilege escalation, and gets
+  `/dev/kvm` from the node and nothing else. There is no `dind` container
+  and no init container.
+- **Inside the VM** run the user's image, Docker and the same daemon as on
+  `commodity`. The daemon binds before it listens, holds the Sandbox's
+  tokens, and serves 7777, 2222 and the tailnet.
+- **The supervisor** in the container boots the VM, hands it the Pod's
+  settings, keeps the VM's copies of the projected tokens fresh, forwards
+  7777 and 2222 from the Pod's address to the daemon, and powers the guest
+  off when the Pod is told to stop. The tailnet uses its relays; the direct
+  UDP path is later work.
+- **The VM has no network device.** Its traffic leaves through the
+  supervisor to cw-egress on the node, which decides every destination, so
+  `standard` is offered only where hosted egress (#4000) is on.
+- **The workspace image** reaches the VM as a read-only disk that the node
+  pulls and caches like any image and every Sandbox on the node shares. Each
+  VM adds a small writable root that is rebuilt at every start. The home and
+  the workspace persist on the Sandbox's volume, as on `commodity`.
+- **Beside the other profiles.** `commodity` and `confidential` do not
+  change. A profile is chosen for an organization, an environment keeps the
+  profile it was created on, and nothing is converted. Until `standard` can
+  run a user's own image, an environment that names one is created on
+  `commodity`.
+- **Not on `standard` at first:** a user's own image, private images, and
+  snapshots and forks.
+
+The Guard rules for this profile are in
+[docs/dev/CODEWIRE-GUARD-RUNTIME-PROFILES.md](docs/dev/CODEWIRE-GUARD-RUNTIME-PROFILES.md),
+and its walk is
+[docs/journeys/standard-runtime.md](docs/journeys/standard-runtime.md).
+
 ## 5. Local VMs and trusted hosts
 
 ### Runtime

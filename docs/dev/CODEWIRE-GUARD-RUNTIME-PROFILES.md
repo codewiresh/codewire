@@ -16,6 +16,14 @@ itself a runtime or a CRI handler.
 | `commodity` | `commodity` | Kata + Cloud Hypervisor through `kata-clh` | normal commodity runtime | VM boundary and defense in depth; no CoCo/SNP/TDX host-root secrecy |
 | `confidential` | `confidential` | Kata + QEMU-SNP through `kata-qemu-snp` for the first dev proof | host/SNP proof in progress | hardware TEE boundary; attestation and Trustee secret-release gates are later proof work |
 
+Target, not shipped (#5602): a third managed profile, `standard`, with RuntimeClass
+`standard` on the node's ordinary handler. Its backend is Codewire's own VM
+runtime, Cloud Hypervisor started inside the Pod by a non-root container. Its
+security claim is a VM boundary whose VM process is itself confined to a
+container with no capabilities; like `commodity`, it claims no secrecy from
+the host's root. ["The `standard` profile"](#the-standard-profile) below has
+its rules.
+
 There are no accepted alias profile names. Backend choices such as Cloud
 Hypervisor, SNP, TDX, CoCo guest-components, Trustee, and KBS are
 implementation details under `commodity` or `confidential`, not
@@ -277,6 +285,64 @@ workspace keeps a Filesystem claim.
   environment's resize replaces its Pod.
 - **Before the Block workspace.** A commodity environment whose workspace is
   still a Filesystem volume cannot start; existing ones are deleted at cutover.
+
+## The `standard` profile
+
+Target, not shipped (#5602). `SPEC.md` section 4 states what the Pod and the
+VM hold. This section states what Guard requires around them.
+
+**Admission.** Under Kata a VM wraps the whole Pod, which is why a privileged
+Docker container is admitted there. Nothing wraps a `standard` Pod, so its
+rule is stricter and applies to every Pod of the class, not only to pool
+templates:
+
+- exactly one container, at an allowed digest of Codewire's runtime image;
+- it runs the image's own entrypoint: a Pod that sets a command or
+  arguments is refused, because the rule pins the image and not what is run
+  from it;
+- it does not run as root, is not privileged, cannot escalate privilege,
+  drops every capability and keeps the runtime's default seccomp profile;
+- it changes none of the container runtime's default confinement: no
+  SELinux options, no `procMount`, no sysctls, and no AppArmor or seccomp
+  profile other than the runtime's default. An SELinux type or an
+  unconfined profile would remove the second layer the claim below rests
+  on;
+- no host namespace, host path or host port;
+- no init container and no ephemeral container;
+- one device, `/dev/kvm`, and no supplemental group to reach it;
+- only these volumes: the workspace claim, the projected tokens, the roots
+  ConfigMap and the workspace image's disk;
+- the workspace image's disk is an image at an allowed digest, mounted
+  read-only. Otherwise a Pod of the class could make the node pull an image
+  of its choosing.
+
+The `/dev/kvm` device resource is refused on a Pod of any other class.
+
+**The claim.** Outside the VM are the supervisor and the VM process, with
+the Pod's address and the Sandbox's projected tokens. The boundary a
+workload has to cross is KVM, Cloud Hypervisor and the supervisor's own
+interface to the guest. A break-out reaches a container that is not root and
+has no capabilities, on the node's shared kernel, with that Sandbox's own
+tokens and the fenced Pod network. The node is a second, kernel-level
+escape away. The container is a second layer, not a second VM.
+
+**The device.** A device plugin on the node hands `/dev/kvm` to the Pod. The
+container opens it as its own user. On a node where the device is not open to
+every user, that needs the container runtime to give a device the
+container's own owner (containerd's `device_ownership_from_security_context`).
+
+**Resources.** The container's requests are the size the user chose, as on
+the other profiles, because billing reads them. The VM process's own memory
+and CPU are added to the limit and to the RuntimeClass overhead, never to
+the request.
+
+**Storage.** The VM's disks are files on the Sandbox's filesystem volume,
+opened with direct I/O so that the guest's writes are not also held in a
+page cache charged to the Pod.
+
+**What changes for an operator.** `kubectl exec` into `workspace` lands in
+the runtime's container, outside the VM. The container's log carries the
+daemon's log.
 
 ## Managed Runtime Gates
 

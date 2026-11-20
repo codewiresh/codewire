@@ -115,7 +115,9 @@ environment's tailnet peer. See `dev/SANDBOX-DAEMON.md`.
 
 The in-repo defense-in-depth layer around sandbox runtime profiles. Runtime
 profiles are `runc`, `commodity`, and `confidential`; `runc` is diagnostic
-or bootstrap only for managed sandboxes.
+or bootstrap only for managed sandboxes. A third managed profile,
+`standard`, is a target and not shipped (#5602): Codewire's own VM runtime
+inside the Pod.
 
 ## Codewire Mesh
 
