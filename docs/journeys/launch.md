@@ -17,10 +17,10 @@ sandbox for steps 2 to 10; the examples call it `launch-walk`.
 ## Who walks what
 
 Sessions prove every UI and CLI state of the walk themselves: on Kind, with
-the UI specs, and with their own walks on Dev. The owner is asked for three
+the UI specs, and with their own walks on Dev. The owner is asked for four
 things only. The first two are the owner's decision (owner, 2026-11-14,
 #4370: "we aren't worried about emails. we are worried about the ui. i can
-check emails myself."); the third needs a person, as a real inbox does:
+check emails myself."); the last two need a person, as a real inbox does:
 
 - that an email arrived, because no session can read a real inbox: the
   verification and access-enabled emails (step 1), the invitation (step 5),
@@ -29,6 +29,8 @@ check emails myself."); the third needs a person, as a real inbox does:
 - "land it" on a design preview;
 - a purchase with a real card on Production (step 6), which is the walker's
   own card and the walker's own decision.
+- a sign-in with a real GitHub and a real Google account (step 1, "Owner:
+  provider sign-in"), because no session can sign in to one.
 
 ## Where the walk stands
 
@@ -133,6 +135,36 @@ to give. The email and password steps, from sign-up through verification, are
 - **Owner: email arrived:** the verification email and the access-enabled
   email reach a real inbox. Every page and command of this step is a
   session's to prove.
+- **Owner: provider sign-in** (#4062), about 8 minutes, one pass. Production's
+  audit log already shows the email-match link for GitHub and for Google, the
+  at-once Google link, and a Google sign-up through review (`signup-provider`,
+  Observed). What is left needs a GitHub account new to this server, so the
+  pass uses the GitHub account `codewire-e2e`, which the owner signs in to.
+  Use a private window for (1) to (3), and your usual window for (4) and (5).
+  After each step a session reads, read-only, what it wrote: the `accounts`
+  row, the account's `audit_logs` rows and the `users` count.
+  1. On `/signup` choose **Continue with GitHub** and sign in at GitHub as
+     `codewire-e2e`. Codewire asks why you want access; send it, and it says
+     "You're on the list". hello@codewire.sh now has one "Codewire: access
+     request from …" email naming `codewire-e2e`'s address, "Signed up with"
+     GitHub, and a link to Manage account access (the operator's notice,
+     #5358). Approve the request in **Admin → Manage account access**; the
+     access-enabled email arrives. If Codewire says instead that it emailed a
+     link, `codewire-e2e`'s address already has an account; stop and tell the
+     session.
+  2. The session runs `cw login` in its own throwaway `HOME` and gives you the
+     page it prints. Open it in the private window and choose **Continue with
+     GitHub**. The session runs `cw whoami`, which names the account from (1),
+     finds no new `users` row, then signs out.
+  3. In the private window open Settings, **Sign-in methods**. GitHub is the
+     only way in, so Disconnect is disabled: "Add a password or connect
+     another provider first."
+  4. In your own account's Settings, **Sign-in methods**: **Disconnect**
+     Google, then **Connect** it again and finish at Google. Each change emails
+     your address.
+  5. In **Admin → Manage account access**, delete the `codewire-e2e` account
+     (#4541's admin delete). Its GitHub identity goes with it, so the next
+     walk can sign up with it again.
 - **Gotchas:**
   - The sign-up credit is a platform setting, `signup_credit_cents`, that
     starts at 0. A new organization gets it once, when it is created, and

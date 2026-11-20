@@ -255,6 +255,20 @@ Issue: #4062. Launch step 1 (`launch-signup`) walks this on Production.
     first sign-up through a provider, a second sign-in, a completed
     `cw login` through one, the email-match link, linking and unlinking in
     Settings, and a replayed state after a completed exchange.
+  - Production, 2026-11-12 to 2026-11-19, read from the audit log
+    (#4062):
+    - the email-match link for GitHub and for Google, each confirmed from the
+      account's email;
+    - Google's at-once link for an address Google vouches for, on an account
+      with no second factor;
+    - a Google sign-up through review: the access request, the approval, then
+      a Google sign-in.
+
+    Not yet observed anywhere: a GitHub sign-up, a second sign-in through a
+    provider, a `cw login` through one, and a Connect or a Disconnect in
+    Settings. The launch walk's "Owner: provider sign-in" observes them. A
+    replayed state after a completed exchange is proved by tests only: a
+    browser drops the state cookie first.
   - The owner reported on 2026-11-13 that signing in with GitHub and with
     Google works ("GitHub and Google both work for me", #4062), and on
     2026-11-14 that this was on Dev and on Production ("it works on both").
