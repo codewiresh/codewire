@@ -13,16 +13,16 @@ The limits and the refusal wording are in
 
 ## Where it stands
 
-Updated 2026-11-19. Nothing here is observed on Production. The owner
+Updated 2026-11-20. Nothing here is observed on Production. The owner
 checks feedback on Production in person (owner, 2026-11-14, #4061): no walk
 sends feedback there, and the Production column is the owner's to fill.
 
 | ID | Dev | Production |
 | --- | --- | --- |
 | `feedback-signed-in` | observed 2026-11-14, the stored row included (#4061) | not yet observed |
-| `feedback-anonymous` | observed 2026-11-14, the stored row included (#4061) | not yet observed |
+| `feedback-anonymous` | observed 2026-11-14, the stored row included (#4061); the reply address with `--email` 2026-11-20 (#5466) | not yet observed |
 | `feedback-limits` | anonymous limit observed 2026-11-11 (#4061); account limit and ceiling not yet observed | not yet observed |
-| `feedback-operator-email` | not yet observed | not yet observed |
+| `feedback-operator-email` | observed 2026-11-20, the operator's inbox included (#5466); the cap and failure states not yet observed | not yet observed |
 | `feedback-admin-page` | not yet observed | not yet observed |
 
 ## Before the walk
@@ -127,7 +127,14 @@ sends feedback there, and the Production column is the owner's to fill.
     by ID, named no account and no organization, held the message as sent
     and a 64-character address hash.
   - A signed-out `cw`: not yet observed.
-  - The reply address, asked or with `--email` (#5466): not yet observed.
+  - Dev, 2026-11-20, `cw` built from `b1a024b6db` (it reports `cw 0.1.0`;
+    no release has `--email` yet), Dev running source `b1a024b6db` (#5466):
+    `--email walk-reply-20261120@example.test` exited 0 with
+    `"signed_in": false`, and the summary showed "Reply to" with that
+    address. `--email walk-reply@example` and `--email` while signed in
+    were each refused with exit 1 before anything was sent. The address
+    appeared in no IdP or orchestration log.
+  - The reply address asked for at a terminal: not yet observed.
   - Production: not yet observed.
 
 ## `feedback-limits`: a sender past the limit is told when to try again
@@ -236,7 +243,18 @@ the rules are in `docs/CONFIGURATION.md`, "Operator notices".
     an anonymous sender typed, and not one written in the message. The
     operator answers an anonymous sender by copying the address from the
     body (cw-security, 2026-11-19, #5466).
-- **Observed:** not yet observed on Dev or Production.
+- **Observed:**
+  - Dev, 2026-11-20, `cw` built from `b1a024b6db`, Dev running source
+    `b1a024b6db` (#5466): one signed-in message as the Dev smoke identity
+    and two anonymous ones, with `--email` and without, each exited 0. The
+    IdP logged `sent feedback email` for each `id` on its first attempt,
+    seconds after each submit, and neither the IdP's logs nor
+    orchestration's held the reply address. The owner read the operator's
+    inbox and reported the three emails received and correct (owner,
+    2026-11-20: "feedback emails were received and everything looks good.").
+  - The cap, a failing provider, an unset `CODEWIRE_OPERATOR_EMAIL` and
+    hostile message text: not yet observed.
+  - Production: not yet observed.
 
 ## `feedback-admin-page`: a platform admin reads the feedback
 
