@@ -101,6 +101,35 @@ const VIEW_CURRENT_REFRESHES: u32 = 3;
 /// The first wait between attempts to reach NATS at startup, doubling to
 /// [`CONNECT_RETRY_MAX`].
 const CONNECT_RETRY: Duration = Duration::from_secs(1);
+static SHARED_METRIC: std::sync::OnceLock<codewire_server_core::metrics::IntGauge> =
+    std::sync::OnceLock::new();
+
+/// How often the sharing gauge is read from the view.
+const SHARED_METRIC_INTERVAL: Duration = Duration::from_secs(5);
+
+/// `codewire_mesh_registry_shared` (#5515): 1 while this replica's view of the
+/// others is current ([`Shared::view_current`]), 0 otherwise: before NATS is
+/// reached, and whenever the watch fails or stalls or the connection drops
+/// after that, within [`VIEW_CURRENT_REFRESHES`] refreshes. A replica without
+/// NATS registers none, so an alert on 0 fires only where sharing is
+/// configured. Readiness never waits for NATS, so this is the only signal.
+fn shared_metric() -> &'static codewire_server_core::metrics::IntGauge {
+    SHARED_METRIC.get_or_init(|| {
+        codewire_server_core::metrics::gauge(
+            "codewire_mesh_registry_shared",
+            "1 while this Mesh replica's view of the other replicas through NATS is current; 0 before NATS is reached and whenever the view goes stale.",
+        )
+    })
+}
+
+/// Whether this replica shares its registry now: attached, and its view of
+/// the other replicas current.
+pub(super) fn sharing_now(state: &MeshCoordinateState) -> bool {
+    state
+        .shared
+        .get()
+        .is_some_and(|shared| shared.view_current())
+}
 const CONNECT_RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// The shared registry could not take a change the store has committed. Both
@@ -451,11 +480,13 @@ impl Shared {
     /// Reaches NATS and opens the bucket, retrying until it can, then starts
     /// this replica's writer, watcher and guard. Until then the replica serves
     /// its own sessions and admits no remote key: it fails closed, and its
-    /// readiness never waits for NATS.
+    /// readiness never waits for NATS. From then on it keeps the sharing
+    /// gauge current.
     pub(crate) fn start_in_background(
         state: MeshCoordinateState,
         nats: crate::config::NatsConfig,
     ) -> tokio::task::JoinHandle<()> {
+        shared_metric().set(0);
         tokio::spawn(async move {
             let mut wait = CONNECT_RETRY;
             loop {
@@ -466,7 +497,10 @@ impl Shared {
                             kv_replicas = nats.kv_replicas,
                             "codewire mesh shares its registry"
                         );
-                        return;
+                        loop {
+                            shared_metric().set(i64::from(sharing_now(&state)));
+                            tokio::time::sleep(SHARED_METRIC_INTERVAL).await;
+                        }
                     }
                     Err(error) => tracing::warn!(
                         %error,

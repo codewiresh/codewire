@@ -1,14 +1,12 @@
 use std::time::Duration;
 
 use codewire_mesh::{Config, serve};
-use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    // JSON lines at info unless RUST_LOG says otherwise, as the other services
+    // log, so a replica that can't reach its shared registry says so (#5515).
+    codewire_server_core::obs::init_logs();
 
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let config = Config::from_sources(&args, |key| std::env::var(key).ok())?;

@@ -57,6 +57,13 @@ pub fn export_active() -> bool {
 /// Initialize JSON logs for a service. Idempotent — repeated calls return
 /// `Ok(())` after the first. Never exports traces; see [`init_with_traces`].
 pub fn init(_cfg: &ServiceConfig) -> anyhow::Result<()> {
+    init_logs();
+    Ok(())
+}
+
+/// [`init`] for a binary without a [`ServiceConfig`], such as Mesh and the
+/// migration Job: the same JSON logs at `RUST_LOG`, default `info` (#5515).
+pub fn init_logs() {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -65,7 +72,6 @@ pub fn init(_cfg: &ServiceConfig) -> anyhow::Result<()> {
         .with(json_log_layer())
         .try_init()
         .ok();
-    Ok(())
 }
 
 /// [`init`] plus OTLP trace export when the `otel` feature is compiled in and

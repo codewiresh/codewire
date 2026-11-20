@@ -26,6 +26,16 @@ pub fn counter(name: &str, help: &str) -> IntCounter {
         .unwrap_or_else(|error| panic!("metric {name} must register once: {error}"))
 }
 
+/// The gauge type a service registers through [`gauge`].
+pub use prometheus::IntGauge;
+
+/// Registers a gauge in the shared registry this module serves. Panics on a
+/// duplicate name, as [`counter`] does.
+pub fn gauge(name: &str, help: &str) -> IntGauge {
+    prometheus::register_int_gauge!(name, help)
+        .unwrap_or_else(|error| panic!("metric {name} must register once: {error}"))
+}
+
 /// Registers a counter with `labels`, which must be finite categories.
 pub fn counter_vec(name: &str, help: &str, labels: &[&str]) -> IntCounterVec {
     register_int_counter_vec!(Opts::new(name, help), labels)

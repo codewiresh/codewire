@@ -163,8 +163,13 @@ Updated 2026-11-13.
   replica until #3542's step 5c, so draining its node there takes Mesh down
   until the replacement pod is ready on another node.
 - **Proof:** `cw network list` answers and two members on other nodes keep
-  reaching each other throughout.
+  reaching each other throughout, and each replica's
+  `codewire_mesh_registry_shared` reads 1 before and after.
 - **Gotchas:** the node that holds Mesh has not been drained for this reason.
+  Mesh's readiness never waits for NATS, so a replica that can't reach its
+  shared registry still reads Ready. Its signal is
+  `codewire_mesh_registry_shared 0` and the warning "Mesh can't reach its
+  shared registry yet", logged at the default level (#5515).
 - **Observed:** not yet observed.
 
 ## `reboot-restart-notice`: the sandbox on that node says why it restarted

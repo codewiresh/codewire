@@ -922,6 +922,23 @@ mod nats_tests {
         serde_json::from_slice(&entry.value).unwrap()
     }
 
+    /// #5515's review: the sharing gauge reads the current view, not the first
+    /// attach. A replica whose watch stalls after it attached (every change
+    /// dropped, its own heartbeats included, as when its connection drops)
+    /// reads unshared within a few refreshes, and shared again once the watch
+    /// delivers its heartbeat.
+    #[tokio::test]
+    #[ignore = "requires NATS_URL pointing at a JetStream-enabled NATS server"]
+    async fn a_replica_whose_watch_stalls_after_attaching_stops_reading_shared() {
+        let r = replicas_with(fast(RECORD_MAX_AGE, DRAINING_GRACE), Timing::default()).await;
+        assert!(sharing_now(&r.a), "attached and current");
+        let a = r.a.shared.get().unwrap();
+        a.watch_paused.store(true, Ordering::Release);
+        eventually(|| !sharing_now(&r.a)).await;
+        a.watch_paused.store(false, Ordering::Release);
+        eventually(|| sharing_now(&r.a)).await;
+    }
+
     /// The #4580 re-review's blocker: a restarted watch replays this
     /// replica's last heartbeat, stamped up to a refresh ago. The server-time
     /// estimate must not go back with it, or a reconnect soon after an older
