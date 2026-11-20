@@ -144,7 +144,11 @@ Issue: #3586, its third step (cw-security, 2026-11-18). A launch item (owner,
   - the API key behind a tailnet exec is disabled: that exec ends;
   - the account is disabled: every tailnet connection of the account ends;
   - a new `cw shell` with the revoked credential is refused;
-  - a credential that only expires: its connection keeps running.
+  - a credential that only expires: its connection keeps running;
+  - **on the Sandbox, the removed client's SSH connection closes at once**
+    (#3586, after its third step): its shell's processes end when the peer
+    is removed, not when SSH's keepalive gives up, and the other machine's
+    shell keeps running. Not yet observed.
 - **Driving it:** a running Sandbox of the walk account, and an administrator
   on Admin → Accounts for the disable. Two throwaway `HOME`s, A and B, stand
   for two machines.
@@ -157,6 +161,10 @@ Issue: #3586, its third step (cw-security, 2026-11-18). A launch item (owner,
   2. In a second terminal on A, copy A's saved sign-in aside, then run
      `cw logout`; it revokes the token A's shell holds. A's lines stop and its
      shell ends with "Access revoked". B's shell and the exec keep printing.
+     On the Sandbox (from B's shell, in a second window),
+     `pgrep -fc 'while :; do date'` counts the three loops (A, B and the
+     exec) before, and two within seconds of the sign-out (not yet
+     observed).
   3. In Settings, disable the API key: the exec's lines stop and it ends with
      "Access revoked".
   4. Disable the account: B's lines stop and its shell ends. Enable the
@@ -170,8 +178,9 @@ Issue: #3586, its third step (cw-security, 2026-11-18). A launch item (owner,
 - **Gotchas:**
   - the two coordinator replicas matter in Production, not on a one-replica
     Kind cluster; the dropped-publish case is a test, not a walk;
-  - on the Sandbox's side an SSH connection from a removed peer ends only
-    when it times out, until the next step closes it at once.
+  - before the daemon closes a removed peer's connections, A's loop on the
+    Sandbox outlives the sign-out by up to 60 seconds (SSH's keepalive),
+    though no packet reaches A.
 - **Observed:** on the local Kind cluster before merge, 2026-11-18, main
   4199fd0f6 with this step's coordinator and `cw` (#3586), plain `cw shell`
   and `cw exec` running "via DERP":

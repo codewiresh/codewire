@@ -522,9 +522,20 @@ connection, and it ends in the same four cases (#3586):
   access away, never grant or widen it. Once every replica sends it, a remote
   client node without it is refused. Who may publish those subjects is
   limited by the NATS accounts (infra#2620).
-- **Not yet:** on the environment's side, an SSH connection from a removed
-  peer carries nothing but ends only when it times out. Closing a removed
-  peer's connections at once is the next step.
+- **The environment's side:** a client chooses its own tailnet addresses,
+  and the coordinator passes them on, so an address another client held can
+  be announced again by a different one. The environment's daemon therefore
+  records each tailnet SSH connection, before its session runs anything,
+  with the node key of the peer that held the connection's address in the
+  peer set it last applied; a connection from an address no peer holds is
+  closed at once. When the daemon applies a peer set in which that key no
+  longer holds that address, IPv4 or IPv6, it closes the connection at once,
+  and none from any other peer. The shell or exec on it ends then, with its
+  processes, as for a client that vanished, rather than when SSH's
+  keepalive gives up (up to 60 seconds). The rule is about each set the
+  daemon applies: a client absent from one has lost its connections, even
+  if a later set holds it again. A client announced again under a new
+  session keeps its node key and addresses, so its connections stay.
 
 The terminal and SSH-proxy WebSockets, Mesh sessions, and removal from an
 organization don't end a stream yet. Expiry ends no tailnet connection
