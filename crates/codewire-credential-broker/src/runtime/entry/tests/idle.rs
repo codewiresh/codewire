@@ -24,7 +24,8 @@ impl Joined {
         let environment_id = Uuid::new_v4();
         let (loopback, loopback_input, loopback_output) = loopback_session(environment_id).await;
         let (joins, joining) = mpsc::channel(1);
-        let broker = recorded.broker();
+        // A front door is served only beside placeholder logins (#4001).
+        let broker = recorded.broker().paired_with_front_door();
         let runner = tokio::spawn(async move {
             run_admitted_credential_bridge_with_front_doors(broker, loopback, joining, Some(IDLE))
                 .await

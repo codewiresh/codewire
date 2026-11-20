@@ -248,6 +248,7 @@ fn binding(scope: WorkspaceCredentialScope) -> LiveBinding {
         isolation_tier: "standard".into(),
         working_directory: "/workspace/app".into(),
         defaults: None,
+        interception: None,
     }
 }
 
@@ -444,6 +445,8 @@ struct FakeStore {
     /// What issuing answers once the attachment is found.
     issue_outcome: Mutex<MeshIssueOutcome>,
     reports: Mutex<Vec<(String, String, MeshAttachmentReport)>>,
+    /// The interception each Pod's first bind stored, set once.
+    interception: Mutex<HashMap<String, bool>>,
 }
 
 impl FakeStore {
@@ -459,6 +462,7 @@ impl FakeStore {
             issued: Mutex::new(Vec::new()),
             issue_outcome: Mutex::new(MeshIssueOutcome::Issued),
             reports: Mutex::new(Vec::new()),
+            interception: Mutex::new(HashMap::new()),
         })
     }
 
@@ -482,6 +486,19 @@ impl FakeStore {
 
 #[async_trait]
 impl BindingStore for FakeStore {
+    async fn record_interception(
+        &self,
+        pod_uid: &str,
+        decided: bool,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        Ok(*self
+            .interception
+            .lock()
+            .unwrap()
+            .entry(pod_uid.to_owned())
+            .or_insert(decided))
+    }
+
     async fn live_binding(
         &self,
         pod_uid: &str,
@@ -883,6 +900,42 @@ async fn interception_is_sent_only_for_a_broker_mode_sandbox_with_it_on() {
     assert!(!direct.bind(20).await.unwrap().interception);
 }
 
+/// The Pod's first bind decides and stores its interception; a rebind after
+/// the switch changes keeps what was stored, either way, so the switch takes
+/// effect only at the Pod's next start (#4001, cw-security 2026-11-19).
+#[tokio::test]
+async fn a_rebind_keeps_the_interception_its_first_bind_stored() {
+    let broker_pod = || {
+        let mut pod = workspace_pod();
+        pod.metadata.labels.as_mut().unwrap().insert(
+            crate::egress::admission::EGRESS_MODE_LABEL.into(),
+            crate::egress::admission::EGRESS_MODE_BROKER.into(),
+        );
+        pod
+    };
+    let cluster = || {
+        FakeCluster::new(
+            valid_review(),
+            vec![Some(broker_pod())],
+            vec![Some(sandbox())],
+        )
+    };
+    let binding = || Ok(Some(binding(WorkspaceCredentialScope::Pod)));
+    for first in [true, false] {
+        let store = FakeStore::returning(vec![binding(), binding()]);
+        let before = fixture_with(cluster(), store.clone(), |state| {
+            state.with_interception(first)
+        });
+        assert_eq!(before.bind(20).await.unwrap().interception, first);
+        let after = fixture_with(cluster(), store, |state| state.with_interception(!first));
+        assert_eq!(
+            after.bind(20).await.unwrap().interception,
+            first,
+            "first {first}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn garbage_and_expired_bearers_never_reach_token_review() {
     let fixture = fixture(
@@ -1267,6 +1320,7 @@ async fn a_token_that_expires_during_the_wait_gets_no_binding() {
         issued: Mutex::new(Vec::new()),
         issue_outcome: Mutex::new(MeshIssueOutcome::Issued),
         reports: Mutex::new(Vec::new()),
+        interception: Mutex::new(HashMap::new()),
     });
     let fixture = fixture_with(FakeCluster::valid(), store, |state| {
         state.with_timing(Duration::from_secs(5), Duration::from_millis(100))

@@ -1346,6 +1346,11 @@ where
         })
     }
 
+    /// What this broker's sealed agent logins carry.
+    pub(crate) fn login_delivery(&self) -> LoginDelivery {
+        self.login_delivery
+    }
+
     /// This broker serves beside the environment's front door. Only
     /// [`crate::run_admitted_credential_bridges`], before either session
     /// serves, and a delegation epoch whose admitted Open declared a front

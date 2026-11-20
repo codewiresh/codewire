@@ -186,7 +186,7 @@ impl RunningService {
             .await?;
         let output = tokio::time::timeout(
             TIMEOUT,
-            client.credential_bridge(rpc_request(receiver, Some("synthetic-allow"))),
+            client.credential_bridge(relay_request(receiver, Some("synthetic-allow"))),
         )
         .await
         .context("generated database bridge admission timed out")??

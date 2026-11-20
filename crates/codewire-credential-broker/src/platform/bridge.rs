@@ -362,9 +362,13 @@ where
         Ok((stream, expires_at_unix))
     }
 
-    /// [`Self::serve_authenticated`] for an epoch a front-door stream may
-    /// join (#4001, #4909): also returns the epoch's handle, for its response
-    /// header and nowhere else.
+    /// [`Self::serve_authenticated`] for a relayed hosted epoch whose
+    /// admission also says whether its Pod is intercepted (#4001). Only an
+    /// intercepted epoch can be joined by a front-door stream, and its broker
+    /// then delivers placeholder logins or none, never the sign-in's own
+    /// tokens beside the front door: one decision, the relay's, for both
+    /// (cw-security, 2026-11-19). It returns the epoch's handle exactly then,
+    /// for its response header and nowhere else.
     pub async fn serve_authenticated_joinable<B, I, F>(
         &self,
         admission: F,
@@ -372,20 +376,31 @@ where
         (
             ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>,
             u64,
-            tonic::metadata::BinaryMetadataValue,
+            Option<tonic::metadata::BinaryMetadataValue>,
         ),
         Status,
     >
     where
         B: PlatformRuntimeAuthority + 'static,
         I: Stream<Item = Result<v1::CredentialBridgeGuestMessage, Status>> + Send + 'static,
-        F: Future<Output = Result<(Arc<B>, I), PlatformBridgeAuthenticationError>> + Send,
+        F: Future<Output = Result<(Arc<B>, I, bool), PlatformBridgeAuthenticationError>> + Send,
     {
-        let (stream, expires_at_unix, handle) = self.serve(admission, Joinable::Binding).await?;
+        // Whether the relay said the Pod is intercepted: read only once
+        // admission has succeeded.
+        let intercepted = Arc::new(AtomicBool::new(false));
+        let said = Arc::clone(&intercepted);
+        let admission = async move {
+            let (authority, input, intercepted) = admission.await?;
+            said.store(intercepted, Ordering::Release);
+            Ok((authority, input))
+        };
+        let (stream, expires_at_unix, handle) = self
+            .serve(admission, Joinable::Binding(intercepted))
+            .await?;
         Ok((
             stream,
             expires_at_unix,
-            handle.ok_or_else(unavailable)?.header_value(),
+            handle.map(|handle| handle.header_value()),
         ))
     }
 
@@ -545,18 +560,22 @@ where
         let expires_at_unix = sink.epoch.expires_at_unix;
         let scope = match joinable {
             Joinable::No => None,
-            Joinable::Binding => Some(FrontDoorScope::Binding {
-                environment_id,
-                generation,
-            }),
+            Joinable::Binding(intercepted) => {
+                intercepted
+                    .load(Ordering::Acquire)
+                    .then_some(FrontDoorScope::Binding {
+                        environment_id,
+                        generation,
+                    })
+            }
             Joinable::Owner(owner, front_door) => front_door
                 .load(Ordering::Acquire)
                 .then_some(FrontDoorScope::Owner(owner)),
         };
-        // A delegation that declared a front door delivers placeholders, never
-        // the sign-in's tokens, from its first request: before any join, so a
-        // front door that never joins fails closed. Hosted epochs are left as
-        // they are (#4001).
+        // An intercepted hosted epoch, or a delegation that declared a front
+        // door, delivers placeholders, never the sign-in's tokens, from its
+        // first request: before any join, so a front door that never joins
+        // fails closed.
         let broker = if seals_placeholders(scope.as_ref()) {
             broker.paired_with_front_door()
         } else {
@@ -851,7 +870,11 @@ where
             // Preserve the private Pod path: no frame consumption, domain
             // lookup or material access precedes its existing authenticator.
             let authority = self.state.authenticator.authenticate(&metadata).await?;
-            Ok((authority, input))
+            // Read only on the relay-authenticated stream, after its
+            // authentication; anything but one exact value refuses the epoch.
+            let intercepted = intercepted(&metadata, self.state.hosted_placeholders)
+                .ok_or(PlatformBridgeAuthenticationError::Denied)?;
+            Ok((authority, input, intercepted))
         })
         .await
         .map(|(stream, expires_at_unix, handle)| {
@@ -868,11 +891,14 @@ where
                 codewire_daemon_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,
                 tonic::metadata::MetadataValue::from(expires_at_unix),
             );
-            // For the relay only: it never reaches the daemon or the guest.
-            response.metadata_mut().insert_bin(
-                codewire_daemon_proto::CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER,
-                handle,
-            );
+            // For the relay only, and only for an intercepted epoch: it never
+            // reaches the daemon or the guest.
+            if let Some(handle) = handle {
+                response.metadata_mut().insert_bin(
+                    codewire_daemon_proto::CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER,
+                    handle,
+                );
+            }
             response
         })
     }
@@ -920,17 +946,19 @@ where
 }
 
 /// Whether an epoch joinable in `scope` seals its agent logins with
-/// placeholders: only a delegation that declared a front door (#4909).
+/// placeholders: every joinable one, an intercepted hosted epoch (#4001) and
+/// a delegation that declared a front door (#4909).
 fn seals_placeholders(scope: Option<&FrontDoorScope>) -> bool {
-    matches!(scope, Some(FrontDoorScope::Owner(_)))
+    scope.is_some()
 }
 
 /// Whether an admitted epoch can be joined by a front door, and in which
 /// scope.
 enum Joinable {
     No,
-    /// Hosted (#4001): the binding the workspace authorization names.
-    Binding,
+    /// Hosted (#4001): the binding the workspace authorization names, and
+    /// whether the relay said its Pod is intercepted.
+    Binding(Arc<AtomicBool>),
     /// Delegated (#4909): the owner whose OAuth admitted the delegation, and
     /// whether its Open declared a front door.
     Owner(String, Arc<AtomicBool>),
@@ -1079,6 +1107,31 @@ fn bridge_status(error: BrokerBridgeError) -> Status {
             Status::invalid_argument("platform credential bridge protocol is invalid")
         }
         BrokerBridgeError::Unavailable => unavailable(),
+    }
+}
+
+/// Whether the relay says this epoch's Pod is intercepted (#4001): exactly
+/// one value, `true` or `false`. `None` for a repeated or other value, which
+/// refuses the epoch, so no relay fault can serve a front door beside a real
+/// login, or a real login to an intercepted Pod. A missing value is a relay
+/// older than this header, mid-rollout or after orchestration alone rolled
+/// back: while this service's hosted placeholders are off it can serve no
+/// intercepted epoch anyway, so the epoch is not intercepted; with them on,
+/// it is refused.
+fn intercepted(metadata: &tonic::metadata::MetadataMap, hosted_placeholders: bool) -> Option<bool> {
+    let mut values = metadata
+        .get_all(codewire_daemon_proto::CREDENTIAL_BRIDGE_INTERCEPTED_HEADER)
+        .iter();
+    let Some(value) = values.next() else {
+        return (!hosted_placeholders).then_some(false);
+    };
+    if values.next().is_some() {
+        return None;
+    }
+    match value.as_bytes() {
+        b"true" => Some(true),
+        b"false" => Some(false),
+        _ => None,
     }
 }
 

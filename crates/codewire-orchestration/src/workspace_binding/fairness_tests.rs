@@ -230,6 +230,7 @@ impl TwoPodStore {
                 isolation_tier: "standard".into(),
                 working_directory: String::new(),
                 defaults: None,
+                interception: None,
             },
         );
     }
@@ -245,6 +246,14 @@ impl BindingStore for TwoPodStore {
     ) -> Result<Option<LiveBinding>, BindingStoreUnavailable> {
         self.queries.fetch_add(1, Ordering::SeqCst);
         Ok(self.bound.lock().unwrap().get(pod_uid).cloned())
+    }
+
+    async fn record_interception(
+        &self,
+        _pod_uid: &str,
+        decided: bool,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        Ok(decided)
     }
 }
 

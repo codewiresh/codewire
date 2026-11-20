@@ -65,10 +65,11 @@ async fn seed(db: &TestDatabase, environment: &Environment) -> Result<()> {
 const SELECTION: &str = "5e1ec7ed5e1ec7ed5e1ec7ed5e1ec7ed5e1ec7ed5e1ec7ed5e1ec7ed5e1ec7ed";
 
 /// Binds a fresh Pod of `environment` at `generation` with a credential
-/// selection, releasing any earlier binding, as the recorder does. Returns
-/// the new Pod's UID.
+/// selection, releasing any earlier binding, as the recorder does, and with
+/// the interception its first bind stored as not intercepted. Returns the new
+/// Pod's UID.
 async fn bind(db: &TestDatabase, environment: &Environment, generation: i64) -> Result<String> {
-    bind_with(db, environment, generation, Some(SELECTION)).await
+    bind_with(db, environment, generation, Some(SELECTION), Some(false)).await
 }
 
 async fn bind_with(
@@ -76,6 +77,7 @@ async fn bind_with(
     environment: &Environment,
     generation: i64,
     selection: Option<&str>,
+    interception: Option<bool>,
 ) -> Result<String> {
     let pod_uid = Uuid::new_v4().to_string();
     let mut tx = db.pool.begin().await?;
@@ -89,8 +91,8 @@ async fn bind_with(
     sqlx::query(
         "INSERT INTO sandbox_workspace_bindings(pod_uid,environment_id,namespace,pod_name, \
            claim_uid,sandbox_uid,operation_generation,managed_credential_clients,credential_scope, \
-           projection_selection_sha256) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pod',$9)",
+           projection_selection_sha256,interception) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pod',$9,$10)",
     )
     .bind(&pod_uid)
     .bind(environment.id)
@@ -101,6 +103,7 @@ async fn bind_with(
     .bind(generation)
     .bind(codewire_access::ManagedCredentialClients::default().encode())
     .bind(selection)
+    .bind(interception)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -141,6 +144,7 @@ fn target(environment: &Environment, pod_uid: &str, generation: u64) -> Target {
         pod_uid: pod_uid.to_owned(),
         generation,
         scope: WorkspaceCredentialScope::Pod,
+        interception: false,
     }
 }
 
@@ -249,9 +253,29 @@ async fn db_the_relay_serves_exactly_the_live_bindings_of_its_namespace() -> Res
         ensure!(live_targets(&db.pool, NAMESPACE).await?.is_empty());
 
         // A Pod bound without a credential selection has no bridge to relay.
-        bind_with(&db, &LIVE, 5, None).await?;
+        bind_with(&db, &LIVE, 5, None, Some(false)).await?;
         ensure!(live_targets(&db.pool, NAMESPACE).await?.is_empty());
         ensure!(live_target(&db.pool, NAMESPACE, live_id).await?.is_none());
+
+        // A Pod whose first bind hasn't stored its interception gets no
+        // epoch (#4001), until a deployment that doesn't intercept settles
+        // it as not intercepted: only in its own namespace, and never over
+        // a stored decision.
+        let undecided = bind_with(&db, &LIVE, 6, Some(SELECTION), None).await?;
+        let elsewhere = bind_with(&db, &ELSEWHERE, 4, Some(SELECTION), None).await?;
+        ensure!(live_targets(&db.pool, NAMESPACE).await?.is_empty());
+        settle_not_intercepted(&db.pool, NAMESPACE).await?;
+        ensure!(live_targets(&db.pool, NAMESPACE).await? == [running(&LIVE, &undecided, 6)]);
+        ensure!(live_targets(&db.pool, OTHER_NAMESPACE).await?.is_empty());
+        let intercepted = bind_with(&db, &LIVE, 7, Some(SELECTION), Some(true)).await?;
+        settle_not_intercepted(&db.pool, NAMESPACE).await?;
+        let mut expected = running(&LIVE, &intercepted, 7);
+        expected.target.interception = true;
+        ensure!(live_targets(&db.pool, NAMESPACE).await? == [expected]);
+        settle_not_intercepted(&db.pool, OTHER_NAMESPACE).await?;
+        ensure!(
+            live_targets(&db.pool, OTHER_NAMESPACE).await? == [running(&ELSEWHERE, &elsewhere, 4)]
+        );
         Ok(())
     }
     .await;

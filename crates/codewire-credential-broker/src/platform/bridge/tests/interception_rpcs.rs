@@ -166,7 +166,10 @@ async fn a_leaf_request_before_its_binding_has_an_epoch_is_unavailable_to_retry(
 #[tokio::test]
 async fn a_leaf_request_needs_its_bindings_live_epoch_handle_and_takes_no_stream() {
     let fixture = Fixture::new().await;
-    let (_epoch_input, epoch) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    // Only an intercepted epoch has a handle (#4001).
+    let (_epoch_input, epoch) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &["true"])
+        .await;
     let handle = handle_of(&epoch.unwrap());
     let mut client = fixture.client().await;
     for (request, expected) in [

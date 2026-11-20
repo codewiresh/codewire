@@ -2240,6 +2240,14 @@ takes effect at a Sandbox's next start, never during its life.
   only, or refuses them; it never delivers a real login beside a front door,
   and an epoch that would is refused at admission. A Sandbox whose binding
   turns interception on has its earlier real login file removed.
+- **The relay says it on every epoch.** Orchestration's relay sends the
+  binding's stored decision as `x-codewire-credential-bridge-intercepted`,
+  exactly `true` or `false`; a repeated or other value refuses the epoch. A
+  missing one comes from a relay older than the header, while a deploy rolls
+  the credential service before orchestration or orchestration alone is
+  rolled back. While the credential service's hosted placeholders are off
+  (`CREDENTIAL_HOSTED_PLACEHOLDERS_ENABLED`) it reads as `false`, so such a
+  deploy changes nothing; with them on, it refuses the epoch.
 - **The sign-in exception ends.** With the switch on, the two hosted rows of
   [Direct delivery exceptions](#direct-delivery-exceptions) no longer apply:
   no real Codex or Claude sign-in token is written into the Sandbox (#4002).

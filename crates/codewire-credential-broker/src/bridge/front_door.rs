@@ -167,6 +167,12 @@ where
     B: CredentialBridgeTransport,
     F: CredentialBridgeTransport,
 {
+    // The invariant (cw-security, 2026-11-17, #4001): a front door is never
+    // served beside an agent's real login, however this runner was reached.
+    if broker.login_delivery() == crate::runtime::LoginDelivery::Real {
+        tracing::error!("credential bridge refused: a front door beside a real agent login");
+        return Err(BrokerBridgeError::Unavailable);
+    }
     let broker = Arc::new(broker);
     let ended = CancellationToken::new();
     let loopback = async {

@@ -385,6 +385,16 @@ pub const CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER: &str = "x-codewire-credential-bri
 /// authorization, to join that epoch. It grants nothing alone, lives only as
 /// long as its epoch, and the relay never passes it to the daemon or guest.
 pub const CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER: &str = "x-codewire-credential-bridge-epoch-bin";
+/// Request header on the relay's `CredentialBridge` stream: whether the
+/// epoch's Pod is intercepted (#4001), exactly `true` or `false`, as its
+/// first bind stored it. The credential service lets front-door sessions join
+/// the epoch, and delivers only placeholder logins on it, exactly when it is
+/// `true`, and refuses the epoch when it is repeated or anything else. A
+/// missing value reads as `false` while the service's hosted placeholders are
+/// off, so a relay older than this header keeps working through a rollout,
+/// and refuses the epoch while they are on. Only the relay's own admission
+/// path reads it.
+pub const CREDENTIAL_BRIDGE_INTERCEPTED_HEADER: &str = "x-codewire-credential-bridge-intercepted";
 /// Bytes in a front-door epoch handle.
 pub const CREDENTIAL_BRIDGE_EPOCH_HANDLE_BYTES: usize = 32;
 /// The broker serves `CodexLoginRequest` on this epoch. A daemon sends that

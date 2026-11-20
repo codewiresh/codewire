@@ -49,6 +49,7 @@ impl BindingStore for Bound {
                     isolation_tier: "standard".into(),
                     working_directory: String::new(),
                     defaults: None,
+                    interception: None,
                 }
             }),
         )

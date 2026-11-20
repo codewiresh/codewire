@@ -700,6 +700,12 @@ async fn open_refresh(
     request
         .metadata_mut()
         .insert("x-synthetic-runtime-identity", "accepted".parse()?);
+    // As the relay sends every epoch: exactly one interception decision
+    // (#4001), here not intercepted.
+    request.metadata_mut().insert(
+        codewire_daemon_proto::CREDENTIAL_BRIDGE_INTERCEPTED_HEADER,
+        "false".parse()?,
+    );
     let output = tokio::time::timeout(TIMEOUT, client.credential_bridge(request))
         .await??
         .into_inner();

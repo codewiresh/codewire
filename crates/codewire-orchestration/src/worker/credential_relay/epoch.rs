@@ -75,6 +75,9 @@ pub(super) struct EpochConfig {
     pub(super) pod_uid: String,
     /// `None` while hosted interception is off.
     pub(super) front_doors: Option<Arc<FrontDoorEpochs>>,
+    /// Whether the Pod's agents are intercepted, as its first bind stored it
+    /// (#4001). Every epoch states it to the credential service.
+    pub(super) interception: bool,
 }
 
 #[derive(Clone)]
@@ -718,8 +721,12 @@ async fn run_epoch_on(
             let relay = read_relay_token(&config.relay_token)
                 .await
                 .map_err(|_| Unadmitted::RelayToken)?;
-            let metadata = credential_metadata(&relay, prepared.workspace_authorization())
-                .map_err(|_| Unadmitted::RelayToken)?;
+            let metadata = credential_metadata(
+                &relay,
+                prepared.workspace_authorization(),
+                config.interception,
+            )
+            .map_err(|_| Unadmitted::RelayToken)?;
             let channel = match &config.broker {
                 BrokerEndpoint::Tls(endpoint) => endpoint
                     .connect()
@@ -950,7 +957,11 @@ pub(crate) async fn read_relay_token(path: &std::path::Path) -> Result<Zeroizing
 }
 
 /// The relay's bearer and the daemon's workspace token, both sensitive.
-fn credential_metadata(relay: &str, workspace: &[u8]) -> Result<tonic::metadata::MetadataMap, ()> {
+fn credential_metadata(
+    relay: &str,
+    workspace: &[u8],
+    interception: bool,
+) -> Result<tonic::metadata::MetadataMap, ()> {
     let authorization = Zeroizing::new(format!("Bearer {relay}"));
     let mut relay_value = MetadataValue::try_from(authorization.as_str()).map_err(|_| ())?;
     relay_value.set_sensitive(true);
@@ -959,6 +970,10 @@ fn credential_metadata(relay: &str, workspace: &[u8]) -> Result<tonic::metadata:
     let mut metadata = tonic::metadata::MetadataMap::new();
     metadata.insert("authorization", relay_value);
     metadata.insert_bin(WORKSPACE_AUTHORIZATION, workspace_value);
+    metadata.insert(
+        codewire_daemon_proto::CREDENTIAL_BRIDGE_INTERCEPTED_HEADER,
+        MetadataValue::from_static(if interception { "true" } else { "false" }),
+    );
     Ok(metadata)
 }
 

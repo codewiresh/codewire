@@ -156,6 +156,41 @@ async fn db_host_keys_are_write_once_per_pod_and_trusted_only_for_the_bound_pod(
     db.finish(result).await
 }
 
+/// A Pod's interception is stored once, by its first bind, and every later
+/// bind reads it back whatever it would decide now (#4001). A released or
+/// unknown Pod has none to record, and the live binding carries it.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_interception_is_recorded_once_by_the_first_bind() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed(&db, 3).await?;
+        let store = PgBindingStore::from_pool(db.pool.clone());
+        bind(&db, POD, 3).await?;
+        let pod_name = format!("sandbox-{POD}");
+        let live = || store.live_binding(POD, NAMESPACE, &pod_name);
+        ensure!(live().await?.map(|binding| binding.interception) == Some(None));
+        ensure!(store.record_interception(POD, true).await?);
+        ensure!(store.record_interception(POD, false).await?);
+        ensure!(live().await?.map(|binding| binding.interception) == Some(Some(true)));
+
+        release(&db, POD).await?;
+        bind(&db, NEXT_POD, 3).await?;
+        ensure!(!store.record_interception(NEXT_POD, false).await?);
+        ensure!(!store.record_interception(NEXT_POD, true).await?);
+        ensure!(store.record_interception(POD, false).await.is_err());
+        ensure!(
+            store
+                .record_interception("unknown-pod", false)
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
 async fn db_the_live_binding_carries_the_environment_generation() -> Result<()> {

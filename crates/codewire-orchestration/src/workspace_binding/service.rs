@@ -378,7 +378,16 @@ impl WorkspaceBindingState {
 
         // §4.7: respond only while the reviewed token is still valid.
         still_valid(&caller.identity)?;
-        let interception = intercepted(self.interception, &member);
+        // Decided at the Pod's first bind and stored; every later bind, and
+        // every relay epoch, reads the stored decision.
+        let interception = self
+            .store
+            .record_interception(
+                caller.identity.pod_uid(),
+                intercepted(self.interception, &member),
+            )
+            .await
+            .map_err(|_| BindError::Unavailable)?;
         let mut response = respond(
             &self.session_secret,
             &caller.identity,
@@ -704,7 +713,8 @@ fn still_valid(identity: &VerifiedPodIdentity) -> Result<(), BindError> {
 /// Whether this sandbox's agents are intercepted (#4001): the deployment has
 /// it on and the Pod is a broker-mode sandbox. Interception runs in cw-egress's
 /// front door, so a sandbox whose egress does not go through cw-egress never
-/// gets it, whatever the setting says.
+/// gets it, whatever the setting says. Decided at the Pod's first bind only;
+/// the binding stores it for the Pod's life.
 fn intercepted(enabled: bool, member: &MemberFacts) -> bool {
     enabled
         && member

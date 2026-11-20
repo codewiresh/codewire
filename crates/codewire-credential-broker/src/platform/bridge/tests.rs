@@ -193,7 +193,18 @@ impl Fixture {
     }
 
     async fn with_limits(streams: usize, leases: usize) -> Self {
-        Self::build(streams, leases, FRONT_DOOR_IDLE).await
+        Self::build(streams, leases, FRONT_DOOR_IDLE, false).await
+    }
+
+    /// The production limits, with hosted placeholders on (#4001).
+    async fn with_hosted_placeholders() -> Self {
+        Self::build(
+            PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS,
+            PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES,
+            FRONT_DOOR_IDLE,
+            true,
+        )
+        .await
     }
 
     /// The production limits, with joined front-door streams idling out
@@ -203,11 +214,17 @@ impl Fixture {
             PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS,
             PLATFORM_CREDENTIAL_BRIDGE_MAX_LEASES,
             idle,
+            false,
         )
         .await
     }
 
-    async fn build(streams: usize, leases: usize, idle: std::time::Duration) -> Self {
+    async fn build(
+        streams: usize,
+        leases: usize,
+        idle: std::time::Duration,
+        hosted_placeholders: bool,
+    ) -> Self {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://synthetic:synthetic@127.0.0.1:1/synthetic")
             .unwrap();
@@ -264,6 +281,11 @@ impl Fixture {
         .with_front_door_idle(idle)
         .with_interception_cas(cas.clone())
         .unwrap();
+        let service = if hosted_placeholders {
+            service.with_hosted_placeholders().unwrap()
+        } else {
+            service
+        };
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
@@ -321,12 +343,25 @@ impl Fixture {
         mpsc::Sender<v1::CredentialBridgeGuestMessage>,
         Result<Response<Streaming<v1::CredentialBridgeHostMessage>>, Status>,
     ) {
+        self.open_as(identity, first, &["false"]).await
+    }
+
+    /// [`Self::open`] with `intercepted` as the relay's interception headers.
+    async fn open_as(
+        &self,
+        identity: Option<&str>,
+        first: v1::CredentialBridgeGuestMessage,
+        intercepted: &[&'static str],
+    ) -> (
+        mpsc::Sender<v1::CredentialBridgeGuestMessage>,
+        Result<Response<Streaming<v1::CredentialBridgeHostMessage>>, Status>,
+    ) {
         let (input, receiver) = mpsc::channel(4);
         input.send(first).await.unwrap();
         let result = self
             .client()
             .await
-            .credential_bridge(rpc_request(receiver, identity))
+            .credential_bridge(intercepted_as(rpc_request(receiver, identity), intercepted))
             .await;
         (input, result)
     }
@@ -367,6 +402,26 @@ fn rpc_request(
         request
             .metadata_mut()
             .insert("x-synthetic-identity", identity.parse().unwrap());
+    }
+    request
+}
+
+/// [`rpc_request`] as the relay sends it: it always says whether the epoch
+/// is intercepted (#4001), here not.
+fn relay_request(
+    receiver: mpsc::Receiver<v1::CredentialBridgeGuestMessage>,
+    identity: Option<&str>,
+) -> Request<ReceiverStream<v1::CredentialBridgeGuestMessage>> {
+    intercepted_as(rpc_request(receiver, identity), &["false"])
+}
+
+/// `request` with each of `values` as an interception header.
+fn intercepted_as<T>(mut request: Request<T>, values: &[&'static str]) -> Request<T> {
+    for value in values {
+        request.metadata_mut().append(
+            codewire_daemon_proto::CREDENTIAL_BRIDGE_INTERCEPTED_HEADER,
+            tonic::metadata::MetadataValue::from_static(value),
+        );
     }
     request
 }
@@ -440,7 +495,7 @@ async fn admission_rechecks_authority_after_waiting_for_ready() {
     let (input, receiver) = mpsc::channel(1);
     let open = tokio::spawn(async move {
         client
-            .credential_bridge(rpc_request(receiver, Some("synthetic-allow")))
+            .credential_bridge(relay_request(receiver, Some("synthetic-allow")))
             .await
     });
     tokio::time::timeout(
@@ -480,7 +535,7 @@ async fn whole_admission_timeout_includes_authentication() {
     input.send(fixture.ready()).await.unwrap();
     let open = tokio::spawn(async move {
         client
-            .credential_bridge(rpc_request(receiver, Some("synthetic-allow")))
+            .credential_bridge(relay_request(receiver, Some("synthetic-allow")))
             .await
     });
     tokio::time::timeout(TEST_TIMEOUT, fixture.authenticator.gate.entered.notified())
@@ -769,7 +824,7 @@ async fn shutdown_cancels_pending_authentication_without_admitting_a_worker() {
     input.send(fixture.ready()).await.unwrap();
     let open = tokio::spawn(async move {
         client
-            .credential_bridge(rpc_request(receiver, Some("synthetic-allow")))
+            .credential_bridge(relay_request(receiver, Some("synthetic-allow")))
             .await
     });
     tokio::time::timeout(TEST_TIMEOUT, fixture.authenticator.gate.entered.notified())

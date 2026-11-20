@@ -160,7 +160,9 @@ async fn a_delegation_serves_one_front_door_stream_at_a_time() {
 #[tokio::test]
 async fn hosted_and_delegated_handles_never_cross_scopes() {
     let fixture = Fixture::new().await;
-    let (_hosted_input, hosted) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let (_hosted_input, hosted) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &["true"])
+        .await;
     let hosted = hosted
         .unwrap()
         .metadata()
@@ -198,12 +200,15 @@ async fn only_a_delegation_that_declared_a_front_door_can_be_joined() {
     joined.unwrap();
 }
 
+/// Every joinable epoch seals its logins with placeholders: a declared
+/// delegation (#4909) and an intercepted hosted epoch (#4001). An epoch no
+/// front door can join keeps its logins.
 #[test]
-fn only_a_declared_delegations_scope_seals_placeholders() {
+fn every_joinable_scope_seals_placeholders() {
     assert!(super::super::seals_placeholders(Some(
         &FrontDoorScope::Owner(OWNER.into())
     )));
-    assert!(!super::super::seals_placeholders(Some(
+    assert!(super::super::seals_placeholders(Some(
         &FrontDoorScope::Binding {
             environment_id: Uuid::new_v4(),
             generation: 1,

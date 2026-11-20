@@ -486,3 +486,143 @@ async fn workspace_binding_pointer_moves_within_one_environment_and_cascades_wit
     .await;
     result.and(db.drop().await)
 }
+
+/// The workspace binding's interception migration.
+const INTERCEPTION_VERSION: i64 = 42;
+
+/// 0042 (#4001): every binding already recorded is decided not intercepted,
+/// live or released; one recorded later is undecided until it is decided,
+/// once: the immutability trigger refuses any change to a stored decision.
+/// Restoring the trigger and dropping the column restores the shape before
+/// it. Only the migrations before it and then it run, so another migration
+/// in the ledger never changes what this compares.
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn workspace_binding_interception_backfills_recorded_bindings_and_leaves_new_ones_undecided()
+-> anyhow::Result<()> {
+    let db = TestDatabase::create(&std::env::var("TEST_DATABASE_URL")?).await?;
+    let result = async {
+        let mut connection = PgConnection::connect(&db.url).await?;
+        sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(
+                MIGRATOR
+                    .iter()
+                    .filter(|migration| migration.version < INTERCEPTION_VERSION)
+                    .cloned()
+                    .collect(),
+            ),
+            ..sqlx::migrate::Migrator::DEFAULT
+        }
+        .run(&mut connection)
+        .await?;
+        connection.close().await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&db.url)
+            .await?;
+        seed(&pool).await?;
+        let mut released = binding(POD_A2, ENV_A);
+        released["bound_at"] = "2026-09-01T12:00:00Z".into();
+        released["released_at"] = "2026-09-01T13:00:00Z".into();
+        insert_binding(&pool, &released).await?;
+        seed_binding(&pool).await?;
+        let previous = fingerprint(&pool).await?;
+        // The fingerprint covers no function body, so the trigger's is
+        // compared on its own.
+        let trigger = || {
+            sqlx::query_scalar::<_, String>(
+                "SELECT pg_get_functiondef('public.codewire_workspace_binding_immutable()'::regprocedure)",
+            )
+            .fetch_one(&pool)
+        };
+        let previous_trigger = trigger().await?;
+
+        sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(
+                MIGRATOR
+                    .iter()
+                    .filter(|migration| migration.version <= INTERCEPTION_VERSION)
+                    .cloned()
+                    .collect(),
+            ),
+            ..sqlx::migrate::Migrator::DEFAULT
+        }
+        .run(&pool)
+        .await?;
+        anyhow::ensure!(trigger().await? != previous_trigger);
+        insert_binding(&pool, &binding(POD_B, ENV_B)).await?;
+        let rows: Vec<(String, Option<bool>)> = sqlx::query_as(
+            "SELECT pod_uid, interception FROM sandbox_workspace_bindings ORDER BY pod_uid",
+        )
+        .fetch_all(&pool)
+        .await?;
+        anyhow::ensure!(
+            rows == [
+                (POD_A.to_owned(), Some(false)),
+                (POD_A2.to_owned(), Some(false)),
+                (POD_B.to_owned(), None),
+            ],
+            "{rows:?}"
+        );
+
+        let set = |pod: &'static str, value: Option<bool>| {
+            sqlx::query(
+                "UPDATE sandbox_workspace_bindings SET interception = $2 WHERE pod_uid = $1",
+            )
+            .bind(pod)
+            .bind(value)
+            .execute(&pool)
+        };
+        set(POD_B, Some(true)).await?;
+        for (pod, value) in [
+            (POD_B, Some(false)),
+            (POD_B, None),
+            (POD_A, Some(true)),
+            (POD_A, None),
+            (POD_A2, Some(true)),
+        ] {
+            let error = set(pod, value)
+                .await
+                .expect_err("a stored decision changed");
+            anyhow::ensure!(
+                sqlstate(&error).as_deref() == Some("23514"),
+                "{pod} {value:?}: {error}"
+            );
+        }
+        // Setting the stored value again, or releasing, is no change to it.
+        set(POD_B, Some(true)).await?;
+        sqlx::query(
+            "UPDATE sandbox_workspace_bindings SET released_at = bound_at + interval '1 minute' \
+             WHERE pod_uid = $1",
+        )
+        .bind(POD_A)
+        .execute(&pool)
+        .await?;
+
+        let migration = include_str!("../../../migrations/0042_workspace_binding_interception.sql");
+        let function = &migration[migration
+            .find("CREATE OR REPLACE FUNCTION")
+            .context("0042 replaces the trigger function")?..];
+        let rule = "    IF OLD.interception IS NOT NULL";
+        let start = function
+            .find(rule)
+            .context("0042 adds the interception rule")?;
+        let end = start
+            + function[start..]
+                .find("    END IF;\n")
+                .context("the rule ends")?
+            + "    END IF;\n".len();
+        sqlx::raw_sql(&format!("{}{}", &function[..start], &function[end..]))
+            .execute(&pool)
+            .await?;
+        sqlx::query("ALTER TABLE sandbox_workspace_bindings DROP COLUMN interception")
+            .execute(&pool)
+            .await?;
+        anyhow::ensure!(fingerprint(&pool).await? == previous);
+        anyhow::ensure!(trigger().await? == previous_trigger);
+        pool.close().await;
+        Ok(())
+    }
+    .await;
+    result.and(db.drop().await)
+}

@@ -52,7 +52,9 @@ impl Fixture {
 #[tokio::test]
 async fn an_admitted_epoch_carries_one_handle_that_never_appears_in_its_frames() {
     let fixture = Fixture::new().await;
-    let (input, response) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let (input, response) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &["true"])
+        .await;
     let mut response = response.unwrap();
     let handle = handle_of(&response);
     assert_eq!(handle.len(), CREDENTIAL_BRIDGE_EPOCH_HANDLE_BYTES);
@@ -79,7 +81,9 @@ async fn an_admitted_epoch_carries_one_handle_that_never_appears_in_its_frames()
 #[tokio::test]
 async fn a_front_door_stream_with_the_epochs_handle_joins_and_lists_its_operations() {
     let fixture = Fixture::new().await;
-    let (_epoch_input, epoch) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let (_epoch_input, epoch) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &["true"])
+        .await;
     let handle = handle_of(&epoch.unwrap());
     let (_input, joined) = fixture.join(Some("synthetic-allow"), Some(&handle)).await;
     let joined = joined.unwrap();
@@ -106,7 +110,9 @@ async fn a_front_door_stream_with_the_epochs_handle_joins_and_lists_its_operatio
 #[tokio::test]
 async fn the_relay_identity_is_checked_before_the_handle_is_read() {
     let fixture = Fixture::new().await;
-    let (_epoch_input, epoch) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let (_epoch_input, epoch) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &["true"])
+        .await;
     let handle = handle_of(&epoch.unwrap());
     let calls = fixture.authenticator.authority.calls.load(Ordering::SeqCst);
     // Without a handle too: the caller learns nothing about handles until
@@ -127,7 +133,9 @@ async fn the_relay_identity_is_checked_before_the_handle_is_read() {
 #[tokio::test]
 async fn a_missing_malformed_or_unknown_handle_is_denied() {
     let fixture = Fixture::new().await;
-    let (_epoch_input, epoch) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let (_epoch_input, epoch) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &["true"])
+        .await;
     let mut wrong = handle_of(&epoch.unwrap());
     wrong[0] ^= 1;
     for handle in [None, Some(&wrong[..16]), Some(&wrong[..])] {
@@ -139,7 +147,9 @@ async fn a_missing_malformed_or_unknown_handle_is_denied() {
 #[tokio::test]
 async fn an_ended_epochs_handle_is_denied() {
     let fixture = Fixture::new().await;
-    let (epoch_input, epoch) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let (epoch_input, epoch) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &["true"])
+        .await;
     let epoch = epoch.unwrap();
     let handle = handle_of(&epoch);
     drop((epoch_input, epoch));
@@ -151,7 +161,9 @@ async fn an_ended_epochs_handle_is_denied() {
 #[tokio::test]
 async fn another_bindings_handle_is_denied() {
     let fixture = Fixture::new().await;
-    let (_epoch_input, epoch) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let (_epoch_input, epoch) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &["true"])
+        .await;
     let handle = handle_of(&epoch.unwrap());
     // The same relay identity, now naming another generation of the binding.
     fixture
@@ -169,7 +181,9 @@ async fn another_bindings_handle_is_denied() {
 #[tokio::test]
 async fn an_epoch_serves_one_front_door_stream_and_takes_the_next_once_it_ends() {
     let fixture = Fixture::new().await;
-    let (_epoch_input, epoch) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let (_epoch_input, epoch) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &["true"])
+        .await;
     let handle = handle_of(&epoch.unwrap());
     let (first_input, first) = fixture.join(Some("synthetic-allow"), Some(&handle)).await;
     let first = first.unwrap();
@@ -197,7 +211,9 @@ async fn an_epoch_serves_one_front_door_stream_and_takes_the_next_once_it_ends()
 async fn an_idle_joined_stream_ends_and_returns_its_slot() {
     let idle = Duration::from_millis(300);
     let fixture = Fixture::idling_after(idle).await;
-    let (_epoch_input, epoch) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let (_epoch_input, epoch) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &["true"])
+        .await;
     let handle = handle_of(&epoch.unwrap());
     let before = fixture.service.streams_in_use();
     let (_input, joined) = fixture.join(Some("synthetic-allow"), Some(&handle)).await;
@@ -218,4 +234,81 @@ async fn an_idle_joined_stream_ends_and_returns_its_slot() {
     // And the epoch takes the next stream at once.
     let (_next_input, next) = fixture.join(Some("synthetic-allow"), Some(&handle)).await;
     assert!(next.is_ok());
+}
+
+/// Only an epoch the relay says is intercepted can be joined (#4001): one it
+/// says isn't carries no handle, so no front door is ever served beside its
+/// real logins.
+#[tokio::test]
+async fn an_epoch_the_relay_says_is_not_intercepted_carries_no_handle() {
+    let fixture = Fixture::new().await;
+    let (_epoch_input, epoch) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    let epoch = epoch.unwrap();
+    assert_eq!(
+        epoch
+            .metadata()
+            .get_all_bin(CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER)
+            .iter()
+            .count(),
+        0
+    );
+}
+
+/// A relay states an epoch's interception at most once, and exactly `true`
+/// or `false`; anything else refuses the epoch, never defaulting to real
+/// logins. The relay's identity is checked first.
+#[tokio::test]
+async fn a_repeated_or_other_interception_header_refuses_the_epoch() {
+    let fixture = Fixture::new().await;
+    for intercepted in [
+        &["yes"][..],
+        &["TRUE"],
+        &[""],
+        &["false", "false"],
+        &["true", "false"],
+    ] {
+        let (_input, epoch) = fixture
+            .open_as(Some("synthetic-allow"), fixture.ready(), intercepted)
+            .await;
+        assert_eq!(
+            epoch.unwrap_err().code(),
+            Code::PermissionDenied,
+            "{intercepted:?}"
+        );
+        let (_input, epoch) = fixture.open_as(None, fixture.ready(), intercepted).await;
+        assert_eq!(epoch.unwrap_err().code(), Code::Unauthenticated);
+    }
+    assert_eq!(fixture.service.streams_in_use(), 0);
+}
+
+/// A relay older than the header sends none (#4001). While hosted
+/// placeholders are off, the service could serve no intercepted epoch
+/// anyway, so the epoch is admitted as not intercepted, with no handle: a
+/// deploy that rolls the credential service first changes nothing. With
+/// them on, a missing header refuses the epoch.
+#[tokio::test]
+async fn a_missing_interception_header_is_not_intercepted_only_while_placeholders_are_off() {
+    let fixture = Fixture::new().await;
+    let (_input, epoch) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &[])
+        .await;
+    let epoch = epoch.unwrap();
+    assert_eq!(
+        epoch
+            .metadata()
+            .get_all_bin(CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER)
+            .iter()
+            .count(),
+        0
+    );
+
+    let fixture = Fixture::with_hosted_placeholders().await;
+    let (_input, epoch) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &[])
+        .await;
+    assert_eq!(epoch.unwrap_err().code(), Code::PermissionDenied);
+    let (_input, epoch) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &["false"])
+        .await;
+    assert!(epoch.is_ok());
 }

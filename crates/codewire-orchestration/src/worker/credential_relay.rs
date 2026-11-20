@@ -86,6 +86,9 @@ struct Target {
     pod_uid: String,
     generation: u64,
     scope: WorkspaceCredentialScope,
+    /// What the Pod's first bind stored (#4001): every epoch says so to the
+    /// credential service.
+    interception: bool,
 }
 
 /// A live binding, and whether the broker can admit its epochs yet. Only the
@@ -96,24 +99,25 @@ struct Live {
     admissible: bool,
 }
 
-type TargetRow = (String, String, i64, String, bool);
+type TargetRow = (String, String, i64, String, bool, bool);
 
 /// The live bindings of this sandbox namespace: the backend pointer names the
 /// binding, it is not released, and it carries the projection selection
-/// without which the bound daemon serves no bridge. `admissible` is the
-/// environment half of the broker's admission scope, which refuses every
-/// other state.
+/// without which the bound daemon serves no bridge, and the interception its
+/// Pod's first bind stored, without which no epoch is made (#4001). `admissible`
+/// is the environment half of the broker's admission scope, which refuses
+/// every other state.
 macro_rules! live_targets {
     ($filter:literal) => {
         concat!(
             "SELECT b.environment_id, w.pod_uid, w.operation_generation, w.credential_scope, \
-                    e.state = 'running' AND e.desired_state = 'started' \
+                    e.state = 'running' AND e.desired_state = 'started', w.interception \
                FROM sandbox_environment_backend b \
                JOIN sandbox_workspace_bindings w \
                  ON w.environment_id = b.environment_id AND w.pod_uid = b.pod_uid \
                JOIN environments e ON e.id = b.environment_id \
               WHERE b.bound_at IS NOT NULL AND w.released_at IS NULL AND w.namespace = $1 \
-                AND w.projection_selection_sha256 IS NOT NULL",
+                AND w.projection_selection_sha256 IS NOT NULL AND w.interception IS NOT NULL",
             $filter,
             " ORDER BY b.environment_id LIMIT $2"
         )
@@ -122,6 +126,23 @@ macro_rules! live_targets {
 const LIVE_TARGETS: &str = live_targets!("");
 /// One environment's live binding, for a pass on its notification.
 const LIVE_TARGET: &str = live_targets!(" AND b.environment_id = $3");
+
+/// While this deployment doesn't intercept, every undecided live binding of
+/// the namespace is decided not intercepted, as its Pod's bind would decide
+/// it, and with the same write-once. One bound by a replica that predates the
+/// stored decision then still gets its epochs, since its daemon binds only
+/// once per start. With interception on, only the bind decides: the relay
+/// can't see the Pod's egress mode.
+async fn settle_not_intercepted(pool: &PgPool, namespace: &str) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE sandbox_workspace_bindings SET interception = false \
+          WHERE namespace = $1 AND released_at IS NULL AND interception IS NULL",
+    )
+    .bind(namespace)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
 
 async fn live_targets(pool: &PgPool, namespace: &str) -> anyhow::Result<Vec<Live>> {
     let rows: Vec<TargetRow> = sqlx::query_as(LIVE_TARGETS)
@@ -153,7 +174,7 @@ async fn live_target(
 }
 
 fn live_from_row(
-    (environment_id, pod_uid, generation, scope, admissible): TargetRow,
+    (environment_id, pod_uid, generation, scope, admissible, interception): TargetRow,
 ) -> Option<Live> {
     let target = Uuid::parse_str(&environment_id)
         .ok()
@@ -163,6 +184,7 @@ fn live_from_row(
                 pod_uid,
                 generation: u64::try_from(generation).ok().filter(|value| *value > 0)?,
                 scope: WorkspaceCredentialScope::parse(&scope)?,
+                interception,
             })
         });
     if target.is_none() {
@@ -327,6 +349,7 @@ async fn relay_environment(
         budget: EnvironmentBudget::new(config.limits),
         pod_uid: target.pod_uid.clone(),
         front_doors: config.front_doors.clone(),
+        interception: target.interception,
     };
     tracing::info!(
         event = "credential_relay_started",
@@ -419,6 +442,11 @@ pub(crate) async fn credential_relay_loop(ctx: Arc<WorkerContext>, leadership: A
                 _serving = None;
                 continue;
             }
+        }
+        if config.front_doors.is_none()
+            && let Err(error) = settle_not_intercepted(&ctx.pool, &config.namespace).await
+        {
+            tracing::warn!(%error, "credential relay: settle undecided bindings failed");
         }
         let live = match only {
             None => live_targets(&ctx.pool, &config.namespace).await,

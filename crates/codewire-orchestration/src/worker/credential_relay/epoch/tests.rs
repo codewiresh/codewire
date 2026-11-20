@@ -357,6 +357,7 @@ impl Fixture {
                 budget: EnvironmentBudget::new(limits),
                 pod_uid: SYNTHETIC_POD_UID.into(),
                 front_doors: Some(Arc::default()),
+                interception: true,
             },
             daemon_calls,
             broker_calls,
@@ -1083,6 +1084,7 @@ async fn a_daemon_refusing_the_credential_ends_the_epoch_before_the_broker() {
         budget: EnvironmentBudget::new(Limits::DEFAULT),
         pod_uid: SYNTHETIC_POD_UID.into(),
         front_doors: Some(Arc::default()),
+        interception: true,
     };
     let (admitted, never_admitted) = oneshot::channel();
     bounded(run_epoch_with_lifetime(

@@ -1639,7 +1639,7 @@ async fn a_front_door_that_ends_is_replaced_by_the_next_one_to_join() {
     let environment_id = Uuid::new_v4();
     let (loopback, _loopback_input, _loopback_output) = loopback_session(environment_id).await;
     let (joins, joining) = mpsc::channel(1);
-    let broker = recorded.broker();
+    let broker = recorded.broker().paired_with_front_door();
     let runner = tokio::spawn(async move {
         run_admitted_credential_bridge_with_front_doors(broker, loopback, joining, None).await
     });
@@ -1674,7 +1674,7 @@ async fn once_the_loopback_session_ends_no_front_door_joins() {
     let environment_id = Uuid::new_v4();
     let (loopback, loopback_input, _loopback_output) = loopback_session(environment_id).await;
     let (joins, joining) = mpsc::channel(1);
-    let broker = recorded.broker();
+    let broker = recorded.broker().paired_with_front_door();
     let runner = tokio::spawn(async move {
         run_admitted_credential_bridge_with_front_doors(broker, loopback, joining, None).await
     });
@@ -1693,6 +1693,24 @@ async fn once_the_loopback_session_ends_no_front_door_joins() {
         joins.send(late_session).await.is_err(),
         "nothing joins an ended loopback session"
     );
+}
+
+/// The runner never serves a front door beside an agent's real login,
+/// however it was reached (#4001): with a Real-delivery broker it refuses
+/// before serving either session.
+#[tokio::test]
+async fn a_front_door_is_never_served_beside_a_real_login() {
+    let recorded = Recorded::default();
+    let environment_id = Uuid::new_v4();
+    let (loopback, _loopback_input, _loopback_output) = loopback_session(environment_id).await;
+    let (joins, joining) = mpsc::channel(1);
+    let (_front_door, _front_door_task, session) = front_door_pair(environment_id).await;
+    joins.send(session).await.unwrap();
+    assert!(matches!(
+        run_admitted_credential_bridge_with_front_doors(recorded.broker(), loopback, joining, None)
+            .await,
+        Err(BrokerBridgeError::Unavailable)
+    ));
 }
 
 // ---------------------------------------------------------------------------

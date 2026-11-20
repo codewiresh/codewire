@@ -7,6 +7,7 @@ fn target(environment: u128, pod_uid: &str, generation: u64) -> Target {
         pod_uid: pod_uid.to_owned(),
         generation,
         scope: WorkspaceCredentialScope::Pod,
+        interception: false,
     }
 }
 
@@ -69,6 +70,7 @@ fn only_a_canonical_live_binding_is_a_target() {
             generation,
             scope.to_owned(),
             false,
+            true,
         )
     };
     assert_eq!(
@@ -79,6 +81,7 @@ fn only_a_canonical_live_binding_is_a_target() {
                 pod_uid: "pod-a".into(),
                 generation: 3,
                 scope: WorkspaceCredentialScope::Pod,
+                interception: true,
             },
             admissible: false,
         })

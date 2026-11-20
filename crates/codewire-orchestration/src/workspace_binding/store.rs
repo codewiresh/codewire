@@ -54,6 +54,10 @@ pub struct LiveBinding {
     /// bind (#3684), read in the same statement. `None` when the stored
     /// environment is not a string map, so setup writes them as before.
     pub defaults: Option<BindDefaults>,
+    /// Whether the Pod's agents are intercepted, as its first bind stored it
+    /// (#4001); `None` until that bind. Read by the bind, every rebind and
+    /// every relay epoch, never recomputed.
+    pub interception: Option<bool>,
 }
 
 /// What [`LiveBinding::defaults`] carries. No `Debug`: the values are the
@@ -73,6 +77,7 @@ impl std::fmt::Debug for LiveBinding {
             .field("environment_id", &self.environment_id)
             .field("pod_uid", &self.pod_uid)
             .field("credential_scope", &self.credential_scope)
+            .field("interception", &self.interception)
             .finish_non_exhaustive()
     }
 }
@@ -113,6 +118,18 @@ pub trait BindingStore: Send + Sync {
         _pod_uid: &str,
         _public_key: &str,
     ) -> Result<HostKeyRecord, BindingStoreUnavailable> {
+        Err(BindingStoreUnavailable)
+    }
+
+    /// Stores whether the agents of the live binding of `pod_uid` are
+    /// intercepted, `decided`, if nothing is stored yet, and answers what is
+    /// stored: one decision per Pod life, which the bind, every rebind and
+    /// every credential relay epoch read (#4001, cw-security 2026-11-19).
+    async fn record_interception(
+        &self,
+        _pod_uid: &str,
+        _decided: bool,
+    ) -> Result<bool, BindingStoreUnavailable> {
         Err(BindingStoreUnavailable)
     }
 
@@ -218,6 +235,7 @@ struct LiveBindingRow {
     git_email: Option<String>,
     account_name: Option<String>,
     email: Option<String>,
+    interception: Option<bool>,
 }
 
 #[async_trait]
@@ -246,7 +264,8 @@ impl BindingStore for PgBindingStore {
                       u.git_name,
                       u.git_email,
                       u.name AS account_name,
-                      u.email
+                      u.email,
+                      w.interception
                  FROM sandbox_workspace_bindings w
                  JOIN sandbox_environment_backend b
                    ON b.environment_id = w.environment_id
@@ -275,6 +294,41 @@ impl BindingStore for PgBindingStore {
             BindingStoreUnavailable
         })?;
         row.map(live_binding_from_row).transpose()
+    }
+
+    async fn record_interception(
+        &self,
+        pod_uid: &str,
+        decided: bool,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        let unavailable = |error: sqlx::Error| {
+            tracing::warn!(error = %error, "workspace binding interception record failed");
+            BindingStoreUnavailable
+        };
+        // Set once: of two concurrent first binds, one sets it and the other
+        // reads what it set.
+        let set: Option<bool> = sqlx::query_scalar(
+            "UPDATE sandbox_workspace_bindings SET interception = $2 \
+              WHERE pod_uid = $1 AND released_at IS NULL AND interception IS NULL \
+              RETURNING interception",
+        )
+        .bind(pod_uid)
+        .bind(decided)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        if let Some(stored) = set {
+            return Ok(stored);
+        }
+        let stored: Option<Option<bool>> = sqlx::query_scalar(
+            "SELECT interception FROM sandbox_workspace_bindings \
+              WHERE pod_uid = $1 AND released_at IS NULL",
+        )
+        .bind(pod_uid)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        stored.flatten().ok_or(BindingStoreUnavailable)
     }
 
     async fn record_host_key(
@@ -476,6 +530,7 @@ fn live_binding_from_row(
         git_email,
         account_name,
         email,
+        interception,
     }: LiveBindingRow,
 ) -> Result<LiveBinding, BindingStoreUnavailable> {
     // The schema constrains the scope; anything else is a broken store.
@@ -496,6 +551,7 @@ fn live_binding_from_row(
         isolation_tier,
         working_directory,
         defaults: bind_defaults(environment, git_name, git_email, account_name, email),
+        interception,
     })
 }
 
@@ -674,6 +730,7 @@ mod tests {
                 git_email: None,
                 account_name: None,
                 email: None,
+                interception: None,
             }
         };
         assert_eq!(
