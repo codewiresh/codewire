@@ -101,11 +101,11 @@ fn a_childs_store_refuses_every_write() {
     assert!(!root.path().join(FILE_STORE_DIRECTORY).exists());
 }
 
-/// A `file` store takes no refreshed bundle: the broker's Landlock domain only
-/// reads `protected-v1`. Its refresh is refused before Start, so the provider
-/// is never asked and nothing is written (#5537).
+/// A `file` child only reads `protected-v1`, as the broker's Landlock domain
+/// does, and its refresh still lands: the authority stages the bundle it sends
+/// in Commit (#5539).
 #[tokio::test]
-async fn a_file_childs_refresh_is_refused_before_start() {
+async fn a_file_childs_refresh_is_staged_by_the_authority() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join(FILE_STORE_DIRECTORY);
     let authority_store =
@@ -115,30 +115,34 @@ async fn a_file_childs_refresh_is_refused_before_start() {
     }
     .open()
     .unwrap();
-    assert!(!child.can_stage_refresh());
+    let refreshed = codewire_local_credentials::refresh_testing::refresh_through(
+        &root.path().join("authority"),
+        authority_store,
+        child.clone(),
+        b"synthetic-rotated-oauth-bundle",
+    )
+    .await
+    .unwrap();
+    assert_eq!(refreshed.material_generation, 2);
+    assert_eq!(refreshed.material, b"synthetic-rotated-oauth-bundle");
+    let next = ProtectedEntryId::parse("local/credentials/synthetic/material-v3").unwrap();
+    let value = ProtectedValue::new(b"synthetic".to_vec()).unwrap();
     assert_eq!(
-        codewire_local_credentials::refresh_staging_testing::refresh_through(
-            &root.path().join("authority"),
-            authority_store,
-            child,
-            b"synthetic-must-never-be-asked-for",
-        )
-        .await,
-        Err(codewire_local_credentials::BrokerLeaseChannelError::StoreReadOnly)
+        child.put(&next, &value),
+        Err(ProtectedStoreError::AccessDenied)
     );
-    let generations = std::fs::read_dir(&directory).unwrap().count();
-    assert_eq!(generations, 1, "only the enrolled generation is stored");
+    assert_eq!(child.delete(&next), Err(ProtectedStoreError::AccessDenied));
 }
 
-/// A real refresh commit through the broker's opened Secret Service store:
-/// the one started write lands and the authority promotes it, while any
-/// other `put` and every `delete` still refuse (#5537). It needs a private
+/// A real refresh commit with the broker's opened Secret Service store: the
+/// authority stages and promotes the bundle, and the child's own `put` and
+/// `delete` still refuse every entry (#5539). It needs a private
 /// Secret Service, never the host's, so it runs only under
 /// `scripts/ci/tests/test-child-store-secret-service.sh`.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 #[ignore = "needs a private Secret Service: scripts/ci/tests/test-child-store-secret-service.sh"]
-async fn a_secret_service_childs_refresh_stages_once_and_nothing_else() {
+async fn a_secret_service_childs_refresh_is_staged_by_the_authority() {
     let private = std::env::var("CODEWIRE_PRIVATE_SECRET_SERVICE_BUS").unwrap_or_default();
     assert!(
         !private.is_empty()
@@ -150,8 +154,7 @@ async fn a_secret_service_childs_refresh_stages_once_and_nothing_else() {
         SelectedProtectedStore::open(ProtectedStoreBackend::SecretService, Path::new("/"), None)
             .unwrap();
     let child = ChildStore::SecretService.open().unwrap();
-    assert!(child.can_stage_refresh());
-    let refreshed = codewire_local_credentials::refresh_staging_testing::refresh_through(
+    let refreshed = codewire_local_credentials::refresh_testing::refresh_through(
         &root.path().join("authority"),
         authority_store,
         child.clone(),

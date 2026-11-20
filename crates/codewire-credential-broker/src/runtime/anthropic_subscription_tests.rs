@@ -50,7 +50,7 @@ impl BrokerLeaseProvider for Authority {
         &self,
         _: (),
         _: CanonicalCodexOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         panic!("a Claude subscription token has no refresh")
     }
     async fn abort_credential_refresh(&self, _: ()) -> Result<(), BrokerRefreshError> {

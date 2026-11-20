@@ -5,13 +5,13 @@ use super::*;
 
 /// The sign-ins whose refresh runs through the local refresh journal.
 #[derive(Clone, Copy, Debug)]
-enum SignIn {
+pub(super) enum SignIn {
     Codex,
     Claude,
 }
 
 impl SignIn {
-    fn credential(self) -> NewCredential {
+    pub(super) fn credential(self) -> NewCredential {
         let (provider_id, authentication_kind) = match self {
             Self::Codex => ("openai", CredentialAuthKind::OAuth),
             Self::Claude => ("anthropic", CredentialAuthKind::ClaudeSignIn),
@@ -25,7 +25,7 @@ impl SignIn {
         }
     }
 
-    fn request(self, environment_id: &EnvironmentId) -> CredentialOperationLeaseRequest {
+    pub(super) fn request(self, environment_id: &EnvironmentId) -> CredentialOperationLeaseRequest {
         let (capability_slot, operation, route) = match self {
             Self::Codex => (CapabilitySlot::codex(), "responses", "openai-api"),
             Self::Claude => (CapabilitySlot::anthropic(), "messages", "anthropic-api"),
@@ -64,7 +64,7 @@ const LAST_WRITES: [LastWrite; 5] = [
     LastWrite::Retire,
 ];
 
-fn open(
+pub(super) fn open(
     root: &std::path::Path,
     store: &TestProtectedStore,
 ) -> Result<LocalCredentialAuthority<TestProtectedStore>, LocalCredentialError> {
@@ -77,7 +77,7 @@ fn open(
 
 /// Adds the sign-in, selects it for one environment and reserves its refresh.
 /// Returns the credential and the refresh's channel, refresh and request IDs.
-fn reserve_refresh(
+pub(super) fn reserve_refresh(
     authority: &LocalCredentialAuthority<TestProtectedStore>,
     sign_in: SignIn,
     request: &CredentialOperationLeaseRequest,
@@ -147,7 +147,12 @@ fn stop_and_reopen(sign_in: SignIn, last: LastWrite) {
                 Fault::AfterEffect
             });
             authority
-                .commit_environment_credential_refresh(channel_id, refresh_id, request_id)
+                .commit_environment_credential_refresh(
+                    channel_id,
+                    refresh_id,
+                    request_id,
+                    &material(b"synthetic-new-sign-in"),
+                )
                 .unwrap_or_else(|error| panic!("{context}: commit: {error}"));
             store.clear_faults();
         }

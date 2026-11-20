@@ -1,5 +1,5 @@
 //! One OAuth refresh commit through a real authority and broker lease
-//! channel, so a child's own store can be tested where it stages (#5537).
+//! channel, with a child's own store, which only reads (#5537, #5539).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -16,8 +16,7 @@ use uuid::Uuid;
 
 use crate::{
     BrokerCredentialRefreshAdmission, BrokerLeaseChannelError, LocalCredentialAuthority,
-    LocalCredentialBrokerLeaseClient, NewCredential, RefreshStagingStore,
-    serve_broker_lease_channel,
+    LocalCredentialBrokerLeaseClient, NewCredential, serve_broker_lease_channel,
 };
 
 /// What the next lease sees after a committed refresh.
@@ -40,7 +39,7 @@ pub async fn refresh_through<A, S>(
 ) -> Result<RefreshedLease, BrokerLeaseChannelError>
 where
     A: ProtectedStore + 'static,
-    S: RefreshStagingStore + Clone + 'static,
+    S: ProtectedStore + Clone + 'static,
 {
     let operation = BrokerOperationId::parse("responses").unwrap();
     let route = BrokerRouteId::parse("openai-api").unwrap();
@@ -128,7 +127,8 @@ where
         let started = client.start_credential_refresh(reservation).await?;
         client
             .commit_credential_refresh(started, ProtectedValue::from_slice(bundle).unwrap())
-            .await?;
+            .await
+            .map_err(|unpublished| unpublished.error)?;
         let refreshed = client
             .lease_operation(
                 Uuid::new_v4(),

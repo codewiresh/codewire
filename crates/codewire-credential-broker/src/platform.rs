@@ -41,11 +41,12 @@ use codewire_platform_credentials::{
 use codewire_protected_store::ProtectedValue;
 use uuid::Uuid;
 
+use crate::commit_failure::{taken_bundle, valid_bundle};
 use crate::timing::{self, AuthorityUse, MaterialCacheUse, Phase, PlaceholderUse};
 use crate::{
     BrokerCredentialLease, BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest,
     BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError,
-    CanonicalClaudeOAuthBundle, CanonicalCodexOAuthBundle, GitHubAppUserOAuthBundle,
+    CanonicalClaudeOAuthBundle, CanonicalCodexOAuthBundle, CommitFailure, GitHubAppUserOAuthBundle,
 };
 pub use decision::AUTHORITY_DECISION_REUSE;
 use decision::EpochDecision;
@@ -1354,42 +1355,40 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
         &self,
         permit: Self::StartedRefresh,
         material: CanonicalCodexOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         if permit.request.kind != BrokerCredentialRefreshKind::CodexOAuth {
-            return Err(BrokerRefreshError::Denied);
+            return Err(CommitFailure::returned(permit, BrokerRefreshError::Denied));
         }
-        let value = ProtectedValue::from_slice(material.as_bytes())
-            .map_err(|_| BrokerRefreshError::InvalidResponse)?;
+        let (permit, value) =
+            valid_bundle(permit, ProtectedValue::from_slice(material.as_bytes()))?;
         drop(material);
-        self.commit_refresh_value(permit, value).await
+        Ok(self.commit_refresh_value(permit, value).await?)
     }
 
     async fn commit_github_app_refresh(
         &self,
         permit: Self::StartedRefresh,
         material: GitHubAppUserOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         if permit.request.kind != BrokerCredentialRefreshKind::GitHubAppUserOAuth {
-            return Err(BrokerRefreshError::Denied);
+            return Err(CommitFailure::returned(permit, BrokerRefreshError::Denied));
         }
         let mut bytes = material.into_bytes();
-        let value = ProtectedValue::new(std::mem::take(&mut *bytes))
-            .map_err(|_| BrokerRefreshError::InvalidResponse)?;
-        self.commit_refresh_value(permit, value).await
+        let (permit, value) = taken_bundle(permit, &mut bytes)?;
+        Ok(self.commit_refresh_value(permit, value).await?)
     }
 
     async fn commit_claude_oauth_refresh(
         &self,
         permit: Self::StartedRefresh,
         material: CanonicalClaudeOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         if permit.request.kind != BrokerCredentialRefreshKind::ClaudeOAuth {
-            return Err(BrokerRefreshError::Denied);
+            return Err(CommitFailure::returned(permit, BrokerRefreshError::Denied));
         }
         let mut bytes = material.into_bytes();
-        let value = ProtectedValue::new(std::mem::take(&mut *bytes))
-            .map_err(|_| BrokerRefreshError::InvalidResponse)?;
-        self.commit_refresh_value(permit, value).await
+        let (permit, value) = taken_bundle(permit, &mut bytes)?;
+        Ok(self.commit_refresh_value(permit, value).await?)
     }
 
     async fn abort_credential_refresh(

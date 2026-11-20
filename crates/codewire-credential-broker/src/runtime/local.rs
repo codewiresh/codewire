@@ -6,7 +6,7 @@ use super::*;
 #[async_trait]
 impl<S> BrokerLeaseProvider for codewire_local_credentials::LocalCredentialBrokerLeaseClient<S>
 where
-    S: codewire_local_credentials::RefreshStagingStore + Clone + 'static,
+    S: codewire_protected_store::ProtectedStore + Clone + 'static,
 {
     type Lease = codewire_local_credentials::CredentialOperationLease;
     type RefreshReservation = codewire_local_credentials::BrokerCredentialRefreshReservation;
@@ -108,8 +108,7 @@ where
             codewire_local_credentials::BrokerLeaseChannelError::RefreshInProgress => {
                 BrokerLeaseError::Denied
             }
-            codewire_local_credentials::BrokerLeaseChannelError::StaleRefresh
-            | codewire_local_credentials::BrokerLeaseChannelError::StoreReadOnly => {
+            codewire_local_credentials::BrokerLeaseChannelError::StaleRefresh => {
                 BrokerLeaseError::Denied
             }
             codewire_local_credentials::BrokerLeaseChannelError::Unavailable => {
@@ -188,7 +187,7 @@ where
         &self,
         permit: Self::StartedRefresh,
         material: CanonicalCodexOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         commit_local_refresh(self, permit, material.into_bytes()).await
     }
 
@@ -198,7 +197,7 @@ where
         &self,
         permit: Self::StartedRefresh,
         material: GitHubAppUserOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         commit_local_refresh(self, permit, material.into_bytes()).await
     }
 
@@ -207,7 +206,7 @@ where
         &self,
         permit: Self::StartedRefresh,
         material: CanonicalClaudeOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         commit_local_refresh(self, permit, material.into_bytes()).await
     }
 
@@ -246,16 +245,25 @@ where
     }
 }
 
+/// The authority stages the bundle (#5539); an unpublished one hands its
+/// started refresh back, so the runtime can still record its failure.
 async fn commit_local_refresh<S>(
     client: &codewire_local_credentials::LocalCredentialBrokerLeaseClient<S>,
     permit: codewire_local_credentials::StartedBrokerCredentialRefresh,
     mut bytes: Zeroizing<Vec<u8>>,
-) -> Result<(), BrokerRefreshError>
+) -> Result<(), CommitFailure<codewire_local_credentials::StartedBrokerCredentialRefresh>>
 where
-    S: codewire_local_credentials::RefreshStagingStore + Clone + 'static,
+    S: codewire_protected_store::ProtectedStore + Clone + 'static,
 {
-    let value = codewire_protected_store::ProtectedValue::new(std::mem::take(&mut *bytes))
-        .map_err(|_| BrokerRefreshError::InvalidRequest)?;
+    let value = match codewire_protected_store::ProtectedValue::new(std::mem::take(&mut *bytes)) {
+        Ok(value) => value,
+        Err(_) => {
+            return Err(CommitFailure::returned(
+                permit,
+                BrokerRefreshError::InvalidRequest,
+            ));
+        }
+    };
     let mut client = client.clone();
     codewire_local_credentials::LocalCredentialBrokerLeaseClient::commit_credential_refresh(
         &mut client,
@@ -263,7 +271,10 @@ where
         value,
     )
     .await
-    .map_err(map_local_refresh_error)
+    .map_err(|unpublished| CommitFailure {
+        started: unpublished.started,
+        error: map_local_refresh_error(unpublished.error),
+    })
 }
 
 fn map_local_refresh_error(
@@ -286,9 +297,6 @@ fn map_local_refresh_error(
         codewire_local_credentials::BrokerLeaseChannelError::StaleRefresh => {
             BrokerRefreshError::Stale
         }
-        codewire_local_credentials::BrokerLeaseChannelError::StoreReadOnly => {
-            BrokerRefreshError::StoreReadOnly
-        }
     }
 }
 
@@ -303,8 +311,7 @@ fn map_local_lease_error(
         codewire_local_credentials::BrokerLeaseChannelError::RefreshInProgress => {
             BrokerLeaseError::Denied
         }
-        codewire_local_credentials::BrokerLeaseChannelError::StaleRefresh
-        | codewire_local_credentials::BrokerLeaseChannelError::StoreReadOnly => {
+        codewire_local_credentials::BrokerLeaseChannelError::StaleRefresh => {
             BrokerLeaseError::Denied
         }
         codewire_local_credentials::BrokerLeaseChannelError::Unavailable => {

@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 25;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 26;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -70,6 +70,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
     (
         25,
         "a credential's name is unique per provider (store schema 7), and a new name may not start with a provider id and / (#4928)",
+    ),
+    (
+        26,
+        "a credential child sends a refresh's bundle in Commit and the authority stages it, so the child only reads its store (#5539)",
     ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);

@@ -17,7 +17,7 @@ Updated 2026-11-19.
 | `mac-vm-cached-image` | observed on a development build of #5036 (e42e2f457) | not yet observed |
 | `mac-vm-mesh-ingress` | not yet observed | not yet observed |
 | `mac-vm-intercept` | boots observed on #4916 on #5124 (268f2709e), 5 of 5; serving partly observed on a scratch merge with the placeholder seed (245992e87) | not yet observed |
-| `mac-vm-refresh-refused` | not yet observed (#5537) | not yet observed (#5537) |
+| `mac-vm-refresh` | not yet observed (#5539) | not yet observed (#5539) |
 
 ## Before the walk
 
@@ -318,7 +318,7 @@ Issues: #3999, #4916.
     under Seatbelt (`sandbox_check` = 1), reported its CA, and terminated
     TLS for a handed-over stream.
 
-## 6. `mac-vm-refresh-refused`: a sign-in due for refresh is refused before Start
+## 6. `mac-vm-refresh`: a sign-in due for refresh refreshes
 
 Issues: #5537, #5539. The rule is in
 [SECRETS-AND-CREDENTIALS.md](../dev/SECRETS-AND-CREDENTIALS.md), "Children".
@@ -329,19 +329,18 @@ Issues: #5537, #5539. The rule is in
 - **States to exercise:** a due Claude or Codex sign-in, and a due GitHub
   login on a host checkout.
 - **Driving it:** the broker's Seatbelt profile only reads the keychain, so
-  the broker can't keep a refreshed bundle there. It refuses the refresh
-  before Start and never asks the provider. A synthetic Claude sign-in from
+  the broker sends the refreshed bundle in Commit and the authority writes it
+  to the keychain. A synthetic Claude sign-in from
   the featured smoke build (#5374) is due on its first use. Walk it with a
   throwaway `HOME` and keychain, as in [Before the walk](#before-the-walk).
 - **Proof:**
-  - The due Claude or Codex sign-in's request is denied, and a due GitHub
-    login stops `git` with `this credential store cannot keep a refreshed
-    GitHub login`.
-  - `brokers.log` shows no broker ending, and the credential stays at
-    material generation 1 with no refresh row in the journal: the provider
-    was never asked.
-- **Gotchas:** this lasts until #5539 lets the authority stage the bundle, or
-  a recorded run shows the broker's staged write working inside its Seatbelt
-  profile (tracked on #5537). Until then, a Mac VM's sign-in works only until
-  its access token is due, about 8 hours for a Claude sign-in.
+  - The due Claude or Codex sign-in's request succeeds with the refreshed
+    login, and a due GitHub login renews before `git` runs.
+  - `brokers.log` shows no broker ending, and the credential is at material
+    generation 2 with no refresh row left in the journal.
+- **Gotchas:** before #5539 the broker's own keychain write failed inside its
+  Seatbelt profile (`Operation not permitted`, #5537), so a Mac VM's sign-in
+  worked only until its access token was due, about 8 hours for a Claude
+  sign-in. Assert on the refresh's result, not the Sandbox log: that refusal
+  logged no file-write denial.
 - **Observed:** not yet observed.

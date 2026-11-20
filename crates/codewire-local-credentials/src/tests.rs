@@ -32,6 +32,8 @@ struct StoreState {
     delete_fault: Fault,
     /// A put lands its value, then answers that the store timed out.
     put_times_out: bool,
+    /// A put lands nothing and answers access denied, as a locked keyring.
+    put_denied: bool,
     get_calls: usize,
     put_calls: usize,
     delete_calls: usize,
@@ -53,6 +55,10 @@ impl TestProtectedStore {
 
     fn empty_with_persistence(persistence: ProtectedStorePersistence) -> Self {
         Self::new(persistence)
+    }
+
+    fn set_put_denied(&self, denied: bool) {
+        self.state.lock().expect("store lock").put_denied = denied;
     }
 
     fn set_put_fault(&self, fault: Fault) {
@@ -140,6 +146,9 @@ impl ProtectedStore for TestProtectedStore {
         state.put_calls += 1;
         if state.put_fault == Fault::BeforeEffect {
             return Err(ProtectedStoreError::Unavailable);
+        }
+        if state.put_denied {
+            return Err(ProtectedStoreError::AccessDenied);
         }
         state.entries.insert(
             id.expose_reference().to_string(),
@@ -778,7 +787,12 @@ fn oauth_refresh_serializes_and_promotes_one_exact_protected_generation() {
 
     let next_entry = protected_entry_id(&credential.metadata.id, 2).expect("next entry");
     assert!(matches!(
-        authority.commit_environment_credential_refresh(channel_id, refresh_id, request_id),
+        authority.commit_environment_credential_refresh(
+            channel_id,
+            refresh_id,
+            request_id,
+            &material(b"refreshed-oauth-bundle"),
+        ),
         Err(LocalCredentialError::StaleCredentialRefresh)
     ));
     authority
@@ -788,7 +802,12 @@ fn oauth_refresh_serializes_and_promotes_one_exact_protected_generation() {
         .put(&next_entry, &material(b"refreshed-oauth-bundle"))
         .expect("write refreshed bundle");
     let (refreshed, committed_material_generation) = authority
-        .commit_environment_credential_refresh(channel_id, refresh_id, request_id)
+        .commit_environment_credential_refresh(
+            channel_id,
+            refresh_id,
+            request_id,
+            &material(b"refreshed-oauth-bundle"),
+        )
         .expect("commit refresh");
     assert_eq!(refreshed.metadata.revocation_generation, 2);
     assert_eq!(committed_material_generation, 2);
@@ -937,7 +956,12 @@ fn repository_refresh_promotes_one_github_generation_through_the_shared_journal(
         )
         .expect("stage the rotated bundle");
     let (refreshed, generation) = authority
-        .commit_environment_credential_refresh(channel_id, refresh_id, request_id)
+        .commit_environment_credential_refresh(
+            channel_id,
+            refresh_id,
+            request_id,
+            &material(b"refreshed-github-app-bundle"),
+        )
         .expect("commit repository refresh");
     assert_eq!(generation, 2);
     assert_eq!(refreshed.metadata.revocation_generation, revocation + 1);
@@ -3861,7 +3885,7 @@ fn the_credential_kinds_the_local_authority_stores_are_pinned_to_its_protocol() 
         admitted, expected,
         "bump the authority protocol with this set"
     );
-    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 25);
+    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 26);
 }
 
 /// The store keeps one default profile as the cloud does (#4717): the first
@@ -4000,4 +4024,5 @@ fn move_default_away(authority: &LocalCredentialAuthority<TestProtectedStore>) {
 }
 
 mod credential_names;
+mod refresh_commit;
 mod refresh_crash;

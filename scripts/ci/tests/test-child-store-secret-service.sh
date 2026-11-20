@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# The broker's opened Secret Service store stages a started refresh's bundle,
-# once, and refuses every other write (#5537). It runs the ignored test
-# `a_secret_service_childs_refresh_stages_once_and_nothing_else` against a
+# A refresh with the broker's opened Secret Service store lands, staged by the
+# authority, while the child's own store refuses every write (#5539). It runs
+# the ignored test
+# `a_secret_service_childs_refresh_is_staged_by_the_authority` against a
 # private gnome-keyring on its own session bus, with its own HOME and runtime
 # directory, so the host's keyring and session bus are never reached.
 set -euo pipefail
@@ -40,5 +41,5 @@ env -i PATH=/usr/bin:/bin HOME="$root/home" XDG_RUNTIME_DIR="$root/runtime" \
     done
     CODEWIRE_PRIVATE_SECRET_SERVICE_BUS="$DBUS_SESSION_BUS_ADDRESS" "$TEST_BINARY" \
       --ignored --exact \
-      commands::credential_child_store::tests::a_secret_service_childs_refresh_stages_once_and_nothing_else
+      commands::credential_child_store::tests::a_secret_service_childs_refresh_is_staged_by_the_authority
   '

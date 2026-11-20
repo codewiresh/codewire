@@ -73,7 +73,7 @@ use crate::{
 
 const REPOSITORY_LEASE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_REPOSITORY_LEASE_RPC_MESSAGE_BYTES: usize = 128 * 1024;
-pub const REPOSITORY_LEASE_PROTOCOL_VERSION: u32 = 4;
+pub const REPOSITORY_LEASE_PROTOCOL_VERSION: u32 = 5;
 pub const REPOSITORY_SSH_RUNTIME_PREFIX: &str = "ssh-";
 /// `sockaddr_un.sun_path` capacity, including the terminating NUL.
 #[cfg(not(target_os = "macos"))]
@@ -398,7 +398,6 @@ impl LocalCredentialRepositoryLeaseClient {
 pub(crate) struct RepositoryRefreshReservation {
     refresh_id: Uuid,
     request_id: Uuid,
-    credential_id: codewire_access::CredentialId,
     revocation_generation: u64,
     next_material_generation: u64,
 }
@@ -408,27 +407,6 @@ pub(crate) struct RepositoryRefreshReservation {
 pub(crate) struct StartedRepositoryRefresh {
     reservation: RepositoryRefreshReservation,
     execution_deadline_unix_ms: u64,
-}
-
-impl crate::refresh_staging::StartedRefreshPermit for StartedRepositoryRefresh {
-    type Reservation = RepositoryRefreshReservation;
-
-    fn into_staged(
-        self,
-    ) -> Result<
-        (
-            codewire_protected_store::ProtectedEntryId,
-            u64,
-            Self::Reservation,
-        ),
-        crate::LocalCredentialError,
-    > {
-        let entry_id = crate::protected_entry_id(
-            &self.reservation.credential_id,
-            self.reservation.next_material_generation,
-        )?;
-        Ok((entry_id, self.execution_deadline_unix_ms, self.reservation))
-    }
 }
 
 pub(crate) enum RepositoryRefreshBegin {
@@ -485,7 +463,6 @@ impl LocalCredentialRepositoryLeaseClient {
                     RepositoryRefreshReservation {
                         refresh_id,
                         request_id,
-                        credential_id: lease.credential.metadata.id.clone(),
                         revocation_generation: lease.credential.metadata.revocation_generation,
                         next_material_generation: reservation.next_material_generation,
                     },
@@ -518,41 +495,47 @@ impl LocalCredentialRepositoryLeaseClient {
         })
     }
 
-    /// Stage the rotated bundle in the next exact protected generation, then
-    /// ask the authority to promote it. A staging error is never reported as
-    /// a failed refresh: the write may have taken effect, and the journal
-    /// reconciles it on the next admission.
-    pub(crate) async fn commit_github_refresh<S>(
+    /// Send the rotated bundle to the authority, which stages it in the next
+    /// exact protected generation and promotes it (#5539). An `unavailable`
+    /// answer is sent again until the Started deadline; a final failure the
+    /// authority answered hands the started refresh back so its failure can be
+    /// recorded.
+    pub(crate) async fn commit_github_refresh(
         &mut self,
         started: StartedRepositoryRefresh,
         material: ProtectedValue,
-        protected_store: S,
-    ) -> Result<(), RepositoryLeaseChannelError>
-    where
-        S: crate::RefreshStagingStore + Clone + 'static,
-    {
-        let (write, reservation) = crate::RefreshStagingWrite::from_started(started)
-            .map_err(|_| RepositoryLeaseChannelError::InvalidResponse)?;
-        let stored =
-            tokio::task::spawn_blocking(move || protected_store.stage_refresh(write, &material))
-                .await
-                .map_err(|_| RepositoryLeaseChannelError::Unavailable)?;
-        if stored.is_err() {
-            return Err(RepositoryLeaseChannelError::Unavailable);
-        }
-        let response = self
-            .inner
-            .commit_repository_credential_refresh(v1::BrokerCredentialRefreshCommitRequest {
-                refresh_id: reservation.refresh_id.to_string(),
-                request_id: reservation.request_id.to_string(),
-            })
-            .await
-            .map_err(map_client_status)?
-            .into_inner();
+    ) -> Result<
+        (),
+        (
+            Option<StartedRepositoryRefresh>,
+            RepositoryLeaseChannelError,
+        ),
+    > {
+        let inner = self.inner.clone();
+        let reservation = &started.reservation;
+        let (refresh_id, request_id) = (reservation.refresh_id, reservation.request_id);
+        let deadline = started.execution_deadline_unix_ms;
+        let sent = crate::refresh_commit::send_commit(
+            deadline,
+            refresh_id,
+            request_id,
+            &material,
+            |request| {
+                let mut inner = inner.clone();
+                async move { inner.commit_repository_credential_refresh(request).await }
+            },
+        );
+        let response = match sent.await {
+            Ok(response) => response,
+            Err((status, answered)) => {
+                return Err((answered.then_some(started), map_client_status(status)));
+            }
+        };
+        let reservation = &started.reservation;
         if response.revocation_generation != reservation.revocation_generation.saturating_add(1)
             || response.material_generation != reservation.next_material_generation
         {
-            return Err(RepositoryLeaseChannelError::InvalidResponse);
+            return Err((Some(started), RepositoryLeaseChannelError::InvalidResponse));
         }
         Ok(())
     }
@@ -794,6 +777,18 @@ impl<S: ProtectedStore + 'static> RepositoryLeaseRpc<S> {
         + Send
         + 'static,
     ) -> Result<T, Status> {
+        self.journal_outcome(transition)
+            .await?
+            .map_err(map_refresh_error)
+    }
+
+    /// [`Self::journal`], leaving the authority's own error to its caller.
+    async fn journal_outcome<T: Send + 'static>(
+        &self,
+        transition: impl FnOnce(&LocalCredentialAuthority<S>) -> Result<T, LocalCredentialError>
+        + Send
+        + 'static,
+    ) -> Result<Result<T, LocalCredentialError>, Status> {
         let authority = Arc::clone(&self.authority);
         let operation = self.lifetime.acquire()?;
         tokio::task::spawn_blocking(move || {
@@ -801,8 +796,7 @@ impl<S: ProtectedStore + 'static> RepositoryLeaseRpc<S> {
             transition(&authority)
         })
         .await
-        .map_err(|_| Status::unavailable("repository credential authority is unavailable"))?
-        .map_err(map_refresh_error)
+        .map_err(|_| Status::unavailable("repository credential authority is unavailable"))
     }
 }
 
@@ -964,15 +958,21 @@ where
         request: Request<v1::BrokerCredentialRefreshCommitRequest>,
     ) -> Result<Response<v1::BrokerCredentialRefreshCommitResponse>, Status> {
         self.lifetime.ensure_open()?;
-        let request = request.into_inner();
+        let mut request = request.into_inner();
+        let material = crate::broker_channel::refresh_commit_material(&mut request.material)?;
         let refresh_id = parse_canonical_uuid(&request.refresh_id)?;
         let request_id = parse_canonical_uuid(&request.request_id)?;
         let channel_id = self.channel_id;
         let (record, material_generation) = self
-            .journal(move |authority| {
-                authority.commit_environment_credential_refresh(channel_id, refresh_id, request_id)
+            .journal_outcome(move |authority| {
+                authority.commit_environment_credential_refresh(
+                    channel_id, refresh_id, request_id, &material,
+                )
             })
-            .await?;
+            .await?
+            .map_err(|error| {
+                crate::broker_channel::refresh_commit_status(error, map_refresh_error)
+            })?;
         self.release_allowed.store(true, Ordering::Release);
         Ok(Response::new(v1::BrokerCredentialRefreshCommitResponse {
             revocation_generation: record.metadata.revocation_generation,

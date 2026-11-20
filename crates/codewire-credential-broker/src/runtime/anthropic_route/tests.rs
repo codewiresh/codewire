@@ -192,14 +192,14 @@ impl BrokerLeaseProvider for Authority {
         &self,
         (): (),
         _: CanonicalCodexOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         panic!("a Claude sign-in never commits a Codex login")
     }
     async fn commit_claude_oauth_refresh(
         &self,
         (): (),
         bundle: CanonicalClaudeOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         let mut journal = self.journal.lock().unwrap();
         journal.bundle = bundle.into_bytes().to_vec();
         journal.generation += 1;

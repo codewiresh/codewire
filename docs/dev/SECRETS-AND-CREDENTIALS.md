@@ -409,6 +409,13 @@ would have done. A published refresh whose old material was not yet removed
 removes it. A rate-limited refresh the store stopped before cancelling counts
 as started without a stored result.
 
+A running broker whose refresh got the provider's answer but could not store
+it, after its retries, records the attempt as failed (#5537). The credential
+reads **Reconnect needed**, only the request that needed it is refused, and
+the broker's bridge epoch goes on serving every other credential. The epoch
+ends only when the authority can't record that failure: it is unavailable,
+or a result was stored after all, which recovery publishes.
+
 OAuth logins are personal. An organization may hold API keys and SSH keys,
 but never an OAuth credential: no Codex (ChatGPT) login, GitHub OAuth
 connection or GitHub App user connection. GitHub is each account's one
@@ -3088,18 +3095,41 @@ deletes them. cw-security agreed this design on #5255 (2026-11-18).
   repository executor's command line, on Linux as on macOS
   (`--protected-store`, and for `file` its `protected-v1` directory), and a
   child opens exactly that store, read-only: a child's store refuses every
-  write, since the authority alone writes. The one exception is a refresh the
-  authority recorded as started (#5537). The child stages the refreshed bundle
-  itself, once, in exactly that credential's next material generation, only
-  into an empty entry and before the refresh's execution deadline. So a
-  rotated refresh token is kept even when the commit's reply is lost, and the
-  refresh journal reconciles either outcome. Only a Secret Service store
-  takes that write. A child whose store cannot refuses the refresh before
-  Start (`store_read_only`), so the provider is never asked for a token it
-  could not keep: a `file` store, which the broker's Landlock domain only
-  reads, and a macOS keychain, whose broker's Seatbelt profile allows only
-  reads of it, until a staged write is recorded working inside that profile.
-  #5539 moves staging to the authority. A `file` store's children get no
+  write, since the authority alone writes. A refresh's bundle is no
+  exception (#5539):
+  - **The child sends it in Commit, and the authority stages it.** The entry,
+    the generation and the deadline come from the authority's own Started
+    record; the request names only the refresh. The bundle is written into
+    the credential's next material generation before the refresh's
+    execution deadline, only into an empty entry or one already holding the
+    same bytes, then promoted. Other bytes already there are refused and left
+    to the refresh journal.
+  - **The write holds no database lock** (#5413). The credential's refresh
+    ownership keeps reconcile away meanwhile: a Begin or delete for it is
+    refused as in progress, and a channel releases its refreshes only after
+    its writes have returned, even when the child has gone.
+  - **A locked or slow store is answered `unavailable`**, and the child sends
+    the same Commit again until the execution deadline. A Commit the
+    authority answered and refused hands the refresh back to be failed; one
+    that timed out may still be writing, so its channel ends instead and the
+    journal settles it.
+  - **Every root refreshes this way**: Secret Service, a macOS keychain,
+    which the broker's Seatbelt profile only reads, and a `file` store, which
+    its Landlock domain only reads. A rotated refresh token is lost only if
+    the child or the authority stops between the provider's answer and the
+    authority's write.
+  - **The bundle is bounded** by the channel's message limit (320 KiB on a
+    broker's, 128 KiB on a repository executor's) and again by the store's
+    1 MiB, before anything else is read; an empty one is refused.
+  - **What it doesn't close, locally:** a child holding a started refresh
+    still chooses the bytes of that credential's next generation, so a
+    compromised local broker can replace a credential it is refreshing, for
+    every environment that uses it. Closing that needs the authority to make
+    or check the provider call. A hosted refresh has no such gap: the
+    credential service's own broker makes the exchange, and no Sandbox-side
+    process chooses the next generation.
+
+  A `file` store's children get no
   session bus address (`DBUS_SESSION_BUS_ADDRESS`); a GitHub repository
   executor keeps `XDG_RUNTIME_DIR` for its runtime directory. A Secret Service
   root's children keep the bus address their authority has.
@@ -3107,8 +3137,7 @@ deletes them. cw-security agreed this design on #5255 (2026-11-18).
   allowing reading files and listing directories beneath that
   `protected-v1` directory, and nothing else: no write, and no other path.
   Seccomp is unchanged. As on macOS, the broker only reads the store; the
-  authority writes it, apart from a started refresh's staged generation on a
-  Secret Service store (above).
+  authority writes it.
 - **Admission.** A `cw` that admits an already running authority uses the
   configured store, so a `file` root is never reopened on Secret Service.
 

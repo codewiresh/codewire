@@ -17,6 +17,7 @@ use uuid::Uuid;
 use base64::Engine as _;
 
 use super::*;
+use crate::CommitFailure;
 use crate::bridge::AdmittedCredentialBridge;
 use crate::bridge::{BrokerRequestExecutor as _, FrontDoorExecutor};
 use crate::http_test_support::Lease;
@@ -405,7 +406,7 @@ impl BrokerLeaseProvider for Authority {
         &self,
         _: (),
         _: CanonicalCodexOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         panic!("non-refreshing identity attempted refresh")
     }
 

@@ -8,6 +8,7 @@ use futures::StreamExt as _;
 use serde_json::{Value, json};
 
 use super::*;
+use crate::CommitFailure;
 use crate::claude_oauth::CanonicalClaudeOAuthBundle;
 use crate::http_test_support::Lease;
 use crate::{
@@ -114,7 +115,7 @@ impl BrokerLeaseProvider for Arc<SignIn> {
         &self,
         _: (),
         _: CanonicalCodexOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         panic!("a Claude sign-in committed Codex material")
     }
 
@@ -122,7 +123,7 @@ impl BrokerLeaseProvider for Arc<SignIn> {
         &self,
         _: (),
         material: CanonicalClaudeOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         *self.material.lock().unwrap() = material.into_bytes().to_vec();
         self.commits.fetch_add(1, Ordering::Relaxed);
         self.refreshing.store(false, Ordering::Release);

@@ -1682,7 +1682,7 @@ mod tests {
         use codewire_credential_broker::{
             BrokerCredentialLease, BrokerCredentialRefreshRequest, BrokerLeaseError,
             BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError, BrokerRequestError,
-            CanonicalCodexOAuthBundle, OpenAiBroker,
+            CanonicalCodexOAuthBundle, CommitFailure, OpenAiBroker,
         };
         use codewire_daemon_proto::codewire::bridge::v1::{
             CredentialBridgeRequest, CredentialHttpHeader,
@@ -1817,7 +1817,7 @@ mod tests {
                 &self,
                 _: (),
                 _: CanonicalCodexOAuthBundle,
-            ) -> Result<(), BrokerRefreshError> {
+            ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
                 panic!("API-key fixture must not refresh OAuth")
             }
             async fn abort_credential_refresh(&self, _: ()) -> Result<(), BrokerRefreshError> {

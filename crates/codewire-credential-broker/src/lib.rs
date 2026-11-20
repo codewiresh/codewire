@@ -15,6 +15,7 @@ pub mod anthropic;
 mod bridge;
 mod claude_oauth;
 mod codex_oauth;
+mod commit_failure;
 pub mod github;
 pub mod github_app;
 #[cfg(all(feature = "host-agent-synthetic-smoke", target_os = "linux"))]
@@ -49,6 +50,7 @@ pub use codewire_access::{CODEX_CONFIG_FILE_NAME, CodexProviderProjection};
 pub use codex_oauth::{
     CanonicalCodexOAuthBundle, CodexOAuthImport, CodexOAuthMaterialError, import_codex_tokens,
 };
+pub use commit_failure::CommitFailure;
 pub use github_app::{
     GitHubAccountKind, GitHubAppAuthorizationConfig, GitHubAppAuthorizationError,
     GitHubAppAuthorizationImport, GitHubAppAuthorizationOwner, GitHubAppInstallationReach,

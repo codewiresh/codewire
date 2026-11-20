@@ -45,6 +45,7 @@ const SKIP_DEBUG: &[&str] = &[
     ".codewire.local.credentials.v1.SetUserWorkloadSecretRequest",
     ".codewire.local.credentials.v1.SetProjectWorkloadSecretRequest",
     ".codewire.local.credentials.v1.BrokerBootSecret",
+    ".codewire.local.credentials.v1.BrokerCredentialRefreshCommitRequest",
 ];
 
 /// Reports a missing `protoc` in one line; any other failure keeps its detail.

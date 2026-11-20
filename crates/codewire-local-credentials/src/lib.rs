@@ -28,7 +28,7 @@ mod placeholder;
 mod platform;
 mod profile_rows;
 mod provider_revocation;
-mod refresh_staging;
+mod refresh_commit;
 mod repository;
 mod revocation;
 mod service;
@@ -58,7 +58,7 @@ pub use broker_channel::{
     BrokerLeaseAuditEvent, BrokerLeaseChannelError, LocalCredentialBrokerLeaseClient,
     LocalCredentialDelegationClient, LocalCredentialDelegationOutput,
     LocalEnvironmentProjectionBinding, LocalSshSignError, LocalSshSignRequest, LocalSshSigner,
-    StartedBrokerCredentialRefresh, serve_broker_lease_channel,
+    StartedBrokerCredentialRefresh, UnpublishedRefresh, serve_broker_lease_channel,
 };
 pub use broker_log::{
     AGENT_LOGIN_REFUSAL_AGENTS, AGENT_LOGIN_REFUSAL_REASONS, AGENT_LOGIN_REFUSED_MARKER,
@@ -87,8 +87,7 @@ pub use provider_revocation::{
     read_leased_material, run_revocation_executor,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use refresh_staging::testing as refresh_staging_testing;
-pub use refresh_staging::{RefreshStagingStore, RefreshStagingWrite};
+pub use refresh_commit::testing as refresh_testing;
 pub use repository::{
     GitHubLoginRenewer, GitHubLoginState, LocalCredentialRepositoryLeaseClient, LocalRepositoryGit,
     LocalRepositoryGitProcessSpawner, LocalRepositoryProcessConfig, LocalRepositoryProcessSpawner,
@@ -561,6 +560,7 @@ pub struct LocalCredentialAuthority<S: ProtectedStore> {
     catalog: ProviderCatalog,
     owner_id: OwnerId,
     active_refreshes: Mutex<BTreeMap<CredentialId, CredentialRefreshPermit>>,
+    settling_refreshes: refresh_commit::Settling,
     placeholder_key: placeholder::PlaceholderKeySlot,
 }
 
@@ -711,6 +711,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             catalog,
             owner_id,
             active_refreshes: Mutex::new(BTreeMap::new()),
+            settling_refreshes: Default::default(),
             placeholder_key: Default::default(),
         };
         authority.reconcile()?;
@@ -1324,44 +1325,6 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         Ok(execution_deadline_unix_ms)
     }
 
-    pub(crate) fn commit_environment_credential_refresh(
-        &self,
-        channel_id: Uuid,
-        refresh_id: Uuid,
-        request_id: Uuid,
-    ) -> Result<(CredentialRecord, u64), LocalCredentialError> {
-        let permit = self.active_refresh_permit(channel_id, refresh_id, request_id)?;
-        let connection = self.connection()?;
-        let current = load_internal_credential(
-            &connection,
-            permit.credential_id(),
-            Some(MaterialState::Ready),
-        )?;
-        let marker = load_credential_refresh_marker(&connection, permit.credential_id())?
-            .filter(|marker| {
-                marker.permit == permit
-                    && matches!(marker.phase, CredentialRefreshPhase::Started { .. })
-            })
-            .ok_or(LocalCredentialError::StaleCredentialRefresh)?;
-        validate_refresh_current(&current, &marker)?;
-        let journal = load_validated_protected_entry_journal(&connection, &current)?
-            .filter(|journal| journal.operation == JournalOperation::RollbackWrite)
-            .ok_or(LocalCredentialError::StaleCredentialRefresh)?;
-        // Publication is durable bookkeeping, not fresh request authority.
-        // The shared broker obtains a new operation lease after this commit.
-        // A completed blocking write remains recoverable after its deadline.
-        promote_oauth_refresh(&connection, &self.protected_store, &current, &journal)?;
-        let record = load_internal_credential(
-            &connection,
-            permit.credential_id(),
-            Some(MaterialState::Ready),
-        )?
-        .public;
-        drop(connection);
-        self.release_credential_refresh(permit.credential_id(), channel_id, refresh_id)?;
-        Ok((record, permit.next_material_generation()))
-    }
-
     /// Cancellation is valid only while no provider request has been started.
     pub(crate) fn abort_environment_credential_refresh(
         &self,
@@ -1395,50 +1358,6 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         delete_credential_refresh_journal(&connection, permit.credential_id())?;
         drop(connection);
         self.release_credential_refresh(permit.credential_id(), channel_id, refresh_id)
-    }
-
-    /// Invalidate an unsuccessful or ambiguous Started attempt. Neither a
-    /// provider response nor an opaque transport error is retained.
-    pub(crate) fn fail_environment_credential_refresh(
-        &self,
-        channel_id: Uuid,
-        refresh_id: Uuid,
-        request_id: Uuid,
-    ) -> Result<CredentialRecord, LocalCredentialError> {
-        let permit = self.active_refresh_permit(channel_id, refresh_id, request_id)?;
-        let connection = self.connection()?;
-        let marker = load_credential_refresh_marker(&connection, permit.credential_id())?
-            .filter(|marker| {
-                marker.permit == permit
-                    && matches!(marker.phase, CredentialRefreshPhase::Started { .. })
-            })
-            .ok_or(LocalCredentialError::StaleCredentialRefresh)?;
-        let current = load_internal_credential(
-            &connection,
-            permit.credential_id(),
-            Some(MaterialState::Ready),
-        )?;
-        validate_refresh_current(&current, &marker)?;
-        let journal = load_validated_protected_entry_journal(&connection, &current)?
-            .filter(|journal| journal.operation == JournalOperation::RollbackWrite)
-            .ok_or(LocalCredentialError::StaleCredentialRefresh)?;
-        if self
-            .protected_store
-            .get(&journal.protected_entry_id)?
-            .is_some()
-        {
-            return Err(LocalCredentialError::CorruptMetadata);
-        }
-        fail_oauth_refresh(&connection, &current)?;
-        let record = load_internal_credential(
-            &connection,
-            permit.credential_id(),
-            Some(MaterialState::Ready),
-        )?
-        .public;
-        drop(connection);
-        self.release_credential_refresh(permit.credential_id(), channel_id, refresh_id)?;
-        Ok(record)
     }
 
     pub(crate) fn release_channel_credential_refreshes(

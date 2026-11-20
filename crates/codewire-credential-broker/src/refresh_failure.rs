@@ -225,7 +225,6 @@ impl RefreshFailure {
                 BrokerRefreshError::InProgress => "start_in_progress",
                 BrokerRefreshError::InvalidRequest => "start_invalid_request",
                 BrokerRefreshError::InvalidResponse => "start_invalid_response",
-                BrokerRefreshError::StoreReadOnly => "start_store_read_only",
             },
             Self::RequestBuild => "request_build",
             Self::Transport(error) => match error {
@@ -249,7 +248,6 @@ impl RefreshFailure {
                 BrokerRefreshError::InProgress => "publication_in_progress",
                 BrokerRefreshError::InvalidRequest => "publication_invalid_request",
                 BrokerRefreshError::InvalidResponse => "publication_invalid_response",
-                BrokerRefreshError::StoreReadOnly => "publication_store_read_only",
             },
         }
     }

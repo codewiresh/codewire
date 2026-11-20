@@ -30,7 +30,6 @@ use crate::anthropic::{
     AnthropicApiKeyAdapter, AnthropicClaudeSignInAdapter, AnthropicStreamingResponse,
     AnthropicSubscriptionTokenAdapter,
 };
-use crate::bridge::BridgeEntry;
 use crate::claude_oauth::{
     CLAUDE_LOGIN_MINIMUM_VALIDITY_SECONDS, CanonicalClaudeOAuthBundle, ClaudeOAuthCredential,
 };
@@ -52,6 +51,7 @@ use crate::{
     BrokerCredentialLease, CredentialBrokerError, OpenAiApiKeyAdapter, OpenAiStreamingResponse,
     ValidatedOpenAiRequest,
 };
+use crate::{bridge::BridgeEntry, commit_failure::CommitFailure};
 
 const OPENAI_OPERATION: &str = "responses";
 const OPENAI_ROUTE: &str = "openai-api";
@@ -71,6 +71,7 @@ mod codex_login;
 mod entry;
 mod forced_refresh;
 mod github_front_door;
+mod refresh_outcome;
 use forced_refresh::{
     RefreshCredentialGeneration, RetryFailure, after_failed_refresh, forced_refresh_due,
     hold_rejection, refresh_generation,
@@ -224,27 +225,27 @@ pub trait BrokerLeaseProvider: Send + Sync {
         &self,
         permit: Self::StartedRefresh,
         material: CanonicalCodexOAuthBundle,
-    ) -> Result<(), BrokerRefreshError>;
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>>;
 
     /// Narrow GitHub App publication hook. The only accepted material is the
     /// canonical protected App bundle; raw CLI token bytes and arbitrary
     /// provider material cannot cross this boundary.
     async fn commit_github_app_refresh(
         &self,
-        _permit: Self::StartedRefresh,
+        permit: Self::StartedRefresh,
         _material: GitHubAppUserOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
-        Err(BrokerRefreshError::Denied)
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
+        Err(CommitFailure::returned(permit, BrokerRefreshError::Denied))
     }
 
     /// Narrow Claude sign-in publication hook. The only accepted material is
     /// the canonical sign-in envelope. Placements without Claude sign-ins deny.
     async fn commit_claude_oauth_refresh(
         &self,
-        _permit: Self::StartedRefresh,
+        permit: Self::StartedRefresh,
         _material: CanonicalClaudeOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
-        Err(BrokerRefreshError::Denied)
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
+        Err(CommitFailure::returned(permit, BrokerRefreshError::Denied))
     }
 
     /// Release a reservation only before Start. Absence of replacement material
@@ -305,10 +306,6 @@ pub enum BrokerRefreshError {
     InProgress,
     #[error("credential refresh generation changed")]
     Stale,
-    /// The broker's store cannot keep a refreshed bundle, so the refresh is
-    /// refused before Start and the provider is never asked (#5537).
-    #[error("credential refresh cannot be stored by this broker")]
-    StoreReadOnly,
 }
 
 /// Stable upstream failures safe to map back to the guest.
@@ -1943,35 +1940,12 @@ where
             }
         };
         match exchanged {
-            Ok(published) => published.map_err(|error| {
-                RefreshFailure::Publication(error).warn(provider);
-                publication_failure()
-            }),
+            Ok(published) => match published {
+                Ok(()) => Ok(()),
+                Err(failure) => Self::publication_failed(&*leases, failure, provider).await,
+            },
             Err((permit, (failure, error))) => {
                 Self::fail_started_refresh(&*leases, permit, provider, failure, error).await
-            }
-        }
-    }
-
-    /// Record one terminal failure for an exact started attempt after logging
-    /// its closed class. The caller never retries the previous refresh token.
-    async fn fail_started_refresh(
-        leases: &P,
-        permit: P::StartedRefresh,
-        provider: &'static str,
-        failure: RefreshFailure,
-        error: BrokerRequestError,
-    ) -> Result<(), BrokerRequestError> {
-        failure.warn(provider);
-        match leases.fail_credential_refresh(permit).await {
-            Ok(()) => Err(error),
-            Err(_) => {
-                tracing::warn!(
-                    provider,
-                    failure = failure.class(),
-                    "provider credential refresh failure could not be recorded"
-                );
-                Err(BrokerRequestError::AuthorityUnavailable)
             }
         }
     }
@@ -2135,13 +2109,12 @@ where
         };
         let (failure, error) = match exchange_github_app_refresh(&owner, bundle).await {
             Ok(bundle) => {
-                return leases
-                    .commit_github_app_refresh(permit, bundle)
-                    .await
-                    .map_err(|error| {
-                        RefreshFailure::Publication(error).warn(GITHUB_REFRESH_PROVIDER);
-                        publication_failure()
-                    });
+                return match leases.commit_github_app_refresh(permit, bundle).await {
+                    Ok(()) => Ok(()),
+                    Err(failure) => {
+                        Self::publication_failed(&*leases, failure, GITHUB_REFRESH_PROVIDER).await
+                    }
+                };
             }
             Err(failed) => failed,
         };
@@ -2575,9 +2548,9 @@ fn publication_failure() -> BrokerRequestError {
 
 fn map_refresh_error(error: BrokerRefreshError) -> BrokerRequestError {
     match error {
-        BrokerRefreshError::InvalidRequest
-        | BrokerRefreshError::Denied
-        | BrokerRefreshError::StoreReadOnly => BrokerRequestError::Denied,
+        BrokerRefreshError::InvalidRequest | BrokerRefreshError::Denied => {
+            BrokerRequestError::Denied
+        }
         BrokerRefreshError::Unavailable
         | BrokerRefreshError::InvalidResponse
         | BrokerRefreshError::InProgress
@@ -2802,8 +2775,8 @@ mod tests {
             &self,
             _permit: Self::StartedRefresh,
             _material: CanonicalCodexOAuthBundle,
-        ) -> Result<(), BrokerRefreshError> {
-            Err(BrokerRefreshError::Denied)
+        ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
+            Err(BrokerRefreshError::Denied.into())
         }
 
         async fn abort_credential_refresh(
@@ -2900,9 +2873,11 @@ mod tests {
         /// The authority refuses the commit and keeps its owner, as a local
         /// authority does until the lease channel closes.
         refuse_commit: bool,
-        /// The broker's store cannot stage a refreshed bundle, as a local
-        /// broker on a `file` store (#5537).
-        store_read_only: bool,
+        /// A refused commit hands its started permit back, as a local
+        /// commit whose bundle was not stored does (#5537).
+        return_refused_permit: bool,
+        /// The authority cannot record a refresh failure.
+        refuse_failure: bool,
     }
 
     #[async_trait]
@@ -2954,9 +2929,6 @@ mod tests {
             request: BrokerCredentialRefreshRequest,
         ) -> Result<BrokerRefreshAdmission<Self::RefreshReservation>, BrokerRefreshError> {
             self.begin_count.fetch_add(1, Ordering::Relaxed);
-            if self.store_read_only {
-                return Err(BrokerRefreshError::StoreReadOnly);
-            }
             if let Some(material) = self.recovered_material.lock().unwrap().take() {
                 let observed = self
                     .authority
@@ -3063,14 +3035,20 @@ mod tests {
             &self,
             permit: Self::StartedRefresh,
             material: CanonicalCodexOAuthBundle,
-        ) -> Result<(), BrokerRefreshError> {
+        ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
+            if self.refuse_commit && self.return_refused_permit {
+                return Err(CommitFailure::returned(
+                    permit,
+                    BrokerRefreshError::Unavailable,
+                ));
+            }
             if self.refuse_commit
                 || !self.refresh_active.load(Ordering::Acquire)
                 || permit.credential_id != self.credential_id
                 || permit.material_generation
                     != self.material_generation.load(Ordering::Acquire) as u64
             {
-                return Err(BrokerRefreshError::Denied);
+                return Err(BrokerRefreshError::Denied.into());
             }
             self.commit_started.store(true, Ordering::Release);
             if !self.commit_delay.is_zero() {
@@ -3095,7 +3073,7 @@ mod tests {
                     observed.expires_at_unix,
                     observed.account_hint,
                 )
-                .map_err(|_| BrokerRefreshError::Unavailable);
+                .map_err(|_| CommitFailure::from(BrokerRefreshError::Unavailable));
             if result.is_ok() {
                 self.material_generation.fetch_add(1, Ordering::AcqRel);
                 self.commit_count.fetch_add(1, Ordering::Relaxed);
@@ -3125,6 +3103,9 @@ mod tests {
             &self,
             permit: Self::StartedRefresh,
         ) -> Result<(), BrokerRefreshError> {
+            if self.refuse_failure {
+                return Err(BrokerRefreshError::Unavailable);
+            }
             if permit.credential_id != self.credential_id
                 || !self.refresh_active.swap(false, Ordering::AcqRel)
             {
@@ -3617,7 +3598,8 @@ mod tests {
                 begin_control: None,
                 deny_login: Arc::new(AtomicBool::new(false)),
                 refuse_commit: false,
-                store_read_only: false,
+                return_refused_permit: false,
+                refuse_failure: false,
             },
             OAuthSyntheticUpstream {
                 refresh_status,
@@ -5073,24 +5055,78 @@ mod tests {
         assert_eq!(state.failure_count.load(Ordering::Relaxed), 0);
     }
 
-    /// A broker whose store cannot stage the refreshed bundle never asks the
-    /// provider: the refresh is refused before Start, so the stored refresh
-    /// token is never spent, and the request is denied without ending the
-    /// epoch (#5537).
+    fn refresh_answer() -> (String, Vec<u8>) {
+        let access_token = jwt(json!({
+            "exp": current_unix_time().expect("current time") + 3_600
+        }));
+        let refresh_response = serde_json::to_vec(&json!({
+            "access_token": access_token.clone(),
+            "refresh_token": "synthetic-new-refresh-token",
+            "token_type": "bearer"
+        }))
+        .unwrap();
+        (access_token, refresh_response)
+    }
+
+    /// A publication that fails with its permit back is recorded as a failed
+    /// refresh: the request is refused as needing Reconnect, and the epoch
+    /// goes on serving (#5537).
     #[tokio::test]
-    async fn a_store_that_cannot_stage_refuses_the_refresh_before_any_provider_request() {
-        let (mut broker, state) =
-            oauth_broker(StatusCode::OK, Vec::new(), "unused".into(), Duration::ZERO);
-        Arc::get_mut(&mut broker.leases).unwrap().store_read_only = true;
-        assert!(matches!(
-            broker.execute(request()).await,
-            Err(BrokerRequestError::Denied)
-        ));
-        assert_eq!(state.begin_count.load(Ordering::Relaxed), 1);
-        assert_eq!(broker.leases.start_count.load(Ordering::Acquire), 0);
-        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 0);
-        assert_eq!(state.response_count.load(Ordering::Relaxed), 0);
+    async fn a_failed_publication_with_its_permit_back_is_recorded_and_the_epoch_goes_on() {
+        use crate::bridge::tests::{Answer, TestEpoch};
+        let (access_token, refresh_response) = refresh_answer();
+        let (mut broker, state) = oauth_broker(
+            StatusCode::OK,
+            refresh_response,
+            access_token,
+            Duration::ZERO,
+        );
+        let leases = Arc::get_mut(&mut broker.leases).unwrap();
+        leases.refuse_commit = true;
+        leases.return_refused_permit = true;
+        let refresh_active = Arc::clone(&broker.leases.refresh_active);
+        let mut epoch = TestEpoch::start(Arc::new(broker)).await;
+        let first = epoch.answer(request()).await;
+        assert!(matches!(first, Answer::Response { .. }), "{first:?}");
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
         assert_eq!(state.commit_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.failure_count.load(Ordering::Relaxed), 1);
+        assert!(!refresh_active.load(Ordering::Acquire));
+        // The same epoch still answers: the failed publication refused one
+        // request, not the bridge. The credential is now failed, so its next
+        // lease is denied, by this epoch.
+        assert_eq!(
+            epoch.answer(request()).await,
+            Answer::Failure(v1::CredentialBridgeFailureReason::Denied)
+        );
+        assert_eq!(state.refresh_count.load(Ordering::Relaxed), 1);
+    }
+
+    /// When the authority can't record that failure, the epoch ends as
+    /// before, so recovery decides from the journal (#5537).
+    #[tokio::test]
+    async fn a_failed_publication_the_authority_cannot_record_ends_the_epoch() {
+        use crate::bridge::tests::{Answer, TestEpoch};
+        let (access_token, refresh_response) = refresh_answer();
+        let (mut broker, state) = oauth_broker(
+            StatusCode::OK,
+            refresh_response,
+            access_token,
+            Duration::ZERO,
+        );
+        let leases = Arc::get_mut(&mut broker.leases).unwrap();
+        leases.refuse_commit = true;
+        leases.return_refused_permit = true;
+        leases.refuse_failure = true;
+        let mut epoch = TestEpoch::start(Arc::new(broker)).await;
+        assert_eq!(
+            epoch.answer(request()).await,
+            Answer::Failure(v1::CredentialBridgeFailureReason::Unavailable)
+        );
+        assert_eq!(
+            epoch.ended().await,
+            Err(crate::BrokerBridgeError::Unavailable)
+        );
         assert_eq!(state.failure_count.load(Ordering::Relaxed), 0);
     }
 

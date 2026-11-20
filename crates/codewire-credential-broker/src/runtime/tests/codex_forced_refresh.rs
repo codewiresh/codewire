@@ -79,7 +79,8 @@ fn second_broker(
             begin_control: None,
             deny_login: Arc::new(AtomicBool::new(false)),
             refuse_commit: false,
-            store_read_only: false,
+            return_refused_permit: false,
+            refuse_failure: false,
         },
         OAuthSyntheticUpstream {
             refresh_status: StatusCode::OK,

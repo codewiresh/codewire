@@ -76,7 +76,7 @@ impl BrokerLeaseProvider for Authority {
         &self,
         _: (),
         _: CanonicalCodexOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         panic!("non-refreshing HTTP identity attempted refresh")
     }
     async fn abort_credential_refresh(&self, _: ()) -> Result<(), BrokerRefreshError> {
@@ -591,17 +591,17 @@ impl BrokerLeaseProvider for AppRefreshAuthority {
         &self,
         _: Self::StartedRefresh,
         _: CanonicalCodexOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
-        Err(BrokerRefreshError::Denied)
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
+        Err(BrokerRefreshError::Denied.into())
     }
 
     async fn commit_github_app_refresh(
         &self,
         permit: Self::StartedRefresh,
         bundle: GitHubAppUserOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
         if self.refuse_commit {
-            return Err(BrokerRefreshError::Denied);
+            return Err(BrokerRefreshError::Denied.into());
         }
         let mut material = bundle.into_bytes();
         GitHubAppUserOAuthBundle::parse(&material)
@@ -611,7 +611,7 @@ impl BrokerLeaseProvider for AppRefreshAuthority {
             .lock()
             .map_err(|_| BrokerRefreshError::Unavailable)?;
         if permit != (state.revocation_generation, state.material_generation) {
-            return Err(BrokerRefreshError::Stale);
+            return Err(BrokerRefreshError::Stale.into());
         }
         state.material = Zeroizing::new(std::mem::take(&mut *material));
         state.revocation_generation = state

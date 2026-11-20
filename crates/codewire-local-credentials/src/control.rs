@@ -50,6 +50,23 @@ impl std::fmt::Debug for v1::RotateCredentialMaterialRequest {
     }
 }
 
+impl std::fmt::Debug for v1::BrokerCredentialRefreshCommitRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrokerCredentialRefreshCommitRequest")
+            .field("refresh_id", &self.refresh_id)
+            .field("request_id", &self.request_id)
+            .field("material", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for v1::BrokerCredentialRefreshCommitRequest {
+    fn drop(&mut self) {
+        self.material.zeroize();
+    }
+}
+
 impl Drop for v1::AddCredentialRequest {
     fn drop(&mut self) {
         self.material.zeroize();
@@ -100,6 +117,19 @@ impl std::fmt::Debug for v1::BrokerBootSecret {
 #[cfg(test)]
 mod tests {
     use super::{v1, zeroize_workload_secret_value};
+
+    #[test]
+    fn a_refresh_commit_debugs_without_its_material() {
+        let request = v1::BrokerCredentialRefreshCommitRequest {
+            refresh_id: "refresh".into(),
+            request_id: "request".into(),
+            material: b"refreshed-bundle-canary".to_vec(),
+        };
+        let printed = format!("{request:?}");
+        assert!(printed.contains("refresh"), "{printed}");
+        assert!(!printed.contains("refreshed-bundle-canary"), "{printed}");
+        assert!(!printed.contains("114, 101, 102"), "{printed}");
+    }
 
     #[test]
     fn an_ensure_request_debugs_without_its_boot_secrets() {

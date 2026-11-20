@@ -50,8 +50,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     BrokerCredentialRefreshRequest, BrokerHttpResponse, BrokerLeaseError, BrokerLeaseProvider,
-    BrokerRefreshAdmission, BrokerRefreshError, CanonicalCodexOAuthBundle, OpenAiBroker,
-    SyntheticOpenAiSmokeTransport,
+    BrokerRefreshAdmission, BrokerRefreshError, CanonicalCodexOAuthBundle, CommitFailure,
+    OpenAiBroker, SyntheticOpenAiSmokeTransport,
 };
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -141,8 +141,8 @@ impl BrokerLeaseProvider for SmokeAuthority {
         &self,
         _: (),
         _: CanonicalCodexOAuthBundle,
-    ) -> Result<(), BrokerRefreshError> {
-        Err(BrokerRefreshError::Denied)
+    ) -> Result<(), CommitFailure<Self::StartedRefresh>> {
+        Err(CommitFailure::returned((), BrokerRefreshError::Denied))
     }
     async fn abort_credential_refresh(&self, _: ()) -> Result<(), BrokerRefreshError> {
         Err(BrokerRefreshError::Denied)
