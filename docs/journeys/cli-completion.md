@@ -12,15 +12,15 @@ completion"). The format is in [README.md](README.md).
 ## Where the journey stands
 
 Updated 2026-11-17. Written first; only the local half of
-`complete-environments` is observed so far.
+`complete-environments` is observed so far, on a local build.
 
 | ID | Local | Dev | Production |
 | --- | --- | --- | --- |
-| `complete-environments` | local names observed 2026-11-17; cloud names not yet | not yet observed | not applicable |
+| `complete-environments` | local names observed 2026-11-17; cloud names observed 2026-11-20, a local build against Dev's server | not yet observed | not applicable |
 | `complete-sessions` | not yet observed | not yet observed | not applicable |
 | `complete-account-names` | not yet observed | not yet observed | not applicable |
 | `complete-snapshots` | not yet observed | not yet observed | not applicable |
-| `complete-bounds` | not yet observed | not yet observed | not applicable |
+| `complete-bounds` | server bounds observed 2026-11-20; cache, expiry and logout states by tests only | not yet observed | not applicable |
 | `complete-install` | not yet observed | not applicable | not applicable |
 
 Production is not walked: completion reads only the signed-in user's own
@@ -98,6 +98,15 @@ or hash is ever read for completion, let alone offered.
     <TAB>` completed it, and `cw --cloud attach <TAB>` offered no local name.
     Local names only; cloud names, `cw ls -o json` set equality and a walk on
     Dev are not yet observed (#5195).
+  - 2026-11-20, local build of #5406 at fc54e79d27, as the Dev smoke identity
+    through `with-dev-smoke-auth.sh` (an API key in a throwaway `HOME`, so no
+    saved sign-in and no cache), against `codewire-dev.sh`: `cw ls --output
+    json` named one cloud environment, `egress-walk-pre`, and the engine
+    offered exactly that name, labelled `cloud`, for `cw attach ''` in fish,
+    zsh and bash (197 to 291 ms each); `cw --local attach ''` offered none and
+    `cw --cloud attach ''` offered it. Not walked: a saved OAuth sign-in (the
+    cache, its expiry and `cw logout`), a keypress in each shell, and a local
+    and a cloud environment together.
 
 ## `complete-sessions`: `cw msg ENV --session <TAB>`
 
@@ -143,9 +152,9 @@ or hash is ever read for completion, let alone offered.
 - **Entry points:** every completion above.
 - **States to exercise:** the server unreachable, the server answering slowly,
   signed out, an expired sign-in (completion neither refreshes nor rewrites
-  it), a corrupt or unreadable cache file, a terminal with no `HOME`, a switch
+  it), a corrupt or unreadable cache file, a terminal with no `HOME`, an API key in `CODEWIRE_API_KEY` (no cache is read or written), a switch
   to another account, organization or server (the previous one's cloud names
-  are not offered, not even from a fresh cache), and `cw logout` (the cache is
+  are not offered, not even from a fresh cache), and `cw login` or `cw logout` (the cache is
   gone), and a local daemon that is wedged: its socket accepts and never
   answers.
 - **Driving it:** point `CODEWIRE_API_URL` at a port that accepts and never
@@ -164,6 +173,14 @@ or hash is ever read for completion, let alone offered.
     no cloud name from before is offered;
   - the cache file holds names only, in the user's own state directory, mode
     0600, and a test reads it and finds no value, token or ID.
+- **Observed:**
+  - 2026-11-20, local build of #5406 at fc54e79d27, engine call in fish with an
+    API key and no `HOME` state: a server that accepts and never answers cost
+    426 ms, a closed port 31 ms, and signed out 32 ms; each printed only the
+    flags, with no prompt, error text or sign-in. The cache, an expired
+    sign-in and `cw logout` are covered by `completion/cache/tests.rs` and
+    `completion/cloud/tests.rs` and not yet observed on a built `cw`; the
+    wedged local daemon is not yet observed.
 
 ## `complete-install`: install, doctor and upgrade
 

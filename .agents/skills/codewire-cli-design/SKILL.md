@@ -184,10 +184,11 @@ The spec and journey are `docs/journeys/cli-completion.md` (#5108; owner,
   It never signs in, refreshes a sign-in, starts a daemon or a VM, or writes
   to stdout or stderr but the candidates.
 - Local names come from local state and a daemon that is already running.
-  Cloud names come from a names-only cache in the user's state directory
+  Cloud names come from a names-only cache beside the saved sign-in
   (mode 0600), keyed by server URL, user and organization, fresh for 30 s and
-  served stale for an hour when the bounded request fails. `cw logout` removes
-  it, and a switch of account, organization or server never offers the
+  served stale for an hour when the bounded request fails. `cw login` and
+  `cw logout` remove it, a sign-in with `CODEWIRE_API_KEY` reads and writes
+  none, and a switch of account, organization or server never offers the
   previous one's names. Signed out, a cloud name is simply not offered.
 - A name is offered in the form its argument accepts: an organization's slug
   or ID where `--org` takes one, the name where a command takes a name, the

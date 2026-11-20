@@ -70,6 +70,7 @@ pub(crate) async fn log_out(
             access_token_expires_at_unix: None,
         },
     };
+    crate::completion::forget_cached_names(config_dir);
     codewire_client::CredentialStore::delete(&store).context("remove the saved sign-in")?;
     config::delete_platform_config(config_dir).context("remove the saved configuration")?;
     config::delete_deployment_ca(config_dir).context("remove the pinned CA")?;

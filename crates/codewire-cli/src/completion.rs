@@ -186,6 +186,9 @@ fn words_before_cursor_of(
     words.into_iter().take(index).skip(1).collect()
 }
 
+mod cache;
+pub(crate) use cache::remove as forget_cached_names;
+mod cloud;
 mod environments;
 pub(crate) use environments::environments;
 

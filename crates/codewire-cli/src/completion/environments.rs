@@ -34,16 +34,26 @@ pub(crate) fn environments(current: &OsStr) -> Vec<CompletionCandidate> {
     let Some(prefix) = current.to_str() else {
         return Vec::new();
     };
-    // `--cloud`, before or after the command, selects the cloud's names alone.
-    let cloud_only = super::words_before_cursor()
-        .iter()
-        .any(|word| word == "--cloud");
-    if cloud_only {
-        return Vec::new();
+    let words = super::words_before_cursor();
+    let said = |flag: &str| words.iter().any(|word| word == flag);
+    // `--local` and `--cloud`, before or after the command, narrow the names
+    // to one placement; with neither, both are offered, a local one first.
+    let mut candidates: Vec<CompletionCandidate> = Vec::new();
+    let mut offer = |names: Vec<String>, placement: &'static str| {
+        for name in names.into_iter().filter(|name| name.starts_with(prefix)) {
+            if !candidates
+                .iter()
+                .any(|offered| offered.get_value() == OsStr::new(&name))
+            {
+                candidates.push(CompletionCandidate::new(name).help(Some(placement.into())));
+            }
+        }
+    };
+    if !said("--cloud") {
+        offer(local_names(), "local");
     }
-    local_names()
-        .into_iter()
-        .filter(|name| name.starts_with(prefix))
-        .map(|name| CompletionCandidate::new(name).help(Some("local".into())))
-        .collect()
+    if !said("--local") {
+        offer(super::cloud::environment_names(), "cloud");
+    }
+    candidates
 }

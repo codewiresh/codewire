@@ -522,7 +522,7 @@ pub struct SavedAccount {
     pub user_id: String,
 }
 
-const ACCOUNT_FILE: &str = "account.json";
+pub(crate) const ACCOUNT_FILE: &str = "account.json";
 
 /// Write `account.json` atomically: a private temporary file, synced, then
 /// renamed over the old one and the directory synced, so a reader sees the

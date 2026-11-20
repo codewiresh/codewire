@@ -641,6 +641,7 @@ pub(crate) fn save_login_platform_config(
     default_org: Option<&str>,
     deployment_ca: Option<&config::PinnedCa>,
 ) -> anyhow::Result<()> {
+    crate::completion::forget_cached_names(&paths.platform_config_dir);
     config::save_platform_config(
         &paths.platform_config_dir,
         &config::PlatformConfig {
@@ -650,11 +651,8 @@ pub(crate) fn save_login_platform_config(
         },
     )
     .context("save config")?;
-    codewire_client::CredentialStore::save(
-        &codewire_client::FileCredentialStore::new(&paths.platform_config_dir),
-        credentials,
-    )
-    .context("save OAuth credentials")
+    let store = codewire_client::FileCredentialStore::new(&paths.platform_config_dir);
+    codewire_client::CredentialStore::save(&store, credentials).context("save OAuth credentials")
 }
 
 pub(crate) fn oauth_user_display_name(user: &OAuthUserInfo) -> String {
