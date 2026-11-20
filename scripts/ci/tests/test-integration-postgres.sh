@@ -389,7 +389,8 @@ batches = [
     ['test', '--locked', '-p', 'codewire-credential-broker', '--no-default-features', '--features',
      'platform,ssh-agent', '--lib', '--no-run'],
     ['test', '--locked', '-p', 'codewire-platform-credentials', '--test', 'storage',
-     '--test', 'profiles', '--test', 'refresh', '--test', 'authority', '--test', 'owner_sources', '--no-run'],
+     '--test', 'profiles', '--test', 'refresh', '--test', 'authority', '--test', 'owner_sources',
+     '--test', 'placeholder_keys', '--no-run'],
     ['test', '-p', 'codewire-billing', '--lib', '--no-run'],
 ]
 lane_order = ['core', 'credential-mutations', 'credential-service', 'broker-admission', 'broker-checked',
@@ -1154,7 +1155,7 @@ archive_build_check() {
     { echo "the $batches $name build batches did not run at the same time" >&2; exit 1; }
 }
 EXPECTED_DATABASE_ARCHIVES='nextest archive --locked -p codewire-server-core --lib --test session_auth --test org_deletion_lifecycle --test oauth_bearer_auth --archive-file OUT/codewire-server-core.tar.zst
-nextest archive --locked -p codewire-platform-credentials --test storage --test profiles --test refresh --test authority --test owner_sources --archive-file OUT/codewire-platform-credentials.tar.zst
+nextest archive --locked -p codewire-platform-credentials --test storage --test profiles --test refresh --test authority --test owner_sources --test placeholder_keys --archive-file OUT/codewire-platform-credentials.tar.zst
 nextest archive --locked -p codewire-orchestration --lib --test access_profiles --test credentials --test environment_external_cleanup --test environment_sources --archive-file OUT/codewire-orchestration.tar.zst
 nextest archive --locked -p codewire-credential-service --features enrollment --lib --archive-file OUT/codewire-credential-service--features-enrollment.tar.zst
 nextest archive --locked -p codewire-credential-service --lib --archive-file OUT/codewire-credential-service.tar.zst
@@ -1179,7 +1180,7 @@ database/batch-credential-service-enrollment:
 database/batch-orchestration:
   nextest archive --locked -p codewire-orchestration --lib --test access_profiles --test credentials --test environment_external_cleanup --test environment_sources --archive-file OUT/codewire-orchestration.tar.zst
 database/batch-platform-credentials:
-  nextest archive --locked -p codewire-platform-credentials --test storage --test profiles --test refresh --test authority --test owner_sources --archive-file OUT/codewire-platform-credentials.tar.zst
+  nextest archive --locked -p codewire-platform-credentials --test storage --test profiles --test refresh --test authority --test owner_sources --test placeholder_keys --archive-file OUT/codewire-platform-credentials.tar.zst
   nextest archive --locked -p codewire-billing --lib --archive-file OUT/codewire-billing.tar.zst' 4
 [ ! -e "$TMP/archive-build-database/build/targets/database/batch-migration-runner" ] ||
   { echo 'the migration runner batch folder from before was kept' >&2; exit 1; }

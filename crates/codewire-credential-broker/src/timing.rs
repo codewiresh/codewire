@@ -77,6 +77,41 @@ impl MaterialCacheUse {
     }
 }
 
+/// Whether a request's hosted leases carried their environment's placeholder,
+/// and how (#4001). A request with several leases reports the worst: a
+/// failure over a derivation over a reuse. A failure is one closed reason;
+/// the line never carries an environment, a key or a provider's error.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PlaceholderUse {
+    /// No lease asked for a placeholder: placeholders are off, or the epoch
+    /// is not hosted.
+    #[default]
+    Off,
+    /// Every lease reused one its epoch had already derived.
+    Reused,
+    /// A lease read its environment's key and derived one.
+    Derived,
+    /// The environment or its key was not found.
+    NotFound,
+    /// The database or the key-encryption provider was unavailable.
+    ProviderUnavailable,
+    /// The stored key did not open.
+    CorruptRecord,
+}
+
+impl PlaceholderUse {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Reused => "reused",
+            Self::Derived => "derived",
+            Self::NotFound => "not_found",
+            Self::ProviderUnavailable => "provider_unavailable",
+            Self::CorruptRecord => "corrupt_record",
+        }
+    }
+}
+
 /// Whether a request's leases reused their hosted epoch's authority decision.
 /// A request with several leases reports the most expensive.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -138,6 +173,7 @@ pub struct Timings {
     pub lease_wait: Sample,
     pub material_cache: MaterialCacheUse,
     pub authority_decision: AuthorityUse,
+    pub placeholder: PlaceholderUse,
 }
 
 impl Timings {
@@ -190,6 +226,11 @@ pub fn record(phase: Phase, count: u32, elapsed: Duration) {
 /// Record one lease's material-cache decision in the current record.
 pub fn material_cache(decision: MaterialCacheUse) {
     update(|timings| timings.material_cache = timings.material_cache.max(decision));
+}
+
+/// Record how one hosted lease came by its placeholder in the current record.
+pub fn placeholder(decision: PlaceholderUse) {
+    update(|timings| timings.placeholder = timings.placeholder.max(decision));
 }
 
 /// Record whether one lease reused or evaluated authority in the current record.
@@ -315,6 +356,7 @@ pub(crate) fn proxied_request(
         record_ms = ms(timings.record.elapsed),
         material_reads = timings.material_read.count,
         cache = timings.material_cache.label(),
+        placeholder = timings.placeholder.label(),
         read_db_ms = ms(timings.material_database()),
         unwraps = timings.unwrap.count,
         unwrap_ms = ms(timings.unwrap.elapsed),
@@ -533,6 +575,7 @@ pub(crate) mod tests {
         "record_ms",
         "material_reads",
         "cache",
+        "placeholder",
         "read_db_ms",
         "unwraps",
         "unwrap_ms",
@@ -627,6 +670,11 @@ pub(crate) mod tests {
         "none",
         "reused",
         "evaluated",
+        "off",
+        "derived",
+        "not_found",
+        "provider_unavailable",
+        "corrupt_record",
     ];
 
     /// The whole contract of a timing line: the dedicated target, exactly its
@@ -826,6 +874,7 @@ pub(crate) mod tests {
         timings.lease_wait.add(1, millis(7));
         timings.material_cache = MaterialCacheUse::Miss;
         timings.authority_decision = AuthorityUse::Reused;
+        timings.placeholder = PlaceholderUse::CorruptRecord;
         let canonical = Uuid::new_v4().to_string();
         let response = Ok(BrokerHttpResponse::new(
             StatusCode::UNAUTHORIZED,
@@ -868,6 +917,7 @@ pub(crate) mod tests {
         assert_eq!(first["lease_wait_ms"], 7.0);
         assert_eq!(first["cache"], "miss");
         assert_eq!(first["authority"], "reused");
+        assert_eq!(first["placeholder"], "corrupt_record");
         let second = &lines[1]["fields"];
         assert_eq!(second["request_id"], Uuid::nil().to_string().as_str());
         assert_eq!(second["slot"], "invalid");

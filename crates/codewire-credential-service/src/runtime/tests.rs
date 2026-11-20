@@ -906,3 +906,44 @@ async fn dead_pooled_database_connection_fails_at_most_one_statement() -> Result
     admin.close().await?;
     Ok(())
 }
+
+/// With hosted placeholders on, startup requires SELECT and INSERT on the
+/// placeholder key table: either alone is refused (#4001). The real
+/// restricted login of a migrated, isolated database, as the Kind ACL guard's
+/// test uses, starts with both.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn hosted_placeholders_require_select_and_insert_on_the_key_table() -> Result<()> {
+    use crate::platform_test_support::{TestDatabase, quote_ident};
+    let database = TestDatabase::create().await?;
+    let result = async {
+        let (pool, role) = database.broker_pool().await?;
+        let role = quote_ident(&role);
+        ensure!(
+            super::placeholder_keys_privileges(&pool).await?,
+            "SELECT and INSERT are accepted"
+        );
+        sqlx::query(&format!(
+            "REVOKE INSERT ON public.platform_placeholder_keys FROM {role}"
+        ))
+        .execute(&database.pool)
+        .await?;
+        ensure!(
+            !super::placeholder_keys_privileges(&pool).await?,
+            "SELECT alone is refused"
+        );
+        sqlx::query(&format!(
+            "REVOKE SELECT ON public.platform_placeholder_keys FROM {role}"
+        ))
+        .execute(&database.pool)
+        .await?;
+        ensure!(
+            !super::placeholder_keys_privileges(&pool).await?,
+            "no grant is refused"
+        );
+        pool.close().await;
+        Ok(())
+    }
+    .await;
+    database.finish(result).await
+}

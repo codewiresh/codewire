@@ -346,17 +346,19 @@ fn derivation_matches_the_documented_layout() {
 #[test]
 fn derivation_matches_a_known_answer() {
     let key_bytes: [u8; PLACEHOLDER_KEY_BYTES] = std::array::from_fn(|index| index as u8);
+    assert_eq!(known_answer::KEY, key_bytes);
     let placeholder = CredentialPlaceholder::derive(
-        &PlaceholderKey::from_slice(&key_bytes).unwrap(),
-        &environment("environment-a"),
-        0x0102_0304_0506_0708,
-        &slot("codex"),
-        &credential("credential-a"),
+        &PlaceholderKey::from_slice(&known_answer::KEY).unwrap(),
+        &environment(known_answer::ENVIRONMENT),
+        known_answer::BINDING_REVISION,
+        &slot(known_answer::SLOT),
+        &credential(known_answer::CREDENTIAL),
     );
     assert_eq!(
         placeholder.as_str(),
         "cwp1_CrtskkVMKO8hWIv0dqtomFhFamB5zbu6Peo4NJ8QLZc"
     );
+    assert_eq!(placeholder.as_str(), known_answer::PLACEHOLDER);
 }
 
 /// The Claude Code compatibility check makes its placeholders up in the shape

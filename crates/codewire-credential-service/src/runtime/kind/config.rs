@@ -179,6 +179,11 @@ async fn assert_restricted_role(pool: &PgPool, expected_role: &str) -> Result<()
              ]::text[]) AS material(name) \
              WHERE pg_catalog.has_any_column_privilege(current_user,'public.'||material.name,'SELECT') \
          ) \
+         AND (pg_catalog.to_regclass('public.platform_placeholder_keys') IS NULL OR ( \
+             NOT pg_catalog.has_table_privilege(current_user,'public.platform_placeholder_keys', \
+                 'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') \
+             AND NOT pg_catalog.has_any_column_privilege(current_user, \
+                 'public.platform_placeholder_keys','UPDATE,REFERENCES'))) \
          AND NOT pg_catalog.has_table_privilege(current_user,'public.tenant_secrets','SELECT') \
          AND NOT pg_catalog.has_table_privilege(current_user,'public.tenant_secret_deks','SELECT') \
          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a \
@@ -318,6 +323,12 @@ mod tests {
                     "UPDATE (released_at) ON public.sandbox_workspace_bindings",
                     "INSERT ON public.sandbox_workspace_bindings",
                     "UPDATE (pod_uid) ON public.sandbox_environment_backend",
+                    // A placeholder key is created once and never changed or
+                    // removed by the broker (#4001).
+                    "UPDATE ON public.platform_placeholder_keys",
+                    "UPDATE (nonce) ON public.platform_placeholder_keys",
+                    "DELETE ON public.platform_placeholder_keys",
+                    "TRUNCATE ON public.platform_placeholder_keys",
                     // The broker uses no sequence, so the guard denies every
                     // privilege on every public sequence.
                     "USAGE ON SEQUENCE public.billing_events_id_seq",

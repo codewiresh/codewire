@@ -556,8 +556,9 @@ fn the_placeholder_is_the_same_after_the_authority_restarts() {
 #[test]
 fn a_stored_key_is_used_as_it_is() {
     let fixture = fixture();
-    // Built at run time: a key of one repeated byte.
-    let key_bytes = [0x2a_u8; PLACEHOLDER_KEY_BYTES];
+    // The shared worked derivation's key (#4001), so local and hosted derive
+    // under the same written-out key.
+    let key_bytes = codewire_access::known_answer::KEY;
     fixture.set_stored_key(&key_bytes);
     let expected = CredentialPlaceholder::derive(
         &PlaceholderKey::from_slice(&key_bytes).unwrap(),

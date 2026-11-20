@@ -51,7 +51,7 @@ pub use model::{
 };
 pub use placeholder::{
     CREDENTIAL_PLACEHOLDER_LENGTH, CREDENTIAL_PLACEHOLDER_TAG, CredentialPlaceholder,
-    PLACEHOLDER_KEY_BYTES, PlaceholderKey,
+    PLACEHOLDER_KEY_BYTES, PlaceholderKey, known_answer,
 };
 pub use projection::{
     CODEX_CONFIG_FILE_NAME, CODEX_MANAGED_CONFIG_HEADER, CODEX_NATIVE_HOME, CODEX_PLATFORM_HOME,

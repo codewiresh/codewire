@@ -90,6 +90,38 @@ pub enum RuntimeError {
     Hardening,
 }
 
+/// With hosted placeholders on, every hosted lease reads, and on its first use
+/// creates, its environment's placeholder key (#4001). A login that cannot
+/// select and insert that table would leave every lease without a placeholder,
+/// so startup fails instead.
+async fn placeholder_keys_granted(pool: &PgPool) -> Result<(), RuntimeError> {
+    if placeholder_keys_privileges(pool)
+        .await
+        .map_err(|_| RuntimeError::Database)?
+    {
+        Ok(())
+    } else {
+        Err(RuntimeError::Configuration(
+            "hosted placeholders need SELECT and INSERT on platform_placeholder_keys",
+        ))
+    }
+}
+
+/// Whether this login holds both SELECT and INSERT on the key table; false
+/// when the table does not exist.
+pub(crate) async fn placeholder_keys_privileges(pool: &PgPool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT COALESCE(\
+             pg_catalog.has_table_privilege(current_user, \
+                 pg_catalog.to_regclass('public.platform_placeholder_keys'), 'SELECT') \
+             AND pg_catalog.has_table_privilege(current_user, \
+                 pg_catalog.to_regclass('public.platform_placeholder_keys'), 'INSERT'), \
+             false)",
+    )
+    .fetch_one(pool)
+    .await
+}
+
 /// Run the production service using only explicit restricted dependencies.
 /// The caller retains the runtime until this returns: dropping this future
 /// cannot prove provider or database cleanup after an issued mutation.
@@ -291,6 +323,14 @@ async fn run_connected(
             .with_github_app_authorization_owner(owner.clone())
             .map_err(|_| RuntimeError::Configuration("GitHub App authorization owner"))?,
         None => bridge,
+    };
+    let bridge = if config.hosted_placeholders {
+        placeholder_keys_granted(&pool).await?;
+        bridge
+            .with_hosted_placeholders()
+            .map_err(|_| RuntimeError::Configuration("hosted placeholders"))?
+    } else {
+        bridge
     };
     let bridge = ssh::configure(bridge, &config.runtime_directory)?;
     // Revoking a credential also asks its provider, each over a transport

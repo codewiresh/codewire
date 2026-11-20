@@ -695,7 +695,8 @@ database_build_server_core() {
 database_build_platform_credentials() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
     cargo test --locked -p codewire-platform-credentials --test storage \
-      --test profiles --test refresh --test authority --test owner_sources --no-run
+      --test profiles --test refresh --test authority --test owner_sources \
+      --test placeholder_keys --no-run
 }
 database_build_orchestration() {
   TEST_DATABASE_URL="$DATABASE_URL_RUST" \
@@ -854,6 +855,11 @@ database_lane_core() {
   counted_suite "platform credential restricted-role matrix" platform-credential-authority \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-platform-credentials --test authority \
+      -- --ignored --nocapture --test-threads=4
+
+  counted_suite "hosted placeholder key matrix" platform-placeholder-keys \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-platform-credentials --test placeholder_keys \
       -- --ignored --nocapture --test-threads=4
 
   counted_suite "OAuth-only restricted identity matrix" oauth-bearer-identity \

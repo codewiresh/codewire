@@ -1943,6 +1943,8 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             // An attached interception CA goes with its environment (0032,
             // #5030); an unbound one names none.
             "platform_interception_cas:cascade",
+            // An environment's placeholder key goes with it (0041, #4001).
+            "platform_placeholder_keys:cascade",
             "preview_auth_challenges:cascade",
             "preview_browser_grants:cascade",
             "sandbox_egress_enforcement:cascade",

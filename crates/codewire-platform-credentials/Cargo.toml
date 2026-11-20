@@ -10,7 +10,7 @@ description = "Owner-fenced platform credential metadata and encrypted material 
 [features]
 # The hosted interception CA store and its leaf signer (#5030), which only
 # the credential service enables.
-interception-ca = ["dep:codewire-egress-policy", "dep:rand", "dep:rcgen", "dep:time", "dep:x509-parser"]
+interception-ca = ["dep:codewire-egress-policy", "dep:rcgen", "dep:time", "dep:x509-parser"]
 # An in-memory CA that signs real leaves, for the signer's callers' tests.
 interception-ca-test-support = ["interception-ca"]
 
@@ -18,7 +18,9 @@ interception-ca-test-support = ["interception-ca"]
 codewire-access = { workspace = true }
 codewire-egress-policy = { workspace = true, optional = true }
 codewire-protected-store = { workspace = true, features = ["platform", "ssh-material"] }
-rand = { workspace = true, optional = true }
+# The placeholder-key store draws each environment's key (#4001), so rand is
+# not behind the interception CA's feature.
+rand = { workspace = true }
 # The front door's rcgen: ring, PEM and zeroize, so the CA key's encodings
 # can be wiped.
 rcgen = { version = "0.13", features = ["zeroize"], optional = true }

@@ -64,6 +64,8 @@ pub struct CredentialServiceConfig {
     /// This service's own namespace, from the downward API: the server
     /// namespace it shares with orchestration, the only credential relay.
     pub(super) relay_namespace: String,
+    /// Whether hosted leases carry their environment's placeholder (#4001).
+    pub(super) hosted_placeholders: bool,
     /// The namespace hosted Sandbox Pods run in, which the interception CA
     /// check and sweep read Pods from (#5030). `None` leaves both off.
     pub(super) sandbox_namespace: Option<String>,
@@ -197,9 +199,26 @@ impl CredentialServiceConfig {
             runtime_directory: path("CREDENTIAL_RUNTIME_DIR")?,
             keks,
             oauth_keepalive: oauth_keepalive_config(&lookup)?,
+            hosted_placeholders: hosted_placeholders_config(&lookup)?,
             relay_namespace,
             sandbox_namespace: sandbox_namespace(&lookup)?,
         })
+    }
+}
+
+const HOSTED_PLACEHOLDERS: &str = "CREDENTIAL_HOSTED_PLACEHOLDERS_ENABLED";
+
+/// Hosted placeholders (#4001): off unless
+/// `CREDENTIAL_HOSTED_PLACEHOLDERS_ENABLED=true`. A present value must be
+/// exact, so a typo stops startup instead of silently leaving it off.
+pub(super) fn hosted_placeholders_config(
+    lookup: &impl Fn(&str) -> Option<OsString>,
+) -> Result<bool, RuntimeError> {
+    match lookup(HOSTED_PLACEHOLDERS).map(OsString::into_string) {
+        None => Ok(false),
+        Some(Ok(value)) if value == "true" => Ok(true),
+        Some(Ok(value)) if value == "false" => Ok(false),
+        Some(_) => Err(RuntimeError::Configuration(HOSTED_PLACEHOLDERS)),
     }
 }
 
@@ -562,6 +581,26 @@ mod tests {
                 Err(RuntimeError::Configuration(
                     "GitHub App authorization configuration"
                 ))
+            ));
+        }
+    }
+
+    #[test]
+    fn hosted_placeholders_are_off_by_default_and_the_switch_is_exact() {
+        let config =
+            CredentialServiceConfig::from_lookup(|name| inputs().get(name).cloned()).unwrap();
+        assert!(!config.hosted_placeholders);
+        let with = |value: &str| {
+            let mut values = inputs();
+            values.insert(HOSTED_PLACEHOLDERS, value.into());
+            CredentialServiceConfig::from_lookup(move |name| values.get(name).cloned())
+        };
+        assert!(with("true").unwrap().hosted_placeholders);
+        assert!(!with("false").unwrap().hosted_placeholders);
+        for typo in ["TRUE", "1", "on", ""] {
+            assert!(matches!(
+                with(typo),
+                Err(RuntimeError::Configuration(HOSTED_PLACEHOLDERS))
             ));
         }
     }

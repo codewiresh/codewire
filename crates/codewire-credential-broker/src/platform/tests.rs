@@ -7,6 +7,7 @@ mod codex_login;
 mod decision;
 mod keepalive;
 mod material_cache;
+mod placeholders;
 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
 mod ssh;
 mod subscription;
@@ -1334,6 +1335,7 @@ fn a_platform_lease_carries_no_placeholder() {
         grant: fake.grant.clone(),
         permission: fake.permission.clone(),
         material: ProtectedValue::from_slice(b"synthetic-platform-material").unwrap(),
+        placeholder: None,
     };
     assert!(BrokerCredentialLease::placeholder(&lease).is_none());
 }

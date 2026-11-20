@@ -35,8 +35,8 @@ use tonic::{Request, Response, Status, Streaming, metadata::MetadataMap};
 use uuid::Uuid;
 
 use super::{
-    EpochDecision, LeaseBudget, PlatformBrokerLeaseProvider, PlatformRuntimeAuthority,
-    PlatformRuntimeError, RuntimeIdentity,
+    EpochDecision, EpochPlaceholders, LeaseBudget, PlatformBrokerLeaseProvider,
+    PlatformRuntimeAuthority, PlatformRuntimeError, RuntimeIdentity,
 };
 use crate::timing::{self, Phase};
 use crate::{
@@ -138,6 +138,9 @@ struct ServiceState<A, U> {
     profiles: PlatformAccessProfileStore,
     upstream: U,
     github_app_authorization: Option<Arc<GitHubAppAuthorizationOwner>>,
+    /// Whether a hosted epoch's leases carry their environment's placeholder
+    /// (#4001). Off unless the credential service's setting turns it on.
+    hosted_placeholders: bool,
     permits: Arc<Semaphore>,
     stream_capacity: usize,
     leases: LeaseBudget,
@@ -203,6 +206,7 @@ where
                 profiles,
                 upstream,
                 github_app_authorization: None,
+                hosted_placeholders: false,
                 permits: Arc::new(Semaphore::new(streams)),
                 stream_capacity: streams,
                 leases: LeaseBudget::new(leases),
@@ -258,6 +262,19 @@ where
             return Err(PlatformRuntimeError::Denied);
         }
         state.github_app_authorization = Some(owner);
+        Ok(self)
+    }
+
+    /// Give each hosted epoch's leases their environment's placeholder
+    /// (#4001; docs/dev/SECRETS-AND-CREDENTIALS.md, "Per-environment
+    /// placeholders"). Explicit process composition only, before cloning or
+    /// serving; an owner-local epoch never gets one.
+    pub fn with_hosted_placeholders(mut self) -> Result<Self, PlatformRuntimeError> {
+        let state = Arc::get_mut(&mut self.state).ok_or(PlatformRuntimeError::Denied)?;
+        if state.shutdown.is_cancelled() {
+            return Err(PlatformRuntimeError::Denied);
+        }
+        state.hosted_placeholders = true;
         Ok(self)
     }
 
@@ -639,6 +656,8 @@ where
         let hosted = matches!(provider.session.identity, RuntimeIdentity::Hosted { .. });
         let provider = PlatformBrokerLeaseProvider {
             decision: hosted.then(EpochDecision::new),
+            placeholders: (hosted && self.state.hosted_placeholders)
+                .then(EpochPlaceholders::default),
             ..provider
         };
         #[cfg(all(feature = "ssh-agent", target_os = "linux"))]

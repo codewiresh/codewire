@@ -1511,7 +1511,7 @@ is exactly as described above. What exists today:
   loopback route; an API request given the credential keeps the 4 MiB bound
   and is answered 413 above it.
 
-### Per-environment placeholders (#3999)
+### Per-environment placeholders
 
 When a local VM's agent hosts go through the TLS front door, which is off by
 default, the guest holds a per-environment placeholder for each credential in
@@ -1572,6 +1572,49 @@ or one whose credentials come from the platform, carries none.
   the fixed `codewire-managed` never reaches the real host. The function
   exists (`ManagedCredentialClientProjection::intercepted_github`); no boot
   calls it yet, because nothing delivers a GitHub placeholder to a guest.
+
+- **Hosted (#4001).** The same derivation, under one key per environment in
+  `platform_placeholder_keys`:
+  - Created by the credential service on that environment's first lease while
+    hosted placeholders are on. Its row goes when the environment's row is
+    deleted, by the foreign key's cascade. A destroyed environment keeps its
+    row until its environment row is purged: the broker has no `DELETE`, and
+    nothing else deletes a key earlier.
+  - Sealed like credential material: a DEK wrapped by the credential-material
+    KEK, scoped to the environment's organization.
+    The envelope's associated data names the environment, so a sealed key
+    copied into another environment's row does not open.
+  - Two first uses that race insert with `ON CONFLICT (environment_id) DO
+    NOTHING`, and each then uses the stored row, never a key that lost.
+  - `codewire_credential_broker` has `SELECT` and `INSERT` on the table and
+    nothing else, and the migration revokes everything from `PUBLIC`. What is
+    checked here: the Kind grants check refuses the broker `UPDATE`, `DELETE`,
+    `TRUNCATE` and references on it, and with placeholders on the credential
+    service refuses to start unless its login holds both `SELECT` and
+    `INSERT`. Dev's and Production's grants and their audit are infra's
+    credential database grants (#4001 step M).
+  - **A key never changes.** Placeholders rotate through the derivation's
+    inputs, not the key. A key thought compromised is deleted and created again
+    by an operator with the schema owner's role, which changes every
+    placeholder of that environment; a stale placeholder then matches nothing
+    and fails closed. No helper does this yet: it is to come under #4001.
+    Until the new placeholder is delivered again, the running environment's
+    agents hold one that matches nothing.
+  - A lease that derives a placeholder reads and opens the key itself and
+    drops it once the placeholder is derived. Its bridge epoch keeps the
+    derived placeholder, which is not secret, so later leases of that epoch
+    read no key. Nothing keeps a key, in a process or across leases (see
+    [Invariants](#invariants)).
+  - A key that cannot be read or created leaves the lease without a
+    placeholder; a placeholder never decides admission. The failure is logged
+    at warn with the environment and one closed reason (`NotFound`,
+    `ProviderUnavailable` or `CorruptRecord`), and labels the request's timing
+    line (`placeholder`), never with the row or a provider's error.
+  - Off by default: until the credential service's optional
+    `CREDENTIAL_HOSTED_PLACEHOLDERS_ENABLED` is `true` (it accepts only `true`
+    or `false`), hosted leases carry none, and no key is created or read. With
+    it on, the service refuses to start unless its login holds `SELECT` and
+    `INSERT` on the table. An owner-local epoch's leases never carry one.
 
 ### Refusals an agent or a person can read (#5057)
 
@@ -2611,6 +2654,8 @@ Optional credential-service inputs, absent by default:
   default 2592000.
 - `CREDENTIAL_OAUTH_KEEPALIVE_CLAUDE_AGE_SECONDS`: 60 to 691200 (8 days);
   default 604800.
+- `CREDENTIAL_HOSTED_PLACEHOLDERS_ENABLED`: `true` or `false` (default); see
+  [Per-environment placeholders](#per-environment-placeholders).
 
 A present value must be a plain decimal in range, even when disabled; anything
 else stops startup. Short values are for local observation only. The Kind

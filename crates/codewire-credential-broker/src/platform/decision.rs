@@ -319,6 +319,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                 grant: admission.grant,
                 permission: admission.permission,
                 material,
+                placeholder: None,
             });
         }
     }

@@ -270,6 +270,7 @@ impl<A: PlatformRuntimeAuthority + 'static> PlatformBrokerLeaseProvider<A> {
             // runs full authority checks for each one.
             material: None,
             decision: None,
+            placeholders: None,
             ssh: None,
         };
         let admission = scope.clone();

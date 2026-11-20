@@ -178,5 +178,30 @@ fn base64url_value(byte: u8) -> Option<u8> {
     }
 }
 
+/// One worked derivation, written out: a key of the bytes 0 to 31, the inputs
+/// below, and the placeholder they give. The access tests and the hosted
+/// broker's tests both derive it, so neither the layout nor how a hosted lease
+/// passes its grant to [`CredentialPlaceholder::derive`] can drift from local
+/// (#4001). Test data only; it grants nothing.
+#[doc(hidden)]
+pub mod known_answer {
+    /// The key: the bytes 0 to 31.
+    pub const KEY: [u8; super::PLACEHOLDER_KEY_BYTES] = {
+        let mut key = [0_u8; super::PLACEHOLDER_KEY_BYTES];
+        let mut index = 0;
+        while index < key.len() {
+            key[index] = index as u8;
+            index += 1;
+        }
+        key
+    };
+    pub const ENVIRONMENT: &str = "environment-a";
+    /// The selected binding's profile revision (#4812).
+    pub const BINDING_REVISION: u64 = 0x0102_0304_0506_0708;
+    pub const SLOT: &str = "codex";
+    pub const CREDENTIAL: &str = "credential-a";
+    pub const PLACEHOLDER: &str = "cwp1_CrtskkVMKO8hWIv0dqtomFhFamB5zbu6Peo4NJ8QLZc";
+}
+
 #[cfg(test)]
 mod tests;

@@ -32,6 +32,9 @@ GRANT SELECT,INSERT,DELETE ON public.platform_credentials TO codewire_credential
 GRANT UPDATE (status,expires_at_unix,revocation_generation,material_generation,updated_at,account_hint,display_name)
     ON public.platform_credentials TO codewire_credential_broker;
 GRANT SELECT,INSERT,DELETE ON public.platform_credential_material TO codewire_credential_broker;
+-- Hosted placeholder keys (#4001): created once, then only read. A key never
+-- changes and is deleted only with its environment, so no UPDATE or DELETE.
+GRANT SELECT,INSERT ON public.platform_placeholder_keys TO codewire_credential_broker;
 GRANT SELECT,INSERT,UPDATE,DELETE ON public.platform_credential_refresh_attempts TO codewire_credential_broker;
 GRANT SELECT,INSERT,UPDATE,DELETE ON public.platform_credential_refresh_material TO codewire_credential_broker;
 GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_owner(text,text) TO codewire_credential_broker;
