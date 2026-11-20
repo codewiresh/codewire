@@ -16,6 +16,7 @@ pub mod credentials;
 pub mod environment;
 pub mod environment_agent;
 pub mod environment_cw_runtime;
+pub mod environment_desktop;
 pub mod environment_session;
 pub mod environment_setup;
 pub mod exec;

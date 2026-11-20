@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use codewire_daemon_proto::daemon::v1;
-use codewire_daemon_proto::{DESKTOP_DISPLAY, DESKTOP_SESSION_NAME, DESKTOP_VNC_PORT};
+use codewire_daemon_proto::{
+    DESKTOP_DISPLAY, DESKTOP_SESSION_NAME, DESKTOP_VIEWER_PASSWORD_LENGTH, DESKTOP_VNC_PORT,
+};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tonic::Status;
@@ -31,8 +33,7 @@ const START_POLL: Duration = Duration::from_millis(100);
 const LISTENER_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 /// The launcher says little before the ready line; this bounds one read.
 const OUTPUT_READ_LIMIT: u64 = 64 * 1024;
-/// VNC's password scheme reads no more than this.
-const PASSWORD_LENGTH: usize = 8;
+const PASSWORD_LENGTH: usize = DESKTOP_VIEWER_PASSWORD_LENGTH;
 const PASSWORD_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 
 /// Whether a desktop runs, read wherever the daemon starts a process. The
@@ -482,12 +483,9 @@ mod tests {
     fn a_viewer_password_is_eight_characters_the_launcher_accepts_and_differs_each_time() {
         let passwords: Vec<String> = (0..64).map(|_| viewer_password()).collect();
         for password in &passwords {
-            assert_eq!(password.len(), PASSWORD_LENGTH);
             assert!(
-                password
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()),
-                "outside the launcher's alphabet"
+                codewire_daemon_proto::is_desktop_viewer_password(password),
+                "not the shape a caller accepts"
             );
         }
         let distinct: std::collections::BTreeSet<&String> = passwords.iter().collect();

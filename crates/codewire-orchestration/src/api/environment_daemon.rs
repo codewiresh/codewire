@@ -41,9 +41,14 @@ use crate::worker::workspace_binding::{
     DaemonNotBound, bind_replacement_runtime, environment_daemon_credential,
 };
 
+mod desktop;
 #[cfg(test)]
 mod repair_database_tests;
 mod session_mutation;
+
+pub use desktop::{
+    get_environment_desktop_core, start_environment_desktop_core, stop_environment_desktop_core,
+};
 
 const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);

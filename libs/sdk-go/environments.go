@@ -411,6 +411,7 @@ func (s *EnvironmentService) wrap(orgID string, data EnvironmentData, pollInterv
 		Files:           newFiles(s.client, orgID, data.Id),
 		Runtime:         newCwRuntime(s.client, orgID, data.Id),
 		Agents:          newPlatformAgents(s.client, orgID, data.Id),
+		Desktop:         newDesktop(s.client, orgID, data.Id),
 		client:          s.client,
 		orgID:           orgID,
 		pollInterval:    pollInterval,

@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { compileTests, qualifyGeneratedImports, runSuite, runTests } from "./run-tests.mjs";
 
-const SUITES = ["test", "mesh.test", "cw-runtime.test", "platform-agents.test"];
+const SUITES = ["test", "mesh.test", "cw-runtime.test", "platform-agents.test", "desktop.test"];
 
 async function temporary(run) {
   const root = await fs.mkdtemp(path.join(tmpdir(), "cw-sdk-runner-fixture-"));

@@ -9,6 +9,7 @@ import { ApiKeyService } from "@codewire/proto-ts/gen/codewire/v1/api_key_pb";
 import { EnvironmentService } from "@codewire/proto-ts/gen/codewire/v1/environment_pb";
 import { EnvironmentCwRuntimeService } from "@codewire/proto-ts/gen/codewire/v1/environment_cw_runtime_pb";
 import { EnvironmentAgentService } from "@codewire/proto-ts/gen/codewire/v1/environment_agent_pb";
+import { EnvironmentDesktopService } from "@codewire/proto-ts/gen/codewire/v1/environment_desktop_pb";
 import { ExecService } from "@codewire/proto-ts/gen/codewire/v1/exec_pb";
 import { FileService } from "@codewire/proto-ts/gen/codewire/v1/file_pb";
 import { PortService } from "@codewire/proto-ts/gen/codewire/v1/port_pb";
@@ -22,6 +23,7 @@ export type ApiKeyClient = Client<typeof ApiKeyService>;
 export type EnvironmentClient = Client<typeof EnvironmentService>;
 export type CwRuntimeClient = Client<typeof EnvironmentCwRuntimeService>;
 export type EnvironmentAgentClient = Client<typeof EnvironmentAgentService>;
+export type DesktopClient = Client<typeof EnvironmentDesktopService>;
 export type ExecClient = Client<typeof ExecService>;
 export type FileClient = Client<typeof FileService>;
 export type PortClient = Client<typeof PortService>;
@@ -44,6 +46,7 @@ export interface CodewireClients {
   cwRuntime: CwRuntimeClient;
   cwRuntimeUpdates: CwRuntimeClient;
   environmentAgents: EnvironmentAgentClient;
+  desktop: DesktopClient;
   exec: ExecClient;
   files: FileClient;
   fileUploads: FileClient;
@@ -152,6 +155,7 @@ export function createCodewireClients(
     cwRuntime: createClient(EnvironmentCwRuntimeService, runtimeUnaryTransport),
     cwRuntimeUpdates: createClient(EnvironmentCwRuntimeService, runtimeUpdateTransport),
     environmentAgents: createClient(EnvironmentAgentService, agentTransport),
+    desktop: createClient(EnvironmentDesktopService, fetchTransport),
     exec: createClient(ExecService, fetchTransport),
     files: createClient(FileService, fetchTransport),
     fileUploads: createClient(FileService, uploadTransport),

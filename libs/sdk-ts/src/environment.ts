@@ -1,5 +1,6 @@
 import { Files } from "./files.js";
 import { CwRuntime } from "./cw-runtime.js";
+import { Desktop } from "./desktop.js";
 import { PlatformAgents } from "./platform-agents.js";
 import { EnvironmentResizeDisruptionPolicy } from "@codewire/proto-ts/gen/codewire/v1/environment_pb";
 import {
@@ -73,6 +74,7 @@ export class Environment implements EnvironmentData {
   readonly source_selection: EnvironmentSourceSelection | undefined;
   readonly files: Files;
   readonly runtime: CwRuntime;
+  readonly desktop: Desktop;
   readonly agents: PlatformAgents;
 
   constructor(
@@ -121,6 +123,7 @@ export class Environment implements EnvironmentData {
     this.source_selection = data.source_selection;
     this.runtime = new CwRuntime(clients.cwRuntime, clients.cwRuntimeUpdates, orgId, this.id);
     this.agents = new PlatformAgents(clients.environmentAgents, orgId, this.id);
+    this.desktop = new Desktop(clients.desktop, orgId, this.id);
     this.files = new Files(
       clients.files,
       clients.fileUploads,

@@ -490,6 +490,7 @@ pub mod ssh;
 pub mod projection;
 
 mod desktop;
+pub use desktop::{DESKTOP_VIEWER_PASSWORD_LENGTH, is_desktop_viewer_password};
 mod login_debug;
 
 /// Validated credential for the private environment-daemon RPC boundary.

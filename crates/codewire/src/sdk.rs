@@ -13,6 +13,9 @@ use bytes::Bytes;
 use connectrpc::ErrorCode;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
+use crate::desktop::{
+    EnvironmentDesktop, GetDesktopRequest, StartDesktopRequest, StopDesktopRequest,
+};
 use crate::{
     ClientConfig, ClientError, CodewireClient, CreateEnvironmentRequest, CreatePortRequest,
     CreatePortResponse, DeleteEnvironmentRequest, DeletePortRequest, DownloadFileRequest,
@@ -360,6 +363,45 @@ impl EnvironmentHandle {
         Ok(())
     }
 
+    /// Starts the environment's desktop, or returns the one that runs. A
+    /// running desktop carries the password its viewer is asked for.
+    pub async fn start_desktop(&self) -> Result<EnvironmentDesktop, ClientError> {
+        let mut request = StartDesktopRequest::default();
+        self.ids(&mut request.org_id, &mut request.environment_id);
+        self.codewire
+            .client
+            .start_desktop(request)
+            .await?
+            .desktop
+            .into_option()
+            .ok_or_else(no_desktop)
+    }
+
+    pub async fn desktop(&self) -> Result<EnvironmentDesktop, ClientError> {
+        let mut request = GetDesktopRequest::default();
+        self.ids(&mut request.org_id, &mut request.environment_id);
+        self.codewire
+            .client
+            .get_desktop(request)
+            .await?
+            .desktop
+            .into_option()
+            .ok_or_else(no_desktop)
+    }
+
+    /// Stops the desktop. Stopping one that does not run succeeds.
+    pub async fn stop_desktop(&self) -> Result<EnvironmentDesktop, ClientError> {
+        let mut request = StopDesktopRequest::default();
+        self.ids(&mut request.org_id, &mut request.environment_id);
+        self.codewire
+            .client
+            .stop_desktop(request)
+            .await?
+            .desktop
+            .into_option()
+            .ok_or_else(no_desktop)
+    }
+
     /// Stops the environment, keeping its disk.
     pub async fn stop(&self) -> Result<(), ClientError> {
         let mut request = StopEnvironmentRequest::default();
@@ -383,6 +425,10 @@ impl EnvironmentHandle {
         self.codewire.client.delete_environment(request).await?;
         Ok(())
     }
+}
+
+fn no_desktop() -> ClientError {
+    ClientError::new(ErrorCode::Internal, "the server returned no desktop")
 }
 
 fn fill(field: &mut String, value: &str) {

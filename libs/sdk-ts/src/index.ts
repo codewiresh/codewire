@@ -47,6 +47,10 @@ export { CodewireError } from "./types.js";
 export { Environment } from "./environment.js";
 export { Files } from "./files.js";
 export { CwRuntime, CwRuntimeOutcomeUnknownError } from "./cw-runtime.js";
+export { Desktop } from "./desktop.js";
+export type {
+  EnvironmentDesktop, EnvironmentDesktopRunning, EnvironmentDesktopState,
+} from "./desktop.js";
 export { PlatformAgents, PlatformAgentOutcomeUnknownError } from "./platform-agents.js";
 export type {
   EnvironmentAgentScope, EnvironmentAgentSupport, EnvironmentAgentOperation,

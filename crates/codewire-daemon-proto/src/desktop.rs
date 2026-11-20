@@ -1,8 +1,22 @@
-//! `Debug` for the one desktop message that carries the viewer password.
+//! The desktop's viewer password: its shape, and `Debug` for the one message
+//! that carries it.
 
 use std::fmt;
 
 use crate::daemon::v1;
+
+/// How long a viewer password is: all that VNC's password scheme reads.
+pub const DESKTOP_VIEWER_PASSWORD_LENGTH: usize = 8;
+
+/// Whether `value` has the shape of a viewer password the daemon makes:
+/// eight lowercase letters or digits. A caller that takes one from a daemon
+/// it cannot trust checks this before using it in an address or a prompt.
+pub fn is_desktop_viewer_password(value: &str) -> bool {
+    value.len() == DESKTOP_VIEWER_PASSWORD_LENGTH
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+}
 
 impl fmt::Debug for v1::DesktopRunning {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -21,6 +35,23 @@ mod tests {
     use super::*;
 
     const PASSWORD: &str = "k3m9x2qa";
+
+    #[test]
+    fn a_viewer_password_is_eight_lowercase_letters_or_digits_and_nothing_else() {
+        assert!(is_desktop_viewer_password(PASSWORD));
+        for other in [
+            "",
+            "k3m9x2q",
+            "k3m9x2qab",
+            "K3M9X2QA",
+            "k3m9x2q ",
+            "k3m9@2qa",
+            "k3m9x2q\n",
+            "pässwor",
+        ] {
+            assert!(!is_desktop_viewer_password(other), "{other:?}");
+        }
+    }
 
     fn running() -> v1::DesktopRunning {
         v1::DesktopRunning {

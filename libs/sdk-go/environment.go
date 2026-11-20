@@ -15,6 +15,7 @@ type Environment struct {
 	Files   *Files
 	Runtime *CwRuntime
 	Agents  *PlatformAgents
+	Desktop *Desktop
 
 	client       *Client
 	orgID        string

@@ -1,4 +1,5 @@
 mod connect_smoke;
+mod environment_desktop;
 mod environment_project_spec;
 mod environment_session;
 mod environment_sources;
@@ -128,6 +129,7 @@ impl Harness {
         environment_sources::run(self).await;
         environment_project_spec::run(self).await;
         environment_session::run(self).await;
+        environment_desktop::run(self).await;
         exec_file::run(self).await;
     }
 

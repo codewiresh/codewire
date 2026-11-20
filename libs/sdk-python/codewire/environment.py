@@ -16,6 +16,7 @@ from codewire.environment_ops import (
 )
 from codewire.files import Files
 from codewire.cw_runtime import CwRuntime
+from codewire.desktop import Desktop
 from codewire.platform_agents import PlatformAgents
 from codewire.v1.environment_connect import EnvironmentServiceClientSync
 from codewire.v1.environment_pb2 import (
@@ -57,6 +58,7 @@ class Environment:
         self.files = Files(context, self.id)
         self.runtime = CwRuntime(context, self.id)
         self.agents = PlatformAgents(context, self.id)
+        self.desktop = Desktop(context, self.id)
 
     def exec(
         self,

@@ -50,9 +50,12 @@ The desktop is built on these, which are on `main`:
   that ends an admitted stream ([AUTH-POLICY.md](AUTH-POLICY.md)).
 - The image's desktop layer, its launcher, Chromium and the look ("In the
   image", "The browser" and "The look", below), and the daemon's
-  `desktop.vnc.v1` ("What the daemon does"). Nothing calls the daemon's three
-  RPCs yet: the control plane, `cw desktop` and the dashboard viewer are not
-  built.
+  `desktop.vnc.v1` ("What the daemon does").
+- The hosted service, `codewire.v1.EnvironmentDesktopService`, with its
+  generated clients and the Rust, TypeScript, Go and Python SDK wrappers
+  ("Starting and stopping"). It is reachable with an API key. The local
+  supervisor's operations, `cw desktop` and the dashboard viewer are not
+  built, so nothing a user runs starts a desktop yet.
 
 ## In the image
 
@@ -299,8 +302,28 @@ environment. A caller needs operator access to the environment (its creator,
 an organization owner or admin, or a member granted operator), as launching a
 terminal does, and the Sandbox must be running, current and claimed.
 Orchestration calls the daemon with the bound Pod's credential. The service
-ships with its generated clients and the TypeScript, Go and Python SDK
+ships with its generated clients and the Rust, TypeScript, Go and Python SDK
 wrappers.
+
+None of the three is marked as a read without side effects, `GetDesktop`
+included: its answer carries the viewer password, so it is never served as a
+cacheable GET, and like every authenticated answer of this API it is sent
+`no-store`. A daemon without the capability is refused with the repair.
+
+A hosted Sandbox's daemon can be replaced by whoever has a shell in the
+Sandbox, so the control plane treats everything it answers as the workload's
+own text, and none of that text reaches a caller or a log:
+
+- A refusal is told in the control plane's own sentences, chosen by the
+  daemon's status code and, after a refused start, by the state read next:
+  the image has no desktop (create the environment again on the current
+  image); the desktop did not start (a held display or port, or a session in
+  the way); it was not ready in time. The log line carries the code alone.
+- An answer is passed on only in the shape the real daemon gives it: a
+  known state; when unavailable, the control plane's sentence in place of
+  the daemon's reason; when running, display `:1`, port 5901, a password of
+  eight lowercase letters or digits, and a start time a client can format,
+  or none. Any other answer is an upstream error and no part of it is kept.
 
 **Local.** The supervisor's control protocol carries the same three
 operations for the VM's owner, over the owner-only socket, and calls the

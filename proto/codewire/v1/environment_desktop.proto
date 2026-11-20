@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package codewire.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// EnvironmentDesktopService starts, reads and stops the graphical desktop of
+// one running environment: an X and VNC server with a desktop session, on
+// the environment's loopback only. A caller needs operator access to the
+// environment, as launching a terminal does.
+//
+// No method is marked NO_SIDE_EFFECTS, GetDesktop included: its answer
+// carries the viewer password, and a read that returns one is not served as
+// a cacheable GET.
+service EnvironmentDesktopService {
+  // Starts the desktop and answers once it accepts a viewer. A desktop that
+  // already runs is returned, never restarted.
+  rpc StartDesktop(StartDesktopRequest) returns (StartDesktopResponse);
+
+  rpc GetDesktop(GetDesktopRequest) returns (GetDesktopResponse);
+
+  // Stops the desktop. Stopping one that does not run succeeds.
+  rpc StopDesktop(StopDesktopRequest) returns (StopDesktopResponse);
+}
+
+enum EnvironmentDesktopState {
+  ENVIRONMENT_DESKTOP_STATE_UNSPECIFIED = 0;
+  // The environment's image has no desktop. The environment must be created
+  // again on an image that has one.
+  ENVIRONMENT_DESKTOP_STATE_UNAVAILABLE = 1;
+  ENVIRONMENT_DESKTOP_STATE_STOPPED = 2;
+  ENVIRONMENT_DESKTOP_STATE_STARTING = 3;
+  ENVIRONMENT_DESKTOP_STATE_RUNNING = 4;
+}
+
+// EnvironmentDesktop is the desktop's state at the time of the call.
+message EnvironmentDesktop {
+  EnvironmentDesktopState state = 1;
+  // What the image lacks, when the state is unavailable.
+  string unavailable_reason = 2;
+  // Set while the state is running.
+  EnvironmentDesktopRunning running = 3;
+}
+
+message EnvironmentDesktopRunning {
+  // The X display programs in the environment draw on, such as ":1".
+  string display = 1;
+  // The VNC listener's port on the environment's loopback. It is reached
+  // through an SSH local forward or the dashboard's viewer, never published.
+  int32 port = 2;
+  google.protobuf.Timestamp started_at = 3;
+  // The password the VNC server asks a viewer for, made at each start. It
+  // is not an access control: who may reach the desktop is decided by who
+  // may call this service and forward to the environment.
+  string viewer_password = 4 [debug_redact = true];
+}
+
+message StartDesktopRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message StartDesktopResponse {
+  EnvironmentDesktop desktop = 1;
+}
+
+message GetDesktopRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message GetDesktopResponse {
+  EnvironmentDesktop desktop = 1;
+}
+
+message StopDesktopRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message StopDesktopResponse {
+  EnvironmentDesktop desktop = 1;
+}
