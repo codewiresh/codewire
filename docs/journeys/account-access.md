@@ -237,6 +237,10 @@ comment 123530). Not yet observed.
   shell opened before ends within 60 seconds and the WebSocket one keeps
   printing until the deletion stops the Sandbox; another organization's
   streams are unaffected.
+- **Gotchas:** a small organization's deletion can run to its end in
+  seconds, which leaves nothing to refuse, so try the new streams at once. A
+  deletion that failed holds still for the walk: it stays refused until it is
+  retried.
 
 ## `access-tailnet`: a tailnet shell or exec when its authority is lost
 

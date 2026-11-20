@@ -4,6 +4,7 @@ use axum::http::StatusCode;
 use codewire_server_core::AppError;
 use codewire_server_core::auth::AuthUser;
 use codewire_server_core::org::user_org_role;
+use codewire_server_core::org::{ORGANIZATION_DELETING, org_admits_streams};
 use sqlx::Row;
 
 use super::ApiState;
@@ -94,6 +95,11 @@ async fn resolve_running_sandbox_target_inner(
     let desired_state: String = row.get("desired_state");
     let environment_type: String = row.get("type");
     let isolation_tier: String = row.get("isolation_tier");
+    match org_admits_streams(&state.pool, org_id).await {
+        Ok(true) => {}
+        Ok(false) => return Err((StatusCode::CONFLICT, ORGANIZATION_DELETING)),
+        Err(_) => return Err((StatusCode::SERVICE_UNAVAILABLE, "organization unavailable")),
+    }
     if let Err(error) = require_confidential_access(
         &state.pool,
         state.confidential_storage_flags,
@@ -202,6 +208,12 @@ pub(crate) fn huma_error(status: StatusCode, message: &'static str) -> AppError 
         StatusCode::SERVICE_UNAVAILABLE => {
             AppError::ServiceUnavailable(std::borrow::Cow::Borrowed(message))
         }
+        // The one conflict a runtime target answers.
+        StatusCode::CONFLICT => AppError::Coded {
+            status,
+            code: "organization_deleting",
+            detail: std::borrow::Cow::Borrowed(message),
+        },
         _ => AppError::InternalMsg(std::borrow::Cow::Borrowed(message)),
     }
 }

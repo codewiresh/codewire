@@ -197,6 +197,28 @@ impl Fixture {
         Ok(decision.map_or_else(|response| response.status(), |()| StatusCode::OK))
     }
 
+    /// The proxy's refusal text for a non-navigation request, or `None` when
+    /// it lets the request through.
+    async fn proxied_message(&self, user: &AuthUser) -> Result<Option<String>> {
+        let (matched, target) = self.target().await?;
+        let decision = authorize_proxy_user(
+            &self.context(),
+            &Method::GET,
+            &HeaderMap::new(),
+            user,
+            &matched,
+            &target,
+        )
+        .await;
+        match decision {
+            Ok(()) => Ok(None),
+            Err(response) => {
+                let body = axum::body::to_bytes(response.into_body(), 64 * 1024).await?;
+                Ok(Some(String::from_utf8(body.to_vec())?.trim().to_string()))
+            }
+        }
+    }
+
     async fn granted(&self, token: &str) -> Result<bool> {
         let (matched, target) = self.target().await?;
         let mut headers = HeaderMap::new();
@@ -807,6 +829,59 @@ async fn removed_creator_proxy_requests_are_refused_for_old_grants_and_bearers()
             .await?;
         anyhow::ensure!(f.proxied_with_grant(&token).await? == StatusCode::OK);
         anyhow::ensure!(f.proxied_as(&bearer("preview-user"), &no_cookie).await? == StatusCode::OK);
+        Ok(())
+    }
+    .await;
+    result.and(f.cleanup().await)
+}
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL"]
+async fn an_organization_being_deleted_opens_no_shared_preview() -> Result<()> {
+    // AUTH-POLICY.md, #3586: a preview with a caller to check is refused once
+    // its organization's deletion has started or failed, and the reason
+    // reaches only a caller the access check admits. A public one is left to
+    // the deletion stopping its environment.
+    let f = Fixture::create(2).await?;
+    let result = async {
+        let user = |user_id: &str| AuthUser {
+            user_id: user_id.to_string(),
+            org_id: None,
+            is_admin: false,
+            via_api_key: false,
+        };
+        let no_cookie = HeaderMap::new();
+        sqlx::query("UPDATE environment_ports SET access='org_members' WHERE id='preview-port'")
+            .execute(&f.pool)
+            .await?;
+        anyhow::ensure!(f.proxied_as(&user("preview-user"), &no_cookie).await? == StatusCode::OK);
+        for (deletion, failure) in [("deleting", None), ("delete_failed", Some("synthetic_failure"))] {
+            sqlx::query("UPDATE organizations SET deletion_state=$1, deletion_generation=1, deletion_operation_id='synthetic-operation', deletion_workflow_id='synthetic-workflow', deletion_requested_at=NOW(), deletion_phase='synthetic_phase', deletion_failure_code=$2 WHERE id='preview-org'")
+                .bind(deletion)
+                .bind(failure)
+                .execute(&f.pool)
+                .await?;
+            for access in ["org_members", "creator"] {
+                sqlx::query("UPDATE environment_ports SET access=$1 WHERE id='preview-port'")
+                    .bind(access)
+                    .execute(&f.pool)
+                    .await?;
+                anyhow::ensure!(
+                    f.proxied_message(&user("preview-user")).await?
+                        == Some(codewire_server_core::org::ORGANIZATION_DELETING.to_string()),
+                    "{deletion}: the member opened a {access} preview"
+                );
+                let stranger = f.proxied_message(&user("stranger-user")).await?;
+                anyhow::ensure!(
+                    stranger.as_deref().is_some_and(|message| !message.contains("deleted")),
+                    "{deletion}: a stranger's {access} answer was {stranger:?}"
+                );
+            }
+            sqlx::query("UPDATE environment_ports SET access='public' WHERE id='preview-port'")
+                .execute(&f.pool)
+                .await?;
+            anyhow::ensure!(f.proxied_as(&user("stranger-user"), &no_cookie).await? == StatusCode::OK);
+        }
         Ok(())
     }
     .await;

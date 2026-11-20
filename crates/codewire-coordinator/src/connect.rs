@@ -329,6 +329,7 @@ async fn response_to_connect_error(response: axum::response::Response) -> Connec
             ConnectError::failed_precondition(message)
         }
         StatusCode::BAD_REQUEST => ConnectError::invalid_argument(message),
+        StatusCode::CONFLICT => ConnectError::failed_precondition(message),
         status if status.is_server_error() => ConnectError::internal("internal error"),
         _ => ConnectError::internal("internal error"),
     }
@@ -1186,6 +1187,7 @@ mod tests {
     /// convergence"). A starved CI guest failed a fixed 5 s (#4241, #4169).
     const PRODUCTION_AUTH_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
 
+    mod org_deleting;
     mod revocation;
 
     async fn production_auth_outcome(

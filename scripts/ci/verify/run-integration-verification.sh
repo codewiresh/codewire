@@ -1386,6 +1386,13 @@ database_lane_orchestration_hosts() {
       'api::socket_fence::database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  # #3586: an organization being deleted admits no new stream.
+  counted_suite "organization deleting stream matrix" org-deleting-streams \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::org_deleting_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "preset projection matrix" preset-projection \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
@@ -1975,6 +1982,12 @@ run_coordinator() {
   listed_run "coordinator remote client revocation" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo_ci test --profile ci -p codewire-coordinator --lib \
       session::fenced::tests::a_remote_client_is_dropped_by_the_serving_replica_alone -- --exact \
+      --nocapture
+  # #3586: an organization being deleted admits no client session.
+  logfile="$RUN_DIR/coordinator-organization-deleting.log"
+  listed_run "coordinator organization deleting" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-coordinator --lib \
+      connect::tests::org_deleting::a_client_session_into_an_organization_being_deleted_is_refused_and_an_open_one_ends -- --exact \
       --nocapture
 
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \

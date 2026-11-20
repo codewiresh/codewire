@@ -349,6 +349,22 @@ pub(crate) async fn client_environment_access(
             "only supported for sandbox environments",
         ));
     }
+    match codewire_server_core::org::org_admits_streams(&state.pool, org_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(text_error(
+                StatusCode::CONFLICT,
+                codewire_server_core::org::ORGANIZATION_DELETING,
+            ));
+        }
+        Err(err) => {
+            tracing::error!(error = ?err, "coordinator organization lookup failed");
+            return Err(text_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error",
+            ));
+        }
+    }
 
     Uuid::parse_str(env_id)
         .map_err(|_| text_error(StatusCode::BAD_REQUEST, "invalid environment id"))

@@ -375,6 +375,15 @@ pub(super) async fn authorize_proxy_user(
             Err(_) => return Err(unavailable()),
         }
     }
+    // Only a preview with a caller to check: a public one ends when the
+    // deletion stops the environment (AUTH-POLICY.md).
+    if target.access != "public" {
+        match codewire_server_core::org::org_admits_streams(state.pool, &matched.org_id).await {
+            Ok(true) => {}
+            Ok(false) => return Err(forbidden(codewire_server_core::org::ORGANIZATION_DELETING)),
+            Err(_) => return Err(unavailable()),
+        }
+    }
     Ok(())
 }
 

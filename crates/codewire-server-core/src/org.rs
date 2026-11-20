@@ -5,6 +5,24 @@ use sqlx::PgPool;
 use crate::auth::AuthUser;
 use crate::error::AppError;
 
+/// What a new stream into an organization whose deletion has started or
+/// failed is refused with (AUTH-POLICY.md, "Account access revocation").
+pub const ORGANIZATION_DELETING: &str = "organization is being deleted";
+
+/// Whether `org_id` admits a new stream or connection into its environments:
+/// not once its deletion has started or failed, until it is retried to the
+/// end. Callers ask after the caller's own access check, so only a caller who
+/// would otherwise be admitted learns why. The organization's own pages keep
+/// working while it is deleted, so [`user_org_role`] does not ask this.
+pub async fn org_admits_streams(pool: &PgPool, org_id: &str) -> Result<bool, sqlx::Error> {
+    let active: Option<bool> =
+        sqlx::query_scalar("SELECT deletion_state = 'active' FROM organizations WHERE id = $1")
+            .bind(org_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(active == Some(true))
+}
+
 /// Returns the caller's role in `org_id`:
 ///
 /// 1. An API key scoped to a different org never grants access, even if

@@ -159,6 +159,14 @@ pub(crate) async fn open_environment_log_stream(
 
     require_environment_access(&state.pool, user, env_id, org_id, "viewer", "access denied")
         .await?;
+    // A bounded backfill is a read; only a follow is a stream.
+    if follow && !codewire_server_core::org::org_admits_streams(&state.pool, org_id).await? {
+        return Err(AppError::Coded {
+            status: StatusCode::CONFLICT,
+            code: "organization_deleting",
+            detail: codewire_server_core::org::ORGANIZATION_DELETING.into(),
+        });
+    }
 
     // Bound each account's live follows; a bounded backfill read is free.
     let follow = if follow {

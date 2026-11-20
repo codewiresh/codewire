@@ -29,6 +29,8 @@ pub mod hosts;
 pub mod log_notifications;
 pub mod logs;
 pub mod network_policies;
+#[cfg(test)]
+mod org_deleting_database_tests;
 pub mod organizations;
 pub mod platform_agents;
 pub mod ports;
@@ -44,6 +46,8 @@ pub mod snapshots;
 pub(crate) mod socket_fence;
 pub mod ssh_proxy;
 pub mod terminal;
+#[cfg(test)]
+mod test_state;
 pub mod trust_report;
 
 use std::sync::Arc;

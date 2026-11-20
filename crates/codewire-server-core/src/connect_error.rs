@@ -226,6 +226,8 @@ fn connect_code_for(status: StatusCode, reason: Option<&str>) -> ConnectCode {
             | "environment_protected"
             | "no_organizations"
             | "organization_not_available"
+            // Its deletion has started or failed (AUTH-POLICY.md, #3586).
+            | "organization_deleting"
             | "organization_not_selected"
             | "email_not_verified"
             | "last_owner"
