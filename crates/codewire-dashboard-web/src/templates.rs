@@ -12,10 +12,10 @@ use crate::view::InvitationState;
 use crate::view::{
     AccountAccessView, AccountDeletionPageView, AdminAccountDeletionView, ApiKeysPageView,
     AuthFormView, CredentialSettingsView, DashboardView, DevicePageView, EnvironmentsPageView,
-    InvitationPageView, MembersPageView, OrganizationContext, OrganizationFormView,
-    OrganizationRow, PersonalApiKeysPageView, PersonalSecretsPageView, PresetsPageView,
-    SecretBucketPageView, SecretProjectsPageView, SettingsPageView, SetupTwoFactorView,
-    TerminalPageView, TwoFactorRecoveryView,
+    GithubAcceptView, InvitationPageView, MembersPageView, OrganizationContext,
+    OrganizationFormView, OrganizationRow, PersonalApiKeysPageView, PersonalSecretsPageView,
+    PresetsPageView, SecretBucketPageView, SecretProjectsPageView, SettingsPageView,
+    SetupTwoFactorView, TerminalPageView, TwoFactorRecoveryView,
 };
 
 #[derive(Template)]
@@ -211,6 +211,12 @@ pub(crate) struct SettingsTemplate<'a> {
 pub(crate) struct CredentialSettingsTemplate<'a> {
     pub(crate) view: &'a DashboardView,
     pub(crate) page: &'a CredentialSettingsView,
+}
+
+#[derive(Template)]
+#[template(path = "settings-github-permissions.html")]
+pub(crate) struct GithubPermissionsTemplate<'a> {
+    pub(crate) pending: &'a [GithubAcceptView],
 }
 
 #[derive(Template)]

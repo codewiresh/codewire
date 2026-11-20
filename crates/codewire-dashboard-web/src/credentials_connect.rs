@@ -16,11 +16,10 @@ use codewire_proto::codewire::v1::{
     CredentialAuthenticationKind, CredentialMutationServiceClient, CredentialServiceClient,
     CredentialStatus, DeleteAccessProfileRequest, EnrollCodexRequest, EnrollCodexResponse,
     GenerateSshCredentialRequest, GetAccessProfileRequest, GetCredentialRequest,
-    GithubAppAccountKind, GithubAppPendingPermissions, GithubRepositoryServiceClient,
-    ListAccessProfilesRequest, ListCredentialsRequest, ListGithubPendingPermissionsRequest,
-    RenameAccessProfileRequest, RenameCredentialRequest, RotateApiKeyCredentialRequest,
-    UpdateAccessProfileRequest, enroll_codex_response, get_access_profile_request,
-    get_credential_request,
+    GithubAppAccountKind, GithubAppPendingPermissions, ListAccessProfilesRequest,
+    ListCredentialsRequest, RenameAccessProfileRequest, RenameCredentialRequest,
+    RotateApiKeyCredentialRequest, UpdateAccessProfileRequest, enroll_codex_response,
+    get_access_profile_request, get_credential_request,
 };
 use connectrpc::{
     ConnectError, ErrorCode,
@@ -537,7 +536,7 @@ fn unix_now() -> Result<u64, ConnectError> {
 
 /// An installation of the Codewire GitHub App that has not yet granted the
 /// permissions Codewire needs, as a connect's response or the credentials
-/// page's live check reported it (#2712). Never stored.
+/// page's live check reported it (#2712). Never written down.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GithubPendingPermissions {
     pub(crate) account: String,
@@ -556,8 +555,8 @@ pub(crate) enum GithubAccountKind {
 /// At most this many installations are named on the page.
 const MAX_GITHUB_PENDING: usize = 8;
 /// The live status is advisory: the page renders without it after this.
-const GITHUB_PENDING_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_GITHUB_PENDING_RESPONSE_BYTES: usize = 16 * 1024;
+pub(crate) const GITHUB_PENDING_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const MAX_GITHUB_PENDING_RESPONSE_BYTES: usize = 16 * 1024;
 
 impl GithubPendingPermissions {
     pub(crate) fn new(
@@ -597,7 +596,7 @@ impl GithubPendingPermissions {
 
     /// The service's entries, validated again: an invalid login, a zero ID
     /// or an unknown kind is dropped, never shown.
-    fn from_wire(pending: &[GithubAppPendingPermissions]) -> Vec<Self> {
+    pub(crate) fn from_wire(pending: &[GithubAppPendingPermissions]) -> Vec<Self> {
         pending
             .iter()
             .filter_map(|pending| {
@@ -638,41 +637,6 @@ pub(crate) fn live_check_allowed(headers: &axum::http::HeaderMap, public_origin:
                 .and_then(origin)
                 .is_some_and(|referrer| Some(referrer) == origin(public_origin))
         }
-    }
-}
-
-/// The installations of the signed-in person's GitHub App connection that
-/// have not yet granted what Codewire needs, checked live by the credential
-/// service with that person's own connection and authority (#2712). Advisory:
-/// an error, or no answer within two seconds, is an empty list, so the page
-/// never fails or waits long because of GitHub.
-pub(crate) async fn github_pending_permissions(
-    state: &AppState,
-    cookie: HeaderValue,
-) -> Vec<GithubPendingPermissions> {
-    let client = GithubRepositoryServiceClient::new(
-        BrowserTransport {
-            http: state.credential_http.clone(),
-            cookie: Some(cookie),
-            origin: Some(
-                HeaderValue::from_str(&state.public_origin)
-                    .expect("validated dashboard public origin is a valid header value"),
-            ),
-        },
-        ClientConfig::new(state.credential_origin.clone())
-            .with_default_timeout(GITHUB_PENDING_TIMEOUT)
-            .with_default_max_message_size(MAX_GITHUB_PENDING_RESPONSE_BYTES),
-    );
-    match tokio::time::timeout(
-        GITHUB_PENDING_TIMEOUT,
-        client.list_github_pending_permissions(ListGithubPendingPermissionsRequest::default()),
-    )
-    .await
-    {
-        Ok(Ok(response)) => {
-            GithubPendingPermissions::from_wire(&response.into_owned().pending_permissions)
-        }
-        _ => Vec::new(),
     }
 }
 

@@ -30,6 +30,7 @@ observed**.
 | `cred-same-name` | not yet observed (#4928) | not yet observed (#4928) | not yet observed (#4928) |
 | `cred-wording` | not yet observed | not yet observed | not yet observed |
 | `cred-pickers` | not yet observed | not yet observed | not yet observed |
+| `cred-github-notice` | not applicable | not applicable | not yet observed (dashboard) |
 
 ## Before the walk
 
@@ -954,3 +955,56 @@ the first release with the four rows.
   Locally, walk only against a private keyring, as "Before the walk" says.
 - **Observed:** not yet observed. The walk on a Mac and in the cloud, on a
   released `cw` (v0.4.22 or later), is still to do.
+
+## 16. `cred-github-notice`: GitHub's pending permissions, on the dashboard's Credentials page
+
+The dashboard's Credentials page tells a person whose GitHub connection has not
+yet accepted Codewire's updated permissions (#2712). The notice used to be part
+of the page, so every render of the page waited on a live call to GitHub: on
+Production 574 to 648 ms, and 2 s when the call hit its bound (#5206). It now
+appears after the page has loaded.
+
+- **Entry points:** the dashboard at `/settings/credentials/`, signed in. Only
+  the dashboard shows it; `cw credentials` is not part of this step.
+- **States to exercise:**
+  - no GitHub connection: no notice, and no request for it;
+  - a GitHub connection that has accepted the permissions: the page loads, and
+    no notice appears;
+  - a connection with an update pending: the page loads first, then the notice
+    "GitHub is waiting for you to accept Codewire's updated permissions on
+    ACCOUNT", with its "Review on GitHub" link, appears in place within 2 s,
+    in a polite live region, without moving focus or closing a dialog that a
+    `?dialog=` link opened;
+  - the check is slow or fails: no notice, and never GitHub's error text, a
+    token fragment or a scope the person cannot already see; the page's trace
+    has a `github_pending_permissions` span whose `outcome` says why (`ok`,
+    the Connect code, or `timed_out`);
+  - a session the page turns away (no two-factor, a second session cookie, an
+    `Authorization` header): an empty answer, and no call to GitHub;
+  - reloads within 45 s: the page does not ask GitHub again, and the notice
+    shows what the same person's last check found, or nothing. A GitHub
+    connect or reconnect that completes ends that person's window, so the
+    notice reflects the new connection on the next load;
+  - a load another site started, and a request without `Sec-Fetch-Site:
+    same-origin` or without the fragment header: refused, and no call to GitHub;
+  - JavaScript off: the page works and the notice never shows. It is advisory.
+- **Driving it:** on Dev, as a person whose GitHub App connection lacks the
+  current permissions. Load `/settings/credentials/` in a browser, read the
+  `Server-Timing` header of the page (#5217), then watch the notice appear;
+  reload ten times in a row; and request the fragment from another origin.
+- **Proof:**
+  - the page's `Server-Timing` total is under 500 ms, and has no `github`
+    phase;
+  - the notice appears within 2 s of the load, in the page's own markup;
+  - the credential service logged at most one `ListGithubPendingPermissions`
+    call for that person in each 45 s, however many times the page loaded;
+  - the cross-site and header-less requests answer 403 and add no
+    `ListGithubPendingPermissions` line;
+  - the edge's p95 for `/settings/credentials/` on Dev is under 500 ms.
+- **Gotchas:** a pending update needs a GitHub App installation that lacks the
+  new permission, which only the owner's GitHub account can set up, so a walk
+  without one can prove everything but the notice itself. The fragment is a GET
+  that can cause GitHub to renew a token, which is acceptable only because of
+  the same-origin refusal.
+- **Observed:** not yet observed.
+

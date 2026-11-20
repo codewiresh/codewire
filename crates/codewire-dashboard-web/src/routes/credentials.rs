@@ -39,7 +39,7 @@ use crate::{
         CredentialRevisionSubmission, CredentialRotateSubmission, CredentialSettingsView,
         CredentialSshGenerateSubmission, CredentialSshImportSubmission,
         CredentialSubscriptionTokenSubmission, GitHubAppAuthorizationSubmission,
-        GitIdentitySubmission, GithubAcceptView,
+        GitIdentitySubmission,
     },
 };
 
@@ -141,36 +141,16 @@ async fn render_page(
         Ok(cookie) => cookie,
         Err(()) => return login_redirect(&continuation, headers),
     };
-    // The live GitHub permission status runs beside the metadata reads and
-    // never holds the page up for long. A page load another site started
-    // renders without it, so a link elsewhere cannot make the dashboard call
-    // GitHub or renew a token (#2712). It matters only while the person's own
-    // GitHub connection is active, so once the credentials show none the page
-    // stops waiting for it.
+    // The GitHub permission notice is not part of this render: a person whose
+    // GitHub connection is active gets a placeholder that fills it in after
+    // the page has loaded, so GitHub never holds the page up (#5206). A page
+    // load another site started gets no placeholder, so a link elsewhere
+    // cannot make the dashboard call GitHub or renew a token (#2712).
     let live = credentials_connect::live_check_allowed(headers, &state.public_origin);
-    let github_cookie = cookie.clone();
-    let github = async move {
-        if live {
-            credentials_connect::github_pending_permissions(state, github_cookie).await
-        } else {
-            Vec::new()
-        }
-    };
-    tokio::pin!(github);
-    let reads = async {
-        tokio::join!(
-            git_identity_data(state, cookie.clone()),
-            credentials_connect::settings_data(state, cookie.clone()),
-        )
-    };
-    tokio::pin!(reads);
-    let mut github_pending = None;
-    let (git_identity, data) = loop {
-        tokio::select! {
-            reads = &mut reads => break reads,
-            pending = &mut github, if github_pending.is_none() => github_pending = Some(pending),
-        }
-    };
+    let (git_identity, data) = tokio::join!(
+        git_identity_data(state, cookie.clone()),
+        credentials_connect::settings_data(state, cookie.clone()),
+    );
     timing.mark("reads");
     let git_identity = match git_identity {
         Ok(identity) => identity,
@@ -209,22 +189,10 @@ async fn render_page(
             "",
         ),
     };
-    // Shown while the person's own GitHub connection is active; the check is
-    // live on every render, so it is gone once GitHub has the grant.
     let github_connected = data
         .credentials
         .iter()
         .any(|credential| credential.oauth_provider == "github" && !credential.revoked);
-    let github_pending = if github_connected {
-        let pending = match github_pending {
-            Some(pending) => pending,
-            None => github.await,
-        };
-        timing.mark("github");
-        pending
-    } else {
-        Vec::new()
-    };
     let page = CredentialSettingsView {
         navigation_query: page_query(query),
         creation_return_url: if dashboard.has_selected_organization {
@@ -251,13 +219,7 @@ async fn render_page(
         message: approved_message(message).into(),
         error: approved_error(error).into(),
         retained_name: retained_name.into(),
-        github_accept: github_pending
-            .into_iter()
-            .map(|pending| GithubAcceptView {
-                url: pending.settings_url().unwrap_or_default(),
-                account: pending.account,
-            })
-            .collect(),
+        github_notice_deferred: live && github_connected,
     };
     let mut response = with_csrf_cookie(
         render_credential_settings_page(CredentialSettingsTemplate {
@@ -925,7 +887,11 @@ pub(super) async fn github_app_callback(
         )
         .await
         {
-            Ok(pending) => github_connected_response(&pending, &context, &headers),
+            Ok(pending) => {
+                // What the notice would find has just changed.
+                state.github_checks.forget(&dashboard.account_id);
+                github_connected_response(&pending, &context, &headers)
+            }
             Err(error) if error.code == ErrorCode::AlreadyExists => {
                 page_error_redirect("github-app-already-connected", &dialog, &context, &headers)
             }
@@ -1734,23 +1700,16 @@ mod tests {
         navigation: &str,
         retained_name: &str,
     ) -> String {
-        rendered_page_with_github_accept(
-            active_dialog,
-            error,
-            data,
-            navigation,
-            retained_name,
-            Vec::new(),
-        )
+        rendered_page_with_notice(active_dialog, error, data, navigation, retained_name, false)
     }
 
-    fn rendered_page_with_github_accept(
+    fn rendered_page_with_notice(
         active_dialog: &str,
         error: &str,
         data: credentials_connect::CredentialSettingsData,
         navigation: &str,
         retained_name: &str,
-        github_accept: Vec<GithubAcceptView>,
+        github_notice_deferred: bool,
     ) -> String {
         let view = DashboardView {
             account_id: "synthetic-account".to_owned(),
@@ -1798,7 +1757,7 @@ mod tests {
             message: String::new(),
             error: error.into(),
             retained_name: retained_name.into(),
-            github_accept,
+            github_notice_deferred,
         };
         CredentialSettingsTemplate {
             view: &view,
@@ -1809,47 +1768,17 @@ mod tests {
     }
 
     #[test]
-    fn the_page_names_installations_still_short_of_permissions() {
-        // #2712: the live status names each installation and links its
-        // settings page; it is absent when every installation granted what
-        // is needed.
-        let html = rendered_page_with_github_accept(
-            "",
-            "",
-            dialog_data(),
-            "?org=sample-org",
-            "",
-            vec![GithubAcceptView {
-                account: "octo-org".into(),
-                url: "https://github.com/organizations/octo-org/settings/installations/43".into(),
-            }],
-        );
-        assert!(html.contains(
-            r#"<section class="cw-alert cw-alert--warning" aria-label="GitHub permissions">"#
-        ));
-        assert!(html.contains(
-            "<p>GitHub is waiting for you to accept Codewire's updated permissions on octo-org. \
-             <a class=\"cw-link-button\" href=\"https://github.com/organizations/octo-org/settings/installations/43\" \
-             target=\"_blank\" rel=\"noopener noreferrer\">Review on GitHub</a></p>"
-        ), "{html}");
-        let html = rendered_page("", "", dialog_data(), "?org=sample-org", "");
-        assert!(!html.contains("GitHub permissions"));
-        // An enterprise accepts in its own settings: the notice links nothing.
-        let html = rendered_page_with_github_accept(
-            "",
-            "",
-            dialog_data(),
-            "?org=sample-org",
-            "",
-            vec![GithubAcceptView {
-                account: "octo-enterprise".into(),
-                url: String::new(),
-            }],
-        );
-        assert!(html.contains(
-            "<p>GitHub is waiting for you to accept Codewire's updated permissions on octo-enterprise.</p>"
-        ));
-        assert!(!html.contains("Review on GitHub"));
+    fn the_page_only_asks_for_the_notice_and_never_holds_it() {
+        // #5206: the page carries a placeholder in a polite live region, and
+        // never the notice itself, so GitHub cannot hold it up.
+        let asked = rendered_page_with_notice("", "", dialog_data(), "?org=sample-org", "", true);
+        assert!(asked.contains(
+            r#"<div aria-live="polite"><div hx-get="/settings/credentials/_fragments/github-permissions" hx-trigger="load" hx-swap="outerHTML"></div></div>"#
+        ), "{asked}");
+        assert!(!asked.contains("GitHub is waiting"));
+        let not_asked = rendered_page("", "", dialog_data(), "?org=sample-org", "");
+        assert!(!not_asked.contains("github-permissions"));
+        assert!(!not_asked.contains("GitHub permissions"));
     }
 
     #[test]

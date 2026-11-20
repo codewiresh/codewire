@@ -44,6 +44,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 codewire-workspace-hack.workspace = true
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

@@ -31,6 +31,8 @@ pub(crate) struct AppState {
     pub(crate) oauth_providers: std::sync::Arc<crate::raw_auth::OAuthProvidersCache>,
     /// How the IdP admits a sign-up, as it last said.
     pub(crate) signup_mode: std::sync::Arc<crate::raw_auth::SignupModeCache>,
+    /// What each person's GitHub permission check last found (#5206).
+    pub(crate) github_checks: std::sync::Arc<crate::github_check::GithubChecks>,
     /// The public Updates page's source; `None` turns the page off.
     pub(crate) updates: Option<std::sync::Arc<crate::updates_connect::Updates>>,
 }
@@ -81,6 +83,7 @@ impl AppState {
             signup_credit: std::sync::Arc::default(),
             oauth_providers: std::sync::Arc::default(),
             signup_mode: std::sync::Arc::default(),
+            github_checks: std::sync::Arc::default(),
             updates: config
                 .updates_site
                 .map(|site| std::sync::Arc::new(crate::updates_connect::Updates::new(site))),

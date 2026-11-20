@@ -24,6 +24,7 @@ mod environment_drafts;
 mod environment_source_forms;
 mod environment_sources;
 mod error;
+mod github_check;
 mod hosts_connect;
 mod mailto;
 mod network_policies_connect;

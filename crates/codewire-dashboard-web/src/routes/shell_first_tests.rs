@@ -284,10 +284,11 @@ async fn credentials_upstream(github: bool) -> TestServer {
     serve(router).await
 }
 
-/// Without a GitHub connection the page does not wait for the live GitHub
-/// permission check; with one it does, and its timing says so.
+/// The page never waits for GitHub (#5206). With a GitHub connection it carries
+/// a placeholder that asks for the permission notice after load; without one it
+/// carries none. Its timing never has a `github` phase.
 #[tokio::test]
-async fn the_credentials_page_waits_for_github_only_while_github_is_connected() {
+async fn the_credentials_page_never_waits_for_github_and_asks_only_when_connected() {
     for github in [false, true] {
         let upstream = credentials_upstream(github).await;
         let dashboard = serve(crate::app(config(&upstream.origin))).await;
@@ -313,14 +314,25 @@ async fn the_credentials_page_waits_for_github_only_while_github_is_connected() 
         let phases: Vec<&str> = timing
             .split(", ")
             .map(|phase| phase.split(';').next().unwrap_or_default())
+            .filter(|phase| *phase != "total")
             .collect();
-        if github {
-            assert_eq!(phases, ["shell", "reads", "github"], "{timing}");
-        } else {
-            assert_eq!(phases, ["shell", "reads"], "{timing}");
-            // The check's own deadline is 2 s; the page never reaches it.
-            assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
-        }
+        assert_eq!(phases, ["shell", "reads"], "{timing}");
+        // The check's own deadline is 2 s; the page never reaches it.
+        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+        let body = response.text().await.unwrap();
+        assert_eq!(
+            body.contains(r#"hx-get="/settings/credentials/_fragments/github-permissions""#),
+            github,
+            "github {github}"
+        );
+        assert!(!body.contains("GitHub is waiting"), "github {github}");
+        // The placeholder fetches only if the page loads htmx, with the config
+        // that keeps a refused (4xx) answer out of the page.
+        assert!(
+            body.contains("/assets/codewire/htmx-2.0.10.min.js"),
+            "github {github}"
+        );
+        assert!(body.contains(r#"name="htmx-config""#), "github {github}");
     }
 }
 
@@ -392,4 +404,212 @@ async fn a_member_who_is_not_an_admin_never_reaches_feedback() {
     let calls = calls.lock().unwrap().clone();
     assert_eq!(count(&calls, "/api/auth/get-session"), 1, "{calls:?}");
     assert_eq!(count(&calls, "/ListFeedback"), 0, "{calls:?}");
+}
+
+/// An upstream that records every path it is asked and answers the GitHub
+/// permission check with a failure that carries words the page must never
+/// show.
+async fn recording_upstream(two_factor: bool) -> (TestServer, Arc<Mutex<Vec<String>>>) {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let seen = calls.clone();
+    let router = Router::new().fallback(any(move |request: axum::extract::Request| {
+        let seen = seen.clone();
+        async move {
+            let path = request.uri().path().to_owned();
+            seen.lock().unwrap().push(path.clone());
+            if path == "/api/auth/get-session" {
+                return Json(serde_json::json!({"user": {"id": "synthetic-account", "email": "synthetic@example.test", "two_factor_enabled": two_factor}})).into_response();
+            }
+            (StatusCode::BAD_GATEWAY, "SYNTHETIC-GITHUB-ERROR-BODY").into_response()
+        }
+    }));
+    (serve(router).await, calls)
+}
+
+/// The deferred GitHub check answers only a fetch this dashboard's own page
+/// started (#2712, #5206): anything else is refused before anything is read,
+/// and no upstream is asked.
+#[tokio::test]
+async fn the_github_notice_fragment_refuses_what_the_page_did_not_ask_for() {
+    let (upstream, calls) = recording_upstream(true).await;
+    let dashboard = serve(crate::app(config(&upstream.origin))).await;
+    let url = format!(
+        "{}/settings/credentials/_fragments/github-permissions",
+        dashboard.origin
+    );
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
+        .build()
+        .unwrap();
+    for extra in [
+        vec![],
+        vec![("sec-fetch-site", "same-origin")],
+        vec![("hx-request", "true")],
+        vec![("sec-fetch-site", "cross-site"), ("hx-request", "true")],
+        vec![("sec-fetch-site", "same-site"), ("hx-request", "true")],
+        vec![("sec-fetch-site", "none"), ("hx-request", "true")],
+    ] {
+        let mut headers = session();
+        for (name, value) in &extra {
+            headers.insert(
+                axum::http::HeaderName::from_static(name),
+                value.parse().unwrap(),
+            );
+        }
+        let response = client.get(&url).headers(headers).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{extra:?}");
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "private, no-store",
+            "{extra:?}"
+        );
+        assert!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none(),
+            "{extra:?}"
+        );
+    }
+    assert!(calls.lock().unwrap().is_empty(), "{:?}", calls.lock());
+}
+
+/// A check that fails shows no notice and none of the failure's words, and
+/// the answer is never cached.
+#[tokio::test]
+async fn a_failed_github_check_shows_nothing_and_never_the_upstream_words() {
+    let (upstream, calls) = recording_upstream(true).await;
+    let dashboard = serve(crate::app(config(&upstream.origin))).await;
+    let mut headers = session();
+    headers.insert("sec-fetch-site", "same-origin".parse().unwrap());
+    headers.insert("hx-request", "true".parse().unwrap());
+    let response = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
+        .build()
+        .unwrap()
+        .get(format!(
+            "{}/settings/credentials/_fragments/github-permissions",
+            dashboard.origin
+        ))
+        .headers(headers)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "private, no-store"
+    );
+    let body = response.text().await.unwrap();
+    assert!(!body.contains("SYNTHETIC"), "{body}");
+    assert!(!body.contains("GitHub is waiting"), "{body}");
+    assert_eq!(
+        count(&calls.lock().unwrap(), "/ListGithubPendingPermissions"),
+        1
+    );
+}
+
+fn fragment_headers() -> HeaderMap {
+    let mut headers = session();
+    headers.insert("sec-fetch-site", "same-origin".parse().unwrap());
+    headers.insert("hx-request", "true".parse().unwrap());
+    headers
+}
+
+async fn fetch_fragment(dashboard: &TestServer) -> reqwest::Response {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(crate::test_support::LOOPBACK_HANG_GUARD)
+        .build()
+        .unwrap()
+        .get(format!(
+            "{}/settings/credentials/_fragments/github-permissions",
+            dashboard.origin
+        ))
+        .headers(fragment_headers())
+        .send()
+        .await
+        .unwrap()
+}
+
+/// The page's gate comes first (#5206): a session whose account has not set up
+/// two-factor, which every page sends to setup, makes no call for GitHub.
+#[tokio::test]
+async fn a_session_without_two_factor_gets_an_empty_notice_and_no_check() {
+    let (upstream, calls) = recording_upstream(false).await;
+    let dashboard = serve(crate::app(config(&upstream.origin))).await;
+    let response = fetch_fragment(&dashboard).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.text().await.unwrap(), "");
+    assert_eq!(
+        count(&calls.lock().unwrap(), "/ListGithubPendingPermissions"),
+        0
+    );
+}
+
+/// One person asks GitHub once in the window, however often the page loads.
+#[tokio::test]
+async fn one_person_fetching_the_notice_twice_asks_the_credential_service_once() {
+    let (upstream, calls) = recording_upstream(true).await;
+    let dashboard = serve(crate::app(config(&upstream.origin))).await;
+    for _ in 0..2 {
+        assert_eq!(fetch_fragment(&dashboard).await.status(), StatusCode::OK);
+    }
+    assert_eq!(
+        count(&calls.lock().unwrap(), "/ListGithubPendingPermissions"),
+        1
+    );
+}
+
+/// What a span's `outcome` field was recorded as.
+#[derive(Clone, Default)]
+struct Outcomes(Arc<Mutex<Vec<String>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Outcomes {
+    fn on_record(
+        &self,
+        _span: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        _context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        struct Find<'a>(&'a Outcomes);
+        impl tracing::field::Visit for Find<'_> {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "outcome" {
+                    self.0.0.lock().unwrap().push(value.to_owned());
+                }
+            }
+            fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+        }
+        values.record(&mut Find(self));
+    }
+}
+
+/// A failed check leaves its cause on its span, a code or a timeout and never
+/// a message (#5206).
+#[tokio::test]
+async fn the_check_span_says_how_the_call_ended() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    let outcomes = Outcomes::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(outcomes.clone()));
+    let (unavailable, _) = recording_upstream(true).await;
+    let silent = credentials_upstream(true).await;
+    for origin in [&unavailable.origin, &silent.origin] {
+        let state = crate::state::AppState::new(config(origin));
+        let found = crate::github_check::github_pending_checked(
+            &state,
+            "synthetic-account",
+            "codewire.session_token=synthetic".parse().unwrap(),
+        )
+        .await;
+        assert!(found.is_empty());
+    }
+    let outcomes = outcomes.0.lock().unwrap().clone();
+    assert_eq!(outcomes.len(), 2, "{outcomes:?}");
+    assert!(!outcomes[0].contains("SYNTHETIC"), "{outcomes:?}");
+    assert_ne!(outcomes[0], "ok", "{outcomes:?}");
+    assert_eq!(outcomes[1], "deadline_exceeded");
 }

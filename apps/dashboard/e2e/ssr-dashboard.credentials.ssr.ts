@@ -453,16 +453,22 @@ test.describe("managed provider credential browser journey", () => {
       expect((await page.context().cookies()).map((cookie) => cookie.name))
         .not.toContain("codewire_github_accept");
       const permissions = page.getByRole("region", { name: "GitHub permissions", exact: true });
-      // A page load another site starts never runs the live check, so a link
-      // elsewhere cannot make the dashboard call GitHub or renew a token.
+      // The page's placeholder for the notice, gone once the fragment has
+      // answered: an absence is only read after that.
+      const placeholder = page.locator('[hx-get$="/github-permissions"]');
+      // A page load another site starts never asks for the notice, so a link
+      // elsewhere cannot make the dashboard call GitHub or renew a token: the
+      // page carries no placeholder for it.
       await Promise.all([
         page.waitForURL(`${ssrUrl}/settings/credentials/`),
         page.evaluate((target) => { window.location.assign(target); }, `${ssrUrl}/settings/credentials/`),
       ]);
       await expect(credentialRows.filter({ hasText: name })).toHaveCount(1);
+      await expect(placeholder).toHaveCount(0);
       await expect(permissions).toHaveCount(0);
       // Back on Codewire by the person's own navigation (or a Setup URL
-      // return when the App has one), the live status names both.
+      // return when the App has one), the page loads first and the notice
+      // fills in after it (#5206), naming both.
       await page.goto("/settings/credentials/?installation_id=41&setup_action=update");
       await expect(page.getByRole("status")).toHaveText("GitHub permissions updated.");
       const waiting = "GitHub is waiting for you to accept Codewire's updated permissions on";
@@ -474,7 +480,8 @@ test.describe("managed provider credential browser journey", () => {
       await expect(review.nth(1))
         .toHaveAttribute("href", "https://github.com/organizations/synthetic-works/settings/installations/42");
       await expect(credentialRows.filter({ hasText: name })).toHaveCount(1);
-      // It lasts: every visit checks again while GitHub holds the earlier grant.
+      // It lasts: a visit inside the check window shows the person's last
+      // answer, and a later one asks again, while GitHub holds the earlier grant.
       await page.goto("/settings/credentials/");
       await expect(permissions).toContainText(`${waiting} synthetic-user.`);
       // Once GitHub reports the full grant for the connection, it is gone.
@@ -484,6 +491,7 @@ test.describe("managed provider credential browser journey", () => {
       await expect(page).toHaveURL(/\/settings\/credentials\/\?(?:.*&)?message=github-app-connected$/);
       await page.goto("/settings/credentials/");
       await expect(credentialRows.filter({ hasText: name })).toHaveCount(1);
+      await expect(placeholder).toHaveCount(0);
       await expect(permissions).toHaveCount(0);
       // A GitHub error during the live check shows nothing and never blocks
       // the page: this login's listing answers its connect, then fails.
@@ -491,6 +499,7 @@ test.describe("managed provider credential browser journey", () => {
       await expect(page).toHaveURL("https://github.com/settings/installations/41");
       await page.goto("/settings/credentials/");
       await expect(credentialRows.filter({ hasText: name })).toHaveCount(1);
+      await expect(placeholder).toHaveCount(0);
       await expect(permissions).toHaveCount(0);
 
       // Disconnect revokes the connection, which asks GitHub to revoke its

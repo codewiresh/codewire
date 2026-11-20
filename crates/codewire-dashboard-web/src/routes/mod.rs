@@ -16,6 +16,7 @@ mod dashboard;
 mod device;
 mod environment_drafts;
 mod environments;
+mod github_notice;
 mod github_repositories;
 mod hosts;
 mod invitations;
@@ -492,6 +493,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/settings/", get(settings::settings))
         .route("/settings/credentials", get(slash_redirect))
         .route("/settings/credentials/", get(credentials::page))
+        .route(
+            "/settings/credentials/_fragments/github-permissions",
+            get(github_notice::fragment),
+        )
         .route("/settings/invitations", get(slash_redirect))
         .route(my_invitations::PATH, get(my_invitations::page))
         .route(

@@ -735,10 +735,12 @@ difference. A day GitHub cannot be read ends in a warning and the line
   `repositories you can access in ACCOUNT`: that installation's selection is
   its owner's choice, and this sign-in reaches only what the user can already
   reach there. No repository list is read for it (#5443).
-- **The credentials page** checks live on every render, so it shows the
-  status for as long as GitHub holds the earlier grant and stops once the
-  owner accepts: "GitHub is waiting for you to accept Codewire's updated
-  permissions on LOGIN", with **Review on GitHub**. The check is
+- **The credentials page** shows the status for as long as GitHub holds the
+  earlier grant and stops once the owner accepts: "GitHub is waiting for you
+  to accept Codewire's updated permissions on LOGIN", with **Review on
+  GitHub**. The page itself asks nothing of GitHub (#5206): for a person whose
+  GitHub connection is active it carries a placeholder, and the page's own
+  script fetches the notice after load. The check is
   `GithubRepositoryService.ListGithubPendingPermissions`, which runs under
   exactly `ListGithubRepositories`' authority: the original exact-Origin
   browser session or `codewire.api` OAuth bearer (organization API keys are
@@ -746,19 +748,33 @@ difference. A day GitHub cannot be read ends in a warning and the line
   version, the same durable App-token renewal and the same record recheck
   after GitHub answers. Unlike discovery it never renews ahead of expiry: a
   token GitHub still accepts is used as it is, and one GitHub refuses (401)
-  renews once, so a page render never rotates a working token. It answers login,
+  renews once, so a check never rotates a working token. It answers login,
   installation ID and account kind only, never a token, permission set or
   provider response, and stores nothing. Being advisory, it never holds
   anything up: it has three slots of its own (never discovery's), a
   two-second budget, and answers nothing at once when its slots are full or
   another renewal of the same credential is running. A renewal it starts
   moves to the tracked worker and completes durably for the next read. The
-  dashboard runs it beside the page's metadata reads and gives it two
-  seconds; any error or timeout shows nothing. A page load another site
-  started (`Sec-Fetch-Site: cross-site`, or another cross value without a
-  referrer from the dashboard) renders without it, so a link elsewhere cannot
-  make the dashboard call GitHub or renew a token; this includes GitHub's
-  Setup URL return, and the person's next visit shows the status.
+  dashboard's fragment `GET /settings/credentials/_fragments/github-permissions`
+  runs it with a two-second bound; any error or timeout shows nothing, and
+  the span of the call records only how it ended: `ok`, the Connect code, or
+  `timed_out`, never a message. The fragment is a state change behind a GET,
+  because the check can renew a person's GitHub token, and it is acceptable
+  only because of its refusal: it answers 403 (`private, no-store`, no CORS
+  headers) unless the browser says `Sec-Fetch-Site: same-origin` and the
+  request carries htmx's own header, so a missing `Sec-Fetch-Site`, `same-site`,
+  `none` and `cross-site` are all refused before anything is read, and a link
+  on another site cannot make the dashboard call GitHub or renew a token. It
+  also sits behind the page's own gate: one session cookie, no `Authorization`
+  header, a valid session and two-factor; a session the page turns away gets
+  an empty answer and no check. A page load another site started carries no
+  placeholder, including GitHub's Setup URL return, and the person's next visit
+  shows the status. The dashboard asks at most once per person per 45
+  seconds, in the process's memory only, never shared between people and
+  capped at 4096 people: other requests in the window get that person's last
+  answer, or none while the first is running, and a completed GitHub connect
+  ends that person's window. With more than one replica the window is
+  per replica.
   `cw credentials --cloud list` and `get` print the same lines in text
   output under the same rule. Only the first page of 100 installations is
   compared. A transient failure of a renewal that has started still ends the
