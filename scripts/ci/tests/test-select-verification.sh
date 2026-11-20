@@ -1796,11 +1796,14 @@ run_paths_case sdk_examples_typescript pull_request refs/pull/5109/head false \
   'policy sdk_ts security security_js' \
   libs/sdk-examples/quickstart/typescript/quickstart.ts \
   libs/sdk-examples/quickstart/typescript/package.json \
-  libs/sdk-examples/quickstart/typescript/package-lock.json
+  libs/sdk-examples/quickstart/typescript/package-lock.json \
+  libs/sdk-examples/pi-durable/typescript/durable.ts \
+  libs/sdk-examples/pi-durable/typescript/package-lock.json
 run_paths_case sdk_examples_python pull_request refs/pull/5109/head false \
   'policy sdk_python' libs/sdk-examples/quickstart/python/quickstart.py
 run_paths_case sdk_examples_docs pull_request refs/pull/5109/head false \
-  'docs policy' libs/sdk-examples/README.md libs/sdk-examples/quickstart/README.md
+  'docs policy' libs/sdk-examples/README.md libs/sdk-examples/quickstart/README.md \
+  libs/sdk-examples/pi-durable/README.md
 run_paths_case retired_cli_assets pull_request refs/pull/1513/head false \
   'policy security security_js' \
   apps/cli/.env.example \

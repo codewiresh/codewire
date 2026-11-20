@@ -627,6 +627,8 @@ test-sdk-examples-ts:
 	cd libs/sdk-ts && npm ci --silent --install-links --ignore-scripts && npm run build --silent
 	cd libs/sdk-examples/quickstart/typescript && npm ci --silent --install-links --ignore-scripts && \
 	  ./node_modules/.bin/tsc --noEmit -p .
+	cd libs/sdk-examples/pi-durable/typescript && npm ci --silent --install-links --ignore-scripts && \
+	  ./node_modules/.bin/tsc --noEmit -p .
 
 test-sdk-python:
 	cd libs/sdk-python && \
@@ -656,6 +658,12 @@ sdk-e2e-ts:
 	cd libs/sdk-ts && npm run build --silent
 	cd libs/sdk-examples/quickstart/typescript && npm ci --silent --install-links --ignore-scripts && \
 	  CODEWIRE_API_URL="$$CODEWIRE_SERVER_URL" ./node_modules/.bin/tsx quickstart.ts
+	# cw runs as the demo's SSH ProxyCommand: give it an empty home so it
+	# signs in only with the API key it is handed, never a saved login.
+	cd libs/sdk-examples/pi-durable/typescript && npm ci --silent --install-links --ignore-scripts && \
+	  scratch="$$(mktemp -d)" && \
+	  HOME="$$scratch" CW_CONFIG_DIR="$$scratch/cw" CODEWIRE_API_URL="$$CODEWIRE_SERVER_URL" \
+	    ./node_modules/.bin/tsx durable.ts demo; status=$$?; rm -rf -- "$$scratch"; exit $$status
 
 sdk-e2e-rust:
 	cargo run --locked -p codewire --example quickstart

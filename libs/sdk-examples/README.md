@@ -7,6 +7,7 @@ repository.
 | Example | Go | Python | TypeScript | Rust |
 | --- | --- | --- | --- | --- |
 | [Quickstart](quickstart/): create an environment, run a command, write and read back a file, delete it | [go](quickstart/go/main.go) | [python](quickstart/python/quickstart.py) | [typescript](quickstart/typescript/quickstart.ts) | [rust](../../crates/codewire/examples/quickstart.rs) |
+| [A durable pi agent](pi-durable/): a pi-durable agent whose tools run in an environment, and a turn that survives its host process being killed | | | [typescript](pi-durable/typescript/durable.ts) | |
 
 The Rust examples live with the crate, as Cargo expects
 (`cargo run -p codewire --example quickstart`).
