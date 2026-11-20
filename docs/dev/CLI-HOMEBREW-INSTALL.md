@@ -111,7 +111,8 @@ Actions permission on the tap and which GitHub expires within an hour; neither t
 nor the token appears in arguments, output or a file another step can read.
 The minter is the mirror's (`scripts/ci/release/mint-github-app-token.sh`).
 
-The tap's current `update-formula.yml` reads GitHub release assets, which no
-longer exist, with a stored personal token (`HOMEBREW_TAP_TOKEN`); nobody
-dispatches it. It is rewritten as above, and the token is revoked after the
-first App-dispatched run works.
+The tap's `update-formula.yml` is the workflow above, and it holds no stored
+credential: it commits with its own `GITHUB_TOKEN`. A by-hand dispatch moved
+the tap to v0.4.25 with it (2026-11-20, run 44776138549). The personal token
+its earlier version read (`HOMEBREW_TAP_TOKEN`) is referenced nowhere, and the
+owner removed it; the tap holds no repository secret (2026-11-20, #5407).
