@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -12,7 +12,8 @@ use uuid::Uuid;
 use super::*;
 use crate::admitted::{AdmittedStream, FailureCode, PodEvent, PodEvents};
 use crate::interception::{FrontDoorSpec, Interception, InterceptionRefusal, PairIntercepts};
-use crate::orchestration::{AssignedPolicy, Assignment, AssignmentError, PlatformAllow};
+use crate::leaves::{IssuedLeaves, LeafSigner};
+use crate::orchestration::{AssignedPolicy, Assignment, AssignmentError, CallError, PlatformAllow};
 
 /// What the fake launcher was asked to do, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +46,12 @@ struct World {
     acks: Acks,
     /// What each start intercepts, in order.
     intercepts: Vec<PairIntercepts>,
+    /// Each install, by Pod.
+    installed: Vec<(Uuid, Vec<Vec<u8>>)>,
+    /// Each Pod whose leaves were asked for, in order.
+    asks: Vec<Uuid>,
+    /// The signer's next answers; past them, it is unavailable.
+    answers: VecDeque<Result<IssuedLeaves, CallError>>,
 }
 
 #[derive(Clone, Default)]
@@ -68,6 +75,8 @@ struct FakePair {
     pod: Uuid,
     fake: Fake,
     statuses: mpsc::UnboundedReceiver<PairStatus>,
+    /// Set for a pair started with a front door.
+    front_door_key: Option<Vec<u8>>,
 }
 
 impl Launch for Fake {
@@ -88,11 +97,14 @@ impl Launch for Fake {
         world
             .did
             .push(Did::Started(spec.pod_uid, spec.policy.digest()));
+        let front_door_key = matches!(spec.intercepts, PairIntercepts::FrontDoor(_))
+            .then(|| FRONT_DOOR_KEY.to_vec());
         world.intercepts.push(spec.intercepts);
         Ok(FakePair {
             pod: spec.pod_uid,
             fake: self.clone(),
             statuses,
+            front_door_key,
         })
     }
 }
@@ -117,6 +129,18 @@ impl Pair for FakePair {
         }
     }
 
+    fn front_door_key(&self) -> Option<&[u8]> {
+        self.front_door_key.as_deref()
+    }
+
+    async fn install_leaves(&mut self, leaves: &[Vec<u8>]) -> Result<(), &'static str> {
+        self.fake
+            .world()
+            .installed
+            .push((self.pod, leaves.to_vec()));
+        Ok(())
+    }
+
     async fn request_drain(&mut self) -> Result<(), &'static str> {
         self.fake.world().did.push(Did::DrainRequested(self.pod));
         Ok(())
@@ -130,6 +154,25 @@ impl Pair for FakePair {
         self.fake.world().did.push(Did::Ended(self.pod));
     }
 }
+
+impl LeafSigner for Fake {
+    async fn sign(
+        &self,
+        pod_uid: &str,
+        _pod_name: &str,
+        public_key: &[u8],
+    ) -> Result<IssuedLeaves, CallError> {
+        assert_eq!(public_key, FRONT_DOOR_KEY);
+        let mut world = self.world();
+        world.asks.push(Uuid::parse_str(pod_uid).unwrap());
+        world
+            .answers
+            .pop_front()
+            .unwrap_or_else(|| Err(CallError::Unavailable("not signed yet".into())))
+    }
+}
+
+const FRONT_DOOR_KEY: &[u8] = b"front door spki";
 
 const POD: Uuid = Uuid::from_u128(1);
 const OTHER_POD: Uuid = Uuid::from_u128(2);
@@ -269,7 +312,12 @@ impl Harness {
         let fake = Fake::default();
         let (admit, admitted) = mpsc::channel(8);
         let signals = Signals::default();
-        let supervisor = tokio::spawn(supervisor(admitted, signals.clone(), fake.clone()));
+        let supervisor = tokio::spawn(supervisor(
+            admitted,
+            signals.clone(),
+            fake.clone(),
+            Arc::new(fake.clone()),
+        ));
         Self {
             fake,
             admit,
@@ -856,4 +904,91 @@ async fn a_change_to_a_pairs_front_door_ends_the_pair() {
         harness.fake.did().last(),
         Some(&Did::Replaced(fifth, locked().digest()))
     );
+}
+
+fn issued(name: &str, renew_in: u64) -> Result<IssuedLeaves, CallError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    Ok(IssuedLeaves {
+        certificates: vec![name.as_bytes().to_vec()],
+        renew_at_unix: i64::try_from(now + renew_in).unwrap(),
+    })
+}
+
+/// A pair with a front door asks for its leaves once its guest's check has
+/// passed, installs them, and asks again at their renew_at.
+#[tokio::test]
+async fn a_front_doors_leaves_are_asked_for_installed_and_renewed() {
+    let harness = Harness::new().await;
+    harness.fake.world().answers = VecDeque::from([issued("first", 600), issued("second", 600)]);
+    let spec = front_door(&["api.openai.com"]);
+    let _pod = harness
+        .enforcing(POD, intercepting(Interception::On(spec)))
+        .await;
+    settle().await;
+    assert_eq!(harness.fake.world().asks, [POD]);
+    assert_eq!(
+        harness.fake.world().installed,
+        [(POD, vec![b"first".to_vec()])]
+    );
+
+    tokio::time::advance(Duration::from_secs(601)).await;
+    settle().await;
+    assert_eq!(harness.fake.world().asks, [POD, POD]);
+    assert_eq!(
+        harness.fake.world().installed.last(),
+        Some(&(POD, vec![b"second".to_vec()]))
+    );
+}
+
+/// No front door, no leaves: interception off, or a broker that refuses
+/// the bound hosts, never asks.
+#[tokio::test]
+async fn a_pair_without_a_front_door_asks_for_no_leaves() {
+    let harness = Harness::new().await;
+    let hosts = front_door(&["api.openai.com"]).intercepts;
+    let _off = harness
+        .enforcing(POD, intercepting(Interception::Off))
+        .await;
+    let _refusing = harness
+        .enforcing(
+            OTHER_POD,
+            intercepting(Interception::RefuseHosts {
+                hosts,
+                why: InterceptionRefusal::Port,
+            }),
+        )
+        .await;
+    tokio::time::advance(Duration::from_secs(3600)).await;
+    settle().await;
+    assert!(harness.fake.world().asks.is_empty());
+    assert!(harness.fake.world().installed.is_empty());
+}
+
+/// The asking ends with the pair, and nothing carries over to the next.
+#[tokio::test]
+async fn the_asking_stops_with_the_pair() {
+    let harness = Harness::new().await;
+    let spec = front_door(&["api.openai.com"]);
+    let mut pod = harness
+        .enforcing(POD, intercepting(Interception::On(spec)))
+        .await;
+    // Unavailable: asked at once, then after 5 and 10 more seconds; the
+    // fourth is 20 seconds after the third.
+    for _ in 0..20 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+    }
+    assert_eq!(harness.fake.world().asks.len(), 3);
+
+    pod.changes
+        .send(Ok(intercepting(Interception::Off)))
+        .unwrap();
+    assert_eq!(pod.next().await, PodEvent::Ended { moved: false });
+    tokio::time::advance(Duration::from_secs(3600)).await;
+    settle().await;
+    assert_eq!(harness.fake.world().asks.len(), 3);
+    assert!(harness.fake.world().installed.is_empty());
 }

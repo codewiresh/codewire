@@ -10,10 +10,12 @@ use uuid::Uuid;
 use super::{Launch, Pair, PairSpec, PairStatus, SELF_CHECK_TIMEOUT, Signals};
 use crate::admitted::{AdmittedStream, FailureCode, PodEvent, PodEvents};
 use crate::interception::{Interception, InterceptionRefusal, PairIntercepts};
-use crate::orchestration::{Assignment, AssignmentError};
+use crate::leaves::{IssuedLeaves, LeafSigner, Renewal, Settled};
+use crate::orchestration::{Assignment, AssignmentError, CallError};
 
-pub(super) struct Pod<L> {
+pub(super) struct Pod<L, S> {
     pub(super) launch: Arc<L>,
+    pub(super) signer: Arc<S>,
     /// The Pod's stream was replaced, or admission is gone.
     pub(super) stop: CancellationToken,
     pub(super) signals: Signals,
@@ -135,8 +137,10 @@ enum End {
     ReporterGone,
 }
 
-struct Session<'a, P> {
+struct Session<'a, P, S> {
     pod_uid: Uuid,
+    /// The front door's leaves, for a pair with one. They end with it.
+    leaves: Option<Renewal<S>>,
     pair: &'a mut P,
     enforcing: Enforcing,
     changes: watch::Receiver<Result<Assignment, AssignmentError>>,
@@ -155,7 +159,7 @@ fn shut_down(signals: &Signals) -> End {
     }
 }
 
-impl<L: Launch> Pod<L> {
+impl<L: Launch, S: LeafSigner> Pod<L, S> {
     pub(super) async fn run(self, admitted: AdmittedStream) -> Outcome {
         let AdmittedStream {
             pod_uid,
@@ -195,8 +199,18 @@ impl<L: Launch> Pod<L> {
         };
         let end = match started {
             Ok((mut pair, enforcing)) => {
+                let leaves = pair.front_door_key().map(|key| {
+                    Renewal::new(
+                        Arc::clone(&self.signer),
+                        pod_uid.to_string(),
+                        pod_name.clone(),
+                        key.to_vec(),
+                        unix_now(),
+                    )
+                });
                 let end = Session {
                     pod_uid,
+                    leaves,
                     pair: &mut pair,
                     enforcing,
                     changes,
@@ -250,7 +264,7 @@ async fn report_end(
     outcome
 }
 
-impl<P: Pair> Session<'_, P> {
+impl<P: Pair, S: LeafSigner> Session<'_, P, S> {
     async fn run(mut self) -> End {
         if let Err(end) = self.self_check().await {
             return end;
@@ -265,9 +279,39 @@ impl<P: Pair> Session<'_, P> {
                     Err(_) => Err(End::Told),
                 },
                 status = self.pair.status() => self.on_status(status),
+                asked = ask(self.leaves.as_ref()) => {
+                    self.install(asked).await;
+                    Ok(())
+                }
             };
             if let Err(end) = step {
                 return end;
+            }
+        }
+    }
+
+    /// Installs what an ask returned and schedules the next. Its outcome is
+    /// logged as a count or an error code, never a certificate.
+    async fn install(&mut self, asked: Result<IssuedLeaves, CallError>) {
+        let Some(leaves) = self.leaves.as_mut() else {
+            return;
+        };
+        let pair = &mut *self.pair;
+        let pod_uid = self.pod_uid;
+        match leaves
+            .settle(asked, async |certificates: &[Vec<u8>]| {
+                pair.install_leaves(certificates).await
+            })
+            .await
+        {
+            Settled::Installed(count) => {
+                tracing::info!(%pod_uid, leaves = count, "a front door's leaves are installed");
+            }
+            Settled::Refused(error) => {
+                tracing::warn!(%pod_uid, %error, "a front door kept its leaves; asking again");
+            }
+            Settled::Unanswered(error) => {
+                tracing::warn!(%pod_uid, %error, "a front door's leaves were not signed; asking again");
             }
         }
     }
@@ -354,4 +398,20 @@ impl<P: Pair> Session<'_, P> {
             }
         }
     }
+}
+
+/// The next ask of `leaves`; never, for a pair without a front door.
+async fn ask<S: LeafSigner>(leaves: Option<&Renewal<S>>) -> Result<IssuedLeaves, CallError> {
+    match leaves {
+        Some(leaves) => leaves.ask().await,
+        None => std::future::pending().await,
+    }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+        })
 }

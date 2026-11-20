@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use crate::admitted::AdmittedStream;
 use crate::interception::PairIntercepts;
+use crate::leaves::LeafSigner;
 
 mod pod;
 #[cfg(test)]
@@ -121,6 +122,17 @@ pub trait Pair: Send + 'static {
     /// as [`PairStatus::NoFlow`].
     fn request_drain(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
+    /// The front door's public key, a DER SubjectPublicKeyInfo, for its
+    /// leaves; `None` for a pair without one.
+    fn front_door_key(&self) -> Option<&[u8]>;
+
+    /// Has the front door serve `leaves` from now on, all or none. A refusal
+    /// keeps the leaves it had.
+    fn install_leaves(
+        &mut self,
+        leaves: &[Vec<u8>],
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
     /// Kills and reaps every process.
     fn end(self) -> impl Future<Output = ()> + Send;
 }
@@ -158,8 +170,9 @@ struct Running {
 }
 
 /// Every Pod's task, and the table of the newest one per Pod.
-struct Pods<L> {
+struct Pods<L, S> {
     launch: Arc<L>,
+    signer: Arc<S>,
     signals: Signals,
     /// Ends every pair when admission is lost outside a drain.
     stop_all: CancellationToken,
@@ -169,10 +182,11 @@ struct Pods<L> {
     drained: Drained,
 }
 
-impl<L: Launch> Pods<L> {
-    fn new(launch: L, signals: Signals) -> Self {
+impl<L: Launch, S: LeafSigner> Pods<L, S> {
+    fn new(launch: L, signer: Arc<S>, signals: Signals) -> Self {
         Self {
             launch: Arc::new(launch),
+            signer,
             signals,
             stop_all: CancellationToken::new(),
             running: HashMap::new(),
@@ -195,6 +209,7 @@ impl<L: Launch> Pods<L> {
         };
         let pod = pod::Pod {
             launch: Arc::clone(&self.launch),
+            signer: Arc::clone(&self.signer),
             stop: running.stop.clone(),
             signals: self.signals.clone(),
         };
@@ -245,16 +260,18 @@ impl<L: Launch> Pods<L> {
 
 /// Runs a pair for every stream `admitted` yields. A newer stream for a Pod
 /// replaces the older: the older pair is reaped before the newer starts.
+/// `signer` signs the leaves of each pair's front door ([`crate::leaves`]).
 ///
 /// It returns, with every pair reaped, on shutdown; when admission closes
 /// its channel outside a drain; or, in a drain, once admission has closed
 /// its channel and the last pair is gone.
-pub async fn supervisor<L: Launch>(
+pub async fn supervisor<L: Launch, S: LeafSigner>(
     mut admitted: mpsc::Receiver<AdmittedStream>,
     signals: Signals,
     launch: L,
+    signer: Arc<S>,
 ) -> Drained {
-    let mut pods = Pods::new(launch, signals.clone());
+    let mut pods = Pods::new(launch, signer, signals.clone());
     let mut admitting = true;
     while admitting || !pods.tasks.is_empty() {
         tokio::select! {

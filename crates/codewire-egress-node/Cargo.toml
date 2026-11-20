@@ -38,6 +38,8 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
+# Reads an installed leaf's end, so no retry waits past it.
+x509-parser = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]

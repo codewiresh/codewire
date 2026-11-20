@@ -63,6 +63,23 @@ service EgressService {
   // while no epoch runs for the Pod's current binding on this replica, and
   // cw-egress retries with bounded backoff.
   rpc FrontDoorSession(stream FrontDoorSessionRequest) returns (stream FrontDoorSessionResponse);
+
+  // Leaves for the TLS front door of one bound, intercepting Pod on the
+  // caller's node (#4001), for the front door's own key. The caller is the
+  // cw-egress serving that Pod, authenticated as every method here is.
+  // Orchestration signs through the Pod's live credential relay epoch
+  // (CredentialBrokerService.SignInterceptionLeaves, #5170); the leaves'
+  // hosts come only from the credential service's binding record, never
+  // from this request. cw-egress installs every leaf of one answer at once
+  // and asks again at renew_at_unix.
+  //
+  // Refusals: PERMISSION_DENIED, with no detail, for a Pod that is not on
+  // the caller's node, not bound, or whose binding records that it does not
+  // intercept; UNAVAILABLE before the Pod's epoch is admitted, while its
+  // binding carries no interception decision yet (C5), or while the signer
+  // cannot sign, and cw-egress retries. Its front door's hosts fail closed
+  // until a set is installed.
+  rpc SignInterceptionLeaves(SignInterceptionLeavesRequest) returns (SignInterceptionLeavesResponse);
 }
 
 message AdmitRequest {
@@ -246,3 +263,23 @@ message FrontDoorSessionResponse {
 }
 
 message FrontDoorSessionAttached {}
+
+message SignInterceptionLeavesRequest {
+  string pod_uid = 1;
+  string pod_name = 2;
+  // The front door's P-256 public key, as a DER SubjectPublicKeyInfo. Its
+  // private key never leaves the front door.
+  bytes leaf_public_key = 3;
+}
+
+// One leaf certificate for the front door's key. The names it covers are
+// its own subjectAltName, which the front door reads; nothing restates them.
+message InterceptionLeaf {
+  bytes certificate_der = 1;
+}
+
+message SignInterceptionLeavesResponse {
+  repeated InterceptionLeaf leaves = 1;
+  // When cw-egress asks again, before the leaves' end.
+  int64 renew_at_unix = 2;
+}

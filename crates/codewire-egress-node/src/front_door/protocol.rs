@@ -8,7 +8,8 @@
 //!    can compare its executable with its own image;
 //! 3. supervisor: [`CONFINE`];
 //! 4. front door, confined and holding its new key: [`READY`] followed by the
-//!    key's SubjectPublicKeyInfo in DER. Nothing else ever leaves it;
+//!    key's SubjectPublicKeyInfo in DER, which the supervisor takes only as
+//!    a P-256 key ([`is_p256_spki`]). Nothing else ever leaves it;
 //! 5. supervisor, once the Pod's broker is enforcing: [`HANDOFF`] with
 //!    exactly one descriptor, the front door's end of the broker's hand-off
 //!    socket. The front door reads the broker's role tag on it, says
@@ -108,6 +109,26 @@ pub async fn decode_bindings(frame: &[u8]) -> Option<Bindings> {
 /// [`READY`] and the key's SubjectPublicKeyInfo.
 pub fn ready_message(spki: &[u8]) -> Vec<u8> {
     [READY, spki].concat()
+}
+
+/// Every P-256 public key's DER SubjectPublicKeyInfo up to its point:
+/// id-ecPublicKey, prime256v1, and a 66-byte BIT STRING.
+const P256_SPKI_PREFIX: [u8; 26] = [
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a,
+    0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+];
+
+/// An uncompressed P-256 point: its tag and two 32-byte coordinates.
+const P256_POINT_LEN: usize = 65;
+
+/// Whether `spki` is a P-256 public key's DER SubjectPublicKeyInfo with an
+/// uncompressed point, the only key the signer issues leaves for. The
+/// supervisor relays nothing else, so a wrong key fails at the node and not
+/// at orchestration (#4001).
+pub fn is_p256_spki(spki: &[u8]) -> bool {
+    spki.len() == P256_SPKI_PREFIX.len() + P256_POINT_LEN
+        && spki.starts_with(&P256_SPKI_PREFIX)
+        && spki[P256_SPKI_PREFIX.len()] == 0x04
 }
 
 /// [`LEAVES`], the count in one byte, then each certificate's length in two
@@ -319,6 +340,33 @@ mod tests {
         too_many.push(u8::try_from(MAX_LEAVES + 1).unwrap());
         too_many.extend(std::iter::repeat_n(0, 2 * (MAX_LEAVES + 1)));
         assert_eq!(decode_leaves(&too_many), None);
+    }
+
+    #[test]
+    fn only_an_uncompressed_p256_key_is_taken_as_the_front_doors() {
+        let key = codewire_egress_front_door::SignedLeaves::generate().unwrap();
+        assert!(is_p256_spki(key.public_key_spki()));
+        let spki = key.public_key_spki().to_vec();
+
+        let other = |algorithm| rcgen::KeyPair::generate_for(algorithm).unwrap();
+        let p384 = other(&rcgen::PKCS_ECDSA_P384_SHA384).public_key_der();
+        let ed25519 = other(&rcgen::PKCS_ED25519).public_key_der();
+        let mut compressed = spki.clone();
+        compressed[P256_SPKI_PREFIX.len()] = 0x02;
+        let mut other_curve = spki.clone();
+        other_curve[22] = 0x08;
+        for refused in [
+            &p384[..],
+            &ed25519,
+            &compressed,
+            &other_curve,
+            &spki[..spki.len() - 1],
+            &[&spki[..], &[0]].concat(),
+            &spki[P256_SPKI_PREFIX.len()..],
+            b"",
+        ] {
+            assert!(!is_p256_spki(refused), "{refused:02x?}");
+        }
     }
 
     #[test]

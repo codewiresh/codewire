@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .egress_pb2 import AdmitRequest, AdmitResponse, FrontDoorSessionRequest, FrontDoorSessionResponse, ReportEnforcementRequest, ReportEnforcementResponse, ReportRecordsRequest, ReportRecordsResponse, WatchAssignmentRequest, WatchAssignmentResponse
+from .egress_pb2 import AdmitRequest, AdmitResponse, FrontDoorSessionRequest, FrontDoorSessionResponse, ReportEnforcementRequest, ReportEnforcementResponse, ReportRecordsRequest, ReportRecordsResponse, SignInterceptionLeavesRequest, SignInterceptionLeavesResponse, WatchAssignmentRequest, WatchAssignmentResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -48,6 +48,9 @@ class EgressService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def front_door_session(self, request: AsyncIterator[FrontDoorSessionRequest], ctx: RequestContext[FrontDoorSessionRequest, FrontDoorSessionResponse]) -> AsyncIterator[FrontDoorSessionResponse]:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def sign_interception_leaves(self, request: SignInterceptionLeavesRequest, ctx: RequestContext[SignInterceptionLeavesRequest, SignInterceptionLeavesResponse]) -> SignInterceptionLeavesResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -113,6 +116,16 @@ class EgressServiceASGIApplication(ConnectASGIApplication[EgressService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.front_door_session,
+                ),
+                "/codewire.internal.v1.EgressService/SignInterceptionLeaves": Endpoint.unary(
+                    method=MethodInfo(
+                        name="SignInterceptionLeaves",
+                        service_name="codewire.internal.v1.EgressService",
+                        input=SignInterceptionLeavesRequest,
+                        output=SignInterceptionLeavesResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.sign_interception_leaves,
                 ),
             },
             interceptors=interceptors,
@@ -252,6 +265,26 @@ class EgressServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def sign_interception_leaves(
+        self,
+        request: SignInterceptionLeavesRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SignInterceptionLeavesResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SignInterceptionLeaves",
+                service_name="codewire.internal.v1.EgressService",
+                input=SignInterceptionLeavesRequest,
+                output=SignInterceptionLeavesResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class EgressServiceSync(Protocol):
     def admit(self, request: AdmitRequest, ctx: RequestContext[AdmitRequest, AdmitResponse]) -> AdmitResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -266,6 +299,9 @@ class EgressServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def front_door_session(self, request: Iterator[FrontDoorSessionRequest], ctx: RequestContext[FrontDoorSessionRequest, FrontDoorSessionResponse]) -> Iterator[FrontDoorSessionResponse]:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def sign_interception_leaves(self, request: SignInterceptionLeavesRequest, ctx: RequestContext[SignInterceptionLeavesRequest, SignInterceptionLeavesResponse]) -> SignInterceptionLeavesResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -329,6 +365,16 @@ class EgressServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.front_door_session,
+                ),
+                "/codewire.internal.v1.EgressService/SignInterceptionLeaves": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="SignInterceptionLeaves",
+                        service_name="codewire.internal.v1.EgressService",
+                        input=SignInterceptionLeavesRequest,
+                        output=SignInterceptionLeavesResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.sign_interception_leaves,
                 ),
             },
             interceptors=interceptors,
@@ -458,6 +504,25 @@ class EgressServiceClientSync(ConnectClientSync):
                 service_name="codewire.internal.v1.EgressService",
                 input=FrontDoorSessionRequest,
                 output=FrontDoorSessionResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def sign_interception_leaves(
+        self,
+        request: SignInterceptionLeavesRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SignInterceptionLeavesResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SignInterceptionLeaves",
+                service_name="codewire.internal.v1.EgressService",
+                input=SignInterceptionLeavesRequest,
+                output=SignInterceptionLeavesResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

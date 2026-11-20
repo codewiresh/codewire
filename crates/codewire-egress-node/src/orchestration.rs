@@ -14,8 +14,8 @@ use codewire_egress_policy::{CompiledPolicy, PolicyDigest, PolicyDocument};
 use codewire_network_session::{EgressTrust, MAX_EGRESS_TRUST_BYTES};
 use codewire_proto::codewire::internal::v1::__buffa::oneof::egress_assignment::Binding;
 use codewire_proto::codewire::internal::v1::{
-    AdmitRequest, EgressAssignment, EgressServiceClient, WatchAssignmentRequest,
-    WatchAssignmentResponse,
+    AdmitRequest, EgressAssignment, EgressServiceClient, SignInterceptionLeavesRequest,
+    WatchAssignmentRequest, WatchAssignmentResponse,
 };
 use codewire_tls::ConnectOriginTransport;
 use connectrpc::client::{CallOptions, ClientConfig};
@@ -274,6 +274,37 @@ impl Orchestration {
 #[cfg(target_os = "linux")]
 mod front_door;
 mod report;
+
+impl crate::leaves::LeafSigner for Orchestration {
+    async fn sign(
+        &self,
+        pod_uid: &str,
+        pod_name: &str,
+        public_key: &[u8],
+    ) -> Result<crate::leaves::IssuedLeaves, CallError> {
+        let response = self
+            .client()?
+            .sign_interception_leaves_with_options(
+                SignInterceptionLeavesRequest {
+                    pod_uid: pod_uid.to_owned(),
+                    pod_name: pod_name.to_owned(),
+                    leaf_public_key: public_key.to_vec(),
+                    ..Default::default()
+                },
+                self.options()?,
+            )
+            .await?
+            .into_owned();
+        Ok(crate::leaves::IssuedLeaves {
+            certificates: response
+                .leaves
+                .into_iter()
+                .map(|leaf| leaf.certificate_der)
+                .collect(),
+            renew_at_unix: response.renew_at_unix,
+        })
+    }
+}
 
 pub use report::{Enforcement, RECORDS_PER_CALL, wire_record};
 

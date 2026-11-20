@@ -318,6 +318,30 @@ async fn a_hand_off_without_the_brokers_role_tag_is_refused() {
     ));
 }
 
+/// A key that is not P-256 is never taken as the front door's, so it is
+/// never relayed to the signer: the start fails at the node.
+#[tokio::test]
+async fn a_front_door_whose_key_is_not_p256_does_not_start() {
+    let (supervisor, child) = stream_pair().unwrap();
+    let mut control = ControlChannel::new(supervisor).unwrap();
+    let mut child = ControlChannel::new(child).unwrap();
+    let door = tokio::spawn(async move {
+        child.receive(MAX_CONTROL_MESSAGE, 0).await.unwrap();
+        child.send(PREPARED, &[]).await.unwrap();
+        let (confine, _) = child.receive(MAX_CONTROL_MESSAGE, 0).await.unwrap();
+        assert_eq!(confine, CONFINE);
+        let p384 = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let ready = crate::front_door::protocol::ready_message(&p384.public_key_der());
+        child.send(&ready, &[]).await.unwrap();
+        child
+    });
+    assert_eq!(
+        prepare(&mut control, &spec(), deadline(), || Ok(())).await,
+        Err(StartError::Bootstrap)
+    );
+    bounded(door).await.unwrap();
+}
+
 /// Bindings it cannot serve stop the front door before it confines.
 #[tokio::test]
 async fn a_front_door_refuses_bindings_off_443_before_it_confines() {

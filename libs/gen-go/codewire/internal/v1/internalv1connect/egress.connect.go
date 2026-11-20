@@ -47,6 +47,9 @@ const (
 	// EgressServiceFrontDoorSessionProcedure is the fully-qualified name of the EgressService's
 	// FrontDoorSession RPC.
 	EgressServiceFrontDoorSessionProcedure = "/codewire.internal.v1.EgressService/FrontDoorSession"
+	// EgressServiceSignInterceptionLeavesProcedure is the fully-qualified name of the EgressService's
+	// SignInterceptionLeaves RPC.
+	EgressServiceSignInterceptionLeavesProcedure = "/codewire.internal.v1.EgressService/SignInterceptionLeaves"
 )
 
 // EgressServiceClient is a client for the codewire.internal.v1.EgressService service.
@@ -93,6 +96,22 @@ type EgressServiceClient interface {
 	// while no epoch runs for the Pod's current binding on this replica, and
 	// cw-egress retries with bounded backoff.
 	FrontDoorSession(context.Context) *connect.BidiStreamForClient[v1.FrontDoorSessionRequest, v1.FrontDoorSessionResponse]
+	// Leaves for the TLS front door of one bound, intercepting Pod on the
+	// caller's node (#4001), for the front door's own key. The caller is the
+	// cw-egress serving that Pod, authenticated as every method here is.
+	// Orchestration signs through the Pod's live credential relay epoch
+	// (CredentialBrokerService.SignInterceptionLeaves, #5170); the leaves'
+	// hosts come only from the credential service's binding record, never
+	// from this request. cw-egress installs every leaf of one answer at once
+	// and asks again at renew_at_unix.
+	//
+	// Refusals: PERMISSION_DENIED, with no detail, for a Pod that is not on
+	// the caller's node, not bound, or whose binding records that it does not
+	// intercept; UNAVAILABLE before the Pod's epoch is admitted, while its
+	// binding carries no interception decision yet (C5), or while the signer
+	// cannot sign, and cw-egress retries. Its front door's hosts fail closed
+	// until a set is installed.
+	SignInterceptionLeaves(context.Context, *connect.Request[v1.SignInterceptionLeavesRequest]) (*connect.Response[v1.SignInterceptionLeavesResponse], error)
 }
 
 // NewEgressServiceClient constructs a client for the codewire.internal.v1.EgressService service. By
@@ -136,16 +155,23 @@ func NewEgressServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(egressServiceMethods.ByName("FrontDoorSession")),
 			connect.WithClientOptions(opts...),
 		),
+		signInterceptionLeaves: connect.NewClient[v1.SignInterceptionLeavesRequest, v1.SignInterceptionLeavesResponse](
+			httpClient,
+			baseURL+EgressServiceSignInterceptionLeavesProcedure,
+			connect.WithSchema(egressServiceMethods.ByName("SignInterceptionLeaves")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // egressServiceClient implements EgressServiceClient.
 type egressServiceClient struct {
-	admit             *connect.Client[v1.AdmitRequest, v1.AdmitResponse]
-	watchAssignment   *connect.Client[v1.WatchAssignmentRequest, v1.WatchAssignmentResponse]
-	reportEnforcement *connect.Client[v1.ReportEnforcementRequest, v1.ReportEnforcementResponse]
-	reportRecords     *connect.Client[v1.ReportRecordsRequest, v1.ReportRecordsResponse]
-	frontDoorSession  *connect.Client[v1.FrontDoorSessionRequest, v1.FrontDoorSessionResponse]
+	admit                  *connect.Client[v1.AdmitRequest, v1.AdmitResponse]
+	watchAssignment        *connect.Client[v1.WatchAssignmentRequest, v1.WatchAssignmentResponse]
+	reportEnforcement      *connect.Client[v1.ReportEnforcementRequest, v1.ReportEnforcementResponse]
+	reportRecords          *connect.Client[v1.ReportRecordsRequest, v1.ReportRecordsResponse]
+	frontDoorSession       *connect.Client[v1.FrontDoorSessionRequest, v1.FrontDoorSessionResponse]
+	signInterceptionLeaves *connect.Client[v1.SignInterceptionLeavesRequest, v1.SignInterceptionLeavesResponse]
 }
 
 // Admit calls codewire.internal.v1.EgressService.Admit.
@@ -171,6 +197,11 @@ func (c *egressServiceClient) ReportRecords(ctx context.Context, req *connect.Re
 // FrontDoorSession calls codewire.internal.v1.EgressService.FrontDoorSession.
 func (c *egressServiceClient) FrontDoorSession(ctx context.Context) *connect.BidiStreamForClient[v1.FrontDoorSessionRequest, v1.FrontDoorSessionResponse] {
 	return c.frontDoorSession.CallBidiStream(ctx)
+}
+
+// SignInterceptionLeaves calls codewire.internal.v1.EgressService.SignInterceptionLeaves.
+func (c *egressServiceClient) SignInterceptionLeaves(ctx context.Context, req *connect.Request[v1.SignInterceptionLeavesRequest]) (*connect.Response[v1.SignInterceptionLeavesResponse], error) {
+	return c.signInterceptionLeaves.CallUnary(ctx, req)
 }
 
 // EgressServiceHandler is an implementation of the codewire.internal.v1.EgressService service.
@@ -217,6 +248,22 @@ type EgressServiceHandler interface {
 	// while no epoch runs for the Pod's current binding on this replica, and
 	// cw-egress retries with bounded backoff.
 	FrontDoorSession(context.Context, *connect.BidiStream[v1.FrontDoorSessionRequest, v1.FrontDoorSessionResponse]) error
+	// Leaves for the TLS front door of one bound, intercepting Pod on the
+	// caller's node (#4001), for the front door's own key. The caller is the
+	// cw-egress serving that Pod, authenticated as every method here is.
+	// Orchestration signs through the Pod's live credential relay epoch
+	// (CredentialBrokerService.SignInterceptionLeaves, #5170); the leaves'
+	// hosts come only from the credential service's binding record, never
+	// from this request. cw-egress installs every leaf of one answer at once
+	// and asks again at renew_at_unix.
+	//
+	// Refusals: PERMISSION_DENIED, with no detail, for a Pod that is not on
+	// the caller's node, not bound, or whose binding records that it does not
+	// intercept; UNAVAILABLE before the Pod's epoch is admitted, while its
+	// binding carries no interception decision yet (C5), or while the signer
+	// cannot sign, and cw-egress retries. Its front door's hosts fail closed
+	// until a set is installed.
+	SignInterceptionLeaves(context.Context, *connect.Request[v1.SignInterceptionLeavesRequest]) (*connect.Response[v1.SignInterceptionLeavesResponse], error)
 }
 
 // NewEgressServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -256,6 +303,12 @@ func NewEgressServiceHandler(svc EgressServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(egressServiceMethods.ByName("FrontDoorSession")),
 		connect.WithHandlerOptions(opts...),
 	)
+	egressServiceSignInterceptionLeavesHandler := connect.NewUnaryHandler(
+		EgressServiceSignInterceptionLeavesProcedure,
+		svc.SignInterceptionLeaves,
+		connect.WithSchema(egressServiceMethods.ByName("SignInterceptionLeaves")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.internal.v1.EgressService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case EgressServiceAdmitProcedure:
@@ -268,6 +321,8 @@ func NewEgressServiceHandler(svc EgressServiceHandler, opts ...connect.HandlerOp
 			egressServiceReportRecordsHandler.ServeHTTP(w, r)
 		case EgressServiceFrontDoorSessionProcedure:
 			egressServiceFrontDoorSessionHandler.ServeHTTP(w, r)
+		case EgressServiceSignInterceptionLeavesProcedure:
+			egressServiceSignInterceptionLeavesHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -295,4 +350,8 @@ func (UnimplementedEgressServiceHandler) ReportRecords(context.Context, *connect
 
 func (UnimplementedEgressServiceHandler) FrontDoorSession(context.Context, *connect.BidiStream[v1.FrontDoorSessionRequest, v1.FrontDoorSessionResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.EgressService.FrontDoorSession is not implemented"))
+}
+
+func (UnimplementedEgressServiceHandler) SignInterceptionLeaves(context.Context, *connect.Request[v1.SignInterceptionLeavesRequest]) (*connect.Response[v1.SignInterceptionLeavesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.internal.v1.EgressService.SignInterceptionLeaves is not implemented"))
 }

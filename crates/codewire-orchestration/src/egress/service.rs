@@ -14,7 +14,8 @@ use codewire_proto::codewire::internal::v1::{
     AdmitRequest, AdmitResponse, BoundAssignment, EgressAssignment, EgressPolicyRevision,
     EgressService, FrontDoorSessionRequest, FrontDoorSessionResponse, InterceptionBinding,
     PlatformAllow, ReportEnforcementRequest, ReportEnforcementResponse, ReportRecordsRequest,
-    ReportRecordsResponse, WatchAssignmentRequest, WatchAssignmentResponse,
+    ReportRecordsResponse, SignInterceptionLeavesRequest, SignInterceptionLeavesResponse,
+    WatchAssignmentRequest, WatchAssignmentResponse,
 };
 use codewire_server_core::pod_identity::PodIdentityError;
 use connectrpc::{
@@ -375,7 +376,6 @@ impl EgressServiceState {
         Ok(Watched::Assignment(self.assignment_of(binding).await?))
     }
 
-    /// Orchestration's own record of whether `guest` is bound, and to what.
     /// Whether `guest`'s streams intercept. Hosted interception is decided
     /// once per Pod, at its first bind, and recorded on the binding (C5,
     /// #5468); an unbound warm member has no decision yet, and the setting,
@@ -409,6 +409,7 @@ impl EgressServiceState {
             .map_err(|error| unavailable("get the interception CA", error))
     }
 
+    /// Orchestration's own record of whether `guest` is bound, and to what.
     async fn live_binding(&self, guest: &GuestPod) -> Result<Option<LiveBinding>, ConnectError> {
         self.bindings
             .live_binding(&guest.uid, &guest.namespace, &guest.name)
@@ -786,5 +787,26 @@ impl EgressService for EgressConnectService {
         requests: InboundStream<FrontDoorSessionRequest>,
     ) -> ServiceResult<ServiceStream<FrontDoorSessionResponse>> {
         self.state.front_door_session(&ctx, requests).await
+    }
+
+    async fn sign_interception_leaves(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SignInterceptionLeavesRequest>,
+    ) -> ServiceResult<SignInterceptionLeavesResponse> {
+        let node = self.state.caller_node(&ctx).await?;
+        let request = request.view();
+        let guest = self.state.named_guest(request.pod_name, request.pod_uid);
+        self.state.guest_on_node(&guest, &node).await?;
+        match self.state.live_binding(&guest).await? {
+            Some(binding) if self.state.intercepts(Some(&binding)) => {}
+            _ => return Err(denied()),
+        }
+        // Signing goes through the Pod's live relay epoch, which a later
+        // change attaches (#4001); until then cw-egress retries, and the
+        // front door's hosts fail closed.
+        Err(ConnectError::unavailable(
+            "interception leaves are not signed yet",
+        ))
     }
 }

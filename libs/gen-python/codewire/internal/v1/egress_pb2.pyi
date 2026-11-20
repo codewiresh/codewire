@@ -210,3 +210,27 @@ class FrontDoorSessionResponse(_message.Message):
 class FrontDoorSessionAttached(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
+
+class SignInterceptionLeavesRequest(_message.Message):
+    __slots__ = ("pod_uid", "pod_name", "leaf_public_key")
+    POD_UID_FIELD_NUMBER: _ClassVar[int]
+    POD_NAME_FIELD_NUMBER: _ClassVar[int]
+    LEAF_PUBLIC_KEY_FIELD_NUMBER: _ClassVar[int]
+    pod_uid: str
+    pod_name: str
+    leaf_public_key: bytes
+    def __init__(self, pod_uid: _Optional[str] = ..., pod_name: _Optional[str] = ..., leaf_public_key: _Optional[bytes] = ...) -> None: ...
+
+class InterceptionLeaf(_message.Message):
+    __slots__ = ("certificate_der",)
+    CERTIFICATE_DER_FIELD_NUMBER: _ClassVar[int]
+    certificate_der: bytes
+    def __init__(self, certificate_der: _Optional[bytes] = ...) -> None: ...
+
+class SignInterceptionLeavesResponse(_message.Message):
+    __slots__ = ("leaves", "renew_at_unix")
+    LEAVES_FIELD_NUMBER: _ClassVar[int]
+    RENEW_AT_UNIX_FIELD_NUMBER: _ClassVar[int]
+    leaves: _containers.RepeatedCompositeFieldContainer[InterceptionLeaf]
+    renew_at_unix: int
+    def __init__(self, leaves: _Optional[_Iterable[_Union[InterceptionLeaf, _Mapping]]] = ..., renew_at_unix: _Optional[int] = ...) -> None: ...

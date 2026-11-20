@@ -2404,7 +2404,14 @@ credential, and never serves under a CA it made itself.
   front-door stream is: the relay token, the Pod's workspace authorization,
   then the epoch's handle. So the environment and Pod UID come only from that
   authentication, and orchestration's own identity alone gets no leaf. Before
-  the epoch is admitted, the call answers `UNAVAILABLE`.
+  the epoch is admitted, the call answers `UNAVAILABLE`. `cw-egress` asks once
+  the guest's self-check passes, and relays only a P-256 key: any other key
+  fails the pair's start at the node. It installs every leaf of an answer at
+  once and asks again at `renew_at_unix`. A failed ask or a refused install
+  is retried after 5 seconds, doubling to a minute, never past the end of
+  the leaves installed; a `renew_at_unix` already past or more than an hour
+  ahead is retried the same way, never slept on. Until a set is installed,
+  the front door's hosts fail closed, and the asking ends with the pair.
 - **Which hosts.** Only those in Codewire's interceptable-host table that
   the route of a credential this session is authorized for reaches; a caller
   cannot name one. A session with no such credential, and so an unbound Pod,

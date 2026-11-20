@@ -108,7 +108,7 @@ async fn serve(settings: NodeSettings, image: OwnImage) -> ExitCode {
         settings.drain,
     ));
     tracing::info!(port = STREAM_PORT, "cw-egress serves guest streams");
-    let drained = supervisor(streams, signals, launch).await;
+    let drained = supervisor(streams, signals, launch, Arc::clone(&orchestration)).await;
     tracing::info!(
         moved_idle = drained.moved_idle,
         cut_at_deadline = drained.cut_at_deadline,

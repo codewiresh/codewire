@@ -205,15 +205,6 @@ impl Launch for ProcessLaunch {
 }
 
 impl ProcessPair {
-    /// The front door's public key, as a DER SubjectPublicKeyInfo: what the
-    /// credential service's signer issues its leaves for. `None` without a
-    /// front door.
-    pub fn front_door_key(&self) -> Option<&[u8]> {
-        self.front_door
-            .as_ref()
-            .map(front_door::FrontDoor::public_key_spki)
-    }
-
     /// The front door's sessions socket, when no session opener drives it:
     /// for a caller that hands sessions itself. `None` once taken, or
     /// without a front door.
@@ -221,15 +212,6 @@ impl ProcessPair {
         self.front_door
             .as_mut()
             .and_then(front_door::FrontDoor::take_sessions)
-    }
-
-    /// Has the front door serve `leaves`, DER certificates for its key, from
-    /// now on, all or none. A refusal keeps the leaves it had.
-    pub async fn install_leaves<C: AsRef<[u8]>>(&mut self, leaves: &[C]) -> Result<(), StartError> {
-        match self.front_door.as_mut() {
-            Some(front_door) => front_door.install(leaves).await,
-            None => Err(StartError::NoFrontDoor),
-        }
     }
 }
 
@@ -258,6 +240,19 @@ impl Pair for ProcessPair {
 
     async fn request_drain(&mut self) -> Result<(), StartError> {
         self.worker.request_drain().await
+    }
+
+    fn front_door_key(&self) -> Option<&[u8]> {
+        self.front_door
+            .as_ref()
+            .map(front_door::FrontDoor::public_key_spki)
+    }
+
+    async fn install_leaves(&mut self, leaves: &[Vec<u8>]) -> Result<(), StartError> {
+        match self.front_door.as_mut() {
+            Some(front_door) => front_door.install(leaves).await,
+            None => Err(StartError::NoFrontDoor),
+        }
     }
 
     async fn end(self) {

@@ -16,6 +16,7 @@ use crate::front_door::protocol::{
     Bindings, CONFINE, CREDENTIALS, FRONT_DOOR_CONTROL_FD, FRONT_DOOR_SESSIONS_FD, HANDOFF,
     INSTALLED, MAX_CONTROL_MESSAGE, PREPARED, READY, SERVING, SESSION_SERVING, SessionRefusal,
     decode_failed, decode_refused, decode_session_dropped, encode_bindings, encode_leaves,
+    is_p256_spki,
 };
 use crate::interception::FrontDoorSpec;
 
@@ -109,8 +110,9 @@ pub(super) async fn start(
 
 /// The supervisor's half of a start: the bindings, then `check` while the
 /// child waits unconfined, then confinement. Returns the front door's public
-/// key. A failed `check` tells the child nothing more: it never confines,
-/// never makes a key, and ends when its process is killed.
+/// key, which must be a P-256 SubjectPublicKeyInfo. A failed `check` tells
+/// the child nothing more: it never confines, never makes a key, and ends
+/// when its process is killed.
 pub(super) async fn prepare(
     control: &mut ControlChannel,
     spec: &FrontDoorSpec,
@@ -129,7 +131,7 @@ pub(super) async fn prepare(
     send(control, CONFINE, None, deadline).await?;
     let ready = receive(control, deadline).await?;
     match ready.strip_prefix(READY) {
-        Some(spki) if !spki.is_empty() => Ok(spki.to_vec()),
+        Some(spki) if is_p256_spki(spki) => Ok(spki.to_vec()),
         _ => Err(refusal(&ready)),
     }
 }

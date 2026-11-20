@@ -1590,3 +1590,59 @@ async fn a_sandbox_failed_closed_is_counted_by_its_reason_even_when_it_cannot_be
     assert_eq!(lockdown::failed_closed(&refusal), before + 1);
     assert_eq!(refusal.reason(), "not_broker_mode");
 }
+
+/// A router whose state binds the guest and, when `intercepting`, has the
+/// deployment's interception switched on.
+fn signing_app(
+    cluster: &Arc<Cluster>,
+    bindings: Arc<dyn BindingStore>,
+    intercepting: bool,
+) -> axum::Router {
+    let mut state = state(cluster, bindings, None);
+    state.intercepts = crate::egress::assignment::interception_bindings(intercepting).unwrap();
+    codewire_server_core::connect::connect_router(egress_router(Arc::new(state)))
+}
+
+fn sign_body() -> Value {
+    json!({"podUid": GUEST_UID, "podName": GUEST, "leafPublicKey": "AAEC"})
+}
+
+/// Signing goes through the Pod's relay epoch, which is not attached yet
+/// (#4001): an authenticated, bound, intercepting Pod is told UNAVAILABLE,
+/// and cw-egress retries with its hosts failing closed.
+#[tokio::test]
+async fn interception_leaves_are_unavailable_to_a_bound_intercepting_pod() {
+    let cluster = Cluster::healthy();
+    let (status, body) = call_app(
+        signing_app(&cluster, Arc::new(Bound), true),
+        "SignInterceptionLeaves",
+        sign_body(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "unavailable", "{body}");
+}
+
+/// Refused as every Pod-naming method refuses: a Pod on another node, one
+/// that is not bound, or one the deployment does not intercept.
+#[tokio::test]
+async fn interception_leaves_are_refused_to_any_other_pod() {
+    let elsewhere = Cluster::healthy().with(|cluster| {
+        cluster.edit_guest(|pod| pod.spec.as_mut().unwrap().node_name = Some("runtime-b".into()));
+    });
+    let healthy = Cluster::healthy();
+    for (app, case) in [
+        (
+            signing_app(&elsewhere, Arc::new(Bound), true),
+            "another node",
+        ),
+        (signing_app(&healthy, Arc::new(Unbound), true), "unbound"),
+        (
+            signing_app(&healthy, Arc::new(Bound), false),
+            "not intercepting",
+        ),
+    ] {
+        let (status, body) = call_app(app, "SignInterceptionLeaves", sign_body()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{case}: {body}");
+    }
+}
