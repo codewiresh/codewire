@@ -65,11 +65,12 @@ pub(crate) const CLAUDE_TOKEN_PATH: &str = "/v1/oauth/token";
 pub(crate) const CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 /// Claude's OAuth profile, read once with a new sign-in for its plan.
 pub(crate) const CLAUDE_PROFILE_PATH: &str = "/api/oauth/profile";
-const CLAUDE_PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
+pub(crate) const CLAUDE_PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 /// The claude.ai subscription sign-in, not the Console's API-key login.
 const CLAUDE_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
 /// The page that shows `code#state` for the person to paste.
-const CLAUDE_MANUAL_REDIRECT_URL: &str = "https://platform.claude.com/oauth/code/callback";
+pub(crate) const CLAUDE_MANUAL_REDIRECT_URL: &str =
+    "https://platform.claude.com/oauth/code/callback";
 /// Claude Code's claude.ai scopes in the pinned 2.1.308, never
 /// `org:create_api_key`. `user:profile` enables `/usage` and the plan.
 pub const CLAUDE_SIGN_IN_SCOPES: [&str; 6] = [

@@ -93,15 +93,15 @@ MAX_SOURCE_DIRECTORY_DEPTH = 16
 # The closed record crates/codewire-cli/build.rs embeds once in every cw.
 BUILD_RECORD_MAGIC = b"\0codewire-cw-build-record-v1\0"
 BUILD_RECORD_FIELDS = {"package_version", "rustc", "source_revision", "source_tree_sha256", "target"}
-# Source files compiled only under a non-shipping Cargo feature, one for each
-# such feature a cw's dependency graph can turn on. A cw whose dep-info lists
-# one was built with that feature, and a release never ships it (#4986): under
-# local-broker-synthetic-smoke the local credential broker and the provider
-# revocation executor answer in process, so a shipped cw would report a sign-in
-# revoked at the provider when nothing reached it. A feature that only changes
-# lines in always-compiled files gets an empty module of its own to key on.
+# Source files compiled only under a non-shipping Cargo feature, at least one per
+# feature a cw can turn on; a cw whose dep-info lists one was built with it, and a
+# release never ships it (#4986). Under local-broker-synthetic-smoke the local
+# credential broker, the revocation executor and Claude's token endpoint (#5374)
+# answer in process, so a shipped cw would report provider results nothing made.
+# A feature changing only always-compiled lines gets an empty module to key on.
 NON_SHIPPING_INPUTS = {
     "crates/codewire-credential-broker/src/runtime/native_managed_smoke.rs": "local-broker-synthetic-smoke",
+    "crates/codewire-credential-broker/src/runtime/synthetic_claude.rs": "local-broker-synthetic-smoke",
     "crates/codewire-local-vmm/src/non_shipping_synthetic_oci_input_smoke.rs": "synthetic-oci-input-smoke",
     "crates/codewire-cli/src/fuzzing.rs": "fuzzing",
 }

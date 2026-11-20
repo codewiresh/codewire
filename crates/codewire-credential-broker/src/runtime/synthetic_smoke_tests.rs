@@ -1104,3 +1104,253 @@ async fn unserved_transparent_routes_still_require_the_injected_credential() {
         ));
     }
 }
+
+// The synthetic Claude sign-in (#5374).
+
+fn claude_token_request(body: serde_json::Value) -> BrokerUpstreamRequest {
+    BrokerUpstreamRequest {
+        method: Method::POST,
+        target: Url::parse(crate::provider_oauth::claude::CLAUDE_TOKEN_URL).unwrap(),
+        headers: HeaderMap::from_iter([(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )]),
+        body: serde_json::to_vec(&body).unwrap(),
+        body_stream: None,
+        pinned: None,
+    }
+}
+
+fn code_exchange() -> serde_json::Value {
+    serde_json::json!({
+        "grant_type": "authorization_code",
+        "code": synthetic_claude::SIGN_IN_CODE,
+        "redirect_uri": crate::provider_oauth::claude::CLAUDE_MANUAL_REDIRECT_URL,
+        "client_id": crate::provider_oauth::claude::CLAUDE_OAUTH_CLIENT_ID,
+        "code_verifier": "v".repeat(43),
+        "state": "s".repeat(43),
+    })
+}
+
+fn refresh_exchange(refresh_token: &str) -> serde_json::Value {
+    serde_json::json!({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": crate::provider_oauth::claude::CLAUDE_OAUTH_CLIENT_ID,
+        "scope": crate::provider_oauth::claude::CLAUDE_SIGN_IN_SCOPES.join(" "),
+    })
+}
+
+async fn answered(request: BrokerUpstreamRequest) -> (StatusCode, String) {
+    let (status, _, mut body) = SyntheticOpenAiSmokeTransport
+        .execute(request)
+        .await
+        .unwrap()
+        .into_parts();
+    let mut text = Vec::new();
+    while let Some(chunk) = body.next().await {
+        text.extend_from_slice(&chunk.unwrap());
+    }
+    (status, String::from_utf8(text).unwrap())
+}
+
+async fn signed_in() -> (String, String) {
+    let (status, body) = answered(claude_token_request(code_exchange())).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let tokens: serde_json::Value = serde_json::from_str(&body).unwrap();
+    (
+        tokens["access_token"].as_str().unwrap().to_owned(),
+        tokens["refresh_token"].as_str().unwrap().to_owned(),
+    )
+}
+
+#[tokio::test]
+async fn the_claude_code_exchange_issues_this_boots_unique_synthetic_tokens() {
+    let boot = synthetic_values::boot_id().unwrap();
+    let (status, body) = answered(claude_token_request(code_exchange())).await;
+    assert_eq!(status, StatusCode::OK);
+    let tokens: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let access = tokens["access_token"].as_str().unwrap();
+    let refresh = tokens["refresh_token"].as_str().unwrap();
+    assert_eq!(
+        synthetic_claude::issued(access, synthetic_claude::ACCESS_PREFIX),
+        Some(boot.as_str())
+    );
+    assert_eq!(
+        synthetic_claude::issued(refresh, synthetic_claude::REFRESH_PREFIX),
+        Some(boot.as_str())
+    );
+    assert_eq!(tokens["expires_in"], 301, "the first use refreshes");
+    assert_eq!(
+        tokens["scope"],
+        crate::provider_oauth::claude::CLAUDE_SIGN_IN_SCOPES.join(" ")
+    );
+    let (again, _) = signed_in().await;
+    assert_ne!(
+        again, access,
+        "every issued token carries its own randomness"
+    );
+}
+
+#[tokio::test]
+async fn a_claude_exchange_that_is_not_the_synthetic_sign_ins_is_refused() {
+    for (field, value) in [
+        ("code", "real-claude-code"),
+        ("client_id", "another-client"),
+        ("redirect_uri", "https://example.invalid/callback"),
+        ("code_verifier", "short"),
+        ("state", "short"),
+        ("grant_type", "client_credentials"),
+    ] {
+        let mut exchange = code_exchange();
+        exchange[field] = value.into();
+        let (status, body) = answered(claude_token_request(exchange)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}");
+        assert!(body.contains("invalid_grant"), "{field}");
+    }
+    // Nothing else on the token host is answered, nor forwarded.
+    for (method, target) in [
+        (Method::GET, crate::provider_oauth::claude::CLAUDE_TOKEN_URL),
+        (Method::POST, "https://platform.claude.com/v1/oauth/revoke"),
+    ] {
+        let mut request = claude_token_request(code_exchange());
+        request.method = method;
+        request.target = Url::parse(target).unwrap();
+        assert!(matches!(
+            SyntheticOpenAiSmokeTransport.execute(request).await,
+            Err(BrokerUpstreamError::Protocol)
+        ));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_claude_refresh_waits_answers_once_and_refuses_reuse_or_real_tokens() {
+    let (_, refresh) = signed_in().await;
+    let started = tokio::time::Instant::now();
+    let (status, body) = answered(claude_token_request(refresh_exchange(&refresh))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(started.elapsed() >= synthetic_claude::REFRESH_DELAY);
+    let refreshed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_ne!(refreshed["refresh_token"].as_str().unwrap(), refresh);
+    assert_eq!(refreshed["expires_in"], 8 * 60 * 60);
+    let boot = synthetic_values::boot_id().unwrap();
+    for (field, prefix) in [
+        ("access_token", synthetic_claude::ACCESS_PREFIX),
+        ("refresh_token", synthetic_claude::REFRESH_PREFIX),
+    ] {
+        assert_eq!(
+            synthetic_claude::issued(refreshed[field].as_str().unwrap(), prefix),
+            Some(boot.as_str()),
+            "a refresh keeps the presented token's boot id"
+        );
+    }
+    for presented in [
+        refresh.as_str(),
+        "sk-ant-ort01-a-real-refresh-token-is-never-accepted-here",
+    ] {
+        let (status, body) = answered(claude_token_request(refresh_exchange(presented))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("invalid_grant"));
+    }
+}
+
+fn claude_profile_request(bearer: &str) -> BrokerUpstreamRequest {
+    BrokerUpstreamRequest {
+        method: Method::GET,
+        target: Url::parse("https://api.anthropic.com/api/oauth/profile").unwrap(),
+        headers: HeaderMap::from_iter([(
+            http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {bearer}")).unwrap(),
+        )]),
+        body: Vec::new(),
+        body_stream: None,
+        pinned: None,
+    }
+}
+
+#[tokio::test]
+async fn the_claude_profile_answers_only_a_synthetic_access_token() {
+    let (access, _) = signed_in().await;
+    let (status, body) = answered(claude_profile_request(&access)).await;
+    assert_eq!(status, StatusCode::OK);
+    let profile: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(profile["organization"]["organization_type"], "claude_max");
+    assert!(matches!(
+        SyntheticOpenAiSmokeTransport
+            .execute(claude_profile_request("sk-ant-oat01-a-real-access-token"))
+            .await,
+        Err(BrokerUpstreamError::Protocol)
+    ));
+}
+
+fn claude_model_request(bearer: &str) -> BrokerUpstreamRequest {
+    let mut request = anthropic_request();
+    request.headers.remove("x-api-key");
+    request.headers.insert(
+        http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {bearer}")).unwrap(),
+    );
+    request.headers.insert(
+        HeaderName::from_static("anthropic-beta"),
+        HeaderValue::from_static("claude-code-20250219,oauth-2025-04-20"),
+    );
+    request
+}
+
+/// A model call with a sign-in's synthetic access token is answered by the
+/// in-process fixture, which opens no connection; a real-looking token, or
+/// one beside an API key or without the OAuth beta, is refused and reaches
+/// nothing.
+#[tokio::test]
+async fn a_claude_sign_in_model_call_is_answered_in_process_and_never_forwarded() {
+    let (access, _) = signed_in().await;
+    let (status, body) = answered(claude_model_request(&access)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("CWCLAUDE21238 broker"), "{body}");
+    let real = claude_model_request("sk-ant-oat01-a-real-access-token");
+    let mut with_key = claude_model_request(&access);
+    with_key
+        .headers
+        .insert("x-api-key", HeaderValue::from_static(ANTHROPIC_KEY));
+    let mut without_beta = claude_model_request(&access);
+    without_beta.headers.remove("anthropic-beta");
+    for request in [real, with_key, without_beta] {
+        assert!(matches!(
+            SyntheticOpenAiSmokeTransport.execute(request).await,
+            Err(BrokerUpstreamError::Protocol)
+        ));
+    }
+}
+
+/// The broker's Landlock domain denies reading the boot id, so only the code
+/// exchange, which runs in the CLI, may need it. A refresh, the profile, a
+/// sign-in's model call and every request that is not Claude's are
+/// classified without it.
+#[tokio::test(start_paused = true)]
+async fn only_the_claude_code_exchange_reads_the_boot_id() {
+    let denied =
+        || -> Result<String, BrokerUpstreamError> { panic!("the broker cannot read the boot id") };
+    let (access, refresh) = signed_in().await;
+    for request in [
+        claude_token_request(refresh_exchange(&refresh)),
+        claude_profile_request(&access),
+        claude_model_request(&access),
+        anthropic_request(),
+        exact_api_request("openai"),
+        transparent_openai_request(
+            Method::POST,
+            "https://chatgpt.com/backend-api/codex/responses",
+        ),
+    ] {
+        let (method, target, headers, body) = request.into_parts();
+        let classified =
+            synthetic_claude::classify(&method, &target, &headers, &body, denied).await;
+        assert!(classified.is_ok(), "{target}");
+    }
+    let (method, target, headers, body) = claude_token_request(code_exchange()).into_parts();
+    let refused = synthetic_claude::classify(&method, &target, &headers, &body, || {
+        Err(BrokerUpstreamError::Protocol)
+    })
+    .await;
+    assert!(matches!(refused, Err(BrokerUpstreamError::Protocol)));
+}

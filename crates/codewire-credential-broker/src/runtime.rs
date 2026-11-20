@@ -108,6 +108,12 @@ mod anthropic_subscription_tests;
 #[cfg(feature = "local-broker-synthetic-smoke")]
 #[path = "runtime/native_managed_smoke.rs"]
 mod native_managed_smoke;
+#[cfg(feature = "local-broker-synthetic-smoke")]
+#[path = "runtime/synthetic_claude.rs"]
+mod synthetic_claude;
+#[cfg(feature = "local-broker-synthetic-smoke")]
+#[path = "runtime/synthetic_values.rs"]
+mod synthetic_values;
 
 /// Metadata-only description of one exact OAuth generation to refresh.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -432,15 +438,31 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
         if let Some(answer) = Self::device_login(&method, &target, &body)? {
             return Ok(answer);
         }
+        // Claude's sign-in never falls through: answered here or refused.
+        match synthetic_claude::classify(
+            &method,
+            &target,
+            &headers,
+            &body,
+            synthetic_values::boot_id,
+        )
+        .await?
+        {
+            synthetic_claude::Classified::Answer(answer) => return Ok(answer),
+            synthetic_claude::Classified::ModelCall(token) => {
+                return Self::anthropic(method, target, headers, body, Some(&token));
+            }
+            synthetic_claude::Classified::Unrelated => {}
+        }
         if let Some(host) = unserved_host(&method, &target) {
-            return if Self::unserved_credential(host, &headers) {
+            return if synthetic_values::unserved_credential(host, &headers) {
                 Ok(Self::not_found(host))
             } else {
                 Err(BrokerUpstreamError::Protocol)
             };
         }
         if target.host_str() == Some("api.anthropic.com") {
-            return Self::anthropic(method, target, headers, body);
+            return Self::anthropic(method, target, headers, body, None);
         }
         let account_header_is_valid = match target.as_str() {
             "https://api.openai.com/v1/responses" => !headers.contains_key("chatgpt-account-id"),
@@ -465,7 +487,7 @@ impl BrokerUpstreamTransport for SyntheticOpenAiSmokeTransport {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
             .filter(|value| {
-                Self::canary(
+                synthetic_values::canary(
                     value,
                     if target.as_str() == "https://api.openai.com/v1/responses" {
                         "cwlocalopenai"
@@ -609,51 +631,6 @@ impl SyntheticOpenAiSmokeTransport {
         )
     }
 
-    /// An unserved request still carries exactly the credential this fixture
-    /// expects the broker to inject for that host, and nothing a guest could
-    /// have supplied in its place.
-    fn unserved_credential(host: SyntheticProviderHost, headers: &HeaderMap) -> bool {
-        let single = |name: &str| headers.get_all(name).iter().count() == 1;
-        let bearer = |prefix: &str| {
-            single("authorization")
-                && headers
-                    .get("authorization")
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.strip_prefix("Bearer "))
-                    .is_some_and(|value| Self::canary(value, prefix))
-        };
-        if ["cookie", "proxy-authorization", "host"]
-            .iter()
-            .any(|name| headers.contains_key(*name))
-        {
-            return false;
-        }
-        match host {
-            SyntheticProviderHost::Codex => {
-                !headers.contains_key("x-api-key")
-                    && bearer("cwlocalbroker")
-                    && single("chatgpt-account-id")
-                    && headers
-                        .get("chatgpt-account-id")
-                        .and_then(|value| value.to_str().ok())
-                        == Some(SYNTHETIC_CODEX_ACCOUNT_ID)
-            }
-            SyntheticProviderHost::OpenAi => {
-                !headers.contains_key("x-api-key")
-                    && !headers.contains_key("chatgpt-account-id")
-                    && bearer("cwlocalopenai")
-            }
-            SyntheticProviderHost::Anthropic => {
-                !headers.contains_key("authorization")
-                    && single("x-api-key")
-                    && headers
-                        .get("x-api-key")
-                        .and_then(|value| value.to_str().ok())
-                        .is_some_and(|value| Self::canary(value, "cwlocalanthropic"))
-            }
-        }
-    }
-
     /// Select only the fixed API family before route validation. An invalid
     /// URL on either API host must stay in this branch and be refused instead
     /// of falling through to an OAuth fixture.
@@ -733,7 +710,7 @@ impl SyntheticOpenAiSmokeTransport {
             }
             _ => return Err(denied),
         };
-        if !Self::canary(expected, prefix)
+        if !synthetic_values::canary(expected, prefix)
             || request.method != Method::POST
             || request.body.is_empty()
             || request.body.len() > route.max_body_bytes
@@ -815,19 +792,7 @@ impl SyntheticOpenAiSmokeTransport {
         target: &url::Url,
         body: &[u8],
     ) -> Result<Option<BrokerUpstreamResponse>, BrokerUpstreamError> {
-        // Linux smokes scan for this boot's id. Synthetic macOS journeys have
-        // no such file, so their canary suffix is fixed.
-        let boot = || {
-            if cfg!(target_os = "linux") {
-                std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
-                    .ok()
-                    .map(|id| id.trim().replace('-', ""))
-                    .filter(|id| id.len() == 32)
-                    .ok_or(BrokerUpstreamError::Protocol)
-            } else {
-                Ok("0123456789abcdef0123456789abcdef".to_owned())
-            }
-        };
+        let boot = synthetic_values::boot_id;
         let grant = |name: &str| {
             url::form_urlencoded::parse(body)
                 .any(|(key, value)| key == "grant_type" && value == name)
@@ -888,15 +853,6 @@ impl SyntheticOpenAiSmokeTransport {
         )))
     }
 
-    fn canary(value: &str, prefix: &str) -> bool {
-        value.strip_prefix(prefix).is_some_and(|suffix| {
-            suffix.len() == 32
-                && suffix
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-    }
-
     /// A provider diagnostic header reflecting the credential inside JSON.
     /// Transparent routes return it with the credential redacted.
     fn reflection(value: &str) -> Result<HeaderValue, BrokerUpstreamError> {
@@ -904,11 +860,14 @@ impl SyntheticOpenAiSmokeTransport {
             .map_err(|_| BrokerUpstreamError::Protocol)
     }
 
+    /// A model call with an API key, or with `sign_in`, a synthetic Claude
+    /// sign-in's access token the caller already admitted.
     fn anthropic(
         method: Method,
         target: Url,
         headers: HeaderMap,
         body: Vec<u8>,
+        sign_in: Option<&str>,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
         let messages = match target.as_str() {
             "https://api.anthropic.com/v1/messages"
@@ -923,10 +882,8 @@ impl SyntheticOpenAiSmokeTransport {
             || body.is_empty()
             || body.len() > 4 * 1024 * 1024
             || headers.keys().any(|name| {
-                matches!(
-                    name.as_str(),
-                    "authorization" | "cookie" | "proxy-authorization" | "host"
-                )
+                matches!(name.as_str(), "cookie" | "proxy-authorization" | "host")
+                    || (name.as_str() == "authorization" && sign_in.is_none())
             })
             || headers
                 .keys()
@@ -937,11 +894,15 @@ impl SyntheticOpenAiSmokeTransport {
         {
             return Err(BrokerUpstreamError::Protocol);
         }
-        let protected_value = headers
-            .get("x-api-key")
-            .and_then(|value| value.to_str().ok())
-            .filter(|value| Self::canary(value, "cwlocalanthropic"))
-            .ok_or(BrokerUpstreamError::Protocol)?;
+        let protected_value = match sign_in {
+            Some(token) if !headers.contains_key("x-api-key") => token,
+            Some(_) => return Err(BrokerUpstreamError::Protocol),
+            None => headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| synthetic_values::canary(value, "cwlocalanthropic"))
+                .ok_or(BrokerUpstreamError::Protocol)?,
+        };
         let payload: serde_json::Value =
             serde_json::from_slice(&body).map_err(|_| BrokerUpstreamError::Protocol)?;
         if !payload.is_object()
