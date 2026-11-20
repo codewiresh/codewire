@@ -194,6 +194,16 @@ grep -Fq 'gitleaks reported a finding' "$work/out" || fail 'a secret refusal is 
 if grep -Fq "$token" "$work/out"; then fail 'a refusal printed the secret'; fi
 reset_to_base
 
+# The #5459 allowlist covers one commit only: the same placeholder in the same
+# journey, in any other commit, is still refused, and so is a key-shaped value.
+for value in 'sk-ant-made-up' "sk-ant-$(printf 'A1b2C3d4%.0s' {1..4})"; do
+  mkdir -p "$repo/docs/journeys"
+  commit_file docs/journeys/network-and-egress.md "  \`curl -sS -H 'x-api-key: $value'"
+  if run_check "$base" >"$work/out" 2>&1; then fail "the #5459 allowlist accepted $value outside its commit"; fi
+  grep -Fq 'gitleaks reported a finding' "$work/out" || fail 'a refusal outside the allowlisted commit is not attributable'
+  reset_to_base
+done
+
 # An unknown, malformed or non-ancestor mirror head fails closed.
 for head in '' 'not-a-sha' "$(printf '0%.0s' {1..40})"; do
   if run_check "$head" >"$work/out" 2>&1; then fail "mirror head '$head' was accepted"; fi

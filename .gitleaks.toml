@@ -103,3 +103,12 @@ condition = "AND"
 paths = ['''(^|/)scripts/ci/tests/test-support-images-workflow\.sh$''']
 regexTarget = "line"
 regexes = ['''noel/actions-[a-z-]+@[[:xdigit:]]{40}''']
+
+[[allowlists]]
+description = "A prose placeholder (not a key) in a curl example of the hosted-egress journey, from #5459; #5534 rewrote it, but the commit stays in the history the mirror scans"
+targetRules = ["curl-auth-header"]
+condition = "AND"
+commits = ["268a2e7f6bbba2aa1e063fc1810c2470055baa75"]
+paths = ['''^docs/journeys/network-and-egress\.md$''']
+regexTarget = "secret"
+regexes = ['''^sk-ant-made-up$''']
