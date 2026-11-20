@@ -25,7 +25,7 @@ Updated 2026-11-20.
 | `account-admin-delete` | observed 2026-11-18 on Kind at `a4a3c815d`, stand-in (#4541) | not yet observed |
 | `signup-unverified-purge` | observed 2026-11-15 at b183980df, a seeded account and a one-hour lifetime | enforce passes observed 2026-11-18 at v0.4.22, nothing old enough yet; the first deletion is due after 2026-11-20 18:05Z |
 | `account-receipt-email` | not yet observed | not yet observed |
-| `account-fresh-sign-in` | partly observed on Kind 2026-11-18, main 4199fd0f6 (server side; redirect delivery not yet observed since #5364's fix); not on Dev | not yet observed |
+| `account-fresh-sign-in` | observed on Kind 2026-11-18 (server side, main 4199fd0f6) and 2026-11-20 (redirect delivery, main 6557aa7e83); not on Dev | not yet observed |
 
 ## Before the walk
 
@@ -418,14 +418,17 @@ Issue: #4785 (pentest#13 T14). The rule is in
   for the old session refused at the resumed request.
 - **Observed:** on a local Kind cluster, 2026-11-18, IdP at main 4199fd0f6
   (with #5104), in Chromium, as the seeded `e2e-owner`, with the
-  `codewire-desktop` client (PKCE S256), recorded on #4785. Server side
-  only: with neither value `/api/oauth/authorize` answered with the code at
+  `codewire-desktop` client (PKCE S256), recorded on #4785. That day the
+  server side only: with neither value `/api/oauth/authorize` answered with the code at
   once; with `prompt=login`, signed in, the sign-in page appeared, and after
   signing in the IdP's database showed the code issued, bound to the new
   sign-in's session; with `max_age=1` and a session minutes old, the sign-in
-  page again. The code reaching the client's redirect URI after a sign-in
-  form is not yet observed: on 2026-11-18 the form's `form-action` blocked
-  the native redirect (#5364, since fixed). The old session refused at the resumed request is the
+  page again; the form's `form-action` blocked the native redirect
+  (#5364). After its fix, on 2026-11-20 at main 6557aa7e83 (IdP
+  b39637d6cef1), the code reached the client's redirect URI: with
+  `prompt=login` only after the password and two-factor steps, at once with
+  neither value, and with `max_age=1` about seven seconds later only after
+  signing in again. The old session refused at the resumed request is the
   database test
   `prompt_login_and_max_age_need_a_fresh_sign_in_through_the_round_trip`. Not on Dev:
   no agent can sign in to a Dev account in a browser (scratch accounts keep no

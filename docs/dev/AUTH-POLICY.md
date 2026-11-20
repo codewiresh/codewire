@@ -520,7 +520,10 @@ The database records each loss in `credential_revocations`:
 A revoked Connect stream ends with `permission_denied`, "access revoked". A
 WebSocket closes with code 1008, "access revoked". Each writes a
 `stream.revoked` audit event naming the user, the kind of loss, the surface
-and the environment, never a credential or the stream's contents.
+and the environment, never a credential or the stream's contents. The kind
+of loss is the key that matched: when several land in one transaction, as a
+disabled account's own row and its sessions' rows do, it is whichever the
+stream matched first, usually the session's after a disable.
 
 A WebSocket is admitted by the credential its handshake carried, and that is
 the credential whose loss ends it:

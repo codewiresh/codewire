@@ -15,7 +15,7 @@ Updated 2026-11-20.
 | --- | --- | --- |
 | `access-ticket` | not yet observed | not yet observed |
 | `access-streams` | not yet observed | not yet observed |
-| `access-websockets` | not yet observed | not yet observed |
+| `access-websockets` | the terminal half observed on Kind 2026-11-20, main 6557aa7e83; the SSH proxy and Dev not yet observed | not yet observed |
 | `access-org-deleting` | not yet observed | not yet observed |
 | `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
 
@@ -133,17 +133,18 @@ terminal and the SSH proxy are `access-websockets`.
 
 ## `access-websockets`: the dashboard's terminal and the SSH proxy when their authority is lost
 
-Issue: #3586, after its tailnet steps. Not yet observed.
+Issue: #3586, after its tailnet steps. The terminal half is observed on
+Kind; the SSH proxy is not yet observed.
 
-- **Entry points:** the dashboard's terminal on a Sandbox page, durable or
-  not, opened from a browser session; and the SSH proxy's WebSocket, which
+- **Entry points:** the dashboard's terminal on a Sandbox page, which is
+  durable and opened from a browser session; and the SSH proxy's WebSocket, which
   `cw shell --stdio` (OpenSSH's `ProxyCommand` after `cw setup ssh`) uses
   with `CW_SSH_TRANSPORT=websocket`, or when the tailnet cannot connect,
   signed in with an OAuth token from `cw login` or an API key.
 - **States to exercise:**
   - the browser session behind a terminal signs out, from that browser or
-    from Settings → Sessions: that terminal closes with "access revoked",
-    and a terminal opened from another browser keeps running;
+    from Settings → Sessions: that terminal's socket closes with "access
+    revoked", and a terminal opened from another browser keeps running;
   - the OAuth token behind an SSH-proxy session is revoked by `cw logout`,
     and the API key behind another is disabled: each ends;
   - the account is disabled: every terminal and SSH-proxy session of the
@@ -152,16 +153,19 @@ Issue: #3586, after its tailnet steps. Not yet observed.
 - **Driving it:** a running Sandbox of the walk account, two browsers (or a
   browser and a private window) signed in as it, and throwaway `HOME`s for
   `cw`.
-  1. In the first browser open two terminals: the Sandbox page's terminal,
-     which is durable and admitted by the session cookie, and the
-     standalone terminal page, admitted by a terminal ticket. In the second
-     browser open the Sandbox page's terminal. Run
-     `while :; do date -u +%T.%N; sleep 0.2; done` in each.
+  1. In the first browser open the Sandbox page's terminal, which is
+     durable and admitted by the session cookie. In the second browser open
+     the Sandbox page and start a new terminal beside it. Run
+     `while :; do date -u +%T.%N; sleep 0.2; done` in each. No dashboard
+     page opens the one-off terminal admitted by a terminal ticket any more;
+     that path is still served and fenced, and its database tests cover it
+     (`access-ticket`).
   2. In a `HOME` signed in with `cw login`, run `cw setup ssh`, then
      `CW_SSH_TRANSPORT=websocket ssh cw-<sandbox>` and the same loop. With
      an API key in `CODEWIRE_API_KEY`, open a second one the same way.
-  3. Sign the first browser out: both its terminals stop printing and close
-     with "access revoked"; the second browser's terminal keeps printing.
+  3. Sign the first browser out: its terminal stops printing, shows
+     "Disconnected." and the page moves to sign-in within about five
+     seconds; the second browser's terminal keeps printing.
      Sign the first browser in again and open the Sandbox page's terminal:
      the durable shell's loop is still running, and its lines resume.
   4. Run `cw logout` in the `HOME`: its `ssh` ends. Disable the API key in
@@ -169,19 +173,37 @@ Issue: #3586, after its tailnet steps. Not yet observed.
   5. Disable the account: the second browser's terminal closes. Enable it
      afterwards; a new sign-in and terminal work at once.
 - **Proof:** the last line each socket printed lies within 30 seconds of
-  its revocation, the browser's terminal shows the close as "access
-  revoked" (code 1008), and a `stream.revoked` audit event names the kind
-  of loss and the surface, `terminal` or `ssh_proxy`. The surviving
-  terminal is still printing at the end of its step, and the durable
-  terminal's loop was still running when a fresh sign-in attached to it;
-  the one-off terminal's shell ended with its socket. The expiry case and a
+  its revocation; the socket closes with code 1008, "access revoked"; the
+  browser's terminal shows "Disconnected." and its page moves to sign-in
+  within about five seconds; and a `stream.revoked` audit event names the
+  key that matched and the surface, `terminal` or `ssh_proxy`. The
+  surviving terminal is still printing at the end of its step, and the
+  durable terminal's loop was still running when a fresh sign-in attached
+  to it. The expiry case and a
   ticket whose session signs out before it is redeemed are the database
   tests' (`access-ticket` covers redemption).
 - **Gotchas:**
   - with the tailnet up, `cw shell --stdio` takes the tailnet, which
     `access-tailnet` covers; set `CW_SSH_TRANSPORT=websocket` to walk this
-    one.
-- **Observed:** not yet observed.
+    one;
+  - the close code is not on the page: read it from the socket, as a
+    walk's browser tooling can, and the time from the audit event;
+  - a disable writes the account's row and its sessions' rows in one
+    transaction, so its events usually name `session`.
+- **Observed:** the terminal half, on a local Kind cluster, 2026-11-20, main
+  6557aa7e83 (orchestration cfc126636f92, dashboard 20bc5f61426e), in
+  Chromium, as the seeded `e2e-owner`, with two browser contexts and the
+  socket closes recorded by the walk's browser tooling; recorded on #3586.
+  Signed out at 18:11:38.527Z, the first browser's socket closed with 1008
+  "access revoked" at 18:11:39.052, the event (`session`, `terminal`) is at
+  18:11:39.015, and the page moved to sign-in about five seconds later. The
+  second browser kept printing through it. Signed in again, the first
+  browser reattached to its durable terminal, whose loop had kept running.
+  An admin's Disable at 18:12:53.035 closed both of the second browser's
+  sockets with 1008 "access revoked" at 18:12:53.553, its last line at
+  18:12:53.0, and wrote two events naming `session`; after Enable a new
+  sign-in's terminal ran at once. The SSH proxy (steps 2 and 4) and Dev are
+  not yet observed.
 
 ## `access-org-deleting`: no new stream into an organization being deleted
 
