@@ -45,17 +45,12 @@ spec:
           # entrypoints); the codewire-orchestration binary is selected by
           # `command`.
           command: ["/codewire-orchestration"]
-          # The root filesystem stays writable for one path: a cw runtime
-          # upload is received below the temporary directory, and every
-          # directory on its path must be owned by root or this user and
-          # writable by no one else, except a root-owned 1777 one
-          # (crates/codewire-orchestration/src/api/cw_runtime/intake.rs).
-          # Under this Pod's fsGroup an emptyDir is setgid 2777 or 3777,
-          # which the intake refuses, so a read-only root waits for the
-          # intake to admit a volume (#5508).
+          # Writes only to the cw runtime staging mount below, in a private
+          # directory the server makes and checks at startup
+          # (docs/dev/CW-RUNTIME-JOURNAL.md, "Where an upload is staged").
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
             seccompProfile:
@@ -129,6 +124,10 @@ spec:
             - name: credential-broker-roots
               mountPath: /run/codewire-credentials/broker-roots
               readOnly: true
+            # cw runtime uploads, staged in a private directory the server
+            # makes in it at startup; never the mount's group-writable root.
+            - name: cw-runtime-staging
+              mountPath: /var/lib/codewire-orchestration/staging
       volumes:
         # cert-manager-owned leaf for the internal TLS listener. Readable by
         # the image's 65532 group only, through the pod fsGroup.
@@ -184,6 +183,11 @@ spec:
           configMap:
             name: codewire-credential-broker-roots
             optional: true
+        # On disk, not memory. Three 512 MiB uploads fit; past 2Gi the
+        # kubelet evicts the Pod, so the server admits at most three.
+        - name: cw-runtime-staging
+          emptyDir:
+            sizeLimit: 2Gi
 ---
 apiVersion: v1
 kind: ServiceAccount

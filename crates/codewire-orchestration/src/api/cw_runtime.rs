@@ -14,6 +14,7 @@ mod resolve;
 pub mod service;
 #[cfg(test)]
 mod service_test_support;
+pub mod staging;
 pub(crate) mod wire;
 
 use std::net::IpAddr;

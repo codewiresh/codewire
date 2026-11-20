@@ -16,10 +16,6 @@ services image:
 - has a read-only root filesystem. A path a service writes is an emptyDir
   mounted exactly there.
 
-WRITABLE_ROOT names the containers whose root filesystem stays writable, each
-with its reason; such a container says `readOnlyRootFilesystem: false` itself,
-so the exception is visible where it is made.
-
 The renders are those test-deploy-helm-chart.py compares: Production's source
 tree (the service directories composed, as Production's overlay builds on
 them) and the chart with its fixture values, and the two Kind overlays and the
@@ -51,15 +47,6 @@ SOURCE_VALUES = ROOT / "scripts/ci/tests/fixtures/helm-chart-values-source.yaml"
 
 WORKLOAD_KINDS = {"Deployment", "DaemonSet", "StatefulSet"}
 SERVICES_IMAGES = {"services", "codewire-services"}
-
-# (workload, container): why its root filesystem stays writable.
-WRITABLE_ROOT = {
-    ("codewire-orchestration", "orchestration"): (
-        "a cw runtime upload is received below the temporary directory, whose path "
-        "the intake admits only when root-owned 1777 or this user's alone; an "
-        "emptyDir under the Pod's fsGroup is setgid (#5508)"
-    ),
-}
 
 _SERVICES = (
     "codewire-billing", "codewire-coordinator", "codewire-idp", "codewire-orchestration",
@@ -160,10 +147,7 @@ def violations(workload: dict[str, Any]) -> list[str]:
             found.append(f"{label}: capabilities are not exactly drop [ALL]")
         if (effective("seccompProfile") or {}).get("type") != "RuntimeDefault":
             found.append(f"{label}: seccompProfile is not RuntimeDefault on the container or its Pod")
-        if (name, container["name"]) in WRITABLE_ROOT:
-            if context.get("readOnlyRootFilesystem") is not False:
-                found.append(f"{label}: a listed writable root must say readOnlyRootFilesystem: false itself")
-        elif context.get("readOnlyRootFilesystem") is not True:
+        if context.get("readOnlyRootFilesystem") is not True:
             found.append(f"{label}: readOnlyRootFilesystem is not true")
     return found
 
@@ -191,16 +175,6 @@ class Renders(unittest.TestCase):
         problems = [problem for render, (documents, expected) in renders().items()
                     for problem in check(documents, expected, render)]
         self.assertEqual(problems, [])
-
-    def test_every_writable_root_is_still_rendered(self) -> None:
-        # An exception for a container no render has any more is stale.
-        rendered = {
-            (workload["metadata"]["name"], container["name"])
-            for documents, _ in renders().values()
-            for workload in service_workloads(documents)
-            for container in workload["spec"]["template"]["spec"]["containers"]
-        }
-        self.assertEqual(set(WRITABLE_ROOT) - rendered, set())
 
 
 class HardeningRules(unittest.TestCase):
@@ -252,9 +226,10 @@ class HardeningRules(unittest.TestCase):
              "seccompProfile is not RuntimeDefault"),
             ("codewire-orchestration", lambda pod: container(pod).update(seccompProfile={"type": "Unconfined"}),
              "seccompProfile is not RuntimeDefault"),
-            # The listed exception must be spelled out where it is made.
+            # Orchestration stages cw runtime uploads on its own mount (#5508),
+            # so its root is read-only like every other service's.
             ("codewire-orchestration", lambda pod: container(pod).pop("readOnlyRootFilesystem"),
-             "must say readOnlyRootFilesystem: false itself"),
+             "readOnlyRootFilesystem is not true"),
             ("codewire-credential-service", lambda pod: pod["containers"][0].pop("securityContext"),
              "allowPrivilegeEscalation is not false"),
             # An init container joins its Pod's attack surface too.

@@ -114,6 +114,8 @@ pub struct ApiState {
     pub environment_logs: Arc<log_notifications::EnvironmentLogNotifications>,
     /// This replica's drain, which ends its public streams (#4426).
     pub drain: crate::drain::Drain,
+    /// Where cw runtime uploads are staged, validated before serving (#5508).
+    pub cw_runtime_staging: cw_runtime::staging::Staging,
     /// This process's revocation fence, which ends a stream when the
     /// authority that admitted it is lost (#3586).
     pub revocation: codewire_server_core::revocation::Fence,

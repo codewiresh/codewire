@@ -167,6 +167,7 @@ where
     // No journal admission, daemon command or bootstrap until exact EOF and
     // full static-musl/record/identity admission through the same held file.
     let candidate = intake::receive(
+        &state.cw_runtime_staging,
         intent.mutation.target_identity.clone(),
         chunks,
         state.drain.signal(Restart::Deadline),

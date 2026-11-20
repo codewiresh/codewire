@@ -2371,10 +2371,14 @@ start_orchestration_process() {
       ;;
   esac
 
+  # Orchestration refuses to start without its cw runtime staging mount,
+  # which a Pod gets as an emptyDir (docs/dev/CW-RUNTIME-JOURNAL.md).
+  mkdir -p "$RUN_DIR/orchestration-staging"
   # A worker with a sandbox backend requires the workspace-binding Service
   # namespace and an API URL at startup (Program #2238 review L2).
   start_proc orchestration "$ORCHESTRATION_PORT" env \
     KUBECONFIG="$kubeconfig" \
+    CODEWIRE_CW_RUNTIME_STAGING="$RUN_DIR/orchestration-staging" \
     KUBERNETES_SERVICE_HOST= KUBERNETES_SERVICE_PORT= \
     POD_NAMESPACE=codewire-integration \
     SANDBOX_NAMESPACE="$ORCHESTRATION_SANDBOX_NAMESPACE" \

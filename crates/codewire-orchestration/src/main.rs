@@ -506,6 +506,10 @@ async fn main() -> anyhow::Result<()> {
     let cfg = ServiceConfig::from_env("orchestration")?;
     let tracing_guard = codewire_server_core::obs::init_with_traces(&cfg)?;
     require_runtime_images()?;
+    // Before anything serves: a server that cannot stage a cw runtime upload
+    // in its own private directory never starts, and never stages anywhere
+    // else (docs/dev/CW-RUNTIME-JOURNAL.md, "Where an upload is staged").
+    let cw_runtime_staging = codewire_orchestration::api::cw_runtime::staging::Staging::from_env()?;
     let workspace_binding_bind_addr = workspace_binding_bind_addr(
         cfg.bind_addr,
         std::env::var(ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV)
@@ -828,6 +832,7 @@ async fn main() -> anyhow::Result<()> {
         network_policy_flags,
         environment_logs,
         drain: drain.clone(),
+        cw_runtime_staging,
         revocation,
     };
 

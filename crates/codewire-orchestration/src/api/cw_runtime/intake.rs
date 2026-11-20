@@ -3,7 +3,7 @@
 use std::fs::{File, Metadata};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt as _;
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use codewire_cw_release::build_record;
@@ -16,6 +16,7 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use super::model::{invalid_request, unavailable};
+use super::staging::{Slot, Staging};
 use super::wire::{MAX_CHUNK, validate_identity};
 
 pub(super) const UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
@@ -61,15 +62,15 @@ struct Directory {
     id: (u64, u64),
 }
 
-/// Held ancestry through the server's admitted temporary parent, plus one
-/// exclusive owner-private leaf. Foreign writable ancestors are refused;
-/// root-owned sticky01777 is the sole shared-parent exception.
+/// The held staging directory, plus one exclusive owner-private leaf, and
+/// the upload's slot, released only after the leaf is cleaned up.
 pub(super) struct Candidate {
     directories: Vec<Directory>,
     path: PathBuf,
     file: File,
     stamp: Stamp,
     identity: CwPayloadIdentity,
+    _slot: Slot,
 }
 
 fn owner_directory(metadata: &Metadata, private: bool) -> AppResult<()> {
@@ -97,30 +98,11 @@ fn named_matches_held(named: &rfs::Stat, held: &Metadata) -> bool {
 }
 
 impl Candidate {
-    fn create(parent: &Path, identity: CwPayloadIdentity) -> AppResult<Self> {
+    /// The walk starts at the staging directory the server validated and
+    /// holds at startup; nothing above it is followed or checked again.
+    fn create(staging: &Staging, slot: Slot, identity: CwPayloadIdentity) -> AppResult<Self> {
         validate_identity(&identity)?;
-        if !parent.is_absolute() || parent.as_os_str().len() > 4096 {
-            return Err(unavailable());
-        }
-        let names = parent
-            .components()
-            .filter_map(|v| match v {
-                Component::Normal(n) => Some(Ok(n)),
-                Component::RootDir => None,
-                _ => Some(Err(unavailable())),
-            })
-            .collect::<AppResult<Vec<_>>>()?;
-        if names.len() > 64 {
-            return Err(unavailable());
-        }
-        let root = File::from(
-            rfs::open(
-                "/",
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|_| unavailable())?,
-        );
+        let root = staging.directory().try_clone().map_err(|_| unavailable())?;
         let m = root.metadata().map_err(|_| unavailable())?;
         owner_directory(&m, false)?;
         let mut directories = vec![Directory {
@@ -128,24 +110,6 @@ impl Candidate {
             name: None,
             id: (m.dev(), m.ino()),
         }];
-        for name in names {
-            let file = File::from(
-                rfs::openat(
-                    &directories.last().ok_or_else(unavailable)?.file,
-                    name,
-                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
-                .map_err(|_| unavailable())?,
-            );
-            let m = file.metadata().map_err(|_| unavailable())?;
-            owner_directory(&m, false)?;
-            directories.push(Directory {
-                file,
-                name: Some(name.to_owned()),
-                id: (m.dev(), m.ino()),
-            });
-        }
         let name = std::ffi::OsString::from(format!("codewire-cw-runtime-{}", Uuid::new_v4()));
         let parent_file = &directories.last().ok_or_else(unavailable)?.file;
         rfs::mkdirat(parent_file, &name, Mode::from_raw_mode(0o700)).map_err(|_| unavailable())?;
@@ -182,10 +146,11 @@ impl Candidate {
         let stamp = Stamp::of(&file.metadata().map_err(|_| unavailable())?);
         let value = Self {
             directories,
-            path: parent.join(name).join("candidate.cw"),
+            path: staging.path().join(name).join("candidate.cw"),
             file,
             stamp,
             identity,
+            _slot: slot,
         };
         value.check()?;
         Ok(value)
@@ -325,6 +290,7 @@ impl Drop for Candidate {
 }
 
 pub(super) async fn receive<S>(
+    staging: &Staging,
     identity: CwPayloadIdentity,
     mut stream: S,
     restart: RestartSignal,
@@ -332,17 +298,17 @@ pub(super) async fn receive<S>(
 where
     S: Stream<Item = AppResult<Vec<u8>>> + Unpin,
 {
-    receive_before(&std::env::temp_dir(), identity, &mut stream, restart).await
+    receive_before(staging, identity, &mut stream, restart).await
 }
 
 /// Ends an upload still arriving at this replica's drain deadline with a
 /// retryable error, where the kill would reset it (#4460). The candidate is in
-/// this replica's own temporary directory, so it goes with the upload, and the
+/// this replica's own staging directory, so it goes with the upload, and the
 /// client sends the whole runtime again to the next replica. Nothing is
 /// admitted or issued before this returns, and nothing stops the update after:
 /// a stop there would leave its journal entry uncertain.
 async fn receive_before<S>(
-    parent: &Path,
+    staging: &Staging,
     identity: CwPayloadIdentity,
     stream: &mut S,
     restart: RestartSignal,
@@ -353,12 +319,12 @@ where
     tokio::select! {
         biased;
         () = restart => Err(AppError::ServiceUnavailable(RESTARTED.into())),
-        candidate = receive_in(parent, identity, stream) => candidate,
+        candidate = receive_in(staging, identity, stream) => candidate,
     }
 }
 
 async fn receive_in<S>(
-    parent: &Path,
+    staging: &Staging,
     identity: CwPayloadIdentity,
     stream: &mut S,
 ) -> AppResult<Candidate>
@@ -366,7 +332,8 @@ where
     S: Stream<Item = AppResult<Vec<u8>>> + Unpin,
 {
     validate_identity(&identity)?;
-    let mut candidate = Candidate::create(parent, identity)?;
+    let slot = staging.reserve()?;
+    let mut candidate = Candidate::create(staging, slot, identity)?;
     let mut hash = Sha256::new();
     let mut chunks = 0;
     let deadline = tokio::time::Instant::now() + UPLOAD_TIMEOUT;

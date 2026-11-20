@@ -207,9 +207,12 @@ RUST_BIN_DIR="$ROOT/target/ci"
 # CONNECT_TESTING_SURFACE mounts the Connect conformance probe
 # (connect-rpc/03, D8) — dev/CI/kind surfaces only. The runtime images name
 # the documentation registry (docs/CONFIGURATION.md); orchestration refuses to
-# start without them.
+# start without them, nor without its cw runtime staging mount, which a Pod
+# gets as an emptyDir (docs/dev/CW-RUNTIME-JOURNAL.md).
+mkdir -p "$RUN_DIR/orchestration-staging"
 DATABASE_URL="$DATABASE_URL" SESSION_SECRET="$SESSION_SECRET" NATS_URL="$NATS_URL" \
 ORCHESTRATION_PORT="$ORCH_PORT" \
+CODEWIRE_CW_RUNTIME_STAGING="$RUN_DIR/orchestration-staging" \
 CODEWIRE_WORKSPACE_IMAGE_REPOSITORY=registry.example.invalid/codewire/workspace \
 CODEWIRE_APPROVED_IMAGE_REGISTRIES=registry.example.invalid/,docker.io/library/ \
 SANDBOX_DAEMON_IMAGE=registry.example.invalid/codewire/daemon@sha256:adaba1f8e5ca50ed7aaeaf1b15d0588e441cadd1830e508a83108f798f66e029 \

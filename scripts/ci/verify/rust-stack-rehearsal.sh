@@ -668,8 +668,12 @@ fi
 
 ORCHESTRATION_KUBECONFIG="$RUN_DIR/orchestration-deliberately-missing-kubeconfig"
 rm -f "$ORCHESTRATION_KUBECONFIG"
+# Orchestration refuses to start without its cw runtime staging mount,
+# which a Pod gets as an emptyDir (docs/dev/CW-RUNTIME-JOURNAL.md).
+mkdir -p "$RUN_DIR/orchestration-staging"
 start_proc orchestration "$ORCHESTRATION_PORT" env \
   KUBECONFIG="$ORCHESTRATION_KUBECONFIG" \
+  CODEWIRE_CW_RUNTIME_STAGING="$RUN_DIR/orchestration-staging" \
   KUBERNETES_SERVICE_HOST= KUBERNETES_SERVICE_PORT= \
   DATABASE_URL="$DATABASE_URL_RUST" \
   SESSION_SECRET="$SESSION_SECRET" \
