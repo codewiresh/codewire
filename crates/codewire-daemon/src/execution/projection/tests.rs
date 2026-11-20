@@ -21,6 +21,7 @@ fn config(directory: &Path) -> Config {
             additional_gids: vec![],
             network_namespace: "/run/codewire/netns/workspace".into(),
             workload_may_become_root: false,
+            workload_root: "/generation/merged".into(),
         })),
         credential_bridge: Some(CredentialBridgeConfig {
             transport: crate::CredentialBridgeTransport::Local,

@@ -3308,6 +3308,27 @@ mod tests {
             Err(Status::unimplemented("fixture unused lifecycle RPC"))
         }
 
+        async fn start_desktop(
+            &self,
+            _request: Request<v1::StartDesktopRequest>,
+        ) -> Result<Response<v1::StartDesktopResponse>, Status> {
+            Err(Status::unimplemented("fixture unused desktop RPC"))
+        }
+
+        async fn get_desktop(
+            &self,
+            _request: Request<v1::GetDesktopRequest>,
+        ) -> Result<Response<v1::GetDesktopResponse>, Status> {
+            Err(Status::unimplemented("fixture unused desktop RPC"))
+        }
+
+        async fn stop_desktop(
+            &self,
+            _request: Request<v1::StopDesktopRequest>,
+        ) -> Result<Response<v1::StopDesktopResponse>, Status> {
+            Err(Status::unimplemented("fixture unused desktop RPC"))
+        }
+
         async fn set_app_ports(
             &self,
             _request: Request<v1::SetAppPortsRequest>,

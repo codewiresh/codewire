@@ -205,6 +205,7 @@ async fn eof_during_actual_pending_projection_reaps_launcher_before_terminal_exi
     let mut worker = SessionTask(tokio::spawn(run_pty_session(
         config,
         bridge,
+        crate::desktop::Display::default(),
         ReceiverStream::new(input_rx),
         start,
         output,

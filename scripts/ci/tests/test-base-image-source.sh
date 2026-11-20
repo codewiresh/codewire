@@ -113,6 +113,13 @@ grep -qF '      xfce4-session=4.18.3-1build2 ' "$workspace_dockerfile" ||
   fail 'workspace image does not install the pinned desktop session'
 grep -qxF 'COPY --chown=0:0 --chmod=0755 images/workspace/desktop/ /opt/codewire/desktop/' \
   "$workspace_dockerfile" || fail 'workspace image does not install the desktop launcher and its defaults root-owned'
+# The daemon's start waits for one line from the launcher. A daemon test holds
+# the same tie; this one runs when only the launcher changes.
+desktop_ready_line="$(sed -n 's/^const READY_LINE: &\[u8\] = b"\(.*\)";$/\1/p' \
+  "$ROOT/crates/codewire-daemon/src/desktop.rs")"
+[[ -n "$desktop_ready_line" ]] || fail 'the daemon no longer names the line a desktop start waits for'
+[[ "$(grep -cxF "echo '$desktop_ready_line'" "$ROOT/images/workspace/desktop/start")" == 1 ]] ||
+  fail "the desktop launcher does not print the line the daemon waits for: $desktop_ready_line"
 grep -qF 'APT::Update::Error-Mode=any' "$workspace_dockerfile" ||
   fail 'SSH artifact preparation tolerates partial package-index failures'
 # shellcheck disable=SC2016 # Match the literal package loop, not this test's environment.

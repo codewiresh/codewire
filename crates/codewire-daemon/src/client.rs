@@ -26,16 +26,10 @@ use zeroize::Zeroizing;
 
 pub const HOSTED_WORKSPACE_AUTHORIZATION: &str = "x-codewire-workspace-authorization-bin";
 
+mod desktop;
 mod forward;
 mod hosted;
-pub use hosted::HostedCredentialBridgeDrain;
-
-/// The admitted hosted daemon response, still inactive until the broker opens
-/// it. Its request producer remains owned by the separately returned drain.
-pub type HostedCredentialBridgePrepared = (
-    PreparedHostedCredentialBridge,
-    Streaming<bridge_v1::CredentialBridgeGuestMessage>,
-);
+pub use hosted::{HostedCredentialBridgeDrain, HostedCredentialBridgePrepared};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionClientError {

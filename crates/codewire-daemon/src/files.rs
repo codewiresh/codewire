@@ -514,6 +514,7 @@ mod tests {
                     additional_gids: Vec::new(),
                     network_namespace: "/run/codewire/netns/workspace".into(),
                     workload_may_become_root: false,
+                    workload_root: "/generation/merged".into(),
                 },
             )),
             ..config

@@ -15,6 +15,7 @@ pub mod config;
 mod confirm;
 mod credential_bridge;
 pub mod delivered_logins;
+mod desktop;
 mod durable_session;
 pub mod env;
 pub mod execution;

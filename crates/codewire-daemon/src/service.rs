@@ -46,6 +46,9 @@ pub struct DaemonServiceImpl {
     /// serves no tailnet (environment-token mode, local placements).
     app_ports: Option<AppPortsSender>,
     workload_sockets: crate::forward::WorkloadSockets,
+    /// The environment's desktop (`desktop.vnc.v1`), which a host daemon
+    /// never serves.
+    desktop: crate::desktop::Desktop,
     /// The token every RPC must present. It starts as `config.auth_token`;
     /// only a local guest daemon rotates it (`auth_rotation`).
     auth: crate::auth_rotation::DaemonAuth,
@@ -117,16 +120,51 @@ impl DaemonServiceImpl {
 
     pub fn with_runtime_state(config: Config, runtime_state: DaemonRuntimeState) -> Self {
         let credential_bridge = CredentialBridge::new(config.credential_bridge.clone());
+        let session_engine = SessionEngine::new(&config, credential_bridge.clone());
+        let workload_sockets = crate::forward::WorkloadSockets::default();
         Self {
-            session_engine: SessionEngine::new(&config, credential_bridge.clone()),
+            desktop: crate::desktop::Desktop::new(
+                &config,
+                session_engine.clone(),
+                workload_sockets.clone(),
+                crate::desktop::Layout::default(),
+            ),
+            session_engine,
             auth: crate::auth_rotation::DaemonAuth::new(config.auth_token.clone()),
             credential_bridge,
             config,
             runtime_state,
             app_ports: None,
-            workload_sockets: crate::forward::WorkloadSockets::default(),
+            workload_sockets,
             before_launch: None,
         }
+    }
+
+    /// The same service looking for the desktop at `layout`, where a test
+    /// puts a launcher of its own.
+    #[cfg(test)]
+    pub(crate) fn with_desktop_layout(mut self, layout: crate::desktop::Layout) -> Self {
+        self.desktop = self.desktop_at(layout);
+        self
+    }
+
+    fn desktop_at(&self, layout: crate::desktop::Layout) -> crate::desktop::Desktop {
+        crate::desktop::Desktop::new(
+            &self.config,
+            self.session_engine.clone(),
+            self.workload_sockets.clone(),
+            layout,
+        )
+    }
+
+    /// The session `session_id` names, if it is the desktop's: the generic
+    /// session calls that would change it are refused or handed to the
+    /// desktop.
+    async fn is_desktop_session(&self, session_id: &str) -> bool {
+        self.session_engine
+            .get(session_id)
+            .await
+            .is_ok_and(|session| crate::desktop::Desktop::owns(&session))
     }
 
     /// The same service, running `hook` before each session launch. The
@@ -157,6 +195,7 @@ impl DaemonServiceImpl {
     pub(crate) fn with_host_bounds(mut self, bounds: crate::durable_session::HostBounds) -> Self {
         self.session_engine =
             SessionEngine::with_host_bounds(&self.config, self.credential_bridge.clone(), bounds);
+        self.desktop = self.desktop_at(crate::desktop::Layout::default());
         self
     }
 
@@ -266,6 +305,12 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::LaunchSessionRequest>,
     ) -> Result<Response<v1::LaunchSessionResponse>, Status> {
         self.authorize(&request)?;
+        if request.get_ref().name == codewire_daemon_proto::DESKTOP_SESSION_NAME {
+            return Err(Status::invalid_argument(format!(
+                "the session name {} is the desktop's; start the desktop instead",
+                codewire_daemon_proto::DESKTOP_SESSION_NAME
+            )));
+        }
         if let Some(hook) = self.before_launch.clone() {
             let _ = tokio::task::spawn_blocking(move || hook()).await;
         }
@@ -312,11 +357,17 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::StopSessionRequest>,
     ) -> Result<Response<v1::StopSessionResponse>, Status> {
         self.authorize(&request)?;
-        let session = self
-            .session_engine
-            .stop(&request.into_inner().session_id)
-            .await
-            .map_err(status_from_session_error)?;
+        let session_id = request.into_inner().session_id;
+        let session = if self.is_desktop_session(&session_id).await {
+            // Stopping the desktop's session is stopping the desktop, so its
+            // state and the display new processes get end with it.
+            self.desktop.stop_session(&session_id).await?
+        } else {
+            self.session_engine
+                .stop(&session_id)
+                .await
+                .map_err(status_from_session_error)?
+        };
         Ok(Response::new(v1::StopSessionResponse {
             session: Some(session),
         }))
@@ -328,6 +379,11 @@ impl DaemonService for DaemonServiceImpl {
     ) -> Result<Response<v1::RestartSessionResponse>, Status> {
         self.authorize(&request)?;
         let request = request.into_inner();
+        if self.is_desktop_session(&request.session_id).await {
+            return Err(Status::failed_precondition(
+                "the desktop's session is restarted by starting the desktop",
+            ));
+        }
         let session = match request.expected_launch_generation {
             Some(generation) => {
                 self.session_engine
@@ -427,9 +483,43 @@ impl DaemonService for DaemonServiceImpl {
         Ok(Response::new(session::exec_session(
             self.config.clone(),
             self.credential_bridge.clone(),
+            self.session_engine.display(),
             stream,
             start,
         )))
+    }
+
+    async fn start_desktop(
+        &self,
+        request: Request<v1::StartDesktopRequest>,
+    ) -> Result<Response<v1::StartDesktopResponse>, Status> {
+        self.authorize(&request)?;
+        self.require_guest()?;
+        Ok(Response::new(v1::StartDesktopResponse {
+            desktop: Some(self.desktop.start().await?),
+        }))
+    }
+
+    async fn get_desktop(
+        &self,
+        request: Request<v1::GetDesktopRequest>,
+    ) -> Result<Response<v1::GetDesktopResponse>, Status> {
+        self.authorize(&request)?;
+        self.require_guest()?;
+        Ok(Response::new(v1::GetDesktopResponse {
+            desktop: Some(self.desktop.get().await?),
+        }))
+    }
+
+    async fn stop_desktop(
+        &self,
+        request: Request<v1::StopDesktopRequest>,
+    ) -> Result<Response<v1::StopDesktopResponse>, Status> {
+        self.authorize(&request)?;
+        self.require_guest()?;
+        Ok(Response::new(v1::StopDesktopResponse {
+            desktop: Some(self.desktop.stop().await?),
+        }))
     }
 
     async fn forward_tcp(
@@ -473,6 +563,7 @@ impl DaemonService for DaemonServiceImpl {
         Ok(Response::new(session::pty_session(
             self.config.clone(),
             self.credential_bridge.clone(),
+            self.session_engine.display(),
             stream,
             start,
         )))
@@ -2945,6 +3036,30 @@ mod tests {
         assert_eq!(
             service
                 .stat(authorized(v1::StatRequest::default()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            service
+                .start_desktop(authorized(v1::StartDesktopRequest {}))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            service
+                .get_desktop(authorized(v1::GetDesktopRequest {}))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            service
+                .stop_desktop(authorized(v1::StopDesktopRequest {}))
                 .await
                 .unwrap_err()
                 .code(),

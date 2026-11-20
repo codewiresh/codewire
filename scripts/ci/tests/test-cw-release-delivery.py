@@ -794,6 +794,8 @@ class EmbeddedSourceTest(unittest.TestCase):
     # Embedded only by test code, which no cw build compiles: each from an
     # inline #[cfg(test)] module, or a test function, of the file named.
     TEST_ONLY = {
+        # codewire-daemon src/desktop.rs
+        "images/workspace/desktop/start",
         # codewire-server-core src/migrate.rs
         "crates/codewire-server-core/tests/data/application_schema_fingerprint.sql",
         # codewire-local-vmm src/bin/codewire-local-codex-bridge-smoke.rs

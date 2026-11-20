@@ -34,12 +34,13 @@ fn main() {
 }
 
 /// Messages whose `Debug` is written by hand, because they hold a field
-/// marked `debug_redact` (src/ssh.rs, src/login_debug.rs).
+/// marked `debug_redact` (src/ssh.rs, src/login_debug.rs, src/desktop.rs).
 const SKIP_DEBUG: &[&str] = &[
     ".codewire.bridge.v1.ClaudeLoginResponse",
     ".codewire.bridge.v1.CodexLoginResponse",
     ".codewire.bridge.v1.CredentialSshSignRequest",
     ".codewire.bridge.v1.CredentialSshSignature",
+    ".daemon.v1.DesktopRunning",
 ];
 
 /// Reports a missing `protoc` in one line; any other failure keeps its detail.

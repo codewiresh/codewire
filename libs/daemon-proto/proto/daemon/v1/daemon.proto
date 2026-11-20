@@ -49,6 +49,19 @@ service DaemonService {
   // RPC ends once both have.
   rpc ForwardTcp(stream ForwardTcpMessage) returns (stream ForwardTcpMessage);
 
+  // Requires desktop.vnc.v1. The environment's one graphical desktop: an X
+  // and VNC server on display :1 with an XFCE session, run as the durable
+  // session `codewire-desktop`, with its VNC listener on the workload's
+  // loopback only. Start is idempotent and answers once the launcher has said
+  // its own server holds the display and the listener accepts, or fails with
+  // DeadlineExceeded after 10 seconds, or with FailedPrecondition when the
+  // image has no desktop, another process holds the display or the port, or
+  // an earlier session took the desktop's name. Stop is idempotent. A host
+  // daemon refuses all three.
+  rpc StartDesktop(StartDesktopRequest) returns (StartDesktopResponse);
+  rpc GetDesktop(GetDesktopRequest) returns (GetDesktopResponse);
+  rpc StopDesktop(StopDesktopRequest) returns (StopDesktopResponse);
+
   rpc List(ListRequest) returns (ListResponse);
   rpc Stat(StatRequest) returns (StatResponse);
   rpc OpenFile(OpenFileRequest) returns (OperationStatus);
@@ -335,6 +348,54 @@ message SetAppPortsRequest {
 }
 
 message SetAppPortsResponse {}
+
+enum DesktopState {
+  DESKTOP_STATE_UNSPECIFIED = 0;
+  // This environment's image has no desktop. Not a missing capability: a
+  // daemon without desktop.vnc.v1 cannot start one in any image.
+  DESKTOP_STATE_UNAVAILABLE = 1;
+  DESKTOP_STATE_STOPPED = 2;
+  DESKTOP_STATE_STARTING = 3;
+  DESKTOP_STATE_RUNNING = 4;
+}
+
+message Desktop {
+  DesktopState state = 1;
+  // What the image lacks, when unavailable.
+  string unavailable_reason = 2;
+  // Set while running.
+  DesktopRunning running = 3;
+}
+
+message DesktopRunning {
+  // The X display, ":1".
+  string display = 1;
+  // The VNC listener's port on the workload's loopback.
+  uint32 port = 2;
+  google.protobuf.Timestamp started_at = 3;
+  // The password the VNC server asks a viewer for, made at each start. It
+  // protects nothing and exists because some viewers will not open a desktop
+  // without one; it is still never logged.
+  string viewer_password = 4 [debug_redact = true];
+}
+
+message StartDesktopRequest {}
+
+message StartDesktopResponse {
+  Desktop desktop = 1;
+}
+
+message GetDesktopRequest {}
+
+message GetDesktopResponse {
+  Desktop desktop = 1;
+}
+
+message StopDesktopRequest {}
+
+message StopDesktopResponse {
+  Desktop desktop = 1;
+}
 
 message HealthDiagnostic {
   string name = 1;

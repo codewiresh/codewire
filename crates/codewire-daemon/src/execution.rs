@@ -108,6 +108,10 @@ pub struct RuncExecution {
     /// (`docs/dev/LINUX-LOCAL-VMS.md`, "Root and sudo in a VM", #5464). A
     /// process still starts with no capabilities either way.
     pub workload_may_become_root: bool,
+    /// The workload container's root filesystem as the daemon sees it. The
+    /// daemon only looks there for what the image holds; it runs nothing
+    /// from it and writes nothing to it.
+    pub workload_root: PathBuf,
 }
 
 /// The capability bounding set a workload that may become root keeps: the
@@ -130,6 +134,15 @@ pub const WORKLOAD_ROOT_CAPABILITIES: [&str; 14] = [
 ];
 
 impl ProcessExecution {
+    /// Where `path`, absolute inside the workload, is for the daemon: the
+    /// same path where the daemon runs in the workload's own filesystem.
+    pub fn workload_path(&self, path: &str) -> PathBuf {
+        match self {
+            Self::Native => PathBuf::from(path),
+            Self::Runc(config) => config.workload_root.join(path.trim_start_matches('/')),
+        }
+    }
+
     pub fn default_shell(&self, native: impl FnOnce() -> String) -> String {
         match self {
             Self::Native => native(),
@@ -646,6 +659,7 @@ mod tests {
             additional_gids: vec![27],
             network_namespace: "/run/codewire/netns/workspace".into(),
             workload_may_become_root: false,
+            workload_root: "/generation/merged".into(),
         }));
         let secret = "CW_TEST_SECRET=not-on-helper-command";
         let daemon_auth = format!("{DAEMON_AUTH_TOKEN_ENV}=must-not-enter-child");
@@ -741,6 +755,7 @@ mod tests {
             additional_gids: Vec::new(),
             network_namespace: "/run/codewire/netns/workspace".into(),
             workload_may_become_root: false,
+            workload_root: "/generation/merged".into(),
         }));
         let error =
             PreparedProcess::prepare(&execution, &["/bin/sh".into()], "/", &[], false, 0, 0)
@@ -769,6 +784,7 @@ mod tests {
                 additional_gids: Vec::new(),
                 network_namespace: "/run/codewire/netns/workspace".into(),
                 workload_may_become_root: may_become_root,
+                workload_root: "/generation/merged".into(),
             }));
             let prepared = PreparedProcess::prepare(
                 &execution,

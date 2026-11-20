@@ -48,6 +48,11 @@ The desktop is built on these, which are on `main`:
 - The dashboard terminal's WebSocket admission
   ([BROWSER-TERMINALS.md](BROWSER-TERMINALS.md)) and the revocation fence
   that ends an admitted stream ([AUTH-POLICY.md](AUTH-POLICY.md)).
+- The image's desktop layer, its launcher, Chromium and the look ("In the
+  image", "The browser" and "The look", below), and the daemon's
+  `desktop.vnc.v1` ("What the daemon does"). Nothing calls the daemon's three
+  RPCs yet: the control plane, `cw desktop` and the dashboard viewer are not
+  built.
 
 ## In the image
 

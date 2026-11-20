@@ -285,6 +285,11 @@ The typed service exposes:
   from each last detach. Every attach stream counts, whichever path it came
   by. The record keeps the setting and says `ended: no client for N minutes`.
   Zero, the default, never ends a session this way
+- `StartDesktop`, `GetDesktop` and `StopDesktop` (capability `desktop.vnc.v1`,
+  a guest daemon only): the environment's desktop, run as the reserved durable
+  session `codewire-desktop`. Its states, what a start waits for and refuses,
+  the per-start viewer password and `DISPLAY` for later launches are specified
+  in [SANDBOX-DESKTOP.md](SANDBOX-DESKTOP.md), "What the daemon does"
 - `ExecSession`: bidirectional stream for non-PTY commands
 - `PtySession`: bidirectional stream for interactive shells
 - `List`, `Stat`, `OpenFile`, `Read`, `Write`, `Mkdir`, `Remove`, `Rename`,

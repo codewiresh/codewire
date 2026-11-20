@@ -297,6 +297,16 @@ pub const DAEMON_CAPABILITY_WORKLOAD_FILES: &str = "files.workload_user.v1";
 /// namespace as the workload user, for SSH port forwarding served outside it
 /// (#3025).
 pub const DAEMON_CAPABILITY_FORWARD_TCP: &str = "forward.workload_loopback.v1";
+/// `StartDesktop`, `GetDesktop` and `StopDesktop`: the environment's
+/// graphical desktop (`docs/dev/SANDBOX-DESKTOP.md`). The daemon has it
+/// whatever image the environment runs; an image without a desktop is the
+/// `unavailable` state, so a client can tell the two apart.
+pub const DAEMON_CAPABILITY_DESKTOP_VNC: &str = "desktop.vnc.v1";
+/// The durable session the desktop runs as. No other session may take the
+/// name, and stopping this one stops the desktop.
+pub const DESKTOP_SESSION_NAME: &str = "codewire-desktop";
+/// The desktop's X display.
+pub const DESKTOP_DISPLAY: &str = ":1";
 pub const SESSION_INPUT_MAX_BYTES: usize = 64 * 1024;
 pub const SESSION_INPUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub const DAEMON_CAPABILITY_CREDENTIAL_BRIDGE: &str = "credential_bridge.v1";
@@ -441,6 +451,7 @@ pub const DAEMON_CAPABILITIES: &[&str] = &[
     DAEMON_CAPABILITY_SESSION_END_AFTER_DETACHED,
     DAEMON_CAPABILITY_WORKLOAD_FILES,
     DAEMON_CAPABILITY_FORWARD_TCP,
+    DAEMON_CAPABILITY_DESKTOP_VNC,
 ];
 
 pub const HOST_DAEMON_CAPABILITIES: &[&str] = &[
@@ -468,6 +479,7 @@ pub mod ssh;
 /// Canonical names-only framing for fixed-role native projection composition.
 pub mod projection;
 
+mod desktop;
 mod login_debug;
 
 /// Validated credential for the private environment-daemon RPC boundary.

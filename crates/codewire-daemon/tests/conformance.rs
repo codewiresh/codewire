@@ -2004,3 +2004,76 @@ async fn a_forward_to_a_closed_port_is_unavailable() {
     );
     harness.shutdown().await;
 }
+
+/// The daemon has the desktop contract whatever image it runs in; where the
+/// image has no desktop, as on this machine, the state says so and names
+/// what is missing, and nothing is started.
+#[tokio::test]
+async fn a_daemon_in_an_image_without_a_desktop_reports_it_unavailable() {
+    let harness = DaemonHarness::spawn().await;
+    let mut client = harness.client().await;
+    let capabilities = client
+        .get_capabilities(v1::GetCapabilitiesRequest::default())
+        .await
+        .unwrap()
+        .into_inner()
+        .capabilities;
+    assert!(
+        capabilities
+            .iter()
+            .any(|capability| capability == codewire_daemon_proto::DAEMON_CAPABILITY_DESKTOP_VNC),
+        "{capabilities:?}"
+    );
+
+    let desktop = client
+        .get_desktop(v1::GetDesktopRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .desktop
+        .unwrap();
+    assert_eq!(desktop.state, v1::DesktopState::Unavailable as i32);
+    assert!(
+        desktop
+            .unavailable_reason
+            .contains("/opt/codewire/desktop/start"),
+        "{desktop:?}"
+    );
+    assert!(desktop.running.is_none());
+
+    let refused = client
+        .start_desktop(v1::StartDesktopRequest {})
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.code(),
+        tonic::Code::FailedPrecondition,
+        "{refused:?}"
+    );
+    let sessions = client
+        .list_sessions(v1::ListSessionsRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .sessions;
+    assert!(sessions.is_empty(), "{sessions:?}");
+    harness.shutdown().await;
+}
+
+/// No session launched through the session calls takes the desktop's name.
+#[tokio::test]
+async fn the_session_calls_refuse_the_desktops_name() {
+    let harness = DaemonHarness::spawn().await;
+    let mut client = harness.client().await;
+    let refused = client
+        .launch_session(v1::LaunchSessionRequest {
+            command: vec!["true".into()],
+            name: codewire_daemon_proto::DESKTOP_SESSION_NAME.into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::InvalidArgument, "{refused:?}");
+    assert!(refused.message().contains("desktop"), "{refused:?}");
+    harness.shutdown().await;
+}

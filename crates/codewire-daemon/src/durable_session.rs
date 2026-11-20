@@ -171,6 +171,10 @@ struct SessionEngineInner {
     host_bounds: HostBounds,
     /// The kernel boot ID this daemon runs under, read once ([`current_boot_id`]).
     boot_id: Option<String>,
+    /// Whether the environment's desktop runs, for the processes this engine
+    /// starts. It is cleared here when the desktop's session ends, however
+    /// it ends.
+    display: crate::desktop::Display,
     /// How many stops and restarts asked the record helper about an active
     /// run to interrupt first.
     #[cfg(all(test, target_os = "linux"))]
@@ -210,6 +214,9 @@ struct SessionHandle {
     /// capture holds across its writes and fsyncs.
     #[cfg(target_os = "linux")]
     platform_managed: std::sync::atomic::AtomicBool,
+    /// Whether this is the desktop's session, by the name it was created
+    /// with. Input reads it here for the same reason.
+    desktop: bool,
     output_index: Mutex<Vec<OutputFrameIndex>>,
     /// The output end offset, published after each capture is recorded, so
     /// an attachment reads new output at once instead of on its next poll.
@@ -240,6 +247,7 @@ impl SessionHandle {
             platform_managed: std::sync::atomic::AtomicBool::new(
                 metadata.platform_managed_origin.is_some(),
             ),
+            desktop: metadata.name == codewire_daemon_proto::DESKTOP_SESSION_NAME,
             output_end: watch::channel(metadata.output_end_offset).0,
             metadata: AsyncMutex::new(metadata),
             output_index: Mutex::new(output_index),
@@ -676,6 +684,7 @@ impl SessionEngine {
                 store_refusal: Mutex::new(None),
                 host_bounds: bounds,
                 boot_id: current_boot_id(),
+                display: crate::desktop::Display::default(),
                 #[cfg(all(test, target_os = "linux"))]
                 stop_interrupt_checks: std::sync::atomic::AtomicUsize::new(0),
                 #[cfg(all(test, target_os = "linux"))]
@@ -1652,7 +1661,7 @@ impl SessionEngine {
         Ok(output)
     }
 
-    pub async fn input(&self, session_id: &str, data: Vec<u8>) -> Result<(), SessionError> {
+    async fn write_input(&self, session_id: &str, data: Vec<u8>) -> Result<(), SessionError> {
         let mut timing = SlowControl::new("input", session_id);
         self.ensure_initialized().await?;
         validate_session_id(session_id)?;
@@ -2771,6 +2780,7 @@ impl SessionEngine {
             &self.inner.credential_bridge,
             &snapshot,
             std::env::vars(),
+            &self.inner.display,
         ) {
             Ok(prepared) => prepared,
             Err(message) => return self.record_unspawned_failure(handle, message).await,
@@ -2979,18 +2989,19 @@ impl SessionEngine {
         snapshot: PersistedSession,
         cancel: &CancellationToken,
     ) -> Result<v1::SessionRecord, SessionError> {
-        let environment = match build_process_env(&self.inner.config, &snapshot.env, &snapshot.term)
-        {
-            Ok(environment) => environment,
-            Err(error) => {
-                return self
-                    .record_unspawned_failure(
-                        handle,
-                        format!("prepare session PTY environment: {error}"),
-                    )
-                    .await;
-            }
-        };
+        let mut environment =
+            match build_process_env(&self.inner.config, &snapshot.env, &snapshot.term) {
+                Ok(environment) => environment,
+                Err(error) => {
+                    return self
+                        .record_unspawned_failure(
+                            handle,
+                            format!("prepare session PTY environment: {error}"),
+                        )
+                        .await;
+                }
+            };
+        self.inner.display.apply(&snapshot.env, &mut environment);
         let size = pty_size(snapshot.width, snapshot.height);
         let pair = match native_pty_system().openpty(size) {
             Ok(pair) => pair,
@@ -3766,37 +3777,6 @@ async fn prune_session_records_preserving(
     Ok(())
 }
 
-/// One pipe session's process. Every session is prepared the same way, a
-/// managed agent's driver included, because a managed agent works in the
-/// user's environment: the one shared builder (the Git route, the SSH signer
-/// socket, the provider routes), then the launch projection when this daemon
-/// has one, with its own authority check for this launch. The driver, its
-/// guardian and the provider inherit the result, and the guardian adds only
-/// the managed login lockdown. Nothing resolved is kept: the values exist in
-/// the launcher and the processes it becomes, never in the session record.
-/// `daemon_environment` is this daemon's own environment, from which the
-/// builder drops the daemon's internal configuration.
-fn prepare_pipe_process(
-    config: &Config,
-    bridge: &CredentialBridge,
-    snapshot: &PersistedSession,
-    daemon_environment: impl IntoIterator<Item = (String, String)>,
-) -> Result<PreparedProcess, String> {
-    let environment =
-        build_process_env_in(config, &snapshot.env, &snapshot.term, daemon_environment)
-            .map_err(|error| format!("prepare session environment: {error}"))?;
-    PreparedProcess::prepare_configured(
-        (config, bridge),
-        &snapshot.command,
-        &snapshot.working_dir,
-        &environment,
-        false,
-        0,
-        0,
-    )
-    .map_err(|error| format!("prepare session process: {error}"))
-}
-
 /// The environment and driver IDs of a host owner's own managed
 /// conversation: the only kind of session whose run can pause or resume. A
 /// member's or the platform's conversation, a terminal and every other
@@ -4512,6 +4492,7 @@ async fn finish_process(
         {
             let mut metadata = handle.metadata.lock().await;
             metadata.finished_at = Some(PersistedTimestamp::now());
+            inner.display.session_ended(&metadata.name);
             if end.owned {
                 metadata.cleanup_unknown =
                     completion_result(&completion).is_err() || output_error.is_some();
@@ -5614,6 +5595,7 @@ mod tests {
                 additional_gids: Vec::new(),
                 network_namespace: "/proc/self/ns/net".into(),
                 workload_may_become_root: false,
+                workload_root: "/generation/merged".into(),
             })),
             credential_bridge: None,
             managed_credential_clients: Default::default(),
@@ -6336,6 +6318,7 @@ mod tests {
             platform_managed: std::sync::atomic::AtomicBool::new(
                 metadata.platform_managed_origin.is_some(),
             ),
+            desktop: metadata.name == codewire_daemon_proto::DESKTOP_SESSION_NAME,
             output_end: watch::channel(metadata.output_end_offset).0,
             metadata: AsyncMutex::new(metadata),
             output_index: Mutex::new(index),
@@ -7076,3 +7059,10 @@ mod input_streams;
 mod platform_managed;
 #[cfg(target_os = "linux")]
 use platform_managed::{platform_managed_bypass_refused, refuse_platform_managed_bypass};
+
+#[path = "durable_session/pipe_process.rs"]
+mod pipe_process;
+use pipe_process::prepare_pipe_process;
+
+#[path = "durable_session/desktop_session.rs"]
+mod desktop_session;

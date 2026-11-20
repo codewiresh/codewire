@@ -71,6 +71,7 @@ mod network_status;
 mod oci_config;
 mod shutdown;
 mod vm_only;
+mod workload_execution;
 
 use bootstrap::{BootstrapChild, BootstrapParent};
 use codewire_daemon::execution::BootstrapPhase;
@@ -552,21 +553,11 @@ pub async fn run_daemon() -> Result<()> {
             .context("validate guest daemon auth token")?,
         managed_credential_clients: seed.managed_credential_clients(),
         interception: interception::from_seed(&seed),
-        process_execution: codewire_daemon::execution::ProcessExecution::Runc(Box::new(
-            codewire_daemon::execution::RuncExecution {
-                helper_path: PathBuf::from(INIT_PATH),
-                process_directory: PathBuf::from(RUNC_PROCESS_PATH),
-                container_id: WORKSPACE_CONTAINER_ID.to_owned(),
-                process_wrapper: vec![CONTAINER_INIT_PATH.to_owned(), "workspace-exec".to_owned()],
-                default_shell: plan.identity.shell.clone(),
-                base_environment: runtime_path_environment(&plan.environment, publisher.is_some()),
-                uid: plan.identity.uid,
-                gid: plan.identity.gid,
-                additional_gids: plan.identity.additional_gids.clone(),
-                network_namespace: PathBuf::from(NETWORK_NAMESPACE_PATH),
-                workload_may_become_root: seed.docker_data_disk(),
-            },
-        )),
+        process_execution: workload_execution::workload_execution(
+            &seed,
+            &plan,
+            publisher.is_some(),
+        ),
         host: None,
         launch_projection: seed.environment_projection_sha256().map(|selection| {
             codewire_daemon::LaunchProjectionConfig {

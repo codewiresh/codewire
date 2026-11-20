@@ -48,12 +48,13 @@ struct PrelaunchPtyInput {
 pub(crate) fn exec_session(
     config: Config,
     bridge: CredentialBridge,
+    display: crate::desktop::Display,
     stream: Streaming<v1::ExecMessage>,
     start: v1::ExecStartRequest,
 ) -> ReceiverStream<Result<v1::ExecMessage, Status>> {
     let (tx, rx) = mpsc::channel(32);
     tokio::spawn(async move {
-        run_exec_session(config, bridge, stream, start, tx).await;
+        run_exec_session(config, bridge, display, stream, start, tx).await;
     });
     ReceiverStream::new(rx)
 }
@@ -61,12 +62,13 @@ pub(crate) fn exec_session(
 pub(crate) fn pty_session(
     config: Config,
     bridge: CredentialBridge,
+    display: crate::desktop::Display,
     stream: Streaming<v1::PtyMessage>,
     start: v1::PtyStartRequest,
 ) -> ReceiverStream<Result<v1::PtyMessage, Status>> {
     let (tx, rx) = mpsc::channel(32);
     tokio::spawn(async move {
-        run_pty_session(config, bridge, stream, start, tx).await;
+        run_pty_session(config, bridge, display, stream, start, tx).await;
     });
     ReceiverStream::new(rx)
 }
@@ -74,19 +76,21 @@ pub(crate) fn pty_session(
 async fn run_exec_session(
     config: Config,
     bridge: CredentialBridge,
+    display: crate::desktop::Display,
     stream: Streaming<v1::ExecMessage>,
     start: v1::ExecStartRequest,
     tx: mpsc::Sender<Result<v1::ExecMessage, Status>>,
 ) {
     let command = command_or_default(start.command, &config);
     let working_dir = normalize_working_dir(&config, &start.working_dir);
-    let env = match build_process_env(&config, &start.env, "") {
+    let mut env = match build_process_env(&config, &start.env, "") {
         Ok(environment) => environment,
         Err(error) => {
             send_exec_startup_failure(&tx, error.to_string()).await;
             return;
         }
     };
+    display.apply(&start.env, &mut env);
 
     let mut prepared = match PreparedProcess::prepare_configured(
         (&config, &bridge),
@@ -232,6 +236,7 @@ async fn finish_cancelled_exec_launch(
 async fn run_pty_session<S>(
     config: Config,
     bridge: CredentialBridge,
+    display: crate::desktop::Display,
     mut stream: S,
     start: v1::PtyStartRequest,
     tx: mpsc::Sender<Result<v1::PtyMessage, Status>>,
@@ -250,13 +255,14 @@ async fn run_pty_session<S>(
         .await;
         return;
     }
-    let env = match build_process_env(&config, &start.env, &start.term) {
+    let mut env = match build_process_env(&config, &start.env, &start.term) {
         Ok(environment) => environment,
         Err(error) => {
             send_pty_startup_failure(&tx, error.to_string()).await;
             return;
         }
     };
+    display.apply(&start.env, &mut env);
     let size = pty_size(start.width, start.height);
 
     let pty_system = native_pty_system();

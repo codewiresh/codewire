@@ -9,8 +9,15 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
-use super::SessionClientError;
+use super::{PreparedHostedCredentialBridge, SessionClientError};
 use codewire_daemon_proto::codewire::bridge::v1;
+
+/// The admitted hosted daemon response, still inactive until the broker opens
+/// it. Its request producer remains owned by the separately returned drain.
+pub type HostedCredentialBridgePrepared = (
+    PreparedHostedCredentialBridge,
+    tonic::Streaming<v1::CredentialBridgeGuestMessage>,
+);
 
 pub(super) struct HostedLifetime(CancellationToken);
 impl Drop for HostedLifetime {

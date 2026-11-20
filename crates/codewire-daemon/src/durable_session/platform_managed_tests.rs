@@ -414,10 +414,22 @@ async fn platform_managed_driver_is_prepared_through_the_launch_projection_like_
     };
 
     let credential_bridge = CredentialBridge::new(Some(bridge));
-    let prepared_ordinary =
-        prepare_pipe_process(&config, &credential_bridge, &ordinary, daemon_environment()).unwrap();
-    let prepared_managed =
-        prepare_pipe_process(&config, &credential_bridge, &managed, daemon_environment()).unwrap();
+    let prepared_ordinary = prepare_pipe_process(
+        &config,
+        &credential_bridge,
+        &ordinary,
+        daemon_environment(),
+        &Default::default(),
+    )
+    .unwrap();
+    let prepared_managed = prepare_pipe_process(
+        &config,
+        &credential_bridge,
+        &managed,
+        daemon_environment(),
+        &Default::default(),
+    )
+    .unwrap();
     let (ordinary_program, ordinary_arguments, ordinary_environment) = describe(&prepared_ordinary);
     let (managed_program, managed_arguments, managed_environment) = describe(&prepared_managed);
     // Both run the projection launcher, each with its own one-launch
@@ -489,9 +501,14 @@ async fn platform_managed_driver_is_prepared_through_the_launch_projection_like_
     config.launch_projection = None;
     config.managed_credential_clients = Default::default();
     for snapshot in [&ordinary, &managed] {
-        let prepared =
-            prepare_pipe_process(&config, &credential_bridge, snapshot, daemon_environment())
-                .unwrap();
+        let prepared = prepare_pipe_process(
+            &config,
+            &credential_bridge,
+            snapshot,
+            daemon_environment(),
+            &Default::default(),
+        )
+        .unwrap();
         let (program, arguments, _) = describe(&prepared);
         assert_eq!(program.to_str(), Some(snapshot.command[0].as_str()));
         assert_eq!(arguments, snapshot.command[1..]);
@@ -502,7 +519,14 @@ async fn platform_managed_driver_is_prepared_through_the_launch_projection_like_
         native: None,
     });
     assert!(
-        prepare_pipe_process(&config, &credential_bridge, &managed, daemon_environment()).is_err()
+        prepare_pipe_process(
+            &config,
+            &credential_bridge,
+            &managed,
+            daemon_environment(),
+            &Default::default()
+        )
+        .is_err()
     );
 }
 
