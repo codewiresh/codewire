@@ -1232,8 +1232,13 @@ VM can't use it.`, then the fix: a sign-in is reconnected under its own name
 credential is replaced in the profile (`cw credentials --local --profile work
 set SLOT NAME`). An expired one `has expired` and a failed one `needs
 reconnecting`. Reconnecting the same credential restores it on the next
-request, with no stop or start (observed for a Claude sign-in withheld at
-start, #5545). What the VM set up at start keeps its form until the next
+request, with no stop or start, when it is the profile's only usable
+credential: no broker ran, and the next request starts one with its provider
+(observed for a Claude sign-in withheld at start, #5545). When another of the
+profile's credentials keeps the VM's broker running, the reconnected one is
+used from the next start instead: a broker's providers are fixed for its
+generation, and the authority refuses a changed set (#5615 lifts that). What
+the VM set up at start keeps its form until the next
 start: with its Anthropic slot withheld, Claude Code starts in its API-key
 form, and starts in its sign-in form again after a start.
 

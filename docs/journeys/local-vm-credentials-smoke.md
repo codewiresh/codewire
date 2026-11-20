@@ -114,7 +114,9 @@ and Codex sign-ins are synthetic, served by synthetic providers on loopback.
     other capabilities keep working, and the revoked one's request is still
     refused.
   - Re-enrolling the same credential serves the next request, with no stop
-    or start in between.
+    or start in between, when it is the profile's only usable credential.
+    With another usable credential in the profile, it serves from the next
+    start, until #5615.
 - **Observed:** `claude`, 2026-11-20, with #5541, #5512 and #5545 on a
   local tree: every state above passed, including the start with the sign-in
   still revoked. The start printed `Claude (sign-in) 'native-broker-claude'
