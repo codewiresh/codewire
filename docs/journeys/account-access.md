@@ -164,8 +164,9 @@ Kind; the SSH proxy is not yet observed.
      `CW_SSH_TRANSPORT=websocket ssh cw-<sandbox>` and the same loop. With
      an API key in `CODEWIRE_API_KEY`, open a second one the same way.
   3. Sign the first browser out: its terminal stops printing, shows
-     "Disconnected." and the page moves to sign-in within about five
-     seconds; the second browser's terminal keeps printing.
+     "Access revoked. Sign in again to continue." with no Reconnect, and the
+     page moves to sign-in within about five seconds; the second browser's
+     terminal keeps printing.
      Sign the first browser in again and open the Sandbox page's terminal:
      the durable shell's loop is still running, and its lines resume.
   4. Run `cw logout` in the `HOME`: its `ssh` ends. Disable the API key in
@@ -174,8 +175,9 @@ Kind; the SSH proxy is not yet observed.
      afterwards; a new sign-in and terminal work at once.
 - **Proof:** the last line each socket printed lies within 30 seconds of
   its revocation; the socket closes with code 1008, "access revoked"; the
-  browser's terminal shows "Disconnected." and its page moves to sign-in
-  within about five seconds; and a `stream.revoked` audit event names the
+  browser's terminal shows "Access revoked. Sign in again to continue."
+  with no Reconnect (#5660; not yet observed; any other close keeps
+  "Disconnected.") and its page moves to sign-in within about five seconds; and a `stream.revoked` audit event names the
   key that matched and the surface, `terminal` or `ssh_proxy`. The
   surviving terminal is still printing at the end of its step, and the
   durable terminal's loop was still running when a fresh sign-in attached
@@ -246,7 +248,13 @@ comment 123530). Not yet observed.
   organization is being deleted, and none reaches the Sandbox; the tailnet
   shell opened before ends within 60 seconds and the WebSocket one keeps
   printing until the deletion stops the Sandbox; another organization's
-  streams are unaffected.
+  streams are unaffected. In the dashboard (#5677; not yet observed), the
+  Sandbox page's terminal area says "This organization is being deleted, so
+  its Sandboxes can't open terminals." with no Retry, and an open terminal
+  shows the same line and stops reconnecting; a member opening a shared
+  preview sees "Preview unavailable" and "This organization is being
+  deleted, so its Sandboxes' previews can't open."; a non-member still sees
+  "Preview access denied".
 - **Gotchas:** a small organization's deletion can run to its end in
   seconds, which leaves nothing to refuse, so try the new streams at once. A
   deletion that failed holds still for the walk: it stays refused until it is

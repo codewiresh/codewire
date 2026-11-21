@@ -2008,6 +2008,57 @@ test("a session list the Sandbox refuses says so in place of the invitation, and
   await expect(retry).toBeHidden();
 });
 
+// An organization whose deletion has started refuses every new stream (#3586).
+// No Retry or restart can change that, so the page says why and offers neither (#5677).
+const organizationDeleting = "This organization is being deleted, so its Sandboxes can't open terminals.";
+
+test("a session list refused because the organization is being deleted says so, with no Retry", async ({ page }) => {
+  const state = await transport(page);
+  state.listStatus = 409;
+  state.listError = "organization-deleting";
+  await openFixture(page);
+  await expect(page.locator("[data-terminal-empty]")).toHaveText(organizationDeleting);
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeHidden();
+  expect(state.launches).toBe(0);
+});
+
+test("an open terminal whose organization starts being deleted says why and stops reconnecting", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  await expectAttached(page);
+  await pauseClock(page);
+  await settleReadiness(page);
+  state.listStatus = 409;
+  state.listError = "organization-deleting";
+  await (await terminalAction(page, "Refresh sessions")).click();
+  await expect(connectionStatus(page, sessionId(1))).toHaveText(organizationDeleting);
+  await expect.poll(() => state.connections[0].closed).toBe(true);
+  // No automatic reconnect follows.
+  await advance(page, 30_000);
+  expect(state.connections).toHaveLength(1);
+  expect(state.launches).toBe(0);
+});
+
+// A socket the server closes because the sign-in, key or account behind it was
+// revoked says so in the CLI's words, and offers no Reconnect (#5660). Any other
+// close keeps "Disconnected." and its Reconnect.
+test("a terminal whose access is revoked says so and offers no Reconnect", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  await expectAttached(page);
+  await pauseClock(page);
+  await settleReadiness(page);
+  state.connections[0].route.close({ code: 1008, reason: "access revoked" });
+  await expect(connectionStatus(page, sessionId(1))).toHaveText("Access revoked. Sign in again to continue.");
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeHidden();
+  await advance(page, 30_000);
+  expect(state.connections).toHaveLength(1);
+});
+
 test("Sandbox lifecycle changes pause terminal controls without automatic launch, and re-attaches existing sessions automatically when ready again", async ({ page }) => {
   const state = await transport(page);
   state.sessions = [{ sessionId: sessionId(1), state: "running" }];

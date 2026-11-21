@@ -200,11 +200,17 @@ impl Fixture {
     /// The proxy's refusal text for a non-navigation request, or `None` when
     /// it lets the request through.
     async fn proxied_message(&self, user: &AuthUser) -> Result<Option<String>> {
+        self.proxied_body(user, &HeaderMap::new()).await
+    }
+
+    /// The proxy's refusal body for a request with `headers`, or `None` when
+    /// it lets the request through.
+    async fn proxied_body(&self, user: &AuthUser, headers: &HeaderMap) -> Result<Option<String>> {
         let (matched, target) = self.target().await?;
         let decision = authorize_proxy_user(
             &self.context(),
             &Method::GET,
-            &HeaderMap::new(),
+            headers,
             user,
             &matched,
             &target,
@@ -851,6 +857,9 @@ async fn an_organization_being_deleted_opens_no_shared_preview() -> Result<()> {
             via_api_key: false,
         };
         let no_cookie = HeaderMap::new();
+        let mut navigation = HeaderMap::new();
+        navigation.insert("sec-fetch-mode", "navigate".parse()?);
+        navigation.insert("sec-fetch-dest", "document".parse()?);
         sqlx::query("UPDATE environment_ports SET access='org_members' WHERE id='preview-port'")
             .execute(&f.pool)
             .await?;
@@ -875,6 +884,19 @@ async fn an_organization_being_deleted_opens_no_shared_preview() -> Result<()> {
                 anyhow::ensure!(
                     stranger.as_deref().is_some_and(|message| !message.contains("deleted")),
                     "{deletion}: a stranger's {access} answer was {stranger:?}"
+                );
+                // A browser opening it is shown why, in the page's words
+                // (#5677); a stranger still sees only that access is denied.
+                let member_page = f.proxied_body(&user("preview-user"), &navigation).await?;
+                anyhow::ensure!(
+                    member_page.as_deref().is_some_and(|page| page.contains("<h1 id=\"preview-denied-title\" class=\"cw-page-title\">Preview unavailable</h1>")
+                        && page.contains("This organization is being deleted, so its Sandboxes' previews can't open.")),
+                    "{deletion}: the member's {access} page was {member_page:?}"
+                );
+                let stranger_page = f.proxied_body(&user("stranger-user"), &navigation).await?;
+                anyhow::ensure!(
+                    stranger_page.as_deref().is_some_and(|page| page.contains(">Preview access denied</h1>") && !page.contains("deleted")),
+                    "{deletion}: a stranger's {access} page was {stranger_page:?}"
                 );
             }
             sqlx::query("UPDATE environment_ports SET access='public' WHERE id='preview-port'")

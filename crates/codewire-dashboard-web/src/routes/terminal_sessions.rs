@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     auth::{authenticated_identity, enforce_two_factor},
-    error::WebError,
+    error::{WebError, codewire_reason},
     security::{canonical_cookie, request_has_same_origin, valid_csrf_token},
     state::AppState,
     transport::BrowserTransport,
@@ -112,10 +112,18 @@ fn connect_failure(error: ConnectError, mutation: bool) -> Response {
 /// FailedPrecondition when the Sandbox is not running or its daemon is
 /// starting, out of date, unhealthy or refuses its session store. The reason
 /// stays in orchestration and the daemon status; the browser gets one closed
-/// code it can explain. Mutations never use it: there FailedPrecondition can
-/// also mean an unknown outcome.
+/// code it can explain. An organization whose deletion has started or failed
+/// refuses every new stream (AUTH-POLICY.md, #3586); it is named apart, since
+/// no retry or restart can change it (#5677). Mutations never use it: there
+/// FailedPrecondition can also mean an unknown outcome.
 fn list_failure(error: ConnectError) -> Response {
     match error.code {
+        ErrorCode::FailedPrecondition
+            if codewire_reason(&error).ok().flatten().as_deref()
+                == Some("ORGANIZATION_DELETING") =>
+        {
+            failure(StatusCode::CONFLICT, "organization-deleting")
+        }
         ErrorCode::FailedPrecondition => failure(StatusCode::CONFLICT, "sessions-refused"),
         _ => connect_failure(error, false),
     }
@@ -437,6 +445,43 @@ mod tests {
         let (status, value) = body(list_failure(refused.clone())).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(value, serde_json::json!({"error": "sessions-refused"}));
+        // An organization being deleted is named by its Codewire reason, not
+        // its message, and only when that reason is the one detail.
+        let deleting = |domain: &str, reason: &str, repeated: bool| {
+            let info = codewire_proto::google::rpc::ErrorInfo {
+                domain: domain.into(),
+                reason: reason.into(),
+                ..Default::default()
+            };
+            let mut error = ConnectError::new(
+                ErrorCode::FailedPrecondition,
+                "organization is being deleted; private-reason-canary",
+            );
+            error.details.push(connectrpc::ErrorDetail::from_message(
+                "google.rpc.ErrorInfo",
+                &info,
+            ));
+            if repeated {
+                error.details.push(error.details[0].clone());
+            }
+            error
+        };
+        let (status, value) = body(list_failure(deleting(
+            "codewire.sh",
+            "ORGANIZATION_DELETING",
+            false,
+        )))
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(value, serde_json::json!({"error": "organization-deleting"}));
+        for refused in [
+            deleting("example.com", "ORGANIZATION_DELETING", false),
+            deleting("codewire.sh", "ORGANIZATION_DELETING", true),
+            deleting("codewire.sh", "ENVIRONMENT_NOT_RUNNING", false),
+        ] {
+            let (_, value) = body(list_failure(refused)).await;
+            assert_eq!(value, serde_json::json!({"error": "sessions-refused"}));
+        }
         // A refused mutation may still have run; it stays an unknown outcome.
         let (status, value) = body(connect_failure(refused, true)).await;
         assert_eq!(status, StatusCode::CONFLICT);

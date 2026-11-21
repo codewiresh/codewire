@@ -4,11 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::http::HeaderValue;
-use base64::{
-    Engine as _,
-    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
-};
-use buffa::Message as _;
 use codewire_proto::codewire::v1::{
     AccessProfile, AccessProfileEntry, AccessProfileServiceClient, AddApiKeyCredentialRequest,
     AddClaudeSubscriptionTokenCredentialRequest, AddSshCredentialRequest,
@@ -27,6 +22,7 @@ use connectrpc::{
 };
 
 use crate::environment_source_forms::exact_id;
+use crate::error::codewire_reason;
 use crate::state::AppState;
 use crate::time_display::calendar_date;
 use crate::transport::BrowserTransport;
@@ -108,7 +104,7 @@ fn failed_error(error: &ConnectError, uncertain: bool) -> OAuthEnrollmentEvent {
     use OAuthEnrollmentFailure as Failure;
     // Do not render or retain an upstream message, detail metadata, provider
     // output or challenge. Only these closed reasons cross into the view.
-    let trusted_reason = match enrollment_error_reason(error) {
+    let trusted_reason = match codewire_reason(error) {
         Ok(reason) => reason,
         Err(()) => return failed(uncertain),
     };
@@ -149,36 +145,11 @@ fn failed_error(error: &ConnectError, uncertain: bool) -> OAuthEnrollmentEvent {
     OAuthEnrollmentEvent::Failed { reason, uncertain }
 }
 
-fn enrollment_error_reason(error: &ConnectError) -> Result<Option<String>, ()> {
-    let mut details = error.details.iter().filter(|detail| {
-        matches!(
-            detail.type_url.as_str(),
-            "google.rpc.ErrorInfo" | "type.googleapis.com/google.rpc.ErrorInfo"
-        )
-    });
-    let Some(detail) = details.next() else {
-        return Ok(None);
-    };
-    if details.next().is_some() {
-        return Err(());
-    }
-    let encoded = detail.value.as_deref().ok_or(())?;
-    let bytes = STANDARD_NO_PAD
-        .decode(encoded)
-        .or_else(|_| STANDARD.decode(encoded))
-        .map_err(|_| ())?;
-    let info = codewire_proto::google::rpc::ErrorInfo::decode_from_slice(&bytes).map_err(|_| ())?;
-    if info.domain != "codewire.sh" || info.reason.is_empty() {
-        return Err(());
-    }
-    Ok(Some(info.reason))
-}
-
 pub(crate) fn github_authorization_feedback(error: &ConnectError) -> Option<&'static str> {
     if error.code != ErrorCode::FailedPrecondition {
         return None;
     }
-    match enrollment_error_reason(error).ok()?.as_deref()? {
+    match codewire_reason(error).ok()?.as_deref()? {
         "CREDENTIAL_GITHUB_APP_NOT_CONFIGURED" => Some("github-app-unavailable"),
         "CREDENTIAL_GITHUB_INSTALLATION_REQUIRED" => Some("github-installation-required"),
         "CREDENTIAL_ENROLLMENT_FAILED" => Some("github-app-failed"),

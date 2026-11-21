@@ -295,6 +295,8 @@
       tab.inputTimer = null;
       tab.stagedInput = null;
     }
+    // A refusal no retry can change (#3586): no Retry and no reconnect.
+    const organizationDeleting = "This organization is being deleted, so its Sandboxes can't open terminals.";
     function detach(tab, text = "Disconnected", keepWanted = false, tone = "neutral") {
       if (!keepWanted) {
         tab.wanted = false;
@@ -592,6 +594,10 @@
           finalAfterRender(tab, finalText, finalTone);
         } else if (finalStatus) {
           detach(tab, "Connection closed before terminal output could be confirmed.", false, "danger");
+        } else if (event.code === 1008 && event.reason === "access revoked") {
+          detach(tab, "Access revoked. Sign in again to continue.", false, "warning");
+          // Reconnecting can't succeed; the page moves to sign-in instead.
+          tab.toggle.hidden = true;
         } else lose(tab, "Disconnected.");
       });
     }
@@ -787,6 +793,7 @@
           error.reload = value?.error === "request-rejected";
           error.limit = value?.error === "session-limit";
           error.refused = value?.error === "sessions-refused";
+          error.deleting = value?.error === "organization-deleting";
           error.authorization = response.status === 401 || (response.status === 403 && !error.reload) || value?.error === "account-changed";
           throw error;
         }
@@ -860,16 +867,19 @@
       } catch (error) {
         if (current !== epoch || suspended) return;
         if (error.authorization) { clearReferences(); clearPresentations(); account = null; }
+        else if (error.deleting) for (const tab of tabs.values()) detach(tab, organizationDeleting, false, "warning");
         else for (const tab of tabs.values()) if (automatic(tab)) lose(tab, "Terminal sessions are unavailable.");
         if (tabs.size) {
           announce(error.authorization ? "Sign in with access to this Sandbox, then refresh sessions."
+            : error.deleting ? organizationDeleting
             : error.refused ? "This Sandbox can't list its terminals right now. Refresh sessions to try again, or restart the Sandbox."
               : "Terminal sessions are unavailable. Refresh sessions to try again.");
         } else {
           // With no tab open the empty state says why, once, beside Retry.
           announce("");
-          failure = { retry: true, rearm: false,
+          failure = { retry: !error.deleting, rearm: false,
             text: error.authorization ? "Sign in with access to this Sandbox, then retry."
+              : error.deleting ? organizationDeleting
               : error.refused ? "This Sandbox can't list its terminals right now. Retry, or restart the Sandbox."
                 : "Terminal sessions are unavailable right now." };
         }

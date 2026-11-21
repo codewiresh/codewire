@@ -131,15 +131,52 @@ fn denied() -> Response {
     preview_error(StatusCode::FORBIDDEN, "preview access denied")
 }
 
+/// What the denied page tells a browser that may not open a preview.
+#[derive(Clone, Copy)]
+pub(super) enum Denial {
+    /// The caller has no access to it.
+    Access,
+    /// Its organization is being deleted, so none of its previews opens,
+    /// whoever asks (AUTH-POLICY.md, #3586; the words are #5677's).
+    OrganizationDeleting,
+}
+
+impl Denial {
+    /// The page's title and its one line of explanation.
+    fn words(self) -> (&'static str, &'static str) {
+        match self {
+            Denial::Access => (
+                "Preview access denied",
+                "Your account can't open this preview. Ask the Sandbox's owner for access, or sign in with another account.",
+            ),
+            Denial::OrganizationDeleting => (
+                "Preview unavailable",
+                "This organization is being deleted, so its Sandboxes' previews can't open.",
+            ),
+        }
+    }
+}
+
+fn denied_html(frontend: &str, denial: Denial) -> String {
+    let (title, copy) = denial.words();
+    format!(
+        include_str!("denied.html"),
+        frontend = html_escape(frontend),
+        title = title,
+        copy = copy,
+    )
+}
+
 pub(super) fn denied_page(state: &PreviewContext<'_>) -> Response {
+    denial_page(state, Denial::Access)
+}
+
+fn denial_page(state: &PreviewContext<'_>, denial: Denial) -> Response {
     let Ok(frontend) = preview_frontend_origin(state.frontend_url, state.preview_base_domain)
     else {
         return unavailable();
     };
-    let html = format!(
-        include_str!("denied.html"),
-        frontend = html_escape(&frontend)
-    );
+    let html = denied_html(&frontend, denial);
     no_store(
         Response::builder()
             .status(StatusCode::FORBIDDEN)
@@ -380,7 +417,15 @@ pub(super) async fn authorize_proxy_user(
     if target.access != "public" {
         match codewire_server_core::org::org_admits_streams(state.pool, &matched.org_id).await {
             Ok(true) => {}
-            Ok(false) => return Err(forbidden(codewire_server_core::org::ORGANIZATION_DELETING)),
+            Ok(false) if top_level_navigation(method, headers) => {
+                return Err(denial_page(state, Denial::OrganizationDeleting));
+            }
+            Ok(false) => {
+                return Err(preview_error(
+                    StatusCode::FORBIDDEN,
+                    codewire_server_core::org::ORGANIZATION_DELETING,
+                ));
+            }
             Err(_) => return Err(unavailable()),
         }
     }
@@ -841,7 +886,7 @@ mod tests {
 
     #[test]
     fn denied_page_and_fixture_share_the_auth_shell() {
-        let product = include_str!("denied.html");
+        let product = &denied_html("https://codewire.example", Denial::Access);
         let fixture = include_str!(
             "../../../../../packages/codewire-design/reference/fixtures/preview-access-denied.html"
         );
@@ -859,6 +904,24 @@ mod tests {
         assert!(!fixture.contains("gradient"));
         assert!(!product.contains("cosmos"));
         assert!(!fixture.contains("cosmos"));
+    }
+
+    #[test]
+    fn a_preview_of_an_organization_being_deleted_says_so_and_asks_for_no_access() {
+        let page = denied_html("https://codewire.example", Denial::OrganizationDeleting);
+        let fixture = include_str!(
+            "../../../../../packages/codewire-design/reference/fixtures/preview-unavailable-deleting.html"
+        );
+        for fragment in [
+            "<title>Preview unavailable · Codewire</title>",
+            "<h1 id=\"preview-denied-title\" class=\"cw-page-title\">Preview unavailable</h1>",
+            "<p class=\"cw-auth-copy\">This organization is being deleted, so its Sandboxes' previews can't open.</p>",
+            "<body class=\"cw-body cw-auth-body\" data-route=\"preview-access-denied\">",
+        ] {
+            assert!(page.contains(fragment), "missing {fragment}");
+            assert!(fixture.contains(fragment), "fixture missing {fragment}");
+        }
+        assert!(!page.contains("Ask the Sandbox's owner"));
     }
 
     // A database failure while resolving a challenge's host is transient, so the
