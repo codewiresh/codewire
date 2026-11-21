@@ -531,6 +531,12 @@ unwired = temporary / 'sources-unwired'
 (unwired / 'crates' / 'fixture' / 'Cargo.toml').write_text('[package]\nname = "codewire-fixture"\nversion = "0.0.0"\n')
 (unwired / 'crates' / 'fixture' / 'src' / 'lib.rs').write_text(
     '#[tokio::test]\n#[ignore = "requires isolated TEST_DATABASE_URL"]\nasync fn db_nothing_runs() {}\n')
+# The merged source of a head whose base predates main renaming that test.
+renamed_on_main = temporary / 'sources-renamed-on-main'
+(renamed_on_main / 'crates' / 'fixture' / 'src').mkdir(parents=True)
+(renamed_on_main / 'crates' / 'fixture' / 'Cargo.toml').write_text((unwired / 'crates' / 'fixture' / 'Cargo.toml').read_text())
+(renamed_on_main / 'crates' / 'fixture' / 'src' / 'lib.rs').write_text(
+    (unwired / 'crates' / 'fixture' / 'src' / 'lib.rs').read_text().replace('db_nothing_runs', 'db_renamed_on_main'))
 
 lock_dir = temporary / 'lane-locks'
 
@@ -641,6 +647,10 @@ cases = {
     'empty': pool.submit(run_case, 'empty:--test owner_sources'),
     # and a database test that no suite lists, which no count could see:
     'unwired': pool.submit(run_case, extra={'DATABASE_TEST_SOURCE_ROOT': str(unwired)}),
+    # but not one the merged source the binaries came from no longer has
+    # (main renamed it after the head's base).
+    'renamed on main': pool.submit(run_case, extra={'DATABASE_TEST_SOURCE_ROOT': str(unwired),
+                                                    'BUILD_SOURCE_DIR': str(renamed_on_main)}),
     **{failure: pool.submit(run_case, failure) for failure in failures},
 }
 
@@ -794,6 +804,10 @@ unwired_run, unwired_commands, _ = cases['unwired'].result()
 assert unwired_run.returncode != 0 and '[product-integration] green' not in unwired_run.stdout
 assert 'codewire-fixture database test db_nothing_runs (crates/fixture/src/lib.rs:2) runs in no database lane' in unwired_run.stderr, unwired_run.stderr
 assert not executions_of(unwired_commands)
+renamed, _, _ = cases['renamed on main'].result()
+assert renamed.returncode == 0 and '[product-integration] green' in renamed.stdout, renamed.stdout + renamed.stderr
+for why, name in (('renamed or removed on main', 'db_nothing_runs'), ('added on main', 'db_renamed_on_main')):
+    assert f'({why}; main\'s run checks them): codewire-fixture::{name}' in renamed.stdout, renamed.stdout
 failed, trace, _ = cases['journal'].result()
 assert failed.returncode != 0 and '[product-integration] green' not in failed.stdout
 assert 'api::platform_agents::journal::database_tests::db_' in trace[-1]['args']

@@ -1583,8 +1583,16 @@ list_database_suites() {
     cat "$RUN_DIR/database-list-$lane.log"
   done
   [ "$failed" = false ] || return 1
+  # A pull request's binaries come from the merged source and its lanes from
+  # this head, so a test main renamed since the head's base was in no listing
+  # (#5736's run 67978): check only the tests both trees define.
+  local -a compiled=()
+  if [ -n "${DATABASE_TEST_SOURCE_ROOT:-}" ] && [ -n "${BUILD_SOURCE_DIR:-}" ]; then
+    compiled=(--compiled-root "$BUILD_SOURCE_DIR")
+  fi
   python3 -B "$ROOT/scripts/ci/verify/database-test-coverage.py" \
-    --root "${DATABASE_TEST_SOURCE_ROOT:-${BUILD_SOURCE_DIR:-$ROOT}}" --listings "$SUITE_LISTINGS"
+    --root "${DATABASE_TEST_SOURCE_ROOT:-${BUILD_SOURCE_DIR:-$ROOT}}" "${compiled[@]}" \
+    --listings "$SUITE_LISTINGS"
 }
 
 run_database() {
