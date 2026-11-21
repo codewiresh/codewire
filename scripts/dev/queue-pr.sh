@@ -15,6 +15,26 @@ if [[ $# != 2 || ! "$1" =~ ^[1-9][0-9]*$ || -z "$2" || "$2" == *$'\n'* || "$2" =
   printf 'usage: scripts/dev/queue-pr.sh PR_NUMBER "COMMIT TITLE"\n' >&2
   exit 2
 fi
+# Main's copy of this script and of the helpers it runs does the queueing,
+# whatever the caller's branch carries: a branch cut before a check landed
+# would otherwise queue without it (#5664's compile check was skipped by every
+# PR worktree older than it). The copy runs with the caller's checkout as its
+# repository, for its git objects and its warm target.
+here="$(cd "$(dirname "$0")/../.." && pwd)"
+if [[ -z "${QUEUE_PR_CALLER-}" ]]; then
+  git -C "$here" fetch -q --no-write-fetch-head origin "+refs/heads/main:refs/queue-pr/$$/self"
+  copy="$(mktemp -d "${TMPDIR:-/tmp}/queue-pr.XXXXXX")"
+  if ! git -C "$here" archive "refs/queue-pr/$$/self" \
+      scripts/dev/queue-pr.sh scripts/dev/queue_pr_packages.py scripts/checks | tar -x -C "$copy"; then
+    rm -rf -- "$copy"
+    git -C "$here" update-ref -d "refs/queue-pr/$$/self"
+    printf "queue-pr.sh: could not read main's copy of queue-pr.sh\n" >&2
+    exit 1
+  fi
+  git -C "$here" update-ref -d "refs/queue-pr/$$/self"
+  QUEUE_PR_CALLER="$here" QUEUE_PR_COPY="$copy" exec bash "$copy/scripts/dev/queue-pr.sh" "$@"
+fi
+[[ -z "${QUEUE_PR_COPY-}" ]] || trap 'rm -rf -- "$QUEUE_PR_COPY"' EXIT
 pr="$1" title="$2"
 # The title becomes a commit on main and on the public mirror, and it cannot be
 # changed afterwards. A placeholder is refused: #4834's pull request was
@@ -32,7 +52,7 @@ fi
 # A pull request's CI checks its own head, so two valid Cargo lockfiles can
 # still merge textually into one Cargo refuses (b34cf2bb: a bare "base64" once
 # main locked two). Check every lockfile of the merge itself before merging.
-root="$(cd "$(dirname "$0")/../.." && pwd)"
+root="$QUEUE_PR_CALLER"
 # Every session shares the canonical checkout, so FETCH_HEAD and
 # refs/remotes/origin/main move under a concurrent fetch: the pull request's
 # head and main go into refs of this run's own, removed on exit.
@@ -40,6 +60,7 @@ refs="refs/queue-pr/$$"
 cleanup() {
   git -C "$root" update-ref -d "$refs/head" 2>/dev/null || true
   git -C "$root" update-ref -d "$refs/main" 2>/dev/null || true
+  [[ -z "${QUEUE_PR_COPY-}" ]] || rm -rf -- "$QUEUE_PR_COPY"
 }
 trap cleanup EXIT
 git -C "$root" fetch -q --no-write-fetch-head origin "+refs/pull/$pr/head:$refs/head" "+refs/heads/main:$refs/main"
@@ -51,7 +72,7 @@ if ! tree="$(git -C "$root" merge-tree --write-tree "$base" "$head")"; then
 fi
 while IFS= read -r lock; do
   if ! git -C "$root" show "$tree:$lock" |
-      python3 "$root/scripts/checks/repo_checks.py" cargo-lock-integrity --lock - --label "merged $lock"; then
+      python3 "$here/scripts/checks/repo_checks.py" cargo-lock-integrity --lock - --label "merged $lock"; then
     printf 'queue-pr.sh: #%s would leave main with a %s Cargo refuses; merge main into it and update the lock\n' \
       "$pr" "$lock" >&2
     exit 1
@@ -96,7 +117,7 @@ if ! metadata="$(cd "$check_dir" && cargo metadata --locked --no-deps --format-v
   exit 1
 fi
 # A mapper that fails refuses too, rather than reading as "no package".
-if ! mapped="$(python3 "$root/scripts/dev/queue_pr_packages.py" "${changed[@]}" <<<"$metadata")"; then
+if ! mapped="$(python3 "$here/scripts/dev/queue_pr_packages.py" "${changed[@]}" <<<"$metadata")"; then
   printf 'queue-pr.sh: could not map #%s changed files to packages\n' "$pr" >&2
   exit 1
 fi

@@ -395,7 +395,9 @@ git init -q -b main "$merge_repo"
 git -C "$merge_repo" config user.name 'Test Author'
 git -C "$merge_repo" config user.email 'test@example.invalid'
 mkdir -p "$merge_repo/scripts/dev" "$merge_repo/scripts/checks"
-cp "$ROOT/scripts/dev/merge-pr.sh" "$merge_repo/scripts/dev/"
+# queue-pr.sh runs main's copy of itself and its helpers, so main carries them.
+cp "$ROOT/scripts/dev/merge-pr.sh" "$ROOT/scripts/dev/queue-pr.sh" "$ROOT/scripts/dev/queue_pr_packages.py" \
+  "$merge_repo/scripts/dev/"
 cp -R "$ROOT/scripts/checks/repo_checks.py" "$ROOT/scripts/checks/repo_policy" "$merge_repo/scripts/checks/"
 merge_lock 'app 0.1.0 base64' 'base64 0.22.1' 'middle 0.1.0' >"$merge_repo/Cargo.lock"
 git -C "$merge_repo" add -A
@@ -489,8 +491,8 @@ cat >"$work/merge-bin/fj" <<'SH'
 { printf '%s\0' "$@"; printf '\n'; } >>"${MERGE_TEST_ARGS:?}"
 case "$*" in *' view '*' labels') printf '%s\n' "${FAKE_LABELS-merge-queue}" ;; esac
 SH
-cp "$ROOT/scripts/dev/queue-pr.sh" "$merge_repo/scripts/dev/"
-queue_pr() { PATH="$work/merge-bin:$PATH" bash "$merge_repo/scripts/dev/queue-pr.sh" "$@"; }
+mkdir "$work/queue-tmp"
+queue_pr() { TMPDIR="$work/queue-tmp" PATH="$work/merge-bin:$PATH" bash "$merge_repo/scripts/dev/queue-pr.sh" "$@"; }
 queue_pr 42 'fix: safe title (#42)' >"$work/queue.out"
 python3 - "$MERGE_TEST_ARGS" <<'PYTEST'
 import sys
@@ -516,7 +518,6 @@ fi
 [[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a refused queue contacted the forge'
 # The compile check (#5664): a stub cargo and a codewire-cpu with a free slot,
 # which prints no wait line; the cache stays in this test's own directory.
-cp "$ROOT/scripts/dev/queue_pr_packages.py" "$merge_repo/scripts/dev/"
 cat >"$work/merge-bin/cargo" <<'SH'
 #!/usr/bin/env bash
 case "$1" in
@@ -560,6 +561,20 @@ grep -qF '#44 is queued as "feat: a demo crate (#44)"' "$work/queue-rust.out" ||
 grep -qxF 'check --locked --all-targets --all-features -p demo' "$work/cargo.log" ||
   fail "queue-pr.sh did not check the touched package: $(cat "$work/cargo.log")"
 grep -qP '\t44\t[0-9]+\t0\tdemo$' "$work/xdg/codewire-queue-pr/times.tsv" || fail 'queue-pr.sh did not record the check'
+[[ -z "$(ls -A "$work/queue-tmp")" ]] || fail "queue-pr.sh left main's copy behind: $(ls -A "$work/queue-tmp")"
+# The caller's own copy hands over to main's, whatever the caller's branch
+# carries: here main's is a stub that says it ran.
+cat >"$merge_repo/scripts/dev/queue-pr.sh" <<'SH'
+printf "main's copy ran: %s from %s\n" "$*" "$QUEUE_PR_CALLER"
+rm -rf -- "$QUEUE_PR_COPY"
+SH
+git -C "$merge_repo" commit -q -am "main's queue-pr.sh"
+git -C "$merge_repo" push -q origin main
+git -C "$merge_repo" checkout -q HEAD~1 -- scripts/dev/queue-pr.sh
+queue_pr 42 'fix: safe title' >"$work/queue-main.out" 2>&1 || fail "main's copy of queue-pr.sh did not run: $(cat "$work/queue-main.out")"
+grep -qxF "main's copy ran: 42 fix: safe title from $merge_repo" "$work/queue-main.out" ||
+  fail "queue-pr.sh did not run main's copy: $(cat "$work/queue-main.out")"
+[[ -z "$(git -C "$merge_repo" for-each-ref refs/queue-pr)" ]] || fail 'queue-pr.sh left its refs behind'
 rm "$MERGE_TEST_ARGS"
 python3 - "$ROOT/.gitea/default_merge_message/SQUASH_TEMPLATE.md" <<'PYTEST'
 import sys
@@ -569,6 +584,6 @@ rendered=Template(Path(sys.argv[1]).read_text()).substitute(
     PullRequestTitle='fix: safe title', PullRequestIndex='42')
 assert rendered == 'fix: safe title (#42)\n\nReviewed-on: #42\n', rendered
 PYTEST
-printf '[test-check-mirror-content] explicit merge metadata, the queue path and template: 10 cases passed\n'
+printf '[test-check-mirror-content] explicit merge metadata, the queue path and template: 11 cases passed\n'
 
 printf '[test-check-mirror-content] mirror content gate contract passed\n'
