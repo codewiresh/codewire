@@ -1101,11 +1101,12 @@ class CwCopyTests(unittest.TestCase):
 
     def test_stall_bound_kills_only_owned_command_and_proves_cleanup(self):
         self.configure(mode="stall")
-        started = time.monotonic()
         with mock.patch.object(artifact, "time", StallEventClock(self.stalled)), \
                 self.assertRaisesRegex(ValueError, f"docker run made no progress for {artifact.CW_STALL_SECONDS} s"):
             self.verify()
-        self.assertLess(time.monotonic() - started, STALLED_DOCKER_SECONDS / 2)
+        # A stalled copy left to run to its end rewrites the marker, so its
+        # text proves the kill however slowly a loaded host gets here.
+        self.assertEqual(self.stalled.read_text(), "stalled")
         self.assert_closed()
 
     def test_slow_but_progressing_copy_is_not_a_stall(self):
@@ -1249,6 +1250,8 @@ elif arguments[:1]==['run']:
     if mode=='stall':
         # The container is recorded; tell the test's clock the copy has stalled.
         Path(STALL_MARKER_PATH).write_text('stalled');time.sleep(STALLED_DOCKER_SECONDS)
+        # Reached only when nothing killed the stalled copy.
+        Path(STALL_MARKER_PATH).write_text('outlasted')
     if mode=='trickle':
         # Each chunk moves the test's clock (TrickleEventClock), and the next
         # waits until the verifier has read it, so the clock never moves twice
