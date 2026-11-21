@@ -36,6 +36,21 @@ pub const GATEWAY_SERVICE: &str = "CODEWIRE_HOSTED_EGRESS_GATEWAY_SERVICE";
 pub const FENCE_REVISION: &str = "CODEWIRE_HOSTED_EGRESS_FENCE_REVISION";
 /// The cluster DNS Service's IPv4 address, for the self-check's DNS probe.
 pub const CLUSTER_DNS_IP: &str = "CODEWIRE_CLUSTER_DNS_IP";
+/// Every `codewire-hosted-egress` key whose absence stops orchestration's
+/// startup while hosted egress is on, and no other. A deployment's policy can
+/// read this list from the source it delivers and refuse a switch-on whose
+/// ConfigMap lacks one (#4000: a switch-on with two missing crash-looped
+/// orchestration). The test below holds it to [`startup`], the one read.
+pub const REQUIRED_WHEN_ON: [&str; 8] = [
+    GATEWAY_NAMESPACE,
+    GATEWAY_NAME,
+    GATEWAY_OWNER_NAMESPACE,
+    GATEWAY_PORT,
+    GATEWAY_CLUSTER_IP,
+    GATEWAY_SERVICE,
+    FENCE_REVISION,
+    CLUSTER_DNS_IP,
+];
 
 /// The Services in orchestration's own namespace a broker-mode Sandbox dials,
 /// each as Kubernetes names its Service-link variables: the Service's name
@@ -44,26 +59,44 @@ const STREAM_LINK: (&str, &str) = ("CODEWIRE_EGRESS", "STREAM");
 const BINDING_LINK: (&str, &str) = ("CODEWIRE_ORCHESTRATION_WORKSPACE_BINDING", "WORKSPACE_BIND");
 const DERP_LINK: (&str, &str) = ("CODEWIRE_DERP", "HTTPS");
 
-/// What every broker-mode template renders, or `None` while hosted egress is
-/// off (#4000, item 3). Read once at startup: with the switch on, a missing
-/// or malformed setting fails startup, named. The three in-namespace
-/// Services come from the Service links Kubernetes gives orchestration's Pod
-/// when it starts, so no Service is read through the API. A link that is
-/// absent leaves its address empty, and every broker-mode render then fails
-/// naming the Service (`TemplateOpts::validate_hosted_egress`); a Service
-/// created or re-created later is seen at orchestration's next rollout, and
-/// until then new Sandboxes fail closed.
-pub fn hosted_egress_template(derp_host: &str) -> anyhow::Result<Option<HostedEgressTemplate>> {
-    template_from(|key| std::env::var(key).ok(), derp_host)
+/// Everything orchestration reads for hosted egress, read once at startup: the
+/// switches, what every broker-mode template renders, and the gateway Service
+/// its address is held to. Startup reads hosted egress only through
+/// [`startup`], so a setting this read refuses to go without is one startup
+/// refuses to go without.
+#[derive(Debug)]
+pub struct Startup {
+    pub settings: EgressSettings,
+    /// `None` while hosted egress is off.
+    pub template: Option<HostedEgressTemplate>,
+    /// `None` while hosted egress is off.
+    pub gateway: Option<crate::egress::gateway_check::GatewayService>,
+}
+
+/// [`Startup`] from the process environment. A switch or list that is not
+/// UTF-8 is refused rather than read as unset.
+pub fn startup(derp_host: &str) -> anyhow::Result<Startup> {
+    for key in [SWITCH, PLATFORM_ALLOWS, INTERCEPTION_SWITCH] {
+        crate::confidential_storage::env_setting(key)?;
+    }
+    startup_from(|key| std::env::var(key).ok(), derp_host)
+}
+
+fn startup_from(get: impl Fn(&str) -> Option<String>, derp_host: &str) -> anyhow::Result<Startup> {
+    Ok(Startup {
+        settings: EgressSettings::from_values(
+            get(SWITCH).as_deref(),
+            get(PLATFORM_ALLOWS).as_deref(),
+            get(INTERCEPTION_SWITCH).as_deref(),
+        )?,
+        template: template_from(&get, derp_host)?,
+        gateway: gateway_service_from(&get)?,
+    })
 }
 
 /// The gateway Service and its configured address, which
 /// `egress::gateway_check` holds equal while hosted egress is on; `None`
 /// while it is off.
-pub fn gateway_service() -> anyhow::Result<Option<crate::egress::gateway_check::GatewayService>> {
-    gateway_service_from(|key| std::env::var(key).ok())
-}
-
 fn gateway_service_from(
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<Option<crate::egress::gateway_check::GatewayService>> {
@@ -88,6 +121,15 @@ fn gateway_service_from(
     }))
 }
 
+/// What every broker-mode template renders, or `None` while hosted egress is
+/// off (#4000, item 3). With the switch on, a missing or malformed setting
+/// fails startup, named. The three in-namespace Services come from the Service
+/// links Kubernetes gives orchestration's Pod when it starts, so no Service is
+/// read through the API. A link that is absent leaves its address empty, and
+/// every broker-mode render then fails naming the Service
+/// (`TemplateOpts::validate_hosted_egress`); a Service created or re-created
+/// later is seen at orchestration's next rollout, and until then new
+/// Sandboxes fail closed.
 fn template_from(
     get: impl Fn(&str) -> Option<String>,
     derp_host: &str,
@@ -174,14 +216,6 @@ pub struct EgressSettings {
 }
 
 impl EgressSettings {
-    pub fn from_env() -> anyhow::Result<Self> {
-        Self::from_values(
-            crate::confidential_storage::env_setting(SWITCH)?.as_deref(),
-            crate::confidential_storage::env_setting(PLATFORM_ALLOWS)?.as_deref(),
-            crate::confidential_storage::env_setting(INTERCEPTION_SWITCH)?.as_deref(),
-        )
-    }
-
     fn from_values(
         enabled: Option<&str>,
         platform: Option<&str>,
@@ -357,6 +391,35 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("DERP_HOST")
+        );
+    }
+
+    #[test]
+    fn the_required_list_is_exactly_what_startup_refuses_to_go_without() {
+        // Every ConfigMap key a deployment with hosted egress on sets; the
+        // Service links come from Kubernetes, not the ConfigMap.
+        let mut full = on();
+        full.insert(GATEWAY_SERVICE, "envoy-codewire-public");
+        let starts = |values: &HashMap<&str, &str>| {
+            startup_from(|key| values.get(key).map(|v| (*v).to_owned()), DERP_HOST).is_ok()
+        };
+        assert!(starts(&full));
+        let required: std::collections::BTreeSet<&str> = full
+            .keys()
+            .copied()
+            .filter(|key| {
+                *key != SWITCH && !key.contains("_SERVICE_HOST") && !key.contains("_SERVICE_PORT_")
+            })
+            .filter(|key| {
+                let mut values = full.clone();
+                values.remove(key);
+                !starts(&values)
+            })
+            .collect();
+        assert_eq!(
+            required,
+            REQUIRED_WHEN_ON.into_iter().collect(),
+            "REQUIRED_WHEN_ON must name every key startup requires, and only those"
         );
     }
 

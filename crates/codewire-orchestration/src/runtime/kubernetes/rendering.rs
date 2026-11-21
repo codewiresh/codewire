@@ -47,7 +47,7 @@ pub struct KubernetesRenderConfig {
     pub egress_bandwidth: String,
     pub derp_host: String,
     /// What a broker-mode template renders, read at startup while hosted
-    /// egress is on (`egress::settings::hosted_egress_template`); `None` off.
+    /// egress is on (`egress::settings::startup`); `None` off.
     pub hosted_egress: Option<HostedEgressTemplate>,
     pub derp_port: i64,
     pub stun_host: String,

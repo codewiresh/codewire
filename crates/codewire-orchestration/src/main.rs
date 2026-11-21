@@ -611,16 +611,15 @@ async fn main() -> anyhow::Result<()> {
     .map(Arc::new);
 
     let mut sandbox_cfg = worker::create::SandboxWorkerCfg::from_env();
-    // With hosted egress on, every template on a VM runtime is broker-mode
-    // (#4000); a malformed setting stops startup here.
-    sandbox_cfg.hosted_egress =
-        codewire_orchestration::egress::settings::hosted_egress_template(&sandbox_cfg.derp_host)
-            .context("read the hosted egress settings")?;
+    // Hosted egress is read here, once and only here (#4000): with it on, every
+    // template on a VM runtime is broker-mode, and a missing or malformed
+    // setting stops startup.
+    let hosted_egress = egress::settings::startup(&sandbox_cfg.derp_host)
+        .context("read the hosted egress settings")?;
+    sandbox_cfg.hosted_egress = hosted_egress.template;
     // While hosted egress is on, the gateway address it renders is held to the
     // gateway Service's ClusterIP; a broker-mode render refuses until it is.
-    if let Some(gateway) = codewire_orchestration::egress::settings::gateway_service()
-        .context("read the hosted egress gateway Service")?
-    {
+    if let Some(gateway) = hosted_egress.gateway {
         match kube.as_ref() {
             Some(kube) => {
                 codewire_orchestration::egress::gateway_check::start(kube.clone(), gateway)
@@ -687,7 +686,7 @@ async fn main() -> anyhow::Result<()> {
         codewire_server_core::credit_enforcement::CreditEnforcement::from_env()?;
     // Read once: the relay and EgressService share one front-door registry,
     // which exists only while hosted interception is on (#4001).
-    let egress_settings = egress::settings::EgressSettings::from_env()?;
+    let egress_settings = hosted_egress.settings;
     let front_doors = egress_settings
         .interception
         .then(Arc::<codewire_orchestration::front_door::FrontDoorEpochs>::default);
@@ -886,9 +885,7 @@ async fn main() -> anyhow::Result<()> {
             },
             Arc::new(relay_allocator(|name| std::env::var(name).ok())?),
         )
-        .with_interception(
-            codewire_orchestration::egress::settings::EgressSettings::from_env()?.interception,
-        )
+        .with_interception(egress_settings.interception)
         .with_server_url(&api_state.frontend_url),
     );
     // There is no plaintext form: inside a cluster it serves TLS with the
