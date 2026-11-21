@@ -37,6 +37,7 @@ pub mod snapshots;
 /// one canonical Connect meaning.
 /// Admits a stream on `surface` to this process's revocation fence (#3586),
 /// with the end it takes when the authority that admitted it is lost.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
 pub(crate) async fn fenced_stream(
     state: &crate::api::ApiState,
     ctx: &RequestContext,

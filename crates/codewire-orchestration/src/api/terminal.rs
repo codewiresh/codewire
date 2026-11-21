@@ -713,6 +713,7 @@ async fn close_browser<Tx: Sink<Message> + Unpin>(
     .await;
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env_id))]
 pub(crate) async fn require_sandbox_claim_ready(
     runtime: &dyn RuntimeDriver,
     placement: &Placement,

@@ -48,6 +48,12 @@ pub(crate) async fn resolve_running_sandbox_target_for_role(
     resolve_running_sandbox_target_inner(state, user, org_id, env_id, required_role).await
 }
 
+#[tracing::instrument(
+    level = "debug",
+    name = "resolve_running_sandbox_target",
+    skip_all,
+    fields(environment_id = %env_id)
+)]
 async fn resolve_running_sandbox_target_inner(
     state: &ApiState,
     user: &AuthUser,

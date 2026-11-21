@@ -616,7 +616,26 @@ an attached session, a followed log or a watch, holds no span open, and
 nothing its stream does later joins the trace. The trace of a session that
 lasts hours is the trace of setting it up, and it can be read as soon as the
 session is established. A 5xx response still writes its `response failed`
-line inside the request span.
+line inside the request span. A failure seen only while a body is streamed,
+such as a body that errors halfway, is logged after the span has ended, so
+that line carries no trace ids.
+
+Running a command, attaching to a session, opening the browser terminal and
+opening an SSH connection are traced through their setup, so a slow or hung
+start can be read from its trace. Under the request span are admitting the
+stream (`fenced_stream`), resolving the running environment with its access
+checks and the runtime's probe (`resolve_running_sandbox_target`), dialling
+the workspace daemon (`daemon_channel_for_endpoint`, inside
+`environment_daemon_bridge_client_core` for a command or the terminal) and,
+for a session, checking the daemon is ready and attaching
+(`require_ready_daemon`, `attach_environment_daemon_session_core`). The
+terminal and SSH add the check that the environment's claim is ready
+(`require_sandbox_claim_ready`), and SSH adds opening the stream to the
+workspace (`open_fenced_ssh_stream`, `workspace_ssh_stream`). For a command,
+the time left in the request span after the daemon is dialled is the daemon
+starting it. A span carries `environment_id` at most: never a command, its
+directory or its variables, a path inside the environment, or an SSH user or
+key. The relay that follows the setup is in no span.
 
 Codewire's spans are at `DEBUG` level, so at the default `RUST_LOG=info` they
 do not appear in the JSON logs.

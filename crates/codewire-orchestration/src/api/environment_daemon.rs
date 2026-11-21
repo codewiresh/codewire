@@ -544,6 +544,7 @@ pub async fn read_environment_daemon_session_output_core(
         .map(tonic::Response::into_inner)
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
 pub async fn attach_environment_daemon_session_core(
     state: &ApiState,
     user: &AuthUser,
@@ -616,6 +617,7 @@ impl EnvironmentDaemonSessionAttachment {
 /// The environment-scoped credential remains inside orchestration and is
 /// marked sensitive by `DaemonClient`; public adapters receive only the typed
 /// client handle.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
 pub(crate) async fn environment_daemon_bridge_client_core(
     state: &ApiState,
     user: &AuthUser,
@@ -1287,6 +1289,7 @@ pub(crate) fn cluster_daemon_endpoint(namespace: &str, environment_id: &str) -> 
     )
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
 async fn daemon_channel_for_endpoint(
     pool: &PgPool,
     runtime: Option<&dyn RuntimeDriver>,
@@ -1335,6 +1338,7 @@ fn daemon_connect_failure(error: tonic::transport::Error) -> String {
     format!("{:#}", anyhow::Error::new(error))
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 async fn require_ready_daemon(
     client: &mut v1::daemon_service_client::DaemonServiceClient<Channel>,
     token: &str,

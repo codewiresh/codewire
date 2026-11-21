@@ -203,6 +203,7 @@ impl SandboxClient {
     /// A stream to `port` of the current workspace Pod: the exact Pod the
     /// bound Sandbox controls, over the Pod network, else through a kube
     /// port-forward to that Pod.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %env_id))]
     pub async fn workspace_ssh_stream(
         &self,
         env_id: &str,

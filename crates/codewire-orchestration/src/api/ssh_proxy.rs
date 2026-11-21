@@ -139,6 +139,7 @@ pub async fn ssh_proxy_websocket(
 /// releases it; a failed port-forward retains
 /// `environment_runtime_dispatch_ambiguous` evidence. A stream opened after the
 /// client left still releases the lease and is then dropped, which closes it.
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
 async fn open_fenced_ssh_stream<S, F>(
     pool: &PgPool,
     org_id: &str,
