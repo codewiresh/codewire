@@ -359,6 +359,11 @@ class FixtureRepository:
                     "kind": "file-set",
                     "inputs": ["images/confidential-probe/**"],
                 },
+                "workspace_systemd_image": {
+                    "kind": "composite",
+                    "dependencies": ["workspace_image"],
+                    "inputs": ["images/workspace-systemd/**"],
+                },
                 "confidential_workspace_acceptance_contract": {
                     "kind": "file-set",
                     "inputs": [
@@ -616,6 +621,7 @@ dependencies = ["core"]
         self.write("images/base/Dockerfile", "FROM fixture-base@sha256:base\n")
         self.write("images/base/entrypoint.sh", "#!/bin/sh\nexec \"$@\"\n", 0o755)
         self.write("images/confidential-probe/Dockerfile", "FROM fixture-probe@sha256:probe\n")
+        self.write("images/workspace-systemd/Dockerfile", "FROM ${BASE_IMAGE_REF}\n")
         self.write("images/workspace/Dockerfile", "FROM ${BASE_IMAGE_REF}\n")
         for path in WORKSPACE_VERIFICATION_SPEC["inputs"]:
             if "*" not in path and not (self.root / path).exists():
@@ -2050,6 +2056,10 @@ class PlannerFixtureTests(unittest.TestCase):
             "scripts/ci/release/package-cli.sh": {"cw_cli_release_assets"},
         }
         for path, expected in cases.items():
+            # The systemd workspace is built from the workspace image, so
+            # whatever changes that image changes it too.
+            if "workspace_image" in expected:
+                expected = expected | {"workspace_systemd_image"}
             with self.subTest(path=path), tempfile.TemporaryDirectory(
                 prefix="codewire-image-script-"
             ) as temporary:

@@ -329,6 +329,11 @@
       "kind": "file-set",
       "inputs": ["images/confidential-probe/**"]
     },
+    "workspace_systemd_image": {
+      "kind": "composite",
+      "dependencies": ["workspace_image"],
+      "inputs": ["images/workspace-systemd/**"]
+    },
     "confidential_workspace_acceptance_contract": {
       "kind": "file-set",
       "inputs": [

@@ -129,7 +129,61 @@ publish_job="$(sed -n '/^  publish-support-images:/,/^  publish-confidential-pro
 probe_job="$(sed -n '/^  publish-confidential-probe:/,/^  propose-workspace-image-pin:/p' "$WORKFLOW")"
 pin_job="$(sed -n '/^  propose-workspace-image-pin:/,/^  # The cw-egress pin/p' "$WORKFLOW")"
 egress_pin_job="$(sed -n '/^  propose-egress-image-pin:/,/^  alias-support-pair:/p' "$WORKFLOW")"
-alias_job="$(sed -n '/^  alias-support-pair:/,$p' "$WORKFLOW")"
+alias_job="$(sed -n '/^  alias-support-pair:/,/^  # The systemd workspace/p' "$WORKFLOW")"
+systemd_job="$(sed -n '/^  publish-workspace-systemd:/,$p' "$WORKFLOW")"
+# The systemd workspace (#5638) builds only for main's own commit, after the
+# pair is published or aliased, on the trusted builder, from this commit's
+# workspace index by digest, and goes to Harbor alone: no GHCR identity or
+# copy, never latest, never tolerated failure.
+# shellcheck disable=SC2016
+systemd_job_violation() {
+  local job="$1"
+  [[ -n "$job" ]] || { echo 'no job publishes the systemd workspace image'; return; }
+  grep -Fqx "    needs: [support-selection, publish-support-images, alias-support-pair]" <<<"$job" ||
+    { echo 'the systemd workspace does not wait for the published or aliased pair'; return; }
+  local condition
+  for condition in "needs.support-selection.outputs.build_workspace_systemd_image == 'true'" \
+      "needs.support-selection.outputs.superseded == 'false'" \
+      "needs.support-selection.outputs.source_sha == github.sha" \
+      "(needs.publish-support-images.result == 'success' || needs.alias-support-pair.result == 'success')"; do
+    grep -E '^    if: ' <<<"$job" | grep -Fq "$condition" ||
+      { echo "the systemd workspace runs without: $condition"; return; }
+  done
+  grep -Fqx "      CODEWIRE_TRUSTED_BUILDKIT: '1'" <<<"$job" ||
+    { echo 'the systemd workspace does not build on the trusted BuildKit builder'; return; }
+  grep -Fqx '      OPENBAO_ROLE: codewire-source-support-publisher' <<<"$job" ||
+    { echo 'the systemd workspace does not use the support publisher identity'; return; }
+  grep -Fqx '        run: scripts/ci/images/build-push-image.sh workspace-systemd images/workspace-systemd/Dockerfile images/workspace-systemd' <<<"$job" ||
+    { echo 'the systemd workspace is not built by the canonical helper'; return; }
+  grep -Fqx '          CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.ref }}' <<<"$job" ||
+    { echo 'the systemd workspace does not build on the chosen workspace index'; return; }
+  [[ "$(grep -Fc 'outputs.source_sha }}" == "$GITHUB_SHA"' <<<"$job")" -eq 1 ]] ||
+    { echo 'the systemd workspace publisher does not verify its exact build source'; return; }
+  grep -Fq '"${{ steps.systemd.outputs.candidate_ref }}"' <<<"$job" ||
+    { echo 'the systemd workspace publisher omits the immutable candidate'; return; }
+  grep -Fq '"$CODEWIRE_IMAGE_REGISTRY/codewire/workspace-systemd"' <<<"$job" ||
+    { echo 'the systemd workspace publisher omits its Harbor repository'; return; }
+  if grep -Eq 'GHCR|ghcr\.io|secrets\.|github\.token|--support-pair|latest|continue-on-error' <<<"$job"; then
+    echo 'the systemd workspace reaches GHCR, moves latest, tolerates failure or holds another capability'
+    return
+  fi
+}
+[[ -z "$(systemd_job_violation "$systemd_job")" ]] || fail "$(systemd_job_violation "$systemd_job")"
+systemd_mutations=(
+  'no build selection::s/build_workspace_systemd_image == .true. \&\& //'
+  'any commit::s/needs.support-selection.outputs.source_sha == github.sha \&\& //'
+  'pulled BuildKit::s/CODEWIRE_TRUSTED_BUILDKIT: .1./CODEWIRE_TRUSTED_BUILDKIT: '"'"'0'"'"'/'
+  'no exact source check::/== "$GITHUB_SHA" \]\]/d'
+  'a GHCR copy::s#codewire/workspace-systemd"#codewire/workspace-systemd" ghcr.io/codewiresh/workspace-systemd#'
+  'tolerated failure::s/^      - name: Publish the systemd workspace image to Harbor without rebuilding$/&\n        continue-on-error: true/'
+)
+for mutation in "${systemd_mutations[@]}"; do
+  label="${mutation%%::*}"
+  mutated="$(sed -e "${mutation#*::}" <<<"$systemd_job")"
+  [[ "$mutated" != "$systemd_job" ]] || fail "systemd job mutation did not apply: $label"
+  [[ -n "$(systemd_job_violation "$mutated")" ]] || fail "systemd job mutation was accepted: $label"
+done
+
 # The probe builds on the trusted BuildKit builder, never on a BuildKit image
 # this job pulls itself, except under the owner's exact-commit recovery.
 grep -qxF "      CODEWIRE_TRUSTED_BUILDKIT: '1'" <<<"$probe_job" ||

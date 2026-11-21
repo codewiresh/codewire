@@ -20,6 +20,7 @@ def plan_document(
     base_state: str = "unaffected",
     workspace_state: str = "unaffected",
     confidential_probe_state: str = "unaffected",
+    workspace_systemd_state: str = "unaffected",
     *,
     baseline_valid: bool = True,
 ) -> dict:
@@ -53,6 +54,7 @@ def plan_document(
             "base_image": {"state": base_state},
             "workspace_image": {"state": workspace_state},
             "confidential_probe_image": {"state": confidential_probe_state},
+            "workspace_systemd_image": {"state": workspace_systemd_state},
         },
         "degraded_reasons": [],
     }
@@ -117,7 +119,9 @@ class SupportPlanAdapterTests(unittest.TestCase):
 
     def test_alias_refuses_without_a_published_pair_so_the_pair_builds(self) -> None:
         outputs, _ = self.apply(
-            plan_document("unclassified", "unclassified", "unclassified", baseline_valid=False)
+            plan_document(
+                "unclassified", "unclassified", "unclassified", "unclassified", baseline_valid=False
+            )
         )
         self.assertEqual(outputs["build_support_images"], "true")
         self.assertEqual(outputs["alias_support_pair"], "false")
@@ -158,6 +162,25 @@ class SupportPlanAdapterTests(unittest.TestCase):
         self.assertEqual(outputs["confidential_probe_image_state"], "affected")
         self.assertEqual(outputs["reason"], "artifact_affected")
 
+    def test_workspace_systemd_is_selected_without_the_pair(self) -> None:
+        outputs, _ = self.apply(plan_document(workspace_systemd_state="affected"))
+        self.assertEqual(outputs["build_support_images"], "false")
+        self.assertEqual(outputs["alias_support_pair"], "true")
+        self.assertEqual(outputs["build_workspace_systemd_image"], "true")
+        self.assertEqual(outputs["build_confidential_probe_image"], "false")
+        self.assertEqual(outputs["workspace_systemd_image_state"], "affected")
+        self.assertEqual(outputs["reason"], "artifact_affected")
+
+    def test_unaffected_workspace_systemd_is_not_built(self) -> None:
+        outputs, _ = self.apply(plan_document(workspace_state="affected"))
+        self.assertEqual(outputs["build_support_images"], "true")
+        self.assertEqual(outputs["build_workspace_systemd_image"], "false")
+
+    def test_unclassified_workspace_systemd_fails_closed_to_a_build(self) -> None:
+        outputs, _ = self.apply(plan_document(workspace_systemd_state="unclassified"))
+        self.assertEqual(outputs["build_workspace_systemd_image"], "true")
+        self.assertEqual(outputs["reason"], "artifact_unclassified")
+
     def test_unclassified_artifact_selects_atomic_pair(self) -> None:
         outputs, _ = self.apply(plan_document(workspace_state="unclassified"))
         self.assertEqual(outputs["build_support_images"], "true")
@@ -178,6 +201,7 @@ class SupportPlanAdapterTests(unittest.TestCase):
     def test_invalid_baseline_requires_all_artifacts_unclassified(self) -> None:
         outputs, _ = self.apply(
             plan_document(
+                "unclassified",
                 "unclassified",
                 "unclassified",
                 "unclassified",

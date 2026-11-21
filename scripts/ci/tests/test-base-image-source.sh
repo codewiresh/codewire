@@ -183,7 +183,7 @@ for path in sys.argv[1:]:
 print(count)
 PY
 )" || fail 'an APT helper RUN does not keep the apt snapshot cache out of its layer'
-[[ "$apt_runs" == 7 ]] || fail "expected seven APT helper RUN steps (base 1, workspace 5, cw-runtime 1), found $apt_runs"
+[[ "$apt_runs" == 8 ]] || fail "expected eight APT helper RUN steps (base 1, workspace 5, workspace-systemd 1, cw-runtime 1), found $apt_runs"
 # The cache host is CI configuration; no image input may name it.
 if git -C "$ROOT" grep -nIE 'apt-snapshot-cache|forgejo-runner-control|svc\.cluster\.local' -- \
     images scripts/ci/images "${tracked_dockerfiles[@]}" docker-bake.hcl; then

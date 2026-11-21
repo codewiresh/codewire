@@ -52,11 +52,13 @@ jobs:
       superseded: ${{ steps.canonical.outputs.superseded }}
       build_support_images: ${{ steps.select.outputs.build_support_images }}
       build_confidential_probe_image: ${{ steps.select.outputs.build_confidential_probe_image }}
+      build_workspace_systemd_image: ${{ steps.select.outputs.build_workspace_systemd_image }}
       reason: ${{ steps.select.outputs.reason }}
       matched_categories: ${{ steps.select.outputs.matched_categories }}
       base_image_state: ${{ steps.select.outputs.base_image_state }}
       workspace_image_state: ${{ steps.select.outputs.workspace_image_state }}
       confidential_probe_image_state: ${{ steps.select.outputs.confidential_probe_image_state }}
+      workspace_systemd_image_state: ${{ steps.select.outputs.workspace_systemd_image_state }}
       baseline_sha: ${{ steps.select.outputs.baseline_sha }}
       head_sha: ${{ steps.select.outputs.head_sha }}
       head_tree: ${{ steps.select.outputs.head_tree }}
@@ -516,3 +518,59 @@ jobs:
         run: |
           scripts/ci/images/alias-support-pair.sh \
             "$SOURCE_SHA" "$ALIAS_FROM_SHA" "$ALIAS_BASE_DIGEST" "$ALIAS_WORKSPACE_DIGEST"
+
+  # The systemd workspace (docs/dev/SYSTEMD-WORKSPACE.md): this commit's
+  # workspace image plus an init system, amd64 only, published to Harbor with
+  # no GHCR copy, since only a deployment that names its repository runs it.
+  # It is built on the workspace index this run published, or on the one the
+  # alias job tagged for this commit, and only for main's own commit.
+  publish-workspace-systemd:
+    # zizmor: ignore[excessive-permissions] This independent protected job receives the same scoped publisher identity only for this image.
+    name: Build and publish the systemd workspace image
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
+    timeout-minutes: 30
+    needs: [support-selection, publish-support-images, alias-support-pair]
+    if: ${{ always() && needs.support-selection.result == 'success' && needs.support-selection.outputs.build_workspace_systemd_image == 'true' && needs.support-selection.outputs.superseded == 'false' && needs.support-selection.outputs.source_sha == github.sha && (needs.publish-support-images.result == 'success' || needs.alias-support-pair.result == 'success') }}
+    env:
+      OPENBAO_ROLE: codewire-source-support-publisher
+      OPENBAO_AUDIENCE: openbao-codewire-source-support-publisher
+      # It builds on the trusted BuildKit builder, as the probe does; only the
+      # owner's recovery variable naming this exact commit builds it in the job.
+      CODEWIRE_TRUSTED_BUILDKIT: '1'
+      CODEWIRE_IN_JOB_BUILD: ${{ vars.CODEWIRE_IN_JOB_BUILD_SHA == github.sha && '1' || '0' }}
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Skip a superseded commit
+        id: canonical
+        run: scripts/ci/images/support-superseded.sh
+
+      - name: Choose this commit's published workspace image
+        if: ${{ steps.canonical.outputs.superseded == 'false' }}
+        id: base
+        env:
+          BUILT_WORKSPACE_REF: ${{ needs.publish-support-images.outputs.workspace_ref }}
+          ALIASED_WORKSPACE_DIGEST: ${{ needs.support-selection.outputs.alias_workspace_digest }}
+        run: |
+          set -euo pipefail
+          ref="$BUILT_WORKSPACE_REF"
+          [ -n "$ref" ] || ref="$CODEWIRE_IMAGE_REGISTRY/codewire/workspace@$ALIASED_WORKSPACE_DIGEST"
+          printf 'ref=%s\n' "$ref" >>"$GITHUB_OUTPUT"
+
+      - name: Build the systemd workspace image on it
+        if: ${{ steps.canonical.outputs.superseded == 'false' }}
+        id: systemd
+        env:
+          CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.ref }}
+        run: scripts/ci/images/build-push-image.sh workspace-systemd images/workspace-systemd/Dockerfile images/workspace-systemd
+
+      - name: Publish the systemd workspace image to Harbor without rebuilding
+        if: ${{ steps.canonical.outputs.superseded == 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "${{ steps.systemd.outputs.source_sha }}" == "$GITHUB_SHA" ]]
+          scripts/ci/images/publish-image-to-harbor.sh \
+            "${{ steps.systemd.outputs.candidate_ref }}" \
+            "$CODEWIRE_IMAGE_REGISTRY/codewire/workspace-systemd" \
+            "$GITHUB_SHA"

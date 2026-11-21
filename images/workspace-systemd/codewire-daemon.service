@@ -1,0 +1,27 @@
+# The environment daemon as a systemd service (docs/dev/SYSTEMD-WORKSPACE.md).
+[Unit]
+Description=Codewire environment daemon
+ConditionPathExists=/codewire/run
+# Sessions use the workspace user's manager (XDG_RUNTIME_DIR), so it starts
+# first; the daemon still starts if it fails.
+Wants=user@1000.service
+After=user@1000.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/libexec/codewire/codewire-daemon-run
+# The daemon ends its sessions' processes itself, so systemd signals only the
+# daemon. Its own shutdown takes at most 14 s.
+KillMode=process
+TimeoutStopSec=15
+Delegate=yes
+# Every session runs in this unit's cgroup; the default limit, 15% of the
+# container's, would cap all of them together.
+TasksMax=infinity
+LimitNOFILE=1048576
+# Kubernetes restarts nothing here: a daemon that exits leaves the sandbox
+# unready, as in a default workspace.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

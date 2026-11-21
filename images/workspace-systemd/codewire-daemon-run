@@ -1,0 +1,26 @@
+#!/bin/bash
+# Starts the environment daemon as the workspace user. systemd gives a unit a
+# clean environment, and the daemon builds every session's from its own, so
+# this hands it the container's: the image's and the Pod's variables, as PID 1
+# received them.
+set -euo pipefail
+
+while IFS= read -r -d '' entry; do
+  case "$entry" in
+    container=*|HOME=*|USER=*|LOGNAME=*|SHELL=*|PWD=*|OLDPWD=*|SHLVL=*|_=*) ;;
+    *=*) export "$entry" ;;
+  esac
+done </proc/1/environ
+
+export HOME=/home/codewire USER=codewire LOGNAME=codewire SHELL=/bin/bash
+# The workspace user's systemd manager, so `systemctl --user` works in every
+# session.
+export XDG_RUNTIME_DIR=/run/user/1000
+cd /home/codewire
+
+daemon=/codewire/bin/cw
+for _ in $(seq 1 600); do
+  [ -x "$daemon" ] && break
+  sleep 0.1
+done
+exec setpriv --reuid 1000 --regid 1000 --init-groups "$daemon" __hosted-daemon

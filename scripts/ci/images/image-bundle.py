@@ -18,8 +18,15 @@ KIND = "ImageBundle"
 SOURCE_REPOSITORY = "codewire/codewire"
 FAMILIES = ("dashboard", "derp", "daemon", "services", "mesh")
 # Published by digest but never part of the runtime bundle: cw-egress is
-# built and signed by Dev delivery and pinned by its own component (#4000).
-PUBLICATION_FAMILIES = FAMILIES + ("base", "workspace", "confidential-probe", "egress")
+# built and signed by Dev delivery and pinned by its own component (#4000),
+# and the systemd workspace is an opt-in image a deployment names (#5638).
+PUBLICATION_FAMILIES = FAMILIES + (
+    "base",
+    "workspace",
+    "confidential-probe",
+    "egress",
+    "workspace-systemd",
+)
 ENVIRONMENTS = ("dev", "prod")
 SOURCE_SHA = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")

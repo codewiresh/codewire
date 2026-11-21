@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly HARBOR_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
 readonly HARBOR_HOST_PATTERN="${HARBOR_HOST//./\\.}"
-readonly source_pattern="^$HARBOR_HOST_PATTERN/codewire/(dashboard|derp|daemon|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})\$"
+readonly source_pattern="^$HARBOR_HOST_PATTERN/codewire/(dashboard|derp|daemon|services|mesh|base|workspace|confidential-probe|workspace-systemd)@sha256:([0-9a-f]{64})\$"
 readonly HARBOR_PROJECT="$HARBOR_HOST/codewire"
 readonly PUBLIC_MIRROR='ghcr.io/codewiresh'
 

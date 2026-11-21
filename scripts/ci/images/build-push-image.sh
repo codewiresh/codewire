@@ -137,14 +137,28 @@ case "$build_runtime_set" in
 esac
 
 if [ -n "$base_image_ref" ]; then
-  if [ "$image_name" != workspace ]; then
-    echo "An exact base image may only be supplied to the workspace build" >&2
-    exit 1
-  fi
-  if [[ ! "$base_image_ref" =~ ^("$REGISTRY_REPOSITORY_PREFIX"/base|ghcr\.io/codewiresh/base)@sha256:[0-9a-f]{64}$ ]]; then
-    echo "Workspace base image must be an exact supported digest reference" >&2
-    exit 1
-  fi
+  case "$image_name" in
+    workspace)
+      if [[ ! "$base_image_ref" =~ ^("$REGISTRY_REPOSITORY_PREFIX"/base|ghcr\.io/codewiresh/base)@sha256:[0-9a-f]{64}$ ]]; then
+        echo "Workspace base image must be an exact supported digest reference" >&2
+        exit 1
+      fi
+      ;;
+    workspace-systemd)
+      # Built on this commit's published workspace image, from Harbor only.
+      if [[ ! "$base_image_ref" =~ ^"$REGISTRY_REPOSITORY_PREFIX"/workspace@sha256:[0-9a-f]{64}$ ]]; then
+        echo "The systemd workspace's base image must be the published workspace image by digest" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      echo "An exact base image may only be supplied to the workspace and systemd workspace builds" >&2
+      exit 1
+      ;;
+  esac
+elif [ "$image_name" = workspace-systemd ]; then
+  echo "The systemd workspace build needs its exact base image (CODEWIRE_BASE_IMAGE_REF)" >&2
+  exit 1
 fi
 
 # The support pair publishes one index for every supported architecture, so a
@@ -832,7 +846,7 @@ fi
 apt_mirror_args=()
 if [ -n "${CODEWIRE_APT_SNAPSHOT_MIRROR:-}" ]; then
   case "$image_name" in
-    base|workspace)
+    base|workspace|workspace-systemd)
       apt_mirror_args=(--secret "id=codewire-apt-mirror,env=CODEWIRE_APT_SNAPSHOT_MIRROR")
       ;;
   esac
