@@ -124,7 +124,7 @@
   {% if organization.can_admin %}{% for key in page.keys %}{% if page.filter.matches(key) %}
   <dialog class="cw-dialog" data-dialog id="api-key-{{ loop.index }}-delete" aria-labelledby="api-key-{{ loop.index }}-delete-title">
     <header class="cw-dialog-header"><h2 id="api-key-{{ loop.index }}-delete-title">Delete {{ key.name }}?</h2></header>
-    <p class="cw-dialog-body">This permanently removes the key. Integrations using it stop working, and the <code>cw shell</code>, <code>cw exec</code> and API connections opened with it end within seconds. Sessions already running in a Sandbox keep running.</p>
+    <p class="cw-dialog-body">All connections using this key are dropped when it is deleted.</p>
     <form class="cw-dialog-actions" method="post" action="/{{ organization.slug }}/api-keys/_actions/delete" hx-post="/{{ organization.slug }}/api-keys/_actions/delete">
       <input type="hidden" name="_csrf" value="{{ page.csrf_token }}">
       <input type="hidden" name="key_id" value="{{ key.id }}">
