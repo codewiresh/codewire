@@ -50,6 +50,17 @@ stop_side_by_side() {
   wait "$@" 2>/dev/null || true
 }
 
+# Usage: run_builds_side_by_side COMMAND...: build commands that share no
+# build, through run_side_by_side: all at once under a shared jobserver (CI's
+# build job, which bounds every compiler), else one after another, so a
+# workstation never runs them all on every core at once.
+run_builds_side_by_side() {
+  [ "$#" -gt 0 ] || return 0
+  local jobs=1
+  [[ "${CARGO_MAKEFLAGS:-}" != *--jobserver-auth=* ]] || jobs=$#
+  VERIFICATION_TEST_JOBS="$jobs" run_side_by_side < <(printf '%s\n' "$@")
+}
+
 # Run the commands on standard input, one per line (blank lines are skipped),
 # side by side: at most VERIFICATION_TEST_JOBS at a time (default: the CI CPU
 # share where CODEWIRE_CI_CPU_SHARE is set, else the CPU count). Each command

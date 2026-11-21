@@ -855,6 +855,7 @@ run_ci_script_tests() {
   python3 -I -B scripts/ci/tests/test-cw-image-consumer.py
   scripts/ci/tests/test-cargo-target-runner-failures.sh
   scripts/ci/tests/test-darwin-cross-check.sh
+  scripts/ci/tests/test-transport-local-vmm-checks.sh
   scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-dev-deployment-smoke-receipt.sh
   scripts/ci/tests/test-run-side-by-side.sh
@@ -1638,6 +1639,7 @@ run_transport() {
   fi
   rust_shard local-vmm || return 0
   check_shard_stage || return $?
+  local -a checks=()
   if shard_stage tests && { selected transport_pkg_codewire_local_vmm || selected transport_pkg_codewire_vmm_guest_probe; }; then
     python3 -B scripts/dev/test-cw-runtime-image.py
     python3 -B scripts/dev/test-cli-native-managed.py --self-test
@@ -1645,12 +1647,8 @@ run_transport() {
     python3 -B scripts/ci/tests/test-native-managed-update-entrypoint.py
   fi
   if selected transport_pkg_codewire_local_vmm; then
-    if shard_stage tests; then
-      python3 crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py
-    fi
-    if shard_stage checks; then
-      scripts/ci/verify/check-darwin-cross.sh
-    fi
+    ! shard_stage tests || python3 crates/codewire-local-vmm/macos-vz-runner/Tests/test_static_contract.py
+    ! shard_stage checks || checks+=(scripts/ci/verify/check-darwin-cross.sh)
   fi
   if selected transport_pkg_codewire_vmm_guest_probe; then
     # These kernel fixtures need a private mount namespace, which only root
@@ -1670,9 +1668,10 @@ run_transport() {
       echo '::notice::guest-probe kernel fixtures not run: no CAP_SYS_ADMIN here; run this shard on a workstation with sudo'
     fi
     if shard_stage checks && static_guest_proof_runs; then
-      scripts/ci/verify/build-local-vmm-initramfs.sh --verify
+      checks+=('scripts/ci/verify/build-local-vmm-initramfs.sh --verify')
     fi
   fi
+  run_builds_side_by_side "${checks[@]}" || return $?  # No shared build (infra#1534, A5a).
   if selected transport_derp_contract; then
     run_derp_contract
   fi

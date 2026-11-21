@@ -301,18 +301,21 @@ for darwin_tool in ('cargo', 'cargo-zigbuild'):
 # Old fail/new pass uses the actual runner with only its old bare check restored.
 # The synthetic Cargo rejects missing cross-compilation setup, not the package
 # or target. The new runner must still make exactly the same Cargo check once.
-new_check = '    scripts/ci/verify/check-darwin-cross.sh\n'
+# The checks stage runs its builds through run_builds_side_by_side, which
+# reports a failing command by name with status 1 (infra#1534, step A5a).
+new_check = 'checks+=(scripts/ci/verify/check-darwin-cross.sh)'
 assert production.count(new_check) == 1
-old_check = '    cargo ' + ' '.join(darwin_check) + '\n'
+old_check = "checks+=('cargo " + ' '.join(darwin_check) + "')"
 runner.write_text(production.replace(new_check, old_check))
-old_records, _ = run(special, status=47)
+old_records, _ = run(special, status=1)
 assert old_records[-1]['tool'] == 'cargo' and old_records[-1]['args'] == darwin_check
 runner.write_text(production)
 
 # The Darwin check must fail the actual shared entrypoint, not merely a
 # duplicated list in the fixture. A later command may not hide its failure.
-records, _ = run(special, fail_args=darwin_check, status=46)
+records, output = run(special, fail_args=darwin_check, status=1)
 assert records[-1]['args'] == darwin_check
+assert '==> first failure: scripts/ci/verify/check-darwin-cross.sh' in output, output
 
 records, _ = run(special, fail_tool='test_static_contract.py', status=44)
 assert records[-1]['tool'] == 'test_static_contract.py'
