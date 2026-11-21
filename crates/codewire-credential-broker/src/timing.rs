@@ -486,9 +486,9 @@ pub(crate) mod tests {
 
     /// Registered once per test process and never dropped. It enables nothing
     /// itself. Its `sometimes` interest keeps tracing-core from caching a
-    /// timing callsite as never enabled when a parallel test thread, with no
+    /// callsite as never enabled when a parallel test thread, with no
     /// subscriber of its own, registers or rebuilds that callsite first, so a
-    /// thread-local capture sees every event its own thread emits.
+    /// thread-local capture sees every event its own thread emits (#3103).
     struct InterestPeer;
 
     impl tracing::Subscriber for InterestPeer {
@@ -516,6 +516,12 @@ pub(crate) mod tests {
 
     static INTEREST_PEER: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
 
+    /// Call before installing any thread-local log capture in this crate's
+    /// tests; without it, the capture can read an empty log.
+    pub(crate) fn keep_interest_peer() {
+        INTEREST_PEER.get_or_init(|| tracing::Dispatch::new(InterestPeer));
+    }
+
     /// Keeps this thread's capture subscriber installed.
     pub(crate) struct TimingCapture {
         _default: tracing::subscriber::DefaultGuard,
@@ -524,7 +530,7 @@ pub(crate) mod tests {
     impl TimingLog {
         pub(crate) fn install() -> (Self, TimingCapture) {
             use tracing_subscriber::layer::SubscriberExt as _;
-            INTEREST_PEER.get_or_init(|| tracing::Dispatch::new(InterestPeer));
+            keep_interest_peer();
             let log = Self::default();
             let writer = log.clone();
             let subscriber = tracing_subscriber::registry()
@@ -928,6 +934,23 @@ pub(crate) mod tests {
         assert_eq!(second["status"], 0);
         #[cfg(feature = "platform")]
         assert_eq!(lines[2]["fields"]["streams_in_use"], 9);
+    }
+
+    /// A timing event whose callsite only the capture test below uses.
+    fn first_registration_probe() {
+        tracing::info!(target: TARGET, event = "first_registration_probe");
+    }
+
+    /// The race behind #3103, forced: a thread with no subscriber registers a
+    /// callsite first, while a capture is live. The capture still reads it.
+    #[test]
+    fn a_capture_reads_a_callsite_first_registered_without_a_subscriber() {
+        let (log, _guard) = TimingLog::install();
+        std::thread::spawn(first_registration_probe).join().unwrap();
+        first_registration_probe();
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["fields"]["event"], "first_registration_probe");
     }
 
     /// Every agent-login refusal this crate gives is one its authority keeps:

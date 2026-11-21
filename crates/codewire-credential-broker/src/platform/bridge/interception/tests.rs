@@ -371,6 +371,7 @@ async fn the_issuance_record_names_the_key_by_digest_and_never_holds_it() {
         .with_max_level(tracing::Level::TRACE)
         .with_writer(move || writer.clone())
         .finish();
+    crate::timing::tests::keep_interest_peer();
     let _guard = tracing::subscriber::set_default(subscriber);
     tracing::callsite::rebuild_interest_cache();
     let (_, interception) = service(Cas::default());

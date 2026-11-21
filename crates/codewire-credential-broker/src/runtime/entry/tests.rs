@@ -1079,6 +1079,7 @@ async fn a_forwarded_credential_is_never_logged() {
         .with_max_level(tracing::Level::TRACE)
         .with_writer(move || writer.clone())
         .finish();
+    crate::timing::tests::keep_interest_peer();
     let _guard = tracing::subscriber::set_default(subscriber);
     tracing::callsite::rebuild_interest_cache();
     let users_key = "sk-ant-users-own-key-never-logged";

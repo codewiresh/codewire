@@ -4797,6 +4797,7 @@ mod tests {
                 .with_max_level(tracing::Level::WARN)
                 .with_writer(move || writer.clone())
                 .finish();
+            crate::timing::tests::keep_interest_peer();
             let guard = tracing::subscriber::set_default(subscriber);
             (log, guard)
         }
