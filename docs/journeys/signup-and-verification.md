@@ -11,20 +11,20 @@ Production. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-20.
+Updated 2026-11-21.
 
 | ID | Dev | Production |
 | --- | --- | --- |
 | `signup-email-invite` | not yet observed | not yet observed |
-| `signup-email-review` | not yet observed | not yet observed |
+| `signup-email-review` | not yet observed | the operator's notice for a GitHub access request observed 2026-11-21 at v0.4.26 (#5358); the email path not yet observed |
 | `signup-unverified-stranger` | observed 2026-11-16 at b183980df, stand-in (#4481) | not yet observed |
 | `signup-resend` | not yet observed | not yet observed |
-| `signup-provider` | buttons, start, cancel and state refusals observed 2026-11-17 at `5c6631406` (#4062); a real provider sign-in reported working by the owner 2026-11-14, not walked | buttons, start, cancel and state refusals observed 2026-11-17 at v0.4.22 (#4062); a real provider sign-in reported working by the owner 2026-11-14, not walked |
+| `signup-provider` | buttons, start, cancel and state refusals observed 2026-11-17 at `5c6631406` (#4062); a real provider sign-in reported working by the owner 2026-11-14, not walked | buttons, start, cancel and state refusals observed 2026-11-17 at v0.4.22 (#4062); a GitHub sign-up through review, a second GitHub sign-in, and Disconnect and Connect Google observed 2026-11-21 at v0.4.26 (#5646) |
 | `signup-gates` | not yet observed | not yet observed |
 | `account-password-reset` | not yet observed | not yet observed |
-| `account-admin-delete` | observed 2026-11-18 on Kind at `a4a3c815d`, stand-in (#4541) | not yet observed |
+| `account-admin-delete` | observed 2026-11-18 on Kind at `a4a3c815d`, stand-in (#4541) | not yet observed; an account with 2FA can't finish deleting until #5767 ships |
 | `signup-unverified-purge` | observed 2026-11-15 at b183980df, a seeded account and a one-hour lifetime | enforce passes observed 2026-11-18 at v0.4.22, nothing old enough yet; the first deletion is due after 2026-11-20 18:05Z |
-| `account-receipt-email` | not yet observed | not yet observed |
+| `account-receipt-email` | not yet observed | Stripe's receipt for a real €5 purchase observed 2026-11-21 (#4816) |
 | `account-fresh-sign-in` | observed on Kind 2026-11-18 (server side, main 4199fd0f6) and 2026-11-20 (redirect delivery, main 6557aa7e83); not on Dev | not yet observed |
 
 ## Before the walk
@@ -119,7 +119,12 @@ operator's sign-up notice".
     verification, because the provider verified the address;
   - the notice limit is site-wide, so other sign-ups in the same hour count
     against the walker's.
-- **Observed:** not yet observed.
+- **Observed:**
+  - Production, 2026-11-21, at v0.4.26 (#5358, #5646): a GitHub access
+    request at 16:40:42Z took the `operator_notice` count at the same
+    moment, and the owner saw the notice in the operator inbox. The IdP
+    logged no failed send. The email path (steps 1 to 5 above) is not yet
+    observed.
 
 ## `signup-unverified-stranger`: a sign-up at someone else's address
 
@@ -264,11 +269,15 @@ Issue: #4062. Launch step 1 (`launch-signup`) walks this on Production.
     - a Google sign-up through review: the access request, the approval, then
       a Google sign-in.
 
-    Not yet observed anywhere: a GitHub sign-up, a second sign-in through a
-    provider, a `cw login` through one, and a Connect or a Disconnect in
-    Settings. The launch walk's "Owner: provider sign-in" observes them. A
-    replayed state after a completed exchange is proved by tests only: a
+    A replayed state after a completed exchange is proved by tests only: a
     browser drops the state cookie first.
+  - Production, 2026-11-21, at v0.4.26, the launch walk's "Owner: provider
+    sign-in" (#5646), read back from the audit log: a GitHub sign-up through
+    review (16:40:42Z) and its approval (16:41:59Z); a second sign-in
+    through GitHub (16:42:16Z); and Disconnect then Connect Google in
+    Settings (16:50:30Z and 16:50:35Z, `confirmed_by: session`). A
+    completed `cw login` through a provider isn't shown: the account's CLI
+    tokens were revoked by its deletion before they were read.
   - The owner reported on 2026-11-13 that signing in with GitHub and with
     Google works ("GitHub and Google both work for me", #4062), and on
     2026-11-14 that this was on Dev and on Production ("it works on both").
@@ -562,17 +571,29 @@ Issue: #2053. The receipt is walked as `billing-receipt` in
 Production.
 
 - **Entry points:** **Add credit** on the Billing page, or an automatic
-  top-up; the receipt goes to the organization's first owner, whoever paid.
+  top-up. On Dev and Production, Stripe emails the receipt to the
+  organization owner's address, which billing keeps on the Stripe customer
+  (`CODEWIRE_BILLING_RECEIPTS=stripe`, #4816). With the setting unset, as on
+  a self-hosted server, billing sends its own "Payment Receipt — Codewire"
+  email instead.
 - **States to exercise:** one real payment on Production. Dev's Stripe is in
   test mode, and Dev's SES sends only to verified addresses, so Dev cannot
   stand in for it.
 - **Driving it:** the owner adds the smallest credit (€5, **Custom**), or the
   walk waits for the next real top-up. Either is a real charge, so the owner
   chooses which (#2053).
-- **Proof:** one "Payment Receipt — Codewire" email for the invoice, whose
-  invoice number and amount match **Invoices** and whose **View Invoice** and
-  **Download PDF** links open Stripe's copies; a second delivery of the same
+- **Proof:** exactly one receipt for the invoice, Stripe's, whose amount
+  matches **Invoices**; billing logs "Stripe sends this invoice's receipt;
+  billing sends none" for that invoice. Where billing sends it, one
+  "Payment Receipt — Codewire" email, and a second delivery of the same
   `invoice.paid` sends no second email.
-- **Gotchas:** a receipt that fails to send fails the webhook, so Stripe
-  delivers it again; one late email is a retry, not a duplicate.
-- **Observed:** not yet observed.
+- **Gotchas:** Stripe sends no automatic receipt for a test-mode payment, so
+  Dev proves only billing's skip. Where billing sends the receipt, a failed
+  send fails the webhook, so Stripe delivers it again; one late email is a
+  retry, not a duplicate.
+- **Observed:**
+  - Dev, 2026-11-18 (#4816): a test-mode purchase, and billing logged the
+    skip for its invoice.
+  - Production, 2026-11-21 (#4816): the owner's €5 purchase. Billing
+    logged the skip 0.4 s after the payment, and Stripe's receipt reached
+    the owner, later than expected.

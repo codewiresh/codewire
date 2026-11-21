@@ -40,12 +40,12 @@ else is.
 
 | Step | ID | Detail | Dev | Production |
 | --- | --- | --- | --- | --- |
-| 1 | `launch-signup` | below, and [signup-and-verification.md](signup-and-verification.md) | failure paths observed 2026-11-11 (#4062); a sign-up not yet observed | not yet observed |
+| 1 | `launch-signup` | below, and [signup-and-verification.md](signup-and-verification.md) | failure paths observed 2026-11-11 (#4062); a sign-up not yet observed | the owner's provider pass observed 2026-11-21 on v0.4.26, except the admin delete, which found #5767 |
 | 2 | `launch-agent-push` | below | not yet observed; the fix (#4303) is released in `v0.4.17` | not yet observed |
 | 3 | `launch-preview` | [previews-and-ports.md](previews-and-ports.md) | not yet observed | not yet observed |
 | 4 | `launch-cp` | [cloud-sandbox.md](cloud-sandbox.md) | upload, resume and download observed 2026-11-13 with builds of the fixes (#4373, #4394), which are tagged `v0.4.18`; not yet observed with it | not yet observed |
 | 5 | `launch-invite` | [invitations.md](invitations.md) | invite, email, accept and remove observed 2026-11-13 (#3847, #3840) | the invitation and its email's send observed 2026-11-14 on `v0.4.18` (#3847); arrival, accept and remove not yet observed |
-| 6 | `launch-buy-credit` | [billing-and-credits.md](billing-and-credits.md) | card, top-up, costs and refusal observed (#3381, #3954); Add credit and the receipt not yet observed | not yet observed |
+| 6 | `launch-buy-credit` | [billing-and-credits.md](billing-and-credits.md) | card, top-up, costs and refusal observed (#3381, #3954); Add credit and the receipt not yet observed | a first €5 purchase with a new card, and Stripe's receipt, observed 2026-11-21 (#4816); costs not yet observed |
 | 7 | `launch-idle-wake` | out of the launch | out of the launch (owner, 2026-11-13) | out of the launch |
 | 8 | `launch-password-reset` | [signup-and-verification.md](signup-and-verification.md) | not yet observed | reported working by the owner 2026-11-13 (#2053); no walk recorded |
 | 9 | `launch-node-reboot` | [node-reboot.md](node-reboot.md), and below for the restart notice | restart notice observed 2026-11-13 after a Pod delete (#4376) | two worker drains observed 2026-11-13 (#3542); a reboot, STUN and the relay, Mesh and the restart notice not yet observed |
@@ -181,6 +181,24 @@ to give. The email and password steps, from sign-up through verification, are
     is above.
   - The sign-up credit was 0 on Dev and on Production when read on
     2026-11-12, so no grant has been seen.
+  - Production, 2026-11-21, on v0.4.26, the owner's provider pass (#5646),
+    read back from the audit log, the rate-limit counters and the identity
+    rows:
+    1. 16:40:42Z, a GitHub sign-up as `codewire-e2e` through review
+       (`user.signup.access_requested`, provider github), and the operator's
+       notice counted at the same moment (#5358). The owner saw it in the
+       operator inbox. The approval is `admin.account.enabled` at 16:41:59Z.
+    2. 16:42:16Z, a second sign-in through GitHub (`user.signin`, method
+       github). The account's CLI tokens were revoked by its deletion
+       before they were read, so a completed `cw login` isn't shown.
+    3. Disconnect disabled on the last sign-in method: reported by the
+       owner. It writes nothing to read back.
+    4. 16:50:30Z `user.oauth.unlinked` and 16:50:35Z `user.oauth.linked`
+       (google, `confirmed_by: session`) on the owner's own account.
+    5. Not observed. The test account was deleted from its own Settings
+       (16:44:05Z), and no admin delete reached the IdP. That deletion
+       stopped at its database phase because of #5767. The admin delete
+       waits for the fix on Production.
 
 ## 2. `launch-agent-push`: a sandbox, an agent, and a Git push over 4 MiB
 
@@ -336,7 +354,12 @@ Production: `billing-card`; then `billing-auto-top-up` or
   - Dev: the card, the automatic top-up, costs in credits and the refusal
     at an empty balance are observed. **Add credit** and the receipt email
     are not. The dates and evidence are in the file above.
-  - Production: not yet observed. Credit is not enforced there yet (#3381).
+  - Production, 2026-11-21 (#4816): the owner's first purchase, €5 with a
+    card added at the same time. Card setup finished at 16:47:55Z, and
+    billing handled `invoice.paid` 0.4 s later, logging that Stripe sends
+    the receipt. Stripe's receipt reached the owner, later than expected.
+    The delay is Stripe's or the mail path's; nothing of ours waits after
+    the payment. Costs in credits aren't observed on Production yet.
 
 ## 7. `launch-idle-wake`: out of the launch
 

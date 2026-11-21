@@ -17,7 +17,7 @@ the first Production release after codewire/deploy#245.
 | `billing-card` | observed 2026-11-11 (#3381) | not yet observed |
 | `billing-auto-top-up` | observed 2026-11-11 (#3381) | not yet observed |
 | `billing-add-credit` | not yet observed | not yet observed |
-| `billing-receipt` | not yet observed | not yet observed |
+| `billing-receipt` | billing's skip observed 2026-11-18 (#4816) | Stripe's receipt observed 2026-11-21 (#4816) |
 | `billing-costs` | observed 2026-11-13 (#3954) | not yet observed |
 | `billing-zero-refusal` | observed 2026-11-11 and 2026-11-13 (#3381) | not yet observed |
 | `billing-admin-adjust` | not yet observed | not yet observed |
@@ -159,9 +159,13 @@ the first Production release after codewire/deploy#245.
 
 ## 4. `billing-receipt`: the receipt email
 
-- **Entry points:** the organization owner's inbox. Billing sends the
-  receipt itself on Stripe's `invoice.paid`, with links to Stripe's invoice
-  and PDF; Stripe sends none from a test-mode account.
+- **Entry points:** the organization owner's inbox. On Dev and Production,
+  Stripe sends the receipt, with the invoice and receipt PDFs, and billing
+  sends none (`CODEWIRE_BILLING_RECEIPTS=stripe`, #4816). Billing keeps the
+  Stripe customer's email on the organization's current owner before each
+  purchase. With the setting unset, billing sends its own receipt on
+  `invoice.paid`, with links to Stripe's invoice and PDF. Stripe sends no
+  automatic receipt for a test-mode payment.
 - **States to exercise:** a top-up receipt and an Add credit receipt; a send
   that fails, which makes billing fail the webhook so Stripe delivers it
   again.
@@ -169,9 +173,15 @@ the first Production release after codewire/deploy#245.
   number match **Invoices**. An automatic top-up's receipt says why the card
   was charged: "Compute credit, added by automatic top-up when the balance
   reached €0" (#4754), whether billing or Stripe sends it.
-- **Gotchas:** Dev's SES delivers only to addresses it is allowed to send
-  to, so most Dev owners never see the email. Production email is #2053.
-- **Observed:** not yet observed.
+- **Gotchas:** on Dev, a test-mode payment gets no automatic receipt from
+  Stripe, so a Dev walk proves billing's skip line, not the email.
+- **Observed:**
+  - Dev, 2026-11-18 (#4816): billing logged "Stripe sends this invoice's
+    receipt; billing sends none" for a test-mode **Add credit** of €5, and
+    sent no email.
+  - Production, 2026-11-21 (#4816): Stripe's receipt for the owner's €5
+    purchase arrived, later than expected. Billing logged the skip 0.4 s
+    after the payment.
 
 ## 5. `billing-costs`: the Billing page shows costs in credits
 
