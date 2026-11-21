@@ -26,7 +26,7 @@ observed**.
 | `profile-default` | not yet observed | not yet observed | not yet observed |
 | `cred-delivery-diagnosis` | observed, #5237 at a8c2d9625, 2026-11-17 (the token, no-profile and stopped states; the sign-in and older-guest states not yet observed) | not yet observed | local VMs only |
 | `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, the early replacements on that build plus their change, and `main` at 4cae0f601 through the smoke, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | observed, #5286: main's tree at 57b68c6be (#5295 and #5312), 2026-11-18, with a name resolving only to private addresses; the provider came back at the regular replacement, not the early ones (a sign-in's token host not walked) | local VMs only |
-| `cred-file-store` | partly observed, #5552 on main 22bcc705e, 2026-11-20 (a local VM from a `file` root: its broker serves a lease on the intercepted and the loopback route, and `list` names the file store; the other states not yet observed) | the macOS file store; not part of this check | local stores only |
+| `cred-file-store` | partly observed, #5552 on main 22bcc705e, 2026-11-20, and main 8880d56e7, 2026-11-21 (a local VM from a `file` root is served a lease on both routes; a new `file` root keeps its key in `protected-v1` alone, 0700 and 0600; a root with nothing set uses Secret Service and says so first; the upgraded root, the 0644 refusal and a due refresh not yet observed) | the macOS file store; not part of this check | local stores only |
 | `cred-same-name` | observed, #4928 on released v0.4.26, 2026-11-21 (steps 1 to 6, with an Anthropic and an OpenAI API key in place of the two sign-ins; a store holding a literal `github/work` not walked) | not yet observed (#4928) | not yet observed (#4928) |
 | `cred-wording` | not yet observed | not yet observed | not yet observed |
 | `cred-pickers` | not yet observed | not yet observed | not yet observed |
@@ -836,7 +836,8 @@ The spec is
   private keyring of [Before the walk](#before-the-walk).
 
   ```sh
-  printf 'local_credential_store = "file"\n' >> "$HOME/.codewire/config.toml"
+  (umask 077 && printf 'local_credential_store = "file"\n' >> "$HOME/.codewire/config.toml")
+  chmod 600 "$HOME/.codewire/config.toml"
   printf '%s' "$SYNTHETIC_KEY" | cw credentials --local add anthropic --name parity-file-key
   cw credentials --local list
   ls -l "$HOME/.codewire/credentials-v1/protected-v1"
@@ -857,7 +858,13 @@ The spec is
   - The due sign-in's request succeeds, `brokers.log` shows no broker
     ending, the credential is at material generation 2, and the journal has
     no refresh row left: the authority staged and promoted the bundle.
-- **Gotchas:** entries are plaintext: never walk it with a real credential.
+- **Gotchas:**
+  - entries are plaintext: never walk it with a real credential;
+  - `config.toml` must be the user's alone (0600): a file the default umask
+    makes 0644, or one a reused `HOME` already had, is refused before
+    anything runs;
+  - `cw credentials` commands read only metadata, so a `chmod 0644` entry is
+    refused at the next read of its material, a VM's lease, not by `list`.
 - **Observed:** partly, on a Linux local VM (x86_64, KVM), 2026-11-20, with
   `cw` from main 22bcc705e (#5552) and the guest runtime of main 8f3a2d502,
   a throwaway `HOME` with no session bus and one synthetic Anthropic API key.
@@ -866,7 +873,23 @@ The spec is
   Anthropic with the stored key swapped in (Anthropic's own 401 for an
   invalid key), and with it off, the loopback route did the same. On main
   before #5552 both routes answered `CredentialUnavailable` within
-  milliseconds. The other states are not yet observed.
+  milliseconds.
+
+  On 2026-11-21, with `cw` from main 8880d56e7 (plus #5817, which changes
+  orchestration only) in the local smoke isolation (a private `HOME`, D-Bus
+  and Secret Service, inside a mount namespace) and synthetic Anthropic keys:
+  - a new `file` root put the key in `protected-v1` and nowhere else (the
+    directory 0700, the entry 0600, both the user's); `list` printed the
+    file-store line and `--output json` gave `"protected_store": "file"`;
+    the private keyring held no item before, after or at the end;
+  - a root with nothing set printed the one-line Secret Service warning
+    before the write, listed `"protected_store": "secret-service"` with no
+    material under its `credentials-v1`, held one item in the private
+    keyring, and a delete left none.
+
+  Not yet observed: an existing Secret Service root after the update, a
+  `chmod 0644` entry's refusal (it needs a VM's lease to read the material),
+  and a due sign-in's refresh in a VM from a `file` root.
 
 ## 14. `cred-same-name`: one name for a credential of each provider
 
