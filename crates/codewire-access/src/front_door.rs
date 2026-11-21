@@ -13,6 +13,20 @@ pub const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
 pub const OPENAI_API_HOST: &str = "api.openai.com";
 /// Codex on a ChatGPT sign-in.
 pub const CHATGPT_HOST: &str = "chatgpt.com";
+/// The fixed suffixes under which Codex's account routing may name its model
+/// origin (#3999): the egress broker intercepts every name under each on
+/// 443, and a front-door request is served there only on Codex's model path,
+/// at the origin this session recorded, dialled at the admitted address.
+pub const ROUTED_SUFFIXES: [&str; 1] = [CHATGPT_HOST];
+
+/// The routed suffix `host` is exactly one label under, if any.
+pub fn routed_suffix(host: &str) -> Option<&'static str> {
+    ROUTED_SUFFIXES.into_iter().find(|suffix| {
+        host.strip_suffix(suffix)
+            .and_then(|label| label.strip_suffix('.'))
+            .is_some_and(|label| !label.is_empty() && !label.contains('.'))
+    })
+}
 
 /// One host the front door serves on [`INTERCEPT_PORT`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

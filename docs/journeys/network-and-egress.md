@@ -1278,12 +1278,12 @@ Issues: #3999, #4001.
     with the selected credential prints its answer, and `example.com` is
     refused. `cw --local policy list` says `locked  built-in · nothing,
     except the model providers of credentials you selected`, and `cw info`
-    says the same under its network policy line. Not yet: that the `curl`
-    with another key is refused (#5215, #5555);
+    says the same under its network policy line. Not yet observed: that
+    the `curl` with another key is refused (#5215, #5555);
   - **in a hosted Sandbox with interception on** (#5555), the user's own
     key and a request with no credential are both refused
     `selected_credential_only` with nothing sent, under every policy, and
-    the placeholder is served. Not yet built;
+    the placeholder is served. Not yet observed;
   - after a policy edit, the next request follows the new policy: allowed
     once a rule allows the host, refused once it is removed.
 - **Gotchas:**

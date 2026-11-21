@@ -1,7 +1,7 @@
 ---
 title: Egress policies
 description: Decide what an environment may reach on the Internet; the built-in open and locked policies, your own policies, and what egress does not protect.
-updated: 2026-11-19
+updated: 2026-11-20
 weight: 3
 ---
 
@@ -75,6 +75,21 @@ selected credential, on the paths its route serves. The GitHub connection is
 not such a credential: it follows the policy, as above. To stop a provider as
 well, revoke its credential with `cw credentials --local revoke NAME`, which
 stops it at once everywhere that credential is used, not only in this VM.
+
+Your own key is a different request. A program in the VM that calls a
+provider's host with a key of its own, or with none, gets no help from the
+selected credential and follows the policy like any other destination. Under
+`open` it reaches the provider untouched. Under `locked`, or a policy with no
+rule for that host, it is refused before anything is sent; a rule for the
+host lets it through:
+
+```sh
+cw --local policy allow web-only api.anthropic.com
+```
+
+Codex sometimes sends its requests to a workspace host under `chatgpt.com`.
+For your own key to reach those, the rule must be `*.chatgpt.com`: a rule
+for one workspace host on its own isn't enough yet.
 
 Right after you update `cw`, VMs that were already running are still served
 by the earlier version's background services. Until you have stopped your

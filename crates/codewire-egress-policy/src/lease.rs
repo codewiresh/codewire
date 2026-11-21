@@ -3084,6 +3084,25 @@ rules:
         assert_eq!(table.active_leases(at(0)), 0);
     }
 
+    /// #5555: a rule allowing every name under a routed suffix never reaches
+    /// a name a deny rule refuses: the dial is refused here and nothing is
+    /// handed to the front door, so the credential broker's `*.` answer can
+    /// never carry an own-key request to a denied routed name.
+    #[test]
+    fn a_deny_rule_on_a_routed_name_beats_suffix_interception() {
+        let mut table = EgressLeaseTable::new(rules(
+            "  - id: deny-routed\n    action: deny\n    protocols: [tcp]\n    destinations: [routed.chatgpt.com]\n    route_classes: [general]\n  - id: every-routed\n    action: allow\n    protocols: [dns, tcp]\n    ports: [443]\n    destinations: [\"*.chatgpt.com\"]\n    route_classes: [general]\n",
+        ));
+        bind_suffix(&mut table, at(0));
+        resolve(&mut table, ROUTED, PUBLIC_V4, 60, at(0));
+        let refusal = refused(verdict(&mut table, PUBLIC_V4, 443, at(1)));
+        assert_eq!(refusal.reason(), RefusalReason::NameNotAllowed);
+        assert_eq!(refusal.decision().rule_id.as_deref(), Some("deny-routed"));
+        // Another name under the suffix is still intercepted.
+        resolve(&mut table, "other.chatgpt.com", OTHER_PUBLIC_V4, 60, at(0));
+        intercepted(verdict(&mut table, OTHER_PUBLIC_V4, 443, at(1)));
+    }
+
     #[test]
     fn a_bound_name_never_leases_a_protected_or_host_address() {
         let mut table = EgressLeaseTable::new(named_policy());

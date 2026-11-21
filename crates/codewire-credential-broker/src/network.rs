@@ -43,11 +43,7 @@ const CHATGPT_FRONT_DOOR_PREFIXES: [&str; 4] = [
     "/backend-api/ps/",
 ];
 const CHATGPT_FRONT_DOOR_PATHS: [&str; 1] = ["/backend-api/accounts/verified_access"];
-/// The fixed suffixes under which Codex's account routing may name its model
-/// origin (#3999): the egress broker intercepts every name under each on
-/// 443, and a front-door request is served there only on Codex's model path,
-/// at the origin this session recorded, dialled at the admitted address.
-pub(crate) const ROUTED_SUFFIXES: [&str; 1] = [CHATGPT_HOST];
+pub(crate) use codewire_access::ROUTED_SUFFIXES;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The whole-request bound for a request with a whole body. A streamed GitHub
 /// Git request has none: its bridge bounds it by idle time instead (#4280).

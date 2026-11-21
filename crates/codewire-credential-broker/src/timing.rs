@@ -312,6 +312,8 @@ fn error_label(error: BrokerRequestError) -> &'static str {
         BrokerRequestError::ResponseTooLarge => "response_too_large",
         BrokerRequestError::ReconnectRequired(_) => "reconnect_required",
         BrokerRequestError::NotSelected => "not_selected",
+        BrokerRequestError::NameNotAllowed => "name_not_allowed",
+        BrokerRequestError::SelectedCredentialOnly => "selected_credential_only",
     }
 }
 

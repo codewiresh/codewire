@@ -15,6 +15,10 @@ pub struct EnvironmentBrokerSelection {
     /// rule (#4926). The default is no: a caller of this client that does
     /// not say is refused the managed GitHub credential.
     pub network_policy_allows_github: bool,
+    /// The bound hosts the environment's network policy allows by rule on
+    /// 443, lowercase (#5555). A caller that does not say gets none, and its
+    /// broker forwards no front-door request carrying no placeholder.
+    pub network_policy_allowed_hosts: BTreeSet<String>,
     /// An intercepting boot's secrets, for each broker it starts (#3999).
     pub boot_secrets: crate::BrokerBootSecrets,
 }
@@ -33,6 +37,9 @@ pub struct LocalBrokerProcessConfig {
     /// Whether the child serves the managed GitHub credential: the
     /// environment's network policy allows GitHub's hosts by rule (#4926).
     pub network_policy_allows_github: bool,
+    /// Where the child may forward a front-door request carrying no
+    /// placeholder untouched (#5555).
+    pub network_policy_allowed_hosts: BTreeSet<String>,
 }
 
 impl LocalBrokerProcessConfig {
@@ -40,6 +47,11 @@ impl LocalBrokerProcessConfig {
         if self.environment_generation == 0
             || (self.platform_delegated && !self.http_providers.is_empty())
             || !valid_environment_name(&self.environment_name)
+            || self.network_policy_allowed_hosts.len() > MAX_ALLOWED_HOSTS
+            || !self
+                .network_policy_allowed_hosts
+                .iter()
+                .all(|host| valid_allowed_host(host))
             || !self.runner_socket.is_absolute()
             || self
                 .runner_socket
@@ -98,6 +110,29 @@ impl ProviderLookup {
                 .collect(),
         }
     }
+}
+
+/// More than any route table binds; the answer names only bound hosts.
+const MAX_ALLOWED_HOSTS: usize = 16;
+
+/// A lowercase DNS name of letters, digits, hyphens and dots, or `*.` and a
+/// routed suffix: each becomes a broker argument, so it never starts with
+/// `-`.
+fn valid_allowed_host(host: &str) -> bool {
+    if let Some(suffix) = host.strip_prefix("*.") {
+        return codewire_access::ROUTED_SUFFIXES.contains(&suffix);
+    }
+    host.len() <= 253
+        && !host.is_empty()
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
 }
 
 fn valid_environment_name(name: &str) -> bool {
@@ -163,7 +198,50 @@ mod tests {
             http_providers: BTreeSet::from([HttpProvider::OpenAiApiKey]),
             platform_delegated: false,
             network_policy_allows_github: true,
+            network_policy_allowed_hosts: Default::default(),
         }
+    }
+
+    /// #5555: each allowed host becomes a broker argument, so only a bounded
+    /// set of lowercase DNS names is launched.
+    #[test]
+    fn only_lowercase_dns_names_are_launched_as_allowed_hosts() {
+        let with = |hosts: &[&str]| LocalBrokerProcessConfig {
+            network_policy_allowed_hosts: hosts.iter().map(|host| (*host).to_owned()).collect(),
+            ..config("project")
+        };
+        assert!(
+            with(&["api.anthropic.com", "chatgpt.com", "*.chatgpt.com"])
+                .validate()
+                .is_ok()
+        );
+        for denied in [
+            "",
+            "-x",
+            "--network-policy-allows-github",
+            "API.anthropic.com",
+            "api.anthropic.com.",
+            "a..b",
+            "-a.com",
+            "api.anthropic.com:443",
+            "*.example.com",
+            "*.a.chatgpt.com",
+            "*.",
+        ] {
+            assert_eq!(
+                with(&[denied]).validate(),
+                Err(LocalBrokerSpawnError::InvalidConfiguration),
+                "{denied}"
+            );
+        }
+        let many: Vec<String> = (0..=MAX_ALLOWED_HOSTS)
+            .map(|index| format!("h{index}.com"))
+            .collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert_eq!(
+            with(&many).validate(),
+            Err(LocalBrokerSpawnError::InvalidConfiguration)
+        );
     }
 
     #[test]

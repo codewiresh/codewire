@@ -78,6 +78,9 @@ enum CredentialBridgeRefusal {
   CREDENTIAL_BRIDGE_REFUSAL_UPSTREAM_FAILED = 13;
   CREDENTIAL_BRIDGE_REFUSAL_NAME_NOT_ALLOWED = 14;
   CREDENTIAL_BRIDGE_REFUSAL_UNAVAILABLE = 15;
+  // A hosted Sandbox's request on an intercepted host that carries none of
+  // its placeholders (#5555). An older guest reads it as unavailable.
+  CREDENTIAL_BRIDGE_REFUSAL_SELECTED_CREDENTIAL_ONLY = 16;
 }
 
 message CredentialBridgeResponseFailure {

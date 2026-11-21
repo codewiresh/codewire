@@ -26,7 +26,7 @@ pub use credential_name::{
 };
 pub use front_door::{
     ANTHROPIC_API_HOST, CHATGPT_HOST, FRONT_DOOR_HOSTS, FrontDoorHost, INTERCEPT_PORT,
-    OPENAI_API_HOST,
+    OPENAI_API_HOST, ROUTED_SUFFIXES, routed_suffix,
 };
 pub use grant::{
     AvailableGrants, DerivedGrant, GrantContext, GrantPlacement, GrantProfile, UngrantedGitHub,

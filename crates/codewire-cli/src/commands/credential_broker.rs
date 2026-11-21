@@ -200,6 +200,11 @@ pub(crate) struct LocalCredentialBrokerArgs {
     /// the managed GitHub credential is served (#4926). Absent, it is not.
     #[arg(long)]
     pub(crate) network_policy_allows_github: bool,
+    /// A bound host the environment's network policy allows by rule on 443,
+    /// once each: a front-door request carrying none of this environment's
+    /// placeholders is forwarded untouched only to one of these (#5555).
+    #[arg(long = "network-policy-allows-host")]
+    pub(crate) network_policy_allowed_hosts: Vec<String>,
     /// No broker serves this generation: start whatever resolves, leaving a
     /// provider host with no address unserved (#5286).
     #[arg(long, conflicts_with = "may_not_resolve")]
@@ -541,7 +546,8 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
     stage.set("provider.policy");
     let broker = OpenAiBroker::new(leases, upstream)
         .map_err(|_| anyhow::anyhow!("initialize broker provider policy"))?
-        .with_network_policy_allowing_github(args.network_policy_allows_github);
+        .with_network_policy_allowing_github(args.network_policy_allows_github)
+        .with_network_policy_allowing_hosts(&args.network_policy_allowed_hosts);
     #[cfg(not(feature = "local-broker-synthetic-smoke"))]
     let broker = match github_app {
         Some(owner) => broker.with_github_app_authorization_owner(owner),

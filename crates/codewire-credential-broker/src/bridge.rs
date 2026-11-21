@@ -2,7 +2,6 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use codewire_access::Refusal;
 use codewire_daemon::client::{
     CredentialBridgeConnection, CredentialBridgeResponseSender, SessionClientError,
 };
@@ -33,6 +32,9 @@ mod relay;
 mod request_body;
 mod ssh;
 mod websocket;
+mod wire_refusal;
+
+use wire_refusal::wire_refusal;
 
 #[cfg(test)]
 pub(crate) use front_door::FrontDoorExecutor;
@@ -998,7 +1000,9 @@ async fn send_login_response<S: CredentialBridgeResponseSink>(
             BrokerRequestError::InvalidRequest
             | BrokerRequestError::Denied
             | BrokerRequestError::ReconnectRequired(_)
-            | BrokerRequestError::NotSelected,
+            | BrokerRequestError::NotSelected
+            | BrokerRequestError::NameNotAllowed
+            | BrokerRequestError::SelectedCredentialOnly,
         ) => Err(v1::CredentialBridgeFailureReason::Denied as i32),
         Err(
             BrokerRequestError::AuthorityUnavailable
@@ -1288,7 +1292,9 @@ async fn send_failure<S: CredentialBridgeResponseSink>(
         BrokerRequestError::InvalidRequest
         | BrokerRequestError::Denied
         | BrokerRequestError::ReconnectRequired(_)
-        | BrokerRequestError::NotSelected => v1::CredentialBridgeFailureReason::Denied,
+        | BrokerRequestError::NotSelected
+        | BrokerRequestError::NameNotAllowed
+        | BrokerRequestError::SelectedCredentialOnly => v1::CredentialBridgeFailureReason::Denied,
         BrokerRequestError::AuthorityUnavailable => v1::CredentialBridgeFailureReason::Unavailable,
         BrokerRequestError::UpstreamFailed => v1::CredentialBridgeFailureReason::UpstreamFailed,
         BrokerRequestError::ResponseTooLarge => v1::CredentialBridgeFailureReason::ResponseTooLarge,
@@ -1305,30 +1311,6 @@ async fn send_failure<S: CredentialBridgeResponseSink>(
         )
         .await
         .map_err(|_| ())
-}
-
-/// A refusal as the bridge protocol carries it. `denied` is left unspecified:
-/// the frame's reason already says it, as every guest reads it.
-pub(crate) fn wire_refusal(refusal: Refusal) -> v1::CredentialBridgeRefusal {
-    use v1::CredentialBridgeRefusal as Wire;
-    match refusal {
-        Refusal::CredentialRevoked => Wire::CredentialRevoked,
-        Refusal::CredentialExpired => Wire::CredentialExpired,
-        Refusal::CredentialNeedsReconnect => Wire::CredentialNeedsReconnect,
-        Refusal::NoCredentialSelected => Wire::NoCredentialSelected,
-        Refusal::CredentialUnavailable => Wire::CredentialUnavailable,
-        Refusal::CredentialConflict => Wire::CredentialConflict,
-        Refusal::PathNotServed => Wire::PathNotServed,
-        Refusal::WebsocketNotServed => Wire::WebsocketNotServed,
-        Refusal::RouteNotServed => Wire::RouteNotServed,
-        Refusal::RequestNotForwarded(_) => Wire::RequestNotForwarded,
-        Refusal::BodyTooLarge => Wire::BodyTooLarge,
-        Refusal::Busy => Wire::Busy,
-        Refusal::UpstreamFailed(_) => Wire::UpstreamFailed,
-        Refusal::NameNotAllowed => Wire::NameNotAllowed,
-        Refusal::Unavailable => Wire::Unavailable,
-        Refusal::Denied => Wire::Unspecified,
-    }
 }
 
 #[cfg(test)]

@@ -206,6 +206,7 @@ where
         let target = admitted
             .target(&format!("https://{CLAUDE_TOKEN_HOST}"))
             .map_err(|_| BrokerRequestError::InvalidRequest)?;
+        self.untouched_forward_allowed(&target, false)?;
         let TransparentRequest {
             method,
             headers,
@@ -477,7 +478,9 @@ fn managed_failure(error: BrokerRequestError) -> Result<BrokerHttpResponse, Brok
             "invalid_grant",
             Some(RENEW_SIGN_IN),
         )),
-        BrokerRequestError::InvalidRequest => Ok(invalid_request()),
+        BrokerRequestError::InvalidRequest
+        | BrokerRequestError::NameNotAllowed
+        | BrokerRequestError::SelectedCredentialOnly => Ok(invalid_request()),
         BrokerRequestError::UpstreamFailed | BrokerRequestError::ResponseTooLarge => {
             Ok(temporarily_unavailable())
         }
@@ -487,14 +490,18 @@ fn managed_failure(error: BrokerRequestError) -> Result<BrokerHttpResponse, Brok
 
 /// A forwarded request that could not be sent. Claude was never asked, so
 /// the user's login is not called invalid: a destination this environment's
-/// transport does not admit is refused, anything else but an unreachable
-/// authority, which a forward never asks, is temporary.
+/// transport does not admit, or one the network policy does not allow
+/// (#5555), is refused, anything else but an unreachable authority, which a
+/// forward never asks, is temporary. Never `invalid_grant`: the user's own
+/// login is not Codewire's to end.
 fn forward_failure(error: BrokerRequestError) -> Result<BrokerHttpResponse, BrokerRequestError> {
     tracing::debug!(outcome = "claude_token_forward_failed", error = %error);
     match error {
         BrokerRequestError::Denied
         | BrokerRequestError::InvalidRequest
-        | BrokerRequestError::NotSelected => {
+        | BrokerRequestError::NotSelected
+        | BrokerRequestError::NameNotAllowed
+        | BrokerRequestError::SelectedCredentialOnly => {
             Ok(oauth_error(StatusCode::FORBIDDEN, "invalid_request", None))
         }
         BrokerRequestError::ReconnectRequired(_)

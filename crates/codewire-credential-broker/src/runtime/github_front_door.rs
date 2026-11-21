@@ -175,6 +175,7 @@ where
         body_stream: Option<BrokerRequestBodyStream>,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
         let target = forward_target(host, &request.path, request.query.as_deref())?;
+        self.untouched_forward_allowed(&target, false)?;
         let response = timing::timed(
             Phase::Provider,
             self.upstream.forward_github(BrokerUpstreamRequest {

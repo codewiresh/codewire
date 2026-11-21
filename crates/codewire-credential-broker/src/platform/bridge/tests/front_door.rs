@@ -236,6 +236,63 @@ async fn an_idle_joined_stream_ends_and_returns_its_slot() {
     assert!(next.is_ok());
 }
 
+/// #5555: a hosted epoch's broker sends nothing that lacks the Sandbox's own
+/// placeholder. The user's own token on the front door is refused with the
+/// hosted refusal, before any lease, and no upstream is called.
+#[tokio::test]
+async fn a_hosted_front_door_request_without_the_placeholder_is_refused_and_never_sent() {
+    let fixture = Fixture::new().await;
+    let (_epoch_input, epoch) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &["true"])
+        .await;
+    let handle = handle_of(&epoch.unwrap());
+    let (input, joined) = fixture.join(Some("synthetic-allow"), Some(&handle)).await;
+    let mut joined = joined.unwrap();
+    let request_id = Uuid::new_v4().to_string();
+    input
+        .send(v1::CredentialBridgeGuestMessage {
+            payload: Some(v1::credential_bridge_guest_message::Payload::Request(
+                v1::CredentialBridgeRequest {
+                    capability_slot: "github".into(),
+                    route: "github-api".into(),
+                    request_id: request_id.clone(),
+                    method: "GET".into(),
+                    path: "/user".into(),
+                    query: String::new(),
+                    headers: vec![v1::CredentialHttpHeader {
+                        name: "authorization".into(),
+                        value: b"token ghp_usersOwnToken0123456789".to_vec(),
+                    }],
+                    body: vec![],
+                    intercepted_host: "api.github.com".into(),
+                    streamed_body: false,
+                    intercept_decision: Vec::new(),
+                    destination_ip: String::new(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+    let failure = loop {
+        let frame = tokio::time::timeout(TEST_TIMEOUT, joined.get_mut().message())
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("an answer before the stream ends");
+        if let Some(v1::credential_bridge_host_message::Payload::ResponseFailure(failure)) =
+            frame.payload
+        {
+            break failure;
+        }
+    };
+    assert_eq!(failure.request_id, request_id);
+    assert_eq!(
+        failure.refusal,
+        v1::CredentialBridgeRefusal::SelectedCredentialOnly as i32
+    );
+    assert_eq!(fixture.upstream.calls.load(Ordering::SeqCst), 0);
+}
+
 /// Only an epoch the relay says is intercepted can be joined (#4001): one it
 /// says isn't carries no handle, so no front door is ever served beside its
 /// real logins.

@@ -541,3 +541,32 @@ fn only_a_front_door_github_request_streams_an_api_body() {
     other.body.clear();
     assert!(ValidatedGuestRequest::parse(BridgeEntry::FrontDoor, other, true).is_err());
 }
+
+/// #5555: GitHub's forward branch asks the same answer. A broker started
+/// without it sends nothing that lacks this environment's placeholder, even
+/// where the older GitHub answer (#4926) says yes; a hosted broker never
+/// does.
+#[tokio::test]
+async fn without_the_policys_answer_github_sends_nothing_without_our_placeholder() {
+    let own = [("authorization", format!("token {USERS_TOKEN}"))];
+    for hosted in [false, true] {
+        let recorded = ours();
+        let broker = recorded.broker_without_answer();
+        let broker = if hosted {
+            broker.with_untouched_forwards_refused()
+        } else {
+            broker
+        };
+        let refused = broker
+            .execute_front_door(github("api.github.com", "GET", "/user", "", &own, b""))
+            .await;
+        let expected = if hosted {
+            BrokerRequestError::SelectedCredentialOnly
+        } else {
+            BrokerRequestError::NameNotAllowed
+        };
+        assert_eq!(refused.err(), Some(expected), "hosted: {hosted}");
+        assert_eq!(recorded.forwarded(), 0);
+        assert!(recorded.outbound().is_empty());
+    }
+}

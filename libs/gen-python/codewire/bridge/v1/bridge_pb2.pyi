@@ -33,6 +33,7 @@ class CredentialBridgeRefusal(int, metaclass=_enum_type_wrapper.EnumTypeWrapper)
     CREDENTIAL_BRIDGE_REFUSAL_UPSTREAM_FAILED: _ClassVar[CredentialBridgeRefusal]
     CREDENTIAL_BRIDGE_REFUSAL_NAME_NOT_ALLOWED: _ClassVar[CredentialBridgeRefusal]
     CREDENTIAL_BRIDGE_REFUSAL_UNAVAILABLE: _ClassVar[CredentialBridgeRefusal]
+    CREDENTIAL_BRIDGE_REFUSAL_SELECTED_CREDENTIAL_ONLY: _ClassVar[CredentialBridgeRefusal]
 
 class CredentialBridgeStreamCloseKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -67,6 +68,7 @@ CREDENTIAL_BRIDGE_REFUSAL_BUSY: CredentialBridgeRefusal
 CREDENTIAL_BRIDGE_REFUSAL_UPSTREAM_FAILED: CredentialBridgeRefusal
 CREDENTIAL_BRIDGE_REFUSAL_NAME_NOT_ALLOWED: CredentialBridgeRefusal
 CREDENTIAL_BRIDGE_REFUSAL_UNAVAILABLE: CredentialBridgeRefusal
+CREDENTIAL_BRIDGE_REFUSAL_SELECTED_CREDENTIAL_ONLY: CredentialBridgeRefusal
 CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_UNSPECIFIED: CredentialBridgeStreamCloseKind
 CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_HALF_CLOSE: CredentialBridgeStreamCloseKind
 CREDENTIAL_BRIDGE_STREAM_CLOSE_KIND_RESET: CredentialBridgeStreamCloseKind

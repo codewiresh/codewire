@@ -207,6 +207,16 @@ impl RouteTable {
         Self::with_optional_hosts(false, false)
     }
 
+    /// Every host any environment's route table may bind: the hosts a
+    /// credential broker needs the network policy's answer for (#5555).
+    pub fn bindable_hosts() -> Vec<String> {
+        Self::with_optional_hosts(true, true)
+            .hosts()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
     /// The routes for an environment whose stock clients are `clients`: the
     /// defaults, Claude's token host only when the Anthropic slot holds a
     /// Claude sign-in, and GitHub's two hosts only with a GitHub connection.

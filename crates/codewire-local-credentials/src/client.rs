@@ -7,8 +7,8 @@ use std::time::Duration;
 use codewire_access::{
     AccessProfile, AccessProfileId, AccessProfileName, AccessProfileReference, AccessProfileScope,
     BrokerOperationId, BrokerRouteId, CapabilitySlot, CredentialAuthKind, CredentialId,
-    CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding, EnvironmentId,
-    GrantPermission, GrantProfile, Owner, OwnerId, Placement, ProviderId, SshPublicKeyMetadata,
+    CredentialMetadata, DerivedGrant, EnvironmentAccessBinding, EnvironmentId, GrantPermission,
+    GrantProfile, Owner, OwnerId, Placement, ProviderId, SshPublicKeyMetadata,
 };
 use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, ProtectedStorePersistence, ProtectedValue,
@@ -25,12 +25,14 @@ use workload_secrets::{
 };
 mod audit;
 mod grants;
+mod metadata;
 mod profiles;
 mod provider_revocation;
 mod store_probe;
 
 pub use audit::EnvironmentLeaseAudit;
 pub use grants::EnvironmentGrants;
+use metadata::{persistence_from_proto, status_from_proto};
 
 use crate::control::v1::local_credential_authority_service_client::LocalCredentialAuthorityServiceClient;
 use crate::control::v1::{self, CredentialAuthenticationKind};
@@ -1189,6 +1191,7 @@ impl LocalCredentialControlClient {
             projection,
             platform,
             network_policy_allows_github,
+            network_policy_allowed_hosts,
             boot_secrets,
         } = selection;
         if local_profile.as_ref().is_some_and(|binding| {
@@ -1219,6 +1222,7 @@ impl LocalCredentialControlClient {
                     profile_revision: binding.profile_revision,
                 }),
                 network_policy_allows_github: Some(network_policy_allows_github),
+                network_policy_allowed_hosts: network_policy_allowed_hosts.into_iter().collect(),
             })
             .await?
             .into_inner();
@@ -1531,32 +1535,6 @@ fn auth_kind_from_proto(value: i32) -> Result<CredentialAuthKind, Status> {
         Ok(CredentialAuthenticationKind::SshKey) => Ok(CredentialAuthKind::SshKey),
         Ok(CredentialAuthenticationKind::ClaudeSignIn) => Ok(CredentialAuthKind::ClaudeSignIn),
         Ok(CredentialAuthenticationKind::Unspecified) | Err(_) => Err(Status::data_loss(
-            "local credential authority returned invalid metadata",
-        )),
-    }
-}
-
-fn status_from_proto(value: i32) -> Result<CredentialStatus, Status> {
-    match v1::CredentialStatus::try_from(value) {
-        Ok(v1::CredentialStatus::Active) => Ok(CredentialStatus::Active),
-        Ok(v1::CredentialStatus::Expired) => Ok(CredentialStatus::Expired),
-        Ok(v1::CredentialStatus::RefreshFailed) => Ok(CredentialStatus::RefreshFailed),
-        Ok(v1::CredentialStatus::Revoked) => Ok(CredentialStatus::Revoked),
-        Ok(v1::CredentialStatus::Unspecified) | Err(_) => Err(Status::data_loss(
-            "local credential authority returned invalid metadata",
-        )),
-    }
-}
-
-fn persistence_from_proto(value: i32) -> Result<ProtectedStorePersistence, Status> {
-    match v1::ProtectedStorePersistence::try_from(value) {
-        Ok(v1::ProtectedStorePersistence::OperatingSystem) => {
-            Ok(ProtectedStorePersistence::OperatingSystem)
-        }
-        Ok(v1::ProtectedStorePersistence::ProcessLifetime) => {
-            Ok(ProtectedStorePersistence::ProcessLifetime)
-        }
-        Ok(v1::ProtectedStorePersistence::Unspecified) | Err(_) => Err(Status::data_loss(
             "local credential authority returned invalid metadata",
         )),
     }

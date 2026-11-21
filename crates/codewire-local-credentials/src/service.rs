@@ -434,6 +434,7 @@ struct BrokerEnsureRequest {
     platform: Option<crate::PlatformCredentialBinding>,
     local_profile: Option<EnvironmentAccessBinding>,
     network_policy_allows_github: bool,
+    network_policy_allowed_hosts: BTreeSet<String>,
     boot_secrets: crate::BrokerBootSecrets,
 }
 
@@ -660,6 +661,7 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
             http_providers,
             platform_delegated,
             network_policy_allows_github: request.network_policy_allows_github,
+            network_policy_allowed_hosts: request.network_policy_allowed_hosts,
         };
         config
             .validate()
@@ -674,10 +676,11 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
                 if *existing.shutdown.borrow() {
                     return Err(Status::unavailable("local credential broker is draining"));
                 }
-                // The network policy's answer for GitHub is the one part of
-                // a selection that may change while a generation runs.
+                // The network policy's answers are the one part of a
+                // selection that may change while a generation runs.
                 let under_this_policy = LocalBrokerProcessConfig {
                     network_policy_allows_github: config.network_policy_allows_github,
+                    network_policy_allowed_hosts: config.network_policy_allowed_hosts.clone(),
                     ..existing.config.clone()
                 };
                 if under_this_policy != config
@@ -1689,8 +1692,15 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
                     .map(crate::PlatformCredentialBinding::from_proto)
                     .transpose()?,
                 // A supervisor older than protocol 20 does not say; it is
-                // served as it was before the rule existed.
+                // served as it was before the rule existed. This answer is
+                // the loopback GitHub route's alone: a front-door forward to
+                // GitHub's hosts follows `network_policy_allowed_hosts`, where
+                // an absent answer refuses (#5555).
                 network_policy_allows_github: request.network_policy_allows_github.unwrap_or(true),
+                network_policy_allowed_hosts: request
+                    .network_policy_allowed_hosts
+                    .into_iter()
+                    .collect(),
                 boot_secrets: crate::BrokerBootSecrets::from_proto(request.boot_secrets)?,
             })
             .await?;
@@ -2091,6 +2101,7 @@ mod drain_tests {
             http_providers: BTreeSet::new(),
             platform_delegated: false,
             network_policy_allows_github: true,
+            network_policy_allowed_hosts: Default::default(),
         };
         manager.entries.lock().await.insert(
             environment_id.clone(),

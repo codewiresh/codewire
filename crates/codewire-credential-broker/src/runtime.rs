@@ -88,6 +88,7 @@ mod openai_serve;
 mod routed;
 pub(crate) use routed::FrontDoorSession;
 mod swap;
+mod untouched;
 pub(crate) mod upgrade;
 mod upstream;
 use upstream::map_upstream_error;
@@ -1032,6 +1033,13 @@ pub enum BrokerRequestError {
     /// The bound profile fills no credential for the requested slot.
     #[error("credential broker request names a slot the profile does not fill")]
     NotSelected,
+    /// An untouched forward to a host the network policy does not allow by
+    /// rule, or one this broker was given no answer for (#5555).
+    #[error("credential broker request is not allowed by the network policy")]
+    NameNotAllowed,
+    /// An untouched forward from a hosted broker, which never sends one.
+    #[error("credential broker request does not carry the selected credential")]
+    SelectedCredentialOnly,
 }
 
 impl BrokerRequestError {
@@ -1051,6 +1059,8 @@ impl BrokerRequestError {
                 Refusal::CredentialNeedsReconnect
             }
             Self::NotSelected => Refusal::NoCredentialSelected,
+            Self::NameNotAllowed => Refusal::NameNotAllowed,
+            Self::SelectedCredentialOnly => Refusal::SelectedCredentialOnly,
         }
     }
 }
@@ -1072,6 +1082,7 @@ pub struct OpenAiBroker<P, U> {
     placeholders: swap::PlaceholderCache,
     github_forced_attempts: forced_refresh::ForcedAttempts,
     network_policy_allows_github: bool,
+    untouched_forwards: untouched::UntouchedForwards,
     login_delivery: LoginDelivery,
 }
 
@@ -1342,6 +1353,7 @@ where
             placeholders: swap::PlaceholderCache::default(),
             github_forced_attempts: forced_refresh::ForcedAttempts::default(),
             network_policy_allows_github: true,
+            untouched_forwards: untouched::UntouchedForwards::default(),
             login_delivery: LoginDelivery::Real,
         })
     }

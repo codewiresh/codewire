@@ -1,7 +1,7 @@
 ---
 title: Credentials
 description: Connect Codex, add OpenAI and Anthropic keys, a Claude subscription token or sign-in, SSH keys and GitHub, then build the credential profile an environment uses.
-updated: 2026-11-17
+updated: 2026-11-20
 weight: 1
 aliases: ["/guides/credentials"]
 ---
@@ -128,6 +128,11 @@ while it is the default; make another profile the default first.
 In the dashboard, **Create Sandbox** has a credential profile picker, and a
 Sandbox's **Edit secrets and credentials** changes it later. The credentials
 page shows **Needs attention** when an identity needs reconnecting.
+
+A selected credential is used only for the requests that carry Codewire's
+placeholder for it. In a local VM, a request with your own key follows the
+network policy instead: untouched under `open`, refused under `locked` unless
+a rule allows the provider's host ([Egress policies](@/networking/egress.md)).
 
 ## Inspect, revoke, delete
 

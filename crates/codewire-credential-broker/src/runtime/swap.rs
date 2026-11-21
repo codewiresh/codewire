@@ -322,6 +322,7 @@ where
         pinned: Option<std::net::SocketAddr>,
         max_bytes: usize,
     ) -> Result<BrokerHttpResponse, BrokerRequestError> {
+        self.untouched_forward_allowed(&target, pinned.is_some())?;
         let response = timing::timed(
             Phase::Provider,
             self.upstream.execute(BrokerUpstreamRequest {

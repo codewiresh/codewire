@@ -339,3 +339,20 @@ async fn a_sockets_grant_lapses_on_a_refusal_another_credential_or_a_revocation(
         assert!(!broker.socket_grant_holds(&grant).await);
     }
 }
+
+/// #5555: a handshake that lacks this environment's placeholder opens no
+/// socket to a host the policy's answer doesn't name.
+#[tokio::test]
+async fn without_the_policys_answer_a_users_own_token_opens_no_socket() {
+    let recorded = signed_in();
+    let refused = recorded
+        .broker_without_answer()
+        .execute_front_door_upgrade(handshake(
+            MODEL_CALL,
+            Some("Bearer users-own-token".to_owned()),
+        ))
+        .await;
+    assert!(matches!(refused, Err(BrokerRequestError::NameNotAllowed)));
+    assert_eq!(recorded.leases(), 0);
+    assert!(recorded.outbound().is_empty());
+}

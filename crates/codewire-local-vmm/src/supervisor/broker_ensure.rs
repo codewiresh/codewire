@@ -22,6 +22,14 @@ fn authority_predates_network_policy_github() -> String {
     )
 }
 
+/// What a user reads when the running credential authority would forward an
+/// intercepting boot's requests past its network policy (#5555).
+fn authority_predates_bound_host_policy() -> String {
+    format!(
+        "this environment's network policy does not allow every host Codewire intercepts, which would be reached anyway: {OUTDATED_CREDENTIAL_SERVICE}"
+    )
+}
+
 pub(super) async fn ensure_credential_broker(
     request: CredentialBrokerEnsureRequest,
 ) -> Result<AuthorityBrokerRuntime, SupervisorError> {
@@ -56,6 +64,20 @@ pub(super) async fn ensure_credential_broker(
             authority_predates_network_policy_github(),
         ));
     }
+    if !authority_applies_bound_host_policy(
+        client.info().protocol_version,
+        !boot_secrets.is_empty(),
+        &request.network_policy_allowed_hosts,
+    ) {
+        // The same as above: an older authority's broker would forward an
+        // intercepted request past this policy, so it starts none.
+        let _ = client
+            .stop_environment_broker(&request.environment_id, None)
+            .await;
+        return Err(SupervisorError::NetworkPolicySelection(
+            authority_predates_bound_host_policy(),
+        ));
+    }
     client
         .ensure_environment_broker(
             &request.environment_id,
@@ -67,11 +89,81 @@ pub(super) async fn ensure_credential_broker(
                 projection: request.projection,
                 platform: request.platform,
                 network_policy_allows_github: request.network_policy_allows_github,
+                network_policy_allowed_hosts: request.network_policy_allowed_hosts,
                 boot_secrets,
             },
         )
         .await
         .map_err(credential_control_error)
+}
+
+/// The bound hosts `policy` allows by rule on 443: where a front-door request
+/// carrying none of the environment's placeholders may be forwarded untouched
+/// (#5555). A host the policy merely doesn't list is not allowed.
+pub(super) fn allowed_bound_hosts(
+    policy: &codewire_egress_policy::CompiledPolicy,
+) -> std::collections::BTreeSet<String> {
+    let allows = |host: &str| {
+        policy
+            .allows_by_rule(
+                host,
+                codewire_egress_front_door_bridge::INTERCEPT_PORT,
+                None,
+            )
+            .unwrap_or(false)
+    };
+    let mut allowed: std::collections::BTreeSet<String> =
+        codewire_egress_front_door_bridge::RouteTable::bindable_hosts()
+            .into_iter()
+            .filter(|host| allows(host))
+            .collect();
+    allowed.extend(
+        routed_wildcards()
+            .filter(|(_, suffix)| {
+                // Routed names can't be listed ahead, so the question is whether a
+                // rule covers every name under the suffix. A fresh random label each
+                // time means a rule for one name, whichever, never answers yes.
+                allows(&format!("{}.{suffix}", random_label()))
+            })
+            .map(|(wildcard, _)| wildcard),
+    );
+    allowed
+}
+
+/// Each routed suffix's `*.` entry, and the suffix.
+fn routed_wildcards() -> impl Iterator<Item = (String, &'static str)> {
+    codewire_access::ROUTED_SUFFIXES
+        .into_iter()
+        .map(|suffix| (format!("*.{suffix}"), suffix))
+}
+
+/// A DNS label no policy can name ahead: 32 random hex characters.
+fn random_label() -> String {
+    use std::hash::{BuildHasher as _, Hasher as _};
+    let half = || {
+        std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish()
+    };
+    format!("cwprobe{:016x}{:016x}", half(), half())
+}
+
+/// Whether an authority at `authority_protocol` may start an intercepting
+/// boot's broker under these answers (#5555). One from before the feature
+/// forwards every front-door request carrying no placeholder, which is only
+/// right when the policy allows every host the boot may bind and every name
+/// under each routed suffix.
+pub(super) fn authority_applies_bound_host_policy(
+    authority_protocol: u32,
+    intercepting: bool,
+    allowed_hosts: &std::collections::BTreeSet<String>,
+) -> bool {
+    !intercepting
+        || AuthorityFeature::NetworkPolicyHosts.served_by(authority_protocol)
+        || (codewire_egress_front_door_bridge::RouteTable::bindable_hosts()
+            .iter()
+            .all(|host| allowed_hosts.contains(host))
+            && routed_wildcards().all(|(wildcard, _)| allowed_hosts.contains(&wildcard)))
 }
 
 #[cfg(test)]

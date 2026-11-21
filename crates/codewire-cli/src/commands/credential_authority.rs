@@ -637,6 +637,9 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
         if config.network_policy_allows_github {
             command.arg("--network-policy-allows-github");
         }
+        for host in &config.network_policy_allowed_hosts {
+            command.arg("--network-policy-allows-host").arg(host);
+        }
         command.args(lookup.arguments());
         if secrets_fd.is_some() {
             command

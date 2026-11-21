@@ -335,6 +335,7 @@ where
         } = provider_request
             .into_forwarded()
             .map_err(map_adapter_error)?;
+        self.untouched_forward_allowed(&target, false)?;
         let upgraded = timing::timed(
             Phase::Provider,
             self.upstream.upgrade(BrokerUpstreamRequest {

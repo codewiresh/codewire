@@ -34,6 +34,19 @@ fn a_refusal_the_broker_names_wins_over_its_reason() {
         from_failure(Reason::Denied as i32, Wire::CredentialUnavailable as i32),
         Some(Refusal::CredentialUnavailable)
     );
+    // #5555: the hosted refusal arrives as itself, never as the policy's.
+    for (wire, refusal) in [
+        (Wire::NameNotAllowed, Refusal::NameNotAllowed),
+        (
+            Wire::SelectedCredentialOnly,
+            Refusal::SelectedCredentialOnly,
+        ),
+    ] {
+        assert_eq!(
+            from_failure(Reason::Denied as i32, wire as i32),
+            Some(refusal)
+        );
+    }
 }
 
 #[test]

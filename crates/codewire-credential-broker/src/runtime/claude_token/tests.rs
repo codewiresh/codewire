@@ -197,7 +197,8 @@ impl Harness {
                 reply,
             },
         )
-        .unwrap();
+        .unwrap()
+        .with_network_policy_allowing_hosts(["platform.claude.com"]);
         Self {
             sign_in,
             outbound,
@@ -1114,4 +1115,50 @@ async fn a_codewire_value_in_the_path_query_or_form_is_refused() {
     }
     assert!(harness.outbound().is_empty());
     assert_eq!(harness.leases(), 0);
+}
+
+/// #5555: the user's own request to Claude's token host is sent only where
+/// the policy allows that host by rule. Without the answer it is refused in
+/// the token endpoint's own shape, never as `invalid_grant`, which would end
+/// the user's login.
+#[tokio::test]
+async fn without_the_policys_answer_the_users_own_request_is_not_sent() {
+    let Harness {
+        sign_in,
+        outbound,
+        broker,
+    } = Harness::new(SignIn::new(material(FRESH)), Ok((StatusCode::OK, "{}")));
+    for hosted in [false, true] {
+        let broker = OpenAiBroker::new(
+            Arc::clone(&sign_in),
+            Upstream {
+                outbound: Arc::clone(&outbound),
+                reply: Ok((StatusCode::OK, "{}")),
+            },
+        )
+        .unwrap();
+        let broker = if hosted {
+            broker.with_untouched_forwards_refused()
+        } else {
+            broker
+        };
+        let harness = Harness {
+            sign_in: Arc::clone(&sign_in),
+            outbound: Arc::clone(&outbound),
+            broker,
+        };
+        let mut request = host_request("GET", "/api/oauth/profile", "", b"");
+        request.headers.push(v1::CredentialHttpHeader {
+            name: "authorization".into(),
+            value: b"Bearer synthetic-users-own-access".to_vec(),
+        });
+        assert_eq!(
+            harness.front_door(request).await,
+            (StatusCode::FORBIDDEN, json!({ "error": "invalid_request" })),
+            "hosted: {hosted}"
+        );
+    }
+    drop(broker);
+    assert!(outbound.lock().unwrap().is_empty());
+    assert_eq!(sign_in.leases.load(Ordering::Relaxed), 0);
 }

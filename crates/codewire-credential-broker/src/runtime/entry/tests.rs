@@ -233,8 +233,28 @@ enum LeasePlan {
     RefreshedJustNow,
 }
 
+/// Every host a route table may bind, and every name under the routed
+/// suffix: what a policy allowing them all gives a broker at launch, so an
+/// untouched forward is sent (#5555).
+pub(super) const EVERY_BOUND_HOST: [&str; 7] = [
+    "*.chatgpt.com",
+    "api.anthropic.com",
+    "platform.claude.com",
+    "api.openai.com",
+    "chatgpt.com",
+    "github.com",
+    "api.github.com",
+];
+
 impl Recorded {
+    /// A broker whose environment's policy allows every bound host by rule.
     fn broker(&self) -> OpenAiBroker<Authority, Upstream> {
+        self.broker_without_answer()
+            .with_network_policy_allowing_hosts(EVERY_BOUND_HOST)
+    }
+
+    /// A broker started without the policy's answer for any host.
+    fn broker_without_answer(&self) -> OpenAiBroker<Authority, Upstream> {
         OpenAiBroker::new(
             Authority {
                 leases: Arc::clone(&self.leases),
@@ -2303,6 +2323,117 @@ async fn beside_the_front_door_a_claude_lease_without_a_placeholder_delivers_not
 
 mod github;
 mod upgrade;
+
+/// #5555: a front-door request carrying none of this environment's
+/// placeholders goes untouched only to a host the policy allows by rule. A
+/// broker started without that answer (`locked`, or any policy with no rule
+/// for the host) refuses the user's own key, no credential and another
+/// environment's placeholder alike, as `name_not_allowed`, with nothing
+/// dialled. The first two take no lease; the third needs one to tell, and
+/// drops it unused.
+#[tokio::test]
+async fn without_the_policys_answer_nothing_without_our_placeholder_is_sent() {
+    for (credential, leases) in [
+        (vec![("x-api-key", "sk-ant-users-own-key".to_owned())], 0),
+        (Vec::new(), 0),
+        (vec![("authorization", format!("Bearer {THEIRS}"))], 1),
+    ] {
+        for allowed in [&[][..], &["chatgpt.com"][..]] {
+            let recorded = Recorded {
+                placeholder: Some(OURS),
+                ..Recorded::default()
+            };
+            let broker = recorded
+                .broker_without_answer()
+                .with_network_policy_allowing_hosts(allowed);
+            let refused = broker
+                .execute_front_door(anthropic("api.anthropic.com", &credential))
+                .await;
+            assert!(
+                matches!(refused, Err(BrokerRequestError::NameNotAllowed)),
+                "{credential:?} {allowed:?}"
+            );
+            assert_eq!(recorded.leases(), leases, "{credential:?}");
+            assert!(recorded.outbound().is_empty(), "{credential:?}");
+        }
+    }
+    for credential in [Some("Bearer users-own-token".to_owned()), None] {
+        let recorded = Recorded {
+            placeholder: Some(OURS),
+            codex_sign_in: true,
+            ..Recorded::default()
+        };
+        let refused = recorded
+            .broker_without_answer()
+            .with_network_policy_allowing_hosts(["api.anthropic.com"])
+            .execute_front_door(codex("GET", "/backend-api/wham/usage", credential.clone()))
+            .await;
+        assert!(
+            matches!(refused, Err(BrokerRequestError::NameNotAllowed)),
+            "{credential:?}"
+        );
+        assert_eq!(recorded.leases(), 0);
+        assert!(recorded.outbound().is_empty());
+    }
+}
+
+/// #5555: the policy's answer never stands between this environment's
+/// placeholder and its own route: with no answer at all, ours is served.
+#[tokio::test]
+async fn our_placeholder_is_served_without_the_policys_answer() {
+    let recorded = Recorded {
+        placeholder: Some(OURS),
+        ..Recorded::default()
+    };
+    for broker in [
+        recorded.broker_without_answer(),
+        recorded
+            .broker_without_answer()
+            .with_untouched_forwards_refused(),
+    ] {
+        let (status, _, _) = collect(
+            broker
+                .execute_front_door(anthropic(
+                    "api.anthropic.com",
+                    &[("x-api-key", OURS.to_owned())],
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    assert_eq!(recorded.outbound().len(), 2);
+}
+
+/// #5555: a hosted broker sends nothing that lacks the Sandbox's own
+/// placeholder, whatever it is told about the policy, and says so with its
+/// own refusal rather than blaming the policy.
+#[tokio::test]
+async fn a_hosted_broker_refuses_every_request_without_our_placeholder() {
+    for credential in [
+        vec![("x-api-key", "sk-ant-users-own-key".to_owned())],
+        Vec::new(),
+        vec![("authorization", format!("Bearer {THEIRS}"))],
+    ] {
+        let recorded = Recorded {
+            placeholder: Some(OURS),
+            ..Recorded::default()
+        };
+        let broker = recorded
+            .broker_without_answer()
+            .with_network_policy_allowing_hosts(EVERY_BOUND_HOST)
+            .with_untouched_forwards_refused();
+        let refused = broker
+            .execute_front_door(anthropic("api.anthropic.com", &credential))
+            .await;
+        assert!(
+            matches!(refused, Err(BrokerRequestError::SelectedCredentialOnly)),
+            "{credential:?}"
+        );
+        assert!(recorded.outbound().is_empty(), "{credential:?}");
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Codex's routed origin (#3999 change 11)

@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 26;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 27;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -75,6 +75,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         26,
         "a credential child sends a refresh's bundle in Commit and the authority stages it, so the child only reads its store (#5539)",
     ),
+    (
+        27,
+        "EnsureEnvironmentBroker carries the bound hosts the network policy allows by rule, and the broker forwards a request without a placeholder only to one of them (#5555)",
+    ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 
@@ -118,10 +122,15 @@ pub enum AuthorityFeature {
     /// authority refuses the second name, and accepts a new name starting
     /// with a provider id and `/`.
     NamesPerProvider,
+    /// `EnsureEnvironmentBroker.network_policy_allowed_hosts`: the broker
+    /// it starts forwards a front-door request carrying no placeholder only
+    /// to a host the policy allows by rule (#5555). An older authority
+    /// ignores the field and forwards every such request.
+    NetworkPolicyHosts,
 }
 
 impl AuthorityFeature {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::PlatformGithub,
         Self::ClaudeSignIn,
         Self::DefaultProfile,
@@ -132,6 +141,7 @@ impl AuthorityFeature {
         Self::StoreProbe,
         Self::ProviderRevocation,
         Self::NamesPerProvider,
+        Self::NetworkPolicyHosts,
     ];
 
     /// The protocol that introduced it.
@@ -147,6 +157,7 @@ impl AuthorityFeature {
             Self::StoreProbe => 23,
             Self::ProviderRevocation => 24,
             Self::NamesPerProvider => 25,
+            Self::NetworkPolicyHosts => 27,
         }
     }
 

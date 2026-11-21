@@ -61,6 +61,7 @@ pub(crate) fn from_failure(reason: i32, refusal: i32) -> Option<Refusal> {
         Ok(Wire::Busy) => Refusal::Busy,
         Ok(Wire::UpstreamFailed) => Refusal::UpstreamFailed(UpstreamFailure::Failed),
         Ok(Wire::NameNotAllowed) => Refusal::NameNotAllowed,
+        Ok(Wire::SelectedCredentialOnly) => Refusal::SelectedCredentialOnly,
         Ok(Wire::Unavailable) | Err(_) => Refusal::Unavailable,
     })
 }

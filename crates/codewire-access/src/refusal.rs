@@ -6,6 +6,8 @@
 //! never carries a label, an id or anything from the request or the
 //! provider's answer, so nothing here takes one.
 
+use std::borrow::Cow;
+
 /// The response header that carries [`Refusal::reason`].
 pub const REFUSAL_HEADER: &str = "codewire-refusal";
 
@@ -26,6 +28,9 @@ pub enum Refusal {
     Busy,
     UpstreamFailed(UpstreamFailure),
     NameNotAllowed,
+    /// A hosted Sandbox's request that carries none of its placeholders,
+    /// refused whatever the network policy (#5555).
+    SelectedCredentialOnly,
     Unavailable,
     /// An older broker's refusal that carries no reason. It keeps a
     /// denial's 403, so an agent doesn't retry it.
@@ -112,6 +117,7 @@ impl Refusal {
             Self::Busy => "busy",
             Self::UpstreamFailed(_) => "upstream_failed",
             Self::NameNotAllowed => "name_not_allowed",
+            Self::SelectedCredentialOnly => "selected_credential_only",
             Self::Unavailable => "unavailable",
             Self::Denied => "denied",
         }
@@ -137,6 +143,7 @@ impl Refusal {
             | Self::RouteNotServed
             | Self::RequestNotForwarded(Unforwarded::Refused)
             | Self::NameNotAllowed
+            | Self::SelectedCredentialOnly
             | Self::Denied => 403,
             Self::CredentialUnavailable | Self::Busy | Self::Unavailable => 503,
             Self::CredentialConflict | Self::RequestNotForwarded(Unforwarded::Malformed) => 400,
@@ -162,15 +169,15 @@ impl Refusal {
         let (sentence, fix) = match self {
             Self::CredentialRevoked => (
                 format!("{credential} this environment uses was revoked."),
-                Some(RECONNECT_FIX),
+                Some(Cow::Borrowed(RECONNECT_FIX)),
             ),
             Self::CredentialExpired => (
                 format!("{credential} this environment uses has expired."),
-                Some(RECONNECT_FIX),
+                Some(Cow::Borrowed(RECONNECT_FIX)),
             ),
             Self::CredentialNeedsReconnect => (
                 format!("{credential} this environment uses needs reconnecting."),
-                Some(RECONNECT_FIX),
+                Some(Cow::Borrowed(RECONNECT_FIX)),
             ),
             Self::NoCredentialSelected => (
                 match provider {
@@ -180,7 +187,7 @@ impl Refusal {
                     ),
                     None => "this environment's profile no longer has this credential.".to_owned(),
                 },
-                Some(PROFILE_FIX),
+                Some(Cow::Borrowed(PROFILE_FIX)),
             ),
             Self::CredentialUnavailable => {
                 (format!("{credential} can't be used right now; try again."), None)
@@ -223,6 +230,19 @@ impl Refusal {
             ),
             Self::NameNotAllowed => (
                 format!("this environment's network policy doesn't allow this request{to_host}."),
+                Some(Cow::Owned(format!(
+                    "Fix: to send it, select a network policy with a rule that allows {} on port 443.",
+                    allowing_rule(host)
+                ))),
+            ),
+            Self::SelectedCredentialOnly => (
+                match host {
+                    Some(host) => format!(
+                        "in a hosted Sandbox, requests to {host} must carry the Sandbox's Codewire credential."
+                    ),
+                    None => "in a hosted Sandbox, these requests must carry the Sandbox's Codewire credential."
+                        .to_owned(),
+                },
                 None,
             ),
             Self::Unavailable => (
@@ -237,6 +257,19 @@ impl Refusal {
             Some(fix) => format!("Codewire: {sentence}\n{fix}\n"),
             None => format!("Codewire: {sentence}\n"),
         }
+    }
+}
+
+/// The rule a policy needs for an own-key request to `host`: the host itself,
+/// or for a routed origin every name under its suffix, since a rule for one
+/// routed name doesn't count yet (#4931).
+fn allowing_rule(host: Option<&str>) -> String {
+    match host {
+        Some(host) => match crate::routed_suffix(host) {
+            Some(suffix) => format!("*.{suffix}"),
+            None => host.to_owned(),
+        },
+        None => "this host".to_owned(),
     }
 }
 

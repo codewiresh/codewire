@@ -82,6 +82,7 @@ async fn platform_generation_reuses_only_the_exact_owner_binding() {
         http_providers: BTreeSet::new(),
         platform_delegated: true,
         network_policy_allows_github: true,
+        network_policy_allowed_hosts: Default::default(),
     };
     let selected = binding(directory.path().join("explicit-platform-config"));
     let (finish, completed) = tokio::sync::oneshot::channel();
@@ -110,6 +111,7 @@ async fn platform_generation_reuses_only_the_exact_owner_binding() {
         platform: Some(platform),
         local_profile: None,
         network_policy_allows_github: true,
+        network_policy_allowed_hosts: Default::default(),
         boot_secrets: Default::default(),
     };
     assert!(
@@ -170,9 +172,8 @@ async fn platform_generation_reuses_only_the_exact_owner_binding() {
     assert!(manager.entries.lock().await.is_empty());
 }
 
-/// Records what each launch was told about the network policy, and never
-/// starts a child.
-struct RefusedSpawns(Arc<std::sync::Mutex<Vec<bool>>>);
+/// Records what each launch was told, and never starts a child.
+struct RefusedSpawns(Arc<std::sync::Mutex<Vec<LocalBrokerProcessConfig>>>);
 
 impl LocalBrokerProcessSpawner for RefusedSpawns {
     fn runner_protocol(&self) -> u32 {
@@ -186,103 +187,170 @@ impl LocalBrokerProcessSpawner for RefusedSpawns {
         _: std::os::unix::net::UnixStream,
         _: &crate::BrokerBootSecrets,
     ) -> Result<tokio::process::Child, crate::LocalBrokerSpawnError> {
-        self.0
-            .lock()
-            .unwrap()
-            .push(config.network_policy_allows_github);
+        self.0.lock().unwrap().push(config.clone());
         Err(crate::LocalBrokerSpawnError::InvalidConfiguration)
     }
 }
 
-/// #4926: the network policy's answer for GitHub is the one part of a
-/// selection that may change within a generation. The broker that served
-/// under the earlier answer is stopped before its replacement is launched,
-/// so a replacement that cannot start leaves none serving under the earlier
+/// A manager holding one running broker for generation 7, started under
+/// `config`, whose stop is recorded, and the launches it makes after.
+struct RunningBroker {
+    manager: BrokerProcessManager<EphemeralProtectedStore>,
+    id: EnvironmentId,
+    config: LocalBrokerProcessConfig,
+    selected: crate::PlatformCredentialBinding,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+    launches: Arc<std::sync::Mutex<Vec<LocalBrokerProcessConfig>>>,
+}
+
+impl RunningBroker {
+    async fn new(directory: &std::path::Path) -> Self {
+        let authority = Arc::new(
+            LocalCredentialAuthority::open(
+                &directory.join("authority"),
+                EphemeralProtectedStore::default(),
+                builtin_provider_catalog(),
+            )
+            .unwrap(),
+        );
+        let launches = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let manager = BrokerProcessManager::new(
+            authority,
+            Some(Arc::new(RefusedSpawns(Arc::clone(&launches)))),
+            Arc::new(BrokerLeaseAuditLog::default()),
+            LocalSshOperationRuntime::new(None),
+            Some(Arc::new(NeverConnect)),
+            Arc::new(crate::broker_log::BrokerLog::disabled()),
+        );
+        let id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
+        let config = LocalBrokerProcessConfig {
+            environment_id: id.clone(),
+            environment_generation: 7,
+            environment_name: "synthetic".into(),
+            runner_socket: directory.join(format!("{id}.sock")),
+            http_providers: BTreeSet::new(),
+            platform_delegated: true,
+            network_policy_allows_github: true,
+            network_policy_allowed_hosts: ["api.anthropic.com".to_owned()].into(),
+        };
+        let selected = binding(directory.join("explicit-platform-config"));
+        let (shutdown, mut stopping) = watch::channel(false);
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::clone(&stopped);
+        manager.entries.lock().await.insert(
+            id.clone(),
+            BrokerProcessEntry {
+                generation: 7,
+                config: config.clone(),
+                projection: None,
+                platform: Some(selected.clone()),
+                local_profile: None,
+                shutdown,
+                state: watch::channel(BrokerProcessState::Running).1,
+                task: tokio::spawn(async move {
+                    let _ = stopping.changed().await;
+                    observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                }),
+                drain_failed: false,
+            },
+        );
+        Self {
+            manager,
+            id,
+            config,
+            selected,
+            stopped,
+            launches,
+        }
+    }
+
+    fn request(&self, allows_github: bool, allowed_hosts: &[&str]) -> BrokerEnsureRequest {
+        BrokerEnsureRequest {
+            environment_id: self.id.clone(),
+            environment_generation: 7,
+            environment_name: self.config.environment_name.clone(),
+            runner_socket: self.config.runner_socket.clone(),
+            projection: None,
+            platform: Some(self.selected.clone()),
+            local_profile: None,
+            network_policy_allows_github: allows_github,
+            network_policy_allowed_hosts: allowed_hosts
+                .iter()
+                .map(|host| (*host).to_owned())
+                .collect(),
+            boot_secrets: Default::default(),
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn launches(&self) -> Vec<LocalBrokerProcessConfig> {
+        self.launches.lock().unwrap().clone()
+    }
+}
+
+/// #4926: the network policy's answer for GitHub is one part of a selection
+/// that may change within a generation. The broker that served under the
+/// earlier answer is stopped before its replacement is launched, so a
+/// replacement that cannot start leaves none serving under the earlier
 /// answer.
 #[tokio::test(start_paused = true)]
 async fn a_network_policy_change_stops_the_broker_before_it_launches_another() {
     let directory = tempfile::tempdir().unwrap();
-    let authority = Arc::new(
-        LocalCredentialAuthority::open(
-            &directory.path().join("authority"),
-            EphemeralProtectedStore::default(),
-            builtin_provider_catalog(),
-        )
-        .unwrap(),
-    );
-    let launches = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let manager = BrokerProcessManager::new(
-        authority,
-        Some(Arc::new(RefusedSpawns(Arc::clone(&launches)))),
-        Arc::new(BrokerLeaseAuditLog::default()),
-        LocalSshOperationRuntime::new(None),
-        Some(Arc::new(NeverConnect)),
-        Arc::new(crate::broker_log::BrokerLog::disabled()),
-    );
-    let id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
-    let config = LocalBrokerProcessConfig {
-        environment_id: id.clone(),
-        environment_generation: 7,
-        environment_name: "synthetic".into(),
-        runner_socket: directory.path().join(format!("{id}.sock")),
-        http_providers: BTreeSet::new(),
-        platform_delegated: true,
-        network_policy_allows_github: true,
-    };
-    let selected = binding(directory.path().join("explicit-platform-config"));
-    let (shutdown, mut stopping) = watch::channel(false);
-    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let observed = Arc::clone(&stopped);
-    manager.entries.lock().await.insert(
-        id.clone(),
-        BrokerProcessEntry {
-            generation: 7,
-            config: config.clone(),
-            projection: None,
-            platform: Some(selected.clone()),
-            local_profile: None,
-            shutdown,
-            state: watch::channel(BrokerProcessState::Running).1,
-            task: tokio::spawn(async move {
-                let _ = stopping.changed().await;
-                observed.store(true, std::sync::atomic::Ordering::SeqCst);
-            }),
-            drain_failed: false,
-        },
-    );
-    let request = |allows| BrokerEnsureRequest {
-        environment_id: id.clone(),
-        environment_generation: 7,
-        environment_name: config.environment_name.clone(),
-        runner_socket: config.runner_socket.clone(),
-        projection: None,
-        platform: Some(selected.clone()),
-        local_profile: None,
-        network_policy_allows_github: allows,
-        boot_secrets: Default::default(),
-    };
+    let running = RunningBroker::new(directory.path()).await;
 
     // The same answer keeps the running broker.
-    assert!(manager.ensure(request(true)).await.unwrap().running);
-    assert!(!stopped.load(std::sync::atomic::Ordering::SeqCst));
-    assert!(launches.lock().unwrap().is_empty());
+    let same = running.request(true, &["api.anthropic.com"]);
+    assert!(running.manager.ensure(same).await.unwrap().running);
+    assert!(!running.stopped());
+    assert!(running.launches().is_empty());
 
     // The policy now refuses GitHub: the old broker is gone, and every
     // launch since was told the new answer. None started, so none runs.
-    let replaced = manager.ensure(request(false)).await.unwrap();
+    let refused = running.request(false, &["api.anthropic.com"]);
+    let replaced = running.manager.ensure(refused).await.unwrap();
     assert!(!replaced.running);
-    assert!(stopped.load(std::sync::atomic::Ordering::SeqCst));
-    let told = launches.lock().unwrap().clone();
+    assert!(running.stopped());
+    let told = running.launches();
     assert!(
-        !told.is_empty() && told.iter().all(|allows| !allows),
+        !told.is_empty()
+            && told
+                .iter()
+                .all(|config| !config.network_policy_allows_github),
         "{told:?}"
     );
     assert!(
-        !manager.entries.lock().await[&id]
+        !running.manager.entries.lock().await[&running.id]
             .config
             .network_policy_allows_github
     );
-    manager.stop(&id, Some(7)).await.unwrap();
+    running.manager.stop(&running.id, Some(7)).await.unwrap();
+}
+
+/// #5555: the bound hosts the policy allows change with it too. An edit
+/// that removes the rule for a host stops the broker that would still
+/// forward to it, and every launch after is told the new hosts.
+#[tokio::test(start_paused = true)]
+async fn a_policy_edit_to_the_allowed_hosts_stops_the_broker_before_it_launches_another() {
+    let directory = tempfile::tempdir().unwrap();
+    let running = RunningBroker::new(directory.path()).await;
+
+    let edited = running.request(true, &["chatgpt.com"]);
+    let replaced = running.manager.ensure(edited).await.unwrap();
+    assert!(!replaced.running);
+    assert!(running.stopped());
+    let told = running.launches();
+    let expected: BTreeSet<String> = ["chatgpt.com".to_owned()].into();
+    assert!(
+        !told.is_empty()
+            && told
+                .iter()
+                .all(|config| config.network_policy_allowed_hosts == expected),
+        "{told:?}"
+    );
+    running.manager.stop(&running.id, Some(7)).await.unwrap();
 }
 
 #[test]

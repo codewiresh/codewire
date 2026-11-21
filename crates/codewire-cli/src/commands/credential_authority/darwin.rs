@@ -331,6 +331,9 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
         if config.network_policy_allows_github {
             command.arg("--network-policy-allows-github");
         }
+        for host in &config.network_policy_allowed_hosts {
+            command.arg("--network-policy-allows-host").arg(host);
+        }
         command.args(lookup.arguments());
         if secrets_fd.is_some() {
             command
@@ -587,6 +590,7 @@ mod tests {
             http_providers: [codewire_access::HttpProvider::OpenAiApiKey].into(),
             platform_delegated: false,
             network_policy_allows_github: false,
+            network_policy_allowed_hosts: Default::default(),
         };
         let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut child = LocalBrokerProcessSpawner::spawn(

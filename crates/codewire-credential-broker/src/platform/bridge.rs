@@ -762,8 +762,11 @@ where
         .await
         .map_err(|_| denied())??;
         epoch.ensure_live().map_err(bridge_status)?;
-        let broker =
-            OpenAiBroker::new(provider, self.state.upstream.clone()).map_err(|_| unavailable())?;
+        // A forward from here would leave from the platform, past the
+        // Sandbox's own policy and cw-egress, so none is sent (#5555).
+        let broker = OpenAiBroker::new(provider, self.state.upstream.clone())
+            .map_err(|_| unavailable())?
+            .with_untouched_forwards_refused();
         let broker = match &self.state.github_app_authorization {
             Some(owner) => broker.with_github_app_authorization_owner(owner.clone()),
             None => broker,

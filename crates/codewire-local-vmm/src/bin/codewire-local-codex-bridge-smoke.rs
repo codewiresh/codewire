@@ -2013,6 +2013,20 @@ function generalEgress(){
             // The spawner's answer when the environment's network policy
             // allows GitHub's hosts by rule, as the smoke's does (#4926).
             "--network-policy-allows-github".into(),
+            // Every bound host, which the smoke's policy allows by rule, in
+            // the order the supervisor's set yields them (#5555).
+            "--network-policy-allows-host".into(),
+            "api.anthropic.com".into(),
+            "--network-policy-allows-host".into(),
+            "api.github.com".into(),
+            "--network-policy-allows-host".into(),
+            "api.openai.com".into(),
+            "--network-policy-allows-host".into(),
+            "chatgpt.com".into(),
+            "--network-policy-allows-host".into(),
+            "github.com".into(),
+            "--network-policy-allows-host".into(),
+            "platform.claude.com".into(),
         ]
     }
 
@@ -4556,6 +4570,18 @@ process.stdout.write(JSON.stringify({before,http:httpCount,tls:tlsCount,stdout,e
                 "--http-provider",
                 "github-oauth",
                 "--network-policy-allows-github",
+                "--network-policy-allows-host",
+                "api.anthropic.com",
+                "--network-policy-allows-host",
+                "api.github.com",
+                "--network-policy-allows-host",
+                "api.openai.com",
+                "--network-policy-allows-host",
+                "chatgpt.com",
+                "--network-policy-allows-host",
+                "github.com",
+                "--network-policy-allows-host",
+                "platform.claude.com",
             ]
             .into_iter()
             .map(OsString::from)
@@ -4666,6 +4692,7 @@ process.stdout.write(JSON.stringify({before,http:httpCount,tls:tlsCount,stdout,e
             rejects(&reordered);
             rejects(&actual[..20]); // Missing selected GitHub provider.
             rejects(&actual[..22]); // Missing the network policy's GitHub answer.
+            rejects(&actual[..33]); // Missing an allowed host's answer.
             let mut additional = actual.clone();
             additional.extend(["--http-provider", "anthropic-api-key"].map(OsString::from));
             rejects(&additional);

@@ -1,5 +1,6 @@
 use std::sync::atomic::AtomicUsize;
 
+use super::broker_ensure::authority_applies_bound_host_policy;
 use super::*;
 use crate::artifact::{ArtifactArchitecture, ArtifactLock, ArtifactSpec};
 use crate::direct_share::DirectShareDiscriminator;
@@ -5949,6 +5950,126 @@ async fn the_credential_broker_is_told_whether_the_network_policy_allows_github(
             )
             .unwrap();
         assert_eq!(allows(&core), expected, "{name}");
+    }
+}
+
+/// #5555: an older authority's broker forwards every intercepted request
+/// carrying no placeholder, so an intercepting boot asks it for a broker only
+/// when the policy allows every host the boot may bind. A boot that doesn't
+/// intercept has no front door, and asks as before.
+#[test]
+fn an_authority_from_before_the_feature_starts_no_intercepting_broker_it_would_widen() {
+    let since = AuthorityFeature::NetworkPolicyHosts.since();
+    let hosts: std::collections::BTreeSet<String> =
+        codewire_egress_front_door_bridge::RouteTable::bindable_hosts()
+            .into_iter()
+            .collect();
+    let mut every = hosts.clone();
+    every.insert("*.chatgpt.com".to_owned());
+    let one: std::collections::BTreeSet<String> = ["api.anthropic.com".to_owned()].into();
+    // Every bound host but not every routed name is still too wide for it.
+    assert!(!authority_applies_bound_host_policy(
+        since - 1,
+        true,
+        &hosts
+    ));
+    assert!(authority_applies_bound_host_policy(since, true, &one));
+    assert!(authority_applies_bound_host_policy(
+        since,
+        true,
+        &Default::default()
+    ));
+    assert!(authority_applies_bound_host_policy(since - 1, true, &every));
+    assert!(authority_applies_bound_host_policy(
+        since - 1,
+        false,
+        &Default::default()
+    ));
+    assert!(!authority_applies_bound_host_policy(since - 1, true, &one));
+    assert!(!authority_applies_bound_host_policy(
+        since - 1,
+        true,
+        &Default::default()
+    ));
+}
+
+/// #5555: the credential broker is told, per bound host, whether the
+/// selected policy allows it by rule on 443, from the selection the egress
+/// broker enforces. `open` allows every one, `locked` none, and a stored
+/// policy exactly the hosts its rules name. Selecting another policy changes
+/// the answer the next broker is started with.
+#[tokio::test]
+async fn the_credential_broker_is_told_which_bound_hosts_the_network_policy_allows() {
+    let environment = project_environment_with_access();
+    let (_parent, core) = test_supervisor_core(environment.clone());
+    let allowed = |core: &SupervisorCore| {
+        core.credential_broker_request_for_environment(&environment, 1)
+            .unwrap()
+            .network_policy_allowed_hosts
+    };
+    let every: std::collections::BTreeSet<String> =
+        codewire_egress_front_door_bridge::RouteTable::bindable_hosts()
+            .into_iter()
+            .chain(["*.chatgpt.com".to_owned()])
+            .collect();
+    assert_eq!(
+        allowed(&core),
+        every,
+        "no selection is `open`, which covers every routed name too"
+    );
+    core.network_policies
+        .select(
+            environment.id,
+            Some(&crate::network_policy_store::PolicySelection::Locked),
+        )
+        .unwrap();
+    assert!(
+        allowed(&core).is_empty(),
+        "`locked` has no rule for any, and a policy edit drops the wildcard"
+    );
+
+    use crate::network_policy_store::{PolicyBase, PolicySelection, PolicySelector};
+    use codewire_egress_policy::reference::PolicyName;
+    use codewire_egress_policy::typed::{AllowRule, AllowTarget};
+    let rule = |target: &str| AllowRule::new(AllowTarget::parse(target).unwrap(), [443]).unwrap();
+    for (name, targets, expected) in [
+        (
+            "anthropic-only",
+            &["api.anthropic.com"][..],
+            &["api.anthropic.com"][..],
+        ),
+        (
+            "two-providers",
+            &["api.anthropic.com", "chatgpt.com", "example.com"][..],
+            &["api.anthropic.com", "chatgpt.com"][..],
+        ),
+        ("unrelated", &["example.com"][..], &[][..]),
+        // A rule for one routed name never answers for every name under the
+        // suffix, whichever name it is.
+        ("one-routed-name", &["abc.chatgpt.com"][..], &[][..]),
+        (
+            "routed-wildcard",
+            &["*.chatgpt.com"][..],
+            &["*.chatgpt.com"][..],
+        ),
+    ] {
+        let name = PolicyName::parse(name).unwrap();
+        core.network_policies
+            .create(
+                &name,
+                &PolicyBase::Locked,
+                targets.iter().map(|target| rule(target)).collect(),
+            )
+            .unwrap();
+        core.network_policies
+            .select(
+                environment.id,
+                Some(&PolicySelection::Stored(PolicySelector::Name(name.clone()))),
+            )
+            .unwrap();
+        let expected: std::collections::BTreeSet<String> =
+            expected.iter().map(|host| (*host).to_owned()).collect();
+        assert_eq!(allowed(&core), expected, "{name}");
     }
 }
 

@@ -96,7 +96,12 @@ fn table() -> Vec<(Refusal, u16, String)> {
         (
             Refusal::NameNotAllowed,
             403,
-            "Codewire: this environment's network policy doesn't allow this request to api.anthropic.com.\n".to_owned(),
+            "Codewire: this environment's network policy doesn't allow this request to api.anthropic.com.\nFix: to send it, select a network policy with a rule that allows api.anthropic.com on port 443.\n".to_owned(),
+        ),
+        (
+            Refusal::SelectedCredentialOnly,
+            403,
+            "Codewire: in a hosted Sandbox, requests to api.anthropic.com must carry the Sandbox's Codewire credential.\n".to_owned(),
         ),
         (
             Refusal::Unavailable,
@@ -145,6 +150,20 @@ fn without_a_bound_host_the_sentence_leaves_it_out() {
         Refusal::UpstreamFailed(UpstreamFailure::Failed).body(Some(RefusalProvider::OpenAi), None),
         "Codewire: OpenAI couldn't be reached; try again.\n"
     );
+    // A routed origin's own-key request needs a rule for every name under
+    // its suffix, so that is the rule the fix names.
+    assert_eq!(
+        Refusal::NameNotAllowed.body(None, Some("ab12.chatgpt.com")),
+        "Codewire: this environment's network policy doesn't allow this request to ab12.chatgpt.com.\nFix: to send it, select a network policy with a rule that allows *.chatgpt.com on port 443.\n"
+    );
+    assert_eq!(
+        Refusal::NameNotAllowed.body(None, None),
+        "Codewire: this environment's network policy doesn't allow this request.\nFix: to send it, select a network policy with a rule that allows this host on port 443.\n"
+    );
+    assert_eq!(
+        Refusal::SelectedCredentialOnly.body(None, None),
+        "Codewire: in a hosted Sandbox, these requests must carry the Sandbox's Codewire credential.\n"
+    );
 }
 
 #[test]
@@ -168,6 +187,7 @@ fn each_reason_is_one_of_the_specs_names() {
         "busy",
         "upstream_failed",
         "name_not_allowed",
+        "selected_credential_only",
         "unavailable",
         "denied",
     ] {

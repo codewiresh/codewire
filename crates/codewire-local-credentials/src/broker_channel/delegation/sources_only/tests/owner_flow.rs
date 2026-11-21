@@ -219,6 +219,7 @@ async fn owner_client_requires_exact_local_profile_and_delivers_both_application
             selection_sha256: context.selection_sha256,
         }),
         network_policy_allows_github: true,
+        network_policy_allowed_hosts: Default::default(),
         boot_secrets: Default::default(),
     };
     let socket = temp.path().join(format!("{environment_id}.sock"));

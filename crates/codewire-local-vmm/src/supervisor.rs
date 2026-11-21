@@ -216,6 +216,8 @@ struct CredentialBrokerEnsureRequest {
     platform: Option<codewire_local_credentials::PlatformCredentialBinding>,
     local_profile: Option<EnvironmentAccessBinding>,
     network_policy_allows_github: bool,
+    /// The bound hosts the network policy allows by rule on 443 (#5555).
+    network_policy_allowed_hosts: std::collections::BTreeSet<String>,
     enabled: bool,
 }
 
@@ -5866,6 +5868,12 @@ impl SupervisorCore {
         } else {
             environment.access_binding.clone()
         };
+        let policy = self
+            .network_policies
+            .environment_policy(environment.id)
+            .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?
+            .selected
+            .compile();
         Ok(CredentialBrokerEnsureRequest {
             authority: self.config.credential_authority_config(),
             environment_id: access_environment_id(environment.id)?,
@@ -5879,15 +5887,10 @@ impl SupervisorCore {
             platform,
             local_profile,
             // The credential broker never sees the network policy, so its
-            // answer for GitHub is decided here, from the same selection
-            // this environment's egress broker enforces (#4926).
-            network_policy_allows_github: self
-                .network_policies
-                .environment_policy(environment.id)
-                .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?
-                .selected
-                .compile()
-                .allows_managed_github(),
+            // answers are decided here, from the same selection this
+            // environment's egress broker enforces (#4926, #5555).
+            network_policy_allows_github: policy.allows_managed_github(),
+            network_policy_allowed_hosts: broker_ensure::allowed_bound_hosts(&policy),
         })
     }
 }

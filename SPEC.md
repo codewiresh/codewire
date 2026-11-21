@@ -545,11 +545,18 @@ such request, whatever the policy, until one can leave through the Sandbox's
 own egress. A refused request gets the same answer whether it carried no
 credential, the user's own key or another environment's placeholder, and
 nothing is dialled; one with no placeholder-shaped value is refused before
-any lease (#5555). Not yet built: today such a request to `api.anthropic.com`,
-`platform.claude.com` or `chatgpt.com`, or a WebSocket upgrade to one, is
-forwarded untouched whatever the policy. GitHub's hosts already send nothing
-unless the policy allows them (#4926). A deny rule on the host refuses
-everything to it. A
+any lease (#5555). Codex's routed workspace origins, one label under
+`chatgpt.com`, can't be named ahead, so for them the supervisor's answer is
+whether a rule covers every such name (`*.chatgpt.com`): it asks the policy
+about a fresh random name under the suffix each time, so a rule for one name
+never counts. An exact rule for one routed name doesn't let an untouched
+forward through until the egress broker's signed decision reaches the
+credential broker (#4931). A deny rule on a routed name refuses its
+connection at the egress broker, before any hand-off. The wildcard arrives
+with the per-host answer itself, at local authority protocol 27: an authority
+from before ignores the whole answer, so the supervisor starts no
+intercepting broker from one unless the policy allows every bound host and
+every routed suffix. A deny rule on the host refuses everything to it. A
 selected credential acts on the user's own account at its provider, which no
 network policy limits. The managed GitHub credential is the exception: it is
 served only where a rule allows the GitHub hosts, because its grant cannot be

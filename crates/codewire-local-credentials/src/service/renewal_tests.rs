@@ -308,6 +308,7 @@ impl Lifecycle {
             http_providers: BTreeSet::from([HttpProvider::CodexOAuth]),
             platform_delegated: false,
             network_policy_allows_github: true,
+            network_policy_allowed_hosts: Default::default(),
         };
         let (shutdown, shutdown_rx) = watch::channel(false);
         let (state, mut state_rx) = watch::channel(BrokerProcessState::Starting);
