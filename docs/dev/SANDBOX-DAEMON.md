@@ -529,6 +529,14 @@ Every hosted workspace binds at claim time, confidential ones included
   A missing or malformed address stops the daemon's start and names its
   variable. STUN is not run, and the direct UDP endpoints in the access
   grant must be address literals.
+
+  The egress stream carries the session version the daemon speaks. When
+  `cw-egress` does not accept it, no stream is opened: the daemon logs both
+  ranges, tries again after 30 s and then every 60 s, and, once it serves,
+  shows `egress_version_unsupported` in GetHealth as the `egress`
+  diagnostic until `cw-egress` admits a stream. Only an update of one of
+  them heals it, so `cw-egress` is rolled out before a daemon that speaks a
+  new version.
 - **Record before release.** As soon as the chain is bind-ready, while
   create and start still wait for Claim Ready, orchestration
   verifies the Claim → Sandbox → Pod UID chain, images and the workspace PVC

@@ -167,6 +167,16 @@ async fn a_version_refusal_opens_no_stream_and_names_both_ranges() {
                 && highest == *accepted.end()
                 && spoken == NETWORK_PROTOCOL_VERSION
     ));
+    // The loop reads the refusal from the error, to pace and report it.
+    assert_eq!(
+        PodConnector::version_refused(&refused),
+        Some(VersionRefused {
+            lowest: *accepted.start(),
+            highest: *accepted.end(),
+            spoken: NETWORK_PROTOCOL_VERSION,
+        })
+    );
+    assert_eq!(PodConnector::version_refused(&ConnectError::TimedOut), None);
     assert_eq!(
         refused.to_string(),
         format!(

@@ -16,6 +16,10 @@
 //! does not finish within its bound sends nothing: the stream is dropped, and
 //! the host, whose own wait is longer, records the sandbox as failed closed. A
 //! failed check is sent, and readiness is never reported for it.
+//!
+//! Two round ends are not healed by redialling: a session whose trust differs
+//! from the pinned one, and cw-egress refusing the daemon's session version.
+//! Those are paced apart from the loop's own backoff, and slower.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -48,14 +52,15 @@ pub struct HostedEgressConfig {
     /// How long a stream must carry packets to count as established, so the
     /// next redial goes at once and the backoff starts over.
     pub steady_after: Duration,
-    /// The first wait after a session whose trust differs from the pinned one
-    /// (#5006). Redialling cannot heal that, since only a restart of the
-    /// Sandbox does, so it is paced apart from, and slower than, the loop's
-    /// own backoff: a node that lost a Pod's CA is not met with a session and
-    /// an admission from every Sandbox every few seconds.
-    pub trust_changed_backoff: Duration,
-    /// The longest wait between such sessions.
-    pub trust_changed_max_backoff: Duration,
+    /// The first wait after a round that redialling cannot heal: a session
+    /// whose trust differs from the pinned one (#5006), which only a restart
+    /// of the Sandbox heals, or a session version cw-egress refuses, which
+    /// only an update does. It is paced apart from, and slower than, the
+    /// loop's own backoff: a node that lost a Pod's CA, or runs another
+    /// version, is not met with a dial from every Sandbox every few seconds.
+    pub unhealed_backoff: Duration,
+    /// The longest wait between such rounds.
+    pub unhealed_max_backoff: Duration,
 }
 
 impl HostedEgressConfig {
@@ -72,8 +77,8 @@ impl HostedEgressConfig {
         // `BROKER_REFUSAL_RETRY_INITIAL` and `BROKER_REFUSAL_RETRY_MAX` in
         // codewire-workspace-access (#5039), which a refusal that redialling
         // cannot heal shares.
-        trust_changed_backoff: Duration::from_secs(30),
-        trust_changed_max_backoff: Duration::from_secs(60),
+        unhealed_backoff: Duration::from_secs(30),
+        unhealed_max_backoff: Duration::from_secs(60),
     };
 }
 
@@ -94,6 +99,21 @@ pub trait EgressConnector {
     fn connect(
         &self,
     ) -> impl Future<Output = Result<GuestSession<Self::Stream>, Self::Error>> + Send;
+
+    /// The version refusal `error` is, if it is one: cw-egress answered the
+    /// hello with the session versions it accepts.
+    fn version_refused(_error: &Self::Error) -> Option<VersionRefused> {
+        None
+    }
+}
+
+/// cw-egress accepts session versions `lowest` to `highest`, and this daemon
+/// speaks `spoken`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VersionRefused {
+    pub lowest: u16,
+    pub highest: u16,
+    pub spoken: u16,
 }
 
 /// What the loop reports, for the daemon to act on and log.
@@ -125,6 +145,10 @@ pub enum RoundEnd {
     /// trusts. The stream is dropped before its self-check, never bridged or
     /// reported, and the loop redials (#5006).
     TrustChanged,
+    /// cw-egress refused the daemon's session version before it read the
+    /// token, so no stream was opened. Only an update of one of them heals
+    /// it (#4000).
+    VersionRefused(VersionRefused),
 }
 
 /// Run the egress loop for as long as the daemon runs. `self_check` runs the
@@ -146,20 +170,21 @@ where
     // The trust of the session that first became ready; `Some` once ready.
     let mut pinned = None;
     let mut backoff = config.first_backoff;
-    let mut trust_backoff = config.trust_changed_backoff;
+    let mut unhealed_backoff = config.unhealed_backoff;
     loop {
         let (end, bridged) = round(config, connector, &self_check, &tun, events, &mut pinned).await;
         events.round_ended(&end);
         match end {
-            RoundEnd::TrustChanged => {
-                drain(&tun, trust_backoff).await;
-                trust_backoff = trust_backoff
+            RoundEnd::TrustChanged | RoundEnd::VersionRefused(_) => {
+                drain(&tun, unhealed_backoff).await;
+                unhealed_backoff = unhealed_backoff
                     .saturating_mul(2)
-                    .min(config.trust_changed_max_backoff);
+                    .min(config.unhealed_max_backoff);
                 continue;
             }
-            // Only a session with the pinned trust reaches the bridge.
-            RoundEnd::Bridge(_) => trust_backoff = config.trust_changed_backoff,
+            // Only a session cw-egress admitted, with the pinned trust,
+            // reaches the bridge.
+            RoundEnd::Bridge(_) => unhealed_backoff = config.unhealed_backoff,
             _ => {}
         }
         if bridged >= config.steady_after {
@@ -209,7 +234,13 @@ where
         egress_trust,
     } = match draining(tun, connector.connect()).await {
         Ok(authenticated) => authenticated,
-        Err(error) => return (RoundEnd::Connect(with_sources(&error)), Duration::ZERO),
+        Err(error) => {
+            let end = match C::version_refused(&error) {
+                Some(refused) => RoundEnd::VersionRefused(refused),
+                None => RoundEnd::Connect(with_sources(&error)),
+            };
+            return (end, Duration::ZERO);
+        }
     };
     // Every session's trust is reported, except one that differs from the
     // trust pinned when the daemon first became ready: the daemon installed

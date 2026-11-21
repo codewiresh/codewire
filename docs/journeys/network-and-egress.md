@@ -1684,8 +1684,9 @@ Issue: #4000.
   - a version that never becomes ready moves no Sandbox, and no Sandbox
     loses its egress;
   - a daemon whose stream version `cw-egress` does not accept gets no
-    egress stream. `cw-egress` answers with the versions it accepts before
-    it reads the Sandbox's token, and the daemon's log names both ranges.
+    egress stream. `cw-egress` answers with the versions it accepts and
+    nothing else, before it reads the Sandbox's token, and the daemon's log
+    names both ranges.
     Only an update cures it, so the daemon tries again after 30 s and then
     every 60 s, never every few seconds. A daemon that was already serving
     shows the refusal in its health as `egress_version_unsupported`, with

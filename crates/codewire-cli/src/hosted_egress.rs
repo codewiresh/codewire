@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, anyhow};
 use codewire_daemon_proto::{CLUSTER_DNS_IP_ENV, EGRESS_TOKEN_PATH};
 use codewire_network_session::guest::hosted::{
-    EgressEvents, HostedEgressConfig, PodConnector, RoundEnd, run,
+    EgressEvents, HostedEgressConfig, PodConnector, RoundEnd, VersionRefused, run,
 };
 use codewire_network_session::guest::{InterfaceProbes, PROBE_TIMEOUT, self_check};
 use codewire_network_session::hosted::{HOSTED_TUN_NAME, pod_interface, routing};
@@ -120,9 +120,18 @@ pub fn prove_pod_interface() -> anyhow::Result<()> {
 /// self-check has passed, with that session's egress trust, which the daemon
 /// installs before it serves (#4001). The loop runs for as long as the daemon
 /// does.
-pub(crate) async fn start(settings: EgressSettings) -> anyhow::Result<EgressTrust> {
+///
+/// `refusal` is where the loop reports what redialling cannot heal, for
+/// GetHealth: cw-egress refusing this daemon's session version.
+pub(crate) async fn start(
+    settings: EgressSettings,
+    refusal: codewire_daemon::platform_refusal::PlatformRefusal,
+) -> anyhow::Result<EgressTrust> {
     let (ready, ready_rx) = oneshot::channel();
-    spawn(settings, LoggedEvents::new(Some(ready)))?;
+    spawn(
+        settings,
+        LoggedEvents::new(Some(ready)).reporting_to(refusal),
+    )?;
     tracing::info!("hosted daemon waiting for its first egress self-check");
     ready_rx
         .await
@@ -219,7 +228,12 @@ pub struct LoggedEvents {
     /// The current session's trust, reported before its self-check.
     trust: Option<EgressTrust>,
     rounds: RoundLog,
+    /// Where a version refusal is shown in GetHealth; None for the fixture.
+    refusal: Option<codewire_daemon::platform_refusal::PlatformRefusal>,
 }
+
+/// The health class of cw-egress refusing this daemon's session version.
+const EGRESS_VERSION_UNSUPPORTED: &str = "egress_version_unsupported";
 
 impl LoggedEvents {
     pub fn new(ready: Option<oneshot::Sender<EgressTrust>>) -> Self {
@@ -227,7 +241,15 @@ impl LoggedEvents {
             ready,
             trust: None,
             rounds: RoundLog::default(),
+            refusal: None,
         }
+    }
+
+    /// Also show a version refusal in GetHealth, through `refusal`, for as
+    /// long as it lasts.
+    fn reporting_to(mut self, refusal: codewire_daemon::platform_refusal::PlatformRefusal) -> Self {
+        self.refusal = Some(refusal);
+        self
     }
 }
 
@@ -238,6 +260,10 @@ impl EgressEvents for LoggedEvents {
             "egress stream authenticated"
         );
         self.trust = Some(trust.clone());
+        // cw-egress admitted this stream, so it accepts the daemon's version.
+        if let Some(refusal) = &self.refusal {
+            refusal.clear();
+        }
     }
 
     fn ready(&mut self) {
@@ -250,6 +276,9 @@ impl EgressEvents for LoggedEvents {
     }
 
     fn round_ended(&mut self, end: &RoundEnd) {
+        if let (RoundEnd::VersionRefused(refused), Some(refusal)) = (end, &self.refusal) {
+            refusal.refuse(EGRESS_VERSION_UNSUPPORTED, version_refusal(refused));
+        }
         let reason = round_reason(end);
         let Some(repeated) = self.rounds.admit(reason, Instant::now()) else {
             return;
@@ -275,6 +304,14 @@ impl EgressEvents for LoggedEvents {
                 repeated,
                 "egress stream dropped: its host's egress trust differs from the one installed"
             ),
+            RoundEnd::VersionRefused(refused) => tracing::error!(
+                class = EGRESS_VERSION_UNSUPPORTED,
+                accepted_lowest = refused.lowest,
+                accepted_highest = refused.highest,
+                spoken = refused.spoken,
+                repeated,
+                "egress stream not opened: cw-egress does not accept this daemon's session version; only an update heals it"
+            ),
             RoundEnd::Bridge(result) => {
                 tracing::warn!(?result, repeated, "egress stream ended; redialling")
             }
@@ -293,7 +330,16 @@ fn round_reason(end: &RoundEnd) -> &'static str {
         RoundEnd::SendSelfCheck => "send_self_check",
         RoundEnd::Bridge(_) => "bridge",
         RoundEnd::TrustChanged => "trust_changed",
+        RoundEnd::VersionRefused(_) => "version_refused",
     }
+}
+
+/// A version refusal's words for GetHealth, naming both ranges.
+fn version_refusal(refused: &VersionRefused) -> String {
+    format!(
+        "cw-egress accepts session versions {} to {}, and this daemon speaks {}",
+        refused.lowest, refused.highest, refused.spoken
+    )
 }
 
 /// How often a round's end is logged: a sandbox that stays unready retries
@@ -451,6 +497,37 @@ mod tests {
         // A later session reports nothing more.
         events.egress_trust(&EgressTrust::Ca(vec![0x30; 4]));
         events.ready();
+    }
+
+    /// The refusal stays in health across the rounds between, whatever they
+    /// end with, and clears only when cw-egress admits a stream.
+    #[test]
+    fn a_version_refusal_shows_in_health_until_a_stream_is_admitted() {
+        let health = codewire_daemon::platform_refusal::PlatformRefusal::default();
+        let mut events = LoggedEvents::new(None).reporting_to(health.egress());
+        let refused = RoundEnd::VersionRefused(VersionRefused {
+            lowest: 3,
+            highest: 4,
+            spoken: 2,
+        });
+        events.round_ended(&refused);
+        assert_eq!(health.egress().class(), Some(EGRESS_VERSION_UNSUPPORTED));
+        assert_eq!(
+            version_refusal(&VersionRefused {
+                lowest: 3,
+                highest: 4,
+                spoken: 2,
+            }),
+            "cw-egress accepts session versions 3 to 4, and this daemon speaks 2"
+        );
+        // The tailnet's own refusal is another source: neither clears the other.
+        assert_eq!(health.class(), None);
+        events.round_ended(&RoundEnd::Connect("dialling cw-egress failed".to_owned()));
+        events.round_ended(&refused);
+        assert_eq!(health.egress().class(), Some(EGRESS_VERSION_UNSUPPORTED));
+
+        events.egress_trust(&EgressTrust::None);
+        assert_eq!(health.egress().class(), None);
     }
 
     #[test]

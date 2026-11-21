@@ -135,7 +135,8 @@ pub(crate) async fn run_bound_hosted_daemon_with(
     #[cfg(target_os = "linux")]
     if let Some(egress) = egress {
         // The egress trust is installed here, before serving (#4001).
-        let _trust = hosted_egress::start(egress).await?;
+        let health = refusal.as_ref().map(|refusal| refusal.egress());
+        let _trust = hosted_egress::start(egress, health.unwrap_or_default()).await?;
     }
     // Workspace access (#2460): the daemon serves SSH itself, reaching its
     // own gRPC service in-process, and the environment's application ports

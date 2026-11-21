@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use super::EgressConnector;
+use super::{EgressConnector, VersionRefused};
 use crate::NETWORK_PROTOCOL_VERSION;
 use crate::NetworkError;
 use crate::guest::{GuestHandshakeError, GuestSession, authenticate_guest};
@@ -93,6 +93,21 @@ pub enum ConnectError {
 impl EgressConnector for PodConnector {
     type Stream = TcpStream;
     type Error = ConnectError;
+
+    fn version_refused(error: &ConnectError) -> Option<VersionRefused> {
+        match *error {
+            ConnectError::VersionRefused {
+                lowest,
+                highest,
+                spoken,
+            } => Some(VersionRefused {
+                lowest,
+                highest,
+                spoken,
+            }),
+            _ => None,
+        }
+    }
 
     async fn connect(&self) -> Result<GuestSession<TcpStream>, ConnectError> {
         tokio::time::timeout(self.bound, self.open())

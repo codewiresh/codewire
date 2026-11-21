@@ -30,8 +30,8 @@ fn config() -> HostedEgressConfig {
         first_backoff: Duration::from_millis(20),
         max_backoff: Duration::from_millis(40),
         steady_after: Duration::from_millis(100),
-        trust_changed_backoff: Duration::from_millis(20),
-        trust_changed_max_backoff: Duration::from_millis(40),
+        unhealed_backoff: Duration::from_millis(20),
+        unhealed_max_backoff: Duration::from_millis(40),
     }
 }
 
@@ -40,7 +40,12 @@ fn config() -> HostedEgressConfig {
 /// open for `hold` or closes it.
 enum Host {
     Refuse,
-    Serve { trust: EgressTrust, hold: Duration },
+    /// cw-egress answers the hello with the versions it accepts.
+    RefuseVersion,
+    Serve {
+        trust: EgressTrust,
+        hold: Duration,
+    },
 }
 
 /// What a host saw of the guest's side.
@@ -74,8 +79,10 @@ impl EgressConnector for FakeEgress {
             .unwrap_or(Host::Refuse);
         let seen = self.seen.clone();
         async move {
-            let Host::Serve { trust, hold } = host else {
-                return Err(std::io::Error::other("refused"));
+            let (trust, hold) = match host {
+                Host::Refuse => return Err(std::io::Error::other("refused")),
+                Host::RefuseVersion => return Err(std::io::ErrorKind::Unsupported.into()),
+                Host::Serve { trust, hold } => (trust, hold),
             };
             let (guest, host) = tokio::io::duplex(1 << 20);
             tokio::spawn(serve(host, trust, hold, seen));
@@ -84,7 +91,17 @@ impl EgressConnector for FakeEgress {
                 .map_err(std::io::Error::other)
         }
     }
+
+    fn version_refused(error: &std::io::Error) -> Option<VersionRefused> {
+        (error.kind() == std::io::ErrorKind::Unsupported).then_some(REFUSED)
+    }
 }
+
+const REFUSED: VersionRefused = VersionRefused {
+    lowest: 3,
+    highest: 4,
+    spoken: 2,
+};
 
 /// The host's side, as cw-egress's worker runs it.
 async fn serve(
@@ -160,6 +177,10 @@ impl EgressEvents for Recorder {
             RoundEnd::SendSelfCheck => "send".to_owned(),
             RoundEnd::Bridge(_) => "bridge".to_owned(),
             RoundEnd::TrustChanged => "trust-changed".to_owned(),
+            RoundEnd::VersionRefused(refused) => {
+                assert_eq!(*refused, REFUSED);
+                "version-refused".to_owned()
+            }
         };
         let _ = self.0.send(Event::Ended(name));
     }
@@ -343,8 +364,8 @@ async fn changed_trust_redials_wait_the_trust_pacing_and_double() {
     let trust_wait = Duration::from_millis(300);
     let mut walk = start_with(
         HostedEgressConfig {
-            trust_changed_backoff: trust_wait,
-            trust_changed_max_backoff: trust_wait * 2,
+            unhealed_backoff: trust_wait,
+            unhealed_max_backoff: trust_wait * 2,
             ..config()
         },
         hosts,
@@ -363,6 +384,57 @@ async fn changed_trust_redials_wait_the_trust_pacing_and_double() {
     );
     assert_eq!(walk.event().await, Event::Ended("trust-changed".to_owned()));
     assert!(second.elapsed() >= trust_wait * 2, "doubled to its cap");
+}
+
+/// A version refusal is not healed by redialling either, before or after the
+/// daemon is ready: it waits the slow pacing, doubling, and a stream
+/// cw-egress then admits starts the pacing over.
+#[tokio::test]
+async fn version_refusals_wait_the_slow_pacing_and_an_admitted_stream_starts_it_over() {
+    let hosts = vec![
+        Host::RefuseVersion,
+        Host::RefuseVersion,
+        Host::RefuseVersion,
+        Host::Serve {
+            trust: EgressTrust::None,
+            hold: Duration::ZERO,
+        },
+        Host::RefuseVersion,
+        Host::RefuseVersion,
+    ];
+    // Far above the loop's own backoff (20 ms) and far below `WAIT`. The cap
+    // is high enough that a pacing that did not start over would wait eight
+    // times the first wait, well apart from the bound asserted below.
+    let slow = Duration::from_millis(200);
+    let mut walk = start_with(
+        HostedEgressConfig {
+            unhealed_backoff: slow,
+            unhealed_max_backoff: slow * 16,
+            ..config()
+        },
+        hosts,
+        || async { SelfCheck::Passed },
+    );
+    let refused = Event::Ended("version-refused".to_owned());
+    assert_eq!(walk.event().await, refused);
+    let first = std::time::Instant::now();
+    assert_eq!(walk.event().await, refused);
+    let second = std::time::Instant::now();
+    assert!(second - first >= slow, "the slow wait, not the loop's");
+    assert_eq!(walk.event().await, refused);
+    assert!(second.elapsed() >= slow * 2, "doubled");
+    // No refused round reported a trust or readiness.
+    assert_eq!(walk.event().await, Event::Trust(false));
+    assert_eq!(walk.event().await, Event::Ready);
+    assert_eq!(walk.event().await, Event::Ended("bridge".to_owned()));
+    assert_eq!(walk.event().await, refused);
+    let restarted = std::time::Instant::now();
+    assert_eq!(walk.event().await, refused);
+    let waited = restarted.elapsed();
+    assert!(
+        waited >= slow && waited < slow * 5,
+        "the first slow wait again, not eight times it: {waited:?}"
+    );
 }
 
 #[tokio::test]
