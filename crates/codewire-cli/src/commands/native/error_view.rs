@@ -68,6 +68,9 @@ pub(crate) enum InterceptionReasonView {
     PlatformCredentials,
     NoCredentials,
     CredentialServiceOutdated,
+    /// Told to intercept, it bound nothing: none of its credentials goes
+    /// through the front door yet (#5670).
+    NothingToIntercept,
 }
 
 impl InterceptionView {
@@ -86,6 +89,7 @@ impl InterceptionView {
         let reason = match Reason::try_from(interception.reason) {
             Ok(Reason::PlatformCredentials) => Some(InterceptionReasonView::PlatformCredentials),
             Ok(Reason::NoCredentials) => Some(InterceptionReasonView::NoCredentials),
+            Ok(Reason::NothingToIntercept) => Some(InterceptionReasonView::NothingToIntercept),
             Ok(Reason::CredentialServiceOutdated) => {
                 Some(InterceptionReasonView::CredentialServiceOutdated)
             }
@@ -112,6 +116,9 @@ impl InterceptionView {
             }
             (_, Some(InterceptionReasonView::NoCredentials)) => {
                 "no placeholders: none are selected".to_owned()
+            }
+            (_, Some(InterceptionReasonView::NothingToIntercept)) => {
+                "no placeholders: none of its credentials is intercepted yet".to_owned()
             }
             (_, Some(InterceptionReasonView::CredentialServiceOutdated)) => format!(
                 "no placeholders: {}, then start this one",
@@ -396,6 +403,12 @@ mod tests {
                 Reason::NoCredentials,
                 Some("no placeholders: none are selected"),
                 serde_json::json!({"state": "not_intercepted", "reason": "no_credentials"}),
+            ),
+            (
+                State::NotIntercepted,
+                Reason::NothingToIntercept,
+                Some("no placeholders: none of its credentials is intercepted yet"),
+                serde_json::json!({"state": "not_intercepted", "reason": "nothing_to_intercept"}),
             ),
             (
                 State::NotIntercepted,

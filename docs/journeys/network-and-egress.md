@@ -787,6 +787,10 @@ request adds.
     intercepted and the VM is as with the switch off, except that
     `cw --local info` shows `no placeholders: none are selected` under its
     `Credentials` row (`"reason": "no_credentials"`).
+  - With the switch on and only a GitHub sign-in selected, no front door
+    runs, since GitHub stays on its own route (#5087). `cw --local info`
+    shows `no placeholders: none of its credentials is intercepted yet`
+    (`"reason": "nothing_to_intercept"`), never `intercepted` (#5670).
   - Known limit, tracked on #3999: a restore gives the VM a new certificate
     authority, and a running process cannot reload the one it trusts. Agents
     that were running at the checkpoint must be restarted after a restore

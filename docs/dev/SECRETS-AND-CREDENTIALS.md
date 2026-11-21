@@ -1612,6 +1612,12 @@ is exactly as described above. What exists today:
     session (#4909).
   - `not_intercepted` with `no_credentials`: `no placeholders: none are
     selected`.
+  - `not_intercepted` with `nothing_to_intercept`: `no placeholders: none of
+    its credentials is intercepted yet`. The runner reports it, never the
+    supervisor: a boot told to intercept that runs no front door, because
+    none of its selected credentials goes through one yet (GitHub's does
+    not, #5087). `intercepted` is reported only while the boot runs a front
+    door (#5670).
   - `not_intercepted` with `credential_service_outdated`: `no placeholders:
     the local credential service that is running is from an earlier cw; stop
     your local VMs so cw replaces that service, then start this one`. That is

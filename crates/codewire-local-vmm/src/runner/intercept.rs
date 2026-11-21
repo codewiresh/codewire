@@ -158,6 +158,12 @@ impl super::RunningVm {
             .and_then(RunningFrontDoor::stopped)
             .map(InterceptRefusal::FrontDoorStopped)
     }
+
+    /// Whether this boot runs a front door at all: one that intercepts no
+    /// host has none (#5670).
+    pub(crate) fn has_front_door(&self) -> bool {
+        self.front_door.is_some()
+    }
 }
 
 /// The length of each boot secret.

@@ -1076,6 +1076,10 @@ enum InterceptionReason {
   INTERCEPTION_REASON_NO_CREDENTIALS = 2;
   // The running credential authority predates boot secrets.
   INTERCEPTION_REASON_CREDENTIAL_SERVICE_OUTDATED = 3;
+  // The boot was told to intercept but bound nothing: none of its selected
+  // credentials goes through the front door yet, as GitHub's does not
+  // (#5087). The runner reports it, never the supervisor (#5670).
+  INTERCEPTION_REASON_NOTHING_TO_INTERCEPT = 4;
 }
 
 message Interception {

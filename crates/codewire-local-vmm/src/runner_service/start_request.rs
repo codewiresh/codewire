@@ -59,8 +59,11 @@ pub(super) fn parse_interception(
     let valid = match (State::try_from(interception.state), reason) {
         (Ok(State::Intercepted), Ok(Reason::Unspecified)) => request.intercept,
         (Ok(State::Off), Ok(Reason::Unspecified)) => !request.intercept,
+        // Nothing to intercept is the runner's own finding (#5670).
         (Ok(State::NotIntercepted), Ok(reason)) => {
-            !request.intercept && reason != Reason::Unspecified
+            !request.intercept
+                && reason != Reason::Unspecified
+                && reason != Reason::NothingToIntercept
         }
         _ => false,
     };
@@ -339,6 +342,10 @@ mod tests {
             (false, (State::Lost, unspecified)),
             (false, (State::Unspecified, unspecified)),
             (false, (State::NotIntercepted, 99)),
+            (
+                false,
+                (State::NotIntercepted, Reason::NothingToIntercept as i32),
+            ),
         ] {
             let refused = parse_interception(&request(intercept, Some(interception))).unwrap_err();
             assert_eq!(
