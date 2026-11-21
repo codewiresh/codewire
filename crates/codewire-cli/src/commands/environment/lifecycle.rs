@@ -415,6 +415,8 @@ pub(crate) async fn tick_while<W: std::io::Write, T>(
     .await
 }
 
+pub(crate) mod withheld;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,11 +6,9 @@
 //! (#5545). Each of those commands says which credentials its agents can't
 //! use, one line per credential on stderr, with the command that fixes it.
 
-use codewire_access::{CredentialAuthKind, CredentialMetadata, CredentialStatus};
-
 use super::*;
-use crate::commands::credentials::output::{authentication_kind_label, kind_label};
-use crate::commands::platform_commands::shell_word;
+use crate::commands::credentials::output::CredentialView;
+use crate::commands::credentials::output::withheld::withheld_line;
 
 /// Managed guests use a selected typed proxy, never the host agent's login.
 /// A local VM qualifies a managed agent by the rule hosted Sandboxes use
@@ -113,64 +111,22 @@ async fn withheld_lines(environment: &v1::Environment) -> anyhow::Result<Vec<Str
     let mut lines = Vec::new();
     for (slot, credential_id) in &bound.profile.entries {
         let record = credentials.get_credential(credential_id).await?;
-        if let Some(state) = withheld_state(&record.metadata, now) {
-            lines.push(withheld_line(
-                &record.metadata,
-                bound.profile.name.as_str(),
-                slot.as_str(),
-                state,
-            ));
-        }
+        lines.extend(withheld_line(
+            &CredentialView::from(&record),
+            bound.profile.name.as_str(),
+            slot.as_str(),
+            now,
+        ));
     }
     Ok(lines)
 }
 
-/// Why a credential is withheld, as the line says it.
-fn withheld_state(metadata: &CredentialMetadata, now_unix: u64) -> Option<&'static str> {
-    match metadata.status {
-        CredentialStatus::Revoked => Some("is revoked"),
-        CredentialStatus::Expired => Some("has expired"),
-        CredentialStatus::RefreshFailed => Some("needs reconnecting"),
-        CredentialStatus::Active => metadata
-            .expires_at_unix
-            .is_some_and(|expires| expires <= now_unix)
-            .then_some("has expired"),
-    }
-}
-
-/// `Claude (sign-in) 'walk' in profile work is revoked; agents in this VM
-/// can't use it. Reconnect with ...`: a sign-in is reconnected under its own
-/// name, and anything else is replaced in the profile.
-fn withheld_line(metadata: &CredentialMetadata, profile: &str, slot: &str, state: &str) -> String {
-    let provider = metadata.provider.as_str();
-    let name = terminal_text(&shell_word(&metadata.display_name));
-    let profile = terminal_text(&shell_word(profile));
-    let kind = kind_label(
-        provider,
-        authentication_kind_label(metadata.authentication_kind),
-    );
-    let fix = match (provider, metadata.authentication_kind) {
-        ("anthropic", CredentialAuthKind::ClaudeSignIn) => {
-            format!("Reconnect with `cw credentials --local connect claude --name {name}`.")
-        }
-        ("openai", CredentialAuthKind::OAuth) => {
-            format!("Reconnect with `cw credentials --local connect codex --name {name}`.")
-        }
-        ("github", _) => {
-            format!("Reconnect with `cw credentials --local connect github --name {name}`.")
-        }
-        _ => {
-            format!("Replace it with `cw credentials --local --profile {profile} set {slot} NAME`.")
-        }
-    };
-    let display = terminal_text(&metadata.display_name);
-    format!(
-        "{kind} '{display}' in profile {profile} {state}; agents in this VM can't use it. {fix}"
-    )
-}
-
 #[cfg(test)]
 mod tests {
+    use codewire_access::{CredentialAuthKind, CredentialMetadata, CredentialStatus};
+    use codewire_local_credentials::CredentialRecord;
+    use codewire_protected_store::ProtectedStorePersistence;
+
     use super::*;
 
     fn metadata(
@@ -193,6 +149,18 @@ mod tests {
         .expect("synthetic credential metadata")
     }
 
+    /// The line a local credential gives at `now`, if it is withheld.
+    fn line(metadata: CredentialMetadata, profile: &str, slot: &str, now: u64) -> Option<String> {
+        let record = CredentialRecord {
+            metadata,
+            persistence: ProtectedStorePersistence::OperatingSystem,
+            protected_store_cleanup_pending: false,
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        };
+        withheld_line(&CredentialView::from(&record), profile, slot, now)
+    }
+
     #[test]
     fn a_withheld_credential_says_why_and_how_to_fix_it() {
         let revoked = metadata(
@@ -202,12 +170,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            withheld_line(
-                &revoked,
-                "work",
-                "anthropic",
-                withheld_state(&revoked, 100).expect("revoked is withheld")
-            ),
+            line(revoked, "work", "anthropic", 100).expect("revoked is withheld"),
             "Claude (sign-in) 'walk' in profile work is revoked; agents in this VM can't use it. \
              Reconnect with `cw credentials --local connect claude --name walk`."
         );
@@ -218,12 +181,7 @@ mod tests {
             Some(50),
         );
         assert_eq!(
-            withheld_line(
-                &key,
-                "work",
-                "openai",
-                withheld_state(&key, 100).expect("past its expiry is withheld")
-            ),
+            line(key, "work", "openai", 100).expect("past its expiry is withheld"),
             "OpenAI API key 'walk' in profile work has expired; agents in this VM can't use it. \
              Replace it with `cw credentials --local --profile work set openai NAME`."
         );
@@ -233,14 +191,18 @@ mod tests {
             CredentialStatus::RefreshFailed,
             None,
         );
-        assert_eq!(withheld_state(&failed, 100), Some("needs reconnecting"));
+        assert!(
+            line(failed, "work", "codex", 100)
+                .expect("a failed refresh is withheld")
+                .contains(" needs reconnecting; ")
+        );
         let active = metadata(
             "openai",
             CredentialAuthKind::OAuth,
             CredentialStatus::Active,
             Some(200),
         );
-        assert_eq!(withheld_state(&active, 100), None);
+        assert_eq!(line(active, "work", "codex", 100), None);
     }
 
     /// A name or profile a shell would split is quoted in the command, as the
@@ -255,7 +217,7 @@ mod tests {
         );
         spaced.display_name = "my walk".into();
         assert_eq!(
-            withheld_line(&spaced, "team work", "anthropic", "is revoked"),
+            line(spaced, "team work", "anthropic", 100).expect("revoked is withheld"),
             "Claude (sign-in) 'my walk' in profile 'team work' is revoked; agents in this VM can't use \
              it. Reconnect with `cw credentials --local connect claude --name 'my walk'`."
         );
@@ -267,9 +229,11 @@ mod tests {
         );
         key.display_name = "it's mine".into();
         assert!(
-            withheld_line(&key, "team work", "openai", "is revoked").ends_with(
-                "Replace it with `cw credentials --local --profile 'team work' set openai NAME`."
-            )
+            line(key, "team work", "openai", 100)
+                .expect("revoked is withheld")
+                .ends_with(
+                    "Replace it with `cw credentials --local --profile 'team work' set openai NAME`."
+                )
         );
     }
 }

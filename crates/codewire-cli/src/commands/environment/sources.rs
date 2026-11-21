@@ -414,6 +414,7 @@ pub(super) async fn update_platform_sources(
         }
     );
     confirm_sources(args.yes, args.output)?;
+    let selected = replacement.clone();
     let request = UpdateEnvironmentSourcesRequest {
         expected_operation_generation: environment.operation_generation,
         expected: expected.clone(),
@@ -438,6 +439,11 @@ pub(super) async fn update_platform_sources(
             }
         ),
     }
+    // The credentials its agents can't use, as a local update says them
+    // (#5594).
+    super::lifecycle::withheld::print_withheld(
+        &super::lifecycle::withheld::withheld_credentials(platform, Some(&selected)).await,
+    );
     Ok(())
 }
 

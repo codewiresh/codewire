@@ -104,11 +104,20 @@ pub(super) async fn handle_platform_env_create(
             .context("save preset")?;
         eprintln!("Preset saved: {} ({}).", preset.name, preset.id);
     }
+    // The credentials its agents can't use are part of the result (#5594).
+    let withheld =
+        lifecycle::withheld::withheld_credentials(platform, environment.source_selection.as_ref())
+            .await;
     match args.output {
-        OutputFormat::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(&provenance.add_to(serde_json::to_value(&environment)?))?
-        ),
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &provenance.add_to(serde_json::to_value(&environment)?)
+                )?
+            );
+            lifecycle::withheld::print_withheld(&withheld);
+        }
         OutputFormat::Text if args.follow && !args.no_wait => {
             let caps = super::super::lifecycle_output::capabilities(args.output);
             let summary = lifecycle::cloud_summary(&environment, Outcome::Created, &names);
@@ -131,16 +140,32 @@ pub(super) async fn handle_platform_env_create(
             .ok_or_else(|| {
                 InterruptNotice::new(VmLocation::Cloud, "creation", &summary.name).error(true)
             })??;
-            super::super::lifecycle_output::print_summary(&summary, &caps);
+            print_with_withheld(summary, &withheld, &caps);
         }
         OutputFormat::Text => {
             // Readiness was not observed: the result is pending.
             let caps = super::super::lifecycle_output::capabilities(args.output);
-            super::super::lifecycle_output::print_summary(
-                &lifecycle::cloud_summary(&environment, Outcome::Creating, &names),
+            print_with_withheld(
+                lifecycle::cloud_summary(&environment, Outcome::Creating, &names),
+                &withheld,
                 &caps,
             );
         }
     }
     Ok(Some(environment))
+}
+
+/// The summary, then the credentials its agents can't use, then its next
+/// step, as a local create prints them.
+fn print_with_withheld(
+    mut summary: crate::output::LifecycleSummary,
+    withheld: &[String],
+    caps: &crate::output::Capabilities,
+) {
+    let next = summary.next.take();
+    super::super::lifecycle_output::print_summary(&summary, caps);
+    lifecycle::withheld::print_withheld(withheld);
+    if let Some(next) = next {
+        print!("{}", crate::output::render_next(&next, caps.stdout_style()));
+    }
 }

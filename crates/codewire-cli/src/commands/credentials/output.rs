@@ -399,6 +399,7 @@ pub(in crate::commands) fn rotation_notice(
 }
 
 pub(in crate::commands) mod save_refusal;
+pub(in crate::commands) mod withheld;
 
 /// The refusals both placements share (#4717 C4): one sentence each, with
 /// the placement word the only difference, and the command that helps.

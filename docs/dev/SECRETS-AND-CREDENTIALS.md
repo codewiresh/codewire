@@ -1258,7 +1258,12 @@ withheld capability reads no material; its HTTP route answers 403 with a fixed
 explanation, such as `Codex needs Reconnect in Codewire Settings → Credentials.`
 Reconnecting the same identity restores it on the next request, without a
 restart or rebind. For the same reason, creating a Sandbox or editing its
-sources with such a profile succeeds, with that capability unavailable. A
+sources with such a profile succeeds, with that capability unavailable.
+`cw create --cloud` and `cw update --cloud` then print the same line per
+withheld credential as a local VM's commands (below), with `--cloud` in the
+fix and `agents in this Sandbox`, read from the profile revision the Sandbox
+pinned (#5594). That read is best effort and bounded: when it fails, the
+command still succeeds and prints nothing for it. A
 selected credential that no longer exists still refuses the whole runtime:
 bound credentials cannot be deleted, so that is integrity damage.
 Platform-to-local launches still admit their exact selection as a whole.

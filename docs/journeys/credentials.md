@@ -125,7 +125,13 @@ only what differs.
    then `--profile P get`. Expect the slot to name the credential.
 4. **Use:** a local VM created with `cw create --local --profile local:P …`,
    or a hosted Sandbox created with `cw create --cloud --profile P …`, then
-   the section's check inside the environment.
+   the section's check inside the environment. When one of P's credentials
+   is revoked, expired or needs reconnecting, the create, and `cw update`
+   with that profile, still succeed and print on stderr, before the next
+   step, one line per such credential: for example `Claude (sign-in) 'walk'
+   in profile work is revoked; agents in this Sandbox can't use it.`, then
+   its fix with `--cloud` (`--local` and `agents in this VM` for a local VM,
+   #5545). The hosted lines are not yet observed (#5594).
 5. **Remove:** `cw credentials --local|--cloud delete NAME`.
    - A credential a profile selects is refused, with the exact
      `--profile P unset SLOT` that frees it.
