@@ -9,7 +9,7 @@ surface proves nothing about another. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-20. Every step not listed as observed is **not yet
+Updated 2026-11-21. Every step not listed as observed is **not yet
 observed**.
 
 | ID | Linux local VM | Mac local VM | Hosted Sandbox (Dev) |
@@ -27,7 +27,7 @@ observed**.
 | `cred-delivery-diagnosis` | observed, #5237 at a8c2d9625, 2026-11-17 (the token, no-profile and stopped states; the sign-in and older-guest states not yet observed) | not yet observed | local VMs only |
 | `cred-provider-unresolved` | observed, #5286: #5295 at bdcb89c00, the early replacements on that build plus their change, and `main` at 4cae0f601 through the smoke, 2026-11-18 (a name that resolves only to an address Codewire won't dial, and a sign-in's token host, not walked) | observed, #5286: main's tree at 57b68c6be (#5295 and #5312), 2026-11-18, with a name resolving only to private addresses; the provider came back at the regular replacement, not the early ones (a sign-in's token host not walked) | local VMs only |
 | `cred-file-store` | partly observed, #5552 on main 22bcc705e, 2026-11-20 (a local VM from a `file` root: its broker serves a lease on the intercepted and the loopback route, and `list` names the file store; the other states not yet observed) | the macOS file store; not part of this check | local stores only |
-| `cred-same-name` | not yet observed (#4928) | not yet observed (#4928) | not yet observed (#4928) |
+| `cred-same-name` | observed, #4928 on released v0.4.26, 2026-11-21 (steps 1 to 6, with an Anthropic and an OpenAI API key in place of the two sign-ins; a store holding a literal `github/work` not walked) | not yet observed (#4928) | not yet observed (#4928) |
 | `cred-wording` | not yet observed | not yet observed | not yet observed |
 | `cred-pickers` | not yet observed | not yet observed | not yet observed |
 | `cred-github-notice` | not applicable | not applicable | not yet observed (dashboard) |
@@ -866,7 +866,8 @@ sign-in and a Codex sign-in both named after their email address.
   5. `--profile same set anthropic walk` and `--profile same set codex walk`,
      then `cw create --local --profile local:same` and a request on each
      provider's route in the VM.
-  6. `delete openai/walk`, then `list`.
+  6. `delete openai/walk` while the profile selects it, then
+     `--profile same unset openai`, `delete openai/walk` and `list`.
   7. Steps 1 to 6 again with `--cloud` on Dev, and the dashboard's list.
   8. On Dev, a second account that isn't a member of the organization runs
      `get NAME` for a name two of the organization's credentials share.
@@ -880,11 +881,30 @@ sign-in and a Codex sign-in both named after their email address.
     suggesting a free name;
   - step 5: each slot takes its own provider's `walk`, and each request
     reaches its provider;
-  - step 6: only the Codex credential is gone;
+  - step 6: the first delete is refused, naming profile `same` and the
+    `unset` that frees it; after the unset, only the Codex credential is gone;
   - step 7: the same in the cloud, and the dashboard shows the provider
     beside each name;
   - step 8: `not found`, exactly as for a name that doesn't exist, with no
     provider listed.
+- **Observed** on Linux, released v0.4.26, 2026-11-21, in the isolation of
+  `scripts/ci/verify/lib/local-smoke-isolation.sh`, with made-up API keys:
+  - steps 1 and 2: `add anthropic --name walk` and `add openai --name walk`
+    both succeeded; `list` showed `walk` as an Anthropic API key and as an
+    OpenAI API key; `get walk` answered `✗ "walk" names more than one
+    credential (anthropic, openai); name one, for example anthropic/walk`
+    and the next `list` was unchanged;
+  - step 3: `get openai/walk` showed only the OpenAI key, and the rename
+    there and back moved only it;
+  - step 4: `connect claude-token --name walk`, and `add anthropic --name
+    WALK`, each answered `✗ "walk" is in use in anthropic by an Anthropic
+    API key; choose another name, for example walk-2`; `add anthropic --name
+    github/x` was refused as reading as a provider;
+  - step 5: profile `same` held `Anthropic API key: walk, OpenAI API key:
+    walk`; in the VM, `$ANTHROPIC_BASE_URL/v1/models` and
+    `$OPENAI_BASE_URL/models` each answered 401 from the provider itself
+    for the made-up key;
+  - step 6: as the proof above.
 - **Gotchas:**
   - A `cw` older than the change, talking to a store that already holds the
     same name twice, is refused by the store rather than given one of them.
