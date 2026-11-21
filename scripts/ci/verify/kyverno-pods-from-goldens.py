@@ -170,6 +170,14 @@ def cases(goldens: pathlib.Path, policy_text: str, registry: str) -> dict[str, d
     mutated("deny-privileged-workspace",
             lambda case: container(case, "workspace").setdefault("securityContext", {}).update(
                 privileged=True))
+    # A second privileged init container, mount-workspace's copy under a name
+    # that reads as a number: a policy must judge a name as the string it is.
+    def numeric_init(case: dict) -> None:
+        copied = copy.deepcopy(container(case, "mount-workspace"))
+        copied["name"] = "1"
+        case["spec"]["initContainers"].append(copied)
+
+    mutated("deny-privileged-init-numeric-name", numeric_init)
     # #4000: the TUN device's volume disk-backed, a device node on the node's
     # own filesystem. The broker Pod is otherwise exactly its golden.
     def disk_backed(case: dict) -> None:

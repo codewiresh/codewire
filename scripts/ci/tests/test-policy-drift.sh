@@ -45,9 +45,25 @@ for name in pass-warm-pool-sandboxtemplate pass-warm-pool-subfolder-sandboxtempl
   pass-warm-pool-broker-sandboxtemplate pass-environment-broker-sandboxtemplate \
   pass-confidential-broker-sandboxtemplate \
   deny-mount-registry deny-mount-renamed deny-mount-script deny-runc deny-dind-digest \
-  deny-privileged-workspace deny-devnet-disk; do
+  deny-privileged-workspace deny-privileged-init-numeric-name deny-devnet-disk; do
   grep -qw -- "$name" <<<"$cases" || fail "the builder made no $name case"
 done
+# The numeric-name control is the warm-pool Pod plus mount-workspace's copy named 1.
+python3 -I - "$work/pods" <<'PY'
+import json, pathlib, sys
+pods = pathlib.Path(sys.argv[1])
+deny = json.loads((pods / "deny-privileged-init-numeric-name.json").read_text())
+good = json.loads((pods / "pass-warm-pool-sandboxtemplate.json").read_text())
+inits = deny["spec"]["initContainers"]
+assert inits[-1]["name"] == "1", inits[-1]["name"]
+mount = next(c for c in inits if c["name"] == "mount-workspace")
+assert {**inits[-1], "name": "mount-workspace"} == mount, "the copy differs from mount-workspace beyond its name"
+assert inits[-1]["securityContext"]["privileged"] is True
+del inits[-1]
+for pod in (deny, good):
+    pod["metadata"]["name"] = ""
+assert deny == good, "deny-privileged-init-numeric-name differs from the warm-pool Pod beyond its added container"
+PY
 # The disk-backed control is the broker Pod with only its device volume changed.
 python3 -I - "$work/pods" <<'PY'
 import json, pathlib, sys
