@@ -25,7 +25,6 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 pub(crate) struct AdminStatsView {
-    pub(crate) total_environments: String,
     pub(crate) active_environments: String,
     pub(crate) monthly_cost: String,
     pub(crate) monthly_cpu_hours: String,
@@ -374,7 +373,6 @@ pub(crate) async fn stats(
         .await?
         .into_owned();
     Ok(AdminStatsView {
-        total_environments: stats.total_environments.to_string(),
         active_environments: stats.active_environments.to_string(),
         monthly_cost: money(stats.monthly_cost_cents),
         monthly_cpu_hours: format!("{:.1}", stats.monthly_cpu_hours),

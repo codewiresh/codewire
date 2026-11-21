@@ -117,7 +117,8 @@ test.describe.serial("server-rendered billing and administration", () => {
 
     await page.goto("/admin/");
     await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
-    await expect(page.getByText("Total Sandboxes")).toBeVisible();
+    await expect(page.getByText("Active Sandboxes", { exact: true })).toBeVisible();
+    await expect(page.getByText("Total Sandboxes")).toHaveCount(0);
 
     await followAdminNavigation(page, isMobile, "Audit Log");
     await expect(page.getByRole("heading", { name: "Audit Log" })).toBeVisible();
