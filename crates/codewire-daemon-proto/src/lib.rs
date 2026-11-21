@@ -460,6 +460,15 @@ pub const CREDENTIAL_BRIDGE_FRONT_DOOR_CAPABILITIES: &[&str] = &[
     CREDENTIAL_BRIDGE_CAPABILITY_WEBSOCKET,
     CREDENTIAL_BRIDGE_CAPABILITY_ROUTED_ORIGIN,
 ];
+/// What the platform's front-door entry serves a delegated session (#4909):
+/// the platform lists exactly these when a relay joins, and a local relay
+/// pins them in the front door's Open before it has joined. A join admitting
+/// fewer is never used. No `websocket.v1`: the platform's entry serves no
+/// upgrades, and pinning it would switch interception off.
+pub const CREDENTIAL_BRIDGE_DELEGATED_FRONT_DOOR_CAPABILITIES: &[&str] = &[
+    CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR,
+    CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
+];
 pub const CREDENTIAL_BRIDGE_MAX_CAPABILITIES: usize = 8;
 pub const CREDENTIAL_BRIDGE_MAX_CAPABILITY_BYTES: usize = 64;
 

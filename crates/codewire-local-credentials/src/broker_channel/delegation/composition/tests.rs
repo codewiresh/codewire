@@ -85,6 +85,7 @@ fn fixture(mixed: bool) -> Fixture {
         config_directory: temp.path().join("platform"),
         server_url: "https://platform.invalid".into(),
         selection_sha256: context.selection_sha256,
+        front_door: false,
         selection: PlatformProjectionSelection {
             creator: "owner".into(),
             organization: "organization".into(),

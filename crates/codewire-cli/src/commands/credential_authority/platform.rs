@@ -210,6 +210,7 @@ fn opening(
             .into(),
         ordinary_environment_keys: binding.selection.ordinary_keys.iter().cloned().collect(),
         reserved_environment_keys: binding.selection.reserved_keys.iter().cloned().collect(),
+        front_door: binding.front_door,
         ..Default::default()
     })
 }

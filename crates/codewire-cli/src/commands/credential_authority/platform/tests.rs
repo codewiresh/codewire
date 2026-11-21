@@ -58,6 +58,7 @@ fn binding(directory: &Path, server: &str) -> PlatformCredentialBinding {
             reserved_keys: BTreeSet::from(["CODEWIRE_ENV_ID".into()]),
         },
         selection_sha256: [7; 32],
+        front_door: false,
     }
 }
 
@@ -205,6 +206,18 @@ async fn explicit_saved_oauth_binds_user_and_ignores_changed_default_organizatio
     );
     assert_eq!(error.code(), tonic::Code::PermissionDenied);
     assert_eq!(opening(&selected, ready()).unwrap().org_id, "pinned-org");
+}
+
+/// The delegation asks the platform for a front-door session exactly when the
+/// boot's broker serves one, which the authority decides from the boot
+/// (#4909); otherwise its logins stay real.
+#[test]
+fn opening_asks_for_a_front_door_only_when_the_boot_serves_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut binding = binding(directory.path(), "https://codewire.example");
+    assert!(!opening(&binding, ready()).unwrap().front_door);
+    binding.front_door = true;
+    assert!(opening(&binding, ready()).unwrap().front_door);
 }
 
 #[tokio::test]

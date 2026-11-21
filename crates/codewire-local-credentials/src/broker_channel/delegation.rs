@@ -131,6 +131,49 @@ impl LocalCredentialDelegationClient {
         })
     }
 
+    /// Join this channel's admitted delegation to the boot's front-door session
+    /// (#4909): present this relay's own binding Ready, and get back the
+    /// session's host frames and the capabilities the platform admitted for
+    /// it. The platform's epoch handle stays with the authority.
+    pub async fn delegate_front_door<S>(
+        &mut self,
+        ready: bridge::CredentialBridgeReady,
+        remaining: S,
+    ) -> Result<(LocalFrontDoorDelegationOutput, Vec<String>), BrokerLeaseChannelError>
+    where
+        S: Stream<Item = bridge::CredentialBridgeGuestMessage> + Send + 'static,
+    {
+        self.validate_ready(&ready)?;
+        let first = bridge::CredentialBridgeGuestMessage {
+            payload: Some(bridge::credential_bridge_guest_message::Payload::Ready(
+                ready,
+            )),
+        };
+        let input = stream::once(async move { first }).chain(remaining);
+        let response = self
+            .inner
+            .delegate_front_door(Request::new(input))
+            .await
+            .map_err(map_client_status)?;
+        let capabilities = response
+            .metadata()
+            .get_all(codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITIES_HEADER)
+            .iter()
+            .map(|value| value.to_str().map(str::to_owned))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| BrokerLeaseChannelError::InvalidResponse)?;
+        if capabilities.is_empty() {
+            return Err(BrokerLeaseChannelError::InvalidResponse);
+        }
+        Ok((
+            LocalFrontDoorDelegationOutput {
+                inner: response.into_inner(),
+                ended: false,
+            },
+            capabilities,
+        ))
+    }
+
     /// Report process readiness only after `delegate_credentials` consumed the
     /// exact private admission acknowledgement.
     pub async fn report_ready(&mut self) -> Result<(), BrokerLeaseChannelError> {
@@ -153,6 +196,49 @@ impl LocalCredentialDelegationClient {
             return Err(BrokerLeaseChannelError::InvalidRequest);
         }
         Ok(())
+    }
+}
+
+/// The front-door session's host frames, bounded in size. A host Open never
+/// passes: the relay writes the session's one Open itself. The relay's router
+/// decides each frame's request.
+pub struct LocalFrontDoorDelegationOutput {
+    inner: Streaming<bridge::CredentialBridgeHostMessage>,
+    ended: bool,
+}
+
+impl Stream for LocalFrontDoorDelegationOutput {
+    type Item = Result<bridge::CredentialBridgeHostMessage, BrokerLeaseChannelError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.ended {
+            return Poll::Ready(None);
+        }
+        match Pin::new(&mut self.inner).poll_next(context) {
+            Poll::Ready(Some(Ok(frame)))
+                if frame.encoded_len()
+                    <= codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES
+                    && !matches!(
+                        frame.payload,
+                        None | Some(bridge::credential_bridge_host_message::Payload::Open(_))
+                    ) =>
+            {
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(Some(Ok(_))) => {
+                self.ended = true;
+                Poll::Ready(Some(Err(BrokerLeaseChannelError::InvalidResponse)))
+            }
+            Poll::Ready(Some(Err(_))) => {
+                self.ended = true;
+                Poll::Ready(Some(Err(BrokerLeaseChannelError::Unavailable)))
+            }
+            Poll::Ready(None) => {
+                self.ended = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 

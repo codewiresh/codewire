@@ -1585,11 +1585,13 @@ is exactly as described above. What exists today:
   again and takes all new work while its predecessor finishes what it
   already has, so a broker replaced by its successor keeps interception.
   Only the runner's end, or the front door's exit, ends it for the boot. A
-  boot whose credentials come from the platform, that has no local
-  credential broker, or whose running credential authority predates boot
-  secrets, does not intercept, and the supervisor's log and `cw` say why
-  (below). On macOS a boot with the switch on is refused and names the
-  file, until the front door is confined there.
+  boot that has no local credential broker, or whose running credential
+  authority predates boot secrets, does not intercept, and the supervisor's
+  log and `cw` say why (below). Nor does a boot whose credentials come from
+  the platform on macOS, or against an authority that does not join the
+  platform's front-door session (#4909; see "A local VM on a platform
+  profile" below). On macOS a boot with the switch on is refused and names
+  the file, until the front door is confined there.
 - **What `cw` shows (#4912).** The supervisor sends the boot's decision to
   its runner with the start, and the runner reports it while the boot runs.
   `cw --local info` shows it on its own line under the `Credentials` row
@@ -1600,8 +1602,9 @@ is exactly as described above. What exists today:
   older supervisor started, has none.
   - `intercepted`: `placeholders only: agents never hold your tokens`.
   - `not_intercepted` with `platform_credentials`: `no placeholders: they
-    come from the platform`, until a platform profile's boot intercepts
-    (#4909).
+    come from the platform`, for a platform profile's boot on macOS or
+    against an authority that does not join the platform's front-door
+    session (#4909).
   - `not_intercepted` with `no_credentials`: `no placeholders: none are
     selected`.
   - `not_intercepted` with `credential_service_outdated`: `no placeholders:
@@ -2167,14 +2170,16 @@ below):
   - **Meanwhile,** with no session attached, the front door fails every
     intercepted request closed and the Sandbox's other egress carries on.
 
-**A local VM on a platform profile (not yet served, #4909).** Such a VM has
-no local credential engine: its confined local relay forwards the guest's
-bridge to the platform's broker over the owner-local delegation channel, one
-delegation epoch at a time. Today the supervisor starts it without
-interception, its log says `skipped=platform_credentials`, and `cw --local
-info` says `no placeholders: they come from the platform` ("Agent host
-interception" above). Once this carrier is served, the same front-door
-session crosses the delegation instead, and these rules hold:
+**A local VM on a platform profile (#4909).** Such a VM has no local
+credential engine: its confined local relay forwards the guest's bridge to
+the platform's broker over the owner-local delegation channel, one
+delegation epoch at a time. On Linux, against an authority that joins the
+platform's front-door session, the supervisor intercepts such a boot and
+the front-door session crosses the delegation. On macOS, or against an
+older authority, it starts without interception, its log says
+`skipped=platform_credentials`, and `cw --local info` says `no
+placeholders: they come from the platform` ("Agent host interception"
+above). These rules hold:
 
 - **Who opens it:** only the boot's own front door, paired with the local
   relay exactly as with a local broker: the boot's pairing secret, then the
@@ -2194,14 +2199,28 @@ session crosses the delegation instead, and these rules hold:
   rule (#4722). The entry is decided by the method called,
   `FrontDoorDelegation`, never by a frame. The relay adds no engine, lease,
   decision or material of its own.
-- **The relay writes the session's Open itself.** It admits its delegation
-  and joins upstream before it pairs, so it writes the role tag at once and
-  the Open, listing exactly the capabilities the join's admission names (the
-  first `FrontDoorDelegation` answer), within the front door's
-  limits (2 seconds for the tag, 10 for the Open). A pairing that misses
-  them is dropped by the front door, which keeps serving the predecessor's
-  session. The relay checks each frame's length against the bridge's limit
-  in both directions.
+- **The relay writes the session's Open itself, from a fixed pin.** The
+  runner reads the pairing secret within 2 seconds of the connect, before
+  the relay's delegation can be admitted, so the relay pairs at once, before
+  confinement: the secret, then the role tag. Its Open lists a fixed set,
+  `CREDENTIAL_BRIDGE_DELEGATED_FRONT_DOOR_CAPABILITIES` (the front door and
+  streamed request bodies, what the platform's front-door entry serves; no
+  WebSockets, which it doesn't). The relay holds that Open until its first
+  join is accepted, or 8 seconds after the tag, inside the front door's 10:
+  the front door gives all new work to the newest session as soon as it
+  opens, so a session opened before its join would answer every new request
+  unavailable at each rotation while its predecessor still served. The
+  front door's first frame must then be exactly this binding's Ready, byte
+  for byte as on hosted, within 30 seconds. The relay checks each frame's
+  length against the bridge's limit in both directions.
+- **A join is used only when it admits at least the pin.** The relay joins
+  only after its delegation is admitted, through the authority, which allows
+  one live join per channel, bounded by 10 seconds and never on the
+  loopback session's path. An admission that lands after the Open's hold
+  (its own bound is 15 seconds) is picked up by the next request, which
+  joins then. A join admitting less than the pin is never used:
+  the relay logs the missing capability, intercepted requests are answered
+  unavailable, and it tries again only after a backoff.
 - **An older platform** returns no `front_door_epoch`. The relay then has no
   session to attach, and the boot's logins stay refused: it fails closed.
 - **One session per relay process.** A delegated relay is one delegation
@@ -2212,10 +2231,18 @@ session crosses the delegation instead, and these rules hold:
   it replaces finishes only the requests already sent on it (#4884). A relay
   never moves a request to another epoch, and once replaced it opens no new
   upstream stream.
-- **Within its epoch** the relay keeps at most one upstream stream. It reopens
-  it on demand after an idle end. When an upstream ends with requests open,
-  one still waiting for its response gets the bridge's error response, and a
-  response already streaming ends early. Every upstream ends with its
+- **Within its epoch** the relay keeps at most one upstream stream. The
+  platform ends a joined stream after 120 idle seconds; the relay then holds
+  the next request while it joins again, bounded by 10 seconds and spaced by
+  a backoff from 1 second doubling to 30, so the pause costs the agent no
+  failed call. Every join is spaced: one that is accepted but ends sooner
+  than the backoff counts as failed, so a guest's frames can't drive joins
+  faster than that, and only a join that lasts the backoff resets it. A
+  request that arrives while no join can be made is answered unavailable.
+  Each join is a new upstream, so a late frame from an ended
+  stream never reaches the next one. When an upstream ends with requests
+  open, one still waiting for its response gets the bridge's error response,
+  and a response already streaming ends early. Every upstream ends with its
   epoch, so the 60-second authority and 2-minute material limits hold, and
   no cache outlives an epoch.
 - **Rotation fails closed, and its drain is bounded.** The authority pairs

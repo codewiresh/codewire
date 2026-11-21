@@ -421,11 +421,11 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
         .context("authenticate guest credential bridge")?;
     // The environment's front door (#3999), when the boot binds interception.
     // It pairs before confinement, as the daemon connection does. A relay to
-    // the platform broker does not serve it yet; the supervisor does not
-    // intercept such a boot.
+    // the platform broker (#4909) writes the session's Open only once the
+    // platform has admitted what it serves, so here it only connects.
     stage.set("front_door.pair");
-    let intercepted = !access.front_door_socket.is_empty() && !args.platform_delegated;
-    let front_door = if !intercepted {
+    let intercepted = !access.front_door_socket.is_empty();
+    let paired = if !intercepted {
         None
     } else {
         // Only the boot's own pairing secret pairs; never the daemon token,
@@ -433,14 +433,23 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
         let pairing = boot_secrets
             .get(BootSecretPurpose::FrontDoorPairing)
             .context("the boot's pairing secret is missing")?;
-        pair_front_door(
-            Path::new(&access.front_door_socket),
-            pairing,
-            environment_uuid,
-            args.environment_generation,
-        )
-        .await
-        .context("pair with the environment's front door")?
+        connect_front_door(Path::new(&access.front_door_socket), pairing)
+            .await
+            .context("pair with the environment's front door")?
+    };
+    let (front_door, delegated_front_door) = match paired {
+        Some(stream) if args.platform_delegated => {
+            (None, Some((stream, tokio::time::Instant::now())))
+        }
+        Some(stream) => (
+            Some(
+                open_front_door(stream, environment_uuid, args.environment_generation)
+                    .await
+                    .context("open the environment's front-door session")?,
+            ),
+            None,
+        ),
+        None => (None, None),
     };
     drop(boot_secrets);
     // The broker needs only the admitted bridge from this point onward. Do not
@@ -469,6 +478,23 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
         .context("connect platform credential relay authority")?;
         #[cfg(target_os = "linux")]
         apply_broker_seccomp_confinement().context("seal platform credential relay")?;
+        // The front door's session starts now and holds its Open until the
+        // relay's first join, which waits for the delegation's admission.
+        let hand_over = delegated_front_door.map(|(stream, paired_at)| {
+            let (hand_over, joiner) = tokio::sync::oneshot::channel();
+            let identity = codewire_credential_broker::BridgeIdentity {
+                environment_id: environment_uuid,
+                environment_generation: args.environment_generation,
+            };
+            tokio::spawn(async move {
+                let end = codewire_credential_broker::serve_delegated_front_door(
+                    stream, identity, joiner, paired_at,
+                )
+                .await;
+                tracing::info!(?end, "the platform front-door session ended");
+            });
+            hand_over
+        });
         stage.set("relay.run");
         let relay_policy = if args.network_policy_allows_github {
             RelayNetworkPolicy::AllowsGitHub
@@ -490,6 +516,17 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
                     .report_ready()
                     .await
                     .map_err(|_| BrokerBridgeError::Unavailable)?;
+                if let Some(hand_over) = hand_over {
+                    // Joins go through the authority, which keeps the
+                    // platform's epoch handle; the loopback session never
+                    // waits for them.
+                    let joiner = FrontDoorJoiner {
+                        delegation,
+                        environment_id: environment_uuid,
+                        environment_generation: args.environment_generation,
+                    };
+                    let _ = hand_over.send(joiner); // Fails only once the session has ended.
+                }
                 Ok(
                     Box::pin(output.map(|frame| frame.map_err(|_| BrokerBridgeError::Unavailable)))
                         as CredentialBridgeRelayOutput,
@@ -615,12 +652,10 @@ fn read_boot_secret_descriptor(descriptor: &OwnedFd) -> anyhow::Result<BrokerBoo
 /// new work (#3999). Gone means the runner or its front door has ended: this
 /// broker serves its loopback session alone, and intercepted dials stay
 /// refused.
-async fn pair_front_door(
+async fn connect_front_door(
     socket: &Path,
     capability: &[u8],
-    environment_id: Uuid,
-    environment_generation: u64,
-) -> anyhow::Result<Option<AdmittedCredentialBridge<FrontDoorTransport>>> {
+) -> anyhow::Result<Option<tokio::net::UnixStream>> {
     use tokio::io::AsyncWriteExt as _;
     let connected = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -648,16 +683,68 @@ async fn pair_front_door(
     stream
         .write_all(&[codewire_credential_broker::FRONT_DOOR_SESSION_ROLE_TAG])
         .await?;
-    let session = FrontDoorTransport::open(stream, environment_id, environment_generation).await?;
-    Ok(Some(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            admit_credential_bridge(session, environment_id, environment_generation),
-        )
-        .await
-        .context("front door session readiness timed out")??,
-    ))
+    Ok(Some(stream))
 }
+
+/// Open the local broker's front-door session on a paired `stream` and admit
+/// the front door's Ready.
+async fn open_front_door(
+    stream: tokio::net::UnixStream,
+    environment_id: Uuid,
+    environment_generation: u64,
+) -> anyhow::Result<AdmittedCredentialBridge<FrontDoorTransport>> {
+    let session = FrontDoorTransport::open(stream, environment_id, environment_generation).await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        admit_credential_bridge(session, environment_id, environment_generation),
+    )
+    .await
+    .context("front door session readiness timed out")?
+    .map_err(Into::into)
+}
+
+/// Joins the admitted delegation's front-door session (#4909) with this
+/// relay's own binding Ready, through the authority on the relay's channel.
+/// The platform's epoch handle stays with the authority.
+struct FrontDoorJoiner {
+    delegation: LocalCredentialDelegationClient,
+    environment_id: Uuid,
+    environment_generation: u64,
+}
+
+impl codewire_credential_broker::DelegatedFrontDoorJoiner for FrontDoorJoiner {
+    fn join(
+        &mut self,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Option<codewire_credential_broker::DelegatedFrontDoorUpstream>,
+    > {
+        Box::pin(async move {
+            let ready = codewire_daemon_proto::codewire::bridge::v1::CredentialBridgeReady {
+                protocol_version: codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                environment_id: self.environment_id.to_string(),
+                environment_generation: self.environment_generation,
+            };
+            let (guest, guest_frames) = tokio::sync::mpsc::channel(FRONT_DOOR_GUEST_BUFFER);
+            let (host, capabilities) = self
+                .delegation
+                .delegate_front_door(
+                    ready,
+                    tokio_stream::wrappers::ReceiverStream::new(guest_frames),
+                )
+                .await
+                .ok()?;
+            Some(codewire_credential_broker::DelegatedFrontDoorUpstream {
+                capabilities,
+                guest,
+                host: host.map(|frame| frame.map_err(|_| ())).boxed(),
+            })
+        })
+    }
+}
+
+/// Guest frames queued toward the platform's front-door session.
+const FRONT_DOOR_GUEST_BUFFER: usize = 32;
 
 #[cfg(target_os = "macos")]
 fn verify_broker_process_confinement() -> anyhow::Result<()> {
@@ -764,7 +851,7 @@ mod tests {
     async fn a_pairing_socket_already_gone_means_no_front_door_session() {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("front-door.sock");
-        let paired = pair_front_door(&socket, b"capability", Uuid::new_v4(), 1).await;
+        let paired = connect_front_door(&socket, b"capability").await;
         assert!(paired.unwrap().is_none());
     }
 
@@ -775,8 +862,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("front-door.sock");
         let _silent = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        let paired = pair_front_door(&socket, b"capability", Uuid::new_v4(), 1).await;
-        assert!(paired.is_err());
+        let stream = connect_front_door(&socket, b"capability")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(open_front_door(stream, Uuid::new_v4(), 1).await.is_err());
     }
 
     #[test]

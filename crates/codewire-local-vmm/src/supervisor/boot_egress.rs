@@ -28,16 +28,26 @@ pub(super) struct BootEgress {
 }
 
 impl Supervisor {
-    /// Whether the running credential authority carries a boot's secrets to
-    /// its brokers, asked only when the switch is on: an older one would drop
-    /// them, and its brokers could never pair with the front door (#3999).
-    async fn authority_carries_boot_secrets(&self) -> bool {
+    /// What the running credential authority serves that interception
+    /// needs, asked only when the switch is on: an older one would drop a
+    /// boot's secrets, and its brokers could never pair with the front door
+    /// (#3999), and only a newer one joins a platform delegation's front-door
+    /// session (#4909).
+    async fn authority_serves(&self) -> egress_intercept::AuthorityServes {
         if !egress_intercept::read_switch(&self.config.root).intercepts() {
-            return false;
+            return Default::default();
         }
-        self.access_control_client().await.is_ok_and(|client| {
-            AuthorityFeature::BootSecrets.served_by(client.info().protocol_version)
-        })
+        match self.access_control_client().await {
+            Ok(client) => {
+                let protocol = client.info().protocol_version;
+                egress_intercept::AuthorityServes {
+                    boot_secrets: AuthorityFeature::BootSecrets.served_by(protocol),
+                    front_door_delegation: AuthorityFeature::FrontDoorDelegation
+                        .served_by(protocol),
+                }
+            }
+            Err(_) => Default::default(),
+        }
     }
 
     pub(super) async fn boot_egress(
@@ -45,7 +55,7 @@ impl Supervisor {
         environment_id: Uuid,
         broker: &super::CredentialBrokerEnsureRequest,
     ) -> Result<BootEgress, SupervisorError> {
-        let authority_carries_boot_secrets = self.authority_carries_boot_secrets().await;
+        let authority = self.authority_serves().await;
         let network_policy = self
             .core()
             .network_policies
@@ -59,12 +69,8 @@ impl Supervisor {
                 .canonical_json()
                 .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?,
         };
-        let interception = egress_intercept::for_boot(
-            &self.config.root,
-            self.log.as_deref(),
-            broker,
-            authority_carries_boot_secrets,
-        );
+        let interception =
+            egress_intercept::for_boot(&self.config.root, self.log.as_deref(), broker, authority);
         Ok(BootEgress {
             network_policy,
             network_policy_document,

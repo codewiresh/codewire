@@ -27,6 +27,7 @@ use crate::{
     BrokerUpstreamTransport, OpenAiBroker, timing,
 };
 
+pub(crate) mod delegated_front_door;
 mod front_door;
 mod relay;
 mod request_body;
@@ -42,7 +43,6 @@ pub use front_door::{
     FrontDoorResponseSink, FrontDoorTransport, run_admitted_credential_bridge_with_front_doors,
     run_admitted_credential_bridges, run_admitted_front_door_bridge,
 };
-
 pub use relay::{
     CredentialBridgeRelayInput, CredentialBridgeRelayOutput, RelayNetworkPolicy,
     run_admitted_credential_bridge_relay,

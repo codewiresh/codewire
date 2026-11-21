@@ -175,6 +175,37 @@ impl Finished {
     }
 }
 
+/// A session's refusals, counted by reason and reported at most once a
+/// minute, so a front door that floods bad frames is counted without a log
+/// line each. The caller logs what [`Refusals::count`] hands back.
+pub struct Refusals {
+    counts: HashMap<Refusal, u64>,
+    next_log: Instant,
+}
+
+impl Default for Refusals {
+    fn default() -> Self {
+        Self {
+            counts: HashMap::new(),
+            next_log: Instant::now(),
+        }
+    }
+}
+
+impl Refusals {
+    /// Count `refusal`. Once a minute, it hands back every count since the
+    /// last report, for the caller to log.
+    pub fn count(&mut self, refusal: Refusal) -> Vec<(Refusal, u64)> {
+        *self.counts.entry(refusal).or_default() += 1;
+        let now = Instant::now();
+        if now < self.next_log {
+            return Vec::new();
+        }
+        self.next_log = now + Duration::from_secs(60);
+        self.counts.drain().collect()
+    }
+}
+
 /// The routing state of one front-door session.
 pub struct FrontDoorRouter<U> {
     pinned: Vec<String>,

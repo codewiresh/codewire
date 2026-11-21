@@ -160,6 +160,10 @@ pub enum CredentialBrokerError {
     #[error("protected credential material is invalid for this provider")]
     InvalidCredentialMaterial,
 }
+pub use bridge::delegated_front_door::{
+    DelegatedFrontDoorEnd, DelegatedFrontDoorJoiner, DelegatedFrontDoorUpstream, JOIN_TIMEOUT,
+    OPEN_HOLD, serve_delegated_front_door,
+};
 pub use bridge::{
     AdmittedCredentialBridge, BrokerBridgeError, CredentialBridgeRelayInput,
     CredentialBridgeRelayOutput, CredentialBridgeResponseSink, CredentialBridgeTransport,
@@ -168,5 +172,7 @@ pub use bridge::{
     run_admitted_credential_bridge_with_front_doors, run_admitted_credential_bridges,
     run_admitted_front_door_bridge, run_credential_bridge,
 };
+/// The environment and generation a front-door session serves.
+pub use codewire_credential_bridge::BridgeIdentity;
 /// Written before a front-door session's Open (#3999).
 pub use codewire_credential_bridge::FRONT_DOOR_SESSION_ROLE_TAG;

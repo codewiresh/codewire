@@ -18,10 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use codewire_daemon_proto::codewire::bridge::v1;
-use codewire_daemon_proto::{
-    CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES, CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
-};
+use codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
 use futures::stream::BoxStream;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -57,21 +54,9 @@ pub struct Joined {
     pub session: tokio_util::sync::DropGuard,
 }
 
-/// The Ready of a binding, unframed: what the relay opens every upstream
-/// with, and what the front door's own first frame must equal byte for byte.
-pub fn binding_ready(environment_id: Uuid, generation: u64) -> Vec<u8> {
-    use prost::Message as _;
-    v1::CredentialBridgeGuestMessage {
-        payload: Some(v1::credential_bridge_guest_message::Payload::Ready(
-            v1::CredentialBridgeReady {
-                protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
-                environment_id: environment_id.to_string(),
-                environment_generation: generation,
-            },
-        )),
-    }
-    .encode_to_vec()
-}
+/// The Ready of a binding, unframed: the one encoding the hosted and local
+/// carriers both check the front door's first frame against.
+pub use codewire_credential_bridge::binding_ready;
 
 /// The live epochs a front-door session may join, one current per binding.
 #[derive(Default)]

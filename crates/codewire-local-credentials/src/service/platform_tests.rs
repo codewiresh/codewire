@@ -51,6 +51,7 @@ fn binding(directory: PathBuf) -> crate::PlatformCredentialBinding {
             reserved_keys: BTreeSet::from(["CODEX_HOME".into()]),
         },
         selection_sha256: [7; 32],
+        front_door: false,
     }
 }
 
@@ -582,4 +583,83 @@ async fn the_platform_question_refuses_an_environment_with_a_local_binding() {
             .await
             .unwrap()
     );
+}
+
+/// A platform boot's binding serves a front-door session exactly when the
+/// boot carries a front-door pairing secret (#4909): the authority decides it
+/// from the boot, never from the wire.
+#[tokio::test]
+async fn a_platform_boots_front_door_follows_its_pairing_secret() {
+    let directory = tempfile::tempdir().unwrap();
+    let authority = Arc::new(
+        LocalCredentialAuthority::open(
+            &directory.path().join("authority"),
+            EphemeralProtectedStore::default(),
+            builtin_provider_catalog(),
+        )
+        .unwrap(),
+    );
+    let manager = BrokerProcessManager::new(
+        authority,
+        Some(Arc::new(NeverSpawn)),
+        Arc::new(BrokerLeaseAuditLog::default()),
+        LocalSshOperationRuntime::new(None),
+        Some(Arc::new(NeverConnect)),
+        Arc::new(crate::broker_log::BrokerLog::disabled()),
+    );
+    let id = EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap();
+    let config = LocalBrokerProcessConfig {
+        environment_id: id.clone(),
+        environment_generation: 7,
+        environment_name: "synthetic".into(),
+        runner_socket: directory.path().join(format!("{id}.sock")),
+        http_providers: BTreeSet::new(),
+        platform_delegated: true,
+        network_policy_allows_github: true,
+        network_policy_allowed_hosts: Default::default(),
+    };
+    let sent = binding(directory.path().join("explicit-platform-config"));
+    let mut serving = sent.clone();
+    serving.front_door = true;
+    let (_finish, completed) = tokio::sync::oneshot::channel::<()>();
+    manager.entries.lock().await.insert(
+        id.clone(),
+        BrokerProcessEntry {
+            generation: 7,
+            config: config.clone(),
+            projection: None,
+            platform: Some(serving),
+            local_profile: None,
+            shutdown: watch::channel(false).0,
+            state: watch::channel(BrokerProcessState::Running).1,
+            task: tokio::spawn(async {
+                let _ = completed.await;
+            }),
+            drain_failed: false,
+        },
+    );
+    let request = |boot_secrets| BrokerEnsureRequest {
+        environment_id: id.clone(),
+        environment_generation: 7,
+        environment_name: config.environment_name.clone(),
+        runner_socket: config.runner_socket.clone(),
+        projection: None,
+        platform: Some(sent.clone()),
+        local_profile: None,
+        network_policy_allows_github: true,
+        network_policy_allowed_hosts: Default::default(),
+        boot_secrets,
+    };
+    let pairing = crate::BrokerBootSecrets::new([(
+        crate::BootSecretPurpose::FrontDoorPairing,
+        vec![9; crate::BOOT_SECRET_BYTES],
+    )])
+    .unwrap();
+    // The running broker serves a front door, so only a boot with a pairing
+    // secret is the same selection.
+    assert!(manager.ensure(request(pairing)).await.unwrap().running);
+    assert!(matches!(
+        manager.ensure(request(Default::default())).await,
+        Err(status) if status.code() == tonic::Code::FailedPrecondition
+    ));
 }

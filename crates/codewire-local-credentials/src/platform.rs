@@ -1,6 +1,7 @@
 //! Owner-only selection for a platform-backed native broker. This metadata
 //! never enters the isolated child; only canonical bridge frames cross FD3.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::pin::Pin;
 
@@ -21,9 +22,28 @@ pub struct PlatformCredentialBinding {
     pub server_url: String,
     pub selection: PlatformProjectionSelection,
     pub selection_sha256: [u8; 32],
+    /// Whether this boot's broker serves a front-door session (#4909): its
+    /// boot carries a front-door pairing secret. The delegation then asks the
+    /// platform for one, and the logins it delivers are placeholders. Set by
+    /// the authority from the boot, never carried on the wire.
+    pub front_door: bool,
 }
 
 impl PlatformCredentialBinding {
+    /// Bind what the authority takes from this boot, never from the wire: the
+    /// keys reserved across the boot's sources, and whether its broker serves
+    /// a front-door session (#4909).
+    pub(crate) fn bind_boot(
+        &mut self,
+        reserved_keys: BTreeSet<String>,
+        boot_secrets: &crate::BrokerBootSecrets,
+    ) {
+        self.selection.reserved_keys = reserved_keys;
+        self.front_door = boot_secrets
+            .get(crate::BootSecretPurpose::FrontDoorPairing)
+            .is_some();
+    }
+
     pub(crate) fn validate_local_projection(
         &self,
         local: &crate::LocalEnvironmentProjectionBinding,
@@ -120,6 +140,7 @@ impl PlatformCredentialBinding {
                 reserved_keys: names(value.reserved_keys)?,
             },
             selection_sha256: value.selection_sha256.try_into().map_err(|_| invalid())?,
+            front_door: false,
         };
         result.validate()?;
         Ok(result)
@@ -221,6 +242,7 @@ mod tests {
                 reserved_keys: ["CODEX_HOME".into()].into(),
             },
             selection_sha256: [11; 32],
+            front_door: false,
         }
     }
 

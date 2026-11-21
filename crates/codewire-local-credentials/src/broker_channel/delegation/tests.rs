@@ -322,6 +322,7 @@ async fn fixture_with_projection(mode: ConnectorMode, local_projection: bool) ->
             reserved_keys: Default::default(),
         },
         selection_sha256: [7; 32],
+        front_door: false,
     };
     let lifetime = BrokerChannelRefreshLifetime::new(authority);
     let server = tokio::spawn(super::super::serve_broker_lease_channel_with_ready(

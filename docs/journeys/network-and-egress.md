@@ -41,7 +41,7 @@ separately.
 | `refusal-readable` | #5057, #5058 | no command yet | no command yet | n/a | n/a |
 | `learn-mode` | #4015 | after launch | after launch | after launch | after launch |
 | `agent-vm-interception` | #3999 (#4809, #4884, #4812, #4887) | partly observed 2026-11-18, source 582326b40 (an API key; the smoke) | no command yet | n/a | n/a |
-| `agent-vm-platform-profile` | #4909 | no command yet | no command yet | n/a | n/a |
+| `agent-vm-platform-profile` | #4909 | not yet observed | no command yet | n/a | n/a |
 | `agent-claude` | #3999, #4001 | no command yet | partly observed 2026-11-19, v0.4.24 | no command yet | no command yet |
 | `agent-codex` | #3999, #4001 | no command yet | partly observed 2026-11-19, source 8f3a2d502 | no command yet | no command yet |
 | `agent-codex-websocket` | #3999 | no command yet | no command yet | n/a | n/a |
@@ -668,16 +668,17 @@ request adds.
     the VM reports started. If it cannot start, or the broker does not
     connect within the limit, the start fails with the reason; it never
     reports started with requests left hanging;
-  - a VM whose credentials come from the platform starts without
-    interception: its recorded state reads interception off, the
+  - a VM whose credentials come from the platform, on macOS or against an
+    authority that does not join the platform's front-door session, starts
+    without interception: its recorded state reads interception off, the
     supervisor's log gives the reason (`skipped=platform_credentials`), and
     `cw --local info` shows `no placeholders: they come from the platform`
     under its `Credentials` row, with `{"state": "not_intercepted", "reason":
     "platform_credentials"}` in its JSON. Its
     seed carries no authority and no placeholders, so the guest sets no
     `NODE_EXTRA_CA_CERTS`, and its agents use today's routes. It never boots
-    trusting an authority that nothing serves. This holds until the
-    delegation carries the front-door session (#4909,
+    trusting an authority that nothing serves. On Linux against a current
+    authority it intercepts through the delegation (#4909,
     `agent-vm-platform-profile`);
   - **only the boot's pairing secret pairs a credential broker with the
     front door** (#3999). The runner mints it for the boot and keeps it in
@@ -777,10 +778,12 @@ session through a relay".
     agent session runs, with a request in flight and a long streamed
     response;
   - the front door killed while an agent runs;
+  - an agent idle for more than two minutes, then a request;
   - the switch off.
-- **Driving it:** no command yet (#4909). On a Linux host with a built
-  `cw`, against Dev, with the switch on: start the VM, then run a Claude Code
-  prompt, `/usage` and the plan, and a Codex task.
+- **Driving it:** on a Linux host with a `cw` built from #4909's change,
+  signed in to Dev, with the switch on and the VM's credential profile on
+  the platform: start the VM, then run a Claude Code prompt, `/usage` and
+  the plan, and a Codex task.
 - **Proof:**
   - the VM starts with interception on: its recorded state says so, and the
     supervisor's log has no `skipped=platform_credentials`;
@@ -803,7 +806,12 @@ session through a relay".
     started after the successor paired is served by the successor, and no
     request fails in between. A streamed response long enough to span the
     successor's pairing, but shorter than the old relay's epoch, completes on
-    the old relay unbroken. A WebSocket resets at most once;
+    the old relay unbroken;
+  - **after an idle spell** of more than two minutes, when the platform has
+    ended the joined stream, the next request is served, not failed: the
+    relay joins again while it waits;
+  - **a WebSocket upgrade** to an intercepted host is refused by the relay:
+    the platform's front door serves no WebSockets;
   - **with the front door gone,** a request to an intercepted host is
     refused by the egress broker and counted, and nothing is dialled
     directly;

@@ -631,7 +631,7 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
             .platform
             .as_mut()
             .map(|binding| {
-                binding.selection.reserved_keys = reserved_keys;
+                binding.bind_boot(reserved_keys, &request.boot_secrets);
                 binding.validate()?;
                 if let Some(local) = &request.projection {
                     binding.validate_local_projection(local)?;

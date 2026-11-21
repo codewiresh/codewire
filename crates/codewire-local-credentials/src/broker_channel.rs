@@ -71,7 +71,10 @@ async fn projection_permit(
 }
 pub use audit::{BrokerLeaseAuditDecision, BrokerLeaseAuditEvent};
 pub(crate) use audit::{BrokerLeaseAuditLog, MAX_BROKER_LEASE_AUDIT_LIST_LIMIT};
-pub use delegation::{LocalCredentialDelegationClient, LocalCredentialDelegationOutput};
+pub use delegation::{
+    LocalCredentialDelegationClient, LocalCredentialDelegationOutput,
+    LocalFrontDoorDelegationOutput,
+};
 pub use projection::LocalEnvironmentProjectionBinding;
 pub(crate) use ssh::LocalSshOperationRuntime;
 pub use ssh::{LocalSshSignError, LocalSshSignRequest, LocalSshSigner};

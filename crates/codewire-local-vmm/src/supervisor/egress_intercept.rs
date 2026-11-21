@@ -125,27 +125,24 @@ fn interception(switch: InterceptSwitch, skipped: Option<Skipped>) -> v1::Interc
 
 /// Read the switch for one boot of `broker`'s environment, log what the boot
 /// starts with, and say what it starts with. The front door serves only
-/// through the boot's local credential broker, so a boot with no broker, or
-/// one whose credentials come from the platform, whose relay does not pair
-/// yet, does not intercept: its agent hosts are reached as they would be with
-/// the switch off, and the log and the boot's report say why.
+/// through the boot's local credential broker, so a boot with no broker does
+/// not intercept: its agent hosts are reached as they would be with the
+/// switch off, and the log and the boot's report say why. A boot whose
+/// credentials come from the platform intercepts only where its relay can
+/// serve the front door: on Linux, against an authority that joins the
+/// platform's front-door session (#4909).
 pub(super) fn for_boot(
     root: &Path,
     log: Option<&DiagnosticLog>,
     broker: &super::CredentialBrokerEnsureRequest,
-    authority_carries_boot_secrets: bool,
+    authority: AuthorityServes,
 ) -> v1::Interception {
     let switch = read_switch(root);
     if switch == InterceptSwitch::Unrecognized && !WARNED_UNRECOGNIZED.swap(true, Ordering::Relaxed)
     {
         diagnostic_log::record(log, "egress_intercept_file_unrecognized", &[]);
     }
-    let skipped = skipped(
-        switch,
-        broker.enabled,
-        broker.platform.is_some(),
-        authority_carries_boot_secrets,
-    );
+    let skipped = skipped(switch, broker.enabled, broker.platform.is_some(), authority);
     let generation = ("generation", LogField::Count(broker.environment_generation));
     let switch_name = ("switch", LogField::Name(switch.name()));
     match skipped {
@@ -163,22 +160,35 @@ pub(super) fn for_boot(
     interception(switch, skipped)
 }
 
+/// What the running credential authority serves that interception needs,
+/// asked only when the switch is on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct AuthorityServes {
+    /// It carries a boot's secrets to its brokers (#3999).
+    pub(super) boot_secrets: bool,
+    /// It joins a platform delegation's front-door session (#4909).
+    pub(super) front_door_delegation: bool,
+}
+
 /// Why a switched-on boot does not intercept, if it doesn't. A boot whose
 /// running authority predates boot secrets would get brokers that can never
-/// pair, so it starts as with the switch off instead (#3999).
+/// pair, so it starts as with the switch off instead (#3999). A platform
+/// boot's relay serves the front door only on Linux, where its confinement
+/// keeps the paired socket, and only against an authority that joins the
+/// platform's session (#4909).
 fn skipped(
     switch: InterceptSwitch,
     has_broker: bool,
     platform: bool,
-    authority_carries_boot_secrets: bool,
+    authority: AuthorityServes,
 ) -> Option<Skipped> {
     if !switch.intercepts() {
         None
     } else if !has_broker {
         Some(Skipped::NoCredentialBroker)
-    } else if platform {
+    } else if platform && (cfg!(target_os = "macos") || !authority.front_door_delegation) {
         Some(Skipped::PlatformCredentials)
-    } else if !authority_carries_boot_secrets {
+    } else if !authority.boot_secrets {
         Some(Skipped::AuthorityPredatesBootSecrets)
     } else {
         None
@@ -189,32 +199,57 @@ fn skipped(
 mod tests {
     use super::*;
 
+    const SECRETS_ONLY: AuthorityServes = AuthorityServes {
+        boot_secrets: true,
+        front_door_delegation: false,
+    };
+    const BOTH: AuthorityServes = AuthorityServes {
+        boot_secrets: true,
+        front_door_delegation: true,
+    };
+
     #[test]
     fn a_boot_intercepts_only_through_a_local_credential_broker() {
         use InterceptSwitch::{Off, On, Unrecognized};
         let name = |skipped: Option<Skipped>| skipped.map(Skipped::name);
-        assert_eq!(skipped(On, true, false, true), None);
+        assert_eq!(skipped(On, true, false, SECRETS_ONLY), None);
         assert_eq!(
-            name(skipped(On, false, false, true)),
+            name(skipped(On, false, false, SECRETS_ONLY)),
             Some("no_credential_broker")
         );
         assert_eq!(
-            name(skipped(On, false, true, true)),
+            name(skipped(On, false, true, BOTH)),
             Some("no_credential_broker")
         );
         assert_eq!(
-            name(skipped(On, true, true, true)),
-            Some("platform_credentials")
-        );
-        assert_eq!(
-            name(skipped(On, true, false, false)),
+            name(skipped(On, true, false, AuthorityServes::default())),
             Some("authority_predates_boot_secrets")
         );
         for switch in [Off, Unrecognized] {
             for (has_broker, platform) in [(true, false), (false, false), (true, true)] {
-                assert_eq!(skipped(switch, has_broker, platform, false), None);
+                assert_eq!(
+                    skipped(switch, has_broker, platform, AuthorityServes::default()),
+                    None
+                );
             }
         }
+    }
+
+    /// A platform boot intercepts only against an authority that joins the
+    /// platform's front-door session, and never on macOS (#4909).
+    #[test]
+    fn a_platform_boot_intercepts_only_where_its_relay_serves_the_front_door() {
+        use InterceptSwitch::On;
+        assert_eq!(
+            skipped(On, true, true, SECRETS_ONLY),
+            Some(Skipped::PlatformCredentials)
+        );
+        let expected = if cfg!(target_os = "macos") {
+            Some(Skipped::PlatformCredentials)
+        } else {
+            None
+        };
+        assert_eq!(skipped(On, true, true, BOTH), expected);
     }
 
     /// The boot's report says what its log says (#4912): off for an

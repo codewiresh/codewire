@@ -43,8 +43,8 @@ pub mod front_door_router;
 mod front_door_session;
 pub use front_door_session::{
     FRONT_DOOR_OPEN_TIMEOUT, FRONT_DOOR_SESSION_ROLE_TAG, FrontDoorHostSender,
-    FrontDoorHostSession, FrontDoorSessionError, SessionStream, front_door_capabilities,
-    serve_front_door_session,
+    FrontDoorHostSession, FrontDoorSessionError, SessionStream, binding_ready,
+    front_door_capabilities, serve_front_door_session,
 };
 mod http_ingress;
 pub use http_ingress::{

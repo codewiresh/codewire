@@ -62,10 +62,8 @@ const FRONT_DOOR_IDLE: std::time::Duration = std::time::Duration::from_secs(120)
 
 /// The operations a joined front-door stream serves, listed in its response
 /// headers; the relay copies exactly these into the front door's Open.
-pub const FRONT_DOOR_CAPABILITIES: &[&str] = &[
-    codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_FRONT_DOOR,
-    codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
-];
+pub const FRONT_DOOR_CAPABILITIES: &[&str] =
+    codewire_daemon_proto::CREDENTIAL_BRIDGE_DELEGATED_FRONT_DOOR_CAPABILITIES;
 
 /// Admission and active/draining epochs share one process-wide service budget.
 /// Each hosted Sandbox with credentials holds one long-lived epoch, and two for

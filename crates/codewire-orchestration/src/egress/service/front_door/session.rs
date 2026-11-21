@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codewire_credential_bridge::front_door_router::{
-    FrontDoorRouter, GuestRoute, HostRoute, Refusal,
+    FrontDoorRouter, GuestRoute, HostRoute, Refusal, Refusals,
 };
 use codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION;
 use codewire_daemon_proto::codewire::bridge::v1;
@@ -220,16 +220,16 @@ impl Session {
                             }
                         }
                         GuestRoute::Answer(answer, refusal) => {
-                            refusals.count(refusal);
+                            count_refusal(&mut refusals, refusal);
                             if !self.send(&answer.encode_to_vec()).await {
                                 return;
                             }
                         }
-                        GuestRoute::Drop(refusal) => refusals.count(refusal),
+                        GuestRoute::Drop(refusal) => count_refusal(&mut refusals, refusal),
                         GuestRoute::Cancel { answer, upstream, cancel, refusal } => {
                             // The router has ended this live id: its upstream
                             // stops it, and the front door reads the answer.
-                            refusals.count(refusal);
+                            count_refusal(&mut refusals, refusal);
                             let sent = match upstreams.guests.get(&upstream) {
                                 Some(guest) => guest.send(cancel.encode_to_vec()).await.is_ok(),
                                 None => false,
@@ -274,14 +274,14 @@ impl Session {
                             // A late frame for an id the router cancelled on
                             // this upstream, already answered.
                             HostRoute::Drop(refusal) => {
-                                refusals.count(refusal);
+                                count_refusal(&mut refusals, refusal);
                                 if !router.holds(id) && router.current() != Some(id) {
                                     upstreams.remove(id);
                                 }
                                 continue;
                             }
                             HostRoute::EndUpstream(answers, refusal) => {
-                                refusals.count(refusal);
+                                count_refusal(&mut refusals, refusal);
                                 answers
                             }
                         },
@@ -392,36 +392,14 @@ fn ended(class: &'static str) {
     );
 }
 
-/// Refused frames, counted by reason only: a request id never reaches a log
-/// or a metric. Logged at most once a minute per session.
-struct Refusals {
-    counts: HashMap<Refusal, u64>,
-    next_log: Instant,
-}
-
-impl Default for Refusals {
-    fn default() -> Self {
-        Self {
-            counts: HashMap::new(),
-            next_log: Instant::now(),
-        }
-    }
-}
-
-impl Refusals {
-    fn count(&mut self, refusal: Refusal) {
-        *self.counts.entry(refusal).or_default() += 1;
-        let now = Instant::now();
-        if now >= self.next_log {
-            self.next_log = now + Duration::from_secs(60);
-            for (reason, count) in self.counts.drain() {
-                tracing::info!(
-                    event = "front_door_frames_refused",
-                    reason = ?reason,
-                    count,
-                    "front-door session refused frames"
-                );
-            }
-        }
+/// Log a session's refusal counts, at most once a minute (`Refusals`).
+fn count_refusal(refusals: &mut Refusals, refusal: Refusal) {
+    for (reason, count) in refusals.count(refusal) {
+        tracing::info!(
+            event = "front_door_frames_refused",
+            reason = ?reason,
+            count,
+            "front-door session refused frames"
+        );
     }
 }

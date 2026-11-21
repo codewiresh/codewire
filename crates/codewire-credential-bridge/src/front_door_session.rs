@@ -27,6 +27,8 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt as _;
 use tonic::Status;
 
+use uuid::Uuid;
+
 use crate::{BridgeIdentity, CredentialBridge, EpochReplacement};
 
 /// The host's first byte on the session socket, before its Open: the role
@@ -129,6 +131,21 @@ fn admit_open(
     Ok(open.capabilities)
 }
 
+/// The Ready of a binding, unframed: what a relay opens every upstream with,
+/// and what the front door's own first frame must equal byte for byte.
+pub fn binding_ready(environment_id: Uuid, generation: u64) -> Vec<u8> {
+    v1::CredentialBridgeGuestMessage {
+        payload: Some(v1::credential_bridge_guest_message::Payload::Ready(
+            v1::CredentialBridgeReady {
+                protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                environment_id: environment_id.to_string(),
+                environment_generation: generation,
+            },
+        )),
+    }
+    .encode_to_vec()
+}
+
 /// What a front-door session's Open lists for an executor that does, or does
 /// not, serve WebSocket upgrades: the front door itself and streamed request
 /// bodies, since intercepted uploads are the large ones, and `websocket.v1`
@@ -218,12 +235,28 @@ impl FrontDoorHostSession {
         self.sender.clone()
     }
 
+    /// Write every message already queued, then end the session. It returns
+    /// once every [`FrontDoorHostSender`] of this session is dropped and the
+    /// queue is written, so drop the callers' senders first. Dropping the
+    /// session instead discards what is queued.
+    pub async fn finish(mut self) {
+        let writer = std::mem::replace(&mut self.writer, tokio::spawn(async {}));
+        drop(self);
+        let _ = writer.await;
+    }
+
     /// The next guest message, or `None` when the guest closed the stream.
     /// Cancellation-safe: bytes already read stay buffered.
     pub async fn receive(
         &mut self,
     ) -> Result<Option<v1::CredentialBridgeGuestMessage>, FrontDoorSessionError> {
         self.reader.next().await
+    }
+
+    /// [`Self::receive`], undecoded: the guest message's exact bytes, for a
+    /// relay that routes and compares them as sent.
+    pub async fn receive_frame(&mut self) -> Result<Option<BytesMut>, FrontDoorSessionError> {
+        self.reader.next_frame().await
     }
 }
 
@@ -269,13 +302,20 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
     }
 
     async fn next<M: Message + Default>(&mut self) -> Result<Option<M>, FrontDoorSessionError> {
+        match self.next_frame().await? {
+            Some(frame) => M::decode(frame)
+                .map(Some)
+                .map_err(|_| FrontDoorSessionError::InvalidFrame),
+            None => Ok(None),
+        }
+    }
+
+    /// The next frame's encoded message, undecoded.
+    async fn next_frame(&mut self) -> Result<Option<BytesMut>, FrontDoorSessionError> {
         loop {
             if let Some(length) = self.complete_frame()? {
                 self.buffer.advance(LENGTH_BYTES);
-                let frame = self.buffer.split_to(length);
-                return M::decode(frame)
-                    .map(Some)
-                    .map_err(|_| FrontDoorSessionError::InvalidFrame);
+                return Ok(Some(self.buffer.split_to(length)));
             }
             let read = self
                 .inner

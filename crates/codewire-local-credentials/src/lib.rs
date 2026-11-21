@@ -15,6 +15,7 @@
 
 mod admission;
 use admission::derive_local_environment_grants;
+mod authority_lock;
 mod boot_secrets;
 mod broker_channel;
 mod broker_log;
@@ -40,6 +41,7 @@ mod store_refusal;
 mod transport;
 mod workload_secret;
 
+use authority_lock::AuthorityLock;
 use credential_names::{
     CREDENTIALS_TABLE_BODY, credential_names_unique_per_provider, upgrade_credential_names_schema,
 };
@@ -59,8 +61,9 @@ pub use broker_channel::{
     BrokerCredentialRefreshAdmission, BrokerCredentialRefreshReservation, BrokerLeaseAuditDecision,
     BrokerLeaseAuditEvent, BrokerLeaseChannelError, LocalCredentialBrokerLeaseClient,
     LocalCredentialDelegationClient, LocalCredentialDelegationOutput,
-    LocalEnvironmentProjectionBinding, LocalSshSignError, LocalSshSignRequest, LocalSshSigner,
-    StartedBrokerCredentialRefresh, UnpublishedRefresh, serve_broker_lease_channel,
+    LocalEnvironmentProjectionBinding, LocalFrontDoorDelegationOutput, LocalSshSignError,
+    LocalSshSignRequest, LocalSshSigner, StartedBrokerCredentialRefresh, UnpublishedRefresh,
+    serve_broker_lease_channel,
 };
 pub use broker_log::{
     AGENT_LOGIN_REFUSAL_AGENTS, AGENT_LOGIN_REFUSAL_REASONS, AGENT_LOGIN_REFUSED_MARKER,
@@ -147,8 +150,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[cfg(unix)]
-use rustix::fs::{FlockOperation, Mode, OFlags, flock, open};
-#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
 
 pub const DATABASE_FILE: &str = "credentials.db";
@@ -162,7 +163,6 @@ pub const LOCAL_OWNER_ID: &str = "local-user";
 pub const AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES: [&str; 2] =
     ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"];
 
-const AUTHORITY_LOCK_FILE: &str = "authority.lock";
 const DATABASE_APPLICATION_ID: i64 = 0x4357_4352; // "CWCR"
 const DATABASE_SCHEMA_VERSION: i64 = 7;
 /// Adds the store's default profile.
@@ -2155,62 +2155,6 @@ pub(crate) fn deny_generic_ssh_lease(
         return Err(LocalCredentialError::CredentialOperationLeaseDenied);
     }
     Ok(())
-}
-
-struct AuthorityLock {
-    #[cfg(unix)]
-    _file: fs::File,
-}
-
-impl AuthorityLock {
-    fn acquire(root: &Path) -> Result<Self, LocalCredentialError> {
-        #[cfg(not(unix))]
-        {
-            let _ = root;
-            Err(LocalCredentialError::UnsupportedPlatform)
-        }
-
-        #[cfg(unix)]
-        {
-            let path = root.join(AUTHORITY_LOCK_FILE);
-            let descriptor = open(
-                &path,
-                OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-                Mode::RUSR | Mode::WUSR,
-            )
-            .map_err(|_| LocalCredentialError::InvalidDatabasePath)?;
-            let file = fs::File::from(descriptor);
-            validate_private_file(
-                &file
-                    .metadata()
-                    .map_err(|_| LocalCredentialError::InvalidDatabasePath)?,
-            )?;
-            // CLOEXEC still permits a concurrent fork to retain this lock
-            // briefly until exec. Match the supervisor's bounded handoff;
-            // never unlock or take ownership from a live authority.
-            const RETRY_DELAY: Duration = Duration::from_millis(10);
-            const MAX_RETRIES: usize = 25;
-            let mut retries = 0;
-            loop {
-                match flock(&file, FlockOperation::NonBlockingLockExclusive) {
-                    Ok(()) => return Ok(Self { _file: file }),
-                    Err(error) if error == rustix::io::Errno::INTR && retries < MAX_RETRIES => {
-                        retries += 1;
-                    }
-                    Err(error)
-                        if error == rustix::io::Errno::WOULDBLOCK && retries < MAX_RETRIES =>
-                    {
-                        retries += 1;
-                        std::thread::sleep(RETRY_DELAY);
-                    }
-                    Err(error) if error == rustix::io::Errno::WOULDBLOCK => {
-                        return Err(LocalCredentialError::AlreadyRunning);
-                    }
-                    Err(_) => return Err(LocalCredentialError::InvalidDatabasePath),
-                }
-            }
-        }
-    }
 }
 
 fn open_database(root: &Path) -> Result<Connection, LocalCredentialError> {
