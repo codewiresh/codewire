@@ -24,6 +24,7 @@
 //! writes no such row, is asked through the API instead.
 
 mod follow;
+mod retry;
 mod wait;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -39,6 +40,7 @@ pub use follow::{
     EnvironmentLogFeed, FollowEnd, FollowError, FollowPolicy, Interruption, LogFeedConnection,
     LogFeedEvent, PlatformLogFeed, SetupObserver, follow_setup, wait_with_ticks,
 };
+pub use retry::RECLONE_UNCONFIRMED;
 pub use wait::{
     CONFIDENTIAL_READY_TIMEOUT, DAEMON_READY_TIMEOUT, DaemonObservation, DaemonWaitError,
     EnvironmentFacts, GetEnvironmentError, PlatformEnd, READY_POLL, READY_TIMEOUT,

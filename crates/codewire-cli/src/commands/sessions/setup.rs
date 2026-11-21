@@ -92,6 +92,16 @@ fn without_escapes(text: &str) -> String {
     out
 }
 
+/// The failed setup's line, then the command that runs it again once it is
+/// fixed in the session that follows.
+fn failed_warning(line: &str, name: &str, style: crate::output::Style) -> String {
+    format!(
+        "{} {line}\n{} cw retry {name}\n",
+        style.status(Status::Attention),
+        style.status(Status::Next)
+    )
+}
+
 fn setup_running(name: &str) -> String {
     format!(
         "{name}'s setup is running; wait for it, or follow it with `cw logs {name} --setup --follow`"
@@ -123,21 +133,19 @@ pub(crate) async fn ready(
     else {
         return Ok(());
     };
+    let name = match terminal_text(&environment.name) {
+        name if name.is_empty() => environment.id.clone(),
+        name => name,
+    };
     match setup_of(&environment) {
         Setup::Ready => Ok(()),
         Setup::Failed(line) => {
             let style = crate::output::Capabilities::from_process(crate::output::OutputMode::Text)
                 .stderr_style();
-            eprintln!("{} {line}", style.status(Status::Attention));
+            eprint!("{}", failed_warning(&line, &name, style));
             Ok(())
         }
-        Setup::Running => {
-            let name = match terminal_text(&environment.name) {
-                name if name.is_empty() => environment.id.clone(),
-                name => name,
-            };
-            anyhow::bail!(setup_running(&name))
-        }
+        Setup::Running => anyhow::bail!(setup_running(&name)),
     }
 }
 
@@ -177,6 +185,19 @@ mod tests {
             Some("Setup failed: ports: refused")
         );
         assert_eq!(failed_line(" \n"), None);
+    }
+
+    #[test]
+    fn a_failed_setup_warning_names_the_retry() {
+        let style = crate::output::Style::new(false, crate::output::Charset::Unicode);
+        assert_eq!(
+            failed_warning(
+                "Setup failed at Running install command: exited 1",
+                "app",
+                style
+            ),
+            "! Setup failed at Running install command: exited 1\n→ cw retry app\n"
+        );
     }
 
     #[test]

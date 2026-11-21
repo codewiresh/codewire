@@ -1,7 +1,7 @@
 ---
 title: Environments
-description: ls, info, create, start, stop, restart, rm, update, ports, local-https, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh, setup rex, checkpoint and preset.
-updated: 2026-11-20
+description: ls, info, create, start, stop, restart, rm, retry, update, ports, local-https, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh, setup rex, checkpoint and preset.
+updated: 2026-11-21
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -313,6 +313,33 @@ cw agent observe ENV --request-id UUID       # observe a managed request without
 `cw logs ENV --setup` shows how a cloud environment was set up:
 provisioning, repository clones, and the install and startup steps.
 `--follow` keeps streaming until setup ends.
+
+## cw retry (cloud)
+
+```sh
+cw retry ENV [--yes] [--output json]
+```
+
+A cloud Sandbox whose setup fails keeps running. `cw create` ends with the
+step that failed and `→ cw shell ENV`, and `cw shell` and `cw run` say the
+step before they start, then `→ cw retry ENV`. Fix it there, then `cw retry
+ENV` runs setup again from the step it failed at; steps that completed don't
+run again. It follows the retry to its end: `✓ Setup complete for ENV`, or the
+step that failed again, with exit status 1.
+
+A retry from the clone step clones the repositories again, which deletes their
+directories and any edits made there. `cw retry` names them and asks first;
+without a terminal it refuses unless `--yes` is given. If the retry hasn't
+started after two minutes, `cw retry` says it runs after the Sandbox's current
+operation and keeps waiting. Ctrl-C ends only the wait. With `--output json`
+it prints `{"environment": "ENV", "status": "complete"}`, or `"failed"` with
+`step` and `error`. A local VM's setup can't be retried yet, so `cw retry
+--local` is refused.
+
+```text
+✗ Setup failed at Running install command: npm ci exited 1; app is still running, so fix it there and run `cw retry app` (`cw logs app --setup` has the whole log)
+→ cw shell app
+```
 
 ## cw extend, protect, unprotect, cancel-delete, prune, nuke (cloud)
 

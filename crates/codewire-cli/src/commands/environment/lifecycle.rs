@@ -13,6 +13,8 @@ use crate::output::{
     Allocation, LifecycleSummary, NetworkRef, Outcome, SourceRef, Status, StatusLine, VmLocation,
 };
 
+pub(crate) mod retry;
+
 /// Display-only names of the selected credential profile and secret
 /// project. The selection itself keeps its canonical references.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

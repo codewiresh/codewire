@@ -1261,9 +1261,17 @@ async fn create_exits_non_zero_on_a_failed_stage_without_waiting_for_the_daemon(
     .unwrap_err();
 
     assert!(!daemon_checked.get());
+    // The Sandbox still runs: the error says where to fix it and how to
+    // retry, as `cw retry` does.
     assert_eq!(
-        error.to_string(),
-        "environment env-1 failed at stage \"Cloning repositories\": git clone: repository not found (see `cw logs env-1 --setup`)"
+        error.root_cause().to_string(),
+        "setup failed at Cloning repositories: git clone: repository not found; env-1 is still running, so fix it there and run `cw retry env-1` (`cw logs env-1 --setup` has the whole log)"
+    );
+    assert_eq!(
+        error
+            .downcast_ref::<crate::error_report::NextStep>()
+            .map(ToString::to_string),
+        Some("cw shell env-1".to_owned())
     );
     assert!(
         output(view).ends_with("  ✗ Cloning repositories: git clone: repository not found  2s\n")

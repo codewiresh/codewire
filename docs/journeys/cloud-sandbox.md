@@ -25,7 +25,7 @@ Updated 2026-11-21.
 | `sandbox-session-stop` | cw-cleanup | observed 2026-11-20 (#5490) | not yet observed |
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
 | `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
-| `sandbox-setup-retry` | cw-snapshots | observed in part 2026-11-16 (CLI only) | not yet observed |
+| `sandbox-setup-retry` | cw-hosted-runtime | observed in part 2026-11-17 (CLI: create, run and `cw retry`; #5167) | not yet observed |
 | `sandbox-attach-repaint` | cw-direct-udp | partly observed 2026-11-18 (#5120) | not yet observed |
 | `sandbox-cp-upload` | cw-workspace-mount | observed 2026-11-14 (#4460) | not yet observed |
 | `sandbox-cp-resume` | cw-workspace-mount | observed 2026-11-13 (#4373) | not yet observed; v0.4.17 lacks it |
@@ -667,13 +667,15 @@ Issues: #4767, and #5050 for the clone's reason.
   - a fix made in its terminal, then Retry setup;
   - a setup that failed before or at the clone, whose Retry asks first;
   - a clone of a private repository on a host other than GitHub, which needs a credential Codewire doesn't have (#5050).
-- **Driving it:** create a Sandbox with an install command that fails until a file exists, for example `test -f /workspace/ok`. Open its terminal, run `touch /workspace/ok`, and press Retry setup.
+- **Driving it:** create a Sandbox with an install command that fails until a file exists, for example `test -f /workspace/ok`. Open its terminal, run `touch /workspace/ok`, and press Retry setup. From the CLI: `cw create` with the same install command, `cw shell SANDBOX` and `touch /workspace/ok` there, then `cw retry SANDBOX`.
 - **Proof:**
   - **After the failure:** the page shows the banner "Setup failed at Running install command: …" over an open terminal.
   - **After Retry:** the list, headed "Retrying setup", shows the steps before install as done without running them, and install runs again. The Sandbox then becomes ready, and the banner is gone.
   - **The clone case:** a Retry that would clone again opens "Retry cloning?" before it runs.
   - **A clone that needs a credential:** the banner reads "Setup failed at Cloning repositories: git clone <url>: <host> needs a credential that Codewire doesn't have; clone it in the terminal with your own". It names the host from the project's URL and nothing the remote wrote. The terminal opens, so the repository can be cloned there with your own token.
-  - **`cw` after the failure:** `cw run --in SANDBOX -- CMD` and `cw shell SANDBOX` print `! Setup failed at Running install command: …`, then run.
+  - **`cw create` with the failure:** it ends with `✗ Setup failed at Running install command: …`, which says SANDBOX is still running and to fix it there and run `cw retry SANDBOX`, then `→ cw shell SANDBOX`, and exits 1.
+  - **`cw` after the failure:** `cw run --in SANDBOX -- CMD` and `cw shell SANDBOX` print `! Setup failed at Running install command: …` and `→ cw retry SANDBOX`, then run.
+  - **`cw retry SANDBOX`:** it follows the retry's steps from install and ends with `✓ Setup complete for SANDBOX`. A retry that would clone again names the directories and asks `Retry? [y/N]`; without a terminal it refuses with `→ cw retry SANDBOX --yes`.
   - **`cw` while setup runs:** they refuse with "SANDBOX's setup is running; wait for it, or follow it with `cw logs SANDBOX --setup --follow`".
 - **Gotchas:**
   - A Retry runs the failed step's own command again: install and startup scripts should be safe to rerun.
@@ -688,7 +690,12 @@ Issues: #4767, and #5050 for the clone's reason.
   - Kind, 2026-11-16: a local cluster built from #5053's branch at 0c7e484d8 (with #4846), the dashboard as the synthetic owner. Evidence: #4767's Kind comment of that date.
     - An install command failed: the danger banner read "Setup failed at Running install command: workspace exec exited 1", with a terminal open. After the cause was fixed in that terminal, Retry setup ran install again, and only install, then setup completed and the banner cleared.
     - A clone of a private repository on a forge other than GitHub, with no credential, failed with #5053's sentence naming the host. Retry setup asked "Retry cloning?"; Cancel left the failure; "Delete and retry" showed "Retrying setup" and failed again the same way.
-  - Not yet observed: `cw`'s refusal while setup runs; on Dev, the dashboard banner and Retry setup (a dashboard walk runs on Dev only in the protected smoke, which gains this step in #5065).
+  - Dev, 2026-11-17, 08:50–08:51Z: Dev ran source cd986b75d (promoted 08:34:29Z; the next promotion came at 08:52:06Z), with #5167 at 94ce6da8a (a built `cw`), the smoke identity and an install command `test -f /workspace/ok`. Evidence: #5167's body.
+    - `cw create --cloud` ended with `✗ Setup failed at Running install command: workspace exec exited 1; NAME is still running, so fix it there and run `cw retry NAME` …` and `→ cw shell NAME`, exit 1.
+    - `cw retry` before the fix followed install again to the same failure, exit 1.
+    - `cw run --in NAME -- touch /workspace/ok` printed `! Setup failed at …` and `→ cw retry NAME`, then ran, exit 0.
+    - `cw retry` after it ran install only and ended with `✓ Setup complete for NAME` in about 1 s, exit 0. Once more, the service refused: `This Sandbox's setup completed`.
+  - Not yet observed: `cw`'s refusal while setup runs; `cw retry`'s reclone question and its 2-minute note; on Dev, the dashboard banner and Retry setup (a dashboard walk runs on Dev only in the protected smoke, which gains this step in #5065).
   - Production: not yet; v0.4.21 lacks Retry setup.
 
 ## `sandbox-attach-repaint`: a full-screen program is left clean after a reconnect

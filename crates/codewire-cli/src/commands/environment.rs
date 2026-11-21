@@ -3265,7 +3265,7 @@ async fn wait_for_platform_environment_setup(
         &feed,
         &mut view,
         &FollowPolicy::default(),
-        environment_id,
+        &terminal_text(&lifecycle::display_name(environment)),
         progress::watch_setup_failure(client, org_id, environment_id),
         || async {
             wait_for_platform_environment_daemon_ready(client, org_id, environment_id)

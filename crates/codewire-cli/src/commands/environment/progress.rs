@@ -114,7 +114,9 @@ pub(crate) struct StageFailure {
 const SANDBOX_START_LABEL: &str = "Starting the sandbox";
 
 impl StageFailure {
-    pub(crate) fn into_error(self, environment_id: &str) -> anyhow::Error {
+    /// `environment` names the environment in the error and its next step:
+    /// a create passes its name, a start its ID.
+    pub(crate) fn into_error(self, environment: &str) -> anyhow::Error {
         if self.sandbox_start && !self.message.is_empty() {
             return anyhow::anyhow!("{}", self.message);
         }
@@ -124,7 +126,7 @@ impl StageFailure {
             format!(": {}", self.message)
         };
         anyhow::anyhow!(
-            "environment {environment_id} failed at stage {:?}{detail} (see `cw logs {environment_id} --setup`)",
+            "environment {environment} failed at stage {:?}{detail} (see `cw logs {environment} --setup`)",
             self.stage
         )
     }
@@ -628,12 +630,13 @@ where
 
 /// `cw create`: every setup stage through `complete`, then daemon
 /// readiness. Fails on a `failed` row or when `setup_guard` reports that the
-/// environment can no longer finish setup.
+/// environment can no longer finish setup. `name` is the environment as a
+/// failed setup's next steps name it.
 pub(crate) async fn await_environment_setup<F, W, D, R>(
     feed: &F,
     view: &mut StartProgress<W>,
     policy: &FollowPolicy,
-    environment_id: &str,
+    name: &str,
     setup_guard: impl Future<Output = anyhow::Error>,
     daemon_ready: D,
 ) -> anyhow::Result<()>
@@ -649,9 +652,19 @@ where
             view.finish()?;
             Ok(())
         }
+        // A sandbox that could not start says so in its own words; any
+        // other failed stage leaves a running Sandbox to fix and retry.
+        Ok(SetupEnd::Failed(failure)) if failure.sandbox_start => {
+            view.finish()?;
+            Err(failure.into_error(name))
+        }
         Ok(SetupEnd::Failed(failure)) => {
             view.finish()?;
-            Err(failure.into_error(environment_id))
+            Err(super::lifecycle::retry::setup_failed_error(
+                name,
+                Some(&failure.stage),
+                &failure.message,
+            ))
         }
         Err(SetupWaitError::Follow(error)) => {
             let stage = view.fail_open_stage(None, Instant::now())?;
@@ -757,6 +770,8 @@ where
             view.finish()?;
             return Err(stage_error(error, stage));
         }
+        // A start's failed stage isn't always setup (the gateway, the
+        // daemon), so it keeps the stage's own words, not `cw retry`'s.
         Ended::Followed(Ok(FollowEnd::Failed(failure))) => {
             view.finish()?;
             return Err(failure.into_error(environment_id));
