@@ -386,7 +386,12 @@ Issues: #2537, #4000.
   --allow` refuses it: `the range includes protected addresses`), and
   allowing a name that answers only protected addresses does not make it
   reachable.
-- **Gotchas:** a name that resolves only to protected addresses is refused as
+- **Gotchas:** a user's own tailnet ([own-tailnet.md](own-tailnet.md)) reaches
+  private addresses inside its tunnel. That is not a way round this step.
+  `tailscaled` does send UDP to peers' advertised endpoints, private ones
+  included, and each of those sends is refused and logged here like any
+  other. A
+  name that resolves only to protected addresses is refused as
   a name. Do not read that as a DNS outage. `policy check` reports such a
   name as `Allowed … when the name answers public addresses`: it judges the
   rule, not what the name resolves to.

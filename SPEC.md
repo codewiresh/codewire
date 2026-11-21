@@ -990,6 +990,46 @@ command that needs a sign-in says this is a sandbox on that server, that
 that anything in the sandbox could use. Not yet observed working
 (`sandbox-cw-knows-its-server`); a local VM gets the same later (#5103).
 
+Target, not shipped (#5741): **a user's own tailnet.** The workspace image
+ships `tailscale` and `tailscaled`, pinned and not started. A user may join
+their own Tailscale-compatible tailnet (tailscale.com or a self-hosted Headscale) in
+userspace mode (`--tun=userspace-networking`), as the workspace user. That
+mode adds no network device, no route and no resolver. Their tools reach the
+tailnet only through the local HTTP or SOCKS proxy that `tailscaled` serves
+on loopback. Codewire's own tailnet and Mesh nodes are separate and
+unaffected.
+- **What the sandbox sends.** TCP to the tailnet's control server and DERP
+  relays. UDP to STUN and to the endpoints its peers advertise, some of them
+  private addresses. All of it is ordinary egress under the environment's
+  policy:
+  - Under the hosted default (TCP and DNS only), only the TCP to public
+    addresses passes. Every non-DNS UDP send, and every send to a protected
+    address, is refused and logged, so traffic inside the tunnel rides DERP
+    over 443.
+  - The control server must be at a public address, or the join is refused as
+    protected.
+  - The protected-address rule is unchanged because it is enforced on these
+    sends like any other, not because `tailscaled` never tries.
+  - A private address reached inside the tunnel, through the user's own
+    subnet routers, is on the user's network, as with any VPN client.
+- **The auth key** is an application secret ("Application secrets" in
+  `docs/dev/SECRETS-AND-CREDENTIALS.md`). It must be one-use, ephemeral,
+  tagged and short-lived; a reusable or untagged key is outside this feature.
+- **The trust boundary is the sandbox tag's ACL.** Once the node exists,
+  every process in the sandbox can use what the tag reaches, through the
+  loopback proxy. So the tag gets only what an agent in the sandbox may reach.
+- **What a join must not do:**
+  - no Tailscale SSH (`--ssh`);
+  - no `--advertise-exit-node` and no `--advertise-routes`;
+  - no `tailscale serve` or `funnel`;
+  - no preview of the proxy ports.
+
+  Each of these would open the sandbox to the tailnet or the internet past
+  Codewire's controls.
+- **Codewire's part.** It neither brokers the key nor starts `tailscaled`.
+
+Not yet observed working (`docs/journeys/own-tailnet.md`).
+
 Hosted network policy today
 (`crates/codewire-orchestration/src/sandbox/template/network.rs`):
 orchestration renders one `NetworkPolicy` per environment. Ingress admits the

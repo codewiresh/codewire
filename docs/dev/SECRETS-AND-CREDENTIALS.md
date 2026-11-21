@@ -170,6 +170,16 @@ Missing, empty or whitespace-only keys cannot mean project deletion. Collection
 deletion displays the resolved target and impact, defaults to no, rejects EOF
 as consent and requires affirmative confirmation or explicit `--yes`.
 
+A tailnet auth key for the user's own tailnet (SPEC.md, "A user's own
+tailnet") is an application secret like any other, not provider material.
+Every process in the sandbox can read it, so it must be one-use, ephemeral,
+tagged and short-lived. Store it shortly before the sandbox starts, and
+delete it after the join. Deleting it doesn't remove it from a running
+sandbox's environment; being one-use is what makes the copy left there
+worthless. Codewire has no credential kind for it and doesn't broker it.
+After the join, the node is open to every process through the loopback proxy,
+so the sandbox tag's ACL is the trust boundary.
+
 ### Provider credentials and profiles
 
 Before connecting Codex, turn on **Enable device code authorization for Codex**
