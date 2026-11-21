@@ -422,9 +422,28 @@ message is still stored and on the admin page. A failed send is logged with
 the feedback's ID, a fixed reason and the provider's error code, never the
 message, a name or an address, and never fails the submit.
 
+Billing emails the operator once per paid credit purchase (#5358; not yet
+built): **Add credit**, with a saved card or through Stripe's page, and an
+automatic top-up. It is sent when billing has handled the purchase's
+`invoice.paid` delivery: an invoice whose metadata `kind` is
+`credit_top_up` or `credit_checkout`. Stripe delivers each event once to
+billing's handler, which skips a duplicate, so one purchase sends one
+notice. The subject is "Codewire: credit bought, <amount>". The body names
+the organization (its name, escaped, and its slug), the amount and
+currency, whether it was **Add credit** or an automatic top-up, and the time
+in UTC. It links to that organization's admin page,
+`<FRONTEND_URL>/admin/organizations/<id>/`. It is a notice, not a receipt:
+no card, payment method, invoice number or link, Stripe ID, buyer, or token
+of any kind, and nothing the organization typed reaches a header. At most 10
+an hour, counted apart from the sign-up and feedback notices; the 11th sends
+one "More credit purchases" email instead, holding only how many were paid
+and the Admin → Organizations link. A failed send is logged with the
+invoice's ID and a fixed reason, is not retried, and never fails the
+delivery, so Stripe never redelivers a purchase for its notice.
+
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
-| `CODEWIRE_OPERATOR_EMAIL` | No | Where the IdP sends the operator's sign-up notices and feedback emails. Unset or empty sends neither, the default. Any value that is not one email address stops the IdP at startup. | `operator@example.com` |
+| `CODEWIRE_OPERATOR_EMAIL` | No | Where the IdP sends the operator's sign-up notices and feedback emails, and billing its credit purchase notices (not yet built, #5358). Unset or empty sends none of them, the default. Any value that is not one email address stops the service that reads it at startup. | `operator@example.com` |
 
 ## Browser origins
 

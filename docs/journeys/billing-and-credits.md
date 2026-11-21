@@ -22,6 +22,7 @@ the first Production release after codewire/deploy#245.
 | `billing-zero-refusal` | observed 2026-11-11 and 2026-11-13 (#3381) | not yet observed |
 | `billing-admin-adjust` | not yet observed | not yet observed |
 | `billing-banner` | not yet observed | not yet observed |
+| `billing-operator-notice` | not yet observed (not yet built, #5358) | not yet observed |
 | `billing-notice` | sent once observed 2026-11-13 (#4087); failure backoff not observed | not yet observed |
 | `billing-stripe-delivery` | observed 2026-10-24 (#3263) | endpoint created 2026-10-24; delivery not yet observed |
 
@@ -350,4 +351,41 @@ Issue: #4754. Design: private-docs `designs/billing-compute-credits.md`,
     and the refusal.
 - **Gotchas:** where credit isn't enforced (`CODEWIRE_CREDIT_ENFORCEMENT`
   unset), there is no banner at all: nothing would be refused or charged.
+- **Observed:** not yet observed.
+
+## 11. `billing-operator-notice`: the operator is told when credit is bought
+
+Issue: #5358 (owner, 2026-11-18: "I would like to get a duplicate receipt
+myself if it's possible or at least a notice that somebody signed up.").
+Not yet built: these steps are what the code must make true. The rules are
+in `docs/CONFIGURATION.md`, "Operator notices".
+
+- **Entry points:** **Add credit** on the Billing page (saved card, and no
+  card yet), an automatic top-up, and the operator's inbox
+  (`CODEWIRE_OPERATOR_EMAIL` on billing).
+- **States to exercise:**
+  - each of the three purchases, paid;
+  - a declined charge, and one the bank holds for approval and the customer
+    then pays on Stripe's page;
+  - an organization name holding HTML, line breaks and lines that look like
+    email headers;
+  - more than 10 purchases in an hour;
+  - the email provider failing, and `CODEWIRE_OPERATOR_EMAIL` unset.
+- **Driving it:** on Dev, as in `billing-add-credit` and
+  `billing-auto-top-up`, with `CODEWIRE_OPERATOR_EMAIL` set to an inbox the
+  walker reads. The burst, the failing provider and the hostile names are
+  for tests.
+- **Proof:**
+  - one "Codewire: credit bought, <amount>" email per paid purchase. It
+    names the organization, the amount, Add credit or automatic top-up, and
+    the time, and links to the organization's admin page. It holds no card,
+    payment method, invoice number or link, Stripe ID or buyer;
+  - a declined charge sends none, and a held one sends one when it is paid;
+  - a second delivery of the same `invoice.paid` sends no second notice;
+  - the 11th in an hour sends one "More credit purchases" email, and later
+    ones none;
+  - a failed send, or the address unset, changes nothing for the buyer: the
+    purchase is credited, and Stripe isn't asked to redeliver.
+- **Gotchas:** Stripe's receipt to the buyer (#4816) is separate: this
+  notice goes only to the operator, and never to the buyer.
 - **Observed:** not yet observed.
