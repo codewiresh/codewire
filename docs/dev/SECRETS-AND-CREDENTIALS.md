@@ -527,13 +527,43 @@ sign-in).
 
 In every form, the hosted daemon marks Claude Code's onboarding complete in
 `~/.claude.json` (`hasCompletedOnboarding`, `hasAcknowledgedCostThreshold`), so
-the managed credential is used without the first-run login picker. It also
-marks the workspace root `/workspace` trusted (`projects["/workspace"]
-.hasTrustDialogAccepted`). Claude Code applies that trust to every folder
-beneath it, including every checked-out repository, so it starts without asking
+the managed credential is used without the first-run login picker. Whatever
+clients are selected, it also marks trusted
+(`projects[FOLDER].hasTrustDialogAccepted`) the workspace root and every Git
+repository under it, each by its own root, because Claude Code stops looking
+upward at a repository's root. So `claude` starts in any checkout without asking
 whether you trust the folder, and loads the repository's own project settings,
 such as hooks, without that question. Other folders, such as the home
-directory, still ask. Local VMs do not do this.
+directory, still ask. A local VM's guest daemon does the same for the workload
+user.
+
+Target, not shipped (#5813): `claude` in a Sandbox, a cloud Sandbox or a local
+VM, starts with no screen at all, in bypass permissions mode. Whatever clients are selected, the same pass also
+sets in `~/.claude/settings.json`:
+- `permissions.defaultMode: "bypassPermissions"`, so plain `claude` runs every
+  tool without asking, as `--dangerously-skip-permissions` does;
+- `skipDangerousModePermissionPrompt: true`, so neither that default nor the
+  flag stops at the "Bypass Permissions mode … No, exit" screen;
+- `enableAllProjectMcpServers: true`, so a repository's own `.mcp.json` servers
+  start without the "New MCP server found in this project" question. The
+  reasoning is the same as for trust: the workspace holds the user's own
+  checkouts. "Own" means the user cloned it, not that they wrote it: a cloned
+  repository's `.mcp.json` runs its servers' commands as soon as `claude`
+  starts there.
+
+Each key is set only where it is missing, and a value the user set is never
+changed. That includes their own `permissions.defaultMode` and an
+administrator's `permissions.disableBypassPermissionsMode`, which still turns
+bypass off. These keys are written only on a Sandbox placement, never by `cw`
+on a trusted host; a test pins that. The file rules are those of
+`~/.claude.json` above: mode 0600, no
+symlink followed, and no token, credential or placeholder ever written.
+Checked against Claude Code 2.1.308 and 2.1.330 in a Dev Sandbox with a
+throwaway home: with these keys, `claude` and `claude
+--dangerously-skip-permissions` in a repository start and answer with no
+screen. Without `skipDangerousModePermissionPrompt`, both stop at the bypass
+screen. Not yet observed through the daemon
+([claude-in-a-sandbox.md](../journeys/claude-in-a-sandbox.md)).
 
 Limitation: a native local VM that uses a platform profile still receives the
 API-key projection, because its platform source authority carries slot names
@@ -3207,7 +3237,8 @@ guarantee. Your and the repository's Claude settings apply as they do for
 declared `CLAUDE_CODE_USE_BEDROCK`, can move it to another provider or
 credential. No Codewire-held material is involved either way: the Sandbox
 holds only the placeholder. On a Sandbox placement it starts with
-`--permission-mode auto`; see
+`--permission-mode auto`; target, not shipped (#5813), it starts with
+`--permission-mode bypassPermissions`. See
 [CLI-ORCHESTRATION.md](CLI-ORCHESTRATION.md) for what that argument outranks.
 
 ### Codex home in hosted Sandboxes

@@ -282,14 +282,13 @@ the `cw inbox ENV --session S` that shows it. A later turn that completes
 clears `last_error`.
 
 Managed Claude keeps the installed CLI's settings, MCP configuration and
-permission rules on every placement; Codewire adds no option that hides them
-and never passes a bypass or skip-permissions option. What differs is the
-permission mode:
+permission rules on every placement, and Codewire adds no option that hides
+them. What differs is the permission mode:
 
 | Placement | Permission mode | Why |
 | --- | --- | --- |
 | Trusted host | None passed: the user's own default mode decides | The user's rules on their own machine |
-| Local VM, platform sandbox | `--permission-mode auto` | A headless turn can use tools such as Bash with no person to answer a prompt |
+| Local VM, platform sandbox | `--permission-mode auto` today. Target, not shipped (#5813): `--permission-mode bypassPermissions` | A headless turn can use tools such as Bash with no person to answer a prompt |
 
 Verified against Claude Code 2.1.308: `auto` is one of
 `--permission-mode`'s choices and needs no separate opt-in. The argument
@@ -301,6 +300,30 @@ driver declines every control request. The provider can also refuse auto mode
 for an account or a model. Auto mode relies on safety verdicts the provider
 returns with its responses, so in a Sandbox it depends on the credential route
 passing responses through unchanged.
+
+Target, not shipped (#5813, owner decision: "bypass wins and default"): on a
+Sandbox placement, a cloud Sandbox or a local VM, bypass permissions mode
+replaces auto mode for managed Claude, as it becomes the default for `claude`
+typed there (SECRETS-AND-CREDENTIALS.md, the Claude home paragraph). Every tool
+then runs without a prompt and without the provider's auto-mode verdicts, so
+whatever the agent is told, by the user or by text it reads, runs. What bounds
+it is the Sandbox:
+- **Its egress.** Under an open policy, anything in the Sandbox can leave to
+  any public address. Only a restrictive policy narrows that.
+- **The credential broker,** which keeps provider material outside the
+  Sandbox. The exceptions are the
+  [direct delivery exceptions](SECRETS-AND-CREDENTIALS.md#direct-delivery-exceptions).
+  With the Claude or Codex sign-in form selected, the Sandbox holds the real
+  `~/.claude/.credentials.json` or Codex `auth.json`, which a bypass-mode or
+  prompt-injected agent can read and send wherever egress allows. Application
+  secrets are likewise readable by every process.
+- **Its isolation from the host.**
+
+The daemon's `skipDangerousModePermissionPrompt` skips Claude Code's bypass
+screen. An administrator's `permissions.disableBypassPermissionsMode` still
+turns bypass off, and Claude Code then starts in its default mode. A trusted
+host is unchanged: no mode is passed, and the three keys are never written
+there.
 
 noel, the Rust port of pi, runs only on a trusted Linux host; macOS hosts,
 VMs, Mesh members and platform sandboxes refuse it. Codewire looks up `noel`
