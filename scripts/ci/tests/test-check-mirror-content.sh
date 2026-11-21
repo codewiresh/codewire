@@ -532,6 +532,10 @@ esac
 SH
 cat >"$work/merge-bin/codewire-cpu" <<'SH'
 #!/usr/bin/env bash
+if [[ -n "${FAKE_CPU_REFUSE-}" ]]; then
+  printf 'codewire-cpu: %s\n' "$FAKE_CPU_REFUSE" >&2
+  exit 75
+fi
 [[ "$1" == build ]] && shift
 [[ "$1" == -- ]] && shift
 exec "$@"
@@ -555,6 +559,13 @@ if command -v timeout >/dev/null; then
   ! grep -qF 'does not compile' "$work/queue-rust-slow.out" || fail 'a timed-out check was reported as a compile error'
   [[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a pull request whose check timed out reached the forge'
 fi
+# A build slot codewire-cpu refuses says so: the check never ran.
+FAKE_CPU_REFUSE='only 54 GB free on /var/build, below the floor of 60 GB' rust_queue 44 'feat: a demo crate' \
+  >"$work/queue-rust-refused.out" 2>&1 && fail 'queue-pr.sh queued a pull request whose check was refused a slot'
+grep -qF '#44 not checked: build slot refused (only 54 GB free on /var/build, below the floor of 60 GB)' \
+  "$work/queue-rust-refused.out" || fail "a refused slot did not say so: $(cat "$work/queue-rust-refused.out")"
+! grep -qF 'does not compile' "$work/queue-rust-refused.out" || fail 'a refused slot was reported as a compile error'
+[[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a pull request whose check was refused a slot reached the forge'
 rust_queue 44 'feat: a demo crate' >"$work/queue-rust.out" 2>&1 ||
   fail "queue-pr.sh refused a merge that compiles, with a free slot: $(cat "$work/queue-rust.out")"
 grep -qF '#44 is queued as "feat: a demo crate (#44)"' "$work/queue-rust.out" || fail 'queue-pr.sh did not queue #44'
