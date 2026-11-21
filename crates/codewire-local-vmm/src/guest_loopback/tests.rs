@@ -4,7 +4,7 @@ use codewire_daemon::execution::ProcessExecution;
 use codewire_daemon::local_transport::{local_transport, with_local_connections};
 use codewire_daemon::{Config, serve_grpc_with_incoming};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tonic::Status;
 
 use super::*;
@@ -85,10 +85,28 @@ async fn a_server_on_every_address_is_reached_on_loopback() {
 async fn a_server_bound_only_to_ipv6_loopback_is_reached() {
     let temp = tempfile::tempdir().unwrap();
     let client = in_process_daemon(temp.path()).await;
-    let Ok(server) = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await else {
+    let Some((server, _held)) = ipv6_only_server().await else {
         return; // This host has no IPv6 loopback.
     };
     reaches(&client, server).await;
+}
+
+/// A server on `[::1]` alone, with its port held on 127.0.0.1 by a socket
+/// that never listens. `open_guest_loopback` tries 127.0.0.1 first, and a
+/// port free on `[::1]` can be another process's there: held, that try is
+/// refused and only this server answers. `None` without an IPv6 loopback.
+async fn ipv6_only_server() -> Option<(TcpListener, TcpSocket)> {
+    for _ in 0..16 {
+        let server = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await.ok()?;
+        let port = server.local_addr().unwrap().port();
+        let held = TcpSocket::new_v4().unwrap();
+        match held.bind((Ipv4Addr::LOCALHOST, port).into()) {
+            Ok(()) => return Some((server, held)),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+    panic!("no port was free on both loopbacks in 16 tries");
 }
 
 #[tokio::test]
