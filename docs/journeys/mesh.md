@@ -67,12 +67,12 @@ Issue: #3350.
   cw --cloud network nodes --org ORG_ID --network mesh-walk
   cw run --in mesh-walk-a --name server --detach -- python3 -m http.server 8000
   cw ports mesh-walk-a --publish 8000
-  cw run --in mesh-walk-b --name probe --no-tty -- sh -c 'printf "GET / HTTP/1.0\r\n\r\n" | cw network connect mesh-walk-a 8000 | head -1'
-  cw run --in mesh-walk-c --name probe --no-tty -- sh -c 'printf "GET / HTTP/1.0\r\n\r\n" | cw network connect mesh-walk-a 8000 | head -1'
+  cw run --in mesh-walk-b --name probe-before --no-tty -- sh -c 'printf "GET / HTTP/1.0\r\n\r\n" | cw network connect mesh-walk-a 8000 | head -1'
+  cw run --in mesh-walk-c --name probe-before --no-tty -- sh -c 'printf "GET / HTTP/1.0\r\n\r\n" | cw network connect mesh-walk-a 8000 | head -1'
   cw stop mesh-walk-a
   cw start mesh-walk-a
-  cw run --in mesh-walk-a --name server --detach -- python3 -m http.server 8000
-  cw run --in mesh-walk-b --name probe --no-tty -- sh -c 'printf "GET / HTTP/1.0\r\n\r\n" | cw network connect mesh-walk-a 8000 | head -1'
+  cw --cloud restart mesh-walk-a --session server
+  cw run --in mesh-walk-b --name probe-after --no-tty -- sh -c 'printf "GET / HTTP/1.0\r\n\r\n" | cw network connect mesh-walk-a 8000 | head -1'
   cw --cloud network delete mesh-walk --org ORG_ID --yes
   ```
 
@@ -83,8 +83,8 @@ Issue: #3350.
     and `mesh-walk-b`, and `Network: not attached` for `mesh-walk-c`;
   - `nodes` lists both Sandboxes, each `reported online`;
   - the probe from `mesh-walk-b` prints `HTTP/1.0 200 OK`; the probe from
-    `mesh-walk-c` fails with "`cw network connect` works only inside a cloud
-    environment that joined a Mesh network";
+    `mesh-walk-c` fails with "this environment has not joined its Mesh
+    network; `cw info` shows why";
   - after the stop, `mesh-walk-a` reads `reported offline` within 45 s, and
     after the start it is online again under the same node name;
   - after the start, the probe from the unchanged `mesh-walk-b` prints
@@ -100,6 +100,9 @@ Issue: #3350.
 - **Gotchas:**
   - Only published ports are served. `cw network connect` to a port that is
     not published prints nothing and exits 0 (#4258); publish first.
+  - `cw run --name` never reuses a session's name, even a stopped one's. After
+    the start, restart the stopped `server` session instead; its published
+    port is kept across the stop.
   - Online means a live session with Mesh, not that two nodes reach each
     other. Only the probe proves reach.
   - Production Mesh runs one replica (#3542); a drain of its node takes Mesh
