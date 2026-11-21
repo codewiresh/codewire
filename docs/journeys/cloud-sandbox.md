@@ -20,7 +20,7 @@ Updated 2026-11-21.
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-cw-knows-its-server` | cw-identity | partly observed 2026-11-17 (#5202) | not yet observed |
-| `sandbox-attach-stays` | cw-direct-udp | observed 2026-11-18 (#5120) | not yet observed |
+| `sandbox-attach-stays` | cw-mesh | observed 2026-11-18 (#5120); 4.5 h attach 2026-11-21 | observed in part 2026-11-21 (#5120): the attach only, no cut or `cw shell` |
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14; named sessions and `cw run --name` 2026-11-20 (#5494, #5497) | not yet observed |
 | `sandbox-session-stop` | cw-cleanup | observed 2026-11-20 (#5490) | not yet observed |
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
@@ -378,6 +378,10 @@ server it belongs to and says what it can do, instead of asking for a URL.
     level; the coordinator's `peer_remove sent` line is the record.
   - Before the fix, a drop came about 60 seconds after each coordinator
     reconnect, when SSH keepalive gave up.
+  - Dev runs one coordinator replica and rolls it out on every delivery,
+    so an attached client's coordinator session reconnects about 70 s after
+    each new coordinator ReplicaSet, with the error `failed to read response
+    body`. That is the rollout, not a fault; the attachment stays up.
 - **Observed:**
   - Dev, 2026-11-18 (cw-direct-udp): source a44ac15fc, rollout finished,
     `cw` built from main b26ed65a9, as the Dev smoke identity; evidence on
@@ -387,6 +391,16 @@ server it belongs to and says what it can do, instead of asking for a URL.
     of the attach: one connection-lost line and one path line; the older
     session ended `Silent` about 45 s after its last ping, with
     `peer_remove` sent at once, and one session remained.
+  - Production and Dev, 2026-11-21 (cw-mesh): released `cw v0.4.26` on the
+    workstation, both surfaces on v0.4.26, as each smoke identity; evidence
+    on #5120. One `cw attach` per surface for 4.5 hours, with a key every
+    10 s and 40 mouse reports a minute: one attachment each, no
+    connection-lost line, no refused peer addresses and no keepalive end.
+    The client's coordinator session reconnected once on Production, with
+    no rollout and no cause found, and nine times on Dev, each a Dev
+    coordinator rollout; each took about a second, and the attachment
+    stayed up. Not walked on Production: the cut and
+    `cw shell`.
 
 ## `sandbox-stop-start`: stop a sandbox and start it again
 
