@@ -16,7 +16,7 @@ Updated 2026-11-20.
 | `access-ticket` | not yet observed | not yet observed |
 | `access-streams` | not yet observed | not yet observed |
 | `access-websockets` | the terminal half observed on Kind 2026-11-20, main 6557aa7e83; the SSH proxy and Dev not yet observed | not yet observed |
-| `access-org-deleting` | not yet observed | not yet observed |
+| `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only; the browser's terminal not as written, #5677); not on Dev | not yet observed |
 | `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
 
 ## `access-ticket`: a terminal ticket from a session that has ended
@@ -240,7 +240,27 @@ comment 123530). Not yet observed.
 - **Gotchas:** a small organization's deletion can run to its end in
   seconds, which leaves nothing to refuse, so try the new streams at once. A
   deletion that failed holds still for the walk: it stays refused until it is
-  retried.
+  retried. `cw org delete` waits for the deletion to end, so start it in the
+  background and try the new streams a second later.
+- **Observed:** partly, on a local Kind cluster, 2026-11-20, with
+  orchestration and the coordinator at #5674's source (3c91fabd47), as the
+  seeded `e2e-owner` alone, through `cw login` and a browser session, in
+  four throwaway organizations of one running Sandbox each; recorded on
+  #3586. Inside a deletion (20:38:09.285 to 20:38:30.223Z, tried 1.2 s in):
+  `cw logs --follow` said "Follow environment logs: organization is being
+  deleted" while a bounded backfill still read; a new `cw shell`, over the
+  tailnet and with `CW_SSH_TRANSPORT=websocket`, said "Organization is being
+  deleted"; `cw exec` said the same with #5679's CLI (20:59:56Z), where the
+  CLI before it printed the transport steps. A new browser tab 0.65 s into
+  a deletion was refused, but its terminal said "This Sandbox can't list its
+  terminals right now. Retry, or restart the Sandbox." (#5677). Streams
+  opened before, a tailnet shell, a WebSocket shell and a browser terminal,
+  printed until the deletion stopped the Sandbox 3 to 6 s in; the WebSocket
+  shell's reconnect was refused with "Organization is being deleted", and
+  the tailnet shell's, once the organization was gone, with "Organization
+  not found". Not walked in the product: a second member, a non-member, and
+  another organization's streams during a deletion; the database tests hold
+  those. Dev is not yet observed.
 
 ## `access-tailnet`: a tailnet shell or exec when its authority is lost
 
