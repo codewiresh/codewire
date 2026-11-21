@@ -28,7 +28,9 @@ use uuid::Uuid;
 use codewire_egress_policy::handoff::InterceptedStreamHeader;
 
 use crate::handoff::{HandoffSocket, Received};
-use crate::{CLAUDE_TOKEN_HOST, CredentialRouteBackend, GITHUB_HOSTS, RouteTable};
+use codewire_access::{CLAUDE_TOKEN_HOST, GITHUB_HOSTS};
+
+use crate::{CredentialRouteBackend, RouteTable};
 
 /// The only port a binding may name: the front door serves TLS.
 pub const INTERCEPT_PORT: u16 = codewire_access::INTERCEPT_PORT;

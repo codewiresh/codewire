@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::PoisonError;
 use std::time::Duration;
 
+use codewire_access::ManagedCredentialClients;
 use codewire_proto::codewire::internal::v1::__buffa::oneof::egress_assignment::Binding;
 use codewire_proto::codewire::internal::v1::{
     AdmitRequest, AdmitResponse, BoundAssignment, EgressAssignment, EgressPolicyRevision,
@@ -26,7 +27,7 @@ use sqlx::PgPool;
 use codewire_egress_node::replacement::StartLimiter;
 
 use super::admission::{self, Reviewed};
-use super::assignment::{AssignedPolicy, Intercept, environment_policy};
+use super::assignment::{AssignedPolicy, Intercept, environment_policy, interception_bindings};
 use super::lockdown;
 use super::reports;
 
@@ -59,12 +60,12 @@ pub struct EgressServiceState {
     pub server_namespace: String,
     pub sandbox_namespace: String,
     pub platform: Vec<PlatformDestination>,
-    /// What a bound sandbox intercepts: the deployment's interception
-    /// bindings, or none when it does not intercept (#4001). An unbound
+    /// Whether bound sandboxes intercept (#4001): each gets the bindings for
+    /// its own binding's clients, or none when this is off. An unbound
     /// warm-pool member never gets them. Only a broker-mode sandbox gets an
     /// assignment at all (`admission::guest_on_node`), so this is the
     /// setting AND-ed with broker mode, as the bind response's is.
-    pub intercepts: Vec<Intercept>,
+    pub interception: bool,
     /// Admissions per caller node and stream peer, counted before the
     /// guest's token is reviewed, so a guest flooding a cw-egress costs
     /// orchestration no review (#4000). cw-egress applies the same limit on
@@ -104,6 +105,8 @@ enum Assignment {
         environment_id: String,
         operation_generation: i64,
         policy: AssignedPolicy,
+        /// The hosts its front door serves, from the binding's clients.
+        intercepts: Vec<Intercept>,
     },
 }
 
@@ -171,6 +174,21 @@ fn invalid_report() -> ConnectError {
 
 fn denied() -> ConnectError {
     ConnectError::permission_denied("egress is not admitted")
+}
+
+/// The hosts a bound sandbox's front door serves, from its binding's encoded
+/// clients, or none while the deployment doesn't intercept. The encoding is
+/// read only while it does; then one this build can't read withholds the
+/// assignment, so the sandbox has no egress rather than another selection's
+/// hosts.
+fn binding_intercepts(interception: bool, encoded: &str) -> Result<Vec<Intercept>, ConnectError> {
+    if !interception {
+        return Ok(Vec::new());
+    }
+    let clients = ManagedCredentialClients::decode(encoded)
+        .map_err(|error| unavailable("read the binding's credential clients", error))?;
+    interception_bindings(true, clients)
+        .map_err(|error| unavailable("select the binding's interception hosts", error))
 }
 
 fn unavailable(what: &str, error: impl std::fmt::Display) -> ConnectError {
@@ -382,7 +400,7 @@ impl EgressServiceState {
     /// which its first bind will record, decides. Until the binding carries
     /// that decision (#5496), the setting decides for a bound Pod too.
     fn intercepts(&self, _binding: Option<&LiveBinding>) -> bool {
-        !self.intercepts.is_empty()
+        self.interception
     }
 
     /// The guest's interception CA certificate, or nothing when it does not
@@ -427,10 +445,13 @@ impl EgressServiceState {
         let policy = environment_policy(&self.pool, &binding.environment_id)
             .await
             .map_err(|error| unavailable("read the environment's policy", error))?;
+        let intercepts =
+            binding_intercepts(self.interception, &binding.managed_credential_clients)?;
         Ok(Assignment::Bound {
             environment_id: binding.environment_id,
             operation_generation: binding.operation_generation,
             policy,
+            intercepts,
         })
     }
 
@@ -441,6 +462,7 @@ impl EgressServiceState {
                 environment_id,
                 operation_generation,
                 policy,
+                intercepts,
             } => Binding::Bound(Box::new(BoundAssignment {
                 environment_id: environment_id.clone(),
                 operation_generation: *operation_generation,
@@ -452,9 +474,8 @@ impl EgressServiceState {
                     ..Default::default()
                 })
                 .into(),
-                interception: !self.intercepts.is_empty(),
-                interception_bindings: self
-                    .intercepts
+                interception: !intercepts.is_empty(),
+                interception_bindings: intercepts
                     .iter()
                     .map(|intercept| InterceptionBinding {
                         host: intercept.binding.hostname().to_owned(),

@@ -252,12 +252,10 @@ impl FrontDoorFailure {
 
 /// The names a boot binds: none unless `intercept`, else every host the
 /// front door routes for `clients`, and every name strictly under each of
-/// its suffixes (Codex's routed origin under chatgpt.com, #3999), on 443.
-/// Claude's token host is bound for
-/// a Claude sign-in only. GitHub's hosts are never bound from here: a
-/// placeholder outside GitHub's route has to be refused on that route first
-/// (#5087; cw-security's condition on #5149), so GitHub stays on its
-/// loopback route until then.
+/// its suffixes (Codex's routed origin under chatgpt.com, #3999), on 443:
+/// the one selection a hosted Sandbox binds too
+/// (`codewire_access::front_door_hosts`, #4001 step P), which keeps GitHub on
+/// its loopback route until its hosts are intercepted.
 pub(crate) fn boot_intercepts(
     intercept: bool,
     clients: codewire_access::ManagedCredentialClients,
@@ -265,7 +263,7 @@ pub(crate) fn boot_intercepts(
     if !intercept {
         return InterceptSet::default();
     }
-    RouteTable::for_clients(clients.without_github())
+    RouteTable::for_clients(clients)
         .intercepts()
         .expect("the front door routes at most MAX_ROUTES canonical hosts and suffixes")
 }

@@ -3,7 +3,7 @@
 //! compiles and checks against the digest. An environment that selects
 //! nothing is on `hosted-default` (#3997 D2), and stores no row.
 
-use codewire_access::{FRONT_DOOR_HOSTS, FrontDoorHost, INTERCEPT_PORT};
+use codewire_access::{FrontDoorHost, INTERCEPT_PORT, ManagedCredentialClients, front_door_hosts};
 use codewire_egress_policy::intercept::{InterceptBinding, MAX_INTERCEPT_BINDINGS};
 use codewire_egress_policy::{
     BuiltinPolicy, CompiledPolicy, HOSTED_DEFAULT_NAME, HOSTED_DEFAULT_YAML, PolicyDocument,
@@ -55,14 +55,32 @@ pub struct Intercept {
 }
 
 /// What a bound sandbox intercepts when the deployment does (#4001): every
-/// host the front door routes, on its port; nothing when it does not. Today
-/// every bound sandbox gets this default set; #4001 step K derives it from
-/// the binding's profile. A list that does not validate stops startup.
-pub fn interception_bindings(interception: bool) -> anyhow::Result<Vec<Intercept>> {
+/// host the front door serves for its binding's clients, on its port, the
+/// selection a local boot binds too (#4001 step P); nothing when it does
+/// not.
+pub fn interception_bindings(
+    interception: bool,
+    clients: ManagedCredentialClients,
+) -> anyhow::Result<Vec<Intercept>> {
     if !interception {
         return Ok(Vec::new());
     }
-    intercepts(&FRONT_DOOR_HOSTS)
+    intercepts(&front_door_hosts(clients))
+}
+
+/// Check at startup that the widest selection's bindings validate, so no
+/// binding's assignment can fail on them later.
+pub fn check_interception_bindings(interception: bool) -> anyhow::Result<()> {
+    let widest = ManagedCredentialClients::from_profile_slots([
+        "codex",
+        "openai",
+        "anthropic",
+        "ssh",
+        "github",
+    ])
+    .and_then(ManagedCredentialClients::with_anthropic_sign_in)
+    .map_err(|_| anyhow::anyhow!("the widest client selection is not valid"))?;
+    interception_bindings(interception, widest).map(drop)
 }
 
 fn intercepts(hosts: &[FrontDoorHost]) -> anyhow::Result<Vec<Intercept>> {
@@ -249,9 +267,10 @@ mod tests {
 
     #[test]
     fn interception_binds_each_front_door_host_on_its_port_only_when_on() {
-        assert!(interception_bindings(false).unwrap().is_empty());
-        let on = interception_bindings(true).unwrap();
-        let mut expected: Vec<(&str, u16, bool)> = FRONT_DOOR_HOSTS
+        let clients = ManagedCredentialClients::default();
+        assert!(interception_bindings(false, clients).unwrap().is_empty());
+        let on = interception_bindings(true, clients).unwrap();
+        let mut expected: Vec<(&str, u16, bool)> = codewire_access::FRONT_DOOR_HOSTS
             .iter()
             .map(|host| (host.host, 443, host.suffix))
             .collect();
@@ -267,23 +286,41 @@ mod tests {
             })
             .collect();
         assert_eq!(sent, expected);
+        check_interception_bindings(true).unwrap();
     }
 
+    /// A hosted sandbox binds exactly the hosts a local boot's front door
+    /// routes for the same clients, for every selection (#4001 step P).
     #[test]
     fn the_bindings_are_the_hosts_the_local_front_door_routes() {
-        let exact: Vec<String> = interception_bindings(true)
-            .unwrap()
-            .into_iter()
-            .filter(|intercept| !intercept.suffix)
-            .map(|intercept| intercept.binding.hostname().to_owned())
-            .collect();
-        let mut routed: Vec<String> = codewire_egress_front_door_bridge::RouteTable::defaults()
-            .hosts()
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        routed.sort();
-        assert_eq!(exact, routed);
+        let slots = ["codex", "openai", "anthropic", "ssh", "github"];
+        for bits in 0..(1_u8 << slots.len()) {
+            let chosen = (0..slots.len())
+                .filter(|bit| bits & (1 << bit) != 0)
+                .map(|bit| slots[bit]);
+            let base = ManagedCredentialClients::from_profile_slots(chosen).unwrap();
+            let forms = [
+                Some(base),
+                base.with_anthropic_subscription_token().ok(),
+                base.with_anthropic_sign_in().ok(),
+            ];
+            for clients in forms.into_iter().flatten() {
+                let exact: Vec<String> = interception_bindings(true, clients)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|intercept| !intercept.suffix)
+                    .map(|intercept| intercept.binding.hostname().to_owned())
+                    .collect();
+                let mut routed: Vec<String> =
+                    codewire_egress_front_door_bridge::RouteTable::for_clients(clients)
+                        .hosts()
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect();
+                routed.sort();
+                assert_eq!(exact, routed, "{clients:?}");
+            }
+        }
         assert_eq!(
             codewire_egress_front_door_bridge::INTERCEPT_PORT,
             INTERCEPT_PORT

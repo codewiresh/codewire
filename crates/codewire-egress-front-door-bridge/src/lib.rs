@@ -35,9 +35,9 @@ use std::task::{Context, Poll};
 use axum::body::Body;
 use bytes::Bytes;
 use codewire_access::{
-    ANTHROPIC_API_HOST, CHATGPT_HOST, MANAGED_ANTHROPIC_API_PREFIX, MANAGED_ANTHROPIC_OAUTH_PREFIX,
-    ManagedCredentialClient, ManagedCredentialClients, OPENAI_API_HOST, Refusal, Unforwarded,
-    UpstreamFailure,
+    ANTHROPIC_API_HOST, CHATGPT_HOST, CLAUDE_TOKEN_HOST, GITHUB_HOSTS,
+    MANAGED_ANTHROPIC_API_PREFIX, MANAGED_ANTHROPIC_OAUTH_PREFIX, ManagedCredentialClients,
+    OPENAI_API_HOST, Refusal, Unforwarded, UpstreamFailure,
 };
 use codewire_credential_bridge::{
     CredentialBridge, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX, UpgradeAnswer,
@@ -70,15 +70,10 @@ const CODEX_PREFIX: &str = "/v1";
 // (#3999).
 /// The OpenAI API route's base.
 const OPENAI_API_PATH: &str = "/v1";
-/// Claude's token host, on every path: the pinned Claude Code refreshes its
-/// sign-in at `/v1/oauth/token`, and the broker forwards every request that
-/// is not a managed refresh untouched. Routed only for an environment whose
-/// Anthropic slot holds a Claude sign-in ([`RouteTable::for_clients`]).
-pub(crate) const CLAUDE_TOKEN_HOST: &str = "platform.claude.com";
-/// GitHub over Git and the GitHub API. The bridge selects each route from
-/// the bound host, so every path maps as received. Routed only for an
-/// environment with a GitHub connection ([`RouteTable::for_clients`]).
-pub(crate) const GITHUB_HOSTS: [&str; 2] = ["github.com", "api.github.com"];
+// Claude's token host is routed on every path, and the broker forwards every
+// request that is not a managed refresh untouched. GitHub's hosts each select
+// their route by host, so every path maps as received. Which hosts an
+// environment gets is `codewire_access::front_door_hosts`.
 
 /// The managed path prefixes the bridge's classifier recognises. Each
 /// selects one route; a rewritten path is that prefix and the rest of the
@@ -217,21 +212,13 @@ impl RouteTable {
             .collect()
     }
 
-    /// The routes for an environment whose stock clients are `clients`: the
-    /// defaults, Claude's token host only when the Anthropic slot holds a
-    /// Claude sign-in, and GitHub's two hosts only with a GitHub connection.
-    /// With an API key, a subscription token or no Anthropic client, Claude's
-    /// token host is never bound, and without a GitHub connection neither
-    /// GitHub host is, so the environment reaches them exactly as it would
-    /// without a front door. A local boot binds these hosts and no others,
-    /// without GitHub's until a placeholder outside GitHub's route is refused
-    /// there (#5087), so a local boot binds the token host for a Claude
-    /// sign-in and never a GitHub host yet (#3999).
+    /// The routes for an environment whose stock clients are `clients`: one
+    /// for each host [`codewire_access::front_door_hosts`] selects, the one
+    /// selection a hosted Sandbox's bindings use too (#4001 step P).
     pub fn for_clients(clients: ManagedCredentialClients) -> Self {
-        Self::with_optional_hosts(
-            clients.anthropic_sign_in(),
-            clients.contains(ManagedCredentialClient::GitHub),
-        )
+        let hosts = codewire_access::front_door_hosts(clients);
+        let serves = |name: &str| hosts.iter().any(|host| host.host == name);
+        Self::with_optional_hosts(serves(CLAUDE_TOKEN_HOST), serves(GITHUB_HOSTS[0]))
     }
 
     /// The defaults, with Claude's token host on every path when

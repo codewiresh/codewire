@@ -536,8 +536,9 @@ fn claudes_token_host_is_routed_only_for_a_claude_sign_in() {
 }
 
 /// GitHub's two hosts are routed, and so bound, only with a GitHub
-/// connection, and always together. Each covers every path with no prefix:
-/// the bridge selects the route from the bound host.
+/// connection, and always together, and not at all until GitHub's hosts are
+/// intercepted (#5087). Each covers every path with no prefix: the bridge
+/// selects the route from the bound host.
 #[test]
 fn githubs_hosts_are_routed_only_with_a_github_connection() {
     let without = ManagedCredentialClients::from_profile_slots(["anthropic", "openai"]).unwrap();
@@ -545,7 +546,14 @@ fn githubs_hosts_are_routed_only_with_a_github_connection() {
     assert!(!routes.hosts().iter().any(|host| host.contains("github")));
 
     let with = ManagedCredentialClients::from_profile_slots(["github"]).unwrap();
-    let routes = RouteTable::for_clients(with);
+    assert_eq!(
+        RouteTable::for_clients(with)
+            .hosts()
+            .iter()
+            .any(|host| host.contains("github")),
+        codewire_access::GITHUB_INTERCEPTED
+    );
+    let routes = RouteTable::with_optional_hosts(false, true);
     assert_eq!(
         routes.hosts(),
         [
@@ -1389,4 +1397,35 @@ async fn requests_through_a_front_door_reach_the_bridge_and_replies_stream_back(
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body_of(response).await, "hello, world");
     door.close();
+}
+
+/// The route table and the hosted bindings serve the same hosts for every
+/// client selection, because both are [`codewire_access::front_door_hosts`]
+/// (#4001 step P).
+#[test]
+fn the_route_table_serves_exactly_the_shared_selection() {
+    let slots = ["codex", "openai", "anthropic", "ssh", "github"];
+    for bits in 0..(1_u8 << slots.len()) {
+        let chosen: Vec<&str> = (0..slots.len())
+            .filter(|bit| bits & (1 << bit) != 0)
+            .map(|bit| slots[bit])
+            .collect();
+        let base = ManagedCredentialClients::from_profile_slots(chosen.iter().copied()).unwrap();
+        let forms = [
+            Some(base),
+            base.with_anthropic_subscription_token().ok(),
+            base.with_anthropic_sign_in().ok(),
+        ];
+        for clients in forms.into_iter().flatten() {
+            let mut selected: Vec<&str> = codewire_access::front_door_hosts(clients)
+                .iter()
+                .map(|host| host.host)
+                .collect();
+            let table = RouteTable::for_clients(clients);
+            let mut routed = table.hosts();
+            selected.sort_unstable();
+            routed.sort_unstable();
+            assert_eq!(routed, selected, "{clients:?}");
+        }
+    }
 }

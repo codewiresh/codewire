@@ -1,8 +1,9 @@
-//! The fixed hosts a TLS front door outside the environment serves (#3999,
-//! #4001), which the front door's route table and hosted interception's
-//! bindings both read. The hosts the front door adds for some environments'
-//! clients (Claude's token host, GitHub) are not here yet: one selection for
-//! both sides is #4001 step P.
+//! The hosts a TLS front door outside the environment serves (#3999, #4001).
+//! [`front_door_hosts`] is the one selection both placements read: a local
+//! boot's bindings and route table, and hosted interception's bindings, so
+//! the two never serve different hosts for the same clients (#4001 step P).
+
+use crate::{ManagedCredentialClient, ManagedCredentialClients};
 
 /// The only port interception binds: the front door serves TLS.
 pub const INTERCEPT_PORT: u16 = 443;
@@ -27,6 +28,17 @@ pub fn routed_suffix(host: &str) -> Option<&'static str> {
             .is_some_and(|label| !label.is_empty() && !label.contains('.'))
     })
 }
+/// Claude's token host, on every path: the pinned Claude Code refreshes its
+/// sign-in at `/v1/oauth/token`. Served only for a Claude sign-in.
+pub const CLAUDE_TOKEN_HOST: &str = "platform.claude.com";
+/// GitHub over Git and the GitHub API. Served only for a GitHub connection,
+/// and only once [`GITHUB_INTERCEPTED`] is on.
+pub const GITHUB_HOSTS: [&str; 2] = ["github.com", "api.github.com"];
+/// Whether GitHub's hosts are served at all. They stay off until a
+/// placeholder sent outside GitHub's route is refused on that route (#5087;
+/// cw-security's condition on #5149), so GitHub stays on its loopback route
+/// on both placements until then.
+pub const GITHUB_INTERCEPTED: bool = false;
 
 /// One host the front door serves on [`INTERCEPT_PORT`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,3 +64,84 @@ pub const FRONT_DOOR_HOSTS: [FrontDoorHost; 3] = [
         suffix: false,
     },
 ];
+
+/// The hosts the front door serves for an environment whose stock clients are
+/// `clients`, each exact: [`FRONT_DOOR_HOSTS`], Claude's token host for a
+/// Claude sign-in, and GitHub's two hosts for a GitHub connection once
+/// [`GITHUB_INTERCEPTED`]. With an API key, a subscription token or no
+/// Anthropic client the token host is never served, and without a GitHub
+/// connection neither GitHub host is, so the environment reaches them as it
+/// would without a front door.
+pub fn front_door_hosts(clients: ManagedCredentialClients) -> Vec<FrontDoorHost> {
+    let exact = |host| FrontDoorHost {
+        host,
+        suffix: false,
+    };
+    let mut hosts = FRONT_DOOR_HOSTS.to_vec();
+    if clients.anthropic_sign_in() {
+        hosts.push(exact(CLAUDE_TOKEN_HOST));
+    }
+    if GITHUB_INTERCEPTED && clients.contains(ManagedCredentialClient::GitHub) {
+        hosts.extend(GITHUB_HOSTS.map(exact));
+    }
+    hosts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clients(slots: &[&str]) -> ManagedCredentialClients {
+        ManagedCredentialClients::from_profile_slots(slots.iter().copied()).unwrap()
+    }
+
+    fn names(clients: ManagedCredentialClients) -> Vec<&'static str> {
+        front_door_hosts(clients)
+            .iter()
+            .map(|host| host.host)
+            .collect()
+    }
+
+    #[test]
+    fn the_fixed_hosts_are_served_for_every_selection() {
+        let fixed = [ANTHROPIC_API_HOST, OPENAI_API_HOST, CHATGPT_HOST];
+        assert_eq!(names(clients(&[])), fixed);
+        assert_eq!(names(clients(&["openai", "codex", "ssh"])), fixed);
+        assert_eq!(names(clients(&["anthropic"])), fixed);
+        let token = clients(&["anthropic"])
+            .with_anthropic_subscription_token()
+            .unwrap();
+        assert_eq!(names(token), fixed);
+    }
+
+    #[test]
+    fn claude_token_host_is_served_for_a_claude_sign_in_only() {
+        let sign_in = clients(&["anthropic"]).with_anthropic_sign_in().unwrap();
+        assert_eq!(
+            names(sign_in),
+            [
+                ANTHROPIC_API_HOST,
+                OPENAI_API_HOST,
+                CHATGPT_HOST,
+                CLAUDE_TOKEN_HOST
+            ]
+        );
+    }
+
+    #[test]
+    fn github_hosts_wait_for_the_refusal_on_their_route() {
+        let github = clients(&["github", "ssh"]);
+        assert_eq!(
+            names(github)
+                .iter()
+                .filter(|host| GITHUB_HOSTS.contains(host))
+                .count(),
+            if GITHUB_INTERCEPTED { 2 } else { 0 }
+        );
+        assert!(
+            !names(clients(&["ssh"]))
+                .iter()
+                .any(|host| GITHUB_HOSTS.contains(host))
+        );
+    }
+}

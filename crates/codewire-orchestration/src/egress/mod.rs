@@ -83,7 +83,10 @@ pub fn service_state(
         sandbox_namespace: sandbox_namespace.to_owned(),
         // No deployment sets a platform allow (see `settings::PLATFORM_ALLOWS`).
         platform: Vec::new(),
-        intercepts: assignment::interception_bindings(settings.interception)?,
+        interception: {
+            assignment::check_interception_bindings(settings.interception)?;
+            settings.interception
+        },
         starts: Default::default(),
         front_doors,
         interception_cas,
@@ -225,7 +228,7 @@ mod tests {
                 InterceptionInputs::default(),
             )
             .unwrap()
-            .is_some_and(|state| state.intercepts.is_empty() && state.interception_cas.is_none())
+            .is_some_and(|state| !state.interception && state.interception_cas.is_none())
         );
         let intercepting = || settings::EgressSettings {
             enabled: true,
@@ -259,7 +262,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert!(!state.intercepts.is_empty());
+        assert!(state.interception);
         assert!(state.interception_cas.is_some());
     }
 }

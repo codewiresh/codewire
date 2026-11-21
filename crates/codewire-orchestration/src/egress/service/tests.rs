@@ -336,7 +336,7 @@ fn state(
             host: "codewire-dev.sh".into(),
             port: 443,
         }],
-        intercepts: Default::default(),
+        interception: false,
         starts: Default::default(),
         front_doors,
         interception_cas: None,
@@ -460,7 +460,7 @@ impl crate::egress::interception_ca::InterceptionCaSource for Cas {
 async fn admit_intercepting(interception: bool, cas: &Arc<Cas>) -> (StatusCode, Value) {
     let cluster = Cluster::healthy();
     let mut state = state(&cluster, Arc::new(Unbound), None);
-    state.intercepts = crate::egress::assignment::interception_bindings(interception).unwrap();
+    state.interception = interception;
     state.interception_cas =
         Some(Arc::clone(cas)
             as Arc<
@@ -733,7 +733,7 @@ rules:
         server_namespace: SERVER.into(),
         sandbox_namespace: SANDBOXES.into(),
         platform: configured.clone(),
-        intercepts: Default::default(),
+        interception: false,
         starts: Default::default(),
         front_doors: None,
         interception_cas: None,
@@ -747,6 +747,7 @@ rules:
             document: policy.canonical_json().unwrap(),
             digest: *policy.digest().as_bytes(),
         },
+        intercepts: Vec::new(),
     };
     for assignment in [&Assignment::Unbound, &bound] {
         let sent: Vec<(String, u32)> = state
@@ -780,13 +781,13 @@ async fn interception_reaches_only_a_bound_sandbox_and_only_when_switched_on() {
             server_namespace: SERVER.into(),
             sandbox_namespace: SANDBOXES.into(),
             platform: Vec::new(),
-            intercepts: crate::egress::assignment::interception_bindings(interception).unwrap(),
+            interception,
             starts: Default::default(),
             front_doors: None,
             interception_cas: None,
         }
     };
-    let bound = Assignment::Bound {
+    let bound = |interception| Assignment::Bound {
         environment_id: "env".into(),
         operation_generation: 7,
         policy: AssignedPolicy {
@@ -795,6 +796,11 @@ async fn interception_reaches_only_a_bound_sandbox_and_only_when_switched_on() {
             document: br#"{"rules":[]}"#.to_vec(),
             digest: [9; 32],
         },
+        intercepts: crate::egress::assignment::interception_bindings(
+            interception,
+            codewire_access::ManagedCredentialClients::default(),
+        )
+        .unwrap(),
     };
     // The assignment as it was before interception existed.
     let today = || BoundAssignment {
@@ -819,7 +825,10 @@ async fn interception_reaches_only_a_bound_sandbox_and_only_when_switched_on() {
     };
 
     // Off: byte for byte the assignment a bound sandbox gets today.
-    assert_eq!(state(false).proto(&bound).encode_to_vec(), encoded(today()));
+    assert_eq!(
+        state(false).proto(&bound(false)).encode_to_vec(),
+        encoded(today())
+    );
     // On: today's assignment, the switch, and each front door host with its
     // port and suffix flag; nothing else, so no credential, key or
     // placeholder can travel in it.
@@ -842,7 +851,7 @@ async fn interception_reaches_only_a_bound_sandbox_and_only_when_switched_on() {
             .collect(),
         ..today()
     };
-    assert_eq!(state(true).proto(&bound).encode_to_vec(), encoded(on));
+    assert_eq!(state(true).proto(&bound(true)).encode_to_vec(), encoded(on));
     // An unbound warm-pool member gets none either way.
     for interception in [false, true] {
         assert!(matches!(
@@ -890,7 +899,7 @@ fn watch(cluster: &Arc<Cluster>, expires_in: Duration) -> Watch {
             server_namespace: SERVER.into(),
             sandbox_namespace: SANDBOXES.into(),
             platform: Vec::new(),
-            intercepts: Default::default(),
+            interception: false,
             starts: Default::default(),
             front_doors: None,
             interception_cas: None,
@@ -1599,7 +1608,7 @@ fn signing_app(
     intercepting: bool,
 ) -> axum::Router {
     let mut state = state(cluster, bindings, None);
-    state.intercepts = crate::egress::assignment::interception_bindings(intercepting).unwrap();
+    state.interception = intercepting;
     codewire_server_core::connect::connect_router(egress_router(Arc::new(state)))
 }
 
@@ -1645,4 +1654,26 @@ async fn interception_leaves_are_refused_to_any_other_pod() {
         let (status, body) = call_app(app, "SignInterceptionLeaves", sign_body()).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{case}: {body}");
     }
+}
+
+/// A binding's clients are read only while the deployment intercepts, so an
+/// encoding this build can't read costs no egress with interception off, and
+/// withholds the assignment with it on (#4001 step P).
+#[test]
+fn a_bindings_clients_are_read_only_while_intercepting() {
+    assert_eq!(binding_intercepts(false, "unreadable").unwrap(), Vec::new());
+    assert!(binding_intercepts(true, "unreadable").is_err());
+    let sign_in = codewire_access::ManagedCredentialClients::from_profile_slots(["anthropic"])
+        .and_then(codewire_access::ManagedCredentialClients::with_anthropic_sign_in)
+        .unwrap();
+    let hosts: Vec<String> = binding_intercepts(true, sign_in.encode())
+        .unwrap()
+        .into_iter()
+        .map(|intercept| intercept.binding.hostname().to_owned())
+        .collect();
+    assert!(
+        hosts
+            .iter()
+            .any(|host| host == codewire_access::CLAUDE_TOKEN_HOST)
+    );
 }
