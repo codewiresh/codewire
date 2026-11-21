@@ -95,8 +95,18 @@ if [[ "$head" != "$before" ]]; then
 fi
 
 deadline=$(($(date +%s) + timeout_seconds))
+# Forgejo moves refs/pull/N/head a little after a push lands, so the head from
+# before the push is read for a while: wait for it, up to two minutes, before
+# taking any other head for someone else's push (deploy#336).
+ref_deadline=$(($(date +%s) + (timeout_seconds < 120 ? timeout_seconds : 120)))
 for ((;;)); do
   current="$(pr_head)"
+  if [[ "$current" == "$before" && "$head" != "$before" ]]; then
+    (( $(date +%s) < ref_deadline )) ||
+      stop "refs/pull/$pr/head still names $before, not the pushed $head"
+    sleep "$poll"
+    continue
+  fi
   [[ -z "$current" || "$current" == "$head" ]] || stop "the head moved to $current; someone else pushed"
   status="$(fj -C "$deploy" pr status "$pr" 2>/dev/null | plain)"
   if grep -Eq '^- (Failure|Error) ' <<<"$status"; then

@@ -391,12 +391,24 @@ deploy_status() { # CHECK_STATUS
   printf "x\nBy fixture $dash %s\n" "$(iso Merged)" >"$FAKE/merged-9"
 }
 # The fake forge moves the pull request ref when a helper pushes the branch.
+# With $FAKE/ref-lag holding N, it moves it only after N more reads, as
+# Forgejo does a little after a push; with $FAKE/ref-other, it moves it to
+# that commit instead, as another person's push would.
 cat >"$work/bin/git" <<EOF
 #!/usr/bin/env bash
 real_git="$(command -v git)"
 "\$real_git" "\$@" || exit \$?
-if [[ " \$* " == *" push "* ]]; then
-  "\$real_git" -C "$deploy_origin" update-ref refs/pull/9/head refs/heads/feature
+if [[ " \$* " == *" push "* && ! -f "$FAKE/ref-lag" ]]; then
+  "\$real_git" -C "$deploy_origin" update-ref refs/pull/9/head "\$(cat "$FAKE/ref-other" 2>/dev/null || echo refs/heads/feature)"
+fi
+if [[ " \$* " == *" ls-remote "*" refs/pull/9/head "* && -f "$FAKE/ref-lag" ]]; then
+  lag="\$(cat "$FAKE/ref-lag")"
+  if (( lag <= 1 )); then
+    rm "$FAKE/ref-lag"
+    "\$real_git" -C "$deploy_origin" update-ref refs/pull/9/head refs/heads/feature
+  else
+    echo \$((lag - 1)) >"$FAKE/ref-lag"
+  fi
 fi
 EOF
 chmod +x "$work/bin/git"
@@ -420,6 +432,29 @@ git -C "$deploy_origin" merge-base --is-ancestor "$feature_before" "$pushed" || 
 git -C "$deploy_origin" merge-base --is-ancestor "$deploy_main" "$pushed" || fail 'deploy-update-merge did not merge main'
 grep -qxF 'pr merge 9 -M merge -d -m Reviewed-on: #9' "$FAKE/merges" || fail "deploy-update-merge merged wrongly: $(cat "$FAKE/merges")"
 [[ "$(worktrees)" == 1 ]] || fail 'deploy-update-merge left its worktree'
+
+# Forgejo moves refs/pull/9/head a little after the push: the old head read
+# meanwhile is waited out, not taken for someone else's push (deploy#336). A
+# head that never moves stops within the timeout, and a head another push
+# moved still stops.
+branch_back() {
+  git -C "$deploy_origin" update-ref refs/heads/feature "$feature_before"
+  git -C "$deploy_origin" update-ref refs/pull/9/head "$feature_before"
+}
+branch_back; reset_fake; deploy_status Success; echo 3 >"$FAKE/ref-lag"
+update --timeout 5 "$deploy" 9 feature || fail "deploy-update-merge stopped on a pull request ref that lagged its push: $(cat "$work/out")"
+grep -qxF 'pr merge 9 -M merge -d -m Reviewed-on: #9' "$FAKE/merges" || fail 'deploy-update-merge did not merge after the ref caught up'
+branch_back; reset_fake; deploy_status Success; echo 1000000 >"$FAKE/ref-lag"
+update --timeout 2 "$deploy" 9 feature && fail 'deploy-update-merge merged while the pull request ref never moved'
+grep -q "still names $feature_before" "$work/out" || fail "deploy-update-merge did not say the ref never moved: $(cat "$work/out")"
+[[ ! -f "$FAKE/merges" ]] || fail 'deploy-update-merge called merge while the ref never moved'
+branch_back; reset_fake; deploy_status Success; git -C "$deploy_origin" rev-parse main >"$FAKE/ref-other"
+update --timeout 5 "$deploy" 9 feature && fail 'deploy-update-merge merged over someone else'"'"'s push'
+grep -q 'someone else pushed' "$work/out" || fail "deploy-update-merge did not report the other push: $(cat "$work/out")"
+[[ "$(worktrees)" == 1 ]] || fail 'deploy-update-merge left its worktree'
+reset_fake
+git -C "$deploy_origin" update-ref refs/heads/feature "$pushed"
+git -C "$deploy_origin" update-ref refs/pull/9/head "$pushed"
 
 # A conflict stops before any push, and the worktree still goes.
 git -C "$deploy" checkout -q main
