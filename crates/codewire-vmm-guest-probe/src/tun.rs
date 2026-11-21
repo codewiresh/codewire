@@ -6,7 +6,8 @@
 //! A Kata container has no `/dev/net/tun`, so the init container makes the
 //! device node itself, in a memory-backed volume at `/dev/net` that the
 //! workspace can also write. It trusts nothing it finds there:
-//! [`create_persistent`] replaces the path with a fresh node, opens it without
+//! [`create_persistent`] first checks `/dev/net` itself is that memory-backed
+//! directory, then replaces the path with a fresh node, opens it without
 //! following a link, and checks the open descriptor is the TUN before any
 //! ioctl (`docs/dev/CODEWIRE-GUARD-RUNTIME-PROFILES.md`, "Hosted Egress Setup").
 
@@ -37,7 +38,8 @@ const TUNSETIFF: libc::c_ulong = IOC_WRITE | 0xca;
 const TUNSETPERSIST: libc::c_ulong = IOC_WRITE | 0xcb;
 const TUNSETOWNER: libc::c_ulong = IOC_WRITE | 0xcc;
 
-const TUN_PATH: &CStr = c"/dev/net/tun";
+const DEVNET_DIR: &CStr = c"/dev/net";
+const TUN_NODE: &CStr = c"tun";
 /// The TUN's character device: the misc major and the kernel's `TUN_MINOR`.
 const TUN_MAJOR: u32 = 10;
 const TUN_MINOR: u32 = 200;
@@ -69,7 +71,7 @@ pub enum TunError {
     Node(#[source] io::Error),
     #[error("/dev/net/tun is not the TUN device (character 10:200)")]
     NotTun,
-    #[error("/dev/net/tun is not on a memory-backed filesystem (tmpfs)")]
+    #[error("/dev/net is not a directory on a memory-backed filesystem (tmpfs)")]
     NotMemory,
     #[error("give /dev/net/tun to its owner, mode 0600")]
     Own(#[source] io::Error),
@@ -102,53 +104,68 @@ pub fn open(name: &str) -> Result<OwnedFd, TunError> {
 /// made afresh first, mode 0600 and owned by `owner`, which needs root.
 pub fn create_persistent(name: &str, owner: libc::uid_t) -> Result<(), TunError> {
     let mut request = request(name)?;
-    let device = fresh_node(TUN_PATH, owner)?;
+    let device = fresh_node(DEVNET_DIR, owner)?;
     ioctl(&device, TUNSETIFF, &mut request).map_err(TunError::Attach)?;
     ioctl_value(&device, TUNSETOWNER, libc::c_ulong::from(owner)).map_err(TunError::Persist)?;
     ioctl_value(&device, TUNSETPERSIST, 1).map_err(TunError::Persist)
 }
 
-/// Replace whatever is at `path` with a new TUN device node, open it, and give
-/// it to `owner` through the open descriptor, so a path swapped meanwhile is
-/// never what gets the owner.
-fn fresh_node(path: &CStr, owner: libc::uid_t) -> Result<OwnedFd, TunError> {
-    remove(path)?;
+/// Replace whatever is at `tun` in `dir` with a new TUN device node, open it,
+/// and give it to `owner` through the open descriptor, so a path swapped
+/// meanwhile is never what gets the owner. Every step is relative to `dir`,
+/// opened once and checked memory-backed before anything in it changes.
+fn fresh_node(dir: &CStr, owner: libc::uid_t) -> Result<OwnedFd, TunError> {
+    let dir = memory_dir(dir)?;
+    remove(&dir, TUN_NODE)?;
     fs::mknodat(
-        fs::CWD,
-        path,
+        &dir,
+        TUN_NODE,
         FileType::CharacterDevice,
         Mode::RUSR | Mode::WUSR,
         fs::makedev(TUN_MAJOR, TUN_MINOR),
     )
     .map_err(|error| TunError::Node(error.into()))?;
-    let device = open_verified(path)?;
-    // The node's volume is memory-backed: on a disk-backed one it would sit on
-    // the host's filesystem shared into the VM. Admission pins the volume;
-    // this refuses it at the node itself as well.
-    let filesystem = fs::fstatfs(&device).map_err(|error| TunError::Open(error.into()))?;
-    if !is_memory(filesystem.f_type as u64) {
-        return Err(TunError::NotMemory);
-    }
+    let device = open_verified(&dir, TUN_NODE)?;
     fs::fchown(&device, Some(Uid::from_raw(owner)), None)
         .and_then(|()| fs::fchmod(&device, Mode::RUSR | Mode::WUSR))
         .map_err(|error| TunError::Own(error.into()))?;
     Ok(device)
 }
 
-/// Remove whatever is at `path`. unlink(2) removes a symbolic link itself,
-/// never its target; a directory there is refused.
-fn remove(path: &CStr) -> Result<(), TunError> {
-    match fs::unlink(path) {
+/// Open `path` as a directory, without following a link, and keep it only if
+/// it is memory-backed. On a disk-backed volume the node would sit on the
+/// host's filesystem shared into the VM. Admission pins the volume; this
+/// refuses it at the directory as well, before anything in it is removed or
+/// made.
+fn memory_dir(path: &CStr) -> Result<OwnedFd, TunError> {
+    let dir = fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| TunError::Node(error.into()))?;
+    let filesystem = fs::fstatfs(&dir).map_err(|error| TunError::Node(error.into()))?;
+    if !is_memory(filesystem.f_type as u64) {
+        return Err(TunError::NotMemory);
+    }
+    Ok(dir)
+}
+
+/// Remove whatever is at `name` in `dir`. unlink(2) removes a symbolic link
+/// itself, never its target; a directory there is refused.
+fn remove(dir: &OwnedFd, name: &CStr) -> Result<(), TunError> {
+    match fs::unlinkat(dir, name, fs::AtFlags::empty()) {
         Ok(()) | Err(Errno::NOENT) => Ok(()),
         Err(error) => Err(TunError::Node(error.into())),
     }
 }
 
-/// Open `path` without following a link, and keep it only if the descriptor
-/// is the TUN's character device.
-fn open_verified(path: &CStr) -> Result<OwnedFd, TunError> {
-    let device = fs::open(
-        path,
+/// Open `name` in `dir` without following a link, and keep it only if the
+/// descriptor is the TUN's character device.
+fn open_verified(dir: &OwnedFd, name: &CStr) -> Result<OwnedFd, TunError> {
+    let device = fs::openat(
+        dir,
+        name,
         OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOFOLLOW,
         Mode::empty(),
     )
@@ -245,6 +262,17 @@ mod tests {
         std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap()
     }
 
+    /// A test directory opened as the init opens `/dev/net`, without the
+    /// memory check, which a test's temporary directory may not pass.
+    fn dir(path: &std::path::Path) -> OwnedFd {
+        fs::open(
+            self::path(path).as_c_str(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn a_planted_symlink_is_never_followed() {
         let dir = tempfile::tempdir().unwrap();
@@ -253,12 +281,12 @@ mod tests {
         let tun = dir.path().join("tun");
         std::os::unix::fs::symlink(&target, &tun).unwrap();
 
-        let error = open_verified(&path(&tun)).unwrap_err();
+        let error = open_verified(&self::dir(dir.path()), c"tun").unwrap_err();
         assert!(
             matches!(&error, TunError::Open(error) if error.raw_os_error() == Some(libc::ELOOP)),
             "{error:?}"
         );
-        remove(&path(&tun)).unwrap();
+        remove(&self::dir(dir.path()), c"tun").unwrap();
         assert!(std::fs::symlink_metadata(&tun).is_err(), "the link is gone");
         assert_eq!(
             std::fs::read(&target).unwrap(),
@@ -270,11 +298,17 @@ mod tests {
     #[test]
     fn a_device_other_than_the_tun_is_refused_after_opening() {
         // /dev/null is character 1:3; a regular file is no device at all.
-        assert!(matches!(open_verified(c"/dev/null"), Err(TunError::NotTun)));
+        let dev = self::dir(std::path::Path::new("/dev"));
+        assert!(matches!(
+            open_verified(&dev, c"null"),
+            Err(TunError::NotTun)
+        ));
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("tun");
-        std::fs::write(&file, b"").unwrap();
-        assert!(matches!(open_verified(&path(&file)), Err(TunError::NotTun)));
+        std::fs::write(dir.path().join("tun"), b"").unwrap();
+        assert!(matches!(
+            open_verified(&self::dir(dir.path()), c"tun"),
+            Err(TunError::NotTun)
+        ));
     }
 
     #[test]
@@ -298,10 +332,41 @@ mod tests {
     #[test]
     fn removing_a_missing_path_succeeds_and_a_directory_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        remove(&path(&dir.path().join("absent"))).unwrap();
-        let sub = dir.path().join("tun");
-        std::fs::create_dir(&sub).unwrap();
-        assert!(matches!(remove(&path(&sub)), Err(TunError::Node(_))));
+        remove(&self::dir(dir.path()), c"absent").unwrap();
+        std::fs::create_dir(dir.path().join("tun")).unwrap();
+        assert!(matches!(
+            remove(&self::dir(dir.path()), c"tun"),
+            Err(TunError::Node(_))
+        ));
+    }
+
+    #[test]
+    fn a_directory_not_on_tmpfs_is_refused_before_anything_in_it_changes() {
+        // procfs is no tmpfs, and nothing in it can be removed or made, so
+        // reaching either step would fail differently.
+        assert!(matches!(
+            fresh_node(c"/proc", 1000),
+            Err(TunError::NotMemory)
+        ));
+        assert!(matches!(memory_dir(c"/proc"), Err(TunError::NotMemory)));
+    }
+
+    #[test]
+    fn a_tmpfs_directory_is_the_memory_directory_and_a_link_to_one_is_not() {
+        // /dev/shm is tmpfs wherever these tests run on Linux.
+        memory_dir(c"/dev/shm").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("net");
+        std::os::unix::fs::symlink("/dev/shm", &link).unwrap();
+        // With O_DIRECTORY, Linux refuses an unfollowed link as no directory.
+        let error = memory_dir(&path(&link)).unwrap_err();
+        assert!(
+            matches!(&error, TunError::Node(error) if error.raw_os_error() == Some(libc::ENOTDIR)),
+            "{error:?}"
+        );
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        assert!(matches!(memory_dir(&path(&file)), Err(TunError::Node(_))));
     }
 
     #[test]

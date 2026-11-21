@@ -122,9 +122,8 @@ guest before the workload starts, by one init container, `hosted-egress-tun`.
   it. Admission pins this container by name, image, command and mount in
   every layer: the warm-pool template policy, the pool member's first-bind
   isolation, and the cluster's policy.
-- **The TUN device** (specified before its code, which follows in its own
-  change): a Kata container has no `/dev/net/tun`, though the guest kernel has
-  TUN built in. So the Pod carries one more volume, `egress-devnet`:
+- **The TUN device:** a Kata container has no `/dev/net/tun`, though the
+  guest kernel has TUN built in. So the Pod carries one more volume, `egress-devnet`:
   - an `emptyDir` with `medium: Memory` and `sizeLimit: 1Mi`, a tmpfs inside
     the guest. It is never disk-backed: that would be the node's filesystem
     shared into the VM, and a device node must never be written there;
@@ -132,6 +131,9 @@ guest before the workload starts, by one init container, `hosted-egress-tun`.
     `hosted-egress-tun` and the workspace container only.
 - **The node:** the init trusts nothing at the path, because the workspace can
   write the volume.
+  - It opens `/dev/net` itself as a directory, without following a link, and
+    checks it is a tmpfs. On anything else it removes and creates nothing,
+    and fails the Pod. Every later step is relative to that open directory.
   - It removes whatever is at `/dev/net/tun`. Removing a symbolic link removes
     the link, never its target.
   - It creates the node afresh as character device 10:200.
