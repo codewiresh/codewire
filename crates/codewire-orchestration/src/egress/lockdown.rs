@@ -12,10 +12,13 @@
 //! Kubernetes adds together every policy that selects a Pod, so each one that
 //! selects it must be the environment's, the policy the sandbox controller
 //! makes from the Pod's template exactly as orchestration renders that
-//! template, or a policy with no rules at all, which allows nothing. Which
-//! environment the Pod is bound to comes from orchestration's live binding,
-//! never from the Pod's labels, so a Pod cannot leave the check by dropping a
-//! label.
+//! template, a claimed warm member's bridge (#2434) exactly as orchestration
+//! renders it for the Sandbox the binding recorded, or a policy with no rules
+//! at all, which allows nothing. The bridge grants only the environment
+//! policy's own ingress, so accepting it adds nothing the environment's
+//! policy does not already allow. Which environment the Pod is bound to
+//! comes from orchestration's live binding, never from the Pod's labels, so a
+//! Pod cannot leave the check by dropping a label.
 //!
 //! It reads Kubernetes NetworkPolicies only. A Cilium policy can allow
 //! traffic too and is not seen here; only infra's reviewed GitOps creates
@@ -41,7 +44,9 @@ use prometheus::{IntCounterVec, Opts, register_int_counter_vec};
 
 use crate::runtime::{MemberFacts, NamedNetworkPolicy, NetworkPolicyFacts};
 use crate::sandbox::LABEL_ENV_ID;
-use crate::sandbox::template::workspace_daemon_network_policy_name;
+use crate::sandbox::template::{
+    warm_member_daemon_bridge_name, workspace_daemon_network_policy_name,
+};
 use crate::sandbox::warm_pool::TEMPLATE_REF_HASH_LABEL;
 
 use super::admission::{EGRESS_MODE_BROKER, EGRESS_MODE_LABEL};
@@ -135,12 +140,15 @@ pub fn template_ref_hash(guest: &MemberFacts) -> Option<&str> {
 /// the live binding says is bound to `environment_id`. `rendered` is what
 /// orchestration renders for that environment, `rendered_template` what the
 /// sandbox controller makes from the guest's template as orchestration
-/// renders it, and `live` every NetworkPolicy in the guest's namespace.
+/// renders it, `rendered_bridge` the warm-member bridge orchestration renders
+/// for the Sandbox the binding recorded, and `live` every NetworkPolicy in
+/// the guest's namespace.
 pub fn lockdown_applied(
     guest: &MemberFacts,
     environment_id: &str,
     rendered: Option<&NetworkPolicyFacts>,
     rendered_template: Option<&NetworkPolicyFacts>,
+    rendered_bridge: Option<&NetworkPolicyFacts>,
     live: &[NamedNetworkPolicy],
 ) -> Result<(), LockdownRefusal> {
     if guest.labels.get(EGRESS_MODE_LABEL).map(String::as_str) != Some(EGRESS_MODE_BROKER) {
@@ -165,6 +173,7 @@ pub fn lockdown_applied(
         if !may_select(&policy.facts, guest)
             || allows_nothing(&policy.facts)
             || is_template_policy(policy, rendered_template)
+            || is_warm_member_bridge(policy, environment_id, rendered_bridge)
         {
             continue;
         }
@@ -180,6 +189,18 @@ pub fn lockdown_applied(
 /// names it `<template>-network-policy`.
 fn is_template_policy(policy: &NamedNetworkPolicy, rendered: Option<&NetworkPolicyFacts>) -> bool {
     policy.name.ends_with("-network-policy") && rendered == Some(&policy.facts)
+}
+
+/// Whether `policy` is the bridge orchestration applies to the environment's
+/// adopted warm member: its name, and exactly the rendered content, whose
+/// selector names the Sandbox the binding recorded. Another environment's
+/// bridge, or one rendered from other settings, is not.
+fn is_warm_member_bridge(
+    policy: &NamedNetworkPolicy,
+    environment_id: &str,
+    rendered: Option<&NetworkPolicyFacts>,
+) -> bool {
+    policy.name == warm_member_daemon_bridge_name(environment_id) && rendered == Some(&policy.facts)
 }
 
 /// Whether `policy` has no rule in either direction, whatever its types. It

@@ -719,6 +719,19 @@ pub trait RuntimeAttestation: Send + Sync {
         isolation: Isolation,
     ) -> anyhow::Result<Option<NetworkPolicyFacts>>;
 
+    /// The bridge this runtime renders for an adopted warm member of
+    /// `environment_id` whose Sandbox UID the binding recorded (#2434), in
+    /// the form [`Self::workspace_network_policies`] reads it back. `None`
+    /// as for [`Self::rendered_workspace_network_policy`], or when no Sandbox
+    /// UID was recorded.
+    fn rendered_warm_member_bridge(
+        &self,
+        namespace: &str,
+        environment_id: &str,
+        isolation: Isolation,
+        sandbox_uid: &str,
+    ) -> anyhow::Result<Option<NetworkPolicyFacts>>;
+
     /// The runtime of this name; `None` when there is none.
     async fn attested_runtime(
         &self,

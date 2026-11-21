@@ -8,7 +8,7 @@ use crate::sandbox::template::{
     CpuSharingRatio, CredentialRuntimeTemplateConfig, DOCKER_MODE_LOCAL_DIND_DIRECT,
     HostedEgressTemplate, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL,
     RUNTIME_PROFILE_STANDARD, RuntimeProfileSpec, StandardRuntime, TemplateOpts,
-    WORKSPACE_KEEPALIVE_COMMAND, render_template_network_policy,
+    WORKSPACE_KEEPALIVE_COMMAND, render_template_network_policy, render_warm_member_bridge,
     render_workspace_daemon_network_policy, runtime_profile_spec, validate_managed_runtime_profile,
 };
 use crate::sandbox::{
@@ -220,6 +220,38 @@ impl KubernetesRenderConfig {
         environment_id: &str,
         isolation: Isolation,
     ) -> Option<serde_json::Value> {
+        self.workspace_policy_opts(environment_id, isolation)
+            .map(|opts| render_workspace_daemon_network_policy(namespace, &opts))
+    }
+
+    /// The bridge an adopted warm member of `environment_id` carries (#2434),
+    /// selecting the member whose Sandbox UID the binding recorded, as the
+    /// egress lockdown check expects to read it back; `None` when this
+    /// deployment leaves workspace NetworkPolicies to someone else, or the
+    /// binding recorded no Sandbox UID. It grants the environment policy's
+    /// ingress, from the same inputs.
+    pub fn warm_member_bridge(
+        &self,
+        namespace: &str,
+        environment_id: &str,
+        isolation: Isolation,
+        sandbox_uid: &str,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        if sandbox_uid.is_empty() {
+            return Ok(None);
+        }
+        self.workspace_policy_opts(environment_id, isolation)
+            .map(|opts| render_warm_member_bridge(namespace, &opts, sandbox_uid))
+            .transpose()
+    }
+
+    /// The options an environment's own NetworkPolicies render from, or
+    /// `None` when this deployment leaves them to someone else.
+    fn workspace_policy_opts(
+        &self,
+        environment_id: &str,
+        isolation: Isolation,
+    ) -> Option<TemplateOpts> {
         if !self.network_policy_management.is_empty() && self.network_policy_management != "Managed"
         {
             return None;
@@ -234,17 +266,14 @@ impl KubernetesRenderConfig {
             &self.runtime_spec(isolation),
             shape,
         );
-        Some(render_workspace_daemon_network_policy(
-            namespace,
-            &TemplateOpts {
-                environment_id: environment_id.to_owned(),
-                // The policy reads whether a direct UDP port is allocated,
-                // never which, and the access stack allocates one for every
-                // environment where the LoadBalancer is enabled.
-                direct_udp_lb_port: i64::from(opts.direct_udp_lb_enabled),
-                ..opts
-            },
-        ))
+        Some(TemplateOpts {
+            environment_id: environment_id.to_owned(),
+            // The policies read whether a direct UDP port is allocated, never
+            // which, and the access stack allocates one for every environment
+            // where the LoadBalancer is enabled.
+            direct_udp_lb_port: i64::from(opts.direct_udp_lb_enabled),
+            ..opts
+        })
     }
 
     /// The NetworkPolicy the sandbox controller makes from a workspace

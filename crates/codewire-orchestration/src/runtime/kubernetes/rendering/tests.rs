@@ -79,6 +79,76 @@ fn the_policy_the_lockdown_check_expects_is_the_one_the_access_stack_applies() {
     }
 }
 
+const SANDBOX_UID: &str = "51c208bf-0e29-452b-8d74-06d77da367a9";
+
+#[test]
+fn the_bridge_the_lockdown_check_expects_is_the_one_a_warm_claim_applies() {
+    for (config, isolation) in [
+        (config(), Isolation::Standard),
+        (config(), Isolation::Confidential),
+        (
+            KubernetesRenderConfig {
+                direct_udp_lb_enabled: false,
+                stun_host: String::new(),
+                ..config()
+            },
+            Isolation::Standard,
+        ),
+    ] {
+        // What `ensure_warm_member_bridge` renders for a claimed member: the
+        // environment's own options and the Sandbox UID its binding recorded.
+        let mut applied = config.environment(&intent(isolation)).unwrap();
+        if applied.direct_udp_lb_enabled {
+            applied.direct_udp_lb_port = 32417;
+        }
+        let expected = render_warm_member_bridge(NAMESPACE, &applied, SANDBOX_UID).unwrap();
+        let bridge = config
+            .warm_member_bridge(NAMESPACE, ENVIRONMENT, isolation, SANDBOX_UID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bridge, expected, "{isolation:?}");
+        // cw-security, #4000: the bridge may add nothing to the environment's
+        // own policy. It is that policy's ingress, exactly, and no egress.
+        let own = config
+            .workspace_network_policy(NAMESPACE, ENVIRONMENT, isolation)
+            .unwrap();
+        assert_eq!(
+            bridge["spec"]["ingress"], own["spec"]["ingress"],
+            "{isolation:?}"
+        );
+        assert_eq!(
+            bridge["spec"]["policyTypes"],
+            serde_json::json!(["Ingress"])
+        );
+        assert!(bridge["spec"].get("egress").is_none(), "{isolation:?}");
+    }
+}
+
+#[test]
+fn no_bridge_is_rendered_without_a_recorded_sandbox_or_managed_policies() {
+    assert_eq!(
+        config()
+            .warm_member_bridge(NAMESPACE, ENVIRONMENT, Isolation::Standard, "")
+            .unwrap(),
+        None
+    );
+    let unmanaged = KubernetesRenderConfig {
+        network_policy_management: "Unmanaged".into(),
+        ..config()
+    };
+    assert_eq!(
+        unmanaged
+            .warm_member_bridge(NAMESPACE, ENVIRONMENT, Isolation::Standard, SANDBOX_UID)
+            .unwrap(),
+        None
+    );
+    assert!(
+        config()
+            .warm_member_bridge(NAMESPACE, ENVIRONMENT, Isolation::Standard, "not-a-uid")
+            .is_err()
+    );
+}
+
 #[test]
 fn a_deployment_that_does_not_manage_network_policies_renders_none_to_compare() {
     let unmanaged = KubernetesRenderConfig {

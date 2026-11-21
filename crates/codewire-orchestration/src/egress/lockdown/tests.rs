@@ -2,6 +2,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::sandbox::LABEL_TYPE;
+use crate::sandbox::template::{SANDBOX_UID_LABEL, warm_member_daemon_bridge_name};
 
 const ENVIRONMENT: &str = "0f8c2f6e-2c1e-4a8e-9c55-3b1f0f7d9a11";
 const ANOTHER: &str = "9d2a4b7c-51f3-4e0a-8b66-2a7c1e5f3d08";
@@ -9,6 +10,9 @@ const ANOTHER: &str = "9d2a4b7c-51f3-4e0a-8b66-2a7c1e5f3d08";
 const HASH: &str = "2f9c41ab";
 const ANOTHER_HASH: &str = "77d0e3c5";
 const TEMPLATE_POLICY: &str = "warm-2000m-4096mi-20gi-r7-network-policy";
+/// The Sandbox UID the guest's warm binding recorded, and another Sandbox's.
+const SANDBOX_UID: &str = "51c208bf-0e29-452b-8d74-06d77da367a9";
+const ANOTHER_SANDBOX_UID: &str = "c3a1e7d2-6f4b-4b9a-9e2d-7a5f0c1b8e44";
 
 fn guest(labels: &[(&str, &str)]) -> MemberFacts {
     MemberFacts {
@@ -116,6 +120,7 @@ fn check(guest: &MemberFacts, live: &[NamedNetworkPolicy]) -> Result<(), Lockdow
         ENVIRONMENT,
         Some(&rendered()),
         Some(&template()),
+        Some(&bridge_for(SANDBOX_UID)),
         live,
     )
 }
@@ -174,7 +179,7 @@ fn any_difference_from_the_rendered_policy_fails_closed() {
         Err(LockdownRefusal::PolicyMissing)
     );
     assert_eq!(
-        lockdown_applied(&bound(), ENVIRONMENT, None, None, &[own(rendered())]),
+        lockdown_applied(&bound(), ENVIRONMENT, None, None, None, &[own(rendered())]),
         Err(LockdownRefusal::PolicyUnmanaged)
     );
     let allow_all = live(|spec| spec["egress"] = json!([{}]));
@@ -233,6 +238,7 @@ fn the_rendered_policy_must_select_the_pod() {
                 ENVIRONMENT,
                 Some(&policy),
                 None,
+                None,
                 &[own(policy.clone())]
             ),
             Err(LockdownRefusal::PolicyDoesNotSelect),
@@ -279,6 +285,7 @@ fn a_wide_template_policy_beside_an_exact_environment_policy_fails_closed() {
             &unhashed,
             ENVIRONMENT,
             Some(&rendered()),
+            None,
             None,
             &[own(rendered()), named(TEMPLATE_POLICY, any_hash)]
         ),
@@ -394,4 +401,137 @@ fn a_policy_with_no_rules_allows_nothing_and_passes() {
             "{allow_all}"
         );
     }
+}
+
+/// The adopted warm member's bridge (#2434), shaped like the one orchestration
+/// renders for `ENVIRONMENT`'s member `uid`: ingress only, by Sandbox UID.
+fn bridge_for(uid: &str) -> NetworkPolicyFacts {
+    NetworkPolicyFacts {
+        spec: json!({
+            "podSelector": {"matchLabels": {SANDBOX_UID_LABEL: uid, LABEL_TYPE: "workspace"}},
+            "policyTypes": ["Ingress"],
+            "ingress": [{
+                "from": [{
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "dev"}},
+                    "podSelector": {"matchLabels": {"app.kubernetes.io/component": "orchestration"}},
+                }],
+                "ports": [{"protocol": "TCP", "port": 7777}],
+            }],
+        }),
+    }
+}
+
+fn claimed() -> MemberFacts {
+    guest(&[
+        (LABEL_ENV_ID, ENVIRONMENT),
+        (LABEL_TYPE, "workspace"),
+        (EGRESS_MODE_LABEL, EGRESS_MODE_BROKER),
+        (TEMPLATE_REF_HASH_LABEL, HASH),
+        (SANDBOX_UID_LABEL, SANDBOX_UID),
+    ])
+}
+
+#[test]
+fn a_claimed_warm_member_under_its_rendered_bridge_passes() {
+    // Dev, 2026-11-21 (#4000): a pooled create's member carried its own
+    // policy, its template's and its bridge, each as orchestration rendered
+    // it, and was refused `policy_differs` on the bridge.
+    assert_eq!(
+        check(
+            &claimed(),
+            &[
+                own(rendered()),
+                named(TEMPLATE_POLICY, template()),
+                named(
+                    &warm_member_daemon_bridge_name(ENVIRONMENT),
+                    bridge_for(SANDBOX_UID)
+                ),
+            ]
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_bridge_that_is_not_exactly_the_rendered_one_fails_closed() {
+    let name = warm_member_daemon_bridge_name(ENVIRONMENT);
+    let bridge = |edit: fn(&mut Value)| {
+        let mut policy = bridge_for(SANDBOX_UID);
+        edit(&mut policy.spec);
+        policy
+    };
+    for (live_name, live_policy) in [
+        // One rule added to it.
+        (
+            name.clone(),
+            bridge(|spec| {
+                spec["ingress"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"from": [{"ipBlock": {"cidr": "0.0.0.0/0"}}]}));
+            }),
+        ),
+        // A render from other settings: an older revision's.
+        (
+            name.clone(),
+            bridge(|spec| spec["ingress"][0]["ports"][0]["port"] = json!(7778)),
+        ),
+        // The same name, with egress added.
+        (
+            name.clone(),
+            bridge(|spec| {
+                spec["policyTypes"] = json!(["Ingress", "Egress"]);
+                spec["egress"] = json!([{"to": [{"ipBlock": {"cidr": "0.0.0.0/0"}}]}]);
+            }),
+        ),
+        // Another environment's bridge, selecting this member.
+        (
+            warm_member_daemon_bridge_name(ANOTHER),
+            bridge_for(SANDBOX_UID),
+        ),
+        // The rendered content under another name.
+        ("copied-bridge".to_owned(), bridge_for(SANDBOX_UID)),
+    ] {
+        assert_eq!(
+            check(
+                &claimed(),
+                &[own(rendered()), named(&live_name, live_policy.clone())]
+            ),
+            differs(&live_name),
+            "{live_name}: {}",
+            live_policy.spec
+        );
+    }
+    // With no rendered bridge (a binding that recorded no Sandbox UID), a
+    // live one is not accepted either.
+    assert_eq!(
+        lockdown_applied(
+            &claimed(),
+            ENVIRONMENT,
+            Some(&rendered()),
+            Some(&template()),
+            None,
+            &[own(rendered()), named(&name, bridge_for(SANDBOX_UID))]
+        ),
+        differs(&name)
+    );
+}
+
+#[test]
+fn a_bridge_for_another_sandbox_does_not_select_the_member() {
+    // Rendered for the binding's Sandbox, a bridge naming another Sandbox's
+    // UID selects another Pod, so it neither passes nor fails this one.
+    assert_eq!(
+        check(
+            &claimed(),
+            &[
+                own(rendered()),
+                named(
+                    &warm_member_daemon_bridge_name(ENVIRONMENT),
+                    bridge_for(ANOTHER_SANDBOX_UID)
+                ),
+            ]
+        ),
+        Ok(())
+    );
 }

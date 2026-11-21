@@ -278,9 +278,10 @@ impl EgressServiceState {
     /// The out-of-band half of the self-check (#4000 P6, #4964): the
     /// NetworkPolicy the cluster holds for the environment `binding` records
     /// is the one orchestration renders for it and selects the guest, and
-    /// every other policy that selects the guest is its template's as
-    /// orchestration renders it, or allows nothing. `Some` is why it is not;
-    /// an error is a read that could not be made, never a pass.
+    /// every other policy that selects the guest is its template's or its
+    /// warm-member bridge as orchestration renders them, or allows nothing.
+    /// `Some` is why it is not; an error is a read that could not be made,
+    /// never a pass.
     /// Nothing the guest reports is read here. A pass clears a refusal stored
     /// for the guest earlier (#5068).
     async fn lockdown_refusal(
@@ -295,6 +296,15 @@ impl EgressServiceState {
             .attestation
             .rendered_workspace_network_policy(&guest.namespace, &binding.environment_id, isolation)
             .map_err(|error| unavailable("render the guest's NetworkPolicy", error))?;
+        let rendered_bridge = self
+            .attestation
+            .rendered_warm_member_bridge(
+                &guest.namespace,
+                &binding.environment_id,
+                isolation,
+                &binding.sandbox_uid,
+            )
+            .map_err(|error| unavailable("render the guest's warm member bridge", error))?;
         let rendered_template = match lockdown::template_ref_hash(facts) {
             Some(hash) => self
                 .attestation
@@ -312,6 +322,7 @@ impl EgressServiceState {
             &binding.environment_id,
             rendered.as_ref(),
             rendered_template.as_ref(),
+            rendered_bridge.as_ref(),
             &live,
         )
         .err();

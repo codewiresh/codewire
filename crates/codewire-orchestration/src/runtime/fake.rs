@@ -281,6 +281,16 @@ impl RuntimeAttestation for FakeRuntimeDriver {
         anyhow::bail!("not scripted")
     }
 
+    fn rendered_warm_member_bridge(
+        &self,
+        _namespace: &str,
+        _environment_id: &str,
+        _isolation: Isolation,
+        _sandbox_uid: &str,
+    ) -> anyhow::Result<Option<NetworkPolicyFacts>> {
+        anyhow::bail!("not scripted")
+    }
+
     async fn attested_runtime(
         &self,
         placement: &Placement,

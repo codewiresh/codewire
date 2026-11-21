@@ -426,6 +426,19 @@ impl RuntimeAttestation for KubernetesDriver {
             .transpose()
     }
 
+    fn rendered_warm_member_bridge(
+        &self,
+        namespace: &str,
+        environment_id: &str,
+        isolation: Isolation,
+        sandbox_uid: &str,
+    ) -> anyhow::Result<Option<NetworkPolicyFacts>> {
+        self.rendering
+            .warm_member_bridge(namespace, environment_id, isolation, sandbox_uid)?
+            .map(attestation::rendered_network_policy)
+            .transpose()
+    }
+
     async fn attested_runtime(
         &self,
         placement: &Placement,
