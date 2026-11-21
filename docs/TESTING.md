@@ -148,9 +148,11 @@ covers a changed file. The files most pages pass through (the page frame,
 sidebar, session and draft plumbing) are covered by no spec on purpose, so a
 change to one runs every spec, as does any change a header does not map. A
 change only to the browser tests' TypeScript runs what Playwright finds
-changed (`--only-changed`). `e2e/helpers/kind-coverage.test.ts` fails when a
-spec is unmapped or names a file that no longer exists. The whole suite still
-runs at merge and on main.
+changed (`--only-changed`). `scripts/dev/kind/dashboard-specs.py check`, which
+`bun run test:fixtures` runs after the helper tests, fails when a spec is
+unmapped or names a file that no longer exists. It runs beside them, not as
+one of them, because bun ends a test after 5 s. The whole suite still runs at
+merge and on main.
 
 Two tags make shorter local runs. `@smoke` marks about fifteen fast desktop
 tests across the main surfaces, and `@kind-heavy` the journeys that drive real
