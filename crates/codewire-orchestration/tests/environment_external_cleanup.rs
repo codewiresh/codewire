@@ -278,6 +278,46 @@ async fn normal_destroy_closes_sessions_removes_backend_and_marks_atomically() {
     cleanup(&pool, &fixture).await;
 }
 
+/// A session still open when the destroy finishes ends at its last
+/// observation, not at the destroy. Its Pod can outlive the delete by hours
+/// while no billing poll closes the row (no leader), and metering draws a
+/// closed session through its end, so ending at the destroy would charge the
+/// owner for a Sandbox the product called deleted (#5675).
+#[tokio::test]
+async fn a_session_open_at_the_destroy_ends_at_its_last_observation() {
+    let Some(pool) = pool().await else { return };
+    let fixture = seed(&pool, "destroying").await;
+    sqlx::query(
+        "UPDATE sandbox_running_sessions
+            SET started_at = NOW() - INTERVAL '2 hours',
+                last_observed_at = NOW() - INTERVAL '90 minutes'
+          WHERE environment_id = $1",
+    )
+    .bind(&fixture.env_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    Service::<PgLifecycleStore>::for_pool(pool.clone())
+        .complete_external_cleanup(&fixture.env_id, false, proof(&pool).await)
+        .await
+        .unwrap();
+
+    let (reason, past_last_observation): (String, f64) = sqlx::query_as(
+        "SELECT end_reason,
+                EXTRACT(EPOCH FROM ended_at - last_observed_at)::float8
+           FROM sandbox_running_sessions WHERE environment_id = $1",
+    )
+    .bind(&fixture.env_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reason, "environment_destroyed");
+    assert_eq!(past_last_observation, 0.0);
+
+    cleanup(&pool, &fixture).await;
+}
+
 #[tokio::test]
 async fn historical_destroyed_row_is_verified_not_backfilled_by_assumption() {
     let Some(pool) = pool().await else { return };

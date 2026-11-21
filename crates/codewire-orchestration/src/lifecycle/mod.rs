@@ -1109,7 +1109,7 @@ impl LifecycleStore for PgLifecycleStore {
                        RETURNING lease.id
                    ), closed_sessions AS (
                        UPDATE sandbox_running_sessions session
-                       SET ended_at = COALESCE(session.ended_at, NOW()),
+                       SET ended_at = COALESCE(session.ended_at, session.last_observed_at), -- not NOW(): #5675
                            end_reason = COALESCE(session.end_reason, 'environment_destroyed'),
                            updated_at = CASE
                                WHEN session.ended_at IS NULL THEN NOW()

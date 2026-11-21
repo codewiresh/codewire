@@ -36,13 +36,13 @@ finally goes.
 | `deleting` | `cw rm`: the Sandbox object has a deletion time, and may still be listed while its Pod ends. | The earlier of its deletion time and when its Ready condition turned off. |
 | `controller_lost_track` | The Sandbox object is gone. | Its last observation, at most one 60-second poll before. |
 | `Failed`, `Error`, `Evicted`, `Expired`, `DeadlineExceeded`, `SandboxFailed`, `PodFailed`, `NodeLost` | The Sandbox's Ready condition gives a reason it can't recover from. | When its Ready condition turned off. |
-| `environment_destroyed` | `cw rm` finished, its Pod gone, before the billing loop's next poll saw the delete. This is the usual end of a quick delete. | The time the destroy finished. |
+| `environment_destroyed` | `cw rm` finished, its Pod gone, before the billing loop's next poll saw the delete. This is the usual end of a quick delete. | Its last observation, at most one 60-second poll before. |
 
 A session the billing loop closed keeps its end; the destroy never moves
 it. When a Pod outlives its delete, the next poll closes the session as
-`deleting`, at the delete, before the destroy can finish. The charge runs
-to the Pod's end only if the billing loop isn't running then, for example
-with no leader.
+`deleting`, at the delete, before the destroy can finish. If no poll ran
+meanwhile, for example with no leader, the destroy still ends it at its
+last observation, so the charge never runs to the Pod's end (#5675).
 
 ## What is charged
 
@@ -51,9 +51,8 @@ allocated vCPU, memory and disk, per second, from its organization's credit
 at the organization's rate card. One draw writes one `usage` ledger entry
 per organization, for all its due sessions. An open session is drawn only
 through its last observation, so a Sandbox whose observations stop is never
-charged past them; a closed one is drawn through its end, which for
-`environment_destroyed` can be up to one poll past its last observation. An
-organization on the Unlimited card is never charged.
+charged past them; a closed one is drawn through its end. An organization
+on the Unlimited card is never charged.
 
 A stopped Sandbox has no open session and draws nothing, its kept disk
 included. A start opens a new session.
