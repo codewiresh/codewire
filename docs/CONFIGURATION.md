@@ -601,6 +601,24 @@ environment on a host adds the wait for the host's answer. Each span carries
 itself, such as one for exhausted credit or an expired environment, is one
 trace too, from the reconciler's signal.
 
+A resize is one trace as well: the handler (`resize_environment`, with the
+plan it builds and the operation it records), the Temporal signal, the resize
+activity, and under `handle_environment_resize` each step a user waits on.
+Those are applying the new size to the claim and the Sandbox
+(`apply_resize_desired_state`), and growing the disk and waiting for the
+volume (`apply_workspace_storage_resize`,
+`wait_for_workspace_storage_resize`). A resize in place then submits the new
+size to the Pod and waits until the kubelet reports it
+(`resize_workspace_pod_in_place`, `submit_workspace_pod_resize`,
+`wait_for_workspace_pod_resize`). A resize that restarts applies the session
+policy first (`enforce_session_policy`), replaces the Pod, waits for its
+replacement and for the grown filesystem (`replace_member`,
+`wait_replacement`, `wait_for_workspace_storage_capacity`), and
+re-establishes the runtime's identity (`reconcile_runtime_identity`). A plan
+read on its own is traced too (`plan_environment_resize_core`). A span
+carries `environment_id` at most; the waits that know only a Pod or a volume
+carry nothing, and no span holds a size.
+
 Whether or not tracing is on, the dashboard answers every signed-in `GET` page
 with `Server-Timing: total;dur=MS`, the milliseconds this server took from the
 request to its response (#5206). A page that marks its own phases keeps them

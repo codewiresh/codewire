@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use tracing::Instrument as _;
+
 use super::WorkerContext;
 use super::activity_authority::ActivityAuthority;
 use super::env_data::{load_backend_row, load_environment, workspace_pvc_anchor};
@@ -153,6 +155,7 @@ async fn checkpoint_previous_pod_uid(
     Ok(pod.uid)
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %operation.environment_id))]
 async fn enforce_session_policy(
     ctx: &WorkerContext,
     authority: &ActivityAuthority,
@@ -297,6 +300,14 @@ async fn complete_resize(
     Ok(())
 }
 
+/// The span around re-establishing the runtime's identity during a resize.
+/// The function itself is in a file past the size at which a file stops
+/// growing, so its span is made here, at its two calls.
+fn reconcile_identity_span(environment_id: &str) -> tracing::Span {
+    tracing::debug_span!("reconcile_runtime_identity", environment_id = %environment_id)
+}
+
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
 pub async fn handle_environment_resize(
     ctx: &WorkerContext,
     environment_id: &str,
@@ -320,7 +331,8 @@ pub async fn handle_environment_resize(
                 &backend,
                 authority,
                 RESIZE_MUTATION_STATES,
-            ),
+            )
+            .instrument(reconcile_identity_span(environment_id)),
         )
         .await
         .map_err(|_| TerminalResizeFailure {
@@ -529,6 +541,7 @@ pub async fn handle_environment_resize(
         authority,
         RESIZE_MUTATION_STATES,
     )
+    .instrument(reconcile_identity_span(environment_id))
     .await?;
     complete_resize(
         authority,

@@ -405,6 +405,7 @@ type ResizePlanRow = (
     Option<String>,
 );
 
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %params.environment_id))]
 async fn build_resize_plan(
     state: &ApiState,
     user: &AuthUser,
@@ -612,6 +613,7 @@ async fn build_resize_plan(
     })
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %params.environment_id))]
 pub async fn plan_environment_resize_core(
     state: &ApiState,
     user: &AuthUser,
@@ -682,6 +684,7 @@ pub async fn resize_environment_core(
     result.map(|(result, _)| result)
 }
 
+#[tracing::instrument(level = "debug", name = "resize_environment", skip_all, fields(environment_id = %params.environment_id))]
 async fn resize_environment_core_inner(
     state: &ApiState,
     user: &AuthUser,
@@ -881,6 +884,7 @@ async fn active_operation_exists(state: &ApiState, environment_id: &str) -> AppR
     .await?)
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(environment_id = %params.environment_id))]
 async fn begin_resize_operation(
     pool: &sqlx::PgPool,
     params: &ResizeEnvironmentParams,

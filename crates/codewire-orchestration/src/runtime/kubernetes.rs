@@ -767,6 +767,7 @@ impl RuntimeLifecycle for KubernetesDriver {
             .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
     async fn replace_member(
         &self,
         placement: &Placement,
@@ -779,6 +780,7 @@ impl RuntimeLifecycle for KubernetesDriver {
             .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn wait_replacement(
         &self,
         placement: &Placement,
