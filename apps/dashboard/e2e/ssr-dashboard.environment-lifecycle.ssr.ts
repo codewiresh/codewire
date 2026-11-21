@@ -646,7 +646,7 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     await expect(row.locator(".cw-sandbox-lifetime time")).toHaveAttribute("datetime", await sourceDeletionDeadline());
 
     await openRowActions(row);
-    await row.getByText("Secrets and credentials", { exact: true }).click();
+    await row.getByRole("button", { name: "Secrets and credentials", exact: true }).click();
     await row.getByRole("link", { name: "Edit secrets and credentials", exact: true }).click();
     const sourceEditor = page.getByRole("dialog", { name: "Edit Sandbox sources", exact: true });
     await expect(sourceEditor).toBeVisible();

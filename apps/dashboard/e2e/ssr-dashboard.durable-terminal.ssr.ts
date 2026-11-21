@@ -2480,7 +2480,7 @@ test("inventory retains usable Actions at each responsive breakpoint and quick s
   await expect(search).not.toBeVisible();
 });
 
-test("inventory Resize dismisses innermost menus with focus return and retains edited values without mutation", async ({ page }) => {
+test("inventory Resize opens a dialog from the row menu, guards edits and returns focus without mutation", async ({ page }) => {
   const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
   test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN for fixture checks");
   let mutations = 0;
@@ -2488,26 +2488,30 @@ test("inventory Resize dismisses innermost menus with focus return and retains e
   await page.goto(`${origin}/reference/fixtures/sandboxes.html`);
   const row = page.locator("#quiet-mesa");
   const actions = row.locator(".cw-row-menu");
-  const resize = row.locator(".cw-menu-resize", { hasText: "Review resize" });
+  const opener = actions.getByRole("button", { name: "Resize", exact: true });
+  const resize = page.getByRole("dialog", { name: "Resize quiet-mesa", exact: true });
+  const cpu = resize.getByLabel("CPU", { exact: true });
+  // A menu of plain items: nothing in it is a disclosure with its own marker.
   await actions.locator(":scope > summary").click();
-  await resize.locator(":scope > summary").click();
-  await resize.getByLabel("CPU", { exact: true }).selectOption("8000");
+  await expect(actions.locator(".cw-menu-panel details")).toHaveCount(1); // the no-script Stop fallback only
+  await opener.click();
+  await expect(resize).toBeVisible();
+  await cpu.selectOption("8000");
+  // An edited resize asks before it is thrown away.
   await page.keyboard.press("Escape");
-  await expect(resize).toHaveJSProperty("open", false);
+  await page.getByRole("button", { name: "Keep editing", exact: true }).click();
+  await expect(cpu).toHaveValue("8000");
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Discard changes", exact: true }).click();
+  await expect(resize).not.toBeVisible();
+  await expect(opener).toBeFocused();
   await expect(actions).toHaveJSProperty("open", true);
-  await expect(resize.locator(":scope > summary")).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(actions).toHaveJSProperty("open", false);
   await expect(actions.locator(":scope > summary")).toBeFocused();
   await actions.locator(":scope > summary").click();
-  await resize.locator(":scope > summary").click();
-  await expect(resize.getByLabel("CPU", { exact: true })).toHaveValue("8000");
-  await page.locator("main").getByRole("heading", { name: "Sandboxes", exact: true }).click();
-  await expect(resize).toHaveJSProperty("open", false);
-  await expect(actions).toHaveJSProperty("open", false);
-  await actions.locator(":scope > summary").click();
-  await resize.locator(":scope > summary").click();
-  await expect(resize.getByLabel("CPU", { exact: true })).toHaveValue("8000");
+  await opener.click();
+  await expect(cpu).toHaveValue("4000");
   expect(mutations).toBe(0);
 });
 

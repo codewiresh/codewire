@@ -623,7 +623,7 @@ test.describe.serial("server-rendered environments", () => {
     await page.goto(`${ssrUrl}/${slug}/`);
     const row = page.locator("tr", { hasText: name }).first();
     await openRowActions(row);
-    await row.getByText("Delete", { exact: true }).click();
+    await row.getByRole("button", { name: "Delete", exact: true }).click();
     await row.getByRole("button", { name: "Delete permanently", exact: true }).click();
     await waitForEnvironmentState(created.id as string, ["destroyed"], 120_000);
     const [destroyed] = await sql`

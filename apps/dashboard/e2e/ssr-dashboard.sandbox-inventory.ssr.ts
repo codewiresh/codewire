@@ -111,8 +111,8 @@ test("a Sandbox names the bound capability that needs Reconnect and links to Cre
   await openInventory(page);
   const row = page.locator(`tr[data-environment-id="${quietMesa}"]`);
   await row.getByLabel("Actions for quiet-mesa", { exact: true }).click();
-  const sources = row.locator("details.cw-disclosure", { hasText: "Secrets and credentials" });
-  await sources.locator(":scope > summary").click();
+  await row.getByRole("button", { name: "Secrets and credentials", exact: true }).click();
+  const sources = page.getByRole("dialog", { name: "Secrets and credentials of quiet-mesa", exact: true });
   await expect(sources.locator(".cw-credential-attention > li")).toHaveCount(1);
   await expect(sources.getByRole("link", { name: "Codex needs Reconnect", exact: true }))
     .toHaveAttribute("href", "settings-credentials.html");
@@ -188,4 +188,75 @@ test("a refresh under a different search compares nothing and announces nothing"
   await refresh(page, [], "quiet");
   await expect(page.locator("[data-inventory-status]")).toBeEmpty();
   expect(await announcements(page)).toEqual([]);
+});
+
+// The list's poll as htmx runs it: a cancelable htmx:beforeRequest on the
+// list, then, unless a listener cancelled the request, the fragment swap.
+async function poll(page: Page): Promise<boolean> {
+  const sent = await page.locator("#environment-list").evaluate((list) =>
+    list.dispatchEvent(new CustomEvent("htmx:beforeRequest", {
+      bubbles: true, cancelable: true, detail: { elt: list, target: list },
+    })));
+  if (sent) await refresh(page);
+  return sent;
+}
+
+test("a row menu stays open through the list's refresh until it is closed", async ({ page }) => {
+  await openInventory(page);
+  const menu = () => page.locator(`tr[data-environment-id="${quietMesa}"] details.cw-row-menu`);
+  await menu().locator(":scope > summary").click();
+  await expect(menu()).toHaveJSProperty("open", true);
+  // While it is open the list waits rather than replace the row under it.
+  expect(await poll(page)).toBe(false);
+  await expect(menu()).toHaveJSProperty("open", true);
+  // A click elsewhere closes it, and the next refresh runs.
+  await page.locator("main h1").click();
+  await expect(menu()).toHaveJSProperty("open", false);
+  expect(await poll(page)).toBe(true);
+  await expect(menu()).toHaveJSProperty("open", false);
+});
+
+test("an open row menu sits above the other rows' menu buttons", { tag: "@mobile" }, async ({ page }) => {
+  await openInventory(page);
+  const menu = page.locator(`tr[data-environment-id="${quietMesa}"] details.cw-row-menu`);
+  await menu.locator(":scope > summary").click();
+  const covered = await menu.locator(".cw-menu-panel").evaluate((panel) => {
+    const box = panel.getBoundingClientRect();
+    const others = [...document.querySelectorAll<HTMLElement>("details.cw-row-menu > summary")]
+      .filter((summary) => !panel.parentElement!.contains(summary));
+    return others.flatMap((summary) => {
+      const { left, top, width, height } = summary.getBoundingClientRect();
+      const [x, y] = [left + width / 2, top + height / 2];
+      if (x < box.left || x > box.right || y < box.top || y > box.bottom) return [];
+      return [panel.contains(document.elementFromPoint(x, y))];
+    });
+  });
+  // At least one other button lies under the panel, and none shows through it.
+  expect(covered.length).toBeGreaterThan(0);
+  expect(covered.every(Boolean)).toBe(true);
+});
+
+test("a row menu's actions open dialogs, with no caret, and Cancel returns to the action", async ({ page }) => {
+  await openInventory(page);
+  const row = page.locator(`tr[data-environment-id="${quietMesa}"]`);
+  await row.getByLabel("Actions for quiet-mesa", { exact: true }).click();
+  const panel = row.locator(".cw-row-menu > .cw-menu-panel");
+  const carets = await panel.locator("summary").evaluateAll((summaries) => summaries
+    .filter((summary) => summary.checkVisibility() && getComputedStyle(summary, "::before").content !== "none")
+    .map((summary) => summary.textContent));
+  expect(carets).toEqual([]);
+  for (const [action, dialogName] of [
+    ["Secrets and credentials", "Secrets and credentials of quiet-mesa"],
+    ["Resize", "Resize quiet-mesa"],
+    ["Delete", "Delete quiet-mesa?"],
+  ]) {
+    const item = panel.getByRole("button", { name: action, exact: true });
+    await item.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", { name: dialogName, exact: true });
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: /^(Cancel|Close)$/ }).click();
+    await expect(dialog).toBeHidden();
+    await expect(item).toBeFocused();
+  }
 });

@@ -573,6 +573,12 @@
     }
   };
   ["htmx:sendError", "htmx:responseError", "htmx:timeout"].forEach((name) => document.addEventListener(name, environmentListError));
+  // A refresh replaces every row, so it waits while a row's menu or a dialog
+  // in the list is open; the next one after it closes catches up.
+  document.addEventListener("htmx:beforeRequest", (event) => {
+    const list = event.target instanceof Element && event.target.id === "environment-list" ? event.target : null;
+    if (list?.querySelector("details[open], dialog[open]")) event.preventDefault();
+  });
   // Each list refresh is compared with the rows it replaces, and every
   // observed lifecycle transition is announced once in the polite inventory
   // status. Rows are tracked by Sandbox id and state in memory only: an

@@ -25,6 +25,7 @@ Updated 2026-11-21.
 | `sandbox-session-stop` | cw-cleanup | observed 2026-11-20 (#5490) | not yet observed |
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
 | `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
+| `sandbox-row-menu` | cw-web | not yet observed | not yet observed |
 | `sandbox-setup-retry` | cw-hosted-runtime | observed in part 2026-11-17 (CLI: create, run and `cw retry`; #5167) | not yet observed |
 | `sandbox-attach-repaint` | cw-direct-udp | partly observed 2026-11-18 (#5120) | not yet observed |
 | `sandbox-cp-upload` | cw-workspace-mount | observed 2026-11-14 (#4460) | not yet observed |
@@ -667,6 +668,42 @@ Issue: #4762.
   fallback: it refreshes when the tab is focused or shown, and once a minute
   while visible. A walk that sees list requests once a minute has lost the
   stream; that is not the journey working.
+- **Observed:** not yet observed.
+
+## `sandbox-row-menu`: a Sandboxes row's menu reaches every action
+
+Issue: #5383. Code: `crates/codewire-dashboard-web/templates/environment-list.html`,
+`packages/codewire-design/environments.js`,
+`packages/codewire-design/routes/environments.css`.
+
+- **Entry points:** the ⋯ button at the end of each row on the Sandboxes
+  page (`/<org>/`), by pointer and by keyboard.
+- **States to exercise:**
+  - a running and a stopped Sandbox, two or more rows, so a menu opens over
+    later rows;
+  - the menu left open for longer than the list's refresh (5 s while the
+    list still polls, #4762);
+  - Secrets and credentials, Resize and Delete, each opened, cancelled and
+    then carried out;
+  - desktop 1440 and phone 390.
+- **Driving it:** on Kind or Dev, open the first row's menu and wait 10 s
+  without touching anything. Move the pointer slowly down to Delete and click
+  it. Cancel, open the menu again and press Delete permanently. Repeat with
+  the keyboard: Tab to the ⋯ button, Enter, Tab to Delete, Enter.
+- **Proof:**
+  - the menu stays open for as long as the user leaves it open; the list
+    catches up on its first refresh after the menu or a dialog closes;
+  - no later row's ⋯ button shows through the open panel;
+  - no item in the menu carries a caret: Secrets and credentials, Resize and
+    Delete each open a dialog named for the Sandbox, and Escape or Cancel
+    returns focus to the item;
+  - Delete permanently deletes the Sandbox, and its row leaves the list;
+  - fixture specs, at 1440 and 390, in
+    `apps/dashboard/e2e/ssr-dashboard.sandbox-inventory.ssr.ts`: "a row menu
+    stays open through the list's refresh until it is closed" and "an open
+    row menu sits above the other rows' menu buttons".
+- **Gotchas:** a check that clicks Delete within a second of opening the
+  menu passes on the broken code; wait past a refresh first.
 - **Observed:** not yet observed.
 
 ## `sandbox-setup-retry`: a failed setup, fixed in a shell and retried

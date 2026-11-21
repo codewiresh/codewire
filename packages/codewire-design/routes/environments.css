@@ -20,6 +20,8 @@
 .cw-sandbox-table th:last-child { width: var(--space-12); }
 .cw-sandbox-table td { overflow: hidden; color: var(--fg-secondary); text-overflow: ellipsis; white-space: nowrap; }
 .cw-sandbox-table .cw-action-cell { overflow: visible; text-align: right; }
+/* The cell right-aligns its menu button; a row's dialogs read from the start. */
+.cw-sandbox-table .cw-action-cell > dialog { text-align: start; }
 .cw-environment-name, .cw-environment-preset { display: block; }
 .cw-environment-name { max-width: 18rem; overflow: hidden; font-family: var(--font-sans); font-size: var(--text-body); font-weight: var(--weight-medium); line-height: var(--leading-ui); text-overflow: ellipsis; white-space: nowrap; }
 .cw-sandbox-table .cw-environment-name { max-width: none; color: var(--fg-primary); }
@@ -35,6 +37,9 @@
 .cw-sandbox-table tbody tr { position: relative; }
 .cw-sandbox-table .cw-environment-name::after { position: absolute; inset: 0; content: ""; }
 .cw-sandbox-table .cw-action-cell { position: relative; z-index: 1; }
+/* Each menu cell is its own stacking context, so an open menu's panel would
+   sit under the cells of later rows; its cell rises above them. */
+.cw-sandbox-table .cw-action-cell:has(> .cw-menu[open]) { z-index: 2; }
 .cw-row-menu-meta { padding: var(--space-1) var(--space-2) var(--space-1-5); border-bottom: var(--border-width) solid var(--border-subtle); color: var(--fg-tertiary); font-size: var(--text-small); }
 /* Why an action is not offered, on the menu items' inset. */
 .cw-row-menu-note { margin: 0; padding: var(--space-1-5) var(--space-2); color: var(--fg-tertiary); font-size: var(--text-small); line-height: var(--leading-body); }

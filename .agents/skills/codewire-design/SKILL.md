@@ -202,6 +202,13 @@ simple." Don't over-tune: no optical offsets for text.
   it is the owner's call.
 - Both are measured in `ssr-dashboard.design-system.ssr.ts` ("an empty
   state's hint sits one token below its action…") at 1440 and 390.
+- A menu holds actions, not forms (#5383). An action that needs a
+  confirmation or fields is a `.cw-menu-item` that opens a dialog
+  (`data-dialog-open`, `aria-haspopup="dialog"`), as Resize and Delete do in
+  the Sandbox page's menu (#4542) and in each Sandboxes row's menu. No
+  disclosure, and so no caret, inside a menu. An open menu's panel paints
+  above every later row: `.cw-action-cell:has(> .cw-menu[open])` in
+  `routes/environments.css`.
 - `python3 scripts/checks/repo_checks.py design-tokens --self-test` fails on:
   - literals outside token files;
   - visual overrides of primitives in route CSS;
@@ -257,6 +264,10 @@ live state, and pages don't poll for it. Design: private-docs
 - Never poll for state the server knows: no htmx `every`, no `setInterval`, no
   `setTimeout` loop that fetches. If the stream has no event for your state,
   add the database notification and the event, not a timer.
+- A refresh never closes what the user has open (#5383). A region that
+  replaces its rows skips its refresh while a `details[open]` or
+  `dialog[open]` inside it is open, and the next refresh after it closes
+  catches up: `environments.js` does this for `#environment-list`.
 - Allowed timers:
   - `live.js`'s own fallback when the stream is busy or unavailable;
   - client-only timers that fetch nothing, such as an elapsed-time display or

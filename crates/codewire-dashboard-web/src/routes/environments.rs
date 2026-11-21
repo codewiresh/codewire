@@ -3022,7 +3022,7 @@ mod tests {
         assert!(!rendered.contains("Region unavailable"));
         for hidden in [
             ">Start</button>",
-            ">Resize</summary>",
+            ">Resize</button>",
             ">Ports</a>",
             ">Terminal</a>",
             ">VS Code</a>",
@@ -3453,7 +3453,7 @@ mod tests {
         }
         .render()
         .unwrap();
-        assert_eq!(list.matches(">Resize</summary>").count(), 1);
+        assert_eq!(list.matches(">Resize</button>").count(), 1);
         assert!(list.contains(&format!("id=\"resize-{READY}-cpu\"")));
         assert!(!list.contains(&format!("id=\"resize-{SETUP}-cpu\"")));
         assert_eq!(
@@ -3634,11 +3634,11 @@ mod tests {
             ">Stop</button>",
             "<summary>Stop</summary>",
             ">Start</button>",
-            ">Resize</summary>",
+            ">Resize</button>",
             ">Ports</a>",
             ">Terminal</a>",
             ">VS Code</a>",
-            "<summary>Delete</summary>",
+            ">Delete</button>",
             "Secrets and credentials",
             "<form",
         ] {
@@ -3650,10 +3650,10 @@ mod tests {
         let running = sandbox(RUNNING);
         for action in [
             ">Stop</button>",
-            ">Resize</summary>",
+            ">Resize</button>",
             ">Ports</a>",
             ">Terminal</a>",
-            "<summary>Delete</summary>",
+            ">Delete</button>",
         ] {
             assert!(running.contains(action), "a running Sandbox lacks {action}");
         }
