@@ -1627,13 +1627,18 @@ async fn journey(
         .await;
     assert!(terminal(&helper.fd));
     assert!(!terminal(&daemon.fd));
-    // A read/refusal never recreates the disappeared coordinate owner.
+    // A read/refusal never recreates the disappeared coordinate owner, and a
+    // target Mesh reports offline is refused from its record, not after the
+    // transport bounds.
+    let offline = caller
+        .run(&["member", "info", "target", "--output", "json"], None)
+        .await;
+    assert!(!offline.status.success());
     assert!(
-        !caller
-            .run(&["member", "info", "target", "--output", "json"], None)
-            .await
-            .status
-            .success()
+        String::from_utf8_lossy(&offline.stderr)
+            .contains("is offline: Mesh reports no live session"),
+        "{}",
+        String::from_utf8_lossy(&offline.stderr)
     );
     assert!(
         !target
@@ -1689,15 +1694,18 @@ async fn journey(
                 && record["state"] == "Running"
                 && record["launch_generation"] == 1)
     );
+    let observed = caller
+        .run(
+            &["member", "observe", "target", &request, "--output", "json"],
+            None,
+        )
+        .await;
+    assert!(!observed.status.success());
     assert!(
-        !caller
-            .run(
-                &["member", "observe", "target", &request, "--output", "json"],
-                None
-            )
-            .await
-            .status
-            .success()
+        String::from_utf8_lossy(&observed.stderr)
+            .contains("is offline: Mesh reports no live session"),
+        "{}",
+        String::from_utf8_lossy(&observed.stderr)
     );
     assert!(
         !target

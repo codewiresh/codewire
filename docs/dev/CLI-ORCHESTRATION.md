@@ -606,6 +606,10 @@ ID returned by `msg` as `MESSAGE_ID`, and its active turn ID from `inbox` as
 Member controls use canonical `session-UUID` IDs. An explicit environment must
 match the pinned UUID. Reconnect through `logs`, `inbox` and `wait`; observe a
 lost control reply with `cw member observe build-linux REQUEST_UUID --output json`.
+A member command first asks Mesh for the target's node record. A member that
+Mesh reports offline, or no longer lists, is refused at once with that reason.
+Only a member reported online gets the 15 s transport and response bounds.
+When the record can't be read, the command goes on and those bounds apply.
 Retain `--request-id` and the observed `--expected-launch-generation` when
 recovering a control operation. Parent notifications stay within that member's
 environment; a host coordinator reads the member's inbox explicitly.

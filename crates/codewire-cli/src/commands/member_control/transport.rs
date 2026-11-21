@@ -185,6 +185,40 @@ fn settle_report(id: &str, receipt: &v1::HostControlReceipt, waited: Duration) -
     )
 }
 
+/// Refuses a target Mesh reports offline or no longer lists, so a command
+/// fails at once rather than after the transport bounds. A record that can't
+/// be read leaves the bounded dial to decide.
+async fn require_online(
+    client: &codewire_client::CodewireClient,
+    alias: &Alias,
+) -> anyhow::Result<()> {
+    let request = codewire_client::ListMeshNodesRequest {
+        org_id: alias.binding.org.clone(),
+        network_id: alias.binding.network.clone(),
+        ..Default::default()
+    };
+    let Ok(Ok(response)) = tokio::time::timeout(RPC_TIMEOUT, client.list_mesh_nodes(request)).await
+    else {
+        return Ok(());
+    };
+    match response
+        .nodes
+        .iter()
+        .find(|node| node.name == alias.route_name)
+    {
+        Some(node) if node.connected => Ok(()),
+        Some(_) => anyhow::bail!(
+            "member {} is offline: Mesh reports no live session for it; run `cw member up` on that host",
+            alias.name
+        ),
+        None => anyhow::bail!(
+            "member {} is no longer in Mesh network {}",
+            alias.name,
+            alias.binding.network
+        ),
+    }
+}
+
 pub(super) struct Remote {
     channel: Channel<TcpStream>,
     tailnet: MemberTailnet,
@@ -236,6 +270,7 @@ impl Remote {
             config.token_provider(),
             reqwest::Client::new(),
         )?;
+        require_online(&client, &alias).await?;
         let mut tailnet = MemberTailnet::dial(
             &client,
             &alias.binding.org,
