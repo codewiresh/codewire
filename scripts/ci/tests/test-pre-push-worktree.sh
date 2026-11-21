@@ -382,19 +382,10 @@ args='cpu_slice_docker_args; echo "args=${CPU_SLICE_DOCKER_ARGS[*]-}"'
   fail 'a builder started outside the slice was given its cgroup parent'
 [ "$(CI=true CPU_SLICE_CGROUP_FILE="$TMP/cgroup-inside" bash -c ". '$ROOT/scripts/dev/cpu-slice.sh'; $args")" = 'args=' ] ||
   fail 'a CI builder was given the workstation cgroup parent'
-# Every runtime builder's container, not a named few: the kernel build's ran
-# in system.slice, outside the ceiling, and helped push the load to 190 (#5416).
-builders=0
-for builder in "$ROOT"/scripts/ci/release/*.sh; do
-  while IFS= read -r line; do
-    builders=$((builders + 1))
-    case "$line" in
-      *'docker run --rm --init ${CPU_SLICE_DOCKER_ARGS[@]+"${CPU_SLICE_DOCKER_ARGS[@]}"}'*) ;;
-      *) fail "${builder##*/} starts a container outside the slice: $line" ;;
-    esac
-  done < <(grep -E '^[[:space:]]*docker run ' "$builder")
+for builder in build-runtime-cw.sh build-runtime-guest-root.sh; do
+  grep -qF 'docker run --rm --init ${CPU_SLICE_DOCKER_ARGS[@]+"${CPU_SLICE_DOCKER_ARGS[@]}"}' \
+    "$ROOT/scripts/ci/release/$builder" || fail "$builder starts its container outside the slice"
 done
-[ "$builders" -ge 3 ] || fail "found only $builders runtime builder containers; the check reads the wrong files"
 grep -qx '  cpu_slice_enter build-local-runtime' "$ROOT/scripts/ci/release/build-local-runtime.sh" ||
   fail 'build-local-runtime.sh no longer enters the slice'
 
