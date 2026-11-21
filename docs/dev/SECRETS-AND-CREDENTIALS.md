@@ -1547,13 +1547,14 @@ is exactly as described above. What exists today:
   `on`, with an optional trailing newline. Anything else is off and logged.
   The supervisor reads it once per boot and logs `egress_intercept` with what
   the boot used. D3 removes it once interception is the default (#3997).
-- **What a boot with it on does.** The runner binds the front door's route
-  hosts (`api.anthropic.com`, `api.openai.com`, `chatgpt.com`) on 443 in the
-  egress broker and carries the front door's CA certificate, never its key,
-  to the guest in the seed. The front door makes the CA in its own memory for
-  each boot, name-constrained to those hosts.
-- **A host is proxied when something selected names it** (#5215; target,
-  not shipped). A credential declares the hosts it is for. A host is proxied
+- **What a boot with it on does.** The runner binds the hosts the boot's
+  selected credentials name (below) on 443 in the egress broker and carries
+  the front door's CA certificate, never its key, to the guest in the seed.
+  The front door makes the CA in its own memory for each boot,
+  name-constrained to those hosts. A boot whose selection names no host
+  binds nothing and starts no front door.
+- **A host is proxied when something selected names it** (#5215). A
+  credential declares the hosts it is for. A host is proxied
   in an environment exactly when something selected for that environment
   names it; every other host is ordinary traffic under the network policy,
   never through the front door. Today's credential kinds name fixed hosts:
@@ -1572,13 +1573,19 @@ is exactly as described above. What exists today:
   boot and for a Pod: a local boot binds the set its selection names when
   it starts, and a hosted Sandbox's assignment carries the set its live
   binding names. Changing the selection is a managed restart locally and a
-  replacement Pod hosted ("Switch to a different profile" above), so a host
-  is never added to or removed from a live front-door session or epoch: a
-  new set arrives with a new boot or Pod, and with its own front door and
-  epochs. `cw-egress` never changes a pair's bindings in place; a bound Pod
-  whose assignment carries a different set ends its pair, front door and
-  session included, and the guest's redial starts a new one. So no host
-  stays bound, and refusing, once nothing selected names it.
+  replacement Pod hosted ("Switch to a different profile" above; a binding
+  whose managed clients changed is not current, so orchestration recovers
+  the environment onto a new Pod, `worker/create.rs`), so a host is never
+  added to or removed from a live front-door session or epoch: a new set
+  arrives with a new boot or Pod, and with its own front door and epochs.
+  `cw-egress` never changes a pair's bindings in place; a bound Pod whose
+  assignment carries a different set ends its pair, front door and session
+  included, and the guest's redial starts a new one (`supervisor/pod.rs`,
+  `a_change_to_a_pairs_front_door_ends_the_pair`). So no host stays bound,
+  and refusing, once nothing selected names it. A hosted binding whose
+  selection names no host gets an assignment with interception off, so its
+  pair runs without a front door rather than failing closed; its trust frame
+  and delivery still follow its stored decision.
 - **The front door.** The runner starts it in `prepare()`, as its own process,
   confined (no new privileges, a deny-all Landlock domain and a seccomp
   floor it shares with the credential broker) before it makes the CA. Only
@@ -2427,7 +2434,7 @@ With the switch on, only the bind decides, since only the bind sees the Pod.
   policy, until such a request can leave through the Sandbox's own egress.
   The credential service would otherwise send it from the platform's side,
   past the Sandbox's policy and `cw-egress`. Only a host something selected
-  names is bound (#5215; target, not shipped): on a host nothing selected
+  names is bound (#5215): on a host nothing selected
   names, the user's own key leaves through the Sandbox's own egress under
   its network policy. To use their own key for a provider, a user leaves
   its managed credential unselected. An own key on a host a selected

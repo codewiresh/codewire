@@ -267,8 +267,15 @@ mod tests {
 
     #[test]
     fn interception_binds_each_front_door_host_on_its_port_only_when_on() {
-        let clients = ManagedCredentialClients::default();
+        let clients =
+            ManagedCredentialClients::from_profile_slots(["anthropic", "openai", "codex"]).unwrap();
         assert!(interception_bindings(false, clients).unwrap().is_empty());
+        // A selection that names no host binds none (#5215).
+        assert!(
+            interception_bindings(true, ManagedCredentialClients::default())
+                .unwrap()
+                .is_empty()
+        );
         let on = interception_bindings(true, clients).unwrap();
         let mut expected: Vec<(&str, u16, bool)> = codewire_access::FRONT_DOOR_HOSTS
             .iter()
@@ -313,10 +320,8 @@ mod tests {
                     .collect();
                 let mut routed: Vec<String> =
                     codewire_egress_front_door_bridge::RouteTable::for_clients(clients)
-                        .hosts()
-                        .into_iter()
-                        .map(str::to_owned)
-                        .collect();
+                        .map(|table| table.hosts().into_iter().map(str::to_owned).collect())
+                        .unwrap_or_default();
                 routed.sort();
                 assert_eq!(exact, routed, "{clients:?}");
             }

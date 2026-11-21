@@ -28,7 +28,6 @@ use uuid::Uuid;
 use codewire_egress_policy::handoff::InterceptedStreamHeader;
 
 use crate::handoff::{HandoffSocket, Received};
-use codewire_access::{CLAUDE_TOKEN_HOST, GITHUB_HOSTS};
 
 use crate::{CredentialRouteBackend, RouteTable};
 
@@ -132,17 +131,11 @@ impl<L: LeafSource> EnvironmentFrontDoor<L> {
         check_intercepts(&intercepts)?;
         let bridge = CredentialBridge::new(environment_id, environment_generation)
             .map_err(|_| StartError::Identity)?;
-        // Claude's token host is bound only for a Claude sign-in and
-        // GitHub's hosts only with a GitHub connection, as the boot chain
-        // builds its intercepts from `RouteTable::for_clients`; a local boot
-        // leaves GitHub's out for now (#5087). Each route follows its
-        // binding, and GitHub's two are bound together.
-        let routes = RouteTable::with_optional_hosts(
-            intercepts.binds(CLAUDE_TOKEN_HOST, INTERCEPT_PORT),
-            GITHUB_HOSTS
-                .iter()
-                .all(|host| intercepts.binds(host, INTERCEPT_PORT)),
-        );
+        // Each route follows its binding: the boot chain binds exactly the
+        // hosts its selected credentials name (`RouteTable::for_clients`,
+        // #5215), so the front door routes those and no others.
+        let routes = RouteTable::serving(|host| intercepts.binds(host, INTERCEPT_PORT))
+            .ok_or(StartError::NoBindings)?;
         let backend = CredentialRouteBackend::new(routes, bridge.clone());
         let door = FrontDoor::new(leaves, backend, FrontDoorConfig::default());
         Ok(Self {

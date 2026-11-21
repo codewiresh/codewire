@@ -505,26 +505,15 @@ fn claudes_token_host_is_routed_only_for_a_claude_sign_in() {
     let api_key = ManagedCredentialClients::from_profile_slots(["anthropic"]).unwrap();
     let subscription = api_key.with_anthropic_subscription_token().unwrap();
     let sign_in = api_key.with_anthropic_sign_in().unwrap();
-    for clients in [
-        ManagedCredentialClients::default(),
-        none,
-        api_key,
-        subscription,
-    ] {
-        let routes = RouteTable::for_clients(clients);
-        assert_eq!(routes, RouteTable::defaults(), "{clients:?}");
-        assert!(!routes.hosts().contains(&"platform.claude.com"));
+    for clients in [none, api_key, subscription] {
+        let routes = RouteTable::for_clients(clients).unwrap();
+        assert!(
+            !routes.hosts().contains(&"platform.claude.com"),
+            "{clients:?}"
+        );
     }
-    let routes = RouteTable::for_clients(sign_in);
-    assert_eq!(
-        routes.hosts(),
-        [
-            "api.anthropic.com",
-            "platform.claude.com",
-            "api.openai.com",
-            "chatgpt.com"
-        ]
-    );
+    let routes = RouteTable::for_clients(sign_in).unwrap();
+    assert_eq!(routes.hosts(), ["api.anthropic.com", "platform.claude.com"]);
     assert!(
         routes
             .routes()
@@ -535,6 +524,29 @@ fn claudes_token_host_is_routed_only_for_a_claude_sign_in() {
     EnvironmentCa::generate(routes.hosts()).expect("the CA binds every sign-in host");
 }
 
+/// A provider's hosts are routed, and so bound, only when a selected
+/// credential names them, and a selection that names none routes nothing
+/// (#5215). Codex's suffix routes follow `chatgpt.com`.
+#[test]
+fn only_a_selected_providers_hosts_are_routed() {
+    let clients = |slots: &[&str]| {
+        ManagedCredentialClients::from_profile_slots(slots.iter().copied()).unwrap()
+    };
+    assert_eq!(RouteTable::for_clients(clients(&[])), None);
+    assert_eq!(RouteTable::for_clients(clients(&["ssh"])), None);
+    for (slot, hosts) in [
+        ("anthropic", ["api.anthropic.com"]),
+        ("openai", ["api.openai.com"]),
+        ("codex", ["chatgpt.com"]),
+    ] {
+        let routes = RouteTable::for_clients(clients(&[slot, "ssh"])).unwrap();
+        assert_eq!(routes.hosts(), hosts, "{slot}");
+        assert_eq!(routes.suffixes().is_empty(), slot != "codex", "{slot}");
+    }
+    let every = RouteTable::for_clients(clients(&["anthropic", "openai", "codex"])).unwrap();
+    assert_eq!(every, RouteTable::defaults());
+}
+
 /// GitHub's two hosts are routed, and so bound, only with a GitHub
 /// connection, and always together, and not at all until GitHub's hosts are
 /// intercepted (#5087). Each covers every path with no prefix: the bridge
@@ -542,15 +554,13 @@ fn claudes_token_host_is_routed_only_for_a_claude_sign_in() {
 #[test]
 fn githubs_hosts_are_routed_only_with_a_github_connection() {
     let without = ManagedCredentialClients::from_profile_slots(["anthropic", "openai"]).unwrap();
-    let routes = RouteTable::for_clients(without);
+    let routes = RouteTable::for_clients(without).unwrap();
     assert!(!routes.hosts().iter().any(|host| host.contains("github")));
 
     let with = ManagedCredentialClients::from_profile_slots(["github"]).unwrap();
     assert_eq!(
         RouteTable::for_clients(with)
-            .hosts()
-            .iter()
-            .any(|host| host.contains("github")),
+            .is_some_and(|routes| routes.hosts().iter().any(|host| host.contains("github"))),
         codewire_access::GITHUB_INTERCEPTED
     );
     let routes = RouteTable::with_optional_hosts(false, true);
@@ -1422,7 +1432,7 @@ fn the_route_table_serves_exactly_the_shared_selection() {
                 .map(|host| host.host)
                 .collect();
             let table = RouteTable::for_clients(clients);
-            let mut routed = table.hosts();
+            let mut routed = table.as_ref().map(RouteTable::hosts).unwrap_or_default();
             selected.sort_unstable();
             routed.sort_unstable();
             assert_eq!(routed, selected, "{clients:?}");

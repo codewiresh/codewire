@@ -798,7 +798,12 @@ async fn interception_reaches_only_a_bound_sandbox_and_only_when_switched_on() {
         },
         intercepts: crate::egress::assignment::interception_bindings(
             interception,
-            codewire_access::ManagedCredentialClients::default(),
+            codewire_access::ManagedCredentialClients::from_profile_slots([
+                "anthropic",
+                "openai",
+                "codex",
+            ])
+            .unwrap(),
         )
         .unwrap(),
     };
@@ -852,6 +857,22 @@ async fn interception_reaches_only_a_bound_sandbox_and_only_when_switched_on() {
         ..today()
     };
     assert_eq!(state(true).proto(&bound(true)).encode_to_vec(), encoded(on));
+    // On, for a binding whose selection names no host (#5215): today's
+    // assignment, with interception off, so cw-egress runs the pair without a
+    // front door rather than failing it closed on an empty set. The Pod's
+    // trust frame and delivery still follow its interception decision.
+    let mut names_none = bound(true);
+    if let Assignment::Bound { intercepts, .. } = &mut names_none {
+        *intercepts = crate::egress::assignment::interception_bindings(
+            true,
+            codewire_access::ManagedCredentialClients::default(),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        state(true).proto(&names_none).encode_to_vec(),
+        encoded(today())
+    );
     // An unbound warm-pool member gets none either way.
     for interception in [false, true] {
         assert!(matches!(

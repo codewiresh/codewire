@@ -214,11 +214,31 @@ impl RouteTable {
 
     /// The routes for an environment whose stock clients are `clients`: one
     /// for each host [`codewire_access::front_door_hosts`] selects, the one
-    /// selection a hosted Sandbox's bindings use too (#4001 step P).
-    pub fn for_clients(clients: ManagedCredentialClients) -> Self {
+    /// selection a hosted Sandbox's bindings use too (#4001 step P). `None`
+    /// when its credentials name no host, so nothing is bound (#5215).
+    pub fn for_clients(clients: ManagedCredentialClients) -> Option<Self> {
         let hosts = codewire_access::front_door_hosts(clients);
-        let serves = |name: &str| hosts.iter().any(|host| host.host == name);
-        Self::with_optional_hosts(serves(CLAUDE_TOKEN_HOST), serves(GITHUB_HOSTS[0]))
+        Self::serving(|name| hosts.iter().any(|host| host.host == name))
+    }
+
+    /// The built-in routes of each host `serves` names, with Codex's suffix
+    /// routes when `chatgpt.com` is one, or `None` when it names none.
+    pub(crate) fn serving(serves: impl Fn(&str) -> bool) -> Option<Self> {
+        let all = Self::with_optional_hosts(true, true);
+        let routes: Vec<HostRoute> = all
+            .routes
+            .into_iter()
+            .filter(|route| serves(&route.host))
+            .collect();
+        if routes.is_empty() {
+            return None;
+        }
+        let suffixes = all
+            .suffixes
+            .into_iter()
+            .filter(|suffix| routes.iter().any(|route| route.host == suffix.host))
+            .collect();
+        Some(Self { routes, suffixes })
     }
 
     /// The defaults, with Claude's token host on every path when

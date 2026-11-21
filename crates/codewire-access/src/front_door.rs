@@ -2,6 +2,9 @@
 //! [`front_door_hosts`] is the one selection both placements read: a local
 //! boot's bindings and route table, and hosted interception's bindings, so
 //! the two never serve different hosts for the same clients (#4001 step P).
+//! A host is served exactly when a selected credential names it (#5215;
+//! docs/dev/SECRETS-AND-CREDENTIALS.md, "A host is proxied when something
+//! selected names it").
 
 use crate::{ManagedCredentialClient, ManagedCredentialClients};
 
@@ -49,7 +52,8 @@ pub struct FrontDoorHost {
     pub suffix: bool,
 }
 
-/// The hosts the front door routes for every environment.
+/// Every provider host a selected credential may name for the front door:
+/// the table [`front_door_hosts`] selects from.
 pub const FRONT_DOOR_HOSTS: [FrontDoorHost; 3] = [
     FrontDoorHost {
         host: ANTHROPIC_API_HOST,
@@ -66,18 +70,27 @@ pub const FRONT_DOOR_HOSTS: [FrontDoorHost; 3] = [
 ];
 
 /// The hosts the front door serves for an environment whose stock clients are
-/// `clients`, each exact: [`FRONT_DOOR_HOSTS`], Claude's token host for a
-/// Claude sign-in, and GitHub's two hosts for a GitHub connection once
-/// [`GITHUB_INTERCEPTED`]. With an API key, a subscription token or no
-/// Anthropic client the token host is never served, and without a GitHub
-/// connection neither GitHub host is, so the environment reaches them as it
-/// would without a front door.
+/// `clients`, each exact, and only those its selected credentials name: the
+/// Anthropic API for an Anthropic client, and Claude's token host as well for
+/// a Claude sign-in; the OpenAI API for an OpenAI API key; `chatgpt.com` for
+/// Codex; and GitHub's two hosts for a GitHub connection once
+/// [`GITHUB_INTERCEPTED`]. Every other host, an unselected provider's
+/// included, is reached as it would be without a front door.
 pub fn front_door_hosts(clients: ManagedCredentialClients) -> Vec<FrontDoorHost> {
     let exact = |host| FrontDoorHost {
         host,
         suffix: false,
     };
-    let mut hosts = FRONT_DOOR_HOSTS.to_vec();
+    let mut hosts = Vec::new();
+    if clients.contains(ManagedCredentialClient::Anthropic) {
+        hosts.push(exact(ANTHROPIC_API_HOST));
+    }
+    if clients.contains(ManagedCredentialClient::OpenAi) {
+        hosts.push(exact(OPENAI_API_HOST));
+    }
+    if clients.contains(ManagedCredentialClient::Codex) {
+        hosts.push(exact(CHATGPT_HOST));
+    }
     if clients.anthropic_sign_in() {
         hosts.push(exact(CLAUDE_TOKEN_HOST));
     }
@@ -103,29 +116,29 @@ mod tests {
     }
 
     #[test]
-    fn the_fixed_hosts_are_served_for_every_selection() {
-        let fixed = [ANTHROPIC_API_HOST, OPENAI_API_HOST, CHATGPT_HOST];
-        assert_eq!(names(clients(&[])), fixed);
-        assert_eq!(names(clients(&["openai", "codex", "ssh"])), fixed);
-        assert_eq!(names(clients(&["anthropic"])), fixed);
+    fn a_providers_host_is_served_only_when_its_credential_is_selected() {
+        assert!(names(clients(&[])).is_empty());
+        assert!(names(clients(&["ssh"])).is_empty());
+        assert_eq!(names(clients(&["anthropic"])), [ANTHROPIC_API_HOST]);
+        assert_eq!(names(clients(&["openai"])), [OPENAI_API_HOST]);
+        assert_eq!(names(clients(&["codex"])), [CHATGPT_HOST]);
+        assert_eq!(
+            names(clients(&["openai", "codex", "ssh"])),
+            [OPENAI_API_HOST, CHATGPT_HOST]
+        );
         let token = clients(&["anthropic"])
             .with_anthropic_subscription_token()
             .unwrap();
-        assert_eq!(names(token), fixed);
+        assert_eq!(names(token), [ANTHROPIC_API_HOST]);
+        // Every host served is one of the table's.
+        let every = clients(&["anthropic", "openai", "codex"]);
+        assert_eq!(front_door_hosts(every), FRONT_DOOR_HOSTS);
     }
 
     #[test]
     fn claude_token_host_is_served_for_a_claude_sign_in_only() {
         let sign_in = clients(&["anthropic"]).with_anthropic_sign_in().unwrap();
-        assert_eq!(
-            names(sign_in),
-            [
-                ANTHROPIC_API_HOST,
-                OPENAI_API_HOST,
-                CHATGPT_HOST,
-                CLAUDE_TOKEN_HOST
-            ]
-        );
+        assert_eq!(names(sign_in), [ANTHROPIC_API_HOST, CLAUDE_TOKEN_HOST]);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 ---
 title: Egress policies
 description: Decide what an environment may reach on the Internet; the built-in open and locked policies, your own policies, and what egress does not protect.
-updated: 2026-11-20
+updated: 2026-11-21
 weight: 3
 ---
 
@@ -78,7 +78,10 @@ stops it at once everywhere that credential is used, not only in this VM.
 
 Your own key is a different request. A program in the VM that calls a
 provider's host with a key of its own, or with none, gets no help from the
-selected credential and follows the policy like any other destination. Under
+selected credential and follows the policy like any other destination.
+Codewire steps in only on the hosts of the credentials you selected: a
+provider you selected no credential for is reached directly, like any other
+host. Under
 `open` it reaches the provider untouched. Under `locked`, or a policy with no
 rule for that host, it is refused before anything is sent; a rule for the
 host lets it through:

@@ -1385,9 +1385,11 @@ Issues: #3999, #4001.
     sent, under every policy, and the placeholder is served. Not yet
     observed;
   - **on a host nothing selected names** (#5215), nothing is bound: inside
-    the environment its TLS certificate is the provider's own, not one the
-    front door's CA signed, and a hosted assignment's interception bindings
-    do not name it. The user's own key
+    the environment the host's certificate is not issued by the front door's
+    CA, and its chain verifies against the public roots with that CA left
+    out (the guest trusts the CA, so a request that merely succeeds proves
+    nothing), and a hosted assignment's interception bindings do not name
+    it. The user's own key
     reaches the provider untouched where the network policy allows its host,
     and is refused by the network policy, never `selected_credential_only`,
     where it does not. The selected provider beside it is still served

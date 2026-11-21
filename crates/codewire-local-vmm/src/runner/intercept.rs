@@ -257,11 +257,13 @@ impl FrontDoorFailure {
 }
 
 /// The names a boot binds: none unless `intercept`, else every host the
-/// front door routes for `clients`, and every name strictly under each of
-/// its suffixes (Codex's routed origin under chatgpt.com, #3999), on 443:
-/// the one selection a hosted Sandbox binds too
-/// (`codewire_access::front_door_hosts`, #4001 step P), which keeps GitHub on
-/// its loopback route until its hosts are intercepted.
+/// front door routes for `clients`, which is none when its selected
+/// credentials name no host (#5215), and every name strictly under each of
+/// its suffixes (Codex's routed origin under chatgpt.com, #3999), on 443.
+/// Its exact hosts are the one selection a hosted Sandbox binds too
+/// (`codewire_access::front_door_hosts`, #4001 step P), which binds no
+/// suffix, and which keeps GitHub on its loopback route until its hosts are
+/// intercepted.
 pub(crate) fn boot_intercepts(
     intercept: bool,
     clients: codewire_access::ManagedCredentialClients,
@@ -269,9 +271,11 @@ pub(crate) fn boot_intercepts(
     if !intercept {
         return InterceptSet::default();
     }
-    RouteTable::for_clients(clients)
-        .intercepts()
-        .expect("the front door routes at most MAX_ROUTES canonical hosts and suffixes")
+    RouteTable::for_clients(clients).map_or_else(InterceptSet::default, |routes| {
+        routes
+            .intercepts()
+            .expect("the front door routes at most MAX_ROUTES canonical hosts and suffixes")
+    })
 }
 
 /// The boot's front door and the CA certificate the guest trusts, or
@@ -393,13 +397,27 @@ mod tests {
     }
 
     #[test]
-    fn switched_on_it_binds_every_front_door_host_on_443() {
-        let intercepts = boot_intercepts(true, clients(&[]));
+    fn switched_on_it_binds_every_selected_front_door_host_on_443() {
+        let intercepts = boot_intercepts(true, clients(&["anthropic", "openai", "codex"]));
         for host in ["api.anthropic.com", "api.openai.com", "chatgpt.com"] {
             assert!(intercepts.binds(host, 443), "{host}");
             assert!(!intercepts.binds(host, 80), "{host}");
         }
         assert_eq!(intercepts.len(), RouteTable::defaults().hosts().len());
+    }
+
+    /// A provider is bound only when a selected credential names its host,
+    /// and a selection that names none binds nothing, so no front door
+    /// starts (#5215).
+    #[test]
+    fn switched_on_it_binds_only_the_selected_providers_hosts() {
+        assert!(boot_intercepts(true, clients(&[])).is_empty());
+        assert!(boot_intercepts(true, clients(&["ssh"])).is_empty());
+        let openai = boot_intercepts(true, clients(&["openai"]));
+        assert!(openai.binds("api.openai.com", 443));
+        for host in ["api.anthropic.com", "chatgpt.com"] {
+            assert!(!openai.binds(host, 443), "{host}");
+        }
     }
 
     /// Claude's token host is bound for a Claude sign-in and no other
@@ -422,16 +440,17 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_restore_must_match_the_captured_boots_interception() {
-        assert!(admit_restored_interception(false, &boot_intercepts(false, clients(&[]))).is_ok());
-        assert!(admit_restored_interception(true, &boot_intercepts(true, clients(&[]))).is_ok());
+        let selected = clients(&["anthropic"]);
+        assert!(admit_restored_interception(false, &boot_intercepts(false, selected)).is_ok());
+        assert!(admit_restored_interception(true, &boot_intercepts(true, selected)).is_ok());
         assert!(matches!(
-            admit_restored_interception(true, &boot_intercepts(false, clients(&[]))),
+            admit_restored_interception(true, &boot_intercepts(false, selected)),
             Err(RunnerError::Interception(
                 InterceptRefusal::RestoreSwitchedOff
             ))
         ));
         assert!(matches!(
-            admit_restored_interception(false, &boot_intercepts(true, clients(&[]))),
+            admit_restored_interception(false, &boot_intercepts(true, selected)),
             Err(RunnerError::Interception(
                 InterceptRefusal::RestoreSwitchedOn
             ))
@@ -494,7 +513,7 @@ mod tests {
     #[tokio::test]
     async fn a_front_door_that_does_not_start_fails_the_boot() {
         let mut request = super::super::tests::request(2, 1024);
-        request.intercepts = boot_intercepts(true, clients(&[]));
+        request.intercepts = boot_intercepts(true, clients(&["anthropic"]));
         let (_directory, paths) = vm_paths(&request);
         assert!(matches!(
             boot_front_door(&request, &paths).await,
