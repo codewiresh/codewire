@@ -527,6 +527,7 @@ static_guest_case() {
 }
 for static_guest_path in \
     crates/codewire-vmm-guest-probe/src/main.rs \
+    crates/codewire-vmm-guest-probe/Cargo.toml \
     crates/codewire-daemon/src/lib.rs \
     crates/codewire-daemon-proto/build.rs \
     crates/codewire-workload-secrets/src/lib.rs \
