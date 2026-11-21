@@ -58,8 +58,8 @@ Rules that go with the table:
   plain HTTP surface and renders `failed_precondition` over Connect.
 - The machine-readable `code` of an error takes precedence over its HTTP
   status for a small closed set of reasons. Lifecycle-state and
-  organization-selection reasons (such as `invalid_state` and
-  `environment_protected`) and `credit_exhausted` render
+  organization-selection reasons (such as `invalid_state`,
+  `environment_protected` and `organization_deleting`) and `credit_exhausted` render
   `failed_precondition`. Quota reasons (`quota_exceeded`,
   `resource_limit_exceeded`) render `resource_exhausted`. The set is the
   match in `connect_code_for`.

@@ -9,13 +9,13 @@ The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-20.
+Updated 2026-11-21.
 
 | ID | Dev | Production |
 | --- | --- | --- |
 | `access-ticket` | not yet observed | not yet observed |
 | `access-streams` | not yet observed | not yet observed |
-| `access-websockets` | the terminal half observed on Kind 2026-11-20, main 6557aa7e83; the SSH proxy and Dev not yet observed | not yet observed |
+| `access-websockets` | the SSH proxy's API-key leg observed on Dev 2026-11-21, source 6ef416acfb; its `cw logout` leg not yet observed; the terminal half observed on Kind only (2026-11-20, main 6557aa7e83) | not yet observed |
 | `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only; the browser's terminal not as written, #5677); not on Dev | not yet observed |
 | `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
 
@@ -202,8 +202,18 @@ Kind; the SSH proxy is not yet observed.
   An admin's Disable at 18:12:53.035 closed both of the second browser's
   sockets with 1008 "access revoked" at 18:12:53.553, its last line at
   18:12:53.0, and wrote two events naming `session`; after Enable a new
-  sign-in's terminal ran at once. The SSH proxy (steps 2 and 4) and Dev are
-  not yet observed.
+  sign-in's terminal ran at once.
+
+  The SSH proxy's API-key leg, on Dev, 2026-11-21, source 6ef416acfb, as the
+  Dev smoke identity, with a scratch API key and a test Sandbox both removed
+  by exact id afterwards. Two `CW_SSH_TRANSPORT=websocket cw shell` sessions
+  ("via API"), one admitted by the scratch key and one by the smoke key,
+  printed a line a second. The scratch key was deleted with
+  `cw api-keys delete` at 13:01:54.940Z: its shell's last line was 13:01:55
+  and it ended with "Access revoked"; the smoke key's shell kept printing for
+  the 60 seconds read after. Not yet observed: the `cw logout` leg (step 4's
+  first half), which waits on a sign-in to a Dev account, the account
+  disable for the SSH proxy, and the terminal half on Dev.
 
 ## `access-org-deleting`: no new stream into an organization being deleted
 

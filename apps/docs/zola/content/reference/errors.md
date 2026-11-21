@@ -1,7 +1,7 @@
 ---
 title: Errors
 description: The error codes the Codewire platform returns, what each one means, and what to do next.
-updated: 2026-11-08
+updated: 2026-11-21
 weight: 10
 ---
 
@@ -70,6 +70,7 @@ Stopped sandboxes do not count toward either limit. See
 | Code | Means | What to do |
 | --- | --- | --- |
 | `organization_write_blocked` | The organization is being deleted | Wait for the deletion to finish, or retry the failed deletion |
+| `organization_deleting` | The organization's deletion has started or failed, so the API opens no new stream into its Sandboxes, such as an exec or a log follow | Nothing reopens them; a failed deletion stays this way until it is retried to the end |
 | `organization_mutation_lease_conflict`, `organization_mutation_barrier_not_drained`, `organization_deletion_stale_generation` | Another change to the organization is still in flight | Wait, reload, and retry |
 
 ## Related

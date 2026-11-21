@@ -465,6 +465,14 @@ mod tests {
             (
                 coded(
                     StatusCode::CONFLICT,
+                    "organization_deleting",
+                    "organization is being deleted",
+                ),
+                ConnectCode::FailedPrecondition,
+            ),
+            (
+                coded(
+                    StatusCode::CONFLICT,
                     "platform_agent_resume_refused",
                     "the environment's previous Pod is still stopping; try again shortly",
                 ),
