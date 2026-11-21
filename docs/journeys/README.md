@@ -35,7 +35,7 @@ runs the same commands and holds the result to the same standard.
 | [editor.md](editor.md) | A cloud sandbox in a desktop editor over Remote-SSH (#4641): `cw vscode`, `cw setup ssh`, editing, a reconnect after sleep, and what a failed connection says |
 | [signup-and-verification.md](signup-and-verification.md) | Getting an account and proving its address: email sign-up, verification, GitHub and Google, and the abuse gates (#4481, #4062, #3297, #2053) |
 | [hosts.md](hosts.md) | Hosts (#3609): enroll a computer, keep its agent connected through proxies, logouts and reboots, the Hosts page, and environments created on a host |
-| [snapshots-and-forks.md](snapshots-and-forks.md) | Disk snapshots and forks: capture, list, inspect and remove a snapshot, and create sandboxes from it, in the cloud and on a local VM (#3046, #4370) |
+| [snapshots-and-forks.md](snapshots-and-forks.md) | Disk snapshots and forks: capture, list, inspect and remove a snapshot, and create sandboxes from it, in the cloud and on a local VM (#3046, #4370); VM checkpoints of a local VM, restored in place or forked, on Linux and a Mac (#4654), the Mac steps written first and not yet observed |
 | [credentials.md](credentials.md) | Connecting provider credentials with `cw credentials`, the same with `--local` and `--cloud` (#4717): first the Claude sign-in (#4714) |
 | [updates.md](updates.md) | The public Updates page: a Liminal CMS site's posts, newest first, the sidebar link, the CMS down and the page switched off. Written first; every step is not yet observed |
 | [feedback.md](feedback.md) | Feedback (#4061): `cw feedback` signed in and anonymous, the stored row, the hourly limits and the admin page |

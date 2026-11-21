@@ -3,7 +3,9 @@
 A disk snapshot saves a stopped environment's disks so that new environments,
 called forks, can start from it, each with its own identity. A cloud snapshot
 is a hosted sandbox's workspace disk; a local snapshot is a stopped local VM's
-disks on a Linux host. `SPEC.md` "Saved state vocabulary" (section 2) defines
+disks on a Linux host or a Mac. A VM checkpoint also saves a running local VM's
+memory and device state, so it can be restored in place or forked while its
+processes keep running ([GLOSSARY.md](../GLOSSARY.md#vm-checkpoint)). `SPEC.md` "Saved state vocabulary" (section 2) defines
 a snapshot, but still says disk snapshots are not implemented; that sentence
 is out of date (#4007). What users are told is in the docs' CLI reference,
 "Cloud snapshots" (`apps/docs/zola/content/reference/cli/environments.md`),
@@ -14,10 +16,11 @@ format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-17. Cloud capture, management and a three-way fork are
+Updated 2026-11-21. Cloud capture, management and a three-way fork are
 observed on Dev and on Production, as the smoke identities. The launch walk by
 a new account, the fork while the snapshot's node is down and the dashboard
-are not observed.
+are not observed. VM checkpoints on a Mac (#4654) are written first: every
+Mac step of `ckpt-local`, `ckpt-restore` and `ckpt-fork` is not yet observed.
 
 | ID | What | Dev | Production |
 | --- | --- | --- | --- |
@@ -27,6 +30,9 @@ are not observed.
 | `snap-fork-node-down` | a fork while the snapshot's node is unavailable | not yet observed (#4371) | not yet observed |
 | `snap-local` | `cw snapshot create`, `ls`, `inspect` and `rm` on a local VM (Linux or a Mac) | does not apply; a local VM observed on a pre-merge build (#3525) and on a Mac with the v0.4.22 candidate; `create` and `rm` with v0.4.22 on Linux and on a Mac | does not apply |
 | `snap-local-fork` | `cw create --local --snapshot`, one fork and `--count N` | does not apply; a local VM observed on a pre-merge build (#3525); one fork on a Mac with the v0.4.22 candidate; with v0.4.22, one fork on Linux and `--count 2` on Linux and on a Mac | does not apply |
+| `ckpt-local` | `cw checkpoint create`, `ls`, `inspect` and `rm` of a running local VM (Linux or a Mac) | does not apply; on Linux, a checkpoint created, listed and removed across an upgrade in [local-vm-upgrade.md](local-vm-upgrade.md), not walked on its own; on a Mac not yet observed (#4654) | does not apply |
+| `ckpt-restore` | `cw checkpoint restore`: a local VM back at a checkpoint's instant, in place | does not apply; on Linux only the refusal of a checkpoint an upgrade left unrestorable is recorded ([local-vm-upgrade.md](local-vm-upgrade.md)); a working restore not yet recorded; on a Mac not yet observed (#4654) | does not apply |
+| `ckpt-fork` | `cw create --local --checkpoint`: a running copy beside the source | does not apply; on Linux only the refusal of a checkpoint an upgrade left unrestorable is recorded ([local-vm-upgrade.md](local-vm-upgrade.md)); a working fork not yet recorded; on a Mac not yet observed (#4654) | does not apply |
 | `snap-dashboard` | the organization's Snapshots page | hidden for launch (#4582) | hidden for launch (#4582) |
 
 ## Before any of these
@@ -46,8 +52,9 @@ are not observed.
 - Local snapshots run on a Linux host or a Mac (#4654). On a Mac they need
   the local VM runtime's `dumpe2fs`; a runtime installed before it shipped
   refuses a capture with "reinstall the local VM runtime: cw setup --local
-  --replace". VM checkpoints, and `cw create --local --checkpoint`, still need
-  a Linux host (#3803).
+  --replace". VM checkpoints, and `cw create --local --checkpoint`, run on
+  Linux today; on a Mac they are being built (#4654), and the Mac steps below
+  are not yet observed.
 
 ## `snap-capture`: a snapshot of a stopped cloud sandbox
 
@@ -375,6 +382,124 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     `cw create --local --snapshot v0422-snap --name snap-fork` in 8.5 s; the
     fork had the source's marker and its own machine ID, and still ran the
     marker's read after `snapshot rm`. `--count N` not observed on a Mac.
+
+## `ckpt-local`: VM checkpoints of a running local VM (Linux or a Mac)
+
+- **Entry points:** `cw checkpoint create ENV [--name NAME]`, `cw checkpoint
+  ls [--env ENV]`, `cw checkpoint inspect CHECKPOINT` and `cw checkpoint rm
+  CHECKPOINT`, on a Linux host or a Mac. `--cloud` is refused: "VM
+  checkpoints are local only for now".
+- **States to exercise:**
+  - a running VM: captured while it keeps running; the name defaults to
+    `ENV-YYYYMMDDTHHMMSSZ`;
+  - a stopped VM: "ENV is stopped; a VM checkpoint needs it running (`cw start
+    ENV`), or take a disk snapshot of it (`cw snapshot create ENV`)";
+  - the limit: "ENV already has 8 VM checkpoints; remove one first (`cw
+    checkpoint rm NAME`)";
+  - a store on a filesystem that cannot share blocks: refused, naming btrfs
+    or XFS on Linux and APFS on a Mac;
+  - on a Mac, the source's clock after the capture: within 50 ms of the
+    host's, since the guest steps its clock when it thaws;
+  - on a Mac, the store kept off backups and search: Time Machine excludes
+    the snapshot store and each VM's `checkpoints/` directory, and Spotlight
+    the snapshot store;
+  - on a Mac, a local VM state root under `~/Library/Mobile Documents` or
+    `~/Library/CloudStorage`: the capture is refused; under `~/Desktop` or
+    `~/Documents`: taken, with a warning that iCloud may sync it;
+  - on a Mac with FileVault off: the host's first checkpoint warns that a
+    removed checkpoint stays readable on the disk.
+- **Driving it:**
+
+  ```sh
+  cw checkpoint create app --name before-refactor
+  cw checkpoint ls
+  cw checkpoint inspect before-refactor
+  cw checkpoint rm before-refactor
+  ```
+
+  `create` prints "VM checkpoint before-refactor of app: VM paused …,
+  workload frozen …, total …; memory …, disks …". `rm` prints "Removed VM
+  checkpoint before-refactor."
+- **Proof:** `inspect` names the source and its boot generation, `Consistency:
+  paired` and the VMM (Cloud Hypervisor on Linux, the macOS virtualization
+  helper on a Mac); after `rm`, `ls` says "No VM checkpoints. Make one of a
+  running local VM with `cw checkpoint create ENV`." On a Mac, `tmutil
+  isexcluded` reports the snapshot store and the VM's `checkpoints/`
+  directory as excluded.
+- **Gotchas:**
+  - A checkpoint holds everything the VM's memory held, delivered sign-ins
+    included, and stays on the host that made it.
+  - The VM stands still while its memory is written: about a second at the
+    default 4 GiB on a Mac.
+- **Observed:**
+  - Linux: a checkpoint created, listed and removed as part of
+    `local-vm-runtime-upgrade` in [local-vm-upgrade.md](local-vm-upgrade.md);
+    these steps are not walked on their own.
+  - A Mac: not yet observed (#4654).
+
+## `ckpt-restore`: a local VM back at a VM checkpoint's instant (Linux or a Mac)
+
+- **Entry points:** `cw checkpoint restore CHECKPOINT [--yes]`.
+- **States to exercise:**
+  - the source running: asked "Restore discards ENV's running state and every
+    disk change since CHECKPOINT. Continue? [y/N]", then stopped and restored;
+    `--yes` skips the question;
+  - the source stopped: restored without a stop;
+  - the source's workspace, runtime or resources changed: refused, offering a
+    fork instead;
+  - another CPU: refused; on a Mac, another hardware model, or another macOS
+    build ("a VM checkpoint restores only on the macOS build it was taken
+    on");
+  - on a Mac, the clock after the restore: within 50 ms of the host's.
+- **Driving it:**
+
+  ```sh
+  cw run app -- sh -c 'echo before > ~/marker'
+  cw checkpoint create app --name before-refactor
+  cw run app -- sh -c 'echo after > ~/marker'
+  cw checkpoint restore before-refactor --yes
+  cw run app -- cat ~/marker
+  ```
+
+  `restore` prints "Restored app to VM checkpoint before-refactor: stop … s,
+  restore … s, total … s".
+- **Proof:** the marker reads `before`; a process started before the
+  checkpoint is still running; `cw run app -- date -u +%s.%N` agrees with
+  the host to within 50 ms.
+- **Observed:**
+  - Linux: only the refusal of a checkpoint an upgrade left unrestorable is
+    recorded, in [local-vm-upgrade.md](local-vm-upgrade.md). A working
+    restore is not yet recorded in a journey.
+  - A Mac: not yet observed (#4654).
+
+## `ckpt-fork`: local VMs from a VM checkpoint (Linux or a Mac)
+
+- **Entry points:** `cw create --local --checkpoint CHECKPOINT [--name
+  NAME]`.
+- **States to exercise:**
+  - a fork while the source keeps running: the fork runs the source's
+    processes from the checkpoint's instant, with its own identity;
+  - the fork's first command, right after the create (#4651);
+  - the checkpoint removed after the fork: the fork keeps running;
+  - on a Mac, the same refusals as `ckpt-restore` for another hardware model
+    or macOS build.
+- **Driving it:**
+
+  ```sh
+  cw create --local --checkpoint before-refactor --name app-2
+  cw run app-2 -- cat ~/marker
+  cw checkpoint rm before-refactor
+  cw run app-2 -- cat ~/marker
+  ```
+
+- **Proof:** the fork has the source's files and the processes that were
+  running at the checkpoint, its own environment ID, machine ID and SSH host
+  key, and its first command succeeds.
+- **Observed:**
+  - Linux: only the refusal of a fork of a checkpoint an upgrade left
+    unrestorable is recorded, in [local-vm-upgrade.md](local-vm-upgrade.md).
+    A working fork is not yet recorded in a journey.
+  - A Mac: not yet observed (#4654).
 
 ## `snap-dashboard`: the Snapshots page
 

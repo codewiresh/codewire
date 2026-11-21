@@ -164,7 +164,7 @@ only.
   - a **disk snapshot**: a stopped environment's disks, saved by `cw snapshot
     create` and forked into new environments by `cw create --snapshot`. It
     holds no memory. Hosted sandboxes have them (`--cloud`), and so do local
-    VMs on Linux; on macOS, local disk snapshots are refused for now (#3803).
+    VMs on Linux and on a Mac (#4654).
 
   Workspace and environment snapshots are reserved names and not implemented,
   and the `pulling_snapshot` state is defined in the contract but never
@@ -176,8 +176,10 @@ only.
   Local VMs on Linux have them: `cw checkpoint` creates, lists, inspects,
   restores and removes them, and `cw create --local --checkpoint` forks one
   into new environments with fresh identity. A checkpoint stays on the host
-  that made it. On macOS they are refused for now, and hosted sandboxes have
-  none.
+  that made it. On macOS they are refused for now and are being built
+  (#4654): the Mac steps of `ckpt-local`, `ckpt-restore` and `ckpt-fork` in
+  [docs/journeys/snapshots-and-forks.md](docs/journeys/snapshots-and-forks.md)
+  describe them and are not yet observed. Hosted sandboxes have none.
 
 ## 3. Components
 
