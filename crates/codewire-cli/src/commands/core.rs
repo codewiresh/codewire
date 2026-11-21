@@ -33,7 +33,9 @@ pub(crate) async fn handle_logout_command(globals: &Globals) -> anyhow::Result<(
 /// What `cw logout` could confirm about the sign-in saved on this machine.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LogoutOutcome {
-    NoSignIn,
+    /// No sign-in was saved. `cleared_settings` is whether a saved server,
+    /// organization, account or pinned CA existed and was removed.
+    NoSignIn { cleared_settings: bool },
     /// The server revoked the sign-in's refresh and access tokens.
     Revoked,
     /// The sign-in was removed from this machine, but the server did not
@@ -54,8 +56,17 @@ pub(crate) async fn log_out(
 ) -> anyhow::Result<LogoutOutcome> {
     let store =
         codewire_client::FileCredentialStore::at(config::oauth_credentials_path(config_dir));
+    let saved_settings = [
+        "config.json",
+        config::ACCOUNT_FILE,
+        config::DEPLOYMENT_CA_FILE,
+    ]
+    .iter()
+    .any(|file| config_dir.join(file).exists());
     let outcome = match codewire_client::CredentialStore::load(&store) {
-        Ok(None) => LogoutOutcome::NoSignIn,
+        Ok(None) => LogoutOutcome::NoSignIn {
+            cleared_settings: saved_settings,
+        },
         Ok(Some(credentials)) => {
             match revoke_saved_sign_in(&credentials, server_url, deployment_ca).await {
                 Ok(()) => LogoutOutcome::Revoked,
@@ -101,12 +112,26 @@ async fn revoke_saved_sign_in(
         })
 }
 
+pub(super) fn not_signed_in_text(cleared_settings: bool, style: crate::output::Style) -> String {
+    let what = if cleared_settings {
+        "removed the saved settings"
+    } else {
+        "there is nothing to remove"
+    };
+    format!(
+        "Not signed in; {what}.\n{} cw login\n",
+        style.status(crate::output::Status::Next)
+    )
+}
+
 /// "Logged out" only when the server confirmed it; otherwise an error, so
 /// the command exits non-zero and scripts notice.
 pub(crate) fn logout_result(outcome: LogoutOutcome) -> anyhow::Result<()> {
     match outcome {
-        LogoutOutcome::NoSignIn => {
-            eprintln!("No sign-in was saved on this machine; removed the saved configuration.");
+        LogoutOutcome::NoSignIn { cleared_settings } => {
+            let style = crate::output::Capabilities::from_process(crate::output::OutputMode::Text)
+                .stderr_style();
+            eprint!("{}", not_signed_in_text(cleared_settings, style));
             Ok(())
         }
         LogoutOutcome::Revoked => {

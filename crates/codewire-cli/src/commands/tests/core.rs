@@ -2400,8 +2400,26 @@ async fn logout_without_a_saved_sign_in_only_removes_the_configuration() {
     let config = private_mesh_data_fixture();
     std::fs::write(config.path().join("config.json"), b"{}").unwrap();
     let outcome = log_out(config.path(), None, None).await.unwrap();
-    assert_eq!(outcome, LogoutOutcome::NoSignIn);
+    assert_eq!(
+        outcome,
+        LogoutOutcome::NoSignIn {
+            cleared_settings: true
+        }
+    );
     assert_signed_out_locally(config.path());
+    logout_result(outcome).unwrap();
+}
+
+#[tokio::test]
+async fn logout_with_nothing_saved_has_nothing_to_remove() {
+    let config = tempfile::tempdir().unwrap();
+    let outcome = log_out(config.path(), None, None).await.unwrap();
+    assert_eq!(
+        outcome,
+        LogoutOutcome::NoSignIn {
+            cleared_settings: false
+        }
+    );
     logout_result(outcome).unwrap();
 }
 
@@ -2536,4 +2554,18 @@ fn a_stopped_cloud_environment_is_refused_with_the_command_that_starts_it() {
             "{state}"
         );
     }
+}
+
+#[test]
+fn logout_not_signed_in_names_cw_login_next() {
+    use crate::output::{Charset, Style};
+    let plain = Style::new(false, Charset::Unicode);
+    assert_eq!(
+        super::core::not_signed_in_text(false, plain),
+        "Not signed in; there is nothing to remove.\n→ cw login\n"
+    );
+    assert_eq!(
+        super::core::not_signed_in_text(true, Style::new(false, Charset::Ascii)),
+        "Not signed in; removed the saved settings.\n-> cw login\n"
+    );
 }
