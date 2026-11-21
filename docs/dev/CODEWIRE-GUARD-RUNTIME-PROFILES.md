@@ -372,6 +372,12 @@ templates:
 
 The `/dev/kvm` device resource is refused on a Pod of any other class.
 
+Orchestration's own template policy holds a `standard` template to its broker
+arm like any other, but without the TUN init and the TUN device: the VM's
+network is its own netstack, so a `standard` template has neither, and the
+TUN rule still refuses a TUN init under `standard`. Only a per-environment
+template may run under `standard`; a pool template may not.
+
 **The claim.** Outside the VM are the supervisor and the VM process, with
 the Pod's address and the Sandbox's projected tokens. The boundary a
 workload has to cross is KVM, Cloud Hypervisor and the supervisor's own

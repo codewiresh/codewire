@@ -373,14 +373,14 @@ HOSTED_EGRESS_FRAGMENTS = [
     # the switch on and always then, mounted at exactly /dev/net by the TUN
     # init and the workspace container only.
     "variables.volumes.all(v, v.name != 'egress-devnet' || "
-    "variables.hostedEgress && dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) && "
+    "variables.hostedEgress && !variables.standardEnvironment && dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) && "
     "dyn(v.emptyDir).all(k, k in ['medium', 'sizeLimit']) && "
     "has(v.emptyDir.medium) && v.emptyDir.medium == 'Memory' && "
     "has(v.emptyDir.sizeLimit) && string(v.emptyDir.sizeLimit) == '1Mi') && "
     "variables.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name != 'egress-devnet' || "
     "(c.name == 'workspace' || c.name == 'hosted-egress-tun') && "
     "dyn(m).all(k, k in ['name', 'mountPath']) && m.mountPath == '/dev/net')) && "
-    "(!variables.hostedEgress || variables.volumes.exists(v, v.name == 'egress-devnet'))",
+    "(!variables.hostedEgress || variables.standardEnvironment || variables.volumes.exists(v, v.name == 'egress-devnet'))",
     # The broker arm's privilege: root only for the TUN init, mount-workspace
     # ordered before it, and dind from the official DinD image; no added
     # capability or escalation anywhere.
@@ -389,8 +389,13 @@ HOSTED_EGRESS_FRAGMENTS = [
     "size(c.securityContext.capabilities.add) == 0",
     # Neither root init container is a sidecar, and a broker template has the TUN init.
     "c.name == 'hosted-egress-tun' && !has(c.restartPolicy) || c.name == 'mount-workspace' && !has(c.restartPolicy) &&",
-    "(!variables.hostedEgress || has(variables.pod.initContainers) && "
+    "(!variables.hostedEgress || variables.standardEnvironment || has(variables.pod.initContainers) && "
     "variables.pod.initContainers.exists(c, c.name == 'hosted-egress-tun'))",
+    # codewire#5602: only a per-environment `standard` template goes without
+    # the TUN init and its device; the TUN rule's VM classes still refuse a
+    # TUN init under `standard`.
+    "expression: variables.environmentTemplate && has(variables.pod.runtimeClassName) && "
+    "variables.pod.runtimeClassName == 'standard' name: standardEnvironment",
     # A broker-mode workspace always has its stream and binding addresses.
     "variables.brokerRequiredEnvironment.all(n, c.env.exists(e, e.name == n && has(e.value) && size(e.value) > 0))",
     # The netstack is the only resolver.

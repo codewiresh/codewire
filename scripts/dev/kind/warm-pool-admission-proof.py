@@ -256,6 +256,31 @@ def environment_cases(env_today: dict, env_broker: dict, conf_today: dict, conf_
     ]
 
 
+
+def without_tun(t: dict) -> None:
+    # mount-workspace goes too, as in "on: no TUN init": without the TUN init
+    # its required place before it fails the privilege rule first.
+    pod(t)["initContainers"] = [c for c in pod(t)["initContainers"]
+                                if c["name"] not in ("hosted-egress-tun", "mount-workspace")]
+
+
+def standard_cases(standard: dict, env_broker: dict,
+                   broker: dict) -> list[tuple[str, dict | None, str, dict, str | None]]:
+    """A `standard` template (#5602) runs its VM in its one container, with
+    no TUN init and no TUN device, and only a per-environment template may."""
+    return [
+        ("off, standard: the golden", OFF, "create", standard, GATE),
+        ("on, standard: the golden", ON, "create", standard, None),
+        ("on, standard: a TUN init added", ON, "create", mutate(standard, lambda t: pod(t).__setitem__(
+            "initContainers", [copy.deepcopy(tun(env_broker))])), TUN),
+        ("on, standard: the TUN device's volume added", ON, "create", mutate(standard, lambda t: pod(t)[
+            "volumes"].append(copy.deepcopy(devnet(env_broker)))), DEVNET),
+        ("on, environment: the broker golden without its TUN init", ON, "create",
+         mutate(env_broker, without_tun), TUN),
+        ("on, pool: the broker golden under standard without its TUN init", ON, "create",
+         mutate(broker, setting(pod, "runtimeClassName", "standard"), without_tun), RUNTIME),
+    ]
+
 def sandbox(labels: dict[str, str]) -> dict:
     return {"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
             "metadata": {"name": "broker-mode-proof", "namespace": SANDBOXES},
@@ -457,6 +482,8 @@ def main() -> int:
         pinned(load("identity-free-sandboxtemplate.golden.json")),
         pinned(load("environment-broker-sandboxtemplate.golden.json")),
         load("confidential-sandboxtemplate.golden.json"), load("confidential-broker-sandboxtemplate.golden.json"),
+        broker) + standard_cases(
+        load("standard-sandboxtemplate.golden.json"), pinned(load("environment-broker-sandboxtemplate.golden.json")),
         broker)
     wait_for(cluster, mutate(today, lambda t: t["spec"]["podTemplate"]["metadata"].setdefault("labels", {})
                              .__setitem__("codewire.sh/egress", "broker")), GATE)

@@ -393,6 +393,14 @@ spec:
     # per-environment template can't drop broker mode either.
     - name: environmentTemplate
       expression: "!request.name.startsWith('cw-pool-')"
+    # codewire#5602: a `standard` workspace's VM is its runtime's, inside the
+    # one container, and its netstack is the VM's own, so it has neither the
+    # TUN init nor its device. Only per-environment templates; a pool
+    # template never runs under `standard` (runtimeClasses).
+    - name: standardEnvironment
+      expression: >-
+        variables.environmentTemplate && has(variables.pod.runtimeClassName) &&
+        variables.pod.runtimeClassName == 'standard'
   validations:
     - expression: >-
         variables.environmentTemplate ||
@@ -699,9 +707,9 @@ spec:
         has(v.image.reference) && v.image.reference == c.image) ||
         variables.environmentTemplate && variables.pod.runtimeClassName == 'confidential' &&
         variables.pod.initContainers.exists(i, i.name == 'codewire-daemon-init' && i.image == c.image))))) &&
-        (!variables.hostedEgress || has(variables.pod.initContainers) &&
+        (!variables.hostedEgress || variables.standardEnvironment || has(variables.pod.initContainers) &&
         variables.pod.initContainers.exists(c, c.name == 'hosted-egress-tun'))
-      message: hosted-egress-tun runs only as an init container with hosted egress on, under a VM runtime class (confidential only outside pools), exactly its command with nothing added and the TUN device's volume its one mount, from the deployment's daemon image, the one codewire-bin is filled from; every broker-mode template has it
+      message: hosted-egress-tun runs only as an init container with hosted egress on, under a VM runtime class (confidential only outside pools), exactly its command with nothing added and the TUN device's volume its one mount, from the deployment's daemon image, the one codewire-bin is filled from; every broker-mode template but a standard one has it
     # The TUN device's volume (#4000): a Kata container has no /dev/net/tun,
     # so the TUN init makes the node here. Memory-backed exactly as rendered,
     # since a disk-backed emptyDir is the node's filesystem shared into the
@@ -710,15 +718,15 @@ spec:
     # template has it. Container names are unique across both lists.
     - expression: >-
         variables.volumes.all(v, v.name != 'egress-devnet' ||
-        variables.hostedEgress && dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) &&
+        variables.hostedEgress && !variables.standardEnvironment && dyn(v).all(k, k in ['name', 'emptyDir']) && has(v.emptyDir) &&
         dyn(v.emptyDir).all(k, k in ['medium', 'sizeLimit']) &&
         has(v.emptyDir.medium) && v.emptyDir.medium == 'Memory' &&
         has(v.emptyDir.sizeLimit) && string(v.emptyDir.sizeLimit) == '1Mi') &&
         variables.containers.all(c, !has(c.volumeMounts) || c.volumeMounts.all(m, m.name != 'egress-devnet' ||
         (c.name == 'workspace' || c.name == 'hosted-egress-tun') &&
         dyn(m).all(k, k in ['name', 'mountPath']) && m.mountPath == '/dev/net')) &&
-        (!variables.hostedEgress || variables.volumes.exists(v, v.name == 'egress-devnet'))
-      message: the TUN device's volume egress-devnet is an emptyDir with medium Memory and sizeLimit 1Mi, only with hosted egress on, mounted at exactly /dev/net by hosted-egress-tun and the workspace container only; every broker-mode template has it
+        (!variables.hostedEgress || variables.standardEnvironment || variables.volumes.exists(v, v.name == 'egress-devnet'))
+      message: the TUN device's volume egress-devnet is an emptyDir with medium Memory and sizeLimit 1Mi, only with hosted egress on, mounted at exactly /dev/net by hosted-egress-tun and the workspace container only; every broker-mode template but a standard one has it, and a standard one never
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
