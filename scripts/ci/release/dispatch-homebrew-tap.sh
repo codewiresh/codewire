@@ -50,7 +50,9 @@ behind() {
   printf 'silent\nshow-error\nfail\n'
 } >"$work/github.curl"
 
-jq -n --arg version "$tag" '{ref: "main", inputs: {version: $version}}' >"$work/dispatch.json"
+# Without return_run_details GitHub accepts the dispatch with an empty answer
+# that names no run to wait for.
+jq -n --arg version "$tag" '{ref: "main", inputs: {version: $version}, return_run_details: true}' >"$work/dispatch.json"
 curl --config "$work/github.curl" --connect-timeout 10 --max-time 30 \
   --request POST --header 'Content-Type: application/json' --data-binary @"$work/dispatch.json" \
   --output "$work/dispatched.json" "$api/workflows/update-formula.yml/dispatches" ||

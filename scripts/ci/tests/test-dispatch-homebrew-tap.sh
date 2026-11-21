@@ -23,8 +23,9 @@ readonly TOKEN='synthetic-tap-installation-token-0123456789'
 printf '%s\n' "$TOKEN" >"$work/token"
 chmod 0600 "$work/token"
 
-# The fake GitHub: the dispatch answers FAKE_DISPATCH (a file), and each read
-# of the run answers the next status from FAKE_STATUSES, "STATUS:CONCLUSION".
+# The fake GitHub: the dispatch answers FAKE_DISPATCH (a file) when it asks for
+# the run's details and, as GitHub does, nothing otherwise; each read of the
+# run answers the next status from FAKE_STATUSES, "STATUS:CONCLUSION".
 cat >"$work/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -46,7 +47,11 @@ case "$method $url" in
   'POST https://api.github.com/repos/codewiresh/homebrew-codewire/actions/workflows/update-formula.yml/dispatches')
     cp "$data" "${FAKE_DISPATCH_BODY:?}"
     [[ -n "${FAKE_DISPATCH:-}" ]] || exit 22
-    cp "$FAKE_DISPATCH" "$output" ;;
+    if jq -e '.return_run_details == true' "$data" >/dev/null; then
+      cp "$FAKE_DISPATCH" "$output"
+    else
+      : >"$output"
+    fi ;;
   'GET https://api.github.com/repos/codewiresh/homebrew-codewire/actions/runs/4242')
     count=$(($(cat "$FAKE_POLLS" 2>/dev/null || echo 0) + 1))
     printf '%s' "$count" >"$FAKE_POLLS"
@@ -78,8 +83,8 @@ dispatch() {
 # through queued and in progress, and passes.
 : >"$work/curl-calls"
 dispatch v0.4.25 >"$work/ok.out" 2>&1 || fail "a successful tap run failed: $(cat "$work/ok.out")"
-jq -e '. == {ref: "main", inputs: {version: "v0.4.25"}}' "$work/body.json" >/dev/null ||
-  fail "the dispatch is not main with the tag: $(cat "$work/body.json")"
+jq -e '. == {ref: "main", inputs: {version: "v0.4.25"}, return_run_details: true}' "$work/body.json" >/dev/null ||
+  fail "the dispatch is not main with the tag, asking for its run: $(cat "$work/body.json")"
 [[ "$(cat "$work/polls")" == 3 ]] || fail 'the script did not wait for the run to complete'
 grep -Fq 'the tap moved its formula to v0.4.25 in run 4242' "$work/ok.out" || fail 'success was not reported'
 if grep -rqF "$TOKEN" "$work/curl-calls" "$work/ok.out"; then
