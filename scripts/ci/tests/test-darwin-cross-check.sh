@@ -114,6 +114,17 @@ else:
                            dict(tool='cargo', args=expected_vmm_tests)], records
     records, _ = run(dict(DARWIN_FIXTURE_CHECK_STATUS='46'), status=46)
     assert records[-1] == dict(tool='cargo', args=expected_check)
+    # Under a shared jobserver both checks run once, side by side, after the
+    # version checks; a failure is still the exit status.
+    def ran_once(records, args):
+        return [r for r in records if r['args'] == args] == [
+            dict(tool='cargo-zigbuild', args=args), dict(tool='cargo', args=args)]
+    for status in (0, 46):
+        records, _ = run(dict(jobserver, DARWIN_FIXTURE_CHECK_STATUS=str(status)), status=status)
+        assert records[:3] == [dict(tool='uname', args=['-s']), dict(tool='zig', args=['version']),
+                               dict(tool='cargo-zigbuild', args=['--version'])], records
+        assert ran_once(records, expected_check) and ran_once(records, expected_vmm_tests), records
+        assert len(records) == 7, records
     beside = (expected_cli, expected_cli_x86_64)
     def once(records, args):
         return [r for r in records if r['args'] == args] == [

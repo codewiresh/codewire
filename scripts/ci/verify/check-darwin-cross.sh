@@ -145,6 +145,26 @@ printf '[darwin-cross] Zig %s; cargo-zigbuild %s; target aarch64-apple-darwin\n'
 
 # `cargo zigbuild clippy` is a build invocation, not this check subcommand.
 # Keep the original packages, locked resolution, target and default features.
+# Under a shared jobserver the unit-test check runs beside the packages' check,
+# in a target folder and zigbuild cache of its own: after it they were 1m52
+# and 1m50 in a row (main run 67041; infra#1534, step A5). Without one they
+# run one after another, as before. The first failure is the exit status.
+if [[ "${CARGO_MAKEFLAGS:-}" == *--jobserver-auth=* ]]; then
+  tests_target="${CARGO_TARGET_DIR:-$ROOT/target}/local-vmm-tests"
+  # The macOS unit tests of the local VMM, its confinement and its network
+  # worker too (#3810): nothing else compiles them.
+  CARGO_TARGET_DIR="$tests_target" CARGO_ZIGBUILD_CACHE_DIR="$tests_target" \
+    "$zigbuild_bin" clippy --locked -p codewire-local-vmm -p codewire-confinement -p codewire-egress-worker \
+    --lib --tests \
+    --target aarch64-apple-darwin -- -D warnings &
+  unit_tests=$!
+  status=0
+  "$zigbuild_bin" clippy --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \
+    -p codewire-confinement -p codewire-egress-worker \
+    --target aarch64-apple-darwin -- -D warnings || status=$?
+  wait "$unit_tests" || { unit_tests_status=$?; [ "$status" != 0 ] || status=$unit_tests_status; }
+  exit "$status"
+fi
 # exec propagates the one actual Cargo check's failure to qualification.
 "$zigbuild_bin" clippy --locked -p codewire-local-vmm -p codewire-vmm-guest-probe \
   -p codewire-confinement -p codewire-egress-worker \
