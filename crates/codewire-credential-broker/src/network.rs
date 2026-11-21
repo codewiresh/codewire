@@ -1992,21 +1992,6 @@ mod tests {
             HttpProvider::AnthropicClaudeSignIn,
         ]);
         let app = BTreeSet::from([HttpProvider::GitHubAppAuthorization]);
-        let asked = std::sync::Mutex::new(Vec::new());
-        let began = std::time::Instant::now();
-        let looked_up = ProviderHttpsTransport::look_up_with(&[&main, &app], |host, _| {
-            asked.lock().unwrap().push(host.to_owned());
-            std::thread::sleep(Duration::from_millis(300));
-            Err(std::io::ErrorKind::TimedOut.into())
-        })
-        .unwrap();
-        assert!(
-            began.elapsed() < Duration::from_millis(600),
-            "{:?}",
-            began.elapsed()
-        );
-        let mut asked = asked.into_inner().unwrap();
-        asked.sort();
         let mut hosts = [
             ANTHROPIC_HOST,
             CLAUDE_TOKEN_HOST,
@@ -2014,6 +1999,34 @@ mod tests {
             GITHUB_GIT_HOST,
         ];
         hosts.sort();
+        let asked = std::sync::Mutex::new(Vec::new());
+        // A lookup answers only once every host's lookup has begun, so the
+        // proof is that they overlap, however slowly a loaded machine runs
+        // them. One left waiting alone gives up and is counted.
+        let all_begun = std::sync::Condvar::new();
+        let waited_alone = std::sync::atomic::AtomicUsize::new(0);
+        let looked_up = ProviderHttpsTransport::look_up_with(&[&main, &app], |host, _| {
+            let mut asked = asked.lock().unwrap();
+            asked.push(host.to_owned());
+            all_begun.notify_all();
+            let (_asked, wait) = all_begun
+                .wait_timeout_while(asked, Duration::from_secs(30), |asked| {
+                    asked.len() < hosts.len()
+                })
+                .unwrap();
+            if wait.timed_out() {
+                waited_alone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(std::io::ErrorKind::TimedOut.into())
+        })
+        .unwrap();
+        assert_eq!(
+            waited_alone.into_inner(),
+            0,
+            "the lookups did not all run at the same time"
+        );
+        let mut asked = asked.into_inner().unwrap();
+        asked.sort();
         assert_eq!(asked, hosts);
         for selected in [&main, &app] {
             let transport = ProviderHttpsTransport::available(selected, &looked_up).unwrap();
