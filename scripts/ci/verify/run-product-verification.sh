@@ -918,6 +918,7 @@ run_ci_script_tests() {
   python3 scripts/dev/test-macos-git-tool.py
   python3 scripts/dev/test-macos-local-runtime.py
   python3 scripts/dev/test-linux-local-runtime.py
+  python3 scripts/dev/test-queue-pr-packages.py
 STEPS
   )
 }

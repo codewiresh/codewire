@@ -410,6 +410,13 @@ git -C "$merge_repo" checkout -q -b bare-name main
 merge_lock 'app 0.1.0 base64' 'base64 0.22.1' 'middle 0.1.0' 'zz-access 0.1.0 base64' >"$merge_repo/Cargo.lock"
 git -C "$merge_repo" commit -q -am 'access depends on base64'
 git -C "$merge_repo" push -q origin HEAD:refs/pull/43/head
+# Pull request 44 changes Rust code: queue-pr.sh compile-checks its merge.
+git -C "$merge_repo" checkout -q -b rust-change main
+mkdir -p "$merge_repo/crates/demo/src"
+printf 'pub fn demo() {}\n' >"$merge_repo/crates/demo/src/lib.rs"
+git -C "$merge_repo" add crates
+git -C "$merge_repo" commit -q -m 'a demo crate'
+git -C "$merge_repo" push -q origin HEAD:refs/pull/44/head
 git -C "$merge_repo" checkout -q main
 merge_lock 'app 0.1.0 base64 0.22.1' 'base64 0.22.1' 'base64 0.23.1' 'middle 0.1.0' >"$merge_repo/Cargo.lock"
 git -C "$merge_repo" commit -q -am 'a second base64'
@@ -507,6 +514,43 @@ if queue_pr 42 wip >/dev/null 2>&1 || queue_pr 43 'feat: access' >/dev/null 2>&1
   fail 'queue-pr.sh queued a placeholder title or a merge Cargo refuses'
 fi
 [[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a refused queue contacted the forge'
+# The compile check (#5664): a stub cargo and a codewire-cpu with a free slot,
+# which prints no wait line; the cache stays in this test's own directory.
+cp "$ROOT/scripts/dev/queue_pr_packages.py" "$merge_repo/scripts/dev/"
+cat >"$work/merge-bin/cargo" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  metadata)
+    here="$(pwd -P)"
+    printf '{"workspace_root":"%s","workspace_members":["demo-id"],"packages":[{"id":"demo-id","name":"demo","manifest_path":"%s/crates/demo/Cargo.toml","dependencies":[]}]}\n' "$here" "$here" ;;
+  check)
+    printf '%s\n' "$*" >>"${FAKE_CARGO_LOG:?}"
+    [[ -z "${FAKE_CARGO_ERROR-}" ]] || { printf 'error[E0063]: %s\n' "$FAKE_CARGO_ERROR" >&2; exit 101; } ;;
+esac
+SH
+cat >"$work/merge-bin/codewire-cpu" <<'SH'
+#!/usr/bin/env bash
+[[ "$1" == build ]] && shift
+[[ "$1" == -- ]] && shift
+exec "$@"
+SH
+chmod 0755 "$work/merge-bin/cargo" "$work/merge-bin/codewire-cpu"
+rust_queue() {
+  XDG_CACHE_HOME="$work/xdg" CARGO_TARGET_DIR="$work/target" FAKE_CARGO_LOG="$work/cargo.log" queue_pr "$@"
+}
+FAKE_CARGO_ERROR='missing field `pinned`' rust_queue 44 'feat: a demo crate' >"$work/queue-rust-red.out" 2>&1 &&
+  fail 'queue-pr.sh queued a pull request whose merge does not compile'
+grep -qF 'error[E0063]: missing field `pinned`' "$work/queue-rust-red.out" ||
+  fail "queue-pr.sh did not show the compiler's error: $(cat "$work/queue-rust-red.out")"
+grep -qF '#44 does not compile merged with main' "$work/queue-rust-red.out" || fail 'queue-pr.sh did not say why it refused'
+[[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a pull request that does not compile reached the forge'
+rust_queue 44 'feat: a demo crate' >"$work/queue-rust.out" 2>&1 ||
+  fail "queue-pr.sh refused a merge that compiles, with a free slot: $(cat "$work/queue-rust.out")"
+grep -qF '#44 is queued as "feat: a demo crate (#44)"' "$work/queue-rust.out" || fail 'queue-pr.sh did not queue #44'
+grep -qxF 'check --locked --all-targets --all-features -p demo' "$work/cargo.log" ||
+  fail "queue-pr.sh did not check the touched package: $(cat "$work/cargo.log")"
+grep -qP '\t44\t[0-9]+\t0\tdemo$' "$work/xdg/codewire-queue-pr/times.tsv" || fail 'queue-pr.sh did not record the check'
+rm "$MERGE_TEST_ARGS"
 python3 - "$ROOT/.gitea/default_merge_message/SQUASH_TEMPLATE.md" <<'PYTEST'
 import sys
 from pathlib import Path

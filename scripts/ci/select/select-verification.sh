@@ -859,6 +859,7 @@ if [ "$event_selected" = false ]; then
       scripts/dev/macos-git-tool.py|scripts/dev/test-macos-git-tool.py|\
       scripts/dev/macos-local-runtime.py|scripts/dev/test-macos-local-runtime.py|\
       scripts/dev/linux-local-runtime.py|scripts/dev/test-linux-local-runtime.py|\
+      scripts/dev/queue_pr_packages.py|scripts/dev/test-queue-pr-packages.py|\
       scripts/dev/preflight.sh|scripts/ci/select/select-verification.sh|\
       scripts/dev/pre-push.sh|scripts/dev/preflight-push.sh|\
       scripts/dev/preflight-environment.sh|scripts/dev/cpu-slice.sh|scripts/dev/preflight-lock.sh|\
