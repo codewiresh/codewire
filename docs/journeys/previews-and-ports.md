@@ -11,13 +11,13 @@ both placements. The format is in [README.md](README.md).
 
 ## Where the walk stands
 
-Updated 2026-11-20.
+Updated 2026-11-21.
 
 | ID | Issue | Linux local VM | macOS local VM | Dev | Production |
 | --- | --- | --- | --- | --- | --- |
 | `ports-local-publish` | #4347 | observed on the branch, 2026-11-13 (#4415) | not yet observed | n/a | n/a |
 | `preview-cloud-loopback` | #4357 | n/a | n/a | not yet observed | not yet observed |
-| `ssh-socket-forward` | #5608 | observed 2026-11-20 (#5625) | not yet observed | not yet observed | not yet observed |
+| `ssh-socket-forward` | #5608 | observed 2026-11-20 (#5625) | not yet observed | observed 2026-11-21 (#5621) | not yet observed |
 | `local-https-hostnames` | #4316 | no command yet | no command yet | n/a | n/a |
 | `preview-host-variable` | #4316 | no command yet | no command yet | no command yet | no command yet |
 
@@ -265,7 +265,16 @@ Issue: #5608. Spec: `SPEC.md` "Port forwarding over SSH". Code:
     answered from the environment's Docker (server 29.9.2, kernel
     6.18.48-codewire3), and both `/run/codewire-host` sockets were still
     refused. Evidence: the walk comment on #5608.
-  - Dev and Production: not yet observed.
+  - Dev at source 6ef416acfb, 2026-11-21, the Dev smoke identity
+    with `cw` v0.4.24: a server in the home directory saw uid=1000 gid=1000
+    groups=1000 1001 (the hosted daemon, uid 1000, connects itself); the
+    daemon's Mesh socket was refused by identity, directly and through a
+    symlink; `/codewire/bin/cw` was refused as not a socket; `docker info`
+    through `ssh -L` of `/run/docker/docker.sock` named the Sandbox's own
+    Docker. The credential bridge's sockets need credentials attached, which
+    the organization-scoped smoke key can't do: not yet observed on Dev.
+    Evidence: the walk comment on #5608.
+  - Production: not yet observed.
 
 ## `local-https-hostnames`: an HTTPS hostname per labelled port on a local VM
 

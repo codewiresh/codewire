@@ -11,7 +11,7 @@ yet; its owner adds it. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-20.
+Updated 2026-11-21.
 
 | ID | Owner | Dev | Production |
 | --- | --- | --- | --- |
@@ -550,7 +550,14 @@ Issue: #5472.
     v0.4.24 (#5635): the stop of `web` answered "The session's outcome is
     unknown" after 7 s, `web` ended `Interrupted` with cleanup unknown, and
     `cw restart` refused it; only `sleep 7777` was left, in its own session.
-    Evidence: the comment on #5635. With the fix: not yet observed.
+    Evidence: the comment on #5635.
+  - With the fix, Dev at source 6ef416acfb, 2026-11-21, the Dev
+    smoke identity with `cw` v0.4.24 (#5649): the stop of `web` answered
+    `Stopped` in 5 s including sign-in, with cleanup known and the status
+    "session stopped. Its output is still open in 1 process that left the
+    session (pid 11165 `sleep`), which keeps running; …"; only `sleep 7777`,
+    in its own session, was left, and `cw restart` brought `web` back
+    `Running` under the same session ID. Evidence: the walk comment on #5635.
 
 ## `sandbox-start-list`: a starting sandbox's page shows one list of steps
 
