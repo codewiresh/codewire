@@ -2247,7 +2247,21 @@ With hosted interception on, a hosted Sandbox's agent credentials go through
 the proxy as a local VM's do with its front door, and the Sandbox holds no
 real token (owner, 2026-11-19, #4001). It is a deployment switch,
 `CODEWIRE_HOSTED_INTERCEPTION_ENABLED` on orchestration, off by default, and it
-takes effect at a Sandbox's next start, never during its life.
+takes effect at a Sandbox's next start, never during its life: orchestration
+decides it once, at the Pod's first bind (the switch, and the Pod being a
+broker-mode Sandbox), and stores it on the binding. The bind, every rebind
+and every credential relay epoch of that Pod read the stored decision, so
+none can disagree (cw-security, 2026-11-19, #4001). A Pod stored as
+intercepted stays so if the switch is later turned off: its epochs still
+serve the front door, and anything it lacks refuses, never falling back to
+the loopback credentials. A Pod stored as not intercepted stays so if the
+switch is later turned on, until it is replaced. Pods bound before the
+decision was stored count as not intercepted, which they were. A Pod with no
+stored decision has no credential epoch. While the switch is off, the
+credential relay stores "not intercepted" for such a Pod with the same
+write-once, since the bind would decide the same; that covers a Pod an older
+orchestration bound during a rollout, whose daemon binds only once per start.
+With the switch on, only the bind decides, since only the bind sees the Pod.
 
 - **The path.** The Sandbox's egress broker in `cw-egress` sends each agent
   host on 443 to the Sandbox's front door. The front door decrypts with a leaf
@@ -2273,6 +2287,29 @@ takes effect at a Sandbox's next start, never during its life.
   (#5149). A placeholder is recognised by its whole value's length and
   charset, never by a prefix, and one sent outside the route table is
   refused, never forwarded.
+- **What the Sandbox projects.** The credential service puts the
+  placeholders in the intercepted epoch's `CredentialBridgeOpen`, one for each
+  slot the binding grants whose hosts the front door serves (the one selection
+  both placements use, `codewire_access::front_door_hosts`), so they arrive
+  with the epoch's admission and
+  never apart from it (cw-security, 2026-11-19, #4001). A placeholder key the
+  credential service can't read fails the epoch's admission, so no Open is
+  sent at all. An Open that is not intercepted carries none, and the daemon
+  refuses the field on one; a
+  missing, extra or repeated slot refuses the whole Open, never a partial
+  projection. With its bind's interception on and placeholders in the Open,
+  the daemon projects as a local guest does with its front door: no
+  loopback base URL, each form's variable holding its placeholder
+  (`ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`;
+  `OPENAI_API_KEY`), and Codex's home routing `chatgpt.com` itself. GitHub
+  keeps today's hosted route while its hosts are not intercepted: it has no
+  placeholder in the Open, and Git and `gh` go through the loopback ingress as
+  before. With its
+  bind's interception on and no placeholders in the Open (an older
+  credential service, say), it projects no agent credential at all, never
+  the loopback routes. `NODE_EXTRA_CA_CERTS` and
+  `CODEX_CA_CERTIFICATE` point at the bundle it installs from the egress
+  trust, never over an image's own value. No placeholder appears in a log.
 - **Delivery follows the front door.** A hosted epoch that serves the
   Sandbox's front door delivers Claude and Codex logins with placeholders
   only, or refuses them; it never delivers a real login beside a front door,
