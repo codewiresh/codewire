@@ -26,6 +26,13 @@ const GITHUB_CHECK_WINDOW: Duration = Duration::from_secs(45);
 /// People whose last check is kept. Past it, a person with no entry is not
 /// checked at all until an entry expires: the bound is on memory and on calls.
 const GITHUB_CHECK_PEOPLE: usize = 4096;
+/// The client's own deadline, inside the call's [`GITHUB_PENDING_TIMEOUT`]
+/// bound. It starts at the call's first poll, a moment after the bound does,
+/// so with equal lengths either could fire first and the span's outcome would
+/// vary. A slow call ends here as `deadline_exceeded`; the bound, which stays
+/// the most the page waits, fires only if the client overran its deadline.
+const GITHUB_CHECK_CLIENT_DEADLINE: Duration =
+    GITHUB_PENDING_TIMEOUT.saturating_sub(Duration::from_millis(250));
 
 /// What the live GitHub check last found for each person, and when it was
 /// asked. Held in this process's memory only, never shared between people,
@@ -131,8 +138,9 @@ pub(crate) async fn github_pending_checked(
 /// service with that person's own connection and authority (#2712). Advisory:
 /// an error, or no answer within two seconds, is an empty list, so the page
 /// never fails or waits long because of GitHub. The span names how the call
-/// ended (`ok`, the Connect code, or `timed_out` when this bound fires before
-/// the client's own, which has the same length) and never a message.
+/// ended (`ok`, the Connect code, `deadline_exceeded` for a slow one, or
+/// `timed_out` if the client overran [`GITHUB_CHECK_CLIENT_DEADLINE`]) and
+/// never a message.
 async fn github_pending_permissions(
     state: &AppState,
     cookie: HeaderValue,
@@ -147,7 +155,7 @@ async fn github_pending_permissions(
             ),
         },
         ClientConfig::new(state.credential_origin.clone())
-            .with_default_timeout(GITHUB_PENDING_TIMEOUT)
+            .with_default_timeout(GITHUB_CHECK_CLIENT_DEADLINE)
             .with_default_max_message_size(MAX_GITHUB_PENDING_RESPONSE_BYTES),
     );
     let span = tracing::info_span!(
