@@ -275,9 +275,27 @@ pub fn relay(
             let _ = io::copy(&mut input, &mut to_socket);
             let _ = to_socket.shutdown(std::net::Shutdown::Write);
         });
-        let mut from_socket = &stream;
-        io::copy(&mut from_socket, &mut output).map(drop)
+        copy_flushing(&stream, &mut output)
     })
+}
+
+/// Copies until end of stream, flushing after every write: the helper's
+/// `output` is its stdout, which would otherwise hold back everything after
+/// the last newline, such as a WebSocket frame, while the connection stays
+/// open.
+#[cfg(target_os = "linux")]
+fn copy_flushing(mut from: impl io::Read, output: &mut impl io::Write) -> io::Result<()> {
+    let mut buffer = [0; 16 * 1024];
+    loop {
+        let read = match from.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        output.write_all(&buffer[..read])?;
+        output.flush()?;
+    }
 }
 
 #[cfg(target_os = "linux")]

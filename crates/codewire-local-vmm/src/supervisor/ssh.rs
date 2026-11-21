@@ -627,7 +627,9 @@ mod tests {
         );
 
         // A Unix socket forward reaches a socket through the daemon's
-        // `ForwardUnix`, which this daemon offers (#5608).
+        // `ForwardUnix` (#5608). A guest daemon only ever runs on Linux; built
+        // for another host, as this test's daemon is on a Mac, it refuses
+        // every socket forward.
         let sockets = tempfile::tempdir().unwrap();
         let socket = sockets.path().join("echo.sock");
         let echo = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -637,26 +639,33 @@ mod tests {
             stream.read_to_end(&mut received).await.unwrap();
             stream.write_all(&received).await.unwrap();
         });
-        let mut forward = connected
+        let opened = connected
             .client
             .channel_open_direct_streamlocal(socket.to_str().unwrap())
-            .await
-            .expect("the socket forward opens");
-        forward.data(&b"through a socket"[..]).await.unwrap();
-        forward.eof().await.unwrap();
-        let mut echoed = Vec::new();
-        timeout(Duration::from_secs(20), async {
-            while let Some(message) = forward.wait().await {
-                match message {
-                    ChannelMsg::Data { data } => echoed.extend_from_slice(&data),
-                    ChannelMsg::Eof | ChannelMsg::Close => break,
-                    _ => {}
+            .await;
+        if cfg!(target_os = "linux") {
+            let mut forward = opened.expect("the socket forward opens");
+            forward.data(&b"through a socket"[..]).await.unwrap();
+            forward.eof().await.unwrap();
+            let mut echoed = Vec::new();
+            timeout(Duration::from_secs(20), async {
+                while let Some(message) = forward.wait().await {
+                    match message {
+                        ChannelMsg::Data { data } => echoed.extend_from_slice(&data),
+                        ChannelMsg::Eof | ChannelMsg::Close => break,
+                        _ => {}
+                    }
                 }
-            }
-        })
-        .await
-        .expect("the socket forward finishes");
-        assert_eq!(echoed, b"through a socket");
+            })
+            .await
+            .expect("the socket forward finishes");
+            assert_eq!(echoed, b"through a socket");
+        } else {
+            assert!(
+                matches!(opened, Err(russh::Error::ChannelOpenFailure(_))),
+                "a daemon built for another host refuses socket forwards"
+            );
+        }
 
         // Another operation on the VM, such as a host-port change, leaves the
         // stream open; a stop ends it and frees its place.

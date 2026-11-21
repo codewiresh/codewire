@@ -244,6 +244,41 @@ fn the_helper_reports_connected_and_relays_both_ways() {
 }
 
 #[test]
+fn the_helper_passes_on_what_the_socket_sends_while_the_connection_stays_open() {
+    // The helper's output is its stdout, which holds back everything after
+    // the last newline. A server's message without one, such as a WebSocket
+    // frame, has to reach the caller while the connection is still open.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("greeting.sock");
+    let listener = StdUnixListener::bind(&path).unwrap();
+    let (seen, wait_until_seen) = std::sync::mpsc::channel::<()>();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(b"hello").unwrap();
+        let _ = wait_until_seen.recv_timeout(std::time::Duration::from_secs(10));
+    });
+    let (input, held_open) = UnixStream::pair().unwrap();
+    let (output, mut caller) = UnixStream::pair().unwrap();
+    let arguments = [path.to_string_lossy().into_owned()];
+    let helper = std::thread::spawn(move || {
+        let mut status = Vec::new();
+        relay(&arguments, &mut status, input, io::LineWriter::new(output)).unwrap();
+        status
+    });
+    caller
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let mut greeting = [0; 5];
+    let read = caller.read_exact(&mut greeting);
+    seen.send(()).unwrap();
+    drop(held_open);
+    server.join().unwrap();
+    assert_eq!(helper.join().unwrap(), b"connected\n");
+    read.expect("the greeting reached the caller while the connection was open");
+    assert_eq!(&greeting, b"hello");
+}
+
+#[test]
 fn the_helper_reports_a_refusal_as_its_code_only() {
     use std::os::unix::fs::MetadataExt as _;
     let directory = tempfile::tempdir().unwrap();
