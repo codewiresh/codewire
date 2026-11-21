@@ -1,7 +1,8 @@
 # Idle stop
 
 A cloud Sandbox that nobody is using stops itself after its idle timeout, so
-it stops drawing credit. The stop is the ordinary stop: its disk is kept, and
+it stops drawing credit ([BILLING.md](BILLING.md) says when a Sandbox's
+charge starts and ends). The stop is the ordinary stop: its disk is kept, and
 `cw start` or the dashboard's **Start** brings it back. This page is the
 contract. It was written before the code (#3384), and the journey is
 [`docs/journeys/idle-stop.md`](../journeys/idle-stop.md). The design and the
