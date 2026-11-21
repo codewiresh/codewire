@@ -234,9 +234,13 @@ async fn call_me_maybe_matches_magicsock_derp_boundary() {
     let c_node = NodePublic::from_raw(PublicKey::from(&c_secret).to_bytes());
     let a_disco = DiscoPrivate::generate(&mut OsRng);
     let b_disco = DiscoPrivate::generate(&mut OsRng);
+    // Bound first and kept: a port that is reserved and released can be
+    // taken by another socket before this one binds it, and while this one
+    // is open no reserved endpoint below can be its port.
+    let listen = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let call_endpoint = listen.local_addr().unwrap();
     let a_endpoint = reserve_local_endpoint();
     let b_endpoint = reserve_local_endpoint();
-    let call_endpoint = reserve_local_endpoint();
     let options = Options::new(a_endpoint, vec![a_endpoint], a_node, a_disco.clone());
     let shared = shared_arc_for_test(&options);
     {
@@ -251,7 +255,6 @@ async fn call_me_maybe_matches_magicsock_derp_boundary() {
         );
     }
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let listen = UdpSocket::bind(call_endpoint).await.unwrap();
     let (fallback, mut fallback_rx, _fallback_in_tx) = recording_fallback();
     let message = Message::CallMeMaybe(CallMeMaybe {
         endpoints: vec![call_endpoint],
