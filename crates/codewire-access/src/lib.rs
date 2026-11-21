@@ -22,7 +22,8 @@ pub use catalog::{
     builtin_provider_catalog, claude_login_permission, codex_login_permission,
 };
 pub use credential_name::{
-    CREDENTIAL_NAME_PROVIDERS, is_credential_name_provider, reserves_provider_prefix,
+    CREDENTIAL_NAME_PROVIDERS, credential_name_provider_prefixes, is_credential_name_provider,
+    reserves_provider_prefix,
 };
 pub use front_door::{
     ANTHROPIC_API_HOST, CHATGPT_HOST, FRONT_DOOR_HOSTS, FrontDoorHost, INTERCEPT_PORT,

@@ -132,6 +132,22 @@ pub(super) fn status_for_error(error: LocalCredentialError) -> Status {
 mod status_tests {
     use super::*;
 
+    /// The error and its status write the prefixes out; both name exactly
+    /// the providers a name is unique within.
+    #[test]
+    fn a_name_reserving_a_provider_is_refused_naming_every_provider() {
+        let expected = format!(
+            "a new local credential name may not start with {}",
+            codewire_access::credential_name_provider_prefixes()
+        );
+        assert_eq!(
+            LocalCredentialError::CredentialNameReservesProvider.to_string(),
+            expected
+        );
+        let status = status_for_error(LocalCredentialError::CredentialNameReservesProvider);
+        assert_eq!(status.message(), expected);
+    }
+
     #[test]
     fn a_record_in_use_says_what_holds_it() {
         let credential = status_for_error(LocalCredentialError::CredentialInUse);

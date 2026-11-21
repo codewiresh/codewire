@@ -512,15 +512,6 @@ pub(in crate::commands) mod refusal {
         format!("that name is in use in {provider}; choose another name")
     }
 
-    /// Codewire refused a name as taken and no credential of the requested
-    /// provider holds it: until migration 0042 the cloud's index refuses a
-    /// name another provider's credential of the owner holds (#4928).
-    pub(in crate::commands) fn name_in_another_provider(name: &str) -> String {
-        format!(
-            "a credential of another provider already uses {name:?} in your Codewire account; choose another name"
-        )
-    }
-
     /// A new or renamed credential's name that starts with a provider id and
     /// `/`, which `PROVIDER/NAME` would read as another credential (#4928).
     pub(in crate::commands) fn reserved_name(name: &str) -> String {

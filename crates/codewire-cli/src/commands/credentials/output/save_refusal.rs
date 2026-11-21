@@ -21,10 +21,6 @@ use crate::commands::platform_commands::shell_word;
 pub(in crate::commands) enum Answer {
     /// The name is taken.
     AlreadyExists,
-    /// The name is taken, and the command found that no credential of the
-    /// provider it saves holds it: until migration 0042 the cloud refuses a
-    /// name another provider's credential holds (#4928).
-    TakenByAnotherProvider,
     /// The credential to reconnect is gone.
     NotFound,
     /// Any other definite refusal: nothing was saved.
@@ -65,7 +61,6 @@ pub(in crate::commands) enum Kind<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Outcome {
     NameInUse,
-    NameInAnotherProvider,
     NameReservesProvider,
     Deleted,
     Changed,
@@ -122,7 +117,6 @@ fn classify(answer: Answer, reason: Option<&str>) -> Outcome {
     } else {
         match answer {
             Answer::AlreadyExists => Outcome::NameInUse,
-            Answer::TakenByAnotherProvider => Outcome::NameInAnotherProvider,
             Answer::NotFound => Outcome::Deleted,
             Answer::Refused | Answer::Uncertain => Outcome::Refused,
         }
@@ -195,12 +189,6 @@ fn words(save: Save<'_>, outcome: Outcome, keychain: Option<&Path>) -> (String, 
                 }
                 None => format!("that name is in use, so your {what} wasn't saved"),
             },
-            Some(renamed),
-        ),
-        Outcome::NameInAnotherProvider => (
-            format!(
-                "a credential of another provider already uses {name:?} {place}, so your {what} wasn't saved"
-            ),
             Some(renamed),
         ),
         Outcome::NameReservesProvider => (
@@ -334,6 +322,26 @@ mod tests {
         );
         let next = crate::error_report::next_step(&error);
         (crate::error_report::sentence(&error), next)
+    }
+
+    /// The refusal writes the prefixes out; it names exactly the providers a
+    /// name is unique within.
+    #[test]
+    fn a_name_reserving_a_provider_names_every_provider() {
+        for placement in ["local", "cloud"] {
+            assert_eq!(
+                said(
+                    placement,
+                    Answer::Refused,
+                    Some("CREDENTIAL_NAME_RESERVES_PROVIDER")
+                )
+                .0,
+                format!(
+                    "a credential's name can't start with {}, so your GitHub sign-in wasn't saved",
+                    codewire_access::credential_name_provider_prefixes()
+                )
+            );
+        }
     }
 
     #[test]

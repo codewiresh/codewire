@@ -1157,6 +1157,30 @@ mod tests {
         }
     }
 
+    /// The refusal of a name that starts with a provider names exactly the
+    /// providers a name is unique within, read from `codewire-access`'s own
+    /// list, which this crate doesn't depend on.
+    #[test]
+    fn a_name_reserving_a_provider_names_every_provider() {
+        const NAMES: &str = include_str!("../../codewire-access/src/credential_name.rs");
+        let (_, list) = NAMES
+            .split_once("pub const CREDENTIAL_NAME_PROVIDERS: [&str; ")
+            .and_then(|(_, rest)| rest.split_once("= ["))
+            .expect("the provider list moved");
+        let (list, _) = list.split_once(']').expect("the provider list moved");
+        let prefixes: Vec<String> = list
+            .split(',')
+            .map(|provider| format!("{}/", provider.trim().trim_matches('"')))
+            .collect();
+        let (last, rest) = prefixes.split_last().expect("a provider");
+        let listed = format!("{} or {last}", rest.join(", "));
+        assert!(
+            GITHUB_NAME_RESERVES_PROVIDER
+                .starts_with(&format!("a credential's name can't start with {listed}, ")),
+            "{listed}"
+        );
+    }
+
     /// The closed reasons the credential service's mutation wire sends, each
     /// with its Connect code, read from the service's own `error` function so
     /// that a reason added there can't reach this client unclassified.

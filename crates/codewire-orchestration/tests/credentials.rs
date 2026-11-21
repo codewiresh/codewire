@@ -246,32 +246,67 @@ async fn metadata_name_resolution_keeps_owner_kind_exact_matching_and_active_own
     h.finish(result).await
 }
 
+/// The ErrorInfo of a refusal, decoded from the Connect JSON error body.
+fn error_info(body: &serde_json::Value) -> Result<codewire_proto::google::rpc::ErrorInfo> {
+    use base64::Engine as _;
+    use buffa::Message as _;
+    let detail = body["details"]
+        .as_array()
+        .and_then(|details| {
+            details
+                .iter()
+                .find(|detail| detail["type"] == "google.rpc.ErrorInfo")
+        })
+        .context("refusal lacks an ErrorInfo")?;
+    let encoded = detail["value"].as_str().context("ErrorInfo value")?;
+    let bytes =
+        base64::engine::general_purpose::STANDARD_NO_PAD.decode(encoded.trim_end_matches('='))?;
+    Ok(codewire_proto::google::rpc::ErrorInfo::decode_from_slice(
+        &bytes,
+    )?)
+}
+
 #[tokio::test]
 #[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn a_provider_narrows_a_name_and_reaches_only_its_owner() -> Result<()> {
+async fn a_name_two_providers_share_needs_its_provider_and_reaches_only_its_owner() -> Result<()> {
     let h = Harness::create().await?;
     let result = async {
-        // Alice's "Work Codex" is an OpenAI credential. Until migration 0042,
-        // no other provider's credential of hers may share the name.
-        sqlx::query("INSERT INTO platform_credentials(id,user_id,provider,authentication_kind,display_name,status,revocation_generation,material_generation) VALUES ($1,$2,$3,$4,$5,'active',1,1)")
-            .bind("credential-shared-github").bind(ALICE).bind("github").bind("oauth").bind("Shared").execute(&h.db).await?;
-        let found = h
-            .ok("GetCredential", Auth::Alice, json!({"name":"work codex","provider":"openai"}))
-            .await?;
-        ensure!(found["credential"]["id"] == ALICE_CREDENTIAL);
-        let found = h
-            .ok("GetCredential", Auth::Alice, json!({"name":"SHARED","provider":"github"}))
-            .await?;
-        ensure!(found["credential"]["id"] == "credential-shared-github");
-        for provider in ["anthropic", "github"] {
-            h.error("GetCredential", Auth::Alice, json!({"name":"work codex","provider":provider}), "not_found").await?;
+        // Alice's "Work Codex" is an OpenAI credential; a Claude one may share
+        // the name, and so may two of hers that Bob has no name like.
+        for (id, provider, kind, name) in [
+            ("credential-anthropic", "anthropic", "api_key", "WORK CODEX"),
+            ("credential-shared-openai", "openai", "api_key", "Shared"),
+            ("credential-shared-github", "github", "oauth", "shared"),
+        ] {
+            sqlx::query("INSERT INTO platform_credentials(id,user_id,provider,authentication_kind,display_name,status,revocation_generation,material_generation) VALUES ($1,$2,$3,$4,$5,'active',1,1)")
+                .bind(id).bind(ALICE).bind(provider).bind(kind).bind(name).execute(&h.db).await?;
         }
+        for (name, providers) in [("work codex", "anthropic,openai"), ("SHARED", "github,openai")] {
+            let (status, body) = h
+                .call("GetCredential", Auth::Alice, json!({"name":name}))
+                .await?;
+            ensure!(!status.is_success() && body["code"] == "failed_precondition", "{status}: {body}");
+            let info = error_info(&body)?;
+            ensure!(info.reason == "CREDENTIAL_NAME_AMBIGUOUS" && info.domain == "codewire.sh");
+            ensure!(info.metadata.get("providers").map(String::as_str) == Some(providers));
+            for id in [ALICE_CREDENTIAL, "credential-anthropic", "credential-shared-openai", "credential-shared-github"] {
+                ensure!(!body.to_string().contains(id), "the refusal names {id}");
+            }
+        }
+        for (provider, id) in [("openai", ALICE_CREDENTIAL), ("anthropic", "credential-anthropic")] {
+            let found = h
+                .ok("GetCredential", Auth::Alice, json!({"name":"work codex","provider":provider}))
+                .await?;
+            ensure!(found["credential"]["id"] == id);
+        }
+        h.error("GetCredential", Auth::Alice, json!({"name":"work codex","provider":"github"}), "not_found").await?;
         for provider in ["OpenAI", "gitlab", ""] {
             h.error("GetCredential", Auth::Alice, json!({"name":"work codex","provider":provider}), "invalid_argument").await?;
         }
         h.error("GetCredential", Auth::Alice, json!({"credentialId":ALICE_CREDENTIAL,"provider":"openai"}), "invalid_argument").await?;
-        // Bob's own "Work Codex" is his; Alice's names never reach him.
-        let bob = h.ok("GetCredential", Auth::Bob, json!({"name":"work codex","provider":"openai"})).await?;
+        // Bob's own "Work Codex" is his only one: he gets it, and never learns
+        // that Alice's name is shared.
+        let bob = h.ok("GetCredential", Auth::Bob, json!({"name":"work codex"})).await?;
         ensure!(bob["credential"]["id"] == BOB_CREDENTIAL);
         h.error("GetCredential", Auth::Bob, json!({"name":"shared"}), "not_found").await?;
         h.error("GetCredential", Auth::Bob, json!({"name":"shared","provider":"github"}), "not_found").await?;

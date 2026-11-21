@@ -536,6 +536,23 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
     use buffa::Message as _;
 
+    /// The refusal writes the prefixes out; it names exactly the providers a
+    /// name is unique within.
+    #[test]
+    fn a_name_reserving_a_provider_is_refused_naming_every_provider() {
+        let refused = error(Error::NameReservesProvider);
+        assert_eq!(
+            refused.message.as_deref(),
+            Some(
+                format!(
+                    "a new credential name may not start with {}",
+                    codewire_access::credential_name_provider_prefixes()
+                )
+                .as_str()
+            )
+        );
+    }
+
     #[test]
     fn enrollment_wire_reasons_are_closed_domain_bound_and_material_free() {
         for (failure, reason, code) in [

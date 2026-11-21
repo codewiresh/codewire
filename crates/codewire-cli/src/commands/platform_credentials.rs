@@ -793,11 +793,6 @@ async fn cloud_written<T>(
     if is_name_taken(&error) {
         match taken_name_holder(client, provider, name, renaming).await {
             TakenBy::Holder(refusal) => return Err(refusal),
-            TakenBy::AnotherProvider => {
-                return Err(anyhow::anyhow!(
-                    super::credentials::output::refusal::name_in_another_provider(name)
-                ));
-            }
             TakenBy::Unknown => {}
         }
     }
@@ -813,18 +808,17 @@ fn is_name_taken(error: &rpc::ClientError) -> bool {
 enum TakenBy {
     /// A credential of the requested provider the caller may read, named.
     Holder(anyhow::Error),
-    /// No credential of the requested provider holds it.
-    AnotherProvider,
-    /// The lookup failed: the refusal keeps the provider-only words.
+    /// No holder the caller may read, or the lookup failed: the refusal
+    /// keeps the provider-only words.
     Unknown,
 }
 
-/// Until migration 0042 makes the cloud's name indexes per provider, the
-/// service also refuses a name any other of the owner's credentials holds,
-/// whatever its provider (#4928). So a refusal is checked against
-/// `provider`'s own holder first: one the caller may read is named with a
-/// free name, as before the write; with none, the name is another
-/// provider's. `renaming` keeps its own name and is no holder.
+/// The cloud's name indexes are per provider (migration 0043, #4928), so a
+/// name the service refuses as taken is held in `provider`. A holder the
+/// caller may read is named with a free name, as before the write; one it
+/// may not read, such as an organization's credential, is never described,
+/// so the refusal names only the provider (cw-security on #4928).
+/// `renaming` keeps its own name and is no holder.
 async fn taken_name_holder(
     client: &CodewireClient,
     provider: &str,
@@ -842,7 +836,7 @@ async fn taken_name_holder(
         .into_iter()
         .find(|holder| renaming.is_none_or(|renamed| renamed.id != holder.id))
     else {
-        return TakenBy::AnotherProvider;
+        return TakenBy::Unknown;
     };
     let held = provider_credentials(client, provider)
         .await
@@ -1286,9 +1280,6 @@ async fn cloud_connect_error(
     if let (true, Kind::Connect(provider)) = (is_name_taken(&error), save.kind) {
         match taken_name_holder(client, provider_id(provider), save.name, existing).await {
             TakenBy::Holder(refusal) => return refusal,
-            TakenBy::AnotherProvider => {
-                return save_error(save, Answer::TakenByAnotherProvider, None, None);
-            }
             TakenBy::Unknown => {}
         }
     }
@@ -2453,12 +2444,12 @@ mod tests {
         crate::error_report::sentence(&cloud_connect_error(client, save, None, taken).await)
     }
 
-    /// Until migration 0042 the cloud refuses a name another provider's
-    /// credential holds (#4928). When the service says a name is taken and
-    /// the provider's own lookup, asked again, finds no holder, the refusal
-    /// says another provider has it, for a rename and a sign-in's save.
+    /// After migration 0043 the cloud refuses only a name its provider holds
+    /// (#4928). When the provider's own lookup, asked again, finds no holder
+    /// the caller may read, the refusal names the provider and nothing of the
+    /// holder, for a rename and a sign-in's save (cw-security on #4928).
     #[tokio::test]
-    async fn a_name_the_cloud_refuses_that_its_provider_does_not_hold_is_another_providers() {
+    async fn a_name_the_cloud_refuses_with_no_readable_holder_names_only_its_provider() {
         let server = MockServer::start().await;
         let client = client(&server);
         let not_found = || lookup_answer(Lookup::NotFound);
@@ -2471,7 +2462,7 @@ mod tests {
         .await;
         assert_eq!(
             format!("{:#}", refused_rename(&server, &client).await),
-            "a credential of another provider already uses \"walk\" in your Codewire account; choose another name"
+            "that name is in use in openai; choose another name"
         );
         server.verify().await;
         server.reset().await;
@@ -2479,7 +2470,7 @@ mod tests {
         lookup(&server, "walk", Some("openai"), Lookup::NotFound).await;
         assert_eq!(
             refused_codex_save(&client).await,
-            "a credential of another provider already uses \"walk\" in your Codewire account, so your Codex sign-in wasn't saved"
+            "that name is in use in openai, so your Codex sign-in wasn't saved"
         );
         server.verify().await;
     }

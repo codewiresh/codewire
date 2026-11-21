@@ -49,6 +49,7 @@ mod tests {
     mod account_suspension;
     mod billing_rate_cards;
     mod confidential_activation_slots;
+    mod credential_names_per_provider;
     mod credential_revocations;
     mod credit_changes;
     mod credit_ledger_outlives_organization;
@@ -100,9 +101,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced), 0002 to 0042.
+    // (which equals the 41-migration history it replaced), 0002 to 0043.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "c1d3eaaca28c60e8d2a4087e78c7ffb52b48925684c2f49052e47d5bb0f54e3c";
+        "a4363fa8b6643568f5e88074c1df3f316ef48254f2f2815c04fe402139bf0e5d";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -208,6 +209,8 @@ mod tests {
     const APPLIED_ENVIRONMENT_IDLE_STOP_CHECKSUM: &str = "b62bff004fd3a1a59d3c50c2b2a403b85a967154ece6180b4b02dba2079b2d0a1a0044f8a395180fa1c2a15a5bb3d07d";
     // SHA-384 of 0042_workspace_binding_interception.sql (#4001).
     const APPLIED_WORKSPACE_BINDING_INTERCEPTION_CHECKSUM: &str = "7f78b8b22f06737e57baa532d97ade89dab6ea972b4f6c16bc4cfae08c314e527eb44af24004ab754b8c13c6d89a052b";
+    // SHA-384 of 0043_credential_names_per_provider.sql (#4928).
+    const APPLIED_CREDENTIAL_NAMES_PER_PROVIDER_CHECKSUM: &str = "810fab514904408cabb7f6cafca421c301a4a130c30b39c16bbea815a4bf55af271ceac13e01a76fca635fe0630d94c5";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1331,6 +1334,7 @@ mod tests {
             (40, APPLIED_FEEDBACK_REPLY_EMAIL_CHECKSUM),
             (41, APPLIED_ENVIRONMENT_IDLE_STOP_CHECKSUM),
             (42, APPLIED_WORKSPACE_BINDING_INTERCEPTION_CHECKSUM),
+            (43, APPLIED_CREDENTIAL_NAMES_PER_PROVIDER_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1361,11 +1365,11 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 42
+                first.len() == 43
                     && first.iter().map(|migration| migration.0).eq([
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
                         22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-                        41, 42
+                        41, 42, 43
                     ])
                     && first.iter().all(|migration| migration.2)
             );

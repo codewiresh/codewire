@@ -344,11 +344,17 @@ lapses, and every existing row stays valid. Rolling back recreates the old
 indexes, which fails once two providers share a name: rename one of them
 first.
 
-Until migration 0042 is applied, the cloud still refuses a name another
-provider's credential holds, and says so in those words: when the service
-refuses a name as taken and the CLI then finds no credential of the requested
-provider holding it, it says `A credential of another provider already uses
-"walk" in your Codewire account; choose another name`.
+The migration applies only over servers that already look a name up by
+provider (#5524, in v0.4.25 and later). Before #5524 the server's
+`GetCredential` by name returned whichever matching row it read first. Once
+two providers share a name, that would let a command that finds a
+credential by name, such as a delete, act on the other provider's
+credential. Since #5524 the same request with a bare shared name is
+refused with `CREDENTIAL_NAME_AMBIGUOUS`. So the release that carries the
+migration follows v0.4.25 or later, in Dev and Production alike, and no
+replica that resolves a bare name to an arbitrary row serves while the
+migration is applied. A `cw` from before #5524 sends a bare name and gets
+that refusal, never a guess.
 
 A local store moves to schema 7, whose `credentials` table is unique on
 `(provider, display_name COLLATE NOCASE)` instead of `display_name`. The
