@@ -698,9 +698,47 @@ if (app) {
     else if (panel instanceof HTMLElement) panel.focus({ preventScroll: true });
   };
 
+  // The drawer is a modal (#4531): while it is open the rest of the page is inert, apart from the native
+  // dialogs and popovers that open above it. Only elements this code made inert are released.
+  let inertOutside = [];
+  let drawerOpener = null;
+  const releaseOutside = () => {
+    inertOutside.forEach((element) => { element.inert = false; });
+    inertOutside = [];
+  };
+  const holdOutside = (drawer) => {
+    releaseOutside();
+    const above = Array.from(document.querySelectorAll("dialog, [popover]")).filter((element) => !drawer.contains(element));
+    const keep = [drawer, ...above];
+    const walk = (parent) => {
+      for (const child of parent.children) {
+        if (keep.includes(child) || child.matches("script, style, template, link, meta")) continue;
+        if (keep.some((element) => child.contains(element))) walk(child);
+        else if (!child.inert) {
+          child.inert = true;
+          inertOutside.push(child);
+        }
+      }
+    };
+    walk(document.body);
+  };
+  const returnFocus = (drawer) => {
+    const opener = drawerOpener;
+    drawerOpener = null;
+    const fallback = Array.from(document.querySelectorAll("[data-drawer-trigger]"))
+      .find((trigger) => trigger instanceof HTMLElement && !drawer.contains(trigger) && trigger.offsetParent !== null);
+    const target = opener?.isConnected && opener.offsetParent !== null ? opener : fallback;
+    if (target instanceof HTMLElement) target.focus({ preventScroll: true });
+  };
+
   const setDrawerOpen = (open, focus = true) => {
     const drawer = currentDrawer();
     if (!(drawer instanceof HTMLElement)) return;
+    const wasOpen = !drawer.hidden;
+    if (open) holdOutside(drawer);
+    else releaseOutside();
+    // Hiding the drawer drops focus held inside it, so decide where focus goes before hiding.
+    const focusedInside = drawer.contains(document.activeElement);
     drawer.hidden = !open;
     drawer.dataset.open = String(open);
     drawer.setAttribute("aria-hidden", String(!open));
@@ -708,15 +746,17 @@ if (app) {
     // The focus waits for the first frame, which can come late on a busy page: by then someone may already be
     // typing in one of the drawer's fields, and moving focus would send the rest of their keystrokes elsewhere.
     if (open && focus) window.requestAnimationFrame(() => { if (!drawer.contains(document.activeElement)) focusDrawer(drawer); });
+    if (!open && wasOpen && (focusedInside || [null, document.body].includes(document.activeElement))) returnFocus(drawer);
   };
 
-  const openDrawer = (href) => {
+  const openDrawer = (href, opener = document.activeElement) => {
     const drawer = currentDrawer();
     if (!drawer || drawer.dataset.formDiscarded === "true") return false;
     const target = new URL(href || drawer.getAttribute("data-create-url"), window.location.origin);
     const rendered = new URL(drawer.getAttribute("data-create-url"), window.location.origin);
     // A different form needs fresh server-rendered selection and concurrency metadata.
     if (target.pathname !== rendered.pathname || target.search !== rendered.search) return false;
+    if (opener instanceof HTMLElement && !drawer.contains(opener) && opener !== document.body) drawerOpener = opener;
     setDrawerOpen(true);
     if (target.pathname !== window.location.pathname || target.search !== window.location.search) {
       historyIndex += 1;
@@ -765,7 +805,7 @@ if (app) {
       if (target && !details.contains(target)) details.removeAttribute("open");
     });
     const drawerTrigger = target?.closest("[data-drawer-trigger]");
-    if (drawerTrigger instanceof HTMLAnchorElement && openDrawer(drawerTrigger.href)) {
+    if (drawerTrigger instanceof HTMLAnchorElement && openDrawer(drawerTrigger.href, drawerTrigger)) {
       event.preventDefault();
       return;
     }
@@ -935,9 +975,15 @@ if (app) {
     dialog.querySelector(".cw-device-enrollment")?.remove();
     const section = element("section", "cw-device-enrollment");
     section.setAttribute("aria-live", "polite");
+    section.tabIndex = -1;
     section.append(...children);
+    const held = document.activeElement;
+    const focusLost = !(dialog.contains(held) && held.closest(".cw-dialog-actions") && !held.matches('[type="submit"]'));
     dialog.querySelector(".cw-dialog-body")?.append(section);
     dialog.dataset.enrollmentState = state;
+    // Each state hides the form and its Connect button, or replaces the view that held focus, so focus moves
+    // into the new view instead of falling to the page (#4533). A view with its own next step focuses it.
+    if (focusLost) section.focus({ preventScroll: true });
     return section;
   };
   const svgIcon = (name) => {
@@ -1013,12 +1059,16 @@ if (app) {
   const showFailure = (dialog, message, uncertain) => {
     const again = element("button", "cw-button cw-button--outline", "Try again");
     again.type = "button";
-    again.addEventListener("click", () => reset(dialog));
+    again.addEventListener("click", () => {
+      reset(dialog);
+      dialog.querySelector("form[data-device-enrollment] :is(input:not([type='hidden']), select, textarea, button)")?.focus();
+    });
     view(dialog, "failed",
       element("p", "cw-alert cw-alert--error", message),
       ...(uncertain ? [element("p", "cw-device-status", "It may already be saved. Check Credentials before connecting again.")] : []),
       again);
     dialog.querySelector(".cw-alert--error")?.setAttribute("role", "alert");
+    again.focus({ preventScroll: true });
   };
   const handle = (dialog, form, name, data) => {
     if (name === "challenge") return showChallenge(dialog, form, data) ? "continue" : "invalid";

@@ -2913,3 +2913,25 @@ for (const limit of ["frames", "bytes"] as const) {
     expect(state.stops).toBe(0);
   });
 }
+
+// Retry hides while it re-lists, so its status line holds focus; once it
+// works, focus goes to the terminal it opens (#4533).
+test("Retry hands focus to its status line while it re-lists, then to the terminal it opens", async ({ page }) => {
+  const state = await transport(page);
+  state.launchFailure = "limit";
+  await openFixture(page);
+  const retry = page.getByRole("button", { name: "Retry", exact: true });
+  await expect(retry).toBeVisible();
+  state.launchFailure = "";
+  let release!: () => void;
+  state.listGate = new Promise<void>((resolve) => { release = resolve; });
+  await retry.focus();
+  await page.keyboard.press("Enter");
+  await expect(retry).toBeHidden();
+  await expect(page.locator("[data-terminal-empty]")).toBeFocused();
+  release();
+  await expect(page.getByRole("tab")).toHaveCount(1);
+  await expect(page.getByRole("tab")).toBeFocused();
+  expect(state.lists).toBe(2);
+  expect(state.launches).toBe(2);
+});

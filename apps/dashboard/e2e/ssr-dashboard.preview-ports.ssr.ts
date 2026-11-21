@@ -52,3 +52,33 @@ test("assigned preview URL copies exactly and clipboard denial has a manual fall
   await page.keyboard.press("Escape");
   await expect(dialog).not.toBeVisible();
 });
+
+// A pressed Copy URL waits as aria-disabled: a disabled button drops keyboard
+// focus to the page, even when the copy succeeds at once (#4533).
+test("Copy URL keeps keyboard focus while it copies and after", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system with CODEWIRE_DESIGN_ORIGIN");
+  await page.addInitScript(() => {
+    let release = () => {};
+    let calls = 0;
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: () => {
+      calls += 1;
+      return new Promise<void>((resolve) => { release = resolve; });
+    } } });
+    Object.assign(window, { releaseCopy: () => release(), copyCalls: () => calls });
+  });
+  await page.goto(`${origin}/reference/fixtures/terminal.html`);
+  await page.getByRole("button", { name: "Ports", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Ports · Example Sandbox", exact: true });
+  const copy = dialog.getByRole("button", { name: "Copy URL", exact: true });
+  await copy.focus();
+  await page.keyboard.press("Enter");
+  await expect(copy).toHaveAttribute("aria-disabled", "true");
+  await expect(copy).toBeFocused();
+  await page.keyboard.press("Enter");
+  await page.evaluate(() => (window as unknown as { releaseCopy(): void }).releaseCopy());
+  await expect(dialog.locator("[data-preview-copy-status]")).toHaveText("Preview URL copied.");
+  await expect(copy).not.toHaveAttribute("aria-disabled");
+  await expect(copy).toBeFocused();
+  expect(await page.evaluate(() => (window as unknown as { copyCalls(): number }).copyCalls())).toBe(1);
+});

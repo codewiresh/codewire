@@ -138,10 +138,14 @@
       if (!retryButton) return;
       retryButton.hidden = !ready || !failure?.retry;
       retryButton.disabled = pending || suspended;
-      // A Retry that fails again gives focus back to Retry, not the page.
+      // Retry hides while it re-lists and its status line holds focus (#4533). If it fails again, focus
+      // returns to Retry; if it worked, to the terminal it opens, which can arrive with a later launch.
       if (retryFocus && !pending) {
-        retryFocus = false;
-        if (!retryButton.hidden && [null, document.body].includes(document.activeElement)) retryButton.focus();
+        const lost = [null, document.body, retryButton, empty].includes(document.activeElement);
+        const tab = tabs.get(active);
+        if (!lost) retryFocus = false;
+        else if (!retryButton.hidden && !emptyState.hidden) { retryFocus = false; retryButton.focus(); }
+        else if (tab) { retryFocus = false; tab.button.focus(); }
       }
     }
     // Output, status-bar groups and tab actions are shown or withheld together.
@@ -192,8 +196,12 @@
       // status; only a Sandbox known not to be ready stops it.
       const openBlocked = stateBlocked || runtimeBlocked();
       tabList.hidden = !authorized || suspended;
-      renameSave.disabled = !authorized || pending || uncertain || needsReload || suspended;
+      // A control waiting on a session request is aria-disabled, not disabled, so a focused one keeps its
+      // keyboard focus (#4533); every handler already ignores presses while pending.
+      renameSave.disabled = !authorized || uncertain || needsReload || suspended;
+      renameSave.setAttribute("aria-disabled", String(pending));
       renameButton.disabled = renameSave.disabled || !tabs.has(active);
+      renameButton.setAttribute("aria-disabled", String(pending));
       root.querySelector("[data-terminal-reload]").hidden = !needsReload;
       newButton.disabled = blocked || tabs.size >= maxTabs;
       // Explain the tab limit where it applies instead of only disabling New.
@@ -203,7 +211,8 @@
         if (atLimit) newButton.setAttribute("aria-describedby", limitNote.id);
         else newButton.removeAttribute("aria-describedby");
       }
-      refreshButton.disabled = pending || suspended;
+      refreshButton.disabled = suspended;
+      refreshButton.setAttribute("aria-disabled", String(pending));
       existing.disabled = blocked || tabs.size >= maxTabs || existing.options.length <= 1;
       existingForm.querySelector("button").disabled = existing.disabled || !existing.value;
       for (const tab of tabs.values()) {
@@ -215,7 +224,8 @@
         tab.close.hidden = removable;
         tab.close.disabled = controlBlocked || removable;
         tab.remove.hidden = !removable;
-        tab.remove.disabled = !authorized || pending || suspended;
+        tab.remove.disabled = !authorized || suspended;
+        tab.remove.setAttribute("aria-disabled", String(pending));
         tab.presentation.terminal.options.disableStdin = openBlocked || !open || !live(tab.state);
       }
       renderEmpty();
@@ -971,6 +981,10 @@
       if (failure.rearm && !tabs.size) autoOpen = "armed";
       retryFocus = true;
       void refresh();
+      if (retryButton.hidden && !emptyState.hidden) {
+        empty.tabIndex = -1;
+        empty.focus({ preventScroll: true });
+      }
     });
     existing.addEventListener("change", updateControls);
     existingForm.addEventListener("submit", (event) => {
@@ -1005,6 +1019,8 @@
     renameInput.addEventListener("input", () => renameInput.setCustomValidity(""));
     renameForm.addEventListener("submit", (event) => {
       event.preventDefault();
+      // A press while a session request runs waits; the editor and its name stay.
+      if (pending) return;
       const target = renameTarget;
       if (!renameDialog.open || !target || !authorized || pending || uncertain || needsReload || suspended
         || target.account !== account || target.epoch !== epoch || tabs.get(target.tab.id) !== target.tab) {

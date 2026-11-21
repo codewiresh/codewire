@@ -109,16 +109,20 @@
       content.inert = !!busy;
       content.setAttribute("aria-busy", String(!!busy));
       observeButton.hidden = attempt?.operationId == null;
-      observeButton.disabled = !!busy;
+      // A pressed action waits as aria-disabled: disabling it would drop its keyboard focus (#4533). The
+      // handlers already ignore presses while busy.
+      observeButton.setAttribute("aria-disabled", String(!!busy));
       const current = step();
       planForm.hidden = current === "review" || current === "result";
       back.hidden = current !== "review";
       cancel.hidden = current !== "choose" && current !== "review";
       done.hidden = current !== "pending" && current !== "result";
       reviewButton.hidden = current !== "choose";
-      reviewButton.disabled = inputs.disabled;
+      reviewButton.disabled = !eligible || locked();
+      reviewButton.setAttribute("aria-disabled", String(!!busy));
       applyButton.hidden = current !== "review";
-      applyButton.disabled = consents.disabled;
+      applyButton.disabled = !eligible || locked() || plan === null;
+      applyButton.setAttribute("aria-disabled", String(!!busy));
     }
     function unresolved() {
       review.hidden = true;
@@ -220,6 +224,8 @@
       if (!resources(desired)) return;
       plan = null;
       review.hidden = true;
+      // Enter in a field submits too; the fields go inert while busy, so Review, which waits, takes focus.
+      if (content.contains(document.activeElement)) reviewButton.focus();
       status.textContent = "Reviewing proposed resources…";
       void request(`${base}/_actions/resize/plan`, { method: "POST", headers: { Accept: "application/json" }, body: body(desired) }, (value) => {
         if (!validPlan(value, actor, environment, desired)) throw new Error("Invalid resize plan");

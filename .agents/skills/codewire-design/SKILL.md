@@ -277,3 +277,26 @@ live state, and pages don't poll for it. Design: private-docs
 - **Review checklist:** this change adds no periodic request; every live
   region subscribes to a `codewire:live:*` event, refreshes on `resync`, and
   still shows the right state after the stream reconnects.
+
+## 10. Keyboard focus
+
+Journey: `docs/journeys/dashboard-keyboard.md`.
+
+- **A drawer is modal.** While a `[data-drawer]` is open, everything outside
+  it is `inert`, except native dialogs and popovers that open above it. Tab
+  and Shift+Tab stay inside the panel, and its first field takes focus on
+  the first frame unless focus is already inside. Escape, the close button
+  and the backdrop close it, and focus returns to the control that opened it.
+  Opened at page load, there is no opener, so focus goes to the page's
+  Create Sandbox trigger (#4531).
+- **A control waiting on its own request keeps focus.** While the request
+  runs, mark the control `aria-disabled="true"` and have its handler ignore
+  presses; never set `disabled` mid-interaction, because a focused control
+  that becomes disabled sends focus to `<body>`. Keep `disabled` for a
+  control that does not apply at all. `.cw-button`, menu items and terminal
+  tab buttons style `aria-disabled` the same as
+  `:disabled` (#4533).
+- **Prove it** with a held request in a fixture spec: activate the control by
+  keyboard, hold its response, and assert that `document.activeElement` is
+  still the control while the request runs and after it ends, on success and
+  on failure.

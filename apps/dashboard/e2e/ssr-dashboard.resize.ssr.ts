@@ -431,3 +431,36 @@ test("a current value outside the fixed choices stays selected as its own choice
   await expect(cpu.locator("option")).toHaveText(["750 millicores (current)", "1 vCPU", "2 vCPU", "4 vCPU", "8 vCPU"]);
   await expect(memory.locator("option:checked")).toHaveText("1536 MiB (current)");
 });
+
+// Review resize waits as aria-disabled, so a keyboard user keeps their place
+// through the plan request; Enter in a field hands focus to Review, because
+// the fields go inert while it runs (#4533).
+test("Review resize keeps keyboard focus while its plan is pending, on success and refusal", async ({ page }) => {
+  const state = await transport(page);
+  let release!: () => void;
+  state.planGate = new Promise<void>((resolve) => { release = resolve; });
+  const dialog = await open(page);
+  await dialog.getByLabel("CPU", { exact: true }).selectOption("2000");
+  await dialog.getByLabel("Memory", { exact: true }).selectOption("4096");
+  await dialog.getByLabel("Disk (GiB)", { exact: true }).fill("20");
+  const reviewButton = dialog.getByRole("button", { name: "Review resize", exact: true });
+  await reviewButton.focus();
+  await page.keyboard.press("Enter");
+  await expect(reviewButton).toHaveAttribute("aria-disabled", "true");
+  await expect(reviewButton).toBeFocused();
+  await page.keyboard.press("Enter");
+  release();
+  await expect(dialog.locator("[data-resize-plan]")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Back", exact: true })).toBeFocused();
+  expect(state.plans).toBe(1);
+  await page.keyboard.press("Enter");
+  state.planRefusal = { error: "setup-in-progress" };
+  state.planGate = new Promise<void>((resolve) => { release = resolve; });
+  await dialog.getByLabel("Disk (GiB)", { exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await expect(reviewButton).toBeFocused();
+  release();
+  await expect(reviewButton).not.toHaveAttribute("aria-disabled", "true");
+  await expect(reviewButton).toBeFocused();
+  expect(state.plans).toBe(2);
+});

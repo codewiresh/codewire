@@ -76,8 +76,8 @@
 .cw-terminal-tab:focus-visible { outline-offset: calc(-1 * var(--focus-ring-width)); }
 .cw-terminal-tab-label { max-width: 12rem; overflow: hidden; text-overflow: ellipsis; }
 .cw-terminal-tab-close { display: inline-grid; width: var(--touch-target); height: var(--touch-target); flex: none; place-items: center; margin-right: var(--space-2); padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--fg-tertiary); cursor: pointer; }
-.cw-terminal-tab-close:hover:not(:disabled) { background: var(--bg-surface-hover); color: var(--fg-primary); }
-.cw-terminal-tab-close:disabled { color: var(--fg-disabled); cursor: not-allowed; }
+.cw-terminal-tab-close:hover:not(:disabled, [aria-disabled="true"]) { background: var(--bg-surface-hover); color: var(--fg-primary); }
+.cw-terminal-tab-close:is(:disabled, [aria-disabled="true"]) { color: var(--fg-disabled); cursor: not-allowed; }
 .cw-terminal-tab-close .cw-icon { width: var(--icon-size-sm); height: var(--icon-size-sm); }
 .cw-terminal-new { align-self: center; margin-inline: var(--space-2); }
 /* With no tab open the plus is the first thing on the bar. */

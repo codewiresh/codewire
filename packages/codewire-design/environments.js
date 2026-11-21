@@ -264,7 +264,8 @@
     const controller = new AbortController();
     state.controller = controller;
     const button = form.querySelector("[data-restore-create-draft]");
-    if (button) button.disabled = true;
+    // aria-disabled, not disabled: a disabled button drops keyboard focus (#4533).
+    button?.setAttribute("aria-disabled", "true");
     draftStatus(form, "Checking current options before restoring selections…");
     // An automatic restore holds the form briefly so an early keystroke cannot
     // replace the saved draft with an empty one; a slow restore gives it back.
@@ -306,7 +307,10 @@
       window.clearTimeout(timer);
       if (state.controller === controller) state.controller = null;
       if (automatic && form.isConnected) { form.inert = false; form.removeAttribute("aria-busy"); }
-      if (button && form.isConnected) button.disabled = state.edited || state.storageFailed || !pristineDraftForm(form);
+      if (button && form.isConnected) {
+        button.removeAttribute("aria-disabled");
+        button.disabled = state.edited || state.storageFailed || !pristineDraftForm(form);
+      }
       resumeCreateOptions(form);
     }
   };
@@ -516,7 +520,7 @@
     if (!(form instanceof HTMLFormElement)) return;
     if (event.target.closest("[data-retry-create-options]")) { void loadCreateOptions(form, optionStates.get(form)); return; }
     const restore = event.target.closest("[data-restore-create-draft]");
-    if (restore) { void restoreDraft(form, draftStates.get(form)); return; }
+    if (restore) { if (restore.getAttribute("aria-disabled") !== "true") void restoreDraft(form, draftStates.get(form)); return; }
     if (event.target.closest("[data-field-help-trigger], [data-github-browser]")) return;
     if (event.target.closest("button")) editDraft(form);
   }, true);

@@ -539,3 +539,29 @@ test.describe("without JavaScript", () => {
     await expect(page.locator('button[type="button"][data-dialog-open], button[type="button"][data-dialog-close]')).toHaveCount(0);
   });
 });
+
+// Each sign-in state hides the form and its Connect button, so focus moves
+// into the view that replaces it instead of falling to the page (#4533).
+test("device sign-in moves focus into each view it shows", async ({ page }) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/settings/credentials/_actions/credentials/oauth/enroll", async (route) => {
+    await gate;
+    await route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" },
+      body: `event: failed\ndata: ${JSON.stringify({ message: "Synthetic sign-in refusal.", uncertain: false })}\n\n` });
+  });
+  await action(page, "Reconnect Work Codex").click();
+  const reconnect = dialog(page, "Reconnect Work Codex");
+  const confirm = reconnect.getByRole("checkbox");
+  await confirm.check();
+  await action(reconnect, "Reconnect Codex").focus();
+  await page.keyboard.press("Enter");
+  const view = reconnect.locator(".cw-device-enrollment");
+  await expect(view).toContainText("Requesting a sign-in code…");
+  await expect(view).toBeFocused();
+  release();
+  const again = action(reconnect, "Try again");
+  await expect(again).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(confirm).toBeFocused();
+});

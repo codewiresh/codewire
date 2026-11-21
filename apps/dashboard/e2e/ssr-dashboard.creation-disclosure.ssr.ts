@@ -1183,3 +1183,75 @@ test("automatic restore holds the form, gives it back on failure, and never runs
   await expect(page.getByRole("button", { name: "Restore saved draft" })).toBeHidden();
   expect(restores).toBe(1);
 });
+
+// Restore waits as aria-disabled, so a keyboard user keeps their place through
+// the restore request and a second press starts nothing (#4533).
+test("Restore saved draft keeps keyboard focus while it restores, then hands focus to Name", async ({ page }) => {
+  const draft = selectionsDraft();
+  await page.addInitScript(({ key, bytes }) => sessionStorage.setItem(key, bytes), { key: keyForDraft(draft), bytes: JSON.stringify(draft) });
+  await page.goto(fixtureUrl());
+  await settleAutomaticRestore(page);
+  const html = await restoredCard(page, draft);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let fail = true;
+  let restores = 0;
+  await page.route("**/fixture/_fragments/create-draft", async (route) => {
+    restores += 1;
+    await gate;
+    if (fail) await route.fulfill({ status: 503, contentType: "text/plain", body: "synthetic outage" });
+    else await route.fulfill({ status: 200, contentType: "text/html", body: html });
+  });
+  const restore = page.getByRole("button", { name: "Restore saved draft" });
+  await restore.focus();
+  await page.keyboard.press("Enter");
+  await expect(restore).toHaveAttribute("aria-disabled", "true");
+  await expect(restore).toBeFocused();
+  await page.keyboard.press("Enter");
+  release();
+  await expect(page.locator("[data-create-draft-status]")).toContainText("could not be restored");
+  await expect(restore).toBeFocused();
+  expect(restores).toBe(1);
+  fail = false;
+  await page.keyboard.press("Enter");
+  await expect(page.locator("[data-environment-form]")).toHaveAttribute("data-create-draft-restored", "true");
+  await expect(page.getByLabel("Name", { exact: true })).toBeFocused();
+});
+
+// The drawer is a modal (#4531): the page behind it is inert, Tab stays inside,
+// and closing it returns focus to the control that opened it.
+test("the Create drawer is modal and returns focus to its opener", async ({ page }) => {
+  const origin = process.env.CODEWIRE_DESIGN_ORIGIN;
+  test.skip(!origin, "Run make design-system and set CODEWIRE_DESIGN_ORIGIN");
+  await page.goto(`${origin}/reference/fixtures/create-sandbox.html`);
+  const layer = page.locator("[data-drawer]");
+  const name = page.getByLabel("Name", { exact: true });
+  const reachableOutside = () => page.evaluate(() => {
+    const drawer = document.querySelector("[data-drawer]")!;
+    return Array.from(document.querySelectorAll<HTMLElement>("a[href], button, input, select, textarea, summary"))
+      .filter((control) => !drawer.contains(control) && !control.closest("dialog, [popover], [inert]")).length;
+  });
+  await expect(name).toBeFocused();
+  expect(await reachableOutside()).toBe(0);
+  for (const key of ["Tab", "Shift+Tab"]) {
+    for (let press = 0; press < 40; press += 1) {
+      await page.keyboard.press(key);
+      expect(await layer.evaluate((drawer) => drawer.contains(document.activeElement))).toBe(true);
+    }
+  }
+  // The walk passed a field-help button, which showed its tooltip: the first
+  // Escape closes the tooltip, the second the drawer. Opened at page load there
+  // is no opener, so focus goes to the page's Create Sandbox.
+  await page.keyboard.press("Escape");
+  await expect(page.locator("[data-field-help-popover]:popover-open")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(layer).toBeHidden();
+  const trigger = page.getByRole("link", { name: "Create Sandbox", exact: true });
+  await expect(trigger).toBeFocused();
+  expect(await reachableOutside()).toBeGreaterThan(0);
+  await page.keyboard.press("Enter");
+  await expect(name).toBeFocused();
+  await page.getByRole("link", { name: "Close Create Sandbox", exact: true }).click();
+  await expect(layer).toBeHidden();
+  await expect(trigger).toBeFocused();
+});

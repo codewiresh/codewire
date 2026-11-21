@@ -47,6 +47,7 @@ runs the same commands and holds the result to the same standard.
 | [mesh.md](mesh.md) | Mesh Networks (#3350, #5115, #5118, #5119): Sandboxes on one Mesh Network reach each other's published ports and nothing else does, and the dashboard shows the same Mesh Networks, nodes and join state as `cw`. Written first; every step is not yet observed |
 | [account-access.md](account-access.md) | What an account can still reach after a sign-out, a disable or a revoked credential (#3586): first, a terminal ticket from a session that has ended |
 | [deletion.md](deletion.md) | Deleting an account or an organization (#4823): the account-deletion page and `cw org delete` say it is permanent, before it happens |
+| [dashboard-keyboard.md](dashboard-keyboard.md) | Keyboard focus in the dashboard (#4531, #4533): the Create Sandbox drawer is modal and returns focus to its opener, and a control waiting on its request keeps focus. Written first; every step is not yet observed |
 | [desktop.md](desktop.md) | An environment's desktop (#3223): `cw desktop`, the dashboard's Desktop panel, an agent drawing on `DISPLAY=:1`, its Codewire look and Chromium, who may open it, and what ends it. Written first; every step is not yet observed |
 | [edge-caching.md](edge-caching.md) | Caching at the edge (#5054, #5123, #5072): no cache in front of Codewire keeps one caller's response for another; the homepage is the one reviewed exception. Observed on Dev 2026-11-21 |
 
