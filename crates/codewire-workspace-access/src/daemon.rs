@@ -1510,6 +1510,7 @@ mod tests {
         type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
         type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
         type ForwardTcpStream = ReceiverStream<Result<v1::ForwardTcpMessage, Status>>;
+        type ForwardUnixStream = ReceiverStream<Result<v1::ForwardTcpMessage, Status>>;
         type AttachSessionStream = ReceiverStream<Result<v1::SessionAttachMessage, Status>>;
         type CredentialBridgeStream =
             ReceiverStream<Result<bridge_v1::CredentialBridgeGuestMessage, Status>>;
@@ -1632,6 +1633,13 @@ mod tests {
             _request: Request<tonic::Streaming<v1::ForwardTcpMessage>>,
         ) -> Result<Response<Self::ForwardTcpStream>, Status> {
             Err(Status::unimplemented("forward tcp"))
+        }
+
+        async fn forward_unix(
+            &self,
+            _request: Request<tonic::Streaming<v1::ForwardTcpMessage>>,
+        ) -> Result<Response<Self::ForwardUnixStream>, Status> {
+            Err(Status::unimplemented("forward unix"))
         }
 
         async fn pty_session(

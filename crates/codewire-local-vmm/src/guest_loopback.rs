@@ -11,8 +11,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 use codewire_daemon::DaemonAuthToken;
+use codewire_daemon::client::ForwardStream;
 use codewire_workspace_access::daemon::{DaemonClientError, DaemonSessionClient};
-use tokio::io::DuplexStream;
 use tonic::Code;
 
 use crate::control::v1;
@@ -56,7 +56,7 @@ impl GuestLoopbackError {
 pub async fn open_guest_loopback(
     client: &DaemonSessionClient,
     guest_port: u16,
-) -> Result<DuplexStream, GuestLoopbackError> {
+) -> Result<ForwardStream, GuestLoopbackError> {
     if let Some(refusal) = codewire_daemon_proto::unpublished_port_refusal(guest_port) {
         return Err(GuestLoopbackError::Refused(refusal.to_owned()));
     }

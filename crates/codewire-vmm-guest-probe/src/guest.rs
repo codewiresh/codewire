@@ -131,6 +131,10 @@ const DOCKER_RUNTIME_PATH: &str = "/run/codewire/docker";
 const DOCKER_SOCKET_PATH: &str = "/run/codewire/docker/docker.sock";
 const DOCKER_ROOT_PATH: &str = "/run/codewire/docker-root";
 const DOCKER_ROOT_BINARY_PATH: &str = "/usr/local/bin/dockerd";
+/// The environment's own Docker, and nothing of the platform's: socket
+/// forwards may reach this one `/run/codewire-*` directory
+/// (`codewire_daemon::platform_sockets`, `DOCKER_RUNTIME_DIRECTORY`, #5608),
+/// so no platform socket or mount may ever be put here.
 const CONTAINER_DOCKER_RUNTIME_PATH: &str = "/run/codewire-docker";
 const CONTAINER_DOCKER_SOCKET_PATH: &str = "/run/codewire-docker/docker.sock";
 const CONTAINER_DEFAULT_DOCKER_SOCKET_PATH: &str = "/run/docker.sock";
@@ -6726,6 +6730,17 @@ mod tests {
             docker_runtime["options"],
             serde_json::json!(["rbind", "rw", "nosuid", "nodev", "noexec"])
         );
+        // Socket forwards may reach the Docker directory, so it is the only
+        // mount at or under it (#5608).
+        let docker_runtime_children = mounts
+            .iter()
+            .filter(|mount| {
+                let destination = mount["destination"].as_str().unwrap_or_default();
+                destination == CONTAINER_DOCKER_RUNTIME_PATH
+                    || destination.starts_with(&format!("{CONTAINER_DOCKER_RUNTIME_PATH}/"))
+            })
+            .count();
+        assert_eq!(docker_runtime_children, 1);
         assert!(mounts.iter().all(|mount| {
             let source = mount["source"].as_str().unwrap_or_default();
             source != "/var/run/docker.sock"

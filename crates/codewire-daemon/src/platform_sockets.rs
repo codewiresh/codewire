@@ -94,25 +94,50 @@ pub fn named(device: u64, inode: u64) -> Option<&'static str> {
     sockets().get(&(device, inode)).map(|(_, name)| *name)
 }
 
+/// Every platform socket this process serves now: device, inode and name.
+pub fn snapshot() -> Vec<(u64, u64, &'static str)> {
+    sockets()
+        .iter()
+        .map(|((device, inode), (_, name))| (*device, *inode, *name))
+        .collect()
+}
+
+/// The platform's own directories, as a refusal names them.
+pub const PLATFORM_DIRECTORIES: [&str; 3] = ["/codewire", "/run/codewire", "/run/codewire-*"];
+
+/// The one `/run/codewire-*` directory that is not the platform's: a local
+/// VM's container holds the environment's Docker socket there.
+const DOCKER_RUNTIME_DIRECTORY: &str = "codewire-docker";
+
 /// The platform's own directory that `resolved`, an absolute path with no
 /// `.` or `..`, lies in: `/codewire`, or `/run/codewire` and its
 /// `/run/codewire-*` siblings. A forward refuses anything there whatever its
 /// identity, in case a socket was ever bound without [`bind`].
 pub fn platform_directory(resolved: &Path) -> Option<&'static str> {
+    platform_directory_index(resolved).map(|index| PLATFORM_DIRECTORIES[index])
+}
+
+/// [`platform_directory`], as its index in [`PLATFORM_DIRECTORIES`].
+pub fn platform_directory_index(resolved: &Path) -> Option<usize> {
     let mut components = resolved.components();
     if components.next() != Some(Component::RootDir) {
         return None;
     }
     match components.next()? {
-        Component::Normal(first) if first == "codewire" => Some("/codewire"),
+        Component::Normal(first) if first == "codewire" => Some(0),
         Component::Normal(first) if first == "run" => match components.next()? {
-            Component::Normal(second) if second == "codewire" => Some("/run/codewire"),
+            Component::Normal(second) if second == "codewire" => Some(1),
+            // Exactly this directory, never a prefix: where a local VM keeps
+            // the environment's Docker socket, which a forward may reach.
+            // Nothing of the platform's is put there; the guest's
+            // `CONTAINER_DOCKER_RUNTIME_PATH` says the same (#5608).
+            Component::Normal(second) if second == DOCKER_RUNTIME_DIRECTORY => None,
             Component::Normal(second)
                 if second
                     .to_str()
                     .is_some_and(|second| second.starts_with("codewire-")) =>
             {
-                Some("/run/codewire-*")
+                Some(2)
             }
             _ => None,
         },
@@ -159,6 +184,18 @@ mod tests {
             ("/codewire/run/daemon/mesh.sock", Some("/codewire")),
             ("/run/codewire/credentials.sock", Some("/run/codewire")),
             ("/run/codewire-runtime/init", Some("/run/codewire-*")),
+            ("/run/codewire-docker/docker.sock", None),
+            ("/run/codewire-docker", None),
+            ("/run/codewire-dockerx/docker.sock", Some("/run/codewire-*")),
+            (
+                "/run/codewire-docker-data/docker.sock",
+                Some("/run/codewire-*"),
+            ),
+            (
+                "/run/codewire-host/credential.sock",
+                Some("/run/codewire-*"),
+            ),
+            ("/run/codewire-host/poweroff.sock", Some("/run/codewire-*")),
             ("/codewire-other/x.sock", None),
             ("/run/codewirex/x.sock", None),
             ("/home/codewire/codewire/x.sock", None),

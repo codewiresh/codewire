@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use codewire_daemon_proto::daemon::v1;
 use codewire_daemon_proto::platform_listeners;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::{OnceCell, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
@@ -123,10 +123,23 @@ impl WorkloadSockets {
 /// directions end, after telling the client the forward is open.
 pub(crate) fn serve(
     target: TcpStream,
+    inbound: Streaming<v1::ForwardTcpMessage>,
+) -> ReceiverStream<Result<v1::ForwardTcpMessage, Status>> {
+    let (from, to) = target.into_split();
+    serve_halves(from, to, inbound, ())
+}
+
+/// [`serve`] for a target given as its two halves. `held` lives as long as
+/// the forward: a Unix forward's helper process, ended when it drops.
+pub(crate) fn serve_halves(
+    mut from: impl AsyncRead + Send + Unpin + 'static,
+    mut to: impl AsyncWrite + Send + Unpin + 'static,
     mut inbound: Streaming<v1::ForwardTcpMessage>,
+    held: impl Send + 'static,
 ) -> ReceiverStream<Result<v1::ForwardTcpMessage, Status>> {
     let (outbound, receiver) = mpsc::channel(FORWARD_QUEUE);
     tokio::spawn(async move {
+        let _held = held;
         let message = |payload| v1::ForwardTcpMessage {
             payload: Some(payload),
         };
@@ -137,8 +150,7 @@ pub(crate) fn serve(
         {
             return;
         }
-        let (mut from, mut to) = target.into_split();
-        let to_target = async {
+        let to_target = async move {
             loop {
                 match inbound.message().await {
                     Ok(Some(v1::ForwardTcpMessage {
@@ -159,6 +171,9 @@ pub(crate) fn serve(
                 }
             }
             let _ = to.shutdown().await;
+            // Dropping the writer ends a pipe's stream as shutdown ends a
+            // socket's.
+            drop(to);
             Ok(())
         };
         let from_target = async {
@@ -181,12 +196,51 @@ pub(crate) fn serve(
                 }
             }
         };
-        if let Err(status) = tokio::try_join!(to_target, from_target) {
+        let mut to_target = std::pin::pin!(to_target);
+        let mut from_target = std::pin::pin!(from_target);
+        let (mut to_done, mut from_done) = (false, false);
+        let ended = loop {
+            tokio::select! {
+                sent = &mut to_target, if !to_done => {
+                    to_done = true;
+                    if let Err(status) = sent {
+                        break Err(status);
+                    }
+                }
+                answered = &mut from_target, if !from_done => {
+                    from_done = true;
+                    if let Err(status) = answered {
+                        break Err(status);
+                    }
+                }
+                // The client went away without ending its side, which a
+                // half-close never does. What it sent still reaches the
+                // target, within the bound; then the forward ends, and drops
+                // what it holds, whatever the target does (#5608).
+                () = outbound.closed() => {
+                    if !to_done {
+                        let _ = tokio::time::timeout(
+                            crate::client::FORWARD_DROP_DRAIN,
+                            &mut to_target,
+                        )
+                        .await;
+                    }
+                    break Ok(());
+                }
+            }
+            if to_done && from_done {
+                break Ok(());
+            }
+        };
+        if let Err(status) = ended {
             let _ = outbound.send(Err(status)).await;
         }
     });
     ReceiverStream::new(receiver)
 }
+
+#[cfg(target_os = "linux")]
+pub(crate) mod unix;
 
 #[cfg(target_os = "linux")]
 mod namespace {

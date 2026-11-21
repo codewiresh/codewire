@@ -17,7 +17,7 @@ Updated 2026-11-20.
 | --- | --- | --- | --- | --- | --- |
 | `ports-local-publish` | #4347 | observed on the branch, 2026-11-13 (#4415) | not yet observed | n/a | n/a |
 | `preview-cloud-loopback` | #4357 | n/a | n/a | not yet observed | not yet observed |
-| `ssh-socket-forward` | #5608 | not yet observed | not yet observed | not yet observed | not yet observed |
+| `ssh-socket-forward` | #5608 | observed 2026-11-20 (#5625) | not yet observed | not yet observed | not yet observed |
 | `local-https-hostnames` | #4316 | no command yet | no command yet | n/a | n/a |
 | `preview-host-variable` | #4316 | no command yet | no command yet | no command yet | no command yet |
 
@@ -160,8 +160,10 @@ Issue: #5608. Spec: `SPEC.md` "Port forwarding over SSH". Code:
   - a target that is not a socket, a relative path, an abstract name
     (`@name`), a path over 107 bytes, and `ssh -R` with a socket;
   - on a local VM: a socket on a mount only the container sees (its `/tmp`),
-    a socket only root may open, and a VM whose runtime predates
-    `ForwardUnix`;
+    the environment's Docker socket through `/var/run/docker.sock`, which
+    links to `/run/codewire-docker/docker.sock`, the two sockets under
+    `/run/codewire-host`, a socket only root may open, and a VM whose
+    runtime predates `ForwardUnix`;
   - 256 forwards open at once, TCP and Unix together, then one more (a test
     in `forward/tests.rs`, since a walk can't hold that many);
   - Rex: `rex server install ssh://cw-cloud-NAME`, then
@@ -202,6 +204,15 @@ Issue: #5608. Spec: `SPEC.md` "Port forwarding over SSH". Code:
   done
   ssh -N -o ExitOnForwardFailure=yes -R "/home/codewire/r.sock:$PWD/peer.sock" HOST
 
+  # A local VM only: a socket on the container's own /tmp, which a walk
+  # under the workload's root would not see.
+  cw run --in walk --name tmp-peer --detach --no-tty -- python3 -c '
+  import socket
+  s = socket.socket(socket.AF_UNIX); s.bind("/tmp/peer.sock"); s.listen()
+  while True:
+      c, _ = s.accept(); c.sendall(b"from /tmp\n"); c.close()'
+  ssh -W /tmp/peer.sock HOST </dev/null
+
   # A local VM only: a socket only root may open.
   cw exec --in walk sudo python3 -c 'import os, socket, time
   s = socket.socket(socket.AF_UNIX); s.bind("/run/root-only.sock")
@@ -221,7 +232,9 @@ Issue: #5608. Spec: `SPEC.md` "Port forwarding over SSH". Code:
   - `.bashrc` (not a socket), `./peer.sock` (relative), the long path and
     `/codewire/bin/cw` (the platform's directory) are refused, each with its
     reason; `ssh -R` exits with "remote port forwarding failed". On a local
-    VM a socket under the container's `/tmp` is reached, the root-only socket
+    VM `ssh -W /tmp/peer.sock` prints `from /tmp`, `docker version` through
+    a forward of `/var/run/docker.sock` names the environment's Docker, both
+    `/run/codewire-host` sockets are refused, the root-only socket
     is refused for permission, and an old runtime refuses with a reason
     naming the runtime.
   - The environment's log has one line per forward, opened or refused, with
@@ -236,7 +249,23 @@ Issue: #5608. Spec: `SPEC.md` "Port forwarding over SSH". Code:
     socket. Where it can't be made, record that and keep the symlink case.
   - `StreamLocalBindUnlink=yes` lets a rerun reuse `LOCAL.sock`; without it
     a leftover local socket makes `ssh` fail before any channel opens.
-- **Observed:** not yet observed.
+- **Observed:**
+  - Linux local VM, 2026-11-20 (codewire-79), `cw` and runtime built from
+    #5625 at 9db31c470f: a server in the home directory and one on the
+    container's own `/tmp` tmpfs each saw uid=1000 gid=1000 groups=1001
+    through `ssh -W` and `ssh -L`, the same as a workload process; a
+    root-only socket was refused for permission; the credential bridge's
+    socket was refused by identity, directly and through a symlink (a hard
+    link can't be made across the mount); `poweroff.sock` was refused by
+    the backstop; `.bashrc` and `./peer.sock` were refused. The Docker
+    socket was refused by the `/run/codewire-*` backstop, the finding the
+    exemption fixes. Evidence: the walk comment on #5608.
+  - Linux local VM, 2026-11-20 (codewire-79), at c9f699bf4d with the
+    exemption: `docker version` through `ssh -L` of `/var/run/docker.sock`
+    answered from the environment's Docker (server 29.9.2, kernel
+    6.18.48-codewire3), and both `/run/codewire-host` sockets were still
+    refused. Evidence: the walk comment on #5608.
+  - Dev and Production: not yet observed.
 
 ## `local-https-hostnames`: an HTTPS hostname per labelled port on a local VM
 

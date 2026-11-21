@@ -2077,3 +2077,221 @@ async fn the_session_calls_refuse_the_desktops_name() {
     assert!(refused.message().contains("desktop"), "{refused:?}");
     harness.shutdown().await;
 }
+
+// ForwardUnix (#5608): a Unix socket in the workload, the same stream as
+// ForwardTcp after its `unix_open`.
+
+fn forward_unix_open(path: &str) -> v1::ForwardTcpMessage {
+    forward_message(ForwardPayload::UnixOpen(v1::ForwardUnixOpen {
+        path: path.into(),
+    }))
+}
+
+async fn forward_unix(
+    client: &mut HarnessClient,
+    first: v1::ForwardTcpMessage,
+) -> (
+    mpsc::Sender<v1::ForwardTcpMessage>,
+    Result<tonic::Streaming<v1::ForwardTcpMessage>, tonic::Status>,
+) {
+    let (input, requests) = mpsc::channel(4);
+    input.send(first).await.unwrap();
+    let response = client
+        .forward_unix(ReceiverStream::new(requests))
+        .await
+        .map(tonic::Response::into_inner);
+    (input, response)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_socket_forward_reaches_a_users_socket_and_half_closes_both_ways() {
+    let harness = DaemonHarness::spawn().await;
+    let mut client = harness.client().await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("user.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let target = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received).await.unwrap();
+        stream.write_all(b"pong:").await.unwrap();
+        stream.write_all(&received).await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+
+    let (input, response) =
+        forward_unix(&mut client, forward_unix_open(path.to_str().unwrap())).await;
+    let mut output = response.expect("the forward opens");
+    assert_eq!(
+        output.message().await.unwrap().and_then(|m| m.payload),
+        Some(ForwardPayload::Opened(()))
+    );
+    input
+        .send(forward_message(ForwardPayload::Data(b"ping".to_vec())))
+        .await
+        .unwrap();
+    input
+        .send(forward_message(ForwardPayload::End(())))
+        .await
+        .unwrap();
+    let mut answer = Vec::new();
+    loop {
+        match output.message().await.unwrap().and_then(|m| m.payload) {
+            Some(ForwardPayload::Data(bytes)) => answer.extend(bytes),
+            Some(ForwardPayload::End(())) => break,
+            other => panic!("unexpected frame {other:?}"),
+        }
+    }
+    assert_eq!(answer, b"pong:ping");
+    target.await.unwrap();
+    harness.shutdown().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_socket_forward_refuses_a_bad_shape_names_a_missing_socket_and_needs_unix_open() {
+    let harness = DaemonHarness::spawn().await;
+    let mut client = harness.client().await;
+    for path in ["relative.sock", "@abstract", ""] {
+        let (_input, response) = forward_unix(&mut client, forward_unix_open(path)).await;
+        let refused = response.unwrap_err();
+        assert_eq!(
+            refused.code(),
+            tonic::Code::PermissionDenied,
+            "{path:?}: {refused:?}"
+        );
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing.sock");
+    let (_input, response) =
+        forward_unix(&mut client, forward_unix_open(missing.to_str().unwrap())).await;
+    let failed = response.unwrap_err();
+    assert_eq!(failed.code(), tonic::Code::Unavailable, "{failed:?}");
+    assert!(
+        failed
+            .message()
+            .starts_with("nothing in the environment is at"),
+        "{failed:?}"
+    );
+    // ForwardUnix opens only with unix_open.
+    let (_input, response) = forward_unix(&mut client, forward_open("127.0.0.1", 9)).await;
+    assert_eq!(response.unwrap_err().code(), tonic::Code::InvalidArgument);
+    harness.shutdown().await;
+}
+
+/// A forward its client drops is ended at once, even when the target neither
+/// writes nor closes, which a half-close would leave running: the daemon
+/// drops its side, so the target's own writes fail (#5608). A local VM's
+/// socket forward ends its helper the same way.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_forward_its_client_drops_is_ended_however_quiet_the_target() {
+    let harness = DaemonHarness::spawn_with_auth_token("daemon-test-token").await;
+    let client = SessionClient::from_channel(harness.channel().await, "daemon-test-token").unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("quiet.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let (accepted, accepted_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let _ = accepted.send(stream);
+    });
+
+    let forward = client.forward_unix(path.to_str().unwrap()).await.unwrap();
+    let target = tokio::time::timeout(Duration::from_secs(30), accepted_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    // The target says nothing and keeps its connection open; the client goes.
+    drop(forward);
+    // A half-close shuts only the daemon's writing, which reads here as the
+    // end of input; a dropped forward closes both directions, which a socket
+    // reports as a hang-up. The target never writes, so nothing it sends can
+    // reveal that the client is gone.
+    let hung_up = || {
+        use std::os::fd::AsRawFd as _;
+        let mut poll = libc::pollfd {
+            fd: target.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll reads one pollfd for a descriptor this test owns.
+        unsafe { libc::poll(&mut poll, 1, 0) };
+        poll.revents & libc::POLLHUP != 0
+    };
+    let ended = tokio::time::timeout(Duration::from_secs(30), async {
+        while !hung_up() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "the daemon kept the dropped forward open");
+    drop(target);
+    harness.shutdown().await;
+}
+
+/// A half-close is not a drop: after the client ends its side, the target can
+/// still answer, and its answer arrives (#5608).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_half_closed_forward_still_carries_the_targets_answer() {
+    let harness = DaemonHarness::spawn_with_auth_token("daemon-test-token").await;
+    let client = SessionClient::from_channel(harness.channel().await, "daemon-test-token").unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("late.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        stream.write_all(b"late answer").await.unwrap();
+    });
+    let mut forward = client.forward_unix(path.to_str().unwrap()).await.unwrap();
+    forward.write_all(b"question").await.unwrap();
+    forward.shutdown().await.unwrap();
+    let mut answer = Vec::new();
+    tokio::time::timeout(Duration::from_secs(30), forward.read_to_end(&mut answer))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(answer, b"late answer");
+    harness.shutdown().await;
+}
+
+/// A one-way upload to a target that closed its own sending side first:
+/// the caller writes, shuts down, reads the target's end and drops the
+/// forward at once, as an SSH client closing its channel does. Every byte it
+/// wrote still reaches the target (#5608).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_forward_dropped_right_after_its_last_write_delivers_all_of_it() {
+    let harness = DaemonHarness::spawn_with_auth_token("daemon-test-token").await;
+    let client = SessionClient::from_channel(harness.channel().await, "daemon-test-token").unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sink.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let sink = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        stream.shutdown().await.unwrap();
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received).await.unwrap();
+        received
+    });
+    let upload: Vec<u8> = (0..1024 * 1024).map(|index| (index % 251) as u8).collect();
+    let mut forward = client.forward_unix(path.to_str().unwrap()).await.unwrap();
+    forward.write_all(&upload).await.unwrap();
+    forward.shutdown().await.unwrap();
+    let mut answer = Vec::new();
+    forward.read_to_end(&mut answer).await.unwrap();
+    drop(forward);
+    let received = tokio::time::timeout(Duration::from_secs(30), sink)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(answer.is_empty());
+    assert_eq!(received.len(), upload.len());
+    assert!(received == upload, "the bytes differ");
+    harness.shutdown().await;
+}

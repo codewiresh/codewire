@@ -831,17 +831,24 @@ descriptor crosses to the root daemon. Since the workload controls that
 helper, the daemon trusts nothing it says: it accepts one status line, bounded
 in bytes and in time, from a fixed set of codes, and tells the client and the
 log only its own words; and it kills the helper's process group when the
-status does not come within the forward's ten seconds, when the forward closes
-and when the connection ends. A VM whose runtime predates `ForwardUnix`
-refuses every socket forward. Each forward, opened or refused, is logged with
-the reason and its target path escaped and bounded.
+status does not come within the forward's ten seconds, and once the forward
+closes or the connection ends, as soon as what the client already sent has
+reached the socket, and at most ten seconds later: five for the client's side
+to finish, and five for the daemon to write what it received. A VM whose
+runtime predates `ForwardUnix` refuses every socket forward. Each forward,
+opened or refused, is logged with the reason and its target path escaped and
+bounded.
 
 The platform's own sockets in the workload are refused, by identity, not by
 name: each one's device and inode are recorded as it is bound, and a target
 that resolves to one of them, through a symlink or a hard link included, is
 refused, naming it; so is any target that resolves under the platform's own
 directories (`/codewire`, and `/run/codewire` and its `/run/codewire-*`
-siblings), whatever its identity. The path is opened, checked and connected
+siblings), whatever its identity, except exactly `/run/codewire-docker`: that
+is where a local VM keeps the environment's Docker socket, which forwards may
+reach, so the client machine can then drive that Docker, which is root inside
+the environment; nothing of the platform's is ever put there. Its sockets are
+still checked by identity first. The path is opened, checked and connected
 through the same open file, so it cannot change in between. This refusal is
 not a boundary against someone with a shell, who reaches the same sockets from
 inside. It keeps a forward from being the supported way to carry the

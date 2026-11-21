@@ -82,6 +82,7 @@ macro_rules! daemon_service {
             type ExecSessionStream = ReceiverStream<Result<daemon_v1::ExecMessage, Status>>;
             type PtySessionStream = ReceiverStream<Result<daemon_v1::PtyMessage, Status>>;
             type ForwardTcpStream = ReceiverStream<Result<daemon_v1::ForwardTcpMessage, Status>>;
+            type ForwardUnixStream = ReceiverStream<Result<daemon_v1::ForwardTcpMessage, Status>>;
             type AttachSessionStream = ReceiverStream<Result<daemon_v1::SessionAttachMessage, Status>>;
             type CredentialBridgeStream = ReceiverStream<Result<v1::CredentialBridgeGuestMessage, Status>>;
             async fn credential_bridge(&self, request: Request<Streaming<v1::CredentialBridgeHostMessage>>) -> Result<Response<Self::CredentialBridgeStream>, Status> {
@@ -120,6 +121,7 @@ daemon_service! {
     exec_session(Streaming<daemon_v1::ExecMessage>) -> Self::ExecSessionStream,
     pty_session(Streaming<daemon_v1::PtyMessage>) -> Self::PtySessionStream,
     forward_tcp(Streaming<daemon_v1::ForwardTcpMessage>) -> Self::ForwardTcpStream,
+    forward_unix(Streaming<daemon_v1::ForwardTcpMessage>) -> Self::ForwardUnixStream,
     start_desktop(daemon_v1::StartDesktopRequest) -> daemon_v1::StartDesktopResponse,
     get_desktop(daemon_v1::GetDesktopRequest) -> daemon_v1::GetDesktopResponse,
     stop_desktop(daemon_v1::StopDesktopRequest) -> daemon_v1::StopDesktopResponse,

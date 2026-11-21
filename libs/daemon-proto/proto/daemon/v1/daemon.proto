@@ -60,6 +60,9 @@ service DaemonService {
   // and each side sends `end` at its end of stream, as a TCP half-close; the
   // RPC ends once both have.
   rpc ForwardTcp(stream ForwardTcpMessage) returns (stream ForwardTcpMessage);
+  // A Unix socket in the workload (#5608): the same stream as ForwardTcp,
+  // opened with `unix_open` instead of `open`.
+  rpc ForwardUnix(stream ForwardTcpMessage) returns (stream ForwardTcpMessage);
 
   // Requires desktop.vnc.v1. The environment's one graphical desktop: an X
   // and VNC server on display :1 with an XFCE session, run as the durable
@@ -636,7 +639,14 @@ message ForwardTcpMessage {
     google.protobuf.Empty opened = 2;
     bytes data = 3;
     google.protobuf.Empty end = 4;
+    // ForwardUnix's first message, in place of `open`.
+    ForwardUnixOpen unix_open = 5;
   }
+}
+
+// An absolute path of at most 107 bytes, connected to as the workload user.
+message ForwardUnixOpen {
+  string path = 1;
 }
 
 // A literal loopback address (127.0.0.0/8 or ::1), never a name.

@@ -110,7 +110,7 @@ Reverse forwards (`ssh -R`) and agent and X11 forwarding are not available.
 
 ### Unix sockets
 
-A local forward can also reach a Unix socket in a hosted sandbox, by its
+A local forward can also reach a Unix socket in an environment, by its
 absolute path:
 
 ```sh
@@ -118,14 +118,16 @@ ssh -N -L "$PWD/app.sock:/home/codewire/app.sock" cw-cloud-my-app
 ssh -W /home/codewire/app.sock cw-cloud-my-app
 ```
 
-The connection is made as the sandbox's user, so it reaches any socket that
-user can, and a server that checks its caller's credentials sees that user.
-That includes the sandbox's Docker socket: forwarding
-`/run/docker/docker.sock` lets programs on your machine drive the sandbox's
-Docker, which is root inside the sandbox. The platform's own sockets, such
-as the credential bridge's, are refused, however the path reaches them. The
-target must be an absolute path of at most 107 bytes; relative paths and
-abstract names are refused. A local VM refuses socket forwards for now.
+The connection is made as the environment's user, so it reaches any socket
+that user can, and a server that checks its caller's credentials sees that
+user. That includes the environment's Docker socket
+(`/run/docker/docker.sock` in a hosted sandbox): forwarding it lets programs
+on your machine drive the environment's Docker, which is root inside the
+environment. The platform's own sockets, such as the credential bridge's,
+are refused, however the path reaches them. The target must be an absolute
+path of at most 107 bytes; relative paths and abstract names are refused. A
+local VM created before socket forwarding refuses them until it is
+recreated.
 
 ## VS Code
 

@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use codewire_daemon::client::ForwardStream;
 use codewire_egress_front_door::{Backend, BoxError, Incoming, ResponseBody, UpgradeOutcome};
 use http::header::{
     CONNECTION, HOST, HeaderMap, HeaderName, HeaderValue, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
@@ -12,7 +13,6 @@ use http::header::{
 use http::{Request, Response, StatusCode, Version};
 use http_body_util::{BodyExt, Empty, Full};
 use hyper_util::rt::TokioIo;
-use tokio::io::DuplexStream;
 
 use super::Routes;
 use crate::guest_loopback::{GuestLoopbackError, open_guest_loopback};
@@ -53,7 +53,7 @@ impl<R> Proxy<R> {
 
 impl<R: Routes> Proxy<R> {
     /// A stream to the route's guest port, or why the browser gets none.
-    async fn upstream(&self, host: &str) -> Result<DuplexStream, Refusal> {
+    async fn upstream(&self, host: &str) -> Result<ForwardStream, Refusal> {
         let route = self.routes.route(host).ok_or(Refusal::NotServed)?;
         let client = self
             .routes

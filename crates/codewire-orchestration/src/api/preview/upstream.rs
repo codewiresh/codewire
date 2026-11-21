@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{Request, Response, Uri};
+use codewire_daemon::client::ForwardStream;
 use codewire_daemon::client::{SessionClient, SessionClientError};
 use codewire_daemon_proto::DAEMON_CAPABILITY_FORWARD_TCP;
 use hyper::body::Incoming;
@@ -23,7 +24,6 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::{Connected, Connection};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use sqlx::PgPool;
-use tokio::io::DuplexStream;
 use tonic::Code;
 
 use crate::api::environment_daemon::{EnvironmentDaemonEndpointOverrides, streaming_daemon_client};
@@ -262,7 +262,7 @@ fn upstream_target(uri: &Uri) -> Result<(&str, &str, u16), UpstreamError> {
 }
 
 /// A stream to `port` on the first workload loopback that accepts it.
-async fn open(client: &SessionClient, port: u16) -> Result<DuplexStream, UpstreamError> {
+async fn open(client: &SessionClient, port: u16) -> Result<ForwardStream, UpstreamError> {
     for address in LOOPBACKS {
         match client.forward_tcp(SocketAddr::new(address, port)).await {
             Ok(stream) => return Ok(stream),
@@ -285,7 +285,7 @@ async fn open(client: &SessionClient, port: u16) -> Result<DuplexStream, Upstrea
 }
 
 /// One forwarded connection, as the pooled client sees it.
-struct ForwardIo(TokioIo<DuplexStream>);
+struct ForwardIo(TokioIo<ForwardStream>);
 
 impl Connection for ForwardIo {
     fn connected(&self) -> Connected {

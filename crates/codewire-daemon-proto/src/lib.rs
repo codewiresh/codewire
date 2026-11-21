@@ -297,6 +297,10 @@ pub const DAEMON_CAPABILITY_WORKLOAD_FILES: &str = "files.workload_user.v1";
 /// namespace as the workload user, for SSH port forwarding served outside it
 /// (#3025).
 pub const DAEMON_CAPABILITY_FORWARD_TCP: &str = "forward.workload_loopback.v1";
+/// `ForwardUnix` connects to a Unix socket in the workload as the workload
+/// user, for an SSH server outside it such as a local VM's supervisor
+/// (#5608). A local VM's daemon makes the connection from a workload process.
+pub const DAEMON_CAPABILITY_FORWARD_UNIX: &str = "forward.workload_unix.v1";
 /// `StartDesktop`, `GetDesktop` and `StopDesktop`: the environment's
 /// graphical desktop (`docs/dev/SANDBOX-DESKTOP.md`). The daemon has it
 /// whatever image the environment runs; an image without a desktop is the
@@ -461,6 +465,7 @@ pub const DAEMON_CAPABILITIES: &[&str] = &[
     DAEMON_CAPABILITY_SESSION_END_AFTER_DETACHED,
     DAEMON_CAPABILITY_WORKLOAD_FILES,
     DAEMON_CAPABILITY_FORWARD_TCP,
+    DAEMON_CAPABILITY_FORWARD_UNIX,
     DAEMON_CAPABILITY_DESKTOP_VNC,
 ];
 

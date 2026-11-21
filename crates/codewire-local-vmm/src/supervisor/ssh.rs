@@ -179,6 +179,9 @@ pub(super) struct DaemonFeatures {
     /// Port forwarding only where the daemon connects inside the workload's
     /// network namespace; a dial from here would reach the host.
     forwarding: bool,
+    /// Unix-socket forwards only where the daemon connects from a workload
+    /// process (#5608); a connect from here would reach the host's sockets.
+    socket_forwarding: bool,
 }
 
 impl DaemonFeatures {
@@ -202,6 +205,9 @@ impl DaemonFeatures {
             }),
             forwarding: response.capabilities.iter().any(|capability| {
                 capability == codewire_daemon_proto::DAEMON_CAPABILITY_FORWARD_TCP
+            }),
+            socket_forwarding: response.capabilities.iter().any(|capability| {
+                capability == codewire_daemon_proto::DAEMON_CAPABILITY_FORWARD_UNIX
             }),
         }
     }
@@ -257,7 +263,7 @@ pub(super) fn serve(
     let config = Arc::new(daemon_ssh_server_config(host_key));
     let runner = Arc::new(DaemonBackedSshRunner::new(daemon.clone()));
     let dialer: Arc<dyn ForwardDialer> = if features.forwarding {
-        Arc::new(DaemonForwardDialer::new(daemon.clone()))
+        Arc::new(DaemonForwardDialer::new(daemon.clone()).with_unix(features.socket_forwarding))
     } else {
         Arc::new(OlderRuntime)
     };
@@ -620,6 +626,38 @@ mod tests {
             "the credential bridge port is refused"
         );
 
+        // A Unix socket forward reaches a socket through the daemon's
+        // `ForwardUnix`, which this daemon offers (#5608).
+        let sockets = tempfile::tempdir().unwrap();
+        let socket = sockets.path().join("echo.sock");
+        let echo = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = echo.accept().await.unwrap();
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).await.unwrap();
+            stream.write_all(&received).await.unwrap();
+        });
+        let mut forward = connected
+            .client
+            .channel_open_direct_streamlocal(socket.to_str().unwrap())
+            .await
+            .expect("the socket forward opens");
+        forward.data(&b"through a socket"[..]).await.unwrap();
+        forward.eof().await.unwrap();
+        let mut echoed = Vec::new();
+        timeout(Duration::from_secs(20), async {
+            while let Some(message) = forward.wait().await {
+                match message {
+                    ChannelMsg::Data { data } => echoed.extend_from_slice(&data),
+                    ChannelMsg::Eof | ChannelMsg::Close => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the socket forward finishes");
+        assert_eq!(echoed, b"through a socket");
+
         // Another operation on the VM, such as a host-port change, leaves the
         // stream open; a stop ends it and frees its place.
         let mut ports = test_operation(OperationKind::UpdateHostPorts, environment);
@@ -657,6 +695,13 @@ mod tests {
             panic!("an older runtime refuses");
         };
         assert!(reason.contains("predates port forwarding"), "{reason}");
+        let Err(ForwardDialError::Prohibited(reason)) = OlderRuntime
+            .dial_unix(Path::new("/home/codewire/rex.sock"))
+            .await
+        else {
+            panic!("an older runtime forwarded a socket");
+        };
+        assert!(reason.contains("does not forward Unix sockets"), "{reason}");
     }
 
     #[test]
@@ -671,6 +716,7 @@ mod tests {
                 exec_shell: "/bin/sh".into(),
                 file_transfer: false,
                 forwarding: false,
+                socket_forwarding: false,
             }
         );
         assert_eq!(
@@ -678,6 +724,7 @@ mod tests {
                 capabilities: vec![
                     codewire_daemon_proto::DAEMON_CAPABILITY_WORKLOAD_FILES.into(),
                     codewire_daemon_proto::DAEMON_CAPABILITY_FORWARD_TCP.into(),
+                    codewire_daemon_proto::DAEMON_CAPABILITY_FORWARD_UNIX.into(),
                 ],
                 default_shell: "/usr/bin/zsh".into(),
                 ..Default::default()
@@ -686,6 +733,7 @@ mod tests {
                 exec_shell: "/usr/bin/zsh".into(),
                 file_transfer: true,
                 forwarding: true,
+                socket_forwarding: true,
             }
         );
         // Only an absolute shell is used.

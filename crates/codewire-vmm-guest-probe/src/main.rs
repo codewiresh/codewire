@@ -129,6 +129,20 @@ fn entrypoint() -> anyhow::Result<()> {
             runtime.block_on(guest::run_credential_forwarder())
         }
         Some("workspace-exec") => guest::run_workspace_exec(arguments.collect()),
+        // A local VM's Unix-socket forward, run as a workload process (#5608).
+        Some("workspace-unix-connect") => {
+            let arguments = arguments
+                .map(|argument| argument.into_string())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| anyhow::anyhow!("workspace-unix-connect takes UTF-8 arguments"))?;
+            codewire_daemon::unix_forward::relay(
+                &arguments,
+                &mut std::io::stderr(),
+                std::io::stdin(),
+                std::io::stdout(),
+            )
+            .context("relay the Unix-socket forward")
+        }
         Some("docker-fixture") => guest::run_docker_fixture(arguments.collect()),
         Some("newc") => build_newc(arguments),
         Some("newc-root") => build_guest_root_newc(arguments),

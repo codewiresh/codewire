@@ -235,6 +235,7 @@ impl DaemonService for DaemonServiceImpl {
     type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
     type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
     type ForwardTcpStream = ReceiverStream<Result<v1::ForwardTcpMessage, Status>>;
+    type ForwardUnixStream = ReceiverStream<Result<v1::ForwardTcpMessage, Status>>;
     type AttachSessionStream = ReceiverStream<Result<v1::SessionAttachMessage, Status>>;
     type CredentialBridgeStream = codewire_credential_bridge::CredentialBridgeOutput;
 
@@ -575,6 +576,43 @@ impl DaemonService for DaemonServiceImpl {
         let target = crate::forward::admit(&open, self.config.tcp_port())?;
         let stream = self.workload_sockets.connect(&self.config, target).await?;
         Ok(Response::new(crate::forward::serve(stream, inbound)))
+    }
+
+    async fn forward_unix(
+        &self,
+        request: Request<Streaming<v1::ForwardTcpMessage>>,
+    ) -> Result<Response<Self::ForwardUnixStream>, Status> {
+        self.authorize(&request)?;
+        self.require_guest()?;
+        let mut inbound = request.into_inner();
+        let open = match inbound
+            .message()
+            .await
+            .map_err(|err| Status::invalid_argument(format!("read forward open message: {err}")))?
+            .and_then(|msg| msg.payload)
+        {
+            Some(v1::forward_tcp_message::Payload::UnixOpen(open)) => open,
+            _ => {
+                return Err(Status::invalid_argument(
+                    "a socket forward opens with unix_open",
+                ));
+            }
+        };
+        #[cfg(target_os = "linux")]
+        {
+            let path = crate::forward::unix::admit(&open)?;
+            Ok(Response::new(
+                crate::forward::unix::serve(&self.config, path, inbound).await?,
+            ))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Nothing here forwards a socket, so the request is not read.
+            let _ = (open, inbound);
+            Err(Status::unimplemented(
+                "socket forwards need a Linux workload",
+            ))
+        }
     }
 
     async fn pty_session(

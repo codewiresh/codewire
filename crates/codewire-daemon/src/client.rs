@@ -29,6 +29,7 @@ pub const HOSTED_WORKSPACE_AUTHORIZATION: &str = "x-codewire-workspace-authoriza
 mod daemon_log;
 mod desktop;
 mod forward;
+pub use forward::{FORWARD_DROP_DRAIN, ForwardStream};
 mod hosted;
 pub use hosted::{HostedCredentialBridgeDrain, HostedCredentialBridgePrepared};
 

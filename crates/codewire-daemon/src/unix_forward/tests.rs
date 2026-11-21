@@ -149,3 +149,155 @@ fn a_shown_path_is_escaped_and_bounded() {
         "{shown}"
     );
 }
+
+#[test]
+fn every_refusal_code_parses_back_and_nothing_else_does() {
+    let refusals = [
+        Refusal::NotSocket,
+        Refusal::PlatformSocket(0),
+        Refusal::PlatformSocket(2),
+        Refusal::PlatformDirectory(1),
+        Refusal::NotFound,
+        Refusal::PermissionDenied,
+        Refusal::NotListening,
+        Refusal::Failed,
+    ];
+    for refusal in refusals {
+        let code = refusal.code();
+        assert!(code.len() < MAX_STATUS_BYTES, "{code}");
+        assert_eq!(Refusal::parse(&code, 3), Some(Err(refusal)), "{code}");
+    }
+    assert_eq!(Refusal::parse(CONNECTED, 0), Some(Ok(())));
+    for unknown in [
+        "",
+        "Connected",
+        "connected ",
+        "ok",
+        "platform-socket 3",
+        "platform-socket 01",
+        "platform-socket -1",
+        "platform-socket",
+        "platform-directory 3",
+        "not-found: /etc/shadow",
+        "the helper's own words",
+    ] {
+        assert_eq!(Refusal::parse(unknown, 3), None, "{unknown:?}");
+    }
+}
+
+#[test]
+fn a_refusal_is_described_in_the_daemons_words_with_its_own_copy_of_the_target() {
+    let shown = shown("/home/codewire/a\nb.sock");
+    assert_eq!(
+        Refusal::PlatformSocket(1).describe(&shown, &["the first", "the second"]),
+        UnixForwardError::Refused(format!(
+            "{shown} is the second, which belongs to the platform; forwarding cannot reach it"
+        ))
+    );
+    assert_eq!(
+        Refusal::PlatformDirectory(1).describe(&shown, &[]),
+        UnixForwardError::Refused(format!(
+            "{shown} is in /run/codewire, the platform's own directory; forwarding cannot reach it"
+        ))
+    );
+}
+
+#[test]
+fn a_socket_among_the_given_identities_is_refused_by_its_index() {
+    use std::os::unix::fs::MetadataExt as _;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("given.sock");
+    let _listener = StdUnixListener::bind(&path).unwrap();
+    let metadata = std::fs::metadata(&path).unwrap();
+    let hard = directory.path().join("hard.sock");
+    std::fs::hard_link(&path, &hard).unwrap();
+    for target in [&path, &hard] {
+        assert_eq!(
+            connect_among(target, &[(0, 0), (metadata.dev(), metadata.ino())]).unwrap_err(),
+            Refusal::PlatformSocket(1)
+        );
+    }
+}
+
+#[test]
+fn the_helper_reports_connected_and_relays_both_ways() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("echo.sock");
+    let listener = StdUnixListener::bind(&path).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request).unwrap();
+        stream.write_all(&request).unwrap();
+    });
+    let (mut status, mut output) = (Vec::new(), Vec::new());
+    relay(
+        &[path.to_string_lossy().into_owned()],
+        &mut status,
+        &b"through the helper"[..],
+        &mut output,
+    )
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(status, b"connected\n");
+    assert_eq!(output, b"through the helper");
+}
+
+#[test]
+fn the_helper_reports_a_refusal_as_its_code_only() {
+    use std::os::unix::fs::MetadataExt as _;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("platform.sock");
+    let _listener = StdUnixListener::bind(&path).unwrap();
+    let metadata = std::fs::metadata(&path).unwrap();
+    for (arguments, code) in [
+        (
+            vec![
+                path.to_string_lossy().into_owned(),
+                format!("{}:{}", metadata.dev(), metadata.ino()),
+            ],
+            "platform-socket 0\n",
+        ),
+        (
+            vec![
+                directory
+                    .path()
+                    .join("missing.sock")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+            "not-found\n",
+        ),
+        (vec!["relative.sock".to_owned()], "failed\n"),
+        (
+            vec![
+                path.to_string_lossy().into_owned(),
+                "not-an-identity".to_owned(),
+            ],
+            "failed\n",
+        ),
+        (Vec::new(), "failed\n"),
+    ] {
+        let (mut status, mut output) = (Vec::new(), Vec::new());
+        relay(&arguments, &mut status, &b""[..], &mut output).unwrap();
+        assert_eq!(String::from_utf8(status).unwrap(), code, "{arguments:?}");
+        assert!(output.is_empty());
+    }
+}
+
+#[test]
+fn a_platform_socket_is_refused_even_in_the_one_exempt_directory() {
+    // The Docker directory passes the directory check, but a socket there
+    // whose identity is a platform socket's is still refused as one.
+    let docker = Path::new("/run/codewire-docker/docker.sock");
+    assert_eq!(admit(Some(0), docker), Err(Refusal::PlatformSocket(0)));
+    assert_eq!(admit(None, docker), Ok(()));
+    assert_eq!(
+        admit(None, Path::new("/run/codewire-host/poweroff.sock")),
+        Err(Refusal::PlatformDirectory(2))
+    );
+    assert_eq!(
+        admit(None, Path::new("/run/codewire-docker-data/x.sock")),
+        Err(Refusal::PlatformDirectory(2))
+    );
+}
