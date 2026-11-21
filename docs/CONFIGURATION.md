@@ -667,6 +667,12 @@ is the app's to read. Orchestration's preview proxy sends the visitor's
 its own. It starts no span for a preview request and continues no trace from
 one, and no header of a preview request reaches the API's request span.
 
+Our own trace context is written into an outgoing request in one place: the
+dashboard's transport, for its calls to the services inside the deployment
+(`inject_http_headers` in `obs.rs`). A repository check
+(`trace-context-callers`) refuses a call from anywhere else, so a new caller is
+reviewed before our trace ids can reach an outside address or a user's app.
+
 A trace starts at an incoming request or a message, never in a background
 loop. A span with no parent is exported only when it is a server span (a
 request), a consumer span (a Temporal activity) or a producer span (a signal to

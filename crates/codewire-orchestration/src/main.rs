@@ -23,7 +23,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Context;
-use axum::middleware;
 use codewire_orchestration::confidential_storage::{ConfidentialStorageManager, FeatureFlags};
 use codewire_orchestration::drain::{DRAIN_WINDOW, Drain};
 use codewire_orchestration::identity::config::{IDENTITY_PORT, ORCHESTRATION_IDENTITY_PORT_ENV};
@@ -1075,11 +1074,8 @@ async fn main() -> anyhow::Result<()> {
         // CONNECT_TESTING_SURFACE=1 (dev-stack/CI/kind only).
         .with_connect_testing_surface(auth.clone())
         .with_routes(codewire_orchestration::api::router(api_state.clone(), auth))
-        .into_router()
-        .layer(middleware::from_fn_with_state(
-            api_state,
-            codewire_orchestration::api::preview::preview_proxy_middleware,
-        ));
+        .into_router();
+    let app = codewire_orchestration::api::preview::mount_outside(app, api_state);
 
     let internal_tls = match (listeners.internal, internal_tls) {
         (Some(listener), Some(files)) => Some((

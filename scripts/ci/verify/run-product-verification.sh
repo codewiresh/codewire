@@ -814,6 +814,8 @@ run_repo_rules() {
   python3 scripts/checks/repo_checks.py deployment-http-clients
   python3 scripts/checks/repo_checks.py forgejo-list-paging --self-test
   python3 scripts/checks/repo_checks.py forgejo-list-paging
+  python3 scripts/checks/repo_checks.py trace-context-callers --self-test
+  python3 scripts/checks/repo_checks.py trace-context-callers
   python3 scripts/checks/repo_checks.py mcp-settings --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source

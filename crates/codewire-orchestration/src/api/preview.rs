@@ -60,9 +60,21 @@ pub(crate) enum PreviewHostError {
     NotFound,
 }
 
+/// `app`, the public router with its standard middleware, behind the preview
+/// proxy. A request on a preview host is answered before `app`'s request span
+/// exists, so no visitor's trace context reaches it (docs/CONFIGURATION.md,
+/// "Tracing"). `main` and the trace test both mount the proxy through this, so
+/// the test holds the order `main` serves.
+pub fn mount_outside(app: axum::Router, state: ApiState) -> axum::Router {
+    app.layer(axum::middleware::from_fn_with_state(
+        state,
+        preview_proxy_middleware,
+    ))
+}
+
 /// Intercepts `*.PREVIEW_BASE_DOMAIN` requests before normal API routing.
 /// Non-preview hosts pass through to the orchestration router unchanged.
-pub async fn preview_proxy_middleware(
+async fn preview_proxy_middleware(
     State(state): State<ApiState>,
     request: Request<Body>,
     next: Next,
