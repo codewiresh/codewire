@@ -2077,9 +2077,10 @@ below):
   The relay is leader-gated, and orchestration runs one replica; scaling it
   out needs the session routed to the leader first. `cw-egress` retries
   `UNAVAILABLE` and `ALREADY_EXISTS` with bounded, capped backoff.
-- **Not yet:** a joined session that is idle holds its epoch's place until the
-  epoch ends; the broker's own idle end (120 seconds with no open request or
-  socket) follows.
+- **Idle.** The broker ends the joined front-door stream once nothing has
+  been in flight or received for 120 seconds (#4963; the joined stream in
+  "Runtime boundaries" above), which frees the epoch's place for the next
+  one; `cw-egress` opens another on demand.
 - **The client** (`codewire-egress-node`'s `front_door_session`). `cw-egress`
   keeps one session open for each
   Pod whose front door runs, from the front door's start until the Pod's
