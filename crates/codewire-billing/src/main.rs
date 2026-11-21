@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = ServiceConfig::from_env("billing")?;
     let tracing_guard = codewire_server_core::obs::init_with_traces(&cfg)?;
     // The card-testing alert must see the first refusal (#4750).
-    codewire_server_core::rate_limit::expose_refusals(&[
+    codewire_server_core::rate_limit::expose_limits(&[
         &codewire_server_core::rate_limit::CARD_SETUP_ORGANIZATION,
         &codewire_server_core::rate_limit::CARD_SETUP_USER,
     ]);

@@ -42,6 +42,38 @@ pub(crate) fn sign_up_refusals() -> &'static IntCounterVec {
     })
 }
 
+/// Every reason [`sign_in_reason`] and [`sign_up_reason`] can give, so
+/// [`expose`] can show each series before its first count.
+const SIGN_IN_REASONS: [&str; 3] = ["credentials", "locked", "refused"];
+const SIGN_UP_REASONS: [&str; 3] = ["invalid", "invite_only", "unavailable"];
+
+/// Exposes the IdP's abuse series and its rate limits' series at zero before
+/// anything is counted (#3297 item 13). A series that first appears at 1 has
+/// no earlier sample, so an alert's `increase()` misses that first count.
+pub fn expose() {
+    for reason in SIGN_IN_REASONS {
+        sign_in_failures().with_label_values(&[reason]);
+    }
+    sign_ups_admitted();
+    for reason in SIGN_UP_REASONS {
+        sign_up_refusals().with_label_values(&[reason]);
+    }
+    // Every limit the IdP takes: the unreadable-limit alert reads them all.
+    use codewire_server_core::rate_limit::{
+        ADMIN_ACCOUNT_DELETE, MAIL_PASSWORD_RESET, MAIL_VERIFICATION, OPERATOR_FEEDBACK_NOTICE,
+        OPERATOR_NOTICE, SIGNUP, SIGNUP_ADDRESS, expose_limits,
+    };
+    expose_limits(&[
+        &SIGNUP,
+        &SIGNUP_ADDRESS,
+        &MAIL_PASSWORD_RESET,
+        &MAIL_VERIFICATION,
+        &ADMIN_ACCOUNT_DELETE,
+        &OPERATOR_NOTICE,
+        &OPERATOR_FEEDBACK_NOTICE,
+    ]);
+}
+
 /// Why a sign-in failed, from its answer: wrong or unknown credentials, a
 /// locked account, or an account that may not sign in (unverified, disabled).
 fn sign_in_reason(status: StatusCode) -> Option<&'static str> {
@@ -110,5 +142,18 @@ mod tests {
         let before = sign_up_refusals().with_label_values(&["invalid"]).get();
         sign_up_refused(StatusCode::BAD_REQUEST);
         assert!(sign_up_refusals().with_label_values(&["invalid"]).get() > before);
+    }
+
+    #[test]
+    fn every_reason_a_sign_in_or_sign_up_can_give_is_exposed() {
+        // `tests/abuse_metrics_exposed.rs` proves the exposed series are
+        // served at zero; this proves no answer maps outside them.
+        for code in 100..600 {
+            let status = StatusCode::from_u16(code).unwrap();
+            if let Some(reason) = sign_in_reason(status) {
+                assert!(SIGN_IN_REASONS.contains(&reason), "{reason}");
+            }
+            assert!(SIGN_UP_REASONS.contains(&sign_up_reason(status)));
+        }
     }
 }

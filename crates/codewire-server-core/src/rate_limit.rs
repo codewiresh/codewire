@@ -382,12 +382,13 @@ pub async fn take_fixed(
     )
 }
 
-/// Exposes each limit's refusal series at zero before any refusal. A series
-/// that first appears at 1 has no earlier sample, so an alert's `increase()`
-/// misses a lone first refusal.
-pub fn expose_refusals(limits: &[&Limit]) {
+/// Exposes each limit's refused and unreadable series at zero before either
+/// is counted. A series that first appears at 1 has no earlier sample, so an
+/// alert's `increase()` misses a lone first refusal.
+pub fn expose_limits(limits: &[&Limit]) {
     for limit in limits {
         crate::metrics::rate_limit_refusals().with_label_values(&[limit.name]);
+        crate::metrics::rate_limit_unavailable().with_label_values(&[limit.name]);
     }
 }
 
@@ -474,18 +475,23 @@ mod tests {
     }
 
     #[test]
-    fn exposed_limits_report_zero_refusals_before_any() {
+    fn exposed_limits_report_zero_refused_and_unreadable_before_any() {
         use prometheus::Encoder;
 
-        expose_refusals(&[&CARD_SETUP_ORGANIZATION, &CARD_SETUP_USER]);
+        expose_limits(&[&CARD_SETUP_ORGANIZATION, &CARD_SETUP_USER]);
         let mut rendered = Vec::new();
         prometheus::TextEncoder::new()
             .encode(&prometheus::gather(), &mut rendered)
             .unwrap();
         let rendered = String::from_utf8(rendered).unwrap();
         for name in [CARD_SETUP_ORGANIZATION.name, CARD_SETUP_USER.name] {
-            let series = format!("codewire_rate_limit_refusals_total{{limit=\"{name}\"}} 0\n");
-            assert!(rendered.contains(&series), "{series} in {rendered}");
+            for metric in [
+                "codewire_rate_limit_refusals_total",
+                "codewire_rate_limit_unavailable_total",
+            ] {
+                let series = format!("{metric}{{limit=\"{name}\"}} 0\n");
+                assert!(rendered.contains(&series), "{series} in {rendered}");
+            }
         }
     }
 

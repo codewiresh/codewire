@@ -505,6 +505,22 @@ async fn main() -> anyhow::Result<()> {
     }
     let cfg = ServiceConfig::from_env("orchestration")?;
     let tracing_guard = codewire_server_core::obs::init_with_traces(&cfg)?;
+    // The abuse alerts must see the first refusal after a restart (#3297),
+    // for every limit orchestration takes.
+    {
+        use codewire_server_core::rate_limit::{
+            INVITATION_LOOKUP, ORG_CREATE, SANDBOX_CREATE, SANDBOX_CREATE_HOURLY, SANDBOX_START,
+            SNAPSHOT_CREATE, expose_limits,
+        };
+        expose_limits(&[
+            &SANDBOX_CREATE,
+            &SANDBOX_CREATE_HOURLY,
+            &SANDBOX_START,
+            &SNAPSHOT_CREATE,
+            &ORG_CREATE,
+            &INVITATION_LOOKUP,
+        ]);
+    }
     require_runtime_images()?;
     // Before anything serves: a server that cannot stage a cw runtime upload
     // in its own private directory never starts, and never stages anywhere

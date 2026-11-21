@@ -48,6 +48,7 @@ pub mod tokens;
 pub mod two_factor;
 pub mod user_auth;
 
+pub use abuse_metrics::expose as expose_abuse_metrics;
 pub use auth_requests::PgAuthorizationStore;
 pub use clients::PgClientStore;
 pub use customizer::PgTokenCustomizer;

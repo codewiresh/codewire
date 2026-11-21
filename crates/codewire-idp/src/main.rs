@@ -140,6 +140,8 @@ fn format_rewrap_report(report: &codewire_idp::SigningKekRewrapReport) -> String
 async fn serve() -> anyhow::Result<()> {
     let cfg = ServiceConfig::from_env("idp")?;
     let tracing_guard = codewire_server_core::obs::init_with_traces(&cfg)?;
+    // The abuse alerts must see the first count after a restart (#3297).
+    codewire_idp::expose_abuse_metrics();
 
     codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
     let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
