@@ -3,6 +3,13 @@ use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Stdio};
 
+/// The trusted launcher the cache seals and copies into its view. Only its
+/// bytes, mode and size matter: the publisher never runs it, and the view's
+/// permission probe checks only that it is executable. It is small and fixed,
+/// so these fixtures never depend on the size of the test build, which a
+/// full-debug build makes larger than `CW_RUNTIME_MAX_BYTES` (#5676).
+const LAUNCHER_FIXTURE: &[u8] = b"#!/bin/false\n# trusted runtime launcher fixture\n";
+
 struct Fixture {
     _directory: tempfile::TempDir,
     root: PathBuf,
@@ -57,13 +64,7 @@ impl Fixture {
         write_new(&member.join("provenance.json"), &a_json, 0o444).unwrap();
         fs::set_permissions(&member, fs::Permissions::from_mode(0o555)).unwrap();
         let launcher = directory.path().join("trusted-init-fixture");
-        // This is the checked-in test ELF, never an incoming candidate.
-        write_new(
-            &launcher,
-            &fs::read(std::env::current_exe().unwrap()).unwrap(),
-            0o755,
-        )
-        .unwrap();
+        write_new(&launcher, LAUNCHER_FIXTURE, 0o755).unwrap();
         let root = directory.path().join("cache");
         let cache = RuntimeCache::initialize_at(
             &root,
