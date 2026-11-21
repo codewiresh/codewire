@@ -52,16 +52,29 @@ fn stamp(value: &fs::Metadata) -> FileStamp {
     }
 }
 
+/// Why a state file was not opened, so a caller can name its own file.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PrivateFileRefusal {
+    /// The user's own bounded regular file, but not mode 0600.
+    #[error("local Mesh state is mode {0:o}, not owner-only 600")]
+    Mode(u32),
+    #[error("local Mesh state is not a bounded owner-private regular file")]
+    Other,
+}
+
 fn private_file(file: &File, maximum: usize) -> anyhow::Result<fs::Metadata> {
     let metadata = file.metadata()?;
-    anyhow::ensure!(
-        metadata.is_file()
-            && metadata.uid() == euid()
-            && metadata.nlink() == 1
-            && metadata.mode() & 0o7777 == 0o600
-            && metadata.len() <= maximum as u64,
-        "local Mesh state is not a bounded owner-private regular file"
-    );
+    let ours = metadata.is_file()
+        && metadata.uid() == euid()
+        && metadata.nlink() == 1
+        && metadata.len() <= maximum as u64;
+    let mode = metadata.mode() & 0o7777;
+    if !ours {
+        return Err(PrivateFileRefusal::Other.into());
+    }
+    if mode != 0o600 {
+        return Err(PrivateFileRefusal::Mode(mode).into());
+    }
     Ok(metadata)
 }
 

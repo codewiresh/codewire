@@ -17,6 +17,7 @@ use url::Url;
 #[cfg(unix)]
 pub(crate) mod account;
 mod deployment_ca;
+mod private_file;
 
 pub use deployment_ca::{
     DEPLOYMENT_CA_FILE, DeploymentCaFileError, PinnedCa, copy_deployment_ca, delete_deployment_ca,
@@ -985,10 +986,7 @@ fn saved_mesh_value_for_selected_url(
 pub fn load_mesh_config(data_dir: &Path) -> Result<MeshConfig, ConfigError> {
     let path = data_dir.join("config.toml");
     let data = {
-        let read_error = |error: anyhow::Error| ConfigError::ReadConfig {
-            path: path.clone(),
-            source: std::io::Error::other(error),
-        };
+        let read_error = |error| private_file::read_error(&path, error);
         let Some(directory) =
             crate::commands::MeshStateDir::open(data_dir, false).map_err(read_error)?
         else {
