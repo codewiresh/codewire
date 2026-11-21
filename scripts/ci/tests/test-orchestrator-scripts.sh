@@ -46,12 +46,14 @@ case "$1 ${2:-}" in
   'actions runs')
     case "$3" in
       list)
-        workflow='' head=''
+        workflow='' head='' page=''
         while [[ $# -gt 0 ]]; do
-          case "$1" in --workflow) workflow="$2" ;; --head) head="$2" ;; esac
+          case "$1" in --workflow) workflow="$2" ;; --head) head="$2" ;; -p) page="$2" ;; esac
           shift
         done
-        if [[ -n "$head" ]]; then answer "runs-$workflow-$head.json"; else answer "runs-$workflow.json"; fi
+        if [[ -n "$head" ]]; then answer "runs-$workflow-$head.json"
+        elif [[ -n "$page" && -f "$FAKE/runs-$workflow-p$page.json" ]]; then answer "runs-$workflow-p$page.json"
+        else answer "runs-$workflow.json"; fi
         ;;
       view) answer "run-$4.json" ;;
       logs) answer "log-$4" ;;
@@ -494,8 +496,76 @@ rerun_run 42471 || status=$?
 grep -q '^unknown: cannot read run 42471' "$work/out" || fail 'rerun-run gave no reason for an unreadable run'
 [[ ! -e "$FAKE/reruns" ]] || fail 'rerun-run reran a run it could not read'
 
+# rerun-recycle-cuts: after a warm VM's recycle, the runs it cut (a job ended
+# with the runner's "context canceled") are rerun through rerun-run.sh; a run
+# that failed any other way, or outside the window, is left alone (infra#1534).
+recycle_cuts() { "$SCRIPTS/rerun-recycle-cuts.sh" "$@" >"$work/out" 2>&1; }
+reset_fake
+jq -n '{runs: [
+  {id: 68336, number: 47048, status: "failure", created_at: "2026-11-21T17:00:00Z", stopped_at: "2026-11-21T17:45:22Z"},
+  {id: 68337, number: 47049, status: "failure", created_at: "2026-11-21T17:01:00Z", stopped_at: "2026-11-21T17:46:00Z"},
+  {id: 68300, number: 47010, status: "failure", created_at: "2026-11-21T16:00:00Z", stopped_at: "2026-11-21T16:30:00Z"},
+  {id: 68338, number: 47050, status: "success", created_at: "2026-11-21T17:02:00Z", stopped_at: "2026-11-21T17:45:30Z"}]}' \
+  >"$FAKE/runs-.json"
+for run in 68336:47048 68337:47049; do
+  jq -n --argjson id "${run%%:*}" --argjson number "${run#*:}" '{run: {id: $id, number: $number, status: "failure"},
+    jobs: [{id: 1, name: "Verification selection", status: "failure"}, {id: 2, name: "Required verification", status: "failure"}]}' \
+    >"$FAKE/run-${run%%:*}.json"
+done
+printf '%s\n' 'PR admission: 2 pull request runs admitted and 1 waiting ahead; 2 at once; waiting' \
+  '⚙️ [runner]: context canceled' '🏁  Job failed' >"$FAKE/log-68336"
+printf '%s\n' '::error::scripts/ci/tests/test-x.sh failed (exit 1) after 5s' '🏁  Job failed' >"$FAKE/log-68337"
+task_page 1 '#47048 (b31b213495) failure Verification selection 45m (pull_request): t'
+recycle_cuts 2026-11-21T17:40:00Z 2026-11-21T17:50:00Z || fail "rerun-recycle-cuts failed: $(cat "$work/out")"
+[[ "$(cat "$FAKE/reruns")" == 68336 ]] || fail "rerun-recycle-cuts did not rerun exactly the cut run: $(cat "$FAKE/reruns" 2>/dev/null)"
+grep -q '^cut by the recycle (job 1): reran run 68336 (#47048)' "$work/out" || fail "rerun-recycle-cuts did not report the rerun: $(cat "$work/out")"
+grep -q "^not cut: run 68337 failed without the runner's context canceled$" "$work/out" ||
+  fail "rerun-recycle-cuts did not name the real failure it left alone: $(cat "$work/out")"
+grep -q '68300' "$FAKE/calls" && fail 'rerun-recycle-cuts read a run that stopped before the window'
+grep -q '^1 cut run(s) between' "$work/out" || fail 'rerun-recycle-cuts did not count the cut runs'
+# A cut run with a task still alive is named for later and exits 1.
+rm -f "$FAKE/reruns"
+task_page 1 '#47048 (b31b213495) running Verification selection 2m (pull_request): t'
+status=0
+recycle_cuts 2026-11-21T17:40:00Z 2026-11-21T17:50:00Z || status=$?
+[[ "$status" -eq 1 ]] || fail "rerun-recycle-cuts did not say a cut run is still alive (exit $status): $(cat "$work/out")"
+grep -q '^cut by the recycle (job 1), still alive, rerun once it ends: .*task is running Verification selection 2m' "$work/out" ||
+  fail "rerun-recycle-cuts did not name the live task: $(cat "$work/out")"
+[[ ! -e "$FAKE/reruns" ]] || fail 'rerun-recycle-cuts reran a run with a live task'
+# A list it cannot read is no evidence: exit 2, rerun nothing.
+rm -f "$FAKE/runs-.json"
+status=0
+recycle_cuts 2026-11-21T17:40:00Z 2026-11-21T17:50:00Z || status=$?
+[[ "$status" -eq 2 && ! -e "$FAKE/reruns" ]] || fail "rerun-recycle-cuts did not refuse an unreadable run list (exit $status)"
+recycle_cuts 2026-11-21T17:50:00Z 2026-11-21T17:40:00Z && fail 'rerun-recycle-cuts accepted a window that ends before it starts'
+# A cut run started before the cut, so newer runs can push it to a later page:
+# here 100 runs started after it, and it is on page 3. A cancelled run with the
+# same runner line was a deliberate cancel, never a cut, and is not rerun.
+reset_fake
+newer() { # PAGE: 50 successful runs started after the cut runs but before SINCE
+  jq -n --argjson page "$1" '{runs: [range(50) | {id: (70000 + ($page * 100) + .), status: "success",
+    created_at: "2026-11-21T17:20:00Z", stopped_at: "2026-11-21T17:30:00Z"}]}'
+}
+newer 1 >"$FAKE/runs--p1.json"
+newer 2 >"$FAKE/runs--p2.json"
+jq -n '{runs: [
+  {id: 68336, status: "failure", created_at: "2026-11-21T17:00:00Z", stopped_at: "2026-11-21T17:45:22Z"},
+  {id: 68340, status: "cancelled", created_at: "2026-11-21T17:01:00Z", stopped_at: "2026-11-21T17:45:30Z"}]}' \
+  >"$FAKE/runs--p3.json"
+jq -n '{run: {id: 68336, number: 47048, status: "failure"}, jobs: [{id: 1, name: "Verification selection", status: "failure"}]}' \
+  >"$FAKE/run-68336.json"
+jq -n '{run: {id: 68340, number: 47052, status: "cancelled"}, jobs: [{id: 3, name: "Verification selection", status: "cancelled"}]}' \
+  >"$FAKE/run-68340.json"
+printf '%s\n' '⚙️ [runner]: context canceled' >"$FAKE/log-68336"
+printf '%s\n' '⚙️ [runner]: context canceled' >"$FAKE/log-68340"
+task_page 1 '#47048 (b31b213495) failure Verification selection 45m (pull_request): t'
+recycle_cuts 2026-11-21T17:40:00Z 2026-11-21T17:50:00Z || fail "rerun-recycle-cuts failed across pages: $(cat "$work/out")"
+[[ "$(cat "$FAKE/reruns" 2>/dev/null)" == 68336 ]] ||
+  fail "rerun-recycle-cuts did not find the cut run on page 3, or reran the cancel: $(cat "$FAKE/reruns" 2>/dev/null)"
+grep -q 'view -R origin 68340' "$FAKE/calls" && fail 'rerun-recycle-cuts read a cancelled run as a candidate'
+
 # The public GitHub repositories' protection (#5407), against a fake gh.
 python3 -I -B "$ROOT/scripts/ci/tests/test-github-repository-protection.py" >"$work/ruleset.out" 2>&1 ||
   fail "the GitHub repository protection helper failed its tests: $(tail -20 "$work/ruleset.out")"
 
-printf '[test-orchestrator-scripts] merge queue, release watch, Dev settle, deploy update, rerun and the GitHub repository protection all decide on their evidence\n'
+printf '[test-orchestrator-scripts] merge queue, release watch, Dev settle, deploy update, rerun, recycle-cut reruns and the GitHub repository protection all decide on their evidence\n'
