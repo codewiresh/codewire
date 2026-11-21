@@ -1623,53 +1623,6 @@ fn a_stop_cleanup_fits_inside_the_time_a_stop_is_given() {
     );
 }
 
-/// A drain that never settles still leaves the stop's cleanup unknown, once
-/// the whole cleanup budget is spent (#3777).
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn host_stop_reports_a_drain_that_never_settles_as_unknown_within_its_budget() {
-    if isolated_descendant_fixture(
-        "host_stop_reports_a_drain_that_never_settles_as_unknown_within_its_budget",
-    )
-    .await
-    {
-        return;
-    }
-    let temp = tempfile::tempdir().unwrap();
-    let engine = host_engine(temp.path());
-    let holder = temp.path().join("holder.pid");
-    let script = format!(
-        "setsid sh -c 'echo $$ > \"{}\"; exec sleep 60' & exec sleep 60",
-        holder.display()
-    );
-    let record = engine.launch(request(&script, false)).await.unwrap();
-    let holder_pid: u32 = wait_file(&holder).await.trim().parse().unwrap();
-    let holder = FixtureDescendant::capture(holder_pid);
-    let stopped = tokio::time::timeout(HANG, engine.stop(&record.session_id))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(stopped.state, v1::SessionLifecycleState::Interrupted as i32);
-    assert!(stopped.cleanup_unknown);
-    // How long the stop took is not asserted: steps that wait together spend
-    // the shared budget together, and a loaded host stretches each check.
-    // That the budget fits the 5 s a stop is given is the budget's own rule
-    // (`a_stop_cleanup_fits_inside_the_time_a_stop_is_given`); the hang guard
-    // above bounds this run (#4170).
-    assert!(
-        alive(holder_pid),
-        "the process outside the session was signaled"
-    );
-    holder.kill_and_reap();
-    // Shutdown does not claim a clean end for a cleanup that stayed unknown.
-    let shutdown = engine.shutdown().await.unwrap_err();
-    assert!(
-        shutdown.to_string().contains("cleanup remains unconfirmed"),
-        "{shutdown}"
-    );
-    assert_no_fixture_children();
-}
-
 #[tokio::test]
 async fn host_stop_owns_shell_descendants_for_pipe_and_pty_preserving_unrelated_child() {
     #[cfg(target_os = "linux")]
@@ -3190,4 +3143,127 @@ async fn a_server_that_traps_term_gets_one_term_and_kill_only_after_the_grace() 
         }
         engine.shutdown().await.unwrap();
     }
+}
+
+/// A process the command moved into its own Unix session on purpose is not
+/// the session's (#5490), even when it still holds the session's output. A
+/// stop that ends every process of the session itself ends it `Stopped`,
+/// with the holder named and left running, and it can be restarted (#5635).
+/// Such a holder once left the stop's cleanup unknown (#4170); the stop still
+/// answers within its budget, which is the budget's own rule
+/// (`a_stop_cleanup_fits_inside_the_time_a_stop_is_given`).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_stop_settles_when_only_a_process_outside_the_session_holds_its_output() {
+    if isolated_descendant_fixture(
+        "a_stop_settles_when_only_a_process_outside_the_session_holds_its_output",
+    )
+    .await
+    {
+        return;
+    }
+    let mut unsettled = Vec::new();
+    for ((owner, engine_for), pty) in OWNERS
+        .into_iter()
+        .flat_map(|owner| [(owner, false), (owner, true)])
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = engine_for(temp.path());
+        let holder = temp.path().join("holder.pid");
+        // The setsid child keeps the session's output, as `setsid server &`
+        // without a redirect does.
+        let script = format!(
+            "setsid sh -c 'echo $$ > \"{}\"; exec sleep 60' & exec sleep 60",
+            holder.display()
+        );
+        let record = engine.launch(request(&script, pty)).await.unwrap();
+        let holder_pid: u32 = wait_file(&holder).await.trim().parse().unwrap();
+        let held = FixtureDescendant::capture(holder_pid);
+        let stopped = tokio::time::timeout(HANG, engine.stop(&record.session_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let outcome = format!(
+            "{owner} (pty={pty}): state {} unknown {} {:?}",
+            stopped.state, stopped.cleanup_unknown, stopped.status_message
+        );
+        assert!(alive(holder_pid), "{outcome}: the holder was signaled");
+        held.kill_and_reap();
+        if stopped.state != v1::SessionLifecycleState::Stopped as i32 || stopped.cleanup_unknown {
+            unsettled.push(outcome.clone());
+        } else if !pty {
+            // A pipe stays open in the holder; a terminal's reader stops
+            // with the session, so it never waits on one.
+            assert!(
+                stopped.status_message.contains(&format!(
+                    "Its output is still open in 1 process that left the session (pid {holder_pid} `sleep`)"
+                )),
+                "{outcome}"
+            );
+        }
+        if !stopped.cleanup_unknown {
+            std::fs::remove_file(&holder).unwrap();
+            let restarted = engine.restart(&record.session_id).await;
+            assert!(restarted.is_ok(), "{outcome}: {restarted:?}");
+            // The restarted command starts a holder of its own.
+            let again: u32 = wait_file(&holder).await.trim().parse().unwrap();
+            let again = FixtureDescendant::capture(again);
+            let _ = engine.shutdown().await;
+            again.kill_and_reap();
+        } else {
+            let _ = engine.shutdown().await;
+        }
+    }
+    assert!(unsettled.is_empty(), "{unsettled:#?}");
+    assert_no_fixture_children();
+}
+
+/// A command that exits after starting a server with setsid but without a
+/// redirect ends as it exited, not with cleanup unknown: the server keeps
+/// the output open, and the end names it (#5635).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_exit_settles_when_only_a_process_outside_the_session_holds_its_output() {
+    if isolated_descendant_fixture(
+        "an_exit_settles_when_only_a_process_outside_the_session_holds_its_output",
+    )
+    .await
+    {
+        return;
+    }
+    for (owner, engine_for) in OWNERS {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = engine_for(temp.path());
+        let holder = temp.path().join("holder.pid");
+        let script = format!(
+            "setsid sh -c 'echo $$ > \"{}\"; exec sleep 60' & while [ ! -s \"{}\" ]; do sleep 0.05; done; exit 0",
+            holder.display(),
+            holder.display()
+        );
+        let record = engine.launch(request(&script, false)).await.unwrap();
+        let holder_pid: u32 = wait_file(&holder).await.trim().parse().unwrap();
+        let held = FixtureDescendant::capture(holder_pid);
+        let ended = ended(&engine, &record.session_id).await;
+        let outcome = format!(
+            "{owner}: state {} unknown {} {:?}",
+            ended.state, ended.cleanup_unknown, ended.status_message
+        );
+        assert!(alive(holder_pid), "{outcome}: the holder was ended");
+        held.kill_and_reap();
+        assert_eq!(
+            ended.state,
+            v1::SessionLifecycleState::Exited as i32,
+            "{outcome}"
+        );
+        assert_eq!(ended.exit_code, Some(0), "{outcome}");
+        assert!(!ended.cleanup_unknown, "{outcome}");
+        assert!(
+            ended.status_message.starts_with(&format!(
+                "session exited with status 0. Its output is still open in 1 process that left the session (pid {holder_pid} `sleep`)"
+            )),
+            "{outcome}"
+        );
+        engine.shutdown().await.unwrap();
+    }
+    assert_no_fixture_children();
 }

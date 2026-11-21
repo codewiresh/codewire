@@ -359,6 +359,10 @@ struct ProcessMonitor {
     control: mpsc::Receiver<SessionControl>,
     stdout_task: JoinHandle<Result<(), SessionError>>,
     stderr_task: JoinHandle<Result<(), SessionError>>,
+    /// The inodes of the session's stdout and stderr pipes, which name a
+    /// process outside the session that still holds them (#5635).
+    #[cfg(unix)]
+    output_pipes: Vec<u64>,
 }
 
 struct PtyProcessMonitor {
@@ -2794,20 +2798,7 @@ impl SessionEngine {
         let mut process = prepared.tokio_command();
         #[cfg(target_os = "linux")]
         if platform_image.is_some() {
-            let parent = unsafe { libc::getpid() };
-            // Fixed owned-child confinement. No daemon/foreign PID signaling
-            // is exposed through the private service.
-            unsafe {
-                process.pre_exec(move || {
-                    if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
-                        || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0
-                        || libc::getppid() != parent
-                    {
-                        return Err(std::io::Error::other("platform driver parent changed"));
-                    }
-                    Ok(())
-                });
-            }
+            confine_platform_driver(&mut process);
         }
         #[cfg(target_os = "linux")]
         let owned = self.owns_session_processes() && platform_image.is_none();
@@ -2943,6 +2934,8 @@ impl SessionEngine {
         // Ownership transfers below without an intervening await.
         let monitor_handle = handle.clone();
 
+        #[cfg(unix)]
+        let output_pipes = output_pipe_inodes(&stdout, &stderr);
         let stdout_task = tokio::spawn(capture_output(
             self.inner.root.clone(),
             handle.clone(),
@@ -2975,6 +2968,8 @@ impl SessionEngine {
                 control: control_rx,
                 stdout_task,
                 stderr_task,
+                #[cfg(unix)]
+                output_pipes,
             })
             .await;
         });
@@ -3932,6 +3927,8 @@ async fn monitor_process(monitor: ProcessMonitor) {
         mut control,
         stdout_task,
         stderr_task,
+        #[cfg(unix)]
+            output_pipes: _,
     } = monitor;
     let completion = loop {
         tokio::select! {
@@ -4021,6 +4018,7 @@ async fn monitor_host_process(monitor: ProcessMonitor) {
         mut control,
         stdout_task,
         stderr_task,
+        output_pipes,
     } = monitor;
     // Declare the group after Child: cancellation signals while Child is owned.
     let mut group = host_group.expect("session process group is owned");
@@ -4062,7 +4060,28 @@ async fn monitor_host_process(monitor: ProcessMonitor) {
         bounded_output_join(stdout_task, group.cleanup(), host),
         bounded_output_join(stderr_task, group.cleanup(), host)
     );
-    let note = ended_note(&ended);
+    // Every process of the session itself is gone once its end is confirmed,
+    // so output still open then is held by a process that left the session
+    // on purpose, which is not the session's (#5490): it keeps running, and
+    // the session ends as it would without it (#5635). Unconfirmed, a held
+    // drain stays unknown.
+    let confirmed = matches!(
+        &completion,
+        ProcessCompletion::Exited(Ok(_)) | ProcessCompletion::Stopped { result: Ok(()), .. }
+    );
+    let held = [&stdout, &stderr]
+        .into_iter()
+        .any(|joined| matches!(joined, OutputJoin::Held));
+    let output_error = [stdout, stderr]
+        .into_iter()
+        .find_map(|joined| joined.error(host, confirmed));
+    let note = [
+        ended_note(&ended),
+        (held && confirmed).then(|| held_output_note(&output_holders(&output_pipes))),
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(|ended, held| format!("{ended} {held}"));
     record_ended_note(
         &inner,
         &handle,
@@ -4076,31 +4095,10 @@ async fn monitor_host_process(monitor: ProcessMonitor) {
         token,
         handle,
         completion,
-        stdout.or(stderr),
+        output_error,
         OwnedEnd { owned: true, note },
     )
     .await;
-}
-
-#[cfg(unix)]
-async fn bounded_output_join(
-    mut task: JoinHandle<Result<(), SessionError>>,
-    budget: &crate::confirm::CheckBudget,
-    host: bool,
-) -> Option<String> {
-    let owner = if host { "host" } else { "session" };
-    match crate::confirm::await_spending(budget, &mut task).await {
-        Some(Ok(Ok(()))) => None,
-        Some(Ok(Err(error))) => Some(error.to_string()),
-        Some(Err(error)) => Some(format!("{owner} output task failed: {error}")),
-        None => {
-            task.abort();
-            let _ = task.await;
-            Some(format!(
-                "{owner} output drain timed out; cleanup is unknown"
-            ))
-        }
-    }
 }
 
 /// Whether an owned group's TERM, KILL and leader reap are confirmed. The
@@ -4128,46 +4126,6 @@ fn owned_cleanup_unconfirmed(host: bool, pty: bool) -> String {
         (false, true) => "session PTY cleanup could not be confirmed",
     }
     .into()
-}
-
-/// The line an owned session's end records when it ended processes its
-/// command left running (#5472): up to three of them by PID and kernel
-/// command name, and how to keep a server on purpose.
-#[cfg(unix)]
-fn ended_note(ended: &[crate::host_process::EndedProcess]) -> Option<String> {
-    if ended.is_empty() {
-        return None;
-    }
-    let listed = ended
-        .iter()
-        .take(3)
-        .map(|process| {
-            let name: String = process
-                .name
-                .chars()
-                .filter(|c| c.is_ascii_graphic() && *c != '`')
-                .collect();
-            if name.is_empty() {
-                format!("pid {}", process.pid)
-            } else {
-                format!("pid {} `{name}`", process.pid)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let more = match ended.len() {
-        0..=3 => String::new(),
-        count => format!(" and {} more", count - 3),
-    };
-    let count = match ended.len() {
-        1 => "1 process".to_owned(),
-        count => format!("{count} processes"),
-    };
-    Some(format!(
-        "Ended {count} left running after the command exited ({listed}{more}). \
-         To keep a server running, run it in its own named session, or start it \
-         with setsid; nohup alone is not enough."
-    ))
 }
 
 /// Writes an owned session's ended-processes line into its output, after
@@ -4356,7 +4314,11 @@ async fn monitor_host_pty_process(monitor: HostPtyProcessMonitor) {
         _ if host => Some("host PTY control join could not be confirmed".into()),
         _ => Some("session PTY control join could not be confirmed".into()),
     };
-    let output_error = bounded_output_join(output_task, group.cleanup(), host).await;
+    // A PTY's reader stops when the session ends, so a held terminal does
+    // not hold its drain.
+    let output_error = bounded_output_join(output_task, group.cleanup(), host)
+        .await
+        .error(host, false);
     let note = ended_note(&ended);
     record_ended_note(
         &inner,
@@ -4525,8 +4487,13 @@ async fn finish_process(
                 (Ok(ProcessResult::Stopped), None) => {
                     metadata.state = v1::SessionLifecycleState::Stopped as i32;
                     metadata.exit_code = None;
-                    metadata.status_message =
-                        stopped_because.unwrap_or_else(|| "session stopped".into());
+                    let stopped = stopped_because.unwrap_or_else(|| "session stopped".into());
+                    // A stop ends every process of the session, so its note
+                    // can only name a holder of its output outside it (#5635).
+                    metadata.status_message = match &end.note {
+                        Some(note) => format!("{stopped}. {note}"),
+                        None => stopped,
+                    };
                 }
                 (Err(error), None) => {
                     metadata.state = v1::SessionLifecycleState::Failed as i32;
@@ -7068,8 +7035,19 @@ mod platform_managed;
 #[cfg(target_os = "linux")]
 use platform_managed::{platform_managed_bypass_refused, refuse_platform_managed_bypass};
 
+#[cfg(unix)]
+#[path = "durable_session/output_holders.rs"]
+mod output_holders;
+#[cfg(unix)]
+use output_holders::{
+    OutputJoin, bounded_output_join, ended_note, held_output_note, output_holders,
+    output_pipe_inodes,
+};
+
 #[path = "durable_session/pipe_process.rs"]
 mod pipe_process;
+#[cfg(target_os = "linux")]
+use pipe_process::confine_platform_driver;
 use pipe_process::prepare_pipe_process;
 
 #[path = "durable_session/desktop_session.rs"]

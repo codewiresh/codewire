@@ -2040,7 +2040,7 @@ fn cleanup_unknown_refusal(place: &SessionPlace, name: &str) -> String {
         )
     } else {
         format!(
-            "session {name}'s processes may still be running from before {environment}'s daemon restarted, so it is not restarted; `cw {placement}stop {environment}` then `cw {placement}start {environment}` ends them, and then `cw {placement}restart {environment} --session {name}` starts it again"
+            "session {name}'s processes may still be running, because their end could not be confirmed, so it is not restarted; `cw {placement}stop {environment}` then `cw {placement}start {environment}` ends them, and then `cw {placement}restart {environment} --session {name}` starts it again"
         )
     }
 }
@@ -3943,7 +3943,7 @@ mod run_output_tests {
         unknown.cleanup_unknown = true;
         assert_eq!(
             duplicate_session_name(&place, &unknown).to_string(),
-            "session coding's processes may still be running from before app's daemon restarted, so it is not restarted; `cw --local stop app` then `cw --local start app` ends them, and then `cw --local restart app --session coding` starts it again"
+            "session coding's processes may still be running, because their end could not be confirmed, so it is not restarted; `cw --local stop app` then `cw --local start app` ends them, and then `cw --local restart app --session coding` starts it again"
         );
         assert!(
             !duplicate_session_name(&place, &unknown)

@@ -490,6 +490,10 @@ Issue: #5472.
     and the same with `nohup sleep 86400 &`;
   - a child started with `setsid`, which is not the session's:
     `sh -c 'setsid sleep 86400 >/dev/null 2>&1 < /dev/null & exit 0'`;
+  - a `setsid` child that keeps the session's output, then a stop and a
+    restart (#5635):
+    `cw run --in walk --name web --detach -- bash -c 'setsid sleep 7777 & sleep 100000'`,
+    `cw stop walk --session web`, `cw restart walk --session web`;
   - another session in the same Sandbox, still `Running` after each stop.
 - **Driving it:**
 
@@ -510,7 +514,12 @@ Issue: #5472.
   - `ps` shows no `sleep 86400` left from the stopped session, the background
     job's included, and the other session's process and the daemon are
     untouched;
-  - no answer says "refresh sessions".
+  - no answer says "refresh sessions";
+  - the stop of `web` answers within 5 s and `cw ls walk` shows it
+    `Stopped`, its status naming the holder ("Its output is still open in 1
+    process that left the session (pid N `sleep`), which keeps running; …"),
+    never `Interrupted` or "outcome is unknown"; `sleep 7777` is still
+    running, and `cw restart` starts `web` again (#5635).
 - **Gotchas:**
   - A process the session moved out of its group on purpose (`setsid`, a
     daemonizing server, a `docker run -d` container) is not the session's,
@@ -536,6 +545,12 @@ Issue: #5472.
     after the command exited (pid N `sleep`) …"; the `setsid` child was still
     running, and its session's end named nothing. Evidence: the walk
     comment on #5472.
+  - A `setsid` child keeping the output, before the fix, Dev at source
+    b1a024b6db, 2026-11-20 (codewire-79), the Dev smoke identity with `cw`
+    v0.4.24 (#5635): the stop of `web` answered "The session's outcome is
+    unknown" after 7 s, `web` ended `Interrupted` with cleanup unknown, and
+    `cw restart` refused it; only `sleep 7777` was left, in its own session.
+    Evidence: the comment on #5635. With the fix: not yet observed.
 
 ## `sandbox-start-list`: a starting sandbox's page shows one list of steps
 

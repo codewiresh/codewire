@@ -146,6 +146,18 @@ Sandbox (#5471, #5472).
   session (`setsid`). On a terminal, the leader's exit already hangs up its
   foreground job, which ends there unless it ignores the hangup (owner
   decision relayed by the orchestrator, 2026-11-19, #5472).
+- **Output a process outside the session still holds does not hold its end.**
+  A process that started its own Unix session can keep the session's
+  standard output or error open, as `setsid my-server &` without a redirect
+  does. Once every process of the session itself is gone, the stop or exit
+  ends the session as it would without it (`Stopped`, or `Exited` with the
+  command's status) rather than with cleanup unknown, and the session's
+  status names it: "Its output is still open in 1 process that left the
+  session (pid 254 `sleep`), which keeps running; what that writes now is
+  not kept. Redirect a server's output when you start it with setsid." The
+  daemon waits for that output within the stop's bound, then stops reading
+  it (#5635). A terminal session's output is the terminal, whose reader
+  stops when the session ends, so a holder never holds it.
 - **A lost reply names a real command.** When a stop's reply is lost, the
   answer is "the session's outcome is unknown; run `cw ls ENV` to see how it
   ended, then try again". There is no "refresh" step.

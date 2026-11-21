@@ -37,3 +37,27 @@ pub(super) fn prepare_pipe_process(
     )
     .map_err(|error| format!("prepare session process: {error}"))
 }
+
+/// Confine a platform-managed driver to its owner: no new privileges, and it
+/// dies with the daemon that started it. No daemon or foreign PID signaling
+/// is exposed through the private service.
+#[cfg(target_os = "linux")]
+pub(super) fn confine_platform_driver(process: &mut tokio::process::Command) {
+    // SAFETY: getpid takes no arguments and cannot fail.
+    let parent = unsafe { libc::getpid() };
+    // SAFETY: the closure makes only async-signal-safe calls (prctl, getppid)
+    // between fork and exec, and touches no allocator state.
+    unsafe {
+        process.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0
+                || libc::getppid() != parent
+            {
+                // The child reports only the raw error, so this is what the
+                // parent sees, and nothing allocates between fork and exec.
+                return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+            }
+            Ok(())
+        });
+    }
+}
