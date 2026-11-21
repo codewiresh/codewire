@@ -30,8 +30,8 @@ use codewire_access::{
     CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CapabilitySlot, CredentialAuthKind,
     CredentialId, CredentialMetadata, CredentialPlaceholder, CredentialStatus, DerivedGrant,
     EnvironmentAccessBinding, GrantContext, GrantPermission, GrantPlacement, Owner,
-    PROVIDER_REFRESH_TIMEOUT_SECONDS, PlaceholderKey, Placement, WithheldReason,
-    claude_login_permission, codex_login_permission,
+    PROVIDER_REFRESH_TIMEOUT_SECONDS, Placement, WithheldReason, claude_login_permission,
+    codex_login_permission,
 };
 use codewire_platform_credentials::{
     CredentialRecord, CredentialVersion, EpochMaterialCache, OAuthRefreshState,
@@ -42,7 +42,7 @@ use codewire_protected_store::ProtectedValue;
 use uuid::Uuid;
 
 use crate::commit_failure::{taken_bundle, valid_bundle};
-use crate::timing::{self, AuthorityUse, MaterialCacheUse, Phase, PlaceholderUse};
+use crate::timing::{self, AuthorityUse, MaterialCacheUse, Phase};
 use crate::{
     BrokerCredentialLease, BrokerCredentialRefreshKind, BrokerCredentialRefreshRequest,
     BrokerLeaseError, BrokerLeaseProvider, BrokerRefreshAdmission, BrokerRefreshError,
@@ -51,7 +51,6 @@ use crate::{
 pub use decision::AUTHORITY_DECISION_REUSE;
 use decision::EpochDecision;
 pub(crate) use placeholders::EpochPlaceholders;
-use placeholders::placeholder_inputs;
 
 /// Exact Pod identity established by a trusted runtime authenticator.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -727,49 +726,6 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             }
         }
         Ok(lease)
-    }
-
-    /// The placeholder for `grant`'s credential in its environment generation:
-    /// the one this epoch already derived, or one derived now under the
-    /// environment's key, which is read for this lease alone and dropped here.
-    ///
-    /// A key that cannot be read or created gives none, and the lease is
-    /// marked failed: a placeholder never decides whether a lease is admitted,
-    /// but the front door's swap refuses a request whose lease failed (#4001
-    /// step C3). That failure is logged at warn with the environment and one
-    /// closed reason, and labels the request's timing line.
-    async fn placeholder(
-        &self,
-        placeholders: &EpochPlaceholders,
-        grant: &DerivedGrant,
-    ) -> Option<CredentialPlaceholder> {
-        let inputs = placeholder_inputs(grant);
-        if let Some(placeholder) = placeholders.get(&inputs) {
-            timing::placeholder(PlaceholderUse::Reused);
-            return Some(placeholder);
-        }
-        match self
-            .credentials
-            .environment_placeholder_key(&grant.environment_id)
-            .await
-        {
-            Ok(key) => {
-                let placeholder = hosted_placeholder(&key, grant);
-                placeholders.insert(inputs, placeholder.clone());
-                timing::placeholder(PlaceholderUse::Derived);
-                Some(placeholder)
-            }
-            Err(error) => {
-                let reason = placeholder_failure(&error);
-                tracing::warn!(
-                    environment_id = grant.environment_id.as_str(),
-                    reason = reason.label(),
-                    "hosted lease carries no placeholder: its environment's key could not be read"
-                );
-                timing::placeholder(reason);
-                None
-            }
-        }
     }
 
     /// One lease with full per-request checks: two runtime authority checks
@@ -1663,31 +1619,6 @@ impl From<BrokerLeaseError> for Checked {
 
 /// Whether `record` is the exact platform record `grant` was derived for,
 /// owned by `owner`.
-/// `grant`'s placeholder under its environment's `key`: the same derivation,
-/// from the same grant fields, as a local lease's. Like local, it takes the
-/// selected binding's profile revision, not the environment generation, so a
-/// new generation of the same binding keeps its placeholders (#4812).
-fn hosted_placeholder(key: &PlaceholderKey, grant: &DerivedGrant) -> CredentialPlaceholder {
-    CredentialPlaceholder::derive(
-        key,
-        &grant.environment_id,
-        grant.profile.as_ref().map_or(0, |profile| profile.revision),
-        &grant.capability_slot,
-        &grant.credential_id,
-    )
-}
-
-/// The one closed reason a placeholder key read failed for. The database and
-/// the key-encryption provider both count as the provider: either way the key
-/// was there to read and could not be.
-fn placeholder_failure(error: &PlatformCredentialError) -> PlaceholderUse {
-    match error {
-        PlatformCredentialError::NotFound => PlaceholderUse::NotFound,
-        PlatformCredentialError::CorruptRecord => PlaceholderUse::CorruptRecord,
-        _ => PlaceholderUse::ProviderUnavailable,
-    }
-}
-
 fn record_matches(record: &CredentialRecord, grant: &DerivedGrant, owner: &Owner) -> bool {
     record.metadata.id == grant.credential_id
         && record.metadata.placement == Placement::Platform

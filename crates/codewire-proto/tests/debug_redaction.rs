@@ -150,6 +150,7 @@ fn cases() -> BTreeMap<&'static str, Check> {
     cases! {
         "codewire.bridge.v1.ClaudeLoginResponse" => bridge::v1::ClaudeLoginResponse,
         "codewire.bridge.v1.CodexLoginResponse" => bridge::v1::CodexLoginResponse,
+        "codewire.bridge.v1.CredentialBridgePlaceholder" => bridge::v1::CredentialBridgePlaceholder,
         "codewire.bridge.v1.CredentialSshSignRequest" => bridge::v1::CredentialSshSignRequest,
         "codewire.bridge.v1.CredentialSshSignature" => bridge::v1::CredentialSshSignature,
         "codewire.internal.v1.BindWorkspaceResponse" => internal::v1::BindWorkspaceResponse,

@@ -44,6 +44,7 @@ fn open(bridge: &CredentialBridge) -> v1::CredentialBridgeHostMessage {
                 environment_id: config.environment_id.to_string(),
                 environment_generation: config.environment_generation,
                 capabilities: Vec::new(),
+                placeholders: Vec::new(),
             },
         )),
     }
@@ -310,4 +311,188 @@ async fn the_hosts_listed_capabilities_reach_the_epoch_and_malformed_lists_refus
         assert!(!bridge.shared().unwrap().supports_codex_login().await);
         bridge.shutdown().await;
     }
+}
+
+/// `open(bridge)` giving the Sandbox `entries` to project (#4001).
+fn open_projecting(
+    bridge: &CredentialBridge,
+    entries: &[(&str, &str)],
+) -> v1::CredentialBridgeHostMessage {
+    let mut message = open(bridge);
+    if let Some(v1::credential_bridge_host_message::Payload::Open(value)) = message.payload.as_mut()
+    {
+        value.placeholders = entries
+            .iter()
+            .map(|(slot, placeholder)| v1::CredentialBridgePlaceholder {
+                capability_slot: (*slot).to_owned(),
+                placeholder: (*placeholder).to_owned(),
+            })
+            .collect();
+    }
+    message
+}
+
+/// A hosted daemon's configuration over `bridge`, intercepted or not.
+fn hosted_config(bridge: &CredentialBridge, interception: bool) -> crate::Config {
+    crate::Config {
+        listen_addr: "injected:projected-placeholders".to_owned(),
+        workspace_root: "/workspace".into(),
+        home_root: "/home/codewire".into(),
+        mount_roots: Vec::new(),
+        auth_token: crate::DaemonAuthToken::new("daemon-placeholders-test-token").unwrap(),
+        process_execution: crate::execution::ProcessExecution::Native,
+        credential_bridge: bridge.config.clone(),
+        managed_credential_clients: Default::default(),
+        interception: interception.then(|| codewire_access::Interception::new(None)),
+        host: None,
+        launch_projection: None,
+        session_working_dir: None,
+        sandbox_server_url: None,
+    }
+}
+
+fn soon() -> tokio::time::Instant {
+    tokio::time::Instant::now() + std::time::Duration::from_secs(1)
+}
+
+/// An intercepted Sandbox keeps each epoch's placeholders, and a launch
+/// projects the active epoch's (#4001): a later epoch's replace them, and
+/// one with none leaves the launch without an Anthropic bearer.
+#[tokio::test]
+async fn a_launch_projects_the_active_epochs_placeholder() {
+    use codewire_access::known_answer::PLACEHOLDER;
+    let (_temp, bridge, path) = fixture();
+    let bridge = bridge.intercepting(true);
+    let config = hosted_config(&bridge, true);
+
+    let (sender, mut first) = prepared(&bridge, &path).await;
+    first.output.next().await.unwrap().unwrap();
+    sender
+        .send(Ok(open_projecting(&bridge, &[("anthropic", PLACEHOLDER)])))
+        .await
+        .unwrap();
+    let launch = bridge.launch_config(&config).await;
+    let anthropic = launch.interception.as_ref().unwrap().anthropic().unwrap();
+    assert_eq!(anthropic.as_str(), PLACEHOLDER);
+    // The daemon's own configuration is never changed.
+    assert!(config.interception.as_ref().unwrap().anthropic().is_none());
+
+    let (sender, mut second) = prepared(&bridge, &path).await;
+    second.output.next().await.unwrap().unwrap();
+    sender
+        .send(Ok(open_projecting(&bridge, &[])))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !bridge
+            .projected_placeholders(soon())
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let launch = bridge.launch_config(&config).await;
+    assert!(launch.interception.as_ref().unwrap().anthropic().is_none());
+    bridge.shutdown().await;
+}
+
+/// A daemon that isn't intercepted uses its configuration as it is, and a
+/// local one too.
+#[tokio::test]
+async fn a_launch_that_is_not_intercepted_keeps_its_configuration() {
+    let (_temp, bridge, _path) = fixture();
+    let config = hosted_config(&bridge, false);
+    assert!(matches!(
+        bridge.launch_config(&config).await,
+        std::borrow::Cow::Borrowed(_)
+    ));
+    let mut local = hosted_config(&bridge, true);
+    if let Some(identity) = local.credential_bridge.as_mut() {
+        identity.transport = CredentialBridgeTransport::Local;
+    }
+    assert!(matches!(
+        bridge.launch_config(&local).await,
+        std::borrow::Cow::Borrowed(_)
+    ));
+}
+
+/// Placeholders on a daemon that isn't intercepted, or any but a whole,
+/// well-formed set, refuse the Open: the epoch never activates (#4001).
+#[tokio::test]
+async fn an_open_with_placeholders_it_cant_take_is_refused() {
+    use codewire_access::known_answer::PLACEHOLDER;
+    let other = "cwp1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let cases: [(bool, &[(&str, &str)]); 6] = [
+        (false, &[("anthropic", PLACEHOLDER)]),
+        (true, &[("openai", PLACEHOLDER)]),
+        (true, &[("anthropic", PLACEHOLDER), ("anthropic", other)]),
+        (true, &[("anthropic", PLACEHOLDER), ("codex", other)]),
+        (true, &[("anthropic", "not-a-placeholder")]),
+        (true, &[("Anthropic", PLACEHOLDER)]),
+    ];
+    for (intercepted, entries) in cases {
+        let (_temp, bridge, path) = fixture();
+        let bridge = bridge.intercepting(intercepted);
+        let (sender, mut connection) = prepared(&bridge, &path).await;
+        connection.output.next().await.unwrap().unwrap();
+        sender
+            .send(Ok(open_projecting(&bridge, entries)))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), connection.output.next())
+                .await
+                .unwrap()
+                .is_none(),
+            "{entries:?} intercepted={intercepted}"
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                bridge.wait_for_initial_host(&context(&bridge))
+            )
+            .await
+            .is_err()
+        );
+        bridge.shutdown().await;
+    }
+}
+
+/// A launch between a lost epoch and the next waits for the next and takes
+/// its placeholder, rather than starting without one (#4001).
+#[tokio::test]
+async fn a_launch_after_a_lost_epoch_waits_for_the_next() {
+    use codewire_access::known_answer::PLACEHOLDER;
+    let (_temp, bridge, path) = fixture();
+    let bridge = bridge.intercepting(true);
+    let (sender, mut first) = prepared(&bridge, &path).await;
+    first.output.next().await.unwrap().unwrap();
+    sender
+        .send(Ok(open_projecting(&bridge, &[])))
+        .await
+        .unwrap();
+    bridge.projected_placeholders(soon()).await.unwrap();
+    // The host goes away: its stream ends, and the epoch with it.
+    drop(sender);
+    assert!(first.output.next().await.is_none());
+
+    let waiting = tokio::spawn({
+        let bridge = bridge.clone();
+        async move { bridge.projected_placeholders(soon()).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(!waiting.is_finished(), "it waits in the gap");
+    let (sender, mut second) = prepared(&bridge, &path).await;
+    second.output.next().await.unwrap().unwrap();
+    sender
+        .send(Ok(open_projecting(&bridge, &[("anthropic", PLACEHOLDER)])))
+        .await
+        .unwrap();
+    let projected = waiting.await.unwrap().unwrap();
+    assert_eq!(projected.anthropic().unwrap().as_str(), PLACEHOLDER);
+    bridge.shutdown().await;
 }

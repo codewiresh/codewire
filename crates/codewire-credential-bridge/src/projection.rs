@@ -83,6 +83,29 @@ impl CredentialBridge {
         }
     }
 
+    /// The placeholders the active epoch's host gave this Sandbox to project
+    /// (#4001; docs/dev/SECRETS-AND-CREDENTIALS.md, "Hosted interception"),
+    /// waiting until `deadline` for an active epoch: the first one, or the
+    /// next after one was lost, so a launch in that gap is delayed rather
+    /// than started without its placeholder. None by then is unavailable,
+    /// and the caller projects none.
+    pub async fn projected_placeholders(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<codewire_access::ProjectedPlaceholders, Status> {
+        loop {
+            let admitted = self.host_admitted.notified();
+            tokio::pin!(admitted);
+            admitted.as_mut().enable();
+            if let Some(active) = &self.inner.lock().await.active {
+                return Ok(active.placeholders.clone());
+            }
+            tokio::time::timeout_at(deadline, admitted)
+                .await
+                .map_err(|_| projection_unavailable())?;
+        }
+    }
+
     /// Request only this environment's already-selected values at an actual
     /// launcher. The application HTTP ingress does not expose this method.
     /// Callers recheck lifecycle authority after resolution and before exec.

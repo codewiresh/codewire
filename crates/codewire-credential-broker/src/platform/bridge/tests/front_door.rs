@@ -3,7 +3,7 @@
 
 use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_CAPABILITIES_HEADER, CREDENTIAL_BRIDGE_EPOCH_HANDLE_BYTES,
-    CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER,
+    CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER, CREDENTIAL_BRIDGE_PLACEHOLDERS_HEADER,
 };
 use prost::Message as _;
 use tonic::metadata::BinaryMetadataValue;
@@ -309,6 +309,66 @@ async fn an_epoch_the_relay_says_is_not_intercepted_carries_no_handle() {
             .count(),
         0
     );
+}
+
+/// The placeholders an admitted epoch's response carries, one per value.
+fn placeholder_values(
+    response: &Response<Streaming<v1::CredentialBridgeHostMessage>>,
+) -> Vec<String> {
+    response
+        .metadata()
+        .get_all(CREDENTIAL_BRIDGE_PLACEHOLDERS_HEADER)
+        .iter()
+        .map(|value| value.to_str().unwrap().to_owned())
+        .collect()
+}
+
+/// An intercepted epoch's response carries its projected placeholders in
+/// exactly one value, for the relay alone (#4001); one that isn't carries
+/// none. This fixture's service derives none, so the value is empty.
+#[tokio::test]
+async fn an_intercepted_epoch_carries_one_placeholders_value_and_another_none() {
+    let fixture = Fixture::new().await;
+    let (_intercepted_input, intercepted) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &["true"])
+        .await;
+    assert_eq!(placeholder_values(&intercepted.unwrap()), [""]);
+    let (_input, epoch) = fixture.open(Some("synthetic-allow"), fixture.ready()).await;
+    assert!(placeholder_values(&epoch.unwrap()).is_empty());
+}
+
+/// The placeholders value is inserted sensitive, so HTTP/2 never indexes it
+/// and a metadata `Debug` never prints it.
+#[test]
+fn the_placeholders_value_is_sensitive() {
+    let placeholder =
+        codewire_access::CredentialPlaceholder::parse(codewire_access::known_answer::PLACEHOLDER)
+            .unwrap();
+    let mut metadata = MetadataMap::new();
+    super::super::insert_placeholders(
+        &mut metadata,
+        &codewire_access::ProjectedPlaceholders::default().with_anthropic(placeholder),
+    )
+    .unwrap();
+    let value = metadata.get(CREDENTIAL_BRIDGE_PLACEHOLDERS_HEADER).unwrap();
+    assert!(value.is_sensitive());
+    assert!(!format!("{metadata:?}").contains(codewire_access::known_answer::PLACEHOLDER));
+}
+
+/// With hosted placeholders on, an intercepted epoch whose grants can't be
+/// evaluated is refused rather than admitted with part of a set or none; an
+/// epoch that isn't intercepted derives nothing and is admitted.
+#[tokio::test]
+async fn an_intercepted_epoch_whose_placeholders_cant_be_derived_is_refused() {
+    let fixture = Fixture::with_hosted_placeholders().await;
+    let (_input, intercepted) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &["true"])
+        .await;
+    assert_eq!(intercepted.unwrap_err().code(), Code::Unavailable);
+    let (_input, epoch) = fixture
+        .open_as(Some("synthetic-allow"), fixture.ready(), &["false"])
+        .await;
+    assert!(placeholder_values(&epoch.unwrap()).is_empty());
 }
 
 /// A relay states an epoch's interception at most once, and exactly `true`

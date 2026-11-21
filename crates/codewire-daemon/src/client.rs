@@ -31,7 +31,9 @@ mod desktop;
 mod forward;
 pub use forward::{FORWARD_DROP_DRAIN, ForwardStream};
 mod hosted;
-pub use hosted::{HostedCredentialBridgeDrain, HostedCredentialBridgePrepared};
+pub use hosted::{
+    HostedCredentialBridgeDrain, HostedCredentialBridgePrepared, PreparedHostedCredentialBridge,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionClientError {
@@ -783,54 +785,6 @@ pub struct CredentialBridgeResponseSender {
     _hosted_lifetime: Option<Arc<hosted::HostedLifetime>>,
 }
 
-/// An inactive hosted stream. No Open has been sent and no live daemon epoch
-/// replaced. Its fixed-purpose token is never exposed by Debug or a session RPC.
-pub struct PreparedHostedCredentialBridge {
-    input: mpsc::Sender<bridge_v1::CredentialBridgeHostMessage>,
-    ready: bridge_v1::CredentialBridgeReady,
-    workspace_authorization: Zeroizing<Vec<u8>>,
-    hosted_lifetime: Arc<hosted::HostedLifetime>,
-}
-
-impl PreparedHostedCredentialBridge {
-    pub fn ready(&self) -> &bridge_v1::CredentialBridgeReady {
-        &self.ready
-    }
-    pub fn workspace_authorization(&self) -> &[u8] {
-        &self.workspace_authorization
-    }
-
-    /// Call only after the isolated broker returned authenticated admission
-    /// headers for this stream's real Ready and both exact Pod tokens.
-    /// `capabilities` are the optional operations that broker listed in those
-    /// headers; the daemon sends such an operation only when its Open lists
-    /// it. Only bounded, canonical names this build knows are forwarded.
-    pub async fn activate(
-        self,
-        capabilities: &[String],
-    ) -> Result<CredentialBridgeResponseSender, SessionClientError> {
-        let forwarded =
-            known_credential_bridge_capabilities(capabilities.iter().map(String::as_str));
-        self.input
-            .send(bridge_v1::CredentialBridgeHostMessage {
-                payload: Some(bridge_v1::credential_bridge_host_message::Payload::Open(
-                    bridge_v1::CredentialBridgeOpen {
-                        protocol_version: self.ready.protocol_version,
-                        environment_id: self.ready.environment_id.clone(),
-                        environment_generation: self.ready.environment_generation,
-                        capabilities: forwarded,
-                    },
-                )),
-            })
-            .await
-            .map_err(|_| SessionClientError::RequestClosed)?;
-        Ok(CredentialBridgeResponseSender {
-            input: self.input,
-            _hosted_lifetime: Some(self.hosted_lifetime),
-        })
-    }
-}
-
 impl SessionClient {
     /// Build a daemon client over a caller-provided transport channel.
     ///
@@ -972,6 +926,7 @@ impl SessionClient {
                         environment_id: environment_id.to_string(),
                         environment_generation,
                         capabilities: listed,
+                        placeholders: Vec::new(),
                     },
                 )),
             })

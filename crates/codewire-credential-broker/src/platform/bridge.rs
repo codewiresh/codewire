@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use codewire_access::ProjectedPlaceholders;
 use codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
 use codewire_daemon_proto::broker::v1::credential_broker_service_server::{
     CredentialBrokerService, CredentialBrokerServiceServer,
@@ -95,6 +96,9 @@ pub const PLATFORM_CREDENTIAL_BRIDGE_CAPABILITIES: &[&str] = &[
     codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM,
 ];
 const ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often an intercepted epoch admitted with hosted placeholders off is
+/// logged, at most: a misconfiguration, not an event per Sandbox.
+const PLACEHOLDERS_OFF_LOG_INTERVAL: Duration = Duration::from_secs(600);
 const RESPONSE_BUFFER: usize = 32;
 
 /// Closed failures from the trusted process-local identity boundary.
@@ -161,6 +165,9 @@ struct ServiceState<A, U> {
     /// Whether a hosted epoch's leases carry their environment's placeholder
     /// (#4001). Off unless the credential service's setting turns it on.
     hosted_placeholders: bool,
+    /// When an intercepted epoch was last logged as admitted with hosted
+    /// placeholders off.
+    placeholders_off_logged: Mutex<Option<Instant>>,
     permits: Arc<Semaphore>,
     stream_capacity: usize,
     leases: LeaseBudget,
@@ -229,6 +236,7 @@ where
                 upstream,
                 github_app_authorization: None,
                 hosted_placeholders: false,
+                placeholders_off_logged: Mutex::new(None),
                 permits: Arc::new(Semaphore::new(streams)),
                 stream_capacity: streams,
                 leases: LeaseBudget::new(leases),
@@ -356,7 +364,7 @@ where
         I: Stream<Item = Result<v1::CredentialBridgeGuestMessage, Status>> + Send + 'static,
         F: Future<Output = Result<(Arc<B>, I), PlatformBridgeAuthenticationError>> + Send,
     {
-        let (stream, expires_at_unix, _) = self.serve(admission, Joinable::No).await?;
+        let (stream, expires_at_unix, _, _) = self.serve(admission, Joinable::No).await?;
         Ok((stream, expires_at_unix))
     }
 
@@ -365,8 +373,9 @@ where
     /// intercepted epoch can be joined by a front-door stream, and its broker
     /// then delivers placeholder logins or none, never the sign-in's own
     /// tokens beside the front door: one decision, the relay's, for both
-    /// (cw-security, 2026-11-19). It returns the epoch's handle exactly then,
-    /// for its response header and nowhere else.
+    /// (cw-security, 2026-11-19). It returns the epoch's handle and the
+    /// placeholders its Sandbox projects exactly then, for its response
+    /// headers and nowhere else.
     pub async fn serve_authenticated_joinable<B, I, F>(
         &self,
         admission: F,
@@ -374,7 +383,7 @@ where
         (
             ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>,
             u64,
-            Option<tonic::metadata::BinaryMetadataValue>,
+            Option<JoinableEpoch>,
         ),
         Status,
     >
@@ -392,14 +401,17 @@ where
             said.store(intercepted, Ordering::Release);
             Ok((authority, input))
         };
-        let (stream, expires_at_unix, handle) = self
+        let (stream, expires_at_unix, handle, projected) = self
             .serve(admission, Joinable::Binding(intercepted))
             .await?;
-        Ok((
-            stream,
-            expires_at_unix,
-            handle.map(|handle| handle.header_value()),
-        ))
+        let joinable = match (handle, projected) {
+            (Some(handle), Some(placeholders)) => Some(JoinableEpoch {
+                handle: handle.header_value(),
+                placeholders,
+            }),
+            _ => None,
+        };
+        Ok((stream, expires_at_unix, joinable))
     }
 
     /// [`Self::serve_authenticated`] for an owner's delegation epoch (#4909).
@@ -435,7 +447,7 @@ where
             declared.store(wanted, Ordering::Release);
             Ok((authority, input))
         };
-        let (stream, expires_at_unix, handle) = self
+        let (stream, expires_at_unix, handle, _) = self
             .serve(admission, Joinable::Owner(owner, front_door))
             .await?;
         Ok((
@@ -513,6 +525,7 @@ where
             ReceiverStream<Result<v1::CredentialBridgeHostMessage, Status>>,
             u64,
             Option<EpochHandle>,
+            Option<ProjectedPlaceholders>,
         ),
         Status,
     >
@@ -532,7 +545,13 @@ where
                 result = tokio::time::timeout_at(deadline, async {
                     let (authority, input) = admission.await
                         .map_err(PlatformBridgeAuthenticationError::status)?;
-                    self.admit(authority, input.boxed()).await
+                    // An intercepted hosted epoch also derives the placeholders
+                    // its Sandbox projects; the relay's word is read only now.
+                    let intercepted = matches!(
+                        &joinable,
+                        Joinable::Binding(intercepted) if intercepted.load(Ordering::Acquire)
+                    );
+                    self.admit(authority, input.boxed(), intercepted).await
                 }) => {
                     result
                         .map_err(|_| Status::deadline_exceeded("platform credential bridge admission timed out"))
@@ -553,6 +572,7 @@ where
             receiver,
             environment_id,
             generation,
+            projected,
         } = admission?;
         sink.epoch.ensure_live().map_err(bridge_status)?;
         let expires_at_unix = sink.epoch.expires_at_unix;
@@ -588,8 +608,13 @@ where
                     let _ = sink.output.try_send(Err(bridge_status(error)));
                 }
             })?;
-            return Ok((ReceiverStream::new(receiver), expires_at_unix, None));
+            return Ok((ReceiverStream::new(receiver), expires_at_unix, None, None));
         };
+        // An intercepted hosted epoch is served only with the placeholders it
+        // derived at admission.
+        if matches!(scope, FrontDoorScope::Binding { .. }) && projected.is_none() {
+            return Err(unavailable());
+        }
         let (joins, joining) = mpsc::channel(1);
         let bounds = EpochBounds {
             expires_at_unix,
@@ -614,7 +639,12 @@ where
                 let _ = sink.output.try_send(Err(bridge_status(error)));
             }
         })?;
-        Ok((ReceiverStream::new(receiver), expires_at_unix, Some(handle)))
+        Ok((
+            ReceiverStream::new(receiver),
+            expires_at_unix,
+            Some(handle),
+            projected,
+        ))
     }
 
     /// Stop admission and signal transport cancellation synchronously. The
@@ -690,10 +720,13 @@ where
         Ok(())
     }
 
+    /// `intercepted` (the relay's word, #4001) also derives the placeholders
+    /// the epoch's Sandbox projects, after its authority is read again.
     async fn admit<B: PlatformRuntimeAuthority + 'static>(
         &self,
         authority: Arc<B>,
         input: BoxStream<'static, Result<v1::CredentialBridgeGuestMessage, Status>>,
+        intercepted: bool,
     ) -> Result<Admission<B, U>, Status> {
         let provider = PlatformBrokerLeaseProvider {
             // Every epoch of this service shares its one lease budget.
@@ -755,10 +788,24 @@ where
             // unwrap or lease credential material; a hosted epoch evaluates
             // its first authority decision from it.
             provider.admit_authority().await.map_err(lease_status)?;
-            Ok::<_, Status>(admitted)
+            if intercepted && !self.state.hosted_placeholders {
+                self.log_placeholders_off();
+            }
+            let projected = if intercepted {
+                Some(
+                    provider
+                        .projected_placeholders()
+                        .await
+                        .map_err(lease_status)?,
+                )
+            } else {
+                None
+            };
+            Ok::<_, Status>((admitted, projected))
         })
         .await
         .map_err(|_| denied())??;
+        let (admitted, projected) = admitted;
         epoch.ensure_live().map_err(bridge_status)?;
         // A forward from here would leave from the platform, past the
         // Sandbox's own policy and cw-egress, so none is sent (#5555).
@@ -776,7 +823,30 @@ where
             receiver,
             environment_id,
             generation,
+            projected,
         })
+    }
+}
+
+impl<A, U> PlatformCredentialBridgeService<A, U> {
+    /// An intercepted epoch admitted while this service derives no hosted
+    /// placeholders projects none (#4001): logged at most once per
+    /// [`PLACEHOLDERS_OFF_LOG_INTERVAL`], naming the setting that is off.
+    fn log_placeholders_off(&self) {
+        let mut logged = self
+            .state
+            .placeholders_off_logged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        if logged.is_some_and(|at| now.duration_since(at) < PLACEHOLDERS_OFF_LOG_INTERVAL) {
+            return;
+        }
+        *logged = Some(now);
+        tracing::error!(
+            setting = "CREDENTIAL_HOSTED_PLACEHOLDERS_ENABLED",
+            "intercepted Sandboxes project no placeholders: turn on CREDENTIAL_HOSTED_PLACEHOLDERS_ENABLED with hosted interception"
+        );
     }
 }
 
@@ -787,6 +857,26 @@ struct Admission<A, U> {
     receiver: mpsc::Receiver<Result<v1::CredentialBridgeHostMessage, Status>>,
     environment_id: Uuid,
     generation: u64,
+    /// An intercepted epoch's projected placeholders; `None` for any other.
+    projected: Option<ProjectedPlaceholders>,
+}
+
+/// What an intercepted epoch's admission gives the relay alone, in its
+/// response headers: the handle a front-door stream joins it with, and the
+/// placeholders its Sandbox projects (#4001).
+pub struct JoinableEpoch {
+    pub handle: tonic::metadata::BinaryMetadataValue,
+    pub placeholders: ProjectedPlaceholders,
+}
+
+impl std::fmt::Debug for JoinableEpoch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("JoinableEpoch")
+            .field("handle", &"[REDACTED]")
+            .field("placeholders", &self.placeholders)
+            .finish()
+    }
 }
 
 #[tonic::async_trait]
@@ -878,7 +968,7 @@ where
             Ok((authority, input, intercepted))
         })
         .await
-        .map(|(stream, expires_at_unix, handle)| {
+        .and_then(|(stream, expires_at_unix, joinable)| {
             let mut response = Response::new(stream);
             for capability in PLATFORM_CREDENTIAL_BRIDGE_CAPABILITIES {
                 response.metadata_mut().append(
@@ -892,15 +982,23 @@ where
                 codewire_daemon_proto::CREDENTIAL_BRIDGE_EXPIRES_AT_HEADER,
                 tonic::metadata::MetadataValue::from(expires_at_unix),
             );
-            // For the relay only, and only for an intercepted epoch: it never
-            // reaches the daemon or the guest.
-            if let Some(handle) = handle {
+            // For the relay only, and only for an intercepted epoch: the
+            // handle never reaches the daemon or the guest, and the relay
+            // copies the placeholders into the daemon's Open. Exactly one
+            // placeholders value, empty when the binding grants no projected
+            // slot. Neither is logged.
+            if let Some(JoinableEpoch {
+                handle,
+                placeholders,
+            }) = joinable
+            {
                 response.metadata_mut().insert_bin(
                     codewire_daemon_proto::CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER,
                     handle,
                 );
+                insert_placeholders(response.metadata_mut(), &placeholders)?;
             }
-            response
+            Ok(response)
         })
     }
 
@@ -1109,6 +1207,23 @@ fn bridge_status(error: BrokerBridgeError) -> Status {
         }
         BrokerBridgeError::Unavailable => unavailable(),
     }
+}
+
+/// `placeholders` as the admission response's one placeholders value (#4001),
+/// marked sensitive: HTTP/2 never indexes it, and no metadata `Debug`
+/// prints it.
+fn insert_placeholders(
+    metadata: &mut MetadataMap,
+    placeholders: &ProjectedPlaceholders,
+) -> Result<(), Status> {
+    let mut value = tonic::metadata::MetadataValue::try_from(placeholders.header_value())
+        .map_err(|_| unavailable())?;
+    value.set_sensitive(true);
+    metadata.insert(
+        codewire_daemon_proto::CREDENTIAL_BRIDGE_PLACEHOLDERS_HEADER,
+        value,
+    );
+    Ok(())
 }
 
 /// Whether the relay says this epoch's Pod is intercepted (#4001): exactly

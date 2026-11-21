@@ -211,6 +211,7 @@ impl FrontDoorHostSession {
                         .iter()
                         .map(|&capability| capability.to_owned())
                         .collect(),
+                    placeholders: Vec::new(),
                 },
             )),
         };

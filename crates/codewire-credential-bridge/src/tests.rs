@@ -359,6 +359,7 @@ async fn out_of_order_or_unknown_host_frames_fail_closed() {
                 environment_id: harness.bridge.identity().environment_id.to_string(),
                 environment_generation: 7,
                 capabilities: Vec::new(),
+                placeholders: Vec::new(),
             })),
             5 => None,
             6 => Some(HostPayload::ResponseFailure(

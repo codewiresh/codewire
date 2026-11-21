@@ -707,6 +707,13 @@ impl WorkspaceBindingConfig {
                 selection_sha256,
                 binding.managed_credential_clients,
             );
+            // An intercepted Sandbox (#4001) delivers placeholder logins
+            // only and drops the managed base URL. Its Anthropic placeholder
+            // arrives with each epoch's Open, and a launch takes the active
+            // epoch's; until then it projects none, never the loopback route.
+            if binding.interception {
+                config.interception = Some(Interception::new(None));
+            }
         }
         config
     }
@@ -1537,8 +1544,9 @@ mod tests {
     }
 
     // Hosted interception (#4001) is off unless the bind response turns it
-    // on, and the flag alone changes nothing the daemon serves yet: the
-    // placeholder logins that act on it come later in #4001.
+    // on. On a broker-mode Sandbox it makes the daemon intercepted, with no
+    // placeholder until an epoch's Open brings one; a Sandbox without a
+    // selected projection serves no agent credential, and it changes nothing.
     #[test]
     fn interception_is_off_unless_the_response_turns_it_on() {
         let config = binding_config();
@@ -1549,7 +1557,28 @@ mod tests {
         assert!(!intercepted.clone().with_interception(false).interception());
         assert_eq!(
             config.clone().into_config(&binding),
-            config.into_config(&intercepted)
+            config.clone().into_config(&intercepted)
+        );
+
+        let digest = "ab".repeat(32);
+        let projected = config
+            .validate(&BindResponseFields {
+                projection_selection_sha256: &digest,
+                managed_credential_clients: "v1:anthropic",
+                ..response()
+            })
+            .unwrap();
+        assert!(
+            config
+                .clone()
+                .into_config(&projected)
+                .interception
+                .is_none()
+        );
+        let served = config.into_config(&projected.with_interception(true));
+        assert_eq!(
+            served.interception,
+            Some(codewire_access::Interception::new(None))
         );
     }
 

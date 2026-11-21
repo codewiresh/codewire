@@ -41,6 +41,9 @@ pub(crate) struct CredentialBridge {
     config: Option<CredentialBridgeConfig>,
     inner: Result<Option<SharedCredentialBridge>, Status>,
     owner: Arc<BridgeOwner>,
+    /// Whether this daemon's agents are intercepted (#4001): only then may a
+    /// host's Open carry placeholders.
+    intercepted: bool,
     // Where a Hosted ingress listens: the fixed guest-facing loopback address
     // in the product. Unit tests bind port 0 instead, so the kernel gives
     // each ingress its own port and no test run contends for a fixed one.
@@ -143,6 +146,7 @@ impl CredentialBridge {
         Self {
             config,
             inner,
+            intercepted: false,
             #[cfg(not(test))]
             loopback: hosted_loopback_address(),
             #[cfg(test)]
@@ -154,6 +158,52 @@ impl CredentialBridge {
                 shutdown: CancellationToken::new(),
             }),
         }
+    }
+
+    /// This bridge for a daemon whose agents are intercepted (#4001), as its
+    /// configuration says: a host's Open may then carry placeholders.
+    pub(crate) fn intercepting(mut self, intercepted: bool) -> Self {
+        self.intercepted = intercepted;
+        self
+    }
+
+    /// The placeholders the active epoch gave this Sandbox to project
+    /// (#4001), waiting until `deadline` for the first host.
+    pub(crate) async fn projected_placeholders(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<codewire_access::ProjectedPlaceholders, Status> {
+        self.shared()?.projected_placeholders(deadline).await
+    }
+
+    /// The configuration a launch builds its environment from. A hosted
+    /// Sandbox whose bind turned interception on (#4001) projects the
+    /// active epoch's Anthropic placeholder, waiting for the first epoch as
+    /// long as a launch waits for its host; without one it projects no
+    /// Anthropic bearer at all, never the loopback route. Any other daemon's
+    /// configuration is used as it is.
+    pub(crate) async fn launch_config<'a>(
+        &self,
+        config: &'a crate::Config,
+    ) -> std::borrow::Cow<'a, crate::Config> {
+        let hosted = config
+            .credential_bridge
+            .as_ref()
+            .is_some_and(|bridge| bridge.transport == CredentialBridgeTransport::Hosted);
+        if !hosted || config.interception.is_none() {
+            return std::borrow::Cow::Borrowed(config);
+        }
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(codewire_workload_secrets::PROJECTION_REQUEST_LIFETIME_MS);
+        let placeholders = self
+            .projected_placeholders(deadline)
+            .await
+            .unwrap_or_default();
+        let mut launch = config.clone();
+        launch.interception = Some(codewire_access::Interception::new(
+            placeholders.anthropic().cloned(),
+        ));
+        std::borrow::Cow::Owned(launch)
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
@@ -244,7 +294,7 @@ impl CredentialBridge {
             Some(tokio::select! {
                 biased;
                 _ = self.owner.shutdown.cancelled() => return Err(hosted::unavailable()),
-                result = read_open(&mut input, identity, deadline) => result?,
+                result = read_open(&mut input, identity, deadline, self.intercepted) => result?,
             })
         };
         let (prepared, output) = self.shared()?.prepare_connection()?;
@@ -254,11 +304,12 @@ impl CredentialBridge {
             ));
         }
         let owner = self.owner.clone();
+        let intercepted = self.intercepted;
         let accepting = self.owner.accepting.lock().await;
         if !*accepting || self.owner.shutdown.is_cancelled() {
             return Err(hosted::unavailable());
         }
-        if let Some(capabilities) = local_capabilities {
+        if let Some((capabilities, placeholders)) = local_capabilities {
             // Keep the local eager-Open contract: RPC headers are sent only
             // after this already-authenticated host has actually activated.
             // The local authority starts the next broker before the current
@@ -266,7 +317,7 @@ impl CredentialBridge {
             // epoch finishes only the requests already sent on it, for at
             // most 90 seconds, and new ones go here.
             let connection = prepared
-                .activate_with_replacement(input, &capabilities, EpochReplacement::Drain)
+                .activate_projecting(input, &capabilities, placeholders, EpochReplacement::Drain)
                 .await?;
             drop(self.owner.tasks.spawn(async move {
                 let _permit = permit;
@@ -285,9 +336,9 @@ impl CredentialBridge {
             let admitted = tokio::select! {
                 biased;
                 _ = owner.shutdown.cancelled() => return,
-                result = read_open(&mut input, identity, deadline) => result,
+                result = read_open(&mut input, identity, deadline, intercepted) => result,
             };
-            let Ok(capabilities) = admitted else {
+            let Ok((capabilities, placeholders)) = admitted else {
                 return;
             };
             let accepting = owner.accepting.lock().await;
@@ -299,7 +350,7 @@ impl CredentialBridge {
             // only the requests already sent on it, for at most 90 seconds,
             // and new ones go here.
             let Ok(connection) = prepared
-                .activate_with_replacement(input, &capabilities, EpochReplacement::Drain)
+                .activate_projecting(input, &capabilities, placeholders, EpochReplacement::Drain)
                 .await
             else {
                 return;
@@ -414,12 +465,16 @@ fn bind_hosted_loopback(address: std::net::SocketAddr) -> io::Result<TcpListener
 }
 
 /// Read and check the host's Open, returning the optional operations it
-/// lists for this epoch. A malformed capability list refuses the epoch.
+/// lists for this epoch and the placeholders it gives the Sandbox to
+/// project. A malformed capability list refuses the epoch, and so do
+/// placeholders on a daemon that is not `intercepted` or any but a whole,
+/// well-formed set (#4001). No placeholder is ever logged.
 async fn read_open<S>(
     input: &mut S,
     identity: BridgeIdentity,
     deadline: tokio::time::Instant,
-) -> Result<Vec<String>, Status>
+    intercepted: bool,
+) -> Result<(Vec<String>, codewire_access::ProjectedPlaceholders), Status>
 where
     S: Stream<Item = Result<v1::CredentialBridgeHostMessage, Status>> + Unpin,
 {
@@ -450,7 +505,18 @@ where
             "credential bridge capabilities are invalid",
         ));
     }
-    Ok(open.capabilities)
+    if !intercepted && !open.placeholders.is_empty() {
+        return Err(Status::invalid_argument(
+            "credential bridge placeholders are not projected here",
+        ));
+    }
+    let placeholders = codewire_access::ProjectedPlaceholders::from_entries(
+        open.placeholders
+            .iter()
+            .map(|entry| (entry.capability_slot.as_str(), entry.placeholder.as_str())),
+    )
+    .map_err(|_| Status::invalid_argument("credential bridge placeholders are invalid"))?;
+    Ok((open.capabilities, placeholders))
 }
 
 impl CredentialIngress {

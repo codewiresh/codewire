@@ -8,7 +8,7 @@ use codewire_access::CredentialPlaceholder;
 use super::*;
 use crate::timing::{self, PlaceholderUse};
 
-async fn key_rows(pool: &PgPool) -> Result<i64> {
+pub(super) async fn key_rows(pool: &PgPool) -> Result<i64> {
     Ok(
         sqlx::query_scalar("SELECT count(*) FROM platform_placeholder_keys")
             .fetch_one(pool)
@@ -64,7 +64,7 @@ async fn a_hosted_lease_carries_its_environments_placeholder_only_when_turned_on
     fixture.finish(result).await
 }
 
-fn placeholder_epoch(adapter: Arc<Adapter>) -> Adapter {
+pub(super) fn placeholder_epoch(adapter: Arc<Adapter>) -> Adapter {
     Adapter {
         placeholders: Some(EpochPlaceholders::default()),
         ..Arc::into_inner(adapter).expect("one owner")
@@ -141,7 +141,7 @@ fn a_hosted_lease_derives_the_shared_known_answer() {
         expires_at_unix: None,
         permissions: Default::default(),
     };
-    let placeholder = super::super::hosted_placeholder(
+    let placeholder = super::super::placeholders::hosted_placeholder(
         &PlaceholderKey::from_slice(&known_answer::KEY).unwrap(),
         &grant,
     );
@@ -167,7 +167,7 @@ fn the_epoch_cache_key_follows_the_binding_revision_not_the_generation() {
         expires_at_unix: None,
         permissions: Default::default(),
     };
-    let inputs = super::super::placeholder_inputs;
+    let inputs = super::super::placeholders::placeholder_inputs;
     assert_eq!(inputs(&grant(1, 5)), inputs(&grant(2, 5)));
     assert_ne!(inputs(&grant(1, 5)), inputs(&grant(1, 6)));
 }

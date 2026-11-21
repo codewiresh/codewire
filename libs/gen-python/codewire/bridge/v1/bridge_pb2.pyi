@@ -78,16 +78,26 @@ ENVIRONMENT_PROJECTION_SOURCE_PROJECT: EnvironmentProjectionSource
 ENVIRONMENT_PROJECTION_SOURCE_USER: EnvironmentProjectionSource
 
 class CredentialBridgeOpen(_message.Message):
-    __slots__ = ("protocol_version", "environment_id", "environment_generation", "capabilities")
+    __slots__ = ("protocol_version", "environment_id", "environment_generation", "capabilities", "placeholders")
     PROTOCOL_VERSION_FIELD_NUMBER: _ClassVar[int]
     ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
     ENVIRONMENT_GENERATION_FIELD_NUMBER: _ClassVar[int]
     CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
+    PLACEHOLDERS_FIELD_NUMBER: _ClassVar[int]
     protocol_version: int
     environment_id: str
     environment_generation: int
     capabilities: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, protocol_version: _Optional[int] = ..., environment_id: _Optional[str] = ..., environment_generation: _Optional[int] = ..., capabilities: _Optional[_Iterable[str]] = ...) -> None: ...
+    placeholders: _containers.RepeatedCompositeFieldContainer[CredentialBridgePlaceholder]
+    def __init__(self, protocol_version: _Optional[int] = ..., environment_id: _Optional[str] = ..., environment_generation: _Optional[int] = ..., capabilities: _Optional[_Iterable[str]] = ..., placeholders: _Optional[_Iterable[_Union[CredentialBridgePlaceholder, _Mapping]]] = ...) -> None: ...
+
+class CredentialBridgePlaceholder(_message.Message):
+    __slots__ = ("capability_slot", "placeholder")
+    CAPABILITY_SLOT_FIELD_NUMBER: _ClassVar[int]
+    PLACEHOLDER_FIELD_NUMBER: _ClassVar[int]
+    capability_slot: str
+    placeholder: str
+    def __init__(self, capability_slot: _Optional[str] = ..., placeholder: _Optional[str] = ...) -> None: ...
 
 class CredentialHttpHeader(_message.Message):
     __slots__ = ("name", "value")

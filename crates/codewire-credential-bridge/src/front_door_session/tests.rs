@@ -41,6 +41,7 @@ fn open(identity: BridgeIdentity, capabilities: &[&str]) -> v1::CredentialBridge
         environment_id: identity.environment_id.to_string(),
         environment_generation: identity.environment_generation,
         capabilities: capabilities.iter().map(|&name| name.to_owned()).collect(),
+        placeholders: Vec::new(),
     }))
 }
 

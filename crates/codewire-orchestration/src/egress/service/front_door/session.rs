@@ -78,6 +78,7 @@ pub(super) fn open_frame(key: &BindingKey, capabilities: &[String]) -> Option<Ve
                 environment_id: key.environment_id.to_string(),
                 environment_generation: key.generation,
                 capabilities: capabilities.to_vec(),
+                placeholders: Vec::new(),
             },
         )),
     };

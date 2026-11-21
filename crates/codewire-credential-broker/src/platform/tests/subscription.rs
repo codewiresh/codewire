@@ -23,7 +23,9 @@ fn messages() -> GrantPermission {
     }
 }
 
-async fn lease_anthropic(adapter: &Adapter) -> Result<PlatformCredentialLease, BrokerLeaseError> {
+pub(super) async fn lease_anthropic(
+    adapter: &Adapter,
+) -> Result<PlatformCredentialLease, BrokerLeaseError> {
     let permission = messages();
     adapter
         .lease_operation(
@@ -41,7 +43,7 @@ fn material(lease: PlatformCredentialLease) -> Vec<u8> {
 
 /// Store a personal subscription token and bind the fixture environment to a
 /// new profile revision that selects it in the Anthropic slot.
-async fn bind_token(f: &Fixture) -> Result<CredentialRecord> {
+pub(super) async fn bind_token(f: &Fixture) -> Result<CredentialRecord> {
     let token = f
         .store
         .create(

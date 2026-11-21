@@ -1213,6 +1213,7 @@ fn front_door_frames(environment_id: Uuid) -> [v1::CredentialBridgeGuestMessage;
             .iter()
             .map(|capability| (*capability).to_owned())
             .collect(),
+        placeholders: Vec::new(),
     };
     let ready = v1::CredentialBridgeReady::decode(open.encode_to_vec().as_slice()).unwrap();
     let request = anthropic("api.anthropic.com", &[("x-api-key", OURS.to_owned())]);

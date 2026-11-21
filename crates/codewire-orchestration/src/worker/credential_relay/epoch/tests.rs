@@ -3,6 +3,7 @@
 mod budgets;
 mod front_door;
 mod front_door_join;
+mod placeholders;
 mod relay;
 mod ssh_deadlines;
 mod streamed_push;
@@ -72,6 +73,10 @@ struct SyntheticBroker {
     expires_at: Arc<std::sync::Mutex<Vec<String>>>,
     /// The epoch handle header; absent models an older broker.
     handle: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    /// Placeholders-header values. One empty value, the default, is a
+    /// current broker's answer to an intercepted epoch with nothing to
+    /// project.
+    placeholders: Arc<std::sync::Mutex<Vec<String>>>,
     front_door_calls: mpsc::Sender<FrontDoorCall>,
 }
 
@@ -266,6 +271,12 @@ impl CredentialBrokerService for SyntheticBroker {
                 tonic::metadata::BinaryMetadataValue::from_bytes(handle),
             );
         }
+        for value in self.placeholders.lock().unwrap().iter() {
+            response.metadata_mut().append(
+                codewire_daemon_proto::CREDENTIAL_BRIDGE_PLACEHOLDERS_HEADER,
+                value.parse().unwrap(),
+            );
+        }
         Ok(response)
     }
 }
@@ -279,6 +290,7 @@ struct Fixture {
     broker_capabilities: Arc<std::sync::Mutex<Vec<&'static str>>>,
     broker_expires_at: Arc<std::sync::Mutex<Vec<String>>>,
     broker_handle: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    broker_placeholders: Arc<std::sync::Mutex<Vec<String>>>,
     front_door_calls: mpsc::Receiver<FrontDoorCall>,
     shutdown: CancellationToken,
     tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -306,12 +318,14 @@ impl Fixture {
         let broker_capabilities = Arc::new(std::sync::Mutex::new(Vec::new()));
         let broker_expires_at = Arc::new(std::sync::Mutex::new(Vec::new()));
         let broker_handle = Arc::new(std::sync::Mutex::new(None));
+        let broker_placeholders = Arc::new(std::sync::Mutex::new(vec![String::new()]));
         let (front_door_tx, front_door_calls) = mpsc::channel(2);
         let synthetic_broker = SyntheticBroker {
             calls: broker_tx,
             capabilities: broker_capabilities.clone(),
             expires_at: broker_expires_at.clone(),
             handle: broker_handle.clone(),
+            placeholders: broker_placeholders.clone(),
             front_door_calls: front_door_tx,
         };
         let synthetic_daemon = SyntheticDaemon {
@@ -368,6 +382,7 @@ impl Fixture {
             broker_capabilities,
             broker_expires_at,
             broker_handle,
+            broker_placeholders,
             front_door_calls,
             shutdown,
             tasks,

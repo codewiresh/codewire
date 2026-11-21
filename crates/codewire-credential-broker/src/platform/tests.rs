@@ -8,6 +8,7 @@ mod decision;
 mod keepalive;
 mod material_cache;
 mod placeholders;
+mod projected;
 #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
 mod ssh;
 mod subscription;

@@ -24,7 +24,9 @@ use axum::http::Method;
 use axum::http::header::{CONNECTION, CONTENT_LENGTH, TRANSFER_ENCODING, UPGRADE};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use bytes::Bytes as WireBytes;
-use codewire_access::{Refusal, RefusalProvider, Unforwarded, UpstreamFailure};
+use codewire_access::{
+    ProjectedPlaceholders, Refusal, RefusalProvider, Unforwarded, UpstreamFailure,
+};
 use codewire_daemon_proto::codewire::bridge::v1;
 use codewire_daemon_proto::{
     CREDENTIAL_BRIDGE_MAX_BODY_CHUNK_BYTES, CREDENTIAL_BRIDGE_MAX_HEADER_BYTES,
@@ -244,6 +246,8 @@ struct ActiveHost {
     streams_request_body: bool,
     /// Whether the host's Open listed WebSocket upgrades.
     websockets: bool,
+    /// The placeholders the host's Open gave the Sandbox to project (#4001).
+    placeholders: ProjectedPlaceholders,
 }
 
 struct PendingResponse {
@@ -983,6 +987,28 @@ impl PreparedBridgeConnection {
     where
         S: Stream<Item = Result<v1::CredentialBridgeHostMessage, Status>> + Send + 'static,
     {
+        self.activate_projecting(
+            input,
+            capabilities,
+            ProjectedPlaceholders::default(),
+            replacement,
+        )
+        .await
+    }
+
+    /// [`Self::activate_with_replacement`] for a hosted Sandbox's epoch whose
+    /// Open gave it `placeholders` to project (#4001), already read whole.
+    /// They are this epoch's, and a launch reads the active epoch's.
+    pub async fn activate_projecting<S>(
+        self,
+        input: S,
+        capabilities: &[String],
+        placeholders: ProjectedPlaceholders,
+        replacement: EpochReplacement,
+    ) -> Result<CredentialBridgeConnection, Status>
+    where
+        S: Stream<Item = Result<v1::CredentialBridgeHostMessage, Status>> + Send + 'static,
+    {
         if capabilities.len() > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES
             || !capabilities.iter().all(|capability| {
                 codewire_daemon_proto::valid_credential_bridge_capability(capability)
@@ -1019,6 +1045,7 @@ impl PreparedBridgeConnection {
                 logins,
                 streams_request_body,
                 websockets,
+                placeholders,
             });
             match (replacement, replaced) {
                 (EpochReplacement::Drain, Some(replaced)) => {

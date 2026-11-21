@@ -14,6 +14,7 @@ mod id;
 mod managed_refresh;
 mod model;
 mod placeholder;
+mod projected_placeholders;
 mod projection;
 mod refusal;
 
@@ -55,6 +56,7 @@ pub use placeholder::{
     CREDENTIAL_PLACEHOLDER_LENGTH, CREDENTIAL_PLACEHOLDER_TAG, CredentialPlaceholder,
     PLACEHOLDER_KEY_BYTES, PlaceholderKey, known_answer,
 };
+pub use projected_placeholders::{PROJECTED_PLACEHOLDER_SLOTS, ProjectedPlaceholders};
 pub use projection::{
     CODEX_CONFIG_FILE_NAME, CODEX_MANAGED_CONFIG_HEADER, CODEX_NATIVE_HOME, CODEX_PLATFORM_HOME,
     CODEX_PLATFORM_TOKEN_FILE, CodexProviderProjection, GH_CONFIG_FILE_NAME, GH_NATIVE_CONFIG_DIR,

@@ -2363,29 +2363,41 @@ With the switch on, only the bind decides, since only the bind sees the Pod.
   (#5149). A placeholder is recognised by its whole value's length and
   charset, never by a prefix, and one sent outside the route table is
   refused, never forwarded.
-- **What the Sandbox projects.** The credential service puts the
-  placeholders in the intercepted epoch's `CredentialBridgeOpen`, one for each
-  slot the binding grants whose hosts the front door serves (the one selection
-  both placements use, `codewire_access::front_door_hosts`), so they arrive
-  with the epoch's admission and
-  never apart from it (cw-security, 2026-11-19, #4001). A placeholder key the
-  credential service can't read fails the epoch's admission, so no Open is
-  sent at all. An Open that is not intercepted carries none, and the daemon
-  refuses the field on one; a
-  missing, extra or repeated slot refuses the whole Open, never a partial
-  projection. With its bind's interception on and placeholders in the Open,
-  the daemon projects as a local guest does with its front door: no
-  loopback base URL, each form's variable holding its placeholder
-  (`ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`;
-  `OPENAI_API_KEY`), and Codex's home routing `chatgpt.com` itself. GitHub
-  keeps today's hosted route while its hosts are not intercepted: it has no
-  placeholder in the Open, and Git and `gh` go through the loopback ingress as
-  before. With its
-  bind's interception on and no placeholders in the Open (an older
-  credential service, say), it projects no agent credential at all, never
-  the loopback routes. `NODE_EXTRA_CA_CERTS` and
-  `CODEX_CA_CERTIFICATE` point at the bundle it installs from the egress
-  trust, never over an image's own value. No placeholder appears in a log.
+- **What the Sandbox projects.** Exactly what a local guest's seed carries:
+  the placeholder of the `anthropic` slot, which the API-key and
+  subscription-token forms take as a variable. The sign-in form's and
+  Codex's placeholders travel in their delivered logins, an OpenAI API key
+  keeps its loopback route as it does locally, and GitHub keeps today's
+  hosted route while its hosts are not intercepted (Git and `gh` go through
+  the loopback ingress as before). The credential service derives the set
+  at the intercepted epoch's admission, from the grant the binding gives
+  that slot, as that epoch's leases derive theirs, so it arrives with the
+  epoch's admission and never apart from it (cw-security, 2026-11-19,
+  #4001). A grant evaluation that fails, or a placeholder key the
+  credential service can't read, refuses the admission, so no Open is sent
+  at all; a credential service whose hosted placeholders are off projects
+  none. The admission's response carries the set to orchestration's relay
+  in one header value, `x-codewire-credential-bridge-placeholders`, only
+  for an epoch the relay said is intercepted; the relay copies it into the
+  daemon's `CredentialBridgeOpen.placeholders` whole, or leaves the epoch
+  unadmitted, and never logs or forwards the header. A client of credential
+  delegation never sets the field, and an Open from one that does is
+  refused. The daemon refuses placeholders on an Open when its bind is not
+  intercepted, and an unknown, repeated or malformed slot refuses the whole
+  Open, never a partial projection. With its bind's interception on, the
+  daemon projects as a local guest does with its front door: no loopback
+  base URL, and the form's variable holding the placeholder of the active
+  epoch. A launch waits for an active epoch, the first or the next after
+  one was lost, as long as it waits for its host, so a launch in that gap
+  is delayed, never started without its placeholder. Every epoch of one binding gives the same placeholder,
+  since no epoch is a derivation input; a rebind to another credential or
+  profile revision gives a new one, and a process started before it
+  carries the old one, which the front door then refuses with 401 until
+  that process restarts. With no placeholder (none granted, or hosted
+  placeholders off), it projects no Anthropic bearer at all, never the
+  loopback routes. `NODE_EXTRA_CA_CERTS` and `CODEX_CA_CERTIFICATE` point
+  at the bundle it installs from the egress trust, never over an image's
+  own value. No placeholder appears in a log.
 - **Delivery follows the front door.** A hosted epoch that serves the
   Sandbox's front door delivers Claude and Codex logins with placeholders
   only, or refuses them; it never delivers a real login beside a front door,
@@ -2419,14 +2431,20 @@ With the switch on, only the bind decides, since only the bind sees the Pod.
   before.
 
 **Not yet built.** Merged: the front-door stream joining an admitted epoch
-(#4934), `EgressService.FrontDoorSession` (#4906, answering `UNIMPLEMENTED`),
-and the per-Pod CA (#5051). Open: the placeholder keys and their failed-read
-refusal (#5017, #5087), the bindings and the switch (#5013, #5023), the relay
-session and its router (#5021, #5439, #5056), the CA's ensure, leaf signing
-and sweep (#5170, #5071), and the idle end (#5125). Then the gates on the
-switch: delivery following the front door, and one per-client host selection
-for local and hosted. `cw-egress` keeps each front door's session open and
-reopens it (**The client** above). The journey is `agent-hosted` in
+(#4934), `EgressService.FrontDoorSession` (#4906), the per-Pod CA and its
+admission to the guest's trust frame (#5051, #5603), the placeholder keys
+and their failed-read refusal (#5017, #5087), the bindings, the switch and
+the stored decision with delivery following the front door (#5013, #5023,
+#5496), the relay session and its router (#5021, #5439, #5056), the
+credential service's CA ensure, leaf signing and sweep (#5170, #5071), the
+idle end (#5125), `cw-egress` asking for its front doors' leaves (#5669), and
+the Open's placeholders with the daemon's projection of them (#5530). Still
+open: one per-client host selection for local and hosted (#5463),
+orchestration signing those leaves through the Pod's relay epoch (it answers
+`UNAVAILABLE` until then), and orchestration's egress service reading each
+binding's stored decision. `cw-egress` keeps each front door's session open
+and reopens it (**The client** above). The switch's gates are #4001's
+switch-on checklist. The journey is `agent-hosted` in
 `docs/journeys/network-and-egress.md`.
 
 ### Hosted interception CA (not yet served)

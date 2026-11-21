@@ -231,7 +231,11 @@ fn selection(
 ) -> Result<OwnerLocalSelection, PlatformBridgeAuthenticationError> {
     use PlatformBridgeAuthenticationError::Denied;
     let runtime = open.runtime.into_option().ok_or(Denied)?;
-    if runtime.protocol_version != CREDENTIAL_BRIDGE_PROTOCOL_VERSION {
+    // Only orchestration's relay gives a hosted Sandbox placeholders
+    // (#4001); a client never sets them.
+    if runtime.protocol_version != CREDENTIAL_BRIDGE_PROTOCOL_VERSION
+        || !runtime.placeholders.is_empty()
+    {
         return Err(Denied);
     }
     let environment = Uuid::parse_str(&runtime.environment_id).map_err(|_| Denied)?;

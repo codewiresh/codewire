@@ -22,6 +22,22 @@ message CredentialBridgeOpen {
   // that admits an epoch sets this; it confers no authority, which the broker
   // rederives for every request.
   repeated string capabilities = 4;
+  // The placeholders a hosted Sandbox's daemon projects on an intercepted
+  // epoch, one per projected capability slot the binding grants (#4001;
+  // docs/dev/SECRETS-AND-CREDENTIALS.md, "Hosted interception"). Only
+  // orchestration's credential relay sets it, from the credential service's
+  // admission; a client never sets it, and the credential delegation path
+  // refuses an Open that does. A daemon whose binding is not intercepted
+  // refuses an Open that carries any, and an unknown, repeated or malformed
+  // entry refuses the whole Open.
+  repeated CredentialBridgePlaceholder placeholders = 5;
+}
+
+// One capability slot's placeholder. Not a secret, as it is worthless outside
+// its environment, but never logged.
+message CredentialBridgePlaceholder {
+  string capability_slot = 1;
+  string placeholder = 2 [debug_redact = true];
 }
 
 message CredentialHttpHeader {

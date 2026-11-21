@@ -196,7 +196,8 @@ impl Fixture {
         Self::build(streams, leases, FRONT_DOOR_IDLE, false).await
     }
 
-    /// The production limits, with hosted placeholders on (#4001).
+    /// The production limits, with hosted placeholders on (#4001). Its
+    /// database is closed, so no grant can be evaluated.
     async fn with_hosted_placeholders() -> Self {
         Self::build(
             PLATFORM_CREDENTIAL_BRIDGE_MAX_STREAMS,

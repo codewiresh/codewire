@@ -37,6 +37,25 @@ fn delegation_selection_is_exact_names_only_and_owner_comes_from_authentication(
     );
 }
 
+// Placeholders are orchestration's to give a hosted Sandbox (#4001): an
+// Open from a delegation client that carries any is refused.
+#[test]
+fn delegation_selection_refuses_placeholders_from_a_client() {
+    let mut open = opening();
+    open.runtime.get_or_insert_default().placeholders.push(
+        public_bridge::CredentialBridgePlaceholder {
+            capability_slot: "anthropic".into(),
+            placeholder: codewire_access::known_answer::PLACEHOLDER.into(),
+            ..Default::default()
+        },
+    );
+    assert!(matches!(
+        selection(open, "synthetic-owner"),
+        Err(PlatformBridgeAuthenticationError::Denied)
+    ));
+    assert!(selection(opening(), "synthetic-owner").is_ok());
+}
+
 #[test]
 fn delegation_selection_rejects_malformed_identity_digest_and_name_sets() {
     for attack in [

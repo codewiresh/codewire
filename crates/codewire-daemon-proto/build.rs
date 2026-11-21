@@ -34,10 +34,12 @@ fn main() {
 }
 
 /// Messages whose `Debug` is written by hand, because they hold a field
-/// marked `debug_redact` (src/ssh.rs, src/login_debug.rs, src/desktop.rs).
+/// marked `debug_redact` (src/ssh.rs, src/login_debug.rs, src/desktop.rs,
+/// src/placeholder_debug.rs).
 const SKIP_DEBUG: &[&str] = &[
     ".codewire.bridge.v1.ClaudeLoginResponse",
     ".codewire.bridge.v1.CodexLoginResponse",
+    ".codewire.bridge.v1.CredentialBridgePlaceholder",
     ".codewire.bridge.v1.CredentialSshSignRequest",
     ".codewire.bridge.v1.CredentialSshSignature",
     ".daemon.v1.DesktopRunning",

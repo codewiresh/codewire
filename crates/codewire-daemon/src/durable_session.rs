@@ -2785,8 +2785,9 @@ impl SessionEngine {
             }
             None => None,
         };
+        let config = self.launch_config().await;
         let mut prepared = match prepare_pipe_process(
-            &self.inner.config,
+            &config,
             &self.inner.credential_bridge,
             &snapshot,
             std::env::vars(),
@@ -2990,19 +2991,11 @@ impl SessionEngine {
         snapshot: PersistedSession,
         cancel: &CancellationToken,
     ) -> Result<v1::SessionRecord, SessionError> {
-        let mut environment =
-            match build_process_env(&self.inner.config, &snapshot.env, &snapshot.term) {
-                Ok(environment) => environment,
-                Err(error) => {
-                    return self
-                        .record_unspawned_failure(
-                            handle,
-                            format!("prepare session PTY environment: {error}"),
-                        )
-                        .await;
-                }
-            };
-        self.inner.display.apply(&snapshot.env, &mut environment);
+        let config = self.launch_config().await;
+        let environment = match pty_environment(&config, &snapshot, &self.inner.display) {
+            Ok(environment) => environment,
+            Err(message) => return self.record_unspawned_failure(handle, message).await,
+        };
         let size = pty_size(snapshot.width, snapshot.height);
         let pair = match native_pty_system().openpty(size) {
             Ok(pair) => pair,
@@ -3014,7 +3007,7 @@ impl SessionEngine {
         };
 
         let mut prepared = match PreparedProcess::prepare_configured(
-            (&self.inner.config, &self.inner.credential_bridge),
+            (&*config, &self.inner.credential_bridge),
             &snapshot.command,
             &snapshot.working_dir,
             &environment,
@@ -7028,6 +7021,10 @@ mod readers;
 
 #[path = "durable_session/input_streams.rs"]
 mod input_streams;
+
+#[path = "durable_session/launch.rs"]
+mod launch;
+use launch::pty_environment;
 
 #[cfg(target_os = "linux")]
 #[path = "durable_session/platform_managed.rs"]

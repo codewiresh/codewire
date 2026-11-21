@@ -9,6 +9,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use codewire_access::ProjectedPlaceholders;
 use codewire_daemon::client::{CredentialBridgeResponseSender, SessionClient, SessionClientError};
 use codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES;
 use codewire_daemon_proto::broker::v1::credential_broker_service_client::CredentialBrokerServiceClient;
@@ -607,6 +608,9 @@ enum Unadmitted {
     BrokerTimeout,
     BrokerUnreachable(tonic::Code),
     BrokerRefused(tonic::Code),
+    /// The broker's admission carried placeholders this relay can't take
+    /// whole (#4001).
+    BrokerPlaceholders,
     Activation,
 }
 
@@ -646,7 +650,8 @@ impl Unadmitted {
             Self::BrokerConnect
             | Self::BrokerTimeout
             | Self::BrokerUnreachable(_)
-            | Self::BrokerRefused(_) => "broker",
+            | Self::BrokerRefused(_)
+            | Self::BrokerPlaceholders => "broker",
         }
     }
 
@@ -662,6 +667,7 @@ impl Unadmitted {
             Self::BrokerTimeout => "broker_timeout",
             Self::BrokerUnreachable(_) => "broker_unreachable",
             Self::BrokerRefused(_) => "broker_refused",
+            Self::BrokerPlaceholders => "broker_placeholders_invalid",
             Self::Activation => "daemon_activation",
         }
     }
@@ -810,6 +816,9 @@ async fn run_epoch_on(
             // daemon's Open carries them, so the daemon never sends one that
             // the broker would end the epoch on.
             let capabilities = broker_capabilities(response.metadata());
+            // Whole or not at all: the daemon never projects part of a set.
+            let placeholders = broker_placeholders(response.metadata(), config.interception)
+                .ok_or(Some(Unadmitted::BrokerPlaceholders))?;
             // For the relay alone: the daemon's Open carries only the
             // capabilities, and no header reaches it.
             let handle = response
@@ -846,7 +855,7 @@ async fn run_epoch_on(
                 return Err(None);
             }
             let sender = prepared
-                .activate(&capabilities)
+                .activate(&capabilities, &placeholders)
                 .await
                 .map_err(|_| Some(Unadmitted::Activation))?;
             let _ = admitted.send(Admitted {
@@ -1168,6 +1177,27 @@ pub(super) fn broker_capabilities(metadata: &tonic::metadata::MetadataMap) -> Ve
         .take(codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_CAPABILITIES)
         .map(str::to_owned)
         .collect()
+}
+
+/// The placeholders the broker's admission gives this epoch's daemon (#4001;
+/// docs/dev/SECRETS-AND-CREDENTIALS.md, "Hosted interception"). Read only
+/// when this relay told the broker the Pod is intercepted, from exactly one
+/// header value, and only whole; a not-intercepted epoch takes none, and the
+/// header on one is refused. `None` leaves the epoch unadmitted. The header
+/// is never logged or forwarded: only the parsed set reaches the daemon's
+/// Open.
+pub(super) fn broker_placeholders(
+    metadata: &tonic::metadata::MetadataMap,
+    intercepted: bool,
+) -> Option<ProjectedPlaceholders> {
+    let mut values = metadata
+        .get_all(codewire_daemon_proto::CREDENTIAL_BRIDGE_PLACEHOLDERS_HEADER)
+        .iter();
+    match (intercepted, values.next(), values.next()) {
+        (false, None, _) => Some(ProjectedPlaceholders::default()),
+        (true, Some(value), None) => ProjectedPlaceholders::from_header(value.to_str().ok()?).ok(),
+        _ => None,
+    }
 }
 
 /// One frame on its way to the broker, with the bytes it holds.

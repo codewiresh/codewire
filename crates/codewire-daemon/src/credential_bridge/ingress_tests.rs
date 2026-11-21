@@ -207,6 +207,7 @@ impl Harness {
                         environment_id: config.environment_id.to_string(),
                         environment_generation: config.environment_generation,
                         capabilities: Vec::new(),
+                        placeholders: Vec::new(),
                     },
                 )),
             }))

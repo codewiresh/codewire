@@ -9,7 +9,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
-use super::{PreparedHostedCredentialBridge, SessionClientError};
+use zeroize::Zeroizing;
+
+use super::{
+    CredentialBridgeResponseSender, SessionClientError, known_credential_bridge_capabilities,
+};
 use codewire_daemon_proto::codewire::bridge::v1;
 
 /// The admitted hosted daemon response, still inactive until the broker opens
@@ -111,6 +115,64 @@ impl Stream for HostedRequestBody {
 impl Drop for HostedRequestBody {
     fn drop(&mut self) {
         self.finish();
+    }
+}
+
+/// An inactive hosted stream. No Open has been sent and no live daemon epoch
+/// replaced. Its fixed-purpose token is never exposed by Debug or a session RPC.
+pub struct PreparedHostedCredentialBridge {
+    pub(super) input: mpsc::Sender<v1::CredentialBridgeHostMessage>,
+    pub(super) ready: v1::CredentialBridgeReady,
+    pub(super) workspace_authorization: Zeroizing<Vec<u8>>,
+    pub(super) hosted_lifetime: Arc<HostedLifetime>,
+}
+
+impl PreparedHostedCredentialBridge {
+    pub fn ready(&self) -> &v1::CredentialBridgeReady {
+        &self.ready
+    }
+    pub fn workspace_authorization(&self) -> &[u8] {
+        &self.workspace_authorization
+    }
+
+    /// Call only after the isolated broker returned authenticated admission
+    /// headers for this stream's real Ready and both exact Pod tokens.
+    /// `capabilities` are the optional operations that broker listed in those
+    /// headers; the daemon sends such an operation only when its Open lists
+    /// it. Only bounded, canonical names this build knows are forwarded.
+    /// `placeholders` are the ones an intercepted epoch's broker derived
+    /// (#4001), already read whole from its admission; empty for any other.
+    pub async fn activate(
+        self,
+        capabilities: &[String],
+        placeholders: &codewire_access::ProjectedPlaceholders,
+    ) -> Result<CredentialBridgeResponseSender, SessionClientError> {
+        let forwarded =
+            known_credential_bridge_capabilities(capabilities.iter().map(String::as_str));
+        self.input
+            .send(v1::CredentialBridgeHostMessage {
+                payload: Some(v1::credential_bridge_host_message::Payload::Open(
+                    v1::CredentialBridgeOpen {
+                        protocol_version: self.ready.protocol_version,
+                        environment_id: self.ready.environment_id.clone(),
+                        environment_generation: self.ready.environment_generation,
+                        capabilities: forwarded,
+                        placeholders: placeholders
+                            .entries()
+                            .map(|(slot, placeholder)| v1::CredentialBridgePlaceholder {
+                                capability_slot: slot.to_owned(),
+                                placeholder: placeholder.as_str().to_owned(),
+                            })
+                            .collect(),
+                    },
+                )),
+            })
+            .await
+            .map_err(|_| SessionClientError::RequestClosed)?;
+        Ok(CredentialBridgeResponseSender {
+            input: self.input,
+            _hosted_lifetime: Some(self.hosted_lifetime),
+        })
     }
 }
 

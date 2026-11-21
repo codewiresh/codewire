@@ -420,6 +420,14 @@ pub const CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER: &str = "x-codewire-credential-b
 /// and refuses the epoch while they are on. Only the relay's own admission
 /// path reads it.
 pub const CREDENTIAL_BRIDGE_INTERCEPTED_HEADER: &str = "x-codewire-credential-bridge-intercepted";
+/// Response header on the broker's admitted `CredentialBridge` stream of an
+/// intercepted epoch (#4001): the placeholders the Sandbox projects, exactly
+/// one value of comma-separated `slot=placeholder` entries, empty for none.
+/// It is sent exactly when the request's [`CREDENTIAL_BRIDGE_INTERCEPTED_HEADER`]
+/// is `true`. The relay reads it from its own admission response alone, copies
+/// it into the daemon's `CredentialBridgeOpen.placeholders`, and never logs or
+/// forwards the header itself.
+pub const CREDENTIAL_BRIDGE_PLACEHOLDERS_HEADER: &str = "x-codewire-credential-bridge-placeholders";
 /// Bytes in a front-door epoch handle.
 pub const CREDENTIAL_BRIDGE_EPOCH_HANDLE_BYTES: usize = 32;
 /// The broker serves `CodexLoginRequest` on this epoch. A daemon sends that
@@ -527,6 +535,8 @@ pub mod projection;
 mod desktop;
 pub use desktop::{DESKTOP_VIEWER_PASSWORD_LENGTH, is_desktop_viewer_password};
 mod login_debug;
+
+mod placeholder_debug;
 
 /// Validated credential for the private environment-daemon RPC boundary.
 ///
@@ -1172,6 +1182,7 @@ mod tests {
                     environment_id: "e".to_owned(),
                     environment_generation: 7,
                     capabilities: Vec::new(),
+                    placeholders: Vec::new(),
                 },
             )),
         };

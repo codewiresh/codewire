@@ -121,7 +121,8 @@ impl DaemonServiceImpl {
     }
 
     pub fn with_runtime_state(config: Config, runtime_state: DaemonRuntimeState) -> Self {
-        let credential_bridge = CredentialBridge::new(config.credential_bridge.clone());
+        let credential_bridge = CredentialBridge::new(config.credential_bridge.clone())
+            .intercepting(config.interception.is_some());
         let session_engine = SessionEngine::new(&config, credential_bridge.clone());
         let workload_sockets = crate::forward::WorkloadSockets::default();
         Self {
