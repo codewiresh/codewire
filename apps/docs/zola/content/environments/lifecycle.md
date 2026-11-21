@@ -1,13 +1,15 @@
 ---
 title: Lifecycle
 description: Stop, start, resize and remove environments; give hosted sandboxes a lifetime, extend it, and protect them from deletion.
-updated: 2026-11-19
+updated: 2026-11-21
 weight: 5
 aliases: ["/guides/lifecycle"]
 ---
 
-An environment keeps its disks while it is stopped and loses them only when
-you remove it. Stopping releases its compute; on the platform, a stopped
+An environment keeps its disks while it is stopped, and removing it deletes
+them. A hosted sandbox's disk can also be lost if the machine it is stored on
+fails; see [One copy of the disk](#hosted-sandboxes-one-copy-of-the-disk).
+Stopping releases its compute; on the platform, a stopped
 sandbox is not billed for compute.
 
 The output below is from real runs: a local VM named `app` and a hosted
@@ -89,6 +91,19 @@ each of at most two image repositories, such as the workspace image across a
 `cw` update. `cw prune --local` deletes them and gives the disk back; see the
 [CLI reference](@/reference/cli/environments.md#cw-prune-local).
 
+## Hosted sandboxes: one copy of the disk
+
+A hosted sandbox's disk is stored as a single copy on one machine, and it is
+not backed up yet. If that machine fails, the sandbox shows `error`, and its
+disk is lost, along with anything you hadn't pushed or copied out. Its
+snapshots are stored on the same machine, so they are lost with it, and
+`cw protect` only stops a deletion.
+
+Push work you want to keep to Git often, and copy other files out with
+`cw cp` ([Files](@/access/files.md)). If a sandbox is lost this way, create a
+new one from your repository. Backups that survive a machine failure are
+planned.
+
 ## Hosted sandboxes: lifetime and protection
 
 Give a sandbox a lifetime when you create it, and it deletes itself:
@@ -137,7 +152,9 @@ and `cw cancel-delete` cancels a pending deletion. See the
 different image or repositories, create a new one.
 
 **What happens to my data when I stop an environment?** Workspace storage is
-kept and compute is released. Removing it deletes the storage.
+kept and compute is released. Removing it deletes the storage. A hosted
+sandbox's storage is one copy on one machine; see
+[One copy of the disk](#hosted-sandboxes-one-copy-of-the-disk).
 
 **An environment is stuck.** `cw info ENV` shows the state and error
 code; `cw daemon status ENV` and `cw daemon repair ENV` inspect and
