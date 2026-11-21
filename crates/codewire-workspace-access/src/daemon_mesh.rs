@@ -95,9 +95,18 @@ pub trait MeshMembership: Send + Sync {
     async fn dial(&self, node: &str, port: u16) -> anyhow::Result<Box<dyn MeshStream>>;
 }
 
-/// The open membership, for the local connect socket: `None` while the
-/// environment has not joined.
-pub type CurrentMembership = watch::Receiver<Option<Arc<dyn MeshMembership>>>;
+/// What the local connect socket answers from.
+pub enum MeshConnectState {
+    /// The environment has not joined, or Mesh refused its node.
+    NotJoined,
+    /// A joined membership ended and the node is joining again: a connect
+    /// waits for the outcome, up to [`MeshTiming::connect_rejoin_wait`].
+    Rejoining,
+    Joined(Arc<dyn MeshMembership>),
+}
+
+/// The membership loop's [`MeshConnectState`], for the local connect socket.
+pub type CurrentMembership = watch::Receiver<MeshConnectState>;
 
 /// Opens one peer stream with one code.
 #[async_trait]
@@ -237,6 +246,10 @@ pub struct MeshTiming {
     pub max_refused_backoff: Duration,
     /// How often an open membership is checked for its end.
     pub readiness_poll: Duration,
+    /// How long a connect waits for a node that is joining again: the 5 s
+    /// a node takes to come back after a Mesh rollout or replica restart
+    /// (`docs/dev/SANDBOX-DAEMON.md`, "Members reach each other").
+    pub connect_rejoin_wait: Duration,
 }
 
 impl Default for MeshTiming {
@@ -247,6 +260,7 @@ impl Default for MeshTiming {
             refused_backoff: Duration::from_secs(60),
             max_refused_backoff: Duration::from_secs(300),
             readiness_poll: Duration::from_secs(2),
+            connect_rejoin_wait: Duration::from_secs(5),
         }
     }
 }
@@ -267,7 +281,7 @@ pub async fn run(
     plane: Arc<dyn MeshControlPlane>,
     joiner: Arc<dyn MeshJoiner>,
     app_ports: watch::Receiver<AppPorts>,
-    current: watch::Sender<Option<Arc<dyn MeshMembership>>>,
+    current: watch::Sender<MeshConnectState>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let timing = config.timing;
@@ -290,6 +304,7 @@ pub async fn run(
         }
         let target = grants.borrow_and_update().mesh().cloned();
         let Some(target) = target else {
+            current.send_replace(MeshConnectState::NotJoined);
             // No network: wait for a grant that names one.
             tokio::select! {
                 _ = shutdown.changed() => return,
@@ -300,6 +315,7 @@ pub async fn run(
         let enrollment = match plane.issue_mesh_enrollment().await {
             Ok(enrollment) => enrollment,
             Err(ControlPlaneError::Refused) => {
+                current.send_replace(MeshConnectState::NotJoined);
                 // The platform says the environment joins no network: wait
                 // for the next grant rather than asking again and again.
                 if !wait(timing.max_refused_backoff, &mut grants, &mut shutdown).await {
@@ -329,7 +345,7 @@ pub async fn run(
                     node = target.node_name(),
                     "workspace joined its Mesh network"
                 );
-                current.send_replace(Some(membership.clone()));
+                current.send_replace(MeshConnectState::Joined(membership.clone()));
                 let (stop, stopped) = watch::channel(false);
                 let forwarding = tokio::spawn(forward_app_ports(
                     membership.conn(),
@@ -345,7 +361,7 @@ pub async fn run(
                     timing.readiness_poll,
                 )
                 .await;
-                current.send_replace(None);
+                current.send_replace(MeshConnectState::Rejoining);
                 let _ = stop.send(true);
                 forwarding.abort();
                 drop(membership);
@@ -371,6 +387,7 @@ pub async fn run(
                 fault_wait = (fault_wait * 2).min(timing.max_fault_backoff);
             }
             Err(JoinError::Refused(reason)) => {
+                current.send_replace(MeshConnectState::NotJoined);
                 report(reason, &mut last_report).await;
                 if !wait(refused_wait, &mut grants, &mut shutdown).await {
                     return;
@@ -387,12 +404,14 @@ const CONNECT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Serve [`codewire_daemon_proto::HOSTED_DAEMON_MESH_SOCKET`] until
 /// `shutdown`: each connection names one member and port, gets `OK` and a
 /// stream to it, or `ERR <reason>` (`invalid`, `not_joined`,
-/// `unreachable`). Only processes that can open the owner-only socket, the
-/// workspace's own, reach other members; the stream carries their bytes and
-/// nothing else.
+/// `unreachable`). A connect made while the node joins again waits up to
+/// `rejoin_wait` for it before `not_joined`. Only processes that can open the
+/// owner-only socket, the workspace's own, reach other members; the stream
+/// carries their bytes and nothing else.
 pub async fn serve_connect(
     listener: tokio::net::UnixListener,
     current: CurrentMembership,
+    rejoin_wait: Duration,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut connections = tokio::task::JoinSet::new();
@@ -404,13 +423,17 @@ pub async fn serve_connect(
                     continue;
                 };
                 while connections.try_join_next().is_some() {}
-                connections.spawn(connect_one(stream, current.clone()));
+                connections.spawn(connect_one(stream, current.clone(), rejoin_wait));
             }
         }
     }
 }
 
-async fn connect_one(stream: tokio::net::UnixStream, current: CurrentMembership) {
+async fn connect_one(
+    stream: tokio::net::UnixStream,
+    mut current: CurrentMembership,
+    rejoin_wait: Duration,
+) {
     let mut local = tokio::io::BufReader::new(stream);
     let mut line = String::new();
     let read = tokio::time::timeout(
@@ -430,8 +453,7 @@ async fn connect_one(stream: tokio::net::UnixStream, current: CurrentMembership)
         let _ = local.get_mut().write_all(b"ERR invalid\n").await;
         return;
     };
-    let membership = current.borrow().clone();
-    let Some(membership) = membership else {
+    let Some(membership) = joined_within(&mut current, rejoin_wait).await else {
         let _ = local.get_mut().write_all(b"ERR not_joined\n").await;
         return;
     };
@@ -448,6 +470,22 @@ async fn connect_one(stream: tokio::net::UnixStream, current: CurrentMembership)
         return;
     }
     let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
+}
+
+/// The open membership, waiting up to `limit` while the node joins again.
+async fn joined_within(
+    current: &mut CurrentMembership,
+    limit: Duration,
+) -> Option<Arc<dyn MeshMembership>> {
+    let settled = tokio::time::timeout(
+        limit,
+        current.wait_for(|state| !matches!(state, MeshConnectState::Rejoining)),
+    )
+    .await;
+    match &*settled.ok()?.ok()? {
+        MeshConnectState::Joined(membership) => Some(membership.clone()),
+        MeshConnectState::NotJoined | MeshConnectState::Rejoining => None,
+    }
 }
 
 /// Serve while the membership lasts and the grant still names `target`.

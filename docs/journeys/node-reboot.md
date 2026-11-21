@@ -164,7 +164,10 @@ Updated 2026-11-13.
   until the replacement pod is ready on another node.
 - **Proof:** `cw network list` answers and two members on other nodes keep
   reaching each other throughout, and each replica's
-  `codewire_mesh_registry_shared` reads 1 before and after.
+  `codewire_mesh_registry_shared` reads 1 before and after. A
+  `cw network connect` probe run once a second from inside one of them
+  never fails with "has not joined its Mesh network" while its node moves to
+  the other replica: the connect waits for the node instead (#5516).
 - **Gotchas:** the node that holds Mesh has not been drained for this reason.
   Mesh's readiness never waits for NATS, so a replica that can't reach its
   shared registry still reads Ready. Its signal is

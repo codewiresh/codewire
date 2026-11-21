@@ -211,6 +211,13 @@ tailnet above: another node, keys and coordinator.
   The daemon serves `cw network connect NODE PORT` on its owner-only socket
   `/codewire/run/daemon/mesh.sock`: one request line, then a TCP stream to
   that member's port. A member serves only its application ports there.
+  A Mesh rollout or replica restart ends every peer stream; the daemon
+  rejoins after 1 s and is expected back within 5 s. So while a node that
+  was joined joins again, a connect
+  waits up to 5 s for it, then refuses as not joined (#5516). A node that
+  never joined, or whose rejoin Mesh refused, is refused at once. Mesh says
+  a node is revoked only when it refuses the rejoin, about a second after the
+  stream ends, so a connect in that gap waits until then.
 - The daemon reports what it observed with `ReportMeshAttachment`. The
   environment shows the report only for its current Pod, so a new Pod reads
   as pending until its daemon reports.

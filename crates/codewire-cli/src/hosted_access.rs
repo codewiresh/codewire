@@ -31,8 +31,8 @@ use codewire_workspace_access::daemon_access::{
     daemon_ssh_server_config, public_key_line, record_host_key_until_accepted, serve_ssh_listener,
 };
 use codewire_workspace_access::daemon_mesh::{
-    self, DaemonMeshConfig, MemberTailnetJoiner, MeshControlPlane, MeshEnrollment, MeshReport,
-    MeshTiming,
+    self, DaemonMeshConfig, MemberTailnetJoiner, MeshConnectState, MeshControlPlane,
+    MeshEnrollment, MeshReport, MeshTiming,
 };
 use codewire_workspace_access::daemon_tailnet::{
     self, AccessGrants, DaemonTailnetConfig, PublicCoordinator, TailnetSsh,
@@ -203,12 +203,13 @@ pub(crate) async fn serve(
             let reserved_ports = unserved_application_ports(&platform);
             // The environment's node in its hosted Mesh network, when the
             // grant names one (#3350): separate keys, socket and coordinator.
-            let (current_membership, membership) = watch::channel(None);
+            let mesh_timing = MeshTiming::default();
+            let (current_membership, membership) = watch::channel(MeshConnectState::NotJoined);
             tokio::spawn(daemon_mesh::run(
                 DaemonMeshConfig {
                     environment_id: bound.environment_id,
                     reserved_ports: reserved_ports.clone(),
-                    timing: MeshTiming::default(),
+                    timing: mesh_timing,
                 },
                 grants.subscribe(),
                 mesh_plane,
@@ -221,7 +222,12 @@ pub(crate) async fn serve(
             // through this owner-only socket.
             match bind_mesh_socket(&paths) {
                 Ok((listener, platform)) => {
-                    let serve = daemon_mesh::serve_connect(listener, membership, shutdown.clone());
+                    let serve = daemon_mesh::serve_connect(
+                        listener,
+                        membership,
+                        mesh_timing.connect_rejoin_wait,
+                        shutdown.clone(),
+                    );
                     // Recorded while served, so SSH socket forwards refuse it.
                     tokio::spawn(async move {
                         let _platform = platform;

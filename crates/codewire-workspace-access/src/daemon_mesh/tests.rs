@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use codewire_daemon::access::{AccessFields, MeshFields};
@@ -137,6 +137,10 @@ struct Joiner {
     joined: Mutex<Vec<(String, String)>>,
     /// The readiness of the latest admitted membership.
     latest: Mutex<Option<Arc<AtomicBool>>>,
+    /// While set, a join waits before it answers.
+    held: AtomicBool,
+    /// Joins waiting on `held` now.
+    waiting: AtomicUsize,
 }
 
 #[async_trait]
@@ -148,6 +152,13 @@ impl MeshJoiner for Joiner {
         environment_id: Uuid,
     ) -> Result<Arc<dyn MeshMembership>, JoinError> {
         assert_eq!(environment_id, ENVIRONMENT);
+        if self.held.load(Ordering::SeqCst) {
+            self.waiting.fetch_add(1, Ordering::SeqCst);
+            while self.held.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            self.waiting.fetch_sub(1, Ordering::SeqCst);
+        }
         self.joined
             .lock()
             .unwrap()
@@ -181,7 +192,7 @@ fn start(network: Option<&str>, answers: Vec<Result<(), JoinError>>) -> Harness 
     let (shutdown, shutdown_rx) = watch::channel(false);
     let (_ports, ports_rx) = watch::channel(AppPorts::default());
     std::mem::forget(_ports);
-    let (current_tx, current) = watch::channel(None);
+    let (current_tx, current) = watch::channel(MeshConnectState::NotJoined);
     let task = tokio::spawn(run(
         DaemonMeshConfig {
             environment_id: ENVIRONMENT,
@@ -192,6 +203,7 @@ fn start(network: Option<&str>, answers: Vec<Result<(), JoinError>>) -> Harness 
                 refused_backoff: Duration::from_millis(30),
                 max_refused_backoff: Duration::from_millis(60),
                 readiness_poll: Duration::from_millis(10),
+                connect_rejoin_wait: Duration::from_millis(10),
             },
         },
         grants_rx,
@@ -369,17 +381,19 @@ fn refused_stream_codes_map_to_reports() {
     assert!(!format!("{enrollment:?}").contains("secret-canary"));
 }
 
-/// One request on a connect socket served for `current`; the answer line and
-/// the stream after it.
+/// One request on a connect socket served for `current`, which waits up to
+/// `rejoin_wait` for a node joining again; the answer line and the stream
+/// after it.
 async fn connect(
     current: CurrentMembership,
+    rejoin_wait: Duration,
     request: &[u8],
 ) -> (String, tokio::io::BufReader<tokio::net::UnixStream>) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("mesh.sock");
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
     let (_stop, stop) = watch::channel(false);
-    tokio::spawn(serve_connect(listener, current, stop));
+    tokio::spawn(serve_connect(listener, current, rejoin_wait, stop));
     std::mem::forget(_stop);
     let mut stream = tokio::net::UnixStream::connect(&path).await.unwrap();
     stream.write_all(request).await.unwrap();
@@ -399,7 +413,12 @@ async fn the_connect_socket_carries_one_stream_to_a_member_of_the_network() {
     harness
         .until(|plane, _| reports(plane) == [MeshReport::Attached])
         .await;
-    let (answer, mut stream) = connect(harness.current.clone(), b"CWMESHCONNECT1 app-2 7\n").await;
+    let (answer, mut stream) = connect(
+        harness.current.clone(),
+        HANG_GUARD,
+        b"CWMESHCONNECT1 app-2 7\n",
+    )
+    .await;
     assert_eq!(answer, "OK\n");
     stream
         .get_mut()
@@ -414,18 +433,137 @@ async fn the_connect_socket_carries_one_stream_to_a_member_of_the_network() {
     assert_eq!(echoed, "synthetic canary\n");
 
     // A member it cannot reach, and a malformed request.
-    let (answer, _) = connect(harness.current.clone(), b"CWMESHCONNECT1 app-3 7\n").await;
+    let (answer, _) = connect(
+        harness.current.clone(),
+        HANG_GUARD,
+        b"CWMESHCONNECT1 app-3 7\n",
+    )
+    .await;
     assert_eq!(answer, "ERR unreachable\n");
-    let (answer, _) = connect(harness.current.clone(), b"CWMESHCONNECT1 ../x 7\n").await;
+    let (answer, _) = connect(
+        harness.current.clone(),
+        HANG_GUARD,
+        b"CWMESHCONNECT1 ../x 7\n",
+    )
+    .await;
     assert_eq!(answer, "ERR invalid\n");
     harness.stop().await;
 }
 
 #[tokio::test]
-async fn the_connect_socket_refuses_until_the_environment_joined() {
-    let (_none, current) = watch::channel::<Option<Arc<dyn MeshMembership>>>(None);
-    let (answer, _) = connect(current, b"CWMESHCONNECT1 app-2 7\n").await;
+async fn the_connect_socket_refuses_at_once_until_the_environment_joined() {
+    let (_state, current) = watch::channel(MeshConnectState::NotJoined);
+    let asked = tokio::time::Instant::now();
+    let (answer, _) = connect(current, HANG_GUARD, b"CWMESHCONNECT1 app-2 7\n").await;
     assert_eq!(answer, "ERR not_joined\n");
+    assert!(asked.elapsed() < Duration::from_secs(1), "it did not wait");
+}
+
+/// A harness joined once, whose membership has ended and whose next join is
+/// held: the node is joining again.
+async fn rejoining(answers: Vec<Result<(), JoinError>>) -> Harness {
+    let harness = start(Some("work"), answers);
+    harness
+        .until(|plane, _| reports(plane) == [MeshReport::Attached])
+        .await;
+    harness.joiner.held.store(true, Ordering::SeqCst);
+    harness
+        .joiner
+        .latest
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .store(false, Ordering::SeqCst);
+    harness
+        .until(|_, joiner| joiner.waiting.load(Ordering::SeqCst) == 1)
+        .await;
+    harness
+}
+
+#[tokio::test]
+async fn a_connect_while_the_node_joins_again_waits_for_it() {
+    let harness = rejoining(Vec::new()).await;
+    let asking = tokio::spawn(connect(
+        harness.current.clone(),
+        HANG_GUARD,
+        b"CWMESHCONNECT1 app-2 7\n",
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !asking.is_finished(),
+        "it answered before the node was back"
+    );
+    harness.joiner.held.store(false, Ordering::SeqCst);
+    let (answer, mut stream) = tokio::time::timeout(HANG_GUARD, asking)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(answer, "OK\n");
+    stream
+        .get_mut()
+        .write_all(b"after the rejoin\n")
+        .await
+        .unwrap();
+    let mut echoed = String::new();
+    tokio::time::timeout(HANG_GUARD, stream.read_line(&mut echoed))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(echoed, "after the rejoin\n");
+    assert_eq!(joins(&harness.joiner), 2);
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_refused_rejoin_ends_the_wait_and_later_connects_refuse_at_once() {
+    // Refused on every retry, so the node stays out while the test asks.
+    let mut answers = vec![Ok(())];
+    answers.extend(std::iter::repeat_n(
+        Err(JoinError::Refused(MeshReport::Revoked)),
+        50,
+    ));
+    let harness = rejoining(answers).await;
+    let asking = tokio::spawn(connect(
+        harness.current.clone(),
+        HANG_GUARD,
+        b"CWMESHCONNECT1 app-2 7\n",
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!asking.is_finished());
+    harness.joiner.held.store(false, Ordering::SeqCst);
+    let (answer, _) = tokio::time::timeout(HANG_GUARD, asking)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(answer, "ERR not_joined\n");
+    harness
+        .until(|plane, _| reports(plane) == [MeshReport::Attached, MeshReport::Revoked])
+        .await;
+    let asked = tokio::time::Instant::now();
+    let (answer, _) = connect(
+        harness.current.clone(),
+        HANG_GUARD,
+        b"CWMESHCONNECT1 app-2 7\n",
+    )
+    .await;
+    assert_eq!(answer, "ERR not_joined\n");
+    assert!(asked.elapsed() < Duration::from_secs(1), "it did not wait");
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_node_not_back_within_the_wait_is_refused() {
+    let harness = rejoining(Vec::new()).await;
+    let (answer, _) = connect(
+        harness.current.clone(),
+        Duration::from_millis(50),
+        b"CWMESHCONNECT1 app-2 7\n",
+    )
+    .await;
+    assert_eq!(answer, "ERR not_joined\n");
+    harness.joiner.held.store(false, Ordering::SeqCst);
+    harness.stop().await;
 }
 
 #[cfg(target_os = "linux")]
