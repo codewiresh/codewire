@@ -367,8 +367,14 @@ run_contract() {
 printf '8\n' >"$work/cgroup/pids.current"
 printf '2048\n' >"$work/cgroup/pids.max"
 printf 'max 0\n' >"$work/cgroup/pids.events"
-run_contract >"$work/success.out" 2>"$work/success.err"
-[[ ! -s "$work/success.err" ]] || fail 'successful contract emitted failure evidence'
+if ! run_contract >"$work/success.out" 2>"$work/success.err"; then
+  cat "$work/success.err" >&2
+  fail 'a sound image failed the contract'
+fi
+if [[ -s "$work/success.err" ]]; then
+  cat "$work/success.err" >&2
+  fail 'successful contract emitted failure evidence'
+fi
 grep -Fxq 'codex-cli 0.160.0' "$work/success.out" || fail 'agent checks did not run'
 grep -Fxq 'npm dry-run OK' "$work/success.out" || fail 'Codex install-plan check did not run'
 if FAIL_AGENT=infocmp run_contract >"$work/terminfo.out" 2>"$work/terminfo.err"; then
