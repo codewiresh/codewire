@@ -535,6 +535,8 @@ impl RuntimeJournal {
             let request = saved.decode()?;
             let result = settle_in(&mut tx, &saved, &request, settlement).await?;
             tx.commit().await.map_err(|_| unavailable())?;
+            // A finished request is use, for idle stop (#3384).
+            crate::worker::idle_stop::note_activity(&journal.pool, &saved.environment_id);
             Ok(result)
         })
         .await

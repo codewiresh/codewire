@@ -1716,6 +1716,7 @@ mod enabled {
             confidential_storage: None,
             temporal_trigger: trigger,
             credit_enforcement: Default::default(),
+            idle_stop: Default::default(),
             unverified_signup_purge: worker::unverified_purge::UnverifiedSignupPurge {
                 setting: worker::unverified_purge::PurgeSetting::Off,
                 ..Default::default()

@@ -36,14 +36,28 @@ pub(crate) fn is_refusal(error: &anyhow::Error) -> bool {
 
 /// What to say when a command couldn't reach cloud environment `name` in
 /// `state`: `None` when it is running, so the command's own error stands;
-/// with no state, that it isn't running and where to look. The command that
-/// helps is the error's next step, printed on its own `→` line.
-pub(crate) fn state_error(name: &str, state: Option<EnvironmentState>) -> Option<anyhow::Error> {
+/// with no state, that it isn't running and where to look. `idle_stop` is
+/// its timeout when it stopped itself for being idle (#3384). The command
+/// that helps is the error's next step, printed on its own `→` line.
+pub(crate) fn state_error(
+    name: &str,
+    state: Option<EnvironmentState>,
+    idle_stop: Option<i32>,
+) -> Option<anyhow::Error> {
     let start = format!("cw --cloud start {name}");
     let info = format!("cw --cloud info {name}");
     let (message, step) = match state {
         Some(EnvironmentState::Running) => return None,
-        Some(EnvironmentState::Stopped) => (format!("cloud environment {name} is stopped"), start),
+        Some(EnvironmentState::Stopped) => match idle_stop {
+            Some(seconds) => (
+                format!(
+                    "cloud environment {name}: {}",
+                    codewire_project::idle_stop_reason(seconds)
+                ),
+                start,
+            ),
+            None => (format!("cloud environment {name} is stopped"), start),
+        },
         Some(EnvironmentState::Stopping) => (
             format!("cloud environment {name} is stopping; start it once it has stopped"),
             info,
@@ -105,14 +119,19 @@ pub(crate) fn coordinator_answer(error: &anyhow::Error) -> Option<anyhow::Error>
 pub(crate) fn explain(
     error: anyhow::Error,
     fallback: &str,
-    found: Option<(&str, Option<EnvironmentState>)>,
+    found: Option<(&str, Option<EnvironmentState>, Option<i32>)>,
 ) -> anyhow::Error {
-    let (name, state) = match found {
+    let (name, state, idle_stop) = match found {
         Some(found) => found,
-        None if is_refusal(&error) => (fallback, None),
+        None if is_refusal(&error) => (fallback, None, None),
         None => return error,
     };
-    state_error(&crate::commands::progress::terminal_text(name), state).unwrap_or(error)
+    state_error(
+        &crate::commands::progress::terminal_text(name),
+        state,
+        idle_stop,
+    )
+    .unwrap_or(error)
 }
 
 #[cfg(test)]
@@ -195,7 +214,7 @@ mod tests {
     #[test]
     fn a_lookup_explains_the_failure_or_leaves_it() {
         let connect = || anyhow::anyhow!("no host key is recorded for the environment's bound Pod");
-        let stopped = Some(("walk", Some(EnvironmentState::Stopped)));
+        let stopped = Some(("walk", Some(EnvironmentState::Stopped), None));
         assert_eq!(
             said(&explain(connect(), "env-1", stopped)),
             says(
@@ -203,7 +222,7 @@ mod tests {
                 Some("cw --cloud start walk")
             )
         );
-        let running = Some(("walk", Some(EnvironmentState::Running)));
+        let running = Some(("walk", Some(EnvironmentState::Running), None));
         assert_eq!(
             said(&explain(connect(), "env-1", running)),
             says(
@@ -231,9 +250,24 @@ mod tests {
         );
     }
 
+    /// One that stopped itself says why, in the owner's words, with its own
+    /// timeout (#3384).
+    #[test]
+    fn an_idle_stop_says_it_stopped_itself_and_how_to_start_it() {
+        let idle = Some(("walk", Some(EnvironmentState::Stopped), Some(21_600)));
+        assert_eq!(
+            said(&explain(anyhow::anyhow!("not running"), "env-1", idle)),
+            says(
+                "cloud environment walk: Stopped itself after 6 hours idle (CPU under 10%, no \
+                 traffic or input). Files are kept.",
+                Some("cw --cloud start walk")
+            )
+        );
+    }
+
     #[test]
     fn each_state_says_what_it_means_and_only_stopped_is_told_to_start() {
-        let state = |state| state_error("walk", state).as_ref().map(said);
+        let state = |state| state_error("walk", state, None).as_ref().map(said);
         assert_eq!(
             state(Some(EnvironmentState::Stopped)),
             Some(says(

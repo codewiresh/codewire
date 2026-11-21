@@ -324,6 +324,8 @@ impl DaemonSshRunners {
             None => handler,
         };
         let connection = handler.connection_id();
+        // An inbound connection is use, for idle stop (#3384).
+        crate::activity::note();
         tracing::info!(connection, peer, "workspace SSH connection opened");
         match server::run_stream(config, stream, handler).await {
             Ok(session) => match session.await {

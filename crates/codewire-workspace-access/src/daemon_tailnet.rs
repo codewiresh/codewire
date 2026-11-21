@@ -1015,11 +1015,14 @@ async fn forward_to_loopback(mut stream: TailnetStream, port: u16) {
         Ok(local) => Ok(local),
         Err(_) => tokio::net::TcpStream::connect((Ipv6Addr::LOCALHOST, port)).await,
     };
-    let Ok(mut local) = local else {
+    let Ok(local) = local else {
         tracing::debug!(port, "workspace application port has no local listener");
         return;
     };
     let _ = local.set_nodelay(true);
+    // An inbound connection and its data are use, for idle stop (#3384).
+    crate::activity::note();
+    let mut local = crate::activity::ActivityIo::new(local);
     let _ = tokio::io::copy_bidirectional(&mut stream, &mut local).await;
 }
 

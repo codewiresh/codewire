@@ -483,6 +483,8 @@ async fn proxy_to_preview_target(
     target: &PreviewTarget,
 ) -> Response {
     let path_and_query = uri.path_and_query().map(|v| v.as_str()).unwrap_or("/");
+    // A request from anyone is use, for idle stop (#3384).
+    crate::worker::idle_stop::note_activity(&state.pool, &target.env_id);
     let request_headers = headers::workload_request_headers(&headers, platform_bearer);
     // Through the daemon to the workload's loopback when it can (#4357), so
     // a server bound only to 127.0.0.1 answers; otherwise the Pod's address.

@@ -114,6 +114,11 @@ pub trait LifecycleStore {
         env_id: &str,
         reason: StopReason,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+    fn request_idle_stop(
+        &self,
+        env_id: &str,
+        seen_activity: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
     fn clear_deletion_grace(
         &self,
         env_id: &str,
@@ -435,6 +440,21 @@ impl<S: LifecycleStore> Service<S> {
             .map_err(|e| anyhow::anyhow!("request stop ({}): {e:#}", reason.as_str()))
     }
 
+    /// Stops an idle Sandbox (#3384), only while it is still meant to run,
+    /// its `last_activity_at` is still `seen_activity` and no request has
+    /// opened since: activity that arrives during the check wins. True when
+    /// it stopped it.
+    pub async fn request_idle_stop(
+        &self,
+        env_id: &str,
+        seen_activity: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> anyhow::Result<bool> {
+        self.store
+            .request_idle_stop(env_id, seen_activity)
+            .await
+            .map_err(|e| anyhow::anyhow!("request idle stop: {e:#}"))
+    }
+
     pub async fn clear_deletion_grace(&self, env_id: &str) -> anyhow::Result<()> {
         self.store
             .clear_deletion_grace(env_id)
@@ -649,6 +669,8 @@ pub enum StopReason {
     User,
     /// Its organization ran out of credit.
     Credit,
+    /// It had no activity for its idle timeout.
+    Idle,
 }
 
 impl StopReason {
@@ -656,6 +678,7 @@ impl StopReason {
         match self {
             Self::User => "user",
             Self::Credit => "credit",
+            Self::Idle => "idle",
         }
     }
 }
@@ -935,7 +958,7 @@ impl LifecycleStore for PgLifecycleStore {
         self.exec_logged(
             env_id,
             sqlx::query(
-                "UPDATE environments SET started_at = NOW(), stopped_at = NULL,
+                "UPDATE environments SET started_at = NOW(), stopped_at = NULL, last_activity_at = NOW(),
                    error_reason = CASE error_code
                      WHEN $2 THEN 'Restarted at ' || to_char(NOW() AT TIME ZONE 'UTC', 'HH24:MI')
                        || ' UTC after stopping unexpectedly. Running processes were lost.'
@@ -1214,6 +1237,37 @@ impl LifecycleStore for PgLifecycleStore {
         )
         .await?;
         Ok(())
+    }
+
+    async fn request_idle_stop(
+        &self,
+        env_id: &str,
+        seen_activity: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> anyhow::Result<bool> {
+        let reason = StopReason::Idle.as_str();
+        let rows = self
+            .exec_logged(
+                env_id,
+                sqlx::query(&format!(
+                    r#"UPDATE environments e SET desired_state = 'stopped', stop_reason = $2,
+                       state_changed_at = NOW()
+                       WHERE e.id = $1 AND e.desired_state = 'started'
+                         AND e.last_activity_at IS NOT DISTINCT FROM $3
+                         AND {}"#,
+                    crate::worker::idle_stop::NO_OPEN_REQUEST
+                ))
+                .bind(env_id)
+                .bind(reason)
+                .bind(seen_activity),
+                LogEntry {
+                    phase: "lifecycle_intent",
+                    status: "completed",
+                    message: format!("desired state -> stopped ({reason})"),
+                    metadata: serde_json::json!({ "kind": "desired_state", "desired_state": "stopped", "stop_reason": reason }),
+                },
+            )
+            .await?;
+        Ok(rows > 0)
     }
 
     async fn request_stop(&self, env_id: &str, reason: StopReason) -> anyhow::Result<()> {
@@ -1626,6 +1680,13 @@ mod tests {
         }
         async fn request_stop(&self, _: &str, _: StopReason) -> anyhow::Result<()> {
             Ok(())
+        }
+        async fn request_idle_stop(
+            &self,
+            _: &str,
+            _: Option<chrono::DateTime<chrono::Utc>>,
+        ) -> anyhow::Result<bool> {
+            Ok(false)
         }
         async fn clear_deletion_grace(&self, _: &str) -> anyhow::Result<()> {
             Ok(())

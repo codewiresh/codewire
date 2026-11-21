@@ -1673,6 +1673,7 @@ impl SessionEngine {
         if data.is_empty() {
             return Ok(());
         }
+        crate::activity::touch();
         #[cfg(target_os = "linux")]
         {
             let retained = { lock(&self.inner.sessions).get(session_id).cloned() };
@@ -4836,6 +4837,8 @@ async fn append_output(
     if data.is_empty() {
         return Ok(());
     }
+    // Output a session writes counts as use, as input does (#3384).
+    crate::activity::touch();
     if data.len() > OUTPUT_BUFFER_SIZE {
         return Err(SessionError::Internal(
             "session capture frame exceeds its buffer".into(),

@@ -27,6 +27,7 @@ pub mod environment_auth;
 #[cfg(feature = "kind-e2e")]
 pub mod fencing_evidence;
 pub(crate) mod host_lifecycle;
+pub mod idle_stop;
 #[cfg(test)]
 mod idle_stop_database_tests;
 pub mod image_cache;
@@ -107,6 +108,8 @@ pub struct WorkerContext {
     pub temporal_trigger: std::sync::Arc<crate::temporal::TemporalTrigger>,
     /// Whether this deployment stops sandboxes that ran out of credit.
     pub credit_enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
+    /// Whether this deployment stops idle sandboxes (#3384).
+    pub idle_stop: idle_stop::IdleStop,
     /// What the purge of unverified email sign-ups does (#4541).
     pub unverified_signup_purge: unverified_purge::UnverifiedSignupPurge,
     /// The credential relay's admitted epochs, which `EgressService`'s

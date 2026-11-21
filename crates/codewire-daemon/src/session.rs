@@ -662,6 +662,7 @@ async fn copy_exec_output<R>(
         match reader.read(&mut buf).await {
             Ok(0) => return,
             Ok(n) => {
+                crate::activity::touch();
                 let data = buf[..n].to_vec();
                 let payload = if stdout {
                     v1::exec_message::Payload::Stdout(data)
@@ -701,6 +702,7 @@ async fn forward_exec_control(
                     let Some(stdin) = stdin.as_mut() else {
                         continue;
                     };
+                    crate::activity::touch();
                     if stdin.write_all(&data).await.is_err() {
                         return;
                     }
@@ -745,6 +747,7 @@ fn copy_pty_output(
         match reader.read(&mut buf) {
             Ok(0) => return,
             Ok(n) => {
+                crate::activity::touch();
                 let data = buf[..n].to_vec();
                 if tx
                     .blocking_send(Ok(v1::PtyMessage {
@@ -830,6 +833,7 @@ fn pty_control_loop(
     for control in control_rx {
         match control {
             PtyControl::Stdin(data) => {
+                crate::activity::touch();
                 if let Some(writer) = writer.as_mut() {
                     let _ = writer.write_all(&data);
                     let _ = writer.flush();

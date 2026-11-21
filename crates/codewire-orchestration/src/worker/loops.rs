@@ -295,6 +295,7 @@ async fn run_reconciliation(ctx: &WorkerContext) {
     evict_expired_environments(ctx).await;
     stop_credit_exhausted_environments(ctx).await;
     stop_suspended_environments(ctx).await;
+    super::idle_stop::stop_idle_environments(ctx).await;
     process_graced_deletions(ctx).await;
     warn_expiring_environments(ctx).await;
     reconcile_incomplete_external_cleanup(ctx).await;
@@ -804,7 +805,7 @@ async fn enqueue_environment_create(
 /// reconciles; the old NATS path purged a stale `TENANT_LOCKS` entry on
 /// recovery, but per-environment serialization is now structural (one
 /// workflow per environment id) so there is nothing to purge.
-async fn enqueue_environment_reconcile(
+pub(super) async fn enqueue_environment_reconcile(
     ctx: &WorkerContext,
     env_id: &str,
     recovery: bool,

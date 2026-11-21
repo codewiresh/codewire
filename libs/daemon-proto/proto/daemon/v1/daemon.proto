@@ -26,6 +26,12 @@ service DaemonService {
   // every access grant the daemon renews also restates the full set.
   rpc SetAppPorts(SetAppPortsRequest) returns (SetAppPortsResponse);
 
+  // When the Sandbox was last in use, as the daemon sees it (#3384): CPU over
+  // 10% of one vCPU in a minute, terminal input or output, or an inbound
+  // connection. Orchestration's idle check reads it; it can only keep the
+  // Sandbox running. Only the time is kept, never what passed.
+  rpc GetActivity(GetActivityRequest) returns (GetActivityResponse);
+
   // Private host-initiated channel for material-free guest credential
   // requests and typed recipient-encrypted application projections. The host
   // authenticates with the generation daemon capability; provider values and
@@ -362,6 +368,13 @@ message SetAppPortsRequest {
 }
 
 message SetAppPortsResponse {}
+
+message GetActivityRequest {}
+
+message GetActivityResponse {
+  // Unset until something was in use since the daemon started.
+  google.protobuf.Timestamp last_active_at = 1;
+}
 
 enum DesktopState {
   DESKTOP_STATE_UNSPECIFIED = 0;

@@ -31,7 +31,7 @@ mod yaml_tests;
 
 pub use idle_stop::{
     IDLE_STOP_FIELD, IDLE_STOP_ON_SECONDS, MAX_IDLE_STOP_SECONDS, MIN_IDLE_STOP_SECONDS,
-    format_idle_stop, idle_stop_notice, idle_stop_words, parse_idle_stop,
+    format_idle_stop, idle_stop_notice, idle_stop_reason, idle_stop_words, parse_idle_stop,
     validate_idle_stop_seconds,
 };
 pub use overrides::{ProjectYamlFile, merge_project_files};

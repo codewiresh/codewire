@@ -126,13 +126,21 @@ pub fn idle_stop_words(seconds: i32) -> String {
     }
 }
 
+/// Why a Sandbox that stopped itself stopped (owner, 2026-11-19, on #3384).
+pub fn idle_stop_reason(idle_stop_seconds: i32) -> String {
+    format!(
+        "Stopped itself after {} idle (CPU under 10%, no traffic or input). Files are kept.",
+        idle_stop_words(idle_stop_seconds)
+    )
+}
+
 /// What a Sandbox that stopped itself says, wherever it says why (owner,
-/// 2026-11-19, on #3384): `cw info`, a refused connection, the dashboard.
+/// 2026-11-19, on #3384): `cw info`, the dashboard. A refused `cw`
+/// connection says [`idle_stop_reason`] and gives the start as its next step.
 pub fn idle_stop_notice(name: &str, idle_stop_seconds: i32) -> String {
     format!(
-        "Stopped itself after {} idle (CPU under 10%, no traffic or input). Files are kept. \
-         Start it with `cw start {name}`.",
-        idle_stop_words(idle_stop_seconds)
+        "{} Start it with `cw start {name}`.",
+        idle_stop_reason(idle_stop_seconds)
     )
 }
 

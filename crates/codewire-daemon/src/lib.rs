@@ -2,6 +2,7 @@
 #![allow(clippy::undocumented_unsafe_blocks, clippy::unwrap_used)]
 
 pub mod access;
+pub mod activity;
 #[cfg(target_os = "linux")]
 mod agent_login;
 pub mod app_ports;

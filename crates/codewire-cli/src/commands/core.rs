@@ -399,6 +399,7 @@ pub(crate) async fn explain_by_state(
         (
             given.unwrap_or(&environment.name),
             environment.state.as_known(),
+            (environment.stop_reason == "idle").then_some(environment.idle_stop_seconds),
         )
     });
     refusal::explain(error, given.unwrap_or(environment_id), found)
@@ -415,7 +416,9 @@ pub(crate) fn ensure_cloud_connectable(
         "stopping" => codewire_client::EnvironmentState::Stopping,
         _ => return Ok(()),
     };
-    refusal::state_error(&terminal_text(shown), Some(state)).map_or(Ok(()), Err)
+    let idle_stop = (environment.stop_reason.as_deref() == Some("idle"))
+        .then_some(environment.idle_stop_seconds);
+    refusal::state_error(&terminal_text(shown), Some(state), idle_stop).map_or(Ok(()), Err)
 }
 
 /// `CW_DEBUG_TAILNET` timeline on stderr for `cw shell`: tailnet and client

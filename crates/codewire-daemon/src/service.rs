@@ -303,6 +303,17 @@ impl DaemonService for DaemonServiceImpl {
         Ok(Response::new(v1::SetAppPortsResponse {}))
     }
 
+    async fn get_activity(
+        &self,
+        request: Request<v1::GetActivityRequest>,
+    ) -> Result<Response<v1::GetActivityResponse>, Status> {
+        self.authorize(&request)?;
+        Ok(Response::new(v1::GetActivityResponse {
+            last_active_at: crate::activity::last_active()
+                .map(|seconds| prost_types::Timestamp { seconds, nanos: 0 }),
+        }))
+    }
+
     async fn credential_bridge(
         &self,
         request: Request<Streaming<bridge_v1::CredentialBridgeHostMessage>>,

@@ -94,6 +94,9 @@ also stops Sandboxes that run out of credit.
   unknown, and the Sandbox stops if nothing the server records is active. A
   Sandbox whose daemon is gone can't be used, and the stop keeps its disk, so
   it never runs and bills without end.
+- **A daemon older than idle stop** answers that it doesn't support the
+  call, and its Sandbox counts as active: it isn't idle-stopped until its
+  daemon is updated.
 - **One conditional update** stops it: desired state `stopped` and stop
   reason `idle`, where the desired state is still `started`, the
   `last_activity_at` is still the value it read, and no request has opened

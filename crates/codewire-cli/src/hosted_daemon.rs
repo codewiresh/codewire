@@ -150,6 +150,13 @@ pub(crate) async fn run_bound_hosted_daemon_with(
     );
     #[cfg(target_os = "linux")]
     {
+        // Idle stop's activity (#3384): inbound traffic through the access
+        // server, and the Sandbox's CPU each minute. A daemon that starts, or
+        // restarts mid-build, counts as use, so its restart never ends the
+        // Sandbox before its CPU is next sampled.
+        codewire_daemon::activity::touch();
+        codewire_workspace_access::activity::set_hook(codewire_daemon::activity::touch);
+        let _cpu_sampler = codewire_daemon::activity::spawn_cpu_sampler();
         let (_access_shutdown, access_shutdown_rx) = tokio::sync::watch::channel(false);
         let daemon_port = daemon_config
             .listen_addr

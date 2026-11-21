@@ -704,6 +704,7 @@ async fn main() -> anyhow::Result<()> {
         confidential_storage: confidential_storage.clone(),
         temporal_trigger: temporal_trigger.clone(),
         credit_enforcement,
+        idle_stop: worker::idle_stop::IdleStop::from_env()?,
         unverified_signup_purge: worker::unverified_purge::UnverifiedSignupPurge::from_env()?,
         front_doors: front_doors.clone(),
     });

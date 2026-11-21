@@ -410,6 +410,8 @@ impl Forwarding {
                 target = shown,
                 "workspace SSH forward opened"
             );
+            // Data either way through a forward is use, for idle stop (#3384).
+            let io: Box<dyn ForwardIo> = Box::new(crate::activity::ActivityIo::new(io));
             let reason = pump_forward(channel, io, &task_stop, &connection, close_grace).await;
             tracing::debug!(
                 connection = key.connection,

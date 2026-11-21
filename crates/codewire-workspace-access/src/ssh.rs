@@ -3374,6 +3374,13 @@ mod tests {
             Err(Status::unimplemented("fixture unused app ports RPC"))
         }
 
+        async fn get_activity(
+            &self,
+            _request: Request<v1::GetActivityRequest>,
+        ) -> Result<Response<v1::GetActivityResponse>, Status> {
+            Err(Status::unimplemented("fixture unused activity RPC"))
+        }
+
         type ExecSessionStream = ReceiverStream<Result<v1::ExecMessage, Status>>;
         type PtySessionStream = ReceiverStream<Result<v1::PtyMessage, Status>>;
         type ForwardTcpStream = ReceiverStream<Result<v1::ForwardTcpMessage, Status>>;

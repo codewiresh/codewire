@@ -722,6 +722,8 @@ impl ManagedJournal {
                 terminal_at=clock_timestamp(),updated_at=clock_timestamp() WHERE request_id=$1")
                 .bind(o.request_id).bind(phase.as_str()).bind(receipt.as_ref().map(json).transpose()?).bind(reason)
                 .execute(&mut *tx).await.map_err(|_|unavailable())?;
+            // A finished turn is use, for idle stop (#3384).
+            crate::worker::idle_stop::note_activity(&j.pool, &saved.environment_id);
             if clearing {
                 if r.cleanup_of.is_some() {
                     let completed = phase == ManagedPhase::Completed;
