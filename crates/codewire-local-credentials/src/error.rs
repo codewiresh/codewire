@@ -1,6 +1,6 @@
 //! The local credential authority's failures, none of which carries material.
 
-use codewire_access::{AccessError, ProviderId};
+use codewire_access::{AccessError, ProviderId, WithheldReason};
 use codewire_protected_store::ProtectedStoreError;
 use thiserror::Error;
 
@@ -53,6 +53,10 @@ pub enum LocalCredentialError {
     CredentialUnavailable,
     #[error("local credential is inactive")]
     CredentialInactive,
+    /// A lease for a slot whose credential the environment's profile
+    /// withholds, and why: its broker answers the reason (#5593).
+    #[error("local credential needs reconnecting")]
+    CredentialWithheld(WithheldReason),
     #[error("local credential material is missing from protected storage")]
     CredentialMaterialMissing,
     #[error("SSH credentials require the dedicated enrollment operation")]

@@ -46,11 +46,13 @@ mod login;
 mod observed_stream;
 mod projection;
 mod ready;
+mod status;
 pub(crate) use ready::BrokerReady;
 mod ssh;
 
 use login::local_login_refused;
 use observed_stream::ObservedBrokerStream;
+use status::{map_client_status, map_server_error};
 
 /// Projections run one at a time. A concurrent launch waits for the permit
 /// until its own deadline, which its context already bounds, rather than
@@ -126,6 +128,9 @@ pub enum BrokerLeaseChannelError {
     RefreshInProgress,
     #[error("credential refresh generation changed")]
     StaleRefresh,
+    /// The slot's credential is withheld, and why (#5593).
+    #[error("the selected credential needs reconnecting")]
+    Withheld(codewire_access::WithheldReason),
 }
 
 /// Client for one authority-created, environment-generation-bound channel.
@@ -1390,44 +1395,6 @@ fn permission_from_proto(
     })
 }
 
-fn map_client_status(status: Status) -> BrokerLeaseChannelError {
-    match status.code() {
-        tonic::Code::InvalidArgument => BrokerLeaseChannelError::InvalidRequest,
-        tonic::Code::Aborted => BrokerLeaseChannelError::RefreshInProgress,
-        tonic::Code::OutOfRange => BrokerLeaseChannelError::StaleRefresh,
-        tonic::Code::FailedPrecondition | tonic::Code::PermissionDenied => {
-            BrokerLeaseChannelError::Denied
-        }
-        _ => BrokerLeaseChannelError::Unavailable,
-    }
-}
-
-fn map_server_error(error: LocalCredentialError) -> Status {
-    match error {
-        LocalCredentialError::StaleCredentialRefresh => {
-            Status::out_of_range("credential refresh generation changed")
-        }
-        LocalCredentialError::CredentialOperationLeaseDenied
-        | LocalCredentialError::CredentialInactive
-        | LocalCredentialError::CredentialUnavailable
-        | LocalCredentialError::CredentialMaterialMissing
-        | LocalCredentialError::CredentialNotFound
-        | LocalCredentialError::EnvironmentBindingNotFound
-        | LocalCredentialError::StaleEnvironmentBinding
-        | LocalCredentialError::ProfileNotFound
-        | LocalCredentialError::ProfileRevisionNotFound
-        | LocalCredentialError::StaleProfileRevision
-        | LocalCredentialError::StaleCredentialRevision
-        | LocalCredentialError::Access(_) => {
-            Status::failed_precondition("credential broker lease was denied")
-        }
-        LocalCredentialError::CredentialRefreshInProgress => {
-            Status::aborted("credential refresh is already in progress")
-        }
-        _ => Status::unavailable("credential broker lease authority is unavailable"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -1713,7 +1680,9 @@ mod tests {
                     BrokerRouteId::parse("openai-api").unwrap(),
                 )
                 .await,
-            Err(BrokerLeaseChannelError::Denied)
+            Err(BrokerLeaseChannelError::Withheld(
+                codewire_access::WithheldReason::Revoked
+            ))
         ));
         let events = audit.recent(8).await;
         assert_eq!(events.len(), 3);
@@ -2323,7 +2292,9 @@ mod tests {
                     BrokerRouteId::parse("openai-api").unwrap(),
                 )
                 .await,
-            Err(BrokerLeaseChannelError::Denied)
+            Err(BrokerLeaseChannelError::Withheld(
+                codewire_access::WithheldReason::NeedsReconnect
+            ))
         ));
         let observed = authority.get_credential(&credential_id).unwrap();
         let recovered = authority
@@ -2732,7 +2703,9 @@ mod tests {
         // second refresh.
         assert_eq!(
             begin_refresh(&mut other).await,
-            Err(BrokerLeaseChannelError::Denied)
+            Err(BrokerLeaseChannelError::Withheld(
+                codewire_access::WithheldReason::NeedsReconnect
+            ))
         );
         assert_eq!(
             fixture

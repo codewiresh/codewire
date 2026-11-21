@@ -664,8 +664,10 @@ fn map_authority_error(error: LocalCredentialError) -> LocalSshSignError {
         | LocalCredentialError::ProfileNotFound
         | LocalCredentialError::ProfileRevisionNotFound
         // Grant derivation reports inactive/revoked identities through the
-        // shared policy error, not only CredentialInactive. Preserve denial
-        // (and its audit decision), just like the HTTP lease boundary.
+        // shared policy error, not only CredentialInactive, and a withheld
+        // slot by its reason (#5593). SSH has no refusal body to carry the
+        // reason, so each is a denial with its audit decision.
+        | LocalCredentialError::CredentialWithheld(_)
         | LocalCredentialError::Access(_) => LocalSshSignError::Denied,
         _ => LocalSshSignError::Unavailable,
     }

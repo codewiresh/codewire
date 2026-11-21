@@ -5,9 +5,9 @@
 use std::collections::BTreeSet;
 
 use codewire_access::{
-    AccessError, CapabilitySlot, CredentialStatus, DerivedGrant, EnvironmentAccessBinding,
-    EnvironmentId, GrantContext, GrantPermission, GrantPlacement, OwnerId, ProviderCatalog,
-    WithheldReason, derive_available_grants,
+    CapabilitySlot, CredentialStatus, DerivedGrant, EnvironmentAccessBinding, EnvironmentId,
+    GrantContext, GrantPermission, GrantPlacement, OwnerId, ProviderCatalog,
+    derive_available_grants,
 };
 use codewire_protected_store::ProtectedStore;
 use rusqlite::Connection;
@@ -64,13 +64,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         )?;
         // The refusal a whole-selection derivation gave this slot before.
         if let Some(withheld) = available.reconnect_required.remove(slot) {
-            let credential = withheld.credential;
-            return Err(LocalCredentialError::Access(match withheld.reason {
-                WithheldReason::Expired => AccessError::CredentialExpired { credential },
-                WithheldReason::Revoked | WithheldReason::NeedsReconnect => {
-                    AccessError::CredentialInactive { credential }
-                }
-            }));
+            return Err(LocalCredentialError::CredentialWithheld(withheld.reason));
         }
         available
             .grants

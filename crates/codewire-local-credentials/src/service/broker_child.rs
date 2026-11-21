@@ -120,6 +120,7 @@ fn lease_outcome(
         Ok(Err(E::InvalidResponse)) => "invalid_response",
         Ok(Err(E::RefreshInProgress)) => "refresh_in_progress",
         Ok(Err(E::StaleRefresh)) => "stale_refresh",
+        Ok(Err(E::Withheld(_))) => "withheld",
         Err(error) if error.is_panic() => "panicked",
         Err(_) => "cancelled",
     }

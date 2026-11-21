@@ -108,6 +108,11 @@ and Codex sign-ins are synthetic, served by synthetic providers on loopback.
   value the broker swapped in, revoke makes the next request fail with the
   broker's refusal and no provider call, and the request works again after
   stop, start and re-enrolment.
+  - The refusal is a hosted Sandbox's (#5593): 403, `Codewire-Refusal:
+    credential_revoked`, a body that names the provider, and a `Fix:` line
+    naming `cw credentials --local list`. A withheld SSH identity's
+    signature is denied. Not yet observed: the smoke's step still asserts
+    the generic `denied` it had before #5593.
   - The start with the credential still revoked succeeds (#5545). It prints,
     before its next step, exactly `KIND 'NAME' in profile PROFILE is revoked;
     agents in this VM can't use it.` and the command that fixes it. The VM's

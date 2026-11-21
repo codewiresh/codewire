@@ -31,16 +31,7 @@ where
             request,
         )
         .await
-        .map_err(|error| match error {
-            codewire_local_credentials::BrokerLeaseChannelError::InvalidRequest => {
-                BrokerLeaseError::InvalidRequest
-            }
-            codewire_local_credentials::BrokerLeaseChannelError::Denied => BrokerLeaseError::Denied,
-            codewire_local_credentials::BrokerLeaseChannelError::InvalidResponse => {
-                BrokerLeaseError::InvalidResponse
-            }
-            _ => BrokerLeaseError::Unavailable,
-        })?;
+        .map_err(map_local_unrefused_error)?;
         response.result.ok_or(BrokerLeaseError::InvalidResponse)
     }
 
@@ -72,16 +63,7 @@ where
             request.deadline_unix_ms,
         )
         .await
-        .map_err(|error| match error {
-            codewire_local_credentials::BrokerLeaseChannelError::InvalidRequest => {
-                BrokerLeaseError::InvalidRequest
-            }
-            codewire_local_credentials::BrokerLeaseChannelError::Denied => BrokerLeaseError::Denied,
-            codewire_local_credentials::BrokerLeaseChannelError::InvalidResponse => {
-                BrokerLeaseError::InvalidResponse
-            }
-            _ => BrokerLeaseError::Unavailable,
-        })
+        .map_err(map_local_unrefused_error)
     }
 
     async fn lease_operation(
@@ -105,6 +87,9 @@ where
                 BrokerLeaseError::InvalidRequest
             }
             codewire_local_credentials::BrokerLeaseChannelError::Denied => BrokerLeaseError::Denied,
+            codewire_local_credentials::BrokerLeaseChannelError::Withheld(reason) => {
+                BrokerLeaseError::ReconnectRequired(reason)
+            }
             codewire_local_credentials::BrokerLeaseChannelError::RefreshInProgress => {
                 BrokerLeaseError::Denied
             }
@@ -284,7 +269,11 @@ fn map_local_refresh_error(
         codewire_local_credentials::BrokerLeaseChannelError::InvalidRequest => {
             BrokerRefreshError::InvalidRequest
         }
-        codewire_local_credentials::BrokerLeaseChannelError::Denied => BrokerRefreshError::Denied,
+        // A withheld credential is not refreshed: its owner reconnects it.
+        codewire_local_credentials::BrokerLeaseChannelError::Denied
+        | codewire_local_credentials::BrokerLeaseChannelError::Withheld(_) => {
+            BrokerRefreshError::Denied
+        }
         codewire_local_credentials::BrokerLeaseChannelError::Unavailable => {
             BrokerRefreshError::Unavailable
         }
@@ -300,6 +289,28 @@ fn map_local_refresh_error(
     }
 }
 
+/// An SSH operation's or a projection's lease failure. Neither answers with
+/// a refusal body to carry a withheld credential's reason, and a retry would
+/// not change it, so it is a plain denial, never a retryable unavailable
+/// (#5593).
+fn map_local_unrefused_error(
+    error: codewire_local_credentials::BrokerLeaseChannelError,
+) -> BrokerLeaseError {
+    match error {
+        codewire_local_credentials::BrokerLeaseChannelError::InvalidRequest => {
+            BrokerLeaseError::InvalidRequest
+        }
+        codewire_local_credentials::BrokerLeaseChannelError::Denied
+        | codewire_local_credentials::BrokerLeaseChannelError::Withheld(_) => {
+            BrokerLeaseError::Denied
+        }
+        codewire_local_credentials::BrokerLeaseChannelError::InvalidResponse => {
+            BrokerLeaseError::InvalidResponse
+        }
+        _ => BrokerLeaseError::Unavailable,
+    }
+}
+
 fn map_local_lease_error(
     error: codewire_local_credentials::BrokerLeaseChannelError,
 ) -> BrokerLeaseError {
@@ -308,6 +319,9 @@ fn map_local_lease_error(
             BrokerLeaseError::InvalidRequest
         }
         codewire_local_credentials::BrokerLeaseChannelError::Denied => BrokerLeaseError::Denied,
+        codewire_local_credentials::BrokerLeaseChannelError::Withheld(reason) => {
+            BrokerLeaseError::ReconnectRequired(reason)
+        }
         codewire_local_credentials::BrokerLeaseChannelError::RefreshInProgress => {
             BrokerLeaseError::Denied
         }
@@ -320,5 +334,42 @@ fn map_local_lease_error(
         codewire_local_credentials::BrokerLeaseChannelError::InvalidResponse => {
             BrokerLeaseError::InvalidResponse
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use codewire_access::WithheldReason;
+    use codewire_local_credentials::BrokerLeaseChannelError;
+
+    use super::*;
+
+    /// A local VM's withheld credential reaches the agent as the same
+    /// refusal a hosted Sandbox gives it, is never refreshed, and is a plain
+    /// denial where no refusal body can carry it (#5593).
+    #[test]
+    fn a_withheld_lease_is_the_reconnect_refusal_and_never_refreshes() {
+        for reason in [
+            WithheldReason::Revoked,
+            WithheldReason::Expired,
+            WithheldReason::NeedsReconnect,
+        ] {
+            assert_eq!(
+                map_local_lease_error(BrokerLeaseChannelError::Withheld(reason)),
+                BrokerLeaseError::ReconnectRequired(reason)
+            );
+            assert_eq!(
+                map_local_refresh_error(BrokerLeaseChannelError::Withheld(reason)),
+                BrokerRefreshError::Denied
+            );
+            assert_eq!(
+                map_local_unrefused_error(BrokerLeaseChannelError::Withheld(reason)),
+                BrokerLeaseError::Denied
+            );
+        }
+        assert_eq!(
+            map_local_lease_error(BrokerLeaseChannelError::Denied),
+            BrokerLeaseError::Denied
+        );
     }
 }

@@ -1275,12 +1275,16 @@ the VM set up at start keeps its form until the next
 start: with its Anthropic slot withheld, Claude Code starts in its API-key
 form, and starts in its sign-in form again after a start.
 
-A withheld capability's request is answered today with Codewire's generic
-refusal, not the specific one a hosted Sandbox gives: 403, `Codewire-Refusal:
-denied`, and the body `Codewire: this request was refused.` with no `Fix:`
-line. A hosted Sandbox answers `credential_revoked`, `credential_expired` or
-`credential_needs_reconnect` (below). Giving a local VM the same answers is
-#5593.
+A withheld capability's request is answered as in a hosted Sandbox (#5593):
+403 with `credential_revoked`, `credential_expired` or
+`credential_needs_reconnect` (below). The body names the credential's
+provider, and its `Fix:` line names `cw credentials --local list` for a
+local VM. The local authority refuses that slot's lease with the reason, and
+the lease channel carries it to the broker as metadata on the denial
+(`codewire-credential-withheld`: `revoked`, `expired` or `needs_reconnect`),
+never an id. A refresh of a withheld credential is refused as a plain
+denial: its owner reconnects it. An SSH signature has no refusal body, so a
+withheld SSH identity's request stays a denial, audited as one.
 
 The credential service's broker evaluates a hosted Sandbox's authority once per
 bridge epoch: one runtime authority resolve and the grant evaluation. The

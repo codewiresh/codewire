@@ -127,6 +127,8 @@ fn exit_kind(error: &anyhow::Error) -> &'static str {
                 Lease::InvalidResponse => "lease.invalid_response",
                 Lease::RefreshInProgress => "lease.refresh_in_progress",
                 Lease::StaleRefresh => "lease.stale_refresh",
+                // The reason stays out: the kind is the same for every one.
+                Lease::Withheld(_) => "lease.withheld",
             };
         }
         if cause.is::<tokio::time::error::Elapsed>() {
@@ -849,6 +851,12 @@ mod exit_tests {
         let lease = anyhow::Error::new(codewire_local_credentials::BrokerLeaseChannelError::Denied)
             .context("complete broker launch handshake");
         assert_eq!(exit_kind(&lease), "lease.denied");
+        let withheld = anyhow::Error::new(
+            codewire_local_credentials::BrokerLeaseChannelError::Withheld(
+                codewire_access::WithheldReason::Revoked,
+            ),
+        );
+        assert_eq!(exit_kind(&withheld), "lease.withheld");
         assert_eq!(exit_kind(&anyhow::anyhow!("sk-0123456789abcdef")), "other");
     }
 }

@@ -82,8 +82,8 @@ fn a_revoked_profile_credential_withholds_only_its_own_capability() {
     );
     assert!(matches!(
         authority.lease_environment_credential_operation(&operation_lease_request(&environment_id)),
-        Err(LocalCredentialError::Access(
-            AccessError::CredentialInactive { .. }
+        Err(LocalCredentialError::CredentialWithheld(
+            codewire_access::WithheldReason::Revoked
         ))
     ));
     let lease = authority

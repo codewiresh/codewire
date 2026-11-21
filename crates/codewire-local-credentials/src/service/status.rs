@@ -67,6 +67,7 @@ pub(super) fn status_for_error(error: LocalCredentialError) -> Status {
         }
         LocalCredentialError::CredentialUnavailable
         | LocalCredentialError::CredentialInactive
+        | LocalCredentialError::CredentialWithheld(_)
         | LocalCredentialError::CredentialMaterialMissing
         | LocalCredentialError::WorkloadSecretMaterialMissing
         | LocalCredentialError::CredentialOperationLeaseDenied

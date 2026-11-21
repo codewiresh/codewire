@@ -657,8 +657,8 @@ fn broker_operation_lease_denies_expired_material_before_store_access() {
 
     assert!(matches!(
         authority.lease_environment_credential_operation(&operation_lease_request(&environment_id)),
-        Err(LocalCredentialError::Access(
-            AccessError::CredentialExpired { .. }
+        Err(LocalCredentialError::CredentialWithheld(
+            codewire_access::WithheldReason::Expired
         ))
     ));
 }
@@ -717,8 +717,8 @@ fn broker_operation_lease_tracks_rotation_and_fails_closed_on_revocation_or_stor
         .expect("revoke credential");
     assert!(matches!(
         authority.lease_environment_credential_operation(&request),
-        Err(LocalCredentialError::Access(
-            AccessError::CredentialInactive { .. }
+        Err(LocalCredentialError::CredentialWithheld(
+            codewire_access::WithheldReason::Revoked
         ))
     ));
 }
