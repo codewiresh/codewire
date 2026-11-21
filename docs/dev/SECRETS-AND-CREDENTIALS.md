@@ -1537,6 +1537,33 @@ is exactly as described above. What exists today:
   egress broker and carries the front door's CA certificate, never its key,
   to the guest in the seed. The front door makes the CA in its own memory for
   each boot, name-constrained to those hosts.
+- **A host is proxied when something selected names it** (#5215; target,
+  not shipped). A credential declares the hosts it is for. A host is proxied
+  in an environment exactly when something selected for that environment
+  names it; every other host is ordinary traffic under the network policy,
+  never through the front door. Today's credential kinds name fixed hosts:
+  an Anthropic credential `api.anthropic.com`, and a Claude sign-in Claude's
+  token host as well; an OpenAI API key `api.openai.com`; a Codex sign-in
+  `chatgpt.com` and the Codex names under it; a GitHub connection GitHub's
+  two hosts, once they are intercepted. A later kind, or a secret selected
+  for proxying, names its own hosts under the same rule. The set is the
+  union of the hosts the environment's managed-client selection names,
+  `codewire_access::front_door_hosts` (#5463), which a local boot and a
+  hosted Sandbox both read. "Your own key" is anything that is not a
+  selected credential: an environment variable or application secret, a
+  sign-in made inside the environment, or a key in a file. On a host
+  nothing selected names, it reaches the host under the network policy.
+- **When the set is decided.** With the selection, which is fixed for a
+  boot and for a Pod: a local boot binds the set its selection names when
+  it starts, and a hosted Sandbox's assignment carries the set its live
+  binding names. Changing the selection is a managed restart locally and a
+  replacement Pod hosted ("Switch to a different profile" above), so a host
+  is never added to or removed from a live front-door session or epoch: a
+  new set arrives with a new boot or Pod, and with its own front door and
+  epochs. `cw-egress` never changes a pair's bindings in place; a bound Pod
+  whose assignment carries a different set ends its pair, front door and
+  session included, and the guest's redial starts a new one. So no host
+  stays bound, and refusing, once nothing selected names it.
 - **The front door.** The runner starts it in `prepare()`, as its own process,
   confined (no new privileges, a deny-all Landlock domain and a seccomp
   floor it shares with the credential broker) before it makes the CA. Only
@@ -2339,7 +2366,13 @@ With the switch on, only the bind decides, since only the bind sees the Pod.
   `selected_credential_only` before anything is sent, whatever the network
   policy, until such a request can leave through the Sandbox's own egress.
   The credential service would otherwise send it from the platform's side,
-  past the Sandbox's policy and `cw-egress`.
+  past the Sandbox's policy and `cw-egress`. Only a host something selected
+  names is bound (#5215; target, not shipped): on a host nothing selected
+  names, the user's own key leaves through the Sandbox's own egress under
+  its network policy. To use their own key for a provider, a user leaves
+  its managed credential unselected. An own key on a host a selected
+  credential names stays refused; serving both is a later decision with
+  its own issue.
 - **Off is today.** With the switch off, every hosted path is exactly as
   before.
 

@@ -1254,6 +1254,12 @@ Issues: #3999, #4001.
     and to another host;
   - **a hosted Sandbox with interception on** (#5555): the user's own key
     and a request with no credential, under `open` and under `locked`;
+  - **a host nothing selected names** (#5215), on a local VM and in a
+    hosted Sandbox with interception on, while another provider's
+    credential is selected: the user's own key to it under `open` and under
+    `locked`;
+  - **a selection change** (#5215): on a running environment, select a
+    credential for that provider, then unselect it;
   - a policy edit on a running local VM that adds, then removes, a rule
     allowing the provider's host.
 - **Driving it:** no command yet (#3999, #4001). For the `locked` state:
@@ -1284,15 +1290,34 @@ Issues: #3999, #4001.
     says the same under its network policy line. The `curl` with another
     key, and one with no credential, are refused `name_not_allowed` before
     anything is sent (#5215, #5555);
-  - **in a hosted Sandbox with interception on** (#5555), the user's own
-    key and a request with no credential are both refused
-    `selected_credential_only` with nothing sent, under every policy, and
-    the placeholder is served. Not yet observed;
+  - **in a hosted Sandbox with interception on** (#5555), on a host a
+    selected credential names, the user's own key and a request with no
+    credential are both refused `selected_credential_only` with nothing
+    sent, under every policy, and the placeholder is served. Not yet
+    observed;
+  - **on a host nothing selected names** (#5215), nothing is bound: inside
+    the environment its TLS certificate is the provider's own, not one the
+    front door's CA signed, and a hosted assignment's interception bindings
+    do not name it. The user's own key
+    reaches the provider untouched where the network policy allows its host,
+    and is refused by the network policy, never `selected_credential_only`,
+    where it does not. The selected provider beside it is still served
+    through the front door. Not yet observed;
+  - **after a selection change** (#5215), the change restarts the local VM
+    or replaces the hosted Pod. Once a credential is selected, its hosts
+    are proxied and the own key on them is refused as above; once it is
+    unselected, they are no longer bound and the own key follows the
+    policy again. No host is ever bound while nothing selected names it.
+    Not yet observed;
   - after a policy edit, the next request follows the new policy: allowed
     once a rule allows the host, refused once it is removed.
 - **Gotchas:**
   - Only a request carrying this environment's placeholder is swapped. The
     reply to any other request is passed back as the provider sent it.
+  - Locally, a request without a Codewire value on a proxied host follows
+    the network policy instead of being refused, because it leaves from the
+    user's own machine under their own policy. Hosted, it would leave from
+    the platform's side, past the Sandbox's policy, so it is refused (#5555).
   - A deny rule on an intercepted host refuses everything to it, the
     placeholder's own requests included. A policy that merely does not
     list the host still serves the placeholder's requests.
