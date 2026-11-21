@@ -15,7 +15,7 @@ shift 2
 tags=("$@")
 
 readonly HARBOR_HOST="${CODEWIRE_IMAGE_REGISTRY:?set to the image registry host}"
-if [[ ! "$source_ref" =~ ^"$HARBOR_HOST"/codewire/(dashboard|derp|daemon|services|mesh|base|workspace|confidential-probe)@sha256:([0-9a-f]{64})$ ]]; then
+if [[ ! "$source_ref" =~ ^"$HARBOR_HOST"/codewire/(dashboard|derp|daemon|services|mesh|base|workspace|confidential-probe|workspace-systemd)@sha256:([0-9a-f]{64})$ ]]; then
   echo "Source must be an exact supported Harbor digest reference" >&2
   exit 1
 fi

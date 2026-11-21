@@ -149,13 +149,26 @@ grep -qxF "ghcr_digest=$expected_digest" "$GITHUB_OUTPUT" ||
   "registry.example.invalid/codewire/confidential-probe@$expected_digest" \
   'ghcr.io/codewiresh/confidential-probe' "$source_sha" >/dev/null ||
   fail 'confidential-probe publication family is absent'
+# The Harbor publisher tags every family it accepts through this helper, so
+# the two family lists must agree.
+families_of() {
+  grep -oE 'codewire/\([a-z|-]+\)@sha256' "$1" | head -n 1
+}
+copy_families="$(families_of "$COPY_IMAGE")"
+harbor_families="$(families_of "$ROOT/scripts/ci/images/publish-image-to-harbor.sh")"
+[[ -n "$copy_families" && "$copy_families" == "$harbor_families" ]] ||
+  fail "the copy helper's families ($copy_families) differ from the Harbor publisher's ($harbor_families)"
+"$COPY_IMAGE" \
+  "registry.example.invalid/codewire/workspace-systemd@$expected_digest" \
+  'registry.example.invalid/codewire/workspace-systemd' "$source_sha" >/dev/null ||
+  fail 'workspace-systemd Harbor family is absent'
 if grep -qF 'harbor-test-password' "$FAKE_CALLS" \
   || grep -qF 'ghcr-test-token' "$FAKE_CALLS"; then
   fail "a registry token reached the command arguments"
 fi
-[[ "$(grep -c '^volume create$' "$FAKE_DOCKER_CALLS")" -eq 2 ]] ||
+[[ "$(grep -c '^volume create$' "$FAKE_DOCKER_CALLS")" -eq 3 ]] ||
   fail "each publication did not create one private auth volume"
-[[ "$(grep -c '^volume rm fake-auth-volume$' "$FAKE_DOCKER_CALLS")" -eq 2 ]] ||
+[[ "$(grep -c '^volume rm fake-auth-volume$' "$FAKE_DOCKER_CALLS")" -eq 3 ]] ||
   fail "each publication did not delete its private auth volume"
 
 printf '0\n' >"$work/ghcr-connect-state"
