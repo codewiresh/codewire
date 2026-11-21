@@ -11,16 +11,16 @@ completion"). The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-17. Written first; only the local half of
-`complete-environments` is observed so far, on a local build.
+Updated 2026-11-21. Written first; `complete-environments` is observed on a local
+build and, for cloud names with an API key, on Dev.
 
 | ID | Local | Dev | Production |
 | --- | --- | --- | --- |
-| `complete-environments` | local names observed 2026-11-17; cloud names observed 2026-11-20, a local build against Dev's server | not yet observed | not applicable |
+| `complete-environments` | local names observed 2026-11-17; cloud names observed 2026-11-20, a local build against Dev's server | cloud names observed 2026-11-21, a build of `main` as the Dev smoke identity (an API key); a saved sign-in not yet observed | not applicable |
 | `complete-sessions` | not yet observed | not yet observed | not applicable |
 | `complete-account-names` | not yet observed | not yet observed | not applicable |
 | `complete-snapshots` | not yet observed | not yet observed | not applicable |
-| `complete-bounds` | server bounds observed 2026-11-20; cache, expiry and logout states by tests only | not yet observed | not applicable |
+| `complete-bounds` | server bounds observed 2026-11-20, and again 2026-11-21 on a build of `main`; cache, expiry and logout states by tests only | not yet observed | not applicable |
 | `complete-install` | not yet observed | not applicable | not applicable |
 
 Production is not walked: completion reads only the signed-in user's own
@@ -107,6 +107,18 @@ or hash is ever read for completion, let alone offered.
     `cw --cloud attach ''` offered it. Not walked: a saved OAuth sign-in (the
     cache, its expiry and `cw logout`), a keypress in each shell, and a local
     and a cloud environment together.
+  - 2026-11-21, `cw` built from `main` at 6ef416acfb (which carries #5406), as
+    the Dev smoke identity through `with-dev-smoke-auth.sh` (an API key in a
+    throwaway `HOME`, no saved sign-in and no cache), against `codewire-dev.sh`:
+    `cw --cloud ls --output json` named 11 environments, 10 live and one
+    whose create had failed. The engine, in fish, offered the 10 live ones,
+    each labelled `cloud`, for `cw attach ''` in 195 ms, and not the failed
+    create (it is not an environment a command can resolve, though `cw ls`
+    lists it for a day); `cw attach egr` offered `egress-walk-pre` alone,
+    `cw --cloud attach ''` offered the 10, and `cw --local attach ''` offered
+    none of them. The walk left no `completion` path under its `HOME`. Not
+    walked: a saved OAuth sign-in (the cache, its expiry and `cw logout`), a
+    keypress in each shell, and a local and a cloud environment together.
 
 ## `complete-sessions`: `cw msg ENV --session <TAB>`
 
@@ -181,6 +193,15 @@ or hash is ever read for completion, let alone offered.
     sign-in and `cw logout` are covered by `completion/cache/tests.rs` and
     `completion/cloud/tests.rs` and not yet observed on a built `cw`; the
     wedged local daemon is not yet observed.
+  - 2026-11-21, a build of `main` at 6ef416acfb, engine call in fish with an API
+    key and a throwaway `HOME`, each case pointed at something local, none at
+    Dev: a listener on the loopback that accepts and never answers cost 437
+    ms, a closed loopback port 29 ms, and no key and no server (signed out) 29
+    ms; each printed only the flags, with no prompt, error text or sign-in.
+    The one Dev-facing timing is `complete-environments`' 195 ms against Dev's
+    real server. The cache, an expired sign-in and `cw logout` need a saved
+    sign-in, which the smoke identity does not give, so they are still not
+    observed on a built `cw`.
 
 ## `complete-install`: install, doctor and upgrade
 
