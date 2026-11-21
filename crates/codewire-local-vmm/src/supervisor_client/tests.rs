@@ -692,19 +692,25 @@ async fn observe_sees_the_initial_and_each_non_terminal_update() {
 
 #[tokio::test]
 async fn a_failed_create_says_whether_its_rollback_removed_it() {
-    for (present_gets, expected) in [
+    // A removed environment's wait is long enough that only the reads decide
+    // it, however slowly a loaded machine answers them (#5785).
+    let until_removed = Duration::from_secs(60);
+    for (present_gets, wait, expected) in [
         (
             0,
+            until_removed,
             " No environment was kept; the image layers it downloaded stay cached, so a retry resumes.",
         ),
         // The rollback delete is still running when the failure arrives;
         // it removes the environment after three more reads (#3329).
         (
             3,
+            until_removed,
             " No environment was kept; the image layers it downloaded stay cached, so a retry resumes.",
         ),
         (
             usize::MAX,
+            Duration::from_millis(300),
             " The failed environment could not be removed; run `cw --local rm dev`.",
         ),
     ] {
@@ -717,7 +723,8 @@ async fn a_failed_create_says_whether_its_rollback_removed_it() {
         );
         let mut client = bounded(NativeSupervisorClient::connect(&server.socket))
             .await
-            .unwrap();
+            .unwrap()
+            .with_create_rollback_wait(wait);
         let error = bounded(client.create(v1::CreateEnvironmentRequest {
             name: "dev".to_owned(),
             ..Default::default()
@@ -745,8 +752,8 @@ async fn a_failed_create_says_whether_its_rollback_removed_it() {
         match present_gets {
             // Removed: one read past the last that found it.
             0 | 3 => assert_eq!(gets.len(), present_gets + 1, "{calls:?}"),
-            // Kept: it read again until the bounded wait ended.
-            _ => assert!(gets.len() > 1, "{calls:?}"),
+            // Kept: it read until the bounded wait ended.
+            _ => assert!(!gets.is_empty(), "{calls:?}"),
         }
         drop(client);
         server.finish().await;

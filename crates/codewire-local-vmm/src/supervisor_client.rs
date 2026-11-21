@@ -37,6 +37,8 @@ pub struct NativeSupervisorClient {
     pub(crate) reconnect_enabled: bool,
     /// The admitted supervisor's protocol, in the supported range.
     protocol: u32,
+    /// How long a failed create waits for its rollback delete.
+    create_rollback_wait: Duration,
 }
 
 impl NativeSupervisorClient {
@@ -47,6 +49,14 @@ impl NativeSupervisorClient {
         // The source-transition regression must submit and disconnect
         // before following completion. Keep this escape hatch test-only.
         self.inner
+    }
+
+    /// A test sets its own wait, so the server's answers decide the outcome,
+    /// not how fast a loaded machine runs.
+    #[cfg(test)]
+    pub(crate) fn with_create_rollback_wait(mut self, wait: Duration) -> Self {
+        self.create_rollback_wait = wait;
+        self
     }
 
     pub(crate) async fn connect_admitted(
@@ -87,6 +97,7 @@ impl NativeSupervisorClient {
             expected_configuration_digest,
             reconnect_enabled,
             protocol,
+            create_rollback_wait: CREATE_ROLLBACK_WAIT,
         })
     }
 
@@ -157,7 +168,7 @@ impl NativeSupervisorClient {
     /// time, so the message says only what is known: removed, kept, or
     /// unknown (#3329).
     async fn with_create_cleanup_outcome(&mut self, failure: Status, name: &str) -> Status {
-        let deadline = tokio::time::Instant::now() + CREATE_ROLLBACK_WAIT;
+        let deadline = tokio::time::Instant::now() + self.create_rollback_wait;
         let outcome = loop {
             match self.get(name).await {
                 Err(status) if status.code() == tonic::Code::NotFound => {
