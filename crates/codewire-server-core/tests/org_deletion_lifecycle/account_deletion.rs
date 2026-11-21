@@ -179,6 +179,18 @@ async fn seed(pool: &PgPool) -> Account {
     .execute(pool)
     .await
     .unwrap();
+    // Some entries carry JSON null, not an object, as enabling 2FA does.
+    sqlx::query(
+        r#"INSERT INTO audit_logs
+               (id, timestamp, action, user_id, ip_address, user_agent, metadata, severity)
+           VALUES ($1, NOW(), 'user.2fa.enabled', $2, '203.0.113.7', 'fixture',
+                   'null'::jsonb, 'info')"#,
+    )
+    .bind(format!("audit_acctdel_null_{namespace}"))
+    .bind(&user_id)
+    .execute(pool)
+    .await
+    .unwrap();
 
     Account {
         namespace,
@@ -473,6 +485,15 @@ async fn each_phase_resumes_and_the_email_can_sign_up_again() {
     assert_eq!(actor, DELETED_USER_ID);
     assert_eq!(ip, None);
     assert_eq!(metadata, serde_json::json!({"key": "TOKEN"}));
+    let (actor, ip, metadata): (String, Option<String>, serde_json::Value) =
+        sqlx::query_as("SELECT user_id, ip_address, metadata FROM audit_logs WHERE id = $1")
+            .bind(format!("audit_acctdel_null_{}", account.namespace))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(actor, DELETED_USER_ID);
+    assert_eq!(ip, None);
+    assert_eq!(metadata, serde_json::Value::Null);
     assert_eq!(
         scalar_i64(
             &pool,

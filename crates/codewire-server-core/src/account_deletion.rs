@@ -761,12 +761,15 @@ pub async fn finalize_account_deletion_database(
             .await
             .map_err(AppError::from)?;
     }
+    // Some entries hold JSON null (enabling 2FA, signing out), and jsonb `-`
+    // fails on anything but an object, which would stop the deletion here.
     sqlx::query(
         r#"
         UPDATE audit_logs
         SET user_id = CASE WHEN user_id = $1 THEN $2 ELSE user_id END,
             target_user_id = CASE WHEN target_user_id = $1 THEN $2 ELSE target_user_id END,
-            metadata = metadata - $3::text[],
+            metadata = CASE WHEN jsonb_typeof(metadata) = 'object'
+                            THEN metadata - $3::text[] ELSE metadata END,
             ip_address = NULL,
             user_agent = NULL
         WHERE user_id = $1 OR target_user_id = $1
