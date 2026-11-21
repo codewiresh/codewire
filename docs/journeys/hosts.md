@@ -162,16 +162,23 @@ observed on Production.
   revoked; widths 1440 and 390 px.
 - **Driving it:** the owner's walk on #3609: two computers enrolled and
   running `cw host run`, then the page, then Ctrl-C on one and a reload.
-- **Proof:** above everything else on the page, in every state (no hosts, a
-  list, or the page's own error), a warning reads "Hosts are a preview and
-  still being built: some host features don't work yet." (not yet observed).
+- **Proof:** under the page's title and description and above everything
+  else, in every state (no hosts, a list, or the page's own error), a warning
+  reads "Hosts are a preview and still being built: some host features don't
+  work yet." (observed on Kind only, no-hosts state).
   A card "Hosts (2)" with one row per computer: name, platform,
   owner, "Not offering VMs", a green Online badge and last seen. After the
   stop, that row reads Offline within about a minute. At 390 px the rows stack
   and nothing scrolls sideways.
 - **Gotchas:** it needs a real browser sign-in, so no synthetic identity can
   walk it.
-- **Observed:** not yet observed.
+- **Observed:**
+  - Kind, standing in for Dev, 2026-11-21 20:06Z, source d006a323e (#5786),
+    no-hosts state only: at 1440 and 390 px the warning sits under the title
+    and description and above the "No hosts yet" card, and nothing scrolls
+    sideways at 390 (#3609). Kind did what Dev will not: the synthetic owner
+    `e2e-owner@codewire.sh` signed in, with no hosts enrolled, so the list,
+    Offline and error states are not observed. Dev is not yet observed.
 
 ## Slice 2: environments on a host
 
