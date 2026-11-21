@@ -579,13 +579,25 @@ async fn start_server_with_ssh_probe(
 /// Waits until `count` SSH enrollments hold a worker. The bound only turns a
 /// request that never arrives into a failure; it is not a timing guess.
 async fn wait_for_ssh_admission(probe: &crate::service::SshEnrollmentProbe, count: usize) {
+    wait_on_ssh(probe, "SSH enrollments admitted", |probe| {
+        probe.admitted() >= count
+    })
+    .await;
+}
+
+/// Waits, bounded, on the enrollment workers' own state, never on a clock.
+async fn wait_on_ssh(
+    probe: &crate::service::SshEnrollmentProbe,
+    what: &str,
+    until: impl Fn(&crate::service::SshEnrollmentProbe) -> bool,
+) {
     tokio::time::timeout(Duration::from_secs(30), async {
-        while probe.admitted() < count {
+        while !until(probe) {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("{count} SSH enrollments were not admitted"));
+    .unwrap_or_else(|_| panic!("not seen: {what}"));
 }
 
 /// The start helpers return only once the authority listens, so one connect
@@ -834,85 +846,10 @@ async fn ssh_enrollment_rpcs_return_only_derived_public_metadata() {
     task.await.unwrap().unwrap();
 }
 
+/// Shutdown during the first enrollment's write publishes neither: its checks
+/// run again at publication (#5413), and the second never wrote. No material.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn abandoned_ssh_enrollment_waiter_cannot_cancel_published_journal_work() {
-    let temp = tempfile::tempdir().unwrap();
-    let config = runtime_config(&temp);
-    let store = TestProtectedStore::default();
-    let put_block = store.block_puts();
-    let (shutdown, server) = start_server(config.clone(), store.clone()).await;
-    let mut enrolling = connect_when_ready(&config).await;
-    let mut request = tokio::spawn(async move {
-        enrolling
-            .generate_ssh_credential("abandoned-ssh".into(), None)
-            .await
-    });
-    store.wait_for_put(&mut request).await;
-    request.abort();
-    assert!(request.await.unwrap_err().is_cancelled());
-    drop(put_block);
-
-    let mut observer = connect_when_ready(&config).await;
-    // The abandoned waiter's journal work publishes on its own. Poll for it
-    // while the authority runs, never against a wall clock.
-    let credentials = loop {
-        let credentials = observer.list_credentials().await.unwrap();
-        if !credentials.is_empty() {
-            break credentials;
-        }
-        assert!(
-            !server.is_finished(),
-            "authority ended before publishing the abandoned credential"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
-    assert_eq!(credentials.len(), 1);
-    assert_eq!(credentials[0].metadata.display_name, "abandoned-ssh");
-    assert_eq!(credentials[0].metadata.provider, provider("ssh"));
-    assert_eq!(store.values().len(), 1);
-
-    shutdown.send(()).unwrap();
-    server.await.unwrap().unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn abandoned_ssh_enrollment_waiter_cancels_before_publication() {
-    let temp = tempfile::tempdir().unwrap();
-    let config = runtime_config(&temp);
-    let store = TestProtectedStore::default();
-    let put_block = store.block_puts();
-    let (shutdown, server) = start_server(config.clone(), store.clone()).await;
-    let mut first_client = connect_when_ready(&config).await;
-    let mut first = tokio::spawn(async move {
-        first_client
-            .generate_ssh_credential("published-first".into(), None)
-            .await
-    });
-    store.wait_for_put(&mut first).await;
-
-    let mut cancelled_client = connect_when_ready(&config).await;
-    let cancelled = tokio::spawn(async move {
-        cancelled_client
-            .generate_ssh_credential("cancelled-before-publication".into(), None)
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    cancelled.abort();
-    assert!(cancelled.await.unwrap_err().is_cancelled());
-    drop(put_block);
-    first.await.unwrap().unwrap();
-
-    let mut observer = connect_when_ready(&config).await;
-    let credentials = observer.list_credentials().await.unwrap();
-    assert_eq!(credentials.len(), 1);
-    assert_eq!(credentials[0].metadata.display_name, "published-first");
-    assert_eq!(store.values().len(), 1);
-    shutdown.send(()).unwrap();
-    server.await.unwrap().unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn shutdown_cancels_ssh_enrollment_waiting_before_publication() {
+async fn shutdown_during_an_enrollment_write_publishes_neither_enrollment() {
     let temp = tempfile::tempdir().unwrap();
     let config = runtime_config(&temp);
     let store = TestProtectedStore::default();
@@ -922,7 +859,7 @@ async fn shutdown_cancels_ssh_enrollment_waiting_before_publication() {
     let mut first_client = connect_when_ready(&config).await;
     let mut first = tokio::spawn(async move {
         first_client
-            .generate_ssh_credential("published-ssh".into(), None)
+            .generate_ssh_credential("first-ssh".into(), None)
             .await
     });
     store.wait_for_put(&mut first).await;
@@ -933,9 +870,8 @@ async fn shutdown_cancels_ssh_enrollment_waiting_before_publication() {
             .generate_ssh_credential("cancelled-ssh".into(), None)
             .await
     });
-    // The second enrollment holds a worker, so it was admitted before
-    // shutdown; it can reach publication only after the first's put, which
-    // stays blocked until shutdown has closed publication.
+    // Both were admitted before shutdown. Every put stays blocked until
+    // shutdown has closed publication, so neither can publish.
     wait_for_ssh_admission(&probe, 2).await;
     shutdown.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(30), probe.stopping())
@@ -947,10 +883,8 @@ async fn shutdown_cancels_ssh_enrollment_waiting_before_publication() {
     let _ = second.await;
 
     let authority = LocalCredentialAuthority::open(&config.root, store.clone(), catalog()).unwrap();
-    let credentials = authority.list_credentials().unwrap();
-    assert_eq!(credentials.len(), 1);
-    assert_eq!(credentials[0].metadata.display_name, "published-ssh");
-    assert_eq!(store.values().len(), 1);
+    assert!(authority.list_credentials().unwrap().is_empty());
+    assert!(store.values().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2964,3 +2898,5 @@ async fn an_authority_reports_the_runner_protocol_its_brokers_accept() {
 }
 
 mod store_refusal;
+
+mod abandoned_ssh_enrollment;

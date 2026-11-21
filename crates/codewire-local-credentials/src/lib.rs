@@ -22,6 +22,7 @@ mod broker_process;
 mod claude_token;
 mod client;
 mod control;
+mod credential_add;
 mod credential_names;
 mod default_profile;
 mod error;
@@ -560,6 +561,11 @@ pub struct LocalCredentialAuthority<S: ProtectedStore> {
     catalog: ProviderCatalog,
     owner_id: OwnerId,
     active_refreshes: Mutex<BTreeMap<CredentialId, CredentialRefreshPermit>>,
+    /// Orders store probes among themselves; they touch no row (#5413).
+    store_probe: Mutex<()>,
+    /// The credentials adds are writing now, to tell one in flight from a
+    /// pending row only start-up recovery removes (#5413).
+    adds_in_flight: Mutex<BTreeSet<CredentialId>>,
     settling_refreshes: refresh_commit::Settling,
     placeholder_key: placeholder::PlaceholderKeySlot,
 }
@@ -711,6 +717,8 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             catalog,
             owner_id,
             active_refreshes: Mutex::new(BTreeMap::new()),
+            store_probe: Mutex::new(()),
+            adds_in_flight: Mutex::new(BTreeSet::new()),
             settling_refreshes: Default::default(),
             placeholder_key: Default::default(),
         };
@@ -778,7 +786,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         display_name: String,
         expires_at_unix: Option<u64>,
         prepared: PreparedSshCredential,
-        publication_check: impl FnOnce() -> Result<(), LocalCredentialError>,
+        publication_check: impl Fn() -> Result<(), LocalCredentialError>,
     ) -> Result<CredentialRecord, LocalCredentialError> {
         let (public_key, material) = prepared.into_parts();
         self.add_credential_inner(
@@ -796,129 +804,6 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             }),
             publication_check,
         )
-    }
-
-    fn add_credential_inner(
-        &self,
-        input: NewCredential,
-        material: ProtectedValue,
-        ssh_public_key: Option<SshPublicKeyMetadata>,
-        publication_check: impl FnOnce() -> Result<(), LocalCredentialError>,
-    ) -> Result<CredentialRecord, LocalCredentialError> {
-        let provider =
-            self.catalog
-                .get(&input.provider)
-                .ok_or_else(|| AccessError::ProviderUnavailable {
-                    provider: input.provider.clone(),
-                })?;
-        if !provider.supports_authentication_kind(input.authentication_kind) {
-            return Err(AccessError::UnsupportedAuthenticationKind {
-                provider: input.provider,
-                kind: input.authentication_kind,
-            }
-            .into());
-        }
-
-        credential_names::admit_new_name(&input.display_name)?;
-        let input = claude_token::admit(input, &material)?;
-        let id = CredentialId::parse(Uuid::new_v4().to_string())?;
-        let metadata = CredentialMetadata {
-            id: id.clone(),
-            placement: Placement::Local,
-            owner: Owner::User(self.owner_id.clone()),
-            provider: input.provider,
-            authentication_kind: input.authentication_kind,
-            display_name: input.display_name,
-            account_hint: input.account_hint,
-            ssh_public_key,
-            status: CredentialStatus::Active,
-            expires_at_unix: input.expires_at_unix,
-            revocation_generation: 1,
-        };
-        metadata.validate()?;
-        let entry_id = protected_entry_id(&id, 1)?;
-        let persistence = self.protected_store.persistence();
-        let now = unix_millis()?;
-        let expires_at = optional_u64_to_i64(metadata.expires_at_unix)?;
-
-        let connection = self.connection()?;
-        match self.protected_store.get(&entry_id) {
-            Ok(None) => {}
-            Ok(Some(_)) => return Err(LocalCredentialError::ProtectedEntryCollision),
-            Err(error) => return Err(error.into()),
-        }
-        // This is the publication boundary. Enrollment admission, shutdown,
-        // and the original RPC deadline are rechecked while the SQLite
-        // serialization lock is held. Once the pending row exists, journal
-        // disposition must finish even if the RPC waiter disappears.
-        publication_check()?;
-        // GitHub is one connection per store. A second one fails closed; the
-        // existing connection is reconnected in place or deleted first.
-        if metadata.provider.as_str() == "github"
-            && metadata.authentication_kind == CredentialAuthKind::OAuth
-            && github_connection_exists(&connection)?
-        {
-            return Err(LocalCredentialError::GitHubAlreadyConnected);
-        }
-        let inserted = connection.execute(
-            "INSERT INTO credentials(
-               id, provider, authentication_kind, display_name, account_hint,
-               ssh_public_key_openssh, ssh_public_key_fingerprint,
-               status, expires_at_unix, revocation_generation,
-               material_generation, protected_entry_id, store_persistence, material_state,
-               created_at_unix_ms, updated_at_unix_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12, ?13, ?14, ?14)",
-            params![
-                id.as_str(),
-                metadata.provider.as_str(),
-                auth_kind_to_str(metadata.authentication_kind),
-                metadata.display_name,
-                metadata.account_hint,
-                metadata
-                    .ssh_public_key
-                    .as_ref()
-                    .map(|key| key.openssh.as_str()),
-                metadata
-                    .ssh_public_key
-                    .as_ref()
-                    .map(|key| key.fingerprint.as_str()),
-                status_to_str(metadata.status),
-                expires_at,
-                i64::try_from(metadata.revocation_generation)
-                    .map_err(|_| LocalCredentialError::InvalidTime)?,
-                entry_id.expose_reference(),
-                persistence_to_str(persistence),
-                MaterialState::PendingWrite.as_str(),
-                i64::try_from(now).map_err(|_| LocalCredentialError::InvalidTime)?,
-            ],
-        );
-        if let Err(error) = inserted {
-            return Err(map_insert_error(error));
-        }
-
-        if let Err(error) = self.protected_store.put(&entry_id, &material) {
-            if self.protected_store.delete(&entry_id).is_ok() {
-                delete_pending_write(&connection, &id)?;
-            }
-            return Err(error.into());
-        }
-
-        let changed = connection
-            .execute(
-                "UPDATE credentials
-                 SET material_state = 'ready', updated_at_unix_ms = ?2
-                 WHERE id = ?1 AND material_state = 'pending_write'",
-                params![
-                    id.as_str(),
-                    i64::try_from(unix_millis()?).map_err(|_| LocalCredentialError::InvalidTime)?
-                ],
-            )
-            .map_err(database_error)?;
-        if changed != 1 {
-            return Err(LocalCredentialError::CorruptMetadata);
-        }
-        load_internal_credential(&connection, &id, Some(MaterialState::Ready))
-            .map(|record| record.public)
     }
 
     pub fn list_credentials(&self) -> Result<Vec<CredentialRecord>, LocalCredentialError> {

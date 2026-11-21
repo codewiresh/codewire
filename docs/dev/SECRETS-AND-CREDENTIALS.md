@@ -3338,6 +3338,66 @@ deletes them. cw-security agreed this design on #5255 (2026-11-18).
 - **Admission.** A `cw` that admits an already running authority uses the
   configured store, so a `file` root is never reopened on Secret Service.
 
+## Store calls and the metadata lock (#5413)
+
+The local authority never calls its protected store while it holds its
+metadata connection. That connection is held only for SQL, so a keyring
+that stops answering, behind an unlock prompt nobody sees, holds up only the
+request that called it. Listing, profiles, environment admission and a
+running VM's lease never wait on it. cw-network and cw-security agreed this
+on #5413 (2026-11-20).
+
+**What keeps a credential from being `ready` without its material** is three
+things together. It used to be one lock held from the checks to `ready`.
+- **A `pending_write` row that nothing reads or changes.** Listing and
+  leases see only `ready` rows, deletion refuses a pending one, and only
+  start-up recovery, which runs before any request and only deletes, removes
+  one.
+- **The checks made again at publication.** An SSH enrollment's checks
+  (its admission, shutdown, its 30-second deadline and its caller still being
+  there) run when the pending row is created and again in the same hold that
+  marks it `ready`. An enrollment whose checks fail then is not published:
+  its material is deleted, then its row. So a caller told it failed never
+  finds the credential afterwards. Two things follow:
+  - an enrollment whose caller has gone by publication is undone;
+  - its deadline now covers the store write, so a keyring that answers after
+    it (an unlock prompt answered late) saves nothing, where it used to
+    publish.
+
+  An ordinary add has no such checks: it publishes once its write succeeds,
+  even during shutdown.
+- **Final updates guarded by the state they expect,** and the refresh-owner
+  lock for every path that changes a credential's material.
+
+**An add:**
+- **Its id.** The authority makes the credential's id, so its entry is fresh,
+  and the collision check needs no lock.
+- **Its steps.** It inserts the pending row, writes the store, and marks the
+  row `ready` (or undoes it), with no lock held across the write.
+- **Its outcome.** It ends in exactly one of: `ready`; its material and row
+  deleted; or, when the store doesn't answer, its row left for start-up
+  recovery (#5271). The service runs it on a blocking worker, so a caller
+  that goes away doesn't stop it.
+- **A second add during the write.** While one add is writing, a second add
+  of the same name or of a second GitHub connection is refused at once: the
+  refusal says another add is still saving, and to wait for it
+  (`LOCAL_CREDENTIAL_ADD_IN_PROGRESS`). The authority knows which adds are
+  writing. A pending row that none is writing (its write and its cleanup
+  both failed, #5271) is refused as an earlier add that never finished
+  (`LOCAL_CREDENTIAL_ADD_UNFINISHED`), never as one to wait for. Only the
+  authority's next start removes that row.
+
+**The store probe** (`cw doctor`'s write check) is ordered only against
+other probes.
+
+**This behaviour has its own authority protocol step,** so a `cw` with it
+replaces a running authority from before it once no local VM runs.
+
+**Not yet** (#5413's second part): rotation, deletion, journal reconcile,
+refresh admission (`prepare_credential_refresh`), refresh abort
+(`abort_environment_credential_refresh`), refresh promotion and workload
+secrets still call the store under the connection.
+
 ## Dashboard
 
 The dashboard uses the same platform services as `cw --cloud`, and its forms

@@ -31,6 +31,13 @@ pub enum StoreRefusal {
     CredentialNameAmbiguous,
     /// A new or renamed credential's name starts with a provider id and `/`.
     CredentialNameReservesProvider,
+    /// Another add of this name, or of the GitHub connection, is still
+    /// writing its material (#5413).
+    CredentialAddInProgress,
+    /// An earlier add of this name, or of the GitHub connection, never
+    /// finished; nothing is writing it, and the authority's next start
+    /// removes it (#5413).
+    CredentialAddUnfinished,
 }
 
 /// The status metadata key that lists, comma-joined and sorted, the providers
@@ -51,6 +58,8 @@ impl StoreRefusal {
             Self::KeyringTimedOut => "LOCAL_KEYRING_TIMED_OUT",
             Self::CredentialNameAmbiguous => "CREDENTIAL_NAME_AMBIGUOUS",
             Self::CredentialNameReservesProvider => "CREDENTIAL_NAME_RESERVES_PROVIDER",
+            Self::CredentialAddInProgress => "LOCAL_CREDENTIAL_ADD_IN_PROGRESS",
+            Self::CredentialAddUnfinished => "LOCAL_CREDENTIAL_ADD_UNFINISHED",
         }
     }
 

@@ -65,6 +65,8 @@ enum Outcome {
     Deleted,
     Changed,
     GithubConnected,
+    AddInProgress,
+    AddUnfinished,
     ClaudeCodeInvalid,
     ClaudeSignInExpired,
     KeychainLocked,
@@ -100,6 +102,10 @@ fn classify(answer: Answer, reason: Option<&str>) -> Outcome {
     let is = |refusal: StoreRefusal| reason == Some(refusal.reason());
     if is(StoreRefusal::GithubAlreadyConnected) {
         Outcome::GithubConnected
+    } else if is(StoreRefusal::CredentialAddInProgress) {
+        Outcome::AddInProgress
+    } else if is(StoreRefusal::CredentialAddUnfinished) {
+        Outcome::AddUnfinished
     } else if is(StoreRefusal::RevisionChanged) {
         Outcome::Changed
     } else if is(StoreRefusal::KeychainLocked) {
@@ -211,6 +217,32 @@ fn words(save: Save<'_>, outcome: Outcome, keychain: Option<&Path>) -> (String, 
         ),
         Outcome::GithubConnected => (
             format!("GitHub is already connected {place}, so your {what} wasn't saved"),
+            Some(list),
+        ),
+        // Another add is still writing to a slow store (#5413); for GitHub
+        // it is the one connection, under whatever name it has.
+        Outcome::AddInProgress => (
+            match kind.provider() {
+                Some("github") => format!(
+                    "another GitHub connection is still saving {place}, so your {what} wasn't saved; wait for it to finish"
+                ),
+                _ => format!(
+                    "another add of {name:?} is still saving {place}, so your {what} wasn't saved; wait for it to finish"
+                ),
+            },
+            Some(list),
+        ),
+        // A pending row nothing is writing: only the authority's next start
+        // removes it (#5413, #5271).
+        Outcome::AddUnfinished => (
+            match kind.provider() {
+                Some("github") => format!(
+                    "an earlier GitHub connection never finished saving {place}, so your {what} wasn't saved; it's removed when the local credential service next starts"
+                ),
+                _ => format!(
+                    "an earlier add of {name:?} never finished saving {place}, so your {what} wasn't saved; it's removed when the local credential service next starts, or save this one under another name"
+                ),
+            },
             Some(list),
         ),
         Outcome::ClaudeCodeInvalid => (CLAUDE_SIGN_IN_CODE_INVALID.to_owned(), Some(connect)),
@@ -396,6 +428,32 @@ mod tests {
             .1
             .as_deref(),
             Some("cw credentials --cloud connect github --name work")
+        );
+    }
+
+    /// Another GitHub connection still writing to a slow store saved nothing
+    /// for this one, and says to wait; one nothing is writing says when it
+    /// goes instead (#5413).
+    #[test]
+    fn an_add_in_progress_says_to_wait_and_an_unfinished_one_when_it_goes() {
+        let (text, next) = said(
+            "local",
+            Answer::AlreadyExists,
+            Some("LOCAL_CREDENTIAL_ADD_IN_PROGRESS"),
+        );
+        assert_eq!(
+            text,
+            "another GitHub connection is still saving on this computer, so your GitHub sign-in wasn't saved; wait for it to finish"
+        );
+        assert_eq!(next.as_deref(), Some("cw credentials --local list"));
+        let (text, _) = said(
+            "local",
+            Answer::AlreadyExists,
+            Some("LOCAL_CREDENTIAL_ADD_UNFINISHED"),
+        );
+        assert_eq!(
+            text,
+            "an earlier GitHub connection never finished saving on this computer, so your GitHub sign-in wasn't saved; it's removed when the local credential service next starts"
         );
     }
 

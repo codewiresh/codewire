@@ -27,6 +27,14 @@ pub(super) fn status_for_error(error: LocalCredentialError) -> Status {
             .attach(Status::already_exists(
                 "a local GitHub connection already exists; reconnect or delete it",
             )),
+        LocalCredentialError::CredentialAddInProgress => StoreRefusal::CredentialAddInProgress
+            .attach(Status::already_exists(
+                "an add of this local credential is still in progress; wait for it to finish",
+            )),
+        LocalCredentialError::CredentialAddUnfinished => StoreRefusal::CredentialAddUnfinished
+            .attach(Status::already_exists(
+                "an earlier add of this local credential never finished saving",
+            )),
         LocalCredentialError::AmbiguousGitHubConnections => Status::failed_precondition(
             "local credential metadata has more than one active GitHub connection",
         ),

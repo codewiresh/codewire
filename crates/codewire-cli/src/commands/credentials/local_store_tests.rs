@@ -204,17 +204,29 @@ impl std::io::Write for ThawOnWrite {
     }
 }
 
-/// A keyring that stops answering holds the authority for as long as it
-/// waits, so another command's first call waits behind it: here the name
-/// check `add` makes before it asks for the key. That wait shows the waiting
-/// line within a second, never a silent pause (#5271).
+/// A keyring that stops answering holds up only the call that reached it
+/// (#5413). That call shows the waiting line within a second, never a
+/// silent pause (#5271). Another command's listing meanwhile answers at
+/// once, with no line, since the authority holds no lock across the store.
 #[tokio::test]
-async fn a_call_behind_a_frozen_keyring_shows_the_waiting_line() {
+async fn only_the_call_at_a_frozen_keyring_waits_and_shows_the_waiting_line() {
     let store = Store::default();
     let thaw = store.freeze();
     let (authority, mut client) = serve(store.clone()).await;
     let mut doctor = connect_ready_authority(&authority.config, &authority.server).await;
-    let probe = tokio::spawn(async move { doctor.probe_protected_store().await });
+    let probe = tokio::spawn(async move {
+        let mut stderr = ThawOnWrite {
+            written: Vec::new(),
+            thaw: Some(thaw),
+        };
+        let screen = store_wait::Screen {
+            live: false,
+            ascii: false,
+        };
+        let probed =
+            store_wait::waiting_on(&mut stderr, screen, doctor.probe_protected_store()).await;
+        (probed, stderr.written)
+    });
     tokio::time::timeout(Duration::from_secs(30), async {
         while !store.held.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -223,29 +235,24 @@ async fn a_call_behind_a_frozen_keyring_shows_the_waiting_line() {
     .await
     .expect("the probe reached the frozen keyring");
 
-    let mut stderr = ThawOnWrite {
-        written: Vec::new(),
-        thaw: Some(thaw),
-    };
-    let screen = store_wait::Screen {
-        live: false,
-        ascii: false,
-    };
+    // Well inside the second before the waiting line would show.
+    let listing = tokio::time::timeout(Duration::from_millis(500), client.list_credentials())
+        .await
+        .expect("the listing answered while the keyring was frozen");
+    assert!(listing.unwrap().is_empty());
+
     // Without the line the store never thaws, so this bound turns a hang
     // into a failure.
-    let listing = tokio::time::timeout(
-        Duration::from_secs(30),
-        store_wait::waiting_on(&mut stderr, screen, client.list_credentials()),
-    )
-    .await
-    .expect("the waiting line was written and the store thawed");
-    assert!(listing.unwrap().is_empty());
+    let (probed, written) = tokio::time::timeout(Duration::from_secs(30), probe)
+        .await
+        .expect("the waiting line was written and the store thawed")
+        .unwrap();
+    probed.unwrap();
     // The words themselves are pinned in store_wait's tests.
     assert_eq!(
-        String::from_utf8(stderr.written).unwrap(),
+        String::from_utf8(written).unwrap(),
         format!("{}\n", store_wait::plain_line())
     );
-    probe.await.unwrap().unwrap();
 }
 
 /// Saves a synthetic credential straight to the store.

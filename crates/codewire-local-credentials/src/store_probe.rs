@@ -13,11 +13,16 @@ const STORE_PROBE_VALUE: &[u8] = b"codewire-store-probe-canary";
 
 impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     /// Write the canary to the store that holds this authority's credentials
-    /// and delete it again. The metadata lock serializes it with every
-    /// credential write. The delete runs even when the write failed, in case
-    /// the store kept part of it; the write's error is the answer.
+    /// and delete it again. Probes are ordered among themselves; they hold no
+    /// metadata lock, since they touch no row, so a store that stops answering
+    /// holds up no other request (#5413). The delete runs even when the write
+    /// failed, in case the store kept part of it; the write's error is the
+    /// answer.
     pub(crate) fn probe_protected_store(&self) -> Result<(), LocalCredentialError> {
-        let _serialized = self.connection()?;
+        let _serialized = self
+            .store_probe
+            .lock()
+            .map_err(|_| LocalCredentialError::DatabaseUnavailable)?;
         let entry = ProtectedEntryId::parse(STORE_PROBE_ENTRY)?;
         let value = ProtectedValue::from_slice(STORE_PROBE_VALUE)?;
         let written = self.protected_store.put(&entry, &value);

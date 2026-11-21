@@ -2,6 +2,8 @@
 //! capped set of blocking workers that shutdown and the request can cancel.
 
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use codewire_protected_store::ssh_material::SshMaterialError;
@@ -17,6 +19,10 @@ pub(super) const SSH_ENROLLMENT_DEADLINE: Duration = Duration::from_secs(30);
 pub(super) struct SshEnrollmentWorkers {
     pub(super) permits: Arc<tokio::sync::Semaphore>,
     shutdown: watch::Sender<bool>,
+    /// Requests whose caller went away before their answer, which a test
+    /// waits on instead of a clock.
+    #[cfg(test)]
+    abandoned: Arc<AtomicUsize>,
 }
 
 pub(super) struct SshEnrollmentCancellation {
@@ -30,13 +36,23 @@ impl SshEnrollmentCancellation {
     }
 }
 
+/// Dropped with its request: a caller that goes away cancels the enrollment,
+/// which is undone if it has not been published yet (#5413).
 struct SshEnrollmentRequestGuard {
     cancelled: watch::Sender<bool>,
+    #[cfg(test)]
+    answered: bool,
+    #[cfg(test)]
+    abandoned: Arc<AtomicUsize>,
 }
 
 impl Drop for SshEnrollmentRequestGuard {
     fn drop(&mut self) {
         self.cancelled.send_replace(true);
+        #[cfg(test)]
+        if !self.answered {
+            self.abandoned.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -48,6 +64,8 @@ impl SshEnrollmentWorkers {
                 MAX_SSH_ENROLLMENT_WORKERS as usize,
             )),
             shutdown,
+            #[cfg(test)]
+            abandoned: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -73,8 +91,13 @@ impl SshEnrollmentWorkers {
             ));
         }
         let (request_cancelled, request) = watch::channel(false);
-        let request_guard = SshEnrollmentRequestGuard {
+        #[cfg_attr(not(test), allow(unused_mut))]
+        let mut request_guard = SshEnrollmentRequestGuard {
             cancelled: request_cancelled,
+            #[cfg(test)]
+            answered: false,
+            #[cfg(test)]
+            abandoned: Arc::clone(&self.abandoned),
         };
         let result = tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -82,6 +105,10 @@ impl SshEnrollmentWorkers {
         })
         .await
         .map_err(|_| Status::internal("local SSH enrollment worker failed"))?;
+        #[cfg(test)]
+        {
+            request_guard.answered = true;
+        }
         drop(request_guard);
         result
     }
@@ -91,6 +118,7 @@ impl SshEnrollmentWorkers {
         SshEnrollmentProbe {
             permits: Arc::clone(&self.permits),
             shutdown: self.shutdown.subscribe(),
+            abandoned: Arc::clone(&self.abandoned),
         }
     }
 
@@ -112,6 +140,7 @@ impl SshEnrollmentWorkers {
 pub(crate) struct SshEnrollmentProbe {
     permits: Arc<tokio::sync::Semaphore>,
     shutdown: watch::Receiver<bool>,
+    abandoned: Arc<AtomicUsize>,
 }
 
 #[cfg(test)]
@@ -119,6 +148,12 @@ impl SshEnrollmentProbe {
     /// Requests admitted to a worker and not yet finished.
     pub(crate) fn admitted(&self) -> usize {
         MAX_SSH_ENROLLMENT_WORKERS as usize - self.permits.available_permits()
+    }
+
+    /// Requests whose caller went away before their answer; each one's
+    /// enrollment fails its publication check from then on.
+    pub(crate) fn abandoned(&self) -> usize {
+        self.abandoned.load(Ordering::SeqCst)
     }
 
     /// Returns once shutdown has closed publication: every admitted

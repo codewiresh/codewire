@@ -35,6 +35,14 @@ pub enum LocalCredentialError {
     AlreadyExists,
     #[error("a local GitHub connection already exists; reconnect or delete it")]
     GitHubAlreadyConnected,
+    /// Another add of this name, or of the GitHub connection, is still
+    /// writing its material (#5413).
+    #[error("an add of this local credential is still in progress; wait for it to finish")]
+    CredentialAddInProgress,
+    /// An earlier add of this name, or of the GitHub connection, never
+    /// finished: its row waits for start-up recovery to remove it (#5413).
+    #[error("an earlier add of this local credential never finished saving")]
+    CredentialAddUnfinished,
     #[error(
         "local credential metadata has more than one active GitHub connection; keep one before upgrading"
     )]
