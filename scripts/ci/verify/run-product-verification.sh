@@ -861,6 +861,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-resolve-deployed-source.sh
   scripts/ci/tests/test-dev-deployment-smoke-receipt.sh
   scripts/ci/tests/test-run-side-by-side.sh
+  scripts/ci/tests/test-policy-cpu-cap.sh
   scripts/ci/tests/test-standard-families.sh
   scripts/ci/tests/test-warm-rust-cache.sh
   scripts/ci/tests/test-install-cargo-nextest.sh
@@ -2136,6 +2137,23 @@ case "$FAMILY" in
     select_local_rust_cache "$ROOT" || true
     ;;
 esac
+
+# Policy runs its script tests side by side, and the processes they start
+# used two to four times the guest's share: 28 cores at p95 against 8, and
+# 701 s of host CPU pressure in one 959 s job, which failed the tests' own
+# wall-clock bounds (infra#1534 step G). In CI it is pinned to twice its share.
+if [[ "$FAMILY" == policy-core && -z "${CODEWIRE_POLICY_CPU_CAP:-}" ]]; then
+  # shellcheck source=scripts/ci/setup/cpu-share.sh
+  source "$ROOT/scripts/ci/setup/cpu-share.sh"
+  policy_cpus="$(ci_cpu_cap_list 2)"
+  if [ -n "$policy_cpus" ]; then
+    if command -v taskset >/dev/null; then
+      echo "[policy] pinned to CPUs $policy_cpus (twice the share of ${CODEWIRE_CI_CPU_SHARE})"
+      CODEWIRE_POLICY_CPU_CAP="$policy_cpus" exec taskset -c "$policy_cpus" "$ROOT/scripts/ci/verify/run-product-verification.sh" "$@"
+    fi
+    echo '::warning::taskset is missing; Policy runs on every CPU' >&2
+  fi
+fi
 
 case "$FAMILY" in
   policy) run_policy ;;
