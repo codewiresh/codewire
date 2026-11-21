@@ -1139,9 +1139,10 @@ fn declined(error: &stripe::StripeError) -> Option<String> {
 }
 
 impl StripeHandle {
-    /// Charges an automatic top-up to the customer's default payment method
-    /// as its own EUR invoice, paid at once. Every call is idempotent on the
-    /// top-up id, so a retry after a crash resumes the same charge.
+    /// Charges a top-up, automatic or an Add credit purchase, to the
+    /// customer's default payment method as its own EUR invoice, paid at
+    /// once. Every call is idempotent on the top-up id, so a retry after a
+    /// crash resumes the same charge.
     pub(crate) async fn charge_top_up(
         &self,
         customer_id: &str,
@@ -1151,6 +1152,17 @@ impl StripeHandle {
     ) -> Result<TopUpCharge, AppError> {
         let client = self.client()?;
         let key = |step: &str| IdempotencyKey::new(format!("cw-top-up-{step}-{top_up_id}"));
+        // Both receipts show why the card was charged (#4754, #5775). The
+        // words name no balance, so a retried charge sends the same request.
+        let (invoice_description, item_description) =
+            if top_up_id.starts_with(crate::credit_purchase::PURCHASE_TOP_UP_PREFIX) {
+                ("Codewire compute credit", "Codewire compute credit")
+            } else {
+                (
+                    "Codewire automatic top-up: compute credit reached €0",
+                    "Compute credit, added by automatic top-up when the balance reached €0",
+                )
+            };
         let metadata = std::collections::HashMap::from([
             ("kind".to_owned(), CREDIT_TOP_UP_KIND.to_owned()),
             ("org_id".to_owned(), organization_id.to_owned()),
@@ -1162,9 +1174,7 @@ impl StripeHandle {
             .auto_advance(false)
             .collection_method(stripe_shared::InvoiceCollectionMethod::ChargeAutomatically)
             .pending_invoice_items_behavior(CreateInvoicePendingInvoiceItemsBehavior::Exclude)
-            // Both receipts show why the card was charged (#4754). The words
-            // name no balance, so a retried charge sends the same request.
-            .description("Codewire automatic top-up: compute credit reached €0")
+            .description(invoice_description)
             .metadata(metadata)
             .customize()
             .request_strategy(RequestStrategy::Idempotent(
@@ -1182,7 +1192,7 @@ impl StripeHandle {
             .invoice(invoice_id.clone())
             .amount(amount_cents)
             .currency(BILLING_CURRENCY)
-            .description("Compute credit, added by automatic top-up when the balance reached €0")
+            .description(item_description)
             .customize()
             .request_strategy(RequestStrategy::Idempotent(
                 key("item").map_err(stripe_err)?,
@@ -1488,6 +1498,12 @@ mod currency_tests {
         assert_eq!(
             form.get("currency").map(String::as_str),
             Some("eur"),
+            "{form:?}"
+        );
+        // An automatic top-up's id isn't a purchase's, so it keeps #4754's words.
+        assert_eq!(
+            form.get("description").map(String::as_str),
+            Some("Codewire automatic top-up: compute credit reached €0"),
             "{form:?}"
         );
     }

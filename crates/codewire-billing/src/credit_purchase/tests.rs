@@ -695,7 +695,16 @@ async fn db_a_saved_card_is_charged_once_and_credited_at_once() {
             "{key}"
         );
     }
+    // A purchase is not an automatic top-up, and its receipt says so (#5775).
+    assert_eq!(
+        created.form.get("description").map(String::as_str),
+        Some("Codewire compute credit")
+    );
     let item = harness.only(Method::POST, "/v1/invoiceitems");
+    assert_eq!(
+        item.form.get("description").map(String::as_str),
+        Some("Codewire compute credit")
+    );
     assert_eq!(item.form.get("amount").map(String::as_str), Some("10000"));
     assert_eq!(item.form.get("currency").map(String::as_str), Some("eur"));
     let pay = harness.only(

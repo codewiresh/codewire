@@ -65,6 +65,10 @@ pub enum AddCreditOutcome {
     InProgress,
 }
 
+/// Every purchase's top-up id starts with this; an automatic top-up's id is
+/// a generated one, so the invoice can say which it was (#5775).
+pub(crate) const PURCHASE_TOP_UP_PREFIX: &str = "credit-";
+
 /// The purchase a request names: the same organization, request id and
 /// amount always give the same id.
 pub(crate) fn purchase_top_up_id(
@@ -78,7 +82,7 @@ pub(crate) fn purchase_top_up_id(
         hasher.update(part.as_bytes());
     }
     let digest = hasher.finalize();
-    let mut id = String::from("credit-");
+    let mut id = String::from(PURCHASE_TOP_UP_PREFIX);
     for byte in &digest[..16] {
         id.push_str(&format!("{byte:02x}"));
     }
