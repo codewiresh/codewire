@@ -525,6 +525,7 @@ case "$1" in
     printf '{"workspace_root":"%s","workspace_members":["demo-id"],"packages":[{"id":"demo-id","name":"demo","manifest_path":"%s/crates/demo/Cargo.toml","dependencies":[]}]}\n' "$here" "$here" ;;
   check)
     printf '%s\n' "$*" >>"${FAKE_CARGO_LOG:?}"
+    [[ -z "${FAKE_CARGO_HANG-}" ]] || exec sleep 30
     [[ -z "${FAKE_CARGO_ERROR-}" ]] || { printf 'error[E0063]: %s\n' "$FAKE_CARGO_ERROR" >&2; exit 101; } ;;
 esac
 SH
@@ -544,6 +545,15 @@ grep -qF 'error[E0063]: missing field `pinned`' "$work/queue-rust-red.out" ||
   fail "queue-pr.sh did not show the compiler's error: $(cat "$work/queue-rust-red.out")"
 grep -qF '#44 does not compile merged with main' "$work/queue-rust-red.out" || fail 'queue-pr.sh did not say why it refused'
 [[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a pull request that does not compile reached the forge'
+# A check that runs out of time says so, not that the code is wrong.
+if command -v timeout >/dev/null; then
+  FAKE_CARGO_HANG=1 QUEUE_PR_CHECK_TIMEOUT=1 rust_queue 44 'feat: a demo crate' >"$work/queue-rust-slow.out" 2>&1 &&
+    fail 'queue-pr.sh queued a pull request whose check timed out'
+  grep -qF 'the compile check of #44 timed out after 1s' "$work/queue-rust-slow.out" ||
+    fail "a timed-out check did not say so: $(cat "$work/queue-rust-slow.out")"
+  ! grep -qF 'does not compile' "$work/queue-rust-slow.out" || fail 'a timed-out check was reported as a compile error'
+  [[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a pull request whose check timed out reached the forge'
+fi
 rust_queue 44 'feat: a demo crate' >"$work/queue-rust.out" 2>&1 ||
   fail "queue-pr.sh refused a merge that compiles, with a free slot: $(cat "$work/queue-rust.out")"
 grep -qF '#44 is queued as "feat: a demo crate (#44)"' "$work/queue-rust.out" || fail 'queue-pr.sh did not queue #44'

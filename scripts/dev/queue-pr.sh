@@ -118,8 +118,15 @@ if [[ ${#packages[@]} -gt 0 ]]; then
   command -v codewire-cpu >/dev/null && check=(codewire-cpu build -- "${check[@]}")
   printf 'queue-pr.sh: compile-checking #%s merged with main: %s\n' "$pr" "${packages[*]}" >&2
   started="$(date +%s)"
-  if ! (cd "$check_dir" && CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}" "${check[@]}" \
-        >"$cache/$key.log" 2>&1); then
+  status=0
+  (cd "$check_dir" && CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}" "${check[@]}" \
+    >"$cache/$key.log" 2>&1) || status=$?
+  if [[ $status == 124 ]]; then
+    # timeout's own status: the check ran out of time, which says nothing of the code.
+    printf 'queue-pr.sh: the compile check of #%s timed out after %ss; nothing was queued, run it again\n' \
+      "$pr" "${QUEUE_PR_CHECK_TIMEOUT:-1800}" >&2
+    exit 1
+  elif [[ $status != 0 ]]; then
     grep -E '^(error|warning: unused)|^ *--> ' "$cache/$key.log" | head -40 >&2 || tail -40 "$cache/$key.log" >&2
     printf 'queue-pr.sh: #%s does not compile merged with main; merge main into it and fix it\n' "$pr" >&2
     exit 1
