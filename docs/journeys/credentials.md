@@ -202,6 +202,20 @@ only what differs.
 - **Use:** `git clone` of a private repository the connection can read, inside
   the environment, through the broker's GitHub route. Expect the clone to
   succeed, with no GitHub token in the environment or on its disk.
+- **A failed check's log** (#5737): in the environment, for a repository with
+  a failed workflow run, `gh run list -R OWNER/REPO` lists it and
+  `gh run view RUN -R OWNER/REPO --log-failed` prints the failing job's log.
+  Expect:
+  - the log text, with no signed URL, `Location` header or GitHub token in
+    the output, the environment or the broker's log;
+  - the same under the `locked` network policy with GitHub allowed by rule,
+    since the broker, not the guest, fetches the log;
+  - `gh run rerun RUN` refused with `request_not_forwarded`;
+  - before an installation's owner accepts the App's `actions`: read, GitHub's
+    own 403 from `gh run list`, and every other GitHub command working.
+
+  Walk it on a local VM and a hosted Sandbox with codewire-e2e's test
+  repository. Not yet observed.
 - **Remove:**
   - In the cloud, deleting a connection made through the GitHub App asks
     GitHub to revoke its access token, and `cw` says whether GitHub confirmed

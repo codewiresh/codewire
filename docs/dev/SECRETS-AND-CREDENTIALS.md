@@ -712,16 +712,21 @@ accepts the request on the installation's settings page, and authorizing or
 reconnecting the user never asks. Codewire compares each installation's
 granted permissions from `/user/installations` with what it needs (`contents`
 and `pull_requests`: write, `metadata`: read) and names an installation that
-falls short, with its settings page:
+falls short, with its settings page. `actions`: read is requested too but is
+not needed: an installation that hasn't accepted it keeps everything else,
+and only its Actions reads are refused (#5737). The settings page is:
 `https://github.com/settings/installations/ID` for a user,
 `https://github.com/organizations/LOGIN/settings/installations/ID` for an
 organization, built only from the validated login and numeric ID under the
 fixed `github.com` prefix. An enterprise installation has no such page and is
 only named: its owner accepts in the enterprise's own settings (#2712).
 
-The App itself must hold exactly those three permissions, because the GitHub
-route was reviewed for them and no others: `administration`, for one, would
-let a Sandbox create repositories through the managed credential. The App's
+The App itself must hold exactly those four permissions (`actions`: read
+beside the three above), because the GitHub route was reviewed for them and
+no others: `administration`, for one, would let a Sandbox create
+repositories through the managed credential. Adding `actions`: read makes
+each installation's owner accept the request once; until then that
+installation's Actions reads get GitHub's own 403, which `gh` shows. The App's
 settings live at GitHub, so a scheduled workflow
 (`.gitea/workflows/github-app-permissions.yaml`) reads the App's public record
 once a day, with no credential, and fails when the set differs, naming each
@@ -1048,8 +1053,11 @@ What works is what the closed operations admit: `gh pr create`, `gh pr list`,
 commands; `gh api user`, `gh auth status` (the API root) and `gh repo view`
 (the repository's README, see
 [the exception below](#accepted-exception-the-readme-download-url-token)); and
-the issue and pull request REST calls. Anything else, such as `gh run list`,
-release uploads or `gh api` for another REST path, fails with HTTP 403 and
+the issue and pull request REST calls; and `gh run list`, `gh run view` and
+`gh run view --log`, which read a repository's workflow runs, jobs and job
+logs ([the Actions reads below](#actions-reads-and-the-one-redirect-the-broker-follows),
+#5737; not yet observed). Anything else, such as a re-run, release uploads
+or `gh api` for another REST path, fails with HTTP 403 and
 `request_not_forwarded` ([Refusals](#refusals-an-agent-or-a-person-can-read-5057)). `gh` finds the repository from an SSH origin (`git@github.com:owner/repo`). In a
 checkout whose origin is `https://github.com/...`, Git reports the rewritten
 bridge URL, so `gh` does not recognize it as GitHub: pass `-R owner/repo` or
@@ -2987,6 +2995,52 @@ through an admitted GitHub API request. It is accepted so that plain
 
 The policy entries in the credential-bridge ingress classifier and the
 broker's GitHub grammar cite this section.
+
+### Actions reads and the one redirect the broker follows
+
+An agent reads why a check failed with `gh run list` and `gh run view --log`
+(#5737). A job's log is repository data the agent may read; nothing here
+writes.
+
+- **What is admitted:** GET only, on any repository the GitHub connection
+  reaches, as the pull request paths are: a repository's workflow runs, one
+  run, its jobs and an attempt's jobs, one job, its workflows and one
+  workflow, a check run's annotations, and the two log downloads (one job's
+  log and one run's logs). No re-run, cancel, dispatch, artifact, cache,
+  secret or variable path. The query names `gh` sends for runs (`branch`,
+  `event`, `status`, `actor`, `created`, `head_sha`, `exclude_pull_requests`
+  and `filter`) join the existing bounded list.
+- **The log redirect.** GitHub answers both log downloads with a 302 to a
+  short-lived signed URL on another host. Anyone holding that URL can read
+  the log until it expires, so it is a credential, and it never reaches the
+  guest. The broker follows that one redirect itself:
+  - only from a 3xx answer to GET on the two log paths, and only once: a
+    redirect from the second request is refused;
+  - only to `https` on port 443 with no userinfo, to a host matched exactly
+    from a fixed list of GitHub's log hosts. Azure blob storage hosts are
+    listed by their exact account names, the ones GitHub was seen
+    redirecting to, never by a pattern or the `blob.core.windows.net`
+    suffix: account names are first-come, so a pattern would accept an
+    account anyone can register. A same-shape name outside the list is
+    refused, and a test pins that;
+  - as a fresh GET carrying no credential, cookie or header from the guest or
+    the first request, through the same client, with its address resolved,
+    classified and pinned per request as the first hop's are, and with its
+    own deadline;
+  - streaming the body back under the existing response cap and redaction.
+    The guest gets the body, the final status, and `Content-Type` and
+    `Content-Length` only, never `Location` or the signed URL, in a
+    response, an error or a log line. The signed URL's query is never
+    logged or put in a trace.
+- **Where it needs egress.** On a computer, the broker dials the log hosts
+  from the host. A hosted credential service needs egress that names those
+  hosts, since Azure's address ranges move.
+- **The App permission:** `actions`: read, accepted once by each
+  installation's owner, as above. The daily permission check expects it from
+  the change that asks for it.
+- **The rollout:** this spec and journey, then the broker code with its
+  tests, then the daily check's new set, then the App's new permission at
+  GitHub, then the walk on a local VM and a hosted Sandbox.
 
 ### A refresh the provider rate-limited
 
