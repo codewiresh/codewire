@@ -354,7 +354,7 @@ fn set_secret_locked<S: ProtectedStore>(
             let id = Uuid::new_v4();
             let entry = secret_entry_id(id, 1)?;
             ensure_entry_absent(authority, &entry)?;
-            let transaction = connection.unchecked_transaction().map_err(database_error)?;
+            let transaction = crate::immediate(connection)?;
             transaction
                 .execute(
                     "INSERT INTO workload_secrets(
@@ -381,7 +381,7 @@ fn set_secret_locked<S: ProtectedStore>(
             )?;
             transaction.commit().map_err(database_error)?;
             authority.protected_store.put(&entry, &value)?;
-            let transaction = connection.unchecked_transaction().map_err(database_error)?;
+            let transaction = crate::immediate(connection)?;
             let changed = transaction
                 .execute(
                     "UPDATE workload_secrets SET material_state = 'ready', updated_at_unix_ms = ?2
@@ -414,7 +414,7 @@ fn set_secret_locked<S: ProtectedStore>(
                 now,
             )?;
             authority.protected_store.put(&next_entry, &value)?;
-            let transaction = connection.unchecked_transaction().map_err(database_error)?;
+            let transaction = crate::immediate(connection)?;
             let changed = transaction
                 .execute(
                     "UPDATE workload_secrets
@@ -473,7 +473,7 @@ fn delete_secret_locked<S: ProtectedStore>(
     if current.material_state != MaterialState::Ready {
         return Err(LocalCredentialError::CorruptMetadata);
     }
-    let transaction = connection.unchecked_transaction().map_err(database_error)?;
+    let transaction = crate::immediate(connection)?;
     let changed = transaction
         .execute(
             "UPDATE workload_secrets SET material_state = 'pending_delete', updated_at_unix_ms = ?2

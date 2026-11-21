@@ -18,6 +18,11 @@ pub enum LocalCredentialError {
     UnsupportedSchema,
     #[error("local credential metadata is corrupt")]
     CorruptMetadata,
+    /// A protected-store call was asked for inside an open database
+    /// transaction, where it would hold the write lock while the store waits
+    /// (#5413). Refused, never made.
+    #[error("local credential store call refused inside a database transaction")]
+    StoreCallInTransaction,
     /// Stored values were left in the recorded backend, unchanged.
     #[error("local protected storage could not switch backends: {0}")]
     ProtectedStoreSwitch(ProtectedStoreError),

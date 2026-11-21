@@ -179,7 +179,7 @@ fn record_store(
     selected: &AuthorityProtectedStore,
     retiring: Option<(&AuthorityProtectedStore, &[ProtectedEntryId])>,
 ) -> Result<(), LocalCredentialError> {
-    let transaction = connection.unchecked_transaction().map_err(database_error)?;
+    let transaction = crate::immediate(connection)?;
     transaction
         .execute(
             "INSERT INTO authority_metadata(key, value) VALUES (?1, ?2)

@@ -88,7 +88,8 @@ pub(super) fn status_for_error(error: LocalCredentialError) -> Status {
         | LocalCredentialError::ProtectedStoreMismatch
         | LocalCredentialError::UnsupportedSchema
         | LocalCredentialError::InvalidDatabase
-        | LocalCredentialError::CorruptMetadata => {
+        | LocalCredentialError::CorruptMetadata
+        | LocalCredentialError::StoreCallInTransaction => {
             Status::failed_precondition("local credential operation cannot be applied")
         }
         // Both are the user's to resolve, so say what holds the record.

@@ -25,8 +25,13 @@ mod client;
 mod control;
 mod credential_add;
 mod credential_names;
+mod credential_rotate;
 mod default_profile;
 mod error;
+mod material;
+#[cfg(test)]
+mod test_store;
+use material::MaterialStore;
 mod placeholder;
 mod platform;
 mod profile_rows;
@@ -145,7 +150,9 @@ use codewire_protected_store::{
     ssh_material::{PreparedSshCredential, SshAgentMaterial, decode_protected_material},
 };
 use rusqlite::config::DbConfig;
-use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension as _, Transaction, TransactionBehavior, params,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -557,6 +564,10 @@ pub struct LocalCredentialAuthority<S: ProtectedStore> {
     protected_store_identity: Option<AuthorityProtectedStore>,
     _authority_lock: AuthorityLock,
     connection: Mutex<Connection>,
+    /// The connection of the paths that change a credential's material,
+    /// taken only under the refresh-owner exclusion each holds, so that their
+    /// store calls never wait while `connection` is held (#5413).
+    material: Mutex<Connection>,
     protected_store: S,
     catalog: ProviderCatalog,
     owner_id: OwnerId,
@@ -704,7 +715,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         #[cfg(unix)]
         ensure_private_root(root)?;
         let authority_lock = AuthorityLock::acquire(root)?;
-        let connection = open_database(root)?;
+        let (connection, material) = open_database(root)?;
         ensure_authority_identity(&connection, &owner_id, protected_store.persistence())?;
         if let Some((selected, open)) = selection {
             store_backend::select_protected_store(&connection, selected, &protected_store, open)?;
@@ -713,6 +724,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             protected_store_identity: selection.map(|(selected, _)| selected.clone()),
             _authority_lock: authority_lock,
             connection: Mutex::new(connection),
+            material: Mutex::new(material),
             protected_store,
             catalog,
             owner_id,
@@ -868,142 +880,6 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             Ok(_) => Err(LocalCredentialError::CorruptMetadata),
             Err(error) => Err(map_insert_error(error)),
         }
-    }
-
-    /// Atomically make a new protected value active behind the same credential
-    /// ID. The old value remains active until the new entry and metadata commit
-    /// are durable. Failure to delete the retired entry is journaled and
-    /// reported through metadata without making the new value unavailable.
-    /// The caller must supply the exact observed revision. An absent account
-    /// hint clears the previous hint; callers preserving it must pass it back.
-    pub fn rotate_credential_material(
-        &self,
-        id: &CredentialId,
-        expected_revocation_generation: u64,
-        material: ProtectedValue,
-        expires_at_unix: Option<u64>,
-        account_hint: Option<String>,
-    ) -> Result<CredentialRecord, LocalCredentialError> {
-        // Hold the refresh-owner lock through every journal and protected-store
-        // mutation. A check-then-unlock here would let a broker begin a refresh
-        // against the same next material generation while a manual rotation is
-        // still in flight.
-        let active_refreshes = self
-            .active_refreshes
-            .lock()
-            .map_err(|_| LocalCredentialError::DatabaseUnavailable)?;
-        if active_refreshes.contains_key(id) {
-            return Err(LocalCredentialError::CredentialRefreshInProgress);
-        }
-        let mut connection = self.connection()?;
-        let mut current = load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
-        if current.public.metadata.provider.as_str() == "ssh"
-            || current.public.metadata.authentication_kind == CredentialAuthKind::SshKey
-        {
-            return Err(LocalCredentialError::SshCredentialRequiresEnrollment);
-        }
-        if expected_revocation_generation == 0
-            || current.public.metadata.revocation_generation != expected_revocation_generation
-        {
-            // Even journal reconciliation can delete or promote protected
-            // material. A stale caller has no authority to initiate it.
-            return Err(LocalCredentialError::StaleCredentialRevision);
-        }
-        let mut replacement_metadata = current.public.metadata.clone();
-        replacement_metadata.account_hint = account_hint;
-        claude_token::set_expiry(&mut replacement_metadata, &material, expires_at_unix)?;
-        replacement_metadata.status = CredentialStatus::Active;
-        replacement_metadata.validate()?;
-        let expires_at = optional_u64_to_i64(replacement_metadata.expires_at_unix)?;
-        reconcile_ready_journal(&connection, &self.protected_store, &current)?;
-        current = load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
-        if current.public.metadata.revocation_generation != expected_revocation_generation {
-            // Recovery may have promoted an abandoned OAuth refresh. Do not
-            // replace that newer result using an earlier confirmation.
-            return Err(LocalCredentialError::StaleCredentialRevision);
-        }
-
-        let generation = current
-            .public
-            .metadata
-            .revocation_generation
-            .checked_add(1)
-            .ok_or(LocalCredentialError::CorruptMetadata)?;
-        let material_generation = current
-            .material_generation
-            .checked_add(1)
-            .ok_or(LocalCredentialError::CorruptMetadata)?;
-        let next_entry_id = protected_entry_id(id, material_generation)?;
-        match self.protected_store.get(&next_entry_id) {
-            Ok(None) => {}
-            Ok(Some(_)) => return Err(LocalCredentialError::ProtectedEntryCollision),
-            Err(error) => return Err(error.into()),
-        }
-        let now = unix_millis()?;
-        insert_protected_entry_journal(
-            &connection,
-            id,
-            JournalOperation::RollbackWrite,
-            &next_entry_id,
-            now,
-        )?;
-
-        if let Err(error) = self.protected_store.put(&next_entry_id, &material) {
-            if self.protected_store.delete(&next_entry_id).is_ok() {
-                delete_protected_entry_journal(&connection, id)?;
-            }
-            return Err(error.into());
-        }
-
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(database_error)?;
-        let changed = transaction
-            .execute(
-                "UPDATE credentials
-                 SET protected_entry_id = ?2, status = 'active', expires_at_unix = ?3,
-                     revocation_generation = ?4, material_generation = ?5,
-                     updated_at_unix_ms = ?6, account_hint = ?7
-                 WHERE id = ?1 AND material_state = 'ready' AND revocation_generation = ?8",
-                params![
-                    id.as_str(),
-                    next_entry_id.expose_reference(),
-                    expires_at,
-                    i64::try_from(generation).map_err(|_| LocalCredentialError::CorruptMetadata)?,
-                    i64::try_from(material_generation)
-                        .map_err(|_| LocalCredentialError::CorruptMetadata)?,
-                    i64::try_from(now).map_err(|_| LocalCredentialError::InvalidTime)?,
-                    replacement_metadata.account_hint,
-                    i64::try_from(expected_revocation_generation)
-                        .map_err(|_| LocalCredentialError::CorruptMetadata)?
-                ],
-            )
-            .map_err(database_error)?;
-        if changed != 1 {
-            return Err(LocalCredentialError::CorruptMetadata);
-        }
-        let journal_changed = transaction
-            .execute(
-                "UPDATE protected_entry_journal
-                 SET operation = 'delete_retired', protected_entry_id = ?2
-                 WHERE credential_id = ?1 AND operation = 'rollback_write'",
-                params![id.as_str(), current.protected_entry_id.expose_reference()],
-            )
-            .map_err(database_error)?;
-        if journal_changed != 1 {
-            return Err(LocalCredentialError::CorruptMetadata);
-        }
-        transaction.commit().map_err(database_error)?;
-
-        if self
-            .protected_store
-            .delete(&current.protected_entry_id)
-            .is_ok()
-        {
-            delete_protected_entry_journal(&connection, id)?;
-        }
-        load_internal_credential(&connection, id, Some(MaterialState::Ready))
-            .map(|record| record.public)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1218,7 +1094,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         request_id: Uuid,
     ) -> Result<(), LocalCredentialError> {
         let permit = self.active_refresh_permit(channel_id, refresh_id, request_id)?;
-        let connection = self.connection()?;
+        let connection = self.material_connection()?;
         let marker = load_credential_refresh_marker(&connection, permit.credential_id())?
             .filter(|marker| {
                 marker.permit == permit && marker.phase == CredentialRefreshPhase::Reserved
@@ -1233,8 +1109,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         let journal = load_validated_protected_entry_journal(&connection, &current)?
             .filter(|journal| journal.operation == JournalOperation::RollbackWrite)
             .ok_or(LocalCredentialError::StaleCredentialRefresh)?;
-        if self
-            .protected_store
+        if MaterialStore::new(&connection, &self.protected_store)
             .get(&journal.protected_entry_id)?
             .is_some()
         {
@@ -1264,13 +1139,16 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         &self,
         permit: &CredentialRefreshPermit,
     ) -> Result<CredentialRefreshAdmission, LocalCredentialError> {
-        let connection = self.connection()?;
+        // The material connection: the refresh owns its credential, and no
+        // store call below waits while the metadata connection is held.
+        let connection = self.material_connection()?;
+        let store = MaterialStore::new(&connection, &self.protected_store);
         let id = permit.credential_id();
         let current = load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
         // An abandoned Started attempt may already have a durable output.
         // Promote that output before evaluating this request's current grant.
         // A Started attempt without output invalidates the old token instead.
-        reconcile_ready_journal(&connection, &self.protected_store, &current)?;
+        reconcile_ready_journal(&store, &current)?;
         let (material_generation, revocation_generation) =
             self.readmit_refresh(&connection, permit)?;
         if material_generation != permit.current_material_generation()
@@ -1293,13 +1171,20 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             return Err(LocalCredentialError::StaleCredentialRefresh);
         }
         let next_entry_id = protected_entry_id(id, permit.next_material_generation())?;
-        match self.protected_store.get(&next_entry_id) {
-            Ok(None) => {}
-            Ok(Some(_)) => return Err(LocalCredentialError::ProtectedEntryCollision),
-            Err(error) => return Err(error.into()),
+        if store.get(&next_entry_id)?.is_some() {
+            return Err(LocalCredentialError::ProtectedEntryCollision);
+        }
+        // Admitted again with the reservation, in one transaction, so a
+        // profile or binding change on the metadata connection cannot come
+        // between the grant and the reservation it permits.
+        let transaction = immediate(&connection)?;
+        if self.readmit_refresh(&transaction, permit)?
+            != (material_generation, revocation_generation)
+        {
+            return Err(LocalCredentialError::StaleCredentialRefresh);
         }
         insert_credential_refresh_journal(
-            &connection,
+            &transaction,
             id,
             &next_entry_id,
             &CredentialRefreshJournal {
@@ -1308,6 +1193,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             },
             unix_millis()?,
         )?;
+        transaction.commit().map_err(database_error)?;
         Ok(CredentialRefreshAdmission::Reserved(permit.clone()))
     }
 
@@ -1362,7 +1248,10 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         if active_refreshes.contains_key(id) {
             return Err(LocalCredentialError::CredentialRefreshInProgress);
         }
-        let connection = self.connection()?;
+        // The material connection: no store call below waits while the
+        // metadata connection is held (#5413).
+        let connection = self.material_connection()?;
+        let store = MaterialStore::new(&connection, &self.protected_store);
         if profile_or_binding_references_credential(&connection, id)? {
             return Err(LocalCredentialError::CredentialInUse);
         }
@@ -1371,12 +1260,19 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             return Err(LocalCredentialError::CredentialUnavailable);
         }
         if record.material_state == MaterialState::Ready {
-            reconcile_ready_journal(&connection, &self.protected_store, &record)?;
+            reconcile_ready_journal(&store, &record)?;
             record = load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
         }
         let journal = load_validated_protected_entry_journal(&connection, &record)?;
         if record.material_state == MaterialState::Ready {
-            let changed = connection
+            // Checked again with the move out of `ready`, in one transaction,
+            // so a profile made meanwhile on the metadata connection cannot
+            // come between them. Its material is deleted only after that.
+            let transaction = immediate(&connection)?;
+            if profile_or_binding_references_credential(&transaction, id)? {
+                return Err(LocalCredentialError::CredentialInUse);
+            }
+            let changed = transaction
                 .execute(
                     "UPDATE credentials SET material_state = 'pending_delete', updated_at_unix_ms = ?2
                      WHERE id = ?1 AND material_state = 'ready'",
@@ -1390,14 +1286,11 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             if changed != 1 {
                 return Err(LocalCredentialError::CorruptMetadata);
             }
+            transaction.commit().map_err(database_error)?;
         }
-        self.protected_store
-            .delete(&record.protected_entry_id)
-            .map_err(LocalCredentialError::from)?;
+        store.delete(&record.protected_entry_id)?;
         if let Some(journal) = journal {
-            self.protected_store
-                .delete(&journal.protected_entry_id)
-                .map_err(LocalCredentialError::from)?;
+            store.delete(&journal.protected_entry_id)?;
         }
         delete_pending_delete(&connection, id)
     }
@@ -2047,7 +1940,11 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     }
 
     fn reconcile(&self) -> Result<(), LocalCredentialError> {
+        // Start-up, before any request: the metadata connection is the only
+        // one in use, so it keeps its hold. Its store calls still go through
+        // the one place that refuses them inside a transaction.
         let connection = self.connection()?;
+        let store = MaterialStore::new(&connection, &self.protected_store);
         let records = load_all_internal_credentials(&connection)?;
         let expected_persistence = self.protected_store.persistence();
         for record in &records {
@@ -2063,19 +1960,19 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
                     {
                         return Err(LocalCredentialError::CorruptMetadata);
                     }
-                    self.protected_store.delete(&record.protected_entry_id)?;
+                    store.delete(&record.protected_entry_id)?;
                     delete_pending_write(&connection, &record.public.metadata.id)?;
                 }
                 MaterialState::PendingDelete => {
                     let journal = load_validated_protected_entry_journal(&connection, &record)?;
-                    self.protected_store.delete(&record.protected_entry_id)?;
+                    store.delete(&record.protected_entry_id)?;
                     if let Some(journal) = journal {
-                        self.protected_store.delete(&journal.protected_entry_id)?;
+                        store.delete(&journal.protected_entry_id)?;
                     }
                     delete_pending_delete(&connection, &record.public.metadata.id)?;
                 }
                 MaterialState::Ready => {
-                    reconcile_ready_journal(&connection, &self.protected_store, &record)?;
+                    reconcile_ready_journal(&store, &record)?;
                     if expected_persistence == ProtectedStorePersistence::ProcessLifetime {
                         // Refresh recovery can atomically promote the staged
                         // generation and retire the entry held by `record`.
@@ -2129,6 +2026,15 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             .lock()
             .map_err(|_| LocalCredentialError::DatabaseUnavailable)
     }
+
+    /// The material paths' connection. A path takes it only while it holds
+    /// the refresh-owner exclusion for its credential, and never while it
+    /// holds `connection` (#5413).
+    fn material_connection(&self) -> Result<MutexGuard<'_, Connection>, LocalCredentialError> {
+        self.material
+            .lock()
+            .map_err(|_| LocalCredentialError::DatabaseUnavailable)
+    }
 }
 
 fn check_selected_environment_binding(
@@ -2157,7 +2063,11 @@ pub(crate) fn deny_generic_ssh_lease(
     Ok(())
 }
 
-fn open_database(root: &Path) -> Result<Connection, LocalCredentialError> {
+/// The metadata connection and the material paths' connection to the one
+/// database, opened by the same flags and configured by the same
+/// `configure_database`, so they differ in nothing but the paths that use
+/// them (#5413).
+fn open_database(root: &Path) -> Result<(Connection, Connection), LocalCredentialError> {
     #[cfg(not(unix))]
     {
         let _ = root;
@@ -2176,11 +2086,8 @@ fn open_database(root: &Path) -> Result<Connection, LocalCredentialError> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return Err(LocalCredentialError::InvalidDatabasePath),
         };
-        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_CREATE
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-        let connection = Connection::open_with_flags(&path, flags).map_err(database_error)?;
+        let connection =
+            Connection::open_with_flags(&path, DATABASE_OPEN_FLAGS).map_err(database_error)?;
         if before.is_none() {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
                 .map_err(|_| LocalCredentialError::InvalidDatabasePath)?;
@@ -2199,8 +2106,28 @@ fn open_database(root: &Path) -> Result<Connection, LocalCredentialError> {
             upgrade_schema(&connection)?;
         }
         validate_database(&connection)?;
-        Ok(connection)
+        let material =
+            Connection::open_with_flags(&path, DATABASE_OPEN_FLAGS).map_err(database_error)?;
+        validate_private_file(
+            &fs::symlink_metadata(&path).map_err(|_| LocalCredentialError::InvalidDatabasePath)?,
+        )?;
+        configure_database(&material)?;
+        validate_database(&material)?;
+        Ok((connection, material))
     }
+}
+
+const DATABASE_OPEN_FLAGS: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
+    .union(OpenFlags::SQLITE_OPEN_CREATE)
+    .union(OpenFlags::SQLITE_OPEN_NO_MUTEX)
+    .union(OpenFlags::SQLITE_OPEN_NOFOLLOW);
+
+/// An IMMEDIATE transaction, so it takes the write lock as it begins: a
+/// deferred one that reads and then writes gets SQLITE_BUSY at once when the
+/// other connection is writing, instead of waiting out the busy timeout
+/// (#5413).
+pub(crate) fn immediate(connection: &Connection) -> Result<Transaction<'_>, LocalCredentialError> {
+    Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(database_error)
 }
 
 #[cfg(unix)]
@@ -2532,7 +2459,7 @@ fn upgrade_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
 
 /// Version 3 to 4: typed SSH public-key metadata. One atomic step.
 fn upgrade_ssh_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
-    let transaction = connection.unchecked_transaction().map_err(database_error)?;
+    let transaction = crate::immediate(connection)?;
     transaction
         .execute_batch(
             "ALTER TABLE credentials ADD COLUMN ssh_public_key_openssh TEXT NULL;
@@ -2552,7 +2479,7 @@ fn upgrade_ssh_schema(connection: &Connection) -> Result<(), LocalCredentialErro
 /// leaves version 4 unchanged rather than choosing one.
 /// Revoked GitHub rows are kept; their protected material is not in SQLite.
 fn upgrade_github_singleton_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
-    let transaction = connection.unchecked_transaction().map_err(database_error)?;
+    let transaction = crate::immediate(connection)?;
     let active: i64 = transaction
         .query_row(
             "SELECT COUNT(*) FROM credentials
@@ -2618,7 +2545,7 @@ fn ensure_authority_identity(
     owner_id: &OwnerId,
     persistence: ProtectedStorePersistence,
 ) -> Result<(), LocalCredentialError> {
-    let transaction = connection.unchecked_transaction().map_err(database_error)?;
+    let transaction = crate::immediate(connection)?;
     for (key, expected) in [
         ("owner_id", owner_id.as_str()),
         ("store_persistence", persistence_to_str(persistence)),
@@ -2713,14 +2640,15 @@ fn credential_refresh_marker_key(credential_id: &CredentialId) -> String {
     format!("credential_refresh/{}", credential_id.as_str())
 }
 
+/// The reservation's journal row and marker, in the caller's transaction,
+/// which also holds the grant that permits them; the caller commits.
 fn insert_credential_refresh_journal(
-    connection: &Connection,
+    transaction: &Transaction<'_>,
     credential_id: &CredentialId,
     protected_entry_id: &ProtectedEntryId,
     marker: &CredentialRefreshJournal,
     now: u64,
 ) -> Result<(), LocalCredentialError> {
-    let transaction = connection.unchecked_transaction().map_err(database_error)?;
     let journal_changed = transaction
         .execute(
             "INSERT INTO protected_entry_journal(
@@ -2745,7 +2673,7 @@ fn insert_credential_refresh_journal(
     if journal_changed != 1 || marker_changed != 1 {
         return Err(LocalCredentialError::CorruptMetadata);
     }
-    transaction.commit().map_err(database_error)
+    Ok(())
 }
 
 fn load_credential_refresh_marker(
@@ -2852,7 +2780,7 @@ fn fail_oauth_refresh(
         .revocation_generation
         .checked_add(1)
         .ok_or(LocalCredentialError::CorruptMetadata)?;
-    let transaction = connection.unchecked_transaction().map_err(database_error)?;
+    let transaction = crate::immediate(connection)?;
     let changed = transaction
         .execute(
             "UPDATE credentials
@@ -2895,7 +2823,7 @@ fn delete_credential_refresh_journal(
     connection: &Connection,
     credential_id: &CredentialId,
 ) -> Result<(), LocalCredentialError> {
-    let transaction = connection.unchecked_transaction().map_err(database_error)?;
+    let transaction = crate::immediate(connection)?;
     let journal_changed = transaction
         .execute(
             "DELETE FROM protected_entry_journal WHERE credential_id = ?1",
@@ -2981,10 +2909,10 @@ fn load_validated_protected_entry_journal(
 }
 
 fn reconcile_ready_journal<S: ProtectedStore>(
-    connection: &Connection,
-    protected_store: &S,
+    material: &MaterialStore<'_, S>,
     credential: &InternalCredentialRecord,
 ) -> Result<(), LocalCredentialError> {
+    let connection = material.connection();
     let Some(journal) = load_validated_protected_entry_journal(connection, credential)? else {
         if load_credential_refresh_marker(connection, &credential.public.metadata.id)?.is_some() {
             return Err(LocalCredentialError::CorruptMetadata);
@@ -3008,7 +2936,7 @@ fn reconcile_ready_journal<S: ProtectedStore>(
                 }
                 if credential.public.metadata.status == CredentialStatus::Active {
                     validate_refresh_current(credential, &marker)?;
-                    let staged = protected_store.get(&journal.protected_entry_id)?.is_some();
+                    let staged = material.get(&journal.protected_entry_id)?.is_some();
                     match marker.phase {
                         CredentialRefreshPhase::Reserved if staged => {
                             // A reservation never permits provider I/O or staging.
@@ -3016,12 +2944,7 @@ fn reconcile_ready_journal<S: ProtectedStore>(
                         }
                         CredentialRefreshPhase::Reserved => {}
                         CredentialRefreshPhase::Started { .. } if staged => {
-                            return promote_oauth_refresh(
-                                connection,
-                                protected_store,
-                                credential,
-                                &journal,
-                            );
+                            return promote_oauth_refresh(material, credential, &journal);
                         }
                         CredentialRefreshPhase::Started { .. } => {
                             // The owner is known gone (restart or drained
@@ -3031,30 +2954,30 @@ fn reconcile_ready_journal<S: ProtectedStore>(
                         }
                     }
                 }
-                protected_store.delete(&journal.protected_entry_id)?;
+                material.delete(&journal.protected_entry_id)?;
                 return delete_credential_refresh_journal(
                     connection,
                     &credential.public.metadata.id,
                 );
             }
-            protected_store.delete(&journal.protected_entry_id)?;
+            material.delete(&journal.protected_entry_id)?;
         }
         JournalOperation::DeleteRetired => {
             if refresh_marker.is_some() {
                 return Err(LocalCredentialError::CorruptMetadata);
             }
-            protected_store.delete(&journal.protected_entry_id)?;
+            material.delete(&journal.protected_entry_id)?;
         }
     }
     delete_protected_entry_journal(connection, &credential.public.metadata.id)
 }
 
 fn promote_oauth_refresh<S: ProtectedStore>(
-    connection: &Connection,
-    protected_store: &S,
+    material: &MaterialStore<'_, S>,
     current: &InternalCredentialRecord,
     journal: &ProtectedEntryJournal,
 ) -> Result<(), LocalCredentialError> {
+    let connection = material.connection();
     if !current.public.metadata.is_refreshable_login()
         || current.public.metadata.status != CredentialStatus::Active
         || journal.operation != JournalOperation::RollbackWrite
@@ -3072,7 +2995,7 @@ fn promote_oauth_refresh<S: ProtectedStore>(
     if journal.protected_entry_id
         != protected_entry_id(&current.public.metadata.id, material_generation)?
         || marker.permit.next_material_generation() != material_generation
-        || protected_store.get(&journal.protected_entry_id)?.is_none()
+        || material.get(&journal.protected_entry_id)?.is_none()
     {
         return Err(LocalCredentialError::CredentialMaterialMissing);
     }
@@ -3083,7 +3006,7 @@ fn promote_oauth_refresh<S: ProtectedStore>(
         .checked_add(1)
         .ok_or(LocalCredentialError::CorruptMetadata)?;
     let now = unix_millis()?;
-    let transaction = connection.unchecked_transaction().map_err(database_error)?;
+    let transaction = crate::immediate(connection)?;
     let changed = transaction
         .execute(
             "UPDATE credentials
@@ -3136,7 +3059,7 @@ fn promote_oauth_refresh<S: ProtectedStore>(
     }
     transaction.commit().map_err(database_error)?;
 
-    if protected_store.delete(&current.protected_entry_id).is_ok() {
+    if material.delete(&current.protected_entry_id).is_ok() {
         delete_protected_entry_journal(connection, &current.public.metadata.id)?;
     }
     Ok(())

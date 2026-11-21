@@ -188,7 +188,7 @@ fn rebuild_credentials_table(connection: &Connection) -> Result<(), LocalCredent
     if foreign_keys {
         return Err(LocalCredentialError::InvalidDatabase);
     }
-    let transaction = connection.unchecked_transaction().map_err(database_error)?;
+    let transaction = crate::immediate(connection)?;
     transaction
         .execute_batch(&format!(
             "CREATE TABLE credentials_schema_7({CREDENTIALS_TABLE_BODY}

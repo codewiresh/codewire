@@ -3511,10 +3511,50 @@ other probes.
 **This behaviour has its own authority protocol step,** so a `cw` with it
 replaces a running authority from before it once no local VM runs.
 
-**Not yet** (#5413's second part): rotation, deletion, journal reconcile,
-refresh admission (`prepare_credential_refresh`), refresh abort
-(`abort_environment_credential_refresh`), refresh promotion and workload
-secrets still call the store under the connection.
+**The material paths' connection.** The paths that change a credential's
+material run on a second connection to the same database:
+- rotation, deletion, the journal's reconcile, refresh admission
+  (`prepare_credential_refresh`), refresh abort
+  (`abort_environment_credential_refresh`) and refresh promotion;
+- one function opens both connections with the same flags and pragmas.
+
+These rules hold on it:
+- **Its own exclusion.** Each path takes that connection only while holding
+  the refresh-owner exclusion it already had: the refresh-owner mutex for
+  rotation and deletion, and its own refresh entry for a refresh. It never
+  takes it while holding the metadata connection.
+- **No store call inside a transaction.** Its store calls go through one
+  wrapper, which refuses any call made inside an open transaction
+  (`StoreCallInTransaction`). So no store call holds the database's write
+  lock, and nothing on the metadata connection waits on a keyring.
+- **Every write transaction is IMMEDIATE,** on both connections, so a write
+  that meets the other's waits its turn within the busy timeout instead of
+  failing at once. Busy past that timeout is a failed step: an admission or
+  a lease refuses, and a material path rolls back as below.
+- **One change, one transaction, one connection.** A check and the change it
+  permits share a transaction: deletion's check that nothing references the
+  credential, with its move out of `ready`; and refresh admission's grant,
+  with its reservation.
+- **A revoke wins.** It runs on the metadata connection and never waits. A
+  rotation whose guarded update then changes no row rolls back what it
+  wrote:
+  - only its own next entry, never the current one;
+  - the entry first, then its journal row, and the row only once the entry
+    is gone, so a row left behind is start-up recovery's;
+  - it returns `StaleCredentialRevision` when the revision moved and
+    `CredentialUnavailable` when the credential left `ready`.
+- **Material changes queue.** Every material path holds the one material
+  connection across its store calls, so changes to different credentials'
+  material now wait behind one another's store calls, and a deletion also
+  waits behind a rotation through the refresh-owner mutex. A metadata
+  request never waits on them.
+
+**The material connection has its own authority protocol step too,** so a
+`cw` with it replaces a running authority that has only the add's step once
+no local VM runs.
+
+**Not yet** (#5413's last part): workload secrets still call the store under
+the metadata connection.
 
 ## Dashboard
 

@@ -2357,7 +2357,7 @@ fn rotation_sql_failure_cannot_partially_replace_account_status_or_expiry() {
     let after = authority.get_credential(&credential.metadata.id).unwrap();
     assert_eq!(after.metadata, revoked.metadata);
     assert_eq!(after.updated_at_unix_ms, revoked.updated_at_unix_ms);
-    assert!(after.protected_store_cleanup_pending);
+    assert!(!after.protected_store_cleanup_pending);
     authority
         .connection()
         .unwrap()
@@ -3882,7 +3882,7 @@ fn the_credential_kinds_the_local_authority_stores_are_pinned_to_its_protocol() 
         admitted, expected,
         "bump the authority protocol with this set"
     );
-    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 29);
+    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 30);
 }
 
 /// The store keeps one default profile as the cloud does (#4717): the first

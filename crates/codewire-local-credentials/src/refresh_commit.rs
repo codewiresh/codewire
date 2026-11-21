@@ -62,12 +62,19 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
             material,
             execution_deadline_unix_ms,
         )?;
-        let connection = self.connection()?;
+        // Promotion calls the store, so it runs on the material connection,
+        // which this refresh's ownership permits; the metadata connection
+        // was let go above and is never held with it (#5413).
+        let connection = self.material_connection()?;
         let (current, _, journal) = load_started_refresh(&connection, &permit)?;
         // Publication is durable bookkeeping, not fresh request authority.
         // The shared broker obtains a new operation lease after this commit.
         // A completed blocking write remains recoverable after its deadline.
-        promote_oauth_refresh(&connection, &self.protected_store, &current, &journal)?;
+        promote_oauth_refresh(
+            &crate::MaterialStore::new(&connection, &self.protected_store),
+            &current,
+            &journal,
+        )?;
         let record = load_internal_credential(
             &connection,
             permit.credential_id(),

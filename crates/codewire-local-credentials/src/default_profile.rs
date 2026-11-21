@@ -87,7 +87,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
 pub(crate) fn upgrade_default_profile_schema(
     connection: &Connection,
 ) -> Result<(), LocalCredentialError> {
-    let transaction = connection.unchecked_transaction().map_err(database_error)?;
+    let transaction = crate::immediate(connection)?;
     transaction
         .execute_batch(DEFAULT_PROFILE_SCHEMA)
         .map_err(database_error)?;
