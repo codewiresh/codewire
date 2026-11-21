@@ -304,6 +304,10 @@ reset_desktop
 /usr/bin/mkdir "$work/proc/11"
 printf '11 (Web) Content) S 1 11 11 0\n' >"$work/proc/11/stat"
 
+# A stopped desktop is gone once the fake's child has cleared it, which a
+# loaded machine may take seconds to schedule. So the contract may wait up to
+# 120 s, and that event ends the wait (#4763). Only a desktop that lingers on
+# purpose gets a short bound, since nothing ends its wait.
 run_contract() {
   env PATH="$work/bin:$PATH" \
     CODEWIRE_CGROUP_ROOT="$work/cgroup" \
@@ -325,7 +329,7 @@ run_contract() {
     CODEWIRE_APT_ROOT="$work/apt" \
     FAKE_CHROMIUM_ROOT="$work/chromium-lib" \
     FAKE_CHROMIUM="${FAKE_CHROMIUM:-starts}" \
-    CODEWIRE_DESKTOP_STOP_POLLS=5 \
+    CODEWIRE_DESKTOP_STOP_POLLS="${FAKE_DESKTOP_STOP_POLLS:-600}" \
     FAKE_RUNTIME_ROOT="$work/tmp" \
     FAKE_DESKTOP_SECURITY="${FAKE_DESKTOP_SECURITY:-VncAuth}" \
     FAKE_DESKTOP_PASSWORD="${FAKE_DESKTOP_PASSWORD:-quiet}" \
@@ -459,15 +463,15 @@ for desktop_failure in missing-launcher missing-defaults writable-launcher wrong
       ssh-agent) FAKE_DESKTOP_HELPER=ssh-agent ;;
       gpg-agent) FAKE_DESKTOP_HELPER=gpg-agent ;;
       agent-replaced) FAKE_DESKTOP_AGENT_SOCKET=replaced ;;
-      lingers) FAKE_DESKTOP_LINGERS=true ;;
-      leaves-a-child) FAKE_DESKTOP_LINGERS=child ;;
+      lingers) FAKE_DESKTOP_LINGERS=true FAKE_DESKTOP_STOP_POLLS=5 ;;
+      leaves-a-child) FAKE_DESKTOP_LINGERS=child FAKE_DESKTOP_STOP_POLLS=5 ;;
       starts-without-a-password) FAKE_DESKTOP_START=without-a-password ;;
       server-asks-for-nothing) FAKE_DESKTOP_SECURITY=None ;;
       password-file-open) FAKE_DESKTOP_PASSWORD_MODE=644 ;;
       password-in-arguments) FAKE_DESKTOP_PASSWORD=in-arguments ;;
       password-in-environment) FAKE_DESKTOP_PASSWORD=in-environment ;;
       password-printed) FAKE_DESKTOP_PASSWORD=printed ;;
-      leaves-the-password-file) FAKE_DESKTOP_LINGERS=password-file ;;
+      leaves-the-password-file) FAKE_DESKTOP_LINGERS=password-file FAKE_DESKTOP_STOP_POLLS=5 ;;
       never-says-ready) FAKE_DESKTOP_START=silent ;;
       no-wallpaper) rm "$work/desktop/share/wallpaper.svg" ;;
       no-theme) rm "$work/themes/Codewire/gtk-3.0/gtk.css" ;;
@@ -510,13 +514,17 @@ done
 reset_desktop
 # A launcher that keeps the caller's flag variables is still held to 9222
 # by the image's defaults, which read those variables too.
-FAKE_CHROMIUM_LAUNCHER=passes-inherited run_contract >"$work/inherits.out" 2>"$work/inherits.err" ||
+if ! FAKE_CHROMIUM_LAUNCHER=passes-inherited run_contract >"$work/inherits.out" 2>"$work/inherits.err"; then
+  cat "$work/inherits.err" >&2
   fail 'the defaults did not refuse a debugging port in an inherited flag variable'
+fi
 assert_no_launcher 'a launcher that keeps inherited flags'
 # Where Chromium has no sandbox it refuses to start, and that passes.
 reset_desktop
-FAKE_CHROMIUM=refuses run_contract >"$work/refuses.out" 2>"$work/refuses.err" ||
+if ! FAKE_CHROMIUM=refuses run_contract >"$work/refuses.out" 2>"$work/refuses.err"; then
+  cat "$work/refuses.err" >&2
   fail 'a Chromium that refused to start without a sandbox failed the contract'
+fi
 grep -Fxq 'workspace image verification: chromium has no sandbox here and refused to start' "$work/refuses.out" ||
   fail 'the refusal was not reported'
 reset_desktop
