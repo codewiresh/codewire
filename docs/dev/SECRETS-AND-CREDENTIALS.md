@@ -2339,8 +2339,10 @@ real token (owner, 2026-11-19, #4001). It is a deployment switch,
 takes effect at a Sandbox's next start, never during its life: orchestration
 decides it once, at the Pod's first bind (the switch, and the Pod being a
 broker-mode Sandbox), and stores it on the binding. The bind, every rebind
-and every credential relay epoch of that Pod read the stored decision, so
-none can disagree (cw-security, 2026-11-19, #4001). A Pod stored as
+and every credential relay epoch of that Pod read the stored decision, and
+so does orchestration's egress service for the Pod's interception CA, its
+assignment's host bindings and its leaves, so none can disagree
+(cw-security, 2026-11-19, #4001). A Pod stored as
 intercepted stays so if the switch is later turned off: its epochs still
 serve the front door, and anything it lacks refuses, never falling back to
 the loopback credentials. A Pod stored as not intercepted stays so if the
@@ -2350,7 +2352,10 @@ stored decision has no credential epoch. While the switch is off, the
 credential relay stores "not intercepted" for such a Pod with the same
 write-once, since the bind would decide the same; that covers a Pod an older
 orchestration bound during a rollout, whose daemon binds only once per start.
-With the switch on, only the bind decides, since only the bind sees the Pod.
+With the switch on, only the bind decides, since only the bind sees the Pod:
+such a Pod's egress admission is then refused too, so it fails closed until
+it is replaced. An unbound warm member has no decision yet, and the switch,
+which its first bind will store, decides its CA.
 
 - **The path.** The Sandbox's egress broker in `cw-egress` sends each agent
   host on 443 to the Sandbox's front door. The front door decrypts with a leaf
@@ -2451,11 +2456,11 @@ the stored decision with delivery following the front door (#5013, #5023,
 #5496), the relay session and its router (#5021, #5439, #5056), the
 credential service's CA ensure, leaf signing and sweep (#5170, #5071), the
 idle end (#5125), `cw-egress` asking for its front doors' leaves (#5669), and
-the Open's placeholders with the daemon's projection of them (#5530). Still
-open: one per-client host selection for local and hosted (#5463),
+the Open's placeholders with the daemon's projection of them (#5530), one
+per-client host selection for local and hosted (#5463), and orchestration's
+egress service reading each binding's stored decision. Still open:
 orchestration signing those leaves through the Pod's relay epoch (it answers
-`UNAVAILABLE` until then), and orchestration's egress service reading each
-binding's stored decision. `cw-egress` keeps each front door's session open
+`UNAVAILABLE` until then). `cw-egress` keeps each front door's session open
 and reopens it (**The client** above). The switch's gates are #4001's
 switch-on checklist. The journey is `agent-hosted` in
 `docs/journeys/network-and-egress.md`.
@@ -2493,11 +2498,18 @@ signer outage (#5032).
   idempotent by Pod UID and refuses a Pod whose binding was released. The key
   is opened only to sign a leaf, and only for an attached row whose Pod UID
   and environment match what the Pod's relay epoch authenticated.
+  Orchestration asks only for a Pod that intercepts: a bound Pod whose
+  stored decision is intercepted, or an unbound warm member while the switch
+  is on. A Pod stored as not intercepted gets no CA, and a bound Pod with no
+  stored decision is refused while the switch is on.
 - **Leaves** are signed for a public key the front door sends, for the hosts
   the signer passes: exact DNS names, or one `*.<suffix>` for a suffix in
   Codewire's interceptable-host table, which covers one label only. A leaf is
   serverAuth only, never a CA, and lives at most an hour, never past its CA.
-  An unbound Pod gets none.
+  An unbound Pod gets none. The signer takes its hosts from the hosts the
+  session's grants reach, never from the request, which names none. Since
+  the CA permits every DNS name, that is the only host limit: an intercepting
+  Pod whose selection names no host gets no leaf.
 - **The Pod check.** Before a CA is created, the credential service reads the
   Pod by name in the sandbox namespace (`CREDENTIAL_SANDBOX_NAMESPACE`, its own
   setting, never a request's). It must be the named UID, carry

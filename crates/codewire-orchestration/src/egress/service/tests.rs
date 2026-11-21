@@ -1147,6 +1147,34 @@ fn binding() -> LiveBinding {
 /// the Pod's labels say.
 struct Bound;
 
+/// [`Bound`], with the interception decision its first bind stored.
+struct Decided(Option<bool>);
+
+#[async_trait]
+impl BindingStore for Decided {
+    async fn live_binding(
+        &self,
+        _pod_uid: &str,
+        _namespace: &str,
+        _pod_name: &str,
+    ) -> Result<Option<LiveBinding>, BindingStoreUnavailable> {
+        Ok(Some(decided(self.0)))
+    }
+}
+
+fn decided(interception: Option<bool>) -> LiveBinding {
+    LiveBinding {
+        interception,
+        managed_credential_clients: codewire_access::ManagedCredentialClients::from_profile_slots(
+            ["anthropic"],
+        )
+        .unwrap()
+        .encode()
+        .to_owned(),
+        ..binding()
+    }
+}
+
 #[async_trait]
 impl BindingStore for Bound {
     async fn live_binding(
@@ -1644,7 +1672,7 @@ fn sign_body() -> Value {
 async fn interception_leaves_are_unavailable_to_a_bound_intercepting_pod() {
     let cluster = Cluster::healthy();
     let (status, body) = call_app(
-        signing_app(&cluster, Arc::new(Bound), true),
+        signing_app(&cluster, Arc::new(Decided(Some(true))), true),
         "SignInterceptionLeaves",
         sign_body(),
     )
@@ -1671,9 +1699,74 @@ async fn interception_leaves_are_refused_to_any_other_pod() {
             signing_app(&healthy, Arc::new(Bound), false),
             "not intercepting",
         ),
+        (
+            signing_app(&healthy, Arc::new(Decided(Some(false))), true),
+            "stored as not intercepted, the switch on",
+        ),
     ] {
         let (status, body) = call_app(app, "SignInterceptionLeaves", sign_body()).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{case}: {body}");
+    }
+}
+
+/// The decision a Pod's first bind stored governs it, whatever the switch
+/// says now; an unbound warm member follows the switch, which its first bind
+/// will store. A bound Pod with none stored is not intercepted while the
+/// switch is off, which it was, and refused while it is on (C5, #5496).
+#[tokio::test]
+async fn a_bound_pod_follows_its_stored_decision_and_an_unbound_one_the_switch() {
+    let cluster = Cluster::healthy();
+    for setting in [false, true] {
+        let mut state = state(&cluster, Arc::new(Unbound), None);
+        state.interception = setting;
+        assert_eq!(state.intercepts(None).unwrap(), setting);
+        for stored in [false, true] {
+            assert_eq!(
+                state.intercepts(Some(&decided(Some(stored)))).unwrap(),
+                stored,
+                "switch {setting}, stored {stored}"
+            );
+        }
+        let none = state.intercepts(Some(&decided(None)));
+        if setting {
+            assert_eq!(none.unwrap_err().code, connectrpc::ErrorCode::Unavailable);
+        } else {
+            assert!(!none.unwrap());
+        }
+    }
+}
+
+/// Once a decision is stored, a bound Pod's CA and its assignment's bindings
+/// agree: an intercepted Pod gets both, a Pod stored as not intercepted
+/// neither, whatever the switch says now.
+#[tokio::test]
+async fn a_stored_decision_gives_the_ca_and_the_bindings_together() {
+    let cluster = Cluster::healthy();
+    for setting in [false, true] {
+        for stored in [false, true] {
+            let cas = Arc::new(Cas {
+                certificate: Some(b"synthetic-ca-der".to_vec()),
+                asked: Default::default(),
+            });
+            let mut state = state(&cluster, Arc::new(Unbound), None);
+            state.interception = setting;
+            state.interception_cas =
+                Some(Arc::clone(&cas)
+                    as Arc<
+                        dyn crate::egress::interception_ca::InterceptionCaSource,
+                    >);
+            let binding = decided(Some(stored));
+            let guest = state.named_guest(GUEST, GUEST_UID);
+            let ca = state.interception_ca(&guest, Some(&binding)).await.unwrap();
+            let bindings = binding_intercepts(
+                state.intercepts(Some(&binding)).unwrap(),
+                &binding.managed_credential_clients,
+            )
+            .unwrap();
+            let case = format!("switch {setting}, stored {stored}");
+            assert_eq!(!ca.is_empty(), stored, "{case}");
+            assert_eq!(!bindings.is_empty(), stored, "{case}");
+        }
     }
 }
 

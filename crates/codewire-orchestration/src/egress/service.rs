@@ -177,7 +177,7 @@ fn denied() -> ConnectError {
 }
 
 /// The hosts a bound sandbox's front door serves, from its binding's encoded
-/// clients, or none while the deployment doesn't intercept. The encoding is
+/// clients, or none while the Pod doesn't intercept. The encoding is
 /// read only while it does; then one this build can't read withholds the
 /// assignment, so the sandbox has no egress rather than another selection's
 /// hosts.
@@ -405,13 +405,24 @@ impl EgressServiceState {
         Ok(Watched::Assignment(self.assignment_of(binding).await?))
     }
 
-    /// Whether `guest`'s streams intercept. Hosted interception is decided
-    /// once per Pod, at its first bind, and recorded on the binding (C5,
-    /// #5468); an unbound warm member has no decision yet, and the setting,
-    /// which its first bind will record, decides. Until the binding carries
-    /// that decision (#5496), the setting decides for a bound Pod too.
-    fn intercepts(&self, _binding: Option<&LiveBinding>) -> bool {
-        self.interception
+    /// Whether `guest`'s streams intercept: the decision its first bind
+    /// stored (C5, #5468, #5496), which every rebind and relay epoch reads
+    /// too, so its CA, its assignment's bindings and its epochs never
+    /// disagree. An unbound warm member has no decision yet, and the setting,
+    /// which its first bind will store, decides. A bound Pod with none was
+    /// bound before decisions were stored: while the switch is off it counts
+    /// as not intercepted, which it was, as its relay stores; while it is on
+    /// it is refused, as its relay refuses it an epoch, until it is replaced.
+    fn intercepts(&self, binding: Option<&LiveBinding>) -> Result<bool, ConnectError> {
+        match binding.map(|binding| binding.interception) {
+            None => Ok(self.interception),
+            Some(Some(decided)) => Ok(decided),
+            Some(None) if !self.interception => Ok(false),
+            Some(None) => Err(unavailable(
+                "read the Pod's interception decision",
+                "none stored",
+            )),
+        }
     }
 
     /// The guest's interception CA certificate, or nothing when it does not
@@ -425,7 +436,7 @@ impl EgressServiceState {
         guest: &GuestPod,
         binding: Option<&LiveBinding>,
     ) -> Result<Vec<u8>, ConnectError> {
-        if !self.intercepts(binding) {
+        if !self.intercepts(binding)? {
             return Ok(Vec::new());
         }
         let source = self
@@ -456,8 +467,10 @@ impl EgressServiceState {
         let policy = environment_policy(&self.pool, &binding.environment_id)
             .await
             .map_err(|error| unavailable("read the environment's policy", error))?;
-        let intercepts =
-            binding_intercepts(self.interception, &binding.managed_credential_clients)?;
+        let intercepts = binding_intercepts(
+            self.intercepts(Some(&binding))?,
+            &binding.managed_credential_clients,
+        )?;
         Ok(Assignment::Bound {
             environment_id: binding.environment_id,
             operation_generation: binding.operation_generation,
@@ -830,9 +843,11 @@ impl EgressService for EgressConnectService {
         let request = request.view();
         let guest = self.state.named_guest(request.pod_name, request.pod_uid);
         self.state.guest_on_node(&guest, &node).await?;
-        match self.state.live_binding(&guest).await? {
-            Some(binding) if self.state.intercepts(Some(&binding)) => {}
-            _ => return Err(denied()),
+        let Some(binding) = self.state.live_binding(&guest).await? else {
+            return Err(denied());
+        };
+        if !self.state.intercepts(Some(&binding))? {
+            return Err(denied());
         }
         // Signing goes through the Pod's live relay epoch, which a later
         // change attaches (#4001); until then cw-egress retries, and the
