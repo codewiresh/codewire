@@ -41,11 +41,13 @@ use crate::worker::workspace_binding::{
     DaemonNotBound, bind_replacement_runtime, environment_daemon_credential,
 };
 
+mod activity;
 mod desktop;
 #[cfg(test)]
 mod repair_database_tests;
 mod session_mutation;
 
+pub(crate) use activity::{DaemonActivity, environment_daemon_activity_for_worker};
 pub use desktop::{
     get_environment_desktop_core, start_environment_desktop_core, stop_environment_desktop_core,
 };
@@ -291,48 +293,6 @@ pub(crate) async fn environment_daemon_status_for_worker(
         daemon_channel_for_runtime(pool, runtime, session_secret, namespace, environment_id)
             .await?;
     query_daemon(channel, token, "").await
-}
-
-/// What a Sandbox's daemon says about its activity, for idle stop (#3384).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DaemonActivity {
-    /// Unix seconds of the last minute it saw in use, if any since it started.
-    LastActive(Option<i64>),
-    /// A daemon older than `GetActivity`. It cannot say, so its Sandbox
-    /// counts as in use until a start gives it a daemon that can.
-    Unsupported,
-}
-
-/// Worker-only: when the Sandbox was last in use as its daemon saw it. Read
-/// by the idle check, which it can only hold off; it changes nothing.
-pub(crate) async fn environment_daemon_activity_for_worker(
-    pool: &PgPool,
-    runtime: Option<&dyn RuntimeDriver>,
-    session_secret: &str,
-    namespace: &str,
-    environment_id: &str,
-) -> AppResult<DaemonActivity> {
-    let (channel, token) =
-        daemon_channel_for_runtime(pool, runtime, session_secret, namespace, environment_id)
-            .await?;
-    let mut client = v1::daemon_service_client::DaemonServiceClient::new(channel);
-    match client
-        .get_activity(authorize(v1::GetActivityRequest {}, &token)?)
-        .await
-    {
-        Ok(response) => Ok(DaemonActivity::LastActive(
-            response
-                .into_inner()
-                .last_active_at
-                .map(|timestamp| timestamp.seconds),
-        )),
-        Err(status) if status.code() == tonic::Code::Unimplemented => {
-            Ok(DaemonActivity::Unsupported)
-        }
-        Err(status) => Err(AppError::InternalMsg(
-            format!("daemon activity: {}", status.message()).into(),
-        )),
-    }
 }
 
 /// The CLI's name for a daemon state, as `cw` renders the public

@@ -40,9 +40,15 @@ maybe 6 hours default?"); turned on without a duration, it is 6 hours.
 The Sandbox is active in any minute in which one of these happens:
 
 - **CPU:** the Sandbox used at least 10% of one vCPU, 6 seconds of CPU time
-  in the minute. The daemon samples its cgroup's `cpu.stat` (`usage_usec`)
-  every minute, so the count covers every process in the Sandbox, Docker
-  containers included.
+  in the minute. The daemon samples the CPU every minute. A cloud Sandbox
+  runs under Kata (`commodity` or `confidential`), one VM to a Sandbox, so
+  the daemon reads the guest kernel's `/proc/stat` (user, nice, system, irq
+  and softirq time), which counts every process in the Sandbox. That
+  includes its Docker containers, which run in the `dind` container, outside
+  the workspace container's own cgroup. Under `runc`, used only for
+  diagnostics such as Kind, the kernel is the host's, so only the workspace
+  container's own cgroup counts (`cpu.stat`, `usage_usec`), without Docker.
+  An idle guest uses under 2 seconds a minute (Dev, 2026-11-21).
 - **Terminal input or output:** data passes, either way, through a `cw`
   session or shell, the browser terminal, or an SSH connection's channels:
   keystrokes in, or a command's output on the way out. SSH keepalives, window
@@ -51,15 +57,17 @@ The Sandbox is active in any minute in which one of these happens:
 - **An agent turn or `cw` runtime request in flight.** An agent waiting on
   its model uses little CPU, and it still counts.
 - **Inbound traffic:** a request the preview proxy forwards into the Sandbox,
-  from anyone, and a new connection into it over SSH or the tailnet. A public
+  from anyone, a login over SSH, and a new tailnet connection. A public
   preview's visitors keep its Sandbox up, scanners included, and its owner
   pays for that time (owner, 2026-11-19: "any traffic counts").
 
 These don't count: an attached terminal or SSH connection with no input or
 output, an open preview tab that makes no requests, listing sessions,
-reading logs, the dashboard showing the Sandbox, and traffic the Sandbox
-sends out, so an app polling the internet still lets it stop. An idle shell
-or a forgotten tab therefore doesn't keep a Sandbox up.
+reading logs, the dashboard showing the Sandbox, orchestration's own access
+check, and traffic the Sandbox sends out, so an app polling the internet
+still lets it stop. An idle shell or a forgotten tab therefore doesn't keep
+a Sandbox up. The access check is the login orchestration makes, as
+`codewire-access-probe`, whenever it reconciles a Sandbox's runtime.
 
 A Sandbox is idle once no minute in its timeout was active and nothing is in
 flight. A Sandbox never stops within its timeout of starting.
@@ -68,9 +76,9 @@ flight. A Sandbox never stops within its timeout of starting.
 
 | Signal | Recorded by | Where |
 | --- | --- | --- |
-| CPU | the Sandbox's daemon, each minute | its last active minute, which it reports to the worker |
+| CPU | the Sandbox's daemon, each minute: the guest kernel's CPU under Kata, the workspace container's cgroup under runc | its last active minute, which it reports to the worker |
 | Terminal input or output: sessions, shells, the browser terminal, SSH channels | the daemon, which carries all of them | the same last active minute |
-| A new SSH or tailnet connection | the daemon, which accepts it | the same last active minute |
+| An SSH login or a new tailnet connection | the daemon, which accepts it | the same last active minute |
 | An agent turn or `cw` runtime request | orchestration, which admits and completes them | in flight: its open row in `environment_platform_agent_requests` or `environment_cw_runtime_requests`; finished: `environments.last_activity_at`, set at completion |
 | A preview request, from anyone | orchestration's preview proxy | `environments.last_activity_at`, at most once a minute per Sandbox |
 
@@ -98,6 +106,11 @@ also stops Sandboxes that run out of credit.
 - **A daemon older than idle stop** answers that it doesn't support the
   call, and its Sandbox counts as active: it isn't idle-stopped until its
   daemon is updated.
+- **A daemon older than the guest CPU** (#3384, 2026-11-21) counts only the
+  workspace container's CPU, so work only in Docker doesn't keep its Sandbox
+  up until a start updates its daemon. The worker asks for the guest's CPU
+  only when the deployment's `SANDBOX_RUNTIME_PROFILE` is `commodity` or
+  `confidential`.
 - **One conditional update** stops it: desired state `stopped` and stop
   reason `idle`, where the desired state is still `started`, the
   `last_activity_at` is still the value it read, and no request has opened

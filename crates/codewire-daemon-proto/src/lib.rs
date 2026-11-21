@@ -192,6 +192,10 @@ pub const HOSTED_DAEMON_ACCESS_READY_FILE: &str = "/codewire/run/daemon/access-r
 /// The bound daemon's SSH listener in the workspace Pod. Only orchestration
 /// (its SSH proxy and setup health check) may reach it.
 pub const WORKSPACE_SSH_PORT: u16 = 2222;
+/// The user orchestration's own access check logs in as on
+/// [`WORKSPACE_SSH_PORT`] whenever it reconciles a Sandbox's runtime. Its
+/// login is not use for idle stop (#3384).
+pub const WORKSPACE_ACCESS_PROBE_USER: &str = "codewire-access-probe";
 /// The environment desktop's VNC listener on the workload's loopback
 /// (`docs/dev/SANDBOX-DESKTOP.md`). It asks for no password, so the only ways
 /// to it are the two that admit a viewer: an SSH local forward and

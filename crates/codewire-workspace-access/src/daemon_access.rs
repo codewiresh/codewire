@@ -324,8 +324,8 @@ impl DaemonSshRunners {
             None => handler,
         };
         let connection = handler.connection_id();
-        // An inbound connection is use, for idle stop (#3384).
-        crate::activity::note();
+        // Its login is use for idle stop (#3384), not the connection: the
+        // handler notes it unless orchestration's own access check logs in.
         tracing::info!(connection, peer, "workspace SSH connection opened");
         match server::run_stream(config, stream, handler).await {
             Ok(session) => match session.await {

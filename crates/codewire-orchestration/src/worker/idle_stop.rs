@@ -19,6 +19,7 @@ use sqlx::PgPool;
 use super::WorkerContext;
 use crate::api::environment_daemon::{DaemonActivity, environment_daemon_activity_for_worker};
 use crate::lifecycle::{PgLifecycleStore, Service};
+use crate::sandbox::template::{RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL};
 
 /// `on` or `off`. Unset or empty is off.
 pub const IDLE_STOP_ENV: &str = "CODEWIRE_IDLE_STOP";
@@ -66,6 +67,18 @@ pub(crate) const NO_OPEN_REQUEST: &str = r#"NOT EXISTS (
         SELECT 1 FROM environment_cw_runtime_requests r
         WHERE r.organization_id = e.org_id AND r.environment_id = e.id
           AND r.terminal_at IS NULL AND r.admitted_at > NOW() - interval '24 hours')"#;
+
+/// Whether the guest kernel's CPU is this Sandbox's own. Under Kata
+/// (`commodity`, `confidential`) each Sandbox is one VM, so the guest's CPU
+/// counts its Docker container, which runs beside the workspace in a cgroup
+/// of its own. Under `runc` or `none`, which only diagnostics use, the kernel
+/// is the host's, so only the workspace container's CPU counts.
+pub(crate) fn counts_guest_cpu(runtime_profile: &str) -> bool {
+    matches!(
+        runtime_profile.trim(),
+        RUNTIME_PROFILE_COMMODITY | RUNTIME_PROFILE_CONFIDENTIAL
+    )
+}
 
 /// Daemons asked at once in one check.
 const DAEMON_CALLS_AT_ONCE: usize = 8;
@@ -177,6 +190,7 @@ pub(crate) async fn stop_idle_environments(ctx: &WorkerContext) {
             .unwrap_or_else(|poison| poison.into_inner()),
         &candidates,
     );
+    let include_guest_cpu = counts_guest_cpu(&ctx.sandbox_cfg.runtime_profile);
     let answers: Vec<(Candidate, Result<DaemonActivity, String>)> =
         futures::stream::iter(candidates)
             .map(|candidate| async move {
@@ -186,6 +200,7 @@ pub(crate) async fn stop_idle_environments(ctx: &WorkerContext) {
                     &ctx.sandbox_cfg.session_secret,
                     &candidate.namespace,
                     &candidate.id,
+                    include_guest_cpu,
                 )
                 .await
                 .map_err(|error| error.to_string());

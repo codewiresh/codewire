@@ -372,7 +372,13 @@ message SetAppPortsRequest {
 
 message SetAppPortsResponse {}
 
-message GetActivityRequest {}
+message GetActivityRequest {
+  // Also count a busy minute of the whole guest kernel's CPU, which sees the
+  // Docker container beside the workspace. Set only where the guest is this
+  // Sandbox's own VM (Kata); under runc the kernel is the host's. A daemon
+  // older than this field counts the workspace container alone.
+  bool include_guest_cpu = 1;
+}
 
 message GetActivityResponse {
   // Unset until something was in use since the daemon started.

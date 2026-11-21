@@ -1025,6 +1025,12 @@ fn without_term_env(env: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// A login is use, for idle stop (#3384), except orchestration's own access
+/// check, which it makes whenever it reconciles a Sandbox's runtime.
+fn login_is_use(user: &str) -> bool {
+    user != codewire_daemon_proto::WORKSPACE_ACCESS_PROBE_USER
+}
+
 fn pty_dimension_to_i32(value: u32) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
@@ -1035,7 +1041,10 @@ where
 {
     type Error = WorkspaceSshError;
 
-    async fn auth_none(&mut self, _user: &str) -> Result<server::Auth, Self::Error> {
+    async fn auth_none(&mut self, user: &str) -> Result<server::Auth, Self::Error> {
+        if login_is_use(user) {
+            crate::activity::note();
+        }
         Ok(server::Auth::Accept)
     }
 
@@ -1945,6 +1954,15 @@ mod tests {
         );
 
         (gateway, client, shutdown_tx, relay_task)
+    }
+
+    #[test]
+    fn a_login_is_use_except_orchestration_s_access_check() {
+        assert!(login_is_use("codewire"));
+        assert!(login_is_use("someone"));
+        assert!(!login_is_use(
+            codewire_daemon_proto::WORKSPACE_ACCESS_PROBE_USER
+        ));
     }
 
     #[test]

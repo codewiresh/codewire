@@ -140,3 +140,13 @@ fn a_silence_is_forgotten_when_its_sandbox_is_no_longer_a_candidate() {
         Decision::Wait
     );
 }
+
+#[test]
+fn only_a_kata_guest_counts_its_whole_cpu() {
+    for profile in ["commodity", " commodity ", "confidential"] {
+        assert!(counts_guest_cpu(profile), "{profile:?}");
+    }
+    for profile in ["runc", "none", ""] {
+        assert!(!counts_guest_cpu(profile), "{profile:?}");
+    }
+}

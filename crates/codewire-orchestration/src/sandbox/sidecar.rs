@@ -474,7 +474,7 @@ async fn login_and_sftp<H: russh::client::Handler>(
     context: &str,
 ) -> anyhow::Result<()> {
     let authenticated = handle
-        .authenticate_none("codewire")
+        .authenticate_none(codewire_daemon_proto::WORKSPACE_ACCESS_PROBE_USER)
         .await
         .map(|r| matches!(r, russh::client::AuthResult::Success))
         .unwrap_or(false);

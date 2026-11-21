@@ -310,8 +310,9 @@ impl DaemonService for DaemonServiceImpl {
         request: Request<v1::GetActivityRequest>,
     ) -> Result<Response<v1::GetActivityResponse>, Status> {
         self.authorize(&request)?;
+        let include_guest_cpu = request.get_ref().include_guest_cpu;
         Ok(Response::new(v1::GetActivityResponse {
-            last_active_at: crate::activity::last_active()
+            last_active_at: crate::activity::last_active(include_guest_cpu)
                 .map(|seconds| prost_types::Timestamp { seconds, nanos: 0 }),
         }))
     }
