@@ -21,8 +21,9 @@ services image:
 One workload is held to a different, exact shape: the /dev/kvm device plugin
 (#5602) runs as root and privileged (docs/dev/CODEWIRE-GUARD-RUNTIME-PROFILES.md,
 "The device"). It must be that DaemonSet, with that one command, context, host
-path and mount and no service account token, and its Pod and container may
-set only the keys listed below; anything else it renders is refused.
+path and mount, only the sandbox runtime nodes and no service account token,
+and its Pod and container may set only the keys listed below; anything else it
+renders is refused.
 
 The renders are those test-deploy-helm-chart.py compares: Production's source
 tree (the service directories composed, as Production's overlay builds on
@@ -72,6 +73,16 @@ KVM_DEVICE_PLUGIN_VOLUMES = [
     {"name": "device-plugins", "hostPath": {"path": KVM_DEVICE_PLUGIN_DIRECTORY, "type": "Directory"}},
 ]
 KVM_DEVICE_PLUGIN_MOUNTS = [{"name": "device-plugins", "mountPath": KVM_DEVICE_PLUGIN_DIRECTORY}]
+# Only the sandbox runtime nodes: the hosted nodes' label everywhere but the
+# two Kind overlays, which use Kind's sandbox pool. A wider toleration or no
+# selector would put a privileged root Pod on the control plane, which nothing
+# at admission refuses.
+KVM_DEVICE_PLUGIN_NODE_SELECTOR = {"node.codewire.sh/purpose": "sandbox-runtime"}
+KVM_DEVICE_PLUGIN_KIND_NODE_SELECTOR = {"codewire.sh/node-pool": "sandbox"}
+KIND_ENVIRONMENTS = {"local-kind", "local-kind-static"}
+KVM_DEVICE_PLUGIN_TOLERATIONS = [
+    {"key": "node.codewire.sh/runtime-candidate", "operator": "Equal", "value": "true", "effect": "NoSchedule"},
+]
 # Every other key is refused: a probe, a lifecycle hook, a port, a shared
 # process namespace or host users would each widen what runs privileged.
 KVM_DEVICE_PLUGIN_POD_KEYS = {
@@ -188,15 +199,22 @@ def violations(workload: dict[str, Any]) -> list[str]:
     return found
 
 
-def kvm_device_plugin_violations(workload: dict[str, Any]) -> list[str]:
-    """What keeps the device plugin from its one allowed shape, if anything."""
+def kvm_device_plugin_violations(workload: dict[str, Any], render: str) -> list[str]:
+    """What keeps the device plugin from its one allowed shape in RENDER, if anything."""
     label = f"{workload['kind']}/{KVM_DEVICE_PLUGIN}"
     pod = workload["spec"]["template"]["spec"]
-    found = [f"{label}: sets {key}, which its shape does not allow" for key in sorted(set(pod) - KVM_DEVICE_PLUGIN_POD_KEYS)]
+    found = [
+        f"{label}: sets {key}, which its shape does not allow" for key in sorted(set(pod) - KVM_DEVICE_PLUGIN_POD_KEYS)
+    ]
     if workload["kind"] != "DaemonSet":
         found.append(f"{label}: is not a DaemonSet")
     if pod.get("automountServiceAccountToken") is not False:
         found.append(f"{label}: automountServiceAccountToken is not false")
+    kind = render.split(" ", 1)[0] in KIND_ENVIRONMENTS
+    if pod.get("nodeSelector") != (KVM_DEVICE_PLUGIN_KIND_NODE_SELECTOR if kind else KVM_DEVICE_PLUGIN_NODE_SELECTOR):
+        found.append(f"{label}: nodeSelector is not exactly the sandbox runtime nodes")
+    if pod.get("tolerations") != KVM_DEVICE_PLUGIN_TOLERATIONS:
+        found.append(f"{label}: tolerations are not exactly the runtime-candidate one")
     if pod.get("volumes") != KVM_DEVICE_PLUGIN_VOLUMES:
         found.append(f"{label}: volumes are not exactly the kubelet's device plugin directory")
     if len(pod["containers"]) != 1:
@@ -222,7 +240,7 @@ def check(documents: list[dict[str, Any]], expected: set[str], render: str) -> l
         f"{render}: {problem}"
         for workload in workloads
         for problem in (
-            kvm_device_plugin_violations(workload)
+            kvm_device_plugin_violations(workload, render)
             if workload["metadata"]["name"] == KVM_DEVICE_PLUGIN
             else violations(workload)
         )
@@ -351,11 +369,23 @@ class DevicePluginShape(unittest.TestCase):
         _, directories, _, cls.expected = ENVIRONMENTS["local-kind"]
         cls.documents = objects(kustomize(directories))
 
-    def plugin_problems(self, change: Callable[[dict[str, Any]], None]) -> list[str]:
+    def plugin_problems(
+        self, change: Callable[[dict[str, Any]], None], render: str = "local-kind (fixture)"
+    ) -> list[str]:
         documents = copy.deepcopy(self.documents)
         plugin = next(d for d in documents if d["metadata"]["name"] == KVM_DEVICE_PLUGIN)
         change(plugin)
-        return check(documents, self.expected, "fixture")
+        return check(documents, self.expected, render)
+
+    def test_each_render_takes_only_its_own_node_selector(self) -> None:
+        def hosted(plugin: dict[str, Any]) -> None:
+            plugin["spec"]["template"]["spec"]["nodeSelector"] = dict(KVM_DEVICE_PLUGIN_NODE_SELECTOR)
+
+        self.assertEqual(self.plugin_problems(hosted, "source (fixture)"), [])
+        for render, change in (("source (fixture)", lambda plugin: None), ("local-kind (fixture)", hosted)):
+            with self.subTest(render=render):
+                problems = self.plugin_problems(change, render)
+                self.assertTrue(any("nodeSelector is not exactly" in p for p in problems), problems)
 
     def test_the_rendered_plugin_passes(self) -> None:
         self.assertEqual(self.plugin_problems(lambda plugin: None), [])
@@ -371,6 +401,16 @@ class DevicePluginShape(unittest.TestCase):
             (lambda plugin: plugin.update(kind="Deployment"), "is not a DaemonSet"),
             (lambda plugin: pod(plugin).pop("automountServiceAccountToken"),
              "automountServiceAccountToken is not false"),
+            (lambda plugin: pod(plugin).pop("nodeSelector"), "nodeSelector is not exactly"),
+            (lambda plugin: pod(plugin).update(nodeSelector={"kubernetes.io/os": "linux"}),
+             "nodeSelector is not exactly"),
+            (lambda plugin: pod(plugin)["nodeSelector"].update({"extra": "x"}), "nodeSelector is not exactly"),
+            (lambda plugin: pod(plugin).update(tolerations=[{"operator": "Exists"}]), "tolerations are not exactly"),
+            (lambda plugin: pod(plugin)["tolerations"].append(
+                {"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"}),
+             "tolerations are not exactly"),
+            (lambda plugin: pod(plugin)["tolerations"][0].update(operator="Exists"), "tolerations are not exactly"),
+            (lambda plugin: pod(plugin).pop("tolerations"), "tolerations are not exactly"),
             (lambda plugin: pod(plugin).update(hostNetwork=True), "sets hostNetwork"),
             (lambda plugin: pod(plugin).update(hostPID=True), "sets hostPID"),
             (lambda plugin: pod(plugin).update(hostUsers=True), "sets hostUsers"),
