@@ -946,6 +946,12 @@ pub(crate) fn environment_row(environment: Environment) -> EnvironmentRow {
         state,
         state_tone: state_tone(state),
         state_symbol: state_symbol(state),
+        stop_reason: if environment.stop_reason == "idle" {
+            "idle"
+        } else {
+            ""
+        },
+        idle_stop_seconds: environment.idle_stop_seconds,
         preset_name: environment.preset_name,
         isolation_tier: match environment.isolation_tier.as_known() {
             Some(codewire_proto::codewire::v1::IsolationTier::Confidential) => "confidential",
@@ -1410,6 +1416,23 @@ mod tests {
                 "This Sandbox is stopped. Its files are kept.",
             ),
             (
+                // It stopped itself: how long it was idle, briefly (#3384).
+                environment_row(Environment {
+                    id: "00000000-0000-4000-8000-000000000001".into(),
+                    state: S::Stopped.into(),
+                    desired_state: DesiredState::Stopped.into(),
+                    stop_reason: "idle".into(),
+                    idle_stop_seconds: 6 * 3600,
+                    setup_complete: true,
+                    ..Default::default()
+                }),
+                "message",
+                "neutral",
+                ("start", "Start"),
+                "stopped",
+                "Stopped after 6 hours idle. Files are kept.",
+            ),
+            (
                 row(S::Stopped, DesiredState::Started, "", ""),
                 "setup",
                 "neutral",
@@ -1569,6 +1592,24 @@ mod tests {
         let destroyed = environment_row(sandbox("gone", 1, EnvironmentState::Destroyed));
         assert_eq!(destroyed.state_label(), "deleted");
         assert!(destroyed.deletion_started());
+    }
+
+    /// The state pill reads plain "stopped" whatever stopped it; the page's
+    /// notice says why (#3384).
+    #[test]
+    fn a_stopped_sandbox_s_pill_reads_stopped_whatever_stopped_it() {
+        let stopped = |reason: &str| {
+            environment_row(Environment {
+                state: EnvironmentState::Stopped.into(),
+                stop_reason: reason.into(),
+                ..Default::default()
+            })
+            .state_label()
+        };
+        assert_eq!(stopped("idle"), "stopped");
+        assert_eq!(stopped("credit"), "stopped");
+        assert_eq!(stopped("user"), "stopped");
+        assert_eq!(stopped(""), "stopped");
     }
 
     #[test]

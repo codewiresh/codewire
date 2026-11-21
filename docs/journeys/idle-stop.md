@@ -7,7 +7,7 @@ before the code. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-19. Written first; every step is not yet observed.
+Updated 2026-11-21. Written first; every step is not yet observed.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -72,8 +72,8 @@ Updated 2026-11-19. Written first; every step is not yet observed.
   3. `cw ls`: STATE is `stopped (idle)`. `cw info idle-stop` prints
      "Stopped itself after 5 minutes idle (CPU under 10%, no traffic or
      input). Files are kept. Start it with `cw start idle-stop`." and the
-     time. The dashboard's pill reads **Stopped (idle)**, with the same
-     words by **Start**.
+     time. The dashboard's pill reads **Stopped**, and the Sandbox's page
+     says "Stopped after 5 minutes idle. Files are kept." by **Start**.
   4. `cw shell idle-stop` refuses with the same words.
   5. `cw start idle-stop`, then `cw run idle-stop -- cat /workspace/marker`.
 - **Proof:** the stop lands between 5 minutes and 5 minutes 30 seconds after

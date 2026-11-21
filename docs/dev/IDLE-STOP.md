@@ -134,8 +134,9 @@ The server switch `CODEWIRE_IDLE_STOP` turns the check on (`on`) or off
 - **`cw info`** prints them, with the time it stopped. **Connecting** to it
   with `cw shell`, `cw attach`, `cw run` or `ssh` refuses with them. A
   person's stop keeps today's message.
-- **The dashboard:** the state pill reads **Stopped (idle)**, with the same
-  words by **Start**, after the owner's "land it" for the dashboard.
+- **The dashboard:** the state pill reads **Stopped**, as for any stop. The
+  Sandbox's page says, by **Start**: "Stopped after 6 hours idle. Files are
+  kept."
 
 ## After launch
 

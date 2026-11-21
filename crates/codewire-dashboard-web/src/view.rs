@@ -1029,6 +1029,11 @@ pub(crate) struct EnvironmentRow {
     pub(crate) state: &'static str,
     pub(crate) state_tone: &'static str,
     pub(crate) state_symbol: &'static str,
+    /// "idle" when it stopped itself (#3384), for the page's notice. The
+    /// state pill reads plain "stopped" whatever stopped it.
+    pub(crate) stop_reason: &'static str,
+    /// Its idle timeout in seconds, 0 for off (#3384).
+    pub(crate) idle_stop_seconds: i32,
     pub(crate) preset_name: String,
     pub(crate) isolation_tier: &'static str,
     pub(crate) last_event: String,

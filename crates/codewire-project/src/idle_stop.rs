@@ -134,9 +134,9 @@ pub fn idle_stop_reason(idle_stop_seconds: i32) -> String {
     )
 }
 
-/// What a Sandbox that stopped itself says, wherever it says why (owner,
-/// 2026-11-19, on #3384): `cw info`, the dashboard. A refused `cw`
-/// connection says [`idle_stop_reason`] and gives the start as its next step.
+/// What a Sandbox that stopped itself says in `cw info` (owner, 2026-11-19,
+/// on #3384); the dashboard says it more briefly. A refused `cw` connection
+/// says [`idle_stop_reason`] and gives the start as its next step.
 pub fn idle_stop_notice(name: &str, idle_stop_seconds: i32) -> String {
     format!(
         "{} Start it with `cw start {name}`.",

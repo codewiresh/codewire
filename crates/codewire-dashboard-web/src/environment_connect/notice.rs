@@ -182,6 +182,18 @@ pub(crate) fn sandbox_notice(row: &EnvironmentRow) -> SandboxNotice {
             SandboxNotice::banner(STARTING.to_owned(), "neutral").kind("setup")
         }
         ("stopped", _) if actions.pending => SandboxNotice::banner(PENDING.to_owned(), "info"),
+        // It stopped itself: how long it was idle, as briefly as it can be
+        // said (#3384). `cw info` gives the full reason. Start, beside it, is
+        // how to start it again.
+        ("stopped", _) if row.stop_reason == "idle" => SandboxNotice::message(
+            "stopped",
+            format!(
+                "Stopped after {} idle. Files are kept.",
+                codewire_project::idle_stop_words(row.idle_stop_seconds)
+            ),
+            "neutral",
+        )
+        .offering(actions.start, "start", "Start"),
         ("stopped", _) => SandboxNotice::message(
             "stopped",
             "This Sandbox is stopped. Its files are kept.".to_owned(),

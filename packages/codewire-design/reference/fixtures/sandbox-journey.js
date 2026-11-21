@@ -218,6 +218,9 @@
     } else if (target === "stopped") {
       setPill("stopped", "neutral");
       setNotice({ kind: "message", graphic: "stopped", text: config.stoppedText, button: "Start" });
+    } else if (target === "idle-stopped") {
+      setPill("stopped", "neutral");
+      setNotice({ kind: "message", graphic: "stopped", text: config.idleStoppedText, button: "Start" });
     } else if (target === "crashed") {
       setPill("error", "danger");
       setNotice({ kind: "message", tone: "danger", graphic: "crashed", text: config.crashedText, button: "Start again" });
@@ -248,6 +251,7 @@
     ["failed", "Failed: terminal open"],
     ["no-capacity", "No capacity"],
     ["stopped", "Stopped"],
+    ["idle-stopped", "Stopped itself (idle)"],
     ["crashed", "Crashed"],
     ["restarted", "Restarted (banner)"],
   ];
