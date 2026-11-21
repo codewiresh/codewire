@@ -16,6 +16,12 @@ resources:
   - idp-signing-keks.yaml
   - postgres.yaml
   - dashboard.yaml
+  # The `standard` profile's class, without the Kata classes Kind cannot run.
+  - ../../runtime-profiles/standard
+
+# The /dev/kvm device plugin (#5602).
+components:
+  - ../../kvm-device-plugin
 
 # Keep the static Kind renderer on the same synthetic browser App contract as
 # the managed fixture; the secret-bearing configuration remains test-only.
@@ -35,6 +41,15 @@ images:
     newTag: local
 
 patches:
+  # Kind's one node is labelled as the sandbox pool, not as a runtime node.
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/nodeSelector
+        value:
+          codewire.sh/node-pool: sandbox
+    target:
+      kind: DaemonSet
+      name: codewire-kvm-device-plugin
   - path: credential-service-origin-patch.yaml
     target:
       kind: Deployment

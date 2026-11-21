@@ -1,0 +1,72 @@
+# One device plugin on every sandbox runtime node. It registers
+# codewire.sh/kvm with the kubelet, so a `standard` sandbox Pod is scheduled
+# only where one is free, and the kubelet adds the node's /dev/kvm, read and
+# write, to that Pod's container. It reads no Kubernetes object and holds no
+# credential.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: codewire-kvm-device-plugin
+  namespace: prod
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: kvm-device-plugin
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: codewire
+      app.kubernetes.io/component: kvm-device-plugin
+  # A Pod that already holds /dev/kvm keeps it while the plugin restarts; only
+  # new Pods wait for the next registration.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codewire
+        app.kubernetes.io/component: kvm-device-plugin
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      imagePullSecrets:
+        - name: harbor-registry
+      nodeSelector:
+        node.codewire.sh/purpose: sandbox-runtime
+      tolerations:
+        - key: node.codewire.sh/runtime-candidate
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: plugin
+          image: git.example.com/codewire/services
+          # 110 is the kubelet's default Pod limit, so the device count never
+          # binds before the node's own limits do.
+          command: ["/cw-kvm-device-plugin", "--devices", "110"]
+          # Root, to make its socket in the kubelet's root-owned directory
+          # and reach the kubelet's socket there. Privileged, because Talos's
+          # enforcing SELinux policy lets the kubelet connect only to a
+          # privileged container's socket, and so that the node's /dev/kvm is
+          # visible for its health check.
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: device-plugins
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: device-plugins
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: Directory

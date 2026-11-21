@@ -134,6 +134,10 @@ map_token() {
     # Nor cw-egress, until its binary and manifests exist (#4000).
     rust_pkg_codewire_egress_node)
       unobserved "$token" 'no binary uses it yet' ;;
+    # Kind deploys the /dev/kvm device plugin, but no retained suite asks for
+    # codewire.sh/kvm yet (#5602).
+    rust_pkg_codewire_kvm_device_plugin)
+      unobserved "$token" 'no retained suite requests codewire.sh/kvm yet' ;;
     # Kind runs the relay (tests/e2e/kind/tailnet.yaml), but no retained suite
     # drives a tailnet through it yet: walk the host tailnet journey.
     transport_pkg_codewire_derp)

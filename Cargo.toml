@@ -20,6 +20,7 @@ members = [
     "crates/codewire-egress-policy",
     "crates/codewire-egress-worker",
     "crates/codewire-ext4-scrub",
+    "crates/codewire-kvm-device-plugin",
     "crates/codewire-email",
     "crates/codewire-daemon-proto",
     "crates/codewire-idp",
@@ -96,6 +97,7 @@ codewire-egress-front-door-bridge = { path = "crates/codewire-egress-front-door-
 codewire-egress-node = { path = "crates/codewire-egress-node" }
 codewire-egress-policy = { path = "crates/codewire-egress-policy" }
 codewire-ext4-scrub = { path = "crates/codewire-ext4-scrub" }
+codewire-kvm-device-plugin = { path = "crates/codewire-kvm-device-plugin" }
 codewire-email = { path = "crates/codewire-email" }
 codewire-netstack = { path = "crates/codewire-netstack" }
 codewire-network-session = { path = "crates/codewire-network-session" }

@@ -2185,6 +2185,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewire-kvm-device-plugin"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "codewire-workspace-hack",
+ "futures",
+ "hyper-util",
+ "prost",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "codewire-local-credentials"
 version = "0.1.0"
 dependencies = [
@@ -2825,6 +2847,8 @@ dependencies = [
  "chrono",
  "cipher 0.4.4",
  "cipher 0.5.2",
+ "clap",
+ "clap_builder",
  "connectrpc",
  "crossbeam-utils",
  "crypto-bigint",
@@ -2899,6 +2923,7 @@ dependencies = [
  "portable-atomic",
  "primeorder",
  "proc-macro2",
+ "prost",
  "prost-reflect",
  "quote",
  "rand 0.10.1",

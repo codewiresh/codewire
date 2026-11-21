@@ -11,6 +11,7 @@
 #   schema bootstrap               → command: ["/codewire-db-migrate"]
 #   runtime UDP peer relay         → command: ["/codewire-udp-relay"]
 #   isolated credential authority  → command: ["/codewire-credential-service"]
+#   /dev/kvm device plugin         → command: ["/cw-kvm-device-plugin"]
 #   diagnostics                    → command: ["/sidecar-smoke"]
 #
 # Built+pushed as codewire/services by .gitea/workflows/ci.yaml. Build from
@@ -118,6 +119,7 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
       -p codewire-server-core --bin codewire-db-migrate \
       -p codewire-udp-relay --bin codewire-udp-relay \
       -p codewire-credential-service --bin codewire-credential-service \
+      -p codewire-kvm-device-plugin --bin cw-kvm-device-plugin \
       --features "$feature_args" && \
     mkdir -p /out && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-idp" /out/codewire-idp && \
@@ -129,6 +131,7 @@ RUN --mount=type=cache,id=codewire-services-cargo-registry,target=/usr/local/car
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-db-migrate" /out/codewire-db-migrate && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-udp-relay" /out/codewire-udp-relay && \
     cp "target/$CODEWIRE_RUST_PROFILE/codewire-credential-service" /out/codewire-credential-service && \
+    cp "target/$CODEWIRE_RUST_PROFILE/cw-kvm-device-plugin" /out/cw-kvm-device-plugin && \
     mkdir -p /out/kind-fixtures /out/kind-git-runtime /out/kind-derp && \
     if [ "$CODEWIRE_ORCHESTRATION_FEATURES" = kind-e2e ]; then \
       codewire-rust-build cargo build --locked --profile "$CODEWIRE_RUST_PROFILE" \
@@ -161,6 +164,7 @@ COPY --from=builder /out/codewire-coordinator /codewire-coordinator
 COPY --from=builder /out/codewire-db-migrate /codewire-db-migrate
 COPY --from=builder /out/codewire-udp-relay /codewire-udp-relay
 COPY --from=builder /out/codewire-credential-service /codewire-credential-service
+COPY --from=builder /out/cw-kvm-device-plugin /cw-kvm-device-plugin
 # Empty in the promotable graph: cfg(test) code is built only by services-ci's
 # kind-e2e feature, in the same runtime profile. No production fixture switch
 # exists.

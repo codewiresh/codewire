@@ -1,0 +1,39 @@
+[package]
+name = "codewire-kvm-device-plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+# The crate's own sources are AGPL-3.0-only. The kubelet protocol it compiles,
+# proto/deviceplugin/v1beta1/api.proto, is vendored Apache-2.0 (LICENSE-APACHE).
+license = "AGPL-3.0-only"
+description = "The node's device plugin that hands /dev/kvm to Pods requesting codewire.sh/kvm"
+
+[[bin]]
+name = "cw-kvm-device-plugin"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+futures = { workspace = true }
+hyper-util = { workspace = true }
+prost = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+codewire-workspace-hack.workspace = true
+
+[lints]
+workspace = true

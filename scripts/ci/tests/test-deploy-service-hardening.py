@@ -18,6 +18,12 @@ services image:
 - never sets CODEWIRE_CW_RUNTIME_STAGING, which moves orchestration's cw
   runtime staging off its mount and exists only for tests and local runs.
 
+One workload is held to a different, exact shape: the /dev/kvm device plugin
+(#5602) runs as root and privileged (docs/dev/CODEWIRE-GUARD-RUNTIME-PROFILES.md,
+"The device"). It must be that DaemonSet, with that one command, context, host
+path and mount and no service account token, and its Pod and container may
+set only the keys listed below; anything else it renders is refused.
+
 The renders are those test-deploy-helm-chart.py compares: Production's source
 tree (the service directories composed, as Production's overlay builds on
 them) and the chart with its fixture values, and the two Kind overlays and the
@@ -52,6 +58,29 @@ WORKLOAD_KINDS = {"Deployment", "DaemonSet", "StatefulSet"}
 # runs only (docs/dev/CW-RUNTIME-JOURNAL.md, "Where an upload is staged").
 STAGING_OVERRIDE = "CODEWIRE_CW_RUNTIME_STAGING"
 SERVICES_IMAGES = {"services", "codewire-services"}
+
+# Root, to make its socket in the kubelet's root-owned directory; privileged,
+# because the nodes' SELinux policy lets the kubelet connect only to a
+# privileged container's socket.
+KVM_DEVICE_PLUGIN = "codewire-kvm-device-plugin"
+KVM_DEVICE_PLUGIN_DIRECTORY = "/var/lib/kubelet/device-plugins"
+KVM_DEVICE_PLUGIN_COMMAND = ["/cw-kvm-device-plugin", "--devices", "110"]
+KVM_DEVICE_PLUGIN_CONTEXT = {
+    "privileged": True, "runAsUser": 0, "runAsGroup": 0, "runAsNonRoot": False, "readOnlyRootFilesystem": True,
+}
+KVM_DEVICE_PLUGIN_VOLUMES = [
+    {"name": "device-plugins", "hostPath": {"path": KVM_DEVICE_PLUGIN_DIRECTORY, "type": "Directory"}},
+]
+KVM_DEVICE_PLUGIN_MOUNTS = [{"name": "device-plugins", "mountPath": KVM_DEVICE_PLUGIN_DIRECTORY}]
+# Every other key is refused: a probe, a lifecycle hook, a port, a shared
+# process namespace or host users would each widen what runs privileged.
+KVM_DEVICE_PLUGIN_POD_KEYS = {
+    "automountServiceAccountToken", "containers", "enableServiceLinks", "imagePullSecrets", "nodeSelector",
+    "tolerations", "volumes",
+}
+KVM_DEVICE_PLUGIN_CONTAINER_KEYS = {
+    "name", "image", "imagePullPolicy", "command", "securityContext", "resources", "volumeMounts",
+}
 
 _SERVICES = (
     "codewire-billing", "codewire-coordinator", "codewire-idp", "codewire-orchestration",
@@ -159,9 +188,45 @@ def violations(workload: dict[str, Any]) -> list[str]:
     return found
 
 
+def kvm_device_plugin_violations(workload: dict[str, Any]) -> list[str]:
+    """What keeps the device plugin from its one allowed shape, if anything."""
+    label = f"{workload['kind']}/{KVM_DEVICE_PLUGIN}"
+    pod = workload["spec"]["template"]["spec"]
+    found = [f"{label}: sets {key}, which its shape does not allow" for key in sorted(set(pod) - KVM_DEVICE_PLUGIN_POD_KEYS)]
+    if workload["kind"] != "DaemonSet":
+        found.append(f"{label}: is not a DaemonSet")
+    if pod.get("automountServiceAccountToken") is not False:
+        found.append(f"{label}: automountServiceAccountToken is not false")
+    if pod.get("volumes") != KVM_DEVICE_PLUGIN_VOLUMES:
+        found.append(f"{label}: volumes are not exactly the kubelet's device plugin directory")
+    if len(pod["containers"]) != 1:
+        found.append(f"{label}: has {len(pod['containers'])} containers, not 1")
+    for container in pod["containers"]:
+        name = f"{label} container {container['name']}"
+        found += [
+            f"{name}: sets {key}, which its shape does not allow"
+            for key in sorted(set(container) - KVM_DEVICE_PLUGIN_CONTAINER_KEYS)
+        ]
+        if container.get("command") != KVM_DEVICE_PLUGIN_COMMAND:
+            found.append(f"{name}: command is not exactly {KVM_DEVICE_PLUGIN_COMMAND}")
+        if container.get("securityContext") != KVM_DEVICE_PLUGIN_CONTEXT:
+            found.append(f"{name}: securityContext is not exactly {KVM_DEVICE_PLUGIN_CONTEXT}")
+        if container.get("volumeMounts") != KVM_DEVICE_PLUGIN_MOUNTS:
+            found.append(f"{name}: volumeMounts are not exactly the device plugin directory")
+    return found
+
+
 def check(documents: list[dict[str, Any]], expected: set[str], render: str) -> list[str]:
     workloads = service_workloads(documents)
-    found = [f"{render}: {problem}" for workload in workloads for problem in violations(workload)]
+    found = [
+        f"{render}: {problem}"
+        for workload in workloads
+        for problem in (
+            kvm_device_plugin_violations(workload)
+            if workload["metadata"]["name"] == KVM_DEVICE_PLUGIN
+            else violations(workload)
+        )
+    ]
     missing = expected - {workload["metadata"]["name"] for workload in workloads}
     found += [f"{render}: renders no {name} from the services image" for name in sorted(missing)]
     return found
@@ -276,6 +341,77 @@ class HardeningRules(unittest.TestCase):
 
         problems = check(self.mutated("codewire-billing", other_image), self.expected, "fixture")
         self.assertEqual(problems, ["fixture: renders no codewire-billing from the services image"])
+
+
+class DevicePluginShape(unittest.TestCase):
+    """The device plugin passes only in its exact shape."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        _, directories, _, cls.expected = ENVIRONMENTS["local-kind"]
+        cls.documents = objects(kustomize(directories))
+
+    def plugin_problems(self, change: Callable[[dict[str, Any]], None]) -> list[str]:
+        documents = copy.deepcopy(self.documents)
+        plugin = next(d for d in documents if d["metadata"]["name"] == KVM_DEVICE_PLUGIN)
+        change(plugin)
+        return check(documents, self.expected, "fixture")
+
+    def test_the_rendered_plugin_passes(self) -> None:
+        self.assertEqual(self.plugin_problems(lambda plugin: None), [])
+
+    def test_any_other_shape_is_refused(self) -> None:
+        def pod(plugin: dict[str, Any]) -> dict[str, Any]:
+            return plugin["spec"]["template"]["spec"]
+
+        def container(plugin: dict[str, Any]) -> dict[str, Any]:
+            return pod(plugin)["containers"][0]
+
+        cases: list[tuple[Callable[[dict[str, Any]], None], str]] = [
+            (lambda plugin: plugin.update(kind="Deployment"), "is not a DaemonSet"),
+            (lambda plugin: pod(plugin).pop("automountServiceAccountToken"),
+             "automountServiceAccountToken is not false"),
+            (lambda plugin: pod(plugin).update(hostNetwork=True), "sets hostNetwork"),
+            (lambda plugin: pod(plugin).update(hostPID=True), "sets hostPID"),
+            (lambda plugin: pod(plugin).update(hostUsers=True), "sets hostUsers"),
+            (lambda plugin: pod(plugin).update(shareProcessNamespace=True), "sets shareProcessNamespace"),
+            (lambda plugin: pod(plugin).update(securityContext={"runAsUser": 0}), "sets securityContext"),
+            (lambda plugin: pod(plugin)["volumes"].append({"name": "root", "hostPath": {"path": "/"}}),
+             "volumes are not exactly"),
+            (lambda plugin: pod(plugin)["volumes"][0]["hostPath"].update(path="/var/lib/kubelet"),
+             "volumes are not exactly"),
+            (lambda plugin: pod(plugin)["containers"].append(copy.deepcopy(container(plugin))), "has 2 containers"),
+            (lambda plugin: container(plugin).update(command=["/cw", "__pod-runtime"]), "command is not exactly"),
+            (lambda plugin: container(plugin).update(args=["--devices", "1"]), "sets args"),
+            (lambda plugin: container(plugin).update(lifecycle={"postStart": {"exec": {"command": ["/bin/sh"]}}}),
+             "sets lifecycle"),
+            (lambda plugin: container(plugin).update(livenessProbe={"exec": {"command": ["/bin/sh"]}}),
+             "sets livenessProbe"),
+            (lambda plugin: container(plugin).update(ports=[{"containerPort": 80, "hostPort": 80}]), "sets ports"),
+            (lambda plugin: container(plugin).update(workingDir="/var/lib/kubelet"), "sets workingDir"),
+            (lambda plugin: container(plugin)["securityContext"].update(readOnlyRootFilesystem=False),
+             "securityContext is not exactly"),
+            (lambda plugin: container(plugin)["securityContext"].update(capabilities={"add": ["SYS_ADMIN"]}),
+             "securityContext is not exactly"),
+            (lambda plugin: container(plugin)["volumeMounts"][0].update(mountPath="/host"),
+             "volumeMounts are not exactly"),
+            (lambda plugin: container(plugin).update(envFrom=[{"configMapRef": {"name": "codewire-config"}}]),
+             "sets envFrom"),
+            (lambda plugin: container(plugin).update(env=[{"name": "RUST_LOG", "value": "trace"}]), "sets env"),
+            (lambda plugin: pod(plugin).update(initContainers=[{"name": "setup", "image": "services"}]),
+             "sets initContainers"),
+        ]
+        for change, wanted in cases:
+            with self.subTest(wanted=wanted):
+                problems = self.plugin_problems(change)
+                self.assertTrue(any(wanted in problem for problem in problems), problems)
+
+    def test_another_privileged_services_workload_is_still_refused(self) -> None:
+        def rename(plugin: dict[str, Any]) -> None:
+            plugin["metadata"]["name"] = "codewire-new"
+
+        problems = self.plugin_problems(rename)
+        self.assertTrue(any("DaemonSet/codewire-new container plugin: privileged" in p for p in problems), problems)
 
 
 if __name__ == "__main__":

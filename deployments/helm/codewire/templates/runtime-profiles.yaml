@@ -110,5 +110,36 @@ scheduling:
       value: "true"
       effect: NoSchedule
 {{- end }}
+---
+{{- if .standard }}
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: standard
+  labels:
+    app.kubernetes.io/name: codewire-runtime-profile
+    app.kubernetes.io/part-of: codewire
+    codewire.sh/runtime-handler: runc
+    codewire.sh/runtime-tier: standard
+handler: runc
+# Codewire's own VM runtime inside the Pod (#5602): the node's ordinary handler
+# starts one non-root container, and the VM that container boots is the
+# boundary. The VM process runs inside the container, so its memory and CPU sit
+# beside the guest's in the container's limits, never its requests, and
+# podFixed reserves the same room for the scheduler. These values are an
+# estimate, to be measured on Dev before an organization moves to `standard`.
+overhead:
+  podFixed:
+    cpu: "1"
+    memory: 1Gi
+# No node selector: only a node whose device plugin advertises codewire.sh/kvm
+# can take the Pod, and the plugin's DaemonSet chooses those nodes.
+scheduling:
+  tolerations:
+    - key: node.codewire.sh/runtime-candidate
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+{{- end }}
 {{- end }}
 {{- end }}

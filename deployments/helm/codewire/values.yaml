@@ -735,6 +735,7 @@ runtimeProfiles:
   commodity: true
   commodity32g: true
   confidential: true
+  standard: true
 
 # The confidential runtime smoke: its control ConfigMap, in the probe
 # namespace, and in the confidential-snp phase the smoke Jobs, which need AMD

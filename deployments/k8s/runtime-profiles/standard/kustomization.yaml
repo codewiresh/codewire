@@ -1,0 +1,7 @@
+# The `standard` profile's RuntimeClass on its own, so Kind, which runs none of
+# the Kata classes, can apply it alone.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - runtime-class-standard.yaml

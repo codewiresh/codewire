@@ -84,6 +84,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
         "crates/codewire-egress-node/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-egress-policy/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-ext4-scrub/Cargo.toml": "AGPL-3.0-only",
+        "crates/codewire-kvm-device-plugin/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-desktop/Cargo.toml": "MIT",
         "crates/codewire-email/Cargo.toml": "AGPL-3.0-only",
         "crates/codewire-daemon-proto/Cargo.toml": "AGPL-3.0-only",
@@ -286,6 +287,7 @@ def check_license_map(_args: argparse.Namespace) -> int:
 
     apache_copies = [
         "crates/codewire-admin-proto/LICENSE-APACHE",
+        "crates/codewire-kvm-device-plugin/LICENSE-APACHE",
         "libs/gen-go/LICENSE-APACHE",
         "libs/gen-python/LICENSE-APACHE",
         "libs/sdk-python/LICENSE-APACHE",

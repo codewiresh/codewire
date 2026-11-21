@@ -23,6 +23,11 @@ defense-in-depth runtime classes used by the Codewire Guard umbrella:
   `kata-qemu-snp` CRI handler. This class is for the confidential runtime proof
   path and schedules only onto nodes labelled
   `node.codewire.sh/confidential-snp=true`.
+- `standard`: Codewire's own VM runtime inside the Pod, on the node's ordinary
+  `runc` handler (#5602). It lives in `../standard`, so Kind can apply it alone,
+  and is not a Kata class: the Kata accounting below does not apply to it. A
+  Pod of the class requests `codewire.sh/kvm`, which only nodes running the
+  `/dev/kvm` device plugin advertise.
 
 Each RuntimeClass also carries Kata runtime-rs `podFixed` accounting. Kubernetes
 adds this VM/runtime overhead to workload requests and limits before scheduling

@@ -385,6 +385,28 @@ container opens it as its own user. On a node where the device is not open to
 every user, that needs the container runtime to give a device the
 container's own owner (containerd's `device_ownership_from_security_context`).
 
+The plugin is `cw-kvm-device-plugin`, a DaemonSet from the services image on
+the sandbox runtime nodes (`deployments/k8s/kvm-device-plugin`). It registers
+the extended resource `codewire.sh/kvm` with the kubelet, 110 per node, the
+kubelet's default Pod limit, so the count never binds before the node's own
+limits. For each container given one, the kubelet adds the node's `/dev/kvm`
+at `/dev/kvm` with read and write access, and nothing else: no mount, no
+variable, no other device. A Pod on a node with none free stays Pending with
+"Insufficient codewire.sh/kvm". When the device is missing the plugin reports
+every one unhealthy, and the scheduler stops placing Pods there.
+
+The plugin runs as root and privileged, the one privileged container this
+profile adds. Root, to make its socket in the kubelet's root-owned device
+plugin directory and reach the kubelet's socket there, its only host path.
+Privileged, because an enforcing SELinux policy on our nodes lets the kubelet
+connect only to a privileged container's socket. It reads no Kubernetes
+object and holds no credential.
+
+The `standard` RuntimeClass runs on the node's ordinary handler, `runc`. It
+carries the runtime nodes' toleration and no node selector: the resource
+already keeps the Pod on a node whose plugin advertises it. Its `podFixed`
+overhead (1 GiB and one CPU) is an estimate, to be measured on Dev.
+
 **Resources.** The container's requests are the size the user chose, as on
 the other profiles, because billing reads them. The VM process's own memory
 and CPU are added to the limit and to the RuntimeClass overhead, never to

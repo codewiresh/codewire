@@ -1,0 +1,9 @@
+# cw-kvm-device-plugin, the node's /dev/kvm device plugin for the `standard`
+# runtime profile (#5602; docs/dev/CODEWIRE-GUARD-RUNTIME-PROFILES.md, "The
+# device"). A Component, not part of base: an overlay opts in. It runs from
+# the services image, so the overlay's services image decides what runs.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - daemonset.yaml

@@ -42,6 +42,7 @@ readonly SERVICES_BINARY_ARTIFACTS=(
   codewire-db-migrate:codewire-db-migrate
   codewire-udp-relay:codewire-udp-relay
   codewire-credential-service:codewire-credential-service
+  cw-kvm-device-plugin:cw-kvm-device-plugin
 )
 
 fail() {
