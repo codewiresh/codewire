@@ -1,188 +1,195 @@
-//! Connect-RPC adapter for an environment's desktop
-//! (`codewire.v1.EnvironmentDesktopService`; `docs/dev/SANDBOX-DESKTOP.md`,
-//! "Starting and stopping"). It names the vetted answer in the public
-//! contract's words and adds nothing: the viewer password a running desktop
-//! carries passes through to the authorized caller, under the no-store
-//! policy every authenticated Connect response gets.
+//! Platform ownership for the shared public `EnvironmentDesktopService`
+//! daemon bridge (`docs/dev/SANDBOX-DESKTOP.md`, "Starting and stopping"):
+//! who may call it, which daemon answers, and how a refusal is worded. The
+//! bridge vets what the daemon answers; the viewer password a running
+//! desktop carries passes through to the authorized caller, under the
+//! no-store policy every authenticated Connect response gets.
 
-use std::sync::Arc;
-
-use buffa_types::Timestamp;
-use codewire_daemon_proto::daemon::v1 as daemon;
-use codewire_proto::codewire::v1 as proto;
-use codewire_server_core::connect::auth_user;
-use connectrpc::{RequestContext, ServiceRequest, ServiceResult};
+use async_trait::async_trait;
+use codewire_daemon_bridge::client::{DaemonClient, DaemonClientError};
+use codewire_daemon_bridge::desktop::{DesktopBackend, DesktopCall, DesktopRefusal};
+use codewire_server_core::AppError;
+use codewire_server_core::connect::{auth_user, wire_error};
+use connectrpc::RequestContext;
 
 use crate::api::ApiState;
-use crate::api::environment_daemon::{
-    get_environment_desktop_core, start_environment_desktop_core, stop_environment_desktop_core,
-};
-use crate::connect::workspace_rpc_error;
+use crate::api::environment_daemon::environment_desktop_daemon_core;
+use crate::connect::rendered_workspace_error;
+
+const DAEMON_UPGRADE_REQUIRED: &str =
+    "environment daemon upgrade is required; run `cw daemon repair`";
 
 pub fn router(state: ApiState) -> connectrpc::Router {
-    connectrpc::Router::new().add_service(Arc::new(DesktopService { state }))
+    codewire_daemon_bridge::desktop::router(PlatformDesktopBackend { state })
 }
 
-struct DesktopService {
+#[derive(Clone)]
+struct PlatformDesktopBackend {
     state: ApiState,
 }
 
-#[allow(refining_impl_trait)]
-impl proto::EnvironmentDesktopService for DesktopService {
-    async fn start_desktop(
-        &self,
-        ctx: RequestContext,
-        request: ServiceRequest<'_, proto::StartDesktopRequest>,
-    ) -> ServiceResult<proto::StartDesktopResponse> {
-        let user = auth_user(&ctx)?;
-        let request = request.view();
-        let desktop = start_environment_desktop_core(
-            &self.state,
-            user,
-            request.org_id,
-            request.environment_id,
-        )
-        .await
-        .map_err(|error| workspace_rpc_error(&error, &ctx))?;
-        connectrpc::Response::ok(proto::StartDesktopResponse {
-            desktop: Some(proto_desktop(desktop)).into(),
-            ..Default::default()
-        })
+#[async_trait]
+impl DesktopBackend for PlatformDesktopBackend {
+    fn authorize(&self, ctx: &RequestContext) -> Result<(), connectrpc::ConnectError> {
+        auth_user(ctx).map(|_| ())
     }
 
-    async fn get_desktop(
+    async fn daemon(
         &self,
-        ctx: RequestContext,
-        request: ServiceRequest<'_, proto::GetDesktopRequest>,
-    ) -> ServiceResult<proto::GetDesktopResponse> {
-        let user = auth_user(&ctx)?;
-        let request = request.view();
-        let desktop =
-            get_environment_desktop_core(&self.state, user, request.org_id, request.environment_id)
-                .await
-                .map_err(|error| workspace_rpc_error(&error, &ctx))?;
-        connectrpc::Response::ok(proto::GetDesktopResponse {
-            desktop: Some(proto_desktop(desktop)).into(),
-            ..Default::default()
-        })
+        ctx: &RequestContext,
+        org_id: &str,
+        environment_id: &str,
+        call: DesktopCall,
+    ) -> Result<DaemonClient, connectrpc::ConnectError> {
+        let user = auth_user(ctx)?.clone();
+        environment_desktop_daemon_core(&self.state, &user, org_id, environment_id, call)
+            .await
+            .map_err(|error| render(&error, request_id(ctx)))
     }
 
-    async fn stop_desktop(
+    fn daemon_error(
         &self,
-        ctx: RequestContext,
-        request: ServiceRequest<'_, proto::StopDesktopRequest>,
-    ) -> ServiceResult<proto::StopDesktopResponse> {
-        let user = auth_user(&ctx)?;
-        let request = request.view();
-        let desktop = stop_environment_desktop_core(
-            &self.state,
-            user,
-            request.org_id,
-            request.environment_id,
-        )
-        .await
-        .map_err(|error| workspace_rpc_error(&error, &ctx))?;
-        connectrpc::Response::ok(proto::StopDesktopResponse {
-            desktop: Some(proto_desktop(desktop)).into(),
-            ..Default::default()
-        })
+        error: DaemonClientError,
+        request_id: Option<&str>,
+    ) -> connectrpc::ConnectError {
+        render(&daemon_error(error), request_id)
+    }
+
+    fn refusal(
+        &self,
+        refusal: DesktopRefusal,
+        request_id: Option<&str>,
+    ) -> connectrpc::ConnectError {
+        // The refusal's name alone: nothing of the daemon's own text exists
+        // by this point.
+        tracing::warn!(?refusal, "environment desktop call refused");
+        render(&refusal_error(refusal), request_id)
     }
 }
 
-fn proto_desktop(desktop: daemon::Desktop) -> proto::EnvironmentDesktop {
-    let state = match daemon::DesktopState::try_from(desktop.state) {
-        Ok(daemon::DesktopState::Unavailable) => proto::EnvironmentDesktopState::Unavailable,
-        Ok(daemon::DesktopState::Stopped) => proto::EnvironmentDesktopState::Stopped,
-        Ok(daemon::DesktopState::Starting) => proto::EnvironmentDesktopState::Starting,
-        Ok(daemon::DesktopState::Running) => proto::EnvironmentDesktopState::Running,
-        Ok(daemon::DesktopState::Unspecified) | Err(_) => {
-            proto::EnvironmentDesktopState::Unspecified
+/// A daemon that is not ready for a desktop call. The variants' own text is
+/// the daemon's and is not read.
+fn daemon_error(error: DaemonClientError) -> AppError {
+    use codewire_daemon_proto::daemon::v1::DaemonState;
+
+    match error {
+        // Transient: nothing has run, so clients wait it out (#4311).
+        DaemonClientError::NotReady {
+            state: DaemonState::Starting,
+            ..
+        } => AppError::ServiceUnavailable("environment daemon is still starting".into()),
+        DaemonClientError::NotReady {
+            state: DaemonState::Unsupported | DaemonState::UpgradeRequired,
+            ..
         }
-    };
-    proto::EnvironmentDesktop {
-        state: state.into(),
-        unavailable_reason: desktop.unavailable_reason,
-        running: desktop.running.map(proto_running).into(),
-        ..Default::default()
+        | DaemonClientError::MissingCapability { .. }
+        | DaemonClientError::IncompatibleProtocol { .. } => {
+            AppError::Precondition(DAEMON_UPGRADE_REQUIRED.into())
+        }
+        DaemonClientError::NotReady { .. } => {
+            AppError::Precondition("environment daemon is not ready; run `cw daemon status`".into())
+        }
+        DaemonClientError::InvalidEndpoint | DaemonClientError::InvalidCredential => {
+            AppError::InternalMsg("failed to authorize environment daemon".into())
+        }
+        _ => AppError::Upstream(DesktopRefusal::TransportLost.sentence().into()),
     }
 }
 
-fn proto_running(running: daemon::DesktopRunning) -> proto::EnvironmentDesktopRunning {
-    proto::EnvironmentDesktopRunning {
-        display: running.display,
-        // The vetted answer names the desktop's one port, which fits.
-        port: i32::try_from(running.port).unwrap_or_default(),
-        started_at: running
-            .started_at
-            .map(|at| Timestamp::from_unix(at.seconds, at.nanos))
-            .into(),
-        viewer_password: running.viewer_password,
-        ..Default::default()
+fn refusal_error(refusal: DesktopRefusal) -> AppError {
+    match refusal {
+        DesktopRefusal::NoDesktopInImage | DesktopRefusal::DidNotStart => {
+            AppError::Precondition(refusal.sentence().into())
+        }
+        DesktopRefusal::DaemonTooOld => AppError::Precondition(DAEMON_UPGRADE_REQUIRED.into()),
+        DesktopRefusal::NotReadyInTime
+        | DesktopRefusal::TransportLost
+        | DesktopRefusal::InvalidAnswer => AppError::Upstream(refusal.sentence().into()),
+        DesktopRefusal::Failed => AppError::InternalMsg(refusal.sentence().into()),
     }
+}
+
+fn render(error: &AppError, request_id: Option<&str>) -> connectrpc::ConnectError {
+    wire_error(&rendered_workspace_error(error, request_id))
+}
+
+fn request_id(ctx: &RequestContext) -> Option<&str> {
+    ctx.headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
 }
 
 #[cfg(test)]
 mod tests {
+    use codewire_daemon_proto::daemon::v1::DaemonState;
+
     use super::*;
 
-    #[test]
-    fn a_running_desktop_keeps_every_field_and_each_state_has_its_name() {
-        let mut details = daemon::DesktopRunning {
-            display: ":1".into(),
-            port: 5901,
-            started_at: Some(Default::default()),
-            viewer_password: "a1b2c3d4".into(),
-        };
-        if let Some(started_at) = details.started_at.as_mut() {
-            started_at.seconds = 1_795_000_000;
-            started_at.nanos = 7;
-        }
-        let running = proto_desktop(daemon::Desktop {
-            state: daemon::DesktopState::Running as i32,
-            unavailable_reason: String::new(),
-            running: Some(details),
-        });
-        assert_eq!(running.state, proto::EnvironmentDesktopState::Running);
-        let details = running.running.as_option().expect("running details");
-        assert_eq!(details.display, ":1");
-        assert_eq!(details.port, 5901);
-        assert_eq!(
-            details.started_at.as_option(),
-            Some(&Timestamp::from_unix(1_795_000_000, 7))
-        );
-        assert_eq!(details.viewer_password, "a1b2c3d4");
-        // The public message redacts it in debug output, as the daemon's does.
-        assert!(!format!("{running:?}").contains("a1b2c3d4"));
+    /// What a replaced daemon might put wherever it can write text.
+    const WORKLOAD_TEXT: &str = "workload-chosen-text-not-for-callers";
 
-        for (daemon_state, public) in [
-            (
-                daemon::DesktopState::Unavailable,
-                proto::EnvironmentDesktopState::Unavailable,
-            ),
-            (
-                daemon::DesktopState::Stopped,
-                proto::EnvironmentDesktopState::Stopped,
-            ),
-            (
-                daemon::DesktopState::Starting,
-                proto::EnvironmentDesktopState::Starting,
-            ),
-            (
-                daemon::DesktopState::Unspecified,
-                proto::EnvironmentDesktopState::Unspecified,
-            ),
+    #[test]
+    fn each_refusal_has_its_kind_of_error_and_an_old_daemon_gets_the_repair() {
+        for refusal in [
+            DesktopRefusal::NoDesktopInImage,
+            DesktopRefusal::DidNotStart,
         ] {
-            let desktop = proto_desktop(daemon::Desktop {
-                state: daemon_state as i32,
-                unavailable_reason: "its launcher is not in the image".into(),
-                running: None,
-            });
-            assert_eq!(desktop.state, public);
-            assert!(desktop.running.as_option().is_none());
-            assert_eq!(
-                desktop.unavailable_reason,
-                "its launcher is not in the image"
+            let error = refusal_error(refusal);
+            assert!(
+                matches!(&error, AppError::Precondition(reason) if reason == refusal.sentence()),
+                "{refusal:?}: {error:?}"
             );
+        }
+        for refusal in [
+            DesktopRefusal::NotReadyInTime,
+            DesktopRefusal::TransportLost,
+            DesktopRefusal::InvalidAnswer,
+        ] {
+            let error = refusal_error(refusal);
+            assert!(
+                matches!(&error, AppError::Upstream(reason) if reason == refusal.sentence()),
+                "{refusal:?}: {error:?}"
+            );
+        }
+        let old = refusal_error(DesktopRefusal::DaemonTooOld);
+        assert!(
+            matches!(&old, AppError::Precondition(reason) if reason.contains("cw daemon repair")),
+            "{old:?}"
+        );
+        assert!(matches!(
+            refusal_error(DesktopRefusal::Failed),
+            AppError::InternalMsg(_)
+        ));
+    }
+
+    #[test]
+    fn a_daemon_that_is_not_ready_is_told_without_its_own_text() {
+        let not_ready = |state| DaemonClientError::NotReady {
+            state,
+            message: WORKLOAD_TEXT.into(),
+        };
+        let cases = [
+            (not_ready(DaemonState::Starting), "still starting"),
+            (not_ready(DaemonState::UpgradeRequired), "cw daemon repair"),
+            (not_ready(DaemonState::Unsupported), "cw daemon repair"),
+            (not_ready(DaemonState::Unhealthy), "cw daemon status"),
+            (
+                DaemonClientError::MissingCapability {
+                    capability: WORKLOAD_TEXT.into(),
+                },
+                "cw daemon repair",
+            ),
+            (
+                DaemonClientError::Status(tonic::Status::unavailable(WORKLOAD_TEXT)),
+                "transport was lost",
+            ),
+            (DaemonClientError::Connect, "transport was lost"),
+        ];
+        for (error, expected) in cases {
+            let rendered = daemon_error(error);
+            let text = format!("{rendered:?} {rendered}");
+            assert!(text.contains(expected), "{text}");
+            assert!(!text.contains("workload-chosen"), "{text}");
         }
     }
 }

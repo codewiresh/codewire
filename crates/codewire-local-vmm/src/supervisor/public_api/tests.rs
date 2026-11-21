@@ -1,3 +1,4 @@
+use super::connect_only::connect_content_type;
 use super::*;
 use std::collections::BTreeMap;
 
@@ -6,6 +7,7 @@ use codewire_proto::codewire::v1::{
 };
 use connectrpc::Protocol;
 use connectrpc::client::{ClientConfig, Http2Connection};
+use http::HeaderValue;
 use prost::Message as _;
 
 use crate::uds::{bind_owner_only_listener, owner_only_connector, remove_bound_socket};
@@ -750,6 +752,100 @@ async fn real_uds_connect_client_shares_the_owner_only_supervisor_endpoint() {
     );
 
     drop(grpc_client);
+    shutdown_tx.send(()).unwrap();
+    server.await.unwrap();
+    remove_bound_socket(&socket, &socket_identity).unwrap();
+    drop(parent);
+}
+
+#[tokio::test]
+async fn the_desktop_service_is_served_on_the_owner_only_socket_and_scoped_before_any_daemon() {
+    let (parent, core) =
+        super::super::tests::test_supervisor_core(super::super::tests::project_environment());
+    let socket = core.config.supervisor_socket();
+    let service = super::super::tests::test_supervisor_service(core);
+    let namespace = service.public_namespace_id().await.unwrap();
+    let (listener, socket_identity) = bind_owner_only_listener(&socket).unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server_service = service.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, supervisor_router(server_service))
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    let authority: http::Uri = "http://codewire-local-control".parse().unwrap();
+    let transport = Http2Connection::connect_with_connector(
+        owner_only_connector(&socket).unwrap(),
+        authority.clone(),
+    )
+    .await
+    .unwrap()
+    .shared(32);
+    let desktop = proto::EnvironmentDesktopServiceClient::new(
+        transport.clone(),
+        ClientConfig::new(authority.clone()).proto(),
+    );
+
+    // A VM that does not exist, and another namespace's coordinates, are
+    // refused on each call before any guest daemon is looked for.
+    let unknown = Uuid::new_v4().to_string();
+    let foreign = Uuid::new_v4().to_string();
+    for (org_id, environment_id, code) in [
+        (
+            namespace.to_string(),
+            unknown.clone(),
+            connectrpc::ErrorCode::NotFound,
+        ),
+        (foreign, unknown, connectrpc::ErrorCode::NotFound),
+    ] {
+        let read = desktop
+            .get_desktop(proto::GetDesktopRequest {
+                org_id: org_id.clone(),
+                environment_id: environment_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("GetDesktop is scoped");
+        assert_eq!(read.code, code, "{read:?}");
+        let started = desktop
+            .start_desktop(proto::StartDesktopRequest {
+                org_id: org_id.clone(),
+                environment_id: environment_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("StartDesktop is scoped");
+        assert_eq!(started.code, code, "{started:?}");
+        let stopped = desktop
+            .stop_desktop(proto::StopDesktopRequest {
+                org_id,
+                environment_id,
+                ..Default::default()
+            })
+            .await
+            .expect_err("StopDesktop is scoped");
+        assert_eq!(stopped.code, code, "{stopped:?}");
+    }
+
+    // The route is Connect only, as the other public routes are.
+    let grpc = proto::EnvironmentDesktopServiceClient::new(
+        transport,
+        ClientConfig::new(authority)
+            .proto()
+            .with_protocol(Protocol::Grpc),
+    );
+    assert!(
+        grpc.get_desktop(proto::GetDesktopRequest::default())
+            .await
+            .is_err()
+    );
+
+    drop(grpc);
+    drop(desktop);
     shutdown_tx.send(()).unwrap();
     server.await.unwrap();
     remove_bound_socket(&socket, &socket_identity).unwrap();

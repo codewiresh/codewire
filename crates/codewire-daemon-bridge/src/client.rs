@@ -201,6 +201,27 @@ impl DaemonClient {
             .into_inner())
     }
 
+    /// The desktop calls return the daemon's answer and its refusal as they
+    /// came, for [`crate::desktop`] to vet: a refusal's message is the
+    /// workload's own text.
+    pub async fn start_desktop(&self) -> Result<Option<v1::Desktop>, tonic::Status> {
+        let mut client = self.inner.clone();
+        let request = self.authorized(v1::StartDesktopRequest {});
+        Ok(client.start_desktop(request).await?.into_inner().desktop)
+    }
+
+    pub async fn get_desktop(&self) -> Result<Option<v1::Desktop>, tonic::Status> {
+        let mut client = self.inner.clone();
+        let request = self.authorized(v1::GetDesktopRequest {});
+        Ok(client.get_desktop(request).await?.into_inner().desktop)
+    }
+
+    pub async fn stop_desktop(&self) -> Result<Option<v1::Desktop>, tonic::Status> {
+        let mut client = self.inner.clone();
+        let request = self.authorized(v1::StopDesktopRequest {});
+        Ok(client.stop_desktop(request).await?.into_inner().desktop)
+    }
+
     pub async fn get_health(&self) -> Result<v1::GetHealthResponse, DaemonClientError> {
         let mut client = self.inner.clone();
         Ok(client

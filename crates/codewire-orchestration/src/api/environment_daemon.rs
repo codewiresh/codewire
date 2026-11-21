@@ -48,9 +48,7 @@ mod repair_database_tests;
 mod session_mutation;
 
 pub(crate) use activity::{DaemonActivity, environment_daemon_activity_for_worker};
-pub use desktop::{
-    get_environment_desktop_core, start_environment_desktop_core, stop_environment_desktop_core,
-};
+pub(crate) use desktop::environment_desktop_daemon_core;
 
 const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);

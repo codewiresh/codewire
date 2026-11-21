@@ -53,9 +53,10 @@ The desktop is built on these, which are on `main`:
   `desktop.vnc.v1` ("What the daemon does").
 - The hosted service, `codewire.v1.EnvironmentDesktopService`, with its
   generated clients and the Rust, TypeScript, Go and Python SDK wrappers
-  ("Starting and stopping"). It is reachable with an API key. The local
-  supervisor's operations, `cw desktop` and the dashboard viewer are not
-  built, so nothing a user runs starts a desktop yet.
+  ("Starting and stopping"). It is reachable with an API key.
+- The same service on a local VM's supervisor, to the VM's owner over its
+  owner-only socket (supervisor protocol 25). `cw desktop` and the dashboard
+  viewer are not built, so nothing a user runs starts a desktop yet.
 
 ## In the image
 
@@ -330,10 +331,15 @@ own text, and none of that text reaches a caller or a log:
   eight lowercase letters or digits, and a start time a client can format,
   or none. Any other answer is an upstream error and no part of it is kept.
 
-**Local.** The supervisor's control protocol carries the same three
-operations for the VM's owner, over the owner-only socket, and calls the
-guest daemon. A VM whose runtime predates the capability is refused with the
-command that moves it onto the installed runtime.
+**Local.** The supervisor serves the same service,
+`codewire.v1.EnvironmentDesktopService`, to the VM's owner over its
+owner-only socket, as it serves the session, exec and file services, and
+calls the guest daemon; `cw` never holds the guest daemon's credential. It
+vets the daemon's answer exactly as the hosted control plane does and tells
+a refusal in its own sentences. A VM whose runtime predates the capability
+is refused with the command that moves it onto the installed runtime. A
+supervisor started by an older `cw` has no such service; it says so by its
+protocol, and `cw desktop` names `cw upgrade --vms`.
 
 ## `cw desktop`
 

@@ -28,6 +28,9 @@ use crate::host::supervisor_peer::SupervisorPeerPin;
 use crate::supervisor::{NativeRuntimeConfig, NativeSupervisorClient, SupervisorError};
 use crate::uds::{UdsError, supervisor_peer_connector};
 
+mod desktop;
+pub use desktop::NativePublicDesktopClient;
+
 const LOCAL_AUTHORITY: &str = "http://codewire-local-control";
 const FILE_CHUNK_BYTES: usize = 64 * 1024;
 const MAXIMUM_DAEMON_LOG_BYTES: usize = 64 * 1024;

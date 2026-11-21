@@ -9,9 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::extract::Request as AxumRequest;
-use axum::middleware::Next;
-use axum::response::{IntoResponse as _, Response as AxumResponse};
 use buffa_types::{Duration as ProtoDuration, Timestamp};
 use codewire_daemon::client::{
     DAEMON_MINIMUM_PROTOCOL_VERSION, DAEMON_PROTOCOL_VERSION,
@@ -25,14 +22,16 @@ use codewire_daemon_bridge::session::{
 };
 use codewire_proto::codewire::v1 as proto;
 use connectrpc::{RequestContext, ServiceRequest, ServiceResult, ServiceStream};
-use http::{HeaderValue, Method, StatusCode as HttpStatus, header};
 use tonic::Request as TonicRequest;
 
 use super::*;
 
+mod connect_only;
 mod daemon_logs;
+mod desktop;
 mod file_errors;
 mod session_error;
+use connect_only::enforce_connect_only;
 use file_errors::local_file_error;
 use session_error::local_session_error;
 
@@ -41,8 +40,6 @@ const PUBLIC_ENVIRONMENT_ROUTE: &str = "/codewire.v1.EnvironmentService/{*method
 const PUBLIC_SESSION_ROUTE: &str = "/codewire.v1.EnvironmentSessionService/{*method}";
 const PUBLIC_EXEC_ROUTE: &str = "/codewire.v1.ExecService/{*method}";
 const PUBLIC_FILE_ROUTE: &str = "/codewire.v1.FileService/{*method}";
-const ACCEPT_POST: &str =
-    "application/connect+json, application/connect+proto, application/json, application/proto";
 const GIB: u64 = 1024 * 1024 * 1024;
 const DAEMON_REPAIR_TIMEOUT: Duration = Duration::from_secs(180);
 const REQUIRED_LOCAL_DAEMON_CAPABILITIES: &[&str] = &[
@@ -87,6 +84,8 @@ pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
         .route_service(PUBLIC_FILE_ROUTE, files)
         .layer(axum::middleware::from_fn(enforce_connect_only));
 
+    let desktop = desktop::router(supervisor.clone());
+
     let router = axum::Router::new();
     let router = router.route_service(
         "/codewire.local.v1.LinuxCwRuntimeService/{*method}",
@@ -116,6 +115,7 @@ pub(super) fn supervisor_router(supervisor: SupervisorRpc) -> axum::Router {
         .merge(sessions)
         .merge(exec)
         .merge(files)
+        .merge(desktop)
 }
 
 fn environment_router(supervisor: SupervisorRpc) -> connectrpc::Router {
@@ -147,42 +147,6 @@ fn environment_router(supervisor: SupervisorRpc) -> connectrpc::Router {
             })
     }));
     router
-}
-
-async fn enforce_connect_only(request: AxumRequest, next: Next) -> AxumResponse {
-    let admitted = match *request.method() {
-        Method::GET => true,
-        Method::POST => {
-            let mut values = request.headers().get_all(header::CONTENT_TYPE).iter();
-            let first = values.next();
-            values.next().is_none() && first.is_some_and(connect_content_type)
-        }
-        _ => false,
-    };
-    if admitted {
-        return next.run(request).await;
-    }
-    let mut response = HttpStatus::UNSUPPORTED_MEDIA_TYPE.into_response();
-    response.headers_mut().insert(
-        http::HeaderName::from_static("accept-post"),
-        HeaderValue::from_static(ACCEPT_POST),
-    );
-    response
-}
-
-fn connect_content_type(value: &HeaderValue) -> bool {
-    let Ok(value) = value.to_str() else {
-        return false;
-    };
-    let essence = value.split(';').next().unwrap_or_default().trim();
-    [
-        "application/connect+json",
-        "application/connect+proto",
-        "application/json",
-        "application/proto",
-    ]
-    .iter()
-    .any(|allowed| essence.eq_ignore_ascii_case(allowed))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
