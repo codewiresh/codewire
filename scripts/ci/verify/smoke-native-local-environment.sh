@@ -88,7 +88,7 @@ MANAGED_AGENT_UPDATE_A_SHA256=''
 CREDENTIAL_ROOT=''
 CREDENTIAL_PROFILE_NAME='native-broker'
 # The login the synthetic broker's GitHub `/user` returns
-# (codewire-credential-broker runtime.rs); native GitHub login records it as
+# (codewire-credential-broker runtime/synthetic_refresh.rs); native GitHub login records it as
 # the credential's account hint. test-native-managed-update-entrypoint.py
 # keeps the two equal.
 readonly SYNTHETIC_GITHUB_LOGIN='synthetic-smoke'

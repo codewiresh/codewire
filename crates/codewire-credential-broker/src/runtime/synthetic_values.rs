@@ -34,13 +34,13 @@ pub(super) fn canary(value: &str, prefix: &str) -> bool {
 /// have supplied in its place.
 pub(super) fn unserved_credential(host: SyntheticProviderHost, headers: &HeaderMap) -> bool {
     let single = |name: &str| headers.get_all(name).iter().count() == 1;
-    let bearer = |prefix: &str| {
+    let bearer = |accepts: &dyn Fn(&str) -> bool| {
         single("authorization")
             && headers
                 .get("authorization")
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.strip_prefix("Bearer "))
-                .is_some_and(|value| canary(value, prefix))
+                .is_some_and(accepts)
     };
     if ["cookie", "proxy-authorization", "host"]
         .iter()
@@ -51,7 +51,7 @@ pub(super) fn unserved_credential(host: SyntheticProviderHost, headers: &HeaderM
     match host {
         SyntheticProviderHost::Codex => {
             !headers.contains_key("x-api-key")
-                && bearer("cwlocalbroker")
+                && bearer(&super::synthetic_refresh::codex_bearer)
                 && single("chatgpt-account-id")
                 && headers
                     .get("chatgpt-account-id")
@@ -61,7 +61,7 @@ pub(super) fn unserved_credential(host: SyntheticProviderHost, headers: &HeaderM
         SyntheticProviderHost::OpenAi => {
             !headers.contains_key("x-api-key")
                 && !headers.contains_key("chatgpt-account-id")
-                && bearer("cwlocalopenai")
+                && bearer(&|value| canary(value, "cwlocalopenai"))
         }
         SyntheticProviderHost::Anthropic => {
             !headers.contains_key("authorization")

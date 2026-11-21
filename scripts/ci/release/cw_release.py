@@ -102,6 +102,7 @@ BUILD_RECORD_FIELDS = {"package_version", "rustc", "source_revision", "source_tr
 NON_SHIPPING_INPUTS = {
     "crates/codewire-credential-broker/src/runtime/native_managed_smoke.rs": "local-broker-synthetic-smoke",
     "crates/codewire-credential-broker/src/runtime/synthetic_claude.rs": "local-broker-synthetic-smoke",
+    "crates/codewire-credential-broker/src/runtime/synthetic_refresh.rs": "local-broker-synthetic-smoke",
     "crates/codewire-local-vmm/src/non_shipping_synthetic_oci_input_smoke.rs": "synthetic-oci-input-smoke",
     "crates/codewire-cli/src/fuzzing.rs": "fuzzing",
 }

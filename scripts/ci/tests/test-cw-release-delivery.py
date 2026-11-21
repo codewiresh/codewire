@@ -706,6 +706,20 @@ class SourceDigestTest(unittest.TestCase):
                             declared.append(declaring.relative_to(root).as_posix())
                 self.assertTrue(declared, f"{relative} is not declared under cfg(feature = {feature!r})")
 
+    def test_the_synthetic_codex_jwt_is_recognized_only_in_a_non_shipping_file(self):
+        # A release must treat the synthetic smoke's unsigned Codex JWT as any
+        # unknown bearer (#5539): only a file a release refuses to compile may
+        # define the check that recognizes it.
+        root = Path(release.__file__).resolve().parents[3]
+        definitions = sorted(
+            path.relative_to(root).as_posix()
+            for path in (root / "crates").rglob("*.rs")
+            if re.search(r'\bfn (codex_jwt|codex_bearer)\b', path.read_text())
+        )
+        self.assertTrue(definitions)
+        for relative in definitions:
+            self.assertIn(relative, release.NON_SHIPPING_INPUTS)
+
     def test_only_the_verified_runtime_document_is_admitted_outside_the_repository(self):
         base = self.base / "embedded-runtime-document"
         base.mkdir()

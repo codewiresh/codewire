@@ -100,8 +100,8 @@ smoke_cw() {
     def test_synthetic_github_login_matches_the_synthetic_broker(self):
         smoke = re.search(r"^readonly SYNTHETIC_GITHUB_LOGIN='([^']+)'$", SOURCE.read_text(), re.MULTILINE)
         broker = re.search(
-            r'\("GET", "https://api\.github\.com/user"\) => \{\s*serde_json::json!\(\{"id": 1, "login": "([^"]+)"\}\)',
-            (ROOT / 'crates/codewire-credential-broker/src/runtime.rs').read_text())
+            r'\("GET", "https://api\.github\.com/user"\) => json!\(\{"id": 1, "login": "([^"]+)"\}\)',
+            (ROOT / 'crates/codewire-credential-broker/src/runtime/synthetic_refresh.rs').read_text())
         self.assertIsNotNone(smoke, 'smoke lacks its synthetic GitHub login')
         self.assertIsNotNone(broker, 'synthetic broker lacks its GitHub /user login')
         self.assertEqual(smoke[1], broker[1])
