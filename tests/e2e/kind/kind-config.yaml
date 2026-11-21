@@ -13,6 +13,14 @@
 # The in-cluster containerPorts and NodePorts always stay fixed.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
+# A device the kubelet adds to a container belongs to that container's own
+# user, so the `standard` profile's non-root container can open /dev/kvm,
+# which is root:kvm 0660 inside the node (#5602). A cluster created before
+# this gets it from `make kind-device-ownership`.
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri"]
+      device_ownership_from_security_context = true
 nodes:
   - role: control-plane
     kubeadmConfigPatches:

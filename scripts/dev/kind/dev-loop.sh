@@ -6,6 +6,9 @@
 #   seed-login      seed e2e-owner@codewire.sh / SecureTestPass9#
 #   runtime-images  load the product's default workspace and DinD images, by
 #                   digest, as Dev runs them (--dry-run prints the plan)
+#   device-ownership
+#                   make containerd give a device the kubelet adds the
+#                   container's own user, in place, as a new cluster has it
 #   watch           make the cluster serve KIND_PUBLIC_ORIGIN like Dev (browser
 #                   origin, default images), then serve the current dashboard
 #                   source there
@@ -211,6 +214,60 @@ cmd_runtime_images() {
   done
 }
 
+# A device the kubelet adds to a container belongs to the container's own user
+# only when containerd is told so; the `standard` profile's non-root container
+# opens /dev/kvm that way (#5602), where the node has it root:kvm 0660. A new
+# cluster gets the setting from tests/e2e/kind/kind-config.yaml; this sets it on
+# a retained cluster's nodes and restarts containerd only where it changed.
+# Running containers outlive the restart, each under its own shim.
+readonly CRI_TABLE='[plugins."io.containerd.grpc.v1.cri"]'
+readonly DEVICE_OWNERSHIP_KEY=device_ownership_from_security_context
+readonly CONTAINERD_CONFIG=/etc/containerd/config.toml
+
+# Whether containerd on node <1> runs with the setting on; fails when it
+# cannot be asked.
+node_device_ownership() {
+  local info
+  info="$(docker exec "$1" crictl info)" || return 2
+  grep -q "\"${DEVICE_OWNERSHIP_KEY}\": true" <<<"$info"
+}
+
+cmd_device_ownership() {
+  local node state tries
+  [ "$#" = 0 ] || die "usage: $0 device-ownership"
+  kind_profile_lock "$ROOT" || exit $?
+  require_cluster
+  for node in $(kind get nodes --name "$KIND_CLUSTER_NAME"); do
+    state=0
+    node_device_ownership "$node" || state=$?
+    [ "$state" != 2 ] || die "could not read containerd's settings on ${node}"
+    if [ "$state" = 0 ]; then
+      log "${node}: containerd already gives a device the container's own user"
+      continue
+    fi
+    # A key someone set otherwise is theirs to change, not this command's.
+    ! docker exec "$node" grep -q "^[[:space:]]*${DEVICE_OWNERSHIP_KEY}[[:space:]]*=" "$CONTAINERD_CONFIG" \
+      || die "${node}: ${CONTAINERD_CONFIG} already sets ${DEVICE_OWNERSHIP_KEY}, but containerd does not run with it on"
+    docker exec "$node" grep -Fqx "$CRI_TABLE" "$CONTAINERD_CONFIG" \
+      || die "${node}: ${CONTAINERD_CONFIG} has no ${CRI_TABLE} table"
+    log "${node}: setting ${DEVICE_OWNERSHIP_KEY} and restarting containerd"
+    docker exec "$node" sed -i \
+      's/^\[plugins\."io\.containerd\.grpc\.v1\.cri"\]$/&\n  '"${DEVICE_OWNERSHIP_KEY}"' = true/' \
+      "$CONTAINERD_CONFIG" \
+      || die "could not edit ${CONTAINERD_CONFIG} on ${node}"
+    docker exec "$node" systemctl restart containerd \
+      || die "could not restart containerd on ${node}"
+    tries=0
+    until node_device_ownership "$node"; do
+      tries=$((tries + 1))
+      [ "$tries" -lt 60 ] || die "${node}: containerd did not come back with ${DEVICE_OWNERSHIP_KEY} on within 60 s"
+      sleep 1
+    done
+  done
+  kubectl --context "$CONTEXT" wait node --all --for=condition=Ready --timeout=120s >/dev/null \
+    || die "the nodes of ${KIND_CLUSTER_NAME} are not Ready after containerd restarted"
+}
+
 release_watch_port() {
   # A process name and a listening port do not establish ownership. A retained
   # review watcher may belong to another session; leave every listener intact.
@@ -283,7 +340,8 @@ cmd_status() {
 case "${1:-}" in
   seed-login) cmd_seed_login ;;
   runtime-images) shift; cmd_runtime_images "$@" ;;
+  device-ownership) shift; cmd_device_ownership "$@" ;;
   watch) cmd_watch ;;
   status) cmd_status ;;
-  *) echo "usage: $0 <seed-login|runtime-images [--dry-run]|watch|status>" >&2; exit 2 ;;
+  *) echo "usage: $0 <seed-login|runtime-images [--dry-run]|device-ownership|watch|status>" >&2; exit 2 ;;
 esac

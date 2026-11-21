@@ -790,13 +790,15 @@ run_paths_case orchestrator_helpers pull_request refs/pull/20017/head false \
   scripts/ci/tests/test-github-repository-protection.py
 run_paths_case kind_runtime_images_fixture pull_request refs/pull/20014/head false \
   'policy policy_shell security security_js' scripts/ci/tests/test-kind-runtime-images.sh
+run_paths_case kind_device_ownership_fixture pull_request refs/pull/20018/head false \
+  'policy policy_shell security security_js' scripts/ci/tests/test-kind-device-ownership.sh
 run_paths_case kind_watch_github_app_fixture pull_request refs/pull/20015/head false \
   'policy policy_shell security security_js' scripts/ci/tests/test-kind-watch-github-app.sh
 # The retained-cluster helpers are policy even where Kind would run; any other
 # scripts/dev/kind helper still selects the Kind gate.
 run_paths_case kind_retained_helpers_main push refs/heads/main false \
   'policy policy_shell security security_js' scripts/dev/kind/dev-loop.sh scripts/ci/tests/test-kind-runtime-images.sh \
-  scripts/ci/tests/test-kind-watch-github-app.sh
+  scripts/ci/tests/test-kind-watch-github-app.sh scripts/ci/tests/test-kind-device-ownership.sh
 run_paths_case kind_deploy_helper_main push refs/heads/main false \
   'policy policy_shell security security_js' scripts/dev/kind/deploy-service.sh scripts/dev/kind/trust-roots.sh \
   deployments/docker/kind-dev-binary.Dockerfile

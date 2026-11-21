@@ -916,6 +916,7 @@ if [ "$event_selected" = false ]; then
       scripts/ci/tests/test-sync-local-secrets.sh|\
       scripts/ci/tests/test-kind-stripe-test-keys.sh|\
       scripts/ci/tests/test-kind-runtime-images.sh|\
+      scripts/ci/tests/test-kind-device-ownership.sh|\
       scripts/ci/tests/test-kind-watch-github-app.sh|\
       scripts/ci/tests/fixtures/cargo-cache-df.sh|\
       scripts/ci/tests/fixtures/ci-runners.sh|scripts/ci/tests/ci_runner_fixtures.py|\

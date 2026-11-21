@@ -586,6 +586,7 @@ make kind-db-restore BACKUP=<dir>  # return the databases to a backup
 make kind-credentials-real   # real credential-service, GitHub App copied from OpenBao
 make kind-seed-login         # e2e-owner@codewire.sh / SecureTestPass9#
 make kind-runtime-images     # default workspace and DinD images, by digest, from public sources
+make kind-device-ownership   # containerd gives an added device the container's own user
 make kind-watch              # current dashboard on 127.0.0.1:5182 = http://localhost:4174/
 make kind-status             # cluster, ingress, dashboard, credential mode and origins
 make kind-credentials-fake   # back to the gate's synthetic fixture
@@ -615,6 +616,16 @@ does not pin the same digest, or a node record naming another digest stops the
 load. `scripts/dev/kind/dev-loop.sh runtime-images --dry-run` prints the plan
 without a cluster. Changing either constant's registry means changing its row,
 which `scripts/ci/tests/test-kind-runtime-images.sh` enforces.
+
+`kind-device-ownership` sets containerd's `device_ownership_from_security_context`
+on every node of a retained cluster, so a device the kubelet adds, such as the
+`standard` profile's `/dev/kvm`, belongs to the container's own user; inside a
+Kind node `/dev/kvm` is root:kvm 0660. A new cluster gets the setting from
+`tests/e2e/kind/kind-config.yaml`, so this is needed once per older cluster. It
+restarts containerd only on a node whose containerd does not already run with
+it, waits for the nodes to be Ready, and refuses a config that already sets the
+key otherwise. Running containers keep running across the restart.
+`scripts/ci/tests/test-kind-device-ownership.sh` holds its contract.
 
 `make e2e-kind` (with `KEEP_KIND_CLUSTER=1`) also leaves a usable cluster, but
 it runs every suite. It is neither a landing gate nor an iteration step; run it

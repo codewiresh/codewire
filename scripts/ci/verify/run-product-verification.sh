@@ -900,6 +900,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-sync-local-secrets.sh
   scripts/ci/tests/test-kind-stripe-test-keys.sh
   scripts/ci/tests/test-kind-runtime-images.sh
+  scripts/ci/tests/test-kind-device-ownership.sh
   scripts/ci/tests/test-kind-watch-github-app.sh
   scripts/ci/tests/test-source-approval-workflow.sh
   scripts/ci/tests/test-policy-drift.sh

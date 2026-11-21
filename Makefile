@@ -1,4 +1,4 @@
-.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-list kind-down kind-deploy kind-trust-roots kind-db-reset kind-db-restore kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-runtime-images kind-watch kind-status design-system design-check e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind seed-test-user seed-e2e-users build build-web clean wasm build-daemon build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
+.PHONY: help up up-billing down dev dev-down db-init web dashboard-ssr-dev dashboard-watch dashboard-watch-kind kind-up kind-list kind-down kind-deploy kind-trust-roots kind-db-reset kind-db-restore kind-test kind-credentials-real kind-credentials-fake kind-seed-login kind-runtime-images kind-device-ownership kind-watch kind-status design-system design-check e2e e2e-kind kind-billing-listen kind-forwards-start kind-forwards-stop kind-forwards-status kind-forwards-cleanup kind-clean-runtime test-ui test-ui-dashboard-ssr test-ui-kind seed-test-user seed-e2e-users build build-web clean wasm build-daemon build-dashboard-local build-sandbox-controller build-derp-local build-services-local rollout-local-runtime local-runtime deploy-local deploy-local-static prune-local-legacy-runtime kind-cluster kind-ingress kind-label-local-nodes kind-sandbox-namespace ios ios-test ios-clean proto-tools proto-lint proto-generate proto-drift-check
 .PHONY: dogfood cli-build cli-smoke cli-install cli-install-user cli-install-system macos-local-runtime scan-supply-chain verify-dashboard-image sync-local-secrets kind-stripe-test-keys kind-stripe-test-keys-remove accept-secrets-credentials
 
 # The older codewire/default-namespace topology has its own fixed endpoints.
@@ -277,6 +277,11 @@ kind-seed-login:
 
 kind-runtime-images:
 	./scripts/dev/kind/dev-loop.sh runtime-images
+
+# Make the retained cluster's containerd give a device the container's own
+# user, as a new cluster has it, so a `standard` Pod opens /dev/kvm (#5602).
+kind-device-ownership:
+	./scripts/dev/kind/dev-loop.sh device-ownership
 
 kind-watch:
 	$(KIND_ORIGIN_ENV) ./scripts/dev/kind/dev-loop.sh watch
