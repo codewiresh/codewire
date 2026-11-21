@@ -13,9 +13,10 @@ use codewire_server_core::auth::AuthUser;
 use sqlx::Row;
 
 use crate::sandbox::template::{
-    RUNTIME_CLASS_CONFIDENTIAL, RUNTIME_CLASS_RUNC, RUNTIME_PROFILE_COMMODITY,
-    RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_NONE, RUNTIME_PROFILE_RUNC,
-    is_commodity_runtime_class, runtime_profile_spec,
+    RUNTIME_CLASS_CONFIDENTIAL, RUNTIME_CLASS_RUNC, RUNTIME_CLASS_STANDARD,
+    RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_NONE,
+    RUNTIME_PROFILE_RUNC, RUNTIME_PROFILE_STANDARD, is_commodity_runtime_class,
+    runtime_profile_spec,
 };
 
 use super::ApiState;
@@ -301,6 +302,7 @@ fn runtime_from_class(runtime_class: &str) -> TrustReportRuntime {
         RUNTIME_CLASS_RUNC => RUNTIME_PROFILE_RUNC,
         class if is_commodity_runtime_class(class) => RUNTIME_PROFILE_COMMODITY,
         RUNTIME_CLASS_CONFIDENTIAL => RUNTIME_PROFILE_CONFIDENTIAL,
+        RUNTIME_CLASS_STANDARD => RUNTIME_PROFILE_STANDARD,
         other => other,
     };
     let spec = runtime_profile_spec(profile, "profile-default", false);
@@ -314,7 +316,8 @@ fn runtime_from_class(runtime_class: &str) -> TrustReportRuntime {
     let handler = match runtime_class.as_str() {
         RUNTIME_CLASS_CONFIDENTIAL => "kata-qemu-snp",
         class if is_commodity_runtime_class(class) => "kata-clh",
-        RUNTIME_CLASS_RUNC => "runc",
+        // The node's ordinary handler; Codewire's runtime starts the VM.
+        RUNTIME_CLASS_RUNC | RUNTIME_CLASS_STANDARD => "runc",
         "" => "unknown",
         other => other,
     }
@@ -375,13 +378,18 @@ fn trust_sections(
         );
     }
 
-    let trust_level = if matches!(profile, RUNTIME_PROFILE_COMMODITY | RUNTIME_PROFILE_RUNC) {
+    let trust_level = if matches!(
+        profile,
+        RUNTIME_PROFILE_COMMODITY | RUNTIME_PROFILE_STANDARD | RUNTIME_PROFILE_RUNC
+    ) {
         TRUST_LEVEL_NOT_CONFIDENTIAL
     } else {
         TRUST_LEVEL_UNVERIFIED
     };
     let warning = if profile == RUNTIME_PROFILE_COMMODITY {
         "Commodity runtime has a Kata VM boundary but does not make a TEE attestation claim."
+    } else if profile == RUNTIME_PROFILE_STANDARD {
+        "Standard runtime has a VM boundary, started by Codewire's runtime inside the Pod, but does not make a TEE attestation claim."
     } else if profile == RUNTIME_PROFILE_RUNC {
         "runc is a diagnostic/runtime fallback and does not make a VM or TEE attestation claim."
     } else {
@@ -552,6 +560,14 @@ mod tests {
         let runc = runtime_from_class("runc");
         assert_eq!(runc.profile, "runc");
         assert_eq!(runc.handler, "runc");
+
+        let standard = runtime_from_class("standard");
+        assert_eq!(standard.profile, "standard");
+        assert_eq!(standard.runtime_class, "standard");
+        assert_eq!(standard.handler, "runc");
+        assert!(!standard.confidential);
+        let (_, _, summary) = trust_sections(false, "standard");
+        assert_eq!(summary.trust_level, "not_confidential");
     }
 
     #[test]

@@ -68,6 +68,7 @@ _SERVICES = {
     ("ClusterRoleBinding", "codewire-orchestration"),
     ("ConfigMap", "codewire-hosted-egress"),
     ("ConfigMap", "codewire-image-registries"),
+    ("ConfigMap", "codewire-standard-runtime"),
     ("Deployment", "codewire-orchestration"),
     ("NetworkPolicy", "codewire-orchestration-workspace-binding"),
     ("NetworkPolicy", "cw-image-cache"),

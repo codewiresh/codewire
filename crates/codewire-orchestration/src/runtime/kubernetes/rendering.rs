@@ -7,7 +7,8 @@ use crate::sandbox::environment_template_name;
 use crate::sandbox::template::{
     CpuSharingRatio, CredentialRuntimeTemplateConfig, DOCKER_MODE_LOCAL_DIND_DIRECT,
     HostedEgressTemplate, RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL,
-    RuntimeProfileSpec, TemplateOpts, WORKSPACE_KEEPALIVE_COMMAND, render_template_network_policy,
+    RUNTIME_PROFILE_STANDARD, RuntimeProfileSpec, StandardRuntime, TemplateOpts,
+    WORKSPACE_KEEPALIVE_COMMAND, render_template_network_policy,
     render_workspace_daemon_network_policy, runtime_profile_spec, validate_managed_runtime_profile,
 };
 use crate::sandbox::{
@@ -49,6 +50,8 @@ pub struct KubernetesRenderConfig {
     /// What a broker-mode template renders, read at startup while hosted
     /// egress is on (`egress::settings::startup`); `None` off.
     pub hosted_egress: Option<HostedEgressTemplate>,
+    /// What a `standard` workspace runs; `None` where none is configured.
+    pub standard_runtime: Option<StandardRuntime>,
     pub derp_port: i64,
     pub stun_host: String,
     pub stun_port: i64,
@@ -112,10 +115,32 @@ impl KubernetesRenderConfig {
     fn environment_spec(&self, intent: &RenderingIntent) -> RuntimeProfileSpec {
         self.shape(
             &intent.image,
-            &self.runtime_spec(intent.isolation),
+            &self.image_runtime_spec(intent.isolation, &intent.image),
             intent.shape,
         )
         .runtime_profile_spec()
+    }
+
+    /// The runtime an environment of `image` is created on. A `standard` VM
+    /// boots only the image its disk was built from, so an environment that
+    /// names any other image, a user's own or a workspace image the disk was
+    /// not republished for, is created on `commodity` (`SPEC.md` section 4),
+    /// which is a VM too.
+    fn image_runtime_spec(&self, isolation: Isolation, image: &str) -> RuntimeProfileSpec {
+        let spec = self.runtime_spec(isolation);
+        if spec.profile == RUNTIME_PROFILE_STANDARD
+            && !self
+                .standard_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.boots(image))
+        {
+            return runtime_profile_spec(
+                RUNTIME_PROFILE_COMMODITY,
+                &self.docker_mode,
+                self.dind_enabled,
+            );
+        }
+        spec
     }
 
     /// The environment's own rendering: its identity on top of the cluster
@@ -126,7 +151,7 @@ impl KubernetesRenderConfig {
             identity.projection_selection_sha256.is_none() || self.credential_runtime.is_some(),
             "selected environment sources require credential runtime trust"
         );
-        let runtime_spec = self.runtime_spec(intent.isolation);
+        let runtime_spec = self.image_runtime_spec(intent.isolation, &intent.image);
         // A confidential claim is the guest-encrypted raw Block volume of its
         // own class; without one the environment is refused, never given the
         // commodity class.
@@ -179,6 +204,7 @@ impl KubernetesRenderConfig {
                 || !opts.workspace_binding_url.trim().is_empty(),
             "confidential workspaces need the workspace binding listener to measure"
         );
+        opts.validate_standard_runtime()?;
         Ok(opts)
     }
 
@@ -261,6 +287,12 @@ impl KubernetesRenderConfig {
             runtime_spec.profile != RUNTIME_PROFILE_CONFIDENTIAL,
             "confidential workspaces are never pooled"
         );
+        // A pool member must render exactly as the environment that adopts
+        // it, and its first-bind checks know only the Kata classes (#5602).
+        anyhow::ensure!(
+            runtime_spec.profile != RUNTIME_PROFILE_STANDARD,
+            "standard workspaces are not pooled yet"
+        );
         validate_managed_runtime_profile(&runtime_spec, self.allow_diagnostic_runtime)
             .map_err(|error| anyhow::anyhow!("warm pool runtime profile: {error}"))?;
         let opts = self.shape(canonical_workspace_runtime_image(), &runtime_spec, shape);
@@ -314,9 +346,15 @@ impl KubernetesRenderConfig {
             hosted_egress: self.hosted_egress.clone().filter(|_| {
                 matches!(
                     runtime_spec.profile.as_str(),
-                    RUNTIME_PROFILE_COMMODITY | RUNTIME_PROFILE_CONFIDENTIAL
+                    RUNTIME_PROFILE_COMMODITY
+                        | RUNTIME_PROFILE_CONFIDENTIAL
+                        | RUNTIME_PROFILE_STANDARD
                 )
             }),
+            standard_runtime: self
+                .standard_runtime
+                .clone()
+                .filter(|_| runtime_spec.profile == RUNTIME_PROFILE_STANDARD),
             runtime_profile: runtime_spec.profile.clone(),
             docker_mode: runtime_spec.docker_mode.clone(),
             credential_runtime: self.credential_runtime.clone(),

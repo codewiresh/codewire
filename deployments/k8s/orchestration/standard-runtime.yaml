@@ -1,0 +1,20 @@
+# What a `standard` workspace runs (codewire#5602): the runtime image and the
+# workspace image's published disk. Orchestration reads both keys into its
+# environment, and this is the one place a deployment sets them, so an
+# admission rule that pins the same digests can read them here too;
+# orchestration cannot write it. The name carries no hash suffix, so a policy
+# binding can name it.
+#
+# Base ships both empty, so no `standard` workspace renders. An overlay that
+# turns the profile on sets both. docs/CONFIGURATION.md documents each key.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: codewire-standard-runtime
+  namespace: prod
+  # Removing it stops every standard render, so a source change never prunes it.
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+data:
+  SANDBOX_STANDARD_RUNTIME_IMAGE: ""
+  SANDBOX_STANDARD_IMAGE_DISK: ""

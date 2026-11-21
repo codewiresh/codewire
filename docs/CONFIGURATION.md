@@ -14,7 +14,9 @@ settings from repository Actions variables; see
 ## Runtime images
 
 Orchestration renders every Sandbox from three images: the workspace image,
-the daemon (support) image, and the Docker-in-Docker image. The workspace
+the daemon (support) image, and the Docker-in-Docker image. A `standard`
+workspace runs the runtime image instead, and boots the workspace image from
+its published disk. The workspace
 digest is the published pin in `crates/codewire-workspace-image`. The DinD image
 is Docker's official image, pinned by digest in the source. The deployment
 chooses where the workspace and daemon images are pulled from.
@@ -29,6 +31,8 @@ and arm64.
 | `CODEWIRE_WORKSPACE_IMAGE_REPOSITORY` | Required by orchestration | The repository the default workspace image is pulled from, with no tag or digest. Orchestration appends the pinned digest. `cw` and the dashboard send the same digest at its public mirror, `ghcr.io/codewiresh/workspace`, and orchestration resolves it to this repository. The public mirror is itself a valid value. | `registry.example.com/codewire/workspace` |
 | `CODEWIRE_APPROVED_IMAGE_REGISTRIES` | Required by orchestration | Comma-separated registry prefixes, each ending in `/` and with no spaces, that the runtime-node image cache may hold digest-pinned images from. The image cache admission policy reads the same value, so the two always approve the same registries. An image from any other registry is never cached. | `registry.example.com/,docker.io/library/` |
 | `SANDBOX_DAEMON_IMAGE` | Required by orchestration | The support image every workspace runs its daemon from. Pin it by digest: a Start then re-pins an existing Sandbox's daemon to it, but only from an image in the same repository. | `registry.example.com/codewire/daemon@sha256:<digest>` |
+| `SANDBOX_STANDARD_RUNTIME_IMAGE` | With `SANDBOX_RUNTIME_PROFILE=standard` | The runtime image every `standard` workspace container runs (#5602, not yet observed working), pinned by digest. Its entrypoint, `cw __pod-runtime`, boots the workspace's VM; the template sets no command. | `registry.example.com/codewire/pod-runtime@sha256:<digest>` |
+| `SANDBOX_STANDARD_IMAGE_DISK` | With `SANDBOX_RUNTIME_PROFILE=standard` | The workspace image's published disk, as the one line its publish step prints: the disk image by digest, its 64-hex image disk id, its 32-hex build id and the workspace image it was built from by digest, separated by spaces. A `standard` workspace mounts the disk read-only and boots that workspace image from it. Set both or neither. Either one malformed, or the profile `standard` without both or without hosted egress on (`CODEWIRE_HOSTED_EGRESS_ENABLED`), stops orchestration at startup. | `registry.example.com/codewire/workspace-disk@sha256:<digest> <disk id> <build id> registry.example.com/codewire/workspace@sha256:<digest>` |
 
 ### Where the manifests set them
 
@@ -43,6 +47,12 @@ and arm64.
   image cache write when the ConfigMap is missing. Its name carries no hash
   suffix, so a changed value reaches orchestration only after its Pods
   restart. The policy applies the new value at once.
+- `SANDBOX_STANDARD_RUNTIME_IMAGE` and `SANDBOX_STANDARD_IMAGE_DISK` are the
+  keys of the `codewire-standard-runtime` ConfigMap in orchestration's
+  namespace (`deployments/k8s/orchestration/standard-runtime.yaml`), never of
+  `codewire-config`, so they have one source that orchestration cannot
+  write. Base sets both empty. Its name carries no hash suffix, so a changed
+  value reaches orchestration only after its Pods restart.
 
 ### Local clusters
 
@@ -292,7 +302,7 @@ without Stripe, the report says `disabled`. `BILLING_LOOPS` without
 
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
-| `SANDBOX_WORKSPACE_STORAGE_CLASS` | Required by orchestration, except under the `confidential` runtime profile | The StorageClass of every `commodity` workspace volume. There is no default: empty, orchestration refuses to start. A disk resize expands the volume only when this class allows volume expansion. | `standard` |
+| `SANDBOX_WORKSPACE_STORAGE_CLASS` | Required by orchestration, except under the `confidential` runtime profile | The StorageClass of every `commodity` and `standard` workspace volume. There is no default: empty, orchestration refuses to start. A disk resize expands the volume only when this class allows volume expansion. | `standard` |
 | `SANDBOX_CONFIDENTIAL_WORKSPACE_STORAGE_CLASS` | Only where confidential environments are enabled | The StorageClass of every confidential workspace volume, claimed as a raw `volumeMode: Block`, `ReadWriteOncePod` device that the guest encrypts. There is no default: empty, every confidential environment is refused before any workload is created. The class must give a fresh, all-zero device of exactly the requested size with no host encryption layer, and a confidential volume never grows. | `linstor-confidential` |
 
 | `SANDBOX_CONFIDENTIAL_STORAGE_ENABLED` | No | `true` lets the deployment create, start, resize and reach confidential environments. Base `config.env` sets `false`, and Production keeps it off. | `true` |

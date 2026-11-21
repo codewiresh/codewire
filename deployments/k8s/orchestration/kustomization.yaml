@@ -13,6 +13,7 @@ resources:
   - image-cache-authz.yaml
   - image-registries.yaml
   - hosted-egress.yaml
+  - standard-runtime.yaml
   - warm-pool-authz.yaml
   - workspace-binding-network-policy.yaml
 

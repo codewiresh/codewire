@@ -498,6 +498,20 @@ orchestration:
           name: codewire-hosted-egress
           key: CODEWIRE_CLUSTER_DNS_IP
           optional: true
+    # What a `standard` workspace runs (#5602); optional, so a ConfigMap
+    # without them starts with no standard workspace.
+    - name: SANDBOX_STANDARD_RUNTIME_IMAGE
+      valueFrom:
+        configMapKeyRef:
+          name: codewire-standard-runtime
+          key: SANDBOX_STANDARD_RUNTIME_IMAGE
+          optional: true
+    - name: SANDBOX_STANDARD_IMAGE_DISK
+      valueFrom:
+        configMapKeyRef:
+          name: codewire-standard-runtime
+          key: SANDBOX_STANDARD_IMAGE_DISK
+          optional: true
   resources:
     requests:
       cpu: 100m
@@ -536,6 +550,14 @@ hostedEgress:
   CODEWIRE_HOSTED_EGRESS_GATEWAY_CLUSTER_IP: ""
   CODEWIRE_HOSTED_EGRESS_FENCE_REVISION: ""
   CODEWIRE_CLUSTER_DNS_IP: ""
+
+# What a `standard` workspace runs (#5602): codewire-standard-runtime. Both
+# empty, so no `standard` workspace renders; a deployment that turns the
+# profile on sets both. docs/CONFIGURATION.md documents each key. Every value
+# is a string.
+standardRuntime:
+  SANDBOX_STANDARD_RUNTIME_IMAGE: ""
+  SANDBOX_STANDARD_IMAGE_DISK: ""
 
 # DERP, the relay sandbox and client tailnets fall back to.
 derp:

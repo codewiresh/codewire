@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::runtime::{MemberPhase as Phase, Resources, RuntimeMember};
 use crate::sandbox::snapshots::is_clearing_sandbox;
+use crate::sandbox::template::{RUNTIME_CLASS_STANDARD, STANDARD_VMM_CPU_MILLICORES};
 use crate::sandbox::{LABEL_ENV_ID, LABEL_ORG_ID};
 
 /// Stable SandboxClaim UID label.
@@ -87,12 +88,15 @@ fn declared_resources(sb: &Value) -> Resources {
         for c in containers {
             let requests = c.pointer("/resources/requests");
             let cpu = if c.get("name").and_then(Value::as_str) == Some("workspace") {
-                workspace_billed_cpu(c)
+                workspace_billed_millicores(spec, c)
             } else {
-                requests.and_then(|r| r.get("cpu")).and_then(Value::as_str)
+                requests
+                    .and_then(|r| r.get("cpu"))
+                    .and_then(Value::as_str)
+                    .map(parse_quantity_millicores)
             };
             if let Some(cpu) = cpu {
-                out.cpu_millicores += parse_quantity_millicores(cpu);
+                out.cpu_millicores += cpu;
             }
             if let Some(mem) = requests
                 .and_then(|r| r.get("memory"))
@@ -129,12 +133,28 @@ fn declared_resources(sb: &Value) -> Resources {
 }
 
 /// A workspace is billed for its vCPUs: its CPU limit, which stays the full
-/// shape when CPU sharing lowers its request (#3635).
-fn workspace_billed_cpu(workspace: &Value) -> Option<&str> {
-    workspace
+/// shape when CPU sharing lowers its request (#3635). A `standard` limit also
+/// holds the VM process beside the vCPUs, which is not billed.
+fn workspace_billed_millicores(pod_spec: Option<&Value>, workspace: &Value) -> Option<i32> {
+    if let Some(limit) = workspace
         .pointer("/resources/limits/cpu")
-        .or_else(|| workspace.pointer("/resources/requests/cpu"))
         .and_then(Value::as_str)
+    {
+        let standard = pod_spec
+            .and_then(|spec| spec.get("runtimeClassName"))
+            .and_then(Value::as_str)
+            == Some(RUNTIME_CLASS_STANDARD);
+        let overhead = if standard {
+            STANDARD_VMM_CPU_MILLICORES
+        } else {
+            0
+        };
+        return Some(parse_quantity_millicores(limit).saturating_sub(overhead));
+    }
+    workspace
+        .pointer("/resources/requests/cpu")
+        .and_then(Value::as_str)
+        .map(parse_quantity_millicores)
 }
 
 fn workspace_declared_resources(sb: &Value) -> Resources {
@@ -149,8 +169,10 @@ fn workspace_declared_resources(sb: &Value) -> Resources {
         })
     {
         let requests = workspace.pointer("/resources/requests");
-        if let Some(cpu) = workspace_billed_cpu(workspace) {
-            out.cpu_millicores = parse_quantity_millicores(cpu);
+        if let Some(cpu) =
+            workspace_billed_millicores(sb.pointer("/spec/podTemplate/spec"), workspace)
+        {
+            out.cpu_millicores = cpu;
         }
         if let Some(memory) = requests
             .and_then(|value| value.get("memory"))
@@ -406,6 +428,33 @@ mod tests {
         assert_eq!(
             triple(&workspace_declared_resources(&sandbox)),
             (2000, 8192, 80)
+        );
+    }
+
+    #[test]
+    fn a_standard_workspace_is_billed_for_the_size_the_user_chose() {
+        // A 1.5 vCPU, 4 GiB, 20 GiB sandbox on `standard`: its limits also
+        // hold the VM process, its requests are the user's size.
+        let sandbox = json!({
+            "spec": {
+                "podTemplate": { "spec": {
+                    "runtimeClassName": "standard",
+                    "containers": [
+                        { "name": "workspace", "resources": {
+                            "requests": { "cpu": "750m", "memory": "4096Mi" },
+                            "limits": { "cpu": "2500m", "memory": "5120Mi", "codewire.sh/kvm": "1" } } }
+                    ]
+                } },
+                "volumeClaimTemplates": [{
+                    "metadata": { "name": "workspace" },
+                    "spec": { "resources": { "requests": { "storage": "20Gi" } } }
+                }]
+            }
+        });
+        assert_eq!(triple(&declared_resources(&sandbox)), (1500, 4096, 20));
+        assert_eq!(
+            triple(&workspace_declared_resources(&sandbox)),
+            (1500, 4096, 20)
         );
     }
 

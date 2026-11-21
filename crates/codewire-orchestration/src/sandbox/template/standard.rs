@@ -1,0 +1,335 @@
+//! The `standard` workspace Pod (#5602): one container of Codewire's runtime
+//! image, whose entrypoint boots the workspace's VM over the workspace image's
+//! published disk. `SPEC.md` section 4 states what the Pod holds, and "The
+//! `standard` profile" in `docs/dev/CODEWIRE-GUARD-RUNTIME-PROFILES.md` what
+//! admission requires of it.
+
+use std::net::SocketAddrV4;
+
+use serde_json::{Map, Value, json};
+
+use codewire_daemon_proto::{
+    POD_RUNTIME_IMAGE_DISK_BUILD_ID_ENV, POD_RUNTIME_IMAGE_DISK_ID_ENV,
+    POD_RUNTIME_IMAGE_DISK_MOUNT_PATH, POD_RUNTIME_MEMORY_MIB_ENV, POD_RUNTIME_PLATFORM_PEERS_ENV,
+    POD_RUNTIME_STATE_DISK_MIB_ENV, POD_RUNTIME_STATE_MOUNT_PATH, POD_RUNTIME_VCPUS_ENV,
+    POD_RUNTIME_WORKSPACE_IMAGE_ENV,
+};
+
+use super::runtime_policy::{
+    RUNTIME_CLASS_STANDARD, STANDARD_VMM_CPU_MILLICORES, STANDARD_VMM_MEMORY_MIB,
+};
+use super::workspace::{apply_daemon_ready_probes, build_workspace_env};
+use super::{
+    HostedEgressTemplate, SANDBOX_SERVICE_ACCOUNT, TemplateOpts, WORKSPACE_DAEMON_PORT,
+    WORKSPACE_EPHEMERAL_STORAGE_GI, hosted_egress, identity,
+};
+
+/// The runtime image every `standard` workspace runs, by digest.
+pub const STANDARD_RUNTIME_IMAGE_ENV: &str = "SANDBOX_STANDARD_RUNTIME_IMAGE";
+/// The workspace image's published disk, as the line its publish step
+/// prints: `<disk reference>@sha256:<digest> <image disk id> <build id>
+/// <workspace image>@sha256:<manifest digest>`. The runtime refuses a
+/// workspace image other than the one the disk was built from, so both come
+/// from this one value.
+pub const STANDARD_IMAGE_DISK_ENV: &str = "SANDBOX_STANDARD_IMAGE_DISK";
+/// The one device a `standard` Pod is given, by the node's device plugin.
+const KVM_DEVICE_RESOURCE: &str = "codewire.sh/kvm";
+/// The runtime bounds the guest's power-off at 45 s, inside this.
+const TERMINATION_GRACE_SECONDS: i64 = 60;
+const IMAGE_DISK_VOLUME: &str = "image-disk";
+/// The share of the Sandbox's volume its filesystem keeps for itself, which
+/// the VM process cannot use: it is not root, so ext4's reserved blocks are
+/// not its. The disks are sparse files of the rest, so the guest can never
+/// fill the volume under them.
+const STATE_DISK_RESERVE_PERCENT: i64 = 7;
+const STATE_DISK_RESERVE_MIB: i64 = 256;
+/// The VM's root disk, its changes over the image, which `cw __pod-runtime`
+/// also keeps on the Sandbox's volume. It costs the user this much of their
+/// disk against `commodity` until it moves to the Pod's own storage (#5602).
+const STANDARD_ROOT_DISK_MIB: i64 = 4_096;
+/// The smallest disk a `standard` workspace takes: its state disk is then
+/// about 3 GiB.
+const MIN_DISK_GIB: i64 = 8;
+/// What `cw __pod-runtime` accepts (`crates/codewire-local-vmm`).
+const MAX_VCPUS: i64 = 32;
+const MEMORY_MIB_RANGE: std::ops::RangeInclusive<i64> = 128..=65_536;
+
+/// The runtime image and the published workspace image disk a deployment's
+/// `standard` workspaces run, parsed once at startup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StandardRuntime {
+    runtime_image: String,
+    image_disk: String,
+    image_disk_id: String,
+    build_id: String,
+    workspace_image: String,
+}
+
+impl StandardRuntime {
+    /// [`STANDARD_RUNTIME_IMAGE_ENV`] and [`STANDARD_IMAGE_DISK_ENV`]: both,
+    /// or neither for a deployment with no `standard` workspace. Anything
+    /// else is refused, so a typo stops orchestration instead of rendering a
+    /// Pod the node cannot start.
+    pub fn parse(runtime_image: &str, image_disk: &str) -> Result<Option<Self>, String> {
+        let runtime_image = runtime_image.trim();
+        let image_disk = image_disk.trim();
+        if runtime_image.is_empty() && image_disk.is_empty() {
+            return Ok(None);
+        }
+        if !crate::sandbox::warm_pool::digest_pinned(runtime_image) {
+            return Err(format!(
+                "{STANDARD_RUNTIME_IMAGE_ENV} must name the runtime image by digest, such as \
+                 registry.example.com/codewire/pod-runtime@sha256:<digest>; see docs/CONFIGURATION.md"
+            ));
+        }
+        let fields: Vec<&str> = image_disk.split_whitespace().collect();
+        let [reference, image_disk_id, build_id, workspace_image] = fields[..] else {
+            return Err(image_disk_error());
+        };
+        if !crate::sandbox::warm_pool::digest_pinned(reference)
+            || !lowercase_hex(image_disk_id, 64)
+            || !lowercase_hex(build_id, 32)
+            || !crate::sandbox::warm_pool::digest_pinned(workspace_image)
+        {
+            return Err(image_disk_error());
+        }
+        Ok(Some(Self {
+            runtime_image: runtime_image.to_owned(),
+            image_disk: reference.to_owned(),
+            image_disk_id: image_disk_id.to_owned(),
+            build_id: build_id.to_owned(),
+            workspace_image: workspace_image.to_owned(),
+        }))
+    }
+
+    /// Whether the VM boots `image`: it has the manifest digest of the
+    /// workspace image the disk was built from, whatever registry it names.
+    pub fn boots(&self, image: &str) -> bool {
+        manifest_digest(image)
+            .is_some_and(|digest| Some(digest) == manifest_digest(&self.workspace_image))
+    }
+
+    /// [`Self::parse`] of this process's environment.
+    pub fn from_env() -> Result<Option<Self>, String> {
+        let read = |name: &str| std::env::var(name).unwrap_or_default();
+        Self::parse(
+            &read(STANDARD_RUNTIME_IMAGE_ENV),
+            &read(STANDARD_IMAGE_DISK_ENV),
+        )
+    }
+}
+
+fn image_disk_error() -> String {
+    format!(
+        "{STANDARD_IMAGE_DISK_ENV} must be the published disk's line: \
+         <reference>@sha256:<digest>, its 64-hex image disk id, its 32-hex build id and \
+         the workspace image it was built from by digest, separated by spaces; see \
+         docs/CONFIGURATION.md"
+    )
+}
+
+fn manifest_digest(image: &str) -> Option<&str> {
+    image
+        .rsplit_once("@sha256:")
+        .map(|(_, digest)| digest)
+        .filter(|digest| lowercase_hex(digest, 64))
+}
+
+fn lowercase_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// The VM's home, workspace and Docker disk, in MiB, on a volume of
+/// `disk_gib` that also holds its root disk.
+fn state_disk_mib(disk_gib: i64) -> i64 {
+    let volume = disk_gib.saturating_mul(1_024);
+    volume.saturating_mul(100 - STATE_DISK_RESERVE_PERCENT) / 100
+        - STATE_DISK_RESERVE_MIB
+        - STANDARD_ROOT_DISK_MIB
+}
+
+/// The VM's whole vCPUs for a CPU size in millicores.
+fn vcpus(cpu_millicores: i64) -> i64 {
+    cpu_millicores.saturating_add(999) / 1_000
+}
+
+/// The platform peers the guest's daemon may reach: cw-egress, the binding
+/// Service, the public gateway and DERP. DERP's TLS name stays in
+/// `CODEWIRE_DERP_ADDR`, which the daemon reads as on `commodity`.
+fn platform_peers(egress: &HostedEgressTemplate) -> [&str; 4] {
+    let derp = egress
+        .derp_addr
+        .split_once('=')
+        .map_or(egress.derp_addr.as_str(), |(_, address)| address);
+    [
+        &egress.stream_addr,
+        &egress.binding_addr,
+        &egress.gateway_addr,
+        derp,
+    ]
+}
+
+/// A `standard` workspace renders only with its runtime, with hosted egress,
+/// which is its VM's only network, and at a size its VM can take.
+pub(super) fn validate(opts: &TemplateOpts) -> anyhow::Result<()> {
+    let Some(egress) = &opts.hosted_egress else {
+        anyhow::bail!(
+            "the standard runtime profile needs hosted egress on: its VM has no other network"
+        );
+    };
+    anyhow::ensure!(
+        opts.standard_runtime.is_some(),
+        "the standard runtime profile needs {STANDARD_RUNTIME_IMAGE_ENV} and {STANDARD_IMAGE_DISK_ENV}; see docs/CONFIGURATION.md"
+    );
+    anyhow::ensure!(
+        opts.disk_gib >= MIN_DISK_GIB,
+        "a standard workspace keeps its VM's disks on its own volume, so it needs a disk of at least {MIN_DISK_GIB} GiB"
+    );
+    anyhow::ensure!(
+        opts.cpu_millicores > 0 && vcpus(opts.cpu_millicores) <= MAX_VCPUS,
+        "a standard workspace takes from 1 to {MAX_VCPUS} vCPUs"
+    );
+    anyhow::ensure!(
+        MEMORY_MIB_RANGE.contains(&opts.memory_mib),
+        "a standard workspace takes from {} to {} MiB of memory",
+        MEMORY_MIB_RANGE.start(),
+        MEMORY_MIB_RANGE.end()
+    );
+    for peer in platform_peers(egress) {
+        let literal = peer.parse::<SocketAddrV4>().ok().filter(|address| {
+            let ip = address.ip();
+            address.port() != 0
+                && !(ip.is_unspecified()
+                    || ip.is_loopback()
+                    || ip.is_link_local()
+                    || ip.is_broadcast())
+        });
+        anyhow::ensure!(
+            literal.is_some(),
+            "a standard workspace reaches its platform peers by literal IPv4 address and port; {peer:?} is not one"
+        );
+    }
+    Ok(())
+}
+
+/// The one container and its Pod. The container's requests are the user's
+/// size, as on the other profiles, because billing reads them; its limits add
+/// the VM process and the runtime beside the guest.
+pub(super) fn pod_spec(
+    opts: &TemplateOpts,
+    runtime: &StandardRuntime,
+    egress: &HostedEgressTemplate,
+) -> Value {
+    let mut ws = json!({
+        "name": "workspace",
+        "image": runtime.runtime_image,
+        "env": build_workspace_env(opts),
+        "ports": [
+            { "name": "daemon", "containerPort": WORKSPACE_DAEMON_PORT, "protocol": "TCP" },
+        ],
+        "resources": {
+            "requests": {
+                "cpu": format!("{}m", opts.cpu_sharing.request_millicores(opts.cpu_millicores)),
+                "memory": format!("{}Mi", opts.memory_mib),
+                "ephemeral-storage": format!("{WORKSPACE_EPHEMERAL_STORAGE_GI}Gi"),
+            },
+            "limits": {
+                "cpu": format!("{}m", opts.cpu_millicores + i64::from(STANDARD_VMM_CPU_MILLICORES)),
+                "memory": format!("{}Mi", opts.memory_mib + i64::from(STANDARD_VMM_MEMORY_MIB)),
+                "ephemeral-storage": format!("{WORKSPACE_EPHEMERAL_STORAGE_GI}Gi"),
+                KVM_DEVICE_RESOURCE: "1",
+            },
+        },
+        "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "capabilities": { "drop": ["ALL"] },
+        },
+        "volumeMounts": [
+            { "name": "workspace", "mountPath": POD_RUNTIME_STATE_MOUNT_PATH },
+            {
+                "name": IMAGE_DISK_VOLUME,
+                "mountPath": POD_RUNTIME_IMAGE_DISK_MOUNT_PATH,
+                "readOnly": true,
+            },
+            { "name": "codewire-run", "mountPath": "/codewire/run" },
+        ],
+    });
+    let mut volumes = vec![
+        json!({
+            "name": IMAGE_DISK_VOLUME,
+            "image": { "reference": runtime.image_disk, "pullPolicy": "IfNotPresent" },
+        }),
+        json!({ "name": "codewire-run", "emptyDir": { "medium": "Memory" } }),
+    ];
+    identity::mount_identity(opts, &mut ws, &mut volumes, hosted_egress::mount_identity);
+    ws["env"]
+        .as_array_mut()
+        .expect("workspace env")
+        .extend(settings(opts, runtime, egress));
+    apply_daemon_ready_probes(&mut ws, &opts.runtime_profile_spec());
+
+    let mut spec = Map::new();
+    spec.insert("restartPolicy".into(), "Never".into());
+    spec.insert("serviceAccountName".into(), SANDBOX_SERVICE_ACCOUNT.into());
+    spec.insert("automountServiceAccountToken".into(), false.into());
+    spec.insert("enableServiceLinks".into(), false.into());
+    spec.insert(
+        "securityContext".into(),
+        json!({
+            "runAsUser": 1000,
+            "runAsGroup": 1000,
+            "runAsNonRoot": true,
+            "fsGroup": 1000,
+            "fsGroupChangePolicy": "OnRootMismatch",
+            "seccompProfile": { "type": "RuntimeDefault" },
+        }),
+    );
+    // The Pod resolves nothing: the runtime dials literal addresses only.
+    hosted_egress::resolver(&mut spec);
+    spec.insert("runtimeClassName".into(), RUNTIME_CLASS_STANDARD.into());
+    spec.insert(
+        "terminationGracePeriodSeconds".into(),
+        TERMINATION_GRACE_SECONDS.into(),
+    );
+    spec.insert("containers".into(), json!([ws]));
+    spec.insert("volumes".into(), Value::Array(volumes));
+    Value::Object(spec)
+}
+
+/// What `cw __pod-runtime` reads, by its fixed names.
+fn settings(
+    opts: &TemplateOpts,
+    runtime: &StandardRuntime,
+    egress: &HostedEgressTemplate,
+) -> Vec<Value> {
+    [
+        (
+            POD_RUNTIME_VCPUS_ENV,
+            vcpus(opts.cpu_millicores).to_string(),
+        ),
+        (POD_RUNTIME_MEMORY_MIB_ENV, opts.memory_mib.to_string()),
+        (
+            POD_RUNTIME_STATE_DISK_MIB_ENV,
+            state_disk_mib(opts.disk_gib).to_string(),
+        ),
+        (
+            POD_RUNTIME_WORKSPACE_IMAGE_ENV,
+            runtime.workspace_image.clone(),
+        ),
+        (POD_RUNTIME_IMAGE_DISK_ID_ENV, runtime.image_disk_id.clone()),
+        (
+            POD_RUNTIME_IMAGE_DISK_BUILD_ID_ENV,
+            runtime.build_id.clone(),
+        ),
+        (
+            POD_RUNTIME_PLATFORM_PEERS_ENV,
+            platform_peers(egress).join(","),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, value)| json!({ "name": name, "value": value }))
+    .collect()
+}

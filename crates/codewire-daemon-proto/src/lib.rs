@@ -83,6 +83,27 @@ pub const EGRESS_NODE_SERVICE_ACCOUNT: &str = "codewire-egress";
 /// cw-egress's stream port, on the Pod network, reached through its
 /// node-local Service.
 pub const EGRESS_STREAM_PORT: u16 = 8089;
+/// The settings `cw __pod-runtime` reads in a `standard` workspace Pod
+/// (#5602), which orchestration renders: the VM's vCPUs (1 to 32), its
+/// memory in MiB (128 to 65536) and the size in MiB of its home and
+/// workspace disk, a file on the Sandbox's volume.
+pub const POD_RUNTIME_VCPUS_ENV: &str = "CODEWIRE_VM_VCPUS";
+pub const POD_RUNTIME_MEMORY_MIB_ENV: &str = "CODEWIRE_VM_MEMORY_MIB";
+pub const POD_RUNTIME_STATE_DISK_MIB_ENV: &str = "CODEWIRE_VM_STATE_DISK_MIB";
+/// The workspace image the VM's project names; its published disk is at
+/// [`POD_RUNTIME_IMAGE_DISK_MOUNT_PATH`].
+pub const POD_RUNTIME_WORKSPACE_IMAGE_ENV: &str = "CODEWIRE_WORKSPACE_IMAGE";
+/// The published disk's id (64 lowercase hex) and build id (32), as its
+/// `record.json` holds them.
+pub const POD_RUNTIME_IMAGE_DISK_ID_ENV: &str = "CODEWIRE_IMAGE_DISK_ID";
+pub const POD_RUNTIME_IMAGE_DISK_BUILD_ID_ENV: &str = "CODEWIRE_IMAGE_DISK_BUILD_ID";
+/// The platform peers the guest's daemon may reach from the Pod's address:
+/// comma-separated literal `IPv4:port` pairs, never a name.
+pub const POD_RUNTIME_PLATFORM_PEERS_ENV: &str = "CODEWIRE_POD_PLATFORM_PEERS";
+/// The Sandbox's volume, which holds the VM's disks as files.
+pub const POD_RUNTIME_STATE_MOUNT_PATH: &str = "/state";
+/// The workspace image's published disk, an image volume mounted read-only.
+pub const POD_RUNTIME_IMAGE_DISK_MOUNT_PATH: &str = "/image";
 /// Selects the hosted daemon's binding mode: the URL of the dedicated
 /// workspace-binding listener. A binding-mode Pod carries no environment
 /// identity; it comes only from the bind response.

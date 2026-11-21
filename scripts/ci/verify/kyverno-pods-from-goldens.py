@@ -44,8 +44,9 @@ HOSTED = (
     "environment-broker-sandboxtemplate",
     "confidential-broker-sandboxtemplate",
 )
-# Rendered for local Kind only (runc), which the shared policy refuses.
-LOCAL_ONLY = ("identity-free-sandboxtemplate-runc",)
+# Templates the shared policy refuses: local Kind's runc one, and the
+# `standard` profile's until the hosted policy admits its class (#5602).
+LOCAL_ONLY = ("identity-free-sandboxtemplate-runc", "standard-sandboxtemplate")
 PLACEHOLDER_REGISTRY = "registry.example.invalid/"
 # A host, with an optional port and no scheme or path.
 REGISTRY = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?$")

@@ -216,3 +216,102 @@ fn a_runtime_that_is_not_a_vm_never_renders_broker_mode() {
     );
     assert_eq!(opts.hosted_egress, None);
 }
+
+/// `SPEC.md` section 4: a deployment on `standard` runs the workspace image
+/// its disk was built from in its own VM runtime; an environment that names
+/// any other image is created on `commodity`; and `standard` renders no warm
+/// pool yet.
+#[test]
+fn a_standard_deployment_runs_the_disks_workspace_image_on_standard_and_any_other_on_commodity() {
+    let canonical = crate::sandbox::canonical_workspace_runtime_image();
+    let (_, digest) = canonical.rsplit_once('@').unwrap();
+    let runtime = crate::sandbox::template::StandardRuntime::parse(
+        "registry.example.invalid/codewire/pod-runtime@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        &format!(
+            "registry.example.invalid/codewire/workspace-disk@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
+             3333333333333333333333333333333333333333333333333333333333333333 \
+             44444444444444444444444444444444 \
+             registry.example.invalid/codewire/workspace@{digest}"
+        ),
+    )
+    .unwrap();
+    let config = KubernetesRenderConfig {
+        runtime_profile: RUNTIME_PROFILE_STANDARD.into(),
+        hosted_egress: Some(broker("2")),
+        standard_runtime: runtime.clone(),
+        ..config()
+    };
+    // The disk names its workspace image at another registry than the one
+    // environments name it at; the digest decides.
+    let workspace = config
+        .environment(&RenderingIntent {
+            image: canonical.into(),
+            ..intent(Isolation::Standard)
+        })
+        .unwrap();
+    assert_eq!(
+        workspace.runtime_profile_spec().runtime_class_name,
+        "standard"
+    );
+    assert_eq!(workspace.standard_runtime, runtime);
+    assert!(
+        config
+            .check_runtime_profile(&intent(Isolation::Standard))
+            .is_ok()
+    );
+
+    // A workspace pin moved on without the disk republished: the VM would
+    // boot the old image, so the environment goes to commodity.
+    let stale_disk = KubernetesRenderConfig {
+        standard_runtime: crate::sandbox::template::StandardRuntime::parse(
+            "registry.example.invalid/codewire/pod-runtime@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "registry.example.invalid/codewire/workspace-disk@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
+             3333333333333333333333333333333333333333333333333333333333333333 \
+             44444444444444444444444444444444 \
+             registry.example.invalid/codewire/workspace@sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        )
+        .unwrap(),
+        ..config.clone()
+    }
+    .environment(&RenderingIntent {
+        image: canonical.into(),
+        ..intent(Isolation::Standard)
+    })
+    .unwrap();
+    assert_eq!(
+        stale_disk.runtime_profile_spec().profile,
+        RUNTIME_PROFILE_COMMODITY
+    );
+    assert_eq!(stale_disk.standard_runtime, None);
+
+    let own_image = config.environment(&intent(Isolation::Standard)).unwrap();
+    assert_eq!(
+        own_image.runtime_profile_spec().profile,
+        RUNTIME_PROFILE_COMMODITY
+    );
+    assert_eq!(own_image.standard_runtime, None);
+    assert!(own_image.hosted_egress.is_some());
+
+    assert!(
+        config
+            .pool(WorkspaceShape {
+                cpu_millicores: 2000,
+                memory_mib: 4096,
+                disk_gib: 20,
+            })
+            .is_err()
+    );
+    // Without hosted egress, a standard environment is refused, never
+    // rendered without a network.
+    assert!(
+        KubernetesRenderConfig {
+            hosted_egress: None,
+            ..config.clone()
+        }
+        .environment(&RenderingIntent {
+            image: crate::sandbox::canonical_workspace_runtime_image().into(),
+            ..intent(Isolation::Standard)
+        })
+        .is_err()
+    );
+}

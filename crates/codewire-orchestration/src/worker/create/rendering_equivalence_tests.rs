@@ -188,6 +188,7 @@ fn before_shape_template_opts(
         // Hosted egress (#4000): rendered once the setting and the two
         // Services' cluster addresses are read; off until then.
         hosted_egress: None,
+        standard_runtime: None,
         runtime_profile: runtime_spec.profile.clone(),
         docker_mode: runtime_spec.docker_mode.clone(),
         credential_runtime: cfg.credential_runtime.clone(),

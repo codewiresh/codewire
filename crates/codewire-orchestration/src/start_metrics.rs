@@ -28,7 +28,7 @@ use prometheus::{
 
 use crate::sandbox::template::{
     RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_NONE,
-    RUNTIME_PROFILE_RUNC,
+    RUNTIME_PROFILE_RUNC, RUNTIME_PROFILE_STANDARD,
 };
 
 static STAGE_SECONDS: OnceLock<HistogramVec> = OnceLock::new();
@@ -239,6 +239,7 @@ impl StartPath {
 pub enum StartProfile {
     Commodity,
     Confidential,
+    Standard,
     Runc,
     None,
     Other,
@@ -249,6 +250,7 @@ impl StartProfile {
         match profile.trim() {
             RUNTIME_PROFILE_COMMODITY => Self::Commodity,
             RUNTIME_PROFILE_CONFIDENTIAL => Self::Confidential,
+            RUNTIME_PROFILE_STANDARD => Self::Standard,
             RUNTIME_PROFILE_RUNC => Self::Runc,
             RUNTIME_PROFILE_NONE => Self::None,
             _ => Self::Other,
@@ -259,6 +261,7 @@ impl StartProfile {
         match self {
             Self::Commodity => "commodity",
             Self::Confidential => "confidential",
+            Self::Standard => "standard",
             Self::Runc => "runc",
             Self::None => "none",
             Self::Other => "other",
@@ -414,6 +417,10 @@ mod tests {
         assert_eq!(
             StartProfile::from_runtime_profile("runc"),
             StartProfile::Runc
+        );
+        assert_eq!(
+            StartProfile::from_runtime_profile("standard"),
+            StartProfile::Standard
         );
         assert_eq!(
             StartProfile::from_runtime_profile("none"),

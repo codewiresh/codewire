@@ -205,6 +205,20 @@ spec:
                   name: codewire-hosted-egress
                   key: CODEWIRE_CLUSTER_DNS_IP
                   optional: true
+            # What a `standard` workspace runs (#5602); optional, so a
+            # ConfigMap without them starts with no standard workspace.
+            - name: SANDBOX_STANDARD_RUNTIME_IMAGE
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-standard-runtime
+                  key: SANDBOX_STANDARD_RUNTIME_IMAGE
+                  optional: true
+            - name: SANDBOX_STANDARD_IMAGE_DISK
+              valueFrom:
+                configMapKeyRef:
+                  name: codewire-standard-runtime
+                  key: SANDBOX_STANDARD_IMAGE_DISK
+                  optional: true
           resources:
             requests:
               cpu: 100m

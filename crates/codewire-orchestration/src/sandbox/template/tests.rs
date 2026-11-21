@@ -1024,6 +1024,16 @@ mod tests {
         let unsupported_docker =
             runtime_profile_spec(RUNTIME_PROFILE_COMMODITY, "unsupported", false);
         assert!(validate_managed_runtime_profile(&unsupported_docker, false).is_err());
+
+        // Docker runs inside a standard VM; the Pod has no Docker container.
+        let standard =
+            runtime_profile_spec(RUNTIME_PROFILE_STANDARD, DOCKER_MODE_PROFILE_DEFAULT, false);
+        assert_eq!(standard.runtime_class_name, RUNTIME_CLASS_STANDARD);
+        assert_eq!(standard.docker_mode, DOCKER_MODE_NONE);
+        assert!(validate_managed_runtime_profile(&standard, false).is_ok());
+        let standard_dind =
+            runtime_profile_spec(RUNTIME_PROFILE_STANDARD, DOCKER_MODE_PROFILE_DEFAULT, true);
+        assert!(validate_managed_runtime_profile(&standard_dind, true).is_err());
     }
 
     #[test]

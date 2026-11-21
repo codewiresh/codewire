@@ -9,10 +9,21 @@ pub const RUNTIME_CLASS_RUNC: &str = "runc";
 pub const RUNTIME_CLASS_COMMODITY: &str = "commodity";
 pub const RUNTIME_CLASS_COMMODITY_32G: &str = "commodity-32g";
 pub const RUNTIME_CLASS_CONFIDENTIAL: &str = "confidential";
+/// The node's ordinary handler, with the Pod overhead of the VM process
+/// ([`STANDARD_VMM_CPU_MILLICORES`], [`STANDARD_VMM_MEMORY_MIB`]).
+pub const RUNTIME_CLASS_STANDARD: &str = "standard";
 pub const RUNTIME_PROFILE_NONE: &str = "none";
 pub const RUNTIME_PROFILE_RUNC: &str = "runc";
 pub const RUNTIME_PROFILE_COMMODITY: &str = "commodity";
 pub const RUNTIME_PROFILE_CONFIDENTIAL: &str = "confidential";
+/// Codewire's own VM runtime in the Pod (#5602; `SPEC.md` section 4).
+pub const RUNTIME_PROFILE_STANDARD: &str = "standard";
+/// What a `standard` workspace container's limits hold beyond the user's
+/// size: the VM process and the runtime beside the guest. The request stays
+/// the user's size, and billing subtracts this from the CPU limit, so a
+/// change here changes what every running `standard` Sandbox is billed.
+pub const STANDARD_VMM_CPU_MILLICORES: i32 = 1_000;
+pub const STANDARD_VMM_MEMORY_MIB: i32 = 1_024;
 pub const DOCKER_MODE_PROFILE_DEFAULT: &str = "profile-default";
 pub const DOCKER_MODE_NONE: &str = "none";
 pub const DOCKER_MODE_LOCAL_DIND_DIRECT: &str = "local-dind-direct";
@@ -47,6 +58,12 @@ pub fn validate_managed_runtime_profile(
 ) -> Result<(), String> {
     match spec.profile.as_str() {
         RUNTIME_PROFILE_COMMODITY | RUNTIME_PROFILE_CONFIDENTIAL => Ok(()),
+        // Docker runs inside the VM; the Pod has no Docker container.
+        RUNTIME_PROFILE_STANDARD if spec.docker_mode != DOCKER_MODE_NONE => Err(format!(
+            "the standard runtime profile runs Docker inside its VM; Docker mode {:?} is not supported",
+            spec.docker_mode
+        )),
+        RUNTIME_PROFILE_STANDARD => Ok(()),
         RUNTIME_PROFILE_RUNC | RUNTIME_PROFILE_NONE => {
             if allow_diagnostic {
                 Ok(())
@@ -99,6 +116,7 @@ fn runtime_class_for_profile(profile: &str) -> String {
         RUNTIME_PROFILE_RUNC => RUNTIME_CLASS_RUNC.to_string(),
         RUNTIME_PROFILE_COMMODITY => RUNTIME_CLASS_COMMODITY.to_string(),
         RUNTIME_PROFILE_CONFIDENTIAL => RUNTIME_CLASS_CONFIDENTIAL.to_string(),
+        RUNTIME_PROFILE_STANDARD => RUNTIME_CLASS_STANDARD.to_string(),
         _ => profile.to_string(),
     }
 }

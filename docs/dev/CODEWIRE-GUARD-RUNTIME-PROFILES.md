@@ -38,8 +38,15 @@ SANDBOX_RUNTIME_PROFILE=commodity
 SANDBOX_DOCKER_MODE=profile-default
 ```
 
-Managed environment creation accepts `commodity` or `confidential`. It accepts
-`none` or `runc` only with `SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME=true`. Empty and
+Managed environment creation accepts `commodity`, `confidential` or `standard`.
+It accepts `none` or `runc` only with `SANDBOX_ALLOW_DIAGNOSTIC_RUNTIME=true`.
+`standard` (#5602, not yet observed working) also needs
+`SANDBOX_STANDARD_RUNTIME_IMAGE`, `SANDBOX_STANDARD_IMAGE_DISK` and hosted
+egress on; without them orchestration stops at startup
+([docs/CONFIGURATION.md](../CONFIGURATION.md)). On `standard`, an environment
+whose image does not have the digest of the workspace image the disk was
+built from (a user's own image, or a workspace image whose disk has not been
+published) is created on `commodity`, and no warm pool is rendered yet. Empty and
 unknown profiles are always rejected. The diagnostic override flag is for
 local-kind and explicit diagnostics only; it must not be enabled in the normal
 managed sandbox path.
@@ -74,6 +81,7 @@ Docker is a profile capability, not a runtime profile.
 | `runc` | `none` | no Docker socket unless local DinD is explicitly enabled |
 | `commodity` | `guest-dind` | workspace talks directly to guest-local `docker:dind` inside the Kata VM |
 | `confidential` | `guest-dind` | same shape as commodity, inside the SNP-backed Kata VM |
+| `standard` | `none` | Docker runs inside the VM; the Pod has no Docker container, and any other mode is refused |
 
 Local kind may use `SANDBOX_DOCKER_MODE=local-dind-direct`, which preserves the
 existing privileged `docker:dind` sidecar for local tests. Local-kind overlays

@@ -2,7 +2,6 @@
 
 use serde_json::{Map, Value, json};
 
-use super::credentials;
 use super::encoding::kata_policy_init_data_annotation;
 use super::hosted_egress;
 use super::naming::{workspace_daemon_service_name, workspace_selector, workspace_template_labels};
@@ -14,13 +13,7 @@ use super::runtime_policy::{
     workspace_storage_class,
 };
 use super::workspace_flush::{BLOCK_WORKSPACE_GRACE_SECONDS, workspace_flush_container};
-use codewire_daemon_proto::{
-    WORKSPACE_BINDING_TLS_ROOTS_MOUNT_PATH, WORKSPACE_BINDING_TOKEN_AUDIENCE,
-    WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS, WORKSPACE_BINDING_TOKEN_MOUNT_PATH,
-    WORKSPACE_BINDING_URL_ENV, WORKSPACE_POD_UID_ENV,
-};
-// The binding recorder recognizes a Pod-scope Pod by this exact volume.
-use crate::worker::workspace_binding::WORKSPACE_BINDING_VOLUME;
+use codewire_daemon_proto::{WORKSPACE_BINDING_URL_ENV, WORKSPACE_POD_UID_ENV};
 
 use super::{
     CONFIDENTIAL_WORKSPACE_READY_TIMEOUT, DIND_SOCKET_PATH, EXTENSIONS_API_VERSION, HOME_ROOT,
@@ -75,6 +68,9 @@ pub fn render_sandbox_template(namespace: &str, opts: &TemplateOpts) -> Value {
 
 /// Render the exact environment-scoped SandboxBlueprint.
 pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
+    if let Some((runtime, egress)) = opts.standard_pod() {
+        return build_template_spec(opts, super::standard::pod_spec(opts, runtime, egress));
+    }
     let support_image = opts.effective_support_image();
 
     const ENSURE_USER_CMD: &str = "user_shell=/bin/bash; [ -x /bin/bash ] || user_shell=/bin/sh; grep -q '^[^:]*:[^:]*:1000:' /etc/passwd || echo \"codewire:x:1000:1000:codewire:/home/codewire:${user_shell}\" >> /etc/passwd; grep -q '^[^:]*:[^:]*:1000:' /etc/group || echo 'codewire:x:1000:' >> /etc/group;";
@@ -144,7 +140,8 @@ pub(super) fn render_sandbox_blueprint(opts: &TemplateOpts) -> Value {
         ],
     });
 
-    build_template_spec(opts, &mut ws_container, support_image)
+    let pod_spec = build_pod_spec(opts, &mut ws_container, support_image);
+    build_template_spec(opts, pod_spec)
 }
 
 /// Keep an intentional PID-1 owner around the daemon. The launch helper must
@@ -218,7 +215,7 @@ pub(super) fn custom_workspace_supervisor_command(
     )
 }
 
-fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> Value {
+pub(super) fn build_template_spec(opts: &TemplateOpts, pod_spec: Value) -> Value {
     let runtime_spec = opts.runtime_profile_spec();
     let mut annotations = Map::new();
     annotations.insert(WORKSPACE_ANNOTATION_KEY.into(), "true".into());
@@ -307,7 +304,7 @@ fn build_template_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str)
         "podTemplate".into(),
         json!({
             "metadata": { "annotations": annotations, "labels": labels },
-            "spec": build_pod_spec(opts, ws, support_image),
+            "spec": pod_spec,
         }),
     );
     if !opts.network_policy_management.is_empty() && opts.network_policy_management != "Managed" {
@@ -403,58 +400,7 @@ fn build_pod_spec(opts: &TemplateOpts, ws: &mut Value, support_image: &str) -> V
     if block {
         volumes.extend(block_workspace_volumes());
     }
-    if opts.credential_runtime.is_some() {
-        volumes.extend(credentials::workspace_volumes(opts));
-        ws["volumeMounts"]
-            .as_array_mut()
-            .expect("workspace mounts")
-            .extend(credentials::workspace_mounts());
-        // The bound daemon expands its managed clients into child
-        // environments from the bind response; nothing is rendered here.
-    }
-    if let Some(egress) = &opts.hosted_egress {
-        hosted_egress::mount_workspace(ws, &mut volumes, egress);
-    }
-    // Workspace container only; never DinD or an init container.
-    volumes.push(workspace_binding_token_volume());
-    ws["volumeMounts"]
-        .as_array_mut()
-        .expect("workspace mounts")
-        .push(json!({
-            "name": WORKSPACE_BINDING_VOLUME,
-            "mountPath": WORKSPACE_BINDING_TOKEN_MOUNT_PATH,
-            "readOnly": true,
-        }));
-    // The public roots that verify the binding listener's TLS identity. A
-    // confidential workspace mounts none: the host supplies every file there,
-    // so its daemon trusts only its measured roots (B2c).
-    let confidential = runtime_spec.profile == RUNTIME_PROFILE_CONFIDENTIAL;
-    if !confidential {
-        volumes.push(workspace_binding_roots_volume());
-        ws["volumeMounts"]
-            .as_array_mut()
-            .expect("workspace mounts")
-            .push(json!({
-                "name": WORKSPACE_BINDING_ROOTS_VOLUME,
-                "mountPath": WORKSPACE_BINDING_TLS_ROOTS_MOUNT_PATH,
-                "readOnly": true,
-            }));
-    }
-    // A local cluster's coordinator is not WebPKI-signed: only there does
-    // orchestration mount the public bundle the daemon trusts beside the
-    // WebPKI roots for its coordinator. Dev and Production never do, and a
-    // confidential daemon never trusts one.
-    if opts.coordinator_extra_roots && !confidential {
-        volumes.push(coordinator_extra_roots_volume());
-        ws["volumeMounts"]
-            .as_array_mut()
-            .expect("workspace mounts")
-            .push(json!({
-                "name": COORDINATOR_EXTRA_ROOTS_VOLUME,
-                "mountPath": codewire_daemon_proto::COORDINATOR_EXTRA_ROOTS_MOUNT_PATH,
-                "readOnly": true,
-            }));
-    }
+    super::identity::mount_identity(opts, ws, &mut volumes, hosted_egress::mount_workspace);
 
     let mut spec = Map::new();
     spec.insert("restartPolicy".into(), "Never".into());
@@ -970,7 +916,7 @@ fn configure_confidential_workspace_device(container: &mut Value) {
 /// readiness probe keeps its 2-second period. The startup budget is the tier's
 /// ready timeout: create or start has already failed before the kubelet would
 /// stop a slow start.
-fn apply_daemon_ready_probes(ws: &mut Value, runtime_spec: &RuntimeProfileSpec) {
+pub(super) fn apply_daemon_ready_probes(ws: &mut Value, runtime_spec: &RuntimeProfileSpec) {
     let ready_timeout = ready_timeout(runtime_spec);
     ws["startupProbe"] = exec_probe(DAEMON_READY_PROBE, 1, ready_timeout.as_secs());
     ws["readinessProbe"] = exec_probe(DAEMON_READY_PROBE, 2, 3);
@@ -999,56 +945,6 @@ fn exec_probe(command: &str, period_seconds: u64, failure_threshold: u64) -> Val
         "timeoutSeconds": 2,
         "failureThreshold": failure_threshold,
         "successThreshold": 1,
-    })
-}
-
-/// The Pod-bound projected token the daemon presents to `BindWorkspace`
-/// (design §3.4). Same mode and lifetime as the gateway's binding token.
-fn workspace_binding_token_volume() -> Value {
-    json!({
-        "name": WORKSPACE_BINDING_VOLUME,
-        "projected": {
-            "defaultMode": 0o440,
-            "sources": [{
-                "serviceAccountToken": {
-                    "audience": WORKSPACE_BINDING_TOKEN_AUDIENCE,
-                    "expirationSeconds": WORKSPACE_BINDING_TOKEN_EXPIRATION_SECONDS,
-                    "path": "token",
-                },
-            }],
-        },
-    })
-}
-
-/// The volume of the binding listener's public roots.
-pub(crate) const WORKSPACE_BINDING_ROOTS_VOLUME: &str = "orchestration-internal-roots";
-
-/// Only the `ca.crt` key of orchestration's published internal roots: public
-/// trust material, never a credential (daemon-hosted access §6).
-fn workspace_binding_roots_volume() -> Value {
-    json!({
-        "name": WORKSPACE_BINDING_ROOTS_VOLUME,
-        "configMap": {
-            "name": ORCHESTRATION_INTERNAL_ROOTS_CONFIGMAP,
-            "items": [{ "key": "ca.crt", "path": "ca.crt" }],
-            "defaultMode": 0o444,
-        },
-    })
-}
-
-/// The volume of the coordinator's extra public roots (local clusters only).
-pub(crate) const COORDINATOR_EXTRA_ROOTS_VOLUME: &str = "coordinator-extra-roots";
-
-/// Only the `ca.crt` key of the coordinator's extra public roots: public trust
-/// material, never a credential.
-fn coordinator_extra_roots_volume() -> Value {
-    json!({
-        "name": COORDINATOR_EXTRA_ROOTS_VOLUME,
-        "configMap": {
-            "name": codewire_daemon_proto::COORDINATOR_EXTRA_ROOTS_CONFIGMAP,
-            "items": [{ "key": "ca.crt", "path": "ca.crt" }],
-            "defaultMode": 0o444,
-        },
     })
 }
 
@@ -1422,7 +1318,7 @@ fn dind_container(
     })
 }
 
-fn build_workspace_env(opts: &TemplateOpts) -> Vec<Value> {
+pub(super) fn build_workspace_env(opts: &TemplateOpts) -> Vec<Value> {
     // Design §13: no daemon token, environment ID, generation, projection
     // digest, managed clients or derived client variables. The daemon gets all
     // of them from its binding.

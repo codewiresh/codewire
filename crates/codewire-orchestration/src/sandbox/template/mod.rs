@@ -15,6 +15,7 @@ mod credentials;
 mod dind;
 mod encoding;
 mod hosted_egress;
+mod identity;
 /// The hosted-egress TUN init container, which runs as root from the support
 /// image, and its device volume; the bind's isolation check admits them only
 /// while hosted egress is on.
@@ -26,6 +27,7 @@ pub(crate) use hosted_egress::{
 mod naming;
 mod network;
 mod runtime_policy;
+mod standard;
 mod workspace;
 mod workspace_flush;
 
@@ -45,12 +47,15 @@ pub use network::{
 pub use runtime_policy::{
     DOCKER_MODE_GUEST_DIND, DOCKER_MODE_LOCAL_DIND_DIRECT, DOCKER_MODE_NONE,
     DOCKER_MODE_PROFILE_DEFAULT, RUNTIME_CLASS_COMMODITY, RUNTIME_CLASS_COMMODITY_32G,
-    RUNTIME_CLASS_CONFIDENTIAL, RUNTIME_CLASS_RUNC, RUNTIME_PROFILE_COMMODITY,
-    RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_NONE, RUNTIME_PROFILE_RUNC, RuntimeProfileSpec,
-    commodity_runtime_class, confidential_workspace_storage_class, is_commodity_runtime_class,
-    required_workspace_storage_class, runtime_profile_spec, validate_managed_runtime_profile,
+    RUNTIME_CLASS_CONFIDENTIAL, RUNTIME_CLASS_RUNC, RUNTIME_CLASS_STANDARD,
+    RUNTIME_PROFILE_COMMODITY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_NONE,
+    RUNTIME_PROFILE_RUNC, RUNTIME_PROFILE_STANDARD, RuntimeProfileSpec,
+    STANDARD_VMM_CPU_MILLICORES, commodity_runtime_class, confidential_workspace_storage_class,
+    is_commodity_runtime_class, required_workspace_storage_class, runtime_profile_spec,
+    validate_managed_runtime_profile,
 };
 pub(crate) use runtime_policy::{dind_image, docker_data_size_gib};
+pub use standard::{STANDARD_IMAGE_DISK_ENV, STANDARD_RUNTIME_IMAGE_ENV, StandardRuntime};
 #[cfg(test)]
 use workspace::custom_workspace_supervisor_command;
 #[cfg(test)]
@@ -316,6 +321,9 @@ pub struct TemplateOpts {
     /// the broker label, the egress token, the TUN init container and the
     /// netstack resolver.
     pub hosted_egress: Option<HostedEgressTemplate>,
+    /// The runtime image and the published workspace image disk a `standard`
+    /// workspace runs (#5602); `None` on every other profile.
+    pub standard_runtime: Option<StandardRuntime>,
 }
 
 /// What a broker-mode workspace needs to reach cw-egress and its binding
@@ -455,6 +463,7 @@ impl fmt::Debug for TemplateOpts {
                 &self.kata_coco_test_resource_path,
             )
             .field("debug_tailnet", &self.debug_tailnet)
+            .field("standard_runtime", &self.standard_runtime)
             .finish()
     }
 }
@@ -539,7 +548,9 @@ impl TemplateOpts {
             anyhow::ensure!(
                 matches!(
                     profile.as_str(),
-                    RUNTIME_PROFILE_COMMODITY | RUNTIME_PROFILE_CONFIDENTIAL
+                    RUNTIME_PROFILE_COMMODITY
+                        | RUNTIME_PROFILE_CONFIDENTIAL
+                        | RUNTIME_PROFILE_STANDARD
                 ),
                 "hosted egress runs only on a VM runtime profile, not {profile:?}"
             );
@@ -547,6 +558,35 @@ impl TemplateOpts {
             crate::egress::gateway_check::verified()?;
         }
         Ok(())
+    }
+
+    /// A `standard` workspace's runtime and hosted egress, `None` on any
+    /// other profile. A `standard` rendering without both is refused by
+    /// [`Self::validate_standard_runtime`] before anything is written.
+    pub(crate) fn standard_pod(&self) -> Option<(&StandardRuntime, &HostedEgressTemplate)> {
+        if self.runtime_profile_spec().profile != RUNTIME_PROFILE_STANDARD {
+            return None;
+        }
+        Some((
+            self.standard_runtime.as_ref()?,
+            self.hosted_egress.as_ref()?,
+        ))
+    }
+
+    /// Every check an environment's template passes before it is written.
+    pub fn validate_environment_template(&self) -> anyhow::Result<()> {
+        self.validate_confidential_storage_manifest()?;
+        self.validate_hosted_egress()?;
+        self.validate_standard_runtime()
+    }
+
+    /// A `standard` workspace renders only with its runtime, with hosted
+    /// egress, its VM's only network, and at a size its VM can take.
+    pub fn validate_standard_runtime(&self) -> anyhow::Result<()> {
+        if self.runtime_profile_spec().profile != RUNTIME_PROFILE_STANDARD {
+            return Ok(());
+        }
+        standard::validate(self)
     }
 
     pub fn validate_confidential_storage_manifest(&self) -> anyhow::Result<()> {
@@ -604,3 +644,5 @@ mod docker_data_tests;
 mod hosted_egress_tests;
 #[cfg(test)]
 mod mount_workspace_tests;
+#[cfg(test)]
+mod standard_tests;

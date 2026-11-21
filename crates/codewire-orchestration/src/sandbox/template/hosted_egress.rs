@@ -43,14 +43,28 @@ pub(crate) const TUN_INIT_COMMAND: [&str; 4] = [
     "1000",
 ];
 
-/// The token, mounted into the workspace container only, the TUN device's
-/// volume, and the addresses the daemon dials instead of names.
+/// The TUN device's volume and [`mount_identity`].
 pub(super) fn mount_workspace(
     ws: &mut Value,
     volumes: &mut Vec<Value>,
     egress: &HostedEgressTemplate,
 ) {
     volumes.push(devnet_volume());
+    mount_identity(ws, volumes, egress);
+    ws["volumeMounts"]
+        .as_array_mut()
+        .expect("workspace mounts")
+        .push(devnet_mount());
+}
+
+/// The token, mounted into the workspace container only, and the addresses
+/// the daemon dials instead of names. A `standard` workspace takes only
+/// these: its VM has no TUN.
+pub(super) fn mount_identity(
+    ws: &mut Value,
+    volumes: &mut Vec<Value>,
+    egress: &HostedEgressTemplate,
+) {
     volumes.push(json!({
         "name": EGRESS_TOKEN_VOLUME,
         "projected": {
@@ -67,14 +81,11 @@ pub(super) fn mount_workspace(
     ws["volumeMounts"]
         .as_array_mut()
         .expect("workspace mounts")
-        .extend([
-            json!({
-                "name": EGRESS_TOKEN_VOLUME,
-                "mountPath": EGRESS_TOKEN_MOUNT_PATH,
-                "readOnly": true,
-            }),
-            devnet_mount(),
-        ]);
+        .push(json!({
+            "name": EGRESS_TOKEN_VOLUME,
+            "mountPath": EGRESS_TOKEN_MOUNT_PATH,
+            "readOnly": true,
+        }));
     let env = ws["env"].as_array_mut().expect("workspace env");
     env.push(json!({ "name": "CODEWIRE_EGRESS_STREAM_ADDR", "value": egress.stream_addr }));
     env.push(json!({ "name": "CODEWIRE_WORKSPACE_BINDING_ADDR", "value": egress.binding_addr }));

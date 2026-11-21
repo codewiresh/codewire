@@ -617,6 +617,22 @@ async fn main() -> anyhow::Result<()> {
     let hosted_egress = egress::settings::startup(&sandbox_cfg.derp_host)
         .context("read the hosted egress settings")?;
     sandbox_cfg.hosted_egress = hosted_egress.template;
+    // The standard runtime profile (#5602) runs only with its runtime, its
+    // image disk and hosted egress, its VM's only network.
+    sandbox_cfg.standard_runtime =
+        codewire_orchestration::sandbox::template::StandardRuntime::from_env()
+            .map_err(anyhow::Error::msg)
+            .context("read the standard runtime settings")?;
+    if sandbox_cfg.runtime_profile.trim()
+        == codewire_orchestration::sandbox::template::RUNTIME_PROFILE_STANDARD
+    {
+        anyhow::ensure!(
+            sandbox_cfg.standard_runtime.is_some() && sandbox_cfg.hosted_egress.is_some(),
+            "the standard runtime profile needs {} and {}, and hosted egress on; see docs/CONFIGURATION.md",
+            codewire_orchestration::sandbox::template::STANDARD_RUNTIME_IMAGE_ENV,
+            codewire_orchestration::sandbox::template::STANDARD_IMAGE_DISK_ENV,
+        );
+    }
     // While hosted egress is on, the gateway address it renders is held to the
     // gateway Service's ClusterIP; a broker-mode render refuses until it is.
     if let Some(gateway) = hosted_egress.gateway {
