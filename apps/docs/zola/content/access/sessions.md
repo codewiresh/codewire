@@ -1,7 +1,7 @@
 ---
 title: Terminal sessions
 description: Run commands that outlive your terminal, read their output later, type into them, wait for them in a script, and stop or restart them.
-updated: 2026-11-19
+updated: 2026-11-21
 weight: 1
 aliases: ["/guides/sessions"]
 ---
@@ -60,9 +60,9 @@ cw ls app
 ```
 
 ```text
-NAME   STATE    MODE    PARENT  SESSION                                       COMMAND
-dev    Running  normal  -       session-5c7443a7-2a7e-409f-b684-bd74c8b580b5  python3 -m http.server 8080
-shell  Running  normal  -       session-a09621a6-d205-4ebb-8a6c-045c7cab5f19  bash
+SESSION  STATE    COMMAND
+dev      Running  python3 -m http.server 8080
+shell    Running  bash
 ```
 
 `cw logs app --session dev` prints what a session has written so far, also
@@ -125,10 +125,10 @@ cw restart app --session dev
 ```
 
 ```text
-NAME  STATE    MODE    PARENT  SESSION                                       COMMAND
-dev   Stopped  normal  -       session-5c7443a7-2a7e-409f-b684-bd74c8b580b5  python3 -m http.server 8080
-NAME  STATE    MODE    PARENT  SESSION                                       COMMAND
-dev   Running  normal  -       session-5c7443a7-2a7e-409f-b684-bd74c8b580b5  python3 -m http.server 8080
+SESSION  STATE    COMMAND
+dev      Stopped  python3 -m http.server 8080
+SESSION  STATE    COMMAND
+dev      Running  python3 -m http.server 8080
 ```
 
 The session keeps its ID and saved output across a restart, and its

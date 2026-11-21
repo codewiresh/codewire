@@ -13,7 +13,9 @@
 //! `managed`; the managed record's own fields are unchanged.
 
 use super::*;
+use crate::commands::message_target::MessageTarget;
 use crate::commands::progress::terminal_text;
+use crate::error_report::with_next_step;
 use crate::output::{Capabilities, OutputMode, Status};
 
 /// The byte a terminal UI reads as Enter. Claude Code and Codex read their
@@ -95,12 +97,11 @@ fn conversation_label(target: &EnvironmentSessionTarget, view: &EnvironmentSessi
     } else {
         current.name.as_str()
     };
-    let session = if view.name.trim().is_empty() {
-        view.session_id.as_str()
-    } else {
-        view.name.as_str()
-    };
-    format!("{}/{}", terminal_text(environment), terminal_text(session))
+    format!(
+        "{}/{}",
+        terminal_text(environment),
+        terminal_text(short_id::session_display(view))
+    )
 }
 
 fn environment_name(target: &EnvironmentSessionTarget) -> String {
@@ -113,11 +114,7 @@ fn environment_name(target: &EnvironmentSessionTarget) -> String {
 }
 
 fn session_name(view: &EnvironmentSessionView) -> String {
-    terminal_text(if view.name.trim().is_empty() {
-        &view.session_id
-    } else {
-        &view.name
-    })
+    terminal_text(short_id::session_display(view))
 }
 
 async fn resolve_session(
@@ -143,19 +140,20 @@ pub(crate) async fn handle_message_command(
     if globals.member.is_some() {
         return super::super::member_control::managed::send_message(globals, args, steer).await;
     }
-    let (environment, session, text) = args.target(command)?;
     if !steer && args.turn_id.is_some() {
         anyhow::bail!("--turn-id applies only to `cw steer`");
     }
-    let (target, view) = resolve_session(globals, environment, session).await?;
+    let message = args.target();
+    let (target, view) = message_session(globals, command, &message, args.output).await?;
+    let text = message.text.as_str();
+    let environment = environment_name(&target);
     let label = conversation_label(&target, &view);
     if is_managed_session(&view) {
         return deliver_managed(target, view, &args, text, steer, &label).await;
     }
     if steer {
         anyhow::bail!(
-            "{label} is a terminal session, not a managed agent conversation; steering applies only to managed conversations. Type into it with `cw msg {} --session {} TEXT`, or send raw input with `cw send`",
-            environment_name(&target),
+            "{label} is a terminal session, not a managed agent conversation; steering applies only to managed conversations. Type into it with `cw msg {environment} --session {} TEXT`, or send raw input with `cw send`",
             session_name(&view)
         );
     }
@@ -164,6 +162,127 @@ pub(crate) async fn handle_message_command(
         "--reply-to applies only to managed agent conversations; {label} is a terminal session"
     );
     write_terminal_message(&target, &view, text, &label, args.output).await
+}
+
+/// The session a message goes to (#5085). `--session` names it. Without
+/// it, the one running session is taken; with several, a terminal picks
+/// and anything else names them. A message with no text, or a lone word
+/// that names an environment, gets the usage with what it could go to.
+async fn message_session(
+    globals: &Globals,
+    command: &str,
+    message: &MessageTarget<'_>,
+    output: OutputFormat,
+) -> anyhow::Result<(EnvironmentSessionTarget, EnvironmentSessionView)> {
+    if message.lone_word
+        && let Ok(target) =
+            resolve_environment_session_target(globals, Some(message.text.as_str())).await
+    {
+        return Err(message_usage(
+            command,
+            Some(&target),
+            &running_sessions(&target).await,
+        ));
+    }
+    if message.text.trim().is_empty() {
+        let target = resolve_environment_session_target(globals, message.environment)
+            .await
+            .ok();
+        let running = match &target {
+            Some(target) => running_sessions(target).await,
+            None => Vec::new(),
+        };
+        return Err(message_usage(command, target.as_ref(), &running));
+    }
+    if let Some(session) = message.session {
+        return resolve_session(globals, message.environment, session).await;
+    }
+    let target = resolve_environment_session_target(globals, message.environment).await?;
+    let running = running_sessions(&target).await;
+    let environment = environment_name(&target);
+    // `cw msg ENV SESSION TEXT` once named the session; a first word that
+    // names a running session is refused, never sent to another one.
+    let (first, rest) = message
+        .text
+        .split_once(' ')
+        .unwrap_or((message.text.as_str(), ""));
+    if running.iter().any(|view| view.name == first) {
+        return Err(with_next_step(
+            anyhow::anyhow!(
+                "{first:?} is a session in {environment}; name it with --session so it isn't sent as text"
+            ),
+            format!("cw {command} {environment} --session {first} {rest}"),
+        ));
+    }
+    match running.as_slice() {
+        [] => Err(with_next_step(
+            anyhow::anyhow!("nothing is running in {environment} to send to"),
+            format!("cw ls {environment}"),
+        )),
+        [view] => Ok((target, view.clone())),
+        views => {
+            let names = views.iter().map(session_name).collect::<Vec<_>>();
+            let repair = with_next_step(
+                anyhow::anyhow!(
+                    "there are {} running sessions in {environment} ({}); name one with --session",
+                    views.len(),
+                    names.join(", ")
+                ),
+                format!(
+                    "cw {command} {environment} --session {} {}",
+                    names[0], message.text
+                ),
+            );
+            if matches!(output, OutputFormat::Json)
+                || !Capabilities::from_process(OutputMode::Text).interactive
+            {
+                return Err(repair);
+            }
+            let view = super::super::select_session_from_picker(
+                &environment,
+                views,
+                "to send to",
+                crate::error_report::sentence(&repair),
+            )
+            .await?;
+            Ok((target, view))
+        }
+    }
+}
+
+/// The sessions a message can go to now: the running ones. An environment
+/// whose sessions can't be listed has none to offer.
+async fn running_sessions(target: &EnvironmentSessionTarget) -> Vec<EnvironmentSessionView> {
+    target
+        .list()
+        .await
+        .map(|sessions| sessions.into_iter().filter(session_running).collect())
+        .unwrap_or_default()
+}
+
+/// `cw msg` with nothing to send: how to send, and to what (#5085).
+fn message_usage(
+    command: &str,
+    target: Option<&EnvironmentSessionTarget>,
+    running: &[EnvironmentSessionView],
+) -> anyhow::Error {
+    let environment = target.map_or_else(|| "ENV".to_owned(), environment_name);
+    let sessions = if running.is_empty() {
+        String::new()
+    } else {
+        let names = running.iter().map(session_name).collect::<Vec<_>>();
+        format!("; {environment}'s running sessions: {}", names.join(", "))
+    };
+    let session = match running {
+        [_] | [] => String::new(),
+        [view, ..] => format!(" --session {}", session_name(view)),
+    };
+    with_next_step(
+        anyhow::anyhow!(
+            "say what to send: `cw {command} [ENV] [--session SESSION] TEXT`{sessions}"
+        ),
+        format!("cw {command} {environment}{session} continue"),
+    )
 }
 
 /// Writes the text and Enter to a normal session's terminal, once.
@@ -518,6 +637,60 @@ fn host_inbox(managed: ManagedConversation, output: OutputFormat) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn running(name: &str) -> EnvironmentSessionView {
+        EnvironmentSessionView {
+            name: name.to_owned(),
+            parent_session_id: String::new(),
+            started_at: String::new(),
+            cleanup_unknown: false,
+            launch_generation: 1,
+            session_id: format!("session-{name}"),
+            state: "Running".to_owned(),
+            command: vec!["codex".to_owned()],
+            working_dir: String::new(),
+            pty: true,
+            exit_code: None,
+            output_end_offset: 0,
+            output_start_offset: 0,
+            status_message: String::new(),
+        }
+    }
+
+    /// Bare `cw msg` (#5085): how to send, then what it could go to.
+    #[test]
+    fn a_message_with_no_text_says_how_to_send_and_to_what() {
+        let shown = |error: anyhow::Error| {
+            (
+                crate::error_report::sentence(&error),
+                crate::error_report::next_step(&error),
+            )
+        };
+        assert_eq!(
+            shown(message_usage("msg", None, &[])),
+            (
+                "say what to send: `cw msg [ENV] [--session SESSION] TEXT`".to_owned(),
+                Some("cw msg ENV continue".to_owned())
+            )
+        );
+        assert_eq!(
+            shown(message_usage("msg", None, &[running("redteam")])).1,
+            Some("cw msg ENV continue".to_owned())
+        );
+        let (message, step) = shown(message_usage(
+            "msg",
+            None,
+            &[running("redteam"), running("lead")],
+        ));
+        assert!(
+            message.ends_with("; ENV's running sessions: redteam, lead"),
+            "{message}"
+        );
+        assert_eq!(
+            step.as_deref(),
+            Some("cw msg ENV --session redteam continue")
+        );
+    }
 
     #[test]
     fn terminal_messages_end_with_the_key_their_input_submits_on() {

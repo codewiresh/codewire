@@ -375,12 +375,21 @@ pub(crate) async fn send_message(
     args: AgentMessageArgs,
     steer: bool,
 ) -> anyhow::Result<()> {
-    let (environment, session, text) = args.target(if steer { "steer" } else { "msg" })?;
+    let command = if steer { "steer" } else { "msg" };
+    let message = args.target();
+    // A member's session is always named: there's no list to choose from.
+    let session = message.session.with_context(|| {
+        format!("name the session with --session: `cw --member M {command} [ENV_UUID] --session SESSION TEXT`")
+    })?;
+    ensure!(
+        !message.text.trim().is_empty(),
+        "say what to send: `cw --member M {command} [ENV_UUID] --session SESSION TEXT`"
+    );
     // Owned, so the connection's body can still take `args`.
     let (environment, session, text) = (
-        environment.map(str::to_owned),
+        message.environment.map(str::to_owned),
         session.to_owned(),
-        text.to_owned(),
+        message.text.clone(),
     );
     ensure!(
         steer || args.turn_id.is_none(),

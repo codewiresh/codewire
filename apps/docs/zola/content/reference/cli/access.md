@@ -135,8 +135,15 @@ cw ls [ENV] [--output json]     # alias: list
 
 Without `ENV`, lists every environment with its location, state and session
 count; see [Environments](@/reference/cli/environments.md). With `ENV`, lists that
-environment's sessions with their state, mode (`normal` or `managed`),
-parent and command.
+environment's sessions: each session by its name, or by its 8-character short
+ID when it has none, then its state, then its command, cut to the terminal's
+width (whole when piped). MODE (`normal` or `managed`) and PARENT appear when
+a session has them. `-o json` gives every field and the full ID.
+
+`--session` takes a name, a full session ID, or a short ID: at least 8
+characters from the start of the ID, with or without `session-`. A name or a
+full ID wins over a short ID, and a short ID two sessions share is refused,
+with `cw ls ENV` to tell them apart.
 
 Example:
 
@@ -145,9 +152,9 @@ cw ls app
 ```
 
 ```text
-NAME   STATE    MODE    PARENT  SESSION                                       COMMAND
-dev    Running  normal  -       session-5c7443a7-2a7e-409f-b684-bd74c8b580b5  python3 -m http.server 8080
-shell  Running  normal  -       session-a09621a6-d205-4ebb-8a6c-045c7cab5f19  bash
+SESSION  STATE    COMMAND
+dev      Running  python3 -m http.server 8080
+shell    Running  bash
 ```
 
 ## cw attach
@@ -261,8 +268,8 @@ cw stop app --session dev
 ```
 
 ```text
-NAME  STATE    MODE    PARENT  SESSION                                       COMMAND
-dev   Stopped  normal  -       session-5c7443a7-2a7e-409f-b684-bd74c8b580b5  python3 -m http.server 8080
+SESSION  STATE    COMMAND
+dev      Stopped  python3 -m http.server 8080
 ```
 
 ## cw restart
@@ -289,6 +296,6 @@ cw restart app --session dev
 ```
 
 ```text
-NAME  STATE    MODE    PARENT  SESSION                                       COMMAND
-dev   Running  normal  -       session-5c7443a7-2a7e-409f-b684-bd74c8b580b5  python3 -m http.server 8080
+SESSION  STATE    COMMAND
+dev      Running  python3 -m http.server 8080
 ```

@@ -11,10 +11,14 @@ mod navigation;
 mod reattach;
 use attach_mode::{attaches_interactively, session_is_terminal};
 pub(crate) mod setup;
-
+mod short_id;
+mod table;
 pub(crate) use entry::{handle_environment_run_command, handle_environment_shell_command};
 pub(crate) use exec::handle_exec_command;
 pub(crate) use navigation::AttachNavigationDecoder;
+#[cfg(test)]
+pub(super) use table::format_environment_sessions;
+pub(super) use table::print_environment_sessions;
 
 #[cfg(target_os = "linux")]
 pub(crate) async fn run_host_agent_control(
@@ -973,11 +977,7 @@ pub(crate) async fn handle_send_command(globals: &Globals, args: SendArgs) -> an
     let SendRequest { selection, data } = send_request(&args)?;
     let (target, session) = resolve_selected_session(globals, &selection.values()).await?;
     if managed_session(&session) {
-        let name = if session.name.is_empty() {
-            &session.session_id
-        } else {
-            &session.name
-        };
+        let name = short_id::session_display(&session);
         anyhow::bail!(
             "{name} is a managed agent conversation and takes no raw input; send it a task with `cw msg ENV --session {name} TEXT`"
         );
@@ -1066,11 +1066,7 @@ pub(crate) async fn handle_stop_command(
 }
 
 fn session_label(session: &EnvironmentSessionView) -> &str {
-    if session.name.is_empty() {
-        &session.session_id
-    } else {
-        &session.name
-    }
+    short_id::session_display(session)
 }
 
 /// Ask at a terminal whether to stop the running children too; never asks
@@ -1419,9 +1415,11 @@ async fn select_environment_session(
             .map(|session| SessionSelection::Select(Box::new(session)))
             .ok_or_else(|| {
                 let environment = &target.current_target().name;
-                anyhow::anyhow!(
-                    "session {requested:?} not found in {environment} (`cw ls {environment}` lists its sessions)"
-                )
+                short_id::ambiguous_id_prefix(&sessions, requested, environment).unwrap_or_else(|| {
+                    anyhow::anyhow!(
+                        "session {requested:?} not found in {environment} (`cw ls {environment}` lists its sessions)"
+                    )
+                })
             });
     }
     match sessions.as_slice() {
@@ -1451,7 +1449,9 @@ pub(crate) fn requested_environment_session<'a>(
     if uuid::Uuid::parse_str(canonical_id).is_ok() {
         by_id
     } else {
-        by_id.or_else(|| sessions.iter().find(|session| session.name == requested))
+        by_id
+            .or_else(|| sessions.iter().find(|session| session.name == requested))
+            .or_else(|| short_id::unique_id_prefix(sessions, requested))
     }
 }
 
@@ -1464,33 +1464,22 @@ async fn select_session_from_picker(
     script_repair: String,
 ) -> anyhow::Result<EnvironmentSessionView> {
     use crate::output::{Capabilities, OutputMode, Picker, PickerOutcome, PickerRow, run_picker};
-    let rows = sessions
-        .iter()
-        .map(|session| {
-            let name = if session.name.is_empty() {
-                "-".to_owned()
-            } else {
-                session.name.clone()
-            };
-            let command = session_command_label(session);
-            let search = format!("{name} {} {command}", session.session_id);
-            PickerRow::new(
-                vec![
-                    name,
-                    session.state.to_lowercase(),
-                    session_mode(session).to_owned(),
-                    command,
-                    session.session_id.clone(),
-                ],
-                search,
-            )
+    // The table's columns, so the picker never shows a full session ID; the
+    // ID stays searchable.
+    let mut table = table::session_rows(sessions).into_iter();
+    let (mut header, command) = table.next().expect("session_rows starts with its header");
+    header.push(command);
+    let rows = table
+        .zip(sessions)
+        .map(|((mut cells, command), session)| {
+            let search = format!("{} {} {command}", cells[0], session.session_id);
+            cells.push(command);
+            PickerRow::new(cells, search)
         })
         .collect();
     let picker = Picker::new(
         format!("Choose a session {verb} in {environment}"),
-        ["NAME", "STATE", "MODE", "COMMAND", "SESSION"]
-            .map(str::to_owned)
-            .to_vec(),
+        header,
         rows,
     )
     .with_no_match("No matching sessions. Backspace to clear the filter.");
@@ -1559,6 +1548,8 @@ fn session_command_label(session: &EnvironmentSessionView) -> String {
         "managed agent".into()
     } else if is_login_shell(&session.command) {
         "login shell".into()
+    } else if session.command.last().map(String::as_str) == Some(DASHBOARD_SHELL) {
+        "bash".into()
     } else {
         session.command.join(" ")
     }
@@ -1589,70 +1580,6 @@ pub(crate) fn sessions_json(
         })
         .collect::<anyhow::Result<Vec<_>>>()
         .map(serde_json::Value::Array)
-}
-
-pub(super) fn print_environment_sessions(
-    sessions: &[EnvironmentSessionView],
-    output: OutputFormat,
-) -> anyhow::Result<()> {
-    match output {
-        OutputFormat::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(&sessions_json(sessions)?)?
-        ),
-        OutputFormat::Text if sessions.is_empty() => println!("No sessions"),
-        OutputFormat::Text => print!("{}", format_environment_sessions(sessions, "")),
-    }
-    Ok(())
-}
-
-/// Aligned session rows under a header. A child names its parent session
-/// from the same environment; COMMAND, the widest column, comes last.
-pub(super) fn format_environment_sessions(
-    sessions: &[EnvironmentSessionView],
-    indent: &str,
-) -> String {
-    let parent = |session: &EnvironmentSessionView| match session.parent_session_id.as_str() {
-        "" => "-".to_owned(),
-        id => sessions
-            .iter()
-            .find(|candidate| candidate.session_id == id && !candidate.name.is_empty())
-            .map_or_else(|| id.to_owned(), |candidate| candidate.name.clone()),
-    };
-    let rows: Vec<[String; 6]> = std::iter::once(
-        ["NAME", "STATE", "MODE", "PARENT", "SESSION", "COMMAND"].map(String::from),
-    )
-    .chain(sessions.iter().map(|session| {
-        [
-            if session.name.is_empty() {
-                "-".to_owned()
-            } else {
-                session.name.clone()
-            },
-            session.state.clone(),
-            session_mode(session).to_owned(),
-            parent(session),
-            session.session_id.clone(),
-            session_command_label(session),
-        ]
-    }))
-    .collect();
-    let widths: [usize; 5] = std::array::from_fn(|column| {
-        rows.iter()
-            .map(|row| row[column].chars().count())
-            .max()
-            .unwrap_or(0)
-    });
-    let mut output = String::new();
-    for row in &rows {
-        output.push_str(indent);
-        for (cell, width) in row.iter().zip(widths) {
-            output.push_str(&format!("{cell:<width$}  "));
-        }
-        output.push_str(&row[5]);
-        output.push('\n');
-    }
-    output
 }
 
 /// `cw run` and `cw shell`. `name_base` names a session that has no
@@ -2268,6 +2195,10 @@ const TERMINFO_ENV: &str = "CW_TERMINFO";
 
 /// Shells launched by released versions of cw, shown as one in `cw ls`.
 const EARLIER_LOGIN_SHELL: &str = "exec \"${SHELL:-/bin/sh}\" -l";
+/// The dashboard terminal's shell (codewire-dashboard-web's
+/// `terminal_sessions.rs`), which the session table names `bash`.
+const DASHBOARD_SHELL: &str =
+    "if [ -x /bin/bash ]; then exec /bin/bash -i; else exec /bin/sh -i; fi";
 
 /// The login shell's environment: the client terminal's own terminfo entry
 /// (`infocmp -x $TERM`, in base64), for an environment that lacks it. Empty

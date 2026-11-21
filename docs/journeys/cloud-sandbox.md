@@ -19,6 +19,7 @@ Updated 2026-11-21.
 | `sandbox-create-fails` | cw-cleanup | observed 2026-11-17 (#4483) | not yet observed; v0.4.21 lacks #4483's reasons |
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
+| `sandbox-msg-session` | cw-cli | observed 2026-11-21 (#5085), a build of ab7223798f; an unnamed session not walked | not yet observed |
 | `sandbox-cw-knows-its-server` | cw-identity | partly observed 2026-11-17 (#5202) | not yet observed |
 | `sandbox-attach-stays` | cw-mesh | observed 2026-11-18 (#5120); 4.5 h attach 2026-11-21 | observed in part 2026-11-21 (#5120): the attach only, no cut or `cw shell` |
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14; named sessions and `cw run --name` 2026-11-20 (#5494, #5497) | not yet observed |
@@ -231,6 +232,65 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished),
     exit status 7, the stdin line, and the two `cw run` lines again from
     `cw logs`. Evidence: the pull
     request that added this section.
+
+## `sandbox-msg-session`: send text to a session and list its sessions
+
+#5085, from the owner's session of 2026-11-16, which is quoted there.
+
+- **Entry points:** `cw msg`, `cw ls SANDBOX`.
+- **States to exercise:**
+  - unquoted text after `--session`;
+  - a sandbox with one running session, and `cw msg SANDBOX TEXT` with no
+    `--session`;
+  - several running sessions, at a terminal and piped;
+  - bare `cw msg`;
+  - `cw ls SANDBOX` with an unnamed dashboard shell and an agent started with
+    a long prompt, at a narrow terminal, at a wide one and piped.
+- **Driving it:**
+
+  ```sh
+  cw run --in walk --name lead --detach -- sh -c 'cat'
+  cw msg walk --session lead just continue
+  cw msg walk hello there
+  cw msg
+  cw msg walk
+  cw run --in walk --detach -- sh -c 'sleep 600 # a long command that a narrow terminal cuts'
+  cw ls walk
+  cw ls walk | cat
+  ```
+
+- **Proof:**
+  - `cw msg walk --session lead just continue` prints `Sent to terminal
+    walk/lead.`, and `cw logs walk --session lead` shows `just continue`;
+  - `cw msg walk hello there` sends to `lead`, the one running session;
+  - with a second running session, a terminal shows the session picker,
+    with `cw ls walk`'s columns and no full session ID, and a pipe refuses
+    with both names and the `--session` command;
+  - bare `cw msg` says how to send and gives a `→` command; `cw msg walk`,
+    or a bare `cw msg` with `walk` selected, also lists walk's running
+    sessions; neither prints clap's "required arguments" error;
+  - `cw ls walk` starts each row with the session's name, or its ID when it
+    has none, never `-`; a dashboard shell reads `bash`; COMMAND is cut with
+    `…` to the terminal and is whole when piped.
+- **Observed:** Dev, 2026-11-21, `cw` built from ab7223798f, as the Dev
+  smoke identity (an API key in a throwaway `HOME`), in sandboxes
+  `cwcli-msg-walk` and `cwcli-msg-walk2`, each removed afterwards:
+  - `cw msg cwcli-msg-walk --session lead just continue` printed `Sent to
+    terminal cwcli-msg-walk/lead.`; `cw msg cwcli-msg-walk hello there`
+    went to `lead`, the one running session; `cw logs` showed both lines;
+  - with a second session, a pipe refused with `✗ There are 2 running
+    sessions in cwcli-msg-walk2 (lead, sh); name one with --session` and `→
+    cw msg cwcli-msg-walk2 --session lead hi`; at a terminal the picker
+    showed `SESSION STATE COMMAND` with no session ID, and Esc answered `✗
+    Canceled; no session chosen`;
+  - bare `cw msg` answered `✗ Say what to send: …` and `→ cw msg ENV
+    continue`; `cw msg cwcli-msg-walk2` added `cwcli-msg-walk2's running
+    sessions: lead, sh`;
+  - `cw ls cwcli-msg-walk2` at 60 columns cut the long command with `…`; at
+    200 columns and piped it was whole.
+  - Not walked: a session with no name. `cw run` without `--name` names the
+    session after its program (`sh`), and a dashboard shell needs the
+    browser; the short ID is covered by the command's tests.
 
 ## `sandbox-shell`: open a shell in a sandbox
 

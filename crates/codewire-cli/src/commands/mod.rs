@@ -2422,16 +2422,13 @@ pub(crate) struct WaitArgs {
     pub(crate) output: OutputFormat,
 }
 
-/// `cw msg` and `cw steer`: `[ENV|--in ENV] --session SESSION TEXT`.
+/// `cw msg` and `cw steer`: `[ENV|--in ENV] [--session SESSION] TEXT…`.
 #[derive(Debug, Args)]
 pub(crate) struct AgentMessageArgs {
-    /// `[ENV] TEXT`. A third positional once named the session; it is
-    /// refused with the `--session` spelling before any lookup.
+    /// `[ENV] TEXT…`: every word after the environment is the text (#5085).
     #[arg(
         value_name = "ENV_AND_TEXT",
-        help = "[ENV] TEXT: the environment (default: the selected one), then the text",
-        num_args = 1..=3,
-        required = true
+        help = "[ENV] TEXT: the environment (default: the selected one), then the text; unquoted words are joined"
     )]
     pub(crate) positionals: Vec<String>,
     #[arg(
@@ -2440,7 +2437,11 @@ pub(crate) struct AgentMessageArgs {
         help = "Environment name or ID (same as ENV)"
     )]
     pub(crate) in_environment: Option<String>,
-    #[arg(long, value_name = "SESSION", help = "The session to send to")]
+    #[arg(
+        long,
+        value_name = "SESSION",
+        help = "The session to send to (default: the one running session)"
+    )]
     pub(crate) session: Option<String>,
     #[arg(long, help = "Reply to a prior message ID")]
     pub(crate) reply_to: Option<String>,
@@ -2452,31 +2453,6 @@ pub(crate) struct AgentMessageArgs {
     pub(crate) expected_launch_generation: Option<u64>,
     #[arg(short = 'o', long, value_enum, default_value_t = OutputFormat::Text)]
     pub(crate) output: OutputFormat,
-}
-
-impl AgentMessageArgs {
-    /// The environment, session and text, checked before any lookup.
-    pub(crate) fn target(&self, command: &str) -> anyhow::Result<(Option<&str>, &str, &str)> {
-        let usage = format!("`cw {command} [ENV] --session SESSION TEXT`");
-        let Some(session) = self.session.as_deref().and_then(trimmed_str) else {
-            anyhow::bail!(
-                "name the session with --session: {usage}; a positional no longer selects a session"
-            );
-        };
-        match self.positionals.as_slice() {
-            [text] => Ok((self.in_environment.as_deref(), session, text)),
-            [environment, text] => {
-                anyhow::ensure!(
-                    self.in_environment.is_none(),
-                    "name the environment once: `cw {command} ENV` or `cw {command} --in ENV`, not both"
-                );
-                Ok((Some(environment), session, text))
-            }
-            _ => anyhow::bail!(
-                "`cw {command} ENV SESSION TEXT` no longer selects a session; use {usage}"
-            ),
-        }
-    }
 }
 
 /// `cw inbox [ENV|--in ENV] --session SESSION`.
@@ -2591,6 +2567,7 @@ mod launch_setup;
 pub(crate) mod lifecycle_output;
 mod login;
 pub(crate) mod mesh_commands;
+mod message_target;
 mod organizations;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod placement_choice;

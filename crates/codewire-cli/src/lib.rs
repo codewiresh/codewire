@@ -473,7 +473,7 @@ enum Command {
     #[cfg(unix)]
     #[command(
         about = "Send text to a session: typed into its terminal, or a managed message",
-        long_about = "Send text to a session:\n  cw msg ENV --session SESSION TEXT\n  cw msg --session SESSION TEXT      (in the selected environment)\n\nA terminal session receives the text and Enter through its terminal input, and cw reports the write, not what the program did with it. A managed agent conversation (started with `cw run --agent`) receives a durable message; cw prints its ID and state, and `cw wait --message ID` waits for its result."
+        long_about = "Send text to a session:\n  cw msg ENV TEXT                    (its one running session)\n  cw msg ENV --session SESSION TEXT\n  cw msg --session SESSION TEXT      (in the selected environment)\n\nThe words after the environment are the text; quotes are optional. With several running sessions and no --session, cw asks at a terminal and otherwise names them. A terminal session receives the text and Enter through its terminal input, and cw reports the write, not what the program did with it. A managed agent conversation (started with `cw run --agent`) receives a durable message; cw prints its ID and state, and `cw wait --message ID` waits for its result."
     )]
     Msg(AgentMessageArgs),
     #[cfg(unix)]

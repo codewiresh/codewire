@@ -1,7 +1,7 @@
 ---
 title: Coding agents
 description: Give each coding agent its own VM with your project, run several on one task, and come back to their results later.
-updated: 2026-11-14
+updated: 2026-11-21
 weight: 3
 aliases: ["/use-cases/parallel-agents"]
 ---
@@ -149,9 +149,9 @@ cw ls pr-42
 `PARENT` (other sessions omitted):
 
 ```text
-NAME           STATE    MODE     PARENT       SESSION                                       COMMAND
-coordinator    Running  managed  -            session-c82414ed-1903-4df5-accf-8d4a807939f5  managed agent
-files          Running  managed  coordinator  session-5d620929-d43c-4e46-8491-3aa0d0f277ed  managed agent
+SESSION      STATE    MODE     PARENT       COMMAND
+coordinator  Running  managed  -            managed agent
+files        Running  managed  coordinator  managed agent
 ```
 
 ### What the lead does with results

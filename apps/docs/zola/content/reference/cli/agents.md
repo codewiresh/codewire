@@ -1,7 +1,7 @@
 ---
 title: Agents
 description: msg, steer, interrupt and inbox for managed Codex and Claude Code conversations.
-updated: 2026-10-26
+updated: 2026-11-17
 weight: 4
 aliases: ["/cli/agents"]
 ---
@@ -14,8 +14,16 @@ and the session with `--session`.
 ## cw msg
 
 ```sh
-cw msg [ENV] --session SESSION TEXT [--reply-to MESSAGE_ID] [-o json]
+cw msg [ENV] [--session SESSION] TEXT… [--reply-to MESSAGE_ID] [-o json]
 ```
+
+The words after the environment are the text, so quotes are optional: `cw
+msg app --session lead just continue` sends "just continue". Without
+`--session`, `cw msg` sends to the environment's one running session. With
+several, it asks at a terminal and otherwise names them, with the
+`--session` command to use. A first word that names a running session is
+refused rather than sent as text. Bare `cw msg` says how to send and lists
+the running sessions it could send to.
 
 One text command for both kinds of session. `cw msg` looks up the session
 before writing anything and acts on its recorded mode:
