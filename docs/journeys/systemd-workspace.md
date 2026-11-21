@@ -8,11 +8,11 @@ example. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-20. Written first; nothing here is built yet.
+Updated 2026-11-21. Written first; nothing here is built yet.
 
 | ID | Dev | Production |
 | --- | --- | --- |
-| `systemd-workspace-boot` | not yet observed | not offered |
+| `systemd-workspace-boot` | not yet observed; the setting-off create on a local Kind cluster, not yet observed | not offered |
 | `systemd-workspace-refusals` | not yet observed; the runtime refusal on a local Kind cluster, not yet observed | not offered |
 | `systemd-workspace-sessions` | not yet observed | not offered |
 | `systemd-workspace-egress` | not yet observed | not offered |
@@ -21,7 +21,8 @@ Updated 2026-11-20. Written first; nothing here is built yet.
 | `systemd-workspace-rex` | not yet observed | not offered |
 
 A systemd workspace exists only on a VM runtime, so a local Kind cluster,
-which runs sandboxes on `runc`, can prove one thing: that it refuses.
+which runs sandboxes on `runc`, can prove two things: that it refuses, and
+that without the setting the image is an ordinary custom image.
 
 Outside the product, scratch Pods on Dev's VM runtime have shown the
 bootstrap booting, taking exec and being killed after a stop. With OpenSSH in
@@ -65,6 +66,10 @@ needs the product's own create.
      tmpfs none /mnt'`.
   5. `cw exec --in sd -- sh -c 'cat /proc/1/cgroup; grep -c "^0$"
      /sys/fs/cgroup/cgroup.procs'`.
+  6. On a local Kind cluster whose orchestration does not set the
+     repository, with the walking organization opted in there, `cw create
+     --cloud --name sd-off --image IMAGE --no-profile --yes`, then read the workspace container of its Pod with `kubectl get
+     pod -o json`, then `cw rm --yes sd-off`.
 - **Proof:**
   - step 2 prints `systemd`, `running`, `0`, and a startup time;
   - step 3 prints `ActiveState=active`, `TasksMax=infinity`,
@@ -76,11 +81,18 @@ needs the product's own create.
   - step 5 prints `0::/workspace/init.scope` and a count of at least `1`.
     The container's own cgroup holds processes outside systemd's PID
     namespace, which a session sees as `0`, and the first process is one of
-    them. The stop's guarantee rests on this arrangement.
+    them. The stop's guarantee rests on this arrangement;
+  - in step 6 the workspace container is a custom image's: its command is
+    the custom-image supervisor running the image's own command (`/sbin/init`)
+    beside the daemon, it adds no capability, and it does not run as root. So
+    systemd does not start as PID 1. No refusal names systemd workspaces.
 - **Gotchas:** `systemctl is-system-running` says `starting` for the first
   moments; the create returns when the daemon is ready, which is before the
   last unit. Compare `CapBnd` with a default sandbox created on the same
-  cluster, not with a number from this file.
+  cluster, not with a number from this file. In step 6 the image's
+  `/sbin/init` is not expected to get far as an ordinary workload without
+  root, so the create may end as it does for any custom image whose command
+  fails; record what it reports, but the proof is the Pod's spec.
 - **Observed:** not yet observed.
 
 ## `systemd-workspace-refusals`: where it must not exist
@@ -98,8 +110,9 @@ needs the product's own create.
      --yes`.
   3. `cw create --cloud --name sd-conf --image IMAGE --isolation
      confidential --no-profile --yes`.
-  4. On a local Kind cluster whose orchestration has the setting, `cw create
-     --cloud --name sd-runc --image IMAGE --no-profile --yes`.
+  4. On a local Kind cluster whose orchestration has the setting, with the
+     walking organization opted in there too, `cw create --cloud --name
+     sd-runc --image IMAGE --no-profile --yes`.
   5. With the flag on, `cw create --cloud --name sd-keep --image IMAGE
      --no-profile --yes`, then `cw stop sd-keep`. With `sd` from
      `systemd-workspace-boot` running, `cw stop sd`. A global admin then
