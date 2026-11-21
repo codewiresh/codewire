@@ -171,7 +171,10 @@ async fn seed(pool: &PgPool) -> Account {
         r#"INSERT INTO audit_logs
                (id, timestamp, action, user_id, ip_address, user_agent, metadata, severity)
            VALUES ($1, NOW(), 'user.secret.created', $2, '203.0.113.7', 'fixture',
-                   jsonb_build_object('email', $3::text, 'key', 'TOKEN'), 'info')"#,
+                   jsonb_build_object('email', $3::text, 'key', 'TOKEN',
+                                      'provider_email', $3::text,
+                                      'provider_account', 'ada-github',
+                                      'provider_subject', '583231'), 'info')"#,
     )
     .bind(format!("audit_acctdel_{namespace}"))
     .bind(&user_id)
@@ -191,6 +194,24 @@ async fn seed(pool: &PgPool) -> Account {
     .execute(pool)
     .await
     .unwrap();
+    // No writer stores an array or a string today; either could hold the
+    // address, so the deletion erases it.
+    for (shape, metadata) in [
+        ("array", serde_json::json!([email.clone()])),
+        ("string", serde_json::json!(email.clone())),
+    ] {
+        sqlx::query(
+            r#"INSERT INTO audit_logs
+                   (id, timestamp, action, user_id, ip_address, user_agent, metadata, severity)
+               VALUES ($1, NOW(), 'user.fixture', $2, '203.0.113.7', 'fixture', $3, 'info')"#,
+        )
+        .bind(format!("audit_acctdel_{shape}_{namespace}"))
+        .bind(&user_id)
+        .bind(metadata)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
 
     Account {
         namespace,
@@ -494,6 +515,16 @@ async fn each_phase_resumes_and_the_email_can_sign_up_again() {
     assert_eq!(actor, DELETED_USER_ID);
     assert_eq!(ip, None);
     assert_eq!(metadata, serde_json::Value::Null);
+    for shape in ["array", "string"] {
+        let (actor, metadata): (String, serde_json::Value) =
+            sqlx::query_as("SELECT user_id, metadata FROM audit_logs WHERE id = $1")
+                .bind(format!("audit_acctdel_{shape}_{}", account.namespace))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(actor, DELETED_USER_ID, "{shape}");
+        assert_eq!(metadata, serde_json::Value::Null, "{shape}");
+    }
     assert_eq!(
         scalar_i64(
             &pool,

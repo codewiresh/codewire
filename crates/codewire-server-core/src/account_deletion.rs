@@ -42,14 +42,19 @@ pub const DELETED_USER_ID: &str = "deleted-user";
 const DELETION_REQUESTED_ACTION: &str = "account.deletion_requested";
 const DELETED_ACTION: &str = "account.deleted";
 
-/// Audit metadata keys that carry an address. They, the IP address and the
-/// user agent are removed from the entries that name a deleted user.
-const AUDIT_EMAIL_KEYS: [&str; 5] = [
+/// Audit metadata keys that carry an address or a sign-in identity: the
+/// GitHub or Google address, login and stable subject of a linked provider.
+/// They, the IP address and the user agent are removed from the entries that
+/// name a deleted user.
+const AUDIT_IDENTITY_KEYS: [&str; 8] = [
     "email",
     "user_email",
     "actor_email",
     "target_email",
     "target_user_email",
+    "provider_email",
+    "provider_account",
+    "provider_subject",
 ];
 
 /// The input of the account deletion workflow and of each of its activities,
@@ -761,15 +766,21 @@ pub async fn finalize_account_deletion_database(
             .await
             .map_err(AppError::from)?;
     }
-    // Some entries hold JSON null (enabling 2FA, signing out), and jsonb `-`
-    // fails on anything but an object, which would stop the deletion here.
+    // Only an object's top-level identity keys can be removed, and no writer
+    // nests an address or identity under another key. jsonb `-` fails on a
+    // scalar (enabling 2FA and signing out write JSON null). No writer stores
+    // an array or a string, but either could hold an address, so it is
+    // erased; null, numbers and booleans can't, and stay.
     sqlx::query(
         r#"
         UPDATE audit_logs
         SET user_id = CASE WHEN user_id = $1 THEN $2 ELSE user_id END,
             target_user_id = CASE WHEN target_user_id = $1 THEN $2 ELSE target_user_id END,
-            metadata = CASE WHEN jsonb_typeof(metadata) = 'object'
-                            THEN metadata - $3::text[] ELSE metadata END,
+            metadata = CASE jsonb_typeof(metadata)
+                           WHEN 'object' THEN metadata - $3::text[]
+                           WHEN 'array' THEN 'null'::jsonb
+                           WHEN 'string' THEN 'null'::jsonb
+                           ELSE metadata END,
             ip_address = NULL,
             user_agent = NULL
         WHERE user_id = $1 OR target_user_id = $1
@@ -777,7 +788,7 @@ pub async fn finalize_account_deletion_database(
     )
     .bind(&user_id)
     .bind(DELETED_USER_ID)
-    .bind(AUDIT_EMAIL_KEYS.as_slice())
+    .bind(AUDIT_IDENTITY_KEYS.as_slice())
     .execute(&mut *tx)
     .await
     .map_err(AppError::from)?;
