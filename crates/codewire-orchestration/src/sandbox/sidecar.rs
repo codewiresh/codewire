@@ -230,7 +230,7 @@ impl SandboxClient {
         self.forwarded_stream(&pod_name, port, direct_error).await
     }
 
-    async fn port_forward_pod_stream(
+    pub(crate) async fn port_forward_pod_stream(
         &self,
         pod_name: &str,
         port: u16,

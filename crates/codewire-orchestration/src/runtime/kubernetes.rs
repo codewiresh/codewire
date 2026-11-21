@@ -26,14 +26,15 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, DynamicObject, LogParams};
 
 use super::{
-    CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
-    Incarnation, Isolation, KeptSnapshot, MemberEvidence, MemberFacts, MemberReplacement,
-    NamedNetworkPolicy, NetworkPolicyFacts, Pick, Placement, PoolBornClaim, PoolPass, PoolState,
-    RenderingIntent, ResizeState, RuntimeAccess, RuntimeAttestation, RuntimeClaims, RuntimeDriver,
-    RuntimeExec, RuntimeFacts, RuntimeLifecycle, RuntimeMember, RuntimeObservation,
-    RuntimeObservations, RuntimePools, RuntimeProbe, RuntimeResize, RuntimeSnapshots,
-    RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime, VerifiedChain, VolumeGrowth,
-    VolumeIdentity, VolumeMode, VolumeRef, WantedPool, WantedPools, WorkspaceVolume,
+    CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, ExecTarget,
+    FailedLiveResize, Incarnation, Isolation, KeptSnapshot, MemberEvidence, MemberFacts,
+    MemberReplacement, NamedNetworkPolicy, NetworkPolicyFacts, Pick, Placement, PoolBornClaim,
+    PoolPass, PoolState, RenderingIntent, ResizeState, RuntimeAccess, RuntimeAttestation,
+    RuntimeClaims, RuntimeDriver, RuntimeExec, RuntimeFacts, RuntimeLifecycle, RuntimeMember,
+    RuntimeObservation, RuntimeObservations, RuntimePools, RuntimeProbe, RuntimeResize,
+    RuntimeSnapshots, RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime,
+    VerifiedChain, VolumeGrowth, VolumeIdentity, VolumeMode, VolumeRef, WantedPool, WantedPools,
+    WorkspaceVolume,
 };
 use crate::sandbox::client::SandboxClient;
 use crate::sandbox::host_keys::HostKeyStore;
@@ -41,8 +42,8 @@ use crate::sandbox::sidecar::WORKSPACE_SSH_PORT;
 use crate::sandbox::snapshots::{clearing_volume_name, kept_snapshot_name, raw_snapshot_name};
 use crate::sandbox::template::render_sandbox_template;
 use crate::sandbox::template::{
-    KATA_COCO_INIT_DATA_ANNOTATION_KEY, RUNTIME_PROFILE_CONFIDENTIAL, TemplateOpts,
-    confidential_init_data,
+    KATA_COCO_INIT_DATA_ANNOTATION_KEY, RUNTIME_PROFILE_CONFIDENTIAL, RUNTIME_PROFILE_STANDARD,
+    TemplateOpts, confidential_init_data,
 };
 use crate::sandbox::warm_pool::{pod_spec_pool_revision, pool_revision, sandbox_matches_rendering};
 use crate::sandbox::{ClaimOpts, shadow_warm_pool_name};
@@ -1184,13 +1185,27 @@ impl RuntimeAccess for KubernetesDriver {
     async fn start_exec(
         &self,
         placement: &Placement,
-        member_name: &str,
+        target: &ExecTarget<'_>,
         command: &[String],
         work_dir: &str,
         env: &BTreeMap<String, String>,
     ) -> anyhow::Result<RuntimeExec> {
-        self.sandbox_client(placement)
-            .start_workspace_exec_on_pod(member_name, command, work_dir, env)
+        let client = self.sandbox_client(placement);
+        // Only a deployment on `standard` has Pods whose container is outside
+        // their VM (an environment falls back from it, never to it), so on any
+        // other a command attaches with no lookup.
+        if self.rendering.runtime_profile.trim() == RUNTIME_PROFILE_STANDARD
+            && client.is_standard_pod(target.member_name).await?
+        {
+            let credential = target.daemon_credential.ok_or_else(|| {
+                anyhow::anyhow!("workspace exec: no daemon credential for the Pod")
+            })?;
+            return client
+                .start_daemon_exec_on_pod(target.member_name, credential, command, work_dir, env)
+                .await;
+        }
+        client
+            .start_workspace_exec_on_pod(target.member_name, command, work_dir, env)
             .await
     }
 
@@ -1968,7 +1983,10 @@ mod tests {
         let attached = driver
             .start_exec(
                 &placement,
-                "workspace-b",
+                &ExecTarget {
+                    member_name: "workspace-b",
+                    daemon_credential: None,
+                },
                 &["true".to_owned()],
                 "/workspace",
                 &BTreeMap::new(),

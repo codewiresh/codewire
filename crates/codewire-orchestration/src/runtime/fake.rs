@@ -11,12 +11,12 @@ use async_trait::async_trait;
 use tokio::sync::oneshot;
 
 use super::{
-    CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, FailedLiveResize,
-    Incarnation, KeptSnapshot, MemberEvidence, MemberReplacement, Pick, Placement, PoolBornClaim,
-    PoolPass, PoolState, RenderingIntent, ResizeState, RuntimeAccess, RuntimeClaims, RuntimeExec,
-    RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeProbe, RuntimeResize, RuntimeSnapshots,
-    RuntimeStorage, RuntimeStream, RuntimeTeardown, SuspendedRuntime, VolumeGrowth, VolumeIdentity,
-    VolumeMode, VolumeRef, WantedPool, WantedPools,
+    CaptureStage, ClaimReadiness, ClaimRef, ClearingOpts, ClearingProgress, ExecTarget,
+    FailedLiveResize, Incarnation, KeptSnapshot, MemberEvidence, MemberReplacement, Pick,
+    Placement, PoolBornClaim, PoolPass, PoolState, RenderingIntent, ResizeState, RuntimeAccess,
+    RuntimeClaims, RuntimeExec, RuntimeLifecycle, RuntimeMember, RuntimePools, RuntimeProbe,
+    RuntimeResize, RuntimeSnapshots, RuntimeStorage, RuntimeStream, RuntimeTeardown,
+    SuspendedRuntime, VolumeGrowth, VolumeIdentity, VolumeMode, VolumeRef, WantedPool, WantedPools,
 };
 use super::{
     Isolation, MemberFacts, NamedNetworkPolicy, NetworkPolicyFacts, RuntimeAttestation,
@@ -893,7 +893,7 @@ impl RuntimeAccess for FakeRuntimeDriver {
     async fn start_exec(
         &self,
         _placement: &Placement,
-        _member_name: &str,
+        _target: &ExecTarget<'_>,
         _command: &[String],
         _work_dir: &str,
         _env: &BTreeMap<String, String>,

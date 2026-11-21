@@ -13,8 +13,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use zeroize::Zeroizing;
 
 use super::client::SandboxClient;
+use super::daemon_exec::DaemonExec;
 
-const WORKSPACE_EXEC_CAPTURE_BYTES: usize = 64 * 1024;
+pub(crate) const WORKSPACE_EXEC_CAPTURE_BYTES: usize = 64 * 1024;
 
 /// Mirrors `sandbox.WorkspaceExecResult`.
 #[derive(Debug, Default, Clone)]
@@ -28,7 +29,14 @@ pub struct WorkspaceExecResult {
 /// Setup fencing retains this handle until `wait` observes the remote exit;
 /// dropping it is ambiguous and therefore requires Pod recovery.
 pub struct WorkspaceExecHandle {
-    attached: AttachedProcess,
+    transport: ExecTransport,
+}
+
+enum ExecTransport {
+    /// `kubectl exec` of `cw __hosted-exec` in the `workspace` container.
+    Attached(AttachedProcess),
+    /// The guest daemon's `ExecSession`, for a `standard` Pod (#5602).
+    Daemon(DaemonExec),
 }
 
 /// Interactive terminal command whose Kubernetes attachment handshake has
@@ -56,67 +64,88 @@ impl WorkspaceExecHandle {
     /// [`Self::wait`], also handing each stderr chunk to `tap` as it arrives.
     /// Capture, completion and status classification are unchanged.
     pub async fn wait_tapping_stderr(
-        mut self,
+        self,
         tap: Option<StderrTap>,
     ) -> anyhow::Result<WorkspaceExecResult> {
-        let stdout: anyhow::Result<Vec<u8>>;
-        let stderr: anyhow::Result<Vec<u8>>;
-        let mut out_reader = self.attached.stdout();
-        let mut err_reader = self.attached.stderr();
-        let status_fut = self.attached.take_status();
-        let out_task = async {
-            if let Some(reader) = out_reader.as_mut() {
-                read_bounded(reader, WORKSPACE_EXEC_CAPTURE_BYTES)
-                    .await
-                    .map(|output| output.bytes.to_vec())
-                    .map_err(|error| anyhow::anyhow!("workspace exec stdout: {error}"))
-            } else {
-                Ok(Vec::new())
-            }
-        };
-        let err_task = async {
-            if let Some(reader) = err_reader.as_mut() {
-                read_bounded_tapped(reader, WORKSPACE_EXEC_CAPTURE_BYTES, tap.as_ref())
-                    .await
-                    .map(|output| output.bytes.to_vec())
-                    .map_err(|error| anyhow::anyhow!("workspace exec stderr: {error}"))
-            } else {
-                Ok(Vec::new())
-            }
-        };
-        let status = if let Some(future) = status_fut {
-            let (out, err, status) = tokio::join!(out_task, err_task, future);
-            stdout = out;
-            stderr = err;
-            status
-        } else {
-            let (out, err) = tokio::join!(out_task, err_task);
-            stdout = out;
-            stderr = err;
-            None
-        };
-        self.attached
-            .join()
-            .await
-            .map_err(|error| anyhow::anyhow!("workspace exec completion: {error}"))?;
-        let stdout = stdout?;
-        let stderr = stderr?;
-
-        let result = WorkspaceExecResult {
-            stdout,
-            stderr,
-            exit_code: 0,
-        };
-        classify_workspace_exec_status(status, result)
+        match self.transport {
+            ExecTransport::Attached(attached) => wait_attached(attached, tap).await,
+            ExecTransport::Daemon(exec) => exec.wait(tap.as_ref()).await,
+        }
     }
 
+    pub(crate) fn daemon(exec: DaemonExec) -> Self {
+        Self {
+            transport: ExecTransport::Daemon(exec),
+        }
+    }
+}
+
+async fn wait_attached(
+    mut attached: AttachedProcess,
+    tap: Option<StderrTap>,
+) -> anyhow::Result<WorkspaceExecResult> {
+    let stdout: anyhow::Result<Vec<u8>>;
+    let stderr: anyhow::Result<Vec<u8>>;
+    let mut out_reader = attached.stdout();
+    let mut err_reader = attached.stderr();
+    let status_fut = attached.take_status();
+    let out_task = async {
+        if let Some(reader) = out_reader.as_mut() {
+            read_bounded(reader, WORKSPACE_EXEC_CAPTURE_BYTES)
+                .await
+                .map(|output| output.bytes.to_vec())
+                .map_err(|error| anyhow::anyhow!("workspace exec stdout: {error}"))
+        } else {
+            Ok(Vec::new())
+        }
+    };
+    let err_task = async {
+        if let Some(reader) = err_reader.as_mut() {
+            read_bounded_tapped(reader, WORKSPACE_EXEC_CAPTURE_BYTES, tap.as_ref())
+                .await
+                .map(|output| output.bytes.to_vec())
+                .map_err(|error| anyhow::anyhow!("workspace exec stderr: {error}"))
+        } else {
+            Ok(Vec::new())
+        }
+    };
+    let status = if let Some(future) = status_fut {
+        let (out, err, status) = tokio::join!(out_task, err_task, future);
+        stdout = out;
+        stderr = err;
+        status
+    } else {
+        let (out, err) = tokio::join!(out_task, err_task);
+        stdout = out;
+        stderr = err;
+        None
+    };
+    attached
+        .join()
+        .await
+        .map_err(|error| anyhow::anyhow!("workspace exec completion: {error}"))?;
+    let stdout = stdout?;
+    let stderr = stderr?;
+
+    let result = WorkspaceExecResult {
+        stdout,
+        stderr,
+        exit_code: 0,
+    };
+    classify_workspace_exec_status(status, result)
+}
+
+impl WorkspaceExecHandle {
     pub async fn stream(
-        mut self,
+        self,
         tx: tokio::sync::mpsc::Sender<(bool, Vec<u8>)>,
     ) -> anyhow::Result<i32> {
-        let status_fut = self.attached.take_status();
-        let mut out_reader = self.attached.stdout();
-        let mut err_reader = self.attached.stderr();
+        let ExecTransport::Attached(mut attached) = self.transport else {
+            anyhow::bail!("workspace exec: a standard Pod's command is not streamed");
+        };
+        let status_fut = attached.take_status();
+        let mut out_reader = attached.stdout();
+        let mut err_reader = attached.stderr();
 
         let out_tx = tx.clone();
         let out_task = async move {
@@ -165,8 +194,7 @@ impl WorkspaceExecHandle {
             let (out, err) = tokio::join!(out_task, err_task);
             (out, err, None)
         };
-        let completion = self
-            .attached
+        let completion = attached
             .join()
             .await
             .map_err(|error| anyhow::anyhow!("workspace exec completion: {error}"));
@@ -343,7 +371,9 @@ impl SandboxClient {
             .exec(pod_name, exec_command, &params)
             .await
             .map_err(|e| anyhow::anyhow!("workspace exec: {e}"))?;
-        Ok(WorkspaceExecHandle { attached })
+        Ok(WorkspaceExecHandle {
+            transport: ExecTransport::Attached(attached),
+        })
     }
 
     /// Mirrors `ExecWorkspaceResult`: resolve the pod, then exec.

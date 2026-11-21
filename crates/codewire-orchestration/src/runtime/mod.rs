@@ -30,6 +30,15 @@ pub use crate::sandbox::client::{
     WorkspaceStorageResizeOutcome as VolumeGrowth,
 };
 pub use crate::sandbox::exec::WorkspaceExecHandle as RuntimeExec;
+
+/// The member a command runs in, and the credential a `standard` member's
+/// daemon is called with (#5602): its container is outside the VM, so the
+/// command goes to the daemon over the daemon port. `None` where it could not
+/// be derived, which refuses only a `standard` member's command.
+pub struct ExecTarget<'a> {
+    pub member_name: &'a str,
+    pub daemon_credential: Option<&'a crate::sandbox::daemon_exec::WorkspaceExecCredential>,
+}
 use crate::sandbox::host_keys::HostKeyStore;
 pub use crate::sandbox::sidecar::PortForwardedStream as RuntimeStream;
 pub use crate::sandbox::snapshots::{ClearingOpts, VolumeMode};
@@ -1011,7 +1020,7 @@ pub trait RuntimeAccess: Send + Sync {
     async fn start_exec(
         &self,
         placement: &Placement,
-        member_name: &str,
+        target: &ExecTarget<'_>,
         command: &[String],
         work_dir: &str,
         env: &BTreeMap<String, String>,

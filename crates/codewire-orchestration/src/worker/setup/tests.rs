@@ -1,3 +1,4 @@
+use super::git_identity::{GitIdentityOutcome, configure_environment_outcome};
 use super::*;
 use std::sync::{Arc, Mutex};
 
@@ -1324,4 +1325,18 @@ fn the_final_reconcile_is_skipped_only_for_the_runtime_create_reconciled() {
             "{case}"
         );
     }
+}
+
+#[test]
+fn a_setup_command_carries_only_the_projects_ordinary_environment() {
+    let spec = codewire_project::ProjectSpec {
+        environment: BTreeMap::from([("APP_MODE".into(), "test".into())]),
+        secrets: codewire_project::SecretBindings {
+            project: "project-store".into(),
+            organization: true,
+            user: None,
+        },
+        ..Default::default()
+    };
+    assert_eq!(setup_exec_env(&spec), spec.environment);
 }

@@ -5,6 +5,7 @@
 //! them with `CODEWIRE_BLESS_GOLDENS=1`).
 
 pub mod client;
+pub mod daemon_exec;
 pub mod exec;
 pub mod host_keys;
 pub mod image_cache;
