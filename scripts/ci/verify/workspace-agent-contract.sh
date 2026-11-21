@@ -549,9 +549,13 @@ else
 fi
 # The daemon stops the desktop by killing the launcher alone, and outright:
 # everything it started must end with it, the password file included.
-kill -KILL "$desktop_pid"
-# Reaped here, quietly: the shell would otherwise report the kill on stderr.
-wait "$desktop_pid" 2>/dev/null || true
+# Killed and reaped as one command, quietly: bash reports a killed job on
+# stderr when it reads its next line, so a launcher that dies between two
+# separate lines is reported before the wait can take it.
+{
+  kill -KILL "$desktop_pid"
+  wait "$desktop_pid" 2>/dev/null || true
+}
 desktop_gone=false
 for _ in $(seq "$desktop_stop_polls"); do
   if desktop_is_gone "$desktop_pid"; then
