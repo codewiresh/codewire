@@ -103,6 +103,7 @@ pub(crate) async fn methods(
     let response = state
         .account_http
         .get(url)
+        .headers(crate::transport::trace_context())
         .header(header::COOKIE, cookie)
         .send()
         .await
@@ -152,6 +153,7 @@ async fn post(
     let response = state
         .account_http
         .post(format!("{}{path}", state.identity_origin_string))
+        .headers(crate::transport::trace_context())
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, origin)
         .json(&ProviderRequest {
@@ -314,6 +316,7 @@ pub(crate) async fn add_password(
             "{}/api/auth/password/add",
             state.identity_origin_string
         ))
+        .headers(crate::transport::trace_context())
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, origin)
         .json(&Request {

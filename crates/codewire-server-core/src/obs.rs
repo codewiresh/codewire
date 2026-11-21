@@ -9,6 +9,8 @@
 //!   exported over OTLP/gRPC. Trace export is a per-service opt-in in code:
 //!   the shared services image compiles the feature into every binary, and a
 //!   service that calls [`init`] stays log-only whatever its environment says.
+//!   Orchestration, the identity service, billing and the coordinator call
+//!   it (docs/CONFIGURATION.md, "Tracing").
 //! - [`init_traces_with_logs_from`]: the same trace export, with JSON logs
 //!   from a fixed list of targets only, each at its own level, whatever
 //!   `RUST_LOG` says. It is for the dashboard, which logs nothing else: its
@@ -36,8 +38,9 @@
 //! with everything under it, so a background loop exports nothing
 //! (docs/CONFIGURATION.md, "Tracing").
 //!
-//! No log event becomes a span event, and URL-valued attributes lose their
-//! query string before export. Span attributes never carry a secret, a token
+//! No log event becomes a span event. The request span holds a request's
+//! path and never its query, and URL-valued attributes lose their query
+//! string before export. Span attributes never carry a secret, a token
 //! or user content: instrumented functions record identifiers such as
 //! `environment_id` only.
 //!
@@ -948,6 +951,53 @@ mod tests {
         assert!(!text.contains("SYNTHETIC_CUSTOMER_EMAIL"), "{text}");
         // Codewire's own spans still give the line its context.
         assert_eq!(line["spans"][0]["route"], "stripe", "{text}");
+    }
+
+    /// A query string can be the credential: a verification token, an OAuth
+    /// code. The request span holds the path only, so a log line written
+    /// inside a request, at any level, never holds the query. The control is
+    /// the path, which every line of the request does hold.
+    #[tokio::test]
+    async fn a_request_never_puts_its_query_string_in_a_log_line() {
+        use tower::ServiceExt as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let lines = Lines::default();
+        let writer = lines.clone();
+        // No level filter: every span and event is written, as at `trace`.
+        let subscriber =
+            tracing_subscriber::registry().with(json_log_layer_to(move || writer.clone()));
+        let _default = tracing::subscriber::set_default(subscriber);
+
+        let app = axum::Router::new()
+            .route(
+                "/api/auth/verify-email",
+                axum::routing::get(|| async {
+                    tracing::debug!("checking the token");
+                    http::StatusCode::INTERNAL_SERVER_ERROR
+                }),
+            )
+            .layer(crate::http::request_trace_layer());
+        let request = http::Request::get("/api/auth/verify-email?token=SYNTHETIC_TOKEN_VALUE")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+        drop(response);
+
+        let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+        let written: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        // The handler's line, and tower-http's for the request, the response
+        // and the failure.
+        assert_eq!(written.len(), 4, "{text}");
+        for line in &written {
+            assert_eq!(line["spans"][0]["uri"], "/api/auth/verify-email", "{text}");
+        }
+        assert!(!text.contains("SYNTHETIC_TOKEN_VALUE"), "{text}");
+        assert!(!text.contains("token="), "{text}");
     }
 
     /// A log line without its leading timestamp, which two layers never share.

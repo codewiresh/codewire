@@ -8,7 +8,7 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = ServiceConfig::from_env("coordinator")?;
-    codewire_server_core::obs::init(&cfg)?;
+    let tracing_guard = codewire_server_core::obs::init_with_traces(&cfg)?;
     let derp_map = DerpMap::from_env()?;
 
     codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
@@ -54,16 +54,22 @@ async fn main() -> anyhow::Result<()> {
             Duration::from_secs(20),
         ),
     );
-    let Some(derp_verify) = derp_verify else {
-        return main.await;
-    };
-    tokio::pin!(main);
-    tokio::select! {
-        result = &mut main => result,
-        // It ends on its own only at shutdown, or when it cannot bind.
-        result = derp_verify => {
-            result??;
-            main.await
+    let served = async {
+        let Some(derp_verify) = derp_verify else {
+            return main.await;
+        };
+        tokio::pin!(main);
+        tokio::select! {
+            result = &mut main => result,
+            // It ends on its own only at shutdown, or when it cannot bind.
+            result = derp_verify => {
+                result??;
+                main.await
+            }
         }
     }
+    .await;
+    // Flush queued spans before the process exits.
+    tracing_guard.shutdown().await;
+    served
 }

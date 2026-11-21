@@ -88,7 +88,13 @@ pub(super) async fn verify_email(
             .append_pair("token", &query.token)
             .finish()
     );
-    match state.http.get(url).send().await {
+    match state
+        .http
+        .get(url)
+        .headers(crate::transport::trace_context())
+        .send()
+        .await
+    {
         Ok(response) if response.status().is_success() => {
             match response.json::<VerifyEmailResponse>().await {
                 Ok(body) => render_page(verified_view(body.access_pending)),

@@ -400,6 +400,10 @@ impl<B> tower_http::trace::MakeSpan<B> for CallersSpan {
 /// OpenTelemetry name (method and path, never the query) and kind. While
 /// trace export is on it continues an incoming W3C `traceparent`, and probes
 /// and scrapes get no span at all.
+///
+/// `uri` holds the path only. A query string can be a credential (a
+/// verification token, an OAuth code), and a span's fields are written into
+/// every log line inside it once `RUST_LOG` admits the span.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RequestSpan;
 
@@ -412,7 +416,7 @@ impl<B> tower_http::trace::MakeSpan<B> for RequestSpan {
         let span = tracing::debug_span!(
             "request",
             method = %request.method(),
-            uri = %request.uri(),
+            uri = %request.uri().path(),
             version = ?request.version(),
             otel.name = %format_args!("{} {}", request.method(), request.uri().path()),
             otel.kind = "server",

@@ -44,6 +44,17 @@ impl ClientTransport for BrowserTransport {
     }
 }
 
+/// This page request's trace context as request headers (W3C traceparent),
+/// so the service called continues its trace, as [`BrowserTransport`] does
+/// for a Connect call. Empty unless trace export is on. For the plain HTTP
+/// calls to the identity service, and for no address outside the deployment:
+/// a trace's ids stay ours (docs/CONFIGURATION.md, "Tracing").
+pub(crate) fn trace_context() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    codewire_server_core::obs::inject_http_headers(&mut headers);
+    headers
+}
+
 /// A [`BrowserTransport`] that also passes on the page request's
 /// `X-Forwarded-For`, for limits the platform counts per client address
 /// (#3840). The platform reads only the hop our edge appended last, so a

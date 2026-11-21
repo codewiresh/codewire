@@ -12,7 +12,9 @@ async-nats = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 base64 = { workspace = true }
 bytes = { workspace = true }
-codewire-server-core = { workspace = true }
+# `otel`: a session's admission exports OpenTelemetry spans when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set (codewire-server-core/src/obs.rs).
+codewire-server-core = { workspace = true, features = ["otel"] }
 codewire-proto = { workspace = true }
 codewire-tailnet = { path = "../codewire-tailnet" }
 connectrpc = { workspace = true, features = ["axum"] }

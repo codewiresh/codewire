@@ -71,6 +71,7 @@ pub(crate) async fn authenticated_identity(
             "{}/api/auth/get-session",
             state.identity_origin_string
         ))
+        .headers(crate::transport::trace_context())
         .header(header::COOKIE, cookie)
         .send()
         .await

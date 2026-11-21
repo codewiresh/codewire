@@ -22,7 +22,9 @@ path = "src/lib.rs"
 [dependencies]
 codewire-admin-proto = { workspace = true }
 codewire-proto = { workspace = true }
-codewire-server-core = { workspace = true }
+# `otel`: a purchase's requests export OpenTelemetry spans when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set (codewire-server-core/src/obs.rs).
+codewire-server-core = { workspace = true, features = ["otel"] }
 codewire-email = { workspace = true }
 
 axum = { workspace = true }

@@ -172,6 +172,9 @@ impl CoordinateAuthorizer for ProductionAuthorizer {
 }
 
 impl ProductionAuthorizer {
+    /// Its span ends when the peer is admitted or refused, so that wait can
+    /// be read at once (docs/CONFIGURATION.md, "Tracing").
+    #[tracing::instrument(level = "debug", skip_all)]
     async fn authorize(
         &self,
         headers: &HeaderMap,
@@ -386,6 +389,9 @@ impl CoordinatorService for CoordinateService {
             peer.client_access,
             peer.fenced,
         );
+        // Outside this request's span on purpose: the session outlives its
+        // admission, and inside the span every statement it ever runs would
+        // join this one trace (docs/CONFIGURATION.md, "Tracing").
         tokio::spawn(session);
 
         let output = futures_util::stream::unfold(rx, |mut rx| async move {

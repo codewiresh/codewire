@@ -175,6 +175,7 @@ pub(crate) async fn inventory(
     let response = state
         .account_http
         .get(url)
+        .headers(crate::transport::trace_context())
         .header(header::COOKIE, cookie)
         .send()
         .await
@@ -218,6 +219,7 @@ pub(crate) async fn revoke(
             "{}/api/auth/sessions/revoke",
             state.identity_origin_string
         ))
+        .headers(crate::transport::trace_context())
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, origin)
         .json(&Request {

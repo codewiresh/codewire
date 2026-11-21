@@ -73,6 +73,7 @@ where
     let response = state
         .http
         .get(format!("{}{}", state.identity_origin_string, path))
+        .headers(crate::transport::trace_context())
         .header(header::COOKIE, cookie)
         .send()
         .await
@@ -114,6 +115,7 @@ pub(crate) async fn oauth_providers(state: &AppState) -> Vec<&'static str> {
                 "{}/api/auth/oauth/providers",
                 state.identity_origin_string
             ))
+            .headers(crate::transport::trace_context())
             .timeout(OAUTH_PROVIDERS_TIMEOUT)
             .send()
             .await
@@ -182,6 +184,7 @@ pub(crate) async fn signup_mode(state: &AppState) -> SignupMode {
                 "{}/api/auth/sign-up/mode",
                 state.identity_origin_string
             ))
+            .headers(crate::transport::trace_context())
             .timeout(OAUTH_PROVIDERS_TIMEOUT)
             .send()
             .await
@@ -239,6 +242,7 @@ where
     let mut request = state
         .http
         .post(format!("{}{}", state.identity_origin_string, path))
+        .headers(crate::transport::trace_context())
         .json(&body);
     if let Some(cookie) = cookie {
         request = request.header(header::COOKIE, cookie);

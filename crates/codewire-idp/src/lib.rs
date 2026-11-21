@@ -41,6 +41,7 @@ pub mod password_add;
 pub mod private_api;
 pub mod provisioning;
 mod refresh_metrics;
+pub mod request_spans;
 pub mod service;
 mod signup_limit;
 pub mod tokens;

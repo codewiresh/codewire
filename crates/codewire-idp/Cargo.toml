@@ -11,7 +11,9 @@ license = "AGPL-3.0-only"
 description = "Codewire OIDC provider service — wires the codewire-oidc library to Postgres and the Codewire session/org model."
 
 [dependencies]
-codewire-server-core = { workspace = true }
+# `otel`: a sign-in's requests export OpenTelemetry spans when
+# OTEL_EXPORTER_OTLP_ENDPOINT is set (codewire-server-core/src/obs.rs).
+codewire-server-core = { workspace = true, features = ["otel"] }
 codewire-oidc = { workspace = true, features = ["axum"] }
 codewire-email = { workspace = true }
 anyhow = { workspace = true }

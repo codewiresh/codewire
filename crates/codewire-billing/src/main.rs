@@ -44,7 +44,7 @@ fn parse_loop_list(value: &str) -> Vec<String> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = ServiceConfig::from_env("billing")?;
-    codewire_server_core::obs::init(&cfg)?;
+    let tracing_guard = codewire_server_core::obs::init_with_traces(&cfg)?;
     // The card-testing alert must see the first refusal (#4750).
     codewire_server_core::rate_limit::expose_refusals(&[
         &codewire_server_core::rate_limit::CARD_SETUP_ORGANIZATION,
@@ -156,7 +156,10 @@ async fn main() -> anyhow::Result<()> {
         .with_routes(codewire_billing::router(state))
         .into_router();
 
-    codewire_server_core::serve(app, cfg.bind_addr).await
+    let served = codewire_server_core::serve(app, cfg.bind_addr).await;
+    // Flush queued spans before the process exits.
+    tracing_guard.shutdown().await;
+    served
 }
 
 #[cfg(test)]

@@ -166,6 +166,7 @@ fn request<I: Serialize>(
     let mut request = state
         .account_http
         .post(format!("{}{path}", state.identity_origin_string))
+        .headers(crate::transport::trace_context())
         .timeout(FACTOR_CHANGE_TIMEOUT)
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, origin)

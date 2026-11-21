@@ -528,16 +528,35 @@ In a cluster, orchestration reaches the Kubernetes API through the `kubernetes` 
 
 ## Tracing
 
-Orchestration (its API and its Temporal worker) and the dashboard server export
-OpenTelemetry traces over OTLP/gRPC when an endpoint is set. One environment
+Orchestration (its API and its Temporal worker), the dashboard server, the
+identity service, billing and the coordinator export OpenTelemetry traces over
+OTLP/gRPC when an endpoint is set. Each reads its own environment, so export
+is switched on one service at a time. One environment
 create is then one trace: the dashboard request, the orchestration
 `CreateEnvironment` handler, the Temporal signal, and the claim-authority,
 create and setup activities, with the claim, bind, access-ready and setup-phase
 functions, each Kubernetes API request and each Postgres statement as child
 spans. The trace context crosses HTTP and gRPC as the W3C `traceparent` header
 and crosses Temporal inside the signal and activity inputs. No other service
-exports traces, whatever its environment says; billing, idp, coordinator and
-the other services only log.
+exports traces, whatever its environment says; the credential service, Mesh
+and the other services only log.
+
+A sign-in is one trace across the dashboard and the identity service: the
+dashboard sends `traceparent` on every call it makes to the identity service,
+the read of the session on each signed-in page included, as it does on its
+calls to orchestration and billing. A purchase is one trace across the
+dashboard and billing up to the redirect to the payment page. The payment
+provider's webhook arrives through the public edge, so it is a trace of its
+own. The identity service, billing and the coordinator add no span attribute
+of their own: each exports the request span and the Postgres statements under
+it, as described below. The payment SDK's span that holds a webhook's payload
+is never exported, as it is never logged.
+
+The coordinator's one call is a stream that lasts as long as a peer's session.
+Under its request span the `authorize` span covers admitting the peer and ends
+as soon as the peer is admitted or refused, so that wait can be read at once.
+The session's own work is outside the trace, so the trace does not grow with
+the session.
 
 A stop and a delete are traced the same way, so the slow step of either can be
 read from its trace: the handler (`stop_environment`, `delete_environment`),
@@ -563,19 +582,22 @@ server's share of a slow page reads apart from the network's.
 
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | The OTLP/gRPC endpoint (a collector or Tempo's OTLP receiver) that orchestration and the dashboard send spans to. Unset or empty means no exporter is installed and tracing costs nothing beyond the compiled-in code. Orchestration logs one line at startup saying whether export is on, naming the endpoint's scheme, host and port only. | `http://tempo.observability.svc:4317` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | The OTLP/gRPC endpoint (a collector or Tempo's OTLP receiver) that a service sends spans to. Unset or empty means no exporter is installed and tracing costs nothing beyond the compiled-in code. Orchestration, the identity service, billing and the coordinator each log one line at startup saying whether export is on, naming the endpoint's scheme, host and port only. | `http://tempo.observability.svc:4317` |
 | `OTEL_TRACES_SAMPLER` | No | The standard OpenTelemetry sampler: `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off` or `parentbased_traceidratio`. Unset means `parentbased_always_on`, every trace. | `parentbased_traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | No | The ratio, from `0.0` to `1.0`, for the two `traceidratio` samplers. Unset means `1.0`. | `0.1` |
-| `OTEL_SERVICE_NAME` | No | Overrides the service name, which is otherwise `codewire-orchestration` or `codewire-dashboard`. | `codewire-orchestration` |
+| `OTEL_SERVICE_NAME` | No | Overrides the service name, which is otherwise `codewire-` and the service: `orchestration`, `dashboard`, `idp`, `billing` or `coordinator`. | `codewire-orchestration` |
 | `OTEL_RESOURCE_ATTRIBUTES` | No | Extra resource attributes. Set `deployment.environment.name` here; without it the `ENVIRONMENT` variable is used when set. `service.version` is the build's version. | `deployment.environment.name=dev` |
 
 What is exported is fixed in code (`crates/codewire-server-core/src/obs.rs`).
 Span attributes carry identifiers such as `environment_id`, request methods
 and paths, Kubernetes API paths, sqlx's four-word statement summary and row
 counts, and timings. They never carry a secret, a token, a credential, an
-environment variable's value or user content: a URL's query string is removed
-before export (a Kubernetes exec URL carries its command line there), no log
-event is exported, and a statement's text and bound values are never recorded.
+environment variable's value or user content: the request span holds a
+request's path and never its query string, in a trace or in a log line at any
+`RUST_LOG` level, since a query can be a credential such as a verification
+token. Any other URL's query string is removed before export (a Kubernetes
+exec URL carries its command line there), no log event is exported, and a
+statement's text and bound values are never recorded.
 Health probes and metrics scrapes start no trace.
 
 A service continues the trace named in a request's `traceparent`, whoever sent

@@ -139,7 +139,7 @@ fn format_rewrap_report(report: &codewire_idp::SigningKekRewrapReport) -> String
 
 async fn serve() -> anyhow::Result<()> {
     let cfg = ServiceConfig::from_env("idp")?;
-    codewire_server_core::obs::init(&cfg)?;
+    let tracing_guard = codewire_server_core::obs::init_with_traces(&cfg)?;
 
     codewire_server_core::migrate::ensure_schema_logged(&cfg.database_url).await?;
     let pool = codewire_server_core::db::connect(&cfg.database_url).await?;
@@ -279,10 +279,10 @@ async fn serve() -> anyhow::Result<()> {
         email,
     );
 
-    let app = codewire_idp::private_api::private_api_responses(
-        AppBuilder::new("codewire-idp")
-            .with_health_and_db(pool)
-            .into_router()
+    // The IdP's own routes, each inside the standard request span, as the
+    // health and metrics routes are through `AppBuilder`.
+    let routes = codewire_idp::request_spans::request_spans(
+        axum::Router::new()
             .merge(oidc)
             .merge(device_verification)
             .merge(session_auth)
@@ -295,6 +295,12 @@ async fn serve() -> anyhow::Result<()> {
             .merge(two_factor_replacement)
             .merge(password_add),
     );
+    let app = codewire_idp::private_api::private_api_responses(
+        AppBuilder::new("codewire-idp")
+            .with_health_and_db(pool)
+            .into_router()
+            .merge(routes),
+    );
 
     let metrics_bind = metrics_addr(std::env::var(METRICS_ADDR_ENV).ok().as_deref())?;
     let metrics = codewire_server_core::metrics::router("codewire-idp");
@@ -305,10 +311,13 @@ async fn serve() -> anyhow::Result<()> {
         issuer = %idp_cfg.issuer,
         "codewire-idp starting"
     );
-    tokio::try_join!(
+    let served = tokio::try_join!(
         codewire_server_core::serve(app, cfg.bind_addr),
         codewire_server_core::serve(metrics, metrics_bind),
-    )?;
+    );
+    // Flush queued spans before the process exits.
+    tracing_guard.shutdown().await;
+    served?;
     Ok(())
 }
 
