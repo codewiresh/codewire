@@ -19,7 +19,7 @@ observed**.
 | `cred-openai-key` | not yet observed | not yet observed | not yet observed |
 | `cred-anthropic-key` | not yet observed | not yet observed | not yet observed |
 | `cred-claude-setup-token` | not yet observed | not yet observed | not yet observed |
-| `cred-claude-sign-in` | observed, #4798 at f5657302c, 2026-11-15 (steps 1–4; the plan and `/usage`, step 5, not yet observed) | login file observed, #4868 at b4541bf05, 2026-11-15 (steps 1–3 and the file; `claude -p`, `/status` and `/usage` not yet observed: the guest had no network, #4948) | link screen and paste prompt observed, v0.4.18, 2026-11-14; a completed sign-in not yet observed |
+| `cred-claude-sign-in` | observed, #4798 at f5657302c, 2026-11-15 (steps 1–4; the plan and `/usage`, step 5, not yet observed) | observed, cw v0.4.24 on macOS 27.2.1, 2026-11-19 (every step: the login file holds only a placeholder, `claude -p` answers, `/status` names the plan and `/usage` shows its weekly usage; #3999 comment 117487) | link screen and paste prompt observed, v0.4.18, 2026-11-14; a completed sign-in not yet observed |
 | `cred-ssh-key` | not yet observed | not yet observed | not yet observed |
 | `cred-sign-in-screen` | partly observed, #4885 at aea6abdb8, 2026-11-16 (steps 1 and 2 for Claude and Codex at a pty; GitHub, `cw login`, piped, `TERM=dumb` and SSH not yet observed) | not yet observed | not yet observed |
 | `profile-revisions` | not yet observed | not yet observed | not yet observed |
@@ -425,6 +425,13 @@ Issues: #4714 (local), #2559 (cloud).
       Seatbelt denials;
     - `claude -p`, `/status` and `/usage`: not yet observed; the guest had
       no network (#4948).
+  - Mac local VM (M3), cw v0.4.24 from the published installer, macOS
+    27.2.1, 2026-11-19, a scratch HOME and a throwaway keychain, a real
+    sign-in, with the front door on (#3999 comment 117487): the login
+    file's `accessToken` is a `cwp1_` placeholder and no `ANTHROPIC_*`
+    variable is set; `claude -p` answered `ok`; `/status` showed "Login
+    method: Claude Ultra account"; `/usage`
+    showed the plan's weekly usage per model, with reset times.
 
 ## 7. `cred-ssh-key`: generate or import an SSH key
 
