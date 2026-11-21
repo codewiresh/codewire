@@ -130,6 +130,29 @@ mod tests {
     use super::*;
     const HOST: &str = "web-abcde-org.preview.test";
 
+    /// A visitor's trace context is the app's to read. It reaches the
+    /// workload as sent, and the proxy writes none of its own: every header
+    /// the workload gets is one the visitor sent
+    /// (docs/CONFIGURATION.md, "Tracing").
+    #[test]
+    fn a_visitors_trace_context_reaches_the_workload_as_sent_and_none_is_added() {
+        const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00";
+        let mut input = HeaderMap::new();
+        input.insert("traceparent", HeaderValue::from_static(TRACEPARENT));
+        input.insert("tracestate", HeaderValue::from_static("vendor=opaque"));
+        input.insert(header::ACCEPT, HeaderValue::from_static("text/html"));
+        let output = workload_request_headers(&input, false);
+        assert_eq!(output["traceparent"], TRACEPARENT);
+        assert_eq!(output.get_all("traceparent").iter().count(), 1);
+        assert_eq!(output["tracestate"], "vendor=opaque");
+        assert!(output.keys().all(|name| input.contains_key(name)));
+
+        input.remove("traceparent");
+        input.remove("tracestate");
+        let output = workload_request_headers(&input, false);
+        assert_eq!(output.keys().collect::<Vec<_>>(), [header::ACCEPT]);
+    }
+
     #[test]
     fn request_strips_platform_authority_and_preserves_app_cookies() {
         let mut input = HeaderMap::new();

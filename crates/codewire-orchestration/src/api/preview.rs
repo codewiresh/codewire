@@ -101,17 +101,7 @@ pub async fn preview_proxy_middleware(
     .await
     {
         Ok(Some(m)) => m,
-        Ok(None) => {
-            return next
-                .run(
-                    Request::builder()
-                        .method(method)
-                        .uri(uri)
-                        .body(body)
-                        .expect("request rebuild"),
-                )
-                .await;
-        }
+        Ok(None) => return next.run(passed_on_without_headers(method, uri, body)).await,
         Err(PreviewHostError::Invalid) => {
             return preview_error(StatusCode::BAD_REQUEST, "invalid preview hostname");
         }
@@ -224,6 +214,22 @@ pub async fn preview_proxy_middleware(
         &target,
     )
     .await
+}
+
+/// A request on a preview host that names no preview, as the API router gets
+/// it: with no header. Its headers are a preview visitor's, so none reaches
+/// the router's request span, which would continue the trace in a
+/// `traceparent` (docs/CONFIGURATION.md, "Tracing").
+fn passed_on_without_headers(
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    body: Body,
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(body)
+        .expect("request rebuild")
 }
 
 fn request_host<'a>(headers: &'a HeaderMap, uri: &'a axum::http::Uri) -> Option<&'a str> {
@@ -740,6 +746,23 @@ mod tests {
     use super::*;
     use futures_util::StreamExt;
     use tokio_stream::wrappers::ReceiverStream;
+
+    #[test]
+    fn a_preview_host_request_passed_to_the_api_router_carries_no_header() {
+        let request = passed_on_without_headers(
+            axum::http::Method::POST,
+            "/codewire.v1.EnvironmentService/ListEnvironments"
+                .parse()
+                .unwrap(),
+            Body::empty(),
+        );
+        assert_eq!(request.method(), axum::http::Method::POST);
+        assert_eq!(
+            request.uri().path(),
+            "/codewire.v1.EnvironmentService/ListEnvironments"
+        );
+        assert!(request.headers().is_empty());
+    }
 
     #[tokio::test]
     async fn a_published_desktop_port_is_refused_at_use_and_its_neighbours_are_not() {

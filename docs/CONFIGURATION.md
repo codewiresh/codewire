@@ -576,9 +576,27 @@ counts, and timings. They never carry a secret, a token, a credential, an
 environment variable's value or user content: a URL's query string is removed
 before export (a Kubernetes exec URL carries its command line there), no log
 event is exported, and a statement's text and bound values are never recorded.
-Health probes and metrics scrapes start no trace. A request's `traceparent` is
-honoured from any caller, so with a ratio sampler a client can ask for its own
-request to be sampled.
+Health probes and metrics scrapes start no trace.
+
+A service continues the trace named in a request's `traceparent`, whoever sent
+it. A deployment's public edge must therefore remove `traceparent` and
+`tracestate` from every request that comes from outside, so each trace starts
+at the edge. Otherwise a caller can keep its own requests out of the traces by
+sending `sampled=0`, or put them under a trace id of its choosing. Calls
+between the services inside the cluster keep their headers, which is how one
+create stays one trace. A service that calls another through the public
+hostname loses its trace link at the edge, like any outside caller. Those two
+headers are every header a service reads a trace from, because the W3C
+trace-context propagator is the only one installed, and a test pins that.
+Before another propagator is installed, its headers are added to the edge's
+list.
+
+A preview host is the one place the edge leaves the two headers alone: a
+request to a user's app is the app's traffic, and its visitors' trace context
+is the app's to read. Orchestration's preview proxy sends the visitor's
+`traceparent` and `tracestate` on to the app as they arrived and adds none of
+its own. It starts no span for a preview request and continues no trace from
+one, and no header of a preview request reaches the API's request span.
 
 A trace starts at an incoming request or a message, never in a background
 loop. A span with no parent is exported only when it is a server span (a

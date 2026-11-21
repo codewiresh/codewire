@@ -226,9 +226,7 @@ fn init_service(
             exporter.discard();
             return Ok(TracingGuard::default());
         }
-        opentelemetry::global::set_text_map_propagator(
-            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
-        );
+        opentelemetry::global::set_text_map_propagator(otel::propagator());
         EXPORT_ACTIVE.store(true, Ordering::Relaxed);
         tracing::info!(
             service = service_name,
@@ -458,6 +456,15 @@ mod otel {
     /// a payload beyond what W3C allows (`tracestate` caps at 32 members).
     const MAX_TRACEPARENT_LEN: usize = 55;
     const MAX_TRACESTATE_LEN: usize = 512;
+
+    /// The one propagator a service installs: W3C trace context, which reads
+    /// and writes `traceparent` and `tracestate` and nothing else. A
+    /// deployment's public edge removes exactly those two from outside
+    /// requests, so another propagator's headers go to the edge's list
+    /// before it is installed here (docs/CONFIGURATION.md, "Tracing").
+    pub(super) fn propagator() -> opentelemetry_sdk::propagation::TraceContextPropagator {
+        opentelemetry_sdk::propagation::TraceContextPropagator::new()
+    }
 
     pub(super) struct Exporter {
         provider: SdkTracerProvider,
@@ -1137,6 +1144,16 @@ mod tests {
                 extracted.span().span_context().trace_id(),
                 TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap()
             );
+        }
+
+        /// The headers the public edge removes are every header a service
+        /// reads a trace from. A propagator that reads another fails this
+        /// until the edge's list and the Tracing section have it.
+        #[test]
+        fn the_installed_propagator_reads_only_traceparent_and_tracestate() {
+            let propagator = super::super::otel::propagator();
+            let fields: Vec<&str> = propagator.fields().collect();
+            assert_eq!(fields, ["traceparent", "tracestate"]);
         }
 
         #[test]

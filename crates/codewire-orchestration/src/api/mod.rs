@@ -37,6 +37,8 @@ pub mod ports;
 pub mod prepare;
 pub mod presets;
 pub mod preview;
+#[cfg(test)]
+mod preview_trace_tests;
 pub mod proxy;
 #[cfg(test)]
 mod runtime_lease_test_support;

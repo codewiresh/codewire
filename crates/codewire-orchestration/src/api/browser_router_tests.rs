@@ -17,7 +17,7 @@ const SSH_PROXY_CHECK: &str =
 
 /// Every dependency is local or offline, and the pool is closed, so a
 /// request that reaches the database fails at once.
-async fn state() -> ApiState {
+pub(super) async fn state() -> ApiState {
     let pool = PgPool::connect_lazy("postgres://synthetic@127.0.0.1:1/none").unwrap();
     pool.close().await;
     super::test_state::offline(pool).await
