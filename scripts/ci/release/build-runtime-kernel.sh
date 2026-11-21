@@ -126,8 +126,14 @@ exec setpriv --reuid="$BUILD_UID" --regid="$BUILD_GID" --init-groups \
 . "$repo/scripts/ci/release/runtime-container.sh"
 runtime_container_mounts "$job_container" "$repo" "$git_common" "$source_dir" "$bc" -- "$parent" ||
   die "the build's paths cannot be mounted"
+# Inside the workstation's CPU slice when this shell runs there, as the other
+# runtime builders do: Docker otherwise starts the container in system.slice,
+# outside the slice's ceiling (#5416).
+# shellcheck source=scripts/dev/cpu-slice.sh
+. "$repo/scripts/dev/cpu-slice.sh"
+cpu_slice_docker_args
 started="$(date +%s)"
-docker run --rm --init "${RUNTIME_MOUNTS[@]}" \
+docker run --rm --init ${CPU_SLICE_DOCKER_ARGS[@]+"${CPU_SLICE_DOCKER_ARGS[@]}"} "${RUNTIME_MOUNTS[@]}" \
   -e SNAPSHOT="$snapshot" -e TOOLS="$tools" -e PACKAGES="$packages" \
   -e BUILD_UID="$uid" -e BUILD_GID="$gid" -e REPO="$repo" -e SOURCE="$source_dir" -e ARCH="$arch" \
   -e BC="$bc" -e OUTPUT="$output" -e JOBS="$jobs" \
