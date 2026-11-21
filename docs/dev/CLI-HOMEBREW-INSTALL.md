@@ -116,3 +116,35 @@ credential: it commits with its own `GITHUB_TOKEN`. A by-hand dispatch moved
 the tap to v0.4.25 with it (2026-11-20, run 44776138549). The personal token
 its earlier version read (`HOMEBREW_TAP_TOKEN`) is referenced nowhere, and the
 owner removed it; the tap holds no repository secret (2026-11-20, #5407).
+
+## The tap's protection
+
+The tap's workflow commits to `main` with its own token, and GitHub refuses
+the Actions App as a ruleset bypass actor, so updates to `main` can't be
+restricted. Instead every other ref is locked, `main` can't be deleted or
+rewritten, and nothing beyond the declared writers may write the repository
+(cw-security, 2026-11-19, on #5407). Three repository rulesets, all active,
+which only repository admins may bypass:
+
+| Ruleset | Refs | Rules |
+| --- | --- | --- |
+| `lock-all-tags` | every tag | creation, update, deletion |
+| `lock-side-branches` | every branch but `main` | creation, update, deletion, non-fast-forward |
+| `protect-main` | `main` | deletion, non-fast-forward |
+
+No collaborator, team or GitHub App installation other than an organization
+owner may write the tap: the release App has Actions permission only, and
+the workflow's own token writes the formula. An App installed on every
+repository with contents write breaks this until the owner narrows it.
+
+`scripts/dev/orchestrator/github-repository-protection.py --check` compares
+each live ruleset with its declaration, all of it (target, enforcement,
+refs, every rule and its parameters, and every bypass actor's type, id and
+mode), and fails on anything extra or missing, including an undeclared
+ruleset. It also fails on any undeclared writer. `--reconcile` creates or
+replaces the rulesets that differ and checks again; a writer is changed only
+by the owner. The same helper keeps the public mirror's `main` and tag
+rulesets and its publishing environments (`crates-io`, `npm` and `pypi`, each
+admitting only `main`), and reports whether immutable releases are on. Both
+modes run through `gh` as an organization owner; no agent holds a GitHub
+credential, and the helper never prints a token.

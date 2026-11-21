@@ -2027,8 +2027,9 @@ if [ "$event_selected" = false ]; then
         select_token policy
         recognized=true
         ;;
-      scripts/dev/orchestrator/*|scripts/ci/tests/test-orchestrator-scripts.sh)
-        # The orchestrator's merge, release and Dev helpers; a fake fj tests them.
+      scripts/dev/orchestrator/*|scripts/ci/tests/test-orchestrator-scripts.sh|\
+      scripts/ci/tests/test-github-repository-protection.py)
+        # The orchestrator's merge, release and Dev helpers; a fake fj or gh tests them.
         select_token policy
         recognized=true
         ;;

@@ -785,7 +785,8 @@ run_paths_case workstation_cpu_helper pull_request refs/pull/20016/head false \
   'policy policy_shell security security_js' scripts/dev/workstation-cpu.sh docs/dev/AGENT-WORKFLOW.md
 run_paths_case orchestrator_helpers pull_request refs/pull/20017/head false \
   'policy policy_shell security security_js' scripts/dev/orchestrator/merge-queue.sh \
-  scripts/ci/tests/test-orchestrator-scripts.sh
+  scripts/ci/tests/test-orchestrator-scripts.sh scripts/dev/orchestrator/github-repository-protection.py \
+  scripts/ci/tests/test-github-repository-protection.py
 run_paths_case kind_runtime_images_fixture pull_request refs/pull/20014/head false \
   'policy policy_shell security security_js' scripts/ci/tests/test-kind-runtime-images.sh
 run_paths_case kind_watch_github_app_fixture pull_request refs/pull/20015/head false \

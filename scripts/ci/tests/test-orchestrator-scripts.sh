@@ -494,4 +494,8 @@ rerun_run 42471 || status=$?
 grep -q '^unknown: cannot read run 42471' "$work/out" || fail 'rerun-run gave no reason for an unreadable run'
 [[ ! -e "$FAKE/reruns" ]] || fail 'rerun-run reran a run it could not read'
 
-printf '[test-orchestrator-scripts] merge queue, release watch, Dev settle, deploy update and rerun all decide on their evidence\n'
+# The public GitHub repositories' protection (#5407), against a fake gh.
+python3 -I -B "$ROOT/scripts/ci/tests/test-github-repository-protection.py" >"$work/ruleset.out" 2>&1 ||
+  fail "the GitHub repository protection helper failed its tests: $(tail -20 "$work/ruleset.out")"
+
+printf '[test-orchestrator-scripts] merge queue, release watch, Dev settle, deploy update, rerun and the GitHub repository protection all decide on their evidence\n'
