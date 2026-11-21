@@ -11,7 +11,7 @@ in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-15. Slice 1's CLI and agent are observed on Dev: enroll with
+Updated 2026-11-21. Slice 1's CLI and agent are observed on Dev: enroll with
 either key store, the agent's connection directly and through a proxy, the
 user service across logout and reboot, and leave. The Hosts page waits for
 the owner's browser walk. Slice 2 is not yet observed anywhere, and nothing is
@@ -162,7 +162,10 @@ observed on Production.
   revoked; widths 1440 and 390 px.
 - **Driving it:** the owner's walk on #3609: two computers enrolled and
   running `cw host run`, then the page, then Ctrl-C on one and a reload.
-- **Proof:** a card "Hosts (2)" with one row per computer: name, platform,
+- **Proof:** above everything else on the page, in every state (no hosts, a
+  list, or the page's own error), a warning reads "Hosts are a preview and
+  still being built: some host features don't work yet." (not yet observed).
+  A card "Hosts (2)" with one row per computer: name, platform,
   owner, "Not offering VMs", a green Online badge and last seen. After the
   stop, that row reads Offline within about a minute. At 390 px the rows stack
   and nothing scrolls sideways.
