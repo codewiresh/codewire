@@ -388,7 +388,12 @@ Issues: #4714 (local), #2559 (cloud).
 - **Stopped mid-refresh:** a local store whose authority stopped during the
   sign-in's refresh (killed, a crash or a power loss) still opens, and
   `cw credentials --local list` shows the sign-in refreshed, as it was, or
-  **Reconnect needed** (#5177). Not yet observed.
+  `refresh_failed`, with `cw create` and `cw start` saying it "needs
+  reconnecting" (#5177). Observed 2026-11-21 on a Linux local VM, main at
+  a7b8429ab5, with the featured build's synthetic sign-in: the authority killed
+  with the refresh started, the store reopened listing `refresh_failed`, a
+  guest call refused `credential_needs_reconnect`, and the VM stopped and
+  started.
 - **Rate-limited refresh** (#4975): a refresh the provider answers 429 keeps
   the sign-in, `cw credentials list` shows it as before, and the next refresh
   waits for the provider's `Retry-After`; a refusal after that wait reads
