@@ -11,8 +11,10 @@ discovery. The work is #4661; the configuration is in
 
 ## Where it stands
 
-Updated 2026-11-14. The issuer's code (#4662) is in review and off by default.
-No environment serves an issuer yet, and nothing mints a token.
+Updated 2026-11-21. The issuer's code (#4662) is merged and off by default;
+Dev's signing key and settings are in review. The contract for groups,
+audiences and minting is [dev/SANDBOX-IDENTITY.md](../dev/SANDBOX-IDENTITY.md);
+nothing mints a token yet.
 
 | ID | Slice | Dev | Production |
 | --- | --- | --- | --- |
@@ -35,8 +37,99 @@ No environment serves an issuer yet, and nothing mints a token.
 - `ISSUER_BASE` below is the environment's `CODEWIRE_IDENTITY_ISSUER_BASE`.
   `ORG` is the ID of an organization the walker belongs to, as `cw org
   current` prints it under `ID:`.
-- Steps that need tokens wait for minting (#4664). Their commands are written
-  when it lands.
+- Steps 1 to 6 and 11 need a scratch Kind cluster whose API server trusts
+  `$ISSUER_BASE/orgs/$ORG` through structured authentication, with
+  `claimMappings.groups` from `groups` and the audience `https://k8s.walk.example`
+  registered for `ORG` (`cw identity audience add https://k8s.walk.example`).
+  `KIND` below is that cluster's API URL, reachable from the Sandbox.
+- Run the steps from inside a cloud Sandbox (`cw ssh NAME`) unless a step
+  says otherwise. An admin of `ORG` sets groups; `MEMBER` is a member who is
+  not an admin.
+- A new signing key signs nothing for 24 hours. On a fresh environment, create
+  the key a day ahead.
+
+## 1. `identity-groups`: a group reaches what it was granted, and nothing else
+
+- **Entry points:** `cw identity groups set`, `cw identity token`, and the
+  scratch cluster's RBAC.
+- **States to exercise:** a Sandbox in `data-readers`, and one in no group.
+- **Driving it:**
+  1. As the admin: `cw identity groups set A data-readers`, and nothing on `B`.
+     The command names who can run code in `A` and so use the group.
+  2. On the scratch cluster, bind `get pods` in namespace `data` to the group
+     `$ORG:data-readers`.
+  3. In `A`: `kubectl --server "$KIND" --token "$(cw identity token --resource
+     https://k8s.walk.example)" get pods -n data` lists the Pods.
+  4. In `B`, the same command is Forbidden. `B`'s token carries only
+     `$ORG:all`.
+- **Proof:** the decoded `groups` claim of each token, and each command's
+  result.
+- **Observed:** not yet observed.
+
+## 2. `identity-per-org-issuer`: another organization's token is refused
+
+- **Entry points:** a second organization `ORG2` with the same audience
+  registered and a group of the same name.
+- **Driving it:**
+  1. In `ORG2`, register `https://k8s.walk.example` and put a Sandbox in
+     `data-readers`.
+  2. Its token is refused at authentication (401): its `iss` is
+     `$ISSUER_BASE/orgs/$ORG2`, which the cluster doesn't trust.
+  3. Remove the cluster's `org_id` claim rule and repeat: still 401.
+- **Proof:** the two `iss` values, and the 401.
+- **Observed:** not yet observed.
+
+## 3. `identity-audiences`: only canonical, registered audiences
+
+- **Driving it:**
+  1. `cw identity token --resource https://unregistered.example` exits non-zero
+     with `invalid_target`.
+  2. `cw identity audience add` refuses each of
+     `https://api.$DOMAIN`, `https://x.$DOMAIN/`,
+     `https://kubernetes.default.svc`, `https://10.0.0.1`,
+     `http://k8s.walk.example` and `https://k8s.walk.example/?a=1`, naming the
+     rule each breaks.
+  3. `cw identity token --resource HTTPS://K8S.WALK.EXAMPLE:443` succeeds, and
+     its `aud` is `https://k8s.walk.example`.
+- **Proof:** each refusal's text, and the decoded `aud`.
+- **Observed:** not yet observed.
+
+## 4. `identity-groups-stay-put`: groups don't spread
+
+- **Driving it:**
+  1. `MEMBER` forks `A`; the fork has no groups, and step 1's command is
+     Forbidden from it. The admin's fork of `A` keeps `data-readers`.
+  2. Granting `operator` on `A` as `MEMBER` is refused; as the admin it works.
+  3. Moving `A` to another organization clears its groups.
+  4. Saving a preset with groups is refused.
+- **Proof:** `cw identity groups` on each Sandbox, and each refusal.
+- **Observed:** not yet observed.
+
+## 5. `identity-changes-apply`: a change takes effect within 10 minutes
+
+- **Driving it:**
+  1. The admin removes `A`'s group. The next `cw identity token` carries only
+     `$ORG:all`, and step 1's command is Forbidden once the old token expires,
+     within 10 minutes.
+  2. `cw identity stop A`: the next token request in `A` fails with
+     `identity_stopped`, even within a cached token's half-life.
+     `cw identity resume A` restores it.
+  3. Stop `A`; once it is stopped, orchestration issues no token for it.
+  4. On Dev, set `CODEWIRE_IDENTITY_MINTING=off`: every Sandbox's request fails
+     with `identity_unavailable`. Set it back.
+- **Proof:** each refusal, with its time against the last token's `exp`.
+- **Observed:** not yet observed.
+
+## 6. `identity-limits`: a flood stays in its own Sandbox
+
+- **Driving it:**
+  1. In `A`, call the RPC directly in a loop faster than 30 a minute: past the
+     burst of 10, calls get `resource_exhausted`.
+  2. Meanwhile, `B`'s binding stays healthy, and its own token requests succeed.
+  3. With several Sandboxes in one organization, the organization's total stays
+     under its limit.
+- **Proof:** the counts of granted and refused calls, and `B`'s health.
+- **Observed:** not yet observed.
 
 ## 7. `identity-discovery`: each organization's issuer, and nothing else
 
@@ -148,9 +241,20 @@ No environment serves an issuer yet, and nothing mints a token.
     (#4664).
 - **Observed:** not yet observed.
 
+## 11. `identity-audit`: every change and mint is on the record
+
+- **Driving it:** after steps 1 to 5, read the `audit_logs` rows with the
+  organization's ID, and `identity_mints` for `A`.
+- **Proof:**
+  - one `identity.groups.changed`, `identity.audience.registered`,
+    `identity.stopped` and `identity.resumed` row per action, with actor and
+    before and after;
+  - one `identity_mints` row per signature, not per cache hit, with `jti` and
+    `kid`, and no column holding a token.
+- **Observed:** not yet observed.
+
 ## The other steps
 
-Design steps 1–6, 9 and 11 (groups, per-org issuers at a verifier,
-audiences, groups staying put, changes taking effect, limits, Codewire's own
-OpenBao, and audit) need groups, audiences and minting. They are written
-here as their slices land: #4663, #4664 and #4666.
+Step 9, Codewire's own OpenBao trusting the Dev issuer, is written with #4666.
+Its proxy is a route on the in-cluster `codewire-sandbox` gateway, so it runs
+only from broker-mode Sandboxes.
