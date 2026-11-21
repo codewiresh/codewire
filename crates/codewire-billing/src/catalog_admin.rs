@@ -35,6 +35,79 @@ pub struct PlanWriteBody {
     pub mem_overage_cents: f64,
     pub disk_overage_cents: f64,
 }
+// ── Systemd environments opt-in ─────────────────────────────────────
+
+/// An organization as the systemd opt-in calls name it.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct OrganizationRef {
+    pub organization_id: String,
+    pub slug: String,
+    pub name: String,
+}
+
+/// The organizations opted in to systemd environments
+/// (docs/dev/SYSTEMD-WORKSPACE.md), by slug.
+pub async fn list_systemd_organizations_core(pool: &PgPool) -> AppResult<Vec<OrganizationRef>> {
+    sqlx::query_as(
+        r#"SELECT id AS organization_id, slug, name FROM organizations
+            WHERE systemd_environments_enabled
+            ORDER BY slug"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::InternalMsg("failed to list systemd organizations".into()))
+}
+
+/// Opt one organization in to, or out of, systemd environments. The change
+/// and its audit entry, naming the actor, the organization and the new value,
+/// commit together.
+pub async fn set_organization_systemd_environments_core(
+    pool: &PgPool,
+    actor_user_id: &str,
+    organization_slug: &str,
+    enabled: bool,
+) -> AppResult<OrganizationRef> {
+    let failed = |message: &'static str| AppError::InternalMsg(message.into());
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|_| failed("failed to start the systemd opt-in update"))?;
+    let updated: Option<OrganizationRef> = sqlx::query_as(
+        r#"UPDATE organizations
+              SET systemd_environments_enabled = $2, updated_at = NOW()
+            WHERE slug = $1
+          RETURNING id AS organization_id, slug, name"#,
+    )
+    .bind(organization_slug)
+    .bind(enabled)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|_| failed("failed to update the systemd opt-in"))?;
+    let organization =
+        updated.ok_or_else(|| AppError::NotFound("organization not found".into()))?;
+    sqlx::query(
+        r#"INSERT INTO audit_logs
+               (id, timestamp, action, user_id, metadata, severity)
+           VALUES
+               (gen_random_uuid()::text, NOW(),
+                'admin.organization.systemd_environments', $1,
+                jsonb_build_object('organization_id', $2::text,
+                                   'systemd_environments_enabled', $3::bool),
+                'warn')"#,
+    )
+    .bind(actor_user_id)
+    .bind(&organization.organization_id)
+    .bind(enabled)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| failed("failed to audit the systemd opt-in update"))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| failed("failed to commit the systemd opt-in update"))?;
+    Ok(organization)
+}
+
 /// Shared catalog-plan create operation used by BillingCatalogService.
 pub async fn create_plan_core(
     pool: &PgPool,
@@ -633,6 +706,98 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn db_the_systemd_opt_in_is_audited_and_listed() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let suffix: String = sqlx::query_scalar("SELECT replace(gen_random_uuid()::text, '-', '')")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let actor = format!("u_systemd_{suffix}");
+        let organization_id = format!("org_systemd_{suffix}");
+        let slug = format!("systemd-{suffix}");
+        sqlx::query("INSERT INTO users (id, email, name, is_admin) VALUES ($1, $1 || '@example.test', 'Admin', true)")
+            .bind(&actor)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, 'Systemd', $2, $3)",
+        )
+        .bind(&organization_id)
+        .bind(&slug)
+        .bind(&actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let listed = |pool: PgPool, organization_id: String| async move {
+            list_systemd_organizations_core(&pool)
+                .await
+                .unwrap()
+                .iter()
+                .any(|organization| organization.organization_id == organization_id)
+        };
+        assert!(!listed(pool.clone(), organization_id.clone()).await);
+
+        for enabled in [true, false] {
+            let organization =
+                set_organization_systemd_environments_core(&pool, &actor, &slug, enabled)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                organization,
+                OrganizationRef {
+                    organization_id: organization_id.clone(),
+                    slug: slug.clone(),
+                    name: "Systemd".into(),
+                }
+            );
+            assert_eq!(listed(pool.clone(), organization_id.clone()).await, enabled);
+        }
+        let audit: Vec<(String, serde_json::Value, String)> = sqlx::query_as(
+            "SELECT action, metadata, severity FROM audit_logs WHERE user_id = $1 ORDER BY timestamp",
+        )
+        .bind(&actor)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let expected = |enabled: bool| {
+            (
+                "admin.organization.systemd_environments".to_string(),
+                serde_json::json!({
+                    "organization_id": organization_id,
+                    "systemd_environments_enabled": enabled,
+                }),
+                "warn".to_string(),
+            )
+        };
+        assert_eq!(audit, vec![expected(true), expected(false)]);
+
+        // An unknown organization changes nothing and audits nothing.
+        assert!(matches!(
+            set_organization_systemd_environments_core(&pool, &actor, "no-such-organization", true)
+                .await,
+            Err(AppError::NotFound(_))
+        ));
+        let audited: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE user_id = $1")
+            .bind(&actor)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(audited, 2);
+
+        sqlx::raw_sql(&format!(
+            "DELETE FROM audit_logs WHERE user_id = '{actor}'; \
+             DELETE FROM organizations WHERE id = '{organization_id}'; \
+             DELETE FROM users WHERE id = '{actor}';"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

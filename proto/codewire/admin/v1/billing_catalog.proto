@@ -70,6 +70,20 @@ service BillingCatalogService {
   // confidential storage, and room in its environment quota.
   rpc SetOrganizationConfidentialEnvironments(SetOrganizationConfidentialEnvironmentsRequest)
       returns (SetOrganizationConfidentialEnvironmentsResponse);
+
+  // ListSystemdOrganizations lists the organizations opted in to systemd
+  // environments (docs/dev/SYSTEMD-WORKSPACE.md). It is global-admin only.
+  rpc ListSystemdOrganizations(ListSystemdOrganizationsRequest)
+      returns (ListSystemdOrganizationsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // SetOrganizationSystemdEnvironments opts one organization in to, or out
+  // of, systemd environments. It is global-admin only and audited. An
+  // opted-in organization still needs a deployment that sets the systemd
+  // workspace image repository.
+  rpc SetOrganizationSystemdEnvironments(SetOrganizationSystemdEnvironmentsRequest)
+      returns (SetOrganizationSystemdEnvironmentsResponse);
 }
 
 message GetCatalogRequest {}
@@ -273,5 +287,27 @@ message SetOrganizationConfidentialEnvironmentsRequest {
 
 message SetOrganizationConfidentialEnvironmentsResponse {
   ConfidentialOrganization organization = 1;
+  bool enabled = 2;
+}
+
+message ListSystemdOrganizationsRequest {}
+
+message SystemdOrganization {
+  string organization_id = 1;
+  string slug = 2;
+  string name = 3;
+}
+
+message ListSystemdOrganizationsResponse {
+  repeated SystemdOrganization organizations = 1;
+}
+
+message SetOrganizationSystemdEnvironmentsRequest {
+  string organization_slug = 1;
+  bool enabled = 2;
+}
+
+message SetOrganizationSystemdEnvironmentsResponse {
+  SystemdOrganization organization = 1;
   bool enabled = 2;
 }

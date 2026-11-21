@@ -13,14 +13,16 @@ use codewire_admin_proto::codewire::admin::v1::{
     CreatePlanResponse, CreatePriceRequest, CreatePriceResponse, GetCatalogRequest,
     GetCatalogResponse, ListConfidentialOrganizationsRequest,
     ListConfidentialOrganizationsResponse, ListSubscriptionMigrationsRequest,
-    ListSubscriptionMigrationsResponse, MigrationRun as ProtoMigrationRun,
+    ListSubscriptionMigrationsResponse, ListSystemdOrganizationsRequest,
+    ListSystemdOrganizationsResponse, MigrationRun as ProtoMigrationRun,
     MigrationSample as ProtoMigrationSample, PlanSpec as ProtoPlanSpec,
     PreviewSubscriptionMigrationRequest, PreviewSubscriptionMigrationResponse,
     RunSubscriptionMigrationRequest, RunSubscriptionMigrationResponse,
     SetOrganizationBillingExemptionRequest, SetOrganizationBillingExemptionResponse,
     SetOrganizationConfidentialEnvironmentsRequest,
-    SetOrganizationConfidentialEnvironmentsResponse, SetPlanArchivedRequest,
-    SetPlanArchivedResponse, SetPriceArchivedRequest, SetPriceArchivedResponse, UpdatePlanRequest,
+    SetOrganizationConfidentialEnvironmentsResponse, SetOrganizationSystemdEnvironmentsRequest,
+    SetOrganizationSystemdEnvironmentsResponse, SetPlanArchivedRequest, SetPlanArchivedResponse,
+    SetPriceArchivedRequest, SetPriceArchivedResponse, SystemdOrganization, UpdatePlanRequest,
     UpdatePlanResponse, UpdatePriceRequest, UpdatePriceResponse, UpdateSettingRequest,
     UpdateSettingResponse,
 };
@@ -35,7 +37,7 @@ use crate::catalog_admin::{
 };
 use crate::routes::BillingState;
 
-/// Registers all thirteen BillingCatalogService RPCs on their generated Connect
+/// Registers all fifteen BillingCatalogService RPCs on their generated Connect
 /// routes. The billing binary mounts this router behind the global-admin auth
 /// layer.
 pub fn router(state: BillingState) -> connectrpc::Router {
@@ -483,6 +485,51 @@ impl BillingCatalogService for BillingCatalogConnectService {
             ..Default::default()
         })
     }
+
+    async fn list_systemd_organizations(
+        &self,
+        ctx: RequestContext,
+        _request: ServiceRequest<'_, ListSystemdOrganizationsRequest>,
+    ) -> ServiceResult<ListSystemdOrganizationsResponse> {
+        let organizations = catalog_admin::list_systemd_organizations_core(&self.state.pool)
+            .await
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(ListSystemdOrganizationsResponse {
+            organizations: organizations
+                .into_iter()
+                .map(systemd_organization)
+                .collect(),
+            ..Default::default()
+        })
+    }
+
+    /// Opt one organization in to or out of systemd environments
+    /// (docs/dev/SYSTEMD-WORKSPACE.md); the change and its audit entry commit
+    /// together.
+    async fn set_organization_systemd_environments(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SetOrganizationSystemdEnvironmentsRequest>,
+    ) -> ServiceResult<SetOrganizationSystemdEnvironmentsResponse> {
+        let actor = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let slug = request.organization_slug.trim();
+        validate_required(&[(slug, "/organization_slug")])
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let organization = catalog_admin::set_organization_systemd_environments_core(
+            &self.state.pool,
+            &actor.user_id,
+            slug,
+            request.enabled,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(SetOrganizationSystemdEnvironmentsResponse {
+            organization: systemd_organization(organization).into(),
+            enabled: request.enabled,
+            ..Default::default()
+        })
+    }
 }
 
 fn plan_spec(plan: Option<&ProtoPlanSpec>) -> AppResult<PlanWriteBody> {
@@ -651,6 +698,15 @@ fn timestamp(value: &str) -> AppResult<Timestamp> {
         parsed.timestamp(),
         parsed.timestamp_subsec_nanos() as i32,
     ))
+}
+
+fn systemd_organization(organization: catalog_admin::OrganizationRef) -> SystemdOrganization {
+    SystemdOrganization {
+        organization_id: organization.organization_id,
+        slug: organization.slug,
+        name: organization.name,
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]

@@ -359,3 +359,39 @@ class SetOrganizationConfidentialEnvironmentsResponse(_message.Message):
     organization: ConfidentialOrganization
     enabled: bool
     def __init__(self, organization: _Optional[_Union[ConfidentialOrganization, _Mapping]] = ..., enabled: _Optional[bool] = ...) -> None: ...
+
+class ListSystemdOrganizationsRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class SystemdOrganization(_message.Message):
+    __slots__ = ("organization_id", "slug", "name")
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    SLUG_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    slug: str
+    name: str
+    def __init__(self, organization_id: _Optional[str] = ..., slug: _Optional[str] = ..., name: _Optional[str] = ...) -> None: ...
+
+class ListSystemdOrganizationsResponse(_message.Message):
+    __slots__ = ("organizations",)
+    ORGANIZATIONS_FIELD_NUMBER: _ClassVar[int]
+    organizations: _containers.RepeatedCompositeFieldContainer[SystemdOrganization]
+    def __init__(self, organizations: _Optional[_Iterable[_Union[SystemdOrganization, _Mapping]]] = ...) -> None: ...
+
+class SetOrganizationSystemdEnvironmentsRequest(_message.Message):
+    __slots__ = ("organization_slug", "enabled")
+    ORGANIZATION_SLUG_FIELD_NUMBER: _ClassVar[int]
+    ENABLED_FIELD_NUMBER: _ClassVar[int]
+    organization_slug: str
+    enabled: bool
+    def __init__(self, organization_slug: _Optional[str] = ..., enabled: _Optional[bool] = ...) -> None: ...
+
+class SetOrganizationSystemdEnvironmentsResponse(_message.Message):
+    __slots__ = ("organization", "enabled")
+    ORGANIZATION_FIELD_NUMBER: _ClassVar[int]
+    ENABLED_FIELD_NUMBER: _ClassVar[int]
+    organization: SystemdOrganization
+    enabled: bool
+    def __init__(self, organization: _Optional[_Union[SystemdOrganization, _Mapping]] = ..., enabled: _Optional[bool] = ...) -> None: ...

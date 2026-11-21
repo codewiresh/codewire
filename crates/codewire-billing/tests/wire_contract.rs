@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use codewire_admin_proto::codewire::admin::v1::{
     BillingCatalogServiceClient, GetCatalogRequest, ListConfidentialOrganizationsRequest,
-    ListSubscriptionMigrationsRequest, SetOrganizationConfidentialEnvironmentsRequest,
+    ListSubscriptionMigrationsRequest, ListSystemdOrganizationsRequest,
+    SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationSystemdEnvironmentsRequest,
 };
 use codewire_proto::codewire::console::v1::{
     BillingServiceClient, GetBillingOverviewRequest, GetEnvironmentUsageRequest,
@@ -345,6 +346,72 @@ async fn configured_billing_wire_contract() {
                 Some(FIXTURE_ORG)
             );
             listed(enabled).await;
+        }
+
+        // Systemd environments opt-in (#5638): global-admin only for both
+        // calls, by slug, and the list shows exactly the opted-in
+        // organizations.
+        let error = catalog_as_user
+            .set_organization_systemd_environments(SetOrganizationSystemdEnvironmentsRequest {
+                organization_slug: FIXTURE_ORG_SLUG.into(),
+                enabled: true,
+                ..Default::default()
+            })
+            .await
+            .expect_err("a non-admin cannot opt an organization in");
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+        let error = catalog_as_user
+            .list_systemd_organizations(ListSystemdOrganizationsRequest::default())
+            .await
+            .expect_err("a non-admin cannot list the opted-in organizations");
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+        let error = catalog
+            .set_organization_systemd_environments(SetOrganizationSystemdEnvironmentsRequest {
+                organization_slug: "no-such-organization".into(),
+                enabled: true,
+                ..Default::default()
+            })
+            .await
+            .expect_err("an unknown organization is not found");
+        assert_eq!(error.code, ErrorCode::NotFound);
+        let listed_systemd = |enabled: bool| {
+            let catalog = &catalog;
+            async move {
+                let organizations = catalog
+                    .list_systemd_organizations(ListSystemdOrganizationsRequest::default())
+                    .await
+                    .expect("ListSystemdOrganizations Connect round trip")
+                    .into_owned()
+                    .organizations;
+                assert_eq!(
+                    organizations.iter().any(|organization| {
+                        organization.organization_id == FIXTURE_ORG
+                            && organization.slug == FIXTURE_ORG_SLUG
+                    }),
+                    enabled
+                );
+            }
+        };
+        listed_systemd(false).await;
+        for enabled in [true, false] {
+            let response = catalog
+                .set_organization_systemd_environments(SetOrganizationSystemdEnvironmentsRequest {
+                    organization_slug: FIXTURE_ORG_SLUG.into(),
+                    enabled,
+                    ..Default::default()
+                })
+                .await
+                .expect("SetOrganizationSystemdEnvironments Connect round trip")
+                .into_owned();
+            assert_eq!(response.enabled, enabled);
+            assert_eq!(
+                response
+                    .organization
+                    .as_option()
+                    .map(|organization| organization.organization_id.as_str()),
+                Some(FIXTURE_ORG)
+            );
+            listed_systemd(enabled).await;
         }
     }
 }

@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .billing_catalog_pb2 import CreatePlanRequest, CreatePlanResponse, CreatePriceRequest, CreatePriceResponse, GetCatalogRequest, GetCatalogResponse, ListConfidentialOrganizationsRequest, ListConfidentialOrganizationsResponse, ListSubscriptionMigrationsRequest, ListSubscriptionMigrationsResponse, PreviewSubscriptionMigrationRequest, PreviewSubscriptionMigrationResponse, RunSubscriptionMigrationRequest, RunSubscriptionMigrationResponse, SetOrganizationBillingExemptionRequest, SetOrganizationBillingExemptionResponse, SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationConfidentialEnvironmentsResponse, SetPlanArchivedRequest, SetPlanArchivedResponse, SetPriceArchivedRequest, SetPriceArchivedResponse, UpdatePlanRequest, UpdatePlanResponse, UpdatePriceRequest, UpdatePriceResponse, UpdateSettingRequest, UpdateSettingResponse
+from .billing_catalog_pb2 import CreatePlanRequest, CreatePlanResponse, CreatePriceRequest, CreatePriceResponse, GetCatalogRequest, GetCatalogResponse, ListConfidentialOrganizationsRequest, ListConfidentialOrganizationsResponse, ListSubscriptionMigrationsRequest, ListSubscriptionMigrationsResponse, ListSystemdOrganizationsRequest, ListSystemdOrganizationsResponse, PreviewSubscriptionMigrationRequest, PreviewSubscriptionMigrationResponse, RunSubscriptionMigrationRequest, RunSubscriptionMigrationResponse, SetOrganizationBillingExemptionRequest, SetOrganizationBillingExemptionResponse, SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationConfidentialEnvironmentsResponse, SetOrganizationSystemdEnvironmentsRequest, SetOrganizationSystemdEnvironmentsResponse, SetPlanArchivedRequest, SetPlanArchivedResponse, SetPriceArchivedRequest, SetPriceArchivedResponse, UpdatePlanRequest, UpdatePlanResponse, UpdatePriceRequest, UpdatePriceResponse, UpdateSettingRequest, UpdateSettingResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -75,6 +75,12 @@ class BillingCatalogService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def set_organization_confidential_environments(self, request: SetOrganizationConfidentialEnvironmentsRequest, ctx: RequestContext[SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationConfidentialEnvironmentsResponse]) -> SetOrganizationConfidentialEnvironmentsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def list_systemd_organizations(self, request: ListSystemdOrganizationsRequest, ctx: RequestContext[ListSystemdOrganizationsRequest, ListSystemdOrganizationsResponse]) -> ListSystemdOrganizationsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def set_organization_systemd_environments(self, request: SetOrganizationSystemdEnvironmentsRequest, ctx: RequestContext[SetOrganizationSystemdEnvironmentsRequest, SetOrganizationSystemdEnvironmentsResponse]) -> SetOrganizationSystemdEnvironmentsResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -230,6 +236,26 @@ class BillingCatalogServiceASGIApplication(ConnectASGIApplication[BillingCatalog
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.set_organization_confidential_environments,
+                ),
+                "/codewire.admin.v1.BillingCatalogService/ListSystemdOrganizations": Endpoint.unary(
+                    method=MethodInfo(
+                        name="ListSystemdOrganizations",
+                        service_name="codewire.admin.v1.BillingCatalogService",
+                        input=ListSystemdOrganizationsRequest,
+                        output=ListSystemdOrganizationsResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.list_systemd_organizations,
+                ),
+                "/codewire.admin.v1.BillingCatalogService/SetOrganizationSystemdEnvironments": Endpoint.unary(
+                    method=MethodInfo(
+                        name="SetOrganizationSystemdEnvironments",
+                        service_name="codewire.admin.v1.BillingCatalogService",
+                        input=SetOrganizationSystemdEnvironmentsRequest,
+                        output=SetOrganizationSystemdEnvironmentsResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.set_organization_systemd_environments,
                 ),
             },
             interceptors=interceptors,
@@ -555,6 +581,48 @@ class BillingCatalogServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def list_systemd_organizations(
+        self,
+        request: ListSystemdOrganizationsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListSystemdOrganizationsResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListSystemdOrganizations",
+                service_name="codewire.admin.v1.BillingCatalogService",
+                input=ListSystemdOrganizationsRequest,
+                output=ListSystemdOrganizationsResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
+    async def set_organization_systemd_environments(
+        self,
+        request: SetOrganizationSystemdEnvironmentsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetOrganizationSystemdEnvironmentsResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetOrganizationSystemdEnvironments",
+                service_name="codewire.admin.v1.BillingCatalogService",
+                input=SetOrganizationSystemdEnvironmentsRequest,
+                output=SetOrganizationSystemdEnvironmentsResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
 class BillingCatalogServiceSync(Protocol):
     def get_catalog(self, request: GetCatalogRequest, ctx: RequestContext[GetCatalogRequest, GetCatalogResponse]) -> GetCatalogResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -596,6 +664,12 @@ class BillingCatalogServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def set_organization_confidential_environments(self, request: SetOrganizationConfidentialEnvironmentsRequest, ctx: RequestContext[SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationConfidentialEnvironmentsResponse]) -> SetOrganizationConfidentialEnvironmentsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def list_systemd_organizations(self, request: ListSystemdOrganizationsRequest, ctx: RequestContext[ListSystemdOrganizationsRequest, ListSystemdOrganizationsResponse]) -> ListSystemdOrganizationsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def set_organization_systemd_environments(self, request: SetOrganizationSystemdEnvironmentsRequest, ctx: RequestContext[SetOrganizationSystemdEnvironmentsRequest, SetOrganizationSystemdEnvironmentsResponse]) -> SetOrganizationSystemdEnvironmentsResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -749,6 +823,26 @@ class BillingCatalogServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.set_organization_confidential_environments,
+                ),
+                "/codewire.admin.v1.BillingCatalogService/ListSystemdOrganizations": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="ListSystemdOrganizations",
+                        service_name="codewire.admin.v1.BillingCatalogService",
+                        input=ListSystemdOrganizationsRequest,
+                        output=ListSystemdOrganizationsResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.list_systemd_organizations,
+                ),
+                "/codewire.admin.v1.BillingCatalogService/SetOrganizationSystemdEnvironments": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="SetOrganizationSystemdEnvironments",
+                        service_name="codewire.admin.v1.BillingCatalogService",
+                        input=SetOrganizationSystemdEnvironmentsRequest,
+                        output=SetOrganizationSystemdEnvironmentsResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.set_organization_systemd_environments,
                 ),
             },
             interceptors=interceptors,
@@ -1055,6 +1149,46 @@ class BillingCatalogServiceClientSync(ConnectClientSync):
                 service_name="codewire.admin.v1.BillingCatalogService",
                 input=SetOrganizationConfidentialEnvironmentsRequest,
                 output=SetOrganizationConfidentialEnvironmentsResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def list_systemd_organizations(
+        self,
+        request: ListSystemdOrganizationsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> ListSystemdOrganizationsResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ListSystemdOrganizations",
+                service_name="codewire.admin.v1.BillingCatalogService",
+                input=ListSystemdOrganizationsRequest,
+                output=ListSystemdOrganizationsResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+    def set_organization_systemd_environments(
+        self,
+        request: SetOrganizationSystemdEnvironmentsRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SetOrganizationSystemdEnvironmentsResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SetOrganizationSystemdEnvironments",
+                service_name="codewire.admin.v1.BillingCatalogService",
+                input=SetOrganizationSystemdEnvironmentsRequest,
+                output=SetOrganizationSystemdEnvironmentsResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

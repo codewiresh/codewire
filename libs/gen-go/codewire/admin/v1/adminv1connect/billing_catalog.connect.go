@@ -75,6 +75,12 @@ const (
 	// BillingCatalogServiceSetOrganizationConfidentialEnvironmentsProcedure is the fully-qualified name
 	// of the BillingCatalogService's SetOrganizationConfidentialEnvironments RPC.
 	BillingCatalogServiceSetOrganizationConfidentialEnvironmentsProcedure = "/codewire.admin.v1.BillingCatalogService/SetOrganizationConfidentialEnvironments"
+	// BillingCatalogServiceListSystemdOrganizationsProcedure is the fully-qualified name of the
+	// BillingCatalogService's ListSystemdOrganizations RPC.
+	BillingCatalogServiceListSystemdOrganizationsProcedure = "/codewire.admin.v1.BillingCatalogService/ListSystemdOrganizations"
+	// BillingCatalogServiceSetOrganizationSystemdEnvironmentsProcedure is the fully-qualified name of
+	// the BillingCatalogService's SetOrganizationSystemdEnvironments RPC.
+	BillingCatalogServiceSetOrganizationSystemdEnvironmentsProcedure = "/codewire.admin.v1.BillingCatalogService/SetOrganizationSystemdEnvironments"
 )
 
 // BillingCatalogServiceClient is a client for the codewire.admin.v1.BillingCatalogService service.
@@ -114,6 +120,14 @@ type BillingCatalogServiceClient interface {
 	// An opted-in organization still needs a deployment that enables
 	// confidential storage, and room in its environment quota.
 	SetOrganizationConfidentialEnvironments(context.Context, *connect.Request[v1.SetOrganizationConfidentialEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationConfidentialEnvironmentsResponse], error)
+	// ListSystemdOrganizations lists the organizations opted in to systemd
+	// environments (docs/dev/SYSTEMD-WORKSPACE.md). It is global-admin only.
+	ListSystemdOrganizations(context.Context, *connect.Request[v1.ListSystemdOrganizationsRequest]) (*connect.Response[v1.ListSystemdOrganizationsResponse], error)
+	// SetOrganizationSystemdEnvironments opts one organization in to, or out
+	// of, systemd environments. It is global-admin only and audited. An
+	// opted-in organization still needs a deployment that sets the systemd
+	// workspace image repository.
+	SetOrganizationSystemdEnvironments(context.Context, *connect.Request[v1.SetOrganizationSystemdEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationSystemdEnvironmentsResponse], error)
 }
 
 // NewBillingCatalogServiceClient constructs a client for the
@@ -214,6 +228,19 @@ func NewBillingCatalogServiceClient(httpClient connect.HTTPClient, baseURL strin
 			connect.WithSchema(billingCatalogServiceMethods.ByName("SetOrganizationConfidentialEnvironments")),
 			connect.WithClientOptions(opts...),
 		),
+		listSystemdOrganizations: connect.NewClient[v1.ListSystemdOrganizationsRequest, v1.ListSystemdOrganizationsResponse](
+			httpClient,
+			baseURL+BillingCatalogServiceListSystemdOrganizationsProcedure,
+			connect.WithSchema(billingCatalogServiceMethods.ByName("ListSystemdOrganizations")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
+		setOrganizationSystemdEnvironments: connect.NewClient[v1.SetOrganizationSystemdEnvironmentsRequest, v1.SetOrganizationSystemdEnvironmentsResponse](
+			httpClient,
+			baseURL+BillingCatalogServiceSetOrganizationSystemdEnvironmentsProcedure,
+			connect.WithSchema(billingCatalogServiceMethods.ByName("SetOrganizationSystemdEnvironments")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -233,6 +260,8 @@ type billingCatalogServiceClient struct {
 	setOrganizationBillingExemption         *connect.Client[v1.SetOrganizationBillingExemptionRequest, v1.SetOrganizationBillingExemptionResponse]
 	listConfidentialOrganizations           *connect.Client[v1.ListConfidentialOrganizationsRequest, v1.ListConfidentialOrganizationsResponse]
 	setOrganizationConfidentialEnvironments *connect.Client[v1.SetOrganizationConfidentialEnvironmentsRequest, v1.SetOrganizationConfidentialEnvironmentsResponse]
+	listSystemdOrganizations                *connect.Client[v1.ListSystemdOrganizationsRequest, v1.ListSystemdOrganizationsResponse]
+	setOrganizationSystemdEnvironments      *connect.Client[v1.SetOrganizationSystemdEnvironmentsRequest, v1.SetOrganizationSystemdEnvironmentsResponse]
 }
 
 // GetCatalog calls codewire.admin.v1.BillingCatalogService.GetCatalog.
@@ -310,6 +339,17 @@ func (c *billingCatalogServiceClient) SetOrganizationConfidentialEnvironments(ct
 	return c.setOrganizationConfidentialEnvironments.CallUnary(ctx, req)
 }
 
+// ListSystemdOrganizations calls codewire.admin.v1.BillingCatalogService.ListSystemdOrganizations.
+func (c *billingCatalogServiceClient) ListSystemdOrganizations(ctx context.Context, req *connect.Request[v1.ListSystemdOrganizationsRequest]) (*connect.Response[v1.ListSystemdOrganizationsResponse], error) {
+	return c.listSystemdOrganizations.CallUnary(ctx, req)
+}
+
+// SetOrganizationSystemdEnvironments calls
+// codewire.admin.v1.BillingCatalogService.SetOrganizationSystemdEnvironments.
+func (c *billingCatalogServiceClient) SetOrganizationSystemdEnvironments(ctx context.Context, req *connect.Request[v1.SetOrganizationSystemdEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationSystemdEnvironmentsResponse], error) {
+	return c.setOrganizationSystemdEnvironments.CallUnary(ctx, req)
+}
+
 // BillingCatalogServiceHandler is an implementation of the codewire.admin.v1.BillingCatalogService
 // service.
 type BillingCatalogServiceHandler interface {
@@ -348,6 +388,14 @@ type BillingCatalogServiceHandler interface {
 	// An opted-in organization still needs a deployment that enables
 	// confidential storage, and room in its environment quota.
 	SetOrganizationConfidentialEnvironments(context.Context, *connect.Request[v1.SetOrganizationConfidentialEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationConfidentialEnvironmentsResponse], error)
+	// ListSystemdOrganizations lists the organizations opted in to systemd
+	// environments (docs/dev/SYSTEMD-WORKSPACE.md). It is global-admin only.
+	ListSystemdOrganizations(context.Context, *connect.Request[v1.ListSystemdOrganizationsRequest]) (*connect.Response[v1.ListSystemdOrganizationsResponse], error)
+	// SetOrganizationSystemdEnvironments opts one organization in to, or out
+	// of, systemd environments. It is global-admin only and audited. An
+	// opted-in organization still needs a deployment that sets the systemd
+	// workspace image repository.
+	SetOrganizationSystemdEnvironments(context.Context, *connect.Request[v1.SetOrganizationSystemdEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationSystemdEnvironmentsResponse], error)
 }
 
 // NewBillingCatalogServiceHandler builds an HTTP handler from the service implementation. It
@@ -444,6 +492,19 @@ func NewBillingCatalogServiceHandler(svc BillingCatalogServiceHandler, opts ...c
 		connect.WithSchema(billingCatalogServiceMethods.ByName("SetOrganizationConfidentialEnvironments")),
 		connect.WithHandlerOptions(opts...),
 	)
+	billingCatalogServiceListSystemdOrganizationsHandler := connect.NewUnaryHandler(
+		BillingCatalogServiceListSystemdOrganizationsProcedure,
+		svc.ListSystemdOrganizations,
+		connect.WithSchema(billingCatalogServiceMethods.ByName("ListSystemdOrganizations")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
+	billingCatalogServiceSetOrganizationSystemdEnvironmentsHandler := connect.NewUnaryHandler(
+		BillingCatalogServiceSetOrganizationSystemdEnvironmentsProcedure,
+		svc.SetOrganizationSystemdEnvironments,
+		connect.WithSchema(billingCatalogServiceMethods.ByName("SetOrganizationSystemdEnvironments")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.admin.v1.BillingCatalogService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case BillingCatalogServiceGetCatalogProcedure:
@@ -474,6 +535,10 @@ func NewBillingCatalogServiceHandler(svc BillingCatalogServiceHandler, opts ...c
 			billingCatalogServiceListConfidentialOrganizationsHandler.ServeHTTP(w, r)
 		case BillingCatalogServiceSetOrganizationConfidentialEnvironmentsProcedure:
 			billingCatalogServiceSetOrganizationConfidentialEnvironmentsHandler.ServeHTTP(w, r)
+		case BillingCatalogServiceListSystemdOrganizationsProcedure:
+			billingCatalogServiceListSystemdOrganizationsHandler.ServeHTTP(w, r)
+		case BillingCatalogServiceSetOrganizationSystemdEnvironmentsProcedure:
+			billingCatalogServiceSetOrganizationSystemdEnvironmentsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -537,4 +602,12 @@ func (UnimplementedBillingCatalogServiceHandler) ListConfidentialOrganizations(c
 
 func (UnimplementedBillingCatalogServiceHandler) SetOrganizationConfidentialEnvironments(context.Context, *connect.Request[v1.SetOrganizationConfidentialEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationConfidentialEnvironmentsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.BillingCatalogService.SetOrganizationConfidentialEnvironments is not implemented"))
+}
+
+func (UnimplementedBillingCatalogServiceHandler) ListSystemdOrganizations(context.Context, *connect.Request[v1.ListSystemdOrganizationsRequest]) (*connect.Response[v1.ListSystemdOrganizationsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.BillingCatalogService.ListSystemdOrganizations is not implemented"))
+}
+
+func (UnimplementedBillingCatalogServiceHandler) SetOrganizationSystemdEnvironments(context.Context, *connect.Request[v1.SetOrganizationSystemdEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationSystemdEnvironmentsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.BillingCatalogService.SetOrganizationSystemdEnvironments is not implemented"))
 }

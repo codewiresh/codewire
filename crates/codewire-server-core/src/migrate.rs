@@ -77,6 +77,7 @@ mod tests {
     mod org_invitation_emails;
     mod organization_confidential_environments;
     mod organization_dedicated_cpu;
+    mod organization_systemd_environments;
     mod owner_sources;
     mod placeholder_keys;
     mod preview_browser;
@@ -101,9 +102,9 @@ mod tests {
     use super::*;
 
     // Measured on disposable PostgreSQL from the full history: the baseline
-    // (which equals the 41-migration history it replaced), 0002 to 0043.
+    // (which equals the 41-migration history it replaced), 0002 to 0044.
     const ACCEPTED_APPLICATION_SCHEMA_FINGERPRINT: &str =
-        "a4363fa8b6643568f5e88074c1df3f316ef48254f2f2815c04fe402139bf0e5d";
+        "db44be93b1e8d46a7774f0a9af69b693e818e82ba900e6cb1e7304286b8892fc";
     // SHA-384 of 0001_baseline.sql. A change to the baseline is a change to
     // every database that already applied it; later schema changes are new
     // migrations.
@@ -211,6 +212,8 @@ mod tests {
     const APPLIED_WORKSPACE_BINDING_INTERCEPTION_CHECKSUM: &str = "7f78b8b22f06737e57baa532d97ade89dab6ea972b4f6c16bc4cfae08c314e527eb44af24004ab754b8c13c6d89a052b";
     // SHA-384 of 0043_credential_names_per_provider.sql (#4928).
     const APPLIED_CREDENTIAL_NAMES_PER_PROVIDER_CHECKSUM: &str = "810fab514904408cabb7f6cafca421c301a4a130c30b39c16bbea815a4bf55af271ceac13e01a76fca635fe0630d94c5";
+    // SHA-384 of 0044_organization_systemd_environments.sql (#5638).
+    const APPLIED_ORGANIZATION_SYSTEMD_ENVIRONMENTS_CHECKSUM: &str = "359caa675b0fef3cc070a7660869e0d541339a3db7558ad672042325c5bf3a6f09d76b43e1342df0dd90bd20a83a7758";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1335,6 +1338,7 @@ mod tests {
             (41, APPLIED_ENVIRONMENT_IDLE_STOP_CHECKSUM),
             (42, APPLIED_WORKSPACE_BINDING_INTERCEPTION_CHECKSUM),
             (43, APPLIED_CREDENTIAL_NAMES_PER_PROVIDER_CHECKSUM),
+            (44, APPLIED_ORGANIZATION_SYSTEMD_ENVIRONMENTS_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1365,11 +1369,11 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 43
+                first.len() == 44
                     && first.iter().map(|migration| migration.0).eq([
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
                         22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-                        41, 42, 43
+                        41, 42, 43, 44
                     ])
                     && first.iter().all(|migration| migration.2)
             );
