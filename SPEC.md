@@ -565,6 +565,59 @@ network policy limits. The managed GitHub credential is the exception: it is
 served only where a rule allows the GitHub hosts, because its grant cannot be
 limited to an environment's own repositories.
 
+Target, not shipped (#5058): `cw --local policy log ENV` shows what a running
+local VM has had refused since it started, most recently seen first. Rows fold
+by destination, protocol, port and reason, so TCP and UDP to one port are two
+rows, and each row says: the name, or the address where no name leads to it;
+the latest address seen; the protocol and the port; the reason; the policy and
+revision it was last refused under; when it was first and last seen; and how
+many times. A refused lookup is a `dns` row with no port and usually no
+address, printed as `-` (JSON `null`). The rows come from two sources, with
+the reason codes of "Refusals an agent or a person can read" in
+`docs/dev/SECRETS-AND-CREDENTIALS.md`:
+
+- the egress broker's refusals of a lookup or a connection, with the raw
+  `RefusalReason`, so the owner sees `protected_address` and
+  `intercept_unavailable` where the guest sees only not allowed or
+  unavailable. Its record log (`crates/codewire-egress-policy/src/record.rs`)
+  also keeps passes while learn mode runs (#4015); the broker sends only
+  refusals, so the owner's log never shows a pass;
+- the credential broker's refusals of a request on an intercepted host, with
+  the reason the agent received. A row names the route's bound host and its
+  port, never the request's `Host` header, path, other headers, body or
+  credential, so a crafted request can't put another name in the log. A
+  request refused by the network policy carries the label of the answer the
+  supervisor gave the broker for that host, which names the policy and
+  revision it was decided under; a host the broker was given no answer for
+  reads `unavailable`, with `-` for the policy.
+
+The workload chooses the hosts and the volume, so each broker folds its
+refusals before it reports and sends the rows that changed at most once a
+second: the egress broker on its control channel to the runner, the
+credential broker over the connection to the runner it already holds. A
+host hammered with refused requests raises a count, never the size of the
+log or the rate of frames. That connection is paired with this boot's runner
+by the secret the runner minted for it, so the runner files every report
+under the boot it serves and never under an environment a report names; a
+report naming another environment is refused. The runner keeps the
+environment's one merged log, bounded at 1,000 rows with the row seen least
+recently dropped, and the log says when it dropped rows. Every host is
+checked before it is stored or printed: ASCII only (an international name in
+its IDNA form), at most 253 characters, and no control or escape character.
+A host that fails the check is kept as one row, `(a name cw won't show)`,
+with its reason and count and never its text, so a host can never carry a
+terminal sequence to the owner's screen. The supervisor reads the log through
+a new read on `LocalSupervisorService` behind its own supervisor feature, so
+an older supervisor says it can't show the log. The log is in memory only and
+lasts one run of the VM: a stop, a restart or a restore starts it empty, and
+on a VM that isn't running the command says so. Only the owner's socket
+reads it; the view inside the environment (#4015) is the protected
+projection, `guest_records`, and the two share no code path that could widen
+what the guest sees. `cw info ENV` adds one line: how many requests were
+refused since the VM started and when the last was, with `→ cw --local policy
+log ENV`; the rows keep counts, not a time series, so it can't count by hour.
+`cw --cloud policy log` for a hosted Sandbox stays with #4000.
+
 Target, not shipped (#5114, #5116, #5117): the dashboard's Network policies
 page lists an organization's policies, each with its revision, its rules and
 the number of Sandboxes that select it; hovering, focusing or tapping that

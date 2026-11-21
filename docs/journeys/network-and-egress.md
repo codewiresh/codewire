@@ -36,7 +36,7 @@ separately.
 | `policy-protected` | #2537, #4000 | observed 2026-11-16, source 40a2877e7 | not yet observed | no command yet | no command yet |
 | `locked-refuses-managed-github` | #4926 | not yet observed | not yet observed | n/a | n/a |
 | `egress-late-answer` | #4948 | not yet observed | not yet observed | n/a | n/a |
-| `refusal-log` | #3999, #4000 | no command yet | no command yet | no command yet | no command yet |
+| `refusal-log` | #5058, #4000 | not yet observed | not yet observed | no command yet (#4000) | no command yet (#4000) |
 | `refusal-in-environment` | #4015 | no command yet | no command yet | no command yet | no command yet |
 | `refusal-readable` | #5057, #5058 | no command yet | no command yet | n/a | n/a |
 | `learn-mode` | #4015 | after launch | after launch | after launch | after launch |
@@ -499,28 +499,100 @@ Issues: #4948, #4965.
 
 ## `refusal-log`: the owner sees what was refused, and why
 
-Issues: #3999 (local), #4000 (hosted).
+Issues: #5058 (local), #4000 (hosted). `SPEC.md` "Networking and egress"
+defines it; the reasons are those of "Refusals an agent or a person can read"
+in `docs/dev/SECRETS-AND-CREDENTIALS.md`.
 
-- **Entry points:** `cw policy log ENV` on the host; `cw --cloud policy log`
-  for a hosted Sandbox; one line in `cw info ENV`. No command yet for any of
-  them.
+- **Entry points:** `cw --local policy log ENV`, with `--output json`; one
+  line in `cw --local info ENV`. A hosted Sandbox's `cw --cloud policy log`
+  is #4000's, with no command yet.
 - **States to exercise:**
-  - an environment that refused nothing (an empty log reads as empty);
-  - one refusal of each kind: a name not allowed, a port not allowed, a
-    protected address, an expired name lease, and a connection to an
-    intercepted host whose front door is gone (`intercept_unavailable`);
-  - the same destination refused many times (one line, a count);
-  - a one-step allow from a log line.
-- **Driving it:** no command yet (#3999, #4000).
+  - a running VM that refused nothing;
+  - one refusal of each egress reason: a name not allowed, a port not
+    allowed, an address not allowed, a protected address, a name that
+    answers only protected addresses (refused at the lookup), an expired
+    lease, and a connection to an intercepted host whose front door is gone
+    (`intercept_unavailable`);
+  - a VM in learn mode (#4015, once it exists), which shows only refusals;
+  - a request the credential broker refuses on an intercepted host: no
+    credential selected for the provider, a path the route doesn't serve,
+    and a request without the placeholder that the policy refuses
+    (`name_not_allowed`), and a host the credential broker was given no
+    answer for;
+  - the same destination refused many times, and more destinations than
+    the log keeps;
+  - a name the workload builds to carry a terminal escape sequence;
+  - the one-step allow from the log's next step, under a policy of yours and
+    under the built-in `open`;
+  - a stopped VM, a restarted VM, and a supervisor older than the command.
+- **Driving it:** on the host, with a released `cw` or one built from the
+  source under test, and a throwaway `HOME`:
+
+  ```sh
+  cw policy --local create walk-log --from open
+  cw create --local --name walk-log --policy walk-log --yes
+  cw --local policy log walk-log
+  cw exec --in walk-log -- sh -c 'curl -sS -m 5 https://example.org/ ; curl -sS -m 5 http://example.com:8080/ ; curl -sS -m 5 http://169.254.169.254/ ; true'
+  cw exec --in walk-log -- sh -c 'for i in 1 2 3 4 5; do curl -sS -m 5 http://example.com:8080/ ; done ; true'
+  cw --local policy log walk-log
+  cw --local policy log walk-log --output json
+  cw --local info walk-log
+  ```
+
+  Then follow the log's `→` line and run the refused request again. For the
+  credential broker's rows, use a VM with interception on, as in
+  `agent-claude`, and send a request without the placeholder and one to a
+  path the route doesn't serve. Stop and start the VM and read the log again.
+  The interception smoke (#5046) asserts an `intercept_unavailable` row and a
+  credential broker's row through `--output json`.
 - **Proof:**
-  - each refusal shows the name, the address where there is one, the port,
-    the policy and revision, the reason, the first and last time and a
-    count;
-  - no payload, header or credential appears;
-  - after the one-step allow, the same request succeeds and the log shows no
-    new refusal for it.
-- **Gotchas:** a refused connection and an unreachable one look the same
-  from inside the environment. Only the log tells them apart.
+  - nothing refused: `Nothing refused since walk-log started.`, exit 0;
+  - each refusal is one row, `DESTINATION PROTOCOL PORT REASON POLICY COUNT
+    FIRST LAST`: the name, or the address where no name leads to it; a
+    refused lookup reads `dns` with `-` for the port; the reason in words,
+    the raw reason, so a protected address reads `protected address`; the
+    policy it was last refused under as `cw info` names it (`walk-log · rev
+    1`), or `-` for a credential reason the policy didn't decide, including
+    a host given no answer, which reads `unavailable`; relative times;
+  - a credential broker's row names the intercepted host, even when the
+    request's `Host` header named another;
+  - five refusals of one destination are one row with a count of 5 (6 with
+    the first);
+  - the rows are most recently seen first, and the table fits the terminal;
+  - the last line is one `→` step for the most recent refusal a rule can
+    allow: `→ cw --local policy allow walk-log example.com:8080`, or under
+    a built-in policy `→ cw --local policy create NAME --from open --allow
+    example.com:8080`. A protected or credential reason gets no `→` line;
+  - after the allow, the same request succeeds and its row's count doesn't
+    grow;
+  - JSON holds every row with its destination, address (`null` when none),
+    port (`null` for `dns`), protocol (`tcp`, `udp` or `dns`),
+    the raw reason code, `source` (`network` or `credentials`), the policy's
+    name and revision, the first and last time in RFC 3339, and the count,
+    and nothing on stdout but that;
+  - `cw --local info walk-log` shows how many requests were refused since
+    it started and when the last was, and `→ cw --local policy log
+    walk-log`;
+  - no row or JSON value holds a path, a header, a body, a placeholder or a
+    credential;
+  - a lookup of a name holding an escape sequence (`printf` with `\033`
+    inside the name) is refused, and its row reads `(a name cw won't show)`
+    with no sequence; the terminal is unchanged;
+  - past 1,000 rows (a loop over 1,100 refused names), the log keeps 1,000
+    and says it dropped the least recently seen;
+  - a stopped VM: `walk-log isn't running; its log starts when it starts`
+    with `→ cw --local start walk-log`, exit 1; after a start the log is
+    empty;
+  - an older supervisor: `your local VMs run on an older cw's supervisor,
+    which has no refusal log`, naming `cw upgrade --vms`, as `cw ssh` does
+    for its own feature.
+- **Gotchas:**
+  - a refused connection and an unreachable one look the same from inside
+    the environment; only the log tells them apart;
+  - the guest's resolver retries a refused lookup, so one `curl` can count
+    more than once;
+  - the log is in memory and lasts one run of the VM, so read it before a
+    stop.
 - **Observed:** not yet observed.
 
 ## `refusal-in-environment`: an agent finds out why a connection failed
