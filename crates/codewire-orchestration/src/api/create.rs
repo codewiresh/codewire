@@ -1240,7 +1240,10 @@ pub(crate) async fn take_create_limits(pool: &PgPool, user_id: &str) -> AppResul
     level = "debug",
     name = "create_environment",
     skip_all,
-    fields(environment_id = tracing::field::Empty)
+    fields(
+        environment_id = tracing::field::Empty,
+        source_snapshot_id = input.source_snapshot_id.as_deref(),
+    )
 )]
 pub(crate) async fn create_environment_core(
     state: &ApiState,

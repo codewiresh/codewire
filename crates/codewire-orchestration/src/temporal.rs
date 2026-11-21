@@ -43,6 +43,7 @@ use crate::worker::{JobPayload, WorkerContext, create, lifecycle, resize, setup}
 mod activity_run;
 mod commands;
 mod host;
+mod snapshot;
 mod worker;
 
 use activity_run::{
@@ -50,6 +51,10 @@ use activity_run::{
     run_cleanup_aware_environment_activity, run_environment_activity, setup_activity_identity,
 };
 use commands::{ensure_workflow_environment, known_environment_action};
+pub use snapshot::{
+    SnapshotAbandonment, SnapshotActivities, SnapshotCaptureWorkflow, SnapshotCommand,
+    SnapshotDeleteWorkflow, snapshot_capture_workflow_id, snapshot_delete_workflow_id,
+};
 pub use worker::{run_temporal_worker, spawn_temporal_worker};
 
 pub const DEFAULT_TASK_QUEUE: &str = "codewire-lifecycle";
@@ -871,201 +876,6 @@ impl EnvironmentWorkflow {
 /// Public marker type for clients that retain a typed handle to this workflow.
 pub type EnvironmentWorkflowRun = environment_workflow::Run;
 
-/// One hosted snapshot's workflow input. The row holds everything else.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SnapshotCommand {
-    pub snapshot_id: String,
-}
-
-/// What [`SnapshotActivities::abandon`] records.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SnapshotAbandonment {
-    pub snapshot_id: String,
-    pub failure_code: String,
-}
-
-pub fn snapshot_capture_workflow_id(snapshot_id: &str) -> String {
-    format!("snapshot/capture/{snapshot_id}")
-}
-
-pub fn snapshot_delete_workflow_id(snapshot_id: &str) -> String {
-    format!("snapshot/delete/{snapshot_id}")
-}
-
-/// Hosted disk snapshot activities (#3046 H1); the bodies are
-/// [`crate::worker::snapshots`]. Each returns a failure code when the capture
-/// can't go on, which no retry would change.
-pub struct SnapshotActivities {
-    pub wctx: Arc<WorkerContext>,
-}
-
-#[activities]
-impl SnapshotActivities {
-    #[activity(name = "SnapshotCaptureRawActivity")]
-    pub async fn capture_raw(
-        self: Arc<Self>,
-        ctx: ActivityContext,
-        cmd: SnapshotCommand,
-    ) -> Result<Option<String>, ActivityError> {
-        run_environment_activity(
-            ctx,
-            crate::worker::snapshots::capture_raw(&self.wctx, &cmd.snapshot_id),
-        )
-        .await
-    }
-
-    #[activity(name = "SnapshotClearActivity")]
-    pub async fn clear(
-        self: Arc<Self>,
-        ctx: ActivityContext,
-        cmd: SnapshotCommand,
-    ) -> Result<Option<String>, ActivityError> {
-        run_environment_activity(
-            ctx,
-            crate::worker::snapshots::run_clearing(&self.wctx, &cmd.snapshot_id),
-        )
-        .await
-    }
-
-    #[activity(name = "SnapshotKeepActivity")]
-    pub async fn keep(
-        self: Arc<Self>,
-        ctx: ActivityContext,
-        cmd: SnapshotCommand,
-    ) -> Result<(), ActivityError> {
-        run_environment_activity(
-            ctx,
-            crate::worker::snapshots::keep_and_finish(&self.wctx, &cmd.snapshot_id),
-        )
-        .await
-    }
-
-    #[activity(name = "SnapshotAbandonActivity")]
-    pub async fn abandon(
-        self: Arc<Self>,
-        ctx: ActivityContext,
-        input: SnapshotAbandonment,
-    ) -> Result<(), ActivityError> {
-        run_environment_activity(
-            ctx,
-            crate::worker::snapshots::abandon_capture(
-                &self.wctx,
-                &input.snapshot_id,
-                &input.failure_code,
-            ),
-        )
-        .await
-    }
-
-    #[activity(name = "SnapshotDeleteActivity")]
-    pub async fn delete(
-        self: Arc<Self>,
-        ctx: ActivityContext,
-        cmd: SnapshotCommand,
-    ) -> Result<(), ActivityError> {
-        run_environment_activity(
-            ctx,
-            crate::worker::snapshots::delete_snapshot(&self.wctx, &cmd.snapshot_id),
-        )
-        .await
-    }
-}
-
-/// Retries until it succeeds: the raw snapshot holds sign-ins whole, so nothing
-/// may give up on deleting it.
-fn snapshot_cleanup_activity_opts() -> ActivityOptions {
-    ActivityOptions::with_start_to_close_timeout(Duration::from_secs(30 * 60))
-        .heartbeat_timeout(Duration::from_secs(15))
-        .cancellation_type(ActivityCancellationType::WaitCancellationCompleted)
-        .retry_policy(RetryPolicy {
-            initial_interval: Duration::from_secs(2).try_into().ok(),
-            backoff_coefficient: 2.0,
-            maximum_interval: Duration::from_secs(60).try_into().ok(),
-            maximum_attempts: 0,
-            ..Default::default()
-        })
-        .build()
-}
-
-/// One hosted snapshot's capture: raw, clear, keep. Any failure, retries
-/// exhausted included, ends in the abandonment that deletes what it made.
-#[workflow]
-#[derive(Default)]
-pub struct SnapshotCaptureWorkflow {}
-
-#[workflow_methods]
-impl SnapshotCaptureWorkflow {
-    #[run(name = "SnapshotCaptureWorkflow")]
-    pub async fn run(ctx: &mut WorkflowContext<Self>, cmd: SnapshotCommand) -> WorkflowResult<()> {
-        let raw = ctx
-            .execute_activity(
-                SnapshotActivities::capture_raw,
-                cmd.clone(),
-                environment_activity_opts(),
-            )
-            .await;
-        let failure = match raw {
-            Ok(Some(code)) => Some(code),
-            Err(_) => Some(crate::worker::snapshots::FAILURE_CAPTURE.to_owned()),
-            Ok(None) => {
-                let cleared = ctx
-                    .execute_activity(
-                        SnapshotActivities::clear,
-                        cmd.clone(),
-                        environment_activity_opts(),
-                    )
-                    .await;
-                match cleared {
-                    Ok(Some(code)) => Some(code),
-                    Err(_) => Some(crate::worker::snapshots::FAILURE_CAPTURE.to_owned()),
-                    Ok(None) => ctx
-                        .execute_activity(
-                            SnapshotActivities::keep,
-                            cmd.clone(),
-                            environment_activity_opts(),
-                        )
-                        .await
-                        .err()
-                        .map(|_| crate::worker::snapshots::FAILURE_CAPTURE.to_owned()),
-                }
-            }
-        };
-        if let Some(failure_code) = failure {
-            ctx.execute_activity(
-                SnapshotActivities::abandon,
-                SnapshotAbandonment {
-                    snapshot_id: cmd.snapshot_id,
-                    failure_code,
-                },
-                snapshot_cleanup_activity_opts(),
-            )
-            .await?;
-        }
-        Ok(())
-    }
-}
-
-/// One hosted snapshot's deletion: its objects, then its row.
-#[workflow]
-#[derive(Default)]
-pub struct SnapshotDeleteWorkflow {}
-
-#[workflow_methods]
-impl SnapshotDeleteWorkflow {
-    #[run(name = "SnapshotDeleteWorkflow")]
-    pub async fn run(ctx: &mut WorkflowContext<Self>, cmd: SnapshotCommand) -> WorkflowResult<()> {
-        ctx.execute_activity(
-            SnapshotActivities::delete,
-            cmd,
-            snapshot_cleanup_activity_opts(),
-        )
-        .await?;
-        Ok(())
-    }
-}
-
 /// Port-DNS command for the PortDnsWorkflow (D3: the misc NATS queue
 /// is retired; the capability lives on as a short-lived workflow).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1676,55 +1486,6 @@ impl TemporalTrigger {
         .await
         .map_err(|e| anyhow::anyhow!("signal/start environment workflow: {e}"))?;
         Ok(())
-    }
-
-    /// Start a snapshot's capture workflow. `UseExisting` makes a restart of a
-    /// running capture change nothing.
-    pub async fn trigger_snapshot_capture(&self, snapshot_id: &str) -> anyhow::Result<()> {
-        use temporalio_client::WorkflowIdConflictPolicy;
-        use temporalio_client::WorkflowStartOptions;
-        let options = WorkflowStartOptions::new(
-            self.task_queue.as_str(),
-            snapshot_capture_workflow_id(snapshot_id),
-        )
-        .id_conflict_policy(WorkflowIdConflictPolicy::UseExisting)
-        .build();
-        let input = SnapshotCommand {
-            snapshot_id: snapshot_id.to_owned(),
-        };
-        let client = self.client.clone();
-        codewire_server_core::span_free::detached(async move {
-            client
-                .start_workflow(SnapshotCaptureWorkflow::run, input, options)
-                .await
-                .map(|_| ())
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("start snapshot capture workflow: {error}"))
-    }
-
-    /// Start a snapshot's delete workflow, as above.
-    pub async fn trigger_snapshot_delete(&self, snapshot_id: &str) -> anyhow::Result<()> {
-        use temporalio_client::WorkflowIdConflictPolicy;
-        use temporalio_client::WorkflowStartOptions;
-        let options = WorkflowStartOptions::new(
-            self.task_queue.as_str(),
-            snapshot_delete_workflow_id(snapshot_id),
-        )
-        .id_conflict_policy(WorkflowIdConflictPolicy::UseExisting)
-        .build();
-        let input = SnapshotCommand {
-            snapshot_id: snapshot_id.to_owned(),
-        };
-        let client = self.client.clone();
-        codewire_server_core::span_free::detached(async move {
-            client
-                .start_workflow(SnapshotDeleteWorkflow::run, input, options)
-                .await
-                .map(|_| ())
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("start snapshot delete workflow: {error}"))
     }
 
     /// Starts the billing `OrgTeardownWorkflow` BY NAME (untyped) on the

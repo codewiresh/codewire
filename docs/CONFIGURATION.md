@@ -712,6 +712,27 @@ starting it. A span carries `environment_id` at most: never a command, its
 directory or its variables, a path inside the environment, or an SSH user or
 key. The relay that follows the setup is in no span.
 
+A snapshot is traced from its request to the kept disk. The handler
+(`create_snapshot`, or `delete_snapshot` for a deletion) starts the capture or
+delete workflow (`temporal.start_workflow`, a producer span), and each of the
+workflow's activities runs in a consumer span with its steps under it. A
+capture takes the raw snapshot and waits for it (`capture_raw`,
+`snapshot_volume`, `wait_snapshot`), starts a clearing run on a restore of it
+and waits for the run to finish (`run_clearing`, `start_clearing`,
+`wait_for_clearing`), then stops the run, keeps the cleared volume and removes
+the capture's objects (`keep_and_finish`, `stop_clearing`,
+`keep_cleared_volume`, `delete_capture`). A failed capture deletes what it made
+(`abandon_capture`), and a deletion removes the snapshot's objects
+(`delete_snapshot_objects`). A create from a snapshot records
+`source_snapshot_id` on its `create_environment` span. A span carries
+`snapshot_id`, `environment_id` or `source_snapshot_id`, and nothing else. The
+API does not yet put its trace context in a snapshot workflow's input: a worker
+from the release before refuses an input field it does not know, so the worker
+learns to accept it first. Until it is sent, each activity is a trace of its
+own named by its `snapshot_id`, and the request's trace ends at starting the
+workflow. The leader's sweep that restarts a quiet capture or deletion starts
+one trace for each snapshot it restarts.
+
 Codewire's spans are at `DEBUG` level, so at the default `RUST_LOG=info` they
 do not appear in the JSON logs.
 

@@ -166,6 +166,13 @@ async fn require_environment_creator(
     ))
 }
 
+/// The create API's span: the snapshot id is recorded once the row exists.
+#[tracing::instrument(
+    level = "debug",
+    name = "create_snapshot",
+    skip_all,
+    fields(environment_id = %environment_id, snapshot_id = tracing::field::Empty)
+)]
 pub async fn create_snapshot_core(
     state: &ApiState,
     user: &AuthUser,
@@ -239,6 +246,7 @@ pub async fn create_snapshot_core(
                 &owned_name,
             )
             .await?;
+            tracing::Span::current().record("snapshot_id", row.id.as_str());
             // The row is durable, so a lost start is recovered by the reconciler.
             if owned_state
                 .temporal_trigger
@@ -372,6 +380,12 @@ pub async fn get_snapshot_core(
 }
 
 /// Mark the snapshot for deletion and start its workflow.
+#[tracing::instrument(
+    level = "debug",
+    name = "delete_snapshot",
+    skip_all,
+    fields(snapshot_id = %snapshot_id)
+)]
 pub async fn delete_snapshot_core(
     state: &ApiState,
     user: &AuthUser,

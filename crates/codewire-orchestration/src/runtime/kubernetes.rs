@@ -989,6 +989,7 @@ impl RuntimeStorage for KubernetesDriver {
 
 #[async_trait]
 impl RuntimeSnapshots for KubernetesDriver {
+    #[tracing::instrument(level = "debug", skip_all, fields(snapshot_id = %snapshot_id))]
     async fn snapshot_volume(
         &self,
         placement: &Placement,
@@ -1012,6 +1013,7 @@ impl RuntimeSnapshots for KubernetesDriver {
             .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(snapshot_id = %snapshot_id))]
     async fn keep_cleared_volume(
         &self,
         placement: &Placement,
@@ -1029,6 +1031,7 @@ impl RuntimeSnapshots for KubernetesDriver {
             .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(snapshot_id = %snapshot_id))]
     async fn wait_snapshot(
         &self,
         placement: &Placement,
@@ -1055,6 +1058,7 @@ impl RuntimeSnapshots for KubernetesDriver {
             .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(snapshot_id = %opts.snapshot_id))]
     async fn start_clearing(
         &self,
         placement: &Placement,
@@ -1075,6 +1079,7 @@ impl RuntimeSnapshots for KubernetesDriver {
             .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(snapshot_id = %snapshot_id))]
     async fn stop_clearing(
         &self,
         placement: &Placement,
@@ -1086,6 +1091,7 @@ impl RuntimeSnapshots for KubernetesDriver {
             .await
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(snapshot_id = %snapshot_id))]
     async fn delete_capture(
         &self,
         placement: &Placement,

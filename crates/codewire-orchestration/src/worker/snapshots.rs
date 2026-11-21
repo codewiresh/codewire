@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use sqlx::{PgPool, Row};
+use tracing::Instrument as _;
 
 use super::WorkerContext;
 use super::activity_authority::EXTERNAL_MUTATION_TIMEOUT;
@@ -125,6 +126,7 @@ fn source_capturable(state: &str, desired_state: &str, isolation_tier: &str) -> 
 /// Step 1: under the source's row lock, require it stopped and standard, and take
 /// the raw snapshot. Returns a failure code when the source can't be captured.
 /// The whole of it runs under one bound, because the lock is held throughout.
+#[tracing::instrument(level = "debug", skip_all, fields(snapshot_id = %snapshot_id))]
 pub async fn capture_raw(ctx: &WorkerContext, snapshot_id: &str) -> anyhow::Result<Option<String>> {
     let (runtime, placement) = require_runtime(ctx)?;
     let class = snapshot_class(ctx)?.to_owned();
@@ -180,6 +182,7 @@ pub async fn capture_raw(ctx: &WorkerContext, snapshot_id: &str) -> anyhow::Resu
 }
 
 /// Step 2: clear a restore of the raw snapshot.
+#[tracing::instrument(level = "debug", skip_all, fields(snapshot_id = %snapshot_id))]
 pub async fn run_clearing(
     ctx: &WorkerContext,
     snapshot_id: &str,
@@ -242,6 +245,8 @@ pub async fn run_clearing(
     };
     let restore_bytes = quantity_bytes(&restore_size).and_then(|bytes| u64::try_from(bytes).ok());
     let timeout = clearing_timeout(volume_mode, restore_bytes);
+    let wait =
+        wait.instrument(tracing::debug_span!("wait_for_clearing", snapshot_id = %snapshot_id));
     tokio::time::timeout(timeout, wait).await.map_err(|_| match volume_mode {
         VolumeMode::Filesystem => anyhow::anyhow!("clearing did not finish in time"),
         VolumeMode::Block => anyhow::anyhow!(
@@ -322,6 +327,7 @@ fn log_clearing_report(snapshot_id: &str, volume_mode: VolumeMode, report: Optio
 /// Step 3: once the clearing Pod is gone, take the kept snapshot and record it.
 /// The row turns `ready` only after everything else is deleted, in the same
 /// activity, so `ready` means the raw snapshot is gone.
+#[tracing::instrument(level = "debug", skip_all, fields(snapshot_id = %snapshot_id))]
 pub async fn keep_and_finish(ctx: &WorkerContext, snapshot_id: &str) -> anyhow::Result<()> {
     let (runtime, placement) = require_runtime(ctx)?;
     let class = snapshot_class(ctx)?;
@@ -375,6 +381,7 @@ async fn keep_cleared(
 /// [`lock_capturing`]). The workflow retries this until it succeeds, so the raw
 /// snapshot never outlives a capture. A capture that finished, whose last attempt
 /// only failed to report it, keeps its snapshot.
+#[tracing::instrument(level = "debug", skip_all, fields(snapshot_id = %snapshot_id))]
 pub async fn abandon_capture(
     ctx: &WorkerContext,
     snapshot_id: &str,
@@ -414,6 +421,12 @@ async fn mark_failed(pool: &PgPool, snapshot_id: &str, failure_code: &str) -> an
 }
 
 /// Delete a snapshot's objects, then its row.
+#[tracing::instrument(
+    level = "debug",
+    name = "delete_snapshot_objects",
+    skip_all,
+    fields(snapshot_id = %snapshot_id)
+)]
 pub async fn delete_snapshot(ctx: &WorkerContext, snapshot_id: &str) -> anyhow::Result<()> {
     let (runtime, placement) = require_runtime(ctx)?;
     runtime
