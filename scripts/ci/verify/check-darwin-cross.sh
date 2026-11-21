@@ -98,10 +98,10 @@ if [[ "$mode" == cli ]]; then
     "$zig_version" "$DARWIN_CHECK_ZIGBUILD_VERSION"
   # The CLI's macOS-only unit tests too: Linux never compiles them, and a
   # signature change once broke them unnoticed (#2745).
-  # Under a shared jobserver (CI's build job, which bounds every compiler), the
-  # x86_64 cw runs beside the aarch64 checks in a target folder of its own
-  # and its own zigbuild cache: after them, in one folder, it added about
-  # 65-135 s (infra#1534, step A3). Without one (a workstation, where
+  # Under a shared jobserver (CI's build job, which bounds every compiler),
+  # each cw runs beside the aarch64 test checks in a target folder of its own
+  # and its own zigbuild cache: after them, in one folder, the two cw builds
+  # added about 109-135 s (infra#1534, steps A3 and A4). Without one (a workstation, where
   # preflight runs this as one job) the builds run one after another, as
   # before, so they never take every core three times over.
   if [[ "${CARGO_MAKEFLAGS:-}" != *--jobserver-auth=* ]]; then
@@ -112,21 +112,32 @@ if [[ "$mode" == cli ]]; then
     exec "$zigbuild_bin" clippy --locked -p codewire-cli-bin --bin cw \
       --target aarch64-apple-darwin --target x86_64-apple-darwin -- -D warnings
   fi
-  x86_target="${CARGO_TARGET_DIR:-$ROOT/target}/x86_64-cw"
-  CARGO_TARGET_DIR="$x86_target" CARGO_ZIGBUILD_CACHE_DIR="$x86_target" \
-    "$zigbuild_bin" clippy --locked -p codewire-cli-bin --bin cw \
-    --target x86_64-apple-darwin -- -D warnings &
+  # The aarch64 cw builds the CLI crate in another mode than its --tests
+  # checks, so it shares little with them and runs beside them too, in a
+  # folder of its own: after them it was 109 s of the chain's 315 (main run
+  # 67041; infra#1534, step A4). The cw tests check stays after the CLI's,
+  # whose build it reuses.
+  side_by_side() {
+    # side_by_side NAME TARGET: cw for TARGET in BASE/NAME, in the background.
+    local folder="${CARGO_TARGET_DIR:-$ROOT/target}/$1"
+    CARGO_TARGET_DIR="$folder" CARGO_ZIGBUILD_CACHE_DIR="$folder" \
+      "$zigbuild_bin" clippy --locked -p codewire-cli-bin --bin cw \
+      --target "$2" -- -D warnings &
+  }
+  side_by_side x86_64-cw x86_64-apple-darwin
   x86_64=$!
+  side_by_side aarch64-cw aarch64-apple-darwin
+  aarch64_cw=$!
   status=0
   "$zigbuild_bin" clippy --locked -p codewire-cli --lib --tests \
     --target aarch64-apple-darwin -- -D warnings &&
     # The cw integration tests' macOS code too (#3810): nothing else compiles it.
     "$zigbuild_bin" clippy --locked -p codewire-cli-bin --tests \
-      --target aarch64-apple-darwin -- -D warnings &&
-    "$zigbuild_bin" clippy --locked -p codewire-cli-bin --bin cw \
       --target aarch64-apple-darwin -- -D warnings || status=$?
-  # The first failure is the exit status; the x86_64 check always finishes.
-  wait "$x86_64" || { x86_64_status=$?; [ "$status" != 0 ] || status=$x86_64_status; }
+  # The first failure is the exit status; the cw checks always finish.
+  for job in "$aarch64_cw" "$x86_64"; do
+    wait "$job" || { job_status=$?; [ "$status" != 0 ] || status=$job_status; }
+  done
   exit "$status"
 fi
 printf '[darwin-cross] Zig %s; cargo-zigbuild %s; target aarch64-apple-darwin\n' \
