@@ -1,0 +1,25 @@
+{
+  "name": "codewire-sdk-run-agent-example",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "tsx run_agent.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@codewire/sdk": "file:../../../sdk-ts"
+  },
+  "devDependencies": {
+    "@types/node": "25.3.5",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "esbuild": "0.28.2"
+  }
+}

@@ -28,8 +28,10 @@ it into an SSH config file of its own for the one host, so your
 
 ## Running it
 
-You need `cw`, signed in or with an API key, OpenSSH 9.6 or later, and
-Node 22.19 or later.
+You need `cw` on your `PATH` (or `CW_BIN` naming it by absolute path), OpenSSH
+9.6 or later, and Node 22.19 or later. `cw` uses your `cw login` sign-in, or
+the API key below; with only the key, also set `CODEWIRE_SERVER_URL` to the
+server, which is `https://codewire.sh` for the hosted one.
 
 ```sh
 export CODEWIRE_API_KEY=cw_...

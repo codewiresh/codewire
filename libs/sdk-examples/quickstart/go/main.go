@@ -33,14 +33,13 @@ func quickstart(ctx context.Context) error {
 			Image:            "python:3.12-slim",
 			WorkingDirectory: "/workspace",
 		},
-	}, codewire.CreateOptions{Wait: true})
+	})
 	if err != nil {
 		return fmt.Errorf("create: %w", err)
 	}
 	fmt.Println("created", env.Id)
-	fmt.Println("ready")
 
-	// Delete the environment whether or not the steps succeeded.
+	// From here on, delete the environment whether or not anything fails.
 	steps := useEnvironment(ctx, env)
 	deleted := env.Remove(ctx)
 	if deleted == nil {
@@ -52,6 +51,11 @@ func quickstart(ctx context.Context) error {
 }
 
 func useEnvironment(ctx context.Context, env *codewire.Environment) error {
+	if err := env.WaitReady(ctx); err != nil {
+		return fmt.Errorf("wait: %w", err)
+	}
+	fmt.Println("ready")
+
 	output, err := env.Exec(ctx, codewire.ExecBody{
 		Command: &[]string{"python3", "--version"},
 	})

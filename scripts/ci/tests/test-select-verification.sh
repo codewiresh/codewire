@@ -1791,19 +1791,22 @@ run_paths_case sdk_examples_go pull_request refs/pull/5109/head false \
   'go_consumer_interop go_support policy sdk_go' \
   libs/sdk-examples/quickstart/go/main.go \
   libs/sdk-examples/quickstart/go/go.mod \
-  libs/sdk-examples/quickstart/go/go.sum
+  libs/sdk-examples/quickstart/go/go.sum \
+  libs/sdk-examples/run-agent/go/main.go
 run_paths_case sdk_examples_typescript pull_request refs/pull/5109/head false \
   'policy sdk_ts security security_js' \
   libs/sdk-examples/quickstart/typescript/quickstart.ts \
   libs/sdk-examples/quickstart/typescript/package.json \
   libs/sdk-examples/quickstart/typescript/package-lock.json \
   libs/sdk-examples/pi-durable/typescript/durable.ts \
-  libs/sdk-examples/pi-durable/typescript/package-lock.json
+  libs/sdk-examples/pi-durable/typescript/package-lock.json \
+  libs/sdk-examples/run-agent/typescript/run_agent.ts
 run_paths_case sdk_examples_python pull_request refs/pull/5109/head false \
-  'policy sdk_python' libs/sdk-examples/quickstart/python/quickstart.py
+  'policy sdk_python' libs/sdk-examples/quickstart/python/quickstart.py \
+  libs/sdk-examples/run-agent/python/run_agent.py
 run_paths_case sdk_examples_docs pull_request refs/pull/5109/head false \
   'docs policy' libs/sdk-examples/README.md libs/sdk-examples/quickstart/README.md \
-  libs/sdk-examples/pi-durable/README.md
+  libs/sdk-examples/pi-durable/README.md libs/sdk-examples/run-agent/README.md
 run_paths_case retired_cli_assets pull_request refs/pull/1513/head false \
   'policy security security_js' \
   apps/cli/.env.example \

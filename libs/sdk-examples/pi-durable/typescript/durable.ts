@@ -19,9 +19,10 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { accessSync, constants } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Codewire, type Environment } from "@codewire/sdk";
@@ -35,13 +36,34 @@ import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { RemoteExecutionEnv, sshConnection } from "@earendil-works/pi-env";
 
 const context = BACKGROUND_CONTEXT;
-const cw = process.env.CW_BIN ?? "cw";
+const cw = findCw();
 const requestId = "write-and-read-notes";
 const prompt =
   "Write the line 'written before the restart' to /workspace/notes.txt, touch /workspace/started, " +
   "then sleep 120 seconds, all in one bash command. Then read /workspace/notes.txt and tell me what it says.";
 
 // The managed directives `cw setup ssh` writes, for this one host.
+// OpenSSH runs a KnownHostsCommand only from an absolute path, so the config
+// names cw by its full path: CW_BIN, or the first cw on PATH.
+function findCw(): string {
+  const named = process.env.CW_BIN?.trim();
+  if (named) {
+    if (!isAbsolute(named)) throw new Error("CW_BIN must be an absolute path");
+    return named;
+  }
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    if (!isAbsolute(directory)) continue;
+    const candidate = join(directory, "cw");
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Not here; try the next directory.
+    }
+  }
+  throw new Error("cw is not on PATH; install it, or set CW_BIN to its absolute path");
+}
+
 function sshConfig(host: string): string {
   return [
     `Host ${host}`,
@@ -183,13 +205,14 @@ async function demo() {
   const name = `pi-durable-${randomUUID().slice(0, 8)}`;
   const env = await codewire.environments.create(
     { name, project_spec: { schema_version: 1, image: "python:3.12-slim", working_directory: "/workspace" } },
-    { wait: true, waitTimeout: 300_000 },
   );
   console.log("created", env.id, `(${name})`);
   const directory = await mkdtemp(join(tmpdir(), "pi-durable-"));
   const turns: ChildProcess[] = [];
-  // Delete the environment and the local storage whether or not the turn succeeded.
+  // From here on, delete the environment and the local storage whether or
+  // not anything fails.
   try {
+    await env.waitReady({ timeout: 300_000 });
     await writeFile(join(directory, "ssh_config"), sshConfig(`cw-cloud-${name}`), { mode: 0o600 });
     await writeFile(join(directory, "known_hosts"), "", { mode: 0o600 });
 

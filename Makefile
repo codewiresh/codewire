@@ -618,16 +618,19 @@ test-sdk-examples: test-sdk-examples-go test-sdk-examples-python test-sdk-exampl
 
 test-sdk-examples-go:
 	cd libs/sdk-examples/quickstart/go && GOWORK=off go build -o /dev/null . && GOWORK=off go vet .
+	cd libs/sdk-examples/run-agent/go && GOWORK=off go build -o /dev/null . && GOWORK=off go vet .
 
 test-sdk-examples-python:
 	python3 -c 'import ast, sys; [ast.parse(open(p).read(), p) for p in sys.argv[1:]]' \
-	  libs/sdk-examples/quickstart/python/quickstart.py
+	  libs/sdk-examples/quickstart/python/quickstart.py libs/sdk-examples/run-agent/python/run_agent.py
 
 test-sdk-examples-ts:
 	cd libs/sdk-ts && npm ci --silent --install-links --ignore-scripts && npm run build --silent
 	cd libs/sdk-examples/quickstart/typescript && npm ci --silent --install-links --ignore-scripts && \
 	  ./node_modules/.bin/tsc --noEmit -p .
 	cd libs/sdk-examples/pi-durable/typescript && npm ci --silent --install-links --ignore-scripts && \
+	  ./node_modules/.bin/tsc --noEmit -p .
+	cd libs/sdk-examples/run-agent/typescript && npm ci --silent --install-links --ignore-scripts && \
 	  ./node_modules/.bin/tsc --noEmit -p .
 
 test-sdk-python:
@@ -642,9 +645,16 @@ test-sdk-python:
 
 sdk-e2e: sdk-e2e-go sdk-e2e-python sdk-e2e-ts sdk-e2e-rust
 
+# CI's stand-in for the run-agent example's agent, so these runs need no
+# provider credential (#5109): configuration, not a second code path. A real
+# run leaves it unset and gets Claude Code, with CODEWIRE_PROFILE naming the
+# profile that holds the credential.
+sdk-e2e-go sdk-e2e-python sdk-e2e-ts sdk-e2e-rust: export RUN_AGENT_COMMAND = sed -i -e 's/"Hello " + name/f"Hello, {name}!"/' greeting.py
+
 sdk-e2e-go:
 	cd libs/sdk-go && go test -tags e2e -run TestE2E -v -timeout 10m
 	cd libs/sdk-examples/quickstart/go && go run .
+	cd libs/sdk-examples/run-agent/go && go run .
 
 sdk-e2e-python: test-sdk-python
 	cd libs/sdk-python && \
@@ -652,12 +662,16 @@ sdk-e2e-python: test-sdk-python
 	  .venv/bin/python -m unittest e2e_test -v
 	PYTHONPATH="$(CURDIR)/libs/gen-python$${PYTHONPATH:+:$$PYTHONPATH}" \
 	  libs/sdk-python/.venv/bin/python libs/sdk-examples/quickstart/python/quickstart.py
+	PYTHONPATH="$(CURDIR)/libs/gen-python$${PYTHONPATH:+:$$PYTHONPATH}" \
+	  libs/sdk-python/.venv/bin/python libs/sdk-examples/run-agent/python/run_agent.py
 
 sdk-e2e-ts:
 	cd libs/sdk-ts && npm ci --silent --install-links --ignore-scripts && ./node_modules/.bin/tsx src/e2e.ts
 	cd libs/sdk-ts && npm run build --silent
 	cd libs/sdk-examples/quickstart/typescript && npm ci --silent --install-links --ignore-scripts && \
 	  CODEWIRE_API_URL="$$CODEWIRE_SERVER_URL" ./node_modules/.bin/tsx quickstart.ts
+	cd libs/sdk-examples/run-agent/typescript && npm ci --silent --install-links --ignore-scripts && \
+	  CODEWIRE_API_URL="$$CODEWIRE_SERVER_URL" ./node_modules/.bin/tsx run_agent.ts
 	# cw runs as the demo's SSH ProxyCommand: give it an empty home so it
 	# signs in only with the API key it is handed, never a saved login.
 	cd libs/sdk-examples/pi-durable/typescript && npm ci --silent --install-links --ignore-scripts && \
@@ -667,3 +681,4 @@ sdk-e2e-ts:
 
 sdk-e2e-rust:
 	cargo run --locked -p codewire --example quickstart
+	cargo run --locked -p codewire --example run_agent

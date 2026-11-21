@@ -3,6 +3,7 @@ go 1.27.3
 use (
 	./libs/gen-go
 	./libs/sdk-examples/quickstart/go
+	./libs/sdk-examples/run-agent/go
 	./libs/sdk-go
 	./tests/contract
 )

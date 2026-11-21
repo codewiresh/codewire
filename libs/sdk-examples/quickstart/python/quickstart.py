@@ -34,13 +34,12 @@ def quickstart() -> None:
                 "image": "python:3.12-slim",
                 "working_directory": "/workspace",
             },
-            wait=True,
-            wait_timeout=300,
         )
         print("created", env.id)
-        print("ready")
-        # Delete the environment whether or not the steps succeeded.
+        # From here on, delete the environment whether or not anything fails.
         try:
+            env.wait_ready(timeout=300)
+            print("ready")
             use_environment(env)
         finally:
             env.remove()

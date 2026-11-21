@@ -31,6 +31,7 @@ done
 expected_modules="$(cat <<'EOF'
 libs/gen-go/go.mod
 libs/sdk-examples/quickstart/go/go.mod
+libs/sdk-examples/run-agent/go/go.mod
 libs/sdk-go/go.mod
 tests/contract/go.mod
 EOF

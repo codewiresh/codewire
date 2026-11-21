@@ -33,12 +33,12 @@ async function quickstart(): Promise<void> {
       name: "typescript-sdk-quickstart",
       project_spec: { schema_version: 1, image: "python:3.12-slim", working_directory: "/workspace" },
     },
-    { wait: true, waitTimeout: 300_000 },
   );
   console.log("created", env.id);
-  console.log("ready");
-  // Delete the environment whether or not the steps succeeded.
+  // From here on, delete the environment whether or not anything fails.
   try {
+    await env.waitReady({ timeout: 300_000 });
+    console.log("ready");
     await useEnvironment(env);
   } finally {
     await env.remove();
