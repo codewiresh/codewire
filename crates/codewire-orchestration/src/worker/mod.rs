@@ -48,6 +48,8 @@ pub mod snapshots;
 mod start_timing;
 #[cfg(test)]
 mod stop_reason_database_tests;
+#[cfg(test)]
+mod stuck_environments_database_tests;
 pub mod suspension_stop;
 pub mod tenant_secret_teardown;
 pub mod unverified_purge;

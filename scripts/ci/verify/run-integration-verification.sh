@@ -1104,6 +1104,12 @@ database_lane_orchestration() {
       'worker::idle_stop_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "stuck-state sweep" stuck-state-sweep \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::stuck_environments_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "no capacity outcome matrix" no-capacity-outcome \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

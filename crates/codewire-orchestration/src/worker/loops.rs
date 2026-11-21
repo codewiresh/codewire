@@ -550,13 +550,19 @@ async fn reconcile_incomplete_external_cleanup(ctx: &WorkerContext) {
     }
 }
 
-/// Mirrors `reconcileStuckEnvironments`.
-async fn reconcile_stuck_environments(ctx: &WorkerContext) {
+/// The environments not in their desired state and quiet for the recovery
+/// window. A running Sandbox whose desired state is `started` is swept on
+/// purpose: its reconcile re-checks the workspace bootstrap and recovers a
+/// stale one (a republished selection, new managed clients, a new
+/// generation), and nothing else asks for that on a running Sandbox. Its
+/// SSH access check logs in as the access probe, which idle stop doesn't
+/// count as use (#3384).
+pub(super) async fn stuck_environment_ids(pool: &PgPool) -> sqlx::Result<Vec<String>> {
     let kinds: Vec<String> = RECOVERY_JOURNAL_KINDS
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let ids: Vec<(String,)> = match sqlx::query_as(
+    let ids: Vec<(String,)> = sqlx::query_as(
         r#"SELECT e.id
              FROM environments e
              LEFT JOIN LATERAL (
@@ -572,17 +578,22 @@ async fn reconcile_stuck_environments(ctx: &WorkerContext) {
     )
     .bind(&kinds)
     .bind(RECOVERY_ACTIVITY_WINDOW_SECS)
-    .fetch_all(&ctx.pool)
-    .await
-    {
-        Ok(rows) => rows,
+    .fetch_all(pool)
+    .await?;
+    Ok(ids.into_iter().map(|(id,)| id).collect())
+}
+
+/// Mirrors `reconcileStuckEnvironments`.
+async fn reconcile_stuck_environments(ctx: &WorkerContext) {
+    let ids = match stuck_environment_ids(&ctx.pool).await {
+        Ok(ids) => ids,
         Err(e) => {
             tracing::error!(error = %e, "reconciler: query stuck environments");
             return;
         }
     };
 
-    for (id,) in ids {
+    for id in ids {
         if let Err(e) = enqueue_environment_reconcile(ctx, &id, false, "stuck-state recovery").await
         {
             tracing::error!(environment_id = id, error = %e, "reconciler: enqueue stuck environment reconcile failed");
