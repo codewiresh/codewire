@@ -24,7 +24,7 @@ met by a base-URL route.
 
 ## Where the walk stands
 
-Updated 2026-11-20. A hosted Sandbox is recorded on Dev and on Production
+Updated 2026-11-21. A hosted Sandbox is recorded on Dev and on Production
 separately.
 
 | ID | Issue | Linux local VM | macOS local VM | Dev | Production |
@@ -48,7 +48,7 @@ separately.
 | `agent-claude-websocket` | #3999 | no command yet | no command yet | n/a | n/a |
 | `agent-github` | #3999 | no command yet | partly observed 2026-11-19, v0.4.24 (read only) | n/a | n/a |
 | `no-token-at-rest` | #3999 (#4897), #4001 | no command yet | no command yet | no command yet | no command yet |
-| `agent-own-key` | #3999, #4001 | no command yet | no command yet | no command yet | no command yet |
+| `agent-own-key` | #3999, #4001 | partly observed 2026-11-21, main e62d4d033 (`locked`: another key and no key refused, the placeholder served; an unselected provider's host refused under every policy, #5555) | no command yet | no command yet | no command yet |
 | `agent-fail-closed` | #3999, #4001 | partly observed 2026-11-19, source 911a51f01 (the ended front door shown) and 2026-11-18, source 582326b40 (the smoke) | no command yet | no command yet | no command yet |
 | `agent-switch-off` | #3999 | no command yet | no command yet | n/a | n/a |
 | `agent-hosted` | #4001 | n/a | n/a | no command yet | no command yet |
@@ -1278,8 +1278,9 @@ Issues: #3999, #4001.
     with the selected credential prints its answer, and `example.com` is
     refused. `cw --local policy list` says `locked  built-in · nothing,
     except the model providers of credentials you selected`, and `cw info`
-    says the same under its network policy line. Not yet observed: that
-    the `curl` with another key is refused (#5215, #5555);
+    says the same under its network policy line. The `curl` with another
+    key, and one with no credential, are refused `name_not_allowed` before
+    anything is sent (#5215, #5555);
   - **in a hosted Sandbox with interception on** (#5555), the user's own
     key and a request with no credential are both refused
     `selected_credential_only` with nothing sent, under every policy, and
@@ -1292,7 +1293,28 @@ Issues: #3999, #4001.
   - A deny rule on an intercepted host refuses everything to it, the
     placeholder's own requests included. A policy that merely does not
     list the host still serves the placeholder's requests.
-- **Observed:** not yet observed.
+- **Observed:** partly, on a Linux local VM, 2026-11-21, `cw` built from
+  main e62d4d033, with interception on, a private keyring and one synthetic
+  Anthropic API key selected; recorded on #5215. Under `locked`: the
+  placeholder's request reached Anthropic, which answered its own 401 for
+  the synthetic key; `curl` to `api.anthropic.com` with another key and
+  with no credential got 403 `Codewire-Refusal: name_not_allowed` in 16 and
+  13 ms, saying the network policy doesn't allow api.anthropic.com;
+  `example.com` did not resolve; a request to
+  `chatgpt.com/backend-api/wham/accounts/check` with another bearer got
+  403 `name_not_allowed` in 19 ms. Under a policy allowing
+  `api.anthropic.com:443` all three Anthropic requests were forwarded and
+  got Anthropic's own 401. Not as the proof reads: under a policy allowing
+  `chatgpt.com:443` and `*.chatgpt.com:443`, and under `open`, the
+  `chatgpt.com` request with another bearer got 403 `denied` with nothing
+  sent, since an environment with no Codex credential dials no ChatGPT host.
+  That is a gap against this proof, which fails closed, until #5215's
+  choice of when a provider's host is bound (#5555 comment 125437). The routed `*.chatgpt.com` branch is proven
+  by unit tests only and needs a real ChatGPT sign-in to walk. Not yet
+  observed: `claude -p` under `locked`,
+  the placeholder on a path the route does not serve, the placeholder
+  beside another header, a policy edit on a running VM, and the hosted
+  state, which waits for #4001's switch.
 
 ## `agent-fail-closed`: losing the front door never opens a direct path
 
