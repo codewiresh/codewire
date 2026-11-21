@@ -113,15 +113,17 @@ when both have been observed.
     appears in its terminal;
   - `cw desktop desk-walk --status` before and after the second
     `cw desktop` names the same start time;
-  - the viewer opens without asking for anything, on a Mac's built-in
-    viewer too: `cw desktop` gave it the password. With `--no-open`, the
-    printed password lets a viewer of your own connect, and a wrong one is
-    refused by the VNC server;
+  - on a Mac the built-in viewer opens without asking for anything:
+    `cw desktop` gave it the password. On Linux `cw desktop` prints the
+    password under the address and the viewer asks for it once. With
+    `--no-open`, the printed password lets a viewer of your own connect, and
+    a wrong one is refused by the VNC server;
   - the password is nowhere it should not be: `--status` does not print it;
     `cw logs desk-walk --session codewire-desktop` does not contain it;
     inside the environment, neither `ps -eo args` nor the environment of a
-    command started there contains it; on the computer, `ps` during
-    `cw desktop` shows no command line with it.
+    command started there contains it; on the computer, `ps -eo args`
+    taken again and again while the viewer opens shows no command line with
+    it, and no file under the temporary directory holds it.
 - **Gotchas:** the `/dev/tcp` read needs `bash`. A viewer that connects is
   not proof that `cw desktop` chose the environment you meant; compare the host
   name the desktop's terminal prints with `cw info desk-walk`. The password

@@ -253,11 +253,16 @@ port 5901 stays reserved exactly as below.
   the desktop, and by no other call. The field is marked for redaction in
   every contract that carries it, and no service logs it, audits it or puts
   it in an error.
-- **`cw desktop`** keeps it in memory and gives it to the local viewer only,
-  without putting it on a command line that other users of the computer
-  could read. With `--no-open` it prints the address and the password, for
-  a viewer of the user's own. `--status` never prints it. It is never
-  written to a file that outlives the command.
+- **`cw desktop`** keeps it in memory, uses it only once it has checked
+  that it is eight lowercase letters or digits, and never puts it in a file
+  or in an argument of a process it starts, where other users of the
+  computer could read it. On macOS it writes the address with the password
+  to the standard input of `osascript`, the system's script runner, which
+  opens it, so the built-in viewer opens without asking. On other systems a
+  registered viewer is started with the address as an argument, so
+  `cw desktop` opens the address without the password and prints the
+  password for the user to type. With `--no-open` it prints the address and
+  the password, for a viewer of the user's own. `--status` never prints it.
 - **The dashboard** receives it in the answer to the panel's own state
   read, keeps it in the page's memory and hands it to the viewer. It is
   never in a URL, in browser storage or in the page's markup. The desktop
@@ -346,9 +351,11 @@ cw desktop [ENV] --stop      stop the desktop
 `cw vscode` does, picks a free port on the computer's loopback and runs
 OpenSSH with one local forward from that port to `127.0.0.1:5901` through
 the environment's managed alias. It prints `vnc://127.0.0.1:PORT`, opens
-that address in the system's viewer where one is registered, giving the
-viewer the password ("The viewer password"), and holds the forward until
-Ctrl-C. Leaving `cw desktop` closes the forward and leaves the desktop running.
+that address in the system's viewer where one is registered, and holds the
+forward until Ctrl-C. On macOS the viewer is given the password and opens
+without asking; elsewhere `cw desktop` prints the password under the address,
+for the viewer's prompt ("The viewer password"). Leaving `cw desktop` closes
+the forward and leaves the desktop running.
 
 When the forward ends by itself, `cw desktop` asks the control plane why and
 says "the environment stopped" or "the desktop ended", never OpenSSH's exit
