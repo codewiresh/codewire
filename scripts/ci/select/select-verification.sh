@@ -2578,6 +2578,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/release/build-runtime-guest-root.sh|scripts/ci/release/runtime-container.sh|\
       scripts/ci/release/build-runtime-cw.sh|\
       scripts/ci/tests/test-local-runtime-parts.py|\
+      scripts/ci/release/kernel_builder_mirror.py|scripts/ci/tests/test-kernel-builder-mirror.py|\
+      scripts/ci/release/collect-kernel-builder-packages.sh|\
       scripts/ci/release/dry-run-superseded.sh|scripts/ci/tests/test-dry-run-superseded.sh|\
       scripts/ci/release/dry-run-deferral.sh|scripts/ci/tests/test-dry-run-deferral.sh|\
       scripts/ci/select/dispatch-source.sh|scripts/ci/tests/test-dispatch-source.sh|\

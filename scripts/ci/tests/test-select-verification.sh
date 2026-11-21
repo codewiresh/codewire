@@ -2043,7 +2043,9 @@ run_paths_case cw_release_delivery_tests pull_request refs/pull/2255/head false 
   scripts/ci/release/build-runtime-kernel.sh scripts/ci/tests/test-local-runtime-parts.py \
   scripts/ci/release/build-local-runtime.sh scripts/ci/release/build-runtime-guest-root.sh \
   scripts/ci/release/runtime-container.sh scripts/ci/release/dry-run-superseded.sh \
-  scripts/ci/tests/test-dry-run-superseded.sh scripts/ci/release/build-runtime-cw.sh
+  scripts/ci/tests/test-dry-run-superseded.sh scripts/ci/release/build-runtime-cw.sh \
+  scripts/ci/release/kernel_builder_mirror.py scripts/ci/tests/test-kernel-builder-mirror.py \
+  scripts/ci/release/collect-kernel-builder-packages.sh
 # The published workspace pin alone is the workspace-pin change class
 # (owner, 2026-10-24): Policy's pin check proves the file is the generator's
 # exact output, so no consumer compiles it again and its artifact facts build

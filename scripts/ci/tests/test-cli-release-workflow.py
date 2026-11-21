@@ -308,6 +308,58 @@ HELPER_SIGNED_IF = "needs.build-helper-darwin.outputs.unsigned_sha256 != ''"
 PRODUCTION_WAIT_STEP = "      - name: Wait for Production to accept this release\n"
 
 
+MIRROR_IF = ("${{ github.event_name == 'workflow_dispatch' && inputs.kernel_builder_mirror"
+             " && github.ref == 'refs/heads/main' }}")
+MIRROR_MAIN_STEP = """      - name: Refuse any ref but main\n        run: '[ "$GITHUB_REF" = refs/heads/main ]'\n"""
+MIRROR_SKIP = "${{ !(github.event_name == 'workflow_dispatch' && inputs.kernel_builder_mirror) }}"
+
+
+def kernel_builder_mirror_errors(header, blocks):
+    """The kernel builder mirror refresh (#5619) can never half-release.
+
+    Its boolean input defaults to false; when it is true, on main, only its two
+    jobs run, because the first release job is skipped and every other release
+    job needs it; when it is false neither runs. The collect job runs the
+    archive's container and holds no OIDC or credential; the record job, on a
+    fresh checkout, receives the collected tree outside it, fetches the R2
+    credential only in its storing step, and neither holds a forge token.
+    """
+    errors = []
+    need = lambda condition, message: condition or errors.append(message)
+    collect, record = blocks.get("kernel-builder-mirror-collect", ""), blocks.get("kernel-builder-mirror-record", "")
+    need(re.search(r"      kernel_builder_mirror:\n(?:        .*\n)*?        type: boolean\n        default: false\n",
+                   header) is not None, "the kernel builder mirror input is not a boolean that defaults to false")
+    need(f"    if: {MIRROR_SKIP}\n" in blocks.get("pending", ""), "a mirror refresh also starts a release")
+    for name, block in (("collect", collect), ("record", record)):
+        need(f"    if: {MIRROR_IF}\n" in block, f"the mirror's {name} job runs without its dispatch input, or off main")
+        parts = [text for _, text in steps(block)]
+        need(parts[1:2] in ([MIRROR_MAIN_STEP], [MIRROR_MAIN_STEP.rstrip("\n")]),
+             f"the mirror's {name} job does not refuse a ref other than main first")
+        need("github.token" not in block and "GITEA_TOKEN" not in block, f"the mirror's {name} job holds a forge token")
+    need(not re.search(r"^    needs:", collect, re.M), "the mirror's collect job waits on a release job")
+    need("    needs: [kernel-builder-mirror-collect]\n" in record, "the mirror's record job does not wait for its collect job")
+    need(not any(c in collect for c in CAPABILITIES), "the job that runs the archive's container holds a credential or OIDC")
+    need("collect-kernel-builder-packages.sh" in collect and "collect-kernel-builder-packages.sh" not in record,
+         "the collector runs where the R2 credential is reachable")
+    need("upload-artifact" in collect, "the mirror's collect job does not hand its tree on")
+    need("download-artifact" in record and "path: ${{ runner.temp }}/kernel-builder-collected" in record,
+         "the mirror's record job does not receive the collected tree outside its checkout")
+    parts = [text for _, text in steps(record)]
+    store = next((b for b in parts if "kernel_builder_mirror.py record" in b), "")
+    need("fetch-openbao-releases-r2-credentials.sh" in store and "shred" in store,
+         "the storing step does not fetch the R2 credential itself and shred it")
+    need([b for b in parts if "fetch-openbao-" in b] == [store], "the R2 credential reaches a step other than the storing one")
+    need("upload-artifact" in record and "kernel-builder-packages.json" in record,
+         "the mirror does not hand its lock on as an artifact")
+    for name, block in blocks.items():
+        if name in ("pending", "kernel-builder-mirror-collect", "kernel-builder-mirror-record"):
+            continue
+        need(re.search(r"^    needs: \[[^\]]*\b(pending|release-selection)\b", block, re.M) is not None,
+             f"{name} does not wait on the release selection, so a mirror refresh could run it")
+        need("kernel-builder-mirror" not in block, f"{name} depends on the kernel builder mirror")
+    return errors
+
+
 def check(text, ci_text):
     errors = []
     # Forgejo runners set no RUNNER_NAME: a step that requires it fails the
@@ -337,10 +389,13 @@ def check(text, ci_text):
          "a dispatched release may skip moving stable")
     need("tags:" not in header, "tag-owned workflow code may release")
     blocks = jobs(text)
-    need(list(blocks) == ["pending", "release-selection", "build-runtime-linux", "build-helper-darwin", "sign-helper",
+    need(list(blocks) == ["pending", "release-selection", "kernel-builder-mirror-collect",
+                          "kernel-builder-mirror-record", "build-runtime-linux",
+                          "build-helper-darwin", "sign-helper",
                           "pack-runtime", "build-darwin", "sign-darwin", "build-linux-musl", "build-linux-gnu",
                           "build-release", "package-release", "propose-nix-release-pin",
                           "update-homebrew-tap"], "unexpected job set")
+    errors.extend(kernel_builder_mirror_errors(header, blocks))
     runtime, darwin = blocks.get("build-runtime-linux", ""), blocks.get("build-darwin", "")
     pack = blocks.get("pack-runtime", "")
     linux_builds = {target: blocks.get(job, "") for job, target in LINUX_BUILDS}
@@ -751,6 +806,27 @@ def check(text, ci_text):
 
 
 MUTATIONS = {
+    "kernel builder mirror input defaults to true": lambda t: t.replace(
+        "        type: boolean\n        default: false\n", "        type: boolean\n        default: true\n", 1),
+    "mirror collect runs on every dispatch": lambda t: t.replace(f"    if: {MIRROR_IF}\n", "", 1),
+    "mirror record runs on any ref": lambda t: nth_replace(
+        t, " && github.ref == 'refs/heads/main' }}\n    runs-on", " }}\n    runs-on", 2),
+    "mirror collect without its main-only step": lambda t: t.replace(MIRROR_MAIN_STEP, "", 1),
+    "a mirror refresh also releases": lambda t: t.replace(f"    if: {MIRROR_SKIP}\n", "", 1),
+    "mirror collect requests OIDC": lambda t: t.replace(
+        "    name: Collect the kernel builder's packages\n",
+        "    name: Collect the kernel builder's packages\n    enable-openid-connect: true\n", 1),
+    "mirror record runs the collector": lambda t: t.replace(
+        "      - name: Store them by digest and write the lock\n        run: |\n",
+        "      - name: Store them by digest and write the lock\n        run: |\n"
+        "          scripts/ci/release/collect-kernel-builder-packages.sh \"$RUNNER_TEMP/c\"\n", 1),
+    "mirror record receives the tree inside its checkout": lambda t: t.replace(
+        "          path: ${{ runner.temp }}/kernel-builder-collected\n", "          path: .kernel-builder/collected\n", 1),
+    "mirror record does not wait for collect": lambda t: t.replace(
+        "    needs: [kernel-builder-mirror-collect]\n", "", 1),
+    "kernel builder mirror holds the forge token": lambda t: t.replace(
+        "      - name: Store them by digest and write the lock\n",
+        "      - name: Store them by digest and write the lock\n        env:\n          GITEA_TOKEN: ${{ github.token }}\n", 1),
     "helper build requires RUNNER_NAME": lambda t: t.replace(
         "${RUNNER_NAME:-$(hostname -s)}", "${RUNNER_NAME:?}", 1),
     "release Linux side without a job limit": lambda t: t.replace("    timeout-minutes: 165\n", "", 1),

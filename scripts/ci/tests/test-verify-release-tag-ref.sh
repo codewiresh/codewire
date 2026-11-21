@@ -601,6 +601,7 @@ assert_composed_selection "$cli_workflow" cli
 # is never cancelled mid-flight.
 assert_scheduled_pickup() {
   python3 -I - "$1" "$2" "$3" "$RUNS_ON_UNTRUSTED_LIGHT" "$RUNS_ON_TRUSTED_LIGHT" <<'PY'
+import json
 import re
 import sys
 
@@ -657,10 +658,23 @@ verify = script.index("scripts/ci/release/verify-release-tag-ref.sh")
 for later in ("workspace-image-pin.py", "verify-release-tag-receipt.sh", "GITHUB_OUTPUT"):
     if script.index(later) < verify:
         sys.exit(f"release selection runs {later} before verifying the tag")
-# Every job after release selection needs it, so none runs unverified.
-for name, job in jobs.items():
-    if name in ("pending", "release-selection"):
+# Every job after release selection needs it, so none runs unverified. The
+# one exception is the kernel builder mirror refresh (#5619), which reads no
+# release tag at all and runs only when dispatched for it, never with a release.
+for mirror_name in ("kernel-builder-mirror-collect", "kernel-builder-mirror-record"):
+    mirror = jobs.get(mirror_name)
+    if mirror is None:
         continue
+    if mirror.get("if") != ("${{ github.event_name == 'workflow_dispatch' && inputs.kernel_builder_mirror"
+                            " && github.ref == 'refs/heads/main' }}"):
+        sys.exit(f"{mirror_name} runs without its dispatch input, or off main")
+    if "release_tag" in json.dumps(mirror) or "release-selection" in json.dumps(mirror):
+        sys.exit(f"{mirror_name} reads the release it does not verify")
+for name, job in jobs.items():
+    if name in ("pending", "release-selection", "kernel-builder-mirror-collect", "kernel-builder-mirror-record"):
+        continue
+    if "kernel-builder-mirror" in json.dumps(job.get("needs") or []):
+        sys.exit(f"{name} depends on the kernel builder mirror")
     needs = job.get("needs") or []
     needs = [needs] if isinstance(needs, str) else needs
     if "release-selection" not in needs:
@@ -888,6 +902,7 @@ python3 -B "$ROOT/scripts/ci/tests/test-cw-release-r2.py" >/dev/null 2>&1 || { e
 python3 -B "$ROOT/scripts/ci/tests/test-nix-release-pin.py" >/dev/null 2>&1 || { echo 'Nix release pin tests failed' >&2; exit 1; }
 python3 -B "$ROOT/scripts/ci/tests/test-package-cw-release.py" >/dev/null 2>&1 || { echo 'cw release packaging tests failed' >&2; exit 1; }
 python3 -B "$ROOT/scripts/ci/tests/test-local-runtime-parts.py" >/dev/null 2>&1 || { echo 'local runtime parts and source pin tests failed' >&2; exit 1; }
+python3 -B "$ROOT/scripts/ci/tests/test-kernel-builder-mirror.py" >/dev/null 2>&1 || { echo 'kernel builder mirror tests failed' >&2; exit 1; }
 "$ROOT/scripts/ci/tests/test-dry-run-superseded.sh" >/dev/null
 "$ROOT/scripts/ci/tests/test-dry-run-deferral.sh" >/dev/null
 "$ROOT/scripts/ci/tests/test-dispatch-source.sh" >/dev/null

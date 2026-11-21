@@ -25,6 +25,16 @@ on:
         type: choice
         default: stable
         options: [stable]
+      # The kernel builder's package mirror (#5619) and nothing else: no
+      # release job runs, and release_tag is ignored. The refresh reads the
+      # pinned archive.archlinux.org snapshot once, stores each file in the
+      # release bucket by digest, and hands the lock on as an artifact for a
+      # reviewed pull request; it writes nothing to the forge.
+      kernel_builder_mirror:
+        description: Refresh the kernel builder's package mirror only (no release)
+        required: false
+        type: boolean
+        default: false
 
   # A pushed, signed release tag is picked up within five minutes (owner,
   # 2026-10-23, #2892). A scheduled run is main's workflow; its first job only
@@ -78,6 +88,8 @@ jobs:
   pending:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Find the release to deliver
+    # A mirror refresh delivers no release: every release job needs this one.
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.kernel_builder_mirror) }}
     # The trusted light runner, with the job token alone: on the untrusted one
     # the release's first job queued 18 minutes behind gates on 2026-11-15 (#5009).
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
@@ -196,6 +208,91 @@ jobs:
           printf 'release_tag=%s\n' "$selected_tag" >> "$GITHUB_OUTPUT"
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
           printf 'tag_object_sha=%s\n' "$remote_object_sha" >> "$GITHUB_OUTPUT"
+
+  kernel-builder-mirror-collect:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
+    # The kernel builder's package mirror (#5619), only when dispatched for it
+    # on main; no release job needs it. The archive's container parses its
+    # unsigned sync databases and runs package scriptlets, as root, with this
+    # job's workspace mounted, so this job holds no credential and no OIDC: it
+    # only hands the collected tree on.
+    name: Collect the kernel builder's packages
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.kernel_builder_mirror && github.ref == 'refs/heads/main' }}
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    timeout-minutes: 45
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+
+      # Main's code only, as the release refuses any other ref.
+      - name: Refuse any ref but main
+        run: '[ "$GITHUB_REF" = refs/heads/main ]'
+
+      - name: Collect the pinned snapshot's packages
+        run: |
+          set -euo pipefail
+          work="$GITHUB_WORKSPACE/.kernel-builder"
+          mkdir -m 0700 "$work"
+          scripts/ci/release/collect-kernel-builder-packages.sh "$work/collected" --job-container "${HOSTNAME:?}"
+
+      - name: Hand the collected packages on
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
+        with:
+          name: kernel-builder-collected-${{ github.run_id }}
+          path: .kernel-builder/collected
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  kernel-builder-mirror-record:
+    # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
+    # Stores the collected files by digest and writes the lock. A fresh
+    # checkout of main runs only its own code: the collected tree is data,
+    # downloaded outside the checkout and read without following links. The
+    # R2 credential exists only in the storing step; the lock leaves as an
+    # artifact for a reviewed PR, and nothing is written to the forge.
+    name: Refresh the kernel builder's package mirror
+    needs: [kernel-builder-mirror-collect]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.kernel_builder_mirror && github.ref == 'refs/heads/main' }}
+    runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
+    enable-openid-connect: true
+    timeout-minutes: 30
+    steps:
+      - uses: noel/actions-checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Refuse any ref but main
+        run: '[ "$GITHUB_REF" = refs/heads/main ]'
+
+      - name: Receive the collected packages outside the checkout
+        uses: noel/actions-download-artifact@a9bc5e6ef2cb54c177f32aa5726adaa15e7e2d59
+        with:
+          name: kernel-builder-collected-${{ github.run_id }}
+          path: ${{ runner.temp }}/kernel-builder-collected
+
+      - name: Store them by digest and write the lock
+        run: |
+          set -euo pipefail
+          [ "$CW_RELEASE_R2_ROUTE_ADMITTED" = 'true' ] || {
+            echo 'The R2 release route is not admitted' >&2
+            exit 1
+          }
+          r2_work="${RUNNER_TEMP:?}/kernel-builder-r2"
+          mkdir -m 0700 "$r2_work"
+          trap 'shred -u "$r2_work/aws-credentials" 2>/dev/null || rm -f "$r2_work/aws-credentials"' EXIT
+          scripts/ci/setup/fetch-openbao-releases-r2-credentials.sh "$r2_work/aws-credentials"
+          python3 -I scripts/ci/release/kernel_builder_mirror.py record \
+            --collected "$RUNNER_TEMP/kernel-builder-collected" --credentials "$r2_work/aws-credentials"
+
+      - name: Hand the lock on for a reviewed pull request
+        uses: noel/actions-upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf
+        with:
+          name: kernel-builder-packages-${{ github.run_id }}
+          path: scripts/ci/release/kernel-builder-packages.json
+          if-no-files-found: error
+          retention-days: 7
 
   build-runtime-linux:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
