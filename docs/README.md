@@ -36,6 +36,8 @@ directory each.
 - [dev/SANDBOX-PREVIEWS.md](dev/SANDBOX-PREVIEWS.md): preview URLs.
 - [dev/SANDBOX-DESKTOP.md](dev/SANDBOX-DESKTOP.md): an environment's
   graphical desktop over VNC, written before the code (#3223).
+- [dev/SYSTEMD-WORKSPACE.md](dev/SYSTEMD-WORKSPACE.md): an opt-in workspace
+  image in which sessions see systemd as PID 1, written before the code (#5638).
 
 ## Using `cw`
 
