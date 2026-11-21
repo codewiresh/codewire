@@ -52,6 +52,8 @@ REGISTRY = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?$")
 PLACEHOLDER_DIGEST = "@sha256:" + "a" * 64
 # A golden is a few kilobytes; the bound only stops an absurd file.
 MAX_GOLDEN_BYTES = 1024 * 1024
+# The TUN device's memory-backed volume every broker-mode Pod carries (#4000).
+DEVNET = "egress-devnet"
 DIND = re.compile(r"^docker\.io/library/docker:([0-9.]+)-dind@sha256:[0-9a-f]{64}$")
 
 
@@ -170,10 +172,16 @@ def cases(goldens: pathlib.Path, policy_text: str, registry: str) -> dict[str, d
                 privileged=True))
     # #4000: the TUN device's volume disk-backed, a device node on the node's
     # own filesystem. The broker Pod is otherwise exactly its golden.
-    mutated("deny-devnet-disk",
-            lambda case: next(volume for volume in case["spec"]["volumes"]
-                              if volume["name"] == "egress-devnet").__setitem__("emptyDir", {}),
-            "warm-pool-broker-sandboxtemplate")
+    def disk_backed(case: dict) -> None:
+        devnet = [volume for volume in case["spec"].get("volumes", []) if volume.get("name") == DEVNET]
+        if len(devnet) != 1:
+            # The base's script runs over a pull request's own goldens; a tree
+            # from before #5667 has none, and the cluster refuses its broker Pod.
+            raise Refused(f"warm-pool-broker-sandboxtemplate has {len(devnet)} {DEVNET} volumes, not one; "
+                          "a tree from before #5667 needs main merged")
+        devnet[0]["emptyDir"] = {}
+
+    mutated("deny-devnet-disk", disk_backed, "warm-pool-broker-sandboxtemplate")
     return built
 
 

@@ -95,6 +95,20 @@ python3 -I -B "$BUILDER" "$work/goldens" "$work/policy.yaml" "$REGISTRY" "$work/
   fail 'a missing hosted golden was accepted'
 grep -q 'missing hosted SandboxTemplate goldens: confidential-sandboxtemplate' "$work/err" ||
   fail 'missing golden not named'
+# A tree from before the TUN device's volume (#5667): named, not a crash.
+cp "$GOLDENS/confidential-sandboxtemplate.golden.json" "$work/goldens/"
+python3 -I -B - "$work/goldens/warm-pool-broker-sandboxtemplate.golden.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+golden = json.load(open(path))
+spec = golden["spec"]["podTemplate"]["spec"]
+spec["volumes"] = [v for v in spec["volumes"] if v["name"] != "egress-devnet"]
+json.dump(golden, open(path, "w"))
+PY
+python3 -I -B "$BUILDER" "$work/goldens" "$work/policy.yaml" "$REGISTRY" "$work/stale" 2>"$work/err" &&
+  fail 'a broker golden without its TUN device volume was accepted'
+grep -q 'warm-pool-broker-sandboxtemplate has 0 egress-devnet volumes, not one; a tree from before #5667 needs main merged' \
+  "$work/err" || fail 'a broker golden without its TUN device volume is not named'
 # A golden committed as a symlink names a file outside the tree: refused, not read.
 mkdir "$work/linked"
 cp "$GOLDENS"/*sandboxtemplate*.golden.json "$work/linked/"
