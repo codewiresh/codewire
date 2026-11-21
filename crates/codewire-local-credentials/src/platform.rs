@@ -134,6 +134,27 @@ pub type PlatformCredentialInput =
 pub type PlatformCredentialOutput =
     Pin<Box<dyn Stream<Item = Result<bridge::CredentialBridgeHostMessage, Status>> + Send>>;
 
+/// Joins one admitted delegation's front door (#4909). The connector that
+/// admitted the delegation keeps the epoch's handle inside the joiner;
+/// nothing a join returns carries it, so it never leaves the authority.
+pub trait PlatformFrontDoorJoiner: Send + Sync + 'static {
+    /// Join with the epoch's own `ready` first; returns the front-door
+    /// operations the join's admission names, and its output.
+    fn join(
+        &self,
+        ready: bridge::CredentialBridgeReady,
+        input: PlatformCredentialInput,
+        deadline: Instant,
+    ) -> BoxFuture<'static, Result<(Vec<String>, PlatformCredentialOutput), Status>>;
+}
+
+/// An admitted delegation's output, and its front-door joiner when the
+/// platform offered one.
+pub type PlatformCredentialConnection = (
+    PlatformCredentialOutput,
+    Option<std::sync::Arc<dyn PlatformFrontDoorJoiner>>,
+);
+
 /// CLI-owned authentication adapter injected into the existing authority. The
 /// returned future must cover configuration, OAuth and exact public admission
 /// under `deadline`. It may return only after the public selection echo; the
@@ -147,6 +168,20 @@ pub trait PlatformCredentialConnector: Send + Sync + 'static {
         input: PlatformCredentialInput,
         deadline: Instant,
     ) -> BoxFuture<'static, Result<PlatformCredentialOutput, Status>>;
+
+    /// [`Self::connect`], and also the delegation's front-door joiner when
+    /// the platform offered one (#4909). The default offers none, so the
+    /// boot's logins stay refused under interception.
+    fn connect_joinable(
+        &self,
+        binding: PlatformCredentialBinding,
+        ready: bridge::CredentialBridgeReady,
+        input: PlatformCredentialInput,
+        deadline: Instant,
+    ) -> BoxFuture<'static, Result<PlatformCredentialConnection, Status>> {
+        let connecting = self.connect(binding, ready, input, deadline);
+        Box::pin(async move { Ok((connecting.await?, None)) })
+    }
 
     /// Whether the selection's creator has an active, unexpired GitHub
     /// connection on the platform now, authenticated as that creator under

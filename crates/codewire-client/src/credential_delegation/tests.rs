@@ -263,11 +263,15 @@ async fn delegation_generated_setup_sends_open_then_ready_and_requires_exact_ech
         peer.response
             .send(reply(protocol, &acknowledgment.encode_to_vec()))
             .unwrap();
-        let (mut stream, accepted) = tokio::time::timeout(TEST_TIMEOUT, setup)
+        let (mut stream, accepted, front_door_epoch) = tokio::time::timeout(TEST_TIMEOUT, setup)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(accepted, accepts_keepalive);
+        assert!(
+            front_door_epoch.is_none(),
+            "an older server offers no front door"
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         stream.close_send();
         assert_input_closed(&mut body).await;
@@ -553,4 +557,79 @@ async fn delegation_auth_ready_after_original_deadline_does_not_dispatch() {
     auth_tx.send(()).unwrap();
     assert_eq!(setup.await.unwrap_err().code(), ErrorCode::DeadlineExceeded);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+/// A delegation's front-door handle is accepted only at exactly 32 bytes, or
+/// as absent, and never shown by `Debug` (#4909, cw-security).
+#[tokio::test]
+async fn an_admission_carries_a_front_door_handle_of_exactly_32_bytes_or_none() {
+    for (handle, accepted) in [
+        (Vec::new(), Some(false)),
+        (vec![0x5a; FRONT_DOOR_EPOCH_BYTES], Some(true)),
+        (vec![0x5a; FRONT_DOOR_EPOCH_BYTES - 1], None),
+        (vec![0x5a; FRONT_DOOR_EPOCH_BYTES + 1], None),
+    ] {
+        let (transport, peer) = transport();
+        let open = opening();
+        let mut setup = Box::pin(setup(
+            generated(transport, Protocol::Connect),
+            options(),
+            open.clone(),
+            Instant::now() + SETUP_HANG,
+        ));
+        assert!(futures_util::poll!(setup.as_mut()).is_pending());
+        let _body = receive_open_and_ready(peer.request, &open, Protocol::Connect).await;
+        let mut acknowledgment = admitted(open);
+        acknowledgment.front_door_epoch = handle.clone();
+        peer.response
+            .send(reply(Protocol::Connect, &acknowledgment.encode_to_vec()))
+            .unwrap();
+        let result = tokio::time::timeout(TEST_TIMEOUT, setup).await.unwrap();
+        match accepted {
+            None => assert!(
+                result.is_err(),
+                "a {}-byte handle was accepted",
+                handle.len()
+            ),
+            Some(present) => {
+                let (_stream, _accepted, epoch) = result.unwrap();
+                assert_eq!(epoch.is_some(), present);
+                if let Some(epoch) = epoch {
+                    let debug = format!("{epoch:?}");
+                    assert!(!debug.contains("90") && !debug.contains("5a"), "{debug}");
+                }
+            }
+        }
+    }
+}
+
+/// The admission echoes the Open exactly, `front_door` included: a server
+/// that admits an Open other than the one sent, either way, is refused
+/// (#4909, cw-security).
+#[tokio::test]
+async fn an_admission_echoing_another_front_door_choice_is_refused() {
+    for declared in [false, true] {
+        let (transport, peer) = transport();
+        let mut open = opening();
+        open.front_door = declared;
+        let mut setup = Box::pin(setup(
+            generated(transport, Protocol::Connect),
+            options(),
+            open.clone(),
+            Instant::now() + SETUP_HANG,
+        ));
+        assert!(futures_util::poll!(setup.as_mut()).is_pending());
+        let _body = receive_open_and_ready(peer.request, &open, Protocol::Connect).await;
+        let mut echoed = open.clone();
+        echoed.front_door = !declared;
+        peer.response
+            .send(reply(Protocol::Connect, &admitted(echoed).encode_to_vec()))
+            .unwrap();
+        let result = tokio::time::timeout(TEST_TIMEOUT, setup).await.unwrap();
+        assert!(
+            result.is_err(),
+            "an echo with front_door {} was admitted",
+            !declared
+        );
+    }
 }

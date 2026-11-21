@@ -175,6 +175,7 @@ fn fixture(signer: Arc<Signer>) -> Fixture {
         platform_mode: super::super::BrokerPlatformMode::Local,
         platform_admitted: Arc::new(AtomicBool::new(false)),
         platform_sources: Mutex::new(None),
+        front_door: Default::default(),
     });
     Fixture {
         _temp: temp,

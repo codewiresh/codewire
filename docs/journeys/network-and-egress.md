@@ -784,6 +784,9 @@ session through a relay".
   - **no real token is found** in the VM's login files (they hold
     placeholders), on its disk, in the local relay's and front door's logs,
     or in the host's credential directories;
+  - **the first login is already a placeholder:** the agent's login file,
+    read before the front door has joined (before any agent request), holds
+    the placeholder, never the sign-in's token;
   - after a forced expiry, the platform refreshes the token, and the agent's
     own refresh gets placeholders back;
   - after a revocation the agent fails; after the credential is selected

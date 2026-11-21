@@ -267,6 +267,7 @@ fn fixture(mode: Mode, mixed: bool) -> Fixture {
         platform_mode: BrokerPlatformMode::SourcesOnly,
         platform_admitted: Arc::new(AtomicBool::new(false)),
         platform_sources: Mutex::new(None),
+        front_door: Default::default(),
     });
     Fixture {
         _temp: temp,

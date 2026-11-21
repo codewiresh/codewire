@@ -128,6 +128,7 @@ fn rpc(
         platform_mode: BrokerPlatformMode::Local,
         platform_admitted: Arc::new(AtomicBool::new(false)),
         platform_sources: Mutex::new(None),
+        front_door: Default::default(),
     }
 }
 

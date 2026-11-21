@@ -19,8 +19,8 @@ use codewire_daemon_proto::{
     codewire::bridge::v1 as bridge,
 };
 use codewire_local_credentials::{
-    PlatformCredentialBinding, PlatformCredentialConnector, PlatformCredentialInput,
-    PlatformCredentialOutput,
+    PlatformCredentialBinding, PlatformCredentialConnection, PlatformCredentialConnector,
+    PlatformCredentialInput, PlatformCredentialOutput,
 };
 use futures::{StreamExt as _, future::BoxFuture, stream};
 use prost::Message as _;
@@ -28,6 +28,8 @@ use tokio::time::Instant;
 use tonic::Status;
 
 use crate::config;
+
+mod front_door;
 
 const MAX_AUTH_FILE_BYTES: u64 = 64 * 1024;
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -62,6 +64,17 @@ impl PlatformCredentialConnector for NativePlatformCredentialConnector {
         input: PlatformCredentialInput,
         deadline: Instant,
     ) -> BoxFuture<'static, Result<PlatformCredentialOutput, Status>> {
+        let connecting = self.connect_joinable(binding, ready, input, deadline);
+        Box::pin(async move { Ok(connecting.await?.0) })
+    }
+
+    fn connect_joinable(
+        &self,
+        binding: PlatformCredentialBinding,
+        ready: bridge::CredentialBridgeReady,
+        input: PlatformCredentialInput,
+        deadline: Instant,
+    ) -> BoxFuture<'static, Result<PlatformCredentialConnection, Status>> {
         let connect_timeout = self.connect_timeout;
         Box::pin(async move {
             tokio::time::timeout_at(deadline, async move {
@@ -75,7 +88,16 @@ impl PlatformCredentialConnector for NativePlatformCredentialConnector {
                     .await
                     .map_err(client_error)?;
                 live(deadline)?;
-                Ok(relay(admitted.stream, admitted.accepts_keepalive, input))
+                // The epoch's handle stays in this process: the joiner keeps
+                // it, and the relay only ever reaches its channel (#4909).
+                let joiner = admitted.front_door_epoch.map(|epoch| {
+                    std::sync::Arc::new(front_door::NativeFrontDoorJoiner { client, epoch })
+                        as std::sync::Arc<dyn codewire_local_credentials::PlatformFrontDoorJoiner>
+                });
+                Ok((
+                    relay(admitted.stream, admitted.accepts_keepalive, input),
+                    joiner,
+                ))
             })
             .await
             .map_err(|_| expired())?
@@ -469,6 +491,10 @@ fn decode(
         return Err(denied());
     }
     Ok(frame)
+}
+
+fn send_timeout() -> Duration {
+    SEND_TIMEOUT
 }
 
 fn live(deadline: Instant) -> Result<(), Status> {

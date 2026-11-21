@@ -48,7 +48,10 @@ pub use coordinator::{
     Handlers as CoordinatorHandlers, MeshCoordinateIdentity, MeshCoordinatorPeerSession,
     PrimaryCoordinateIdentity,
 };
-pub use credential_delegation::{AdmittedCredentialDelegation, CredentialDelegationStream};
+pub use credential_delegation::{
+    AdmittedCredentialDelegation, CredentialDelegationStream, FRONT_DOOR_EPOCH_BYTES,
+    FRONT_DOOR_EPOCH_HEADER, FrontDoorDelegationStream, FrontDoorEpoch,
+};
 pub use tailnet::{
     EnvironmentTailnetDiagnostic, ExpectedTransport, NativeClientFacade, SshTransportMode,
     StunServer, TailnetConnection, TailnetDerpMapDiagnostic, TailnetDiagnosticOptions,

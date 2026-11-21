@@ -79,8 +79,8 @@ pub use control::v1::{
 };
 pub use error::LocalCredentialError;
 pub use platform::{
-    PlatformCredentialBinding, PlatformCredentialConnector, PlatformCredentialInput,
-    PlatformCredentialOutput,
+    PlatformCredentialBinding, PlatformCredentialConnection, PlatformCredentialConnector,
+    PlatformCredentialInput, PlatformCredentialOutput, PlatformFrontDoorJoiner,
 };
 pub use provider_revocation::{
     LocalRevocationLeaseClient, LocalRevocationProcessConfig, LocalRevocationProcessSpawner,

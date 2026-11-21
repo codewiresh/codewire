@@ -5,9 +5,11 @@
 use std::future::Future;
 use std::time::Duration;
 
+use base64::Engine as _;
 use codewire_proto::codewire::bridge::v1 as bridge;
 use codewire_proto::codewire::v1::{
-    CredentialDelegationServiceClient, DelegateCredentialsResponseView,
+    CredentialDelegationServiceClient, DelegateCredentialsResponseView, FrontDoorDelegationRequest,
+    FrontDoorDelegationResponse, FrontDoorDelegationResponseView, front_door_delegation_response,
 };
 use connectrpc::client::{BidiStream, CallOptions, ClientTransport};
 use tokio::time::Instant;
@@ -34,12 +36,57 @@ pub type CredentialDelegationStream = connectrpc::client::BidiStream<
     DelegateCredentialsResponseView<'static>,
 >;
 
+/// A local front door's joined stream to its delegation epoch (#4909): its
+/// first answer, the admission, has already been read.
+pub type FrontDoorDelegationStream = connectrpc::client::BidiStream<
+    reqwest::Body,
+    FrontDoorDelegationRequest,
+    FrontDoorDelegationResponseView<'static>,
+>;
+
+/// The request header a front-door join presents its epoch's handle in;
+/// the bridge's `CREDENTIAL_BRIDGE_EPOCH_HANDLE_HEADER`, pinned by a test
+/// where both are visible.
+pub const FRONT_DOOR_EPOCH_HEADER: &str = "x-codewire-credential-bridge-epoch-bin";
+
+/// A delegation epoch's front-door handle (#4909): exactly 32 bytes, held only
+/// by the native authority that admitted the epoch. It grants nothing alone,
+/// and its `Debug` never shows it.
+#[derive(Clone)]
+pub struct FrontDoorEpoch([u8; FRONT_DOOR_EPOCH_BYTES]);
+
+/// A front-door handle's exact length.
+pub const FRONT_DOOR_EPOCH_BYTES: usize = 32;
+
+impl std::fmt::Debug for FrontDoorEpoch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("FrontDoorEpoch(redacted)")
+    }
+}
+
+impl FrontDoorEpoch {
+    /// The handle an admission answered with: none when empty, refused when
+    /// it is any length but exactly [`FRONT_DOOR_EPOCH_BYTES`].
+    fn from_admission(bytes: &[u8]) -> Result<Option<Self>, ClientError> {
+        match bytes.len() {
+            0 => Ok(None),
+            FRONT_DOOR_EPOCH_BYTES => Ok(Some(Self(
+                bytes.try_into().map_err(|_| invalid_admission())?,
+            ))),
+            _ => Err(invalid_admission()),
+        }
+    }
+}
+
 /// An admitted stream and what its server said it accepts.
 pub struct AdmittedCredentialDelegation {
     pub stream: CredentialDelegationStream,
     /// The server answers request keepalives. Only then may the owner send
     /// one: an older server ends a stream that carries one.
     pub accepts_keepalive: bool,
+    /// The epoch's front-door handle, when the server joins a front door to
+    /// it. None from a server that predates #4909.
+    pub front_door_epoch: Option<FrontDoorEpoch>,
 }
 
 impl CodewireClient {
@@ -64,12 +111,70 @@ impl CodewireClient {
             ReqwestConnectTransport(self.http().clone()),
             self.config().environment_session_connect_config()?,
         );
-        let (stream, accepts_keepalive) =
+        let (stream, accepts_keepalive, front_door_epoch) =
             setup(client, self.auth_options(), open, deadline).await?;
         Ok(AdmittedCredentialDelegation {
             stream,
             accepts_keepalive,
+            front_door_epoch,
         })
+    }
+
+    /// Join `epoch`'s front door (#4909) with one current bearer, within the
+    /// same 15-second setup bound as admission. `ready` is the epoch's own
+    /// Ready, sent first; the platform admits the join only on it. Returns
+    /// the stream and the front-door operations its admission names. Any
+    /// first answer but an admission is refused.
+    pub async fn join_front_door_delegation(
+        &self,
+        epoch: &FrontDoorEpoch,
+        ready: bridge::CredentialBridgeReady,
+    ) -> Result<(FrontDoorDelegationStream, Vec<String>), ClientError> {
+        let deadline = Instant::now() + SETUP_TIMEOUT;
+        tokio::time::timeout_at(deadline, async {
+            let client = CredentialDelegationServiceClient::new(
+                ReqwestConnectTransport(self.http().clone()),
+                self.config().environment_session_connect_config()?,
+            );
+            let options = self
+                .auth_options()
+                .await?
+                .try_with_header(
+                    FRONT_DOOR_EPOCH_HEADER,
+                    base64::engine::general_purpose::STANDARD_NO_PAD.encode(epoch.0),
+                )
+                .map_err(|_| invalid_admission())?;
+            let mut stream = client
+                .front_door_delegation_with_options(options)
+                .await
+                .map_err(ClientError::from)?;
+            stream
+                .send(FrontDoorDelegationRequest {
+                    frame: Some(bridge::CredentialBridgeGuestMessage {
+                        payload: Some(bridge::credential_bridge_guest_message::Payload::Ready(
+                            Box::new(ready),
+                        )),
+                        ..Default::default()
+                    })
+                    .into(),
+                    ..Default::default()
+                })
+                .await
+                .map_err(ClientError::from)?;
+            let first = stream
+                .message::<FrontDoorDelegationResponse>()
+                .await
+                .map_err(ClientError::from)?
+                .ok_or_else(invalid_admission)?
+                .to_owned_message();
+            let Some(front_door_delegation_response::Output::Admitted(admitted)) = first.output
+            else {
+                return Err(invalid_admission());
+            };
+            Ok((stream, admitted.capabilities))
+        })
+        .await
+        .map_err(|_| expired())?
     }
 }
 
@@ -89,6 +194,7 @@ async fn setup<T: ClientTransport>(
             DelegateCredentialsResponseView<'static>,
         >,
         bool,
+        Option<FrontDoorEpoch>,
     ),
     ClientError,
 >
@@ -150,6 +256,7 @@ where
             .ok_or_else(invalid_admission)?
             .to_owned_message();
         let accepts_keepalive = response.accepts_keepalive;
+        let front_door_epoch = FrontDoorEpoch::from_admission(&response.front_door_epoch)?;
         match response.output {
             Some(delegate_credentials_response::Output::Admitted(accepted))
                 if *accepted == open => {}
@@ -159,7 +266,7 @@ where
         if Instant::now() >= deadline {
             return Err(expired());
         }
-        Ok((stream, accepts_keepalive))
+        Ok((stream, accepts_keepalive, front_door_epoch))
     })
     .await
     .map_err(|_| expired())?

@@ -682,6 +682,7 @@ where
         platform_mode,
         platform_admitted: Arc::new(AtomicBool::new(false)),
         platform_sources: Mutex::new(None),
+        front_door: delegation::FrontDoorSlot::default(),
     };
     let (closed_tx, closed_rx) = oneshot::channel();
     let stream = ObservedBrokerStream {
@@ -879,6 +880,7 @@ struct BrokerLeaseRpc<S: ProtectedStore> {
     platform_mode: BrokerPlatformMode,
     platform_admitted: Arc<AtomicBool>,
     platform_sources: Mutex<Option<delegation::sources_only::PlatformSourceConnection>>,
+    front_door: delegation::FrontDoorSlot,
 }
 
 impl<S: ProtectedStore> BrokerLeaseRpc<S> {
@@ -914,13 +916,13 @@ where
 
     async fn delegate_front_door(
         &self,
-        _request: Request<
+        request: Request<
             tonic::Streaming<
                 codewire_daemon_proto::codewire::bridge::v1::CredentialBridgeGuestMessage,
             >,
         >,
     ) -> Result<Response<Self::DelegateFrontDoorStream>, Status> {
-        Err(Status::unimplemented("delegated front door not served yet"))
+        self.delegate_front_door_session(request).await
     }
 
     async fn ssh_operation(

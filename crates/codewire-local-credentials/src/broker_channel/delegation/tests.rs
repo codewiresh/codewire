@@ -12,6 +12,8 @@ use super::super::{BrokerLeaseAuditLog, BrokerLeaseChannelControl};
 use crate::tests::TestProtectedStore;
 use crate::{LocalCredentialAuthority, PlatformCredentialBinding, PlatformCredentialConnector};
 
+mod front_door;
+
 fn environment() -> EnvironmentId {
     EnvironmentId::parse(Uuid::new_v4().to_string()).unwrap()
 }
@@ -164,6 +166,8 @@ enum ConnectorMode {
     /// The platform broker's side of a Codex login: every login request that
     /// crosses the delegation is answered DENIED for the same request ID.
     AnswerLogins,
+    /// Admitted with a front-door joiner (#4909).
+    AdmitJoinable(Arc<dyn crate::PlatformFrontDoorJoiner>),
 }
 
 struct SyntheticConnector {
@@ -172,6 +176,25 @@ struct SyntheticConnector {
 }
 
 impl PlatformCredentialConnector for SyntheticConnector {
+    fn connect_joinable(
+        &self,
+        binding: PlatformCredentialBinding,
+        ready: bridge::CredentialBridgeReady,
+        input: PlatformCredentialInput,
+        deadline: Instant,
+    ) -> futures::future::BoxFuture<'static, Result<crate::PlatformCredentialConnection, Status>>
+    {
+        let joiner = match self.mode.lock().unwrap().as_ref() {
+            Some(ConnectorMode::AdmitJoinable(joiner)) => Some(Arc::clone(joiner)),
+            _ => None,
+        };
+        if joiner.is_some() {
+            *self.mode.lock().unwrap() = Some(ConnectorMode::Admit(VecDeque::new()));
+        }
+        let connecting = self.connect(binding, ready, input, deadline);
+        Box::pin(async move { Ok((connecting.await?, joiner)) })
+    }
+
     fn connect(
         &self,
         _binding: PlatformCredentialBinding,
@@ -192,6 +215,7 @@ impl PlatformCredentialConnector for SyntheticConnector {
                 let _input = input;
                 future::pending().await
             }),
+            ConnectorMode::AdmitJoinable(_) => unreachable!("admitted through connect_joinable"),
             ConnectorMode::AnswerLogins => Box::pin(async move {
                 Ok(Box::pin(input.filter_map(|frame| async move {
                     match frame {

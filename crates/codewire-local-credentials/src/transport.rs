@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 27;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 28;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -79,6 +79,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         27,
         "EnsureEnvironmentBroker carries the bound hosts the network policy allows by rule, and the broker forwards a request without a placeholder only to one of them (#5555)",
     ),
+    (
+        28,
+        "DelegateFrontDoor joins a platform-delegated broker's front-door session to its admitted delegation (#4909)",
+    ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 
@@ -127,10 +131,14 @@ pub enum AuthorityFeature {
     /// to a host the policy allows by rule (#5555). An older authority
     /// ignores the field and forwards every such request.
     NetworkPolicyHosts,
+    /// `DelegateFrontDoor`: a platform-delegated broker's front-door session,
+    /// joined to its admitted delegation (#4909). An older authority answers
+    /// Unimplemented, and its platform boots don't intercept.
+    FrontDoorDelegation,
 }
 
 impl AuthorityFeature {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::PlatformGithub,
         Self::ClaudeSignIn,
         Self::DefaultProfile,
@@ -142,6 +150,7 @@ impl AuthorityFeature {
         Self::ProviderRevocation,
         Self::NamesPerProvider,
         Self::NetworkPolicyHosts,
+        Self::FrontDoorDelegation,
     ];
 
     /// The protocol that introduced it.
@@ -158,6 +167,7 @@ impl AuthorityFeature {
             Self::ProviderRevocation => 24,
             Self::NamesPerProvider => 25,
             Self::NetworkPolicyHosts => 27,
+            Self::FrontDoorDelegation => 28,
         }
     }
 

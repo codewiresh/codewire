@@ -113,6 +113,7 @@ fn fixture(mixed: bool) -> Fixture {
         platform_mode: super::super::super::BrokerPlatformMode::Delegated,
         platform_admitted: Arc::new(AtomicBool::new(true)),
         platform_sources: Mutex::new(None),
+        front_door: Default::default(),
     };
     let composer = ProjectionComposer::for_binding(&rpc, &platform)
         .unwrap()

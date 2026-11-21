@@ -31,7 +31,10 @@ use crate::platform::{PlatformCredentialInput, PlatformCredentialOutput};
 const PLATFORM_DELEGATION_SETUP_TIMEOUT: Duration = Duration::from_secs(15);
 
 mod composition;
+mod front_door;
 pub(super) mod sources_only;
+
+pub(super) use front_door::FrontDoorSlot;
 
 type CloseFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -247,8 +250,8 @@ impl<S: ProtectedStore + 'static> BrokerLeaseRpc<S> {
             Some(composer) => composer.input(remaining),
             None => remaining,
         };
-        let setup = connector.connect(binding, ready.clone(), remaining, deadline);
-        let output = tokio::select! {
+        let setup = connector.connect_joinable(binding, ready.clone(), remaining, deadline);
+        let (output, joiner) = tokio::select! {
             result = tokio::time::timeout_at(deadline, setup) => {
                 result.map_err(|_| Status::deadline_exceeded("platform credential delegation setup expired"))??
             }
@@ -265,6 +268,7 @@ impl<S: ProtectedStore + 'static> BrokerLeaseRpc<S> {
                 "platform credential delegation setup expired",
             ));
         }
+        self.front_door.offer(joiner);
         let state = DelegationOutputState {
             admitted: Some(ready),
             output,
