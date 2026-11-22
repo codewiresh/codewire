@@ -428,7 +428,9 @@ VM checkpoints run on a Linux host and on a Mac. On a Mac, the checkpoint
 store is kept out of Time Machine backups, a local VM state root inside
 a folder a sync service copies (iCloud Drive, or a provider under
 `~/Library/CloudStorage`) is refused, and a checkpoint restores only on the
-macOS build it was taken on. With FileVault off, the first checkpoint warns
+macOS build it was taken on. Restoring or forking a checkpoint needs the Mac
+unlocked, because macOS releases the key that protects the saved memory only
+then. With FileVault off, the first checkpoint warns
 that a removed checkpoint's memory stays readable on the disk.
 
 ## Local VMs on an older cw

@@ -250,7 +250,10 @@ only.
   inspects, restores and removes them, and `cw create --local --checkpoint`
   forks one into new environments with fresh identity. A checkpoint stays on
   the host that made it, and a Mac restores it only on the macOS build it was
-  taken on (#4654). Hosted sandboxes have none.
+  taken on (#4654). A Mac restores or forks one only while it is unlocked,
+  because macOS protects the saved state with a key it releases only then; on
+  a locked Mac both are refused before the source stops or a fork is made
+  (#5976, not yet built). Hosted sandboxes have none.
 
 ## 3. Components
 

@@ -20,7 +20,9 @@ Updated 2026-11-22. Cloud capture, management and a three-way fork are
 observed on Dev and on Production, as the smoke identities. The launch walk by
 a new account, the fork while the snapshot's node is down and the dashboard
 are not observed. VM checkpoints are observed on a Mac and on Linux with
-development builds of #4654's branch (2026-11-21); not yet with a release.
+development builds of #4654's branch (2026-11-21), and on a Mac with released
+`v0.4.28` (2026-11-22). On a locked Mac a restore or fork fails and leaves the
+VM in `error`; the refusal that replaces it is not yet built (#5976).
 
 | ID | What | Dev | Production |
 | --- | --- | --- | --- |
@@ -30,9 +32,9 @@ development builds of #4654's branch (2026-11-21); not yet with a release.
 | `snap-fork-node-down` | a fork while the snapshot's node is unavailable | not yet observed (#4371) | not yet observed |
 | `snap-local` | `cw snapshot create`, `ls`, `inspect` and `rm` on a local VM (Linux or a Mac) | does not apply; a local VM observed on a pre-merge build (#3525) and on a Mac with the v0.4.22 candidate; `create` and `rm` with v0.4.22 on Linux and on a Mac | does not apply |
 | `snap-local-fork` | `cw create --local --snapshot`, one fork and `--count N` | does not apply; a local VM observed on a pre-merge build (#3525); one fork on a Mac with the v0.4.22 candidate; with v0.4.22, one fork on Linux and `--count 2` on Linux and on a Mac | does not apply |
-| `ckpt-local` | `cw checkpoint create`, `ls`, `inspect` and `rm` of a running local VM (Linux or a Mac) | does not apply; observed on a Mac and on Linux with development builds of #4654's branch, 2026-11-21 | does not apply |
-| `ckpt-restore` | `cw checkpoint restore`: a local VM back at a checkpoint's instant, in place | does not apply; a running source observed on a Mac and on Linux with development builds of #4654's branch, 2026-11-21 | does not apply |
-| `ckpt-fork` | `cw create --local --checkpoint`: a running copy beside the source | does not apply; observed on a Mac and on Linux with development builds of #4654's branch, 2026-11-21 | does not apply |
+| `ckpt-local` | `cw checkpoint create`, `ls`, `inspect` and `rm` of a running local VM (Linux or a Mac) | does not apply; observed on a Mac and on Linux with development builds of #4654's branch, 2026-11-21, and on a Mac with `v0.4.28`, 2026-11-22 | does not apply |
+| `ckpt-restore` | `cw checkpoint restore`: a local VM back at a checkpoint's instant, in place | does not apply; a running source observed on a Mac and on Linux with development builds of #4654's branch, 2026-11-21, and on an unlocked Mac with `v0.4.28`, 2026-11-22; the locked-Mac refusal not yet built (#5976) | does not apply |
+| `ckpt-fork` | `cw create --local --checkpoint`: a running copy beside the source | does not apply; observed on a Mac and on Linux with development builds of #4654's branch, 2026-11-21, and on an unlocked Mac with `v0.4.28`, 2026-11-22; the locked-Mac refusal not yet built (#5976) | does not apply |
 | `snap-dashboard` | the organization's Snapshots page | hidden for launch (#4582) | hidden for launch (#4582) |
 
 ## Before any of these
@@ -53,8 +55,8 @@ development builds of #4654's branch (2026-11-21); not yet with a release.
   the local VM runtime's `dumpe2fs`; a runtime installed before it shipped
   refuses a capture with "reinstall the local VM runtime: cw setup --local
   --replace". VM checkpoints, and `cw create --local --checkpoint`, run on
-  Linux today; on a Mac they are being built (#4654), and the Mac steps below
-  are not yet observed.
+  Linux and on a Mac (#4654). On a Mac, a restore or a fork from a checkpoint
+  needs the Mac unlocked; drive those steps while someone is at the Mac.
 
 ## `snap-capture`: a snapshot of a stopped cloud sandbox
 
@@ -461,6 +463,15 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     1170 ms. Not observed on a Mac: the limit of 8, the iCloud refusal and the
     Desktop or Documents warning (unit-tested), and the FileVault-off warning
     (unit-tested).
+  - A local VM on macOS 27.2.1 (an M3 Mac), released `cw` `v0.4.28` and its
+    pinned runtime, installed by `install.sh` into a scratch home,
+    2026-11-22 (#4654): `cw checkpoint create ck --name before` of
+    the running VM printed "VM paused 1166 ms, workload frozen 1175 ms, total
+    5847 ms; memory 4.0 GiB, disks 3"; the guest clock read 9 ms ahead of the
+    host before it and 12 ms after. `inspect` read `Consistency: paired` and
+    `VMM: macOS virtualization helper vz-3`; `tmutil isexcluded` reported
+    `[Excluded]` for the snapshot store and the VM's `checkpoints/`. The
+    capture worked with the Mac's screen locked.
 
 ## `ckpt-restore`: a local VM back at a VM checkpoint's instant (Linux or a Mac)
 
@@ -475,6 +486,11 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
   - another CPU: refused; on a Mac, another hardware model, or another macOS
     build ("a VM checkpoint restores only on the macOS build it was taken
     on");
+  - on a Mac with the screen locked (#5976, not yet built): refused before
+    the source stops, saying the Mac must be unlocked to restore a VM
+    checkpoint and to unlock it and run the command again; the source is
+    left as it was. If the Mac locks during a restore, the error names the
+    lock;
   - on a Mac, the clock after the restore: within 50 ms of the host's.
 - **Driving it:**
 
@@ -517,6 +533,18 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     clock read 20 ms ahead of the host. Not observed on a Mac: a restore of
     a source that was already stopped, and the refusals for another hardware
     model or macOS build.
+  - A local VM on macOS 27.2.1, released `v0.4.28`, 2026-11-22 (#4654).
+    Failure observed first: with the Mac's screen locked, `cw
+    checkpoint restore --yes` failed with `start_vmm_start_failed` twice, of
+    `before` and then of a fresh checkpoint `again`, and left the VM `error`.
+    The macOS VM service logged
+    `SecKeyCreateDecryptedDataWithParameters` failing with -25308
+    (`errSecInteractionNotAllowed`): the saved state's key is usable
+    only while the Mac is unlocked (#5976). With the Mac unlocked, the same
+    VM restored the same checkpoints: "Restored ck to VM checkpoint before:
+    stop 9.64 s, restore 12.87 s, total 22.51 s"; the marker read `before`
+    and the ticker started before the checkpoint counted on from 17. The
+    second, `again`, restored in 8.87 s with its marker.
 
 ## `ckpt-fork`: local VMs from a VM checkpoint (Linux or a Mac)
 
@@ -528,7 +556,8 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
   - the fork's first command, right after the create (#4651);
   - the checkpoint removed after the fork: the fork keeps running;
   - on a Mac, the same refusals as `ckpt-restore` for another hardware model
-    or macOS build.
+    or macOS build, and for a locked screen (#5976, not yet built): no fork
+    is made.
 - **Driving it:**
 
   ```sh
@@ -557,6 +586,13 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     marker `before` and the ticker at 5, still running as PID 13; its
     machine-id differed from ck2's; after `cw checkpoint rm before2` the
     fork's ticker kept counting.
+  - A local VM on macOS 27.2.1, released `v0.4.28`, the Mac unlocked,
+    2026-11-22 (#4654): `cw create --local --checkpoint before
+    --name ck-fork` beside the running ck printed "Created ck-fork from VM
+    checkpoint before in 12.9 s"; its first command read the marker
+    `before` and the ticker at 17, still running as PID 14; its machine-id
+    differed from ck's; after `cw checkpoint rm before` its ticker kept
+    counting.
 
 ## `snap-dashboard`: the Snapshots page
 
