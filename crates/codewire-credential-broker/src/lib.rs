@@ -168,9 +168,9 @@ pub use bridge::{
     AdmittedCredentialBridge, BrokerBridgeError, CredentialBridgeRelayInput,
     CredentialBridgeRelayOutput, CredentialBridgeResponseSink, CredentialBridgeTransport,
     FrontDoorResponseSink, FrontDoorTransport, RelayNetworkPolicy, admit_credential_bridge,
-    run_admitted_credential_bridge, run_admitted_credential_bridge_relay,
-    run_admitted_credential_bridge_with_front_doors, run_admitted_credential_bridges,
-    run_admitted_front_door_bridge, run_credential_bridge,
+    run_admitted_credential_bridge, run_admitted_credential_bridge_with_front_doors,
+    run_admitted_credential_bridges, run_admitted_front_door_bridge, run_credential_bridge,
+    run_credential_bridge_relay,
 };
 /// The environment and generation a front-door session serves.
 pub use codewire_credential_bridge::BridgeIdentity;

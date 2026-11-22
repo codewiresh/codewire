@@ -12,7 +12,7 @@ use codewire_credential_broker::SyntheticOpenAiSmokeTransport;
 use codewire_credential_broker::{
     AdmittedCredentialBridge, BrokerBridgeError, CredentialBridgeRelayOutput, FrontDoorTransport,
     OpenAiBroker, RelayNetworkPolicy, admit_credential_bridge, run_admitted_credential_bridge,
-    run_admitted_credential_bridge_relay, run_admitted_credential_bridges,
+    run_admitted_credential_bridges, run_credential_bridge_relay,
 };
 #[cfg(target_os = "linux")]
 use codewire_local_credentials::AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES;
@@ -421,18 +421,27 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
     if !args.platform_delegated {
         capabilities.push(codewire_daemon_proto::CREDENTIAL_BRIDGE_CAPABILITY_REQUEST_BODY_STREAM);
     }
-    let bridge = daemon
-        .open_credential_bridge_with_capabilities(
-            environment_uuid,
-            args.environment_generation,
-            &capabilities,
-        )
-        .await
-        .context("open guest credential bridge")?;
-    stage.set("bridge.admit");
-    let bridge = admit_credential_bridge(bridge, environment_uuid, args.environment_generation)
-        .await
-        .context("authenticate guest credential bridge")?;
+    // Opening the bridge sends the guest its Open, which activates the
+    // guest's epoch. A local broker opens it now. A platform relay opens it
+    // only once its delegation is admitted (#5957): a relay the platform
+    // refuses then leaves the guest no lost epoch, and the guest's startup
+    // launch waits for the successor relay instead of ending the boot.
+    let open_bridge = open_guest_bridge(
+        daemon,
+        environment_uuid,
+        args.environment_generation,
+        capabilities,
+    );
+    let (bridge, open_bridge) = if args.platform_delegated {
+        (None, Some(open_bridge))
+    } else {
+        let bridge = open_bridge.await?;
+        stage.set("bridge.admit");
+        let bridge = admit_credential_bridge(bridge, environment_uuid, args.environment_generation)
+            .await
+            .context("authenticate guest credential bridge")?;
+        (Some(bridge), None)
+    };
     // The environment's front door (#3999), when the boot binds interception.
     // It pairs before confinement, as the daemon connection does. A relay to
     // the platform broker (#4909) writes the session's Open only once the
@@ -466,90 +475,27 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
         None => (None, None),
     };
     drop(boot_secrets);
-    // The broker needs only the admitted bridge from this point onward. Do not
-    // retain general runner or daemon clients inside the credential-bearing
-    // runtime domain.
-    drop(daemon);
+    // The broker needs only the guest's bridge from this point onward. Do not
+    // retain a general runner or daemon client inside the credential-bearing
+    // runtime domain: the daemon client went into `open_bridge`, and a relay
+    // carries it through confinement only for that one call, which consumes
+    // it. The bridge stream is then all that is left on its connection.
     drop(runner);
     stage.set("relay.confine");
     if args.platform_delegated {
-        // The original guest Ready is retained in `bridge`. This branch has
-        // no provider DNS, protected-store connection, or raw lease provider.
-        // The only authority endpoint is the parent's inherited FD3 channel.
-        #[cfg(target_os = "linux")]
-        apply_broker_landlock_confinement(None).context("confine platform credential relay")?;
-        // One deny-all Seatbelt profile replaces Landlock and seccomp: the
-        // relay keeps only the bridge and authority descriptors it holds.
-        #[cfg(target_os = "macos")]
-        darwin::confine_relay().context("confine platform credential relay")?;
-        stage.set("relay.authority");
-        let mut delegation = LocalCredentialDelegationClient::connect(
+        return run_platform_relay(
+            stage,
             authority_stream,
             environment_id,
+            environment_uuid,
             args.environment_generation,
+            args.network_policy_allows_github,
+            delegated_front_door,
+            open_bridge,
         )
-        .await
-        .context("connect platform credential relay authority")?;
-        #[cfg(target_os = "linux")]
-        apply_broker_seccomp_confinement().context("seal platform credential relay")?;
-        // The front door's session starts now and holds its Open until the
-        // relay's first join, which waits for the delegation's admission.
-        let hand_over = delegated_front_door.map(|(stream, paired_at)| {
-            let (hand_over, joiner) = tokio::sync::oneshot::channel();
-            let identity = codewire_credential_broker::BridgeIdentity {
-                environment_id: environment_uuid,
-                environment_generation: args.environment_generation,
-            };
-            tokio::spawn(async move {
-                let end = codewire_credential_broker::serve_delegated_front_door(
-                    stream, identity, joiner, paired_at,
-                )
-                .await;
-                tracing::info!(?end, "the platform front-door session ended");
-            });
-            hand_over
-        });
-        stage.set("relay.run");
-        let relay_policy = if args.network_policy_allows_github {
-            RelayNetworkPolicy::AllowsGitHub
-        } else {
-            RelayNetworkPolicy::RefusesGitHub
-        };
-        return run_admitted_credential_bridge_relay(
-            bridge,
-            relay_policy,
-            move |ready, input| async move {
-                let output = delegation
-                    .delegate_credentials(ready, input)
-                    .await
-                    .map_err(|_| BrokerBridgeError::Unavailable)?;
-                // The exact private admission was consumed only after the parent
-                // verified the exact public selection echo. HTTP headers alone
-                // never make this native broker ready.
-                delegation
-                    .report_ready()
-                    .await
-                    .map_err(|_| BrokerBridgeError::Unavailable)?;
-                if let Some(hand_over) = hand_over {
-                    // Joins go through the authority, which keeps the
-                    // platform's epoch handle; the loopback session never
-                    // waits for them.
-                    let joiner = FrontDoorJoiner {
-                        delegation,
-                        environment_id: environment_uuid,
-                        environment_generation: args.environment_generation,
-                    };
-                    let _ = hand_over.send(joiner); // Fails only once the session has ended.
-                }
-                Ok(
-                    Box::pin(output.map(|frame| frame.map_err(|_| BrokerBridgeError::Unavailable)))
-                        as CredentialBridgeRelayOutput,
-                )
-            },
-        )
-        .await
-        .context("run platform credential relay");
+        .await;
     }
+    let bridge = bridge.context("the guest's credential bridge is open")?;
     stage.set("broker.confine");
     // Landlock first: it admits reads of a file store's directory only, and
     // Secret Service is connected once afterwards over the session bus.
@@ -617,6 +563,135 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
             .await
             .context("run guest credential bridge"),
     }
+}
+
+/// Run a platform relay (#4909): confine, connect its delegation, and relay
+/// the guest's bridge, opened by `open_bridge` only once the delegation is
+/// admitted (#5957).
+#[allow(clippy::too_many_arguments)]
+async fn run_platform_relay<O>(
+    stage: &BrokerStage,
+    authority_stream: tokio::net::UnixStream,
+    environment_id: EnvironmentId,
+    environment_uuid: Uuid,
+    environment_generation: u64,
+    network_policy_allows_github: bool,
+    delegated_front_door: Option<(tokio::net::UnixStream, tokio::time::Instant)>,
+    open_bridge: Option<O>,
+) -> anyhow::Result<()>
+where
+    O: std::future::Future<
+            Output = anyhow::Result<codewire_daemon::client::CredentialBridgeConnection>,
+        >,
+{
+    // This branch has no provider DNS, protected-store connection, or
+    // raw lease provider. The only authority endpoint is the parent's
+    // inherited FD3 channel.
+    #[cfg(target_os = "linux")]
+    apply_broker_landlock_confinement(None).context("confine platform credential relay")?;
+    // One deny-all Seatbelt profile replaces Landlock and seccomp: the
+    // relay keeps only the bridge and authority descriptors it holds.
+    #[cfg(target_os = "macos")]
+    darwin::confine_relay().context("confine platform credential relay")?;
+    stage.set("relay.authority");
+    let mut delegation = LocalCredentialDelegationClient::connect(
+        authority_stream,
+        environment_id,
+        environment_generation,
+    )
+    .await
+    .context("connect platform credential relay authority")?;
+    #[cfg(target_os = "linux")]
+    apply_broker_seccomp_confinement().context("seal platform credential relay")?;
+    // The front door's session starts now and holds its Open until the
+    // relay's first join, which waits for the delegation's admission.
+    let hand_over = delegated_front_door.map(|(stream, paired_at)| {
+        let (hand_over, joiner) = tokio::sync::oneshot::channel();
+        let identity = codewire_credential_broker::BridgeIdentity {
+            environment_id: environment_uuid,
+            environment_generation,
+        };
+        tokio::spawn(async move {
+            let end = codewire_credential_broker::serve_delegated_front_door(
+                stream, identity, joiner, paired_at,
+            )
+            .await;
+            tracing::info!(?end, "the platform front-door session ended");
+        });
+        hand_over
+    });
+    stage.set("relay.run");
+    let relay_policy = if network_policy_allows_github {
+        RelayNetworkPolicy::AllowsGitHub
+    } else {
+        RelayNetworkPolicy::RefusesGitHub
+    };
+    let open = async move {
+        match open_bridge {
+            Some(open) => open.await.map_err(|_| BrokerBridgeError::Unavailable),
+            None => Err(BrokerBridgeError::Unavailable),
+        }
+    };
+    run_credential_bridge_relay(
+        environment_uuid,
+        environment_generation,
+        relay_policy,
+        move |ready, input| async move {
+            let output = delegation
+                .delegate_credentials(ready, input)
+                .await
+                .map_err(|_| BrokerBridgeError::Unavailable)?;
+            let output =
+                Box::pin(output.map(|frame| frame.map_err(|_| BrokerBridgeError::Unavailable)))
+                    as CredentialBridgeRelayOutput;
+            // Run once the guest's bridge is open, so a ready relay
+            // serves its guest.
+            let opened = async move {
+                // The exact private admission was consumed only after the
+                // parent verified the exact public selection echo. HTTP
+                // headers alone never make this native broker ready.
+                delegation
+                    .report_ready()
+                    .await
+                    .map_err(|_| BrokerBridgeError::Unavailable)?;
+                if let Some(hand_over) = hand_over {
+                    // Joins go through the authority, which keeps the
+                    // platform's epoch handle; the loopback session never
+                    // waits for them.
+                    let joiner = FrontDoorJoiner {
+                        delegation,
+                        environment_id: environment_uuid,
+                        environment_generation,
+                    };
+                    let _ = hand_over.send(joiner); // Fails only once the session has ended.
+                }
+                Ok(())
+            };
+            Ok((output, opened))
+        },
+        open,
+    )
+    .await
+    .context("run platform credential relay")
+}
+
+/// Open the guest's credential bridge with `capabilities` on its epoch. This
+/// is the only call made with `daemon`, which it consumes, so no daemon
+/// client outlives it (#5957).
+async fn open_guest_bridge(
+    daemon: codewire_daemon::client::SessionClient,
+    environment_id: Uuid,
+    environment_generation: u64,
+    capabilities: Vec<&'static str>,
+) -> anyhow::Result<codewire_daemon::client::CredentialBridgeConnection> {
+    daemon
+        .open_credential_bridge_with_capabilities(
+            environment_id,
+            environment_generation,
+            &capabilities,
+        )
+        .await
+        .context("open guest credential bridge")
 }
 
 /// Whether a broker seals no agent login: one started with a front door it

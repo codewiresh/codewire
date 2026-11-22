@@ -78,6 +78,35 @@ async fn startup_host_wait_never_waits_for_a_lost_epoch_to_reconnect() {
     );
 }
 
+/// #5957: a host that connected but never sent its Open leaves no lost
+/// epoch, so startup goes on waiting and the next host to open serves it. A
+/// platform relay opens only once its delegation is admitted, so a refused
+/// relay is this host.
+#[tokio::test]
+async fn startup_host_wait_outlasts_a_host_that_never_opened() {
+    let bridge = bridge();
+    let context = initial_context(&bridge, 5_000);
+    let wait = bridge.wait_for_initial_host(&context);
+    tokio::pin!(wait);
+    let (refused, mut output) = bridge.prepare_connection().unwrap();
+    assert!(output.next().await.is_some());
+    drop((refused, output));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut wait)
+            .await
+            .is_err()
+    );
+    let (prepared, mut output) = bridge.prepare_connection().unwrap();
+    assert!(output.next().await.is_some());
+    let (_sender, receiver) = mpsc::channel(1);
+    let connection = prepared
+        .activate(ReceiverStream::new(receiver))
+        .await
+        .unwrap();
+    bounded(wait).await.unwrap();
+    connection.run_until(std::future::ready(())).await;
+}
+
 #[tokio::test]
 async fn ciphertext_relay_preserves_actual_launcher_recipient_and_epoch_fence() {
     let mut harness = Harness::new(bridge()).await;

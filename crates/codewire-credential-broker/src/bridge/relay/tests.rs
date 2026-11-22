@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use async_trait::async_trait;
 use futures::stream;
 use tokio::sync::mpsc;
@@ -53,6 +56,180 @@ fn ready(environment_id: Uuid, generation: u64) -> v1::CredentialBridgeGuestMess
     }
 }
 
+/// Relay `bridge` to an authority that admits at once and, once the guest's
+/// bridge is open, answers with what `connect` returns: `connect` reads the
+/// guest's frames, so it runs only then.
+async fn relay<C, F>(
+    bridge: FakeBridge,
+    environment_id: Uuid,
+    generation: u64,
+    network_policy: RelayNetworkPolicy,
+    connect: C,
+) -> Result<(), BrokerBridgeError>
+where
+    C: FnOnce(v1::CredentialBridgeReady, CredentialBridgeRelayInput) -> F + Send + 'static,
+    F: Future<Output = Result<CredentialBridgeRelayOutput, BrokerBridgeError>> + Send + 'static,
+{
+    run_credential_bridge_relay(
+        environment_id,
+        generation,
+        network_policy,
+        move |ready, input| async move {
+            let output =
+                stream::once(connect(ready, input)).flat_map(|connected| match connected {
+                    Ok(output) => output,
+                    Err(error) => {
+                        Box::pin(stream::iter([Err(error)])) as CredentialBridgeRelayOutput
+                    }
+                });
+            Ok((
+                Box::pin(output) as CredentialBridgeRelayOutput,
+                std::future::ready(Ok(())),
+            ))
+        },
+        std::future::ready(Ok(bridge)),
+    )
+    .await
+}
+
+/// A guest bridge that records when it is opened, which is when the guest is
+/// sent its Open.
+fn recorded_open(
+    bridge: FakeBridge,
+) -> (
+    Arc<AtomicBool>,
+    impl Future<Output = Result<FakeBridge, BrokerBridgeError>>,
+) {
+    let opened = Arc::new(AtomicBool::new(false));
+    let open = {
+        let opened = Arc::clone(&opened);
+        async move {
+            opened.store(true, Ordering::SeqCst);
+            Ok(bridge)
+        }
+    };
+    (opened, open)
+}
+
+/// #5957: a relay its authority refuses never opens the guest's bridge, so
+/// the guest has no lost epoch and its startup launch waits for the next
+/// relay. Before, the Open went first and the refusal powered the VM off.
+#[tokio::test]
+async fn a_relay_its_authority_refuses_never_opens_the_guest_bridge() {
+    let environment_id = Uuid::new_v4();
+    let (guest_tx, guest_rx) = mpsc::channel(1);
+    let (host_tx, mut host_rx) = mpsc::channel(1);
+    guest_tx.send(ready(environment_id, 3)).await.unwrap();
+    let (opened, open) = recorded_open(FakeBridge {
+        input: guest_rx,
+        output: FakeResponseSink(host_tx),
+    });
+
+    let result = run_credential_bridge_relay(
+        environment_id,
+        3,
+        RelayNetworkPolicy::AllowsGitHub,
+        |_ready, _input| async {
+            Err::<(CredentialBridgeRelayOutput, std::future::Ready<_>), _>(
+                BrokerBridgeError::Unavailable,
+            )
+        },
+        open,
+    )
+    .await;
+
+    assert_eq!(result, Err(BrokerBridgeError::Unavailable));
+    assert!(!opened.load(Ordering::SeqCst));
+    assert!(host_rx.try_recv().is_err());
+}
+
+/// The authority is shown the relay's own Ready before the guest's bridge
+/// opens, and the relay is ready only after it has.
+#[tokio::test]
+async fn the_authority_admits_the_relays_own_ready_before_the_guest_bridge_opens() {
+    let environment_id = Uuid::new_v4();
+    let (guest_tx, guest_rx) = mpsc::channel(1);
+    let (host_tx, _host_rx) = mpsc::channel(1);
+    guest_tx.send(ready(environment_id, 7)).await.unwrap();
+    let (opened, open) = recorded_open(FakeBridge {
+        input: guest_rx,
+        output: FakeResponseSink(host_tx),
+    });
+    let ready_after_open = Arc::new(AtomicBool::new(false));
+
+    let result = run_credential_bridge_relay(
+        environment_id,
+        7,
+        RelayNetworkPolicy::AllowsGitHub,
+        {
+            let opened = Arc::clone(&opened);
+            let ready_after_open = Arc::clone(&ready_after_open);
+            move |actual, _input| async move {
+                assert_eq!(
+                    actual,
+                    v1::CredentialBridgeReady {
+                        protocol_version: codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                        environment_id: environment_id.to_string(),
+                        environment_generation: 7,
+                    }
+                );
+                assert!(!opened.load(Ordering::SeqCst), "admitted before the open");
+                let reported = async move {
+                    ready_after_open.store(opened.load(Ordering::SeqCst), Ordering::SeqCst);
+                    Ok(())
+                };
+                Ok((
+                    Box::pin(stream::empty()) as CredentialBridgeRelayOutput,
+                    reported,
+                ))
+            }
+        },
+        open,
+    )
+    .await;
+
+    assert_eq!(result, Err(BrokerBridgeError::Unavailable));
+    assert!(ready_after_open.load(Ordering::SeqCst));
+}
+
+/// A guest whose Ready isn't the relay's own is refused, and the relay never
+/// reports itself ready.
+#[tokio::test]
+async fn a_guest_ready_other_than_the_relays_own_is_refused() {
+    let environment_id = Uuid::new_v4();
+    let (guest_tx, guest_rx) = mpsc::channel(1);
+    let (host_tx, _host_rx) = mpsc::channel(1);
+    guest_tx.send(ready(environment_id, 8)).await.unwrap();
+    let reported = Arc::new(AtomicBool::new(false));
+
+    let result = run_credential_bridge_relay(
+        environment_id,
+        7,
+        RelayNetworkPolicy::AllowsGitHub,
+        {
+            let reported = Arc::clone(&reported);
+            move |_ready, _input| async move {
+                let report = async move {
+                    reported.store(true, Ordering::SeqCst);
+                    Ok(())
+                };
+                Ok((
+                    Box::pin(stream::empty()) as CredentialBridgeRelayOutput,
+                    report,
+                ))
+            }
+        },
+        std::future::ready(Ok(FakeBridge {
+            input: guest_rx,
+            output: FakeResponseSink(host_tx),
+        })),
+    )
+    .await;
+
+    assert_eq!(result, Err(BrokerBridgeError::InvalidIdentity));
+    assert!(!reported.load(Ordering::SeqCst));
+}
+
 #[tokio::test]
 async fn relay_preserves_actual_ready_and_forwards_only_remaining_frames() {
     let environment_id = Uuid::new_v4();
@@ -68,16 +245,6 @@ async fn relay_preserves_actual_ready_and_forwards_only_remaining_frames() {
     };
     guest_tx.send(cancel.clone()).await.unwrap();
     drop(guest_tx);
-    let admitted = super::super::admit_credential_bridge(
-        FakeBridge {
-            input: guest_rx,
-            output: FakeResponseSink(host_tx),
-        },
-        environment_id,
-        9,
-    )
-    .await
-    .unwrap();
     let response = v1::CredentialBridgeHostMessage {
         payload: Some(v1::credential_bridge_host_message::Payload::ResponseEnd(
             v1::CredentialBridgeResponseEnd {
@@ -87,8 +254,13 @@ async fn relay_preserves_actual_ready_and_forwards_only_remaining_frames() {
     };
     let expected_response = response.payload.clone().unwrap();
 
-    let result = run_admitted_credential_bridge_relay(
-        admitted,
+    let result = relay(
+        FakeBridge {
+            input: guest_rx,
+            output: FakeResponseSink(host_tx),
+        },
+        environment_id,
+        9,
         RelayNetworkPolicy::AllowsGitHub,
         move |actual, mut input| {
             assert_eq!(actual.environment_id, environment_id.to_string());
@@ -112,19 +284,14 @@ async fn relay_rejects_a_missing_host_payload() {
     let (guest_tx, guest_rx) = mpsc::channel(1);
     let (host_tx, mut host_rx) = mpsc::channel(1);
     guest_tx.send(ready(environment_id, 3)).await.unwrap();
-    let admitted = super::super::admit_credential_bridge(
+
+    let result = relay(
         FakeBridge {
             input: guest_rx,
             output: FakeResponseSink(host_tx),
         },
         environment_id,
         3,
-    )
-    .await
-    .unwrap();
-
-    let result = run_admitted_credential_bridge_relay(
-        admitted,
         RelayNetworkPolicy::AllowsGitHub,
         |_actual, _input| async {
             Ok(Box::pin(stream::iter([Ok(
@@ -159,16 +326,6 @@ async fn relay_carries_the_codex_login_request_and_its_answer() {
     };
     guest_tx.send(login.clone()).await.unwrap();
     drop(guest_tx);
-    let admitted = super::super::admit_credential_bridge(
-        FakeBridge {
-            input: guest_rx,
-            output: FakeResponseSink(host_tx),
-        },
-        environment_id,
-        4,
-    )
-    .await
-    .unwrap();
     let answer = v1::CredentialBridgeHostMessage {
         payload: Some(v1::credential_bridge_host_message::Payload::CodexLogin(
             v1::CodexLoginResponse {
@@ -181,8 +338,13 @@ async fn relay_carries_the_codex_login_request_and_its_answer() {
     };
     let expected = answer.payload.clone().unwrap();
 
-    let result = run_admitted_credential_bridge_relay(
-        admitted,
+    let result = relay(
+        FakeBridge {
+            input: guest_rx,
+            output: FakeResponseSink(host_tx),
+        },
+        environment_id,
+        4,
         RelayNetworkPolicy::AllowsGitHub,
         move |_actual, mut input| async move {
             assert_eq!(input.next().await, Some(login));
@@ -217,16 +379,6 @@ async fn relay_carries_the_claude_login_request_and_its_answer() {
     };
     guest_tx.send(login.clone()).await.unwrap();
     drop(guest_tx);
-    let admitted = super::super::admit_credential_bridge(
-        FakeBridge {
-            input: guest_rx,
-            output: FakeResponseSink(host_tx),
-        },
-        environment_id,
-        4,
-    )
-    .await
-    .unwrap();
     let answer = v1::CredentialBridgeHostMessage {
         payload: Some(v1::credential_bridge_host_message::Payload::ClaudeLogin(
             v1::ClaudeLoginResponse {
@@ -239,8 +391,13 @@ async fn relay_carries_the_claude_login_request_and_its_answer() {
     };
     let expected = answer.payload.clone().unwrap();
 
-    let result = run_admitted_credential_bridge_relay(
-        admitted,
+    let result = relay(
+        FakeBridge {
+            input: guest_rx,
+            output: FakeResponseSink(host_tx),
+        },
+        environment_id,
+        4,
         RelayNetworkPolicy::AllowsGitHub,
         move |_actual, mut input| async move {
             assert_eq!(input.next().await, Some(login));
@@ -320,19 +477,14 @@ async fn relay_ends_the_input_on_a_front_door_guest_frame_as_on_an_unknown_one()
             .send(v1::CredentialBridgeGuestMessage { payload })
             .await
             .unwrap();
-        let admitted = super::super::admit_credential_bridge(
+
+        let result = relay(
             FakeBridge {
                 input: guest_rx,
                 output: FakeResponseSink(host_tx),
             },
             environment_id,
             5,
-        )
-        .await
-        .unwrap();
-
-        let result = run_admitted_credential_bridge_relay(
-            admitted,
             RelayNetworkPolicy::AllowsGitHub,
             |_actual, mut input| async move {
                 assert!(input.next().await.is_none());
@@ -356,19 +508,14 @@ async fn relay_refuses_a_front_door_host_frame_as_an_unknown_one() {
         let (guest_tx, guest_rx) = mpsc::channel(1);
         let (host_tx, mut host_rx) = mpsc::channel(1);
         guest_tx.send(ready(environment_id, 6)).await.unwrap();
-        let admitted = super::super::admit_credential_bridge(
+
+        let result = relay(
             FakeBridge {
                 input: guest_rx,
                 output: FakeResponseSink(host_tx),
             },
             environment_id,
             6,
-        )
-        .await
-        .unwrap();
-
-        let result = run_admitted_credential_bridge_relay(
-            admitted,
             RelayNetworkPolicy::AllowsGitHub,
             |_actual, _input| async {
                 Ok(Box::pin(stream::iter([Ok(v1::CredentialBridgeHostMessage {
@@ -425,19 +572,14 @@ async fn a_relay_refuses_github_itself_when_the_network_policy_does() {
     guest_tx.send(github.clone()).await.unwrap();
     guest_tx.send(codex.clone()).await.unwrap();
     drop(guest_tx);
-    let admitted = super::super::admit_credential_bridge(
+
+    let result = relay(
         FakeBridge {
             input: guest_rx,
             output: FakeResponseSink(host_tx),
         },
         environment_id,
         9,
-    )
-    .await
-    .unwrap();
-
-    let result = run_admitted_credential_bridge_relay(
-        admitted,
         RelayNetworkPolicy::RefusesGitHub,
         move |_actual, mut input| async move {
             assert_eq!(input.next().await, Some(codex), "only the other slot");

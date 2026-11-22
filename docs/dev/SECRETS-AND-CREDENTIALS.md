@@ -2320,6 +2320,15 @@ above). These rules hold:
   (#4221).
 - **The environment** comes from the delegation's admitted selection, never
   from a frame.
+- **The guest's bridge opens only after the delegation is admitted** (#5957).
+  The relay delegates with a Ready it builds from its own environment and
+  generation, then sends the guest its Open, and refuses the guest's Ready
+  unless every field equals that Ready's. So a relay the platform refuses
+  activates no guest epoch: the guest's startup launch waits, within its
+  own deadline, for the successor relay rather than ending the boot, and no
+  request is ever sent twice. The relay keeps its daemon client through
+  confinement for this one call, which consumes it; the bridge stream is
+  all that is left on that connection.
 - **The platform's broker serves it** as `BridgeEntry::FrontDoor` on the
   same broker as the loopback session: one lease set, one refresh, the swap
   rule (#4722). The entry is decided by the method called,

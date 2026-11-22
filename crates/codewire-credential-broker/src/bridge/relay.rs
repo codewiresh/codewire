@@ -1,19 +1,24 @@
-//! Transparent relay for an already-admitted native guest bridge.
+//! Transparent relay for a native guest bridge, opened once its remote
+//! authority has admitted it.
 //!
 //! This adapter owns no operation ledger and interprets no provider request.
-//! It only preserves the actual admitted Ready and applies backpressure while
-//! carrying the canonical shared frames to and from an owner-selected relay.
+//! It only checks the guest's Ready against its own and applies backpressure
+//! while carrying the canonical shared frames to and from an owner-selected
+//! relay.
 
 use std::future::Future;
 use std::pin::Pin;
 
+use codewire_daemon_proto::CREDENTIAL_BRIDGE_PROTOCOL_VERSION;
 use codewire_daemon_proto::codewire::bridge::v1;
 use futures::{Stream, StreamExt as _, stream};
 use prost::Message as _;
+use tokio::sync::oneshot;
+use uuid::Uuid;
 
 use super::{
-    AdmittedCredentialBridge, BrokerBridgeError, CredentialBridgeResponseSink,
-    CredentialBridgeTransport, response_headers_to_proto,
+    BrokerBridgeError, CredentialBridgeResponseSink, CredentialBridgeTransport, admit_bridge,
+    response_headers_to_proto,
 };
 use crate::network_policy;
 
@@ -37,47 +42,59 @@ pub enum RelayNetworkPolicy {
     RefusesGitHub,
 }
 
-/// Relay one admitted bridge without creating a second request ledger.
+/// Relay one guest bridge, opened only once its remote authority has admitted
+/// it, without creating a second request ledger.
 ///
-/// `connect` receives the actual guest Ready and a demand-driven stream of all
-/// later guest frames. It must return only after its remote authority has
-/// admitted that Ready. Dropping the returned stream must close both remote
-/// directions. This runner then forwards only canonical host payloads through
-/// the original guest connection and returns when either authority is lost.
-pub async fn run_admitted_credential_bridge_relay<B, C, F>(
-    admitted: AdmittedCredentialBridge<B>,
+/// `connect` receives the Ready this relay builds from `environment_id` and
+/// `environment_generation`, and a demand-driven stream of all later guest
+/// frames. It must return only after its remote authority has admitted that
+/// Ready, with the authority's frames and what to do once the guest's bridge
+/// is open. Dropping the returned stream must close both remote directions.
+///
+/// Only then is `open` run: it sends the guest its Open, which activates the
+/// guest's epoch. So an authority that refuses leaves the guest no lost
+/// epoch, and its startup launch waits for the successor relay instead of
+/// ending the boot (#5957). The guest's own Ready must be the one built here.
+/// This runner then forwards only canonical host payloads through that guest
+/// connection and returns when either authority is lost.
+pub async fn run_credential_bridge_relay<B, O, C, F, R>(
+    environment_id: Uuid,
+    environment_generation: u64,
     network_policy: RelayNetworkPolicy,
     connect: C,
+    open: O,
 ) -> Result<(), BrokerBridgeError>
 where
     B: CredentialBridgeTransport + 'static,
+    O: Future<Output = Result<B, BrokerBridgeError>>,
     C: FnOnce(v1::CredentialBridgeReady, CredentialBridgeRelayInput) -> F,
-    F: Future<Output = Result<CredentialBridgeRelayOutput, BrokerBridgeError>>,
+    F: Future<Output = Result<(CredentialBridgeRelayOutput, R), BrokerBridgeError>>,
+    R: Future<Output = Result<(), BrokerBridgeError>>,
 {
-    let AdmittedCredentialBridge { bridge, ready } = admitted;
+    if environment_id.is_nil() || environment_generation == 0 {
+        return Err(BrokerBridgeError::InvalidIdentity);
+    }
+    let ready = v1::CredentialBridgeReady {
+        protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+        environment_id: environment_id.to_string(),
+        environment_generation,
+    };
+    // The guest's frames follow once its bridge is open; until then the
+    // authority's demand waits.
+    let (opened_bridge, guest) = oneshot::channel::<B>();
+    let input = stream::once(guest)
+        .filter_map(|bridge| std::future::ready(bridge.ok()))
+        .flat_map(move |bridge| guest_frames(bridge, network_policy));
+    let (mut output, opened) = connect(ready.clone(), Box::pin(input)).await?;
+    let (bridge, guest_ready) =
+        admit_bridge(open.await?, environment_id, environment_generation).await?;
+    if guest_ready != ready {
+        return Err(BrokerBridgeError::InvalidIdentity);
+    }
     let sender = bridge.response_sink();
-    let refusals = bridge.response_sink();
-    let input = stream::unfold(
-        (bridge, refusals),
-        move |(mut bridge, refusals)| async move {
-            loop {
-                match bridge.receive().await {
-                    Ok(Some(frame)) if valid_guest_frame(&frame) => {
-                        if network_policy == RelayNetworkPolicy::RefusesGitHub
-                            && let Some(request) = github_request(&frame)
-                        {
-                            refuse_github(&refusals, request).await.ok()?;
-                            continue;
-                        }
-                        return Some((frame, (bridge, refusals)));
-                    }
-                    Ok(None) | Err(_) => return None,
-                    Ok(Some(_)) => return None,
-                }
-            }
-        },
-    );
-    let mut output = connect(ready, Box::pin(input)).await?;
+    // An authority that dropped its input reads no guest frame.
+    let _ = opened_bridge.send(bridge);
+    opened.await?;
     while let Some(frame) = output.next().await {
         let frame = frame?;
         if frame.encoded_len() > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_GRPC_MESSAGE_BYTES {
@@ -97,6 +114,36 @@ where
         sender.send(payload).await?;
     }
     Err(BrokerBridgeError::Unavailable)
+}
+
+/// The guest's frames after its Ready, ending at the first frame the relay
+/// doesn't carry. A GitHub request the network policy refuses is answered
+/// here and never reaches the authority.
+fn guest_frames<B: CredentialBridgeTransport + 'static>(
+    bridge: B,
+    network_policy: RelayNetworkPolicy,
+) -> impl Stream<Item = v1::CredentialBridgeGuestMessage> + Send {
+    let refusals = bridge.response_sink();
+    stream::unfold(
+        (bridge, refusals),
+        move |(mut bridge, refusals)| async move {
+            loop {
+                match bridge.receive().await {
+                    Ok(Some(frame)) if valid_guest_frame(&frame) => {
+                        if network_policy == RelayNetworkPolicy::RefusesGitHub
+                            && let Some(request) = github_request(&frame)
+                        {
+                            refuse_github(&refusals, request).await.ok()?;
+                            continue;
+                        }
+                        return Some((frame, (bridge, refusals)));
+                    }
+                    Ok(None) | Err(_) => return None,
+                    Ok(Some(_)) => return None,
+                }
+            }
+        },
+    )
 }
 
 /// The request in `frame`, when it is one on the GitHub slot.
