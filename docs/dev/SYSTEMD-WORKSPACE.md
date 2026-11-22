@@ -93,7 +93,9 @@ hold at that moment:
 
 - the deployment sets the repository;
 - the environment's organization is opted in;
-- the deployment's standard runtime profile is `commodity`;
+- the deployment's standard runtime profile is `commodity`, or `standard`
+  with a systemd workspace disk built from this image ("On the `standard`
+  profile");
 - the image names the repository with a well-formed digest;
 - the environment is not confidential.
 
@@ -132,8 +134,9 @@ organization's flag. Confidential does the same.
 
 ### Only inside a VM
 
-The rendering exists for the `commodity` runtime profile alone, whose
-runtime classes run each sandbox in a VM of its own. On `runc`, on any
+The rendering exists for the `commodity` runtime profile, whose runtime
+classes run each sandbox in a VM of its own, and for `standard` ("On the
+`standard` profile"), whose Pod boots its own VM. On `runc`, on any
 diagnostic runtime and on a deployment with no runtime profile, this
 container could reach the node, so there is no such rendering there, on a
 local Kind cluster either.
@@ -230,6 +233,126 @@ The cost: with a process in the container's cgroup, the kernel refuses to
 delegate controllers below it, so units get no resource controllers.
 `MemoryMax=` and its like are accepted and do nothing. The sandbox's own
 memory and CPU limits still hold ("What is loosened").
+
+## On the `standard` profile
+
+Target, not built (#5638, #5602): orchestration's half is described here;
+the guest half belongs to the `standard` runtime and is written with it.
+
+On `commodity`, Kubernetes and Kata build the workspace container, so the
+Pod has to ask for systemd's shape itself: root, `CAP_SYS_ADMIN` and the
+bootstrap above. On `standard`, the Pod runs `cw __pod-runtime`, which boots
+a VM whose PID 1 is Codewire's guest init, and guest init builds the
+workspace container itself. So none of the above is rendered there:
+
+- **The Pod is the default `standard` Pod.** Its container gets one more
+  setting, `CODEWIRE_WORKSPACE_INIT=systemd`, which the runtime carries into
+  the guest. The runtime refuses any value other than `systemd`; unset means
+  the default workspace. No capability, no root,
+  no bootstrap, and no change to the cluster's admission for that shape.
+- **The disk is a second published disk**, built from the workspace-systemd
+  image the way the default disk is built from the workspace image, and named
+  by its own deployment setting. A `standard` deployment offers systemd
+  workspaces only when that setting is set, and a create's image must be the
+  image that disk was built from.
+- **In the guest,** guest init stays the VM's PID 1 and keeps what only it
+  holds: the vsock control channel, the hosted ingress, the daemon's listener
+  on 127.0.0.1:17777 and the per-boot bind check. systemd becomes PID 1 of
+  the workspace container, in its own pid, mount and cgroup namespaces with a
+  delegated cgroup v2 subtree. The daemon is still the one guest init executes
+  in the container, as the workspace user, with the held listener; the
+  image's `codewire-daemon.service` is masked.
+
+**The boundary.** The whole guest, guest init included, belongs to the
+Sandbox's user: a systemd workspace is a full operating system whose user can
+become root, and root in a container that shares the guest's kernel should be
+assumed able to reach guest init. The boundary is the VM: the host kernel,
+cloud-hypervisor and the Pod runtime. So everything the host side receives
+from the guest is that one Sandbox's claim, and is never trusted beyond that
+Sandbox. The runtime's per-interface audit, which cw-security accepted on
+2026-11-22, is on #5602; each line below is one of its rows:
+
+- **Hosted control (vsock 7780).** The host dials. The guest's answer is a
+  challenge and a MACed reply, keyed from this Pod's own boot token; a bad
+  one ends the Pod. It can only lie to its own Pod or end it. It never
+  chooses the binding, the environment, the Pod's identity, the egress
+  policy or another Sandbox's state; those come from the Pod spec and
+  orchestration.
+- **Ingress (7781, 7782).** The host dials in and copies raw bytes without
+  parsing them. The guest sees orchestration's connections, so the daemon
+  credential orchestration presents is scoped to this environment and Pod and
+  useless against any other. SSH trusts the host key this same guest
+  recorded, which proves only "this Sandbox".
+- **The bind, `RecordHostKey` and the self-check record.** The guest's own
+  claims. Identity comes from the attested Pod: a TokenReview of the Pod's
+  token, the live Pod's name, UID and namespace, and its IP, mapped through
+  its Sandbox and claim to the stored binding on every call; never from the
+  request. The self-check is the Dev floor; Production's gate is
+  orchestration's own lockdown check.
+- **Egress.** Its mode is named on the runtime container,
+  `CODEWIRE_VM_EGRESS_MODE=guest-carried|broker`, and the runtime refuses a
+  missing or unknown value. With `guest-carried` the workload has no egress.
+  With `broker` (#5602 comment 130891) the daemon runs broker mode inside the
+  VM and `cw-egress` polices the workload, and #5800's host-side check is the
+  orchestration-side lockdown check that Production needs for those Pods. In
+  both, the host end's own network worker policy is `locked` plus
+  `CODEWIRE_POD_PLATFORM_PEERS`, compiled at boot from the Pod's environment;
+  a policy change (`ReplacePolicy`) is applied only from the worker's
+  inherited control socket, and the Pod runtime builds no runner call that
+  reaches it, so no guest message widens the policy, adds a peer or changes
+  its target.
+- **Platform peers.** They are enforced per Pod, not per process, so each
+  authenticates its caller with a credential scoped to this Pod: the binding
+  listener (the binding token), `cw-egress` on 8089 (the egress token, broker
+  mode only), and the gateway and DERP (the peer token).
+- **The credential service.** The guest holds a credential token bound to its
+  Pod (audience `CREDENTIAL_WORKSPACE`, 600 s). The credential service maps it
+  to the Pod's binding by the reviewed Pod UID, and also requires
+  orchestration's relay token. It is not a platform peer, and it serves only
+  this environment's placeholders (#4002).
+- **The coordinator and Mesh.** The peer token names this environment at its
+  generation, and Mesh enrollment is tied to the binding's environment, Pod
+  and generation, so a guest can misreport only its own attachment.
+
+This holds for a default `standard` workspace as well, whose user can `sudo`.
+A host-side path that took a guest answer as more than that Sandbox's claim
+would be a gap to fix before either reaches Production.
+
+**The container is defense in depth.** It keeps casual tampering and
+accidents away from guest init's own pieces, on these conditions:
+
+1. **Guest init out of reach.** The container's root cannot see guest init's
+   `/proc` (separate pid, mount and cgroup namespaces). Its bounding set has
+   no `CAP_SYS_MODULE`, `CAP_SYS_RAWIO` or `CAP_SYS_BOOT`, and no
+   `CAP_SYS_ADMIN` outside the delegated subtree. It has no device beyond the
+   workspace's own.
+2. **No vsock from the container.** Its seccomp filter refuses `AF_VSOCK`
+   sockets, so root in it cannot speak to the host's control port or the
+   ingress ports as guest init would. The same filter refuses
+   `io_uring_setup`, `io_uring_enter` and `io_uring_register`, since io_uring
+   can make a socket without the socket call. The default `standard`
+   container gets the same filter.
+3. **What the held listener protects.** The listener and the daemon's
+   non-dumpable state protect it from unprivileged processes only, not from
+   root in the container. The listener still means no other process binds
+   17777 before the daemon.
+4. **The masked unit stays masked.** A unit that starts another daemon on
+   17777 fails to bind; a test proves it.
+
+None of these is what keeps another Sandbox or the platform safe; the
+boundary above is.
+
+**Stop.** The Pod runtime stops the VM within its stop timeout. Guest init
+sends `SIGRTMIN+3` to the container's systemd, waits a bounded time well
+inside that timeout, kills the container and powers off. As on `commodity`,
+the clean stop is best effort and the bound is the runtime's.
+
+**Docker.** A `standard` workspace's Docker is the guest's own `dockerd`,
+which runs outside the container on a Docker disk the runtime sizes from
+`CODEWIRE_VM_DOCKER_DISK_MIB` (in review). orchestration sets it on every
+`standard` Pod, splitting the volume evenly with the state disk. A systemd
+workspace reaches that `dockerd` through the same socket a default workspace
+uses, and the image's `docker.service` is masked.
 
 ## What is loosened, and why it adds nothing
 
