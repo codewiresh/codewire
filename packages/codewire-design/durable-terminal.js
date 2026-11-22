@@ -297,6 +297,11 @@
     }
     // A refusal no retry can change (#3586): no Retry and no reconnect.
     const organizationDeleting = "This organization is being deleted, so its Sandboxes can't open terminals.";
+    // However the page learns of it (Refresh sessions, a reconnect's check or a
+    // return to the page), every open terminal says so and stops (#5944).
+    function organizationDeleted() {
+      for (const tab of tabs.values()) detach(tab, organizationDeleting, false, "warning");
+    }
     // Once the server revoked a tab's access, nothing later on the page, such
     // as the status feed failing with the same sign-in, replaces that line or
     // offers Reconnect: the page moves to sign-in instead (#5943).
@@ -619,6 +624,7 @@
         if (stale()) return;
         // Identity doubts pause every transport and hide output.
         if (error.authorization) doubtAccount();
+        else if (error.deleting) { organizationDeleted(); announce(organizationDeleting); }
         else scheduleReconnect(tab);
         return;
       }
@@ -872,7 +878,7 @@
       } catch (error) {
         if (current !== epoch || suspended) return;
         if (error.authorization) { clearReferences(); clearPresentations(); account = null; }
-        else if (error.deleting) for (const tab of tabs.values()) detach(tab, organizationDeleting, false, "warning");
+        else if (error.deleting) organizationDeleted();
         else for (const tab of tabs.values()) if (automatic(tab)) lose(tab, "Terminal sessions are unavailable.");
         if (tabs.size) {
           announce(error.authorization ? "Sign in with access to this Sandbox, then refresh sessions."
@@ -1131,7 +1137,9 @@
       const current = epoch;
       let data;
       try { data = await request("list"); } catch (error) {
-        if (current === epoch && !suspended && error.authorization) doubtAccount();
+        if (current !== epoch || suspended) return;
+        if (error.authorization) doubtAccount();
+        else if (error.deleting) { organizationDeleted(); announce(organizationDeleting); }
         return;
       }
       if (current !== epoch || suspended || pending || document.hidden) return;

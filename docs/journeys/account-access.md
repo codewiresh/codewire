@@ -16,7 +16,7 @@ Updated 2026-11-22.
 | `access-ticket` | not yet observed | not yet observed |
 | `access-streams` | not yet observed | not yet observed |
 | `access-websockets` | the SSH proxy's API-key leg observed on Dev 2026-11-21, source 6ef416acfb; its `cw logout` leg not yet observed; the terminal half observed on Kind only (2026-11-20, main 6557aa7e83), and its revoked wording (#5660) on Kind 2026-11-22, main 253add63cd, with a status line that replaces it after about a second | not yet observed |
-| `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only), and the dashboard's terminal area (#5677) on Kind 2026-11-22, main 253add63cd (Refresh sessions on an open terminal not yet observed; the preview pages not walkable on Kind); not on Dev | not yet observed |
+| `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only), and the dashboard's terminal area (#5677) on Kind 2026-11-22, main 253add63cd (Refresh sessions, a reconnect's check and a return to the page on an open terminal not yet observed; the preview pages not walkable on Kind); not on Dev | not yet observed |
 | `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
 | `access-key-org-create` | the key half observed 2026-11-22, source ba20ac0df; the signed-in half by its database test | not yet observed |
 
@@ -262,11 +262,11 @@ comment 123530). Not yet observed.
   streams are unaffected. In the dashboard (#5677), the
   Sandbox page's terminal area says "This organization is being deleted, so
   its Sandboxes can't open terminals." with no Retry; an open terminal
-  keeps printing, Refresh sessions while the Sandbox still runs shows the
-  same line and stops reconnecting, and a dropped socket keeps reconnecting
-  until the deletion stops the Sandbox; the page then says "This Sandbox is
-  being deleted." and shows no terminal, as for any Sandbox being deleted
-  (#5944); a member opening a shared
+  keeps printing, and while the Sandbox still runs, Refresh sessions, a
+  dropped socket's check at every third retry or a return to the page shows
+  the same line and stops reconnecting; once the deletion stops the Sandbox
+  the page says "This Sandbox is being deleted." and shows no terminal, as
+  for any Sandbox being deleted (#5944); a member opening a shared
   preview sees "Preview unavailable" and "This organization is being
   deleted, so its Sandboxes' previews can't open."; a non-member still sees
   "Preview access denied".
@@ -305,14 +305,14 @@ comment 123530). Not yet observed.
   showed "Disconnected. Reconnecting…" for about half a second, then the
   Sandbox's own "Deleting… This Sandbox is being deleted" with no terminal,
   and stopped reconnecting. The proof first said it would show the
-  organization line; that holds only for Refresh sessions while the Sandbox
-  still runs, and the proof now says so (#5944). Refresh sessions inside a
-  deletion is not yet observed on Kind. The preview pages were not walked: the
-  preview proxy builds them only for an https dashboard origin and Kind's is
-  http, so a preview navigation gets 503 "preview authorization unavailable";
-  their database tests and fixtures hold them. An organization API key read
-  the preview before the deletion and got 401 during it, so a Bearer request
-  never reached the deleting check.
+  organization line; that held only for Refresh sessions while the Sandbox
+  still runs, and a reconnect's check and a return to the page now say it
+  too (#5944). None of the three is yet observed on Kind inside a deletion.
+  The preview pages were not walked: the preview proxy builds them only for an
+  https dashboard origin and Kind's is http, so a preview navigation gets 503
+  "preview authorization unavailable"; their database tests and fixtures hold
+  them. An organization API key read the preview before the deletion and got
+  401 during it, so a Bearer request never reached the deleting check.
 
 ## `access-tailnet`: a tailnet shell or exec when its authority is lost
 

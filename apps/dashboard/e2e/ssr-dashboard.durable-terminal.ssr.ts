@@ -2041,6 +2041,59 @@ test("an open terminal whose organization starts being deleted says why and stop
   expect(state.launches).toBe(0);
 });
 
+// A dropped socket learns of the deletion at its reconnect's inventory check,
+// and a page coming back to the foreground at its account check (#5944).
+test("a reconnecting terminal whose organization is being deleted says why at its check and stops", async ({ page }) => {
+  await page.clock.install();
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  const status = connectionStatus(page, sessionId(1));
+  await expect(status).toHaveText("Connected");
+  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await settleReadiness(page);
+  const fail = async (count: number) => {
+    await expect(status).toHaveText("Connected");
+    state.connections[count - 1].route.close({ code: 1011, reason: "upstream unavailable" });
+    await expect(status).toHaveText("Disconnected. Reconnecting…");
+  };
+  await fail(1);
+  await advance(page, 1000);
+  await expect.poll(() => state.connections.length).toBe(2);
+  await fail(2);
+  await advance(page, 2000);
+  await expect.poll(() => state.connections.length).toBe(3);
+  state.listStatus = 409;
+  state.listError = "organization-deleting";
+  await fail(3);
+  // The third retry re-reads the inventory instead of connecting.
+  await advance(page, 4000);
+  await expect(status).toHaveText(organizationDeleting);
+  await expect(page.locator("[data-terminal-message]")).toHaveText(organizationDeleting);
+  await advance(page, 60_000);
+  expect(state.connections).toHaveLength(3);
+  expect(state.launches).toBe(0);
+});
+
+test("an open terminal whose organization is being deleted says why when the page returns", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  await expectAttached(page);
+  await pauseClock(page);
+  await settleReadiness(page);
+  state.listStatus = 409;
+  state.listError = "organization-deleting";
+  await page.evaluate(() => dispatchEvent(new Event("focus")));
+  await expect(connectionStatus(page, sessionId(1))).toHaveText(organizationDeleting);
+  await expect.poll(() => state.connections[0].closed).toBe(true);
+  await advance(page, 30_000);
+  expect(state.connections).toHaveLength(1);
+  expect(state.launches).toBe(0);
+});
+
 // A socket the server closes because the sign-in, key or account behind it was
 // revoked says so in the CLI's words, and offers no Reconnect (#5660). Any other
 // close keeps "Disconnected." and its Reconnect.
