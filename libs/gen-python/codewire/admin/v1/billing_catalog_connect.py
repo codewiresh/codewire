@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .billing_catalog_pb2 import CreatePlanRequest, CreatePlanResponse, CreatePriceRequest, CreatePriceResponse, GetCatalogRequest, GetCatalogResponse, ListConfidentialOrganizationsRequest, ListConfidentialOrganizationsResponse, ListSubscriptionMigrationsRequest, ListSubscriptionMigrationsResponse, ListSystemdOrganizationsRequest, ListSystemdOrganizationsResponse, PreviewSubscriptionMigrationRequest, PreviewSubscriptionMigrationResponse, RunSubscriptionMigrationRequest, RunSubscriptionMigrationResponse, SetOrganizationBillingExemptionRequest, SetOrganizationBillingExemptionResponse, SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationConfidentialEnvironmentsResponse, SetOrganizationSystemdEnvironmentsRequest, SetOrganizationSystemdEnvironmentsResponse, SetPlanArchivedRequest, SetPlanArchivedResponse, SetPriceArchivedRequest, SetPriceArchivedResponse, UpdatePlanRequest, UpdatePlanResponse, UpdatePriceRequest, UpdatePriceResponse, UpdateSettingRequest, UpdateSettingResponse
+from .billing_catalog_pb2 import CreatePlanRequest, CreatePlanResponse, CreatePriceRequest, CreatePriceResponse, GetCatalogRequest, GetCatalogResponse, GetOrganizationDefaultCardRequest, GetOrganizationDefaultCardResponse, ListConfidentialOrganizationsRequest, ListConfidentialOrganizationsResponse, ListSubscriptionMigrationsRequest, ListSubscriptionMigrationsResponse, ListSystemdOrganizationsRequest, ListSystemdOrganizationsResponse, PreviewSubscriptionMigrationRequest, PreviewSubscriptionMigrationResponse, RunSubscriptionMigrationRequest, RunSubscriptionMigrationResponse, SetOrganizationBillingExemptionRequest, SetOrganizationBillingExemptionResponse, SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationConfidentialEnvironmentsResponse, SetOrganizationSystemdEnvironmentsRequest, SetOrganizationSystemdEnvironmentsResponse, SetPlanArchivedRequest, SetPlanArchivedResponse, SetPriceArchivedRequest, SetPriceArchivedResponse, UpdatePlanRequest, UpdatePlanResponse, UpdatePriceRequest, UpdatePriceResponse, UpdateSettingRequest, UpdateSettingResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -81,6 +81,9 @@ class BillingCatalogService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def set_organization_systemd_environments(self, request: SetOrganizationSystemdEnvironmentsRequest, ctx: RequestContext[SetOrganizationSystemdEnvironmentsRequest, SetOrganizationSystemdEnvironmentsResponse]) -> SetOrganizationSystemdEnvironmentsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def get_organization_default_card(self, request: GetOrganizationDefaultCardRequest, ctx: RequestContext[GetOrganizationDefaultCardRequest, GetOrganizationDefaultCardResponse]) -> GetOrganizationDefaultCardResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -256,6 +259,16 @@ class BillingCatalogServiceASGIApplication(ConnectASGIApplication[BillingCatalog
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.set_organization_systemd_environments,
+                ),
+                "/codewire.admin.v1.BillingCatalogService/GetOrganizationDefaultCard": Endpoint.unary(
+                    method=MethodInfo(
+                        name="GetOrganizationDefaultCard",
+                        service_name="codewire.admin.v1.BillingCatalogService",
+                        input=GetOrganizationDefaultCardRequest,
+                        output=GetOrganizationDefaultCardResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=svc.get_organization_default_card,
                 ),
             },
             interceptors=interceptors,
@@ -623,6 +636,28 @@ class BillingCatalogServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def get_organization_default_card(
+        self,
+        request: GetOrganizationDefaultCardRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetOrganizationDefaultCardResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetOrganizationDefaultCard",
+                service_name="codewire.admin.v1.BillingCatalogService",
+                input=GetOrganizationDefaultCardRequest,
+                output=GetOrganizationDefaultCardResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
+        )
+
 class BillingCatalogServiceSync(Protocol):
     def get_catalog(self, request: GetCatalogRequest, ctx: RequestContext[GetCatalogRequest, GetCatalogResponse]) -> GetCatalogResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
@@ -670,6 +705,9 @@ class BillingCatalogServiceSync(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     def set_organization_systemd_environments(self, request: SetOrganizationSystemdEnvironmentsRequest, ctx: RequestContext[SetOrganizationSystemdEnvironmentsRequest, SetOrganizationSystemdEnvironmentsResponse]) -> SetOrganizationSystemdEnvironmentsResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def get_organization_default_card(self, request: GetOrganizationDefaultCardRequest, ctx: RequestContext[GetOrganizationDefaultCardRequest, GetOrganizationDefaultCardResponse]) -> GetOrganizationDefaultCardResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
 
@@ -843,6 +881,16 @@ class BillingCatalogServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.set_organization_systemd_environments,
+                ),
+                "/codewire.admin.v1.BillingCatalogService/GetOrganizationDefaultCard": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="GetOrganizationDefaultCard",
+                        service_name="codewire.admin.v1.BillingCatalogService",
+                        input=GetOrganizationDefaultCardRequest,
+                        output=GetOrganizationDefaultCardResponse,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+                    ),
+                    function=service.get_organization_default_card,
                 ),
             },
             interceptors=interceptors,
@@ -1193,4 +1241,25 @@ class BillingCatalogServiceClientSync(ConnectClientSync):
             ),
             headers=headers,
             timeout_ms=timeout_ms,
+        )
+    def get_organization_default_card(
+        self,
+        request: GetOrganizationDefaultCardRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+        use_get: bool = False,
+    ) -> GetOrganizationDefaultCardResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="GetOrganizationDefaultCard",
+                service_name="codewire.admin.v1.BillingCatalogService",
+                input=GetOrganizationDefaultCardRequest,
+                output=GetOrganizationDefaultCardResponse,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+            use_get=use_get,
         )

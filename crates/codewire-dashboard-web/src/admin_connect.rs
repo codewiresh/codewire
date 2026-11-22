@@ -5,15 +5,15 @@ use codewire_admin_proto::codewire::admin::v1::{
     AdjustOrganizationCreditRequest, AdminServiceClient, BillingCatalogServiceClient,
     ClearOrganizationEnvironmentQuotaRequest, CreatePlanRequest, CreatePriceRequest,
     EnvironmentQuota, FeedbackEntry, FeedbackSender, GetCatalogRequest,
-    GetDefaultEnvironmentQuotaRequest, GetOrganizationOverviewRequest, GetStatsRequest,
-    ListAuditLogsRequest, ListConfidentialOrganizationsRequest, ListFeedbackRequest,
-    ListOrganizationsRequest, ListSubscriptionMigrationsRequest, PlanSpec,
-    PreviewSubscriptionMigrationRequest, RunSubscriptionMigrationRequest,
-    SetDefaultEnvironmentQuotaRequest, SetOrganizationConfidentialEnvironmentsRequest,
-    SetOrganizationDedicatedCpuRequest, SetOrganizationEnvironmentQuotaRequest,
-    SetOrganizationRateCardRequest, SetPlanArchivedRequest, SetPriceArchivedRequest,
-    SuspendAccountRequest, UnsuspendAccountRequest, UpdatePlanRequest, UpdatePriceRequest,
-    UpdateSettingRequest,
+    GetDefaultEnvironmentQuotaRequest, GetOrganizationDefaultCardRequest,
+    GetOrganizationOverviewRequest, GetStatsRequest, ListAuditLogsRequest,
+    ListConfidentialOrganizationsRequest, ListFeedbackRequest, ListOrganizationsRequest,
+    ListSubscriptionMigrationsRequest, PlanSpec, PreviewSubscriptionMigrationRequest,
+    RunSubscriptionMigrationRequest, SetDefaultEnvironmentQuotaRequest,
+    SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationDedicatedCpuRequest,
+    SetOrganizationEnvironmentQuotaRequest, SetOrganizationRateCardRequest, SetPlanArchivedRequest,
+    SetPriceArchivedRequest, SuspendAccountRequest, UnsuspendAccountRequest, UpdatePlanRequest,
+    UpdatePriceRequest, UpdateSettingRequest,
 };
 use connectrpc::{ConnectError, client::ClientConfig};
 
@@ -1128,24 +1128,53 @@ pub(crate) struct CreditConfirmationView {
     pub(crate) question: String,
 }
 
+/// The organization's default card as the page names it, such as
+/// "Visa •••• 4242": `Some(None)` when it has none, and `None` when billing
+/// can't say (#5094).
+pub(crate) async fn default_card(
+    state: &AppState,
+    cookie: HeaderValue,
+    organization_id: &str,
+) -> Option<Option<String>> {
+    let response = catalog_client(state, cookie)
+        .get_organization_default_card(GetOrganizationDefaultCardRequest {
+            organization_id: organization_id.to_owned(),
+            ..Default::default()
+        })
+        .await
+        .ok()?
+        .into_owned();
+    Some(response.card.into_option().map(|card| {
+        format!(
+            "{} •••• {}",
+            crate::billing_connect::card_brand_name(&card.brand),
+            card.last4
+        )
+    }))
+}
+
 /// What confirming an adjustment that leaves `balance_nano_eur`, below zero,
-/// sets off: a top-up charge, or refused work (#4754, journey
-/// `billing-admin-adjust`).
+/// sets off: a top-up charge to the card it names, or refused work (#4754,
+/// #5094, journey `billing-admin-adjust`). `card` is [`default_card`]'s
+/// answer; when billing can't say, the question names both outcomes.
 pub(crate) fn negative_balance_question(
     balance_nano_eur: i64,
     auto_top_up_enabled: bool,
     auto_top_up_cents: i32,
+    card: Option<Option<&str>>,
 ) -> String {
     let balance = euro_text(balance_nano_eur);
-    if auto_top_up_enabled {
-        format!(
-            "This leaves the balance at {balance}. Automatic top-up is on at {}, so a saved card is charged within seconds; without one, new Sandboxes and starts are refused.",
-            euro_text(i64::from(auto_top_up_cents) * (NANO_EUR_PER_EURO / 100))
-        )
-    } else {
-        format!(
+    let top_up = euro_text(i64::from(auto_top_up_cents) * (NANO_EUR_PER_EURO / 100));
+    match (auto_top_up_enabled, card) {
+        (true, Some(Some(card))) => format!(
+            "This leaves the balance at {balance}. Automatic top-up is on, so {card} is charged {top_up} within seconds."
+        ),
+        (true, None) => format!(
+            "This leaves the balance at {balance}. Automatic top-up is on at {top_up}, so a saved card is charged within seconds; without one, new Sandboxes and starts are refused."
+        ),
+        _ => format!(
             "This leaves the balance at {balance}. New Sandboxes and starts are refused, and running Sandboxes stop after 24 hours; their storage is kept."
-        )
+        ),
     }
 }
 

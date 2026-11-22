@@ -9,7 +9,7 @@ same steps on Production. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-13. Production does not enforce credit yet: it starts with
+Updated 2026-11-22. Production does not enforce credit yet: it starts with
 the first Production release after codewire/deploy#245.
 
 | ID | Dev | Production |
@@ -295,14 +295,16 @@ Issue: #4754.
   - a grant, and a removal that leaves the balance at €0 or above: applied at
     once, as today;
   - a removal that would leave the balance below €0, with automatic top-up on
-    and a card: nothing changes yet. The page asks, naming the result and its
-    effect. Proposed wording, for the owner's look with #4754's low-balance
-    copy: "This leaves the balance at -€1.14. Automatic top-up is on at
-    €20.00, so a saved card is charged within seconds; without one, new
-    Sandboxes and starts are refused." (Naming the card is #5094.)
+    and a card: nothing changes yet. The page asks, naming the result, the
+    card and the charge: "This leaves the balance at -€1.14. Automatic
+    top-up is on, so Visa •••• 4242 is charged €20.00 within seconds." The
+    card is read from billing for platform administrators only (#5094);
   - the same with top-up off, or with no card: "This leaves the balance at
     -€1.14. New Sandboxes and starts are refused, and running Sandboxes
     stop after 24 hours; their storage is kept.";
+  - billing can't say whether there is a card: the question names both
+    outcomes, "…Automatic top-up is on at €20.00, so a saved card is charged
+    within seconds; without one, new Sandboxes and starts are refused.";
   - confirming applies it, once; going back changes nothing;
   - the balance moving between the question and the answer: the answer
     confirms the result it was shown, and a different result asks again.

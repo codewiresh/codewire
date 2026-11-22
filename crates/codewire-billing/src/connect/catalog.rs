@@ -11,15 +11,15 @@ use codewire_admin_proto::codewire::admin::v1::{
     BillingCatalogService, CatalogPlan as ProtoCatalogPlan, CatalogPrice as ProtoCatalogPrice,
     CatalogSetting as ProtoCatalogSetting, ConfidentialOrganization, CreatePlanRequest,
     CreatePlanResponse, CreatePriceRequest, CreatePriceResponse, GetCatalogRequest,
-    GetCatalogResponse, ListConfidentialOrganizationsRequest,
-    ListConfidentialOrganizationsResponse, ListSubscriptionMigrationsRequest,
-    ListSubscriptionMigrationsResponse, ListSystemdOrganizationsRequest,
-    ListSystemdOrganizationsResponse, MigrationRun as ProtoMigrationRun,
-    MigrationSample as ProtoMigrationSample, PlanSpec as ProtoPlanSpec,
-    PreviewSubscriptionMigrationRequest, PreviewSubscriptionMigrationResponse,
-    RunSubscriptionMigrationRequest, RunSubscriptionMigrationResponse,
-    SetOrganizationBillingExemptionRequest, SetOrganizationBillingExemptionResponse,
-    SetOrganizationConfidentialEnvironmentsRequest,
+    GetCatalogResponse, GetOrganizationDefaultCardRequest, GetOrganizationDefaultCardResponse,
+    ListConfidentialOrganizationsRequest, ListConfidentialOrganizationsResponse,
+    ListSubscriptionMigrationsRequest, ListSubscriptionMigrationsResponse,
+    ListSystemdOrganizationsRequest, ListSystemdOrganizationsResponse,
+    MigrationRun as ProtoMigrationRun, MigrationSample as ProtoMigrationSample,
+    OrganizationDefaultCard, PlanSpec as ProtoPlanSpec, PreviewSubscriptionMigrationRequest,
+    PreviewSubscriptionMigrationResponse, RunSubscriptionMigrationRequest,
+    RunSubscriptionMigrationResponse, SetOrganizationBillingExemptionRequest,
+    SetOrganizationBillingExemptionResponse, SetOrganizationConfidentialEnvironmentsRequest,
     SetOrganizationConfidentialEnvironmentsResponse, SetOrganizationSystemdEnvironmentsRequest,
     SetOrganizationSystemdEnvironmentsResponse, SetPlanArchivedRequest, SetPlanArchivedResponse,
     SetPriceArchivedRequest, SetPriceArchivedResponse, SystemdOrganization, UpdatePlanRequest,
@@ -37,7 +37,7 @@ use crate::catalog_admin::{
 };
 use crate::routes::BillingState;
 
-/// Registers all fifteen BillingCatalogService RPCs on their generated Connect
+/// Registers every BillingCatalogService RPC on its generated Connect
 /// routes. The billing binary mounts this router behind the global-admin auth
 /// layer.
 pub fn router(state: BillingState) -> connectrpc::Router {
@@ -527,6 +527,44 @@ impl BillingCatalogService for BillingCatalogConnectService {
         connectrpc::Response::ok(SetOrganizationSystemdEnvironmentsResponse {
             organization: systemd_organization(organization).into(),
             enabled: request.enabled,
+            ..Default::default()
+        })
+    }
+
+    /// One organization's default card, for the admin credit adjustment's
+    /// question (#5094). Behind the global-admin layer like the rest of this
+    /// service, so it needs no membership. A real absence answers with none;
+    /// a Stripe or database that couldn't answer is `unavailable`, so the
+    /// question never says nothing will be charged when a card may be.
+    async fn get_organization_default_card(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, GetOrganizationDefaultCardRequest>,
+    ) -> ServiceResult<GetOrganizationDefaultCardResponse> {
+        let request = request.view();
+        let organization_id = request.organization_id.trim();
+        validate_required(&[(organization_id, "/organization_id")])
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let card = self
+            .state
+            .stripe
+            .org_default_card(&self.state.pool, organization_id)
+            .await
+            .map_err(|_| {
+                rpc_app_error(
+                    &AppError::ServiceUnavailable(
+                        "the organization's card could not be read; retry in a moment".into(),
+                    ),
+                    &ctx,
+                )
+            })?
+            .map(|card| OrganizationDefaultCard {
+                brand: card.brand,
+                last4: card.last4,
+                ..Default::default()
+            });
+        connectrpc::Response::ok(GetOrganizationDefaultCardResponse {
+            card: card.into(),
             ..Default::default()
         })
     }

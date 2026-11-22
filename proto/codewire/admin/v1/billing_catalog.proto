@@ -84,6 +84,14 @@ service BillingCatalogService {
   // workspace image repository.
   rpc SetOrganizationSystemdEnvironments(SetOrganizationSystemdEnvironmentsRequest)
       returns (SetOrganizationSystemdEnvironmentsResponse);
+
+  // GetOrganizationDefaultCard reads one organization's default card from
+  // Stripe, for the admin credit adjustment's question (#5094). It is
+  // global-admin only, needs no membership and writes nothing.
+  rpc GetOrganizationDefaultCard(GetOrganizationDefaultCardRequest)
+      returns (GetOrganizationDefaultCardResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 }
 
 message GetCatalogRequest {}
@@ -311,3 +319,20 @@ message SetOrganizationSystemdEnvironmentsResponse {
   SystemdOrganization organization = 1;
   bool enabled = 2;
 }
+
+message GetOrganizationDefaultCardRequest {
+  string organization_id = 1;
+}
+
+message GetOrganizationDefaultCardResponse {
+  // Unset when the organization has no default payment method, or it is not
+  // a card.
+  OrganizationDefaultCard card = 1;
+}
+
+message OrganizationDefaultCard {
+  // Stripe's brand, such as "visa".
+  string brand = 1;
+  string last4 = 2;
+}
+

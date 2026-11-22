@@ -395,3 +395,23 @@ class SetOrganizationSystemdEnvironmentsResponse(_message.Message):
     organization: SystemdOrganization
     enabled: bool
     def __init__(self, organization: _Optional[_Union[SystemdOrganization, _Mapping]] = ..., enabled: _Optional[bool] = ...) -> None: ...
+
+class GetOrganizationDefaultCardRequest(_message.Message):
+    __slots__ = ("organization_id",)
+    ORGANIZATION_ID_FIELD_NUMBER: _ClassVar[int]
+    organization_id: str
+    def __init__(self, organization_id: _Optional[str] = ...) -> None: ...
+
+class GetOrganizationDefaultCardResponse(_message.Message):
+    __slots__ = ("card",)
+    CARD_FIELD_NUMBER: _ClassVar[int]
+    card: OrganizationDefaultCard
+    def __init__(self, card: _Optional[_Union[OrganizationDefaultCard, _Mapping]] = ...) -> None: ...
+
+class OrganizationDefaultCard(_message.Message):
+    __slots__ = ("brand", "last4")
+    BRAND_FIELD_NUMBER: _ClassVar[int]
+    LAST4_FIELD_NUMBER: _ClassVar[int]
+    brand: str
+    last4: str
+    def __init__(self, brand: _Optional[str] = ..., last4: _Optional[str] = ...) -> None: ...

@@ -119,11 +119,14 @@ async fn ask(
     amount_nano_eur: i64,
 ) -> Response {
     let path = organization_path(&submission.organization_id);
-    let organization =
-        match admin_connect::organization(state, cookie, &submission.organization_id).await {
-            Ok(organization) => organization,
-            Err(error) => return quota_response(Err(error), &path, "", headers),
-        };
+    let (organization, card) = tokio::join!(
+        admin_connect::organization(state, cookie.clone(), &submission.organization_id),
+        admin_connect::default_card(state, cookie, &submission.organization_id),
+    );
+    let organization = match organization {
+        Ok(organization) => organization,
+        Err(error) => return quota_response(Err(error), &path, "", headers),
+    };
     let balance = organization
         .credit_balance_nano_eur
         .saturating_add(amount_nano_eur);
@@ -136,6 +139,7 @@ async fn ask(
             balance,
             organization.auto_top_up_enabled,
             organization.auto_top_up_cents,
+            card.as_ref().map(Option::as_deref),
         ),
     };
     let token = page_csrf_token(headers);

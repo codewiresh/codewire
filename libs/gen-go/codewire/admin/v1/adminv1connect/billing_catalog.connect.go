@@ -81,6 +81,9 @@ const (
 	// BillingCatalogServiceSetOrganizationSystemdEnvironmentsProcedure is the fully-qualified name of
 	// the BillingCatalogService's SetOrganizationSystemdEnvironments RPC.
 	BillingCatalogServiceSetOrganizationSystemdEnvironmentsProcedure = "/codewire.admin.v1.BillingCatalogService/SetOrganizationSystemdEnvironments"
+	// BillingCatalogServiceGetOrganizationDefaultCardProcedure is the fully-qualified name of the
+	// BillingCatalogService's GetOrganizationDefaultCard RPC.
+	BillingCatalogServiceGetOrganizationDefaultCardProcedure = "/codewire.admin.v1.BillingCatalogService/GetOrganizationDefaultCard"
 )
 
 // BillingCatalogServiceClient is a client for the codewire.admin.v1.BillingCatalogService service.
@@ -128,6 +131,10 @@ type BillingCatalogServiceClient interface {
 	// opted-in organization still needs a deployment that sets the systemd
 	// workspace image repository.
 	SetOrganizationSystemdEnvironments(context.Context, *connect.Request[v1.SetOrganizationSystemdEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationSystemdEnvironmentsResponse], error)
+	// GetOrganizationDefaultCard reads one organization's default card from
+	// Stripe, for the admin credit adjustment's question (#5094). It is
+	// global-admin only, needs no membership and writes nothing.
+	GetOrganizationDefaultCard(context.Context, *connect.Request[v1.GetOrganizationDefaultCardRequest]) (*connect.Response[v1.GetOrganizationDefaultCardResponse], error)
 }
 
 // NewBillingCatalogServiceClient constructs a client for the
@@ -241,6 +248,13 @@ func NewBillingCatalogServiceClient(httpClient connect.HTTPClient, baseURL strin
 			connect.WithSchema(billingCatalogServiceMethods.ByName("SetOrganizationSystemdEnvironments")),
 			connect.WithClientOptions(opts...),
 		),
+		getOrganizationDefaultCard: connect.NewClient[v1.GetOrganizationDefaultCardRequest, v1.GetOrganizationDefaultCardResponse](
+			httpClient,
+			baseURL+BillingCatalogServiceGetOrganizationDefaultCardProcedure,
+			connect.WithSchema(billingCatalogServiceMethods.ByName("GetOrganizationDefaultCard")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -262,6 +276,7 @@ type billingCatalogServiceClient struct {
 	setOrganizationConfidentialEnvironments *connect.Client[v1.SetOrganizationConfidentialEnvironmentsRequest, v1.SetOrganizationConfidentialEnvironmentsResponse]
 	listSystemdOrganizations                *connect.Client[v1.ListSystemdOrganizationsRequest, v1.ListSystemdOrganizationsResponse]
 	setOrganizationSystemdEnvironments      *connect.Client[v1.SetOrganizationSystemdEnvironmentsRequest, v1.SetOrganizationSystemdEnvironmentsResponse]
+	getOrganizationDefaultCard              *connect.Client[v1.GetOrganizationDefaultCardRequest, v1.GetOrganizationDefaultCardResponse]
 }
 
 // GetCatalog calls codewire.admin.v1.BillingCatalogService.GetCatalog.
@@ -350,6 +365,12 @@ func (c *billingCatalogServiceClient) SetOrganizationSystemdEnvironments(ctx con
 	return c.setOrganizationSystemdEnvironments.CallUnary(ctx, req)
 }
 
+// GetOrganizationDefaultCard calls
+// codewire.admin.v1.BillingCatalogService.GetOrganizationDefaultCard.
+func (c *billingCatalogServiceClient) GetOrganizationDefaultCard(ctx context.Context, req *connect.Request[v1.GetOrganizationDefaultCardRequest]) (*connect.Response[v1.GetOrganizationDefaultCardResponse], error) {
+	return c.getOrganizationDefaultCard.CallUnary(ctx, req)
+}
+
 // BillingCatalogServiceHandler is an implementation of the codewire.admin.v1.BillingCatalogService
 // service.
 type BillingCatalogServiceHandler interface {
@@ -396,6 +417,10 @@ type BillingCatalogServiceHandler interface {
 	// opted-in organization still needs a deployment that sets the systemd
 	// workspace image repository.
 	SetOrganizationSystemdEnvironments(context.Context, *connect.Request[v1.SetOrganizationSystemdEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationSystemdEnvironmentsResponse], error)
+	// GetOrganizationDefaultCard reads one organization's default card from
+	// Stripe, for the admin credit adjustment's question (#5094). It is
+	// global-admin only, needs no membership and writes nothing.
+	GetOrganizationDefaultCard(context.Context, *connect.Request[v1.GetOrganizationDefaultCardRequest]) (*connect.Response[v1.GetOrganizationDefaultCardResponse], error)
 }
 
 // NewBillingCatalogServiceHandler builds an HTTP handler from the service implementation. It
@@ -505,6 +530,13 @@ func NewBillingCatalogServiceHandler(svc BillingCatalogServiceHandler, opts ...c
 		connect.WithSchema(billingCatalogServiceMethods.ByName("SetOrganizationSystemdEnvironments")),
 		connect.WithHandlerOptions(opts...),
 	)
+	billingCatalogServiceGetOrganizationDefaultCardHandler := connect.NewUnaryHandler(
+		BillingCatalogServiceGetOrganizationDefaultCardProcedure,
+		svc.GetOrganizationDefaultCard,
+		connect.WithSchema(billingCatalogServiceMethods.ByName("GetOrganizationDefaultCard")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.admin.v1.BillingCatalogService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case BillingCatalogServiceGetCatalogProcedure:
@@ -539,6 +571,8 @@ func NewBillingCatalogServiceHandler(svc BillingCatalogServiceHandler, opts ...c
 			billingCatalogServiceListSystemdOrganizationsHandler.ServeHTTP(w, r)
 		case BillingCatalogServiceSetOrganizationSystemdEnvironmentsProcedure:
 			billingCatalogServiceSetOrganizationSystemdEnvironmentsHandler.ServeHTTP(w, r)
+		case BillingCatalogServiceGetOrganizationDefaultCardProcedure:
+			billingCatalogServiceGetOrganizationDefaultCardHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -610,4 +644,8 @@ func (UnimplementedBillingCatalogServiceHandler) ListSystemdOrganizations(contex
 
 func (UnimplementedBillingCatalogServiceHandler) SetOrganizationSystemdEnvironments(context.Context, *connect.Request[v1.SetOrganizationSystemdEnvironmentsRequest]) (*connect.Response[v1.SetOrganizationSystemdEnvironmentsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.BillingCatalogService.SetOrganizationSystemdEnvironments is not implemented"))
+}
+
+func (UnimplementedBillingCatalogServiceHandler) GetOrganizationDefaultCard(context.Context, *connect.Request[v1.GetOrganizationDefaultCardRequest]) (*connect.Response[v1.GetOrganizationDefaultCardResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.admin.v1.BillingCatalogService.GetOrganizationDefaultCard is not implemented"))
 }

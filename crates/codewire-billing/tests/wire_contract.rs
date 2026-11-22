@@ -9,9 +9,10 @@ use std::env;
 use std::time::Duration;
 
 use codewire_admin_proto::codewire::admin::v1::{
-    BillingCatalogServiceClient, GetCatalogRequest, ListConfidentialOrganizationsRequest,
-    ListSubscriptionMigrationsRequest, ListSystemdOrganizationsRequest,
-    SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationSystemdEnvironmentsRequest,
+    BillingCatalogServiceClient, GetCatalogRequest, GetOrganizationDefaultCardRequest,
+    ListConfidentialOrganizationsRequest, ListSubscriptionMigrationsRequest,
+    ListSystemdOrganizationsRequest, SetOrganizationConfidentialEnvironmentsRequest,
+    SetOrganizationSystemdEnvironmentsRequest,
 };
 use codewire_proto::codewire::console::v1::{
     BillingServiceClient, GetBillingOverviewRequest, GetEnvironmentUsageRequest,
@@ -413,5 +414,24 @@ async fn configured_billing_wire_contract() {
             );
             listed_systemd(enabled).await;
         }
+
+        // An organization's default card, for the admin credit question
+        // (#5094): global-admin only, and none for the fixture, which has no
+        // card in Stripe.
+        let card_request = || GetOrganizationDefaultCardRequest {
+            organization_id: FIXTURE_ORG.into(),
+            ..Default::default()
+        };
+        let error = catalog_as_user
+            .get_organization_default_card(card_request())
+            .await
+            .expect_err("a non-admin cannot read an organization's card");
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+        let card = catalog
+            .get_organization_default_card(card_request())
+            .await
+            .expect("GetOrganizationDefaultCard Connect round trip")
+            .into_owned();
+        assert!(card.card.as_option().is_none());
     }
 }

@@ -1113,7 +1113,12 @@ fn admin_organization_asks_before_a_negative_balance() {
         reason: "billing test".into(),
         idempotency_key: "credit-key-1".into(),
         confirmed_balance_nano_eur: -1_140_000_000,
-        question: crate::admin_connect::negative_balance_question(-1_140_000_000, true, 2000),
+        question: crate::admin_connect::negative_balance_question(
+            -1_140_000_000,
+            true,
+            2000,
+            Some(Some("Visa •••• 4242")),
+        ),
     };
     let body = AdminOrganizationTemplate {
         view: &view,
@@ -1126,7 +1131,7 @@ fn admin_organization_asks_before_a_negative_balance() {
     }
     .render()
     .expect("render admin organization page");
-    assert!(body.contains(r#"<p class="cw-alert cw-alert--warning" role="alert">This leaves the balance at -€1.14. Automatic top-up is on at €20.00, so a saved card is charged within seconds; without one, new Sandboxes and starts are refused.</p>"#), "{body}");
+    assert!(body.contains(r#"<p class="cw-alert cw-alert--warning" role="alert">This leaves the balance at -€1.14. Automatic top-up is on, so Visa •••• 4242 is charged €20.00 within seconds.</p>"#), "{body}");
     for field in [
         r#"<input type="hidden" name="amount" value="-6">"#,
         r#"<input type="hidden" name="reason" value="billing test">"#,
@@ -1143,12 +1148,29 @@ fn admin_organization_asks_before_a_negative_balance() {
     assert!(!body.contains(">Adjust credit</button>"));
 }
 
+/// The question names the card top-up charges, refused work when nothing
+/// will be charged, and both outcomes when billing can't say (#5094).
 #[test]
 fn a_negative_balance_question_says_what_top_up_sets_off() {
     use crate::admin_connect::negative_balance_question;
+    let refused = "This leaves the balance at -€1.14. New Sandboxes and starts are refused, and running Sandboxes stop after 24 hours; their storage is kept.";
     assert_eq!(
-        negative_balance_question(-1_140_000_000, false, 2000),
-        "This leaves the balance at -€1.14. New Sandboxes and starts are refused, and running Sandboxes stop after 24 hours; their storage is kept."
+        negative_balance_question(-1_140_000_000, true, 2000, Some(Some("Visa •••• 4242"))),
+        "This leaves the balance at -€1.14. Automatic top-up is on, so Visa •••• 4242 is charged €20.00 within seconds."
     );
-    assert!(negative_balance_question(-1, true, 5000).contains("Automatic top-up is on at €50.00"));
+    // No card, or top-up off: nothing is charged, so work is refused.
+    assert_eq!(
+        negative_balance_question(-1_140_000_000, true, 2000, Some(None)),
+        refused
+    );
+    for card in [Some(Some("Visa •••• 4242")), Some(None), None] {
+        assert_eq!(
+            negative_balance_question(-1_140_000_000, false, 2000, card),
+            refused
+        );
+    }
+    // Billing can't say: both outcomes.
+    assert!(negative_balance_question(-1, true, 5000, None).ends_with(
+        "Automatic top-up is on at €50.00, so a saved card is charged within seconds; without one, new Sandboxes and starts are refused."
+    ));
 }

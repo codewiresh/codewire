@@ -417,54 +417,114 @@ impl StripeHandle {
         org_id: &str,
         expand: bool,
     ) -> Option<DefaultPaymentMethod> {
+        self.try_org_payment_method(pool, org_id, expand)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// The organization's default card, for the admin credit question
+    /// (#5094). `Ok(None)` only when there truly is none: Stripe not set up,
+    /// no customer, no default method, or one that isn't a card. `Err` when
+    /// the database or Stripe couldn't answer, so a card that may be charged
+    /// is never reported as absent.
+    pub async fn org_default_card(
+        &self,
+        pool: &PgPool,
+        org_id: &str,
+    ) -> Result<Option<CardSummary>, PaymentMethodUnavailable> {
+        Ok(self
+            .try_org_payment_method(pool, org_id, true)
+            .await?
+            .and_then(|method| method.card))
+    }
+
+    async fn try_org_payment_method(
+        &self,
+        pool: &PgPool,
+        org_id: &str,
+        expand: bool,
+    ) -> Result<Option<DefaultPaymentMethod>, PaymentMethodUnavailable> {
         if !self.is_configured() {
-            return None;
+            return Ok(None);
         }
-        let customer_id = Self::org_customer_id(pool, org_id).await?;
-        self.default_payment_method(&customer_id, expand).await
+        let Some(customer_id) = Self::org_customer_id(pool, org_id).await? else {
+            return Ok(None);
+        };
+        self.try_default_payment_method(&customer_id, expand).await
     }
 
     /// The organization's Stripe customer ID, if it has one.
-    async fn org_customer_id(pool: &PgPool, org_id: &str) -> Option<String> {
+    async fn org_customer_id(
+        pool: &PgPool,
+        org_id: &str,
+    ) -> Result<Option<String>, PaymentMethodUnavailable> {
         let customer_id: Option<Option<String>> =
             sqlx::query_scalar(r#"SELECT stripe_customer_id FROM organizations WHERE id = $1"#)
                 .bind(org_id)
                 .fetch_optional(pool)
                 .await
-                .unwrap_or(None);
-        customer_id.flatten().filter(|id| !id.is_empty())
+                .map_err(|_| PaymentMethodUnavailable)?;
+        Ok(customer_id.flatten().filter(|id| !id.is_empty()))
     }
 
     /// The customer's `invoice_settings.default_payment_method`, expanded
     /// when `expand` is set. Nothing is logged: the expanded object carries
     /// the card's fingerprint, which only [`CardSummary::from_stripe`] reads
     /// past, keeping brand, last four digits and expiry.
+    #[cfg(test)]
     pub(crate) async fn default_payment_method(
         &self,
         customer_id: &str,
         expand: bool,
     ) -> Option<DefaultPaymentMethod> {
-        let client = self.client.as_deref()?;
+        self.try_default_payment_method(customer_id, expand)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// As [`Self::default_payment_method`], telling a customer Stripe has no
+    /// default for (or doesn't know, a 404) from a Stripe that couldn't
+    /// answer.
+    async fn try_default_payment_method(
+        &self,
+        customer_id: &str,
+        expand: bool,
+    ) -> Result<Option<DefaultPaymentMethod>, PaymentMethodUnavailable> {
+        let Some(client) = self.client.as_deref() else {
+            return Ok(None);
+        };
         let mut request = RetrieveCustomer::new(customer_id);
         if expand {
             request = request.expand(["invoice_settings.default_payment_method".to_string()]);
         }
-        let Ok(stripe_core::customer::RetrieveCustomerReturned::Customer(customer)) =
-            request.send(client).await
-        else {
-            return None;
+        let customer = match request.send(client).await {
+            Ok(stripe_core::customer::RetrieveCustomerReturned::Customer(customer)) => customer,
+            Ok(_) => return Ok(None),
+            Err(error) if stripe_not_found(&error) => return Ok(None),
+            Err(_) => return Err(PaymentMethodUnavailable),
         };
-        let method = customer.invoice_settings?.default_payment_method?;
-        Some(DefaultPaymentMethod {
+        let Some(method) = customer
+            .invoice_settings
+            .and_then(|settings| settings.default_payment_method)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(DefaultPaymentMethod {
             card: match &method {
                 stripe_types::Expandable::Object(method) => {
                     method.card.as_ref().and_then(CardSummary::from_stripe)
                 }
                 stripe_types::Expandable::Id(_) => None,
             },
-        })
+        }))
     }
 }
+
+/// Stripe or the database couldn't say whether an organization has a card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaymentMethodUnavailable;
 
 /// An organization's default payment method, as the billing overview shows
 /// it.
@@ -1702,7 +1762,9 @@ mod default_payment_method_tests {
 
     use axum::{Router, extract::RawQuery, routing::get};
 
-    use super::{CardSummary, DefaultPaymentMethod, StripeHandle};
+    use axum::http::StatusCode;
+
+    use super::{CardSummary, DefaultPaymentMethod, PaymentMethodUnavailable, StripeHandle};
 
     /// A synthetic Visa test card in Stripe's customer shape, with the
     /// default payment method expanded. Its fingerprint must never come out.
@@ -1778,6 +1840,83 @@ mod default_payment_method_tests {
         assert_eq!(
             stripe.default_payment_method("cus_synthetic", true).await,
             Some(DefaultPaymentMethod { card: None })
+        );
+    }
+
+    /// Serves `body` with `status` for the synthetic customer.
+    async fn stripe_answering(status: StatusCode, body: &'static str) -> StripeHandle {
+        let app = Router::new().route(
+            "/v1/customers/cus_synthetic",
+            get(move || async move { (status, [("content-type", "application/json")], body) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        StripeHandle::for_test(&format!("http://{address}"))
+    }
+
+    /// The admin card read tells "no card" from "Stripe couldn't say", so a
+    /// card that may be charged is never reported as absent (#5094).
+    #[tokio::test]
+    async fn a_stripe_that_cannot_answer_is_unavailable_not_no_card() {
+        let failing = stripe_answering(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":{"type":"api_error","message":"synthetic outage"}}"#,
+        )
+        .await;
+        assert_eq!(
+            failing
+                .try_default_payment_method("cus_synthetic", true)
+                .await,
+            Err(PaymentMethodUnavailable)
+        );
+        assert_eq!(
+            StripeHandle::for_test("http://127.0.0.1:1")
+                .try_default_payment_method("cus_synthetic", true)
+                .await,
+            Err(PaymentMethodUnavailable)
+        );
+
+        // A real absence is none: Stripe doesn't know the customer, it was
+        // deleted, it has no default, or Stripe isn't set up.
+        let unknown = stripe_answering(
+            StatusCode::NOT_FOUND,
+            r#"{"error":{"type":"invalid_request_error","message":"No such customer"}}"#,
+        )
+        .await;
+        assert_eq!(
+            unknown
+                .try_default_payment_method("cus_synthetic", true)
+                .await,
+            Ok(None)
+        );
+        for body in [
+            r#"{"id":"cus_synthetic","object":"customer","deleted":true}"#,
+            r#"{"id":"cus_synthetic","object":"customer","created":1,"livemode":false,
+              "invoice_settings":{"default_payment_method":null}}"#,
+        ] {
+            let stripe = stripe_answering(StatusCode::OK, body).await;
+            assert_eq!(
+                stripe
+                    .try_default_payment_method("cus_synthetic", true)
+                    .await,
+                Ok(None),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            StripeHandle::default()
+                .try_default_payment_method("cus_synthetic", true)
+                .await,
+            Ok(None)
+        );
+
+        let (visa, _) = fake_stripe(VISA).await;
+        assert_eq!(
+            visa.try_default_payment_method("cus_synthetic", true)
+                .await
+                .map(|method| method.and_then(|method| method.card).map(|card| card.last4)),
+            Ok(Some("4242".to_owned()))
         );
     }
 
