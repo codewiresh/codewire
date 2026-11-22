@@ -248,6 +248,14 @@ installed runtime (orchestrator, 2026-11-15, recorded on #4980).
     `error` and `cw --local rm hw-walk --yes` removed it; the log had no
     `supervisor_halted` or `drain_refused`. Observed working, except the
     step named for an artifact failure (#5892).
+  - Linux 7.2.15, a build of #5892's branch with the runtime above,
+    2026-11-22, in the same scratch `HOME`. hw-check was created and
+    stopped, and the Cloud Hypervisor blob made unreadable. `cw --local
+    start hw-check` printed "x Start hw-check failed at "Checking the VM
+    runtime": … failed: start_artifact_store (the local VM runtime store
+    could not be read, or a file this environment boots is missing from it
+    or differs from what was admitted)", and supervisor.log recorded the
+    same `operation_failed` as before. Observed working (#5892).
 
 ## 2. `local-vm-upgrade-credentials`: credentials across an upgrade
 

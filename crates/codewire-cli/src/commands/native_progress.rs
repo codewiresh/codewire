@@ -254,11 +254,14 @@ fn stage_of(operation: &v1::Operation) -> Option<(&'static str, &'static str)> {
 /// The stage a failure belongs to when its error code names the check that
 /// refused it. Every start, and a replayed create, first checks each direct
 /// mount's host folder (#3209); that runs before any stage the supervisor
-/// publishes, so without this its refusal would name the stage showing.
+/// publishes, so without this its refusal would name the stage showing. A
+/// start checks its VM runtime inside the credential access stage (#5892).
 fn failed_check_stage(error_code: &str) -> Option<(&'static str, &'static str)> {
-    error_code
-        .ends_with("direct_share_changed")
-        .then_some(("mounts", "Checking mounted folders"))
+    if error_code.ends_with("direct_share_changed") {
+        return Some(("mounts", "Checking mounted folders"));
+    }
+    codewire_local_vmm::supervisor_client::runtime_check_error_code(error_code)
+        .then_some(("runtime", "Checking the VM runtime"))
 }
 
 /// What the guest is doing while it boots, for the live line.
@@ -400,6 +403,41 @@ mod tests {
         assert_eq!(
             NativeProgress::new(&caps).fail_with_code(Some("start_direct_share_changed")),
             None
+        );
+    }
+
+    /// #5892: a start whose VM runtime check fails names that check, not
+    /// the credential access stage it runs in, nor a later stage showing.
+    #[test]
+    fn a_failed_runtime_check_fails_its_own_stage() {
+        let caps = crate::output::Capabilities::from_process(crate::output::OutputMode::Machine);
+        for stage in [
+            v1::OperationStage::RequireEnvironmentAccess,
+            v1::OperationStage::EnsureRunner,
+        ] {
+            for code in [
+                "start_artifact_store",
+                "start_artifact",
+                "start_cw_runtime",
+                "runtime_artifact_store_unsafe",
+            ] {
+                let progress = NativeProgress::new(&caps);
+                progress.observe(&operation(stage, v1::RunnerStage::Unspecified));
+                assert_eq!(
+                    progress.fail_with_code(Some(code)),
+                    Some("Checking the VM runtime"),
+                    "{stage:?} {code}"
+                );
+            }
+        }
+        let progress = NativeProgress::new(&caps);
+        progress.observe(&operation(
+            v1::OperationStage::EnsureRunner,
+            v1::RunnerStage::Unspecified,
+        ));
+        assert_eq!(
+            progress.fail_with_code(Some("start_artifact_generation_changed")),
+            Some("Starting the VM runner")
         );
     }
 

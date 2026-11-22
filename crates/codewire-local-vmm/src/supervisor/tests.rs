@@ -9151,6 +9151,38 @@ fn an_unsafe_runtime_artifact_store_has_its_own_code() {
     );
 }
 
+/// #5892: the codes a start's VM runtime check fails with are the ones the
+/// CLI names that check for; a live runner on another runtime, or a failed
+/// credential access, is not that check.
+#[test]
+fn a_start_runtime_check_failure_is_named_as_that_check() {
+    use crate::supervisor_client::runtime_check_error_code;
+
+    for error in [
+        SupervisorError::ArtifactStore,
+        SupervisorError::UnsafeRuntimeArtifactStore {
+            location: "runtime_artifacts_blobs",
+        },
+        SupervisorError::Artifact(
+            crate::artifact::ArtifactError::GuestSeedProtocolUnsupported(std::path::PathBuf::new()),
+        ),
+        SupervisorError::CwRuntime(crate::cw_runtime::CwRuntimeError::InvalidAsset),
+    ] {
+        let code = lifecycle_failure_code("start", &error, None);
+        assert!(runtime_check_error_code(&code), "{error:?}: {code}");
+    }
+    for error in [
+        SupervisorError::ArtifactGenerationChanged,
+        SupervisorError::EnvironmentAccessUnavailable,
+        SupervisorError::CredentialAuthorityUnavailable,
+        SupervisorError::VmStart(String::new()),
+    ] {
+        let code = lifecycle_failure_code("start", &error, None);
+        assert!(!runtime_check_error_code(&code), "{error:?}: {code}");
+    }
+    assert!(!runtime_check_error_code("start_interrupted"));
+}
+
 #[test]
 fn lifecycle_failure_causes_are_closed_codes_that_discard_error_text() {
     const CANARY: &str = "synthetic-secret-value-in-error-text-must-not-escape";

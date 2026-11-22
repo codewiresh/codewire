@@ -1266,12 +1266,30 @@ pub fn operation_error_code(status: &Status) -> Option<&str> {
 /// unsafe_runtime_artifact_store_directories` names each one.
 pub const UNSAFE_RUNTIME_ARTIFACT_STORE_ERROR_CODE: &str = "runtime_artifact_store_unsafe";
 
+/// Whether a failed operation's `error_code` comes from the check of the VM
+/// runtime a start boots: its boot assets, their store, or the cw runtime
+/// for inside the VM. A start runs that check inside its credential access
+/// stage, so a caller that names the failed stage names this check instead
+/// (#5892).
+pub fn runtime_check_error_code(error_code: &str) -> bool {
+    matches!(
+        error_code,
+        UNSAFE_RUNTIME_ARTIFACT_STORE_ERROR_CODE
+            | "start_artifact"
+            | "start_artifact_store"
+            | "start_cw_runtime"
+    )
+}
+
 /// A plain-language reason for an operation error code, where the code alone
 /// does not tell the user what to change.
 fn operation_error_hint(error_code: &str) -> &'static str {
     match error_code {
         UNSAFE_RUNTIME_ARTIFACT_STORE_ERROR_CODE => {
             " (a directory of the local VM runtime store is not private: each must be yours with mode 0700, and nothing was changed)"
+        }
+        "start_artifact_store" => {
+            " (the local VM runtime store could not be read, or a file this environment boots is missing from it or differs from what was admitted)"
         }
         "create_guest_docker_tooling_missing" => {
             " (the image has no Docker tooling; create with --no-docker or choose an image that includes Docker)"
