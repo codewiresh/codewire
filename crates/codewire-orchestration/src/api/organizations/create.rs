@@ -21,6 +21,15 @@ pub(crate) async fn create_organization_core(
     user: AuthUser,
     body: CreateOrgBody,
 ) -> AppResult<Organization> {
+    // An API key acts only inside its own organization, and each new one
+    // brings its own sign-up credit (#5863, docs/dev/AUTH-POLICY.md).
+    if user.via_api_key {
+        return Err(AppError::Coded {
+            status: axum::http::StatusCode::FORBIDDEN,
+            code: "api_key_scope_violation",
+            detail: "organizations are made from a sign-in, not with an API key".into(),
+        });
+    }
     let name = body.name.trim();
     let slug = body.slug.trim().to_lowercase();
     let slug = slug.as_str();

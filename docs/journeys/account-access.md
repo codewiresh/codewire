@@ -9,7 +9,7 @@ The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-21.
+Updated 2026-11-22.
 
 | ID | Dev | Production |
 | --- | --- | --- |
@@ -18,6 +18,7 @@ Updated 2026-11-21.
 | `access-websockets` | the SSH proxy's API-key leg observed on Dev 2026-11-21, source 6ef416acfb; its `cw logout` leg not yet observed; the terminal half observed on Kind only (2026-11-20, main 6557aa7e83) | not yet observed |
 | `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only; the browser's terminal not as written, #5677); not on Dev | not yet observed |
 | `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
+| `access-key-org-create` | not yet observed | not yet observed |
 
 ## `access-ticket`: a terminal ticket from a session that has ended
 
@@ -385,3 +386,23 @@ Issue: #3586, its third step (cw-security, 2026-11-18). A launch item (owner,
   current key, or unset it and run cw login`, and `cw ls` printed `! Cloud
   environments could not be listed: the API key in CODEWIRE_API_KEY is no
   longer accepted` with the same step and no retry.
+
+## `access-key-org-create`: an API key can't create an organization
+
+Issue: #5863. The rule: [`docs/dev/AUTH-POLICY.md`](../dev/AUTH-POLICY.md),
+"Credential rules".
+
+- **Entry points:** `cw org create` and `CreateOrganization`, with an API key
+  in `CODEWIRE_API_KEY`; the same after `cw login`.
+- **States to exercise:** an organization-scoped API key; a sign-in.
+- **Driving it:** on Dev, as the Dev smoke identity (its credential is an API
+  key), `cw org create "Scratch NAME" --slug SCRATCH`. Then the same
+  signed in with `cw login` as a test account, and remove that organization
+  with `cw org delete SCRATCH --yes`.
+- **Proof:**
+  - with the key, `cw org create` fails at once with "organizations are made
+    from a sign-in", exits non-zero, and no organization with that slug
+    exists;
+  - signed in, the create succeeds and the organization is listed.
+- **Observed:** not yet observed.
+

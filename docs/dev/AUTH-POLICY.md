@@ -76,7 +76,11 @@ workspace daemon uses to fetch its binding.
   at the callback (pentest#13 T14, #4785).
 - A `cw_` API key is authorized only inside its one bound organization. It
   cannot inherit its owner's global-admin authority or perform account-global
-  operations.
+  operations. Creating an organization is one: `CreateOrganization` refuses
+  an API key with `permission_denied`, "organizations are made from a
+  sign-in", before anything is written. A key's scope never grows to cover
+  what it would create, and each new organization brings its own sign-up
+  credit (#5863).
 - HMAC sidecar tokens stay inside their platform trust domain. They are not a
   fallback for session, OAuth, or API-key authentication.
 - Invitation and enrollment codes are one-use capabilities, not

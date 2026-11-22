@@ -1,9 +1,13 @@
 //! A new organization gets the sign-up credit current at its creation, once,
-//! and nothing while the setting is 0 (#3381, owner, 2026-11-10).
+//! and nothing while the setting is 0 (#3381, owner, 2026-11-10). Only a
+//! sign-in creates one; an API key is refused (#5863).
 
+use codewire_server_core::AppError;
+use codewire_server_core::auth::AuthUser;
 use sqlx::PgPool;
 
-use super::create::grant_signup_credit;
+use super::CreateOrgBody;
+use super::create::{create_organization_core, grant_signup_credit};
 use crate::api::runtime_lease_test_support::LeaseFixture;
 
 async fn set_signup_credit(pool: &PgPool, cents: i32) {
@@ -30,6 +34,14 @@ async fn create(pool: &PgPool, owner: &str, id: &str) -> Option<i64> {
     let granted = grant_signup_credit(&mut tx, id).await.unwrap();
     tx.commit().await.unwrap();
     granted
+}
+
+async fn slug_exists(pool: &PgPool, slug: &str) -> bool {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM organizations WHERE slug = $1)")
+        .bind(slug)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
 
 async fn credit(pool: &PgPool, id: &str) -> (i64, Vec<(String, i64, String)>) {
@@ -103,4 +115,52 @@ async fn db_a_new_organization_gets_the_current_signup_credit_once() {
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run by the database capability gate"]
+async fn db_an_api_key_cannot_create_an_organization_and_a_sign_in_can() {
+    let fixture = LeaseFixture::seed("synthetic-org-create-credential").await;
+    let state = crate::api::test_state::offline(fixture.pool.clone()).await;
+    let body = |slug: &str| CreateOrgBody {
+        name: "Scratch organization".into(),
+        slug: slug.into(),
+    };
+    let session = AuthUser {
+        user_id: fixture.id.clone(),
+        org_id: None,
+        is_admin: false,
+        via_api_key: false,
+    };
+    let api_key = AuthUser {
+        org_id: Some(fixture.id.clone()),
+        via_api_key: true,
+        ..session.clone()
+    };
+    let keyed = format!("key-{}", &fixture.id[6..18]);
+    let signed_in = format!("signed-in-{}", &fixture.id[6..18]);
+
+    let refused = create_organization_core(state.clone(), api_key, body(&keyed)).await;
+    match refused {
+        Err(AppError::Coded { code, detail, .. }) => {
+            assert_eq!(code, "api_key_scope_violation");
+            assert!(
+                detail.contains("organizations are made from a sign-in"),
+                "{detail}"
+            );
+        }
+        other => panic!("an API key's create must be refused, got {other:?}"),
+    }
+    assert!(!slug_exists(&fixture.pool, &keyed).await);
+
+    let created = create_organization_core(state, session, body(&signed_in))
+        .await
+        .unwrap();
+    assert!(slug_exists(&fixture.pool, &signed_in).await);
+
+    sqlx::query("DELETE FROM organizations WHERE id = $1")
+        .bind(&created.id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
 }
