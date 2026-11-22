@@ -369,9 +369,6 @@ pub(crate) struct LocalGitRepositoryExecutorArgs {
     #[cfg(target_os = "macos")]
     #[arg(long, requires = "runtime_artifact_root")]
     pub(crate) runtime_artifact_lock: Option<PathBuf>,
-    /// The authority's store: a GitHub executor reads the selected backend.
-    #[command(flatten)]
-    pub(crate) store: credential_child_store::ChildStoreArgs,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

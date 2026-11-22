@@ -1,16 +1,17 @@
 //! One-shot provider revocation for a local credential (#4717). The
-//! authority revokes the credential first, then spawns a confined executor
-//! over an inherited stream. The executor leases only the credential's id
-//! and material generation, reads that one generation from OS storage
-//! itself, asks the provider through a transport that admits only the
-//! revocation route, and reports only the outcome class. No material crosses
-//! the channel, and the authority process makes no network request.
+//! authority revokes the credential first, reads the revoked generation, then
+//! spawns a confined executor over an inherited stream. The executor's one
+//! lease carries that generation's value, and it opens no store (#4984). It
+//! asks the provider through a transport that admits only the revocation
+//! route, and reports only the outcome class. The authority process makes no
+//! network request.
 
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use codewire_protected_store::ProtectedValue;
 use futures::StreamExt as _;
 use futures::stream::{once, pending};
 use hyper_util::rt::TokioIo;
@@ -28,7 +29,7 @@ use crate::control::v1::local_credential_revocation_lease_service_server::{
 };
 use crate::repository::ObservedRepositoryStream;
 
-pub const REVOCATION_LEASE_PROTOCOL_VERSION: u32 = 1;
+pub const REVOCATION_LEASE_PROTOCOL_VERSION: u32 = 2;
 const REVOCATION_LEASE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REVOCATION_LEASE_RPC_MESSAGE_BYTES: usize = 16 * 1024;
 /// One executor's launch: its request identity. It needs no directory: it
@@ -85,6 +86,8 @@ pub(crate) struct RevocationLease {
 
 struct RevocationLeaseRpc {
     lease: RevocationLease,
+    /// The leased generation's entry, taken by the one lease (#4984).
+    material: Mutex<Option<ProtectedValue>>,
     ready: Mutex<Option<oneshot::Sender<()>>>,
     report: Mutex<Option<oneshot::Sender<v1::ProviderRevocation>>>,
     leased: AtomicBool,
@@ -129,9 +132,16 @@ impl LocalCredentialRevocationLeaseService for RevocationLeaseRpc {
         if self.ready.lock().await.is_some() || self.leased.swap(true, Ordering::SeqCst) {
             return Err(Status::failed_precondition("one lease, after ready"));
         }
+        let material = self
+            .material
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| Status::failed_precondition("one lease, after ready"))?;
         Ok(Response::new(v1::RevocationCredentialLeaseResponse {
             credential_id: self.lease.credential_id.clone(),
             material_generation: self.lease.material_generation,
+            material: material.expose_secret().to_vec(),
         }))
     }
 
@@ -157,10 +167,12 @@ impl LocalCredentialRevocationLeaseService for RevocationLeaseRpc {
 }
 
 /// Serve one executor's lease channel until it closes: ready, one lease of
-/// `lease`, one outcome report.
+/// `lease` carrying `material`, one outcome report. Only the executor holding
+/// `stream`, the one spawned for this lease, can ask for it.
 pub(crate) async fn serve_revocation_lease_channel(
     stream: UnixStream,
     lease: RevocationLease,
+    material: ProtectedValue,
     ready: oneshot::Sender<()>,
     report: oneshot::Sender<v1::ProviderRevocation>,
 ) -> Result<(), RevocationLeaseChannelError> {
@@ -169,6 +181,7 @@ pub(crate) async fn serve_revocation_lease_channel(
     }
     let service = RevocationLeaseRpc {
         lease,
+        material: Mutex::new(Some(material)),
         ready: Mutex::new(Some(ready)),
         report: Mutex::new(Some(report)),
         leased: AtomicBool::new(false),
@@ -244,9 +257,10 @@ impl LocalRevocationLeaseClient {
             .map_err(map_status)
     }
 
-    /// The credential id and material generation the executor may read.
-    pub async fn lease(&mut self) -> Result<(String, u64), RevocationLeaseChannelError> {
-        let lease = self
+    /// The one value the executor revokes, from its lease (#4984): it opens no
+    /// store. `None` when the lease carries none.
+    pub async fn lease(&mut self) -> Result<Option<ProtectedValue>, RevocationLeaseChannelError> {
+        let mut lease = self
             .inner
             .lease_revocation_credential(v1::RevocationCredentialLeaseRequest {
                 request_id: self.request_id.to_string(),
@@ -254,7 +268,7 @@ impl LocalRevocationLeaseClient {
             .await
             .map_err(map_status)?
             .into_inner();
-        Ok((lease.credential_id, lease.material_generation))
+        Ok(ProtectedValue::new(std::mem::take(&mut lease.material)).ok())
     }
 
     pub async fn report(
@@ -282,25 +296,19 @@ fn map_status(status: Status) -> RevocationLeaseChannelError {
     }
 }
 
-/// The executor's run on its connected channel: ready, its one lease, the
-/// leased generation read from `store`, `ask`, then its one report. With no
-/// store, or a generation the store does not hold, it reports NOT_READ and
-/// the provider is not asked.
-pub async fn run_revocation_executor<S, F, Fut>(
+/// The executor's run on its connected channel: ready, its one lease and the
+/// value it carries, `ask`, then its one report. A lease without a value is
+/// reported NOT_READ and the provider is not asked.
+pub async fn run_revocation_executor<F, Fut>(
     client: &mut LocalRevocationLeaseClient,
-    store: Option<&S>,
     ask: F,
 ) -> Result<(), RevocationLeaseChannelError>
 where
-    S: codewire_protected_store::ProtectedStore,
-    F: FnOnce(codewire_protected_store::ProtectedValue) -> Fut,
+    F: FnOnce(ProtectedValue) -> Fut,
     Fut: std::future::Future<Output = v1::ProviderRevocation>,
 {
     client.report_ready().await?;
-    let (credential_id, material_generation) = client.lease().await?;
-    let material = store
-        .and_then(|store| read_leased_material(store, &credential_id, material_generation).ok());
-    let outcome = match material {
+    let outcome = match client.lease().await? {
         Some(material) => ask(material).await,
         None => v1::ProviderRevocation {
             outcome: v1::ProviderRevocationOutcome::Failed.into(),
@@ -309,23 +317,6 @@ where
         },
     };
     client.report(outcome).await
-}
-
-/// The executor's read of its leased generation from the OS store: the one
-/// entry the lease names, never another.
-pub fn read_leased_material<S: codewire_protected_store::ProtectedStore>(
-    store: &S,
-    credential_id: &str,
-    material_generation: u64,
-) -> Result<codewire_protected_store::ProtectedValue, RevocationLeaseChannelError> {
-    let id = codewire_access::CredentialId::parse(credential_id.to_owned())
-        .map_err(|_| RevocationLeaseChannelError::InvalidRequest)?;
-    let entry = crate::protected_entry_id(&id, material_generation)
-        .map_err(|_| RevocationLeaseChannelError::InvalidRequest)?;
-    store
-        .get(&entry)
-        .map_err(|_| RevocationLeaseChannelError::Unavailable)?
-        .ok_or(RevocationLeaseChannelError::Denied)
 }
 
 #[cfg(test)]
@@ -340,6 +331,10 @@ mod tests {
         }
     }
 
+    fn value() -> ProtectedValue {
+        ProtectedValue::from_slice(b"synthetic-codex-bundle").unwrap()
+    }
+
     #[tokio::test]
     async fn the_channel_leases_once_after_ready_then_takes_one_report() {
         let request_id = Uuid::new_v4();
@@ -349,26 +344,34 @@ mod tests {
         let server = tokio::spawn(serve_revocation_lease_channel(
             authority,
             lease(request_id),
+            value(),
             ready_tx,
             report_tx,
         ));
         let mut client = LocalRevocationLeaseClient::connect(executor, request_id)
             .await
             .unwrap();
-        assert_eq!(
-            client.lease().await,
-            Err(RevocationLeaseChannelError::Denied),
+        assert!(
+            matches!(
+                client.lease().await,
+                Err(RevocationLeaseChannelError::Denied)
+            ),
             "no lease before ready"
         );
         client.report_ready().await.unwrap();
         ready_rx.await.unwrap();
-        assert_eq!(
-            client.lease().await.unwrap(),
-            ("synthetic-credential".to_owned(), 3)
-        );
-        assert_eq!(
-            client.lease().await,
-            Err(RevocationLeaseChannelError::Denied),
+        let leased = client
+            .lease()
+            .await
+            .unwrap()
+            .expect("the lease carries its value");
+        assert_eq!(leased.expose_secret(), b"synthetic-codex-bundle");
+        // Once means once: a repeated lease gets no second copy.
+        assert!(
+            matches!(
+                client.lease().await,
+                Err(RevocationLeaseChannelError::Denied)
+            ),
             "one lease"
         );
         let reported = v1::ProviderRevocation {
@@ -395,6 +398,7 @@ mod tests {
         let server = tokio::spawn(serve_revocation_lease_channel(
             authority,
             lease(Uuid::new_v4()),
+            value(),
             ready_tx,
             report_tx,
         ));
@@ -405,10 +409,11 @@ mod tests {
             client.report_ready().await,
             Err(RevocationLeaseChannelError::Denied)
         );
-        assert_eq!(
+        // Another request's lease gets no value.
+        assert!(matches!(
             client.lease().await,
             Err(RevocationLeaseChannelError::Denied)
-        );
+        ));
         drop(client);
         let _ = server.await;
     }
@@ -422,6 +427,7 @@ mod tests {
         let server = tokio::spawn(serve_revocation_lease_channel(
             authority,
             lease(request_id),
+            value(),
             ready_tx,
             report_tx,
         ));
@@ -455,40 +461,71 @@ mod tests {
         let _ = server.await;
     }
 
-    /// The executor's run against a store holding `held` for a lease of
-    /// `leased`: what it reported, and whether it asked the provider.
-    async fn executor_run(held: u64, leased: u64) -> (v1::ProviderRevocation, bool) {
-        use codewire_protected_store::{ProtectedStore as _, ProtectedValue};
-        let id = codewire_access::CredentialId::parse(Uuid::new_v4().to_string()).unwrap();
-        let store = crate::tests::TestProtectedStore::new(
-            codewire_protected_store::ProtectedStorePersistence::OperatingSystem,
-        );
-        store
-            .put(
-                &crate::protected_entry_id(&id, held).unwrap(),
-                &ProtectedValue::from_slice(b"synthetic-codex-bundle").unwrap(),
-            )
-            .unwrap();
+    /// An authority that predates #4984: its lease names the generation and
+    /// carries no value.
+    struct ValuelessLease(Uuid);
+
+    #[tonic::async_trait]
+    impl LocalCredentialRevocationLeaseService for ValuelessLease {
+        async fn report_revocation_executor_ready(
+            &self,
+            _request: Request<v1::RevocationExecutorReadyRequest>,
+        ) -> Result<Response<v1::RevocationExecutorReadyResponse>, Status> {
+            Ok(Response::new(v1::RevocationExecutorReadyResponse {}))
+        }
+
+        async fn lease_revocation_credential(
+            &self,
+            _request: Request<v1::RevocationCredentialLeaseRequest>,
+        ) -> Result<Response<v1::RevocationCredentialLeaseResponse>, Status> {
+            Ok(Response::new(v1::RevocationCredentialLeaseResponse {
+                credential_id: self.0.to_string(),
+                material_generation: 3,
+                material: Vec::new(),
+            }))
+        }
+
+        async fn report_provider_revocation(
+            &self,
+            _request: Request<v1::ProviderRevocationReportRequest>,
+        ) -> Result<Response<v1::ProviderRevocationReportResponse>, Status> {
+            Ok(Response::new(v1::ProviderRevocationReportResponse {}))
+        }
+    }
+
+    /// The executor's run against a lease from `authority`: whether it asked
+    /// the provider.
+    async fn executor_asks(valueless: bool) -> bool {
         let request_id = Uuid::new_v4();
         let (authority, executor) = UnixStream::pair().unwrap();
         let (ready_tx, _ready_rx) = oneshot::channel();
-        let (report_tx, report_rx) = oneshot::channel();
-        let server = tokio::spawn(serve_revocation_lease_channel(
-            authority,
-            RevocationLease {
-                request_id,
-                credential_id: id.as_str().to_owned(),
-                material_generation: leased,
-            },
-            ready_tx,
-            report_tx,
-        ));
+        let (report_tx, _report_rx) = oneshot::channel();
+        let server = if valueless {
+            tokio::spawn(async move {
+                let incoming = once(async move { Ok::<_, io::Error>(authority) }).chain(pending());
+                let _ = Server::builder()
+                    .add_service(LocalCredentialRevocationLeaseServiceServer::new(
+                        ValuelessLease(request_id),
+                    ))
+                    .serve_with_incoming(incoming)
+                    .await;
+                Ok::<(), RevocationLeaseChannelError>(())
+            })
+        } else {
+            tokio::spawn(serve_revocation_lease_channel(
+                authority,
+                lease(request_id),
+                value(),
+                ready_tx,
+                report_tx,
+            ))
+        };
         let mut client = LocalRevocationLeaseClient::connect(executor, request_id)
             .await
             .unwrap();
         let asked = Arc::new(AtomicBool::new(false));
         let asking = Arc::clone(&asked);
-        run_revocation_executor(&mut client, Some(&store), |material| async move {
+        run_revocation_executor(&mut client, |material| async move {
             assert_eq!(material.expose_secret(), b"synthetic-codex-bundle");
             asking.store(true, Ordering::SeqCst);
             v1::ProviderRevocation {
@@ -499,29 +536,22 @@ mod tests {
         })
         .await
         .unwrap();
-        let reported = report_rx.await.unwrap();
         drop(client);
-        let _ = server.await;
-        (reported, asked.load(Ordering::SeqCst))
+        server.abort();
+        asked.load(Ordering::SeqCst)
     }
 
     #[tokio::test]
-    async fn a_generation_the_store_does_not_hold_is_not_read_and_nothing_is_asked() {
-        let (reported, asked) = executor_run(2, 3).await;
-        assert_eq!(
-            reported.failure,
-            i32::from(v1::ProviderRevocationFailure::NotRead)
-        );
+    async fn the_executor_asks_only_with_a_leased_value() {
         assert!(
-            !asked,
-            "the provider was asked about a generation never read"
+            executor_asks(false).await,
+            "the leased value was not asked about"
         );
-        // The leased generation itself is read and asked about.
-        let (reported, asked) = executor_run(3, 3).await;
-        assert_eq!(
-            reported.outcome,
-            i32::from(v1::ProviderRevocationOutcome::Confirmed)
+        // An authority that sends no value: the executor refuses, NOT_READ,
+        // and never reads a store.
+        assert!(
+            !executor_asks(true).await,
+            "the provider was asked without a value"
         );
-        assert!(asked);
     }
 }

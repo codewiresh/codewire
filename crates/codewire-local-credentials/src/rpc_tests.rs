@@ -324,7 +324,6 @@ impl LocalBrokerProcessSpawner for TestBrokerSpawner {
 
 #[derive(Clone)]
 struct TestRepositorySpawner {
-    store: TestProtectedStore,
     leased_material: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     /// When set, the stand-in executor treats its login as due and refreshes
@@ -348,7 +347,6 @@ impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
             .map_err(|_| LocalRepositorySpawnError::Spawn)?;
         let stream =
             UnixStream::from_std(authority_peer).map_err(|_| LocalRepositorySpawnError::Spawn)?;
-        let store = self.store.clone();
         let request_id = config.request_id;
         let leased_material = self.leased_material.clone();
         let refresh_to = self.refresh_to;
@@ -363,13 +361,13 @@ impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
             if client.report_ready().await.is_err() {
                 return;
             }
-            let Ok(lease) = client.lease_github(store.clone()).await else {
+            let Ok(lease) = client.lease_github().await else {
                 return;
             };
             let _ = leased_material.send(lease.material().to_vec());
             if let Some(rotated) = refresh_to {
                 // No second lease before a refresh outcome.
-                let early = client.lease_github(store.clone()).await;
+                let early = client.lease_github().await;
                 let _ = leased_material.send(if early.is_err() {
                     b"second-lease-denied".to_vec()
                 } else {
@@ -391,7 +389,7 @@ impl LocalRepositoryProcessSpawner for TestRepositorySpawner {
                 {
                     return;
                 }
-                let Ok(lease) = client.lease_github(store).await else {
+                let Ok(lease) = client.lease_github().await else {
                     return;
                 };
                 let _ = leased_material.send(lease.material().to_vec());
@@ -1119,7 +1117,6 @@ async fn prepare_github_repository_taking(work_seconds: u32, control_deadline: O
     let store = TestProtectedStore::default();
     let (material_tx, mut material_rx) = tokio::sync::mpsc::unbounded_channel();
     let spawner = Arc::new(TestRepositorySpawner {
-        store: store.clone(),
         leased_material: material_tx,
         tasks: Arc::new(Mutex::new(Vec::new())),
         refresh_to: None,
@@ -1193,7 +1190,6 @@ async fn a_checkout_refreshes_a_due_github_login_through_the_authority_journal()
     let store = TestProtectedStore::default();
     let (material_tx, mut material_rx) = tokio::sync::mpsc::unbounded_channel();
     let spawner = Arc::new(TestRepositorySpawner {
-        store: store.clone(),
         leased_material: material_tx,
         tasks: Arc::new(Mutex::new(Vec::new())),
         refresh_to: Some(b"rotated-github-app-bundle"),
@@ -2632,14 +2628,13 @@ async fn move_default_away(client: &mut LocalCredentialClient) {
     );
 }
 
-/// Each lease the test executor took: credential, generation, material.
-type Leases = Arc<std::sync::Mutex<Vec<(String, u64, Vec<u8>)>>>;
+/// The value each lease the test executor took carried.
+type Leases = Arc<std::sync::Mutex<Vec<Vec<u8>>>>;
 
 /// The provider revocation executor, played in process (#4717): it leases
-/// over the inherited stream as the real child does, reads the leased
-/// generation from the store, records it, and reports `answer`.
+/// over the inherited stream as the real child does, records the value its
+/// lease carried (#4984), and reports `answer`.
 struct TestRevocationSpawner {
-    store: TestProtectedStore,
     answer: Option<crate::control::v1::ProviderRevocation>,
     leased: Leases,
     spawned: Arc<std::sync::atomic::AtomicUsize>,
@@ -2661,7 +2656,6 @@ impl crate::LocalRevocationProcessSpawner for TestRevocationSpawner {
             .map_err(|_| crate::LocalRevocationSpawnError::Spawn)?;
         let stream = UnixStream::from_std(authority_peer)
             .map_err(|_| crate::LocalRevocationSpawnError::Spawn)?;
-        let store = self.store.clone();
         let leased = Arc::clone(&self.leased);
         let request_id = config.request_id;
         tokio::spawn(async move {
@@ -2673,16 +2667,13 @@ impl crate::LocalRevocationProcessSpawner for TestRevocationSpawner {
             if client.report_ready().await.is_err() {
                 return;
             }
-            let Ok((credential_id, generation)) = client.lease().await else {
+            let Ok(value) = client.lease().await else {
                 return;
             };
-            let material = crate::read_leased_material(&store, &credential_id, generation)
+            let material = value
                 .map(|value| value.expose_secret().to_vec())
                 .unwrap_or_default();
-            leased
-                .lock()
-                .unwrap()
-                .push((credential_id, generation, material));
+            leased.lock().unwrap().push(material);
             let _ = client.report(answer).await;
         });
         let mut child = tokio::process::Command::new("/bin/sh");
@@ -2701,11 +2692,10 @@ impl crate::LocalRevocationProcessSpawner for TestRevocationSpawner {
 }
 
 fn revocation_spawner(
-    store: &TestProtectedStore,
+    _store: &TestProtectedStore,
     answer: Option<crate::control::v1::ProviderRevocation>,
 ) -> Arc<TestRevocationSpawner> {
     Arc::new(TestRevocationSpawner {
-        store: store.clone(),
         answer,
         leased: Arc::default(),
         spawned: Arc::default(),
@@ -2785,10 +2775,9 @@ async fn a_codex_revoke_asks_its_provider_through_one_executor_of_the_revoked_ge
     assert_eq!(answer, Some(confirmed()));
     let leased = spawner.leased.lock().unwrap().clone();
     assert_eq!(leased.len(), 1, "one executor, one lease");
-    assert_eq!(leased[0].0, credential.metadata.id.as_str());
     assert_eq!(
-        leased[0].2, FIRST_MATERIAL,
-        "the revoked generation is still readable"
+        leased[0], FIRST_MATERIAL,
+        "the lease carries the revoked generation's value"
     );
     let _ = shutdown.send(());
     server.await.unwrap().unwrap();

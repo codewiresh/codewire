@@ -6,12 +6,13 @@
 //! write would wait behind it. So each store call checks the connection is in
 //! autocommit, and refuses otherwise.
 
+use codewire_access::{CredentialId, CredentialStatus};
 use codewire_protected_store::{
     ProtectedEntryId, ProtectedStore, ProtectedStorePersistence, ProtectedValue,
 };
 use rusqlite::Connection;
 
-use crate::LocalCredentialError;
+use crate::{LocalCredentialAuthority, LocalCredentialError, MaterialState};
 
 pub(crate) struct MaterialStore<'a, S> {
     connection: &'a Connection,
@@ -61,6 +62,29 @@ impl<'a, S: ProtectedStore> MaterialStore<'a, S> {
         } else {
             Err(LocalCredentialError::StoreCallInTransaction)
         }
+    }
+}
+
+impl<S: ProtectedStore> LocalCredentialAuthority<S> {
+    /// The one value an executor's lease carries (#4984): the entry of
+    /// generation `generation` of `id`, read only while that is the
+    /// credential's current generation and its status is `status`. The checks
+    /// run before the store is read, on the material connection, and the read
+    /// runs outside any transaction on it (#5413).
+    pub(crate) fn executor_lease_material(
+        &self,
+        id: &CredentialId,
+        generation: u64,
+        status: CredentialStatus,
+    ) -> Result<ProtectedValue, LocalCredentialError> {
+        let connection = self.material_connection()?;
+        let current = crate::load_internal_credential(&connection, id, Some(MaterialState::Ready))?;
+        if current.material_generation != generation || current.public.metadata.status != status {
+            return Err(LocalCredentialError::CredentialUnavailable);
+        }
+        MaterialStore::new(&connection, &self.protected_store)
+            .get(&current.protected_entry_id)?
+            .ok_or(LocalCredentialError::CredentialMaterialMissing)
     }
 }
 

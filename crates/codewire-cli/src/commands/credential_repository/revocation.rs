@@ -1,9 +1,10 @@
 //! The one-shot provider revocation executor (#4717). The local credential
 //! authority starts it, confined as the repository executor is, with its
-//! lease stream on FD 3 after it has revoked the credential. It reads the one
-//! leased generation from the OS store, asks OpenAI to revoke the Codex
-//! refresh token over a transport that admits only that request, and reports
-//! only the outcome class. The token is never printed, kept or sent back.
+//! lease stream on FD 3 after it has revoked the credential. Its one lease
+//! carries the revoked generation's value, and it opens no store (#4984). It
+//! asks OpenAI to revoke the Codex refresh token over a transport that admits
+//! only that request, and reports only the outcome class. The token is never
+//! printed, kept or sent back.
 
 use std::os::fd::{FromRawFd as _, OwnedFd};
 use std::sync::Arc;
@@ -17,7 +18,6 @@ use codewire_local_credentials::{
 };
 use uuid::Uuid;
 
-use super::super::credential_child_store::{ChildStore, ChildStoreArgs};
 use super::verify_repository_executor_confinement;
 
 #[derive(Debug, clap::Args)]
@@ -26,16 +26,12 @@ pub(crate) struct LocalProviderRevocationExecutorArgs {
     pub(crate) authority_fd: i32,
     #[arg(long)]
     pub(crate) request_id: String,
-    /// The authority's store: the executor reads the selected backend.
-    #[command(flatten)]
-    pub(crate) store: ChildStoreArgs,
 }
 
 pub(crate) async fn run_local_provider_revocation_executor(
     args: LocalProviderRevocationExecutorArgs,
 ) -> anyhow::Result<()> {
     verify_repository_executor_confinement()?;
-    let store = ChildStore::from_args(&args.store)?;
     let request_id = executor_request_id(args.authority_fd, &args.request_id)?;
     // SAFETY: FD 3 is created by the authority immediately before exec and is
     // the only descriptor deliberately retained across that exec. Ownership is
@@ -52,8 +48,8 @@ pub(crate) async fn run_local_provider_revocation_executor(
     let mut client = LocalRevocationLeaseClient::connect(authority_stream, request_id)
         .await
         .context("connect revocation lease channel")?;
-    let store = store.open().ok();
-    run_revocation_executor(&mut client, store.as_ref(), |material| async move {
+    // The value is dropped, and so zeroized, as soon as the revoke returns.
+    run_revocation_executor(&mut client, |material| async move {
         match codex_revocation_transport().await {
             Ok(transport) => {
                 local_outcome(codex::revoke_stored(&transport, material.expose_secret()).await)
@@ -143,5 +139,57 @@ mod tests {
             "a non-canonical form"
         );
         assert!(executor_request_id(3, "not-a-request").is_err());
+    }
+
+    /// #4984: both executors open no store, so each refuses to start when a
+    /// caller still names one.
+    #[test]
+    fn both_executors_refuse_a_store_argument() {
+        use clap::Parser as _;
+
+        #[derive(clap::Parser)]
+        struct Revocation {
+            #[command(flatten)]
+            args: LocalProviderRevocationExecutorArgs,
+        }
+        #[derive(clap::Parser)]
+        struct Repository {
+            #[command(flatten)]
+            args: crate::commands::LocalGitRepositoryExecutorArgs,
+        }
+        let id = Uuid::new_v4().to_string();
+        let revocation = ["cw", "--authority-fd", "3", "--request-id", id.as_str()];
+        let repository = [
+            "cw",
+            "--transport",
+            "github-oauth",
+            "--authority-fd",
+            "3",
+            "--request-id",
+            id.as_str(),
+            "--staging-directory",
+            "/synthetic/staging",
+        ];
+        assert!(Revocation::try_parse_from(revocation).is_ok());
+        assert!(Repository::try_parse_from(repository).is_ok());
+        for store in [
+            &["--protected-store", "secret-service"][..],
+            &[
+                "--protected-store",
+                "file",
+                "--protected-store-directory",
+                "/synthetic",
+            ],
+            &["--keychain", "/synthetic/login.keychain-db"],
+        ] {
+            assert!(
+                Revocation::try_parse_from(revocation.iter().chain(store)).is_err(),
+                "{store:?}"
+            );
+            assert!(
+                Repository::try_parse_from(repository.iter().chain(store)).is_err(),
+                "{store:?}"
+            );
+        }
     }
 }

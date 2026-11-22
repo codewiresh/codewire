@@ -96,7 +96,7 @@ pub use platform::{
 pub use provider_revocation::{
     LocalRevocationLeaseClient, LocalRevocationProcessConfig, LocalRevocationProcessSpawner,
     LocalRevocationSpawnError, REVOCATION_LEASE_PROTOCOL_VERSION, RevocationLeaseChannelError,
-    read_leased_material, run_revocation_executor,
+    run_revocation_executor,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use refresh_commit::testing as refresh_testing;

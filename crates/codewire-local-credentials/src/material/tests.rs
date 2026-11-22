@@ -251,3 +251,66 @@ fn a_revoke_answers_while_a_refresh_admission_reconciles_on_the_store() {
     let after = authority.get_credential(&work.metadata.id).unwrap();
     assert_eq!(after.metadata.revocation_generation, 2);
 }
+
+/// An executor's lease value (#4984) is read only for the credential's
+/// current generation in the status the lease expects; any other request is
+/// refused before the store is read.
+#[test]
+fn an_executor_lease_reads_only_the_current_generation_in_its_status() {
+    let store = HeldStore::default();
+    let (_temp, authority) = authority(store.clone());
+    let work = authority.add_credential(codex("work"), material()).unwrap();
+    let id = work.metadata.id.clone();
+    let value = authority
+        .executor_lease_material(&id, 1, CredentialStatus::Active)
+        .unwrap();
+    assert_eq!(value.expose_secret(), material().expose_secret());
+    for (generation, status) in [
+        (2, CredentialStatus::Active),
+        (1, CredentialStatus::Revoked),
+    ] {
+        store.hold_next(Call::Get);
+        let refused = {
+            let authority = std::sync::Arc::clone(&authority);
+            let id = id.clone();
+            within(move || authority.executor_lease_material(&id, generation, status))
+        };
+        assert!(
+            matches!(refused, Err(LocalCredentialError::CredentialUnavailable)),
+            "generation {generation}, {status:?}"
+        );
+        assert!(!store.is_held(), "the store was read for a refused lease");
+        store.release();
+    }
+}
+
+/// While an executor's lease waits on a store that doesn't answer, as a
+/// keyring behind a hidden unlock prompt, the metadata path answers: the
+/// read runs on the material connection, outside any transaction (#5413).
+#[test]
+fn a_listing_answers_while_an_executor_lease_waits_on_the_store() {
+    use std::sync::Arc;
+
+    let store = HeldStore::default();
+    let (_temp, authority) = authority(store.clone());
+    let work = authority.add_credential(codex("work"), material()).unwrap();
+    store.hold_next(Call::Get);
+    let leasing = {
+        let authority = Arc::clone(&authority);
+        let id = work.metadata.id.clone();
+        std::thread::spawn(move || {
+            authority.executor_lease_material(&id, 1, CredentialStatus::Active)
+        })
+    };
+    store.wait_for_held();
+    {
+        let authority = Arc::clone(&authority);
+        within(move || {
+            authority.list_credentials().unwrap();
+        });
+    }
+    assert!(store.is_held());
+    store.release();
+    let leased = within(move || leasing.join().unwrap()).unwrap();
+    assert_eq!(leased.expose_secret(), material().expose_secret());
+}

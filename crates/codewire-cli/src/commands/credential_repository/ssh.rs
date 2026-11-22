@@ -463,12 +463,6 @@ mod tests {
     fn repository_transport_is_required_and_closed_in_the_private_cli() {
         use clap::Parser as _;
         let request = uuid::Uuid::new_v4().to_string();
-        // An executor also names its authority's store (#5255).
-        let store: &[&str] = if cfg!(target_os = "macos") {
-            &["--protected-store", "keychain"]
-        } else {
-            &["--protected-store", "secret-service"]
-        };
         let base = [
             "cw",
             "__local-git-repository-executor",
@@ -478,10 +472,7 @@ mod tests {
             &request,
             "--staging-directory",
             "/run/synthetic-repository",
-        ]
-        .into_iter()
-        .chain(store.iter().copied())
-        .collect::<Vec<_>>();
+        ];
         assert!(crate::Cli::try_parse_from(base.iter().copied()).is_err());
         for transport in ["github-oauth", "ssh"] {
             assert!(

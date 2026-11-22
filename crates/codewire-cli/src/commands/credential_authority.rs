@@ -734,17 +734,52 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
         if authority_fd < 3 {
             return Err(LocalRepositorySpawnError::InvalidConfiguration);
         }
-        let store_arguments = child_store_arguments(&self.store, &self.authority_root)
-            .ok_or(LocalRepositorySpawnError::InvalidConfiguration)?;
         let parent_pid = unsafe { libc::getpid() };
-        // SSH uses the inherited signing channel and explicit public runtime
-        // path only. Do not give its executor the Secret Service bus context.
+        let mut command = self.repository_executor_command(config)?;
+        confine_executor_to_fd3(&mut command, authority_fd, parent_pid);
+        command
+            .spawn()
+            .map_err(|_| LocalRepositorySpawnError::Spawn)
+    }
+}
+
+/// The one-shot provider revocation executor (#4717): the local GitHub
+/// executor's confinement, with an empty environment and no store (#4984).
+#[cfg(target_os = "linux")]
+impl LocalRevocationProcessSpawner for CwLocalCredentialProcessSpawner {
+    fn spawn(
+        &self,
+        config: &LocalRevocationProcessConfig,
+        authority_peer: std::os::unix::net::UnixStream,
+    ) -> Result<tokio::process::Child, LocalRevocationSpawnError> {
+        let authority_fd = authority_peer.as_raw_fd();
+        if authority_fd < 3 {
+            return Err(LocalRevocationSpawnError::InvalidConfiguration);
+        }
+        let parent_pid = unsafe { libc::getpid() };
+        let mut command = self.revocation_executor_command(config);
+        confine_executor_to_fd3(&mut command, authority_fd, parent_pid);
+        command
+            .spawn()
+            .map_err(|_| LocalRevocationSpawnError::Spawn)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl CwLocalCredentialProcessSpawner {
+    /// The repository executor's command line and environment, before its
+    /// post-fork confinement: no store argument and no Secret Service bus
+    /// (#4984).
+    fn repository_executor_command(
+        &self,
+        config: &LocalRepositoryProcessConfig,
+    ) -> Result<tokio::process::Command, LocalRepositorySpawnError> {
+        // No executor opens a store (#4984): a GitHub executor gets only its
+        // helper's private runtime directory, no Secret Service bus, owner
+        // HOME, agent socket or provider context; SSH uses the inherited
+        // signing channel and explicit public runtime path only.
         let allowed_environment = match config.transport {
-            codewire_local_credentials::LocalRepositoryTransport::GitHubOAuth
-                if config.platform_delegated =>
-            {
-                // Only the helper's private runtime directory. No Secret
-                // Service bus, owner HOME, agent socket or provider context.
+            codewire_local_credentials::LocalRepositoryTransport::GitHubOAuth => {
                 authority_environment(|name| {
                     if name == "XDG_RUNTIME_DIR" {
                         env::var_os(name)
@@ -752,9 +787,6 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
                         None
                     }
                 })
-            }
-            codewire_local_credentials::LocalRepositoryTransport::GitHubOAuth => {
-                self.child_environment(|name| env::var_os(name))
             }
             codewire_local_credentials::LocalRepositoryTransport::Ssh => Vec::new(),
         };
@@ -772,7 +804,6 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
             .arg(config.request_id.to_string())
             .arg("--staging-directory")
             .arg(&config.staging_directory)
-            .args(store_arguments)
             .env_clear()
             .envs(allowed_environment)
             .current_dir(&config.staging_directory)
@@ -793,29 +824,15 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
             // pipe, discarding diagnostics, before acknowledging cleanup.
             command.stderr(Stdio::piped());
         }
-        confine_executor_to_fd3(&mut command, authority_fd, parent_pid);
-        command
-            .spawn()
-            .map_err(|_| LocalRepositorySpawnError::Spawn)
+        Ok(command)
     }
-}
 
-/// The one-shot provider revocation executor (#4717): the local GitHub
-/// executor's store, environment and confinement.
-#[cfg(target_os = "linux")]
-impl LocalRevocationProcessSpawner for CwLocalCredentialProcessSpawner {
-    fn spawn(
+    /// The provider revocation executor's command line and its empty
+    /// environment, before its post-fork confinement (#4984).
+    fn revocation_executor_command(
         &self,
         config: &LocalRevocationProcessConfig,
-        authority_peer: std::os::unix::net::UnixStream,
-    ) -> Result<tokio::process::Child, LocalRevocationSpawnError> {
-        let authority_fd = authority_peer.as_raw_fd();
-        if authority_fd < 3 {
-            return Err(LocalRevocationSpawnError::InvalidConfiguration);
-        }
-        let store_arguments = child_store_arguments(&self.store, &self.authority_root)
-            .ok_or(LocalRevocationSpawnError::InvalidConfiguration)?;
-        let parent_pid = unsafe { libc::getpid() };
+    ) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&self.executable);
         command
             .arg("__local-provider-revocation-executor")
@@ -823,18 +840,13 @@ impl LocalRevocationProcessSpawner for CwLocalCredentialProcessSpawner {
             .arg("3")
             .arg("--request-id")
             .arg(config.request_id.to_string())
-            .args(store_arguments)
             .env_clear()
-            .envs(self.child_environment(|name| env::var_os(name)))
             .current_dir("/")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        confine_executor_to_fd3(&mut command, authority_fd, parent_pid);
         command
-            .spawn()
-            .map_err(|_| LocalRevocationSpawnError::Spawn)
     }
 }
 
@@ -1180,8 +1192,8 @@ mod tests {
         );
     }
 
-    /// #5255: a file store's broker and repository executor read no Secret
-    /// Service, so they get no session bus; a Secret Service root's keep it.
+    /// #5255: a file store's broker reads no Secret Service, so it gets no
+    /// session bus; a Secret Service root's keeps it.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_file_store_child_gets_no_session_bus() {
@@ -1215,6 +1227,55 @@ mod tests {
                 OsString::from("XDG_RUNTIME_DIR")
             ]
         );
+    }
+
+    /// #4984: neither executor is given a store, by argument or by Secret
+    /// Service address, even on a Secret Service root; each receives its one
+    /// value in its lease.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn neither_executor_is_given_a_store() {
+        let spawner = CwLocalCredentialProcessSpawner {
+            executable: "/synthetic/bin/cw".into(),
+            authority_root: "/synthetic/home/.codewire/credentials-v1".into(),
+            store: AuthorityProtectedStore {
+                backend: ProtectedStoreBackend::SecretService,
+                keychain: None,
+            },
+        };
+        let request_id = uuid::Uuid::new_v4();
+        let repository = spawner
+            .repository_executor_command(&LocalRepositoryProcessConfig {
+                request_id,
+                staging_directory: "/synthetic/staging".into(),
+                transport: codewire_local_credentials::LocalRepositoryTransport::GitHubOAuth,
+                platform_delegated: false,
+                ssh_runtime_directory: None,
+                git: None,
+            })
+            .unwrap();
+        let revocation =
+            spawner.revocation_executor_command(&LocalRevocationProcessConfig { request_id });
+        for command in [repository, revocation] {
+            let command = command.as_std();
+            for argument in command.get_args() {
+                assert!(
+                    ![
+                        "--protected-store",
+                        "--protected-store-directory",
+                        "--keychain"
+                    ]
+                    .contains(&argument.to_str().unwrap()),
+                    "{argument:?}"
+                );
+            }
+            assert!(
+                command
+                    .get_envs()
+                    .all(|(name, _)| name != OsStr::new("DBUS_SESSION_BUS_ADDRESS")),
+                "an executor was given the Secret Service bus"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]

@@ -67,6 +67,46 @@ impl Drop for v1::BrokerCredentialRefreshCommitRequest {
     }
 }
 
+impl std::fmt::Debug for v1::RepositoryCredentialLeaseResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RepositoryCredentialLeaseResponse")
+            .field("credential", &self.credential)
+            .field("profile_id", &self.profile_id)
+            .field("profile_revision", &self.profile_revision)
+            .field("permission", &self.permission)
+            .field("material_generation", &self.material_generation)
+            .field("source", &self.source)
+            .field("branch", &self.branch)
+            .field("revision", &self.revision)
+            .field("material", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for v1::RepositoryCredentialLeaseResponse {
+    fn drop(&mut self) {
+        self.material.zeroize();
+    }
+}
+
+impl std::fmt::Debug for v1::RevocationCredentialLeaseResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RevocationCredentialLeaseResponse")
+            .field("credential_id", &self.credential_id)
+            .field("material_generation", &self.material_generation)
+            .field("material", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for v1::RevocationCredentialLeaseResponse {
+    fn drop(&mut self) {
+        self.material.zeroize();
+    }
+}
+
 impl Drop for v1::AddCredentialRequest {
     fn drop(&mut self) {
         self.material.zeroize();
@@ -129,6 +169,32 @@ mod tests {
         assert!(printed.contains("refresh"), "{printed}");
         assert!(!printed.contains("refreshed-bundle-canary"), "{printed}");
         assert!(!printed.contains("114, 101, 102"), "{printed}");
+    }
+
+    #[test]
+    fn executor_leases_debug_without_their_material() {
+        let repository = v1::RepositoryCredentialLeaseResponse {
+            credential: None,
+            profile_id: "profile".into(),
+            profile_revision: 1,
+            permission: None,
+            material_generation: 2,
+            source: "https://github.com/codewire/codewire".into(),
+            branch: String::new(),
+            revision: String::new(),
+            material: b"repository-lease-canary".to_vec(),
+        };
+        let revocation = v1::RevocationCredentialLeaseResponse {
+            credential_id: "credential".into(),
+            material_generation: 3,
+            material: b"revocation-lease-canary".to_vec(),
+        };
+        for printed in [format!("{repository:?}"), format!("{revocation:?}")] {
+            assert!(printed.contains("[REDACTED]"), "{printed}");
+            for needle in ["lease-canary", "108, 101, 97, 115, 101"] {
+                assert!(!printed.contains(needle), "{printed}");
+            }
+        }
     }
 
     #[test]

@@ -1474,10 +1474,9 @@ when it confirmed it (#4717). Nothing retries.
     checks that setup at entry.
   - **What it holds:** one lease, the revoked credential's ID and material
     generation (a revoked credential keeps its material until delete).
-  - **Its store reach:** it opens the OS store itself, Secret Service on
-    Linux or the selected backend on macOS, as the GitHub repository executor
-    does, and reads only that generation's entry. It does not receive the
-    value over FD 3 yet; #4984 passes it there for both executors.
+  - **Its value:** it opens no store. The authority reads that generation's
+    entry and sends it once in the lease ("An executor's value", under
+    "Children" below); a lease without one is NOT_READ.
   - **Its one route:** it asks OpenAI over a transport that admits only
     `CodexTokenRevocation`.
   - **What it reports:** only the outcome class and the HTTP status. The token
@@ -1485,9 +1484,9 @@ when it confirmed it (#4717). Nothing retries.
   - **Its bound:** the authority stops and reaps it within 20 s, whatever it
     reported, and an executor that never reports is NOT_READ. It needs no
     directory, because it writes nothing.
-  - **A locked store:** on Linux, reading a locked Secret Service item asks
-    the desktop to unlock it. The executor waits for that, and if nobody
-    unlocks it, the 20 s bound ends the run with NOT_READ.
+  - **A locked store:** on Linux, the authority's read of a locked Secret
+    Service item asks the desktop to unlock it. The executor's lease waits for
+    that, and if nobody unlocks it, the 20 s bound ends the run with NOT_READ.
   - **Older authorities:** the CLI asks only an authority that serves
     `AuthorityFeature::ProviderRevocation`. An older one revokes without
     asking, and `cw` says the provider wasn't asked.
@@ -3438,8 +3437,8 @@ On macOS the SSH signer and the repository executor run Apple's OpenSSH and
   debugger attachment. Darwin has no parent-death signal, so Git, its
   helpers and stock SSH stay in the executor's process group, and the
   authority kills and drains that group (stderr EOF from every member) for
-  either transport. A GitHub executor reads its token from the authority's
-  own store and serves it once over a socket in the credential root; the
+  either transport. A GitHub executor receives its token in its lease and
+  serves it once over a socket in the credential root; the
   authority removes such a socket directory left by a killed executor when
   it starts.
 - A platform relay broker installs a deny-all Seatbelt profile where Linux
@@ -3554,48 +3553,71 @@ deletes them. cw-security agreed this design on #5255 (2026-11-18).
   stderr, so stdout stays JSON. A root is the account's own when it is
   `~/.codewire/credentials-v1` under the account's home directory, whatever
   `HOME` says, links included.
-- **Children.** The authority names its store on every broker's and
-  repository executor's command line, on Linux as on macOS
-  (`--protected-store`, and for `file` its `protected-v1` directory), and a
-  child opens exactly that store, read-only: a child's store refuses every
-  write, since the authority alone writes. A refresh's bundle is no
-  exception (#5539):
-  - **The child sends it in Commit, and the authority stages it.** The entry,
-    the generation and the deadline come from the authority's own Started
-    record; the request names only the refresh. The bundle is written into
-    the credential's next material generation before the refresh's
-    execution deadline, only into an empty entry or one already holding the
-    same bytes, then promoted. Other bytes already there are refused and left
-    to the refresh journal.
-  - **The write holds no database lock** (#5413). The credential's refresh
-    ownership keeps reconcile away meanwhile: a Begin or delete for it is
-    refused as in progress, and a channel releases its refreshes only after
-    its writes have returned, even when the child has gone.
-  - **A locked or slow store is answered `unavailable`**, and the child sends
-    the same Commit again until the execution deadline. A Commit the
-    authority answered and refused hands the refresh back to be failed; one
-    that timed out may still be writing, so its channel ends instead and the
-    journal settles it.
-  - **Every root refreshes this way**: Secret Service, a macOS keychain,
-    which the broker's Seatbelt profile only reads, and a `file` store, which
-    its Landlock domain only reads. A rotated refresh token is lost only if
-    the child or the authority stops between the provider's answer and the
-    authority's write.
-  - **The bundle is bounded** by the channel's message limit (320 KiB on a
-    broker's, 128 KiB on a repository executor's) and again by the store's
-    1 MiB, before anything else is read; an empty one is refused.
-  - **What it doesn't close, locally:** a child holding a started refresh
-    still chooses the bytes of that credential's next generation, so a
-    compromised local broker can replace a credential it is refreshing, for
-    every environment that uses it. Closing that needs the authority to make
-    or check the provider call. A hosted refresh has no such gap: the
-    credential service's own broker makes the exchange, and no Sandbox-side
-    process chooses the next generation.
+- **Children.** The authority names its store on every broker's command
+  line, on Linux as on macOS (`--protected-store`, and for `file` its
+  `protected-v1` directory), and a broker opens exactly that store,
+  read-only: a child's store refuses every write, since the authority alone
+  writes.
+  - **An executor's value (#4984).** The repository executor and the provider
+    revocation executor open no store: no store argument, and no Secret
+    Service address in their environment. Each refuses to start when it is
+    given a store argument. The authority sends each one its leased value:
+    - **only to the executor it spawned for that lease,** on its inherited
+      lease channel, never on a connection a later process could make, and
+      never for a permit another channel holds;
+    - **once:** a repeated lease call for the same permit gets no value;
+    - **for the current generation of an active credential only,** checked
+      before the store is read;
+    - **through the material connection** (#5413), never under the metadata
+      connection or an IMMEDIATE transaction;
+    - **bounded** by the channel's message limit and the store's 1 MiB, and
+      never logged, error text included.
 
-  A `file` store's children get no
-  session bus address (`DBUS_SESSION_BUS_ADDRESS`); a GitHub repository
-  executor keeps `XDG_RUNTIME_DIR` for its runtime directory. A Secret Service
-  root's children keep the bus address their authority has.
+    The executor makes itself non-dumpable before the lease, keeps the value
+    a `ProtectedValue` (never a `String`, argv or environment copy, Git's
+    helper answer and the revoke body included), and zeroizes it as soon as
+    the checkout or revocation call is made. An executor that predates this
+    is never given a value (repository lease protocol 6, revocation lease
+    protocol 2), and an executor against an authority that predates it gets
+    none and refuses.
+  - **A refresh's bundle** is written by the authority alone too (#5539):
+    - **The child sends it in Commit, and the authority stages it.** The entry,
+      the generation and the deadline come from the authority's own Started
+      record; the request names only the refresh. The bundle is written into
+      the credential's next material generation before the refresh's
+      execution deadline, only into an empty entry or one already holding the
+      same bytes, then promoted. Other bytes already there are refused and left
+      to the refresh journal.
+    - **The write holds no database lock** (#5413). The credential's refresh
+      ownership keeps reconcile away meanwhile: a Begin or delete for it is
+      refused as in progress, and a channel releases its refreshes only after
+      its writes have returned, even when the child has gone.
+    - **A locked or slow store is answered `unavailable`**, and the child sends
+      the same Commit again until the execution deadline. A Commit the
+      authority answered and refused hands the refresh back to be failed; one
+      that timed out may still be writing, so its channel ends instead and the
+      journal settles it.
+    - **Every root refreshes this way**: Secret Service, a macOS keychain,
+      which the broker's Seatbelt profile only reads, and a `file` store, which
+      its Landlock domain only reads. A rotated refresh token is lost only if
+      the child or the authority stops between the provider's answer and the
+      authority's write.
+    - **The bundle is bounded** by the channel's message limit (320 KiB on a
+      broker's, 128 KiB on a repository executor's) and again by the store's
+      1 MiB, before anything else is read; an empty one is refused.
+    - **What it doesn't close, locally:** a child holding a started refresh
+      still chooses the bytes of that credential's next generation, so a
+      compromised local broker can replace a credential it is refreshing, for
+      every environment that uses it. Closing that needs the authority to make
+      or check the provider call. A hosted refresh has no such gap: the
+      credential service's own broker makes the exchange, and no Sandbox-side
+      process chooses the next generation.
+
+  A `file` store's broker gets no session bus address
+  (`DBUS_SESSION_BUS_ADDRESS`), and the executors get none on any root; a
+  GitHub repository executor keeps `XDG_RUNTIME_DIR` for its runtime
+  directory. A Secret Service root's broker keeps the bus address its
+  authority has.
 - **The broker's Landlock domain** gains, for a `file` store only, one rule
   allowing reading files and listing directories beneath that
   `protected-v1` directory, and nothing else: no write, and no other path.

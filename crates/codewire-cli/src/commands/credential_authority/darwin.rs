@@ -358,8 +358,6 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
         if authority_fd < 3 {
             return Err(LocalRepositorySpawnError::InvalidConfiguration);
         }
-        let store_arguments = child_store_arguments(&self.store, &self.authority_root)
-            .ok_or(LocalRepositorySpawnError::InvalidConfiguration)?;
         let mut command = tokio::process::Command::new(&self.executable);
         command
             .arg("__local-git-repository-executor")
@@ -374,7 +372,6 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
             .arg(config.request_id.to_string())
             .arg("--staging-directory")
             .arg(&config.staging_directory)
-            .args(store_arguments)
             .env_clear()
             .current_dir(&config.staging_directory)
             .stdin(Stdio::null())
@@ -423,9 +420,9 @@ impl LocalRepositoryProcessSpawner for CwLocalCredentialProcessSpawner {
     }
 }
 
-/// The one-shot provider revocation executor (#4717): it opens the
-/// authority's store as the other children do and starts no descendant, so
-/// its stderr is not kept.
+/// The one-shot provider revocation executor (#4717): it opens no store, its
+/// one value arriving in its lease (#4984), and starts no descendant, so its
+/// stderr is not kept.
 impl LocalRevocationProcessSpawner for CwLocalCredentialProcessSpawner {
     fn spawn(
         &self,
@@ -436,8 +433,6 @@ impl LocalRevocationProcessSpawner for CwLocalCredentialProcessSpawner {
         if authority_fd < 3 {
             return Err(LocalRevocationSpawnError::InvalidConfiguration);
         }
-        let store_arguments = child_store_arguments(&self.store, &self.authority_root)
-            .ok_or(LocalRevocationSpawnError::InvalidConfiguration)?;
         let mut command = tokio::process::Command::new(&self.executable);
         command
             .arg("__local-provider-revocation-executor")
@@ -445,7 +440,6 @@ impl LocalRevocationProcessSpawner for CwLocalCredentialProcessSpawner {
             .arg("3")
             .arg("--request-id")
             .arg(config.request_id.to_string())
-            .args(store_arguments)
             .env_clear()
             .current_dir("/")
             .stdin(Stdio::null())

@@ -117,14 +117,14 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/build_record.rs" = { group = "executable", count = 1 }
 "crates/codewire-cli/src/commands/checkpoint.rs" = { group = "filevault", count = 2 }
 "crates/codewire-cli/src/commands/collaboration.rs" = { group = "member", count = 1 }
-"crates/codewire-cli/src/commands/credential_authority.rs" = { group = "credentials", count = 39 }
+"crates/codewire-cli/src/commands/credential_authority.rs" = { group = "credentials", count = 41 }
 "crates/codewire-cli/src/commands/credential_authority/ssh.rs" = { group = "credentials", count = 17 }
 "crates/codewire-cli/src/commands/credential_broker.rs" = { group = "credentials", count = 14 }
 "crates/codewire-cli/src/commands/credential_child_store.rs" = { group = "credentials", count = 17 }
 "crates/codewire-cli/src/commands/credential_child_store/tests.rs" = { group = "credentials", count = 1 }
 "crates/codewire-cli/src/commands/credential_input.rs" = { group = "credentials", count = 4 }
 "crates/codewire-cli/src/commands/credential_repository.rs" = { group = "credentials", count = 20 }
-"crates/codewire-cli/src/commands/credential_repository/ssh.rs" = { group = "credentials", count = 6 }
+"crates/codewire-cli/src/commands/credential_repository/ssh.rs" = { group = "credentials", count = 5 }
 "crates/codewire-cli/src/commands/credentials.rs" = { group = "credentials", count = 1 }
 "crates/codewire-cli/src/commands/credentials/output/save_refusal.rs" = { group = "credentials", count = 3 }
 "crates/codewire-cli/src/commands/credentials/store_notice.rs" = { group = "credentials", count = 7 }

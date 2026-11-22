@@ -68,12 +68,14 @@ use crate::control::v1::local_credential_repository_lease_service_server::{
 use crate::service::credential_to_proto;
 use crate::{
     CredentialRecord, LocalCredentialAuthority, LocalCredentialError,
-    RepositoryCredentialLeaseRequest, protected_entry_id,
+    RepositoryCredentialLeaseRequest,
 };
 
 const REPOSITORY_LEASE_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_REPOSITORY_LEASE_RPC_MESSAGE_BYTES: usize = 128 * 1024;
-pub const REPOSITORY_LEASE_PROTOCOL_VERSION: u32 = 5;
+/// The leased value travels in the lease response, beside its metadata.
+const MAX_LEASED_MATERIAL_BYTES: usize = MAX_REPOSITORY_LEASE_RPC_MESSAGE_BYTES - 16 * 1024;
+pub const REPOSITORY_LEASE_PROTOCOL_VERSION: u32 = 6;
 pub const REPOSITORY_SSH_RUNTIME_PREFIX: &str = "ssh-";
 /// `sockaddr_un.sun_path` capacity, including the terminating NUL.
 #[cfg(not(target_os = "macos"))]
@@ -330,13 +332,12 @@ impl LocalCredentialRepositoryLeaseClient {
             .map(Response::into_inner)
     }
 
-    pub async fn lease_github<S>(
+    /// This executor's one GitHub lease, and the leased value with it: the
+    /// executor opens no store (#4984). An authority that sends no value is
+    /// refused.
+    pub async fn lease_github(
         &mut self,
-        protected_store: S,
-    ) -> Result<RepositoryCredentialLease, RepositoryLeaseChannelError>
-    where
-        S: ProtectedStore + Clone + 'static,
-    {
+    ) -> Result<RepositoryCredentialLease, RepositoryLeaseChannelError> {
         let response = self
             .inner
             .lease_repository_credential(v1::RepositoryCredentialLeaseRequest {
@@ -345,53 +346,57 @@ impl LocalCredentialRepositoryLeaseClient {
             .await
             .map_err(map_client_status)?
             .into_inner();
-        let credential = response
-            .credential
-            .ok_or(RepositoryLeaseChannelError::InvalidResponse)
-            .and_then(|credential| {
-                credential_from_proto(credential)
-                    .map_err(|_| RepositoryLeaseChannelError::InvalidResponse)
-            })?;
-        let profile_id = AccessProfileId::parse(response.profile_id)
-            .map_err(|_| RepositoryLeaseChannelError::InvalidResponse)?;
-        let permission = response
-            .permission
-            .ok_or(RepositoryLeaseChannelError::InvalidResponse)
-            .and_then(permission_from_proto)?;
-        let expected_permission = github_fetch_permission();
-        if response.profile_revision == 0
-            || response.material_generation == 0
-            || credential.persistence != protected_store.persistence()
-            || credential.metadata.provider.as_str() != "github"
-            || credential.metadata.authentication_kind != CredentialAuthKind::OAuth
-            || permission != expected_permission
-            || validate_github_https_source(&response.source).is_err()
-            || (!response.branch.is_empty() && !valid_git_selector(&response.branch))
-            || (!response.revision.is_empty() && !valid_git_selector(&response.revision))
-            || (!response.branch.is_empty() && !response.revision.is_empty())
-        {
-            return Err(RepositoryLeaseChannelError::InvalidResponse);
-        }
-        let entry_id = protected_entry_id(&credential.metadata.id, response.material_generation)
-            .map_err(|_| RepositoryLeaseChannelError::InvalidResponse)?;
-        let store = protected_store;
-        let value = tokio::task::spawn_blocking(move || store.get(&entry_id))
-            .await
-            .map_err(|_| RepositoryLeaseChannelError::Unavailable)?
-            .map_err(|_| RepositoryLeaseChannelError::Unavailable)?
-            .ok_or(RepositoryLeaseChannelError::Unavailable)?;
-        Ok(RepositoryCredentialLease {
-            credential,
-            profile_id,
-            profile_revision: response.profile_revision,
-            permission,
-            source: response.source,
-            branch: response.branch,
-            revision: response.revision,
-            material_generation: response.material_generation,
-            value,
-        })
+        github_lease_from_response(response)
     }
+}
+
+/// A GitHub lease from the authority's answer, its value moved into a
+/// `ProtectedValue` before anything else is read. An answer without a value,
+/// as from an authority that predates #4984, is refused.
+fn github_lease_from_response(
+    mut response: v1::RepositoryCredentialLeaseResponse,
+) -> Result<RepositoryCredentialLease, RepositoryLeaseChannelError> {
+    let value = ProtectedValue::new(std::mem::take(&mut response.material))
+        .map_err(|_| RepositoryLeaseChannelError::Unavailable)?;
+    let credential = response
+        .credential
+        .take()
+        .ok_or(RepositoryLeaseChannelError::InvalidResponse)
+        .and_then(|credential| {
+            credential_from_proto(credential)
+                .map_err(|_| RepositoryLeaseChannelError::InvalidResponse)
+        })?;
+    let profile_id = AccessProfileId::parse(std::mem::take(&mut response.profile_id))
+        .map_err(|_| RepositoryLeaseChannelError::InvalidResponse)?;
+    let permission = response
+        .permission
+        .take()
+        .ok_or(RepositoryLeaseChannelError::InvalidResponse)
+        .and_then(permission_from_proto)?;
+    let expected_permission = github_fetch_permission();
+    if response.profile_revision == 0
+        || response.material_generation == 0
+        || credential.metadata.provider.as_str() != "github"
+        || credential.metadata.authentication_kind != CredentialAuthKind::OAuth
+        || permission != expected_permission
+        || validate_github_https_source(&response.source).is_err()
+        || (!response.branch.is_empty() && !valid_git_selector(&response.branch))
+        || (!response.revision.is_empty() && !valid_git_selector(&response.revision))
+        || (!response.branch.is_empty() && !response.revision.is_empty())
+    {
+        return Err(RepositoryLeaseChannelError::InvalidResponse);
+    }
+    Ok(RepositoryCredentialLease {
+        credential,
+        profile_id,
+        profile_revision: response.profile_revision,
+        permission,
+        source: std::mem::take(&mut response.source),
+        branch: std::mem::take(&mut response.branch),
+        revision: std::mem::take(&mut response.revision),
+        material_generation: response.material_generation,
+        value,
+    })
 }
 
 /// A reserved refresh of the leased GitHub connection.
@@ -864,6 +869,31 @@ where
                 "repository credential lease was denied",
             ));
         };
+        // The value goes only to this channel's own executor, once per lease
+        // (#4984): the request named this channel's authorization, and a
+        // repeated call was refused above.
+        let authority = Arc::clone(&self.authority);
+        let (credential_id, generation) = (
+            admission.credential.metadata.id.clone(),
+            admission.material_generation,
+        );
+        let operation = self.lifetime.acquire()?;
+        let material = tokio::task::spawn_blocking(move || {
+            let _operation = operation;
+            authority.executor_lease_material(
+                &credential_id,
+                generation,
+                codewire_access::CredentialStatus::Active,
+            )
+        })
+        .await
+        .map_err(|_| Status::unavailable("repository credential authority is unavailable"))?
+        .map_err(map_server_error)?;
+        if material.expose_secret().len() > MAX_LEASED_MATERIAL_BYTES {
+            return Err(Status::failed_precondition(
+                "repository credential is too large to lease",
+            ));
+        }
         self.lifetime.ensure_open()?;
         Ok(Response::new(v1::RepositoryCredentialLeaseResponse {
             credential: Some(credential_to_proto(admission.credential)),
@@ -877,6 +907,7 @@ where
             source: self.authorization.source.clone(),
             branch: self.authorization.branch.clone(),
             revision: self.authorization.revision.clone(),
+            material: material.expose_secret().to_vec(),
         }))
     }
 
@@ -1728,15 +1759,31 @@ mod tests {
         )
         .await
         .unwrap();
+        // An executor that predates #4984 speaks the previous lease protocol:
+        // it is refused at ready, so it is never given a value it doesn't
+        // expect, and no lease is served before ready.
+        assert!(
+            client
+                .inner
+                .report_repository_executor_ready(v1::RepositoryExecutorReadyRequest {
+                    protocol_version: REPOSITORY_LEASE_PROTOCOL_VERSION - 1,
+                })
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            client.lease_github().await,
+            Err(RepositoryLeaseChannelError::Denied)
+        ));
         client.report_ready().await.unwrap();
         ready_rx.await.unwrap();
-        let lease = client.lease_github(store.clone()).await.unwrap();
+        let lease = client.lease_github().await.unwrap();
         assert_eq!(lease.profile_id, profile.profile.id);
         assert_eq!(lease.profile_revision, 1);
         assert_eq!(lease.source, authorization.source);
         assert_eq!(lease.material(), b"synthetic-github-token");
         assert!(matches!(
-            client.lease_github(store).await,
+            client.lease_github().await,
             Err(RepositoryLeaseChannelError::Denied)
         ));
         drop(client);
@@ -1745,6 +1792,27 @@ mod tests {
             .expect("repository lease server stopped")
             .unwrap()
             .unwrap();
+    }
+
+    /// #4984: an authority that predates the value sends none, and the
+    /// executor refuses the lease rather than read a store.
+    #[test]
+    fn a_lease_without_its_value_is_refused() {
+        let response = v1::RepositoryCredentialLeaseResponse {
+            credential: None,
+            profile_id: String::new(),
+            profile_revision: 1,
+            permission: None,
+            material_generation: 1,
+            source: "https://github.com/codewire/codewire.git".to_owned(),
+            branch: String::new(),
+            revision: String::new(),
+            material: Vec::new(),
+        };
+        assert!(matches!(
+            github_lease_from_response(response),
+            Err(RepositoryLeaseChannelError::Unavailable)
+        ));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

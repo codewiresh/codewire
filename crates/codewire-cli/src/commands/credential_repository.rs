@@ -14,7 +14,6 @@ use codewire_local_credentials::{
 };
 use uuid::Uuid;
 
-use super::credential_child_store::ChildStore;
 #[cfg(target_os = "macos")]
 use super::credential_darwin::{
     admit_runtime_git, bind_to_parent_and_deny_attachment, isolated_session_and_environment,
@@ -121,8 +120,6 @@ pub(crate) async fn run_local_git_repository_executor(
     args: LocalGitRepositoryExecutorArgs,
 ) -> anyhow::Result<()> {
     verify_repository_executor_confinement()?;
-    // Validate the store selection before any channel or Git effect.
-    let store = ChildStore::from_args(&args.store)?;
     anyhow::ensure!(args.authority_fd == 3, "invalid repository lease channel");
     let request_id = Uuid::parse_str(&args.request_id)
         .ok()
@@ -211,12 +208,8 @@ pub(crate) async fn run_local_git_repository_executor(
                 .await
                 .context("prepare platform repository");
             }
-            let store = store
-                .open()
-                .context("open repository executor protected store")?;
             run_local_repository_executor(
                 authority_stream,
-                store,
                 config,
                 &credential_runtime_directory,
                 &git.program,

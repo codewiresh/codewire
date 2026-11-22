@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use codewire_credential_bridge::MANAGED_GITHUB_GIT_PREFIX;
-use codewire_protected_store::ProtectedStore;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::{UnixListener, UnixStream};
@@ -97,20 +96,16 @@ pub trait GitHubLoginRenewer: Sync {
 const MAX_GITHUB_LOGIN_ATTEMPTS: u32 = 32;
 const BROKER_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run_local_repository_executor<S>(
+/// The executor opens no store: its one value arrives in its lease (#4984).
+pub async fn run_local_repository_executor(
     authority_stream: UnixStream,
-    protected_store: S,
     config: LocalRepositoryProcessConfig,
     credential_runtime_directory: &Path,
     git_executable: &Path,
     credential_helper_executable: &Path,
     git_spawner: &dyn LocalRepositoryGitProcessSpawner,
     github_login: &dyn GitHubLoginRenewer,
-) -> Result<(), RepositoryExecutorError>
-where
-    S: ProtectedStore + Clone + 'static,
-{
+) -> Result<(), RepositoryExecutorError> {
     config
         .validate()
         .map_err(|_| RepositoryExecutorError::InvalidConfiguration)?;
@@ -132,7 +127,7 @@ where
         .await
         .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?;
     let mut lease = leases
-        .lease_github(protected_store.clone())
+        .lease_github()
         .await
         .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?;
     // A login due for renewal is refreshed through the authority's journal,
@@ -188,7 +183,7 @@ where
             }
         }
         lease = leases
-            .lease_github(protected_store.clone())
+            .lease_github()
             .await
             .map_err(|_| RepositoryExecutorError::LeaseUnavailable)?;
     };

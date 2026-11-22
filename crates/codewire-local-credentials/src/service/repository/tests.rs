@@ -25,7 +25,6 @@ struct RunningChild {
 }
 
 struct SyntheticSpawner {
-    store: TestProtectedStore,
     started: mpsc::UnboundedSender<RunningChild>,
     clients: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
@@ -65,7 +64,6 @@ impl LocalRepositoryProcessSpawner for SyntheticSpawner {
         #[cfg(target_os = "macos")]
         command.stderr(Stdio::piped()).process_group(0);
         let child = command.spawn().map_err(fail)?;
-        let store = self.store.clone();
         let request_id = config.request_id;
         let platform = config.platform_delegated;
         let (leased_tx, leased) = oneshot::channel();
@@ -79,7 +77,7 @@ impl LocalRepositoryProcessSpawner for SyntheticSpawner {
                 use base64::Engine as _;
                 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
                 assert_eq!(
-                    client.lease_github(store).await.unwrap_err(),
+                    client.lease_github().await.unwrap_err(),
                     RepositoryLeaseChannelError::Denied
                 );
                 let checkout = client.brokered_checkout().await.unwrap();
@@ -110,7 +108,7 @@ impl LocalRepositoryProcessSpawner for SyntheticSpawner {
                 assert!(response.starts_with(b"HTTP/1.1 200"));
                 assert!(response.windows(4).any(|bytes| bytes == b"PACK"));
             } else {
-                let lease = client.lease_github(store).await.unwrap();
+                let lease = client.lease_github().await.unwrap();
                 drop(lease);
                 let _ = streaming_tx.send(());
             }
@@ -185,7 +183,6 @@ impl Fixture {
         };
         let (started, receiver) = mpsc::unbounded_channel();
         let spawner = Arc::new(SyntheticSpawner {
-            store,
             started,
             clients: Mutex::new(Vec::new()),
         });

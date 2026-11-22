@@ -8,8 +8,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use codewire_access::{CredentialAuthKind, CredentialId};
-use codewire_protected_store::ProtectedStore;
+use codewire_access::{CredentialAuthKind, CredentialId, CredentialStatus};
+use codewire_protected_store::{ProtectedStore, ProtectedValue};
 use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -69,12 +69,27 @@ impl<S: ProtectedStore + 'static> ProviderRevocations<S> {
         let Some(material_generation) = material_generation else {
             return Ok((record, Some(not_read())));
         };
+        // The executor opens no store: the authority reads the revoked
+        // generation, within the run's bound, and its lease carries it (#4984).
+        // A locked keyring that never answers is NOT_READ at the bound.
+        let authority = Arc::clone(&self.authority);
+        let reading = id.clone();
+        let read = tokio::task::spawn_blocking(move || {
+            authority.executor_lease_material(
+                &reading,
+                material_generation,
+                CredentialStatus::Revoked,
+            )
+        });
+        let Ok(Ok(Ok(material))) = tokio::time::timeout(EXECUTOR_BOUND, read).await else {
+            return Ok((record, Some(not_read())));
+        };
         let lease = RevocationLease {
             request_id: Uuid::new_v4(),
             credential_id: id.as_str().to_owned(),
             material_generation,
         };
-        let reported = run_executor(spawner.as_ref(), lease)
+        let reported = run_executor(spawner.as_ref(), lease, material)
             .await
             .unwrap_or_else(|()| not_read());
         Ok((record, Some(reported)))
@@ -84,6 +99,7 @@ impl<S: ProtectedStore + 'static> ProviderRevocations<S> {
 async fn run_executor(
     spawner: &dyn LocalRevocationProcessSpawner,
     lease: RevocationLease,
+    material: ProtectedValue,
 ) -> Result<v1::ProviderRevocation, ()> {
     let config = LocalRevocationProcessConfig {
         request_id: lease.request_id,
@@ -99,6 +115,7 @@ async fn run_executor(
     let server = tokio::spawn(serve_revocation_lease_channel(
         authority_stream,
         lease,
+        material,
         ready_tx,
         report_tx,
     ));
