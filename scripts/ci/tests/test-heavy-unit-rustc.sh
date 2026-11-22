@@ -22,51 +22,74 @@ printf 'end unit %s\n' "$(date +%s.%N)" >> "$LOG"
 EOF
 chmod +x "$work/rustc"
 
-overlapping() { # LOG: 0 when two compiles ran at the same time, 1 when not, 2 on a bad log
+most_at_once() { # LOG: the most compiles that ran at the same time; 99 on a bad log
   python3 -I - "$1" <<'PY'
 import sys
-lines = [line.split() for line in open(sys.argv[1])]
-if len(lines) != 4 or any(len(fields) != 3 for fields in lines):
-    sys.exit(2)
-starts = sorted(float(l.split()[2]) for l in open(sys.argv[1]) if l.startswith("start"))
-ends = sorted(float(l.split()[2]) for l in open(sys.argv[1]) if l.startswith("end"))
-# Serial when each compile starts after the previous one ended.
-sys.exit(0 if any(starts[i + 1] < ends[i] for i in range(len(starts) - 1)) else 1)
+events = []
+for line in open(sys.argv[1]):
+    fields = line.split()
+    if len(fields) != 3 or fields[0] not in ("start", "end"):
+        print(99); sys.exit()
+    events.append((float(fields[2]), 1 if fields[0] == "start" else -1))
+if not events or sum(e for _, e in events) != 0:
+    print(99); sys.exit()
+running = most = 0
+for _, step in sorted(events, key=lambda e: (e[0], e[1])):
+    running += step
+    most = max(most, running)
+print(most)
 PY
 }
 
-expect_overlap() { # WANT MESSAGE: overlapping's exit status must be WANT
-  local got=0
-  overlapping "$work/log" || got=$?
-  [ "$got" -eq "$1" ] || fail "$2 (overlap check returned $got)"
+expect_at_once() { # WANT MESSAGE: at most WANT compiles ran at once, and that many did
+  local got
+  got="$(most_at_once "$work/log")"
+  [ "$got" = "$1" ] || fail "$2 (at most $got at once)"
 }
 
-run_two() { # CRATE: two compiles of CRATE at once through the wrapper, under the lock
+run_n() { # N SLOTS CRATE: N compiles of CRATE at once through the wrapper, with SLOTS slots
   : > "$work/log"
-  for _ in 1 2; do
-    LOG="$work/log" BUILD_ONCE_HEAVY_LOCK="$work/lock" "$WRAPPER" "$work/rustc" --crate-name "$1" &
+  for _ in $(seq "$1"); do
+    LOG="$work/log" BUILD_ONCE_HEAVY_SLOTS="$2" BUILD_ONCE_HEAVY_LOCK="$work/lock" \
+      "$WRAPPER" "$work/rustc" --crate-name "$3" &
   done
   wait
 }
 
-run_two codewire_proto
-expect_overlap 1 'two codewire_proto compiles overlapped under the lock'
-run_two codewire_cli
-expect_overlap 0 'two ordinary units were made to wait for each other'
+# One slot: codewire_proto compiles one at a time; other units are never held.
+run_n 2 1 codewire_proto
+expect_at_once 1 'two codewire_proto compiles overlapped with one slot'
+run_n 2 1 codewire_cli
+expect_at_once 2 'two ordinary units were made to wait for each other'
+# Two slots: the second compile takes the second slot file and runs at once;
+# a third waits for one of them.
+run_n 3 2 codewire_proto
+expect_at_once 2 'with two slots, three codewire_proto compiles did not run two at a time'
+[ -e "$work/lock.0" ] && [ -e "$work/lock.1" ] && [ ! -e "$work/lock.2" ] ||
+  fail "two slots did not use exactly lock.0 and lock.1: $(cd "$work" && echo lock.*)"
+# The default is three slots.
+rm -f "$work"/lock.*
+run_n 4 '' codewire_proto
+expect_at_once 3 'the default did not allow three codewire_proto compiles at once'
 
 : > "$work/log"
-LOG="$work/log" BUILD_ONCE_HEAVY_LOCK="$work/lock" "$WRAPPER" "$work/rustc" --crate-name=codewire_proto &
-LOG="$work/log" BUILD_ONCE_HEAVY_LOCK="$work/lock" "$WRAPPER" "$work/rustc" --crate-name codewire_proto &
+LOG="$work/log" BUILD_ONCE_HEAVY_SLOTS=1 BUILD_ONCE_HEAVY_LOCK="$work/lock" "$WRAPPER" "$work/rustc" --crate-name=codewire_proto &
+LOG="$work/log" BUILD_ONCE_HEAVY_SLOTS=1 BUILD_ONCE_HEAVY_LOCK="$work/lock" "$WRAPPER" "$work/rustc" --crate-name codewire_proto &
 wait
-expect_overlap 1 'the --crate-name=NAME spelling escaped the lock'
+expect_at_once 1 'the --crate-name=NAME spelling escaped the lock'
+
+# A heavy compile's exit status comes back unchanged through its slot.
+status=0
+BUILD_ONCE_HEAVY_LOCK="$work/lock" "$WRAPPER" sh -c 'exit 3' --crate-name codewire_proto || status=$?
+[ "$status" -eq 3 ] || fail "a heavy compile that exited 3 returned $status"
 
 # A compile that leaves a process behind (an sccache client starting its
 # server) does not keep the lock: the next heavy compile still runs at once.
 printf '#!/usr/bin/env bash\nsleep 30 >/dev/null 2>&1 &\necho "$!" > "%s/leftover.pid"\n' "$work" > "$work/spawner"
 chmod +x "$work/spawner"
-BUILD_ONCE_HEAVY_LOCK="$work/lock" "$WRAPPER" "$work/spawner" --crate-name codewire_proto
+BUILD_ONCE_HEAVY_SLOTS=1 BUILD_ONCE_HEAVY_LOCK="$work/lock" "$WRAPPER" "$work/spawner" --crate-name codewire_proto
 status=0
-timeout 5 env BUILD_ONCE_HEAVY_LOCK="$work/lock" "$WRAPPER" true --crate-name codewire_proto || status=$?
+timeout 5 env BUILD_ONCE_HEAVY_SLOTS=1 BUILD_ONCE_HEAVY_LOCK="$work/lock" "$WRAPPER" true --crate-name codewire_proto || status=$?
 kill "$(cat "$work/leftover.pid")" 2>/dev/null || true
 [ "$status" -eq 0 ] || fail 'a process left behind by one heavy compile kept the lock from the next'
 
@@ -101,4 +124,4 @@ sed -n '/^checks() {/,/^}/p' "$once" | grep -A1 '^  unset RUSTC_WRAPPER$' | grep
 grep -q 'peak-rss.py" "$logs/$name.rss"' "$once" || fail 'a leg runs without its peak measured'
 grep -q 'peak-rss.py" "$logs/checks.rss"' "$once" || fail 'the checks run without their peak measured'
 
-echo 'test-heavy-unit-rustc: codewire_proto one at a time, others at once, no lock kept by a leftover process, the next wrapper kept, peaks measured'
+echo 'test-heavy-unit-rustc: codewire_proto in its slots (one, two, the default three), others at once, no slot kept by a leftover process, the next wrapper kept, peaks measured'
