@@ -9,7 +9,7 @@ format is in [README.md](README.md). Issue: #4980.
 
 ## Where it stands
 
-Updated 2026-11-17.
+Updated 2026-11-22.
 
 | ID | Linux | macOS |
 | --- | --- | --- |
@@ -231,6 +231,23 @@ installed runtime (orchestrator, 2026-11-15, recorded on #4980).
     (`cw --local stop NAME`)", the restore with exit status 1; up-walk was
     still `stopped` at generation 1 and up-run `running`. Observed working
     for the restore's refusal (#5243).
+  - Linux 7.2.15, a build of `main` at a92027742 with its runtime, 2026-11-22,
+    in a scratch `HOME` with the file credential store. hw-walk was created
+    and stopped, and the installed runtime's Cloud Hypervisor blob made
+    unreadable. `cw --local start hw-walk` printed "x Start hw-walk failed at
+    "Checking credential access": … failed: start_artifact_store", and
+    supervisor.log recorded `operation_failed` with `cause=artifact_store`;
+    the step named is the one showing, not the artifact check (#5892). With
+    the blob readable again, a start's supervisor was sent SIGTERM at
+    "Starting the VM" and the blob made unreadable. The start printed "x Start
+    hw-walk failed at "Starting the VM": … failed: start_interrupted", never
+    "lost contact": the next supervisor logged `supervisor_started`,
+    `operation_resumed` at `start_vm` and `operation_failed` with
+    `cause=artifact_store`, and supervisor.log kept both supervisors' lines.
+    With the blob readable, `cw --local start hw-walk` started it from
+    `error` and `cw --local rm hw-walk --yes` removed it; the log had no
+    `supervisor_halted` or `drain_refused`. Observed working, except the
+    step named for an artifact failure (#5892).
 
 ## 2. `local-vm-upgrade-credentials`: credentials across an upgrade
 
