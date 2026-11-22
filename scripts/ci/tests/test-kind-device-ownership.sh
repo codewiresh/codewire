@@ -142,6 +142,19 @@ patches = yaml.safe_load(open(template))["containerdConfigPatches"]
 assert any(tomllib.loads(p)["plugins"]["io.containerd.grpc.v1.cri"].get(key) is True for p in patches)
 PY
 
+# A `standard` Pod's image disk is an image volume, which Kind's Kubernetes
+# drops without an error while the gate is off, and its /dev/kvm plugin runs on
+# the sandbox pool, so both new-cluster configs turn the gate on and the e2e
+# node carries the pool's label (#5602).
+python3 - "$TEMPLATE" "$ROOT/deployments/kind/cluster-config.yaml" <<'PY' || fail "a Kind config does not turn ImageVolume on, or the e2e node is not in the sandbox pool"
+import sys, yaml
+e2e, local = (yaml.safe_load(open(path)) for path in sys.argv[1:])
+assert all(config.get("featureGates", {}).get("ImageVolume") is True for config in (e2e, local))
+patch = yaml.safe_load(e2e["nodes"][0]["kubeadmConfigPatches"][0])
+labels = patch["nodeRegistration"]["kubeletExtraArgs"]["node-labels"].split(",")
+assert "codewire.sh/node-pool=sandbox" in labels
+PY
+
 # Two nodes without the setting: each gets one key line under the CRI table,
 # one restart, and containerd back with it on.
 reset

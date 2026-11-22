@@ -27,8 +27,31 @@ resources:
   - coordinator-nodeport.yaml
   # Kind's own DERP relay and the plain-HTTP coordinator route (#3836).
   - tailnet.yaml
+  # The `standard` profile's class, without the Kata classes Kind cannot run
+  # (#5602).
+  - ../../../deployments/k8s/runtime-profiles/standard
+
+# The /dev/kvm device plugin the `standard` profile's Pods take (#5602).
+components:
+  - ../../../deployments/k8s/kvm-device-plugin
 
 patches:
+  # Kind's one node is labelled as the sandbox pool, not as a runtime node, and
+  # the plugin runs the side-loaded services image.
+  - target:
+      kind: DaemonSet
+      name: codewire-kvm-device-plugin
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/nodeSelector
+        value:
+          codewire.sh/node-pool: sandbox
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: codewire-services:e2e
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
   # The registries the image cache may hold images from: the public
   # workspace mirror and Docker Official Images (docs/CONFIGURATION.md).
   - target:

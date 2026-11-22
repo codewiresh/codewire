@@ -21,6 +21,11 @@ containerdConfigPatches:
   - |-
     [plugins."io.containerd.grpc.v1.cri"]
       device_ownership_from_security_context = true
+# The `standard` profile's Pod mounts the workspace image's disk as an image
+# volume (#5602). Kind's Kubernetes 1.34 has the gate off, and the API server
+# then drops the volume and its mount without an error.
+featureGates:
+  ImageVolume: true
 nodes:
   - role: control-plane
     kubeadmConfigPatches:
@@ -28,8 +33,9 @@ nodes:
         kind: InitConfiguration
         nodeRegistration:
           kubeletExtraArgs:
-            # ingress-ready: schedules the vendored ingress-nginx controller.
-            node-labels: "ingress-ready=true"
+            # ingress-ready: schedules the vendored ingress-nginx controller;
+            # the sandbox pool takes workspaces and the /dev/kvm plugin.
+            node-labels: "ingress-ready=true,codewire.sh/node-pool=sandbox"
     extraPortMappings:
       - containerPort: 80
         hostPort: 8090
