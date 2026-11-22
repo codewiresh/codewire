@@ -16,10 +16,11 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use uuid::Uuid;
 
+use super::disco_bindings::disco_hex;
 use super::node_bindings::{
     BindingStore, Claim, NODE_BINDING_REFRESH, Principal, Refresh, Refusal, SessionBinding,
 };
-use super::node_keys::SessionNodeKey;
+use super::node_keys::{SessionNodeKey, key_hex};
 use super::peer::{PeerProof, PeerVerifier, ProofError, unix_now};
 use super::{
     COORDINATE_HEARTBEAT_INTERVAL, CoordinationPlane, DerpMap, PeerEvent, PeerKind, PeerRegistry,
@@ -214,6 +215,8 @@ struct PeerSession {
     node_key: SessionNodeKey,
     /// The node key's binding to this session's principal and environment.
     binding: SessionBinding,
+    /// The node's disco key's binding, the same way (#5962).
+    disco: SessionBinding,
     /// Whether the peer pings, so its silence ends the session.
     pinged: bool,
     last_heard: Instant,
@@ -281,16 +284,23 @@ impl PeerSession {
         let owner = registration.owner;
         let node_key = SessionNodeKey::new(coordination.clone(), owner);
         let env_id = sidecar_id.unwrap_or(peer_id);
+        // A client's peer id is fresh for each session; an environment
+        // peer's is its environment, so its registry owner names it.
+        let session_id = match kind {
+            PeerKind::Client => peer_id,
+            PeerKind::Sidecar => owner,
+        };
         let binding = SessionBinding::new(
             binding_store(&peers, coordination.as_ref()),
             peer.principal.clone(),
             env_id,
-            // A client's peer id is fresh for each session; an environment
-            // peer's is its environment, so its registry owner names it.
-            match kind {
-                PeerKind::Client => peer_id,
-                PeerKind::Sidecar => owner,
-            },
+            session_id,
+        );
+        let disco = SessionBinding::new(
+            disco_store(&peers, coordination.as_ref()),
+            peer.principal.clone(),
+            env_id,
+            session_id,
         );
         tracing::info!(
             %env_id,
@@ -332,6 +342,7 @@ impl PeerSession {
             remote_rx,
             node_key,
             binding,
+            disco,
             pinged: false,
             last_heard: Instant::now(),
             last_sidecar_node,
@@ -476,7 +487,11 @@ impl PeerSession {
     /// Rewrites the node key's binding; one that names another session now
     /// ends this one as a takeover would. An unreachable store keeps it.
     async fn refresh_binding(&self) -> Turn {
-        match self.binding.refresh().await {
+        let refreshed = match self.binding.refresh().await {
+            Ok(Refresh::Kept) => self.disco.refresh().await,
+            other => other,
+        };
+        match refreshed {
             Ok(Refresh::Kept) => ControlFlow::Continue(()),
             Ok(Refresh::Lost) => ControlFlow::Break(Some(PeerEnd::Retired)),
             Err(error) => {
@@ -489,11 +504,11 @@ impl PeerSession {
     /// Binds the key of a node the session sent before the node reaches any
     /// peer, retiring the session it takes the key over from.
     async fn claim_node_key(&mut self, node: &Node) -> Turn {
-        let refusal = match self.binding.claim(node.key).await {
-            Ok(Claim::Bound) => return ControlFlow::Continue(()),
+        let refusal = match self.binding.claim(key_hex(&node.key)).await {
+            Ok(Claim::Bound) => return self.claim_disco_key(node).await,
             Ok(Claim::TookOver { previous }) => {
                 self.retire(previous).await;
-                return ControlFlow::Continue(());
+                return self.claim_disco_key(node).await;
             }
             Ok(Claim::Refused(refusal)) => refusal,
             Err(error) => {
@@ -507,6 +522,33 @@ impl PeerSession {
             kind = self.peer.kind.as_str(),
             refusal = ?refusal,
             "coordinator node key refused"
+        );
+        ControlFlow::Break(Some(PeerEnd::NodeKeyRefused(refusal)))
+    }
+
+    /// Binds the node's disco key as its node key is bound (#5962). A new
+    /// disco key releases the previous one, so a rotated key stops admitting
+    /// relay allocations at once; the all-zero key means none and is never
+    /// bound. A takeover is a reconnect, and the node key's claim has already
+    /// retired the earlier session.
+    async fn claim_disco_key(&mut self, node: &Node) -> Turn {
+        if node.disco_key.is_zero() {
+            return ControlFlow::Continue(());
+        }
+        let refusal = match self.disco.claim(disco_hex(&node.disco_key)).await {
+            Ok(Claim::Bound | Claim::TookOver { .. }) => return ControlFlow::Continue(()),
+            Ok(Claim::Refused(refusal)) => refusal,
+            Err(error) => {
+                tracing::warn!(error = ?error, env_id = %self.env_id, peer_id = %self.peer.peer_id, "coordinator disco binding claim failed");
+                Refusal::Unavailable
+            }
+        };
+        tracing::warn!(
+            env_id = %self.env_id,
+            peer_id = %self.peer.peer_id,
+            kind = self.peer.kind.as_str(),
+            refusal = ?refusal,
+            "coordinator disco key refused"
         );
         ControlFlow::Break(Some(PeerEnd::NodeKeyRefused(refusal)))
     }
@@ -665,6 +707,7 @@ impl PeerSession {
         self.peers.deregister(peer_id, self.owner);
         self.node_key.close().await;
         self.binding.release().await;
+        self.disco.release().await;
         if let (PeerKind::Client, Some(env_id), Some(coordination)) =
             (kind, sidecar_id, self.coordination.as_ref())
             && let Err(err) = coordination.publish_remove(env_id, peer_id).await
@@ -695,6 +738,16 @@ fn binding_store(
     match coordination {
         Some(coordination) => Arc::new(coordination.node_bindings.clone()),
         None => peers.bindings.clone(),
+    }
+}
+
+fn disco_store(
+    peers: &Arc<PeerRegistry>,
+    coordination: Option<&Arc<CoordinationPlane>>,
+) -> Arc<dyn BindingStore> {
+    match coordination {
+        Some(coordination) => Arc::new(coordination.disco_bindings.clone()),
+        None => peers.disco_bindings.clone(),
     }
 }
 

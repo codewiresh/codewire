@@ -14,12 +14,10 @@ use std::time::Duration;
 
 use async_nats::jetstream::kv;
 use bytes::Bytes;
-use codewire_tailnet::node::NodePublic;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::node_keys::key_hex;
 use super::peer::BoxFuture;
 
 /// Shared bucket of node key bindings, keyed by lowercase hex.
@@ -199,13 +197,14 @@ pub(crate) async fn release(
     Ok(())
 }
 
-/// One session's binding of the node key it announced.
+/// One session's binding of a key it announced, by the key's lowercase hex:
+/// its node key, or its disco key in the disco bucket (#5962).
 pub(crate) struct SessionBinding {
     store: Arc<dyn BindingStore>,
     principal: Principal,
     environment: Uuid,
     session: Uuid,
-    key: Option<NodePublic>,
+    key: Option<String>,
 }
 
 impl SessionBinding {
@@ -231,13 +230,13 @@ impl SessionBinding {
 
     /// Claims the key of a node the session sent. A key the session already
     /// holds is not claimed again; a key it replaces is released.
-    pub(crate) async fn claim(&mut self, key: NodePublic) -> Result<Claim, BindingError> {
-        if self.key == Some(key) {
+    pub(crate) async fn claim(&mut self, key: String) -> Result<Claim, BindingError> {
+        if self.key.as_deref() == Some(key.as_str()) {
             return Ok(Claim::Bound);
         }
         let claimed = claim(
             self.store.as_ref(),
-            &key_hex(&key),
+            &key,
             &self.principal,
             self.environment,
             self.session,
@@ -245,8 +244,7 @@ impl SessionBinding {
         .await?;
         if !matches!(claimed, Claim::Refused(_))
             && let Some(previous) = self.key.replace(key)
-            && let Err(error) =
-                release(self.store.as_ref(), &key_hex(&previous), self.session).await
+            && let Err(error) = release(self.store.as_ref(), &previous, self.session).await
         {
             tracing::warn!(error = ?error, "coordinator node binding release failed");
         }
@@ -255,8 +253,8 @@ impl SessionBinding {
 
     /// Rewrites the binding of the key the session holds, if any.
     pub(crate) async fn refresh(&self) -> Result<Refresh, BindingError> {
-        match self.key {
-            Some(key) => refresh(self.store.as_ref(), &key_hex(&key), self.session).await,
+        match &self.key {
+            Some(key) => refresh(self.store.as_ref(), key, self.session).await,
             None => Ok(Refresh::Kept),
         }
     }
@@ -264,7 +262,7 @@ impl SessionBinding {
     /// Drops the session from its binding when the session ends.
     pub(crate) async fn release(self) {
         if let Some(key) = self.key
-            && let Err(error) = release(self.store.as_ref(), &key_hex(&key), self.session).await
+            && let Err(error) = release(self.store.as_ref(), &key, self.session).await
         {
             tracing::warn!(error = ?error, "coordinator node binding release failed");
         }

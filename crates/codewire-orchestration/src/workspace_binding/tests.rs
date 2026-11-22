@@ -1847,6 +1847,37 @@ async fn relay_allocation_fails_closed_without_a_relay_or_allocator() {
     }
 }
 
+/// #5962: an environment holds relay slots for at most 32 distinct pairs.
+/// The 33rd is refused before the allocator is called; a pair it already
+/// holds is not counted again.
+#[tokio::test]
+async fn an_environment_holds_relay_slots_for_at_most_32_pairs() {
+    let fixture = fixture_allocating(
+        FakeCluster::placed(),
+        FakeStore::bound(WorkspaceCredentialScope::Pod),
+        Arc::new(FakeAllocator::default()),
+        |state| state.with_limits(RequestLimits::with_peer_burst(64.0)),
+    );
+    let allocate = |peer: u8| {
+        let state = fixture.state.clone();
+        async move {
+            state
+                .allocate_peer_relay(
+                    &valid_bearer(),
+                    Some(PEER),
+                    &relay_request(&[disco(1), disco(peer)]),
+                )
+                .await
+        }
+    };
+    for peer in 2..=33 {
+        assert!(allocate(peer).await.is_ok(), "pair {peer}");
+    }
+    assert_eq!(allocate(34).await, Err(BindError::ResourceExhausted));
+    assert!(allocate(2).await.is_ok());
+    assert_eq!(fixture.allocator.calls.lock().unwrap().len(), 33);
+}
+
 #[tokio::test]
 async fn each_method_has_the_smallest_body_limit_that_fits_it() {
     let fixture = fixture(

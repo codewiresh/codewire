@@ -95,6 +95,34 @@ caller with mutual TLS (#4011):
   a handshake. The relay ignores, and logs, the removed plain listener's
   `CODEWIRE_UDP_RELAY_ALLOCATOR_ADDR` and `CODEWIRE_UDP_RELAY_ALLOCATOR_TOKEN`.
 
+Orchestration limits what a daemon may ask the relay for (#5962). The relay
+forwards only between clients that have each proved their disco private key in
+the bind handshake, so a pair that names another node's key can't misdirect
+traffic. It could still take slots, so:
+
+- **A per-environment cap.** Each environment may hold at most 32 distinct
+  pairs, each counted for the 300 s steady-state lifetime the relay returns.
+  Asking again for a pair already counted is free, and a pair past the cap is
+  `resource_exhausted`.
+  - The count is kept per orchestration replica, so the effective bound is
+    replicas × 32. That's well under the relay's VNI pool.
+- **Keys checked against the coordinator (not yet built, #5962).**
+  Orchestration will ask the coordinator's `CheckDiscoKey` before it
+  allocates:
+  - `disco_keys[0]` must be `BOUND_HERE`, the calling environment's own
+    daemon;
+  - `disco_keys[1]` must be bound (`BOUND_ELSEWHERE` or `BOUND_HERE`);
+  - any other answer is `permission_denied`, and an unreachable coordinator is
+    `unavailable`.
+
+  That waits on the site's policy for the coordinator's 8097, which today
+  admits DERP alone. The policy will admit orchestration too, matched by
+  namespace and service account. DERP runs as its own service account,
+  `codewire-derp`, with no API token, so it can be matched the same way.
+  Until then, the per-environment cap is the only limit.
+- **A refused allocation costs only the relay path.** The daemon keeps the
+  peer on direct UDP or DERP.
+
 Terminology:
 
 - `runtime_region`: product/scheduling region, for example `dev-eu`.
@@ -275,6 +303,30 @@ quiet; it does not wait for a send to fail.
   behaviour: it ends when a send to it fails, or when its proof lapses.
 - **Proof of possession** of the node key is not required. Binding to the
   principal and environment is the boundary (#5131).
+- **Disco keys are bound the same way (#5962).**
+  - **The bucket:** each node's disco key is bound to the same
+    `{principal, environment, session}` in its own bucket,
+    `coordinator-disco-bindings` (or the local registry without NATS), with
+    the node key's TTL, refresh and compare-and-set.
+  - **Refusal:** an announcement whose disco key another principal or
+    environment holds is refused as a held node key is. Its session ends, and
+    its node reaches no peer.
+  - **Rotation:** a node gets a fresh disco key whenever its tailscale
+    restarts. A session that announces a new disco key binds it and releases
+    its previous one at once, as a session's end releases its key.
+  - **The all-zero key** means a node has no disco key, and is never bound.
+- **Peer relay admission (#5962).**
+  - **The lookup:** the coordinator serves
+    `codewire.internal.v1.PeerRelayAdmissionService/CheckDiscoKey` on the
+    same closed listener as DERP admission (8097). It takes a disco key and
+    the asking environment, and answers one of three things:
+    - `BOUND_HERE`: the key is held by that environment's own daemon, with a
+      live session;
+    - `BOUND_ELSEWHERE`: it's held by any other live session, the
+      environment's clients included;
+    - `UNBOUND`: no binding, or one whose session has ended.
+  - **It never names a holder,** so no caller can use it to enumerate keys.
+  - **An unreadable bucket** is `unavailable`, never an answer.
 
 ## Network Paths
 

@@ -988,6 +988,52 @@ mod tests {
         relay_task.await.unwrap().unwrap();
     }
 
+    /// #5962 rests on this: only a client that holds a pair's disco private
+    /// key binds that side. A third key, or a packet that names a pair key in
+    /// its header but is sealed by another, gets no challenge and binds
+    /// nothing.
+    #[test]
+    fn a_bind_needs_the_private_key_of_a_pair_member() {
+        let server_key = disco(0xaa);
+        let mut server = Server::new(
+            server_key.clone(),
+            vec!["203.0.113.34:41641".parse().unwrap()],
+        );
+        let a = disco(0x11);
+        let b = disco(0x22);
+        let intruder = disco(0x33);
+        let intruder_addr: SocketAddr = "192.0.2.66:40000".parse().unwrap();
+        let endpoint = server.allocate_endpoint(a.public(), b.public()).unwrap();
+
+        let outside = bind_packet(&intruder, server_key.public(), endpoint.vni, 7, b.public());
+        assert!(server
+            .handle_packet(intruder_addr, &outside)
+            .unwrap()
+            .is_none());
+        assert_eq!(server.stats().drops_unknown_source, 1);
+
+        let mut forged = bind_packet(&intruder, server_key.public(), endpoint.vni, 7, b.public());
+        let named = intruder.public();
+        let at = forged
+            .windows(KEY_LEN)
+            .position(|window| window == named.as_bytes())
+            .expect("the wrapper names its sender");
+        forged[at..at + KEY_LEN].copy_from_slice(a.public().as_bytes());
+        assert!(server
+            .handle_packet(intruder_addr, &forged)
+            .unwrap()
+            .is_none());
+        assert_eq!(server.stats().drops_handshake, 1);
+
+        let data = data_packet(endpoint.vni, b"wg");
+        assert!(server
+            .handle_packet(intruder_addr, &data)
+            .unwrap()
+            .is_none());
+        assert_eq!(server.stats().sessions_opened, 0);
+        assert_eq!(server.stats().packets_forwarded, 0);
+    }
+
     #[test]
     fn drops_unknown_vni_unbound_and_unknown_source() {
         let server_key = disco(0xaa);

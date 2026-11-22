@@ -8,3 +8,4 @@ resources:
   - service.yaml
   - service-mesh.yaml
   - pdb.yaml
+  - serviceaccount.yaml

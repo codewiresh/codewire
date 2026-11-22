@@ -26,6 +26,10 @@ spec:
         app.kubernetes.io/component: derp
     spec:
       imagePullSecrets: {{ toYaml (.imagePullSecrets | default $.Values.imagePullSecrets) | nindent 8 }}
+      # Its own identity, so the coordinator's 8097 lookup admits DERP by
+      # service account rather than by a label (#5962). It reads no API.
+      serviceAccountName: codewire-derp
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 60
       # A mounted TLS Secret is readable by the image's 65532 group only.
       securityContext:
@@ -171,5 +175,15 @@ spec:
     matchLabels:
       app.kubernetes.io/name: codewire
       app.kubernetes.io/component: derp
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: codewire-derp
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/component: derp
+automountServiceAccountToken: false
 {{- end }}
 {{- end }}

@@ -514,6 +514,14 @@ impl WorkspaceBindingState {
             .map(|relay| relay.allocator_url.trim().to_owned())
             .filter(|url| !url.is_empty())
             .ok_or(BindError::FailedPrecondition)?;
+        // A pair past the environment's cap takes no relay slot (#5962).
+        let [first, second] = &client_disco;
+        if !self.limits.take_relay_pair(
+            &bound.binding.environment_id,
+            [first.as_str(), second.as_str()],
+        ) {
+            return Err(BindError::ResourceExhausted);
+        }
         still_valid(&bound.caller.identity)?;
         let allocation = self
             .relay

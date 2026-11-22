@@ -5,7 +5,9 @@
 //!   refused with `resource_exhausted` at no review cost;
 //! - at most [`MAX_REVIEWS_IN_FLIGHT`] TokenReviews in flight, where waiting
 //!   longer than [`REVIEW_SLOT_WAIT`] for a slot is `unavailable`;
-//! - one request in flight per reviewed Pod UID.
+//! - one request in flight per reviewed Pod UID;
+//! - at most [`MAX_RELAY_PAIRS`] distinct peer relay pairs per environment,
+//!   each counted for [`RELAY_PAIR_LIFETIME`] (#5962).
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -24,12 +26,19 @@ pub const PEER_BURST: f64 = 5.0;
 pub const MAX_TRACKED_PEERS: usize = 4096;
 pub const MAX_REVIEWS_IN_FLIGHT: usize = 16;
 pub const REVIEW_SLOT_WAIT: Duration = Duration::from_secs(1);
+/// Distinct disco-key pairs one environment may hold relay slots for.
+pub const MAX_RELAY_PAIRS: usize = 32;
+/// How long a pair counts: the relay's steady-state lifetime for a slot.
+pub const RELAY_PAIR_LIFETIME: Duration = Duration::from_secs(300);
+/// Environments whose pairs are tracked before expired ones are swept.
+const MAX_TRACKED_RELAY_ENVIRONMENTS: usize = 4096;
 
 /// All request limits of one replica.
 pub struct RequestLimits {
     peers: PeerRateLimiter,
     reviews: Arc<Semaphore>,
     pods: PodSlots,
+    relay_pairs: RelayPairs,
 }
 
 impl Default for RequestLimits {
@@ -38,6 +47,7 @@ impl Default for RequestLimits {
             peers: PeerRateLimiter::new(PEER_REQUESTS_PER_SECOND, PEER_BURST, MAX_TRACKED_PEERS),
             reviews: Arc::new(Semaphore::new(MAX_REVIEWS_IN_FLIGHT)),
             pods: PodSlots::default(),
+            relay_pairs: RelayPairs::default(),
         }
     }
 }
@@ -58,6 +68,20 @@ impl RequestLimits {
     /// The only in-flight request for this reviewed Pod UID, or `None`.
     pub fn pod_slot(&self, pod_uid: &str) -> Option<PodSlot> {
         self.pods.try_acquire(pod_uid)
+    }
+
+    /// Counts `pair` against `environment`'s relay pairs: true when it is
+    /// already counted or fits under [`MAX_RELAY_PAIRS`].
+    pub fn take_relay_pair(&self, environment: &str, pair: [&str; 2]) -> bool {
+        self.relay_pairs.try_take(environment, pair, Instant::now())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_peer_burst(burst: f64) -> Self {
+        Self {
+            peers: PeerRateLimiter::new(PEER_REQUESTS_PER_SECOND, burst, MAX_TRACKED_PEERS),
+            ..Self::default()
+        }
     }
 
     #[cfg(test)]
@@ -127,6 +151,37 @@ impl PeerRateLimiter {
     }
 }
 
+/// The peer relay pairs each environment holds, with when each stops
+/// counting. A pair is unordered, as the relay keys it.
+#[derive(Default)]
+struct RelayPairs(Mutex<HashMap<String, HashMap<[String; 2], Instant>>>);
+
+impl RelayPairs {
+    fn try_take(&self, environment: &str, pair: [&str; 2], now: Instant) -> bool {
+        let mut pair = pair.map(str::to_owned);
+        pair.sort();
+        let mut environments = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !environments.contains_key(environment)
+            && environments.len() >= MAX_TRACKED_RELAY_ENVIRONMENTS
+        {
+            environments.retain(|_, pairs| {
+                pairs.retain(|_, until| *until > now);
+                !pairs.is_empty()
+            });
+        }
+        let pairs = environments.entry(environment.to_owned()).or_default();
+        pairs.retain(|_, until| *until > now);
+        if !pairs.contains_key(&pair) && pairs.len() >= MAX_RELAY_PAIRS {
+            return false;
+        }
+        pairs.insert(pair, now + RELAY_PAIR_LIFETIME);
+        true
+    }
+}
+
 #[derive(Clone, Default)]
 struct PodSlots(Arc<Mutex<HashSet<String>>>);
 
@@ -166,6 +221,26 @@ mod tests {
     use super::*;
 
     const PEER: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7));
+
+    /// #5962: an environment holds at most 32 distinct pairs at once. A pair
+    /// it already holds is free, in either order, and another environment
+    /// has its own 32. A pair counts for 300 s.
+    #[test]
+    fn relay_pairs_cap_each_environment() {
+        let pairs = RelayPairs::default();
+        let start = Instant::now();
+        let keys: Vec<String> = (0..=MAX_RELAY_PAIRS).map(|n| format!("peer-{n}")).collect();
+        for key in &keys[..MAX_RELAY_PAIRS] {
+            assert!(pairs.try_take("env-a", ["own", key], start));
+        }
+        let extra = keys[MAX_RELAY_PAIRS].as_str();
+        assert!(!pairs.try_take("env-a", ["own", extra], start));
+        assert!(pairs.try_take("env-a", [keys[0].as_str(), "own"], start));
+        assert!(pairs.try_take("env-b", ["own", extra], start));
+
+        let later = start + RELAY_PAIR_LIFETIME;
+        assert!(pairs.try_take("env-a", ["own", extra], later));
+    }
 
     #[test]
     fn peer_bucket_allows_the_burst_then_one_per_second() {

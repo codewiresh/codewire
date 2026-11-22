@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 mod connect;
+mod disco_bindings;
 mod node_bindings;
 mod node_keys;
 mod peer;
@@ -90,6 +91,8 @@ struct CoordinationPlane {
     node_keys: jetstream::kv::Store,
     /// Each node key's principal, environment and session (`node_bindings`).
     node_bindings: node_bindings::KvBindings,
+    /// Each disco key's, the same way (`disco_bindings`, #5962).
+    disco_bindings: node_bindings::KvBindings,
 }
 
 impl CoordinationPlane {
@@ -129,11 +132,21 @@ impl CoordinationPlane {
             ),
         )
         .await?;
+        let disco_bindings = codewire_server_core::nats::kv_bucket(
+            &js,
+            bucket(
+                disco_bindings::DISCO_BINDING_BUCKET,
+                "Each disco key's principal, environment and coordinator session",
+                node_bindings::NODE_BINDING_TTL,
+            ),
+        )
+        .await?;
         Ok(Arc::new(Self {
             client,
             kv,
             node_keys,
             node_bindings: node_bindings::KvBindings(node_bindings),
+            disco_bindings: node_bindings::KvBindings(disco_bindings),
         }))
     }
 
@@ -874,6 +887,8 @@ struct PeerRegistry {
     inner: Mutex<RegistryInner>,
     /// Node key bindings when there is no NATS plane to hold them.
     bindings: Arc<node_bindings::MemoryBindings>,
+    /// Disco key bindings, likewise (#5962).
+    disco_bindings: Arc<node_bindings::MemoryBindings>,
 }
 
 #[derive(Default)]

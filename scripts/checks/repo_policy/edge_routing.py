@@ -170,9 +170,12 @@ WORKSPACE_BINDING_SERVICES = {
 # The third closed listener class: Codewire's public DERP relay asks whether a
 # node key belongs to a live session (codewire#2844). The coordinator and Mesh
 # each serve it for their own sessions on 8097, which no edge routes to; the
-# site's network policy admits only the relay.
+# site's network policy admits only the relay, and orchestration, which asks
+# the coordinator alone whether a relay allocation's disco keys are bound
+# (codewire#5962).
 DERP_ADMISSION_SERVICES = {
     "codewire.internal.v1.DerpAdmissionService": "derp_verify_router",
+    "codewire.internal.v1.PeerRelayAdmissionService": "derp_verify_router",
 }
 
 CLOSED_LISTENERS = {
@@ -187,6 +190,11 @@ CLOSED_LISTENER_BINARIES = {
     "internal-connect": ("orchestration",),
     "workspace-binding": ("orchestration",),
     "derp-admission": ("coordinator", "mesh"),
+}
+
+# A service that only some of its closed listener's binaries serve.
+SERVICE_BINARIES = {
+    "codewire.internal.v1.PeerRelayAdmissionService": ("coordinator",),
 }
 
 WORKSPACE_BINDING_SERVICE_NAME = "codewire-orchestration-workspace-binding"
@@ -787,7 +795,9 @@ def assert_internal_connect_listener_exemption(
         if not isinstance(record, dict):
             fail(f"unrouted service {service} must record binary, listener, and port")
             continue
-        binaries = CLOSED_LISTENER_BINARIES.get(listener or "", ("orchestration",))
+        binaries = SERVICE_BINARIES.get(service) or CLOSED_LISTENER_BINARIES.get(
+            listener or "", ("orchestration",)
+        )
         if len(binaries) == 1:
             if record.get("binary") != binaries[0] or "binaries" in record:
                 fail(f"unrouted service {service} must be owned by {binaries[0]}")
@@ -806,8 +816,8 @@ def assert_internal_connect_listener_exemption(
     if set(unrouted) != expected:
         fail(
             "unrouted listener map must contain exactly MeshAuthorizationService, "
-            "EnvironmentMeshService, EgressService, WorkspaceBindingService and "
-            "DerpAdmissionService"
+            "EnvironmentMeshService, EgressService, WorkspaceBindingService, "
+            "DerpAdmissionService and PeerRelayAdmissionService"
         )
     assert_internal_connect_listener_boundary(INTERNAL_CONNECT_SERVICES, fail, reader)
     assert_workspace_binding_listener_boundary(fail, reader)
@@ -828,11 +838,13 @@ def assert_derp_admission_listener_boundary(
     fail: Callable[[str], None],
     reader: Callable[[str], str] = read_text,
 ) -> None:
-    """Prove 8097 carries only DerpAdmissionService, from both its binaries.
+    """Prove 8097 carries only DerpAdmissionService, from both its binaries,
+    and the coordinator's PeerRelayAdmissionService.
 
     Each binary builds the admission router once, serves it only on its own
-    8097 listener and never on its public app; the manifests name the port
-    and the relay's verifier URLs; and no edge routes to it.
+    8097 listener and never on its public app; the peer relay lookup is the
+    coordinator's alone; the manifests name the port and the relay's verifier
+    URLs; and no edge routes to it.
     """
     coordinator = reader("crates/codewire-coordinator/src/main.rs")
     public_start = coordinator.find('AppBuilder::new("codewire-coordinator")')
@@ -840,6 +852,8 @@ def assert_derp_admission_listener_boundary(
         fail("coordinator must build its public AppBuilder app")
     elif "derp_verify_router" in coordinator[public_start:]:
         fail("DerpAdmissionService is prohibited from the coordinator's public app")
+    if "PeerRelayAdmission" in coordinator:
+        fail("PeerRelayAdmissionService is served only by the coordinator's 8097 router")
     if coordinator.count("derp_verify_router(") != 1 or not re.search(
         r'std::env::var\("COORDINATOR_DERP_VERIFY_ADDR"\)[\s\S]*?'
         r"codewire_server_core::serve\(\s*derp_verify_router\(state\.clone\(\)\),\s*addr,",
@@ -859,6 +873,8 @@ def assert_derp_admission_listener_boundary(
         fail("Mesh must build its public app in router_from_state")
     elif "derp_verify" in mesh[routes:routes_end]:
         fail("DerpAdmissionService is prohibited from Mesh's public app")
+    if "PeerRelayAdmission" in reader("crates/codewire-mesh/src/derp_verify.rs"):
+        fail("Mesh must not serve PeerRelayAdmissionService")
     if mesh.count("crate::derp_verify::router(") != 1 or not re.search(
         r"match state\.config\.derp_verify_addr \{[\s\S]*?"
         r"crate::derp_verify::router\(state\.mesh_coordinate\.clone\(\)\)",
@@ -897,7 +913,7 @@ def assert_derp_admission_listener_boundary(
 
     for file in DERP_ADMISSION_EDGE_FILES:
         source = reader(file)
-        if re.search(r":8097\b|derp-verify|DerpAdmissionService", source):
+        if re.search(r":8097\b|derp-verify|DerpAdmissionService|PeerRelayAdmissionService", source):
             fail(f"{file}: no edge may route to the DERP admission listener")
 
 
@@ -1110,6 +1126,7 @@ def internal_connect_listener_self_test() -> None:
         "crates/codewire-orchestration/src/main.rs",
         "crates/codewire-coordinator/src/main.rs",
         "crates/codewire-mesh/src/server.rs",
+        "crates/codewire-mesh/src/derp_verify.rs",
         "deployments/k8s/coordinator/deployment.yaml",
         "deployments/k8s/coordinator/service.yaml",
         "deployments/k8s/overlays/local-kind/coordinator-deployment-patch.yaml",
@@ -1129,15 +1146,15 @@ def internal_connect_listener_self_test() -> None:
         "Caddyfile.docker",
     ]
     source = {path: read_text(path) for path in paths}
-    def record(listener: str, port: int) -> dict[str, Any]:
-        binaries = CLOSED_LISTENER_BINARIES[listener]
+    def record(service: str, listener: str, port: int) -> dict[str, Any]:
+        binaries = SERVICE_BINARIES.get(service) or CLOSED_LISTENER_BINARIES[listener]
         owner: dict[str, Any] = (
             {"binary": binaries[0]} if len(binaries) == 1 else {"binaries": list(binaries)}
         )
         return {**owner, "listener": listener, "port": port}
 
     valid_unrouted = {
-        service: record(listener, port)
+        service: record(service, listener, port)
         for listener, (port, services) in CLOSED_LISTENERS.items()
         for service in services
     }
@@ -1210,6 +1227,24 @@ def internal_connect_listener_self_test() -> None:
             "crates/codewire-coordinator/src/main.rs",
             ".with_routes(router(state, auth))",
             ".with_routes(router(state.clone(), auth))\n        .merge(derp_verify_router(state))",
+        ),
+    )
+    expect_rejection(
+        "peer relay admission outside the coordinator's 8097 router",
+        "served only by the coordinator's 8097 router",
+        replacement=(
+            "crates/codewire-coordinator/src/main.rs",
+            ".with_routes(router(state, auth))",
+            ".with_routes(router(state, auth)) // PeerRelayAdmission",
+        ),
+    )
+    expect_rejection(
+        "peer relay admission served by Mesh",
+        "Mesh must not serve PeerRelayAdmissionService",
+        replacement=(
+            "crates/codewire-mesh/src/derp_verify.rs",
+            "impl DerpAdmissionService for DerpAdmission",
+            "impl PeerRelayAdmissionService for DerpAdmission {}\nimpl DerpAdmissionService for DerpAdmission",
         ),
     )
     expect_rejection(

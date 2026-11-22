@@ -20,6 +20,7 @@ fn main() {
         "codewire/internal/v1/egress.proto",
         "codewire/internal/v1/environment_mesh.proto",
         "codewire/internal/v1/mesh_authorization.proto",
+        "codewire/internal/v1/peer_relay_admission.proto",
         "codewire/internal/v1/workspace_binding.proto",
         "codewire/v1/access_profile.proto",
         "codewire/v1/api_key.proto",

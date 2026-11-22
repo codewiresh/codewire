@@ -423,7 +423,7 @@ fn sample_node(id: Uuid, derp: i32) -> Node {
         id,
         as_of: "2026-07-11T12:00:00Z".parse().unwrap(),
         key: node_key(id),
-        disco_key: DiscoPublic::from_raw([0x22; 32]),
+        disco_key: disco_key(id),
         preferred_derp: derp,
         derp_latency: None,
         endpoints: vec![],
@@ -437,6 +437,13 @@ fn node_key(id: Uuid) -> NodePublic {
     raw[..16].copy_from_slice(id.as_bytes());
     raw[16..].copy_from_slice(id.as_bytes());
     NodePublic::from_raw(raw)
+}
+
+/// Each node's own disco key: a key is bound to its announcer (#5962).
+fn disco_key(id: Uuid) -> DiscoPublic {
+    let mut raw = [0x5a_u8; 32];
+    raw[16..].copy_from_slice(id.as_bytes());
+    DiscoPublic::from_raw(raw)
 }
 
 fn expect_peer_update(output: SessionOutput) -> Vec<Node> {
@@ -678,6 +685,113 @@ async fn derp_admission_knows_a_live_session_key_until_it_ends() {
     ends(client_task).await;
     assert_eq!(verifier.verify(&key).await, Verdict::Unknown);
     server.abort();
+}
+
+/// #5962: orchestration's peer relay admission call, against the
+/// coordinator's closed listener, sees a daemon's disco key as its own
+/// environment's while the session lives, as bound elsewhere from another
+/// environment, and as unbound once the session ends. Another environment's
+/// daemon announcing the same disco key is refused. A key that is not 32
+/// bytes is an invalid argument.
+#[tokio::test]
+async fn peer_relay_admission_sees_a_live_daemons_disco_key_as_its_own() {
+    use base64::Engine as _;
+    use tower::ServiceExt as _;
+
+    let peers = Arc::new(PeerRegistry::default());
+    let state = crate::CoordinatorState {
+        pool: sqlx::PgPool::connect_lazy("postgres://unused@127.0.0.1:1/unused").unwrap(),
+        session_secret: Arc::from(SECRET),
+        peers: peers.clone(),
+        coordination: None,
+        derp_map: crate::test_derp_map(),
+        revocation: codewire_server_core::revocation::Fence::new(),
+    };
+    let check = |disco: &[u8], environment: Uuid| {
+        let router = crate::derp_verify_router(state.clone());
+        let body = serde_json::json!({
+            "discoKey": base64::engine::general_purpose::STANDARD.encode(disco),
+            "environmentId": environment.to_string(),
+        });
+        async move {
+            let response = router
+                .oneshot(
+                    axum::http::Request::post(
+                        "/codewire.internal.v1.PeerRelayAdmissionService/CheckDiscoKey",
+                    )
+                    .header("content-type", "application/json")
+                    .header("connect-protocol-version", "1")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+            (
+                status,
+                json["binding"].as_str().unwrap_or_default().to_owned(),
+            )
+        }
+    };
+
+    let env = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let disco = *disco_key(env).as_bytes();
+    let (env_tx, mut env_out, env_task) =
+        spawn_session(peers.clone(), env, None, PeerKind::Sidecar);
+    assert!(matches!(
+        next_output(&mut env_out).await,
+        SessionOutput::DerpMap(_)
+    ));
+    env_tx
+        .send(SessionInput::Node(sample_node(env, 1)))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while check(&disco, env).await.1 != "DISCO_KEY_BINDING_BOUND_HERE" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the daemon's disco key is its environment's own");
+    assert_eq!(
+        check(&disco, other).await.1,
+        "DISCO_KEY_BINDING_BOUND_ELSEWHERE"
+    );
+    assert_eq!(check(&[0x77; 32], env).await.1, "DISCO_KEY_BINDING_UNBOUND");
+
+    let (intruder_tx, mut intruder_out, intruder_task) =
+        spawn_session(peers.clone(), other, None, PeerKind::Sidecar);
+    assert!(matches!(
+        next_output(&mut intruder_out).await,
+        SessionOutput::DerpMap(_)
+    ));
+    intruder_tx
+        .send(SessionInput::Node(Node {
+            disco_key: disco_key(env),
+            ..sample_node(other, 1)
+        }))
+        .unwrap();
+    loop {
+        match next_output(&mut intruder_out).await {
+            SessionOutput::NodeKeyRefused(Refusal::BoundElsewhere) => break,
+            SessionOutput::Heartbeat | SessionOutput::Peer(_) => {}
+            output => panic!("expected the disco key's refusal, got {output:?}"),
+        }
+    }
+    drop(intruder_tx);
+    ends(intruder_task).await;
+    assert_eq!(check(&disco, env).await.1, "DISCO_KEY_BINDING_BOUND_HERE");
+
+    let (status, _) = check(&[0x01; 4], env).await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+    drop(env_tx);
+    ends(env_task).await;
+    assert_eq!(check(&disco, env).await.1, "DISCO_KEY_BINDING_UNBOUND");
 }
 
 /// A node sent by `id` under another peer's node key.

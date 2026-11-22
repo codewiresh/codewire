@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package codewire.internal.v1;
+
+// PeerRelayAdmissionService answers orchestration before it allocates a UDP
+// peer relay slot for an environment's daemon (codewire#5962). The platform
+// coordinator serves it on the same cluster-local listener as DERP admission,
+// which only DERP and orchestration reach. The answer says only how one disco
+// key is bound relative to the asking environment; it never names a holder.
+service PeerRelayAdmissionService {
+  // CheckDiscoKey reports how a disco public key is bound, as seen from one
+  // environment.
+  rpc CheckDiscoKey(CheckDiscoKeyRequest) returns (CheckDiscoKeyResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+message CheckDiscoKeyRequest {
+  // The 32-byte disco public key a relay allocation names.
+  bytes disco_key = 1;
+  // The environment asking, as orchestration's binding of the calling Pod
+  // names it.
+  string environment_id = 2;
+}
+
+enum DiscoKeyBinding {
+  DISCO_KEY_BINDING_UNSPECIFIED = 0;
+  // No live session holds the key: never bound, or its session has ended.
+  DISCO_KEY_BINDING_UNBOUND = 1;
+  // The asking environment's own daemon holds the key in a live session.
+  DISCO_KEY_BINDING_BOUND_HERE = 2;
+  // Any other live session holds the key, the environment's clients included.
+  DISCO_KEY_BINDING_BOUND_ELSEWHERE = 3;
+}
+
+message CheckDiscoKeyResponse {
+  DiscoKeyBinding binding = 1;
+}

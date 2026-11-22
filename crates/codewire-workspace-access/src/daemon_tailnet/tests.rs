@@ -992,6 +992,114 @@ async fn a_relay_client_after_four_other_clients_gets_its_relay_within_its_wait(
     );
 }
 
+/// Orchestration refusing every relay allocation, as it does for a pair
+/// past the environment's cap or a key that isn't the daemon's own (#5962).
+#[derive(Default)]
+struct RefusingRelayPlane {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl AccessControlPlane for RefusingRelayPlane {
+    async fn record_host_key(&self, _public_key_openssh: &str) -> Result<(), ControlPlaneError> {
+        Ok(())
+    }
+
+    async fn refresh_access(&self) -> Result<WorkspaceAccessGrant, ControlPlaneError> {
+        Err(ControlPlaneError::Retryable)
+    }
+
+    async fn allocate_peer_relay(
+        &self,
+        _disco_keys: [String; 2],
+        _relay_generation: u32,
+    ) -> Result<PeerRelayAllocation, ControlPlaneError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(ControlPlaneError::Retryable)
+    }
+}
+
+/// #5962: a refused relay allocation costs the peer only its relay path. The
+/// daemon tries again later, and the peer's WireGuard datagrams keep going
+/// over DERP meanwhile.
+#[tokio::test(start_paused = true)]
+async fn a_refused_relay_leaves_the_peer_on_derp() {
+    let plane = Arc::new(RefusingRelayPlane::default());
+    let (derp_out, mut derp_sent) = mpsc::unbounded_channel();
+    let (_derp_in, derp_received) = mpsc::unbounded_channel();
+    let fallback = codewire_tailnet::conn::Transport {
+        to_transport: derp_out,
+        from_transport: derp_received,
+        peer_updates: None,
+        path_probe: None,
+        local_endpoint_updates: None,
+    };
+    let secret = StaticSecret::random_from_rng(OsRng);
+    let disco_private = DiscoPrivate::generate(&mut OsRng);
+    let (transport, handle) = direct_udp::wrap_transport(
+        fallback,
+        direct_udp::Options::new(
+            "127.0.0.1:0".parse().unwrap(),
+            Vec::new(),
+            NodePublic::from_raw(PublicKey::from(&secret).to_bytes()),
+            disco_private.clone(),
+        ),
+    )
+    .await
+    .unwrap();
+    let relay = PeerRelayAllocator::new(
+        Arc::new(OrchestratedPeerRelay::new(plane.clone())),
+        LOG_COMPONENT,
+        Vec::new(),
+        disco_private.public(),
+        handle.clone(),
+    )
+    .with_attempt_timeout(PEER_RELAY_ATTEMPT_TIMEOUT);
+    let _reconciler = AbortOnDropHandle::new(relay.spawn_reconciler());
+    let client = client_node(1);
+    transport
+        .peer_updates
+        .clone()
+        .unwrap()
+        .send(vec![client.clone()])
+        .unwrap();
+    relay.observe_peers(std::slice::from_ref(&client));
+
+    let refused = Instant::now() + HANG_GUARD;
+    while plane.calls.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < refused,
+            "no relay allocation was asked for"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        handle.peer_relay_endpoint_state(&client.key, &client.disco_key),
+        direct_udp::PeerRelayEndpointState::Missing
+    );
+
+    let peer = codewire_tailnet::derp::NodePublic::from_raw(*client.key.as_bytes());
+    transport
+        .to_transport
+        .send(codewire_tailnet::conn::WgDatagram {
+            peer: peer.clone(),
+            data: b"wireguard".to_vec(),
+        })
+        .unwrap();
+    let carried = tokio::time::timeout(HANG_GUARD, async {
+        while let Some(datagram) = derp_sent.recv().await {
+            if datagram.data == b"wireguard" {
+                return Some(datagram.peer);
+            }
+        }
+        None
+    })
+    .await
+    .expect("the datagram never reached DERP");
+    assert_eq!(carried, Some(peer));
+}
+
 /// A loopback proxy to `upstream`; `cut` ends every connection it carries,
 /// so a client must open a new one.
 async fn cuttable_proxy(upstream: SocketAddr) -> (SocketAddr, Arc<Notify>) {

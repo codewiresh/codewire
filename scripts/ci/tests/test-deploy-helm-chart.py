@@ -99,6 +99,7 @@ _SERVICES = {
 # DERP, in every environment.
 _DERP = {
     ("Deployment", "codewire-derp"),
+    ("ServiceAccount", "codewire-derp"),
     ("Service", "codewire-derp"),
     ("Service", "codewire-derp-mesh"),
     ("PodDisruptionBudget", "codewire-derp"),

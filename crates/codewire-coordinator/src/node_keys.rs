@@ -31,10 +31,17 @@ pub(crate) const NODE_KEY_TTL: Duration = Duration::from_secs(15 * 60);
 /// How often a live session rewrites its key.
 const NODE_KEY_REFRESH: Duration = Duration::from_secs(5 * 60);
 
-/// The DERP admission listener's only service.
+/// The closed 8097 listener's services: DERP admission, and the peer relay
+/// admission orchestration asks before it allocates a relay slot (#5962).
 pub fn router(state: CoordinatorState) -> axum::Router {
     codewire_server_core::connect::connect_router(
-        connectrpc::Router::new().add_service(Arc::new(DerpAdmission { state })),
+        connectrpc::Router::new()
+            .add_service(Arc::new(DerpAdmission {
+                state: state.clone(),
+            }))
+            .add_service(Arc::new(super::disco_bindings::PeerRelayAdmission {
+                state,
+            })),
     )
 }
 

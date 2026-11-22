@@ -87,6 +87,11 @@
       ],
       "listener": "derp-admission",
       "port": 8097
+    },
+    "codewire.internal.v1.PeerRelayAdmissionService": {
+      "binary": "coordinator",
+      "listener": "derp-admission",
+      "port": 8097
     }
   }
 }
