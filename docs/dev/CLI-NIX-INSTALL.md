@@ -87,7 +87,7 @@ is not a managed version, before any store, entry or selection change:
 this cw (/nix/store/…-cw-0.4.24/bin/cw) is installed by Nix and can't replace itself.
 Update it with Nix: `nix profile upgrade codewire` for a profile install, or update
 the flake input that names github:codewiresh/codewire in your NixOS or Home Manager
-configuration.
+configuration. Local VMs left on an older cw restart with `cw upgrade --vms`.
 ```
 
 The profile element name (`codewire`) is the one Nix gives

@@ -8,22 +8,28 @@ format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-19.
+Updated 2026-11-22.
 
 | ID | Linux x86_64 | Linux arm64 | macOS Apple silicon | macOS Intel |
 | --- | --- | --- | --- | --- |
-| `brew-install` | observed 2026-11-19 | not yet observed | not yet observed | not yet observed |
+| `brew-install` | observed 2026-11-19 | not yet observed | install observed 2026-11-22 in the tap run; `PATH` not checked | not yet observed |
 | `brew-bytes` | observed 2026-11-19 | not yet observed | not yet observed | not yet observed |
-| `brew-test-audit` | observed 2026-11-19 | not yet observed | not yet observed | not yet observed |
+| `brew-test-audit` | observed 2026-11-19 | not yet observed | observed 2026-11-22 (tap run) | not yet observed |
 | `brew-uninstall` | observed 2026-11-19 | not yet observed | not yet observed | not yet observed |
 | `brew-local-vm` | not applicable | not applicable | not yet observed | not applicable |
 | `brew-upgrade-refusal` | not yet observed | not yet observed | not yet observed | not yet observed |
-| `brew-release-moves` | not yet observed | not applicable | not applicable | not applicable |
+| `brew-release-moves` | observed 2026-11-22 | not applicable | not applicable | not applicable |
 
 The Linux x86_64 walk ran as `linuxbrew` in the `homebrew/brew` image after
 `brew update` (Homebrew 7.0.15, Ubuntu 22.04 base), against the tap at
-`e5c3fd9` (`cw` v0.4.24). #5407's done-when needs macOS Apple silicon and
-Linux; the other two are walked when a machine is at hand.
+`e5c3fd9` (`cw` v0.4.24). macOS Apple silicon is observed in v0.4.27's tap
+run 44955753810. Its `Homebrew checks (macos-15)` job, on a fresh
+GitHub-hosted Apple silicon Mac, ran `brew trust codewiresh/codewire`,
+`brew audit --strict --online`, `brew install` and `brew test` on
+`codewiresh/codewire/codewire` at 0.4.27, and all passed. The macOS
+`brew-bytes`, `brew-uninstall` and `brew-local-vm` steps aren't walked yet.
+#5407's done-when needs macOS Apple silicon and Linux; the other two are
+walked when a machine is at hand.
 
 ## Before the walk
 
@@ -47,6 +53,13 @@ Linux; the other two are walked when a machine is at hand.
   `cw v0.4.24`. Homebrew first installed its own `glibc` and `gcc` and their
   libraries, because the image's glibc is older than Homebrew's floor
   (CLI-HOMEBREW-INSTALL.md, "The formula").
+- **Observed 2026-11-22, macOS Apple silicon (tap run 44955753810,
+  `macos-15`):** `brew trust codewiresh/codewire` and
+  `brew install codewiresh/codewire/codewire` (0.4.27) exited 0. The
+  formula's `brew test` then ran the Cellar's `bin/cw --version` and matched
+  `cw v0.4.27`. But the log wasn't read: GitHub serves job logs only to a
+  signed-in user. So the `Trusted tap` line, the caveat and `command -v cw`
+  resolving to Homebrew's `bin/cw` weren't seen.
 
 ## `brew-bytes`: the installed cw is the released cw
 
@@ -64,6 +77,9 @@ Linux; the other two are walked when a machine is at hand.
   `brew audit --strict --online codewiresh/codewire/codewire`.
 - **See:** both exit 0.
 - **Observed 2026-11-19, Linux x86_64:** both exit 0.
+- **Observed 2026-11-22, macOS Apple silicon (tap run 44955753810,
+  `macos-15`):** `brew audit --strict --online` and `brew test` on
+  `codewiresh/codewire/codewire` 0.4.27 both exit 0. The job's step passed.
 
 ## `brew-uninstall`: it leaves nothing behind
 
@@ -100,8 +116,6 @@ Target, not shipped (#2916).
 
 ## `brew-release-moves`: a release moves the tap
 
-Target, not shipped (#5407).
-
 - **Do:** after the next release's `cli-release` succeeds, open its tap job's
   log and the tap's Actions page.
 - **See:** the job dispatched the tap's `update-formula.yml` for the release's
@@ -110,3 +124,11 @@ Target, not shipped (#5407).
   macOS, and pushed one commit, `codewire <version>`, changing only
   `Formula/codewire.rb`. Then `brew update && brew upgrade codewire` installs
   the new release, and nobody edited the formula by hand.
+- **Observed 2026-11-22 (v0.4.27):** cli-release 68982's tap job logged "the
+  tap is moving to v0.4.27 in run 44955753810", then "the tap moved its
+  formula to v0.4.27 in run 44955753810", and passed. In that run, the
+  rendered formula was checked against the signed release. `brew audit`,
+  `brew install` and `brew test` passed on `ubuntu-24.04` and `macos-15`. The
+  run pushed one commit, `codewire 0.4.27` (`e88a78e530`, by
+  `github-actions[bot]`), changing only `Formula/codewire.rb`. Nobody touched
+  it. `brew upgrade codewire` on an existing install wasn't walked.

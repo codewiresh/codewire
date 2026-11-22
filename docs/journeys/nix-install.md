@@ -9,23 +9,25 @@ docs' install page ("Install with Nix"). The format is in
 
 ## Where the journey stands
 
-Updated 2026-11-19. Written first; only `nix-check-refuses` is observed so
-far, its local half on x86_64 Linux (2026-11-19: the Supply-chain proof, the
-signed-release check and `nix build` in `nixos/nix` 2.28.3 each refused a pin
-with one digit changed).
+Updated 2026-11-22. x86_64-linux is observed on NixOS, with v0.4.24
+(2026-11-19) and with v0.4.27 (2026-11-22), each in a scratch NixOS 26.05 VM
+with no prior `cw`. aarch64-darwin and aarch64-linux aren't walked yet, and
+nor is x86_64-darwin. The public Nix check hasn't run yet: every run of the
+mirror's `Nix flake` workflow so far ended in `startup_failure` before its
+jobs started.
 
 | ID | x86_64-linux (NixOS) | aarch64-linux | aarch64-darwin | x86_64-darwin |
 | --- | --- | --- | --- | --- |
-| `nix-run` | not yet observed | not yet observed | not yet observed | not yet observed |
-| `nix-profile` | not yet observed | not yet observed | not yet observed | not yet observed |
-| `nix-bytes` | not yet observed | not yet observed | not yet observed | not yet observed |
+| `nix-run` | observed 2026-11-22 | not yet observed | not yet observed | not yet observed |
+| `nix-profile` | observed 2026-11-22 | not yet observed | not yet observed | not yet observed |
+| `nix-bytes` | observed 2026-11-22 | not yet observed | not yet observed | not yet observed |
 | `nix-local-vm` | not applicable | not applicable | not yet observed | not applicable |
-| `nix-upgrade-refusal` | not yet observed | not yet observed | not yet observed | not yet observed |
-| `nix-release-moves` | not yet observed | not applicable | not applicable | not applicable |
+| `nix-upgrade-refusal` | observed 2026-11-22 | not yet observed | not yet observed | not yet observed |
+| `nix-release-moves` | observed 2026-11-22, but its Nix check hasn't run | not applicable | not applicable | not applicable |
 | `nix-check-refuses` | local half observed 2026-11-19 | not applicable | public CI not yet observed | not applicable |
 
-The done-when needs `x86_64-linux` on NixOS and `aarch64-darwin`. The other two
-are walked when a machine is at hand, and say so until then.
+#5399's done-when covers x86_64-linux on NixOS. The Mac and arm64 Linux walks
+come after launch.
 
 ## Before the walk
 
@@ -43,6 +45,9 @@ are walked when a machine is at hand, and say so until then.
 - **Do:** `nix run github:codewiresh/codewire -- version`.
 - **See:** the stable version recorded above, and nothing installed:
   `command -v cw` finds nothing afterwards.
+- **Observed 2026-11-22, x86_64-linux (NixOS 26.05, Nix 2.34.9):** with
+  `--refresh`, `cw v0.4.27`, the stable release; no `cw` on `PATH`
+  afterwards. The same on 2026-11-19 with `cw v0.4.24`.
 
 ## `nix-profile`: install it
 
@@ -52,6 +57,9 @@ are walked when a machine is at hand, and say so until then.
   equivalent) and prints the stable version. `nix profile list` shows one
   element for it; record its name, which the refusal in
   `nix-upgrade-refusal` must name.
+- **Observed 2026-11-22, x86_64-linux:** rc 0, element `codewire`;
+  `~/.nix-profile/bin/cw` resolves to `/nix/store/…-cw-0.4.27/bin/cw`, and
+  `cw version` prints `cw v0.4.27`.
 
 ## `nix-bytes`: the installed cw is the released cw
 
@@ -64,6 +72,9 @@ are walked when a machine is at hand, and say so until then.
   - **aarch64-linux:** a different SHA-256, because only the interpreter is
     patched; `readelf -l` names an interpreter under `/nix/store/`, and
     `cw version` runs.
+- **Observed 2026-11-22, x86_64-linux:**
+  `ce2c5d9a18813a5a0610fff428e754a940ca68f4b4d90090cbd1b3eec7dcd7f7`, the
+  release's `x86_64-unknown-linux-musl` executable.
 
 ## `nix-local-vm`: a local VM from a Nix cw on a Mac
 
@@ -91,16 +102,30 @@ are walked when a machine is at hand, and say so until then.
   `~/.local/share/codewire/cli/selection.json` are byte-for-byte as before,
   or still absent. `cw upgrade --vms` still runs. The daily update notice
   names the Nix command.
+- **Observed 2026-11-22, x86_64-linux (v0.4.27):** all three refuse with
+  exit 1, naming `nix profile upgrade codewire`, both before and after
+  `install.sh` created a managed store. Without the store,
+  `~/.local/bin/cw` and `selection.json` stay absent. With it, both are
+  byte-identical before and after. `cw upgrade --vms` answers
+  "No local VMs run on a previous cw." and exits 0. The daily update notice
+  wasn't waited for.
 
 ## `nix-release-moves`: a release moves the flake
 
 - **Do:** after the next release's `cli-release` succeeds, find the
   `automation/nix-release-pin` pull request.
-- **See:** it changes only `nix/release.json`, and its body lists the four
-  systems with the signed `SHA256SUMS` hash, the hash written and
+- **See:** it changes only `nix/release.json` and the signed
+  `nix/SHA256SUMS` and `nix/SHA256SUMS.asc` that prove it. Its body lists the
+  four systems with the signed `SHA256SUMS` hash, the hash written and
   `exact match`. Its Nix check is green. After it lands,
   `nix run --refresh github:codewiresh/codewire -- version` prints the new
   release, and nobody edited the file by hand.
+- **Observed 2026-11-22 (v0.4.27):** cli-release opened #5839 from
+  `automation/nix-release-pin`, with those three files and four `exact match`
+  rows. It landed through the merge queue, and the NixOS walk above printed
+  `cw v0.4.27` from the mirror. The Nix check didn't run: the mirror's
+  `Nix flake` workflow ended in `startup_failure`, as every run of it has so
+  far.
 
 ## `nix-check-refuses`: a wrong hash fails the check
 
