@@ -1,7 +1,7 @@
 ---
 title: The workspace image
 description: "What the Codewire workspace image holds: Ubuntu, language toolchains, Docker, Git, GitHub CLI and the coding agents, and how to add more."
-updated: 2026-11-19
+updated: 2026-11-22
 weight: 3
 ---
 
@@ -95,3 +95,29 @@ root trusted in `~/.claude.json`, keeping everything else in the file. It
 does so when it starts and again before each session, so a repository you
 clone later is covered from your next session on. Folders outside the
 workspace, such as your home directory, still ask.
+
+## Warm builds
+
+The workspace image has no compiler cache, so a new environment builds your
+project from scratch. To start warm, build once, then make later environments
+from a snapshot of that one:
+
+```sh
+cw stop app
+cw --cloud snapshot create app --name app-built
+cw --cloud create --snapshot app-built
+```
+
+The snapshot keeps the whole workspace disk, so the new environment has your
+build output and Cargo, npm or Go caches, and only what changed since rebuilds.
+Building Codewire's own `cw` took 254 seconds cold and 3 seconds in an
+environment made from such a snapshot. See
+[Snapshots](@/reference/cli/environments.md#cloud-snapshots) for where a
+snapshot is kept and its limits.
+
+A snapshot also keeps files you wrote yourself, such as a `.env`,
+`~/.cargo/credentials.toml` or a tool's login file, and every environment made
+from it gets them. Codewire-delivered sign-ins are cleared. Take the snapshot
+before you put personal tokens on the disk, or remove them first.
+
+Codewire does not share a compiler cache between environments or people.
