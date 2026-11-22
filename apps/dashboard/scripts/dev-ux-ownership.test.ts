@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { DevUxError, OwnedUxSandbox, cwFailureClass, failureClassOf, holds, uxOrganizationSlug } from "./dev-ux-ownership";
+import { DevUxError, OwnedUxSandbox, cwFailureClass, failureClassOf, holds, setupRowsSeen, uxOrganizationSlug } from "./dev-ux-ownership";
 
 const USER = "1".repeat(32);
 const ORG = "2".repeat(32);
@@ -323,4 +323,13 @@ test("a check that does not hold names its first failed expectation on one line 
     expect(ran).toEqual(["list-visible", "first-row", "list-visible", "first-row"]);
     expect(lines.mock.calls).toEqual([["[dev-ux] create-start-list:not-held expectation=first-row class=timeout"]]);
   } finally { lines.mockRestore(); }
+});
+
+test("a setup list that did not hold is described by its fixed step names and states only", () => {
+  expect(setupRowsSeen([
+    { label: "Checking sidecar readiness", state: "completed", instant: true },
+    { label: "Running install command", state: "failed", instant: false },
+    { label: "https://user:secret@example.test", state: "<b>x</b>", instant: false },
+  ])).toBe("Checking_sidecar_readiness:completed+instant,Running_install_command:failed,other:other");
+  expect(setupRowsSeen([])).toBe("none");
 });

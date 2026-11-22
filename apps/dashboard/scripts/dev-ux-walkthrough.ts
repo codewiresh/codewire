@@ -1,7 +1,7 @@
 // Runs ONLY inside the existing protected Dev auth helper. No traces, page
 // dumps, screenshots, stored browser sessions, or provider authorizations.
 import { expect, request, type Locator, type Page, type WebSocketRoute } from "@playwright/test";
-import { DevUxError, failureClassOf, holds, type Expectation, type OwnedUxSandbox } from "./dev-ux-ownership";
+import { DevUxError, failureClassOf, holds, setupRowsSeen, type Expectation, type OwnedUxSandbox } from "./dev-ux-ownership";
 
 const ORIGIN = "https://codewire-dev.sh";
 // Re-attaching a surviving terminal after navigation, reload, reconnect, or
@@ -1155,6 +1155,15 @@ export async function runDevUxWalkthrough(page: Page, options: {
       }
     }],
   ])) passed("setup-retry-resume-list", started);
+  else if (resumed) {
+    // What the list held, by fixed step names and states only.
+    const rows = await setupRows(failing).evaluateAll((items) => items.map((item) => ({
+      label: item.querySelector(":scope > .cw-setup-row > .cw-setup-stage-label")?.textContent ?? "",
+      state: item.getAttribute("data-state") ?? "",
+      instant: item.hasAttribute("data-instant"),
+    })));
+    console.error(`[dev-ux] setup-retry-resume-list:rows ${setupRowsSeen(rows)}`);
+  }
   started = Date.now();
   const reclone = dialog(failing, "Retry cloning?");
   if (clonePath && await holds("setup-retry-reclone", [

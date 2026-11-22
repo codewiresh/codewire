@@ -73,6 +73,19 @@ export async function holds(name: string, expectations: Expectation[]): Promise<
   return true;
 }
 
+// The setup list's rows as a value-blind line for a check that did not hold:
+// our fixed step names and states, anything else as "other", so nothing the
+// page or a remote wrote is printed.
+const SETUP_STEPS = new Set(["Checking sidecar readiness", "Configuring environment", "Cloning repositories",
+  "Running install command", "Running startup script", "Checking agent tools", "Registering ports"]);
+const STEP_STATES = new Set(["running", "completed", "warning", "failed"]);
+export type SetupRowSeen = { label: string; state: string; instant: boolean };
+export function setupRowsSeen(rows: SetupRowSeen[]): string {
+  return rows.slice(0, 12).map(({ label, state, instant }) =>
+    `${SETUP_STEPS.has(label) ? label.replaceAll(" ", "_") : "other"}:${STEP_STATES.has(state) ? state : "other"}${instant ? "+instant" : ""}`,
+  ).join(",") || "none";
+}
+
 type Command = (args: string[], deadline: number) => Promise<unknown>;
 type OwnedEnvironment = { id: string; state: string };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
