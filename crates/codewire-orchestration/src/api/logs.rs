@@ -45,6 +45,13 @@ pub(crate) enum LogStreamEvent {
     Heartbeat(DateTime<Utc>),
 }
 
+/// A log row's time, to the microsecond the database keeps. Cut to the
+/// second, a quick retry's rows read as written before it was asked for, and
+/// a Sandbox page that follows the retry from that time missed it (#4767).
+fn log_time(created_at: chrono::DateTime<chrono::Utc>) -> String {
+    created_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+}
+
 /// Mirrors Go's `json.Compact` as applied to embedded RawMessage:
 /// strips insignificant whitespace WITHOUT reparsing (key order and
 /// number formatting stay exactly as jsonb rendered them).
@@ -124,7 +131,7 @@ async fn query_environment_logs(
                 status: r.try_get("status")?,
                 message: r.try_get("message")?,
                 metadata: serde_json::value::RawValue::from_string(compact_json(&meta_text)).ok(),
-                created_at: created_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                created_at: log_time(created_at),
             })
         })
         .collect()
@@ -312,6 +319,20 @@ mod follow_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #4767: a retry that ends within the second it was asked for must read
+    /// as after that time, so the row keeps the database's fraction.
+    #[test]
+    fn a_log_time_keeps_its_fraction_of_a_second() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-11-22T16:37:06.912345Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(log_time(at), "2026-11-22T16:37:06.912345Z");
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&log_time(at)).unwrap(),
+            at
+        );
+    }
 
     #[test]
     fn terminal_predicate_mirrors_go() {
