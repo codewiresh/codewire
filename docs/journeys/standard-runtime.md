@@ -101,7 +101,10 @@ Updated 2026-11-22. Written first; every step is not yet observed.
   [network-and-egress.md](network-and-egress.md), on a `standard` sandbox.
 - **Proof:** the refusal log's entry for the refused destination, and no
   route out of the Pod other than to the egress service (the operator reads
-  the Pod's NetworkPolicy).
+  the Pod's NetworkPolicy). The daemon's log has "guest-carried egress
+  self-check passed" with its three probes, before the create's
+  `access_ready`. A daemon whose check did not pass never records its host
+  key, and the create fails rather than finishing.
 - **Observed:** not yet observed.
 
 ## `standard-stop-start`: the home and the workspace persist, the root does not

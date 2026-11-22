@@ -26,6 +26,7 @@ pub(crate) mod authorize;
 mod authorize_reference;
 pub mod limits;
 mod metrics;
+mod self_check;
 mod service;
 pub(crate) mod store;
 
@@ -91,8 +92,13 @@ impl ConnectionUpgrade for WorkspaceBindingTls {
 
 /// Body limit of every method without a key in its request.
 pub const DEFAULT_BODY_BYTES: usize = 64;
-/// One Ed25519 OpenSSH public key line (80 bytes) in either encoding.
-pub const RECORD_HOST_KEY_BODY_BYTES: usize = 128;
+/// The largest request `RecordHostKey` admits, in either encoding: one
+/// Ed25519 OpenSSH public key line (80 bytes) and a guest-carried self-check
+/// of eight probes (#5602), each with a 32-byte name and a 21-byte target (the
+/// longest IPv4:port, `255.255.255.255:65535`; the 64-byte bound admits no
+/// longer one that parses). That is 876 bytes as compact JSON and 573 as
+/// binary, with their framing.
+pub const RECORD_HOST_KEY_BODY_BYTES: usize = 1024;
 /// Two disco public keys (73 bytes each) and a generation in either encoding.
 pub const ALLOCATE_PEER_RELAY_BODY_BYTES: usize = 256;
 

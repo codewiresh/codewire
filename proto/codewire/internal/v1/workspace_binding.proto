@@ -156,6 +156,27 @@ message RefreshAccessResponse {
 message RecordHostKeyRequest {
   // One OpenSSH public key line: "ssh-ed25519 <base64>", no comment.
   string public_key_openssh = 1;
+  // A guest-carried daemon's start-time egress self-check (#5602): set only
+  // in a standard Pod's guest, never by a Kata daemon. The listener refuses
+  // the key for a standard Pod unless every probe refused, and refuses the
+  // field on any other Pod.
+  optional GuestCarriedSelfCheck guest_carried_self_check = 2;
+}
+
+// What a guest-carried daemon's self-check found before it served: each
+// probe made from the workload's network, bound to the Pod interface.
+message GuestCarriedSelfCheck {
+  // Exactly direct_dial, public_dns and cluster_dns, each once.
+  repeated SelfCheckProbe probes = 1;
+}
+
+message SelfCheckProbe {
+  // The probe's name, at most 32 bytes.
+  string name = 1;
+  // Its literal IPv4 target, "address:port", at most 64 bytes.
+  string target = 2;
+  // True when the probe found no way out: refused, no route or a timeout.
+  bool refused = 3;
 }
 
 message RecordHostKeyResponse {}

@@ -124,10 +124,28 @@ class RefreshAccessResponse(_message.Message):
     def __init__(self, access: _Optional[_Union[WorkspaceAccess, _Mapping]] = ...) -> None: ...
 
 class RecordHostKeyRequest(_message.Message):
-    __slots__ = ("public_key_openssh",)
+    __slots__ = ("public_key_openssh", "guest_carried_self_check")
     PUBLIC_KEY_OPENSSH_FIELD_NUMBER: _ClassVar[int]
+    GUEST_CARRIED_SELF_CHECK_FIELD_NUMBER: _ClassVar[int]
     public_key_openssh: str
-    def __init__(self, public_key_openssh: _Optional[str] = ...) -> None: ...
+    guest_carried_self_check: GuestCarriedSelfCheck
+    def __init__(self, public_key_openssh: _Optional[str] = ..., guest_carried_self_check: _Optional[_Union[GuestCarriedSelfCheck, _Mapping]] = ...) -> None: ...
+
+class GuestCarriedSelfCheck(_message.Message):
+    __slots__ = ("probes",)
+    PROBES_FIELD_NUMBER: _ClassVar[int]
+    probes: _containers.RepeatedCompositeFieldContainer[SelfCheckProbe]
+    def __init__(self, probes: _Optional[_Iterable[_Union[SelfCheckProbe, _Mapping]]] = ...) -> None: ...
+
+class SelfCheckProbe(_message.Message):
+    __slots__ = ("name", "target", "refused")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    TARGET_FIELD_NUMBER: _ClassVar[int]
+    REFUSED_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    target: str
+    refused: bool
+    def __init__(self, name: _Optional[str] = ..., target: _Optional[str] = ..., refused: _Optional[bool] = ...) -> None: ...
 
 class RecordHostKeyResponse(_message.Message):
     __slots__ = ()

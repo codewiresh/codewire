@@ -384,7 +384,12 @@ Pod: the supervisor, Cloud Hypervisor and guest that run a local VM
   UDP path is later work.
 - **The VM has no network device.** Its traffic leaves through the
   supervisor to cw-egress on the node, which decides every destination, so
-  `standard` is offered only where hosted egress (#4000) is on.
+  `standard` is offered only where hosted egress (#4000) is on. The egress
+  stream's lockdown check never sees a daemon in the guest, so until
+  orchestration checks the Pod itself, the daemon sends its own egress
+  self-check with its SSH host key. Orchestration records the key, and the
+  sandbox's access becomes ready, only when each of its three probes (a
+  direct dial, public DNS and the cluster's DNS) found no way out.
 - **The workspace image** reaches the VM as a read-only disk that the node
   pulls and caches like any image and every Sandbox on the node shares. Each
   VM adds a small writable root that is rebuilt at every start. The home and

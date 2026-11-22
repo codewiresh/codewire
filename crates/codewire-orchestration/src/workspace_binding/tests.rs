@@ -1586,7 +1586,7 @@ async fn every_method_refuses_a_token_presented_from_another_workload() {
     );
     assert_eq!(
         state
-            .record_host_key(&headers, Some(OTHER_PEER), HOST_KEY)
+            .record_host_key(&headers, Some(OTHER_PEER), HOST_KEY, None)
             .await,
         Err(BindError::PermissionDenied)
     );
@@ -1674,7 +1674,7 @@ async fn host_keys_are_write_once_per_environment_generation() {
         let state = fixture.state.clone();
         async move {
             state
-                .record_host_key(&valid_bearer(), Some(PEER), key)
+                .record_host_key(&valid_bearer(), Some(PEER), key, None)
                 .await
         }
     };
@@ -1705,7 +1705,7 @@ async fn host_keys_are_write_once_per_environment_generation() {
     assert!(
         rotated
             .state
-            .record_host_key(&valid_bearer(), Some(PEER), OTHER_HOST_KEY)
+            .record_host_key(&valid_bearer(), Some(PEER), OTHER_HOST_KEY, None)
             .await
             .is_ok()
     );
@@ -1727,7 +1727,7 @@ async fn malformed_host_keys_are_refused_before_review() {
         assert_eq!(
             fixture
                 .state
-                .record_host_key(&valid_bearer(), Some(PEER), key)
+                .record_host_key(&valid_bearer(), Some(PEER), key, None)
                 .await,
             Err(BindError::InvalidArgument),
             "{key:?}"
@@ -1874,11 +1874,44 @@ async fn each_method_has_the_smallest_body_limit_that_fits_it() {
         call("RecordHostKey", host_key).await.unwrap().status(),
         StatusCode::OK
     );
+    // #5602: the largest request the host-key bounds admit, padded to the
+    // limit, passes it and fails later (this Pod is refused a check, or is
+    // past its request rate); a byte more does not pass it.
+    let largest = serde_json::to_string(&json!({
+        "publicKeyOpenssh": HOST_KEY,
+        "guestCarriedSelfCheck": {"probes": (0..super::self_check::MAX_PROBES)
+            .map(|_| json!({
+                "name": "n".repeat(super::self_check::MAX_NAME_BYTES),
+                "target": "255.255.255.255:65535",
+                "refused": true,
+            }))
+            .collect::<Vec<_>>()},
+    }))
+    .unwrap();
+    assert!(largest.len() <= super::RECORD_HOST_KEY_BODY_BYTES);
+    let at_limit = format!(
+        "{largest:<width$}",
+        width = super::RECORD_HOST_KEY_BODY_BYTES
+    );
+    assert_eq!(at_limit.len(), super::RECORD_HOST_KEY_BODY_BYTES);
+    assert_ne!(
+        call("RecordHostKey", at_limit.clone())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        call("RecordHostKey", format!("{at_limit} "))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
     let relay = serde_json::to_string(
         &json!({"discoKeys": [disco(1), disco(2)], "relayGeneration": u32::MAX}),
     )
     .unwrap();
-    assert!(relay.len() > super::RECORD_HOST_KEY_BODY_BYTES);
     assert!(relay.len() <= super::ALLOCATE_PEER_RELAY_BODY_BYTES);
     // The relay call passes the limit and fails later: this Pod has no zone.
     assert_ne!(
@@ -2329,7 +2362,7 @@ async fn each_method_makes_the_reads_it_made_before() {
     assert!(
         host_key
             .state
-            .record_host_key(&valid_bearer(), Some(PEER), HOST_KEY)
+            .record_host_key(&valid_bearer(), Some(PEER), HOST_KEY, None)
             .await
             .is_ok()
     );
@@ -2348,5 +2381,7 @@ async fn each_method_makes_the_reads_it_made_before() {
 
 #[path = "authorize_tests.rs"]
 mod authorize_tests;
+#[path = "self_check_tests.rs"]
+mod self_check_tests;
 #[path = "vm_state_tests.rs"]
 mod vm_state_tests;

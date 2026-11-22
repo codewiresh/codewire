@@ -34,6 +34,7 @@ use super::access::{
 use super::authorize::{self, canonical_uid};
 use super::limits::{PodSlot, RequestLimits};
 use super::metrics;
+use super::self_check;
 use super::store::{
     BindDefaults, BindingNotifications, BindingStore, HostKeyRecord, LiveBinding, MeshAttachment,
     MeshAttachmentReport, MeshIssueOutcome,
@@ -458,12 +459,17 @@ impl WorkspaceBindingState {
         headers: &HeaderMap,
         peer: Option<IpAddr>,
         public_key: &str,
+        self_check: Option<&[self_check::Probe<'_>]>,
     ) -> Result<RecordHostKeyResponse, BindError> {
         if !access::valid_host_key(public_key) {
             return Err(BindError::InvalidArgument);
         }
         let bound = self.bound(headers, peer).await?;
         still_valid(&bound.caller.identity)?;
+        // #5602: a standard Pod's key, and so its access_ready, waits on its
+        // guest's passing egress self-check.
+        let standard = self_check::standard_pod(&bound.caller.member)?;
+        self_check::admit(standard, self_check)?;
         let recorded = self
             .store
             .record_host_key(
@@ -890,9 +896,25 @@ impl WorkspaceBindingService for WorkspaceBindingConnectService {
         ctx: RequestContext,
         request: ServiceRequest<'_, RecordHostKeyRequest>,
     ) -> ServiceResult<RecordHostKeyResponse> {
+        let probes = request.guest_carried_self_check.as_option().map(|check| {
+            check
+                .probes
+                .iter()
+                .map(|probe| self_check::Probe {
+                    name: probe.name,
+                    target: probe.target,
+                    refused: probe.refused,
+                })
+                .collect::<Vec<_>>()
+        });
         let result = self
             .state
-            .record_host_key(ctx.headers(), peer_of(&ctx), request.public_key_openssh)
+            .record_host_key(
+                ctx.headers(),
+                peer_of(&ctx),
+                request.public_key_openssh,
+                probes.as_deref(),
+            )
             .await;
         observe("record_host_key", result)
     }
