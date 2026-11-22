@@ -359,7 +359,7 @@ async function credentials(page: Page, slug: string, width: number): Promise<voi
   });
   for (const [key, choice, title] of [
     ["github", "GitHub", "Connect GitHub"], ["codex", "Codex", "Connect Codex"],
-    ["claude-sign-in", "Claude (sign-in)", "Connect Claude (sign-in)"],
+    ["claude-sign-in", "Connect Claude", "Connect Claude"],
     ["claude", "Claude (token)", "Connect Claude (token)"],
     ["openai", "OpenAI API key", "Add OpenAI API key"], ["anthropic", "Anthropic API key", "Add Anthropic API key"],
     ["ssh", "SSH key", "Add SSH key"],
