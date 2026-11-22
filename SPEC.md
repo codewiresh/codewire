@@ -1102,6 +1102,22 @@ environment.
 `scp`, `sftp` and `rsync` over the SSH path; `cw cp` through the daemon's
 file RPCs, which are confined to `/workspace` and `/home/codewire`.
 
+`StatFile` (#5804, not yet built) answers what is at one path without
+listing its folder or reading the file, for a program that checks many paths
+in a loop. The journey is
+[docs/journeys/sdk-files.md](docs/journeys/sdk-files.md).
+- It returns the entry `ListFiles` returns for that path: name, size,
+  whether it is a folder, mode and modification time.
+- It describes the path itself and does not follow a final symlink, as
+  `ListFiles` and downloads don't.
+- A missing path is `not_found`; the SDKs' `exists` turns that into false.
+- It is confined as the other file RPCs are, and a path outside `/workspace`
+  and `/home/codewire` is refused as `ListFiles` refuses it.
+- A local VM's supervisor answers it the same way, through its file
+  service. The SDKs reach only cloud environments today, so `cw` and the
+  supervisor's tests are what use it there.
+- Like the other file RPCs, it needs no API key permission.
+
 ### Desktop
 
 Target, not shipped (#3223). The contract is
