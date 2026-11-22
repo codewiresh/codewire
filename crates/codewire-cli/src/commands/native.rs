@@ -538,6 +538,7 @@ pub(crate) async fn create_native_environment(
     if reviewed && let Some(profile) = args.profile.as_deref().and_then(local_profile_selector) {
         super::credentials::offer_local_profile_ssh_key(profile).await?;
     }
+    let requested_vcpus = args.cpu.as_deref().map(local_vm_vcpus).transpose()?;
     let mut client = native_boot_client().await?;
     let name = args
         .name
@@ -588,10 +589,9 @@ pub(crate) async fn create_native_environment(
         vm_only: implicit_vm_only,
         ..
     } = workspace;
-    let vcpus = match args.cpu.as_deref() {
-        Some(value) => parse_native_cpu(value)?,
-        None => project.vcpus.unwrap_or(DEFAULT_NATIVE_VCPUS),
-    };
+    let vcpus = requested_vcpus
+        .or(project.vcpus)
+        .unwrap_or(DEFAULT_NATIVE_VCPUS);
     let memory_mib = match args.memory.as_deref() {
         Some(value) => parse_native_memory(value)?,
         None => project.memory_mib.unwrap_or(DEFAULT_NATIVE_MEMORY_MIB),
@@ -889,7 +889,7 @@ async fn create_from_snapshot(globals: &Globals, args: EnvCreateArgs) -> anyhow:
     }
     let account = sources::signed_in_account(globals, &paths, &env);
     let vcpus = match args.cpu.as_deref() {
-        Some(value) => parse_native_cpu(value)?,
+        Some(value) => local_vm_vcpus(value)?,
         None => snapshot.vcpus,
     };
     let memory_mib = match args.memory.as_deref() {
@@ -1125,6 +1125,7 @@ fn reject_snapshot_create_options(args: &EnvCreateArgs) -> anyhow::Result<()> {
         (args.image.is_some(), "--image"),
         (args.install.is_some(), "--install"),
         (args.startup.is_some(), "--startup"),
+        (!args.env.is_empty(), "--env"),
         (args.disk.is_some(), "--disk"),
         (args.docker_disk.is_some(), "--docker-disk"),
         (args.no_docker, "--no-docker"),
@@ -1310,7 +1311,7 @@ fn native_create_summary(
         .or_else(|| (!project.spec.image.is_empty()).then(|| project.spec.image.clone()))
         .unwrap_or_else(|| "Codewire workspace (default)".to_owned());
     let cpus = match args.cpu.as_deref() {
-        Some(value) => parse_native_cpu(value)?,
+        Some(value) => local_vm_vcpus(value)?,
         None => project.vcpus.unwrap_or(DEFAULT_NATIVE_VCPUS),
     };
     let memory_mib = match args.memory.as_deref() {
@@ -1501,7 +1502,7 @@ async fn edit_native_create(globals: &Globals, args: &mut EnvCreateArgs) -> anyh
                 current.disk_bytes.unwrap_or(DEFAULT_NATIVE_DISK_BYTES) / (1024 * 1024 * 1024)
             );
             edit_quantity("CPU cores", &mut args.cpu, &cpu, |s| {
-                parse_native_cpu(s).map(drop)
+                local_vm_vcpus(s).map(drop)
             })?;
             edit_quantity("Memory", &mut args.memory, &memory, |s| {
                 parse_native_memory(s).map(drop)
@@ -3332,6 +3333,8 @@ fn native_plan(
         args.branch.as_deref().and_then(trimmed_str),
         true,
     )?;
+    let environment = parse_env_overrides(&args.env)?;
+    project.spec.environment.extend(environment);
     provenance.default_image =
         project.spec.image.is_empty() && args.image.as_deref().and_then(trimmed_str).is_none();
     Ok((source, project, provenance))
@@ -3386,7 +3389,7 @@ fn native_codewire_yaml(
     let resources = &document.spec.resources;
     let vcpus = resources
         .cpu_millicores
-        .map(native_vcpus_from_millicores)
+        .map(local_vm_vcpus_from_millicores)
         .transpose()?;
     let memory_mib = resources
         .memory_mib
@@ -3720,13 +3723,6 @@ fn resolve_native_local_mounts(
             })
         })
         .collect()
-}
-
-fn native_vcpus_from_millicores(millicores: u32) -> anyhow::Result<u32> {
-    if !millicores.is_multiple_of(1000) {
-        anyhow::bail!("native CPU must resolve to a whole core count");
-    }
-    parse_native_cpu(&(millicores / 1000).to_string())
 }
 
 fn native_memory_from_mib(memory_mib: u64) -> anyhow::Result<u32> {
@@ -4244,9 +4240,6 @@ fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> anyhow::Res
     if args.coding_agent.is_some() {
         unsupported.push("--coding-agent");
     }
-    if !args.env.is_empty() {
-        unsupported.push("--env");
-    }
     if !args.follow || args.no_wait {
         unsupported.push("asynchronous creation");
     }
@@ -4260,17 +4253,6 @@ fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> anyhow::Res
         );
     }
     Ok(())
-}
-
-fn parse_native_cpu(value: &str) -> anyhow::Result<u32> {
-    let value = value.trim();
-    let vcpus = value.parse::<u32>().with_context(|| {
-        format!("invalid native CPU quantity {value:?}; use a core count such as 2")
-    })?;
-    if !(1..=32).contains(&vcpus) {
-        anyhow::bail!("native CPU must be from 1 through 32 cores");
-    }
-    Ok(vcpus)
 }
 
 fn parse_native_memory(value: &str) -> anyhow::Result<u32> {
@@ -4784,7 +4766,6 @@ mod tests {
 
     #[test]
     fn native_resource_quantities_match_the_canonical_command() {
-        assert_eq!(parse_native_cpu("2").unwrap(), 2);
         assert_eq!(parse_native_memory("16gi").unwrap(), 16 * 1024);
         assert_eq!(parse_native_memory("16gb").unwrap(), 16 * 1024);
         assert_eq!(parse_native_memory("1024mb").unwrap(), 1024);
@@ -5822,6 +5803,32 @@ working_directory: /workspace/github
         }
     }
 
+    /// `-e KEY=VALUE` reaches a local VM as a cloud create sends it: in the
+    /// project's environment, over codewire.yaml's own value.
+    #[test]
+    fn a_local_create_takes_environment_values_over_the_files() {
+        let (_temp, root) = checkout("version: 1\nenvironment: {SHARED: file, KEPT: file}\n");
+        let args = local_create_args(&[
+            "--path",
+            root.to_str().unwrap(),
+            "-e",
+            "SHARED=flag",
+            "-e",
+            "ADDED=a=b",
+        ]);
+        reject_unsupported_native_create_options(&args).unwrap();
+        let (_, project, _) = native_plan(&args).unwrap();
+        assert_eq!(
+            project.spec.environment,
+            [("ADDED", "a=b"), ("KEPT", "file"), ("SHARED", "flag")]
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect()
+        );
+        let bad = local_create_args(&["--path", root.to_str().unwrap(), "-e", "NO_VALUE"]);
+        assert!(native_plan(&bad).is_err());
+    }
+
     #[test]
     fn native_no_file_skips_the_search() {
         let (_temp, root) = checkout("version: 1\ninstall_command: make setup\n");
@@ -6764,6 +6771,7 @@ mod snapshot_create_tests {
             &["--disk", "40GB"],
             &["--no-docker"],
             &["--profile", "local:work"],
+            &["-e", "KEY=value"],
             &["https://example.invalid/repo.git"],
         ] {
             let args = parsed_create(&[&["--snapshot", "s1"][..], fixed].concat()).unwrap();

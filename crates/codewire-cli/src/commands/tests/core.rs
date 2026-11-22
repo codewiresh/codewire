@@ -2556,6 +2556,56 @@ fn a_stopped_cloud_environment_is_refused_with_the_command_that_starts_it() {
     }
 }
 
+/// `cw shell --stdio`, ssh's ProxyCommand, ends when an idle stop takes the
+/// Sandbox away under an open connection. It says why in plain `cw shell`'s
+/// words, the stop's reason and `cw --cloud start`, whether the stop has
+/// finished or only begun; an environment meant to run says nothing
+/// (docs/journeys/idle-stop.md, `idle-stop`).
+#[test]
+fn an_ssh_connection_a_stop_ended_says_why_as_cw_shell_does() {
+    let said = |environment: &Environment| {
+        ended_by_stop(environment, "walk").map(|error| {
+            let step = error.downcast_ref::<crate::error_report::NextStep>();
+            (error.root_cause().to_string(), step.map(ToString::to_string))
+        })
+    };
+    let idle = |state: &str, desired: &str| Environment {
+        desired_state: desired.to_owned(),
+        stop_reason: Some("idle".to_owned()),
+        idle_stop_seconds: 300,
+        ..test_environment("env-1", Some("walk"), state)
+    };
+    let expected = Some((
+        "cloud environment walk: Stopped itself after 5 minutes idle (CPU under 10%, no \
+         traffic or input). Files are kept."
+            .to_owned(),
+        Some("cw --cloud start walk".to_owned()),
+    ));
+    for (state, desired) in [
+        ("running", "stopped"),
+        ("stopping", "stopped"),
+        ("stopped", "stopped"),
+    ] {
+        assert_eq!(said(&idle(state, desired)), expected, "{state}");
+    }
+    let stopped = Environment {
+        desired_state: "stopped".to_owned(),
+        ..test_environment("env-1", Some("walk"), "stopped")
+    };
+    assert_eq!(
+        said(&stopped),
+        Some((
+            "cloud environment walk is stopped".to_owned(),
+            Some("cw --cloud start walk".to_owned())
+        ))
+    );
+    let running = Environment {
+        desired_state: "started".to_owned(),
+        ..test_environment("env-1", Some("walk"), "running")
+    };
+    assert_eq!(said(&running), None);
+}
+
 #[test]
 fn logout_not_signed_in_names_cw_login_next() {
     use crate::output::{Charset, Style};

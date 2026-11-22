@@ -341,7 +341,7 @@ fn platform_resize_restart_consent_error_names_the_runtime_reason() {
 }
 
 #[test]
-fn native_resize_requires_whole_cores_and_never_shrinks_disk() {
+fn native_resize_rounds_cpu_up_to_whole_cores_and_never_shrinks_disk() {
     let current = NativeResizeResources {
         vcpus: 2,
         memory_mib: 16 * 1024,
@@ -366,7 +366,8 @@ fn native_resize_requires_whole_cores_and_never_shrinks_disk() {
 
     let mut fractional = args;
     fractional.cpu = Some("1500m".to_string());
-    assert!(resolve_native_resize_plan(&fractional, current.clone(), Vec::new()).is_err());
+    let plan = resolve_native_resize_plan(&fractional, current.clone(), Vec::new()).unwrap();
+    assert_eq!(plan.desired.vcpus, 2);
     fractional.cpu = None;
     fractional.disk = Some("19Gi".to_string());
     assert!(resolve_native_resize_plan(&fractional, current, Vec::new()).is_err());

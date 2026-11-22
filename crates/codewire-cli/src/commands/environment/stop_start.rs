@@ -188,6 +188,104 @@ fn print_already(
     }
 }
 
+/// `cw start`: the start's stages, shown as `caps` allows, through its
+/// startup script and daemon readiness. Exits non-zero when a stage fails.
+pub(super) async fn start_platform_environment_with_progress(
+    client: &EnvironmentClient,
+    org_id: &str,
+    environment_id: &str,
+    began: Instant,
+    caps: &crate::output::Capabilities,
+    interrupt: &InterruptNotice,
+) -> anyhow::Result<()> {
+    let cursor = log_cursor(client, org_id, environment_id).await;
+    let started = client
+        .start_environment(org_id, environment_id)
+        .await
+        .context("start environment")?;
+    let feed = progress::PlatformLogFeed {
+        client,
+        org_id,
+        environment_id,
+    };
+    let view = StartProgress::new(std::io::stderr(), caps, began, "Starting");
+    follow_platform_start(
+        &feed,
+        cursor,
+        started.completes_with_log,
+        view,
+        caps,
+        interrupt,
+    )
+    .await
+}
+
+/// Where a start's own log rows begin: rows up to now belong to earlier
+/// operations, including the terminal row that would otherwise end the
+/// stream at once. Read before the request that starts it.
+pub(super) async fn log_cursor(
+    client: &EnvironmentClient,
+    org_id: &str,
+    environment_id: &str,
+) -> anyhow::Result<Option<String>> {
+    client
+        .get_environment_logs(org_id, environment_id)
+        .await
+        .map(|logs| progress::last_log_id(&logs))
+}
+
+/// The wait for a start the platform has accepted, `cw start`'s or the one
+/// a source update's restart ends with: its stages from the log rows after
+/// `cursor`, then daemon readiness, within the daemon wait's bounds. With
+/// `completes_with_log` the start ends with a `complete` row, and the
+/// environment leaving the start path ends the wait at once. An interrupt
+/// ends only the wait.
+pub(super) async fn follow_platform_start(
+    feed: &progress::PlatformLogFeed<'_>,
+    cursor: anyhow::Result<Option<String>>,
+    completes_with_log: bool,
+    mut view: StartProgress<std::io::Stderr>,
+    caps: &crate::output::Capabilities,
+    interrupt: &InterruptNotice,
+) -> anyhow::Result<()> {
+    let (client, org_id, environment_id) = (feed.client, feed.org_id, feed.environment_id);
+    let daemon_ready = async {
+        wait_for_platform_environment_daemon_ready(client, org_id, environment_id)
+            .await
+            .context("wait for environment daemon readiness")
+    };
+    let waited = crate::commands::lifecycle_output::unless_interrupted(!caps.is_machine(), async {
+        match cursor {
+            Ok(cursor) => {
+                progress::await_environment_start(
+                    feed,
+                    &mut view,
+                    &FollowPolicy::default(),
+                    environment_id,
+                    cursor,
+                    completes_with_log
+                        .then(|| progress::watch_start_failure(client, org_id, environment_id)),
+                    daemon_ready,
+                )
+                .await
+            }
+            Err(error) => {
+                view.note(&format!("Start progress is unavailable: {error:#}"))?;
+                progress::await_daemon_ready(&mut view, &FollowPolicy::default(), daemon_ready)
+                    .await
+            }
+        }
+    })
+    .await;
+    match waited {
+        Some(result) => result,
+        None => {
+            view.finish()?;
+            Err(interrupt.error(true))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,10 +1,15 @@
-//! A cloud environment that refuses a session because it isn't running
-//! (#4689). The server answers "environment must be running" whatever the
-//! state (orchestration's `session_state_refusal`, and the coordinator); it is
-//! typed once here, from `display_client_error`, and a command that hits it
-//! asks the environment's state once, then says what that state means.
+//! An environment that refuses a session because it isn't running (#4689).
+//! The cloud answers "environment must be running" whatever the state
+//! (orchestration's `session_state_refusal`, and the coordinator); it is
+//! typed once here, from `display_client_error`. A local VM's supervisor
+//! answers `failed_precondition` with its own words. A command that hits
+//! either asks the environment's state once, then says what that state
+//! means, in one wording for both placements ([`state_error`]).
 
 use codewire_client::{ClientError, EnvironmentState, ErrorCode};
+
+use crate::commands::lifecycle_output::environment_command;
+use crate::output::VmLocation;
 
 /// The server's refusal of a session in an environment that isn't running.
 #[derive(Debug, thiserror::Error)]
@@ -12,6 +17,10 @@ use codewire_client::{ClientError, EnvironmentState, ErrorCode};
 pub(crate) struct EnvironmentNotRunning;
 
 const NOT_RUNNING: &str = "environment must be running";
+
+/// The local supervisor's public API refusal of a session in a VM that
+/// isn't running (`codewire-local-vmm`, `public_api/status.rs`).
+const LOCAL_NOT_RUNNING: &str = "local environment is not in the required state";
 
 /// A client error as the CLI keeps it: the refusal typed, anything else as
 /// it is.
@@ -34,32 +43,96 @@ pub(crate) fn is_refusal(error: &anyhow::Error) -> bool {
         .any(|cause| cause.is::<EnvironmentNotRunning>())
 }
 
-/// What to say when a command couldn't reach cloud environment `name` in
-/// `state`: `None` when it is running, so the command's own error stands;
-/// with no state, that it isn't running and where to look. `idle_stop` is
-/// its timeout when it stopped itself for being idle (#3384). The command
-/// that helps is the error's next step, printed on its own `→` line.
+/// Whether `error` is, or wraps, a local VM's refusal of a session because
+/// it isn't running.
+pub(crate) fn is_local_refusal(error: &anyhow::Error) -> bool {
+    let refused = |code: ErrorCode, message: &str| {
+        code == ErrorCode::FailedPrecondition && message == LOCAL_NOT_RUNNING
+    };
+    error.chain().any(|cause| {
+        if let Some(error) = cause.downcast_ref::<ClientError>() {
+            return refused(error.code(), error.message());
+        }
+        if let Some(error) = cause.downcast_ref::<connectrpc::ConnectError>() {
+            return refused(error.code, error.message.as_deref().unwrap_or_default());
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(error) =
+            cause.downcast_ref::<codewire_local_vmm::public_client::NativePublicClientError>()
+        {
+            use codewire_local_vmm::public_client::NativePublicClientError as Native;
+            return match error {
+                Native::Rpc(error) => {
+                    refused(error.code, error.message.as_deref().unwrap_or_default())
+                }
+                Native::Client(error) => refused(error.code(), error.message()),
+                _ => false,
+            };
+        }
+        false
+    })
+}
+
+/// A local VM's state as [`state_error`] reads it. An orphaned VM has lost
+/// its runtime, so it reads as failed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn local_state(state: i32) -> Option<EnvironmentState> {
+    use codewire_local_vmm::control::v1::EnvironmentState as Local;
+    Some(match Local::try_from(state).ok()? {
+        Local::Running => EnvironmentState::Running,
+        Local::Stopped => EnvironmentState::Stopped,
+        Local::Starting => EnvironmentState::Starting,
+        Local::Error | Local::Orphaned => EnvironmentState::Error,
+        Local::Unspecified => return None,
+    })
+}
+
+/// `error`, or, when a local VM refused it because it isn't running, what
+/// its `state` means and what to do, in [`state_error`]'s words. `state` is
+/// `None` when it couldn't be read.
+pub(crate) fn explain_local(
+    error: anyhow::Error,
+    name: &str,
+    state: Option<EnvironmentState>,
+) -> anyhow::Error {
+    if !is_local_refusal(&error) {
+        return error;
+    }
+    state_error(VmLocation::Local, name, state, None).unwrap_or(error)
+}
+
+/// What to say when a command couldn't reach environment `name` at
+/// `location` in `state`: `None` when it is running, so the command's own
+/// error stands; with no state, that it isn't running and where to look.
+/// `idle_stop` is its timeout when it stopped itself for being idle
+/// (#3384). The command that helps is the error's next step, printed on its
+/// own `→` line. Both placements say it in these words.
 pub(crate) fn state_error(
+    location: VmLocation,
     name: &str,
     state: Option<EnvironmentState>,
     idle_stop: Option<i32>,
 ) -> Option<anyhow::Error> {
-    let start = format!("cw --cloud start {name}");
-    let info = format!("cw --cloud info {name}");
+    let start = environment_command(location, "start", name);
+    let info = environment_command(location, "info", name);
+    let environment = match location {
+        VmLocation::Local => "local environment",
+        VmLocation::Cloud => "cloud environment",
+    };
     let (message, step) = match state {
         Some(EnvironmentState::Running) => return None,
         Some(EnvironmentState::Stopped) => match idle_stop {
             Some(seconds) => (
                 format!(
-                    "cloud environment {name}: {}",
+                    "{environment} {name}: {}",
                     codewire_project::idle_stop_reason(seconds)
                 ),
                 start,
             ),
-            None => (format!("cloud environment {name} is stopped"), start),
+            None => (format!("{environment} {name} is stopped"), start),
         },
         Some(EnvironmentState::Stopping) => (
-            format!("cloud environment {name} is stopping; start it once it has stopped"),
+            format!("{environment} {name} is stopping; start it once it has stopped"),
             info,
         ),
         Some(
@@ -72,16 +145,16 @@ pub(crate) fn state_error(
             | EnvironmentState::Restoring
             | EnvironmentState::Resizing,
         ) => (
-            format!("cloud environment {name} is still starting; try again once it is running"),
+            format!("{environment} {name} is still starting; try again once it is running"),
             info,
         ),
         Some(EnvironmentState::BuildFailed | EnvironmentState::Error) => {
-            (format!("cloud environment {name} failed"), info)
+            (format!("{environment} {name} failed"), info)
         }
         Some(EnvironmentState::Destroying | EnvironmentState::Destroyed) => {
-            return Some(anyhow::anyhow!("cloud environment {name} is being removed"));
+            return Some(anyhow::anyhow!("{environment} {name} is being removed"));
         }
-        _ => (format!("cloud environment {name} isn't running"), info),
+        _ => (format!("{environment} {name} isn't running"), info),
     };
     Some(crate::error_report::with_next_step(
         anyhow::anyhow!(message),
@@ -127,6 +200,7 @@ pub(crate) fn explain(
         None => return error,
     };
     state_error(
+        VmLocation::Cloud,
         &crate::commands::progress::terminal_text(name),
         state,
         idle_stop,
@@ -265,9 +339,82 @@ mod tests {
         );
     }
 
+    /// docs/dev/CLI-PARITY.md, N2: a local VM's refusal of a session in a
+    /// stopped VM says so in the cloud's words, with the local command,
+    /// not "failed_precondition … required state". Any other failure, or a
+    /// running VM, keeps its own error.
+    #[test]
+    fn a_stopped_local_vm_is_refused_in_the_same_words_as_a_cloud_one() {
+        let refused = || {
+            anyhow::Error::new(connectrpc::ConnectError::failed_precondition(
+                LOCAL_NOT_RUNNING,
+            ))
+            .context("run the session")
+        };
+        assert!(is_local_refusal(&refused()));
+        assert_eq!(
+            said(&explain_local(
+                refused(),
+                "walk",
+                Some(EnvironmentState::Stopped)
+            )),
+            says(
+                "local environment walk is stopped",
+                Some("cw --local start walk")
+            )
+        );
+        assert_eq!(
+            said(&explain_local(refused(), "walk", None)),
+            says(
+                "local environment walk isn't running",
+                Some("cw --local info walk")
+            )
+        );
+        let client = anyhow::Error::new(ClientError::new(
+            ErrorCode::FailedPrecondition,
+            LOCAL_NOT_RUNNING,
+        ));
+        assert!(is_local_refusal(&client));
+        // A running VM, or another refusal, keeps its own error.
+        let running = explain_local(refused(), "walk", Some(EnvironmentState::Running));
+        assert!(is_local_refusal(&running));
+        assert_eq!(said(&running).1, None);
+        let other = || {
+            anyhow::Error::new(connectrpc::ConnectError::failed_precondition(
+                "local request is invalid",
+            ))
+        };
+        assert!(!is_local_refusal(&other()));
+        let kept = explain_local(other(), "walk", Some(EnvironmentState::Stopped));
+        assert_eq!(said(&kept), said(&other()));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_local_vms_state_reads_as_the_clouds() {
+        use codewire_local_vmm::control::v1::EnvironmentState as Local;
+        assert_eq!(
+            local_state(Local::Stopped as i32),
+            Some(EnvironmentState::Stopped)
+        );
+        assert_eq!(
+            local_state(Local::Running as i32),
+            Some(EnvironmentState::Running)
+        );
+        assert_eq!(
+            local_state(Local::Orphaned as i32),
+            Some(EnvironmentState::Error)
+        );
+        assert_eq!(local_state(Local::Unspecified as i32), None);
+    }
+
     #[test]
     fn each_state_says_what_it_means_and_only_stopped_is_told_to_start() {
-        let state = |state| state_error("walk", state, None).as_ref().map(said);
+        let state = |state| {
+            state_error(VmLocation::Cloud, "walk", state, None)
+                .as_ref()
+                .map(said)
+        };
         assert_eq!(
             state(Some(EnvironmentState::Stopped)),
             Some(says(

@@ -130,7 +130,23 @@ async fn resolve_session(
     Ok((target, view))
 }
 
+/// `cw msg` and `cw steer`. An environment that isn't running says so in
+/// the words every session command uses.
 pub(crate) async fn handle_message_command(
+    globals: &Globals,
+    args: AgentMessageArgs,
+    steer: bool,
+) -> anyhow::Result<()> {
+    let named = args.target().environment.map(str::to_owned);
+    match message_command(globals, args, steer).await {
+        Err(error) => {
+            Err(crate::commands::explain_not_running(globals, named.as_deref(), error).await)
+        }
+        done => done,
+    }
+}
+
+async fn message_command(
     globals: &Globals,
     args: AgentMessageArgs,
     steer: bool,
@@ -198,7 +214,14 @@ async fn message_session(
         return resolve_session(globals, message.environment, session).await;
     }
     let target = resolve_environment_session_target(globals, message.environment).await?;
-    let running = running_sessions(&target).await;
+    // A listing the environment refuses (a stopped VM) reaches
+    // `explain_not_running` as the refusal, not as an empty list.
+    let running: Vec<_> = target
+        .list()
+        .await?
+        .into_iter()
+        .filter(session_running)
+        .collect();
     let environment = environment_name(&target);
     // `cw msg ENV SESSION TEXT` once named the session; a first word that
     // names a running session is refused, never sent to another one.

@@ -3071,24 +3071,23 @@ pub(crate) async fn handle_environment_sessions_list(
     let target = resolve_environment_session_target(globals, Some(environment)).await?;
     let sessions = match target.list().await {
         Ok(sessions) => sessions,
-        Err(error) => return Err(stopped_environment_sessions(&target).await.unwrap_or(error)),
+        Err(error) => match stopped_environment_sessions(&target).await {
+            Some(stopped) => return Err(stopped),
+            None => return Err(explain_not_running(globals, Some(environment), error).await),
+        },
     };
     print_environment_sessions(&sessions, output)
 }
 
-/// A local VM lists its sessions only while it runs: say so, with the
-/// repair, instead of the supervisor's state refusal.
+/// A local VM lists its sessions only while it runs: say so, in the words
+/// every session command uses, instead of the supervisor's state refusal.
 async fn stopped_environment_sessions(target: &EnvironmentSessionTarget) -> Option<anyhow::Error> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let EnvironmentSessionTarget::NativeLocal { target, .. } = target {
-        let environment = native_environment(&target.name).await.ok()??;
-        if environment.state != codewire_local_vmm::control::v1::EnvironmentState::Running as i32 {
-            let name = &target.name;
-            return Some(anyhow::anyhow!(
-                "{name} is {}; its sessions are listed while it runs (`cw start {name}`)",
-                native_state_label(environment.state)
-            ));
-        }
+        let state = native_environment(&target.name).await.ok()??.state;
+        let name = crate::progress::terminal_text(&target.name);
+        let state = refusal::local_state(state);
+        return refusal::state_error(crate::output::VmLocation::Local, &name, state, None);
     }
     let _ = target;
     None

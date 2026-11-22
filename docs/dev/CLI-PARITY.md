@@ -22,7 +22,9 @@ Since then (2026-11-22), not yet observed on a surface:
 
 - **Same in both now:** R1 (242addf606), S3 (19a51afe40), K3 (2e2960920c), S4
   (ff0d91d276), P3 (07ad66bb3f), L1 (d3505ab915), N1's missing program
-  (c9b80bf7c8) and L7 (bffcb26313).
+  (c9b80bf7c8) and L7 (bffcb26313); then R3 (e5aece4c8c), R2
+  (868eae223d), H1 (643b739dbc), B1 (a5a66569a6), R8 (b5078084f3) and N2
+  (ef334abf33).
 - **Open:** every other gap below, and N1's `exec -t` blank line.
 
 The credentials tables are the audit as it ran on 2026-11-15. Since then:
@@ -494,8 +496,8 @@ copies (`native/sources.rs` and `environment/sources.rs`). `run`, `init` and
 | Progress | Preparing sources, Checking the VM runtime, Preparing the image, Starting the VM, Booting the workspace. The first create downloads the runtime (219 MiB) and says so | Creating sandbox, Waiting for SSH access, Waiting for the workspace daemon, Configuring environment | intended: different machinery, each in the user's terms |
 | A name already in use | Refused before anything: `local environment "N" already exists (remove it with cw --local rm N or choose another --name)` | Refused by the service, under the organization lock, in the same sentence: `cloud environment "N" already exists (remove it with cw --cloud rm N or choose another --name)`. A removed environment's name is free | Same in both now (242addf606); was R1: the cloud created a second `N` |
 | Without `--yes`, no terminal | Creates when there is nothing to confirm; with a secret project, refuses: "native source selection requires --yes …" (*read*) | Created, with nothing to confirm | same rule, in two copies (R4) |
-| `-e KEY=VALUE` | "Native local preview does not yet support: --env", exit 1 | Taken; the variable reaches `exec` | **Gap R2** |
-| `--cpu lots` | After the configuration lines: `Invalid native CPU quantity "lots"; use a core count such as 2: invalid digit found in string` | Before anything: `Invalid CPU quantity "lots"; use values such as 500m, 0.5, or 4` | **Gap R3** |
+| `-e KEY=VALUE` | Taken, over codewire.yaml's value; the VM's sessions get it | Taken; the variable reaches `exec` | Same in both now (868eae223d); was R2: "Native local preview does not yet support: --env", exit 1 |
+| `--cpu 0.5`, `500m`, `lots` | The cloud's grammar, before the supervisor starts or the configuration is shown. A VM boots whole vCPUs, so a fraction rounds up (0.5 and 500m are 1 vCPU), at most 32; `--help` says so. `lots`: `Invalid CPU quantity "lots"; use values such as 500m, 0.5, or 4` | Before anything: the same refusal | Same in both now (e5aece4c8c); was R3: 0.5 and 500m refused locally, and `lots` refused after the configuration lines in other words |
 | `--secrets` a missing project | "Source was not found in the eligible authenticated stores" | "Platform secret project was not found in the selected organization" | **R4**, S2 |
 | `--secrets P`, the confirmation block | `Create native environment "N" with these exact sources:`, `Secret project: "local:id:ID"`; the result says `Secrets: local:P` | `Create environment "N" on platform "URL", organization "ORG_ID".`, `Application-secret project: "platform:id:ID"`; the result says `Secrets: platform:P` | **Gap R4**, A1 |
 | `--policy P` | Selected and enforced | Refused on Dev | P1, P4 |
@@ -508,7 +510,7 @@ copies (`native/sources.rs` and `environment/sources.rs`). `run`, `init` and
 | `init` | `--local` and `--cloud` refused ("does not apply to `cw init`"). Writes the same file signed in or not | Same | same |
 | `preset` | `--local` and `--cloud` refused. Signed out, every subcommand fails: "No server configured (set --server, CODEWIRE_SERVER_URL, run 'cw setup', or run 'cw login')" | Presets live on the server: `list`, `create`, `info` work. `rm` takes only the ID; `rm SLUG` says "preset not found" though `info SLUG` finds it | **Gap R7** |
 | `update --idle-stop` | "--idle-stop applies to cloud sandboxes; a local VM is never stopped for being idle" | Sets it, without a restart | intended: idle stop saves cloud compute; plain |
-| `update --secrets`, `--clear-secrets` | `Update native environment "N" ("ID"), generation 1.`, Current and Replacement, a managed restart, then the whole `info`. With nothing selected, `--clear-secrets` fails: "Update native sources; conflicts require a fresh exact preview: native environment request is invalid" | `Update environment Some("N") ("ID") on platform "URL", organization "ORG_ID", operation 1.`, Current and Replacement, then "Environment source selection stored; managed restart requested." It returns at once, and the next `update` fails ("Source updates require a running or stopped environment; wait for the current operation to finish") until the restart ends | **Gap R4**, **R8** |
+| `update --secrets`, `--clear-secrets` | `Update native environment "N" ("ID"), generation 1.`, Current and Replacement, a managed restart, then the whole `info`. With nothing selected, `--clear-secrets` fails: "Update native sources; conflicts require a fresh exact preview: native environment request is invalid" | `Update environment Some("N") ("ID") on platform "URL", organization "ORG_ID", operation 1.`, Current and Replacement, then the restart's progress, as `cw start` shows a start's, and "Environment source selection stored; the environment restarted with it." | **Gap R4**; the wait is the same in both now (b5078084f3); was R8: it returned at once, and the next `update` failed ("Source updates require a running or stopped environment; wait for the current operation to finish") until the restart ended |
 | `update` with no change; a missing ENV | The same sentences | Same | same |
 | `export ENV` | `✓ Exported local VM N to codewire.yaml`, then "! Not exported: the local workspace's host folder …" and "! Local only: secret and credential references are exact IDs as saved …" | `✓ Exported cloud environment N …`, then "! Not exported: environment values …" | intended: each names what its placement can't carry ("cloud environment" here, "cloud VM" in `create`: A1) |
 | `export` over an existing file; a missing ENV | The same sentences | Same | same |
@@ -521,10 +523,14 @@ copies (`native/sources.rs` and `environment/sources.rs`). `run`, `init` and
   under the organization row lock its quota check already takes, so no
   migration was needed.
 - **R2.** A local VM takes environment values through the same
-  `ProjectSpec.environment` the cloud create sends.
+  `ProjectSpec.environment` the cloud create sends. Same in both now (868eae223d):
+  the refusal dated from the first local preview (#1942), and a local VM
+  already applied codewire.yaml's values.
 - **R3.** One resource parser for both, run before the configuration is
   shown; a local VM takes what `--help` promises (2, 0.5, 500m) or the help
-  says what it takes.
+  says what it takes. Same in both now (e5aece4c8c): `environment::cpu`, with a
+  fraction rounded up to whole vCPUs locally; a local resize and
+  codewire.yaml's `resources.cpu` take it too.
 - **R4.** One source preview, confirmation and result for both, in the user's
   words: no "native", no "platform", no raw organization ID and no Rust
   `Some(…)`. A clear with nothing selected says so.
@@ -537,7 +543,8 @@ copies (`native/sources.rs` and `environment/sources.rs`). `run`, `init` and
   out, say presets live in your Codewire account and name `cw login`. `rm`
   takes the slug, as `info` does.
 - **R8.** A cloud `update` that restarts waits for the restart, as a local
-  one and `cw start` do.
+  one and `cw start` do. Same in both now (b5078084f3): one `follow_platform_start`
+  for both, within the daemon wait's bounds.
 
 ## Lifecycle (`start`, `stop`, `restart`, `rm`, `extend`, `protect`, `unprotect`, `cancel-delete`, `prune`, `nuke`)
 
@@ -597,7 +604,7 @@ placement (`environment/info.rs`, `native/info_text.rs`).
 | `ls --state`, `--type host` | Filtered; nothing matches: the empty line above | Same | same |
 | `ls -a` | The same list | Adds destroyed environments | intended: a removed local VM leaves no record |
 | `ls ENV` | NAME, STATE, MODE, PARENT, SESSION, COMMAND | Same | same |
-| `ls ENV` while it isn't running | "N is stopped; its sessions are listed while it runs (`cw start N`)" | "The environment isn't running"; while it starts, "Environment is starting"; exit 1 | **Gap N2** |
+| `ls ENV` while it isn't running | `Local environment N is stopped`, `→ cw --local start N`; exit 1 | `Cloud environment N is stopped`, `→ cw --cloud start N`; exit 1 | Same in both now (ef334abf33); was N2: "N is stopped; its sessions are listed while it runs (`cw start N`)" locally, "The environment isn't running" in the cloud |
 | `info ENV`, text | Environment, Backend (`cloud-hypervisor`), State, CPU `2`, Memory `4Gi`, Disk `20Gi`, Workspace with the full plan hash, Working dir, Access, Install, Env vars, Agents, Docker, Network policy, Generation, Secrets as `local:id:ID`, Credentials | ID, Name, Type, State, DesiredState, PresetID, CPU `2000m`, Isolation, Memory `8192MB`, Disk `80GB`, CreatedBy (a user ID), CreatedAt and StartedAt in RFC 3339, IdleStop, Recoverable, TotalRunning | **Gap I1** |
 | `info --output json` | backend, cpu, memory, disk, generation, workspace_plan, source_selection, network_policy, … | cpu_millicores, memory_mb, disk_gb, desired_state, org_id, preset_id, created_by, … | **Gap I1** |
 | `info`, `ls ENV` of a missing environment | `Local environment "X" not found` | `Platform environment "X" not found` | A1 |
@@ -614,7 +621,7 @@ placement (`environment/info.rs`, `native/info_text.rs`).
   generations only under `-v` or in JSON, and one JSON shape with placement as
   a field.
 - **N2** (sessions, below) covers `ls ENV` on an environment that isn't
-  running.
+  running. Same in both now (ef334abf33).
 
 ## Sessions (`exec`, `shell`, `attach`, `logs`, `msg`, `inbox`, `send`, `wait`, `interrupt`, `steer`, `resize`)
 
@@ -627,7 +634,7 @@ once after a restart had ended them.
 | `exec --in ENV -- CMD`: output, exit status, `-e`, `-w`, stdin, the selected environment, an option after the command | Same results and refusals | Same | same |
 | `exec` a program that doesn't exist | "definitely-not-a-command: command not found", exit 127 | "cw: 1: exec: definitely-not-a-command: not found", exit 127 | Same in both now (c9b80bf7c8); was N1: "guest probe failed" and exit 1 locally |
 | `exec -t -- tty` | A blank line, then `/dev/pts/0` | `/dev/pts/0` | **Gap N1** |
-| `exec`, `logs`, `msg` in a stopped environment | "Failed_precondition: local environment is not in the required state"; "Local environment is not in the required state" | "Cloud environment N is stopped", `→ cw --cloud start N`; for `msg` "The environment isn't running" | **Gap N2** |
+| `exec`, `logs`, `msg` in a stopped environment | `Local environment N is stopped`, `→ cw --local start N` | `Cloud environment N is stopped`, `→ cw --cloud start N`, `msg` too | Same in both now (ef334abf33); was N2: "Failed_precondition: local environment is not in the required state" locally, and "The environment isn't running" for a cloud `msg` |
 | `shell ENV` at a terminal | A login shell; its exit status is cw's | The same, plus `via direct UDP` | same |
 | `shell ENV`, no terminal | Prints a prompt and waits until it is killed; a login-shell session stays running | Same | same |
 | `attach ENV --session S`; Ctrl-B d; a missing session; ENV with several sessions | `→ Attaching to ENV/S · local VM`; the same refusals ("N has 7 sessions; name one: …") | Same, plus the OSC 7501 state sequence (R6) | same |
@@ -651,7 +658,9 @@ once after a restart had ended them.
   The missing program is the same in both now (c9b80bf7c8); `-t` is open.
 - **N2.** One refusal for a stopped environment in every session command and
   `ls ENV`: "N is stopped", `→ cw --PLACEMENT start N`. No
-  `Failed_precondition` or "required state".
+  `Failed_precondition` or "required state". Same in both now (ef334abf33):
+  `refusal::state_error` words it for both placements, and a local VM's
+  refusal is explained by its state as a cloud one is.
 - **N3.** A session that an environment restart ends has one end state and
   one sentence in both.
 - **N4.** A local VM keeps its create and start progress as its setup log,
@@ -735,7 +744,7 @@ key.
 
 | Command | Local | Cloud | Same or gap |
 | --- | --- | --- | --- |
-| `setup` | `--local`: "Downloading the local VM runtime (6 files, 219 MiB)...", `Local VM runtime installed (ID).`; again: "Local VM runtime is installed and intact (ID)." | `--cloud`: a device sign-in. With no terminal it prints "Opening browser to authorize...", the link and the code, though no browser can open, and waits; at a terminal it shows the link, the code, the copy key and the waiting line. It starts a sign-in even with `CODEWIRE_API_KEY` set | intended: each sets up its own placement. **Gap H1** for the sign-in |
+| `setup` | `--local`: "Downloading the local VM runtime (6 files, 219 MiB)...", `Local VM runtime installed (ID).`; again: "Local VM runtime is installed and intact (ID)." | `--cloud`: a device sign-in. With no terminal it prints the link and the code and waits, and opens no browser; at a terminal it shows the link, the code, the copy key and the waiting line. With `CODEWIRE_API_KEY` set: "Using the API key in CODEWIRE_API_KEY, so there is nothing to sign in to.", no request, then the SSH section and "Setup complete." | intended: each sets up its own placement. The sign-in is fixed (643b739dbc); was H1: "Opening browser" with no terminal, and a sign-in with an API key set |
 | `setup --local --skip-ssh` (or `--org`, `--create-org`) | "--org, --create-org, --org-slug and --skip-ssh apply to sign-in, not to `cw setup --local`" | Taken | intended; plain |
 | `setup ssh --dry-run` | The same section, with `cw-local-*` and `cw-cloud-*` hosts | Same | same |
 | `whoami`, signed out | "No server configured (set --server, CODEWIRE_SERVER_URL, run 'cw setup', or run 'cw login')", exit 1 | Signed in: User and Server; JSON the user record | **Gap H2** for the signed-out words |
@@ -747,7 +756,7 @@ key.
 
 - **H1.** `setup` signs in with the `login` screen in every mode: no "Opening
   browser" when none opens, and with `CODEWIRE_API_KEY` set it says that key
-  is used and asks nothing.
+  is used and asks nothing. Fixed (643b739dbc), in `cw login`'s screen too.
 - **H2.** One signed-out state everywhere: "Not signed in" with `→ cw login`,
   as `cw ls` already says. Today `whoami`, `cost` and `preset` say "No server
   configured (…)", and `secrets` says "Not signed in (run `cw login`, or set
@@ -759,12 +768,12 @@ key.
 | --- | --- | --- | --- |
 | `cost --local`, `cost --cloud` | "--local does not apply to `cw cost`" | Same | same: `cost` is the account's |
 | `cost` | Signed out: the "No server configured" error, exit 1 (H2) | The organization's balance, this month's cost and usage; JSON the billing record | intended: local VMs aren't billed, and `cost` doesn't count them |
-| `cost --org` an organization that doesn't exist | — | Prints nothing, exit 0 | **Gap B1** |
+| `cost --org` an organization that doesn't exist | — | `Organization "X" not found`, `→ cw org list`, exit 1 | fixed (a5a66569a6); was B1: printed nothing, exit 0 |
 
 ### The gaps
 
 - **B1.** `cost --org X` for an organization you aren't in says so and names
-  `cw org list`.
+  `cw org list`. Fixed (a5a66569a6).
 
 ## Other command groups
 

@@ -4,6 +4,7 @@ use super::*;
 use crate::commands::progress::terminal_text;
 
 mod cp;
+pub(crate) mod cpu;
 mod host_placement;
 mod info;
 pub(crate) mod lifecycle;
@@ -14,6 +15,7 @@ mod sources;
 mod stop_start;
 mod transfer;
 use cp::handle_unified_environment_cp;
+pub(crate) use cpu::{local_vm_vcpus, local_vm_vcpus_from_millicores, parse_resize_cpu};
 pub(crate) use info::{env_created_label, env_state_label, format_env_info_text};
 use platform_create::handle_platform_env_create;
 
@@ -978,71 +980,6 @@ pub(crate) struct PlatformResizePlan {
     pub(crate) warnings: Vec<String>,
 }
 
-/// CPU is given in cores (`2`, `0.5`) or millicores with an `m` suffix
-/// (`500m`). No environment has more than 256 CPUs, so a larger bare number
-/// is a millicore value from before cores were the unit; it is refused with
-/// the spelling that works instead of asking for thousands of CPUs.
-pub(crate) fn parse_resize_cpu(value: &str) -> anyhow::Result<i32> {
-    let value = value.trim();
-    if let Ok(whole) = value.parse::<u64>()
-        && whole > MAX_CPU_CORES
-    {
-        let suggestion = if whole % 1000 == 0 {
-            (whole / 1000).to_string()
-        } else {
-            format!("{whole}m")
-        };
-        anyhow::bail!(
-            "CPU is in cores, so {value} means {value} CPUs; use {suggestion}, or add m for millicores"
-        );
-    }
-    if let Some(millicores) = value.strip_suffix('m') {
-        let millicores: i32 = millicores
-            .parse()
-            .with_context(|| format!("invalid CPU quantity {value:?}"))?;
-        if millicores <= 0 {
-            anyhow::bail!("CPU must be greater than zero");
-        }
-        return Ok(millicores);
-    }
-
-    let (whole, fraction) = match value.split_once('.') {
-        Some((whole, fraction)) => (whole, Some(fraction)),
-        None => (value, None),
-    };
-    if whole.is_empty() || !whole.bytes().all(|byte| byte.is_ascii_digit()) {
-        anyhow::bail!("invalid CPU quantity {value:?}; use values such as 500m, 0.5, or 4");
-    }
-    let whole: i32 = whole
-        .parse()
-        .with_context(|| format!("invalid CPU quantity {value:?}"))?;
-    let fractional_millicores = match fraction {
-        None => 0,
-        Some(fraction)
-            if !fraction.is_empty()
-                && fraction.len() <= 3
-                && fraction.bytes().all(|byte| byte.is_ascii_digit()) =>
-        {
-            let scale = 10_i32.pow((3 - fraction.len()) as u32);
-            let fraction: i32 = fraction
-                .parse()
-                .with_context(|| format!("invalid CPU quantity {value:?}"))?;
-            fraction * scale
-        }
-        _ => anyhow::bail!(
-            "invalid CPU quantity {value:?}; CPU fractions may have at most three decimal places"
-        ),
-    };
-    let millicores = whole
-        .checked_mul(1000)
-        .and_then(|whole| whole.checked_add(fractional_millicores))
-        .ok_or_else(|| anyhow::anyhow!("CPU quantity {value:?} is too large"))?;
-    if millicores <= 0 {
-        anyhow::bail!("CPU must be greater than zero");
-    }
-    Ok(millicores)
-}
-
 fn parse_resize_binary_quantity(value: &str, units: &[&str], label: &str) -> anyhow::Result<i32> {
     let value = value.trim();
     let lowercase = value.to_ascii_lowercase();
@@ -1118,19 +1055,7 @@ pub(crate) fn resolve_native_resize_plan(
 ) -> anyhow::Result<NativeResizePlan> {
     const GIB: u64 = 1024 * 1024 * 1024;
     let vcpus = match args.cpu.as_deref() {
-        Some(value) => {
-            let millicores = parse_resize_cpu(value)?;
-            if millicores % 1000 != 0 {
-                anyhow::bail!(
-                    "native local VMs require whole CPU cores; requested {}",
-                    format_resize_cpu(millicores)
-                );
-            }
-            u32::try_from(millicores / 1000)
-                .ok()
-                .filter(|value| (1..=32).contains(value))
-                .ok_or_else(|| anyhow::anyhow!("native CPU must be from 1 through 32 cores"))?
-        }
+        Some(value) => local_vm_vcpus(value)?,
         None => current.vcpus,
     };
     let memory_mib = match args.memory.as_deref() {
@@ -2599,8 +2524,6 @@ pub(crate) fn env_create_request_from_source(
     ))
 }
 
-const MAX_CPU_CORES: u64 = 256;
-
 pub(crate) fn parse_create_memory(value: Option<&str>) -> anyhow::Result<Option<i32>> {
     value
         .map(|value| match value.parse::<i32>() {
@@ -3181,71 +3104,6 @@ async fn wait_for_platform_environment_setup(
         },
     )
     .await
-}
-
-/// `cw start`: the start's stages, shown as `caps` allows, through its
-/// startup script and daemon readiness. Exits non-zero when a stage fails.
-async fn start_platform_environment_with_progress(
-    client: &EnvironmentClient,
-    org_id: &str,
-    environment_id: &str,
-    began: Instant,
-    caps: &crate::output::Capabilities,
-    interrupt: &InterruptNotice,
-) -> anyhow::Result<()> {
-    // Rows up to now belong to earlier operations, including the terminal
-    // row that would otherwise end the stream at once.
-    let cursor = client
-        .get_environment_logs(org_id, environment_id)
-        .await
-        .map(|logs| progress::last_log_id(&logs));
-    let started = client
-        .start_environment(org_id, environment_id)
-        .await
-        .context("start environment")?;
-    let mut view = StartProgress::new(std::io::stderr(), caps, began, "Starting");
-    let daemon_ready = async {
-        wait_for_platform_environment_daemon_ready(client, org_id, environment_id)
-            .await
-            .context("wait for environment daemon readiness")
-    };
-    // The platform accepted the start; an interrupt ends only this wait.
-    let waited = super::lifecycle_output::unless_interrupted(!caps.is_machine(), async {
-        match cursor {
-            Ok(cursor) => {
-                let feed = progress::PlatformLogFeed {
-                    client,
-                    org_id,
-                    environment_id,
-                };
-                progress::await_environment_start(
-                    &feed,
-                    &mut view,
-                    &FollowPolicy::default(),
-                    environment_id,
-                    cursor,
-                    started
-                        .completes_with_log
-                        .then(|| progress::watch_start_failure(client, org_id, environment_id)),
-                    daemon_ready,
-                )
-                .await
-            }
-            Err(error) => {
-                view.note(&format!("Start progress is unavailable: {error:#}"))?;
-                progress::await_daemon_ready(&mut view, &FollowPolicy::default(), daemon_ready)
-                    .await
-            }
-        }
-    })
-    .await;
-    match waited {
-        Some(result) => result,
-        None => {
-            view.finish()?;
-            Err(interrupt.error(true))
-        }
-    }
 }
 
 pub(crate) fn print_environment_logs_historical(logs: &[EnvironmentLog]) {

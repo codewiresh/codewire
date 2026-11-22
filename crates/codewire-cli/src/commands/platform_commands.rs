@@ -6,7 +6,11 @@ use super::*;
 use codewire_client::{ClientError, CodewireClient, DeleteApiKeyRequest, ListApiKeysRequest};
 
 mod doctor_checks;
+mod setup;
 pub(crate) use doctor_checks::doctor_build_check;
+#[cfg(test)]
+pub(crate) use setup::validate_setup_placement;
+pub(crate) use setup::{handle_setup_command, setup_select_org};
 
 pub(crate) fn codewire_client(
     platform: &config::ResolvedPlatformConfig,
@@ -33,7 +37,7 @@ pub(crate) async fn handle_cost_command(globals: &Globals, args: CostArgs) -> an
         .list_orgs()
         .await
         .context("list orgs")?;
-    let reports = collect_cost_reports(&client, &orgs, args.org.as_deref()).await;
+    let reports = collect_cost_reports(&client, &orgs, args.org.as_deref()).await?;
     print_cost_reports(&reports, args.output)
 }
 
@@ -290,181 +294,6 @@ pub(crate) fn short_env_id(id: &str) -> &str {
         return prefix;
     }
     id.get(..8).unwrap_or(id)
-}
-
-pub(crate) async fn handle_setup_command(globals: &Globals, args: SetupArgs) -> anyhow::Result<()> {
-    match args.command {
-        Some(SetupCommand::Ssh(ssh)) => return handle_config_ssh_command(ssh),
-        Some(SetupCommand::Rex(rex)) => return handle_setup_rex_command(rex),
-        None => {}
-    }
-    validate_setup_placement(&args, globals.placement)?;
-    if globals.placement == Some(EnvironmentPlacement::Local) {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        return super::native::setup_local_runtime(args.from, args.replace).await;
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        anyhow::bail!("local VMs are not available on this platform");
-    }
-    let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env)?;
-    let (server_url, sandbox) = resolve_login_server(globals, &paths, &env);
-    if sandbox {
-        eprintln!("Server: {server_url} (this sandbox's server)");
-        eprintln!("{SANDBOX_SIGN_IN_WARNING}");
-    }
-    let login_client = OAuthClient::discover(&server_url)
-        .await
-        .context("discover OAuth device flow")?;
-
-    eprintln!("Welcome to Codewire.");
-    if !sandbox {
-        eprintln!("Server: {server_url}");
-    }
-
-    let (credentials, user) = login_with_device(&login_client).await?;
-    eprintln!("Logged in as {}.", oauth_user_display_name(&user));
-
-    save_login(&paths, &server_url, &credentials, None, &user, None)?;
-
-    let authed_platform = config::ResolvedPlatformConfig::oauth_credentials(
-        server_url.clone(),
-        config::oauth_credentials_path(&paths.platform_config_dir),
-        None,
-    );
-    let organization_client = organization_client(&authed_platform)?;
-    let selected_org = setup_select_org(&organization_client, &args).await?;
-
-    config::save_platform_config(
-        &paths.platform_config_dir,
-        &config::PlatformConfig {
-            server_url: server_url.clone(),
-            default_org: selected_org
-                .as_ref()
-                .map(|org| org.id.clone())
-                .unwrap_or_default(),
-            deployment_ca: None,
-        },
-    )
-    .context("save config")?;
-
-    if let Some(org) = &selected_org {
-        eprintln!("Default org: {} ({}).", org.name, org.slug);
-    } else {
-        eprintln!("No default org selected.");
-    }
-
-    if !args.skip_ssh {
-        // Setup's own lines go to stderr, so the SSH result does too, once.
-        let style = crate::output::Capabilities::from_process(crate::output::OutputMode::Text)
-            .stderr_style();
-        eprintln!();
-        match install_default_managed_ssh_config() {
-            Ok(outcome) => eprint!("{}", outcome.render(style)),
-            Err(err) => eprint!("{}", render_ssh_setup_failure(&err, style)),
-        }
-        eprintln!();
-    }
-
-    eprintln!("Setup complete.");
-    Ok(())
-}
-
-/// `cw setup --local` installs the local VM runtime; sign-in flags belong to
-/// the cloud setup and the runtime flags to the local one. Checked before any
-/// effect, since clap cannot relate a subcommand flag to the global
-/// `--local`.
-pub(crate) fn validate_setup_placement(
-    args: &SetupArgs,
-    placement: Option<EnvironmentPlacement>,
-) -> anyhow::Result<()> {
-    if placement == Some(EnvironmentPlacement::Local) {
-        anyhow::ensure!(
-            args.org.is_none()
-                && args.create_org.is_none()
-                && args.org_slug.is_none()
-                && !args.skip_ssh,
-            "--org, --create-org, --org-slug and --skip-ssh apply to sign-in, not to `cw setup --local`"
-        );
-        return Ok(());
-    }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    anyhow::ensure!(
-        args.from.is_none() && !args.replace,
-        "--from and --replace install the local VM runtime; use `cw setup --local`"
-    );
-    Ok(())
-}
-
-pub(crate) async fn setup_select_org(
-    client: &OrganizationClient,
-    args: &SetupArgs,
-) -> anyhow::Result<Option<OrgWithRole>> {
-    if args.org.as_deref().and_then(trimmed_str).is_some() && args.create_org.is_some() {
-        anyhow::bail!("--org and --create-org are mutually exclusive");
-    }
-
-    if let Some(name) = args.create_org.as_deref().and_then(trimmed_str) {
-        let slug = args
-            .org_slug
-            .as_deref()
-            .and_then(trimmed_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| slugify(name));
-        let org = client
-            .create_org(&CreateOrgRequest {
-                name: name.to_string(),
-                slug,
-            })
-            .await
-            .context("create org")?;
-        return Ok(Some(OrgWithRole {
-            id: org.id,
-            name: org.name,
-            slug: org.slug,
-            role: "owner".to_string(),
-            ..OrgWithRole::default()
-        }));
-    }
-
-    let orgs = client.list_orgs().await.context("list orgs")?;
-    if let Some(org_ref) = args.org.as_deref().and_then(trimmed_str) {
-        return Ok(Some(select_org(&orgs, Some(org_ref))?.clone()));
-    }
-
-    match orgs.as_slice() {
-        [] if stdin_is_interactive() => {
-            if !super::guided::confirm("No organizations found. Create one?")? {
-                return Ok(None);
-            }
-            let name = super::guided::text("Organization name", None, super::guided::required)?;
-            let default_slug = slugify(&name);
-            let slug = super::guided::text(
-                "Organization slug",
-                Some(&default_slug),
-                super::additions::valid_slug,
-            )?;
-            eprintln!("  Name          {}", progress::terminal_text(&name));
-            eprintln!("  Slug          {}", progress::terminal_text(&slug));
-            if !super::guided::confirm("Create organization?")? {
-                return Ok(None);
-            }
-            let org = client
-                .create_org(&CreateOrgRequest { name, slug })
-                .await
-                .context("create org")?;
-            Ok(Some(OrgWithRole {
-                id: org.id,
-                name: org.name,
-                slug: org.slug,
-                role: "owner".to_string(),
-                ..OrgWithRole::default()
-            }))
-        }
-        [] => anyhow::bail!("no organizations found; pass --create-org <name>"),
-        [org] => Ok(Some(org.clone())),
-        _ if stdin_is_interactive() => Ok(Some(prompt_select_org(&orgs)?.clone())),
-        _ => anyhow::bail!("multiple organizations found; pass --org <id-or-slug>"),
-    }
 }
 
 /// The server `cw login` and `cw setup` sign in to: `--server`, then

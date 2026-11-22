@@ -415,6 +415,12 @@ pub(super) async fn update_platform_sources(
     );
     confirm_sources(args.yes, args.output)?;
     let selected = replacement.clone();
+    let began = Instant::now();
+    let cursor = if restart {
+        super::stop_start::log_cursor(client, org_id, &environment.id).await
+    } else {
+        Ok(None)
+    };
     let request = UpdateEnvironmentSourcesRequest {
         expected_operation_generation: environment.operation_generation,
         expected: expected.clone(),
@@ -425,6 +431,23 @@ pub(super) async fn update_platform_sources(
     };
     let result = client.update_environment_sources(org_id, &environment.id, &request).await
         .context("update environment sources; conflicts require a fresh preview, never an automatic retry")?;
+    if result.outcome == EnvironmentSourcesUpdateOutcome::RestartRequired {
+        // The next update is refused until this restart ends, so the update
+        // ends with it, as `cw start` ends with its start.
+        let caps = crate::commands::lifecycle_output::capabilities(args.output);
+        let name = environment.name.as_deref().unwrap_or(&environment.id);
+        let feed = super::progress::PlatformLogFeed {
+            client,
+            org_id,
+            environment_id: &environment.id,
+        };
+        let view = StartProgress::new(std::io::stderr(), &caps, began, "Restarting");
+        let interrupt = InterruptNotice::new(VmLocation::Cloud, "restart", name);
+        Box::pin(super::stop_start::follow_platform_start(
+            &feed, cursor, false, view, &caps, &interrupt,
+        ))
+        .await?;
+    }
     match args.output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
         OutputFormat::Text => println!(
@@ -435,7 +458,7 @@ pub(super) async fn update_platform_sources(
                 EnvironmentSourcesUpdateOutcome::Stored =>
                     "Environment source selection stored for the next managed launch.",
                 EnvironmentSourcesUpdateOutcome::RestartRequired =>
-                    "Environment source selection stored; managed restart requested.",
+                    "Environment source selection stored; the environment restarted with it.",
             }
         ),
     }
@@ -663,6 +686,126 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    const SOURCE_PROJECT: &str = "platform:id:11111111-1111-4111-8111-111111111111";
+
+    fn proto_response(message: impl buffa::Message) -> ResponseTemplate {
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "application/proto")
+            .set_body_bytes(message.encode_to_vec())
+    }
+
+    /// The environment as GetEnvironment answers, with one secret project
+    /// selected.
+    fn sourced_environment(state: rpc::EnvironmentState) -> ResponseTemplate {
+        let spec = codewire_project_proto::to_proto(codewire_project::ProjectSpec {
+            secrets: codewire_project::SecretBindings {
+                project: SOURCE_PROJECT.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        proto_response(rpc::GetEnvironmentResponse {
+            environment: Some(rpc::Environment {
+                id: "exact-environment".into(),
+                org_id: "org_demo".into(),
+                name: "app".into(),
+                state: state.into(),
+                desired_state: rpc::DesiredState::Started.into(),
+                operation_generation: 1,
+                source_selection: Some(rpc::EnvironmentSourceSelection {
+                    secrets: spec.secrets,
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        })
+    }
+
+    /// docs/dev/CLI-PARITY.md, R8: a source update that restarts a running
+    /// environment returns once the restart has finished, as `cw start`
+    /// does, so the next update isn't refused for an operation in flight.
+    #[tokio::test]
+    async fn a_source_update_that_restarts_waits_for_the_restart() {
+        const GET: &str = "/codewire.v1.EnvironmentService/GetEnvironment";
+        const UPDATE: &str = "/codewire.v1.EnvironmentService/UpdateEnvironmentSources";
+        const STATUS: &str = "/codewire.v1.EnvironmentService/GetEnvironmentDaemonStatus";
+        let server = MockServer::start().await;
+        // The plan's read, then the restart as the platform runs it.
+        for state in [
+            rpc::EnvironmentState::Running,
+            rpc::EnvironmentState::Stopping,
+            rpc::EnvironmentState::Starting,
+        ] {
+            Mock::given(method("POST"))
+                .and(path(GET))
+                .respond_with(sourced_environment(state))
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path(GET))
+            .respond_with(sourced_environment(rpc::EnvironmentState::Running))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(UPDATE))
+            .respond_with(proto_response(rpc::UpdateEnvironmentSourcesResponse {
+                environment_id: "exact-environment".into(),
+                operation_generation: 1,
+                selection: Some(rpc::EnvironmentSourceSelection::default()).into(),
+                outcome: rpc::EnvironmentSourcesUpdateOutcome::RestartRequired.into(),
+                ..Default::default()
+            }))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(STATUS))
+            .respond_with(proto_response(rpc::GetEnvironmentDaemonStatusResponse {
+                status: Some(rpc::EnvironmentDaemonStatus {
+                    state: rpc::EnvironmentDaemonState::Ready.into(),
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            }))
+            .mount(&server)
+            .await;
+        let platform = config::ResolvedPlatformConfig::static_token(
+            server.uri(),
+            "synthetic-source-update-token",
+            true,
+            None,
+        );
+        let client = client_with_token(&server, "synthetic-source-update-token");
+        let args = update_args(&["--clear-secrets", "--yes", "--output", "json"]);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            update_platform_sources(&platform, &client, "org_demo", args),
+        )
+        .await
+        .expect("the update's wait is bounded")
+        .unwrap();
+
+        let paths = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|request| request.url.path().to_owned())
+            .collect::<Vec<_>>();
+        let update = paths.iter().position(|path| path == UPDATE).unwrap();
+        let gets_after = paths[update..].iter().filter(|path| *path == GET).count();
+        assert!(
+            gets_after >= 3,
+            "followed the restart to running: {paths:?}"
+        );
+        assert_eq!(paths.last().map(String::as_str), Some(STATUS), "{paths:?}");
     }
 
     fn update_args(flags: &[&str]) -> EnvUpdateArgs {

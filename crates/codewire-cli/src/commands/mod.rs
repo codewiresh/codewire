@@ -1074,7 +1074,7 @@ pub(crate) struct EnvCreateArgs {
     #[arg(
         long,
         value_name = "CPU",
-        help = "CPU cores (for example 2, 0.5, or 500m)"
+        help = "CPU cores (for example 2, 0.5, or 500m; a local VM rounds up to whole cores)"
     )]
     cpu: Option<String>,
     #[arg(long, value_name = "QUANTITY", help = "Memory (for example 8GB)")]

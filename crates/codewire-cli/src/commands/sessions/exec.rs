@@ -32,13 +32,26 @@ pub(crate) async fn handle_exec_command(globals: &Globals, args: ExecArgs) -> an
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         EnvironmentSessionTarget::NativeLocal {
+            target,
             environment_id,
             working_dir,
-            ..
         } => {
-            let client = super::native_environment_data_client(&environment_id).await?;
-            let stream = client.run(run_start(&args, env, &working_dir)?).await?;
-            drive(LocalStream(stream), args.tty).await?
+            let ran = async {
+                let client = super::native_environment_data_client(&environment_id).await?;
+                let stream = client.run(run_start(&args, env, &working_dir)?).await?;
+                drive(LocalStream(stream), args.tty).await
+            };
+            match ran.await {
+                Ok(code) => code,
+                Err(error) => {
+                    return Err(crate::commands::explain_not_running(
+                        globals,
+                        Some(&target.name),
+                        error,
+                    )
+                    .await);
+                }
+            }
         }
         EnvironmentSessionTarget::Platform {
             org_id,

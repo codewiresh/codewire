@@ -129,7 +129,9 @@ to give. The email and password steps, from sign-up through verification, are
      ```
 
      `cw login` opens a page that offers the same two buttons. `cw whoami`
-     names the account. `cw cost` prints the organization's `Balance`.
+     names the account. `cw cost` prints the organization's `Balance`, and
+     `cw cost --org not-mine` says `Organization "not-mine" not found` with
+     `→ cw org list` and exits 1 (#4717; not yet observed).
 - **Proof:** `cw whoami` names the same account after the second sign-in,
   and `Balance` equals the sign-up credit the platform is set to give.
 - **Owner: email arrived:** the verification email and the access-enabled

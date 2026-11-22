@@ -177,7 +177,10 @@ preview request.
   cw-cloud-idle-keep2 closed." `cw shell` in the same case says "Stopped
   itself after 5 minutes idle (CPU under 10%, no traffic or input). Files
   are kept." and `→ cw --cloud start NAME`; the `ssh` path should say the
-  same.
+  same. Since then (#4717), not yet observed: `cw shell --stdio` prints
+  that sentence and `→ cw --cloud start NAME` on stderr when a stop ends
+  the connection, after the broken-stream line, which the environment's
+  SSH server sends and `ssh` prints.
 
   Not yet observed: the browser terminal, and a signed-in preview
   request.

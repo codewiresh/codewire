@@ -128,16 +128,38 @@ pub(crate) async fn collect_cost_reports(
     client: &ConsoleClient,
     orgs: &[OrgWithRole],
     org_filter: Option<&str>,
-) -> Vec<OrgCostReport> {
-    let org_filter = org_filter.and_then(trimmed_str);
+) -> anyhow::Result<Vec<OrgCostReport>> {
     let mut reports = Vec::new();
-    for org in orgs.iter().filter(|org| cost_org_matches(org, org_filter)) {
+    for org in cost_orgs(orgs, org_filter)? {
         reports.push(OrgCostReport {
             org: org.clone(),
             billing: client.get_billing_overview(&org.id).await.ok(),
         });
     }
-    reports
+    Ok(reports)
+}
+
+/// The organizations `cw cost` reports on: every one, or the one `--org`
+/// names. An `--org` that is none of yours is refused as not found, never
+/// answered with an empty report.
+pub(crate) fn cost_orgs<'a>(
+    orgs: &'a [OrgWithRole],
+    org_filter: Option<&str>,
+) -> anyhow::Result<Vec<&'a OrgWithRole>> {
+    let org_filter = org_filter.and_then(trimmed_str);
+    let matched: Vec<_> = orgs
+        .iter()
+        .filter(|org| cost_org_matches(org, org_filter))
+        .collect();
+    if let Some(filter) = org_filter
+        && matched.is_empty()
+    {
+        return Err(crate::error_report::with_next_step(
+            organization_not_found(filter),
+            "cw org list",
+        ));
+    }
+    Ok(matched)
 }
 
 pub(crate) fn cost_org_matches(org: &OrgWithRole, org_filter: Option<&str>) -> bool {

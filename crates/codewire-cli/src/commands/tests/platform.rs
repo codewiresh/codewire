@@ -55,6 +55,30 @@ fn cost_org_matches_slug_or_id() {
     assert!(!cost_org_matches(&org, Some("other")));
 }
 
+/// docs/dev/CLI-PARITY.md, B1: `cw cost --org` of an organization that isn't
+/// yours says so and names `cw org list`, rather than printing nothing.
+#[test]
+fn cost_of_an_organization_that_isnt_yours_is_not_found() {
+    let orgs = vec![
+        test_org("org_1", "Noel Labs", "noel-labs", "owner"),
+        test_org("org_2", "Codewire", "codewire", "admin"),
+    ];
+    let all = cost_orgs(&orgs, None).unwrap();
+    assert_eq!(all.len(), 2);
+    let one = cost_orgs(&orgs, Some("codewire")).unwrap();
+    assert_eq!(one.iter().map(|org| org.id.as_str()).collect::<Vec<_>>(), ["org_2"]);
+    for missing in ["other", " other "] {
+        let error = cost_orgs(&orgs, Some(missing)).unwrap_err();
+        assert_eq!(error.root_cause().to_string(), "organization \"other\" not found");
+        assert_eq!(
+            crate::error_report::next_step(&error).as_deref(),
+            Some("cw org list")
+        );
+    }
+    let error = cost_orgs(&[], Some("other")).unwrap_err();
+    assert_eq!(error.root_cause().to_string(), "organization \"other\" not found");
+}
+
 #[test]
 fn format_cost_text_shows_credit_rates_and_top_up() {
     let reports = vec![

@@ -351,19 +351,63 @@ pub(crate) async fn handle_shell_stdio(
         resolve_alias_or_selected(&environment_client, &org_id, &paths.mesh_data_dir, alias)
             .await?;
     let mode = tailnet_ssh::SshTransportMode::from_env()?;
-    let piped = tailnet_ssh::pipe_shell_stdio(&client, &org_id, &environment_id, mode).await;
-    // A connection that fails, or ends, because the environment stopped says
-    // so, not what the transport saw. Looked up only then, so a connection
-    // that works costs nothing more.
-    if piped.is_err()
-        && let Ok(environment) = environment_client
-            .get_environment(&org_id, &environment_id)
-            .await
-    {
+    let pipe = tailnet_ssh::pipe_shell_stdio(&client, &org_id, &environment_id, mode);
+    let piped = until_ssh_hangs_up(pipe).await.unwrap_or(Ok(()));
+    // When a stop ended the connection, such as the Sandbox stopping itself
+    // for being idle, say why, as `cw shell` does: ssh shows only the broken
+    // stream the environment's SSH server reports, then ends the connection
+    // itself, so the end looks the same here whoever made it. Asked once
+    // per connection, within a bound; ssh doesn't wait for this process.
+    let looked_up = tokio::time::timeout(
+        STOP_LOOKUP_LIMIT,
+        environment_client.get_environment(&org_id, &environment_id),
+    )
+    .await;
+    if let Ok(Ok(environment)) = looked_up {
         let shown = alias.map_or(environment_id.as_str(), |alias| alias.environment_ref);
-        ensure_cloud_connectable(&environment, shown)?;
+        if let Some(stopped) = ended_by_stop(&environment, shown) {
+            return Err(stopped);
+        }
     }
     piped
+}
+
+/// How long `cw shell --stdio` asks why its connection ended.
+const STOP_LOOKUP_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `pipe`'s result, or `None` when ssh hangs up first: OpenSSH sends its
+/// ProxyCommand SIGHUP as it exits. Holding SIGHUP from here on keeps this
+/// process alive to say why the connection ended.
+async fn until_ssh_hangs_up<T>(pipe: impl std::future::Future<Output = T>) -> Option<T> {
+    #[cfg(unix)]
+    if let Ok(mut hangup) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+        return tokio::select! {
+            piped = pipe => Some(piped),
+            _ = hangup.recv() => None,
+        };
+    }
+    Some(pipe.await)
+}
+
+/// Why an ssh connection to a cloud environment ended, when a stop ended
+/// it: the stop is under way (`desired_state` stopped) or done. In
+/// [`refusal::state_error`]'s words for a stopped environment, the idle
+/// timeout included, so it reads as plain `cw shell` says it. `None` while
+/// the environment is meant to run.
+pub(crate) fn ended_by_stop(environment: &Environment, shown: &str) -> Option<anyhow::Error> {
+    let stopping = environment.desired_state == "stopped"
+        || matches!(environment.state.as_str(), "stopping" | "stopped");
+    if !stopping {
+        return None;
+    }
+    let idle_stop = (environment.stop_reason.as_deref() == Some("idle"))
+        .then_some(environment.idle_stop_seconds);
+    refusal::state_error(
+        crate::output::VmLocation::Cloud,
+        &terminal_text(shown),
+        Some(codewire_client::EnvironmentState::Stopped),
+        idle_stop,
+    )
 }
 
 /// `error`, or, when the server refused it because the cloud environment
@@ -374,6 +418,10 @@ pub(crate) async fn explain_not_running(
     environment: Option<&str>,
     error: anyhow::Error,
 ) -> anyhow::Error {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if refusal::is_local_refusal(&error) {
+        return explain_local_not_running(environment, error).await;
+    }
     if !refusal::is_refusal(&error) {
         return error;
     }
@@ -403,6 +451,31 @@ pub(crate) async fn explain_not_running(
             None => error,
         },
     }
+}
+
+/// A local VM's refusal of a session explained by its state, read once:
+/// `environment` as given, else the selected one.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn explain_local_not_running(
+    environment: Option<&str>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let name = match environment {
+        Some(name) => name.to_owned(),
+        None => match ResolvePaths::from_env(&OsEnv)
+            .ok()
+            .and_then(|paths| config::current_target(&paths.mesh_data_dir).ok())
+        {
+            Some(target) if !target.name.is_empty() => target.name,
+            _ => return error,
+        },
+    };
+    let state = native_environment(&name)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|environment| refusal::local_state(environment.state));
+    refusal::explain_local(error, &terminal_text(&name), state)
 }
 
 /// `error` from reaching a cloud environment, or, when the environment is
@@ -443,7 +516,13 @@ pub(crate) fn ensure_cloud_connectable(
     };
     let idle_stop = (environment.stop_reason.as_deref() == Some("idle"))
         .then_some(environment.idle_stop_seconds);
-    refusal::state_error(&terminal_text(shown), Some(state), idle_stop).map_or(Ok(()), Err)
+    refusal::state_error(
+        crate::output::VmLocation::Cloud,
+        &terminal_text(shown),
+        Some(state),
+        idle_stop,
+    )
+    .map_or(Ok(()), Err)
 }
 
 /// `CW_DEBUG_TAILNET` timeline on stderr for `cw shell`: tailnet and client

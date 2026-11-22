@@ -539,6 +539,7 @@ server it belongs to and says what it can do, instead of asking for a URL.
   cw --cloud stop walk
   cw --cloud stop walk; echo $?
   cw --cloud ls
+  cw --cloud ls walk; cw exec --in walk true; cw logs walk; cw msg walk hi
   cw --cloud start walk
   cw --cloud start walk; echo $?
   cw --cloud ls
@@ -550,6 +551,10 @@ server it belongs to and says what it can do, instead of asking for a URL.
 
 - **Proof:**
   - after the stop, `cw ls` shows `walk` as `stopped`;
+  - while it is stopped, `cw ls walk`, `cw exec`, `cw logs` and `cw msg` each
+    say `Cloud environment walk is stopped` with `→ cw --cloud start walk`,
+    and exit 1; a stopped local VM says `Local environment walk is stopped`
+    with `→ cw --local start walk` (#4717; not yet observed);
   - the second stop prints `Environment walk is already stopped.` and the
     second start `Environment walk is already running.`, each exiting 0, as
     `cw --local stop` and `cw --local start` of a local VM do (not yet

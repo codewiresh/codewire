@@ -347,11 +347,12 @@ pub(super) async fn device_login_wait<T>(
     } else {
         url.to_owned()
     };
-    println!("Opening browser to authorize...");
-    println!("If browser doesn't open, visit: {link}");
-    println!("Your code: {code}");
-    // The link printed above is the way there when no browser starts.
-    let _ = super::platform_commands::open_browser(url);
+    let opens = opens_browser_here();
+    print!("{}", device_page_lines(&link, code, opens));
+    if opens {
+        // The link printed above is the way there when no browser starts.
+        let _ = super::platform_commands::open_browser(url);
+    }
     if screen.keys {
         // The key watch draws the waiting line under the hint.
         eprintln!("{INDENT}{COPY_HINT}");
@@ -367,6 +368,17 @@ pub(super) async fn device_login_wait<T>(
     // A Ctrl-C that came as the login finished still saves nothing.
     anyhow::ensure!(!keys.was_cancelled(), "login cancelled; nothing was saved");
     polled
+}
+
+/// The device sign-in's stdout lines. "Opening browser" only when it opens
+/// one; the link and code lines keep their words, which scripts read.
+fn device_page_lines(link: &str, code: &str, opens_browser: bool) -> String {
+    let opening = if opens_browser {
+        "Opening browser to authorize...\n"
+    } else {
+        ""
+    };
+    format!("{opening}If browser doesn't open, visit: {link}\nYour code: {code}\n")
 }
 
 /// Show the link screen on stderr. The link is copied only when `c` is
@@ -396,6 +408,23 @@ mod tests {
         assert_eq!(
             SYNTHETIC_SIGN_IN,
             cfg!(feature = "local-broker-synthetic-smoke")
+        );
+    }
+
+    /// The device sign-in says it opens a browser only when it does: never
+    /// without a terminal, where `cw setup` and `cw login` run in scripts.
+    #[test]
+    fn the_device_page_says_it_opens_a_browser_only_when_it_does() {
+        let url = "https://codewire.test/device?user_code=ABCD-1234";
+        assert_eq!(
+            device_page_lines(url, "ABCD-1234", false),
+            format!("If browser doesn't open, visit: {url}\nYour code: ABCD-1234\n")
+        );
+        assert_eq!(
+            device_page_lines(url, "ABCD-1234", true),
+            format!(
+                "Opening browser to authorize...\nIf browser doesn't open, visit: {url}\nYour code: ABCD-1234\n"
+            )
         );
     }
 
