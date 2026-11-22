@@ -509,7 +509,9 @@ pub fn traced_as_outside_callers(router: Router) -> Router {
         .layer(axum::middleware::from_fn(remove_caller_trace_context))
 }
 
-/// A caller's trace context. A public edge removes the same headers.
+/// A caller's trace context. A deployment's public edge must remove the same
+/// headers, and its own configuration check pins this list, so a change here
+/// changes that list too.
 pub const CALLER_TRACE_HEADERS: [&str; 3] = ["traceparent", "tracestate", "baggage"];
 
 async fn remove_caller_trace_context(
