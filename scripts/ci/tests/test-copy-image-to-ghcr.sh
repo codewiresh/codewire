@@ -162,6 +162,16 @@ harbor_families="$(families_of "$ROOT/scripts/ci/images/publish-image-to-harbor.
   "registry.example.invalid/codewire/workspace-systemd@$expected_digest" \
   'registry.example.invalid/codewire/workspace-systemd' "$source_sha" >/dev/null ||
   fail 'workspace-systemd Harbor family is absent'
+copy_calls_before="$(grep -c . "$FAKE_CALLS")"
+if "$COPY_IMAGE" \
+  "registry.example.invalid/codewire/workspace-systemd@$expected_digest" \
+  'ghcr.io/codewiresh/workspace-systemd' "$source_sha" >"$work/systemd-ghcr.out" 2>&1; then
+  fail 'workspace-systemd was copied to GHCR'
+fi
+grep -qF 'workspace-systemd is published to Harbor only' "$work/systemd-ghcr.out" ||
+  fail 'the workspace-systemd GHCR refusal is unexplained'
+[[ "$(grep -c . "$FAKE_CALLS")" -eq "$copy_calls_before" ]] ||
+  fail 'the workspace-systemd GHCR refusal reached a registry'
 if grep -qF 'harbor-test-password' "$FAKE_CALLS" \
   || grep -qF 'ghcr-test-token' "$FAKE_CALLS"; then
   fail "a registry token reached the command arguments"

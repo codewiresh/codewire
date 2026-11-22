@@ -408,21 +408,26 @@ jobs:
 
       - name: Publish confidential bootstrap probe to Harbor without rebuilding
         if: ${{ steps.canonical.outputs.superseded == 'false' }}
+        env:
+          CANDIDATE_REF: ${{ steps.confidential_probe.outputs.candidate_ref }}
+          CANDIDATE_SOURCE_SHA: ${{ steps.confidential_probe.outputs.source_sha }}
         run: |
           set -euo pipefail
-          [[ "${{ steps.confidential_probe.outputs.source_sha }}" == "$GITHUB_SHA" ]]
+          [[ "$CANDIDATE_SOURCE_SHA" == "$GITHUB_SHA" ]]
           scripts/ci/images/publish-image-to-harbor.sh \
-            "${{ steps.confidential_probe.outputs.candidate_ref }}" \
+            "$CANDIDATE_REF" \
             "$CODEWIRE_IMAGE_REGISTRY/codewire/confidential-probe" \
             "$GITHUB_SHA"
 
       - name: Mirror confidential bootstrap probe to GHCR without gating delivery
         if: ${{ steps.canonical.outputs.superseded == 'false' }}
         continue-on-error: true
+        env:
+          CANDIDATE_REF: ${{ steps.confidential_probe.outputs.candidate_ref }}
         run: |
           set -euo pipefail
           scripts/ci/images/publish-image-to-ghcr.sh \
-            "${{ steps.confidential_probe.outputs.candidate_ref }}" \
+            "$CANDIDATE_REF" \
             ghcr.io/codewiresh/confidential-probe \
             "$GITHUB_SHA"
 
@@ -567,10 +572,13 @@ jobs:
 
       - name: Publish the systemd workspace image to Harbor without rebuilding
         if: ${{ steps.canonical.outputs.superseded == 'false' }}
+        env:
+          CANDIDATE_REF: ${{ steps.systemd.outputs.candidate_ref }}
+          CANDIDATE_SOURCE_SHA: ${{ steps.systemd.outputs.source_sha }}
         run: |
           set -euo pipefail
-          [[ "${{ steps.systemd.outputs.source_sha }}" == "$GITHUB_SHA" ]]
+          [[ "$CANDIDATE_SOURCE_SHA" == "$GITHUB_SHA" ]]
           scripts/ci/images/publish-image-to-harbor.sh \
-            "${{ steps.systemd.outputs.candidate_ref }}" \
+            "$CANDIDATE_REF" \
             "$CODEWIRE_IMAGE_REGISTRY/codewire/workspace-systemd" \
             "$GITHUB_SHA"

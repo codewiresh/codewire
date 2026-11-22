@@ -136,6 +136,12 @@ systemd_job="$(sed -n '/^  publish-workspace-systemd:/,$p' "$WORKFLOW")"
 # workspace index by digest, and goes to Harbor alone: no GHCR identity or
 # copy, never latest, never tolerated failure.
 # shellcheck disable=SC2016
+# Step outputs reach a publisher's script only through env:, never as text
+# interpolated into it. Prints each line that breaks that.
+step_output_in_script() {
+  grep -F '${{ steps.' <<<"$1" |
+    grep -Ev '^ +(- )?if: |^          [A-Z][A-Z0-9_]*: \$\{\{ steps\.[a-z_]+\.outputs\.[a-z_]+ \}\}$' || true
+}
 systemd_job_violation() {
   local job="$1"
   [[ -n "$job" ]] || { echo 'no job publishes the systemd workspace image'; return; }
@@ -157,10 +163,14 @@ systemd_job_violation() {
     { echo 'the systemd workspace is not built by the canonical helper'; return; }
   grep -Fqx '          CODEWIRE_BASE_IMAGE_REF: ${{ steps.base.outputs.ref }}' <<<"$job" ||
     { echo 'the systemd workspace does not build on the chosen workspace index'; return; }
-  [[ "$(grep -Fc 'outputs.source_sha }}" == "$GITHUB_SHA"' <<<"$job")" -eq 1 ]] ||
+  grep -Fqx '          CANDIDATE_SOURCE_SHA: ${{ steps.systemd.outputs.source_sha }}' <<<"$job" &&
+    [[ "$(grep -Fxc '          [[ "$CANDIDATE_SOURCE_SHA" == "$GITHUB_SHA" ]]' <<<"$job")" -eq 1 ]] ||
     { echo 'the systemd workspace publisher does not verify its exact build source'; return; }
-  grep -Fq '"${{ steps.systemd.outputs.candidate_ref }}"' <<<"$job" ||
+  grep -Fqx '          CANDIDATE_REF: ${{ steps.systemd.outputs.candidate_ref }}' <<<"$job" &&
+    grep -Fqx '            "$CANDIDATE_REF" \' <<<"$job" ||
     { echo 'the systemd workspace publisher omits the immutable candidate'; return; }
+  [[ -z "$(step_output_in_script "$job")" ]] ||
+    { echo 'the systemd workspace interpolates a step output into a script'; return; }
   grep -Fq '"$CODEWIRE_IMAGE_REGISTRY/codewire/workspace-systemd"' <<<"$job" ||
     { echo 'the systemd workspace publisher omits its Harbor repository'; return; }
   if grep -Eq 'GHCR|ghcr\.io|secrets\.|github\.token|--support-pair|latest|continue-on-error' <<<"$job"; then
@@ -174,6 +184,7 @@ systemd_mutations=(
   'any commit::s/needs.support-selection.outputs.source_sha == github.sha \&\& //'
   'pulled BuildKit::s/CODEWIRE_TRUSTED_BUILDKIT: .1./CODEWIRE_TRUSTED_BUILDKIT: '"'"'0'"'"'/'
   'no exact source check::/== "$GITHUB_SHA" \]\]/d'
+  'an interpolated candidate::s/"$CANDIDATE_REF"/"${{ steps.systemd.outputs.candidate_ref }}"/'
   'a GHCR copy::s#codewire/workspace-systemd"#codewire/workspace-systemd" ghcr.io/codewiresh/workspace-systemd#'
   'tolerated failure::s/^      - name: Publish the systemd workspace image to Harbor without rebuilding$/&\n        continue-on-error: true/'
 )
@@ -206,7 +217,9 @@ grep -Fq -- '--support-pair' <<<"$publish_job" ||
   fail 'support publisher does not consume same-job step outputs'
 [[ "$(grep -Fc 'outputs.source_sha }}" == "$CODEWIRE_SOURCE_SHA"' <<<"$publish_job")" -eq 2 ]] ||
   fail 'support-pair publisher does not verify both exact build sources'
-[[ "$(grep -Fc 'outputs.source_sha }}" == "$GITHUB_SHA"' <<<"$probe_job")" -eq 1 ]] ||
+# shellcheck disable=SC2016
+grep -Fqx '          CANDIDATE_SOURCE_SHA: ${{ steps.confidential_probe.outputs.source_sha }}' <<<"$probe_job" &&
+  [[ "$(grep -Fxc '          [[ "$CANDIDATE_SOURCE_SHA" == "$GITHUB_SHA" ]]' <<<"$probe_job")" -eq 1 ]] ||
   fail 'confidential-probe publisher does not verify its exact build source'
 # Publication consumes only same-job candidates. The platform digests cross
 # the job boundary only into the two joins, which verify the whole index
@@ -221,8 +234,14 @@ if grep -Fq 'needs.build-' <<<"$probe_job"; then
   fail 'probe publisher crosses a runner job-output boundary'
 fi
 # shellcheck disable=SC2016
-grep -Fq '"${{ steps.confidential_probe.outputs.candidate_ref }}"' <<<"$probe_job" ||
+[[ "$(grep -Fxc '          CANDIDATE_REF: ${{ steps.confidential_probe.outputs.candidate_ref }}' <<<"$probe_job")" -eq 2 \
+  && "$(grep -Fxc '            "$CANDIDATE_REF" \' <<<"$probe_job")" -eq 2 ]] ||
   fail 'confidential-probe publisher omits the immutable candidate'
+[[ -z "$(step_output_in_script "$probe_job")" ]] ||
+  fail "confidential-probe interpolates a step output into a script: $(step_output_in_script "$probe_job")"
+probe_interpolated="$(sed -e '0,/"$CANDIDATE_REF"/s//"${{ steps.confidential_probe.outputs.candidate_ref }}"/' <<<"$probe_job")"
+[[ "$probe_interpolated" != "$probe_job" && -n "$(step_output_in_script "$probe_interpolated")" ]] ||
+  fail 'an interpolated confidential-probe candidate was accepted'
 grep -Fq 'ghcr.io/codewiresh/confidential-probe' <<<"$probe_job" ||
   fail 'confidential-probe publisher omits the public repository'
 # shellcheck disable=SC2016
