@@ -18,7 +18,8 @@ API for it (docs/dev/MACOS-CLI.md), so it is refused there."""
 [groups.hosted]
 reason = """Roles that run only inside a hosted Sandbox, which is Linux: the platform cw \
 runtime, platform agent control and peer, the environment launcher, the hosted daemon and \
-access, and snapshot clearing. A Mac never runs them."""
+access, snapshot clearing, and a standard Pod's VM runtime (`cw __pod-runtime`, #5602), \
+which needs /dev/kvm. A Mac never runs them."""
 
 [groups.credentials]
 reason = """Local credential confinement and stores: Landlock, seccomp and Secret Service \
@@ -164,7 +165,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/hosted_binding.rs" = { group = "hosted", count = 6 }
 "crates/codewire-cli/src/hosted_binding/tests.rs" = { group = "hosted", count = 3 }
 "crates/codewire-cli/src/hosted_daemon.rs" = { group = "hosted", count = 15 }
-"crates/codewire-cli/src/lib.rs" = { group = "dispatch", count = 43 }
+"crates/codewire-cli/src/lib.rs" = { group = "dispatch", count = 46 }
 "crates/codewire-cli/src/public_fetch.rs" = { group = "linux-tests", count = 1 }
 "crates/codewire-cli/src/public_fetch/http.rs" = { group = "linux-tests", count = 1 }
 "crates/codewire-cli/src/public_fetch/scratch.rs" = { group = "linux-tests", count = 1 }

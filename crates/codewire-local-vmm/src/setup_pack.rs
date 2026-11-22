@@ -11,6 +11,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use codewire_cw_release::sha256::Sha256;
+use codewire_vmm_guest_probe::image_disk::BuildId;
 use codewire_vmm_guest_probe::{
     LayerEncoding, SETUP_HEADER_LEN, SetupArchitecture, SetupBlob, SetupError, SetupHeader,
     SetupLayerBlob, SetupObject, Sha256Value,
@@ -65,18 +66,63 @@ pub fn ensure_setup_pack(
     store: &ContentStore,
     request: SetupPackRequest<'_>,
 ) -> Result<SetupPack, SetupPackError> {
+    ensure_pack(engine_state_root, vm_id, store, request, None)
+}
+
+/// The setup pack of a VM over an image disk's build (#4646): the project
+/// and config and no layers, since the guest's lower is already on the disk.
+pub fn ensure_attached_setup_pack(
+    engine_state_root: &Path,
+    vm_id: Uuid,
+    store: &ContentStore,
+    request: SetupPackRequest<'_>,
+    build_id: BuildId,
+) -> Result<SetupPack, SetupPackError> {
+    ensure_pack(engine_state_root, vm_id, store, request, Some(build_id))
+}
+
+fn ensure_pack(
+    engine_state_root: &Path,
+    vm_id: Uuid,
+    store: &ContentStore,
+    request: SetupPackRequest<'_>,
+    image_disk_build: Option<BuildId>,
+) -> Result<SetupPack, SetupPackError> {
     request.image.verify_cached(store)?;
     let project_sha256 = Sha256Value::parse_hex(request.project_sha256)?;
     if Sha256Value::calculate(request.project_json) != project_sha256 {
         return Err(SetupPackError::ProjectDigestMismatch);
     }
 
-    let header = setup_header(&request, project_sha256)?;
+    let header = setup_header(&request, project_sha256, image_disk_build)?;
     let header_bytes = header.encode()?;
     let header_sha256 = Sha256Value::calculate(&header_bytes);
+    publish_setup_pack(
+        engine_state_root,
+        vm_id,
+        request.storage_generation,
+        header,
+        &header_bytes,
+        header_sha256,
+        |output, header| write_setup_pack(output, store, &request, header, &header_bytes),
+    )
+}
+
+/// Publishes a VM's one-boot setup pack in its root generation, read-only,
+/// or reuses the one there when it is byte for byte this pack. `write` fills
+/// a private temporary file with everything after the header's position.
+fn publish_setup_pack(
+    engine_state_root: &Path,
+    vm_id: Uuid,
+    storage_generation: &str,
+    header: SetupHeader,
+    header_bytes: &[u8],
+    header_sha256: Sha256Value,
+    write: impl FnOnce(&mut File, &SetupHeader) -> Result<(), SetupPackError>,
+) -> Result<SetupPack, SetupPackError> {
     let engine = PrivateRoot::open(engine_state_root)?;
     let paths = VmPaths::create(&engine, vm_id)?;
-    let generation = RootGenerationPaths::create(&paths, request.storage_generation)?;
+    let generation = RootGenerationPaths::create(&paths, storage_generation)?;
     let root = PrivateRoot::open(&generation.generation_dir)?;
     let final_name = Path::new(SETUP_FILE_NAME);
     let final_path = generation.setup_disk.clone();
@@ -89,7 +135,7 @@ pub fn ensure_setup_pack(
         Some(0o400),
     ) {
         Ok(opened) => {
-            verify_setup_pack(opened.into_file(), &header, &header_bytes)?;
+            verify_setup_pack(opened.into_file(), &header, header_bytes)?;
             return Ok(SetupPack {
                 path: final_path,
                 header,
@@ -104,7 +150,7 @@ pub fn ensure_setup_pack(
     let opened = root.create_regular(Path::new(&temporary_name), 0o600, true)?;
     let mut cleanup = TemporarySetup::new(&generation.generation_dir, &temporary_name);
     let mut output = opened.into_file();
-    write_setup_pack(&mut output, store, &request, &header, &header_bytes)?;
+    write(&mut output, &header)?;
     output.sync_all().map_err(|source| SetupPackError::Io {
         path: generation.generation_dir.join(&temporary_name),
         source,
@@ -134,7 +180,7 @@ pub fn ensure_setup_pack(
         false,
         Some(0o400),
     )?;
-    verify_setup_pack(opened.into_file(), &header, &header_bytes)?;
+    verify_setup_pack(opened.into_file(), &header, header_bytes)?;
     Ok(SetupPack {
         path: final_path,
         header,
@@ -142,16 +188,111 @@ pub fn ensure_setup_pack(
     })
 }
 
+/// A setup pack for a VM over a published image disk (#5602): the project
+/// and the image's config, bound to the disk's build, and no layer. The
+/// published directory holds the config, so no content store is read.
+#[derive(Debug)]
+pub struct PublishedSetupRequest<'a> {
+    pub project_json: &'a [u8],
+    pub storage_generation: &'a str,
+    pub config_json: &'a [u8],
+    pub manifest_sha256: Sha256Value,
+    pub architecture: SetupArchitecture,
+    pub build_id: BuildId,
+}
+
+pub fn ensure_published_setup_pack(
+    engine_state_root: &Path,
+    vm_id: Uuid,
+    request: PublishedSetupRequest<'_>,
+) -> Result<SetupPack, SetupPackError> {
+    let blob = |bytes: &[u8]| -> Result<SetupBlob, SetupPackError> {
+        Ok(SetupBlob {
+            size: u64::try_from(bytes.len()).map_err(|_| SetupPackError::ProjectTooLarge)?,
+            sha256: Sha256Value::calculate(bytes),
+        })
+    };
+    let header = SetupHeader::layout_image_attach(
+        request.manifest_sha256,
+        request.architecture,
+        request.build_id,
+        blob(request.project_json)?,
+        blob(request.config_json)?,
+    )?;
+    let header_bytes = header.encode()?;
+    let header_sha256 = Sha256Value::calculate(&header_bytes);
+    publish_setup_pack(
+        engine_state_root,
+        vm_id,
+        request.storage_generation,
+        header,
+        &header_bytes,
+        header_sha256,
+        |output, header| {
+            output
+                .write_all(&header_bytes)
+                .map_err(SetupPackError::Write)?;
+            copy_object(
+                output,
+                &mut Cursor::new(request.project_json),
+                header.project,
+            )?;
+            copy_object(output, &mut Cursor::new(request.config_json), header.config)?;
+            pad_to(output, header.total_bytes)?;
+            if output.stream_position().map_err(SetupPackError::Write)? != header.total_bytes {
+                return Err(SetupPackError::InvalidPack);
+            }
+            Ok(())
+        },
+    )
+}
+
 fn setup_header(
     request: &SetupPackRequest<'_>,
     project_sha256: Sha256Value,
+    image_disk_build: Option<BuildId>,
 ) -> Result<SetupHeader, SetupPackError> {
-    let architecture = match request.image.architecture {
+    let (architecture, layers) = setup_layers(request.image)?;
+    let root_generation = Sha256Value::parse_hex(request.root_generation)?;
+    let manifest_sha256 = setup_digest(&request.image.manifest.digest)?;
+    let project = SetupBlob {
+        size: u64::try_from(request.project_json.len())
+            .map_err(|_| SetupPackError::ProjectTooLarge)?,
+        sha256: project_sha256,
+    };
+    let config = SetupBlob {
+        size: request.image.config.size,
+        sha256: setup_digest(&request.image.config.digest)?,
+    };
+    let Some(build_id) = image_disk_build else {
+        return Ok(SetupHeader::layout(
+            root_generation,
+            manifest_sha256,
+            architecture,
+            project,
+            config,
+            layers,
+        )?);
+    };
+    let header =
+        SetupHeader::layout_image_attach(manifest_sha256, architecture, build_id, project, config)?;
+    // The attach layout derives its root generation from the build; the
+    // caller's must be that one, so a pack never binds another generation.
+    if header.root_generation != root_generation {
+        return Err(SetupPackError::RootGenerationMismatch);
+    }
+    Ok(header)
+}
+
+fn setup_layers(
+    image: &ResolvedImage,
+) -> Result<(SetupArchitecture, Vec<SetupLayerBlob>), SetupPackError> {
+    let architecture = match image.architecture {
         OciArchitecture::Amd64 => SetupArchitecture::Amd64,
         OciArchitecture::Arm64 => SetupArchitecture::Arm64,
     };
-    let mut layers = Vec::with_capacity(request.image.layers.len());
-    for layer in &request.image.layers {
+    let mut layers = Vec::with_capacity(image.layers.len());
+    for layer in &image.layers {
         layers.push(SetupLayerBlob {
             blob: SetupBlob {
                 size: layer.descriptor.size,
@@ -161,21 +302,57 @@ fn setup_header(
             encoding: layer_encoding(&layer.descriptor.media_type)?,
         });
     }
-    Ok(SetupHeader::layout(
-        Sha256Value::parse_hex(request.root_generation)?,
-        setup_digest(&request.image.manifest.digest)?,
+    Ok((architecture, layers))
+}
+
+/// An image disk builder's setup pack (#4646): the image's layers and the
+/// host's build id, with no project or config. Written fresh into
+/// `directory` for one build, read-only, and verified as written.
+pub fn write_image_build_pack(
+    directory: &PrivateRoot,
+    name: &Path,
+    store: &ContentStore,
+    image: &ResolvedImage,
+    build_id: BuildId,
+) -> Result<SetupPack, SetupPackError> {
+    image.verify_cached(store)?;
+    let (architecture, layers) = setup_layers(image)?;
+    let header = SetupHeader::layout_image_build(
+        setup_digest(&image.manifest.digest)?,
         architecture,
-        SetupBlob {
-            size: u64::try_from(request.project_json.len())
-                .map_err(|_| SetupPackError::ProjectTooLarge)?,
-            sha256: project_sha256,
-        },
-        SetupBlob {
-            size: request.image.config.size,
-            sha256: setup_digest(&request.image.config.digest)?,
-        },
+        build_id,
         layers,
-    )?)
+    )?;
+    let header_bytes = header.encode()?;
+    let header_sha256 = Sha256Value::calculate(&header_bytes);
+    let path = directory.path().join(name);
+    let mut output = directory.create_regular(name, 0o600, true)?.into_file();
+    output
+        .write_all(&header_bytes)
+        .map_err(SetupPackError::Write)?;
+    for (resolved, layer) in image.layers.iter().zip(&header.layers) {
+        let mut input = store.open_blob(&resolved.descriptor.digest, resolved.descriptor.size)?;
+        copy_object(&mut output, &mut input, layer.object)?;
+    }
+    pad_to(&mut output, header.total_bytes)?;
+    let io = |source| SetupPackError::Io {
+        path: path.clone(),
+        source,
+    };
+    output.sync_all().map_err(io)?;
+    output
+        .set_permissions(fs::Permissions::from_mode(0o400))
+        .map_err(io)?;
+    output.sync_all().map_err(io)?;
+    drop(output);
+    let opened =
+        directory.open_regular(name, false, Some(header.total_bytes), false, Some(0o400))?;
+    verify_setup_pack(opened.into_file(), &header, &header_bytes)?;
+    Ok(SetupPack {
+        path,
+        header,
+        header_sha256,
+    })
 }
 
 fn setup_digest(digest: &Sha256Digest) -> Result<Sha256Value, SetupPackError> {
@@ -281,8 +458,12 @@ fn verify_setup_pack(
     if header_bytes != expected_header_bytes || SetupHeader::decode(&header_bytes)? != *expected {
         return Err(SetupPackError::ExistingPackMismatch);
     }
-    verify_object(&mut input, expected.project)?;
-    verify_object(&mut input, expected.config)?;
+    // A builder's pack has neither (#4646).
+    for object in [expected.project, expected.config] {
+        if !object.is_absent() {
+            verify_object(&mut input, object)?;
+        }
+    }
     for layer in &expected.layers {
         verify_object(&mut input, layer.object)?;
     }
@@ -384,6 +565,8 @@ fn path_error_is_not_found(error: &PathError) -> bool {
 pub enum SetupPackError {
     #[error("canonical project digest does not match its bytes")]
     ProjectDigestMismatch,
+    #[error("the setup pack's root generation is not the image disk build's")]
+    RootGenerationMismatch,
     #[error("canonical project document is too large")]
     ProjectTooLarge,
     #[error("OCI layer encoding is unsupported by the guest setup ABI")]
@@ -518,6 +701,140 @@ mod tests {
         let project = br#"{"schema_version":1,"image":"registry.example/test/workspace","working_directory":"/workspace"}"#.to_vec();
         let project_sha256 = format!("{:x}", Sha256::digest(&project));
         (parent, store, image, project, project_sha256)
+    }
+
+    /// #4646: a builder's pack carries the image's layers and the host's
+    /// build id, and nothing of the project or its config; it is private,
+    /// read-only and verified as written.
+    #[tokio::test]
+    async fn an_image_build_pack_holds_only_the_layers_and_the_build_id() {
+        let (parent, store, image, project, _) = fixture().await;
+        let build = parent.path().join("build");
+        fs::create_dir(&build).unwrap();
+        fs::set_permissions(&build, fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = PrivateRoot::open(&build).unwrap();
+        let build_id = [9_u8; 16];
+        let pack =
+            write_image_build_pack(&directory, Path::new("setup.raw"), &store, &image, build_id)
+                .unwrap();
+        assert_eq!(pack.header.image.built_id(), Some(build_id));
+        assert!(pack.header.project.is_absent() && pack.header.config.is_absent());
+        assert_eq!(pack.header.layers.len(), 1);
+        let bytes = fs::read(&pack.path).unwrap();
+        assert_eq!(bytes.len() as u64, pack.header.total_bytes);
+        assert!(!bytes.windows(project.len()).any(|window| window == project));
+        assert_eq!(
+            fs::metadata(&pack.path).unwrap().permissions().mode() & 0o777,
+            0o400
+        );
+    }
+
+    /// #4646: a VM's first boot over an image disk gets the project and
+    /// config and no layers, bound to the build's own root generation; a
+    /// combined root's generation is refused.
+    #[tokio::test]
+    async fn an_attach_pack_holds_no_layers_and_binds_the_builds_generation() {
+        use codewire_vmm_guest_probe::image_disk::{image_disk_id, image_root_generation};
+
+        let (parent, store, image, project, project_sha256) = fixture().await;
+        let build_id = [7_u8; 16];
+        let attached_generation = image_root_generation(
+            Sha256Value::parse_hex(&project_sha256).unwrap(),
+            image_disk_id(
+                setup_digest(&image.manifest.digest).unwrap(),
+                SetupArchitecture::Amd64,
+            ),
+            build_id,
+        )
+        .to_string();
+        let storage_generation = "c".repeat(64);
+        let combined_generation = root_generation(&image, &project_sha256);
+        let request = |root_generation| SetupPackRequest {
+            project_json: &project,
+            project_sha256: &project_sha256,
+            storage_generation: &storage_generation,
+            root_generation,
+            image: &image,
+        };
+        let runtime = parent.path().join("runtime");
+        assert!(matches!(
+            ensure_attached_setup_pack(
+                &runtime,
+                Uuid::new_v4(),
+                &store,
+                request(&combined_generation),
+                build_id,
+            ),
+            Err(SetupPackError::RootGenerationMismatch)
+        ));
+        let pack = ensure_attached_setup_pack(
+            &runtime,
+            Uuid::new_v4(),
+            &store,
+            request(&attached_generation),
+            build_id,
+        )
+        .unwrap();
+        assert_eq!(
+            pack.header.image,
+            codewire_vmm_guest_probe::SetupImage::Attach { build_id }
+        );
+        assert_eq!(pack.header.root_generation.to_string(), attached_generation);
+        assert!(pack.header.layers.is_empty());
+        let bytes = fs::read(&pack.path).unwrap();
+        assert_eq!(bytes.len() as u64, pack.header.total_bytes);
+        assert!(bytes.windows(project.len()).any(|window| window == project));
+        let layer = b"synthetic-compressed-layer";
+        assert!(!bytes.windows(layer.len()).any(|window| window == layer));
+    }
+
+    /// #5602: a published disk's pack is made from the config bytes beside
+    /// the disk, with no content store, and is the attach layout.
+    #[tokio::test]
+    async fn a_published_pack_holds_the_project_and_config_and_no_layer() {
+        use codewire_vmm_guest_probe::image_disk::{image_disk_id, image_root_generation};
+
+        let (parent, _store, _image, project, _) = fixture().await;
+        let config =
+            br#"{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}"#;
+        let manifest = Sha256Value::calculate(b"manifest");
+        let build_id = [5_u8; 16];
+        let storage_generation = "c".repeat(64);
+        let runtime = parent.path().join("runtime");
+        let pack = ensure_published_setup_pack(
+            &runtime,
+            Uuid::new_v4(),
+            PublishedSetupRequest {
+                project_json: &project,
+                storage_generation: &storage_generation,
+                config_json: config,
+                manifest_sha256: manifest,
+                architecture: SetupArchitecture::Amd64,
+                build_id,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            pack.header.image,
+            codewire_vmm_guest_probe::SetupImage::Attach { build_id }
+        );
+        assert!(pack.header.layers.is_empty());
+        assert_eq!(
+            pack.header.root_generation,
+            image_root_generation(
+                Sha256Value::calculate(&project),
+                image_disk_id(manifest, SetupArchitecture::Amd64),
+                build_id,
+            )
+        );
+        let bytes = fs::read(&pack.path).unwrap();
+        assert_eq!(bytes.len() as u64, pack.header.total_bytes);
+        assert!(bytes.windows(project.len()).any(|window| window == project));
+        assert!(bytes.windows(config.len()).any(|window| window == config));
+        assert_eq!(
+            fs::metadata(&pack.path).unwrap().permissions().mode() & 0o777,
+            0o400
+        );
     }
 
     #[tokio::test]

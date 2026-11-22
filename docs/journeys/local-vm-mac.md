@@ -21,6 +21,7 @@ Updated 2026-11-22.
 | `local-vm-git-mounted` | not yet observed ([local-vm-git.md](local-vm-git.md), #5478) | not yet observed |
 | `mac-vm-indexed-root` | the warning observed on a development build of #5831 (84a45bb16); a completed create not yet observed | not yet observed |
 | `mac-vm-backup-excluded` | observed on a development build of #5900 (84a45bb16), a new root and an older one | not yet observed |
+| `mac-vm-image-disk` | not yet observed (#4646 trial branch) | not yet observed |
 
 ## Before the walk
 
@@ -415,3 +416,27 @@ Issues: #5900.
     directory. The project folder stayed `[Included]`.
   - The same after a VM that completes its create, and after
     `cw --local start` of a VM made before #5900: not yet observed.
+
+## 9. `mac-vm-image-disk`: one shared image disk per image (#4646)
+
+On the #4646 trial branch only: a built `cw` from `feat/image-disk-4646`.
+The design is `private-docs: designs/2026-11-14-local-shared-image-disk.md`.
+The Linux twin is `linux-vm-image-disk` in [local-vm-linux.md](local-vm-linux.md);
+on the Mac the builder runs under the VZ helper.
+
+- **Entry points:** `cw create --local`.
+- **States to exercise:**
+  - the first create from an image never used on this host, which builds the image disk;
+  - a second create from the same image, which builds nothing;
+  - a builder killed mid-build, after which the next create builds again;
+  - an image disk removed by hand, and the error a start then gives;
+  - a VM from before the change;
+  - collection once nothing names the disk.
+- **Driving it:** no command yet beyond `cw create --local`. Each step above
+  is in the design's acceptance journey (section 10).
+- **Proof:**
+  - the first create names "Preparing the image" and the build while it runs;
+  - the second create's time is recorded with no build;
+  - a file written under `/usr` in A is absent in B;
+  - S0's `guest_stages` and `vm_started` lines give the times.
+- **Observed:** not yet observed.

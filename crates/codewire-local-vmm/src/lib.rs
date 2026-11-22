@@ -51,6 +51,8 @@ pub(crate) mod host_port;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod hybrid_vsock;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod image_disk;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod lifecycle;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod local_https;
@@ -261,8 +263,10 @@ pub mod oci;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod orphan;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub mod public_client;
+#[cfg(target_os = "linux")]
+pub mod pod_runtime;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod public_client;
 pub mod runner;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod runner_service;

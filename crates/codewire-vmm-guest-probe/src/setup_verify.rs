@@ -77,12 +77,9 @@ fn verify_setup_contents_with_limits(
         return Err(SetupContentError::InvalidFraming);
     }
 
-    verify_zero_range(input, SETUP_HEADER_LEN as u64, header.project.offset)?;
-    let project = read_verified_object(input, header.project)?;
-    let mut previous_end = object_end(header.project)?;
-    verify_zero_range(input, previous_end, header.config.offset)?;
-    let config = read_verified_object(input, header.config)?;
-    previous_end = object_end(header.config)?;
+    let (project, previous_end) =
+        read_optional_object(input, header.project, SETUP_HEADER_LEN as u64)?;
+    let (config, mut previous_end) = read_optional_object(input, header.config, previous_end)?;
 
     let mut layer_uncompressed_bytes = Vec::with_capacity(header.layers.len());
     let mut layer_plans = Vec::with_capacity(header.layers.len());
@@ -117,6 +114,21 @@ fn verify_setup_contents_with_limits(
         total_uncompressed_bytes,
         layer_plans,
     })
+}
+
+/// An object and where it ends. An image build's pack has neither project
+/// nor config (#4646); an absent object takes no bytes and reads as empty.
+/// The header check already allows absence only in a builder's pack.
+fn read_optional_object(
+    input: &mut (impl Read + Seek),
+    object: SetupObject,
+    previous_end: u64,
+) -> Result<(Vec<u8>, u64), SetupContentError> {
+    if object.is_absent() {
+        return Ok((Vec::new(), previous_end));
+    }
+    verify_zero_range(input, previous_end, object.offset)?;
+    Ok((read_verified_object(input, object)?, object_end(object)?))
 }
 
 fn read_verified_object(
@@ -357,6 +369,40 @@ mod tests {
             copy_object(&mut pack, descriptor.object, &layer.compressed);
         }
         (header, pack)
+    }
+
+    /// #4646: an image disk builder's pack carries only the layers. It
+    /// verifies with an empty project and config, and its digests are still
+    /// checked.
+    #[test]
+    fn a_builders_pack_verifies_with_no_project_or_config() {
+        let tar = tar_file("usr/bin/tool", b"tool");
+        let layer = SetupLayerBlob {
+            blob: SetupBlob {
+                size: tar.len() as u64,
+                sha256: Sha256Value::calculate(&tar),
+            },
+            diff_id: Sha256Value::calculate(&tar),
+            encoding: LayerEncoding::Tar,
+        };
+        let header = SetupHeader::layout_image_build(
+            Sha256Value::calculate(b"manifest"),
+            SetupArchitecture::Amd64,
+            [7; 16],
+            vec![layer],
+        )
+        .unwrap();
+        assert!(header.project.is_absent() && header.config.is_absent());
+        let mut pack = vec![0_u8; header.total_bytes as usize];
+        pack[..SETUP_HEADER_LEN].copy_from_slice(&header.encode().unwrap());
+        copy_object(&mut pack, header.layers[0].object, &tar);
+        let contents = verify_setup_contents(&mut Cursor::new(pack.clone()), &header).unwrap();
+        assert!(contents.project.is_empty() && contents.config.is_empty());
+        assert_eq!(contents.layer_uncompressed_bytes, vec![tar.len() as u64]);
+        // A changed layer byte is still refused.
+        let start = header.layers[0].object.offset as usize;
+        pack[start] ^= 1;
+        assert!(verify_setup_contents(&mut Cursor::new(pack), &header).is_err());
     }
 
     fn copy_object(pack: &mut [u8], object: SetupObject, bytes: &[u8]) {

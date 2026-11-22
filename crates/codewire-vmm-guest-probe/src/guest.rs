@@ -64,9 +64,12 @@ use codewire_network_session::{
 
 mod bootstrap;
 mod daemon_log;
+mod disks;
 use bootstrap::runtime_path_environment;
 use bootstrap::with_boot_selection;
 mod egress_trust;
+mod image_attach;
+mod image_build;
 mod interception;
 mod network_check;
 mod network_rekey;
@@ -78,6 +81,8 @@ mod workload_execution;
 
 use bootstrap::{BootstrapChild, BootstrapParent};
 use codewire_daemon::execution::BootstrapPhase;
+pub use disks::find_disk_by_serial;
+use disks::{validate_block_device, wait_for_disk_by_serial};
 pub use network_check::run_network_check;
 use network_status::{
     NETWORK_AGENT_FAILURE_STAGES, NETWORK_AGENT_GENERIC_FAILURE_STAGE,
@@ -119,6 +124,11 @@ const RUNC_LOG_LIMIT: u64 = 64 * 1024;
 const CGROUP_ROOT_PATH: &str = "/sys/fs/cgroup";
 const CGROUP_HIERARCHY_PATH: &str = "/sys/fs/cgroup/codewire";
 const ROOT_LOWER_PATH: &str = "/generation/lower";
+
+/// The overlay's lower for this boot (#4646).
+fn root_lower_path() -> &'static str {
+    image_attach::lower_path(ROOT_LOWER_PATH)
+}
 const ROOT_UPPER_PATH: &str = "/generation/upper";
 const ROOT_WORK_PATH: &str = "/generation/work";
 const ROOT_MERGED_PATH: &str = "/generation/merged";
@@ -242,6 +252,8 @@ const PERSISTENT_CODEX_HOME_PATH: &str = "/state/agent-homes/codex";
 static POWEROFF_REQUESTED: AtomicBool = AtomicBool::new(false);
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static BOOT_PROGRESS: OnceLock<watch::Sender<BootProgressSnapshot>> = OnceLock::new();
+/// The highest progress sequence written and flushed to the host.
+static PROGRESS_SERVED: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BootProgressSnapshot {
@@ -287,6 +299,17 @@ pub fn run_init() -> Result<()> {
     crate::rtc_clock::follow_if_requested()?;
     install_poweroff_handlers()?;
 
+    let seed_device = wait_for_disk_by_serial(
+        Path::new(SYS_BLOCK_PATH),
+        Path::new(DEV_PATH),
+        SEED_DISK_SERIAL,
+        DISK_DISCOVERY_TIMEOUT,
+    )?;
+    validate_block_device(&seed_device)?;
+    let seed = read_seed_file(&seed_device)?;
+    if seed.image_build() {
+        return image_build::run(&seed, &seed_device);
+    }
     let state_device = wait_for_disk_by_serial(
         Path::new(SYS_BLOCK_PATH),
         Path::new(DEV_PATH),
@@ -300,12 +323,6 @@ pub fn run_init() -> Result<()> {
     mount_workspace_cgroups()?;
     record_boot_stage("cgroups-ready")?;
 
-    let seed_device = wait_for_disk_by_serial(
-        Path::new(SYS_BLOCK_PATH),
-        Path::new(DEV_PATH),
-        SEED_DISK_SERIAL,
-        DISK_DISCOVERY_TIMEOUT,
-    )?;
     let root_device = wait_for_disk_by_serial(
         Path::new(SYS_BLOCK_PATH),
         Path::new(DEV_PATH),
@@ -316,9 +333,7 @@ pub fn run_init() -> Result<()> {
         state_device != seed_device && state_device != root_device && seed_device != root_device,
         "state, root, and seed disks must resolve to distinct devices"
     );
-    validate_block_device(&seed_device)?;
     validate_block_device(&root_device)?;
-    let seed = read_seed_file(&seed_device)?;
     let docker_device = if seed.docker_data_disk() {
         let device = wait_for_disk_by_serial(
             Path::new(SYS_BLOCK_PATH),
@@ -357,6 +372,15 @@ pub fn run_init() -> Result<()> {
             "cw runtime source is not bound to this boot"
         );
     }
+    if seed.image_disk() {
+        let mut others = vec![
+            state_device.as_path(),
+            root_device.as_path(),
+            seed_device.as_path(),
+        ];
+        others.extend(docker_device.as_deref());
+        image_attach::mount(&others)?;
+    }
     record_boot_stage("disks-admitted")?;
     mount_root_generation(&root_device)?;
     if let Some(device) = docker_device.as_deref() {
@@ -376,49 +400,13 @@ pub fn run_init() -> Result<()> {
     start_boot_progress(&seed, GuestBootStage::RootMounted)?;
     checkpoint::start()?;
     let plan = if let Some(binding) = seed.setup() {
-        let setup_device = wait_for_disk_by_serial(
-            Path::new(SYS_BLOCK_PATH),
-            Path::new(DEV_PATH),
-            SETUP_DISK_SERIAL,
-            DISK_DISCOVERY_TIMEOUT,
-        )?;
-        ensure!(
-            setup_device != state_device
-                && setup_device != root_device
-                && setup_device != seed_device
-                && docker_device
-                    .as_ref()
-                    .is_none_or(|docker_device| setup_device != *docker_device),
-            "setup disk must be distinct from every persistent disk"
-        );
-        validate_block_device(&setup_device)?;
-        let mut setup = open_setup_device(&setup_device)?;
-        let header = verify_setup_header(&mut setup, binding)?;
-        record_boot_stage("setup-header-ready")?;
-        let contents = match verify_setup_contents(&mut setup, &header) {
-            Ok(contents) => contents,
-            Err(error) => {
-                record_boot_stage(setup_content_failure_stage(&error))?;
-                return Err(error).context("verify every guest setup object and layer digest");
-            }
-        };
-        record_boot_stage("setup-content-ready")?;
-        if let Err(error) =
-            apply_setup_layers(&mut setup, &header, &contents, Path::new(ROOT_MOUNT_PATH))
-        {
-            record_boot_stage(setup_apply_failure_stage(&error))?;
-            return Err(error).context("apply every admitted OCI layer into the staging root");
-        }
-        record_boot_stage("root-layers-ready")?;
-        let plan = WorkspacePlan::from_verified_setup(
-            &contents.project,
-            &contents.config,
-            &header,
-            Path::new(ROOT_LOWER_PATH),
-        )
-        .context("derive sealed workspace execution plan")?;
-        persist_workspace_plan(&plan)?;
-        plan
+        let mut persistent = vec![
+            state_device.as_path(),
+            root_device.as_path(),
+            seed_device.as_path(),
+        ];
+        persistent.extend(docker_device.as_deref());
+        plan_from_setup(binding, &persistent)?
     } else {
         require_persisted_workspace_plan(load_workspace_plan()?)?
     };
@@ -2356,74 +2344,6 @@ pub fn run_workspace_exec(command: Vec<OsString>) -> Result<()> {
     Err(crate::exec_failure::ExecFailed::last_os_error(&command[0]).into())
 }
 
-pub fn find_disk_by_serial(
-    sys_block_path: &Path,
-    dev_path: &Path,
-    expected_serial: &str,
-) -> Result<PathBuf> {
-    ensure!(!expected_serial.is_empty(), "disk serial must not be empty");
-    let mut matches = Vec::new();
-    for entry in fs::read_dir(sys_block_path)
-        .with_context(|| format!("read block-device class {}", sys_block_path.display()))?
-    {
-        let entry = entry.context("read block-device class entry")?;
-        let name = entry.file_name();
-        if !valid_virtio_block_name(&name) {
-            continue;
-        }
-        let serial_path = entry.path().join("serial");
-        let Ok(serial) = read_bounded(&serial_path, 64) else {
-            continue;
-        };
-        let Ok(serial) = std::str::from_utf8(&serial) else {
-            continue;
-        };
-        if serial.trim_end_matches(['\r', '\n']) == expected_serial {
-            matches.push(dev_path.join(name));
-        }
-    }
-
-    match matches.as_slice() {
-        [path] => Ok(path.clone()),
-        [] => bail!("virtio block disk with required serial is absent"),
-        _ => bail!("multiple virtio block disks use the required serial"),
-    }
-}
-
-fn wait_for_disk_by_serial(
-    sys_block_path: &Path,
-    dev_path: &Path,
-    serial: &str,
-    timeout: Duration,
-) -> Result<PathBuf> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match find_disk_by_serial(sys_block_path, dev_path, serial) {
-            Ok(path) => return Ok(path),
-            Err(error) if error.to_string().starts_with("multiple ") => return Err(error),
-            Err(error) if Instant::now() >= deadline => {
-                return Err(error).with_context(|| format!("discover required {serial} disk"));
-            }
-            Err(_) => thread::sleep(Duration::from_millis(20)),
-        }
-    }
-}
-
-fn valid_virtio_block_name(name: &OsStr) -> bool {
-    let name = name.as_bytes();
-    name.len() >= 3 && name.starts_with(b"vd") && name[2..].iter().all(u8::is_ascii_lowercase)
-}
-
-fn validate_block_device(path: &Path) -> Result<()> {
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("inspect guest block device {}", path.display()))?;
-    ensure!(
-        metadata.file_type().is_block_device(),
-        "guest disk path is not a block device"
-    );
-    Ok(())
-}
-
 fn read_seed_from_discovered_disk() -> Result<Seed> {
     let seed_device = wait_for_disk_by_serial(
         Path::new(SYS_BLOCK_PATH),
@@ -3181,6 +3101,7 @@ async fn serve_boot_progress_connection(
         tokio::io::AsyncWriteExt::flush(&mut stream)
             .await
             .context("flush guest progress")?;
+        PROGRESS_SERVED.fetch_max(snapshot.sequence, Ordering::Release);
         if snapshot.stage.is_terminal() {
             return Ok(());
         }
@@ -3860,7 +3781,7 @@ fn expose_persistent_layout(plan: &WorkspacePlan) -> Result<()> {
     let relative_home = home
         .strip_prefix("/")
         .map_err(|_| anyhow::anyhow!("workspace home is not absolute"))?;
-    let image_home = Path::new(ROOT_LOWER_PATH).join(relative_home);
+    let image_home = Path::new(root_lower_path()).join(relative_home);
     let lower = if confined_image_directory_exists(relative_home)? {
         image_home
     } else {
@@ -3892,7 +3813,7 @@ fn persistent_home_overlay_options(lower: &Path) -> String {
 
 fn confined_image_directory_exists(relative: &Path) -> Result<bool> {
     let root = rustix::fs::open(
-        ROOT_LOWER_PATH,
+        root_lower_path(),
         RustixOFlags::RDONLY
             | RustixOFlags::DIRECTORY
             | RustixOFlags::CLOEXEC
@@ -4438,10 +4359,14 @@ fn prepare_workspace_generation(
     }
     let generation = Sha256Value::parse_hex(&plan.root_generation)
         .context("decode sealed OCI root generation")?;
-    verify_completed_setup_generation(Path::new(ROOT_MOUNT_PATH), generation)
-        .context("validate completed OCI root generation")?;
+    if image_attach::attached() {
+        image_attach::verify_recorded()?;
+    } else {
+        verify_completed_setup_generation(Path::new(ROOT_MOUNT_PATH), generation)
+            .context("validate completed OCI root generation")?;
+    }
     let metadata =
-        fs::symlink_metadata(ROOT_LOWER_PATH).context("inspect completed OCI lower directory")?;
+        fs::symlink_metadata(root_lower_path()).context("inspect completed OCI lower directory")?;
     ensure!(
         metadata.file_type().is_dir()
             && metadata.uid() == unsafe { libc::geteuid() }
@@ -4453,14 +4378,17 @@ fn prepare_workspace_generation(
     let runtime = validate_cw_runtime_catalog(None)?;
     let config = workspace_oci_config_with_cw(plan, runtime.is_some(), workload_may_become_root)?;
     ensure_exact_bytes(Path::new(RUNC_CONFIG_PATH), &config, 0o400)?;
-    inherit_root_directory_metadata(Path::new(ROOT_LOWER_PATH), Path::new(ROOT_UPPER_PATH))?;
+    inherit_root_directory_metadata(Path::new(root_lower_path()), Path::new(ROOT_UPPER_PATH))?;
 
     mount_fs(
         "overlay",
         ROOT_MERGED_PATH,
         "overlay",
         root_overlay_flags(workload_may_become_root),
-        &format!("lowerdir={ROOT_LOWER_PATH},upperdir={ROOT_UPPER_PATH},workdir={ROOT_WORK_PATH}"),
+        &format!(
+            "lowerdir={},upperdir={ROOT_UPPER_PATH},workdir={ROOT_WORK_PATH}",
+            root_lower_path()
+        ),
     )
     .context("mount workspace root overlay")?;
     Ok(())
@@ -5244,6 +5172,56 @@ impl Drop for DaemonStartGuard {
             stop_daemon(child);
         }
     }
+}
+
+/// A generation's first boot: verify the setup pack, unpack the image onto
+/// the root disk unless its lower is on an image disk, and derive and
+/// persist the workspace plan. `persistent` are the disks the setup disk
+/// may not alias.
+fn plan_from_setup(binding: SetupBinding, persistent: &[&Path]) -> Result<WorkspacePlan> {
+    let setup_device = wait_for_disk_by_serial(
+        Path::new(SYS_BLOCK_PATH),
+        Path::new(DEV_PATH),
+        SETUP_DISK_SERIAL,
+        DISK_DISCOVERY_TIMEOUT,
+    )?;
+    ensure!(
+        persistent
+            .iter()
+            .all(|disk| *disk != setup_device.as_path()),
+        "setup disk must be distinct from every persistent disk"
+    );
+    validate_block_device(&setup_device)?;
+    let mut setup = open_setup_device(&setup_device)?;
+    let header = verify_setup_header(&mut setup, binding)?;
+    image_attach::bind_first_boot(&header)?;
+    record_boot_stage("setup-header-ready")?;
+    let contents = match verify_setup_contents(&mut setup, &header) {
+        Ok(contents) => contents,
+        Err(error) => {
+            record_boot_stage(setup_content_failure_stage(&error))?;
+            return Err(error).context("verify every guest setup object and layer digest");
+        }
+    };
+    record_boot_stage("setup-content-ready")?;
+    // An attached VM's lower is already on the image disk.
+    if !image_attach::attached()
+        && let Err(error) =
+            apply_setup_layers(&mut setup, &header, &contents, Path::new(ROOT_MOUNT_PATH))
+    {
+        record_boot_stage(setup_apply_failure_stage(&error))?;
+        return Err(error).context("apply every admitted OCI layer into the staging root");
+    }
+    record_boot_stage("root-layers-ready")?;
+    let plan = WorkspacePlan::from_verified_setup(
+        &contents.project,
+        &contents.config,
+        &header,
+        Path::new(root_lower_path()),
+    )
+    .context("derive sealed workspace execution plan")?;
+    persist_workspace_plan(&plan)?;
+    Ok(plan)
 }
 
 fn spawn_daemon() -> Result<std::process::Child> {

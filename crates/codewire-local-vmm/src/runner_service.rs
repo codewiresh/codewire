@@ -947,6 +947,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 managed_credential_clients,
                 cw_runtime_catalog_generation,
                 cw_runtime_moved_from_generation,
+                image_disk: None,
                 network_policy,
                 intercepts: crate::runner::boot_intercepts(
                     request.intercept,

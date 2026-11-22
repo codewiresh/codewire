@@ -19,7 +19,7 @@ use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{SetupArchitecture, SetupHeader, Sha256Value};
+use crate::{SetupArchitecture, SetupHeader, SetupImage, Sha256Value};
 
 pub(crate) const WORKSPACE_PLAN_PATH: &str = "/generation/workspace-plan.json";
 pub(crate) const ACTIVE_WORKSPACE_PLAN_PATH: &str = "/run/codewire/workspace-plan.json";
@@ -441,6 +441,27 @@ impl WorkspacePlan {
     }
 }
 
+/// A combined root's pack carries the layers, so each diff id must name its
+/// layer. An image disk's pack carries none (#4646): the builder checked the
+/// layers when it unpacked them, and the disk's marker binds that build, so
+/// the config only has to name well-formed layers.
+fn diff_ids_match(configuration: &ImageConfiguration, header: &SetupHeader) -> bool {
+    let diff_ids = configuration.rootfs().diff_ids();
+    if matches!(header.image, SetupImage::Attach { .. }) {
+        return !diff_ids.is_empty()
+            && diff_ids
+                .iter()
+                .all(|actual| Sha256Value::parse_digest(actual).is_ok());
+    }
+    diff_ids.len() == header.layers.len()
+        && diff_ids
+            .iter()
+            .zip(&header.layers)
+            .all(|(actual, expected)| {
+                Sha256Value::parse_digest(actual).ok() == Some(expected.diff_id)
+            })
+}
+
 fn validate_platform(
     configuration: &ImageConfiguration,
     header: &SetupHeader,
@@ -460,15 +481,7 @@ fn validate_platform(
             .os_features()
             .as_ref()
             .is_some_and(|features| !features.is_empty())
-        || configuration.rootfs().diff_ids().len() != header.layers.len()
-        || configuration
-            .rootfs()
-            .diff_ids()
-            .iter()
-            .zip(&header.layers)
-            .any(|(actual, expected)| {
-                Sha256Value::parse_digest(actual).ok() != Some(expected.diff_id)
-            })
+        || !diff_ids_match(configuration, header)
     {
         return Err(WorkspacePlanError::UnsupportedPlatform);
     }
@@ -977,6 +990,47 @@ mod tests {
             }
             (target, source) => *target = source,
         }
+    }
+
+    /// #4646: a pack over an image disk has no layers; its config still has
+    /// to be native Linux content with well-formed diff ids.
+    #[test]
+    fn an_image_disk_plan_takes_the_layers_from_the_disk() {
+        let root = root();
+        let accepted = config(json!({}));
+        let combined = setup(&accepted);
+        let attach = SetupHeader::layout_image_attach(
+            combined.manifest_sha256,
+            SetupArchitecture::Amd64,
+            [3; 16],
+            SetupBlob {
+                size: combined.project.size,
+                sha256: combined.project.sha256,
+            },
+            SetupBlob {
+                size: combined.config.size,
+                sha256: combined.config.sha256,
+            },
+        )
+        .unwrap();
+        assert!(attach.layers.is_empty());
+        WorkspacePlan::from_verified_setup(&project(), &accepted, &attach, root.path()).unwrap();
+        for refused in [
+            config_with_rootfs(json!([])),
+            config_with_rootfs(json!(["sha256:not-a-digest"])),
+            config(json!({"architecture": "arm64"})),
+        ] {
+            assert!(matches!(
+                WorkspacePlan::from_verified_setup(&project(), &refused, &attach, root.path()),
+                Err(WorkspacePlanError::UnsupportedPlatform)
+            ));
+        }
+    }
+
+    fn config_with_rootfs(diff_ids: serde_json::Value) -> Vec<u8> {
+        let mut value: serde_json::Value = serde_json::from_slice(&config(json!({}))).unwrap();
+        value["rootfs"]["diff_ids"] = diff_ids;
+        serde_json::to_vec(&value).unwrap()
     }
 
     #[test]

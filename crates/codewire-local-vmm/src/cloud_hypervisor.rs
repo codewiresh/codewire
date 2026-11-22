@@ -10,6 +10,10 @@ use codewire_vmm_guest_probe::{
 
 use crate::artifact::{AdmittedArtifacts, ArtifactError, validate_parameter_path};
 use codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_DISK_SERIAL;
+use codewire_vmm_guest_probe::image_disk::IMAGE_DISK_SERIAL;
+
+mod image_build;
+pub use image_build::ImageBuildVmConfig;
 
 pub const DEFAULT_VCPUS: u8 = 1;
 pub const DEFAULT_MEMORY_MIB: u32 = 512;
@@ -62,6 +66,9 @@ pub struct CloudHypervisorConfig {
     pub seed_disk: PathBuf,
     pub setup_disk: Option<PathBuf>,
     pub cw_runtime_disk: Option<PathBuf>,
+    /// The shared read-only image disk the guest's overlay takes its lower
+    /// from (#4646). None for a VM on the old combined root disk.
+    pub image_disk: Option<PathBuf>,
     pub api_socket: PathBuf,
     pub event_monitor: PathBuf,
     pub vsock_socket: PathBuf,
@@ -95,6 +102,7 @@ impl fmt::Debug for CloudHypervisorConfig {
             .field("seed_disk", &self.seed_disk)
             .field("setup_disk", &self.setup_disk)
             .field("cw_runtime_disk", &self.cw_runtime_disk)
+            .field("image_disk", &self.image_disk)
             .field("api_socket", &self.api_socket)
             .field("event_monitor", &self.event_monitor)
             .field("vsock_socket", &self.vsock_socket)
@@ -201,6 +209,7 @@ impl CloudHypervisorConfig {
             seed_disk,
             setup_disk,
             cw_runtime_disk: None,
+            image_disk: None,
             api_socket,
             event_monitor,
             vsock_socket,
@@ -261,6 +270,15 @@ impl CloudHypervisorConfig {
         Ok(self)
     }
 
+    pub fn with_image_disk(
+        mut self,
+        disk: Option<PathBuf>,
+    ) -> Result<Self, CloudHypervisorConfigError> {
+        self.image_disk = disk;
+        self.validate()?;
+        Ok(self)
+    }
+
     pub fn validate(&self) -> Result<(), CloudHypervisorConfigError> {
         if self.vsock_cid < 3 || self.vsock_cid == u32::MAX {
             return Err(CloudHypervisorConfigError::InvalidVsockCid);
@@ -290,42 +308,22 @@ impl CloudHypervisorConfig {
         if let Some(runtime) = &self.cw_runtime_disk {
             disks.push(runtime);
         }
+        if let Some(image) = &self.image_disk {
+            disks.push(image);
+        }
         disks.sort();
         if disks.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(CloudHypervisorConfigError::AliasedDiskPaths);
         }
-        if self.api_socket == self.vsock_socket
-            || self.api_socket.parent().is_none()
-            || self.vsock_socket.parent().is_none()
-            || self.api_socket.parent() == self.vsock_socket.parent()
-            || self.api_socket.file_name() == self.vsock_socket.file_name()
-            || self
-                .api_socket
-                .parent()
-                .is_some_and(|parent| self.vsock_socket.starts_with(parent))
-            || self
-                .vsock_socket
-                .parent()
-                .is_some_and(|parent| self.api_socket.starts_with(parent))
-        {
-            return Err(CloudHypervisorConfigError::AliasedSocketPaths);
-        }
-        let mut sockets = vec![&self.api_socket, &self.vsock_socket];
-        sockets.extend(self.virtiofs.iter().map(|share| &share.socket));
-        sockets.sort();
-        if sockets.windows(2).any(|pair| pair[0] == pair[1]) {
-            return Err(CloudHypervisorConfigError::AliasedSocketPaths);
-        }
+        let shares: Vec<&Path> = self
+            .virtiofs
+            .iter()
+            .map(|share| share.socket.as_path())
+            .collect();
+        validate_sockets(&self.api_socket, &self.vsock_socket, &shares)?;
         for (index, share) in self.virtiofs.iter().enumerate() {
             if share.tag != format!("cw-direct-{index:02}") {
                 return Err(CloudHypervisorConfigError::InvalidVirtioFsTag);
-            }
-        }
-        for socket in sockets {
-            if socket.as_os_str().as_bytes().len() >= LINUX_SUN_PATH_BYTES {
-                return Err(CloudHypervisorConfigError::SocketPathTooLong(
-                    socket.to_owned(),
-                ));
             }
         }
         Ok(())
@@ -398,28 +396,7 @@ impl CloudHypervisorConfig {
                 SEED_DISK_SERIAL,
             ),
         );
-        if let Some(setup_disk) = &self.setup_disk {
-            push_option(
-                &mut arguments,
-                "--disk",
-                format!(
-                    "path={},readonly=on,direct=off,id=cw-setup,serial={},image_type=raw,backing_files=off,sparse=off,lock_granularity=full",
-                    display(setup_disk)?,
-                    SETUP_DISK_SERIAL,
-                ),
-            );
-        }
-        if let Some(runtime) = &self.cw_runtime_disk {
-            push_option(
-                &mut arguments,
-                "--disk",
-                format!(
-                    "path={},readonly=on,direct=off,id=cw-runtime,serial={},image_type=raw,backing_files=off,sparse=off,lock_granularity=full",
-                    display(runtime)?,
-                    CW_RUNTIME_DISK_SERIAL,
-                ),
-            );
-        }
+        self.push_optional_read_only_disks(&mut arguments)?;
         for (index, share) in self.virtiofs.iter().enumerate() {
             push_option(
                 &mut arguments,
@@ -472,12 +449,38 @@ impl CloudHypervisorConfig {
             expected_disk_count: 3
                 + usize::from(self.docker_disk.is_some())
                 + usize::from(self.setup_disk.is_some())
-                + usize::from(self.cw_runtime_disk.is_some()),
+                + usize::from(self.cw_runtime_disk.is_some())
+                + usize::from(self.image_disk.is_some()),
             expected_fs_count: self.virtiofs.len(),
             landlock_rule,
         };
         command.validate_allowlist()?;
         Ok(command)
+    }
+
+    /// The optional read-only disks, in the order a VM checkpoint records
+    /// them: the one-boot setup pack, the cw runtime, then the image disk.
+    fn push_optional_read_only_disks(
+        &self,
+        arguments: &mut Vec<OsString>,
+    ) -> Result<(), CloudHypervisorConfigError> {
+        for (disk, id, serial) in [
+            (&self.setup_disk, "cw-setup", SETUP_DISK_SERIAL),
+            (&self.cw_runtime_disk, "cw-runtime", CW_RUNTIME_DISK_SERIAL),
+            (&self.image_disk, "cw-image", IMAGE_DISK_SERIAL),
+        ] {
+            if let Some(disk) = disk {
+                push_option(
+                    arguments,
+                    "--disk",
+                    format!(
+                        "path={},readonly=on,direct=off,id={id},serial={serial},image_type=raw,backing_files=off,sparse=off,lock_granularity=full",
+                        display(disk)?,
+                    ),
+                );
+            }
+        }
+        Ok(())
     }
 
     fn paths(&self) -> Vec<&Path> {
@@ -502,6 +505,9 @@ impl CloudHypervisorConfig {
         }
         if let Some(runtime) = &self.cw_runtime_disk {
             paths.push(runtime.as_path());
+        }
+        if let Some(image) = &self.image_disk {
+            paths.push(image.as_path());
         }
         paths.extend(self.virtiofs.iter().map(|share| share.socket.as_path()));
         if let Some(directory) = &self.checkpoint_dir {
@@ -670,6 +676,43 @@ pub enum CloudHypervisorConfigError {
     },
     #[error("Cloud Hypervisor path is not valid UTF-8: {0}")]
     NonUtf8Path(PathBuf),
+}
+
+/// The API and hybrid-vsock sockets are distinct, in distinct directories
+/// neither inside the other's, and every socket fits a Unix socket path.
+fn validate_sockets(
+    api_socket: &Path,
+    vsock_socket: &Path,
+    others: &[&Path],
+) -> Result<(), CloudHypervisorConfigError> {
+    if api_socket == vsock_socket
+        || api_socket.parent().is_none()
+        || vsock_socket.parent().is_none()
+        || api_socket.parent() == vsock_socket.parent()
+        || api_socket.file_name() == vsock_socket.file_name()
+        || api_socket
+            .parent()
+            .is_some_and(|parent| vsock_socket.starts_with(parent))
+        || vsock_socket
+            .parent()
+            .is_some_and(|parent| api_socket.starts_with(parent))
+    {
+        return Err(CloudHypervisorConfigError::AliasedSocketPaths);
+    }
+    let mut sockets = vec![api_socket, vsock_socket];
+    sockets.extend_from_slice(others);
+    sockets.sort();
+    if sockets.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(CloudHypervisorConfigError::AliasedSocketPaths);
+    }
+    for socket in sockets {
+        if socket.as_os_str().as_bytes().len() >= LINUX_SUN_PATH_BYTES {
+            return Err(CloudHypervisorConfigError::SocketPathTooLong(
+                socket.to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn display(path: &Path) -> Result<&str, CloudHypervisorConfigError> {
@@ -863,6 +906,41 @@ mod tests {
                 expected: 3,
                 actual: 4
             })
+        ));
+    }
+
+    #[test]
+    fn image_disk_is_an_exact_readonly_disk_after_the_runtime_and_cannot_alias_storage() {
+        let selected = config()
+            .with_cw_runtime_disk(Some("/runtime/catalog/runtime.raw".into()))
+            .unwrap()
+            .with_image_disk(Some("/engine/image-disks/disks/a/image.raw".into()))
+            .unwrap();
+        let command = selected.command().unwrap();
+        command.validate_allowlist().unwrap();
+        let disks = command
+            .arguments()
+            .windows(2)
+            .filter(|pair| pair[0] == "--disk")
+            .map(|pair| pair[1].to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(disks.len(), 5);
+        // A checkpoint records the ordered disk list: cw-image comes last.
+        assert!(disks[3].contains("id=cw-runtime,"));
+        assert_eq!(
+            disks[4],
+            "path=/engine/image-disks/disks/a/image.raw,readonly=on,direct=off,id=cw-image,serial=CWIMAGE1,image_type=raw,backing_files=off,sparse=off,lock_granularity=full"
+        );
+        let original = config();
+        for aliased in [original.root_disk.clone(), original.state_disk.clone()] {
+            assert!(matches!(
+                original.clone().with_image_disk(Some(aliased)),
+                Err(CloudHypervisorConfigError::AliasedDiskPaths)
+            ));
+        }
+        assert!(matches!(
+            original.clone().with_image_disk(Some("image.raw".into())),
+            Err(CloudHypervisorConfigError::NonAbsolutePath(_))
         ));
     }
 

@@ -73,6 +73,12 @@ const EGRESS_CA_PRESENT_FLAG: u16 = 1 << 6;
 /// Valid only with [`EGRESS_CA_PRESENT_FLAG`].
 const PLACEHOLDERS_PRESENT_FLAG: u16 = 1 << 7;
 const CW_RUNTIME_MOVED_FROM_PRESENT_FLAG: u16 = 1 << 8;
+/// The builder guest of an image disk (#4646): it unpacks the setup pack's
+/// layers onto its staging disk and powers off. Exclusive of every other
+/// flag and optional field but the setup binding.
+const IMAGE_BUILD_FLAG: u16 = 1 << 9;
+/// The VM's overlay takes its lower from the shared image disk (#4646).
+const IMAGE_DISK_FLAG: u16 = 1 << 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetupBinding {
@@ -134,6 +140,8 @@ pub struct Seed {
     cw_runtime_moved_from_sha256: Option<Sha256Value>,
     egress_ca: Option<EgressCaCertificate>,
     placeholders: SeedPlaceholders,
+    image_build: bool,
+    image_disk: bool,
 }
 
 impl Seed {
@@ -158,7 +166,24 @@ impl Seed {
             cw_runtime_moved_from_sha256: None,
             egress_ca: None,
             placeholders: SeedPlaceholders::default(),
+            image_build: false,
+            image_disk: false,
         };
+        seed.validate()?;
+        Ok(seed)
+    }
+
+    /// The seed of an image disk's builder guest (#4646): a fresh VM id and
+    /// key for this one build, the setup pack whose header carries the build
+    /// id, and nothing else. No other constructor sets build mode.
+    pub fn for_image_build(
+        build_vm_id: Uuid,
+        daemon_vsock_port: u32,
+        auth_token: impl Into<String>,
+        setup: SetupBinding,
+    ) -> Result<Self, SeedError> {
+        let mut seed = Self::new_with_setup(build_vm_id, 1, daemon_vsock_port, auth_token, setup)?;
+        seed.image_build = true;
         seed.validate()?;
         Ok(seed)
     }
@@ -185,6 +210,8 @@ impl Seed {
             cw_runtime_moved_from_sha256: None,
             egress_ca: None,
             placeholders: SeedPlaceholders::default(),
+            image_build: false,
+            image_disk: false,
         };
         seed.validate()?;
         Ok(seed)
@@ -213,6 +240,8 @@ impl Seed {
             cw_runtime_moved_from_sha256: None,
             egress_ca: None,
             placeholders: SeedPlaceholders::default(),
+            image_build: false,
+            image_disk: false,
         };
         seed.validate()?;
         Ok(seed)
@@ -242,6 +271,8 @@ impl Seed {
             cw_runtime_moved_from_sha256: None,
             egress_ca: None,
             placeholders: SeedPlaceholders::default(),
+            image_build: false,
+            image_disk: false,
         };
         seed.validate()?;
         Ok(seed)
@@ -365,6 +396,20 @@ impl Seed {
         &self.placeholders
     }
 
+    pub fn image_build(&self) -> bool {
+        self.image_build
+    }
+
+    /// Attach the shared image disk; the overlay's lower is on it.
+    pub fn with_image_disk(mut self) -> Self {
+        self.image_disk = true;
+        self
+    }
+
+    pub fn image_disk(&self) -> bool {
+        self.image_disk
+    }
+
     pub fn encode(&self) -> [u8; SEED_LEN] {
         // Construction and decoding are the only ways to obtain a Seed, so
         // these invariants have already been checked.
@@ -429,6 +474,12 @@ impl Seed {
             self.placeholders
                 .encode_into(&mut bytes[PLACEHOLDERS_OFFSET..EGRESS_CA_OFFSET]);
         }
+        if self.image_build {
+            flags |= IMAGE_BUILD_FLAG;
+        }
+        if self.image_disk {
+            flags |= IMAGE_DISK_FLAG;
+        }
         put_u16(&mut bytes, FLAGS_OFFSET, flags);
         let clients = self.managed_credential_clients.encode().as_bytes();
         bytes[MANAGED_CREDENTIAL_CLIENTS_OFFSET..MANAGED_CREDENTIAL_CLIENTS_OFFSET + clients.len()]
@@ -475,7 +526,9 @@ impl Seed {
                 | CW_RUNTIME_CATALOG_PRESENT_FLAG
                 | EGRESS_CA_PRESENT_FLAG
                 | PLACEHOLDERS_PRESENT_FLAG
-                | CW_RUNTIME_MOVED_FROM_PRESENT_FLAG)
+                | CW_RUNTIME_MOVED_FROM_PRESENT_FLAG
+                | IMAGE_BUILD_FLAG
+                | IMAGE_DISK_FLAG)
             != 0
             || bytes[RESERVED_OFFSET..RESERVED_END]
                 .iter()
@@ -483,29 +536,7 @@ impl Seed {
         {
             return Err(SeedError::NonZeroReserved);
         }
-        let setup = if flags & SETUP_PRESENT_FLAG != 0 {
-            Some(SetupBinding::new(
-                get_u64(bytes, SETUP_TOTAL_LEN_OFFSET),
-                Sha256Value::from_bytes(
-                    bytes[SETUP_ROOT_GENERATION_OFFSET..SETUP_ROOT_GENERATION_OFFSET + 32]
-                        .try_into()
-                        .expect("fixed seed setup digest"),
-                ),
-                Sha256Value::from_bytes(
-                    bytes[SETUP_HEADER_SHA256_OFFSET..SETUP_HEADER_SHA256_OFFSET + 32]
-                        .try_into()
-                        .expect("fixed seed setup digest"),
-                ),
-            )?)
-        } else {
-            if bytes[SETUP_TOTAL_LEN_OFFSET..DIRECT_SHARES_SHA256_OFFSET]
-                .iter()
-                .any(|byte| *byte != 0)
-            {
-                return Err(SeedError::NonZeroReserved);
-            }
-            None
-        };
+        let setup = decode_setup(bytes, flags)?;
         let direct_shares_sha256 = decode_optional_hash(
             bytes,
             flags,
@@ -537,19 +568,7 @@ impl Seed {
             CW_RUNTIME_MOVED_FROM_PRESENT_FLAG,
             CW_RUNTIME_MOVED_FROM_SHA256_OFFSET,
         )?;
-        let client_bytes =
-            &bytes[MANAGED_CREDENTIAL_CLIENTS_OFFSET..MANAGED_CREDENTIAL_CLIENTS_END];
-        let client_len = client_bytes
-            .iter()
-            .position(|byte| *byte == 0)
-            .ok_or(SeedError::InvalidManagedCredentialClients)?;
-        if client_bytes[client_len..].iter().any(|byte| *byte != 0) {
-            return Err(SeedError::InvalidManagedCredentialClients);
-        }
-        let clients = std::str::from_utf8(&client_bytes[..client_len])
-            .map_err(|_| SeedError::InvalidManagedCredentialClients)?;
-        let clients = ManagedCredentialClients::decode(clients)
-            .map_err(|_| SeedError::InvalidManagedCredentialClients)?;
+        let clients = decode_managed_credential_clients(bytes)?;
 
         let token_len = usize::from(get_u16(bytes, TOKEN_LEN_OFFSET));
         let token_end = TOKEN_OFFSET
@@ -597,7 +616,11 @@ impl Seed {
         } else {
             seed
         };
-        Ok(seed.with_managed_credential_clients(clients))
+        let mut seed = seed.with_managed_credential_clients(clients);
+        seed.image_build = flags & IMAGE_BUILD_FLAG != 0;
+        seed.image_disk = flags & IMAGE_DISK_FLAG != 0;
+        seed.validate()?;
+        Ok(seed)
     }
 
     fn validate(&self) -> Result<(), SeedError> {
@@ -629,6 +652,23 @@ impl Seed {
         if let Some(setup) = self.setup {
             setup.validate()?;
         }
+        // Build mode fails closed: a builder carries its setup pack and
+        // nothing an environment could use (condition 2 on #4646).
+        if self.image_build
+            && (self.setup.is_none()
+                || self.image_disk
+                || self.direct_shares_sha256.is_some()
+                || self.skill_snapshot_sha256.is_some()
+                || self.docker_data_disk
+                || self.environment_projection_sha256.is_some()
+                || self.managed_credential_clients != ManagedCredentialClients::default()
+                || self.cw_runtime_catalog_sha256.is_some()
+                || self.cw_runtime_moved_from_sha256.is_some()
+                || self.egress_ca.is_some()
+                || !self.placeholders.is_empty())
+        {
+            return Err(SeedError::InvalidImageBuild);
+        }
         Ok(())
     }
 }
@@ -646,6 +686,8 @@ impl fmt::Debug for Seed {
             .field("skill_snapshot_sha256", &self.skill_snapshot_sha256)
             .field("docker_data_disk", &self.docker_data_disk)
             .field("cw_runtime_catalog_sha256", &self.cw_runtime_catalog_sha256)
+            .field("image_build", &self.image_build)
+            .field("image_disk", &self.image_disk)
             .field(
                 "cw_runtime_moved_from_sha256",
                 &self.cw_runtime_moved_from_sha256,
@@ -706,6 +748,8 @@ pub enum SeedError {
     InvalidPlaceholders,
     #[error("seed runtime move must name a catalog other than the bound one")]
     InvalidRuntimeMove,
+    #[error("an image disk builder's seed carries only its setup pack")]
+    InvalidImageBuild,
 }
 
 /// The egress trust a seed carries (#3999): the CA certificate and, only
@@ -760,6 +804,49 @@ fn decode_egress_trust(
         None
     };
     Ok((egress_ca, placeholders))
+}
+
+/// The one-boot setup binding, present only with its flag; without it the
+/// binding's bytes are zero.
+fn decode_setup(bytes: &[u8], flags: u16) -> Result<Option<SetupBinding>, SeedError> {
+    if flags & SETUP_PRESENT_FLAG == 0 {
+        if bytes[SETUP_TOTAL_LEN_OFFSET..DIRECT_SHARES_SHA256_OFFSET]
+            .iter()
+            .any(|byte| *byte != 0)
+        {
+            return Err(SeedError::NonZeroReserved);
+        }
+        return Ok(None);
+    }
+    Ok(Some(SetupBinding::new(
+        get_u64(bytes, SETUP_TOTAL_LEN_OFFSET),
+        Sha256Value::from_bytes(
+            bytes[SETUP_ROOT_GENERATION_OFFSET..SETUP_ROOT_GENERATION_OFFSET + 32]
+                .try_into()
+                .expect("fixed seed setup digest"),
+        ),
+        Sha256Value::from_bytes(
+            bytes[SETUP_HEADER_SHA256_OFFSET..SETUP_HEADER_SHA256_OFFSET + 32]
+                .try_into()
+                .expect("fixed seed setup digest"),
+        ),
+    )?))
+}
+
+/// The managed credential clients: NUL-terminated text, zero after it.
+fn decode_managed_credential_clients(bytes: &[u8]) -> Result<ManagedCredentialClients, SeedError> {
+    let client_bytes = &bytes[MANAGED_CREDENTIAL_CLIENTS_OFFSET..MANAGED_CREDENTIAL_CLIENTS_END];
+    let client_len = client_bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or(SeedError::InvalidManagedCredentialClients)?;
+    if client_bytes[client_len..].iter().any(|byte| *byte != 0) {
+        return Err(SeedError::InvalidManagedCredentialClients);
+    }
+    let clients = std::str::from_utf8(&client_bytes[..client_len])
+        .map_err(|_| SeedError::InvalidManagedCredentialClients)?;
+    ManagedCredentialClients::decode(clients)
+        .map_err(|_| SeedError::InvalidManagedCredentialClients)
 }
 
 fn decode_optional_hash(

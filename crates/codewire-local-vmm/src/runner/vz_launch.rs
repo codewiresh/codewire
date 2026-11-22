@@ -163,6 +163,7 @@ impl CloudHypervisorRunner {
                     .cw_runtime_disk
                     .as_ref()
                     .map(|disk| disk.path.as_path()),
+                image: None,
             },
             admitted_shares(&prepared.direct_shares)?,
             &prepared.paths.vsock_socket,

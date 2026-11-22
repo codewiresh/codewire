@@ -28,6 +28,12 @@ pub use crate::supervisor_metadata::workspace::WorkspaceSourceMode;
 use crate::workspace_plan::{WorkspaceInput, WorkspacePlan};
 use codewire_vmm_guest_probe::DIRECT_SHARE_PLAN_RELATIVE_PATH;
 
+mod state_disk;
+// The standard Pod's runtime, which runs on Linux only.
+#[cfg(target_os = "linux")]
+pub(crate) use state_disk::ensure_empty_state_disk;
+use state_disk::format_state_disk;
+
 #[cfg(test)]
 const GIT: &str = "/usr/bin/git";
 // Git maintenance stays in the owned command's family until it is joined.
@@ -2221,45 +2227,6 @@ fn bounded_staging_regular_bytes(root: &Path, maximum: u64) -> Result<u64, Works
     let mut total = 0;
     visit(root, &mut total, maximum)?;
     Ok(total)
-}
-
-/// Format a new VM's state disk with the contents of `staging`. It alone has
-/// the ext4 `verity` feature, so the guest can seal files on it; a kernel
-/// without fs-verity mounts such a disk read-only.
-fn format_state_disk(staging: &Path, disk: &Path) -> Result<(), WorkspaceError> {
-    let mkfs = crate::host::e2fsprogs("mkfs.ext4").ok_or(WorkspaceError::MkfsUnavailable)?;
-    let mut command = Command::new(mkfs);
-    crate::sweep_before_exec(&mut command);
-    command
-        .args(crate::host::EXT4_FORMAT)
-        .args([
-            OsStr::new("-O"),
-            OsStr::new("verity"),
-            OsStr::new("-q"),
-            OsStr::new("-F"),
-            OsStr::new("-m"),
-            OsStr::new("0"),
-        ])
-        .arg("-d")
-        .arg(staging)
-        .arg(disk)
-        .env_clear()
-        .env("LC_ALL", "C");
-    #[cfg(target_os = "macos")]
-    command.env(
-        "MKE2FS_CONFIG",
-        crate::host::mke2fs_config().ok_or(WorkspaceError::MkfsUnavailable)?,
-    );
-    let status = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|_| WorkspaceError::MkfsUnavailable)?;
-    if !status.success() {
-        return Err(WorkspaceError::MkfsFailed);
-    }
-    Ok(())
 }
 
 fn format_empty_ext4(disk: &Path) -> Result<(), WorkspaceError> {

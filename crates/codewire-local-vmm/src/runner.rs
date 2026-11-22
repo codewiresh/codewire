@@ -59,6 +59,7 @@ use crate::host_port::{
     HostPortBinding, bind_loopback_listener, validate_canonical_host_port_bindings,
 };
 use crate::hybrid_vsock::{HybridVsockError, HybridVsockTarget};
+use crate::image_disk::{AdmittedImageDisk, ImageDiskAttachment, ImageDiskError};
 #[cfg(target_os = "linux")]
 use crate::linux::confinement::{
     PreparedFilesystemDomain, install_identity_preserving_setgroups_filter,
@@ -102,6 +103,8 @@ mod checkpoint;
 mod egress_control;
 mod egress_status;
 mod front_door;
+#[cfg(target_os = "linux")]
+mod image_builder;
 mod intercept;
 mod mesh_processes;
 use mesh_processes::{spawn_mesh_enrollment_process, spawn_mesh_transport_process};
@@ -120,6 +123,7 @@ mod worker_descriptors;
 mod worker_frames;
 #[cfg(target_os = "linux")]
 use cw_runtime_disk::validate_live_cw_runtime_disk;
+mod progress;
 #[cfg(target_os = "macos")]
 mod vz_launch;
 
@@ -127,6 +131,9 @@ mod vz_launch;
 pub use checkpoint::{RestoreBoot, RestoreReport};
 use host_port_forward::HostPortForwarder;
 use mesh_ingress_pass::MeshIngressPass;
+use progress::{
+    NetworkProgressAttemptError, NetworkProgressGoal, wait_for_network_progress_attempt,
+};
 pub(crate) use stage_times::GuestStageTimes;
 use worker_descriptors::pass_to_worker;
 use worker_frames::WorkerFrames;
@@ -183,6 +190,9 @@ pub struct CreateVmRequest {
     pub cw_runtime_catalog_generation: Option<String>,
     /// The catalog a move boots this environment away from (#4980).
     pub cw_runtime_moved_from_generation: Option<String>,
+    /// The image disk this boot's overlay takes its lower from (#4646);
+    /// None boots on a combined root disk, as every VM does today.
+    pub image_disk: Option<ImageDiskAttachment>,
     /// The network policy this boot's egress broker enforces (#2537).
     pub network_policy: CompiledPolicy,
     /// The names this boot intercepts through its TLS front door (#3999);
@@ -288,6 +298,11 @@ impl CloudHypervisorRunner {
             .as_deref()
             .map(|generation| CwRuntimeStore::create(&self.state_root)?.open_catalog(generation))
             .transpose()?;
+        let image_disk = request
+            .image_disk
+            .as_ref()
+            .map(|disk| disk.admit(&self.state_root))
+            .transpose()?;
         let host_port_listeners = reserve_host_ports(&request.host_ports)?;
         let paths = VmPaths::create(&self.state_root, request.vm_id)?;
         let lock = paths.lock()?;
@@ -371,6 +386,7 @@ impl CloudHypervisorRunner {
         }
         .with_docker_disk(docker_disk.as_ref().map(|_| paths.docker_disk.clone()))?
         .with_cw_runtime_disk(cw_runtime_disk.as_ref().map(|disk| disk.path.clone()))?
+        .with_image_disk(image_disk.as_ref().map(|disk| disk.path.clone()))?
         .with_checkpoint_dir(Some(paths.checkpoints_dir.clone()))?
         .with_virtiofs(
             direct_shares
@@ -400,6 +416,7 @@ impl CloudHypervisorRunner {
             root_disk,
             setup_disk,
             cw_runtime_disk,
+            image_disk,
             direct_shares,
             token,
             #[cfg(target_os = "linux")]
@@ -498,6 +515,10 @@ impl CloudHypervisorRunner {
         }
         if let Some(disk) = &prepared.cw_runtime_disk {
             CwRuntimeStore::create(&self.state_root)?.revalidate_attachment(disk)?;
+        }
+        if let (Some(attachment), Some(disk)) = (&prepared.request.image_disk, &prepared.image_disk)
+        {
+            attachment.revalidate(&self.state_root, disk)?;
         }
         validate_seed_file(
             &prepared.paths.seed_disk,
@@ -1096,6 +1117,7 @@ pub struct PreparedVm {
     root_disk: StateDiskIdentity,
     setup_disk: Option<SetupDiskIdentity>,
     cw_runtime_disk: Option<AdmittedCwRuntimeDisk>,
+    image_disk: Option<AdmittedImageDisk>,
     direct_shares: Vec<PreparedDirectShare>,
     token: Zeroizing<String>,
     #[cfg(target_os = "linux")]
@@ -1119,6 +1141,7 @@ impl fmt::Debug for PreparedVm {
             .field("root_disk", &self.root_disk)
             .field("setup_disk", &self.setup_disk);
         debug.field("cw_runtime_disk", &self.cw_runtime_disk);
+        debug.field("image_disk", &self.image_disk);
         debug.field("direct_share_count", &self.direct_shares.len());
         debug.field("token", &"[REDACTED]");
         #[cfg(target_os = "linux")]
@@ -1900,97 +1923,6 @@ impl RunningVm {
     async fn wait_reaped(&mut self) -> Result<ExitClass, RunnerError> {
         wait_reaped_child(&mut self.child).await
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NetworkProgressAttemptError {
-    Retry,
-    Timeout,
-    Rejected,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NetworkProgressGoal {
-    NetworkReady,
-    Terminal,
-}
-
-async fn wait_for_network_progress_attempt(
-    hybrid: &HybridVsockTarget,
-    token: &str,
-    vm_id: Uuid,
-    generation: u64,
-    deadline: tokio::time::Instant,
-    goal: NetworkProgressGoal,
-    mut times: Option<&mut GuestStageTimes>,
-) -> Result<GuestBootStage, NetworkProgressAttemptError> {
-    let connected = tokio::time::timeout_at(
-        deadline,
-        hybrid.connect_guest_port(GUEST_PROGRESS_VSOCK_PORT),
-    )
-    .await
-    .map_err(|_| NetworkProgressAttemptError::Timeout)?;
-    let mut stream = match connected {
-        Ok(stream) => stream,
-        Err(
-            HybridVsockError::InvalidSocketPath
-            | HybridVsockError::InvalidGuestPort
-            | HybridVsockError::SocketIdentity(_),
-        ) => return Err(NetworkProgressAttemptError::Rejected),
-        Err(_) => return Err(NetworkProgressAttemptError::Retry),
-    };
-
-    let mut challenge = [0_u8; PROGRESS_CHALLENGE_LEN];
-    while challenge.iter().all(|byte| *byte == 0) {
-        OsRng.fill_bytes(&mut challenge);
-    }
-    let request = ProgressRequest {
-        vm_id,
-        generation,
-        challenge,
-    };
-    match tokio::time::timeout_at(deadline, async {
-        stream.write_all(&request.encode()).await?;
-        stream.flush().await
-    })
-    .await
-    {
-        Err(_) => return Err(NetworkProgressAttemptError::Timeout),
-        Ok(Err(_)) => return Err(NetworkProgressAttemptError::Retry),
-        Ok(Ok(())) => {}
-    }
-
-    let mut sequence = 0_u64;
-    let mut stage = None;
-    for _ in 0..NETWORK_WORKER_PROGRESS_FRAME_LIMIT {
-        let mut bytes = [0_u8; PROGRESS_FRAME_LEN];
-        match tokio::time::timeout_at(deadline, stream.read_exact(&mut bytes)).await {
-            Err(_) => return Err(NetworkProgressAttemptError::Timeout),
-            Ok(Err(_)) => return Err(NetworkProgressAttemptError::Retry),
-            Ok(Ok(_)) => {}
-        }
-        let frame = ProgressFrame::decode(&bytes, &challenge, token, vm_id, generation)
-            .map_err(|_| NetworkProgressAttemptError::Rejected)?;
-        if frame.sequence <= sequence || stage.is_some_and(|previous| frame.stage < previous) {
-            return Err(NetworkProgressAttemptError::Rejected);
-        }
-        sequence = frame.sequence;
-        stage = Some(frame.stage);
-        if let Some(times) = times.as_deref_mut() {
-            times.record(frame.stage);
-        }
-        if frame.stage.is_failure()
-            || match goal {
-                NetworkProgressGoal::NetworkReady => {
-                    frame.stage >= GuestBootStage::RootGenerationReady
-                }
-                NetworkProgressGoal::Terminal => frame.stage.is_terminal(),
-            }
-        {
-            return Ok(frame.stage);
-        }
-    }
-    Err(NetworkProgressAttemptError::Rejected)
 }
 
 /// The error for a terminal guest failure reported before network readiness
@@ -3968,7 +3900,21 @@ fn validate_request(request: &CreateVmRequest) -> Result<(), RunnerError> {
         || direct_share_plan
             .as_ref()
             .is_some_and(|plan| plan.sha256().is_err())
+        || request
+            .image_disk
+            .as_ref()
+            .is_some_and(|disk| !disk.is_valid())
     {
+        return Err(RunnerError::InvalidRequest);
+    }
+    // An image disk boots on Linux only, and not yet from a VM checkpoint,
+    // until both are built (#4646 steps 4 and 5).
+    #[cfg(target_os = "macos")]
+    if request.image_disk.is_some() {
+        return Err(RunnerError::InvalidRequest);
+    }
+    #[cfg(target_os = "linux")]
+    if request.image_disk.is_some() && request.checkpoint.is_some() {
         return Err(RunnerError::InvalidRequest);
     }
     Ok(())
@@ -4720,6 +4666,8 @@ pub enum RunnerError {
     CwRuntimeDiskChanged,
     #[error(transparent)]
     CwRuntime(#[from] CwRuntimeError),
+    #[error(transparent)]
+    ImageDisk(#[from] ImageDiskError),
     #[error("invalid VM create request")]
     InvalidRequest,
     #[error("VM checkpoint: {0}")]
@@ -4942,6 +4890,7 @@ impl RunnerError {
             Self::VzMachineIdentifier => "vz_machine_identifier",
             Self::CwRuntimeDiskChanged => "cw_runtime_disk_changed",
             Self::CwRuntime(_) => "cw_runtime",
+            Self::ImageDisk(_) => "image_disk",
             Self::InvalidRequest => "invalid_request",
             Self::Checkpoint(_) => "checkpoint",
             Self::InvalidArtifactStagingLayout => "invalid_artifact_staging_layout",
@@ -5126,6 +5075,7 @@ mod tests {
             cw_runtime_catalog_generation: None,
             cw_runtime_moved_from_generation: None,
             checkpoint: None,
+            image_disk: None,
             network_policy: CompiledPolicy::developer_baseline(),
             intercepts: InterceptSet::default(),
             credential_placeholders: Default::default(),
@@ -5166,6 +5116,55 @@ mod tests {
         })
         .await
         .expect("child did not reach its expected executable");
+    }
+
+    /// #4646: a request names an image disk by id and build id only, and
+    /// the seed it boots with tells the guest to mount one.
+    #[test]
+    fn an_image_disk_request_is_exact_and_its_seed_asks_for_the_disk() {
+        let mut valid = request(1, 512);
+        let seed = |request: &CreateVmRequest| {
+            boot_seed::boot_seed(
+                request,
+                &"s".repeat(64),
+                None,
+                false,
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap()
+        };
+        assert!(!seed(&valid).image_disk());
+        valid.image_disk = Some(ImageDiskAttachment::Stored {
+            image_disk_id: "d".repeat(64),
+            build_id: "e".repeat(32),
+        });
+        #[cfg(target_os = "linux")]
+        {
+            assert!(validate_request(&valid).is_ok());
+            assert!(seed(&valid).image_disk());
+        }
+        #[cfg(target_os = "macos")]
+        assert!(matches!(
+            validate_request(&valid),
+            Err(RunnerError::InvalidRequest)
+        ));
+        for (image_disk_id, build_id) in [
+            ("D".repeat(64), "e".repeat(32)),
+            ("../disk".to_owned(), "e".repeat(32)),
+            ("d".repeat(64), "e".repeat(31)),
+            ("d".repeat(64), String::new()),
+        ] {
+            valid.image_disk = Some(ImageDiskAttachment::Stored {
+                image_disk_id,
+                build_id,
+            });
+            assert!(matches!(
+                validate_request(&valid),
+                Err(RunnerError::InvalidRequest)
+            ));
+        }
     }
 
     #[test]

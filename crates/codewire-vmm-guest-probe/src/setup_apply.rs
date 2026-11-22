@@ -17,6 +17,7 @@ use rustix::fs::{
 use rustix::io::Errno;
 use thiserror::Error;
 
+use crate::image_disk::BuildId;
 use crate::setup_archive::{
     AdmittedEntry, AdmittedKind, ArchiveError, EntryConsumer, ReplayError, VerifiedLayerPlan,
     Whiteout, replay_tar,
@@ -26,7 +27,9 @@ use crate::{LayerEncoding, SetupHeader, SetupLayer, Sha256Value};
 
 const LOWER_NAME: &[u8] = b"lower";
 pub(crate) const OCI_LOWER_ROOT_MODE: u32 = 0o755;
-const COMPLETION_NAME: &[u8] = b"rootfs.complete";
+/// The lower's marker, beside it on the root disk or the image disk.
+pub(crate) const COMPLETION_FILE: &str = "rootfs.complete";
+const COMPLETION_NAME: &[u8] = COMPLETION_FILE.as_bytes();
 const COMPLETION_TEMP_NAME: &[u8] = b".rootfs.complete.tmp";
 const COMPLETION_VERSION: &str = "codewire-oci-lower-v1";
 const MAX_REMOVAL_ENTRIES: u64 = 2_100_000;
@@ -77,7 +80,7 @@ where
             Mode::empty(),
         ),
     )?;
-    let marker = completion_bytes(header.root_generation);
+    let marker = completion_bytes(header.root_generation, header.image.built_id());
     match read_completion(&generation, &marker)? {
         CompletionState::Absent => {}
         CompletionState::Exact => {
@@ -140,7 +143,7 @@ pub(crate) fn verify_completed_setup_generation(
             Mode::empty(),
         ),
     )?;
-    match read_completion(&root, &completion_bytes(generation))? {
+    match read_completion(&root, &completion_bytes(generation, None))? {
         CompletionState::Exact => {
             let _ = open_directory_at(&root, LOWER_NAME)?;
             Ok(())
@@ -658,8 +661,17 @@ enum CompletionState {
     Exact,
 }
 
-fn completion_bytes(generation: Sha256Value) -> Vec<u8> {
-    format!("{COMPLETION_VERSION} {generation}\n").into_bytes()
+/// The marker a finished unpack publishes. An image disk's also names the
+/// host's build id, which every VM attaching the disk checks (#4646); a
+/// combined root's is byte-for-byte what it was before image disks.
+pub(crate) fn completion_bytes(generation: Sha256Value, build_id: Option<BuildId>) -> Vec<u8> {
+    match build_id {
+        None => format!("{COMPLETION_VERSION} {generation}\n").into_bytes(),
+        Some(build_id) => {
+            let build_id: String = build_id.iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("{COMPLETION_VERSION} {generation} build {build_id}\n").into_bytes()
+        }
+    }
 }
 
 fn read_completion(
@@ -1095,6 +1107,26 @@ mod tests {
         ));
     }
 
+    /// #4646: a combined root's marker is byte-for-byte what it was, so
+    /// existing VMs keep their lowers; an image disk's also names the host's
+    /// build id, which a VM attaching it checks.
+    #[test]
+    fn an_image_disks_marker_names_its_build_id_and_a_combined_roots_is_unchanged() {
+        let generation = Sha256Value::calculate(b"generation");
+        assert_eq!(
+            completion_bytes(generation, None),
+            format!("codewire-oci-lower-v1 {generation}\n").into_bytes()
+        );
+        let mut build_id = [0_u8; 16];
+        build_id[0] = 0xab;
+        build_id[15] = 0x01;
+        assert_eq!(
+            completion_bytes(generation, Some(build_id)),
+            format!("codewire-oci-lower-v1 {generation} build ab000000000000000000000000000001\n")
+                .into_bytes()
+        );
+    }
+
     #[test]
     fn publishes_completion_last_and_reuses_only_the_exact_generation() {
         let layer = archive(&[EntryFixture {
@@ -1135,7 +1167,7 @@ mod tests {
         );
         assert_eq!(
             fs::read(generation.path().join("rootfs.complete")).unwrap(),
-            completion_bytes(header.root_generation)
+            completion_bytes(header.root_generation, None)
         );
         verify_completed_setup_generation(generation.path(), header.root_generation).unwrap();
         assert_eq!(

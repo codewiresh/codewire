@@ -16,6 +16,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_DISK_SERIAL;
+use codewire_vmm_guest_probe::image_disk::IMAGE_DISK_SERIAL;
 use codewire_vmm_guest_probe::{
     DOCKER_DISK_SERIAL, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SETUP_DISK_SERIAL, STATE_DISK_SERIAL,
 };
@@ -49,6 +50,8 @@ pub(crate) enum RestoreDisk {
     Seed,
     Setup,
     CwRuntime,
+    /// The shared image disk (#4646); a checkpoint made before it has none.
+    Image,
 }
 
 impl RestoreDisk {
@@ -60,6 +63,7 @@ impl RestoreDisk {
             Self::Seed => "cw-seed",
             Self::Setup => "cw-setup",
             Self::CwRuntime => "cw-runtime",
+            Self::Image => "cw-image",
         }
     }
 
@@ -71,11 +75,15 @@ impl RestoreDisk {
             Self::Seed => SEED_DISK_SERIAL,
             Self::Setup => SETUP_DISK_SERIAL,
             Self::CwRuntime => CW_RUNTIME_DISK_SERIAL,
+            Self::Image => IMAGE_DISK_SERIAL,
         }
     }
 
     fn readonly(self) -> bool {
-        matches!(self, Self::Seed | Self::Setup | Self::CwRuntime)
+        matches!(
+            self,
+            Self::Seed | Self::Setup | Self::CwRuntime | Self::Image
+        )
     }
 
     fn from_id(id: &str) -> Option<Self> {
@@ -86,6 +94,7 @@ impl RestoreDisk {
             Self::Seed,
             Self::Setup,
             Self::CwRuntime,
+            Self::Image,
         ]
         .into_iter()
         .find(|disk| disk.id() == id)
@@ -438,6 +447,35 @@ mod tests {
         );
         assert_eq!(rewritten["payload"]["kernel"], "/artifacts/kernel");
         assert_eq!(rewritten["memory"]["thp"], true);
+    }
+
+    #[test]
+    fn an_image_disk_restores_read_only_and_only_onto_a_vm_that_names_one() {
+        let mut config = captured();
+        config["disks"].as_array_mut().unwrap().push(disk(
+            "cw-image",
+            "CWIMAGE1",
+            true,
+            "/engine/image-disks/disks/i/image.raw",
+        ));
+        let with_image = target().with_disk(
+            RestoreDisk::Image,
+            "/engine/image-disks/disks/i/image.raw".into(),
+        );
+        let rewritten: Value = serde_json::from_slice(
+            &admit_and_rewrite(&serde_json::to_vec(&config).unwrap(), &with_image).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten["disks"][3]["path"],
+            "/engine/image-disks/disks/i/image.raw"
+        );
+        assert_eq!(rewritten["disks"][3]["readonly"], true);
+        // A VM that names no image disk refuses a checkpoint that had one,
+        // and a writable image disk is never admitted.
+        assert!(admit(&config).is_err());
+        config["disks"][3]["readonly"] = false.into();
+        assert!(admit_and_rewrite(&serde_json::to_vec(&config).unwrap(), &with_image).is_err());
     }
 
     #[test]

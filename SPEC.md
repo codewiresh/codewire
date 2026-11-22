@@ -417,7 +417,7 @@ VMs keep the runtime they started with
 ([docs/dev/LINUX-LOCAL-VMS.md](docs/dev/LINUX-LOCAL-VMS.md),
 [docs/dev/MACOS-CLI.md](docs/dev/MACOS-CLI.md)).
 
-Host requirements on Linux: x86_64, KVM, vhost-vsock, Linux 6.2 or later with
+Host requirements on Linux: x86_64, KVM, Linux 6.2 or later with
 Landlock, e2fsprogs, and a Secret Service for local values; `cw` refuses to
 run local VMs as root. On macOS: Apple Silicon, macOS 26 or later; the runtime
 ships its own e2fsprogs and git, and the helper must be signed with the
@@ -484,6 +484,23 @@ image step reads "Using the cached image". Any part that is missing is fetched
 alone. A tag is always resolved with the registry, because a tag can move. A
 create that can't reach the registry for a tag says that it asked the registry
 for the tag (#4968).
+
+**Target, not shipped (#4646): one read-only image disk per image.** Today each
+new VM unpacks its image in the guest. The target keeps the unpacked image on
+one disk per image on the host, `image.raw`, mode 0400, attached read-only to
+every VM of that image as `cw-image` and mounted `ro,noload,nosuid,nodev`; each
+VM's root disk keeps only its own changes, and its overlay takes its lower from
+the image disk. The disk is built once, under a per-image lock, by a builder
+guest that has no network, share, identity or workload: three disks (a seed, the
+image's layers, an empty disk to fill) and nothing else. The host keeps the
+result only when the builder exits cleanly and the disk's marker carries the
+random build id chosen for that build. Every VM's root generation records the
+image disk and build id it sits on, and the guest refuses to mount an overlay
+over a disk whose marker does not match. That marker is a consistency check, not
+authentication: a disk's integrity rests on the runner's private store, or in a
+`standard` Pod on the digest-pinned, read-only image volume that holds it. A disk is kept while a VM, pending
+create or saved state names it. Existing VMs, snapshots and checkpoints keep
+their combined root disk.
 
 ### Networking and egress
 

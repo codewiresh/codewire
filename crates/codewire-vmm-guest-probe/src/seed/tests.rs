@@ -858,3 +858,101 @@ fn placeholders_are_never_printed() {
     assert!(printed.contains("AnthropicApiKey"));
     assert!(!printed.contains(codewire_access::CREDENTIAL_PLACEHOLDER_TAG));
 }
+
+fn sample_setup() -> SetupBinding {
+    SetupBinding::new(
+        SETUP_HEADER_LEN as u64 + SETUP_ALIGNMENT,
+        Sha256Value::calculate(b"image-disk-id"),
+        Sha256Value::calculate(b"build-pack-header"),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_builder_seed_carries_only_its_setup_pack_and_build_mode() {
+    let build_vm = Uuid::new_v4();
+    let seed = Seed::for_image_build(build_vm, 17777, TOKEN, sample_setup()).unwrap();
+    let encoded = seed.encode();
+    assert_eq!(
+        get_u16(&encoded, FLAGS_OFFSET),
+        SETUP_PRESENT_FLAG | IMAGE_BUILD_FLAG
+    );
+    let decoded = Seed::decode(&encoded).unwrap();
+    assert_eq!(decoded, seed);
+    assert!(decoded.image_build());
+    assert!(!decoded.image_disk());
+    assert_eq!(decoded.vm_id(), build_vm);
+    assert_eq!(decoded.setup(), Some(sample_setup()));
+    assert_eq!(decoded.direct_shares_sha256(), None);
+    assert_eq!(decoded.skill_snapshot_sha256(), None);
+    assert!(!decoded.docker_data_disk());
+    assert_eq!(decoded.environment_projection_sha256(), None);
+    assert_eq!(
+        decoded.managed_credential_clients(),
+        ManagedCredentialClients::default()
+    );
+    assert_eq!(decoded.cw_runtime_catalog_sha256(), None);
+    // Every environment constructor leaves build mode off.
+    assert!(!sample_seed().image_build());
+    assert!(!sample_seed().with_image_disk().image_build());
+}
+
+#[test]
+fn build_mode_with_anything_else_is_refused_before_use() {
+    let hash = Sha256Value::calculate(b"other");
+    let base = || Seed::new_with_setup(Uuid::new_v4(), 1, 17777, TOKEN, sample_setup()).unwrap();
+    let others = [
+        base().with_docker_data_disk(),
+        base().with_image_disk(),
+        base().with_environment_projection_sha256(hash),
+        base().with_cw_runtime_catalog_sha256(hash),
+        base().with_egress_ca(front_door_ca()),
+        Seed::new_with_all_bindings(
+            Uuid::new_v4(),
+            1,
+            17777,
+            TOKEN,
+            Some(sample_setup()),
+            Some(hash),
+            None,
+        )
+        .unwrap(),
+        Seed::new_with_all_bindings(
+            Uuid::new_v4(),
+            1,
+            17777,
+            TOKEN,
+            Some(sample_setup()),
+            None,
+            Some(hash),
+        )
+        .unwrap(),
+        // A builder without its setup pack.
+        sample_seed(),
+    ];
+    for other in others {
+        let mut encoded = other.encode();
+        let flags = get_u16(&encoded, FLAGS_OFFSET);
+        put_u16(&mut encoded, FLAGS_OFFSET, flags | IMAGE_BUILD_FLAG);
+        refresh_checksum(&mut encoded);
+        assert_eq!(
+            Seed::decode(&encoded),
+            Err(SeedError::InvalidImageBuild),
+            "{other:?}"
+        );
+    }
+}
+
+#[test]
+fn an_image_disk_seed_round_trips_and_older_flags_are_unchanged() {
+    let seed = sample_seed().with_docker_data_disk().with_image_disk();
+    let encoded = seed.encode();
+    assert_eq!(
+        get_u16(&encoded, FLAGS_OFFSET),
+        DOCKER_DATA_DISK_PRESENT_FLAG | IMAGE_DISK_FLAG
+    );
+    let decoded = Seed::decode(&encoded).unwrap();
+    assert!(decoded.image_disk());
+    assert!(!decoded.image_build());
+    assert_eq!(get_u16(&sample_seed().encode(), FLAGS_OFFSET), 0);
+}

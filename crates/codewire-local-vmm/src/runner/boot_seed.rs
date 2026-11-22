@@ -40,6 +40,12 @@ pub(super) fn boot_seed(
         Some(disk) => seed.with_cw_runtime_catalog_sha256(digest(&disk.generation)?),
         None => seed,
     };
+    // The runner admitted the request's image disk before building this.
+    let seed = if request.image_disk.is_some() {
+        seed.with_image_disk()
+    } else {
+        seed
+    };
     let seed = match request.cw_runtime_moved_from_generation.as_deref() {
         Some(generation) => seed.with_cw_runtime_moved_from_sha256(digest(generation)?)?,
         None => seed,

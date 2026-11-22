@@ -132,6 +132,11 @@ mod linux {
 
     type SmokeResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
+    mod args;
+    use args::print_usage;
+    mod image_disk;
+    use image_disk::image_disk_proof;
+
     const STATE_DISK_BYTES: u64 = 256 * 1024 * 1024;
     const ROOT_DISK_BYTES: u64 = 1024 * 1024 * 1024;
     const ROOT_GENERATION: &str =
@@ -175,6 +180,8 @@ mod linux {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Mode {
         Run,
+        /// #4646: build an image disk, then boot two VMs over it.
+        ImageDisk,
         Cleanup,
     }
 
@@ -191,6 +198,11 @@ mod linux {
         artifact_lock: PathBuf,
         state_root: PathBuf,
         vm_id: Uuid,
+        /// image-disk only: the second VM over the same image disk.
+        second_vm_id: Option<Uuid>,
+        /// image-disk only: where to write the built disk's record and the
+        /// image's config, as a published image disk holds them (#5602).
+        publish: Option<PathBuf>,
         outside_disk: Option<PathBuf>,
         resources: Option<RunResources>,
     }
@@ -312,168 +324,9 @@ mod linux {
         };
         match arguments.mode {
             Mode::Run => run(arguments).await,
+            Mode::ImageDisk => image_disk_proof(arguments).await,
             Mode::Cleanup => cleanup(arguments).await,
         }
-    }
-
-    impl Args {
-        fn parse(arguments: impl IntoIterator<Item = String>) -> SmokeResult<Option<Self>> {
-            let mut arguments = arguments.into_iter();
-            let Some(mode) = arguments.next() else {
-                return Err(failure("missing run or cleanup subcommand"));
-            };
-            if matches!(mode.as_str(), "-h" | "--help") {
-                if arguments.next().is_some() {
-                    return Err(failure("--help accepts no arguments"));
-                }
-                return Ok(None);
-            }
-            let mode = match mode.as_str() {
-                "run" => Mode::Run,
-                "cleanup" => Mode::Cleanup,
-                _ => return Err(failure("unknown smoke subcommand")),
-            };
-            let mut artifact_root = None;
-            let mut artifact_lock = None;
-            let mut state_root = None;
-            let mut vm_id = None;
-            let mut outside_disk = None;
-            let mut vcpus = None;
-            let mut memory_mib = None;
-            while let Some(flag) = arguments.next() {
-                let value = arguments
-                    .next()
-                    .ok_or_else(|| failure("smoke flag requires a value"))?;
-                let destination = match flag.as_str() {
-                    "--artifact-root" => &mut artifact_root,
-                    "--artifact-lock" => &mut artifact_lock,
-                    "--state-root" => &mut state_root,
-                    "--outside-disk" if mode == Mode::Run => &mut outside_disk,
-                    "--vm-id" => {
-                        if vm_id.is_some() {
-                            return Err(failure("duplicate smoke flag"));
-                        }
-                        vm_id = Some(
-                            Uuid::parse_str(&value)
-                                .map_err(|_| failure("--vm-id is not a UUID"))?,
-                        );
-                        continue;
-                    }
-                    "--cpus" if mode == Mode::Run => {
-                        if vcpus.is_some() {
-                            return Err(failure("duplicate smoke flag"));
-                        }
-                        vcpus = Some(parse_vcpus(&value)?);
-                        continue;
-                    }
-                    "--memory-mib" if mode == Mode::Run => {
-                        if memory_mib.is_some() {
-                            return Err(failure("duplicate smoke flag"));
-                        }
-                        memory_mib = Some(parse_memory_mib(&value)?);
-                        continue;
-                    }
-                    _ => return Err(failure("unknown or invalid smoke flag")),
-                };
-                if destination.is_some() {
-                    return Err(failure("duplicate smoke flag"));
-                }
-                *destination = Some(PathBuf::from(value));
-            }
-            let resources = match mode {
-                Mode::Run => Some(RunResources {
-                    vcpus: vcpus.ok_or_else(|| failure("--cpus is required for run"))?,
-                    memory_mib: memory_mib
-                        .ok_or_else(|| failure("--memory-mib is required for run"))?,
-                }),
-                Mode::Cleanup => None,
-            };
-            let result = Self {
-                mode,
-                artifact_root: artifact_root
-                    .ok_or_else(|| failure("--artifact-root is required"))?,
-                artifact_lock: artifact_lock
-                    .ok_or_else(|| failure("--artifact-lock is required"))?,
-                state_root: state_root.ok_or_else(|| failure("--state-root is required"))?,
-                vm_id: vm_id.ok_or_else(|| failure("--vm-id is required"))?,
-                outside_disk,
-                resources,
-            };
-            if result.mode == Mode::Run && result.outside_disk.is_none() {
-                return Err(failure("--outside-disk is required for run"));
-            }
-            for path in [
-                &result.artifact_root,
-                &result.artifact_lock,
-                &result.state_root,
-            ] {
-                if !path.is_absolute() {
-                    return Err(failure("all smoke paths must be absolute"));
-                }
-            }
-            if result
-                .outside_disk
-                .as_ref()
-                .is_some_and(|path| !path.is_absolute())
-            {
-                return Err(failure("all smoke paths must be absolute"));
-            }
-            Ok(Some(result))
-        }
-
-        fn runner_config(&self) -> RunnerConfig {
-            RunnerConfig {
-                state_root: self.state_root.clone(),
-                artifact_root: self.artifact_root.clone(),
-                artifact_lock: self.artifact_lock.clone(),
-            }
-        }
-    }
-
-    fn print_usage() {
-        eprintln!(
-            "usage:\n  codewire-local-vmm-smoke run --artifact-root PATH --artifact-lock PATH --state-root PATH --vm-id UUID --outside-disk PATH --cpus COUNT --memory-mib MIB\n  codewire-local-vmm-smoke cleanup --artifact-root PATH --artifact-lock PATH --state-root PATH --vm-id UUID"
-        );
-    }
-
-    fn parse_vcpus(value: &str) -> SmokeResult<u8> {
-        if !is_canonical_decimal(value) {
-            return Err(failure(
-                "--cpus must be a decimal integer from 1 through 32",
-            ));
-        }
-        let value = value
-            .parse::<u8>()
-            .map_err(|_| failure("--cpus must be a decimal integer from 1 through 32"))?;
-        if !(1..=32).contains(&value) {
-            return Err(failure(
-                "--cpus must be a decimal integer from 1 through 32",
-            ));
-        }
-        Ok(value)
-    }
-
-    fn parse_memory_mib(value: &str) -> SmokeResult<u32> {
-        if !is_canonical_decimal(value) {
-            return Err(failure(
-                "--memory-mib must be a decimal integer from 128 through 65536",
-            ));
-        }
-        let value = value.parse::<u32>().map_err(|_| {
-            failure("--memory-mib must be a decimal integer from 128 through 65536")
-        })?;
-        if !(128..=65_536).contains(&value) {
-            return Err(failure(
-                "--memory-mib must be a decimal integer from 128 through 65536",
-            ));
-        }
-        Ok(value)
-    }
-
-    fn is_canonical_decimal(value: &str) -> bool {
-        !value.is_empty()
-            && value.bytes().all(|byte| byte.is_ascii_digit())
-            && (value.len() == 1 || !value.starts_with('0'))
     }
 
     async fn run(arguments: Args) -> SmokeResult<()> {
@@ -492,7 +345,6 @@ mod linux {
         observation("host.architecture", preflight.architecture);
         observation("host.landlock_abi", preflight.landlock_abi);
         observation("host.kvm", preflight.kvm.display());
-        observation("host.vhost_vsock", preflight.vhost_vsock.display());
         observation("vmm.seccomp", "kill");
         observation("vmm.landlock", "native");
         let root = ensure_empty_root_generation(
@@ -1227,6 +1079,7 @@ mod linux {
         CreateVmRequest {
             cw_runtime_catalog_generation: None,
             cw_runtime_moved_from_generation: None,
+            image_disk: None,
             network_policy: codewire_egress_policy::CompiledPolicy::developer_baseline(),
             intercepts: codewire_egress_policy::intercept::InterceptSet::default(),
             credential_placeholders: Default::default(),

@@ -7,6 +7,7 @@ pub(crate) fn runner_error_class(error: &RunnerError) -> &'static str {
     match error {
         RunnerError::CwRuntimeDiskChanged => "cw-runtime-disk-changed",
         RunnerError::CwRuntime(_) => "cw-runtime",
+        RunnerError::ImageDisk(_) => "image-disk",
         RunnerError::InvalidRequest => "invalid-request",
         RunnerError::Interception(_) => "interception",
         RunnerError::Checkpoint(_) => "checkpoint",

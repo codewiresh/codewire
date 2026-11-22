@@ -579,6 +579,11 @@ enum Command {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-runner", hide = true)]
     NativeRunner(NativeRunnerArgs),
+    /// The one container of a `standard` sandbox Pod: boots its VM (#5602).
+    /// It takes no arguments; admission pins the image and its entrypoint.
+    #[cfg(target_os = "linux")]
+    #[command(name = "__pod-runtime", hide = true)]
+    PodRuntime,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[command(name = "__native-network-worker", hide = true)]
     NativeNetworkWorker(NativeNetworkWorkerArgs),
@@ -904,6 +909,44 @@ pub(crate) struct UnavailableMemberControlArgs {
     _arguments: Vec<std::ffi::OsString>,
 }
 
+/// The one container of a `standard` sandbox Pod (#5602).
+#[cfg(target_os = "linux")]
+async fn run_pod_runtime() -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    codewire_local_vmm::pod_runtime::run_pod_runtime()
+        .await
+        .context("run the sandbox Pod's VM")
+}
+
+/// `--member` runs only the commands a trusted host member serves, and only
+/// on Linux.
+fn validate_member_command(cli: &Cli) -> anyhow::Result<()> {
+    if cli.member.is_some() {
+        #[cfg(target_os = "linux")]
+        anyhow::ensure!(
+            matches!(
+                &cli.command,
+                Command::Run(_)
+                    | Command::Ls(_)
+                    | Command::Send(_)
+                    | Command::Logs(_)
+                    | Command::Wait(_)
+                    | Command::Stop(_)
+                    | Command::Restart(_)
+                    | Command::Msg(_)
+                    | Command::Steer(_)
+                    | Command::Interrupt(_)
+                    | Command::Inbox(_)
+                    | Command::Member(_)
+            ),
+            "--member supports run, ls, send, logs, wait, stop, restart, msg, steer, interrupt, inbox and member commands"
+        );
+        #[cfg(not(target_os = "linux"))]
+        anyhow::bail!(MEMBER_CONTROL_REQUIRES_LINUX);
+    }
+    Ok(())
+}
+
 fn validate_member_mutation_flags(cli: &Cli) -> anyhow::Result<()> {
     if cli.member.is_none() {
         match &cli.command {
@@ -951,29 +994,7 @@ where
         cli.member.is_some(),
     )?;
     validate_member_mutation_flags(&cli)?;
-    if cli.member.is_some() {
-        #[cfg(target_os = "linux")]
-        anyhow::ensure!(
-            matches!(
-                &cli.command,
-                Command::Run(_)
-                    | Command::Ls(_)
-                    | Command::Send(_)
-                    | Command::Logs(_)
-                    | Command::Wait(_)
-                    | Command::Stop(_)
-                    | Command::Restart(_)
-                    | Command::Msg(_)
-                    | Command::Steer(_)
-                    | Command::Interrupt(_)
-                    | Command::Inbox(_)
-                    | Command::Member(_)
-            ),
-            "--member supports run, ls, send, logs, wait, stop, restart, msg, steer, interrupt, inbox and member commands"
-        );
-        #[cfg(not(target_os = "linux"))]
-        anyhow::bail!(MEMBER_CONTROL_REQUIRES_LINUX);
-    }
+    validate_member_command(&cli)?;
     // Validate an explicitly selected Mesh state root before any ordinary
     // command effects, including routes that otherwise need only platform state.
     ResolvePaths::from_env(&OsEnv)?;
@@ -1058,6 +1079,8 @@ where
         Command::NativeSupervisor(args) => run_native_supervisor(args).await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeRunner(args) => run_native_runner(args).await,
+        #[cfg(target_os = "linux")]
+        Command::PodRuntime => run_pod_runtime().await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Command::NativeNetworkWorker(args) => run_native_network_worker(args).await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]

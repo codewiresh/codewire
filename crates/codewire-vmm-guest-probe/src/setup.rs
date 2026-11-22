@@ -3,6 +3,8 @@ use std::fmt;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
+use crate::image_disk::{BuildId, image_disk_id, image_root_generation};
+
 pub const SETUP_DISK_SERIAL: &str = "CWSETUP1";
 pub const SETUP_HEADER_LEN: usize = 64 * 1024;
 pub const SETUP_ALIGNMENT: u64 = 4096;
@@ -35,6 +37,10 @@ const ROOT_GENERATION_OFFSET: usize = 64;
 const MANIFEST_DIGEST_OFFSET: usize = 96;
 const PROJECT_OBJECT_OFFSET: usize = 128;
 const CONFIG_OBJECT_OFFSET: usize = 176;
+// Zero for a combined root disk, so such a header encodes exactly as before
+// image disks (#4646) and an older guest is never sent anything new.
+const IMAGE_KIND_OFFSET: usize = 44;
+const BUILD_ID_OFFSET: usize = 48;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Sha256Value([u8; 32]);
@@ -157,6 +163,45 @@ pub struct SetupLayer {
     pub encoding: LayerEncoding,
 }
 
+/// What a setup pack builds (#4646).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupImage {
+    /// The image's layers unpacked onto the VM's own root disk.
+    CombinedRoot,
+    /// A builder guest's pack: only the layers, unpacked onto a staging
+    /// image disk. The root generation is the image disk id.
+    Build { build_id: BuildId },
+    /// A VM whose lower is the image disk of this build: the project and the
+    /// image config, no layers.
+    Attach { build_id: BuildId },
+}
+
+impl SetupImage {
+    fn kind(self) -> u8 {
+        match self {
+            Self::CombinedRoot => 0,
+            Self::Build { .. } => 1,
+            Self::Attach { .. } => 2,
+        }
+    }
+
+    /// The build id an image disk build writes into its marker; only a
+    /// builder's pack has one to write.
+    pub fn built_id(self) -> Option<BuildId> {
+        match self {
+            Self::Build { build_id } => Some(build_id),
+            Self::CombinedRoot | Self::Attach { .. } => None,
+        }
+    }
+
+    pub fn build_id(self) -> Option<BuildId> {
+        match self {
+            Self::CombinedRoot => None,
+            Self::Build { build_id } | Self::Attach { build_id } => Some(build_id),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupHeader {
     pub total_bytes: u64,
@@ -168,6 +213,7 @@ pub struct SetupHeader {
     pub project: SetupObject,
     pub config: SetupObject,
     pub layers: Vec<SetupLayer>,
+    pub image: SetupImage,
 }
 
 impl SetupHeader {
@@ -179,16 +225,80 @@ impl SetupHeader {
         config: SetupBlob,
         layers: Vec<SetupLayerBlob>,
     ) -> Result<Self, SetupError> {
+        Self::layout_image(
+            SetupImage::CombinedRoot,
+            root_generation,
+            manifest_sha256,
+            architecture,
+            Some((project, config)),
+            layers,
+        )
+    }
+
+    /// A builder guest's pack: the layers and the build id, nothing else.
+    pub fn layout_image_build(
+        manifest_sha256: Sha256Value,
+        architecture: SetupArchitecture,
+        build_id: BuildId,
+        layers: Vec<SetupLayerBlob>,
+    ) -> Result<Self, SetupError> {
+        Self::layout_image(
+            SetupImage::Build { build_id },
+            image_disk_id(manifest_sha256, architecture),
+            manifest_sha256,
+            architecture,
+            None,
+            layers,
+        )
+    }
+
+    /// A VM's first boot over an image disk: the project and image config,
+    /// and the build the VM's root generation is bound to.
+    pub fn layout_image_attach(
+        manifest_sha256: Sha256Value,
+        architecture: SetupArchitecture,
+        build_id: BuildId,
+        project: SetupBlob,
+        config: SetupBlob,
+    ) -> Result<Self, SetupError> {
+        Self::layout_image(
+            SetupImage::Attach { build_id },
+            image_root_generation(
+                project.sha256,
+                image_disk_id(manifest_sha256, architecture),
+                build_id,
+            ),
+            manifest_sha256,
+            architecture,
+            Some((project, config)),
+            Vec::new(),
+        )
+    }
+
+    fn layout_image(
+        image: SetupImage,
+        root_generation: Sha256Value,
+        manifest_sha256: Sha256Value,
+        architecture: SetupArchitecture,
+        inputs: Option<(SetupBlob, SetupBlob)>,
+        layers: Vec<SetupLayerBlob>,
+    ) -> Result<Self, SetupError> {
         if layers.len() > MAX_SETUP_LAYERS {
             return Err(SetupError::TooManyLayers);
         }
-        validate_blob(project, 1, MAX_SETUP_PROJECT_BYTES)?;
-        validate_blob(config, 1, MAX_SETUP_CONFIG_BYTES)?;
-
         let mut total_layer_bytes = 0_u64;
         let mut cursor = SETUP_HEADER_LEN as u64;
-        let project = place_blob(&mut cursor, project)?;
-        let config = place_blob(&mut cursor, config)?;
+        let (project, config) = match inputs {
+            Some((project, config)) => {
+                validate_blob(project, 1, MAX_SETUP_PROJECT_BYTES)?;
+                validate_blob(config, 1, MAX_SETUP_CONFIG_BYTES)?;
+                (
+                    place_blob(&mut cursor, project)?,
+                    place_blob(&mut cursor, config)?,
+                )
+            }
+            None => (ABSENT_OBJECT, ABSENT_OBJECT),
+        };
         let mut placed_layers = Vec::with_capacity(layers.len());
         for layer in layers {
             validate_blob(layer.blob, 1, MAX_SETUP_LAYER_BYTES)?;
@@ -217,6 +327,7 @@ impl SetupHeader {
             project,
             config,
             layers: placed_layers,
+            image,
         };
         header.validate()?;
         Ok(header)
@@ -237,6 +348,10 @@ impl SetupHeader {
         put_digest(&mut bytes, MANIFEST_DIGEST_OFFSET, self.manifest_sha256);
         put_object(&mut bytes, PROJECT_OBJECT_OFFSET, self.project);
         put_object(&mut bytes, CONFIG_OBJECT_OFFSET, self.config);
+        bytes[IMAGE_KIND_OFFSET] = self.image.kind();
+        if let Some(build_id) = self.image.build_id() {
+            bytes[BUILD_ID_OFFSET..BUILD_ID_OFFSET + 16].copy_from_slice(&build_id);
+        }
         for (index, layer) in self.layers.iter().enumerate() {
             let offset = FIXED_HEADER_END + index * LAYER_ENTRY_LEN;
             bytes[offset] = layer.encoding as u8;
@@ -269,10 +384,21 @@ impl SetupHeader {
         }
         if bytes[10..12].iter().any(|byte| *byte != 0)
             || bytes[33..40].iter().any(|byte| *byte != 0)
-            || bytes[44..64].iter().any(|byte| *byte != 0)
+            || bytes[IMAGE_KIND_OFFSET + 1..BUILD_ID_OFFSET]
+                .iter()
+                .any(|byte| *byte != 0)
         {
             return Err(SetupError::NonZeroReserved);
         }
+        let build_id: BuildId = bytes[BUILD_ID_OFFSET..BUILD_ID_OFFSET + 16]
+            .try_into()
+            .expect("the build id field is 16 bytes");
+        let image = match bytes[IMAGE_KIND_OFFSET] {
+            0 if build_id == [0; 16] => SetupImage::CombinedRoot,
+            1 => SetupImage::Build { build_id },
+            2 => SetupImage::Attach { build_id },
+            _ => return Err(SetupError::NonZeroReserved),
+        };
         let count = usize::try_from(get_u32(bytes, LAYER_COUNT_OFFSET))
             .map_err(|_| SetupError::TooManyLayers)?;
         if count > MAX_SETUP_LAYERS {
@@ -315,6 +441,7 @@ impl SetupHeader {
             project: get_object(bytes, PROJECT_OBJECT_OFFSET),
             config: get_object(bytes, CONFIG_OBJECT_OFFSET),
             layers,
+            image,
         };
         header.validate()?;
         Ok(header)
@@ -333,16 +460,45 @@ impl SetupHeader {
         if self.layers.len() > MAX_SETUP_LAYERS {
             return Err(SetupError::TooManyLayers);
         }
-        validate_object(self.project, 1, MAX_SETUP_PROJECT_BYTES)?;
-        validate_object(self.config, 1, MAX_SETUP_CONFIG_BYTES)?;
-        if self.root_generation
-            != oci_root_generation(self.project.sha256, self.manifest_sha256, self.architecture)
-        {
+        let mut cursor = SETUP_HEADER_LEN as u64;
+        let expected_root_generation = match self.image {
+            SetupImage::Build { .. } => {
+                // A builder's pack holds the layers and nothing else.
+                if self.project != ABSENT_OBJECT
+                    || self.config != ABSENT_OBJECT
+                    || self.layers.is_empty()
+                {
+                    return Err(SetupError::InvalidLayout);
+                }
+                image_disk_id(self.manifest_sha256, self.architecture)
+            }
+            SetupImage::CombinedRoot | SetupImage::Attach { .. } => {
+                validate_object(self.project, 1, MAX_SETUP_PROJECT_BYTES)?;
+                validate_object(self.config, 1, MAX_SETUP_CONFIG_BYTES)?;
+                validate_canonical_object(&mut cursor, self.project)?;
+                validate_canonical_object(&mut cursor, self.config)?;
+                match self.image {
+                    SetupImage::Attach { build_id } => {
+                        if !self.layers.is_empty() {
+                            return Err(SetupError::InvalidLayout);
+                        }
+                        image_root_generation(
+                            self.project.sha256,
+                            image_disk_id(self.manifest_sha256, self.architecture),
+                            build_id,
+                        )
+                    }
+                    _ => oci_root_generation(
+                        self.project.sha256,
+                        self.manifest_sha256,
+                        self.architecture,
+                    ),
+                }
+            }
+        };
+        if self.root_generation != expected_root_generation {
             return Err(SetupError::RootGenerationMismatch);
         }
-        let mut cursor = SETUP_HEADER_LEN as u64;
-        validate_canonical_object(&mut cursor, self.project)?;
-        validate_canonical_object(&mut cursor, self.config)?;
         let mut total_layer_bytes = 0_u64;
         for layer in &self.layers {
             validate_object(layer.object, 1, MAX_SETUP_LAYER_BYTES)?;
@@ -377,6 +533,21 @@ pub fn oci_root_generation(
     digest.update(project_sha256.as_bytes());
     digest.update(manifest_sha256.as_bytes());
     Sha256Value::from_bytes(digest.finalize().into())
+}
+
+/// The project or config object a builder's pack does not carry.
+/// A builder's pack has no project or config (#4646).
+pub(crate) const ABSENT_OBJECT: SetupObject = SetupObject {
+    offset: 0,
+    size: 0,
+    sha256: Sha256Value([0; 32]),
+};
+
+impl SetupObject {
+    /// An object a builder's pack leaves out (#4646): it takes no bytes.
+    pub fn is_absent(&self) -> bool {
+        *self == ABSENT_OBJECT
+    }
 }
 
 fn place_blob(cursor: &mut u64, blob: SetupBlob) -> Result<SetupObject, SetupError> {
@@ -651,6 +822,132 @@ mod tests {
         assert_eq!(
             Sha256Value::parse_digest(&format!("sha512:{}", "a".repeat(64))),
             Err(SetupError::InvalidSha256)
+        );
+    }
+
+    fn layer_blobs() -> Vec<SetupLayerBlob> {
+        header()
+            .layers
+            .iter()
+            .map(|layer| SetupLayerBlob {
+                blob: SetupBlob {
+                    size: layer.object.size,
+                    sha256: layer.object.sha256,
+                },
+                diff_id: layer.diff_id,
+                encoding: layer.encoding,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_combined_root_header_encodes_exactly_as_before_image_disks() {
+        let encoded = header().encode().unwrap();
+        assert!(encoded[IMAGE_KIND_OFFSET..64].iter().all(|byte| *byte == 0));
+        assert_eq!(header().image, SetupImage::CombinedRoot);
+        assert_eq!(SetupHeader::decode(&encoded).unwrap(), header());
+    }
+
+    #[test]
+    fn a_build_pack_carries_only_layers_and_its_build_id() {
+        let manifest = digest(b"manifest");
+        let build_id = [7_u8; 16];
+        let build = SetupHeader::layout_image_build(
+            manifest,
+            SetupArchitecture::Amd64,
+            build_id,
+            layer_blobs(),
+        )
+        .unwrap();
+        assert_eq!(build.image, SetupImage::Build { build_id });
+        assert_eq!(
+            (build.project, build.config),
+            (ABSENT_OBJECT, ABSENT_OBJECT)
+        );
+        assert_eq!(
+            build.root_generation,
+            image_disk_id(manifest, SetupArchitecture::Amd64)
+        );
+        assert_eq!(build.layers[0].object.offset, SETUP_HEADER_LEN as u64);
+        let encoded = build.encode().unwrap();
+        assert_eq!(encoded[IMAGE_KIND_OFFSET], 1);
+        assert_eq!(&encoded[BUILD_ID_OFFSET..BUILD_ID_OFFSET + 16], &build_id);
+        assert_eq!(SetupHeader::decode(&encoded).unwrap(), build);
+        assert!(matches!(
+            SetupHeader::layout_image_build(
+                manifest,
+                SetupArchitecture::Amd64,
+                build_id,
+                Vec::new()
+            ),
+            Err(SetupError::InvalidLayout)
+        ));
+        // A build pack that also names a project is refused.
+        let mut with_project = build.clone();
+        with_project.project = header().project;
+        assert!(with_project.encode().is_err());
+    }
+
+    #[test]
+    fn an_attach_pack_binds_its_root_generation_to_the_exact_build() {
+        let manifest = digest(b"manifest");
+        let project = SetupBlob {
+            size: 123,
+            sha256: digest(b"project"),
+        };
+        let config = SetupBlob {
+            size: 456,
+            sha256: digest(b"config"),
+        };
+        let attach = |build_id| {
+            SetupHeader::layout_image_attach(
+                manifest,
+                SetupArchitecture::Amd64,
+                build_id,
+                project,
+                config,
+            )
+            .unwrap()
+        };
+        let first = attach([1; 16]);
+        assert!(first.layers.is_empty());
+        assert_eq!(first.image, SetupImage::Attach { build_id: [1; 16] });
+        assert_ne!(first.root_generation, attach([2; 16]).root_generation);
+        assert_ne!(
+            first.root_generation,
+            oci_root_generation(project.sha256, manifest, SetupArchitecture::Amd64)
+        );
+        let encoded = first.encode().unwrap();
+        assert_eq!(encoded[IMAGE_KIND_OFFSET], 2);
+        assert_eq!(SetupHeader::decode(&encoded).unwrap(), first);
+        // An unknown kind, or a build id on a combined root, is refused.
+        let mut unknown = header().encode().unwrap();
+        unknown[IMAGE_KIND_OFFSET] = 3;
+        let checksum = Sha256::digest(&unknown[..CHECKSUM_OFFSET]);
+        unknown[CHECKSUM_OFFSET..].copy_from_slice(&checksum);
+        assert_eq!(
+            SetupHeader::decode(&unknown),
+            Err(SetupError::NonZeroReserved)
+        );
+        let mut stray = header().encode().unwrap();
+        stray[BUILD_ID_OFFSET] = 1;
+        let checksum = Sha256::digest(&stray[..CHECKSUM_OFFSET]);
+        stray[CHECKSUM_OFFSET..].copy_from_slice(&checksum);
+        assert_eq!(
+            SetupHeader::decode(&stray),
+            Err(SetupError::NonZeroReserved)
+        );
+    }
+
+    #[test]
+    fn the_image_disk_id_names_the_image_and_architecture_only() {
+        let manifest = digest(b"manifest");
+        let id = image_disk_id(manifest, SetupArchitecture::Amd64);
+        assert_eq!(id, image_disk_id(manifest, SetupArchitecture::Amd64));
+        assert_ne!(id, image_disk_id(manifest, SetupArchitecture::Arm64));
+        assert_ne!(
+            id,
+            image_disk_id(digest(b"other"), SetupArchitecture::Amd64)
         );
     }
 }

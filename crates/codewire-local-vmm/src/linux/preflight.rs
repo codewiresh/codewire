@@ -18,7 +18,6 @@ pub struct PreflightReport {
     pub architecture: &'static str,
     pub landlock_abi: i32,
     pub kvm: PathBuf,
-    pub vhost_vsock: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -71,8 +70,8 @@ pub fn preflight() -> Result<PreflightReport, PreflightError> {
         return Err(PreflightError::KvmApiVersion { actual: version });
     }
 
-    let vhost_vsock_path = Path::new("/dev/vhost-vsock");
-    let _vhost_vsock = open_character_device(vhost_vsock_path)?;
+    // No vhost device: the guest channel is Cloud Hypervisor's hybrid vsock,
+    // a Unix socket, so /dev/vhost-vsock is never opened (#5602).
     let landlock_abi = landlock_abi()?;
     if landlock_abi < MINIMUM_LANDLOCK_ABI {
         return Err(PreflightError::LandlockTooOld {
@@ -85,7 +84,6 @@ pub fn preflight() -> Result<PreflightReport, PreflightError> {
         architecture,
         landlock_abi,
         kvm: kvm_path.to_owned(),
-        vhost_vsock: vhost_vsock_path.to_owned(),
     })
 }
 
@@ -104,7 +102,6 @@ pub struct HostProblem {
 pub(crate) struct HostFacts {
     pub root: bool,
     pub kvm: DeviceState,
-    pub vhost_vsock: DeviceState,
     /// `None` when the kernel has no Landlock or it is disabled.
     pub landlock_abi: Option<i32>,
     pub missing_e2fsprogs: Vec<&'static str>,
@@ -150,7 +147,6 @@ pub fn host_prerequisites() -> Vec<HostProblem> {
     host_problems(&HostFacts {
         root: current_uid() == 0,
         kvm: device("/dev/kvm"),
-        vhost_vsock: device("/dev/vhost-vsock"),
         landlock_abi: landlock_abi().ok(),
         missing_e2fsprogs,
         untrusted_e2fsprogs,
@@ -186,21 +182,6 @@ pub(crate) fn host_problems(facts: &HostFacts) -> Vec<HostProblem> {
         DeviceState::Unusable => required(
             "/dev/kvm does not work as KVM".to_owned(),
             "check that the kvm module loaded without errors (sudo dmesg | grep -i kvm)",
-        ),
-    }
-    match facts.vhost_vsock {
-        DeviceState::Usable => {}
-        DeviceState::Missing => required(
-            "vhost-vsock is not loaded (/dev/vhost-vsock does not exist)".to_owned(),
-            "sudo modprobe vhost_vsock; to load it at every boot: echo vhost_vsock | sudo tee /etc/modules-load.d/vhost_vsock.conf",
-        ),
-        DeviceState::Denied => required(
-            "you cannot open /dev/vhost-vsock".to_owned(),
-            "make it readable and writable by your user (most distributions ship it as mode 0666; check the udev rules)",
-        ),
-        DeviceState::Unusable => required(
-            "/dev/vhost-vsock cannot be opened".to_owned(),
-            "check that the vhost_vsock module loaded without errors (sudo dmesg | grep -i vsock)",
         ),
     }
     match facts.landlock_abi {
@@ -334,7 +315,6 @@ mod tests {
         HostFacts {
             root: false,
             kvm: DeviceState::Usable,
-            vhost_vsock: DeviceState::Usable,
             landlock_abi: Some(MINIMUM_LANDLOCK_ABI),
             missing_e2fsprogs: Vec::new(),
             untrusted_e2fsprogs: Vec::new(),
@@ -353,7 +333,6 @@ mod tests {
         let facts = HostFacts {
             root: true,
             kvm: DeviceState::Denied,
-            vhost_vsock: DeviceState::Missing,
             landlock_abi: Some(1),
             missing_e2fsprogs: vec!["e2fsck", "resize2fs"],
             untrusted_e2fsprogs: vec!["/usr/local/sbin/mke2fs".into()],
@@ -362,13 +341,12 @@ mod tests {
         let problems = host_problems(&facts);
         assert_eq!(
             problems.iter().filter(|problem| problem.required).count(),
-            6
+            5
         );
         let report = host_problem_report(&problems).unwrap();
         for expected in [
             "cw is running as root",
             "you cannot open /dev/kvm. Fix: add yourself to its group: sudo usermod -aG kvm \"$USER\"",
-            "sudo modprobe vhost_vsock",
             "Landlock ABI is 1; local VMs need 3 (Linux 6.2 or later)",
             "Debian 12 and Ubuntu 22.04 GA kernels are too old",
             "e2fsck, resize2fs not found in /usr/sbin or /usr/bin",

@@ -83,8 +83,6 @@ Local VMs need an x86_64 Linux host with:
   firmware and the `kvm_intel` or `kvm_amd` module loaded. Your user must be
   able to open `/dev/kvm`, usually by being in the `kvm` group. Inside a VM,
   nested virtualization must be on.
-- **vhost-vsock**: the `vhost_vsock` module loaded, with `/dev/vhost-vsock`
-  readable and writable by your user.
 - **Linux 6.2 or later, with Landlock**: `cw` confines the host tools it runs
   with Landlock ABI 3. The Debian 12 and Ubuntu 22.04 GA kernels are too old.
   Ubuntu 22.04 HWE or 24.04, Debian 13 and Fedora work.
@@ -105,7 +103,7 @@ its fix, for example:
 ```text
 this host cannot run local VMs yet:
   - you cannot open /dev/kvm. Fix: add yourself to its group: sudo usermod -aG kvm "$USER", then log out and back in.
-  - vhost-vsock is not loaded (/dev/vhost-vsock does not exist). Fix: sudo modprobe vhost_vsock; to load it at every boot: echo vhost_vsock | sudo tee /etc/modules-load.d/vhost_vsock.conf.
+  - e2fsprogs is missing: e2fsck, resize2fs not found in /usr/sbin or /usr/bin. Fix: install your distribution's e2fsprogs package.
 ```
 
 A missing git is only a note, since other workspaces do not need it.

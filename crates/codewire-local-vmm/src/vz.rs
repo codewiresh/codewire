@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_DISK_SERIAL;
+use codewire_vmm_guest_probe::image_disk::IMAGE_DISK_SERIAL;
 use codewire_vmm_guest_probe::{
     DOCKER_DISK_SERIAL, ROOT_DISK_SERIAL, SEED_DISK_SERIAL, SETUP_DISK_SERIAL, STATE_DISK_SERIAL,
 };
@@ -156,6 +157,8 @@ pub(crate) struct VzDisks<'a> {
     pub(crate) setup: Option<&'a Path>,
     /// The read-only cw runtime catalog the guest mounts at `/codewire-cw`.
     pub(crate) cw_runtime: Option<&'a Path>,
+    /// The shared read-only image disk (#4646), always after the runtime.
+    pub(crate) image: Option<&'a Path>,
 }
 
 impl VzConfiguration {
@@ -187,6 +190,7 @@ impl VzConfiguration {
                 .cw_runtime
                 .map(|path| disk(path, CW_RUNTIME_DISK_SERIAL, true)),
         );
+        attached.extend(disks.image.map(|path| disk(path, IMAGE_DISK_SERIAL, true)));
         Self {
             schema_version: SCHEMA_VERSION,
             checkpointing: None,
@@ -454,11 +458,12 @@ mod tests {
             4096,
             VzDisks {
                 state: Path::new("/vm/disks/state.raw"),
-                docker: None,
+                docker: Some(Path::new("/vm/disks/docker.raw")),
                 root: Path::new("/vm/generations/x/root.raw"),
                 seed: Path::new("/vm/seed/seed.raw"),
                 setup: Some(Path::new("/vm/setup.raw")),
                 cw_runtime: Some(Path::new("/engine/cw-runtimes/catalogs/c/runtime.raw")),
+                image: Some(Path::new("/engine/image-disks/disks/i/image.raw")),
             },
             vec![VzShare {
                 tag: "cw-direct-00".to_owned(),
@@ -502,12 +507,16 @@ mod tests {
             serials,
             [
                 (STATE_DISK_SERIAL.to_owned(), false),
+                (DOCKER_DISK_SERIAL.to_owned(), false),
                 (ROOT_DISK_SERIAL.to_owned(), false),
                 (SEED_DISK_SERIAL.to_owned(), true),
                 (SETUP_DISK_SERIAL.to_owned(), true),
                 (CW_RUNTIME_DISK_SERIAL.to_owned(), true),
+                (IMAGE_DISK_SERIAL.to_owned(), true),
             ]
         );
+        // Every disk at once stays under the helper's limit of eight.
+        assert_eq!(serials.len(), 7);
         assert_eq!(value["schemaVersion"], 2);
         assert_eq!(
             value["shares"],
@@ -539,6 +548,7 @@ mod tests {
                     seed: Path::new("/vm/seed/seed.raw"),
                     setup: None,
                     cw_runtime: None,
+                    image: None,
                 },
                 Vec::new(),
                 Path::new("/vm/vsock/v"),
