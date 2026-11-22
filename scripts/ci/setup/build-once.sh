@@ -596,6 +596,18 @@ bound_targets() {
     done | sort -k1,1nr -k2,2)
 }
 
+heavy_unit_wrapper() {
+  # One compile of a heavy unit at a time across every leg and check
+  # (heavy-unit-rustc.sh), in front of whatever RUSTC_WRAPPER is set.
+  export BUILD_ONCE_HEAVY_LOCK="$work/heavy-unit.lock"
+  if [ -n "${RUSTC_WRAPPER:-}" ]; then
+    export BUILD_ONCE_HEAVY_NEXT_WRAPPER="$RUSTC_WRAPPER"
+  else
+    unset BUILD_ONCE_HEAVY_NEXT_WRAPPER
+  fi
+  export RUSTC_WRAPPER="$ROOT/scripts/ci/setup/heavy-unit-rustc.sh"
+}
+
 in_src() {
   [ -n "${BUILD_ONCE_SRC:-}" ] && [ -d "$BUILD_ONCE_SRC/.git" ] || die 'run prepare first'
   cd "$BUILD_ONCE_SRC"
@@ -606,6 +618,7 @@ in_src() {
   else
     unset RUSTC_WRAPPER
   fi
+  heavy_unit_wrapper
   # If the guest still runs out of memory, the kernel kills a compiler, so
   # Cargo fails the job at once, never the job container's own process: a
   # killed job container left its runner reporting the job running for hours
@@ -866,9 +879,11 @@ run_one_leg() {
     fi
   fi
   echo "[build-once] leg $name: start"
-  "$ROOT/scripts/ci/setup/build-once.sh" leg "$name" "$out" > "$logs/$name.log" 2>&1 ||
+  python3 "$ROOT/scripts/ci/setup/peak-rss.py" "$logs/$name.rss" -- \
+    "$ROOT/scripts/ci/setup/build-once.sh" leg "$name" "$out" > "$logs/$name.log" 2>&1 ||
     rebuild_corrupt_leg "$name" "$out" "$logs/$name.log" || status=1
   echo "[build-once] leg $name: finish (status=$status elapsed_seconds=$((SECONDS - started)))"
+  echo "[build-once] leg $name: peak_rss_mib=$(cat "$logs/$name.rss" 2>/dev/null || echo unknown)"
   if sccache_on && [ "${BUILD_ONCE_NO_CACHE:-}" != 1 ]; then
     sccache_leg_stats "$name"
   fi
@@ -1027,8 +1042,10 @@ run_checks_beside_legs() {
   # LOGS/failed as "checks".
   local logs="$1" started=$SECONDS status=0
   echo "[build-once] checks: start"
-  "$ROOT/scripts/ci/setup/build-once.sh" checks > "$logs/checks.log" 2>&1 || status=1
+  python3 "$ROOT/scripts/ci/setup/peak-rss.py" "$logs/checks.rss" -- \
+    "$ROOT/scripts/ci/setup/build-once.sh" checks > "$logs/checks.log" 2>&1 || status=1
   echo "[build-once] checks: finish (status=$status elapsed_seconds=$((SECONDS - started)))"
+  echo "[build-once] checks: peak_rss_mib=$(cat "$logs/checks.rss" 2>/dev/null || echo unknown)"
   if [ "$status" -ne 0 ]; then
     echo checks >> "$logs/failed"
     return 1
@@ -1163,8 +1180,10 @@ checks() {
   # does (rebuild_corrupt_leg).
   local log folder folders=() status=0
   in_src
-  # The canary caches the legs' compiles only (#5146).
+  # The canary caches the legs' compiles only (#5146); the checks still take
+  # their heavy units one at a time with the legs.
   unset RUSTC_WRAPPER
+  heavy_unit_wrapper
   for folder in "${CHECK_FOLDERS[@]}"; do
     mark_used "$work/targets/$folder"
   done

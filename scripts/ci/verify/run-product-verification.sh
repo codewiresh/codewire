@@ -862,6 +862,7 @@ run_ci_script_tests() {
   scripts/ci/tests/test-dev-deployment-smoke-receipt.sh
   scripts/ci/tests/test-run-side-by-side.sh
   scripts/ci/tests/test-policy-cpu-cap.sh
+  scripts/ci/tests/test-heavy-unit-rustc.sh
   scripts/ci/tests/test-standard-families.sh
   scripts/ci/tests/test-warm-rust-cache.sh
   scripts/ci/tests/test-install-cargo-nextest.sh

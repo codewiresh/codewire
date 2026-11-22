@@ -651,7 +651,7 @@ cat > "$work/legs-bin/cargo" <<'CARGO'
 # The archive leg's cargo: fails as LEGS_CARGO_MODE says while its marker
 # file exists, then writes the archive, the zstd tar beside it.
 calls="$LEGS_STATE/calls"; echo x >> "$calls"
-echo "wrapper=${RUSTC_WRAPPER:-none} bucket=${SCCACHE_BUCKET:-none} redis=${SCCACHE_REDIS:-none} aws=${AWS_ACCESS_KEY_ID:-none}" >> "$LEGS_STATE/cargo-env"
+echo "wrapper=${RUSTC_WRAPPER:-none} next=${BUILD_ONCE_HEAVY_NEXT_WRAPPER:-none} bucket=${SCCACHE_BUCKET:-none} redis=${SCCACHE_REDIS:-none} aws=${AWS_ACCESS_KEY_ID:-none}" >> "$LEGS_STATE/cargo-env"
 if [ -e "$CARGO_TARGET_DIR/debug/deps/libbroken.rlib" ]; then
   case "$LEGS_CARGO_MODE" in
     corrupt) echo "rust-lld: error: $CARGO_TARGET_DIR/debug/deps/libbroken.rlib: Archive::children failed: truncated or malformed archive"; exit 101 ;;
@@ -946,14 +946,15 @@ for stray in SCCACHE_BUCKET SCCACHE_REDIS AWS_ACCESS_KEY_ID; do
   ! grep -q "^$stray=" "$work/legs-state/sccache-server-env" || fail "the leg's cache server saw $stray"
 done
 grep -qx 'SCCACHE_CONF=/dev/null' "$work/legs-state/sccache-server-env" || fail 'the cache server could read a configuration file'
-grep -qx "wrapper=$work/legs-bin/fake-sccache bucket=none redis=none aws=none" "$work/legs-state/cargo-env" ||
+# The heavy-unit wrapper stands in front of the cache (heavy-unit-rustc.sh).
+grep -Eqx "wrapper=/.*/scripts/ci/setup/heavy-unit-rustc\.sh next=$work/legs-bin/fake-sccache bucket=none redis=none aws=none" "$work/legs-state/cargo-env" ||
   fail "the leg's compilers did not use only the local cache: $(cat "$work/legs-state/cargo-env")"
 grep -q '^\[build-once\] leg archive: sccache hits=3 misses=1 hit_rate=75.0 ' "$work/legs.log" ||
   fail "the leg logged no hit rate: $(cat "$work/legs.log")"
 FAKE_SCCACHE_LOCATION='S3, name: stray-bucket' cache_legs_build || fail "a build with a remote cache server failed: $(cat "$work/legs.log")"
 grep -q "the archive leg's compiler cache is not this build folder's, or the shared one the job selected; it compiles without it" "$work/legs.log" ||
   fail 'a remote cache server was not refused'
-grep -qx 'wrapper=none bucket=none redis=none aws=none' "$work/legs-state/cargo-env" ||
+grep -Eqx 'wrapper=/.*/scripts/ci/setup/heavy-unit-rustc\.sh next=none bucket=none redis=none aws=none' "$work/legs-state/cargo-env" ||
   fail "a leg compiled through a remote cache: $(cat "$work/legs-state/cargo-env")"
 # The shared level the job selected (#5146): exactly the selector's settings
 # reach a pull request leg's server, read-only, with its own configuration;
