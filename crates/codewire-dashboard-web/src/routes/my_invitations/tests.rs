@@ -551,7 +551,9 @@ async fn accepting_checks_origin_csrf_form_and_two_factor_before_the_platform() 
 /// The headers every invitation page answers with (#3840).
 fn assert_invitation_headers(page: &Page) {
     assert_eq!(page.headers[header::CACHE_CONTROL], "no-store");
-    assert_eq!(page.headers[header::REFERRER_POLICY], "no-referrer");
+    // Not no-referrer, under which a browser posts the page's forms with
+    // `Origin: null` and the exact-origin checks refuse them.
+    assert_eq!(page.headers[header::REFERRER_POLICY], "same-origin");
     assert!(!page.body.contains("token="), "a token in a URL");
 }
 

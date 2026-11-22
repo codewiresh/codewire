@@ -336,13 +336,16 @@ fn login_url() -> String {
 }
 
 /// Every invitation response: nobody caches it, and no link on it sends a
-/// Referer.
+/// Referer to another site. Not no-referrer: under it a browser sends
+/// `Origin: null` on the page's own form posts, which the exact-origin checks
+/// refuse, as `personal_secrets.rs` found. The token is in the URL fragment,
+/// which no Referer carries.
 fn invitation_response(mut response: Response) -> Response {
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(
         header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
+        HeaderValue::from_static("same-origin"),
     );
     response
 }
