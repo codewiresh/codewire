@@ -96,7 +96,9 @@ fn item(response: StreamLogsResponse) -> Option<Item> {
                 .created_at
                 .into_option()
                 .and_then(|time| DateTime::<Utc>::from_timestamp(time.seconds, time.nanos as u32))
-                .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
+                // To the millisecond, as a page's `since` is: a run that ends
+                // in the same second as a Retry, but after it, is the Retry's.
+                .map(|time| time.to_rfc3339_opts(SecondsFormat::Millis, true))
                 .unwrap_or_default(),
         })),
         Event::Heartbeat(_) => Some(Item::Heartbeat),

@@ -528,6 +528,52 @@ async fn a_retrys_page_with_no_run_before_it_gets_an_end_and_follows_nothing() {
     assert_eq!(frames, vec!["event: end\ndata: {\"outcome\":\"none\"}\n\n"]);
 }
 
+#[tokio::test]
+async fn a_retry_that_ends_in_the_second_it_was_asked_for_is_still_followed() {
+    // On Dev a retry's run takes about a second (#4767): its rows can share
+    // the second of the time the page was given, after it.
+    let since = at("2026-10-06T10:00:00.250Z");
+    let script = Script::default();
+    *script.answers.lock().unwrap() = vec![vec![
+        Ok(response(&row_at(
+            1,
+            "install",
+            "failed",
+            "2026-10-06T09:58:02Z",
+        ))),
+        Ok(response(&row_at(
+            2,
+            "install",
+            "started",
+            "2026-10-06T10:00:00.400Z",
+        ))),
+        Ok(response(&row_at(
+            3,
+            "complete",
+            "completed",
+            "2026-10-06T10:00:00.700Z",
+        ))),
+    ]];
+    let frames = relayed_run(&script, None, Run::Next { since: Some(since) }).await;
+    assert_eq!(ids(&frames), vec![id(2), id(3)]);
+    *script.answers.lock().unwrap() = vec![vec![
+        Ok(response(&row_at(
+            1,
+            "install",
+            "failed",
+            "2026-10-06T09:58:02Z",
+        ))),
+        Ok(response(&row_at(
+            3,
+            "complete",
+            "completed",
+            "2026-10-06T10:00:00.700Z",
+        ))),
+    ]];
+    let frames = relayed_run(&script, None, Run::Before { since }).await;
+    assert_eq!(ids(&frames), vec![id(1)]);
+}
+
 #[test]
 fn the_query_asks_for_the_current_run_unless_it_names_the_next() {
     let query = |run: Option<&str>, since: Option<&str>| EventsQuery {
