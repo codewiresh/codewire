@@ -620,10 +620,73 @@ async function themes(page: Page, terminal: Locator, rows: Locator, options: {
   });
 }
 
+// A failed setup and its Retry (#5065; `sandbox-setup-retry` in
+// docs/journeys/cloud-sandbox.md). Two more Sandboxes fail setup: one at its
+// install command until a file exists, one at its clone. Dev's own origin has
+// no repository at the clone's address, so the banner names that host
+// without any credential (#5053). The two start in a tab of their own once
+// the walk's Sandbox has a terminal, so their setup runs while the walk goes
+// on, and are checked after it.
+const SETUP_FIXED = "/tmp/dev-ux-setup-fixed";
+const MISSING_REPOSITORY = `${ORIGIN}/_dev-ux/no-repository.git`;
+const notice = (page: Page) => page.locator("[data-sandbox-notice]");
+const noticeText = (page: Page) => notice(page).locator("[data-sandbox-notice-text]");
+const setupRows = (page: Page) => page.locator("[data-setup-progress] [data-setup-stages] > .cw-setup-stage");
+
+async function typeLine(page: Page, command: string): Promise<void> {
+  const input = page.locator("[data-terminal-tab-panel]:not([hidden]) [data-terminal-root] textarea");
+  await input.focus();
+  // Keystrokes reach the shell only from the focused terminal. After a menu
+  // or dialog, type only once focus has actually arrived there.
+  await expect(input).toBeFocused();
+  await page.keyboard.type(command);
+  await page.keyboard.press("Enter");
+}
+
+async function createFailingSetup(page: Page, slug: string, owned: OwnedUxSandbox, deadline: number,
+  setup: { install: string } | { repository: string }): Promise<string> {
+  await owned.admit(deadline);
+  await visit(page, `/${slug}/new/`);
+  const card = page.locator("#environment-create-card");
+  await page.getByLabel("Name", { exact: true }).fill(owned.name);
+  await card.getByLabel("CPU", { exact: true }).selectOption("1000");
+  await card.getByLabel("Memory", { exact: true }).selectOption("2048");
+  await card.getByLabel("Disk", { exact: true }).selectOption("10");
+  await page.getByLabel("Delete after", { exact: true }).fill("1h");
+  await page.locator("[data-reset-workspace-image]").click();
+  await expect(page.getByLabel("Credential profile", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
+  await expect(page.getByLabel("Organization secrets", { exact: false })).not.toBeChecked();
+  for (const agent of await page.locator('input[name="agent"]').all()) await agent.uncheck();
+  if ("install" in setup) {
+    await page.locator("[data-create-runtime] > summary").click();
+    await page.getByLabel("Install command", { exact: true }).fill(setup.install);
+  } else {
+    await page.getByLabel("Repository URL", { exact: true }).fill(setup.repository);
+    await page.getByLabel("Mount path", { exact: true }).fill("missing");
+  }
+  owned.beforeCreate();
+  await button(page, "Create Sandbox").click();
+  await expect(page).toHaveURL(/\/[0-9a-f-]{36}\/\?message=environment-created$/);
+  return `/${slug}/${await owned.createdId(deadline)}/`;
+}
+
+// The banner says where setup stopped, over a terminal that opened anyway.
+const failedOpen = (page: Page, path: string, step: string): Expectation[] => [
+  ["failed-banner", async () => {
+    await visit(page, path);
+    await expect(noticeText(page)).toHaveText(new RegExp(`^Setup failed at ${step}: `), { timeout: 120_000 });
+  }],
+  ["danger-tone", () => expect(notice(page)).toHaveAttribute("data-tone", "danger")],
+  ["terminal-open", () => attachedTerminal(page, 60_000)],
+];
+
 export async function runDevUxWalkthrough(page: Page, options: {
   slug: string; userId: string; orgId: string; owned: OwnedUxSandbox; deadline: number;
+  own: () => OwnedUxSandbox;
 }): Promise<void> {
-  const { slug, userId, orgId, owned, deadline } = options;
+  const { slug, userId, orgId, owned, deadline, own } = options;
   page.setDefaultTimeout(15_000);
   page.setDefaultNavigationTimeout(30_000);
   // Terminal sockets pass through unchanged. The reconnect journey drops the
@@ -704,15 +767,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
   const detailPath = `/${slug}/${id}/`;
   const terminal = page.locator("[data-terminal-tab-panel]:not([hidden]) [data-terminal-root]");
   const rows = terminal.locator(".xterm-rows");
-  const send = async (command: string) => {
-    const input = terminal.locator("textarea");
-    await input.focus();
-    // Keystrokes reach the shell only from the focused terminal. After a menu
-    // or dialog, type only once focus has actually arrived there.
-    await expect(input).toBeFocused();
-    await page.keyboard.type(command);
-    await page.keyboard.press("Enter");
-  };
+  const send = (command: string) => typeLine(page, command);
   let firstId: string | null = null;
   let pid = "";
   let job = "";
@@ -738,6 +793,23 @@ export async function runDevUxWalkthrough(page: Page, options: {
     expect(firstId).toBeTruthy();
   });
   passed("create-to-terminal", submitted);
+  const failing = await page.context().newPage();
+  const installing = own();
+  const cloning = own();
+  let installPath = "";
+  let clonePath = "";
+  // These checks could not run against Dev before they merged, so one that
+  // fails is reported by `holds` and does not fail the walk yet (#5065).
+  await failing.setViewportSize({ width: 1440, height: 900 });
+  const retryCreated = Date.now();
+  if (await holds("setup-retry-create", [
+    ["install-created", async () => {
+      installPath = await createFailingSetup(failing, slug, installing, deadline, { install: `test -f ${SETUP_FIXED}` });
+    }],
+    ["clone-created", async () => {
+      clonePath = await createFailingSetup(failing, slug, cloning, deadline, { repository: MISSING_REPOSITORY });
+    }],
+  ])) passed("setup-retry-create", retryCreated);
   await stage("terminal-colors-copy", async () => {
     await send("export CW_UX_SESSION=preserved; printf '\\033[31m__UX_RED__\\033[0m\\n__UX_COPY__\\n__UX_PID__%s__\\n' \"$$\"");
     await expect(rows).toContainText(/__UX_PID__\d+__/);
@@ -1035,4 +1107,84 @@ export async function runDevUxWalkthrough(page: Page, options: {
     // Independent CLI finally cleanup proves terminal destruction, even when
     // the browser loses an acknowledgment. Do not equate this redirect to it.
   });
+  // Each check runs only on what the one before it showed: a Retry needs
+  // the failed Sandbox, and the list needs the Retry.
+  let started = Date.now();
+  const install = !!installPath
+    && await holds("setup-retry-banner", failedOpen(failing, installPath, "Running install command"));
+  if (install) passed("setup-retry-banner", started);
+  started = Date.now();
+  const resumed = install && await holds("setup-retry-resume", [
+    ["fixed", async () => {
+      await typeLine(failing, `touch ${SETUP_FIXED} && printf '__UX_%s__\\n' FIXED`);
+      await expect(failing.locator("[data-terminal-tab-panel]:not([hidden]) .xterm-rows")).toContainText("__UX_FIXED__");
+    }],
+    ["retried", async () => {
+      // A Retry returns to this same page, so wait for the page it returns to.
+      await Promise.all([
+        failing.waitForEvent("framenavigated", (frame) => frame === failing.mainFrame()),
+        button(notice(failing), "Retry setup").click(),
+      ]);
+      await failing.waitForLoadState("domcontentloaded");
+    }],
+    // The banner says "Setting up" while the Retry runs, and goes once setup
+    // completes; a Sandbox ready with nothing to say shows no notice.
+    ["ready", async () => {
+      await expect(notice(failing)).toBeHidden({ timeout: 120_000 });
+      await expect(failing.locator("[data-sandbox-state]")).toHaveText("running");
+      await expect(button(failing, "New terminal")).toBeEnabled({ timeout: 60_000 });
+    }],
+  ]);
+  if (resumed) passed("setup-retry-resume", started);
+  // The list keeps its rows once the Sandbox is ready. A Retry fast enough to
+  // finish before the page follows it shows no list.
+  started = Date.now();
+  let labels: string[] = [];
+  if (resumed && await holds("setup-retry-resume-list", [
+    ["retry-heading", () => expect(failing.locator("[data-setup-progress] h2")).toHaveText("Retrying setup")],
+    ["install-ran", async () => {
+      labels = await setupRows(failing).locator(":scope > .cw-setup-row > .cw-setup-stage-label").allTextContents();
+      expect(labels.indexOf("Running install command")).toBeGreaterThan(0);
+      await expect(setupRows(failing).nth(labels.indexOf("Running install command")))
+        .toHaveAttribute("data-state", "completed");
+    }],
+    // The steps before install were done on the failed run and are not run again.
+    ["earlier-done", async () => {
+      for (const row of (await setupRows(failing).all()).slice(0, labels.indexOf("Running install command"))) {
+        await expect(row).toHaveAttribute("data-instant", "");
+      }
+    }],
+  ])) passed("setup-retry-resume-list", started);
+  started = Date.now();
+  const reclone = dialog(failing, "Retry cloning?");
+  if (clonePath && await holds("setup-retry-reclone", [
+    ...failedOpen(failing, clonePath, "Cloning repositories"),
+    // The reason is ours and names the project's host (#5053).
+    ["host-named", () => expect(noticeText(failing)).toContainText(`: ${new URL(ORIGIN).host} `)],
+    ["asked", async () => {
+      await button(notice(failing), "Retry setup").click();
+      // The server refuses to clone again unasked and returns with its question.
+      await expect(failing).toHaveURL(`${ORIGIN}${clonePath}?confirm=reclone`);
+      await expect(reclone).toBeVisible();
+    }],
+    ["cancelled", async () => {
+      await button(reclone, "Cancel").click();
+      await expect(reclone).toBeHidden();
+      await expect(noticeText(failing)).toHaveText(/^Setup failed at Cloning repositories: /);
+    }],
+  ])) passed("setup-retry-reclone", started);
+  // Deleting both here starts their destruction together; the harness's own
+  // cleanup then confirms each by its ID, whatever happened above.
+  const remove = (path: string, name: string) => async () => {
+    await visit(failing, path);
+    await button(await workspaceMenu(failing, "More actions"), "Delete").click();
+    await button(dialog(failing, `Delete ${name}?`), "Delete Sandbox").click();
+    await expect(failing).toHaveURL(`${ORIGIN}/${slug}/?message=environment-destroying&environment=${path.split("/")[2]}`);
+  };
+  started = Date.now();
+  const deletions: Expectation[] = [];
+  if (clonePath) deletions.push(["clone-deleted", remove(clonePath, cloning.name)]);
+  if (installPath) deletions.push(["install-deleted", remove(installPath, installing.name)]);
+  if (deletions.length && await holds("setup-retry-delete", deletions)) passed("setup-retry-delete", started);
+  await failing.close();
 }

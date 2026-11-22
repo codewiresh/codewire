@@ -779,10 +779,16 @@ Issues: #4767, and #5050 for the clone's reason.
   - a setup that failed before or at the clone, whose Retry asks first;
   - a clone of a private repository on a host other than GitHub, which needs a credential Codewire doesn't have (#5050).
 - **Driving it:** create a Sandbox with an install command that fails until a file exists, for example `test -f /workspace/ok`. Open its terminal, run `touch /workspace/ok`, and press Retry setup. From the CLI: `cw create` with the same install command, `cw shell SANDBOX` and `touch /workspace/ok` there, then `cw retry SANDBOX`.
+
+  On Dev every delivery walks this as the Dev smoke browser identity, in `apps/dashboard/scripts/dev-ux-walkthrough.ts` (#5065). Once the walk's own Sandbox has a terminal, it creates two more in a tab of its own:
+  - one whose install is `test -f /tmp/dev-ux-setup-fixed`;
+  - one that clones `https://codewire-dev.sh/_dev-ux/no-repository.git`, an address where Dev has no repository.
+
+  Their setup fails while the walk goes on. After the walk's own Sandbox is deleted, the stages run in order: `setup-retry-banner`, then `setup-retry-resume`, which fixes it in the terminal and retries, then `setup-retry-resume-list`, then `setup-retry-reclone`, which retries the clone and cancels "Retry cloning?". Last, `setup-retry-delete` deletes both. Each check runs only if the one it depends on held. A check that holds prints `stage NAME duration_ms=N`, and one that fails prints `stage NAME not-held expectation=LABEL class=CLASS`. Like the `sandbox-start-list` checks, a failed check does not fail the acceptance yet: these could not be run against Dev before they merged, and a Retry that finishes before the page follows it leaves no list to read. They become failing in a change of their own, once Dev deliveries show them holding.
 - **Proof:**
   - **After the failure:** the page shows the banner "Setup failed at Running install command: …" over an open terminal.
   - **After Retry:** the list, headed "Retrying setup", shows the steps before install as done without running them, and install runs again. The Sandbox then becomes ready, and the banner is gone.
-  - **The clone case:** a Retry that would clone again opens "Retry cloning?" before it runs.
+  - **The clone case:** a Retry that would clone again opens "Retry cloning?" before it runs. On Dev the banner names the host, `codewire-dev.sh`, in the sentence #5053 adds; Cancel leaves the Sandbox failed.
   - **A clone that needs a credential:** the banner reads "Setup failed at Cloning repositories: git clone <url>: <host> needs a credential that Codewire doesn't have; clone it in the terminal with your own". It names the host from the project's URL and nothing the remote wrote. The terminal opens, so the repository can be cloned there with your own token.
   - **`cw create` with the failure:** it ends with `✗ Setup failed at Running install command: …`, which says SANDBOX is still running and to fix it there and run `cw retry SANDBOX`, then `→ cw shell SANDBOX`, and exits 1.
   - **`cw` after the failure:** `cw run --in SANDBOX -- CMD` and `cw shell SANDBOX` print `! Setup failed at Running install command: …` and `→ cw retry SANDBOX`, then run.

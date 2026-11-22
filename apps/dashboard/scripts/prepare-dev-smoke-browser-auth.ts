@@ -504,7 +504,8 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
   let page: Page | undefined;
   let success = false;
   let originalFailure: FixedStageError | undefined;
-  let uxSandbox: OwnedUxSandbox | undefined;
+  // Every Sandbox the walkthrough claimed, removed whatever happens to the browser.
+  const uxSandboxes: OwnedUxSandbox[] = [];
   let signalStage = "";
   const signals = ["SIGHUP", "SIGINT", "SIGTERM"] as NodeJS.Signals[];
   const signalHandlers = new Map<NodeJS.Signals, () => void>();
@@ -568,16 +569,21 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
     assertIdentityResponses(whoami, organizations, current, options);
     if (options.uxWalkthrough) {
       const slug = uxOrganizationSlug(organizations, options.expectedOrgId);
-      uxSandbox = new OwnedUxSandbox(options.expectedUserId, options.expectedOrgId, async (args, limit) => {
-        const bounded = Math.min(limit, Date.now() + 30_000);
-        return args.includes("rm")
-          ? runText(options.cwBin, env, args, bounded)
-          : runJson(options.cwBin, env, args, bounded);
-      });
+      const own = () => {
+        const owned = new OwnedUxSandbox(options.expectedUserId, options.expectedOrgId, async (args, limit) => {
+          const bounded = Math.min(limit, Date.now() + 30_000);
+          return args.includes("rm")
+            ? runText(options.cwBin, env, args, bounded)
+            : runJson(options.cwBin, env, args, bounded);
+        });
+        uxSandboxes.push(owned);
+        return owned;
+      };
+      const owned = own();
       const { runDevUxWalkthrough } = await import("./dev-ux-walkthrough");
       await withinDeadline(() => runDevUxWalkthrough(page!, {
         slug, userId: options.expectedUserId, orgId: options.expectedOrgId,
-        owned: uxSandbox!, deadline,
+        owned, deadline, own,
       }), deadline);
     }
     await withinDeadline(() => signOut(page!), deadline);
@@ -605,8 +611,14 @@ export async function main(argv: string[], totalTimeoutMs = TOTAL_TIMEOUT_MS): P
       ));
       // Quiesce browser actions before resource reconciliation, including a
       // walkthrough whose outer deadline fired during an in-flight request.
-      if (uxSandbox) {
-        await cleanupAttempt("ux-sandbox-remove", () => uxSandbox!.cleanup(Date.now() + 120_000));
+      if (uxSandboxes.length) {
+        // One after another, so no two cw commands share the saved login at
+        // once; the walkthrough deletes its Sandboxes itself, so their
+        // destruction is under way together and the later reads are short.
+        const removeBy = Date.now() + 120_000;
+        for (const owned of uxSandboxes) {
+          await cleanupAttempt("ux-sandbox-remove", () => owned.cleanup(removeBy));
+        }
         if (cleanupFailures.length) success = false;
         else console.error("[dev-ux] owned-sandbox-cleanup:passed");
       }

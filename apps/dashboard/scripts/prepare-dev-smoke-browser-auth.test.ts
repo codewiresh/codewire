@@ -29,21 +29,28 @@ let uxConfig = "";
 mock.module("./dev-ux-walkthrough", () => ({
   runDevUxWalkthrough: async (_page: unknown, options: {
     owned: import("./dev-ux-ownership").OwnedUxSandbox; deadline: number;
+    own: () => import("./dev-ux-ownership").OwnedUxSandbox;
   }) => {
     uxInvocations += 1;
     const history = redirectMode === "ux-large-history" ? LARGE_HISTORY : [];
-    await writeFile(join(uxConfig, "ux-resource.json"), JSON.stringify(history));
-    await options.owned.admit(options.deadline);
-    options.owned.beforeCreate();
-    await writeFile(join(uxConfig, "ux-resource.json"), JSON.stringify([...history, {
-      name: options.owned.name, id: "00000000-0000-4000-8000-000000000009",
-      org_id: ORG, created_by: USER, state: "running",
-    }]));
+    // The setup-retry step claims two more Sandboxes beside the walk's own.
+    const claimed = redirectMode.startsWith("ux-several") ? [options.owned, options.own(), options.own()] : [options.owned];
+    let rows: object[] = [...history];
+    await writeFile(join(uxConfig, "ux-resource.json"), JSON.stringify(rows));
+    for (const [index, owned] of claimed.entries()) {
+      await owned.admit(options.deadline);
+      owned.beforeCreate();
+      rows = [...rows, {
+        name: owned.name, id: `00000000-0000-4000-8000-00000000000${(9 + index).toString(16)}`,
+        org_id: ORG, created_by: USER, state: "running",
+      }];
+      await writeFile(join(uxConfig, "ux-resource.json"), JSON.stringify(rows));
+    }
     if (redirectMode === "ux-large-history") await options.owned.createdId(options.deadline);
     if (redirectMode === "ux-signal") process.emit("SIGTERM", "SIGTERM");
     if (redirectMode === "ux-timeout") await new Promise(() => {});
     if (redirectMode === "ux-stage-timeout") throw new DevUxError("terminal-attach", "timeout");
-    if (!["ux-success", "ux-large-history", "ux-cleanup-failure"].includes(redirectMode)) throw new Error("hostile-ux-private-value-canary");
+    if (!["ux-success", "ux-large-history", "ux-cleanup-failure", "ux-several", "ux-several-cleanup-failure"].includes(redirectMode)) throw new Error("hostile-ux-private-value-canary");
   },
 }));
 
@@ -291,9 +298,8 @@ case " $* " in
     "${process.execPath}" -e 'const rows=JSON.parse(require("node:fs").readFileSync(process.env.CW_CONFIG_DIR+"/ux-resource.json","utf8")); const row=rows.find(row=>row.id===process.argv[1]); if(!row||["destroying","destroyed"].includes(row.state))process.exit(92); console.log(JSON.stringify(row));' "$5" ;;
   *" --cloud rm --yes "*)
     printf 'destroy\\n' >>"${directory}/audit"
-    ${mode === "ux-cleanup-failure" ? "exit 96" : ":"}
-    sed 's/"state":"running"/"state":"destroyed"/' "$CW_CONFIG_DIR/ux-resource.json" >"$CW_CONFIG_DIR/ux-destroyed.json"
-    mv "$CW_CONFIG_DIR/ux-destroyed.json" "$CW_CONFIG_DIR/ux-resource.json" ;;
+    ${mode.endsWith("cleanup-failure") ? "exit 96" : ":"}
+    "${process.execPath}" -e 'const fs=require("node:fs"); const path=process.env.CW_CONFIG_DIR+"/ux-resource.json"; fs.writeFileSync(path+".next", JSON.stringify(JSON.parse(fs.readFileSync(path,"utf8")).map(row=>row.id===process.argv[1]?{...row,state:"destroyed"}:row))); fs.renameSync(path+".next", path);' "$6" ;;
   *" logout "*) printf 'logout\\n' >>"${directory}/audit"; rm -f -- "$CW_CONFIG_DIR/config.json" "$CW_CONFIG_DIR/credentials.json" ;;
   *) exit 92 ;;
 esac
@@ -400,10 +406,11 @@ test("wrong identity prevents all UX mutation and revokes the owned login", asyn
 // The class each failed journey reports beside its fixed stage (#3132).
 const UX_FAILURE_CLASSES: Record<string, string> = {
   "ux-failure": "unexpected", "ux-signal": "unexpected", "ux-timeout": "timeout",
-  "ux-stage-timeout": "timeout", "ux-cleanup-failure": "assertion",
+  "ux-stage-timeout": "timeout", "ux-cleanup-failure": "assertion", "ux-several-cleanup-failure": "assertion",
 };
 
-for (const mode of ["ux-success", "ux-large-history", "ux-failure", "ux-signal", "ux-timeout", "ux-stage-timeout", "ux-cleanup-failure"]) {
+for (const mode of ["ux-success", "ux-large-history", "ux-several", "ux-failure", "ux-signal", "ux-timeout", "ux-stage-timeout",
+  "ux-cleanup-failure", "ux-several-cleanup-failure"]) {
   test(`${mode}: cleanup is independent of browser and precedes OAuth logout`, async () => {
     const value = await fixture(mode);
     // In ux-timeout the walkthrough never resolves, so it waits out the whole
@@ -413,16 +420,19 @@ for (const mode of ["ux-success", "ux-large-history", "ux-failure", "ux-signal",
       .catch((error) => error);
     expect(uxInvocations).toBe(1);
     const audit = await readFile(join(value.directory, "audit"), "utf8");
-    if (mode === "ux-success" || mode === "ux-large-history") {
+    // Each claimed Sandbox is removed by its own ID, once, even when another's removal failed.
+    const removals = "destroy\n".repeat(mode.startsWith("ux-several") ? 3 : 1);
+    if (["ux-success", "ux-large-history", "ux-several"].includes(mode)) {
       expect(result).toBeUndefined();
-      expect(audit).toBe("destroy\n");
+      expect(audit).toBe(removals);
     } else {
       expect(result).toBeInstanceOf(helper.FixedStageError);
       expect(`${result.message} ${result.cleanupFailures}`).not.toContain("hostile-ux-private-value-canary");
-      expect(audit).toBe("destroy\nlogout\n");
+      expect(audit).toBe(`${removals}logout\n`);
       expect(await readdir(value.config)).toEqual([]);
-      if (mode === "ux-cleanup-failure") {
-        expect(result.cleanupFailures).toContain("ux-sandbox-remove:failed");
+      if (mode.endsWith("cleanup-failure")) {
+        expect(result.cleanupFailures.filter((failure: string) => failure === "ux-sandbox-remove:failed"))
+          .toHaveLength(mode === "ux-several-cleanup-failure" ? 3 : 1);
         expect(result.stage).toBe("cleanup-incomplete");
       }
       if (mode === "ux-signal") expect(result.stage).toBe("signal-sigterm");
