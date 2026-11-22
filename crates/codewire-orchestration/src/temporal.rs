@@ -39,13 +39,10 @@ use crate::worker::organization_deletion::{
 };
 use crate::worker::setup_lease::SetupActivityIdentity;
 use crate::worker::{JobPayload, WorkerContext, create, lifecycle, resize, setup};
-use options::*;
 
 mod activity_run;
 mod commands;
-mod continuation;
 mod host;
-mod options;
 mod snapshot;
 mod worker;
 
@@ -674,6 +671,30 @@ impl EnvironmentActivities {
     }
 }
 
+fn retry_policy() -> RetryPolicy {
+    RetryPolicy {
+        initial_interval: Duration::from_secs(2).try_into().ok(),
+        backoff_coefficient: 2.0,
+        maximum_interval: Duration::from_secs(30).try_into().ok(),
+        maximum_attempts: 3,
+        ..Default::default()
+    }
+}
+
+fn environment_activity_opts() -> ActivityOptions {
+    ActivityOptions::with_start_to_close_timeout(Duration::from_secs(30 * 60))
+        .heartbeat_timeout(Duration::from_secs(15))
+        .cancellation_type(ActivityCancellationType::WaitCancellationCompleted)
+        .retry_policy(retry_policy())
+        .build()
+}
+
+fn short_activity_opts() -> ActivityOptions {
+    let mut opts = ActivityOptions::start_to_close_timeout(Duration::from_secs(30 * 60));
+    opts.retry_policy = Some(retry_policy().into());
+    opts
+}
+
 /// Mirrors `orchestration.EnvironmentWorkflow`: a signal-driven
 /// command queue; `destroy` completes the workflow; unknown actions
 /// are logged and ignored.
@@ -699,7 +720,6 @@ impl EnvironmentWorkflow {
         let mut operation_generation = None;
         let mut environment_id = None;
         loop {
-            continuation::continue_when_due(ctx)?;
             ctx.wait_condition(|s| !s.queue.is_empty()).await?;
             let cmd = ctx
                 .state_mut(|s| s.queue.pop_front())
@@ -1009,6 +1029,31 @@ impl ExternalOrganizationBillingActivities {
     }
 }
 
+fn organization_deletion_activity_opts() -> ActivityOptions {
+    environment_activity_opts()
+}
+
+fn organization_deletion_failure_opts() -> ActivityOptions {
+    let mut retry = retry_policy();
+    // The destructive phase has already stopped. Keep retrying only the
+    // idempotent terminal-state write so a database outage cannot strand a
+    // started operation behind a completed Temporal workflow.
+    retry.maximum_attempts = 0;
+    ActivityOptions::with_start_to_close_timeout(Duration::from_secs(30 * 60))
+        .heartbeat_timeout(Duration::from_secs(15))
+        .cancellation_type(ActivityCancellationType::WaitCancellationCompleted)
+        .retry_policy(retry)
+        .build()
+}
+
+fn organization_billing_activity_opts() -> ActivityOptions {
+    ActivityOptions::with_start_to_close_timeout(Duration::from_secs(30 * 60))
+        .task_queue(BILLING_TASK_QUEUE)
+        .cancellation_type(ActivityCancellationType::WaitCancellationCompleted)
+        .retry_policy(retry_policy())
+        .build()
+}
+
 fn organization_deletion_failure(
     operation: &OrganizationDeletionWorkflowInput,
     failure_code: &str,
@@ -1214,6 +1259,34 @@ impl ExternalAccountDeletionBillingActivities {
     ) -> Result<(), ActivityError> {
         unreachable!("external billing activity is not registered locally")
     }
+}
+
+/// Every account deletion phase retries until it succeeds: the account is
+/// already disabled, and stopping part way would leave it neither usable nor
+/// deleted. The backoff tops out at five minutes.
+fn account_deletion_retry_policy() -> RetryPolicy {
+    RetryPolicy {
+        initial_interval: Duration::from_secs(10).try_into().ok(),
+        backoff_coefficient: 2.0,
+        maximum_interval: Duration::from_secs(5 * 60).try_into().ok(),
+        maximum_attempts: 0,
+        ..Default::default()
+    }
+}
+
+fn account_deletion_activity_opts() -> ActivityOptions {
+    ActivityOptions::with_start_to_close_timeout(Duration::from_secs(10 * 60))
+        .cancellation_type(ActivityCancellationType::WaitCancellationCompleted)
+        .retry_policy(account_deletion_retry_policy())
+        .build()
+}
+
+fn account_deletion_billing_activity_opts() -> ActivityOptions {
+    ActivityOptions::with_start_to_close_timeout(Duration::from_secs(10 * 60))
+        .task_queue(BILLING_TASK_QUEUE)
+        .cancellation_type(ActivityCancellationType::WaitCancellationCompleted)
+        .retry_policy(account_deletion_retry_policy())
+        .build()
 }
 
 /// Deletes an account after its request disabled it (#3679). Started only
@@ -1501,6 +1574,3 @@ impl TemporalTrigger {
 
 #[cfg(test)]
 pub(crate) mod tests;
-
-#[cfg(test)]
-mod replay_tests;

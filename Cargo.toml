@@ -274,8 +274,6 @@ temporalio-client = "=1.2.0"
 temporalio-macros = "=1.2.0"
 temporalio-common = "=1.2.0"
 temporalio-workflow = "=1.2.0"
-# Its replay worker, for the environment workflow's replay tests (#5856).
-temporalio-sdk-core = { version = "=0.11.0", default-features = false }
 url = "2"
 
 # Kubernetes (replaces client-go in internal/sandbox). rustls to match
