@@ -30,25 +30,30 @@ RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
 # Foundational release tools are direct, checksum-verified upstream artifacts.
 # Every supported architecture has an explicit reviewed digest; unknown
 # architectures fail closed instead of silently receiving a different binary.
+# forgejo-cli publishes no checksums, so its digests are those of the reviewed
+# release downloads.
 ARG TARGETARCH
 ARG DOCKER_VERSION=29.9.2
 ARG BUILDX_VERSION=0.36.0
 ARG COMPOSE_VERSION=5.4.0
 ARG GH_VERSION=2.97.0
+ARG FJ_VERSION=0.6.0
 RUN set -euo pipefail; \
     case "$TARGETARCH" in \
       amd64) \
-        docker_arch=x86_64; compose_arch=x86_64; gh_arch=amd64; \
+        docker_arch=x86_64; compose_arch=x86_64; gh_arch=amd64; fj_arch=x86_64; \
         docker_sha=9ac225999fd5e863f7694c728ef23d480616b1e5639328fa309befd4243d69eb; \
         buildx_sha=07823fdfcd82a41be90155a8b16876c1a780a6462de805a9f3f63b3119ccfb99; \
         compose_sha=837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be; \
-        gh_sha=a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112 ;; \
+        gh_sha=a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112; \
+        fj_sha=ea559da5449b6dd7e0dd9f7ea51c906b575696f782edd606b52adcf773602742 ;; \
       arm64) \
-        docker_arch=aarch64; compose_arch=aarch64; gh_arch=arm64; \
+        docker_arch=aarch64; compose_arch=aarch64; gh_arch=arm64; fj_arch=aarch64; \
         docker_sha=873b3e0207857c3b2f28392fb922f3ea6efe37620c16d4d4aaf2fef409c90b73; \
         buildx_sha=70382de03915c07c488ae4ddc4f7e169ee978f953e754ecfce110ba017e0132b; \
         compose_sha=fc5d1371f1ec7987e703da94ede49af3fbfb240b83f22991a98511de7bc4b93b; \
-        gh_sha=73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5 ;; \
+        gh_sha=73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5; \
+        fj_sha=f427e0f94e2bf6f4b44bff17020706915bccfe7abb7ad9b9cbb74cc1aa2dd7b5 ;; \
       *) echo "unsupported base image architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
@@ -74,8 +79,15 @@ RUN set -euo pipefail; \
     echo "${gh_sha}  /tmp/gh.tgz" | sha256sum -c -; \
     tar -xzf /tmp/gh.tgz -C /tmp; \
     install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${gh_arch}/bin/gh" /usr/local/bin/gh; \
-    rm -rf /tmp/docker /tmp/docker.tgz /tmp/gh.tgz "/tmp/gh_${GH_VERSION}_linux_${gh_arch}"; \
-    docker --version; dockerd --version; docker buildx version; docker compose version; gh --version
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-connrefused \
+      "https://codeberg.org/forgejo-contrib/forgejo-cli/releases/download/v${FJ_VERSION}/forgejo-cli-${fj_arch}-linux.tar.gz" \
+      -o /tmp/fj.tgz; \
+    echo "${fj_sha}  /tmp/fj.tgz" | sha256sum -c -; \
+    install -d -m 0755 /tmp/fj; \
+    tar -xzf /tmp/fj.tgz -C /tmp/fj; \
+    install -m 0755 /tmp/fj/fj /usr/local/bin/fj; \
+    rm -rf /tmp/docker /tmp/docker.tgz /tmp/gh.tgz "/tmp/gh_${GH_VERSION}_linux_${gh_arch}" /tmp/fj /tmp/fj.tgz; \
+    docker --version; dockerd --version; docker buildx version; docker compose version; gh --version; fj version
 
 RUN locale-gen en_US.UTF-8
 ENV LANG=en_US.UTF-8

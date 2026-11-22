@@ -251,6 +251,7 @@ check_version docker docker buildx version
 check_version docker docker compose version
 check_version docker-compose docker-compose --version
 check_version gh gh --version
+check_version fj fj version
 check_version git git --version
 check_version go go version
 check_version gopls gopls version

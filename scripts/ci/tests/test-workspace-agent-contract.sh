@@ -140,7 +140,7 @@ chmod -R go-w "$work/agents"
 for agent in codex claude gemini kimi pi amp aider; do
   ln -s agent "$work/bin/$agent"
 done
-for tool in cw docker dockerd docker-compose gh git go gopls hcloud kubectl atmos \
+for tool in cw docker dockerd docker-compose gh fj git go gopls hcloud kubectl atmos \
   node bun bun""x pnpm yarn python3 pipx poetry uv cargo rustc rustfmt psql protoc bwrap infocmp; do
   ln -s agent "$work/bin/$tool"
 done
