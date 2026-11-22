@@ -66,7 +66,7 @@ pub struct ClientError {
     validation_errors: Vec<ValidationError>,
     error_info: Option<Box<ErrorInfo>>,
     retry_delay: Option<Duration>,
-    request_id: Option<String>,
+    answer_ids: Option<Box<AnswerIds>>,
     retryable_transport_interruption: bool,
 }
 
@@ -80,7 +80,7 @@ impl ClientError {
             validation_errors: Vec::new(),
             error_info: None,
             retry_delay: None,
-            request_id: None,
+            answer_ids: None,
             retryable_transport_interruption: code == ErrorCode::Unavailable,
         }
     }
@@ -113,7 +113,14 @@ impl ClientError {
     }
 
     pub fn request_id(&self) -> Option<&str> {
-        self.request_id.as_deref()
+        self.answer_ids.as_deref()?.request_id.as_deref()
+    }
+
+    /// The id of the trace the server's answer named (`x-codewire-trace-id`),
+    /// as 32 lowercase hex digits. `None` when the server sent none, as for a
+    /// request its sampler dropped, or when no server answered.
+    pub fn trace_id(&self) -> Option<&str> {
+        self.answer_ids.as_deref()?.trace_id.as_deref()
     }
 
     pub fn retry_delay(&self) -> Option<Duration> {
@@ -185,6 +192,13 @@ impl From<ConnectError> for ClientError {
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_owned)
             });
+        let trace_id = response_trace_id(error.response_headers()).map(str::to_owned);
+        let answer_ids = (request_id.is_some() || trace_id.is_some()).then(|| {
+            Box::new(AnswerIds {
+                request_id,
+                trace_id,
+            })
+        });
         let message = error
             .message
             .as_deref()
@@ -198,10 +212,36 @@ impl From<ConnectError> for ClientError {
             validation_errors,
             error_info,
             retry_delay,
-            request_id,
+            answer_ids,
             retryable_transport_interruption,
         }
     }
+}
+
+/// The ids a server's answer named, boxed together so that every error type
+/// wrapping [`ClientError`] stays under clippy's large-error bound.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AnswerIds {
+    request_id: Option<String>,
+    trace_id: Option<String>,
+}
+
+/// The trace id a Codewire server's answer names in `x-codewire-trace-id`
+/// (docs/CONFIGURATION.md, "Tracing"), as 32 lowercase hex digits. Anything
+/// else in the header is ignored, so it is never shown or logged.
+pub fn response_trace_id(headers: &http::HeaderMap) -> Option<&str> {
+    headers
+        .get("x-codewire-trace-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|id| is_trace_id(id))
+}
+
+fn is_trace_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        && id.bytes().any(|byte| byte != b'0')
 }
 
 fn detail_is(detail: &ErrorDetail, expected: &str) -> bool {
@@ -256,5 +296,35 @@ mod tests {
 
         let denied = ClientError::new(ErrorCode::PermissionDenied, "denied");
         assert!(!denied.is_retryable_transport_interruption());
+    }
+
+    #[test]
+    fn only_a_well_formed_trace_id_header_is_kept() {
+        let answered = |value: &str| {
+            let mut headers = http::HeaderMap::new();
+            headers.insert("x-codewire-trace-id", value.parse().unwrap());
+            let error = ConnectError::not_found("environment not found").with_headers(headers);
+            ClientError::from(error).trace_id().map(str::to_owned)
+        };
+        assert_eq!(
+            answered("4bf92f3577b34da6a3ce929d0e0e4736").as_deref(),
+            Some("4bf92f3577b34da6a3ce929d0e0e4736")
+        );
+        for refused in [
+            "4BF92F3577B34DA6A3CE929D0E0E4736",
+            "4bf92f3577b34da6a3ce929d0e0e473",
+            "00000000000000000000000000000000",
+            "4bf92f3577b34da6a3ce929d0e0e473g",
+        ] {
+            assert_eq!(answered(refused), None, "{refused}");
+        }
+        assert_eq!(
+            ClientError::from(ConnectError::not_found("no header")).trace_id(),
+            None
+        );
+        assert_eq!(
+            ClientError::new(ErrorCode::Unavailable, "no answer").trace_id(),
+            None
+        );
     }
 }

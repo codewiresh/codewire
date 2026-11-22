@@ -15,6 +15,7 @@ use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::set_header::{MakeHeaderValue, SetResponseHeader};
 use tower_http::trace::TraceLayer;
 
 use crate::health::{HealthState, ReadinessProbe, router as health_router};
@@ -317,7 +318,8 @@ impl AppBuilder {
 
 /// The standard request tracing, for a server that does not use
 /// [`AppBuilder`]: the [`RequestSpan`] around each request until its response
-/// starts, and tower-http's request log lines inside it.
+/// starts, tower-http's request log lines inside it, and the
+/// [`TRACE_ID_HEADER`] on the response of a request whose span is exported.
 ///
 /// The span ends when the handler has answered, before the response body is
 /// sent, so a streamed response holds no span open and nothing its body does
@@ -328,25 +330,46 @@ pub fn request_trace_layer() -> RequestTraceLayer {
     RequestTraceLayer
 }
 
+/// The response header that names the request's trace: the server's own id,
+/// never one a caller sent (docs/CONFIGURATION.md, "Tracing").
+pub const TRACE_ID_HEADER: http::HeaderName = http::HeaderName::from_static("x-codewire-trace-id");
+
 /// See [`request_trace_layer`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RequestTraceLayer;
 
 impl<S> tower::Layer<S> for RequestTraceLayer {
     type Service = RequestTrace<
-        tower_http::trace::Trace<
-            S,
-            tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>,
-            CallersSpan,
+        SetResponseHeader<
+            tower_http::trace::Trace<
+                S,
+                tower_http::classify::SharedClassifier<
+                    tower_http::classify::ServerErrorsAsFailures,
+                >,
+                CallersSpan,
+            >,
+            TraceIdHeader,
         >,
     >;
 
     fn layer(&self, inner: S) -> Self::Service {
+        let traced = TraceLayer::new_for_http()
+            .make_span_with(CallersSpan)
+            .layer(inner);
         RequestTrace {
-            inner: TraceLayer::new_for_http()
-                .make_span_with(CallersSpan)
-                .layer(inner),
+            inner: SetResponseHeader::overriding(traced, TRACE_ID_HEADER, TraceIdHeader),
         }
+    }
+}
+
+/// The value of [`TRACE_ID_HEADER`]. It is made while the response future is
+/// polled inside the [`RequestSpan`], so the current span is the request's.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TraceIdHeader;
+
+impl<T> MakeHeaderValue<T> for TraceIdHeader {
+    fn make_header_value(&mut self, _message: &T) -> Option<http::HeaderValue> {
+        crate::obs::exported_trace_id().and_then(|id| http::HeaderValue::try_from(id).ok())
     }
 }
 
@@ -473,6 +496,30 @@ async fn set_service_header(
 /// its own routes keep the layer.
 pub fn never_shared_cached(router: Router) -> Router {
     router.layer(axum::middleware::from_fn(mark_never_shared_cached))
+}
+
+/// The standard request tracing for a listener whose callers are outside
+/// callers, such as a workspace daemon inside a user's environment: their
+/// [`CALLER_TRACE_HEADERS`] are removed before anything reads them, so each
+/// request is a trace of its own and the response names it with
+/// [`TRACE_ID_HEADER`] (docs/CONFIGURATION.md, "Tracing").
+pub fn traced_as_outside_callers(router: Router) -> Router {
+    router
+        .layer(request_trace_layer())
+        .layer(axum::middleware::from_fn(remove_caller_trace_context))
+}
+
+/// A caller's trace context. A public edge removes the same headers.
+pub const CALLER_TRACE_HEADERS: [&str; 3] = ["traceparent", "tracestate", "baggage"];
+
+async fn remove_caller_trace_context(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    for name in CALLER_TRACE_HEADERS {
+        req.headers_mut().remove(name);
+    }
+    next.run(req).await
 }
 
 async fn mark_never_shared_cached(

@@ -198,7 +198,7 @@ pub use config::{
 };
 pub use connectrpc::ErrorCode;
 pub use credentials::{GithubAppInstallUrl, GithubEnrollment, github_app_not_installed};
-pub use error::{ClientError, ErrorInfo, ValidationError};
+pub use error::{ClientError, ErrorInfo, ValidationError, response_trace_id};
 pub use feedback::{
     FeedbackClient, FeedbackPlacement, SubmitFeedbackRequest, SubmitFeedbackResponse,
 };

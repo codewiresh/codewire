@@ -408,6 +408,18 @@ pub fn inject_http_headers(headers: &mut http::HeaderMap) {
     let _ = headers;
 }
 
+/// The trace id of the exported span this thread is inside, as 32 lowercase
+/// hex digits: the id its log lines carry and the trace store finds. `None`
+/// while export is off, outside an exported span, in a trace the sampler
+/// dropped, and always without the `otel` feature.
+pub fn exported_trace_id() -> Option<String> {
+    #[cfg(feature = "otel")]
+    if export_active() {
+        return otel::exported_span_ids().map(|(trace_id, _)| trace_id.to_string());
+    }
+    None
+}
+
 /// Whether trace export, when it is on, exports a span with this metadata.
 /// Always false without the `otel` feature.
 #[cfg(feature = "otel")]
@@ -1624,6 +1636,152 @@ mod tests {
                 "{traceparent}"
             );
             assert!(traceparent.contains(&child.span_context.span_id().to_string()));
+        }
+
+        /// A response names its request's trace only when that trace is
+        /// exported, an error included: its id is the server span's, never
+        /// a caller's `x-request-id`. A request the sampler drops, a probe,
+        /// and every request while export is off answer without it.
+        #[tokio::test]
+        async fn a_response_names_its_trace_only_when_the_trace_is_exported() {
+            use tower::ServiceExt as _;
+            use tracing_subscriber::layer::SubscriberExt as _;
+
+            let collected = Collected::default();
+            let exporter = super::super::otel::Exporter::with_processor(
+                "orchestration",
+                opentelemetry_sdk::trace::SimpleSpanProcessor::new(collected.clone()),
+            );
+            let subscriber = tracing_subscriber::registry().with(exporter.layers());
+            let _default = tracing::subscriber::set_default(subscriber);
+            opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+            let _export_active = EXPORT_ACTIVE_TESTS.lock().await;
+            EXPORT_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+
+            let app = crate::AppBuilder::new("test")
+                .with_health()
+                .with_routes(axum::Router::new().route(
+                    "/codewire.v1.EnvironmentService/GetEnvironment",
+                    axum::routing::post(|| async { http::StatusCode::NOT_FOUND }),
+                ))
+                .into_router();
+            let call = |traceparent: Option<&str>| {
+                let mut request =
+                    http::Request::post("/codewire.v1.EnvironmentService/GetEnvironment")
+                        .header("x-request-id", "caller-chosen");
+                if let Some(traceparent) = traceparent {
+                    request = request.header("traceparent", traceparent);
+                }
+                app.clone()
+                    .oneshot(request.body(axum::body::Body::empty()).unwrap())
+            };
+            let header = |response: &http::Response<axum::body::Body>| {
+                response
+                    .headers()
+                    .get(crate::http::TRACE_ID_HEADER)
+                    .map(|value| value.to_str().unwrap().to_owned())
+            };
+
+            let failed = call(None).await.unwrap();
+            assert_eq!(failed.status(), http::StatusCode::NOT_FOUND);
+            let named = header(&failed).expect("an exported request names its trace");
+            let unsampled = call(Some(
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+            ))
+            .await
+            .unwrap();
+            assert_eq!(header(&unsampled), None);
+            let probe = app
+                .clone()
+                .oneshot(
+                    http::Request::get("/healthz")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(header(&probe), None);
+            exporter.provider().force_flush().unwrap();
+            let spans = collected.0.lock().unwrap().clone();
+            let names: Vec<&str> = spans.iter().map(|span| span.name.as_ref()).collect();
+            assert_eq!(
+                names,
+                ["POST /codewire.v1.EnvironmentService/GetEnvironment"],
+                "only the first request is exported"
+            );
+            EXPORT_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(header(&call(None).await.unwrap()), None);
+            assert_eq!(named, spans[0].span_context.trace_id().to_string());
+            assert_eq!(named.len(), 32);
+            assert!(
+                named
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            );
+        }
+
+        /// On a listener for outside callers, a caller's `traceparent`,
+        /// `tracestate` and `baggage` reach neither the handler nor the
+        /// span: the request is a new root, and its response names that
+        /// trace, not the caller's.
+        #[tokio::test]
+        async fn an_outside_callers_trace_context_starts_no_trace_of_its_own() {
+            use tower::ServiceExt as _;
+            use tracing_subscriber::layer::SubscriberExt as _;
+
+            let collected = Collected::default();
+            let exporter = super::super::otel::Exporter::with_processor(
+                "orchestration",
+                opentelemetry_sdk::trace::SimpleSpanProcessor::new(collected.clone()),
+            );
+            let subscriber = tracing_subscriber::registry().with(exporter.layers());
+            let _default = tracing::subscriber::set_default(subscriber);
+            opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+            let _export_active = EXPORT_ACTIVE_TESTS.lock().await;
+            EXPORT_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = seen.clone();
+            let app = crate::http::traced_as_outside_callers(axum::Router::new().route(
+                "/codewire.v1.WorkspaceBindingService/RefreshAccess",
+                axum::routing::post(move |headers: http::HeaderMap| {
+                    recorded.lock().unwrap().push(headers);
+                    async { http::StatusCode::FORBIDDEN }
+                }),
+            ));
+            let request = http::Request::post("/codewire.v1.WorkspaceBindingService/RefreshAccess")
+                .header(
+                    "traceparent",
+                    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                )
+                .header("tracestate", "vendor=opaque")
+                .header("baggage", "user=someone,tenant=other")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            exporter.provider().force_flush().unwrap();
+            EXPORT_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+
+            let seen = seen.lock().unwrap().clone();
+            assert_eq!(seen.len(), 1);
+            for name in crate::http::CALLER_TRACE_HEADERS {
+                assert!(!seen[0].contains_key(name), "{name} reached the handler");
+            }
+            let spans = collected.0.lock().unwrap().clone();
+            assert_eq!(spans.len(), 1, "{spans:?}");
+            let server = &spans[0];
+            assert_eq!(server.span_kind, SpanKind::Server);
+            assert_eq!(server.parent_span_id, SpanId::INVALID, "a new root");
+            let callers = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap();
+            assert_ne!(server.span_context.trace_id(), callers);
+            assert!(server.attributes.iter().all(|kv| {
+                let value = kv.value.as_str();
+                !value.contains("someone") && !value.contains("vendor=opaque")
+            }));
+            assert_eq!(
+                response.headers()[crate::http::TRACE_ID_HEADER],
+                server.span_context.trace_id().to_string().as_str()
+            );
         }
 
         /// A streamed response through the real layers: its server span is

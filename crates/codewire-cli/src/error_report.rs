@@ -1,7 +1,8 @@
 //! The one shape of a failed command's error (#4609; `codewire-cli-design`,
 //! "Errors"): `✗` (red at a colour terminal, `x` in ASCII), the error chain
 //! as one line with its first letter capitalised, then, when the error
-//! carries one, a `→` line with the next step. Commands return lowercase
+//! carries one, a `→` line with the next step, and, when a server's answer
+//! named its trace, a dim `trace ID` line (#5633). Commands return lowercase
 //! fragments that compose into the chain and never print `✗` themselves.
 //!
 //! The skill's target, the outermost message alone with the chain under
@@ -10,7 +11,7 @@
 
 use std::fmt;
 
-use crate::output::{Capabilities, OutputMode, Status, Style};
+use crate::output::{Capabilities, OutputMode, Role, Status, Style};
 
 /// The one command or flag that helps, carried by an error to the printer.
 /// Attach it with [`with_next_step`]; it never appears in the sentence.
@@ -91,6 +92,9 @@ pub(crate) fn refused_for_tests(api_key: bool) -> anyhow::Error {
 pub fn report_error(error: &anyhow::Error) {
     if json_requested(std::env::args_os().skip(1)) {
         eprintln!("{error:#}");
+        if let Some(id) = trace_id(error) {
+            eprintln!("trace {id}");
+        }
         return;
     }
     let caps = Capabilities::from_process(OutputMode::Text);
@@ -107,6 +111,17 @@ pub(crate) fn next_step(error: &anyhow::Error) -> Option<String> {
                 .downcast_ref::<CredentialRefused>()
                 .map(|refused| refused.step().to_owned())
         })
+}
+
+/// The id of the trace the server's answer named, when `error` came from
+/// that answer (docs/CONFIGURATION.md, "Tracing"). The refusals the CLI
+/// replaces with its own sentence (a refused sign-in, exhausted credit, an
+/// environment that isn't running) keep none: their error says what to do.
+fn trace_id(error: &anyhow::Error) -> Option<&str> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<codewire_client::ClientError>())
+        .and_then(codewire_client::ClientError::trace_id)
 }
 
 /// `error`'s chain as one sentence, joined by ": ", without its next step.
@@ -142,6 +157,10 @@ fn render(error: &anyhow::Error, style: Style) -> String {
     );
     if let Some(step) = step {
         text.push_str(&format!("{} {step}\n", style.status(Status::Next)));
+    }
+    if let Some(id) = trace_id(error) {
+        text.push_str(&style.paint(Role::Dim, &format!("trace {id}")));
+        text.push('\n');
     }
     text
 }
@@ -216,6 +235,41 @@ mod tests {
             render(&api_key, PLAIN),
             "✗ The API key in CODEWIRE_API_KEY is no longer accepted\n\
              → set CODEWIRE_API_KEY to a current key, or unset it and run cw login\n"
+        );
+    }
+
+    #[test]
+    fn a_server_answer_that_names_its_trace_ends_with_its_id() {
+        let answered = |trace: Option<&str>| {
+            let mut headers = http::HeaderMap::new();
+            if let Some(trace) = trace {
+                headers.insert("x-codewire-trace-id", trace.parse().unwrap());
+            }
+            let error =
+                connectrpc::ConnectError::not_found("environment not found").with_headers(headers);
+            anyhow::Error::from(codewire_client::ClientError::from(error)).context("get walk")
+        };
+        assert_eq!(
+            render(&answered(Some("4bf92f3577b34da6a3ce929d0e0e4736")), PLAIN),
+            "✗ Get walk: environment not found\ntrace 4bf92f3577b34da6a3ce929d0e0e4736\n"
+        );
+        let stepped = with_next_step(answered(Some("4bf92f3577b34da6a3ce929d0e0e4736")), "cw ls");
+        assert_eq!(
+            render(&stepped, PLAIN),
+            "✗ Get walk: environment not found\n→ cw ls\ntrace 4bf92f3577b34da6a3ce929d0e0e4736\n"
+        );
+        let dim = render(
+            &answered(Some("4bf92f3577b34da6a3ce929d0e0e4736")),
+            Style::new(true, Charset::Unicode),
+        );
+        assert!(dim.contains("\u{1b}["), "{dim:?}");
+        assert_eq!(
+            render(&answered(None), PLAIN),
+            "✗ Get walk: environment not found\n"
+        );
+        assert_eq!(
+            render(&anyhow::anyhow!("connection refused"), PLAIN),
+            "✗ Connection refused\n"
         );
     }
 

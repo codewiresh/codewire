@@ -142,7 +142,7 @@ tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"]
 tokio-util = { version = "0.7.18", features = ["codec", "io-util", "rt"] }
 tonic = { version = "0.14.6", features = ["gzip", "tls-native-roots", "tls-ring"] }
 tower = { version = "0.5.3", default-features = false, features = ["balance", "buffer", "filter", "limit", "load-shed", "log", "retry"] }
-tower-http = { version = "0.6.11", features = ["auth", "catch-panic", "cors", "map-response-body", "request-id", "trace", "util"] }
+tower-http = { version = "0.6.11", features = ["auth", "catch-panic", "cors", "map-response-body", "request-id", "set-header", "trace", "util"] }
 tracing = { version = "0.1.44", features = ["log"] }
 tracing-core = { version = "0.1.36" }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "parking_lot"] }
@@ -284,7 +284,7 @@ tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"]
 tokio-util = { version = "0.7.18", features = ["codec", "io-util", "rt"] }
 tonic = { version = "0.14.6", features = ["gzip", "tls-native-roots", "tls-ring"] }
 tower = { version = "0.5.3", default-features = false, features = ["balance", "buffer", "filter", "limit", "load-shed", "log", "retry"] }
-tower-http = { version = "0.6.11", features = ["auth", "catch-panic", "cors", "map-response-body", "request-id", "trace", "util"] }
+tower-http = { version = "0.6.11", features = ["auth", "catch-panic", "cors", "map-response-body", "request-id", "set-header", "trace", "util"] }
 tracing = { version = "0.1.44", features = ["log"] }
 tracing-core = { version = "0.1.36" }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "parking_lot"] }

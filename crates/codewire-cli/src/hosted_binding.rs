@@ -420,10 +420,23 @@ fn validate_access(access: &WorkspaceAccess) -> Result<WorkspaceAccessGrant, Att
 }
 
 fn classify(error: &ConnectError) -> AttemptError {
-    match error.code {
+    let outcome = match error.code {
         ErrorCode::NotFound => AttemptError::NotFound,
         code => AttemptError::Rejected(code),
+    };
+    // The listener names each call's trace, so a refused or failed call's
+    // line leads to it (docs/CONFIGURATION.md, "Tracing"). `not_found` is the
+    // binding's expected wait, called again at once.
+    if outcome != AttemptError::NotFound
+        && let Some(trace_id) = codewire_client::response_trace_id(error.response_headers())
+    {
+        tracing::info!(
+            code = error.code.as_str(),
+            trace_id,
+            "workspace binding call answered with an error"
+        );
     }
+    outcome
 }
 
 /// Call until an accepted binding arrives. `not_found` is called again at

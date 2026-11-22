@@ -648,17 +648,19 @@ statement's text and bound values are never recorded.
 Health probes and metrics scrapes start no trace.
 
 A service continues the trace named in a request's `traceparent`, whoever sent
-it. A deployment's public edge must therefore remove `traceparent` and
-`tracestate` from every request that comes from outside, so each trace starts
-at the edge. Otherwise a caller can keep its own requests out of the traces by
-sending `sampled=0`, or put them under a trace id of its choosing. Calls
-between the services inside the cluster keep their headers, which is how one
-create stays one trace. A service that calls another through the public
-hostname loses its trace link at the edge, like any outside caller. Those two
-headers are every header a service reads a trace from, because the W3C
-trace-context propagator is the only one installed, and a test pins that.
-Before another propagator is installed, its headers are added to the edge's
-list.
+it. A deployment's public edge must therefore remove `traceparent`,
+`tracestate` and `baggage` from every request that comes from outside, so
+each trace starts at the edge. Otherwise a caller can keep its own requests out
+of the traces by sending `sampled=0`, or put them under a trace id of its
+choosing. Calls between the services inside the cluster keep their headers,
+which is how one create stays one trace. A service that calls another through
+the public hostname loses its trace link at the edge, like any outside caller.
+`traceparent` and `tracestate` are every header a service reads a trace from,
+because the W3C trace-context propagator is the only one installed, and a test
+pins that. No service reads `baggage`. The edge still removes it, so a caller's
+key-value pairs could not reach a span or a log line even if a propagator that
+reads them were installed. Before another propagator is installed, its
+headers are added to the edge's list.
 
 A preview host is the one place the edge leaves the two headers alone: a
 request to a user's app is the app's traffic, and its visitors' trace context
@@ -743,3 +745,38 @@ therefore leads to its trace. A line written outside an exported span has
 neither: a background loop's line, a line in a trace the sampler dropped, and
 every line of a service that does not export. While export is off, every line
 is byte for byte what it was.
+
+A request whose span is exported answers with `x-codewire-trace-id`. Its value
+is the trace's id as 32 lowercase hex digits, the same id the request's log
+lines carry. The request layer of every exporting service sets it once the
+handler has answered, and no handler sets it. Some requests
+get no header: one the sampler dropped, a probe or a scrape, and every request
+while export is off. So an id on a response always finds a trace. The id is
+the server's own. A caller's `x-request-id` is echoed back, as before, but it
+is never a trace's id and never goes on a span. Knowing an id grants nothing,
+because the trace store is not public. A missing header tells a caller only
+that its request was not sampled. Nothing that guards the platform depends on
+sampling: audit rows, refusal logs and security alerts are written for every
+request, sampled or not. Tracing is for diagnosis. It is never the record that
+shows an attack.
+
+When a command fails on a server's answer, `cw` prints that answer's trace id.
+The line comes after the error and its next step, reads `trace
+4bf92f3577b34da6a3ce929d0e0e4736`, and is dim at a terminal. It is printed with
+`--local` and `--cloud` alike, and with `--output json`. A failure with no
+answer has no id and prints none, such as a host name that doesn't resolve or a
+timeout before any response. Three refusals print none either, because their
+error already says what to do: a sign-in that is no longer accepted, exhausted
+credit, and an environment that isn't running. Nothing is exported from the
+user's machine. `cw`
+sends no `traceparent`, and the edge would remove one.
+
+The workspace daemon calls `BindWorkspace` and `RefreshAccess` on
+orchestration's workspace-binding listener, port 8087. The daemon runs inside
+a user's environment, so that listener treats it as an outside caller. It
+reads no `traceparent`, `tracestate` or `baggage`. Each call is a server span
+that starts its own trace and answers with `x-codewire-trace-id`. When the
+listener refuses or fails one of the daemon's calls, the daemon logs a line
+with that id; a `not_found` while it waits for its binding is not logged. Each
+of these traces is one call and its statements, so the volume follows binds
+and refreshes.

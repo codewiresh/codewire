@@ -92,6 +92,12 @@ the docs, and nothing on screen is internal.
   as lowercase fragments that compose into the chain, and never print `✗`
   themselves. Until #4609 lands, `main` prints `{err:#}`, the chain joined
   with ": ", and this shape is the target.
+- An error the server answered ends with one dim line, `trace ID`, holding the
+  trace id the answer carried (`x-codewire-trace-id`). A user can quote it in
+  a report. The printer adds it, so commands never print it themselves, and an
+  error with no server answer has none. Once `cw` has `-v` (#4631), each API
+  call's id is written there too. The rule is in `docs/CONFIGURATION.md`,
+  "Tracing" (#5633).
 - Parser errors from unknown commands and flags take the same shape, and
   suggest the nearest command (`did you mean ls?`, #4604).
 - Name the flag or input the user gave, not every flag that could be wrong.

@@ -112,15 +112,19 @@ pub fn max_body_bytes(path: &str) -> usize {
 
 /// The axum application served on the workspace-binding listener: the one
 /// generated service and nothing else. There is no health, metrics, REST,
-/// mesh or gateway route; unknown paths are 404.
+/// mesh or gateway route; unknown paths are 404. The daemon runs inside a
+/// user's environment, so each call is traced as an outside caller's: its
+/// trace context is never read (docs/CONFIGURATION.md, "Tracing").
 pub fn app(router: connectrpc::Router) -> axum::Router {
-    codewire_server_core::connect::connect_unary_router_with_limits(
-        router,
-        connectrpc::Limits::default()
-            .with_max_request_body_size(LISTENER_LIMITS.max_body_bytes)
-            .with_max_message_size(LISTENER_LIMITS.max_body_bytes),
+    codewire_server_core::http::traced_as_outside_callers(
+        codewire_server_core::connect::connect_unary_router_with_limits(
+            router,
+            connectrpc::Limits::default()
+                .with_max_request_body_size(LISTENER_LIMITS.max_body_bytes)
+                .with_max_message_size(LISTENER_LIMITS.max_body_bytes),
+        )
+        .layer(axum::middleware::from_fn(per_method_body_limit)),
     )
-    .layer(axum::middleware::from_fn(per_method_body_limit))
 }
 
 /// Refuses a body over its method's limit before routing. The listener has
