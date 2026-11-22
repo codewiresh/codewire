@@ -265,6 +265,38 @@ impl NetworkPolicyStore {
         Self::from_connection(connection)
     }
 
+    /// Open the store under `root` to read it, without the supervisor:
+    /// read-only and query-only, never created, never upgraded and never
+    /// waited on. `None` when the root holds no store. A store this cw would
+    /// first have to upgrade is refused, never read.
+    pub fn open_read_only(root: &Path) -> Result<Option<Self>, NetworkPolicyStoreError> {
+        let root = match PrivateRoot::open(root) {
+            Ok(root) => root,
+            Err(error) if path_error_is_not_found(&error) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let relative = Path::new(DATABASE_FILE);
+        let identity = match root.open_regular(relative, false, None, false, Some(0o600)) {
+            Ok(opened) => opened.identity().clone(),
+            Err(error) if path_error_is_not_found(&error) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let connection = Connection::open_with_flags(root.path().join(relative), flags)?;
+        connection.busy_timeout(std::time::Duration::ZERO)?;
+        connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+        connection.pragma_update(None, "query_only", true)?;
+        connection.pragma_update(None, "trusted_schema", false)?;
+        validate_schema(&connection)?;
+        let reopened = root.open_regular(relative, false, None, false, Some(0o600))?;
+        if reopened.identity() != &identity {
+            return Err(NetworkPolicyStoreError::DatabaseIdentityChanged);
+        }
+        Ok(Some(Self {
+            connection: Mutex::new(connection),
+        }))
+    }
+
     /// Create the schema in a database that has none, then validate it. The
     /// decision reads the database inside the transaction that creates it, so
     /// a first creation interrupted at any point is rolled back by SQLite and
@@ -776,6 +808,56 @@ mod tests {
             .iter()
             .map(|rule| (rule.target().to_string(), rule.ports().to_vec()))
             .collect()
+    }
+
+    /// A read without the supervisor creates nothing and writes nothing
+    /// (CLI-PARITY.md, P3): no store is `None` and leaves none behind; a
+    /// stored policy is listed, and the file is unchanged.
+    #[test]
+    fn a_read_only_open_lists_what_is_stored_and_creates_nothing() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.path().join(DATABASE_FILE);
+        assert!(
+            NetworkPolicyStore::open_read_only(directory.path())
+                .unwrap()
+                .is_none()
+        );
+        assert!(!path.exists(), "a read never creates the store");
+        assert!(
+            NetworkPolicyStore::open_read_only(&directory.path().join("absent"))
+                .unwrap()
+                .is_none()
+        );
+
+        let store =
+            NetworkPolicyStore::open(&PrivateRoot::open(directory.path()).unwrap()).unwrap();
+        store
+            .create(
+                &name("work"),
+                &PolicyBase::Locked,
+                vec![rule("github.com", &[443])],
+            )
+            .unwrap();
+        drop(store);
+        let before = std::fs::read(&path).unwrap();
+        let read = NetworkPolicyStore::open_read_only(directory.path())
+            .unwrap()
+            .expect("the stored policy is read");
+        let listed = read.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name.to_string(), "work");
+        assert!(
+            read.create(&name("other"), &PolicyBase::Locked, Vec::new())
+                .is_err()
+        );
+        drop(read);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a read writes nothing"
+        );
     }
 
     /// What a revision of these rules is, byte for byte. The platform store

@@ -19,6 +19,11 @@ use codewire_workload_secrets::{
 use std::io::{BufRead as _, Read as _};
 use zeroize::Zeroizing;
 
+mod missing;
+pub(crate) use missing::{SecretScope, cloud_deleted};
+#[cfg(test)]
+mod project_name_tests;
+
 #[derive(Debug)]
 pub(crate) enum SecretOperation {
     User(ScopedSecretCommand),
@@ -208,12 +213,16 @@ pub(super) async fn secret_project_choices(
         .collect())
 }
 
+/// A new secret project's name, checked once for both stores before either
+/// sees it (docs/dev/CLI-PARITY.md, S4).
 pub(crate) fn parse_secret_project_name(value: &str) -> Result<String, String> {
     let reference =
         codewire_project::StorageReference::project(value).map_err(|error| error.to_string())?;
     if reference.placement.is_some() || reference.selector.starts_with("id:") {
         return Err("project creation requires a bare project name".to_owned());
     }
+    codewire_workload_secrets::validate_secret_project_name(value)
+        .map_err(|error| error.to_string())?;
     Ok(value.to_owned())
 }
 
@@ -493,10 +502,11 @@ async fn local_user_command(
         }
         ScopedSecretCommand::Delete(args) => {
             let key = trimmed_required(&args.key, "secret key")?.to_owned();
-            client
-                .delete_user_workload_secret(key.clone())
-                .await
-                .context("delete local user secret")?;
+            missing::local_deleted(
+                client.delete_user_workload_secret(key.clone()).await,
+                SecretScope::User,
+                &key,
+            )?;
             eprintln!("Local user secret {key} deleted.");
             Ok(())
         }
@@ -619,10 +629,13 @@ async fn local_project_key_command(
         }
         ScopedSecretCommand::Delete(args) => {
             let key = trimmed_required(&args.key, "secret key")?.to_owned();
-            client
-                .delete_project_workload_secret(project.id, key.clone())
-                .await
-                .context("delete local project secret")?;
+            missing::local_deleted(
+                client
+                    .delete_project_workload_secret(project.id, key.clone())
+                    .await,
+                SecretScope::Project(&project.name),
+                &key,
+            )?;
             eprintln!(
                 "Local secret {key} deleted from project {:?}.",
                 project.name

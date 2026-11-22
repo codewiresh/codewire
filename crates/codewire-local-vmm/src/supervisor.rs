@@ -17,7 +17,7 @@ mod halt;
 use halt::{HaltReason, fatal_drain_error};
 mod local_https;
 mod metadata;
-mod network_policies;
+pub mod network_policies;
 mod operation_log;
 mod retained_images;
 mod runner_report;

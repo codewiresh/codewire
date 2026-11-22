@@ -8,6 +8,13 @@ fn main() {
     let fatal_vm_init_failure =
         is_fatal_vm_init_failure(std::env::args_os().nth(1).as_deref(), std::process::id());
     if let Err(error) = entrypoint() {
+        #[cfg(target_os = "linux")]
+        if let Some(failed) =
+            error.downcast_ref::<codewire_vmm_guest_probe::exec_failure::ExecFailed>()
+        {
+            eprintln!("{failed}");
+            std::process::exit(failed.exit_code());
+        }
         eprintln!("codewire guest probe failed: {error:#}");
         #[cfg(target_os = "linux")]
         if fatal_vm_init_failure {

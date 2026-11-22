@@ -28,6 +28,8 @@ mod setup;
 mod skill_snapshot;
 
 #[cfg(target_os = "linux")]
+pub mod exec_failure;
+#[cfg(target_os = "linux")]
 pub mod guest;
 #[cfg(target_os = "linux")]
 mod rtc_clock;

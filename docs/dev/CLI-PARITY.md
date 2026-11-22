@@ -10,7 +10,7 @@ A gap is fixed with one implementation that both placements call, where only
 the store differs: the local credential authority (the operating system's
 protected store) or the platform credential service. Never a second copy.
 
-## Where it stands (2026-11-21)
+## Where it stands (2026-11-22)
 
 The second pass (2026-11-21, `cw` v0.4.26) audited every other command group:
 secrets, network policy, create and run, lifecycle, inventory, sessions, ports
@@ -18,7 +18,12 @@ and previews, snapshots and checkpoints, setup and health, and billing. Each
 has its own table and gap list below the credentials ones; two differences
 that run through all of them are under "Across groups". The organizations,
 platform-only and local-only groups are classified at the end, not walked.
-Nothing in this pass is fixed yet.
+Since then (2026-11-22), not yet observed on a surface:
+
+- **Same in both now:** R1 (242addf606), S3 (19a51afe40), K3 (2e2960920c), S4
+  (ff0d91d276), P3 (07ad66bb3f), L1 (d3505ab915), N1's missing program
+  (c9b80bf7c8) and L7 (bffcb26313).
+- **Open:** every other gap below, and N1's `exec -t` blank line.
 
 The credentials tables are the audit as it ran on 2026-11-15. Since then:
 
@@ -400,13 +405,13 @@ store the platform's secret service, and each branch prints its own results.
 | `set` a key that isn't a variable name | Parser error, exit 2 | Same | same |
 | `rename`, `delete` | `Local user secret A renamed to B.`, `… deleted.` | `Secret A renamed to B.`, `… deleted.` | **Gap S1** |
 | `rename` a key that isn't there | Raw store error: `Rename local user secret: code: 'Some requested entity was not found', message: "local credential record was not found"` | "Rename user secret: secret not found" | **Gap S2** |
-| `delete` a key that isn't there | The raw store error, exit 1 | `Secret KEY deleted.`, exit 0, though nothing was | **Gap S3** |
+| `delete` a key that isn't there | "There is no local user secret KEY, so nothing was deleted", `→ cw --local secrets --user list`, exit 1 | The same, `cloud`; the service answers NotFound | Same in both now (19a51afe40); was S3: the raw store error locally, `Secret KEY deleted.` and exit 0 in the cloud |
 | `--organization` (list, set, delete) | "Organization workload secrets are unsupported locally; use --cloud", exit 1 | Works | intended: a local store has one user and no organization. The message is plain, but "workload secrets" is an internal word; help says "application secrets" |
 | Guided `set` at a terminal | "Where should this secret live?": A project, Your account | Same, plus Organization | intended, as above |
 | `projects list`, nothing there | "No secret projects found." | Same | same |
 | `projects create NAME` | `Local secret project "NAME" created (ID).` | `Secret project "NAME" created. (id: ID)` | **Gap S1** |
 | `projects create` a name in use | Raw store error ending "local credential record already exists" | "Create secret project: secret project with this name already exists" | **Gap S2** |
-| `projects create 'bad name'` | Refused, with the raw "invalid local workload-secret request" | Creates a project named `bad name` | **Gap S4** |
+| `projects create 'bad name'` | Refused before the store: "a secret project name starts with a letter or digit and has only letters, digits, '-', '_' and '.', at most 64 characters" | The same, before the store; the service refuses the same names | Same in both now (ff0d91d276); was S4: the raw store error locally, a project named `bad name` in the cloud |
 | `projects list`, text and JSON | NAME, SECRETS, CREATED. JSON has `org_id: ""` and `secret_count` | Same columns. JSON leaves out `secret_count` when it is 0 | **Gap S1** |
 | A project that doesn't exist | "Local secret project was not found" | "Platform secret project was not found in the selected organization" | **Gap S2** (neither names it), A1 |
 | `--project P set`, `list`, `delete` | `Local secret KEY set in project "P".` | `Secret KEY set in project "P".` | **Gap S1** |
@@ -425,9 +430,11 @@ store the platform's secret service, and each branch prints its own results.
   lists them. No store error text reaches the user.
 - **S3.** One rule, in the shared layer, for deleting a key that isn't there:
   say nothing was deleted (the local answer, in words), never "deleted".
+  Same in both now (19a51afe40).
 - **S4.** One project-name check before either store
   (`parse_secret_project_name`, the local grammar), and the service refuses the
-  same names.
+  same names. Same in both now (ff0d91d276): the grammar is
+  `codewire_workload_secrets::validate_secret_project_name`.
 
 ## Network policy (`cw policy`)
 
@@ -446,7 +453,7 @@ cloud rows are *read, not run*.
 | Any command without `--local` or `--cloud` | Uses this computer's store. A text `list` first says "Policies on this computer; your organization's are in `cw --cloud policy ls`:" | — | intended: scripts written before organization policies keep their meaning (#4594) |
 | A stored-policy command on Dev | — | "Organization network policies are not enabled on this deployment; keep the policy on this host with `cw --local policy`", exit 1; the same sentence under `--output json` | intended on this deployment; plain |
 | `list` | `open` and `locked`, then `NAME  rev N · TARGET (PORTS), …` per policy | Same renderer (*read, not run*) | same |
-| A local `list`, `--local` or none | Starts the local VM supervisor, which keeps running after the command | Starts nothing | **Gap P3** |
+| A local `list`, `--local` or none | Reads the store without the supervisor; none stored lists `open` and `locked`. Starts nothing | Starts nothing | Same in both now (07ad66bb3f); was P3: it started the supervisor and left it running |
 | `create NAME --allow …` | `Created network policy NAME · rev 1` and its rules. JSON: id, `reference` (`local:id:…`), revision, digest, rules, `enforced_in` | Same renderer, then "Stored. Hosted sandboxes don't enforce network policies yet, so this changes nothing a sandbox can reach." (*read, not run*) | same output; enforcement is **P1** |
 | `create` with a private range or a bad pattern | "Invalid allow target: the range includes protected addresses"; "… not a host name, a *.domain pattern or a CIDR" | Same, before the store | same |
 | `create` without NAME, no terminal | "Missing required input; name the policy: `cw --local policy create NAME` …" | Same, naming `--cloud` | same |
@@ -466,7 +473,8 @@ cloud rows are *read, not run*.
   from the store's refusal codes to the local sentences ("no cloud network
   policy is named X", "X is selected by ENV").
 - **P3.** A local policy read starts the local VM supervisor and leaves it
-  running. A read starts nothing, as the cloud's doesn't.
+  running. A read starts nothing, as the cloud's doesn't. Same in both now
+  (07ad66bb3f).
 - **P4.** The disabled-deployment refusal has three wordings (`policy`,
   `create --policy`, `update --policy`). One mapping of
   `NETWORK_POLICIES_DISABLED`, with the next step, used by all three.
@@ -484,7 +492,7 @@ copies (`native/sources.rs` and `environment/sources.rs`). `run`, `init` and
 | `create --name N --yes`, result | `✓ Environment N created · local VM`, the size, Credentials, Secrets, Network, `→ cw --local shell N` | The same lines, `cloud VM` | same |
 | Default size | 2 vCPU · 4 GiB RAM · 20 GiB disk | 2 vCPU · 8 GiB RAM · 80 GiB disk | intended: a local VM uses this computer's memory and disk |
 | Progress | Preparing sources, Checking the VM runtime, Preparing the image, Starting the VM, Booting the workspace. The first create downloads the runtime (219 MiB) and says so | Creating sandbox, Waiting for SSH access, Waiting for the workspace daemon, Configuring environment | intended: different machinery, each in the user's terms |
-| A name already in use | Refused before anything: `local environment "N" already exists (remove it with cw --local rm N or choose another --name)` | Creates another environment with the same name. Every later command by name then fails: `Multiple environments named "N", use ID: …` (three were made; each was removed by ID) | **Gap R1** |
+| A name already in use | Refused before anything: `local environment "N" already exists (remove it with cw --local rm N or choose another --name)` | Refused by the service, under the organization lock, in the same sentence: `cloud environment "N" already exists (remove it with cw --cloud rm N or choose another --name)`. A removed environment's name is free | Same in both now (242addf606); was R1: the cloud created a second `N` |
 | Without `--yes`, no terminal | Creates when there is nothing to confirm; with a secret project, refuses: "native source selection requires --yes …" (*read*) | Created, with nothing to confirm | same rule, in two copies (R4) |
 | `-e KEY=VALUE` | "Native local preview does not yet support: --env", exit 1 | Taken; the variable reaches `exec` | **Gap R2** |
 | `--cpu lots` | After the configuration lines: `Invalid native CPU quantity "lots"; use a core count such as 2: invalid digit found in string` | Before anything: `Invalid CPU quantity "lots"; use values such as 500m, 0.5, or 4` | **Gap R3** |
@@ -509,7 +517,9 @@ copies (`native/sources.rs` and `environment/sources.rs`). `run`, `init` and
 
 - **R1.** The service refuses the name of a live environment in the
   organization, with the local sentence, and the CLI's create checks it the
-  same way for both.
+  same way for both. Same in both now (242addf606): the create checks the name
+  under the organization row lock its quota check already takes, so no
+  migration was needed.
 - **R2.** A local VM takes environment values through the same
   `ProjectSpec.environment` the cloud create sends.
 - **R3.** One resource parser for both, run before the configuration is
@@ -541,9 +551,9 @@ for cloud environments", and `prune --local` goes to its own handler
 | Command | Local | Cloud | Same or gap |
 | --- | --- | --- | --- |
 | `stop ENV` | `✓ Environment N stopped`, `local VM · environment disk retained`, `→ cw --local start N` | `✓ Environment N stopped`, `cloud VM`, `→ cw --cloud start N` | same |
-| `stop` a stopped environment | Prints the same result again, exit 0 | "Stop N: environment must be running to stop", exit 1 | **Gap L1** |
+| `stop` a stopped environment | `Environment N is already stopped.`, exit 0 | Same | Same in both now (d3505ab915); was L1: the whole result again locally, "must be running to stop" and exit 1 in the cloud |
 | `start ENV` | `✓ Environment N started · local VM` with its progress | The same shape; the progress includes "desired state -> started" | same (the server's words are a CLI-design item) |
-| `start` a running environment; `start --output json` | Starts again, exit 0; JSON is the `info` record | Prints the plan, then "Start environment: environment must be stopped, pending, or errored to start", exit 1 | **Gap L1** |
+| `start` a running environment; `start --output json` | `Environment N is already running.`, exit 0; JSON is the `info` record | The same line; JSON `{"status": "running"}`, as a finished start | Same in both now (d3505ab915); was L1: a second start locally, the plan then a refusal and exit 1 in the cloud |
 | `restart ENV` | `✓ Environment N restarted · local VM`, about 13 s | "Restart is supported only for native local environments" | **Gap L2**, A1 |
 | `extend ENV` | "`cw extend` is available only for cloud environments" | `Environment N: ttl_extended (1 hours added).` | intended: a local VM has no time to live. The cloud's result shows the state word `ttl_extended` |
 | `protect`, `unprotect` | "`cw protect` is available only for cloud environments"; `rm --yes` removed the VM at once | `Environment N: protected.`, JSON `{"status": "protected"}`; `rm --yes` is then refused: "Environment N is protected, so nothing was removed; remove the protection first with `cw --cloud unprotect N`" | **Gap L3** |
@@ -552,13 +562,14 @@ for cloud environments", and `prune --local` goes to its own handler
 | `rm --yes` | `✓ Environment N removed`, `local VM · environment disk removed`, `→ cw ls` | `✓ Removal started: N`, `cloud VM · state: destroying`, `→ cw --cloud ls` | intended: a cloud removal finishes after the command. **Gap L4** for the wording |
 | `rm` a missing environment | `Local environment "N" not found` | `Platform environment "N" not found` | A1 |
 | `prune` | Frees the workspace images kept after the last VM: `Images kept for the next local VM: …`, `Would free 1.9 GiB (dry run).` | Deletes environments stuck in error, creating or pending: "No environments to prune." | **Gap L5** |
-| `prune`, `nuke` without `--yes`, no terminal (*read, not run*) | `prune` reads the answer from stdin; at end of input it prints "Aborted." and exits 0 | The same for `prune`; `nuke` reads its typed confirmation the same way | same, and both break the rule that a destructive command without a terminal fails and names `--yes` |
+| `prune`, `nuke` without `--yes`, no terminal | `prune --local` refuses at once: "nothing was pruned: `cw prune` asks first, and there is no terminal to ask at; add `--yes` to prune", exit 1 | The same for `prune`, and for `nuke` ("nothing was nuked …") | Same in both now, and by the rule (bffcb26313); was L7: both read the answer from stdin and exited 0 at end of input |
 | `nuke` | "`cw nuke` is available only for cloud environments" | Deletes every environment in the organization after a typed confirmation (run once, with none there: "No environments to nuke.") | **Gap L6** |
 
 ### The gaps
 
 - **L1.** One rule in the shared lifecycle code: stopping a stopped
   environment, or starting a running one, says it already is, and exits 0.
+  Same in both now (d3505ab915).
 - **L2.** `cw restart ENV` restarts a cloud environment too, as a stop and a
   start through the same lifecycle path.
 - **L3.** Deletion protection is an environment setting both stores keep, and
@@ -569,6 +580,9 @@ for cloud environments", and `prune --local` goes to its own handler
   error is pruned too, and the kept images move to their own flag.
 - **L6.** `nuke --local` removes every local VM, with the same typed
   confirmation.
+- **L7.** `prune` and `nuke` without `--yes` and without a terminal fail at
+  once and name `--yes`, as `rm` does. Same in both now (bffcb26313); it changes
+  scripted use, so it ships with a release note.
 
 ## Inventory (`ls`, `info`, `use`, `current`)
 
@@ -611,7 +625,7 @@ once after a restart had ended them.
 | Command | Local | Cloud | Same or gap |
 | --- | --- | --- | --- |
 | `exec --in ENV -- CMD`: output, exit status, `-e`, `-w`, stdin, the selected environment, an option after the command | Same results and refusals | Same | same |
-| `exec` a program that doesn't exist | "codewire guest probe failed: execute workspace session command: No such file or directory (os error 2)", exit 1 | "cw: 1: exec: definitely-not-a-command: not found", exit 127 | **Gap N1** |
+| `exec` a program that doesn't exist | "definitely-not-a-command: command not found", exit 127 | "cw: 1: exec: definitely-not-a-command: not found", exit 127 | Same in both now (c9b80bf7c8); was N1: "guest probe failed" and exit 1 locally |
 | `exec -t -- tty` | A blank line, then `/dev/pts/0` | `/dev/pts/0` | **Gap N1** |
 | `exec`, `logs`, `msg` in a stopped environment | "Failed_precondition: local environment is not in the required state"; "Local environment is not in the required state" | "Cloud environment N is stopped", `→ cw --cloud start N`; for `msg` "The environment isn't running" | **Gap N2** |
 | `shell ENV` at a terminal | A login shell; its exit status is cw's | The same, plus `via direct UDP` | same |
@@ -634,6 +648,7 @@ once after a restart had ended them.
 
 - **N1.** `exec` behaves as `ssh HOST COMMAND` in both: a missing program
   exits 127 with the shell's message, and `-t` adds nothing to the output.
+  The missing program is the same in both now (c9b80bf7c8); `-t` is open.
 - **N2.** One refusal for a stopped environment in every session command and
   `ls ENV`: "N is stopped", `→ cw --PLACEMENT start N`. No
   `Failed_precondition` or "required state".
@@ -695,7 +710,7 @@ results.
 | `snapshot ls` | NAME, SOURCE, CREATED (RFC 3339), DISKS, IMAGE, MODE | ID, STATE, SIZE, NAME | **Gap K1** |
 | `snapshot inspect`, text and JSON | Source by name, created, consistency, resources, each disk, what it holds, direct mounts, removed sign-ins; JSON the same | ID, State, Source (an ID), Size; JSON id, name, source_environment_id, state, size_bytes, location | **Gap K1**, A2 |
 | `snapshot inspect`, `rm` of a missing snapshot | "no local snapshot is named S; list them with `cw snapshot ls`" | "No snapshot named S" | **Gap K2** |
-| `snapshot rm S` | `Removed snapshot S; …`; again: refused | `Removing snapshot S; …`; again, while it is still being deleted: the same line, exit 0 | **Gap K3** |
+| `snapshot rm S` | `Removed snapshot S; …`; again: "no local snapshot is named S; list them with `cw snapshot ls`" | `Removing snapshot S; …`; again, while it is still being deleted: "no cloud snapshot is named S; list them with `cw --cloud snapshot ls`", exit 1 | Same in both now (2e2960920c); was K3: the cloud's second `rm` printed the same line and exited 0 |
 | `create --snapshot S` | Refuses `--no-file` and `--no-profile`; a snapshot of a VM that mounted a folder needs `--share-mounts` | Takes both flags; the new environment gets the default size, not the source's | **Gap K4**; `--share-mounts` is intended: only a local VM mounts this computer's folders |
 | `checkpoint create`, `ls`, `inspect`, `restore`, `rm` | Work on Linux. `restore` of a running VM without `--yes` refuses and names it | "VM checkpoints are local only for now; cloud environments cannot be checkpointed yet", exit 1, `ls` included | intended: a feature only local VMs have (the Mac is #4654); plain. An empty `ls` should still exit 0 |
 
@@ -707,7 +722,7 @@ results.
 - **K2.** One set of snapshot refusals, from the local sentences, which name
   the next command.
 - **K3.** One rule for removing a snapshot that is already gone or going, as
-  S3.
+  S3. Same in both now (2e2960920c).
 - **K4.** `create --snapshot` takes the same flags in both and keeps the
   source's size in both.
 

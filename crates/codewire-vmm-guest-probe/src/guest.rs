@@ -2362,7 +2362,7 @@ pub fn run_workspace_exec(command: Vec<OsString>) -> Result<()> {
         .collect::<Vec<_>>();
     let result = unsafe { libc::execvp(arguments[0].as_ptr(), pointers.as_ptr()) };
     debug_assert_eq!(result, -1);
-    Err(io::Error::last_os_error()).context("execute workspace session command")
+    Err(crate::exec_failure::ExecFailed::last_os_error(&command[0]).into())
 }
 
 pub fn find_disk_by_serial(

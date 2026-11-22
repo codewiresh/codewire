@@ -279,6 +279,24 @@ impl ResultBlock {
     }
 }
 
+/// The state a stop or a start asked for, found already.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Already {
+    Stopped,
+    Running,
+}
+
+/// What a stop of a stopped environment, or a start of a running one, says
+/// in both placements: one plain line. The environment is as asked, so the
+/// command exits 0 (docs/dev/CLI-PARITY.md, L1).
+pub(crate) fn already_line(name: &str, already: Already) -> String {
+    let state = match already {
+        Already::Stopped => "stopped",
+        Already::Running => "running",
+    };
+    format!("Environment {name} is already {state}.\n")
+}
+
 /// A lifecycle wait that Ctrl-C ended. Its text is the one line that says
 /// what continues; `cw` exits 130, as a shell reports an interrupted process.
 #[derive(Debug)]
@@ -388,6 +406,18 @@ mod tests {
     use crate::output::Charset;
 
     const PLAIN: Style = Style::new(false, Charset::Unicode);
+
+    #[test]
+    fn a_stop_or_start_already_done_says_so_in_one_line() {
+        assert_eq!(
+            already_line("app", Already::Stopped),
+            "Environment app is already stopped.\n"
+        );
+        assert_eq!(
+            already_line("app", Already::Running),
+            "Environment app is already running.\n"
+        );
+    }
 
     #[test]
     fn next_command_names_placement_and_environment() {

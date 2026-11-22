@@ -114,6 +114,32 @@ pub fn validate_workload_secret_key(key: &str) -> Result<(), WorkloadSecretCodec
     Ok(())
 }
 
+/// The longest secret project name.
+pub const MAX_SECRET_PROJECT_NAME_BYTES: usize = 64;
+
+/// A secret project name outside the one grammar both stores keep.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[error(
+    "a secret project name starts with a letter or digit and has only letters, digits, '-', '_' and '.', at most 64 characters"
+)]
+pub struct InvalidSecretProjectName;
+
+/// Validates a secret project name: the grammar the local store has always
+/// kept, which `cw` checks before either store and the platform enforces too
+/// (docs/dev/CLI-PARITY.md, S4).
+pub fn validate_secret_project_name(name: &str) -> Result<(), InvalidSecretProjectName> {
+    let mut bytes = name.bytes();
+    if name.len() > MAX_SECRET_PROJECT_NAME_BYTES
+        || !bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(InvalidSecretProjectName);
+    }
+    Ok(())
+}
+
 /// Validates one workload-secret value without rendering or retaining it.
 pub fn validate_workload_secret_value(value: &[u8]) -> Result<(), WorkloadSecretCodecError> {
     if value.is_empty()
@@ -141,6 +167,30 @@ pub enum WorkloadSecretCodecError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_project_names_use_the_local_grammar() {
+        for valid in ["web", "Web-2", "app_1.prod", "9lives", &"a".repeat(64)] {
+            assert_eq!(validate_secret_project_name(valid), Ok(()), "{valid}");
+        }
+        for invalid in [
+            "",
+            "bad name",
+            "-web",
+            ".web",
+            "_web",
+            "web/prod",
+            "web:prod",
+            "café",
+            &"a".repeat(65),
+        ] {
+            assert_eq!(
+                validate_secret_project_name(invalid),
+                Err(InvalidSecretProjectName),
+                "{invalid:?}"
+            );
+        }
+    }
 
     #[test]
     fn workload_secret_key_validation_uses_one_canonical_grammar() {

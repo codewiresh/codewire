@@ -104,6 +104,18 @@ pub(super) fn list(store: &NetworkPolicyStore) -> Result<v1::ListNetworkPolicies
     })
 }
 
+/// The policies stored under `root`, read without starting or asking a
+/// supervisor, as the supervisor lists them; `None` when none were ever
+/// stored. A read such as `cw policy ls` starts nothing (CLI-PARITY.md, P3).
+pub fn read_network_policies(
+    root: &std::path::Path,
+) -> Result<Option<Vec<v1::NetworkPolicy>>, NetworkPolicyStoreError> {
+    let Some(store) = NetworkPolicyStore::open_read_only(root)? else {
+        return Ok(None);
+    };
+    Ok(Some(store.list()?.iter().map(policy_proto).collect()))
+}
+
 pub(super) fn get(
     store: &NetworkPolicyStore,
     request: v1::GetNetworkPolicyRequest,

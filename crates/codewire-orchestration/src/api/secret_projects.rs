@@ -97,6 +97,8 @@ pub(crate) async fn create_secret_project_core(
     if name.is_empty() {
         return Err(AppError::BadRequest("name is required".into()));
     }
+    codewire_workload_secrets::validate_secret_project_name(name)
+        .map_err(|error| AppError::BadRequest(error.to_string().into()))?;
 
     run_organization_database_mutation(&state.pool, org_id, async {
         let row = sqlx::query(
@@ -324,12 +326,12 @@ pub(crate) async fn delete_project_secret_core(
     let project = get_project(state, project_id, org_id).await?;
 
     run_organization_tenant_secret_mutation(&state.pool, org_id, async {
-        state
+        let deleted = state
             .secrets
             .delete_secret_at_path(&secret_project_path(org_id, &project.id), key)
             .await
             .map_err(|error| ambiguous_secret_provider_error(error, "failed to delete secret"))?;
-        Ok(())
+        super::secrets::deleted_or_not_found(deleted)
     })
     .await?;
 

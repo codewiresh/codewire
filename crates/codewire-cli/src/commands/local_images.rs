@@ -9,7 +9,7 @@ use anyhow::Context as _;
 use codewire_local_vmm::control::v1;
 
 use super::EnvPruneArgs;
-use super::collaboration::prompt_confirm_default_no;
+use super::collaboration::{BulkDeletion, confirm_bulk_deletion};
 use super::native_client;
 use super::snapshot::gib;
 
@@ -28,7 +28,7 @@ pub(super) async fn prune(args: EnvPruneArgs) -> anyhow::Result<()> {
         println!("Would free {} (dry run).", gib(report.reclaimable_bytes));
         return Ok(());
     }
-    if !args.yes && !prompt_confirm_default_no("Delete the retained images?")? {
+    if !confirm_bulk_deletion(BulkDeletion::Prune, "Delete the retained images?", args.yes)? {
         println!("Aborted.");
         return Ok(());
     }

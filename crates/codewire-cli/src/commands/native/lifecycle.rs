@@ -6,8 +6,9 @@ use codewire_project::{ProjectSpec, StoragePlacement};
 
 use super::*;
 use crate::commands::lifecycle_output::{
-    InterruptNotice, ResultBlock, bounded, credential_ref, environment_command, exact_reference_id,
-    location_label, next_shell_command, print_context, print_summary, secret_refs,
+    Already, InterruptNotice, ResultBlock, already_line, bounded, credential_ref,
+    environment_command, exact_reference_id, location_label, next_shell_command, print_context,
+    print_summary, secret_refs,
 };
 use crate::output::{
     Allocation, Capabilities, LifecycleSummary, MeshPlacement, NetworkRef, Outcome, SourceRef,
@@ -338,6 +339,9 @@ pub(crate) async fn start_native_environment(
     let caps = crate::commands::lifecycle_output::capabilities(output);
     let mut client = native_boot_client().await?;
     let environment = prepare_native_start(&mut client, name).await?;
+    if environment.state == v1::EnvironmentState::Running as i32 {
+        return print_already(&environment, Already::Running, output);
+    }
     let secrets = if caps.is_machine() {
         SourceRef::None
     } else {
@@ -561,6 +565,9 @@ pub(crate) async fn stop_native_environment(
     let caps = crate::commands::lifecycle_output::capabilities(output);
     let mut client = native_client().await?;
     let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
+    if environment.state == v1::EnvironmentState::Stopped as i32 {
+        return print_already(&environment, Already::Stopped, output);
+    }
     let progress = NativeProgress::new(&caps).interruptible(
         &caps,
         InterruptNotice::new(VmLocation::Local, "stop", &environment.name),
@@ -587,6 +594,28 @@ pub(crate) async fn stop_native_environment(
         OutputFormat::Json => print_native_environment(&stopped, output),
         OutputFormat::Text => {
             stop_result(&stopped).print(&caps);
+            Ok(())
+        }
+    }
+}
+
+/// A stop or start that found the environment as asked: the one line both
+/// placements print, and in JSON the environment, as a finished one prints.
+fn print_already(
+    environment: &v1::Environment,
+    already: Already,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    match output {
+        OutputFormat::Json => print_native_environment(environment, output),
+        OutputFormat::Text => {
+            print!(
+                "{}",
+                already_line(
+                    &crate::commands::progress::terminal_text(&environment.name),
+                    already
+                )
+            );
             Ok(())
         }
     }

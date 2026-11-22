@@ -143,10 +143,12 @@ impl NativeSupervisorClient {
         let operation = match self.inner.create_environment(request).await {
             Ok(response) => response.into_inner(),
             Err(status) if status.code() == tonic::Code::AlreadyExists => {
-                return Err(Status::already_exists(format!(
-                    "{} (remove it with `cw --local rm {name}` or choose another --name)",
-                    status.message()
-                )));
+                return Err(Status::already_exists(
+                    codewire_project::environment_name_taken(
+                        codewire_project::EnvironmentPlacement::Local,
+                        &name,
+                    ),
+                ));
             }
             Err(status) => return Err(status),
         };

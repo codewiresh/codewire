@@ -28,8 +28,6 @@ use crate::{
     MaterialState, database_error, map_insert_error, unix_millis,
 };
 
-const MAX_SECRET_PROJECT_NAME_BYTES: usize = 64;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkloadSecretMetadata {
     pub key: String,
@@ -900,17 +898,8 @@ fn validate_selection(selection: &WorkloadSecretSelection) -> Result<(), LocalCr
 }
 
 fn validate_project_name(name: &str) -> Result<(), LocalCredentialError> {
-    let mut bytes = name.bytes();
-    if name.is_empty()
-        || name.len() > MAX_SECRET_PROJECT_NAME_BYTES
-        || !bytes
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphanumeric())
-        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        return Err(LocalCredentialError::InvalidWorkloadSecret);
-    }
-    Ok(())
+    codewire_workload_secrets::validate_secret_project_name(name)
+        .map_err(|_| LocalCredentialError::InvalidWorkloadSecret)
 }
 
 fn validate_secret_key(key: &str) -> Result<(), LocalCredentialError> {

@@ -219,6 +219,9 @@ async fn handle_local_policy_command(
 ) -> anyhow::Result<()> {
     use codewire_local_vmm::control::v1;
 
+    if let PolicyCommand::List(args) = &command {
+        return list_local_policies(args.output).await;
+    }
     let mut client = native_client().await?;
     let status = |action: &'static str| {
         move |status: tonic::Status| anyhow::anyhow!("{action}: {}", status.message())
@@ -306,13 +309,7 @@ async fn handle_local_policy_command(
                 .map_err(status("create the network policy"))?;
             print_policy("Created", &created, args.output)
         }
-        PolicyCommand::List(args) => {
-            let policies = client
-                .list_network_policies()
-                .await
-                .map_err(status("list network policies"))?;
-            print_policies(&policies, args.output)
-        }
+        PolicyCommand::List(_) => unreachable!("a list returned above, before connecting"),
         PolicyCommand::Allow(args) => {
             let allow = rules_from(&args.targets)?;
             let updated = client
@@ -366,6 +363,26 @@ async fn handle_local_policy_command(
             Ok(())
         }
     }
+}
+
+/// `cw policy ls` on this computer. A read starts nothing (CLI-PARITY.md,
+/// P3): the store is read without the supervisor, and none stored lists the
+/// built-ins. Only a store this cw cannot read on its own (one the
+/// supervisor must first upgrade, or one being replaced) is asked of the
+/// supervisor, as before.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn list_local_policies(output: OutputFormat) -> anyhow::Result<()> {
+    let root = native_runtime_config()?.root;
+    let policies =
+        match codewire_local_vmm::supervisor::network_policies::read_network_policies(&root) {
+            Ok(policies) => policies.unwrap_or_default(),
+            Err(_) => native_client()
+                .await?
+                .list_network_policies()
+                .await
+                .map_err(|status| anyhow::anyhow!("list network policies: {}", status.message()))?,
+        };
+    print_policies(&policies, output)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

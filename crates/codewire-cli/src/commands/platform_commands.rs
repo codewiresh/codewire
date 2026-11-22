@@ -1143,10 +1143,8 @@ async fn handle_project_secret_command(
         }
         ScopedSecretCommand::Delete(args) => {
             let key = trimmed_required(&args.key, "secret key")?;
-            client
-                .delete_project_secret(org_id, &project.id, key)
-                .await
-                .context("delete secret")?;
+            let deleted = client.delete_project_secret(org_id, &project.id, key).await;
+            cloud_deleted(deleted, SecretScope::Project(project_name), key)?;
             eprintln!("Secret {key} deleted from project {project_name:?}.");
         }
         ScopedSecretCommand::Rename(args) => {
@@ -1198,10 +1196,8 @@ pub(crate) async fn handle_user_secret_command(
         }
         ScopedSecretCommand::Delete(args) => {
             let key = trimmed_required(&args.key, "secret key")?;
-            client
-                .delete_user_secret(key)
-                .await
-                .context("delete user secret")?;
+            let deleted = client.delete_user_secret(key).await;
+            cloud_deleted(deleted, SecretScope::User, key)?;
             eprintln!("Secret {key} deleted.");
         }
         ScopedSecretCommand::Rename(args) => {
@@ -1255,10 +1251,8 @@ pub(crate) async fn handle_org_secret_command(
         }
         ScopedSecretCommand::Delete(args) => {
             let key = trimmed_required(&args.key, "secret key")?;
-            client
-                .delete_org_secret(org_id, key)
-                .await
-                .context("delete org secret")?;
+            let deleted = client.delete_org_secret(org_id, key).await;
+            cloud_deleted(deleted, SecretScope::Organization, key)?;
             eprintln!("Secret {key} deleted.");
         }
         ScopedSecretCommand::Rename(args) => {

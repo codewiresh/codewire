@@ -136,6 +136,22 @@ async fn resolve_snapshot(
         .ok_or_else(|| anyhow::anyhow!("no snapshot named {}", terminal_text(target)))
 }
 
+/// The snapshot `rm` removes. One already being removed is gone, as a local
+/// one is once `rm` returns, so removing it again is refused in the local
+/// sentence (docs/dev/CLI-PARITY.md, K3).
+fn removable(snapshots: Vec<Snapshot>, target: &str) -> anyhow::Result<Snapshot> {
+    snapshots
+        .into_iter()
+        .filter(|snapshot| snapshot.state.as_known() != Some(SnapshotState::Deleting))
+        .find(|snapshot| snapshot.id == target || snapshot.name == target)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no cloud snapshot is named {}; list them with `cw --cloud snapshot ls`",
+                terminal_text(target)
+            )
+        })
+}
+
 /// Whether a failed poll says nothing about the capture. Capture is its own
 /// workflow, so restarting the API, for a rollout or after a crash, interrupts
 /// this wait and not the snapshot (observed on Dev, #3046).
@@ -330,7 +346,7 @@ pub(super) async fn handle_platform_snapshot_command(
             }
         }
         SnapshotCommand::Rm(args) => {
-            let target = resolve_snapshot(&client, &org_id, &args.snapshot).await?;
+            let target = removable(client.list_snapshots(&org_id).await?, &args.snapshot)?;
             let snapshot = client.delete_snapshot(&org_id, &target.id).await?;
             match args.output {
                 OutputFormat::Json => super::print_json(&PlatformSnapshotView::from(&snapshot)),
@@ -443,6 +459,25 @@ mod tests {
             cli.placement().unwrap(),
             Some(EnvironmentPlacement::Platform)
         );
+    }
+
+    #[test]
+    fn a_snapshot_already_being_removed_is_not_removed_again() {
+        let ready = removable(vec![snapshot(SnapshotState::Ready)], "good-toolchain").unwrap();
+        assert_eq!(ready.name, "good-toolchain");
+        for target in [
+            "good-toolchain",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "other",
+        ] {
+            let refused = removable(vec![snapshot(SnapshotState::Deleting)], target).unwrap_err();
+            assert_eq!(
+                refused.to_string(),
+                format!(
+                    "no cloud snapshot is named {target}; list them with `cw --cloud snapshot ls`"
+                )
+            );
+        }
     }
 
     #[test]

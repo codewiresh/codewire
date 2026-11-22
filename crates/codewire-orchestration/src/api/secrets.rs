@@ -249,12 +249,32 @@ pub(super) fn to_metadata(
 pub(super) fn rename_error(e: anyhow::Error) -> AppError {
     let msg = e.to_string();
     if msg.contains("not found") {
-        AppError::NotFound("secret not found".into())
+        secret_not_found()
     } else if msg.contains("already exists") {
         AppError::Conflict("a secret with that key already exists".into())
     } else {
         tracing::error!(error = %e, "secrets: rename failed");
         AppError::InternalMsg("failed to rename secret".into())
+    }
+}
+
+/// A delete or rename of a key that isn't there. Nothing changed, so a
+/// client can say so rather than report a deletion (CLI-PARITY.md, S3).
+pub(super) fn secret_not_found() -> AppError {
+    AppError::NotFound("secret not found".into())
+}
+
+/// A tenant delete's outcome: a key that wasn't there is known to have
+/// changed nothing.
+pub(super) fn deleted_or_not_found(
+    deleted: bool,
+) -> Result<(), OrganizationTenantSecretMutationError> {
+    if deleted {
+        Ok(())
+    } else {
+        Err(OrganizationTenantSecretMutationError::known(
+            secret_not_found(),
+        ))
     }
 }
 
@@ -345,12 +365,12 @@ pub(crate) async fn delete_secret_core(
     validate_secret_key(key)?;
 
     run_organization_tenant_secret_mutation(&state.pool, org_id, async {
-        state
+        let deleted = state
             .secrets
             .delete_secret_at_path(&org_secret_path(org_id), key)
             .await
             .map_err(|error| ambiguous_secret_provider_error(error, "failed to delete secret"))?;
-        Ok(())
+        deleted_or_not_found(deleted)
     })
     .await?;
 
@@ -462,7 +482,7 @@ pub(crate) async fn delete_user_secret_core(
     key: &str,
 ) -> AppResult<()> {
     validate_secret_key(key)?;
-    state
+    let deleted = state
         .secrets
         .delete_secret_at_path(&user_secret_path(&user.user_id), key)
         .await
@@ -470,6 +490,9 @@ pub(crate) async fn delete_user_secret_core(
             tracing::error!(error = %e, "user-secrets: delete failed");
             AppError::InternalMsg("failed to delete secret".into())
         })?;
+    if !deleted {
+        return Err(secret_not_found());
+    }
 
     log_audit(
         state,

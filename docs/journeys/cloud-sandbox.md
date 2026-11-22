@@ -11,11 +11,11 @@ yet; its owner adds it. The format is in [README.md](README.md).
 
 ## Where the journey stands
 
-Updated 2026-11-21.
+Updated 2026-11-22.
 
 | ID | Owner | Dev | Production |
 | --- | --- | --- | --- |
-| `sandbox-create` | cw-cleanup | observed 2026-11-14 | not yet observed |
+| `sandbox-create` | cw-cleanup | observed 2026-11-14; a taken name refused (#4717) not yet observed | not yet observed |
 | `sandbox-create-fails` | cw-cleanup | observed 2026-11-17 (#4483) | not yet observed; v0.4.21 lacks #4483's reasons |
 | `sandbox-run-exec` | cw-cleanup | observed 2026-11-14 | not yet observed |
 | `sandbox-shell` | cw-cleanup | observed 2026-11-14 | not yet observed |
@@ -59,13 +59,16 @@ Updated 2026-11-21.
   - a create that waits and ends usable;
   - a create with `--no-wait`, which returns at once and is followed with
     `cw ls`;
-  - a create the platform ends (see `sandbox-create-fails`).
+  - a create the platform ends (see `sandbox-create-fails`);
+  - a second create under the name of a live environment in the
+    organization (#4717).
 - **Driving it:**
 
   ```sh
   cw --cloud create --name walk --no-file --ttl 30m --no-network
   cw --cloud ls
   cw --cloud info walk
+  cw --cloud create --name walk --no-file --ttl 30m --no-network
   cw --cloud rm walk --yes
   cw --cloud ls
   ```
@@ -74,6 +77,10 @@ Updated 2026-11-21.
   - `cw create` exits 0 and prints "Environment walk created";
   - `cw ls` shows `walk` as `running`, and `cw info` gives it an ID, `State:
     running` and a `StartedAt` time;
+  - the second `cw create --name walk` exits 1 with ``cloud environment
+    "walk" already exists (remove it with `cw --cloud rm walk` or choose
+    another --name)``, the sentence a local VM gives, and `cw ls` still
+    shows one `walk` (not yet observed);
   - after `cw rm`, `cw ls` no longer shows it.
 - **Gotchas:**
   - `--no-file` keeps a `codewire.yaml` in the current directory out of the
@@ -187,6 +194,7 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished),
 - **States to exercise:**
   - a command that succeeds, with its output;
   - a command that exits non-zero;
+  - a program that doesn't exist, in a sandbox and in a local VM (#4717);
   - input on stdin;
   - `cw exec` in the background of its terminal, as under `timeout` without
     `--foreground` (#4883);
@@ -198,6 +206,8 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished),
   ```sh
   cw exec --in walk sh -c 'echo marker-1 > /workspace/marker && cat /workspace/marker'
   cw exec --in walk sh -c 'exit 7'; echo $?
+  cw exec --in walk -- definitely-not-a-command; echo $?
+  cw --local exec --in local-walk -- definitely-not-a-command; echo $?
   printf 'from stdin\n' | cw exec --in walk cat
   timeout 60 cw exec --in walk cat; echo $?   # from an interactive shell
   cw run --in walk --name job sh -c 'echo run-output-1; echo run-output-2'
@@ -208,6 +218,9 @@ Issues: #4431 (the create never ended), #4482 (the failed create vanished),
 - **Proof:**
   - the first command prints `marker-1`;
   - the second makes `cw` exit 7;
+  - a missing program makes `cw` exit 127 in both placements, with the
+    shell's "not found" (`definitely-not-a-command: command not found` from
+    a local VM), never "guest probe failed" (not yet observed);
   - the third prints `from stdin`;
   - the fourth exits 0 at once, the command having had no input, where `cw`
     used to be stopped (SIGTTIN) and `timeout` to exit 1;
@@ -479,15 +492,19 @@ server it belongs to and says what it can do, instead of asking for a URL.
   - a named session running at the stop, in a Sandbox with and without a
     secret project, restarted by its name after the start (#5471);
   - `cw run --name` with that name after the start, at a terminal and in a
-    script (#5471).
+    script (#5471);
+  - a stop of the stopped sandbox, and a start of the running one, in both
+    placements (#4717).
 - **Driving it:**
 
   ```sh
   cw exec --in walk sh -c 'echo marker-1 > /workspace/marker'
   cw --cloud run --in walk --name play --detach -- sleep 86400
   cw --cloud stop walk
+  cw --cloud stop walk; echo $?
   cw --cloud ls
   cw --cloud start walk
+  cw --cloud start walk; echo $?
   cw --cloud ls
   cw --cloud ls walk
   cw exec --in walk cat /workspace/marker
@@ -497,6 +514,10 @@ server it belongs to and says what it can do, instead of asking for a URL.
 
 - **Proof:**
   - after the stop, `cw ls` shows `walk` as `stopped`;
+  - the second stop prints `Environment walk is already stopped.` and the
+    second start `Environment walk is already running.`, each exiting 0, as
+    `cw --local stop` and `cw --local start` of a local VM do (not yet
+    observed);
   - after the start, `cw ls` shows it as `running`;
   - the marker command prints the marker written before the stop. A file that
     survives is the proof; "running" alone is not;

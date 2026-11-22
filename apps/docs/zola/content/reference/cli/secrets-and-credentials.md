@@ -1,7 +1,7 @@
 ---
 title: Secrets and credentials
 description: cw secrets for application secrets and cw credentials for provider credentials and profiles.
-updated: 2026-11-20
+updated: 2026-11-22
 weight: 5
 aliases: ["/cli/secrets-and-credentials"]
 ---
@@ -63,8 +63,11 @@ fails after project creation, the error identifies the retained project.
 
 For scripts, pass exactly one scope flag. `set` reads the value from a hidden prompt or
 stdin (one trailing newline removed); keys match `[A-Za-z_][A-Za-z0-9_]*` and
-values are UTF-8 up to 64 KiB. `projects delete` removes every key in the
-project and needs `--yes` when not interactive. `preview` shows which key
+values are UTF-8 up to 64 KiB. A project name starts with a letter or digit
+and has only letters, digits, `-`, `_` and `.`, up to 64 characters, in
+both stores. `delete` of a key that isn't there says
+nothing was deleted and exits 1, in both stores. `projects delete` removes
+every key in the project and needs `--yes` when not interactive. `preview` shows which key
 would come from which source for `codewire.yaml`, without values.
 
 Example:

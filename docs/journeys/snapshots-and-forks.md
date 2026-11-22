@@ -16,7 +16,7 @@ format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-21. Cloud capture, management and a three-way fork are
+Updated 2026-11-22. Cloud capture, management and a three-way fork are
 observed on Dev and on Production, as the smoke identities. The launch walk by
 a new account, the fork while the snapshot's node is down and the dashboard
 are not observed. VM checkpoints on a Mac (#4654) are written first: every
@@ -25,7 +25,7 @@ Mac step of `ckpt-local`, `ckpt-restore` and `ckpt-fork` is not yet observed.
 | ID | What | Dev | Production |
 | --- | --- | --- | --- |
 | `snap-capture` | a snapshot of a stopped cloud sandbox, and its refusals | observed 2026-11-13 with `v0.4.17` (#4370); the zero-credit refusal observed 2026-11-13 (#4379) | observed 2026-11-13 with `v0.4.18`, as the smoke identity (#4370); the refusals not yet observed |
-| `snap-manage` | `cw --cloud snapshot ls`, `inspect` and `rm` | observed 2026-11-13 with `v0.4.17` (#4370) | observed 2026-11-13 with `v0.4.18`, as the smoke identity (#4370) |
+| `snap-manage` | `cw --cloud snapshot ls`, `inspect` and `rm` | observed 2026-11-13 with `v0.4.17` (#4370); a second `rm` refused (#4717) not yet observed | observed 2026-11-13 with `v0.4.18`, as the smoke identity (#4370) |
 | `snap-fork` | `cw --cloud create --snapshot`, one fork and `--count N` | `--count 3` observed 2026-11-13 with `v0.4.17` (#4370); one fork on its own not yet observed | `--count 3` observed 2026-11-13 with `v0.4.18`, as the smoke identity (#4370) |
 | `snap-fork-node-down` | a fork while the snapshot's node is unavailable | not yet observed (#4371) | not yet observed |
 | `snap-local` | `cw snapshot create`, `ls`, `inspect` and `rm` on a local VM (Linux or a Mac) | does not apply; a local VM observed on a pre-merge build (#3525) and on a Mac with the v0.4.22 candidate; `create` and `rm` with v0.4.22 on Linux and on a Mac | does not apply |
@@ -159,6 +159,7 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
   - `rm` while an environment is being created from it: "an environment is
     being created from this snapshot; try again when it has started";
   - `rm` with forks running: the forks keep working;
+  - `rm` again while it is still being deleted (#4717);
   - the source sandbox removed: the snapshot stays `ready`.
 - **Driving it:**
 
@@ -166,13 +167,16 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
   cw --cloud snapshot ls
   cw --cloud snapshot inspect launch-walk-snap
   cw --cloud snapshot rm launch-walk-snap
+  cw --cloud snapshot rm launch-walk-snap
   cw --cloud snapshot ls
   ```
 
   `ls` prints ID, STATE, SIZE and NAME. `rm` prints "Removing snapshot
   launch-walk-snap; environments made from it are unaffected."
 - **Proof:** after `rm`, `ls` no longer lists the snapshot, and a fork made
-  from it still answers `cw exec`.
+  from it still answers `cw exec`. The second `rm` exits 1 with "no cloud
+  snapshot is named launch-walk-snap; list them with `cw --cloud snapshot
+  ls`", as a local `rm` of a removed snapshot does (not yet observed).
 - **Gotchas:**
   - `rm` starts a deletion and returns; the snapshot shows `deleting` until
     it is gone.

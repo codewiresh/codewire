@@ -97,13 +97,7 @@ fn workload_secret_source_from_proto(value: i32) -> Result<WorkloadSecretSource,
 }
 
 fn valid_secret_project_name(name: &str) -> bool {
-    let mut bytes = name.bytes();
-    !name.is_empty()
-        && name.len() <= 64
-        && bytes
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphanumeric())
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    codewire_workload_secrets::validate_secret_project_name(name).is_ok()
 }
 
 pub(super) fn valid_workload_secret_key(key: &str) -> bool {

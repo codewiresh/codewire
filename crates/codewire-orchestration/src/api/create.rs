@@ -25,6 +25,8 @@ use crate::confidential_storage::require_confidential_access;
 use crate::repository_mount::validate_repository_mounts;
 use codewire_server_core::rate_limit;
 
+mod environment_name;
+
 /// Confidential volumes keep their own, smaller limit: the guest-encrypted
 /// raw-block profile is sized at create and never expands (#3554 leaves it
 /// unchanged). A confidential create that names no disk gets exactly this.
@@ -777,12 +779,6 @@ async fn insert_environment(
         )
     })?;
 
-    // Auto-generate name if not provided: "env-{short-id}".
-    let name = match p.name.as_deref() {
-        Some(n) if !n.is_empty() => n.to_owned(),
-        _ => format!("env-{}", generate_short_id()),
-    };
-
     let preset_id = (!p.preset_id.is_empty()).then_some(p.preset_id);
     let source_snapshot_id = p.body.source_snapshot_id.as_deref();
 
@@ -824,6 +820,8 @@ async fn insert_environment(
         },
     )
     .await?;
+    let name =
+        environment_name::admitted_name(&mut transaction, p.org_id, p.name.as_deref()).await?;
     let host_id = placed_host(&mut transaction, &p, source_snapshot_id.is_some()).await?;
     let snapshot_idle_stop = match source_snapshot_id {
         Some(snapshot_id) => {
@@ -3254,6 +3252,97 @@ credentials: {profile: user/work}
         assert!(is_quota_exceeded(&error));
         assert_eq!(fixture.environment_count().await, 1);
         fixture.cleanup().await;
+    }
+
+    fn named(name: &str) -> CreateEnvironmentBody {
+        CreateEnvironmentBody {
+            name: Some(name.into()),
+            ..Default::default()
+        }
+    }
+
+    fn is_name_taken(error: &AppError, name: &str) -> bool {
+        matches!(
+            error,
+            AppError::Coded {
+                status: StatusCode::CONFLICT,
+                code: "environment_name_taken",
+                detail,
+            } if *detail == format!(
+                "cloud environment \"{name}\" already exists (remove it with `cw --cloud rm {name}` or choose another --name)"
+            )
+        )
+    }
+
+    /// #4717 R1: a live environment's name is refused, in the local VM's
+    /// sentence; a removed one's is free again, and another organization's
+    /// names are its own.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn db_a_create_refuses_a_live_environments_name_in_its_organization() {
+        let fixture = QuotaFixture::new(2, 6).await;
+        let first = fixture.create(&named("app")).await.unwrap();
+        let error = fixture
+            .create(&named("app"))
+            .await
+            .expect_err("a second live environment named app is refused");
+        assert!(is_name_taken(&error, "app"), "{error:?}");
+        assert_eq!(fixture.environment_count().await, 1);
+
+        let other = QuotaFixture::new(2, 6).await;
+        other
+            .create(&named("app"))
+            .await
+            .expect("another organization may use the name");
+
+        for state in ["destroying", "destroyed"] {
+            sqlx::query("UPDATE environments SET state = $2 WHERE id = $1")
+                .bind(&first.id)
+                .bind(state)
+                .execute(&fixture.pool)
+                .await
+                .unwrap();
+            let again = fixture
+                .create(&named("app"))
+                .await
+                .unwrap_or_else(|error| panic!("a {state} environment's name is free: {error:?}"));
+            sqlx::query("DELETE FROM environments WHERE id = $1")
+                .bind(&again.id)
+                .execute(&fixture.pool)
+                .await
+                .unwrap();
+        }
+        other.cleanup().await;
+        fixture.cleanup().await;
+    }
+
+    /// #4717 R1: creates of one name race under the organization lock and
+    /// exactly one wins.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn db_parallel_creates_of_one_name_admit_exactly_one() {
+        const RACERS: usize = 10;
+        let fixture = std::sync::Arc::new(QuotaFixture::new(RACERS as u32 + 2, 20).await);
+        let start = std::sync::Arc::new(tokio::sync::Barrier::new(RACERS));
+        let mut racers = tokio::task::JoinSet::new();
+        for _ in 0..RACERS {
+            let (fixture, start) = (fixture.clone(), start.clone());
+            racers.spawn(async move {
+                start.wait().await;
+                fixture.create(&named("race")).await.map(|_| ())
+            });
+        }
+        let (mut admitted, mut refused) = (0, 0);
+        while let Some(outcome) = racers.join_next().await {
+            match outcome.unwrap() {
+                Ok(()) => admitted += 1,
+                Err(error) if is_name_taken(&error, "race") => refused += 1,
+                Err(error) => panic!("unexpected create error: {error:?}"),
+            }
+        }
+        assert_eq!((admitted, refused), (1, RACERS - 1));
+        assert_eq!(fixture.environment_count().await, 1);
+        std::sync::Arc::into_inner(fixture).unwrap().cleanup().await;
     }
 
     /// #3256: the start path counts and records the start intent under the

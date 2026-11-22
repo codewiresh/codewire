@@ -148,8 +148,12 @@ impl SecretStore {
         self.0.set_secret_at_path(secret_path, key, value).await
     }
 
-    /// Mirrors `DeleteSecretAtPath` (404 = already gone, treated as OK).
-    pub async fn delete_secret_at_path(&self, secret_path: &str, key: &str) -> anyhow::Result<()> {
+    /// Mirrors `DeleteSecretAtPath`: whether the secret was there to delete.
+    pub async fn delete_secret_at_path(
+        &self,
+        secret_path: &str,
+        key: &str,
+    ) -> anyhow::Result<bool> {
         self.0.delete_secret_at_path(secret_path, key).await
     }
 

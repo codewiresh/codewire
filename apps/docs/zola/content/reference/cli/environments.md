@@ -1,7 +1,7 @@
 ---
 title: Environments
 description: ls, info, create, start, stop, restart, rm, retry, update, ports, local-https, cp and the environment administration commands, plus use, current, init, shell, vscode, setup ssh, setup rex, checkpoint and preset.
-updated: 2026-11-21
+updated: 2026-11-22
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -163,6 +163,11 @@ the background and exits ([Services after a start](@/environments/services.md)).
 Ctrl-C ends only the wait; the start carries on. With `--output json`, a
 cloud `start` prints `{"status": "running"}` when it returns, and `stop`
 prints `{"status": "stopped"}`.
+
+A `stop` of an environment that is already stopped, or a `start` of one
+that is already running, prints `Environment NAME is already stopped.` (or
+`running`) and exits 0, local and cloud alike: the environment is as you
+asked.
 
 A cloud `create` or `start` in an organization with no compute credit exits
 with status 1, names the organization and links its billing page; see
@@ -353,7 +358,9 @@ cw nuke [-y]                               # delete every environment in the org
 ```
 
 These accept `--cloud` and refuse `--local`, except `prune`, which with
-`--local` means the next section.
+`--local` means the next section. `prune` asks before it deletes and `nuke`
+asks you to type a phrase; without a terminal there is no one to ask, so
+both refuse unless `--yes` is given, as `cw rm` does.
 
 ## cw prune --local
 

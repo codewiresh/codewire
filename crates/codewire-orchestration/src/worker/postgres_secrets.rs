@@ -469,7 +469,13 @@ impl PostgresSecretStore {
         Ok(())
     }
 
-    pub async fn delete_secret_at_path(&self, secret_path: &str, key: &str) -> anyhow::Result<()> {
+    /// Whether a secret was there to delete; deleting one that isn't is not
+    /// an error, so a caller decides what that means.
+    pub async fn delete_secret_at_path(
+        &self,
+        secret_path: &str,
+        key: &str,
+    ) -> anyhow::Result<bool> {
         let context = DekContext::from_secret_path(secret_path).map_err(envelope_error)?;
         if !is_valid_secret_key(key) {
             return Err(store_error("invalid-secret-key"));
@@ -484,15 +490,18 @@ impl PostgresSecretStore {
             tx.commit()
                 .await
                 .map_err(|_| store_error("transaction-commit-failed"))?;
-            return Ok(());
+            return Ok(false);
         };
-        sqlx::query("DELETE FROM tenant_secrets WHERE path = $1 AND key = $2 AND dek_id = $3")
-            .bind(secret_path)
-            .bind(key)
-            .bind(&row.dek_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| store_error("secret-delete-failed"))?;
+        let deleted =
+            sqlx::query("DELETE FROM tenant_secrets WHERE path = $1 AND key = $2 AND dek_id = $3")
+                .bind(secret_path)
+                .bind(key)
+                .bind(&row.dek_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| store_error("secret-delete-failed"))?
+                .rows_affected()
+                > 0;
         let remaining: i64 =
             sqlx::query_scalar("SELECT count(*) FROM tenant_secrets WHERE dek_id = $1")
                 .bind(&row.dek_id)
@@ -512,7 +521,7 @@ impl PostgresSecretStore {
         if remaining == 0 {
             self.cache.lock().await.remove(&row.dek_id);
         }
-        Ok(())
+        Ok(deleted)
     }
 
     /// Remove one complete product path atomically. Organization teardown can
@@ -946,9 +955,18 @@ mod tests {
         assert!(!debug.contains("NEW_KEY"));
         assert!(!debug.contains(canary));
 
-        store
-            .delete_secret_at_path(&project_path, "NEW_KEY")
-            .await?;
+        assert!(
+            store
+                .delete_secret_at_path(&project_path, "NEW_KEY")
+                .await?,
+            "a delete of a stored key says it deleted one"
+        );
+        assert!(
+            !store
+                .delete_secret_at_path(&project_path, "NEW_KEY")
+                .await?,
+            "a delete of a key that is gone says nothing was deleted"
+        );
         let deks: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM tenant_secret_deks WHERE scope = 'org' AND scope_id = $1",
         )
@@ -957,7 +975,11 @@ mod tests {
         .await?;
         assert_eq!(deks, 1, "a DEK with another live path must remain");
         assert_eq!(store.cached_dek_count().await, 1);
-        store.delete_secret_at_path(&org_path, "ORG_KEY").await?;
+        assert!(store.delete_secret_at_path(&org_path, "ORG_KEY").await?);
+        assert!(
+            !store.delete_secret_at_path(&org_path, "ORG_KEY").await?,
+            "a scope with no DEK left has nothing to delete"
+        );
         let deks: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM tenant_secret_deks WHERE scope = 'org' AND scope_id = $1",
         )

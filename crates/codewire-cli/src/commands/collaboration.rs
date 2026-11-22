@@ -572,6 +572,66 @@ pub(crate) fn confirm_removal(
     }
 }
 
+/// A command that deletes many things at once: `cw prune`, `cw nuke`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BulkDeletion {
+    Prune,
+    Nuke,
+}
+
+impl BulkDeletion {
+    fn words(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Prune => ("prune", "pruned"),
+            Self::Nuke => ("nuke", "nuked"),
+        }
+    }
+}
+
+/// Asks `question` before `command` deletes, unless `yes`. Without a
+/// terminal it fails at once and names `--yes`, as `cw rm` does, and never
+/// reads an answer from piped input (codewire-cli-design, "Prompts").
+pub(crate) fn confirm_bulk_deletion(
+    command: BulkDeletion,
+    question: &str,
+    yes: bool,
+) -> anyhow::Result<bool> {
+    if yes {
+        return Ok(true);
+    }
+    require_terminal_for(command)?;
+    prompt_confirm_default_no(question)
+}
+
+/// As [`confirm_bulk_deletion`], with the typed confirmation `expected`.
+pub(crate) fn confirm_bulk_deletion_typed(
+    command: BulkDeletion,
+    expected: &str,
+    yes: bool,
+) -> anyhow::Result<bool> {
+    if yes {
+        return Ok(true);
+    }
+    require_terminal_for(command)?;
+    prompt_exact_confirmation(&format!("Type {expected:?} to confirm: "), expected)
+}
+
+fn require_terminal_for(command: BulkDeletion) -> anyhow::Result<()> {
+    use std::io::IsTerminal as _;
+    if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(bulk_refusal(command)))
+    }
+}
+
+fn bulk_refusal(command: BulkDeletion) -> String {
+    let (verb, done) = command.words();
+    format!(
+        "nothing was {done}: `cw {verb}` asks first, and there is no terminal to ask at; add `--yes` to {verb}"
+    )
+}
+
 fn removal_question(name: &str, location: &str) -> String {
     format!("Remove {name} ({location}) and everything on its disk?")
 }
@@ -1025,5 +1085,35 @@ mod removal_tests {
             removal_refusal("app", true),
             "app was not removed: `cw rm --output json` never asks; add `--yes` to remove it"
         );
+    }
+
+    /// docs/dev/CLI-PARITY.md, L7: without a terminal, `prune` and `nuke`
+    /// refuse at once and name `--yes`, and never read piped input. Test
+    /// processes have no terminal on stdin.
+    #[test]
+    fn prune_and_nuke_without_a_terminal_refuse_and_name_yes() {
+        use std::io::IsTerminal as _;
+        if std::io::stdin().is_terminal() {
+            return;
+        }
+        for (command, refused) in [
+            (
+                BulkDeletion::Prune,
+                "nothing was pruned: `cw prune` asks first, and there is no terminal to ask at; add `--yes` to prune",
+            ),
+            (
+                BulkDeletion::Nuke,
+                "nothing was nuked: `cw nuke` asks first, and there is no terminal to ask at; add `--yes` to nuke",
+            ),
+        ] {
+            let error =
+                confirm_bulk_deletion(command, "Delete 2 environments?", false).unwrap_err();
+            assert_eq!(error.to_string(), refused);
+            let error =
+                confirm_bulk_deletion_typed(command, "nuke 2 environments", false).unwrap_err();
+            assert_eq!(error.to_string(), refused);
+            assert!(confirm_bulk_deletion(command, "Delete 2 environments?", true).unwrap());
+            assert!(confirm_bulk_deletion_typed(command, "nuke 2 environments", true).unwrap());
+        }
     }
 }

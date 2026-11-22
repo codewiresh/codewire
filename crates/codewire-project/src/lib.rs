@@ -13,6 +13,7 @@ use thiserror::Error;
 pub use codewire_access::AccessProfileReference;
 
 pub mod create_input;
+mod environment_name;
 mod idle_stop;
 mod normalize;
 mod overrides;
@@ -29,6 +30,7 @@ mod selection_tests;
 #[cfg(test)]
 mod yaml_tests;
 
+pub use environment_name::{EnvironmentPlacement, environment_name_taken};
 pub use idle_stop::{
     IDLE_STOP_FIELD, IDLE_STOP_ON_SECONDS, MAX_IDLE_STOP_SECONDS, MIN_IDLE_STOP_SECONDS,
     format_idle_stop, idle_stop_notice, idle_stop_reason, idle_stop_words, parse_idle_stop,

@@ -11,6 +11,7 @@ mod platform_create;
 pub(crate) mod progress;
 mod runtime;
 mod sources;
+mod stop_start;
 mod transfer;
 use cp::handle_unified_environment_cp;
 pub(crate) use info::{env_created_label, env_state_label, format_env_info_text};
@@ -694,97 +695,9 @@ async fn handle_platform_env_command_with_created(
                 .context("get environment trust report")?;
             print_env_report(&report, args.output)?;
         }
-        EnvCommand::Stop(args) => {
-            let environment_id =
-                resolve_environment_id(&environment_client, &org_id, &args.environment).await?;
-            let caps = super::lifecycle_output::capabilities(args.output);
-            let name = display_name_for(
-                &environment_client,
-                &org_id,
-                &environment_id,
-                &args.environment,
-                &caps,
-            )
-            .await;
-            let mut line = StatusLine::new(std::io::stderr(), &caps);
-            line.begin(STOPPING_LABEL)?;
-            let stopped = Box::pin(lifecycle::stop_cloud_environment(
-                &environment_client,
-                &org_id,
-                &environment_id,
-                &name,
-                &mut line,
-                !caps.is_machine(),
-                lifecycle::StopWait::default(),
-            ))
-            .await;
-            match stopped {
-                Ok(()) => line.clear()?,
-                Err(error) if super::lifecycle_output::interrupted_exit_code(&error).is_some() => {
-                    line.clear()?;
-                    return Err(error);
-                }
-                Err(error) => {
-                    line.fail(STOPPING_LABEL)?;
-                    return Err(error);
-                }
-            }
-            match args.output {
-                OutputFormat::Json => {
-                    let response = StatusResponse {
-                        status: "stopped".to_owned(),
-                    };
-                    print_env_status(&args.environment, &response, args.output)?;
-                }
-                OutputFormat::Text => lifecycle::stop_result(&name).print(&caps),
-            }
-        }
+        EnvCommand::Stop(args) => stop_start::stop(&environment_client, &org_id, args).await?,
         EnvCommand::Start(args) => {
-            let began = Instant::now();
-            let environment_id =
-                resolve_environment_id(&environment_client, &org_id, &args.environment).await?;
-            if matches!(args.output, OutputFormat::Text) {
-                let caps = super::lifecycle_output::capabilities(args.output);
-                let environment = environment_client
-                    .get_environment(&org_id, &environment_id)
-                    .await
-                    .context("get environment")?;
-                let names = lifecycle::resolve_source_names(
-                    &platform,
-                    &environment_client,
-                    &org_id,
-                    &environment,
-                )
-                .await;
-                let summary = lifecycle::cloud_summary(&environment, Outcome::Started, &names);
-                super::lifecycle_output::print_context(&summary, &caps);
-                Box::pin(start_platform_environment_with_progress(
-                    &environment_client,
-                    &org_id,
-                    &environment_id,
-                    began,
-                    &caps,
-                    &InterruptNotice::new(VmLocation::Cloud, "start", &summary.name),
-                ))
-                .await?;
-                super::lifecycle_output::print_summary(&summary, &caps);
-                return Ok(None);
-            }
-            let caps = super::lifecycle_output::capabilities(args.output);
-            Box::pin(start_platform_environment_with_progress(
-                &environment_client,
-                &org_id,
-                &environment_id,
-                began,
-                &caps,
-                &InterruptNotice::new(VmLocation::Cloud, "start", &args.environment),
-            ))
-            .await?;
-            // The start has finished, so report its state, as stop does.
-            let response = StatusResponse {
-                status: "running".to_owned(),
-            };
-            print_env_status(&args.environment, &response, args.output)?;
+            stop_start::start(&platform, &environment_client, &org_id, args).await?;
         }
         EnvCommand::Restart(_) => {
             anyhow::bail!("restart is supported only for native local environments");
@@ -882,12 +795,11 @@ async fn handle_platform_env_command_with_created(
                 return Ok(None);
             }
 
-            if !args.yes
-                && !prompt_confirm_default_no(&format!(
-                    "Delete {} environments?",
-                    selection.targets.len()
-                ))?
-            {
+            if !confirm_bulk_deletion(
+                BulkDeletion::Prune,
+                &format!("Delete {} environments?", selection.targets.len()),
+                args.yes,
+            )? {
                 println!("Aborted.");
                 return Ok(None);
             }
@@ -918,15 +830,10 @@ async fn handle_platform_env_command_with_created(
             print!("{}", format_env_nuke_targets_text(&selection.targets));
             println!();
 
-            if !args.yes {
-                let expected = format!("nuke {} environments", selection.targets.len());
-                if !prompt_exact_confirmation(
-                    &format!("Type {:?} to confirm: ", expected),
-                    &expected,
-                )? {
-                    println!("Aborted.");
-                    return Ok(None);
-                }
+            let expected = format!("nuke {} environments", selection.targets.len());
+            if !confirm_bulk_deletion_typed(BulkDeletion::Nuke, &expected, args.yes)? {
+                println!("Aborted.");
+                return Ok(None);
             }
 
             let deleted =
