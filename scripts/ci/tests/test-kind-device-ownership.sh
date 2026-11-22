@@ -30,7 +30,12 @@ cat >"$BIN/kind" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
-  'get clusters') printf '%s\n' codewire-e2e-ci ;;
+  'get clusters')
+    printf '%s\n' codewire-e2e-ci
+    # More names than a pipe holds after the match, so a reader that stops
+    # at the match leaves kind writing into a closed pipe.
+    [ "${FAKE_LONG_CLUSTER_LIST:-0}" != 1 ] || printf 'other-cluster-%s\n' $(seq 1 20000)
+    ;;
   'get nodes --name codewire-e2e-ci') printf '%s\n' $FAKE_NODES ;;
   *) exit 64 ;;
 esac
@@ -179,6 +184,11 @@ run_step >"$FIXTURE/second.out" 2>&1 || fail "second run failed: $(cat "$FIXTURE
 [ "$(key_lines kind-worker)" = 1 ] || fail "a second run added the key again"
 grep -Fq "already gives a device the container's own user" "$FIXTURE/second.out" \
   || fail "a second run did not say the nodes were already set"
+
+# The cluster is found when it is listed ahead of a long list: the check reads
+# the whole list before matching it.
+run_step FAKE_LONG_CLUSTER_LIST=1 >"$FIXTURE/long-list.out" 2>&1 \
+  || fail "a cluster listed ahead of a long list was not found: $(cat "$FIXTURE/long-list.out")"
 
 # A node already running with it is left alone while the other is fixed.
 reset

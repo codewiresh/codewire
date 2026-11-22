@@ -429,8 +429,11 @@ run_kind_down() {
 }
 
 dump_cluster_state() {
-  local context="kind-${KIND_CLUSTER_NAME}"
-  if ! kind get clusters 2>/dev/null | grep -qx "$KIND_CLUSTER_NAME"; then
+  local context="kind-${KIND_CLUSTER_NAME}" clusters=''
+  # Read the whole list, then match it: piped into `grep -q` under pipefail,
+  # an early match closes the pipe on kind and a present cluster reads as absent.
+  clusters="$(kind get clusters 2>/dev/null)" || clusters=''
+  if ! grep -qxF -- "$KIND_CLUSTER_NAME" <<<"$clusters"; then
     log "kind cluster ${KIND_CLUSTER_NAME} does not exist; skipping kubectl state dump"
     return
   fi

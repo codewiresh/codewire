@@ -19,7 +19,7 @@ source "$ROOT/scripts/ci/verify/kind/credentials.sh"
 
 die() { printf '[kind-trust-roots] error: %s\n' "$*" >&2; exit 1; }
 
-kind get clusters 2>/dev/null | grep -Fxq "$KIND_CLUSTER_NAME" \
+kind_cluster_listed "$KIND_CLUSTER_NAME" \
   || die "cluster ${KIND_CLUSTER_NAME} does not exist"
 if [ "$KIND_PROFILE" = 1 ]; then
   kind_profile_verify_node "$ROOT" || exit $?

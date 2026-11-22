@@ -12,6 +12,7 @@ DOCKER_CALLS="$FIXTURE/docker-calls"
 DOCKER_PS="$FIXTURE/docker-ps"
 KIND_CONFIG="$FIXTURE/kind-config.yaml"
 KIND_GET_FAILURE=0
+KIND_LONG_LIST=0
 KIND_DELETE_FAILURE=''
 DOCKER_PS_FAILURE=0
 # The fixture owns this transaction name even when hosted CI exports its own.
@@ -45,6 +46,9 @@ kind() {
         return 1
       fi
       cat "$CLUSTERS"
+      # Then more names than a pipe holds, one write each, so a reader that
+      # stops at its match leaves kind writing into a closed pipe.
+      [ "$KIND_LONG_LIST" != '1' ] || printf 'other-cluster-%s\n' $(seq 1 20000)
       ;;
     'delete cluster')
       [ "${3:-}" = '--name' ] || fail "unexpected kind delete arguments: $*"
@@ -80,6 +84,7 @@ reset_fixture() {
   : > "$DOCKER_CALLS"
   : > "$DOCKER_PS"
   KIND_GET_FAILURE=0
+  KIND_LONG_LIST=0
   KIND_DELETE_FAILURE=''
   DOCKER_PS_FAILURE=0
 }
@@ -219,6 +224,17 @@ fi
 grep -Fq 'host port 52383 is not one of its KIND_*_HOST_PORT values' "$FIXTURE/profile-unknown.out" ||
   fail 'profile unknown-port error does not name the port'
 [ ! -s "$DELETIONS" ] || fail 'profile startup deleted a cluster'
+
+# The failure dump finds a cluster listed ahead of more names than a pipe
+# holds, and goes on to ask whether it is reachable.
+reset_fixture
+printf '%s\n' "$KIND_CLUSTER_NAME" > "$CLUSTERS"
+KIND_LONG_LIST=1
+kubectl() { return 1; }
+dump_cluster_state > "$FIXTURE/dump.out" 2>&1
+unset -f kubectl
+grep -Fq "kind cluster ${KIND_CLUSTER_NAME} is not reachable" "$FIXTURE/dump.out" \
+  || fail "the failure dump did not find a listed cluster: $(head -3 "$FIXTURE/dump.out")"
 
 # Failure to prove fixed-port release is itself fatal.
 reset_fixture

@@ -114,7 +114,7 @@ if [ "$KIND_PROFILE" = 1 ]; then
   STATE="$(dirname "$KIND_PROFILE_PATH")/dev/$image"
 fi
 
-kind get clusters 2>/dev/null | grep -Fxq "$KIND_CLUSTER_NAME" \
+kind_cluster_listed "$KIND_CLUSTER_NAME" \
   || die "cluster ${KIND_CLUSTER_NAME} does not exist; create it with make kind-up"
 kube() { kubectl --context "kind-${KIND_CLUSTER_NAME}" -n "$NAMESPACE" "$@"; }
 RECORD_KEY="dev.codewire.kind-dev/source-${SERVICE}"

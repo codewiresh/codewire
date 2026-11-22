@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# shellcheck source=scripts/dev/kind/profile.sh
+source "$ROOT/scripts/dev/kind/profile.sh"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-kind-${KIND_CLUSTER_NAME}}"
 NAMESPACE="${NAMESPACE:-default}"
@@ -34,7 +36,7 @@ if [[ "$KUBE_CONTEXT" != "kind-${KIND_CLUSTER_NAME}" ]]; then
   exit 1
 fi
 
-if ! kind get clusters | grep -Fxq "$KIND_CLUSTER_NAME"; then
+if ! kind_cluster_listed "$KIND_CLUSTER_NAME"; then
   echo "local Kind cluster ${KIND_CLUSTER_NAME} is not running; run make up first" >&2
   exit 1
 fi

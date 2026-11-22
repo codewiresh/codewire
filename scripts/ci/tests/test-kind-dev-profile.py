@@ -75,6 +75,10 @@ with (state / "calls").open("a") as log: log.write(json.dumps(entry) + "\n")
 if tool == "kind":
     if args == ["get", "clusters"]:
         print("dev-a\ndev-b\ncodewire-e2e-ci\ncodewire-ux-2099")
+        # Then more names than a pipe holds, so a reader that stops at its
+        # match leaves kind writing into a closed pipe.
+        if os.environ.get("FAKE_LONG_CLUSTER_LIST"):
+            for index in range(20000): print(f"other-cluster-{index}")
     elif args[:2] == ["get", "kubeconfig"]: print("synthetic kubeconfig")
     elif args[:2] != ["load", "docker-image"]: sys.exit(64)
 elif tool == "kubectl":
@@ -654,6 +658,14 @@ exec "$ROOT/scripts/ci/verify/make-up-fixture.py" "$@"
         self.assertTrue([call for call in kube if call["args"][-4:] == ["set", "image", "deployment/codewire-idp", "idp=" + output]])
         self.assertTrue([call for call in kube if "wait" in call["args"] and "pod/old-one" in call["args"] and "pod/old-two" in call["args"]])
         self.assertFalse([call for call in kube if "restart" in call["args"]])
+
+    def test_a_listed_cluster_is_found_ahead_of_a_long_list(self) -> None:
+        for name, expected in (("dev-a", 0), ("codewire-ux-2099", 0), ("dev-c", 1), ("dev", 1)):
+            with self.subTest(name=name):
+                result = self.run_adapter(f"kind_cluster_listed {name}", FAKE_LONG_CLUSTER_LIST="1")
+                self.assertEqual(result.returncode, expected, result.stderr)
+        result = self.run_script("deploy-service.sh", "idp", FAKE_LONG_CLUSTER_LIST="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_changed_binary_changes_output_tag(self) -> None:
         first = self.run_script("deploy-service.sh", "idp", FAKE_BINARY_CONTENT="source-one")
@@ -1541,6 +1553,18 @@ def load_dashboard_specs():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+class ClusterCheckSourceTests(unittest.TestCase):
+    def test_no_script_pipes_kinds_cluster_list_into_grep(self) -> None:
+        # Under pipefail that pipeline reads a listed cluster as absent when
+        # grep matches early; scripts call kind_cluster_listed or read the
+        # whole list before matching it.
+        piped = re.compile(r"kind get clusters[^|\n]*\|\s*grep")
+        found = [f"{path.relative_to(ROOT)}:{number}" for path in sorted((ROOT / "scripts").rglob("*.sh"))
+                 for number, line in enumerate(path.read_text().splitlines(), 1)
+                 if piped.search(line) and not line.lstrip().startswith("#")]
+        self.assertEqual(found, [])
 
 
 class DashboardSpecTests(unittest.TestCase):

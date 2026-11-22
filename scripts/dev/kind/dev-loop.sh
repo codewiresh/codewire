@@ -40,7 +40,7 @@ kube() { kubectl --context "$CONTEXT" --request-timeout=30s -n "$NAMESPACE" "$@"
 
 require_cluster() {
   kind_profile_verify_node "$ROOT" || exit $?
-  kind get clusters 2>/dev/null | grep -qx "$KIND_CLUSTER_NAME" \
+  kind_cluster_listed "$KIND_CLUSTER_NAME" \
     || die "cluster ${KIND_CLUSTER_NAME} does not exist; create it with KIND_CLUSTER_NAME=${KIND_CLUSTER_NAME} KEEP_KIND_CLUSTER=1 make e2e-kind"
   kube get deployment codewire-credential-service >/dev/null \
     || die "cluster ${KIND_CLUSTER_NAME} was not prepared by the Kind gate"
@@ -324,7 +324,7 @@ cmd_watch() {
 
 cmd_status() {
   kind_profile_verify_node "$ROOT" || return $?
-  if ! kind get clusters 2>/dev/null | grep -qx "$KIND_CLUSTER_NAME"; then
+  if ! kind_cluster_listed "$KIND_CLUSTER_NAME"; then
     echo "cluster ${KIND_CLUSTER_NAME}: absent"
     return 1
   fi

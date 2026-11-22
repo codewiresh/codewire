@@ -6,6 +6,15 @@ kind_profile_error() {
   printf '[kind-profile] error: %s\n' "$*" >&2
 }
 
+# Whether kind lists the cluster NAME. The whole list is read before it is
+# matched: piped into `grep -q` under pipefail, an early match closes the pipe
+# on kind, kind dies of SIGPIPE and a listed cluster reads as absent.
+kind_cluster_listed() {
+  local clusters
+  clusters="$(kind get clusters 2>/dev/null)" || return 1
+  grep -qxF -- "$1" <<<"$clusters"
+}
+
 kind_profile_load() {
   local root="$1" key value status count index
   local -a fields=() origin_args=()

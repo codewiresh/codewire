@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # shellcheck source=scripts/ci/verify/playwright-browser-runtime.sh
 source "$ROOT/scripts/ci/verify/playwright-browser-runtime.sh"
+# shellcheck source=scripts/dev/kind/profile.sh
+source "$ROOT/scripts/dev/kind/profile.sh"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-codewire}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-kind-${KIND_CLUSTER_NAME}}"
 export KUBE_CONTEXT
@@ -13,7 +15,7 @@ SERVER_URL="${SERVER_URL:-$PLAYWRIGHT_BASE_URL}"
 DATABASE_URL="${DATABASE_URL:-postgres://codewire:codewire@127.0.0.1:25432/codewire?sslmode=disable}"
 PLAYWRIGHT="$ROOT/apps/dashboard/node_modules/.bin/playwright"
 
-if ! kind get clusters | grep -Fxq "$KIND_CLUSTER_NAME"; then
+if ! kind_cluster_listed "$KIND_CLUSTER_NAME"; then
   echo "interactive Kind cluster ${KIND_CLUSTER_NAME} is not running; run make up first" >&2
   exit 1
 fi
