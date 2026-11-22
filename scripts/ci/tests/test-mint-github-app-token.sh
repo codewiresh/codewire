@@ -66,4 +66,36 @@ if "$MINTER" "$work/input/app-id" "$work/input/installation-id" \
 fi
 [[ ! -e "$work/output/rejected" ]] || fail 'rejected input created a token'
 
+# Without GITHUB_APP_JWT_FILE, as the mirror calls it, the output is exactly
+# the one line and the token is the only file written.
+chmod 0600 "$work/input/app-id"
+mkdir "$work/plain"
+env -u GITHUB_APP_JWT_FILE "$MINTER" "$work/input/app-id" "$work/input/installation-id" \
+  "$work/input/private-key" "$work/plain/token" >"$work/plain.out" 2>&1
+printf '[mint-github-app-token] wrote one private installation token\n' |
+  cmp -s - "$work/plain.out" || fail 'the default output changed'
+[[ "$(find "$work/plain" -mindepth 1 -printf '%f\n')" == token ]] ||
+  fail 'the default mint wrote more than the token'
+
+# With it, the JWT is kept at that new 0600 path, and still never in arguments.
+mkdir "$work/scoped"
+: >"$FAKE_CURL_ARGS"
+GITHUB_APP_JWT_FILE="$work/scoped/app.jwt" "$MINTER" "$work/input/app-id" \
+  "$work/input/installation-id" "$work/input/private-key" "$work/scoped/token" >"$work/scoped.out" 2>&1
+cmp -s "$work/plain.out" "$work/scoped.out" || fail 'keeping the JWT changed the output'
+[[ "$(stat -c '%a' "$work/scoped/app.jwt")" == 600 ]] || fail 'the kept JWT is not mode 0600'
+[[ "$(<"$work/scoped/app.jwt")" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]] ||
+  fail 'the kept JWT is not a JWT'
+if grep -qF "$(<"$work/scoped/app.jwt")" "$FAKE_CURL_ARGS" "$work/scoped.out"; then
+  fail 'the App JWT reached curl arguments or output'
+fi
+[[ -z "$(find "$RUNNER_TEMP" -mindepth 1 -print -quit)" ]] ||
+  fail 'temporary App JWT material survived cleanup'
+if GITHUB_APP_JWT_FILE="$work/scoped/app.jwt" "$MINTER" "$work/input/app-id" \
+    "$work/input/installation-id" "$work/input/private-key" "$work/scoped/again" \
+    >"$work/again.out" 2>&1; then
+  fail 'an existing JWT path was overwritten'
+fi
+[[ ! -e "$work/scoped/again" ]] || fail 'a refused JWT path still minted a token'
+
 printf '[test-mint-github-app-token] private-file mint contract passed\n'

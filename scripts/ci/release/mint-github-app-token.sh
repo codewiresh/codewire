@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Mint one GitHub App installation token from private files without placing
-# the App key, JWT, or installation token in command arguments.
+# the App key, JWT, or installation token in command arguments. With
+# GITHUB_APP_JWT_FILE set, the App's JWT is also kept, at that new 0600 path,
+# for github-app-scope.sh in the same step; unset, nothing else is written.
 set -euo pipefail
 
 fail() {
@@ -26,6 +28,11 @@ for input in "$app_id_file" "$installation_id_file" "$private_key_file"; do
 done
 [[ -d "$(dirname "$token_file")" && ! -e "$token_file" && ! -L "$token_file" ]] ||
   fail 'token output must be a new nonsymlink path in an existing directory'
+readonly jwt_file="${GITHUB_APP_JWT_FILE:-}"
+if [[ -n "$jwt_file" ]]; then
+  [[ -d "$(dirname "$jwt_file")" && ! -e "$jwt_file" && ! -L "$jwt_file" ]] ||
+    fail 'JWT output must be a new nonsymlink path in an existing directory'
+fi
 
 umask 077
 work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/codewire-github-app.XXXXXX")"
@@ -76,4 +83,7 @@ jq -er '.token | strings | select(length > 0)' \
   "$work/installation-token.json" >"$work/token"
 chmod 0600 "$work/token"
 mv "$work/token" "$token_file"
+if [[ -n "$jwt_file" ]]; then
+  mv "$work/app.jwt" "$jwt_file"
+fi
 printf '[mint-github-app-token] wrote one private installation token\n'

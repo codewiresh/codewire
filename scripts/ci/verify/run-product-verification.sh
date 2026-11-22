@@ -1832,6 +1832,7 @@ run_release() {
   scripts/ci/tests/test-mirror-git-tags.sh
   scripts/ci/tests/test-check-mirror-content.sh
   scripts/ci/tests/test-mint-github-app-token.sh
+  scripts/ci/tests/test-github-app-scope.sh
   scripts/ci/tests/test-copy-image-to-ghcr.sh
   scripts/ci/tests/test-dispatch-deploy-dev.sh
   scripts/ci/tests/test-fetch-forgejo-deploy-dev-token.sh

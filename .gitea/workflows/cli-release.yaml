@@ -1450,10 +1450,16 @@ jobs:
         run: |
           set -euo pipefail
           tap_work="$(mktemp -d "$RUNNER_TEMP/homebrew-tap-app.XXXXXX")"
-          trap 'find "$tap_work" -type f -exec shred -u {} +; rm -rf "$tap_work"' EXIT
+          # The token is revoked on every exit, before the files are shredded.
+          trap 'scripts/ci/release/revoke-github-app-token.sh "$tap_work/token"; find "$tap_work" -type f -exec shred -u {} +; rm -rf "$tap_work"' EXIT
           scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh \
             "$tap_work/app-id" "$tap_work/installation-id" "$tap_work/private-key"
-          scripts/ci/release/mint-github-app-token.sh \
+          GITHUB_APP_JWT_FILE="$tap_work/app.jwt" scripts/ci/release/mint-github-app-token.sh \
             "$tap_work/app-id" "$tap_work/installation-id" "$tap_work/private-key" "$tap_work/token"
+          # The App's JWT can mint a token for any of its installations, so it
+          # proves the App's scope here and is shredded before the dispatch.
+          scripts/ci/release/github-app-scope.sh "$tap_work/app-id" "$tap_work/app.jwt" "$tap_work/token" \
+            codewire-release-homebrew actions=write,metadata=read codewiresh/homebrew-codewire
+          shred -u "$tap_work/app.jwt"
           HOMEBREW_TAP_TOKEN_FILE="$tap_work/token" \
             scripts/ci/release/dispatch-homebrew-tap.sh "$RELEASE_TAG"

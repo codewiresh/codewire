@@ -723,6 +723,21 @@ def check(text, ci_text):
     need(tap.count("mint-github-app-token") == 1, "the Homebrew tap job does not mint exactly one App token")
     need(re.findall(r"HOMEBREW_TAP_\w+", tap) == ["HOMEBREW_TAP_TOKEN_FILE"],
          "the Homebrew tap job sets the dispatch's settings")
+    # The App's scope is proved before the dispatch (#5407): its JWT stays in
+    # the step's private directory and is shredded first, and the token is
+    # revoked on every exit.
+    scope = ('          scripts/ci/release/github-app-scope.sh "$tap_work/app-id" "$tap_work/app.jwt" "$tap_work/token" \\\n'
+             "            codewire-release-homebrew actions=write,metadata=read codewiresh/homebrew-codewire\n"
+             '          shred -u "$tap_work/app.jwt"\n'
+             '          HOMEBREW_TAP_TOKEN_FILE="$tap_work/token" \\\n')
+    need(scope in tap, "the Homebrew tap job dispatches without proving the App's exact scope, or keeps its JWT")
+    need(re.findall(r"GITHUB_APP_JWT_FILE=\S+", tap) == ['GITHUB_APP_JWT_FILE="$tap_work/app.jwt"']
+         and text.count("GITHUB_APP_JWT_FILE") == 1,
+         "the App's JWT is kept outside the Homebrew tap step's private directory")
+    need("          trap 'scripts/ci/release/revoke-github-app-token.sh \"$tap_work/token\"; find " in tap,
+         "the Homebrew tap token is not revoked first on every exit")
+    need("GITHUB_ENV" not in tap and "GITHUB_OUTPUT" not in tap and "upload-artifact" not in tap,
+         "the Homebrew tap job hands its credentials on")
     for capability in CAPABILITIES + MACOS_SIGNING:
         if capability not in ("enable-openid-connect", "fetch-openbao-", "mint-github-app-token"):
             need(capability not in tap, f"the Homebrew tap job holds capability {capability}")
@@ -879,6 +894,17 @@ MUTATIONS = {
     "Homebrew tap with a shorter wait": lambda t: t.replace(
         '          HOMEBREW_TAP_TOKEN_FILE="$tap_work/token" \\\n',
         '          HOMEBREW_TAP_WAIT_SECONDS=60 HOMEBREW_TAP_TOKEN_FILE="$tap_work/token" \\\n', 1),
+    "Homebrew tap scope unchecked": lambda t: t.replace(
+        "            codewire-release-homebrew actions=write,metadata=read codewiresh/homebrew-codewire\n",
+        "            codewire-release-homebrew actions=write,contents=write,metadata=read codewiresh/homebrew-codewire\n", 1),
+    "Homebrew tap JWT kept": lambda t: t.replace('          shred -u "$tap_work/app.jwt"\n', "", 1),
+    "Homebrew tap JWT exported": lambda t: t.replace(
+        '          shred -u "$tap_work/app.jwt"\n',
+        '          echo "APP_JWT_FILE=$tap_work/app.jwt" >>"$GITHUB_ENV"\n          shred -u "$tap_work/app.jwt"\n', 1),
+    "Homebrew tap JWT elsewhere": lambda t: t.replace(
+        'GITHUB_APP_JWT_FILE="$tap_work/app.jwt"', 'GITHUB_APP_JWT_FILE="$RUNNER_TEMP/app.jwt"', 1),
+    "Homebrew tap token not revoked": lambda t: t.replace(
+        """trap 'scripts/ci/release/revoke-github-app-token.sh "$tap_work/token"; find""", "trap 'find", 1),
     "Homebrew tap skipped": lambda t: t.replace(
         "    name: Move the Homebrew tap to the release\n",
         "    name: Move the Homebrew tap to the release\n    if: false\n", 1),

@@ -2570,6 +2570,8 @@ if [ "$event_selected" = false ]; then
       scripts/ci/setup/fetch-openbao-release-pin-bot-token.sh|\
       scripts/ci/tests/test-fetch-openbao-release-pin-bot-token.sh|\
       scripts/ci/release/dispatch-homebrew-tap.sh|scripts/ci/tests/test-dispatch-homebrew-tap.sh|\
+      scripts/ci/release/github-app-scope.sh|scripts/ci/release/revoke-github-app-token.sh|\
+      scripts/ci/tests/test-github-app-scope.sh|\
       scripts/ci/tests/test-package-cw-release.py|\
       scripts/ci/release/local_runtime_parts.py|scripts/ci/release/local_runtime_sources.py|\
       scripts/ci/release/local-runtime-sources.json|scripts/ci/release/build-runtime-kernel.sh|\
@@ -2656,11 +2658,13 @@ if [ "$event_selected" = false ]; then
       scripts/ci/setup/fetch-openbao-github-mirror-credentials.sh|\
       scripts/ci/setup/release-run-identity.sh|\
       scripts/ci/release/mint-github-app-token.sh|\
+      scripts/ci/release/github-app-scope.sh|scripts/ci/release/revoke-github-app-token.sh|\
       scripts/ci/release/mirror-github.sh|\
       scripts/ci/release/check-mirror-content.sh|\
       scripts/ci/release/public-content-patterns.txt|\
       scripts/ci/tests/test-check-mirror-content.sh|\
       scripts/ci/tests/test-fetch-openbao-github-mirror-credentials.sh|\
+      scripts/ci/tests/test-github-app-scope.sh|\
       scripts/ci/tests/test-mint-github-app-token.sh)
         select_token deploy
         select_token security

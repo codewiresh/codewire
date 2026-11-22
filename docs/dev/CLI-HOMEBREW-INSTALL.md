@@ -61,8 +61,9 @@ the Nix refusal names Nix's command ([CLI-NIX-INSTALL.md](CLI-NIX-INSTALL.md),
 
 ## How a release moves the tap
 
-Target, not shipped (#5407; the GitHub App route, owner via the orchestrator,
-2026-11-19).
+Shipped (#5407; the GitHub App route, owner via the orchestrator,
+2026-11-19). v0.4.27's release moved the tap with no one involved
+(2026-11-21, tap run 44955753810).
 
 The tap updates itself; a release only asks it to. After `cli-release`
 confirms that `cw upgrade` offers the release (`cw_release_r2.py offered`),
@@ -110,6 +111,22 @@ mints, in memory, one installation token, which carries only the App's
 Actions permission on the tap and which GitHub expires within an hour; neither the key
 nor the token appears in arguments, output or a file another step can read.
 The minter is the mirror's (`scripts/ci/release/mint-github-app-token.sh`).
+
+Before it dispatches, the job proves the App is this one, in this scope
+(`scripts/ci/release/github-app-scope.sh`). The App's JWT can mint a token for
+any of its installations, so the minter keeps it only for this check, as a 0600
+file in the step's private directory, which the step shreds right after the
+check. The check reads `GET /app` with the JWT and
+`GET /installation/repositories` with the token. It prints only:
+- the slug, and whether the App ID is the stored one;
+- the permissions;
+- the repository count and the repositories' full names.
+
+It fails the step unless the slug is `codewire-release-homebrew`, the
+permissions are exactly `actions=write,metadata=read`, and the one repository
+is `codewiresh/homebrew-codewire`. Like a tap that is behind, that failure comes
+after the release is published. The step revokes the token on every exit
+(`DELETE /installation/token`, `scripts/ci/release/revoke-github-app-token.sh`).
 
 The tap's `update-formula.yml` is the workflow above, and it holds no stored
 credential: it commits with its own `GITHUB_TOKEN`. A by-hand dispatch moved
