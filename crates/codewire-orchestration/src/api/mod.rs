@@ -149,6 +149,10 @@ pub fn router(state: ApiState, _auth: AuthState) -> Router {
             get(terminal::terminal_websocket),
         )
         .route(
+            "/api/v1/organizations/{org_id}/environments/{env_id}/desktop-stream",
+            get(terminal::desktop_stream_websocket),
+        )
+        .route(
             "/api/v1/organizations/{org_id}/environments/{env_id}/ssh-proxy",
             get(ssh_proxy::ssh_proxy_websocket),
         )

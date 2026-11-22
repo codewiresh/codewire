@@ -112,7 +112,7 @@ pub(super) fn coordinates(
     }))
 }
 
-fn valid_account_id(value: &str) -> bool {
+pub(super) fn valid_account_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value
@@ -120,7 +120,7 @@ fn valid_account_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-fn require_account(expected: &str, authenticated: &str) -> Result<(), StatusCode> {
+pub(super) fn require_account(expected: &str, authenticated: &str) -> Result<(), StatusCode> {
     if expected == authenticated {
         Ok(())
     } else {
@@ -145,7 +145,10 @@ fn cursor(value: &str) -> Option<u64> {
     value.parse().ok()
 }
 
-fn browser_cookie<'a>(headers: &'a HeaderMap, configured_origin: &str) -> Result<&'a str, ()> {
+pub(super) fn browser_cookie<'a>(
+    headers: &'a HeaderMap,
+    configured_origin: &str,
+) -> Result<&'a str, ()> {
     let origin = url::Url::parse(configured_origin).map_err(|_| ())?;
     if !matches!(origin.scheme(), "http" | "https")
         || origin.host_str().is_none()
@@ -196,6 +199,34 @@ fn browser_cookie<'a>(headers: &'a HeaderMap, configured_origin: &str) -> Result
     token.ok_or(())
 }
 
+/// The dashboard's two-factor setup boundary, read without factor secrets:
+/// an enabled factor, or setup skipped by this same unexpired browser
+/// session.
+pub(super) async fn require_two_factor_eligible(
+    pool: &sqlx::PgPool,
+    user_id: &str,
+    cookie: &str,
+) -> Result<(), StatusCode> {
+    let eligible: bool = sqlx::query_scalar(
+        "SELECT COALESCE(u.two_factor_enabled, false) OR EXISTS ( \
+             SELECT 1 FROM sessions AS s \
+              WHERE s.token_hash = $2 AND s.user_id = u.id AND s.expires_at > NOW() \
+                AND s.two_factor_setup_skipped_at IS NOT NULL) \
+         FROM users AS u WHERE u.id = $1 AND u.enabled",
+    )
+    .bind(user_id)
+    .bind(hash_session_token(cookie))
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    .unwrap_or(false);
+    if eligible {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
+
 pub(super) async fn websocket(
     state: ApiState,
     org_id: String,
@@ -228,25 +259,7 @@ pub(super) async fn websocket(
         // attach a previous account's saved shell under the successor account,
         // even if both accounts can operate this environment.
         require_account(&coordinates.account_id, &admission.user.user_id)?;
-        // Match the dashboard's two-factor setup boundary without reading
-        // factor secrets: an enabled factor, or setup skipped by this same
-        // unexpired browser session.
-        let eligible: bool = sqlx::query_scalar(
-            "SELECT COALESCE(u.two_factor_enabled, false) OR EXISTS ( \
-                 SELECT 1 FROM sessions AS s \
-                  WHERE s.token_hash = $2 AND s.user_id = u.id AND s.expires_at > NOW() \
-                    AND s.two_factor_setup_skipped_at IS NOT NULL) \
-             FROM users AS u WHERE u.id = $1 AND u.enabled",
-        )
-        .bind(&admission.user.user_id)
-        .bind(hash_session_token(&cookie))
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
-        .unwrap_or(false);
-        if !eligible {
-            return Err(StatusCode::FORBIDDEN);
-        }
+        require_two_factor_eligible(&state.pool, &admission.user.user_id, &cookie).await?;
         let target = resolve_running_sandbox_target(&state, &admission.user, &org_id, &env_id)
             .await
             .map_err(|(status, _)| status)?;

@@ -56,7 +56,9 @@ The desktop is built on these, which are on `main`:
   ("Starting and stopping"). It is reachable with an API key.
 - The same service on a local VM's supervisor, to the VM's owner over its
   owner-only socket (supervisor protocol 25).
-- `cw desktop` ("`cw desktop`", below). The dashboard viewer is not built.
+- `cw desktop` ("`cw desktop`", below).
+- Orchestration's desktop stream ("The desktop stream", below). The
+  dashboard's Desktop panel is not built.
 
 ## In the image
 
@@ -405,8 +407,9 @@ entry for the WebSocket origin.
 ### The desktop stream
 
 `GET /api/v1/organizations/{org}/environments/{env}/desktop-stream`, with
-the one subprotocol `codewire.desktop-stream.v1`. Binary frames carry the VNC
-(RFB) bytes unchanged in each direction; there are no text frames.
+the one subprotocol `codewire.desktop-stream.v1` and the page's account as
+the one query parameter, `account_id`. Binary frames carry the VNC (RFB)
+bytes unchanged in each direction; there are no text frames.
 
 Admission is the durable terminal's, in the same order and inside the same
 15 second budget: no `Authorization` header; exactly one `Origin`, equal to
@@ -415,8 +418,11 @@ equal to the cookie's; two-factor eligibility; operator access to a running,
 current Sandbox; the claim ready. A request that fails any of them is
 refused before the upgrade, and nothing is dialed.
 
-Orchestration then opens the daemon's `ForwardTcp` to `127.0.0.1:5901` with
-the bound Pod's credential. It never connects to the Pod's address.
+Orchestration then upgrades the request, counts it against the viewer
+limit and opens the daemon's `ForwardTcp` to `127.0.0.1:5901` with the bound
+Pod's credential. It never connects to the Pod's address. A stream over the
+limit, or whose desktop is not running, closes right after the upgrade, so
+the page can say why; the first dials nothing.
 
 | Bound | Value |
 | --- | --- |
@@ -434,7 +440,10 @@ An open stream ends when:
 - orchestration drains for a rollout (the viewer reconnects).
 
 It closes with 1000 when the viewer left, 1012 on a drain and 1008
-otherwise, and writes the `stream.revoked` audit event when the fence ended
+otherwise, with a reason the page shows: the desktop ended or is not
+running, the viewer limit, a stall, a frame that is not desktop bytes, a
+Sandbox too old for the stream or one that could not be reached, or access
+revoked. It writes the `stream.revoked` audit event when the fence ended
 it. Removing a member from an organization does not end an open stream yet,
 on this surface or any other ([AUTH-POLICY.md](AUTH-POLICY.md)); the next
 admission refuses them.

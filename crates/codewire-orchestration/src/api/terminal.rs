@@ -45,7 +45,10 @@ const TERMINAL_LEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
 type HmacSha256 = Hmac<Sha256>;
 
+mod desktop_stream;
 mod durable;
+
+pub(crate) use desktop_stream::desktop_stream_websocket;
 #[cfg(test)]
 mod ticket_database_tests;
 
