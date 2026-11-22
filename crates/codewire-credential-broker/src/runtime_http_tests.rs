@@ -999,6 +999,63 @@ async fn github_app_401_refreshes_once_then_retries_with_the_direct_successor() 
     );
 }
 
+/// A broker serving a due GitHub App login with no App owner to rotate it
+/// with refuses that one request (#5846). It never answers the shared
+/// authority fault that would end the bridge for every slot, starts no
+/// refresh, and forwards nothing.
+#[tokio::test]
+async fn a_due_github_app_login_without_an_owner_is_refused_for_that_request_only() {
+    let authorization_upstream = Arc::new(AppAuthorizationUpstream::new(60));
+    let owner = Arc::new(GitHubAppAuthorizationOwner::new(
+        app_authorization_config(),
+        authorization_upstream.clone(),
+    ));
+    let mut import = owner
+        .complete(Zeroizing::new(b"synthetic-code-123".to_vec()))
+        .await
+        .expect("initial App authorization");
+    let (material, _) = import.take_import().expect("protected App import");
+    let begins = Arc::new(AtomicUsize::new(0));
+    let authorizations = Arc::new(Mutex::new(Vec::new()));
+    let broker = OpenAiBroker::new(
+        AppRefreshAuthority {
+            state: Arc::new(Mutex::new(AppRefreshState {
+                material,
+                revocation_generation: 7,
+                material_generation: 2,
+            })),
+            begins: begins.clone(),
+            starts: Arc::new(AtomicUsize::new(0)),
+            commits: Arc::new(AtomicUsize::new(0)),
+            failures: Arc::new(AtomicUsize::new(0)),
+            refuse_commit: false,
+        },
+        GitAppUpstream {
+            authorizations: authorizations.clone(),
+            refreshed_status: StatusCode::OK,
+        },
+    )
+    .expect("broker");
+
+    let refused = broker
+        .execute(request(
+            "github",
+            "github-api",
+            "GET",
+            "/user",
+            b"",
+            "application/json",
+        ))
+        .await;
+    assert!(
+        matches!(refused, Err(BrokerRequestError::Denied)),
+        "{:?}",
+        refused.err()
+    );
+    assert_eq!(begins.load(Ordering::SeqCst), 0);
+    assert!(authorizations.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn github_app_early_refresh_does_not_rotate_again_after_a_successor_401() {
     let authorization_upstream = Arc::new(AppAuthorizationUpstream::new(60));

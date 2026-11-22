@@ -641,9 +641,9 @@ impl SyntheticOpenAiSmokeTransport {
 
     /// The fixtures' answer to an unserved request: what the provider answers
     /// for a route it lacks, a fixed 404 that reflects nothing. A transport
-    /// failure would be wrong twice over: no provider fails that way, and the
-    /// broker reports one as UpstreamFailed, which ends the whole bridge epoch
-    /// and with it every other slot's requests.
+    /// failure would be wrong: no provider fails that way, and the broker
+    /// would answer the guest UpstreamFailed (502) in place of the provider's
+    /// own 404.
     pub fn not_found(host: SyntheticProviderHost) -> BrokerUpstreamResponse {
         let body: &'static [u8] = match host {
             SyntheticProviderHost::Anthropic => {
@@ -2004,7 +2004,7 @@ where
             let owner = self
                 .github_app_authorization
                 .as_ref()
-                .ok_or(BrokerRequestError::AuthorityUnavailable)?;
+                .ok_or(BrokerRequestError::Denied)?;
             match timing::timed(
                 Phase::Refresh,
                 self.refresh_github_app_credential(bundle, refresh_request, Arc::clone(owner)),
