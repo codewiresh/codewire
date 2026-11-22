@@ -50,7 +50,7 @@ runs the same commands and holds the result to the same standard.
 | [admin-overview.md](admin-overview.md) | Admin → Overview (#5304): the Sandboxes card shows the ones active now, and nothing else. Written first; not yet observed |
 | [deletion.md](deletion.md) | Deleting an account or an organization (#4823): the account-deletion page and `cw org delete` say it is permanent, before it happens |
 | [dashboard-keyboard.md](dashboard-keyboard.md) | Keyboard focus in the dashboard (#4531, #4533): the Create Sandbox drawer is modal and returns focus to its opener, and a control waiting on its request keeps focus. Written first; every step is not yet observed |
-| [desktop.md](desktop.md) | An environment's desktop (#3223): `cw desktop`, the dashboard's Desktop panel, an agent drawing on `DISPLAY=:1`, its Codewire look and Chromium, who may open it, and what ends it. Written first; every step is not yet observed |
+| [desktop.md](desktop.md) | An environment's desktop (#3223): `cw desktop`, the dashboard's Desktop panel, an agent drawing on `DISPLAY=:1`, its Codewire look and Chromium, who may open it, and what ends it. `cw desktop` observed from Linux on Dev and a Linux local VM; macOS, the dashboard and Kind not yet observed |
 | [edge-caching.md](edge-caching.md) | Caching at the edge (#5054, #5123, #5072): no cache in front of Codewire keeps one caller's response for another; the homepage is the one reviewed exception. Observed on Dev 2026-11-21 |
 
 ## What a journey file holds

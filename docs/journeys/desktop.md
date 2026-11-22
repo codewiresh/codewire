@@ -14,19 +14,25 @@ lands. Every step reads "not yet observed" until it is walked.
 
 ## Where the journey stands
 
-Updated 2026-11-18. The CLI and the dashboard viewer are announced together,
+Updated 2026-11-22. The CLI and the dashboard viewer are announced together,
 when both have been observed.
+
+The 2026-11-22 walks ran `cw` built from a4a20f9d16e9 (#5853) against Dev at
+source b99ac9991704 and against a Linux local VM whose runtime was built from
+a4a20f9d16e9, on the default workspace image, whose digest was not recorded.
+They are recorded on #3223 in that day's Dev and local VM walk comments, and
+in the comment after them with the look and the listeners.
 
 | ID | Kind | Local VM | Dev | Production |
 | --- | --- | --- | --- | --- |
-| `desktop-image-inert` | not yet observed | not yet observed | not yet observed | not yet observed |
-| `desktop-cli` | not yet observed | not yet observed | not yet observed | not yet observed |
-| `desktop-agent` | not yet observed | not yet observed | not yet observed | not yet observed |
-| `desktop-look` | not yet observed | not yet observed | not yet observed | not yet observed |
+| `desktop-image-inert` | not yet observed | observed on Linux | observed | not yet observed |
+| `desktop-cli` | not yet observed | observed on Linux; macOS not yet observed | observed from Linux; macOS not yet observed | not yet observed |
+| `desktop-agent` | not yet observed | partly, on Linux | partly | not yet observed |
+| `desktop-look` | not yet observed | partly, on Linux | partly | not yet observed |
 | `desktop-browser` | not yet observed | not yet observed | not yet observed | not yet observed |
 | `desktop-lifetime` | not yet observed | not yet observed | not yet observed | not yet observed |
-| `desktop-cli-refusals` | not yet observed | not yet observed | not yet observed | not yet observed |
-| `desktop-loopback-only` | not yet observed | not yet observed | not yet observed | not yet observed |
+| `desktop-cli-refusals` | not yet observed | partly, on Linux | partly | not yet observed |
+| `desktop-loopback-only` | not yet observed | partly, on Linux | partly | not yet observed |
 | `desktop-access` | not yet observed | does not apply: one owner | not yet observed | not yet observed |
 | `desktop-dashboard` | not yet observed | does not apply: no dashboard | not yet observed | not yet observed |
 | `desktop-dashboard-ends` | not yet observed | does not apply: no dashboard | not yet observed | not yet observed |
@@ -72,7 +78,9 @@ when both have been observed.
   `unset`).
 - **Gotchas:** an environment created before the image pin moved runs the
   previous image and proves nothing here; check its digest first.
-- **Observed:** not yet observed.
+- **Observed:** in the 2026-11-22 walks on Dev and a Linux local VM: the five
+  programs resolve; no desktop process runs; nothing listens on 5901 or 6001;
+  no session is listed; `DISPLAY` is unset.
 
 ## `desktop-cli`: `cw desktop` shows the desktop
 
@@ -131,7 +139,19 @@ when both have been observed.
   searches need the password: take it from `--no-open`, and search for the
   exact eight characters. On the owner's Mac the viewer is opened in a
   session the owner can watch, never over a bare remote command.
-- **Observed:** not yet observed.
+- **Observed:** from Linux, in the 2026-11-22 walks on Dev and a Linux local
+  VM, with TigerVNC on a private X server as the viewer: every proof but the
+  Mac's and a registered Linux viewer asking for the password. The forward's
+  first bytes were `RFB 003.008`; `--status` named the start time, and a
+  second `cw desktop` started nothing; the viewer showed the XFCE desktop and
+  a line typed through it ran in its terminal; a wrong password was refused;
+  with no `vnc://` handler registered, the automatic path printed the password
+  at a terminal and, with its output in a file, printed none and named
+  `--no-open`. The password was not in `--status`, the desktop's log, `ps -eo
+  args` or a command's environment in the environment, about 340,000 sampled
+  lines of `ps -eo args` on the computer, or a file written during the run.
+  The Mac's built-in viewer, and a Linux viewer opened by `cw desktop` itself,
+  are not yet observed.
 
 ## `desktop-agent`: an agent draws on the desktop and reads it
 
@@ -176,7 +196,11 @@ when both have been observed.
   drawing; the window and the file are the proof. A picture taken with no
   viewer attached must still show the desktop: the desktop does not need a
   watcher.
-- **Observed:** not yet observed.
+- **Observed:** partly, in the 2026-11-22 walks on Dev and a Linux local VM:
+  `DISPLAY=:1`, and `:7` when the request set it; `xdotool` found the
+  `desk-mark` window and its keys wrote `drawn`; the two pictures differ and
+  the copied-out one shows the window. The shell opened before the desktop and
+  an agent driving it are not yet observed.
 
 ## `desktop-look`: a started desktop looks like Codewire
 
@@ -210,7 +234,13 @@ when both have been observed.
     is whole.
 - **Gotchas:** an environment whose home already held a desktop's settings
   shows those, by design; walk the first-start state in a new environment.
-- **Observed:** not yet observed.
+- **Observed:** partly, a first start only, in the 2026-11-22 walks on Dev and
+  a Linux local VM: the Codewire wordmark on a dark background, one dark panel
+  along the top with the menu, a terminal, Chromium, the file manager and a
+  clock, one terminal in `/workspace`, no desktop icons. The terminal's prompt
+  is plain on Dev and coloured on the local VM; whether either matches the
+  dashboard terminal's colours, the restart after a change and a resize are
+  not yet observed.
 
 ## `desktop-browser`: Chromium runs sandboxed, and an agent can drive it
 
@@ -328,7 +358,13 @@ when both have been observed.
     the environment's own loopback.
 - **Gotchas:** an image with no desktop and a runtime too old are different
   repairs; a walk that sees one sentence for both has found a bug.
-- **Observed:** not yet observed.
+- **Observed:** partly, in the 2026-11-22 walks on Dev and a Linux local VM:
+  no `ssh` on `PATH`; a forward to another host, refused by the environment's
+  SSH server; the desktop stopped while a forward was held, which ended within
+  10 s saying the desktop ended; port 5901 held, with `--status` saying
+  stopped; a stopped environment, naming its start command. The previous image
+  and a server, `cw` or local runtime too old for the desktop are not yet
+  observed.
 
 ## `desktop-loopback-only`: nothing new is reachable
 
@@ -369,7 +405,14 @@ when both have been observed.
   5901 before the reservation shipped is the case the refusal at use
   covers: on Kind, insert such a row into the disposable database and
   check that its preview URL answers with the refusal, not the desktop.
-- **Observed:** not yet observed.
+- **Observed:** partly, in the 2026-11-22 walks on Dev and a Linux local VM:
+  inside, 5901 listens on `127.0.0.1` (and `::1` on Dev) only, with no X
+  listener on TCP; `cw ports` lists nothing; publishing 5901 is refused with
+  the desktop running and stopped, with Dev's wording from before #5853 and
+  the local VM's naming `cw desktop`; 5902 publishes and is removed; on the
+  computer the only new listener is `127.0.0.1:PORT`, gone after the end. The
+  check from another Pod, the project file with 5901 and the preview URL are
+  not yet observed.
 
 ## `desktop-access`: who may open it
 
