@@ -1750,7 +1750,10 @@ Issue: #4000.
     daemon before `cw-egress`;
   - an environment made while hosted egress was off, then stopped and
     started, repaired, and stopped and removed after the switch went on;
-    and its running Pod deleted, so the controller rebuilds it.
+    and its running Pod deleted, so the controller rebuilds it;
+  - with the switch on, a confidential environment created, one created
+    from a snapshot, and a stopped one started and then removed; the same
+    with the switch off.
 - **Driving it:** no command yet (#4000).
 - **Proof:**
   - the status reads `NOT_ENFORCED` for the first state, `ENFORCED` with the
@@ -1794,6 +1797,14 @@ Issue: #4000.
     egress and must be recreated. Its Sandbox is unchanged, no Pod starts
     from it, and its stop and removal work. A Pod the controller rebuilt from
     it is refused its bind, so its daemon never serves (not yet observed);
+  - with the switch on, a confidential create, a confidential create from a
+    snapshot, and a stopped confidential environment's start each fail at
+    once with "Confidential sandboxes are unavailable on this deployment
+    while its network change completes." No environment is recorded for
+    the creates, and no Sandbox or Pod is made or changed for any of them;
+    the stopped one's removal works. With the switch off the create and
+    the start go on as before, and the create from a snapshot is refused
+    with its own reason (not yet observed);
   - a claimed warm Sandbox enforces the claimer's policy before the user can
     run anything in it; a claim that cannot confirm that within its limit
     fails, and never hands over an unrestricted Sandbox;

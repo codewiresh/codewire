@@ -857,14 +857,14 @@ fn measured_authorization(
     }))
 }
 
-/// Have confidential storage authorize the init data the driver measures
-/// `intent`'s runtime with, when it is measured.
+/// Have confidential storage authorize the init data of `intent`'s runtime, when it is measured.
 pub(super) async fn authorize_confidential_runtime(
     ctx: &WorkerContext,
     intent: RenderingIntent,
     authority: &ActivityAuthority,
     authoritative_states: &[&str],
 ) -> anyhow::Result<AuthorizedRuntime> {
+    crate::egress::confidential_hold::check(&ctx.sandbox_cfg, intent.isolation)?;
     let Some((init_data, authorized)) = measured_authorization(ctx.require_runtime()?, &intent)?
     else {
         return Ok(AuthorizedRuntime {

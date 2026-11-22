@@ -654,6 +654,7 @@ pub async fn repair_environment_daemon_core(
         .map_err(|(status, message)| huma_error(status, message))?;
     // A repair replaces the Pod, so it is a bring-up like a start.
     let env = super::environments::fetch_env_summary(&state.pool, org_id, environment_id).await?;
+    crate::egress::confidential_hold::check_tier(&state.sandbox_cfg, &env.isolation_tier)?;
     super::environments::require_systemd_bring_up(state, user, org_id, &env).await?;
     let runtime = state
         .runtime

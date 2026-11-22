@@ -1282,6 +1282,20 @@ environment through create, so it is broker-mode. Production will instead
 migrate such a Sandbox to create's broker-mode render at its next start;
 that is designed, not built.
 
+Target, not shipped (#4000): with hosted egress on, a confidential guest
+can't boot yet, because broker mode leaves it no way to reach the key broker
+and the registry before its first image pull. So until it reaches them by a
+fixed route, orchestration refuses a confidential environment's create,
+start, restart and repair, and a resize or setup retry that would bring its
+Pod up again, before anything is recorded, rendered or changed, with the
+reason "Confidential sandboxes are unavailable on this deployment while its
+network change completes." The tier is the one the environment's own record
+holds, and at create the one the request names. A snapshot restore or fork
+makes its environment through create, so a confidential one is refused
+there, as it already is with the switch off; a warm pool never holds a
+confidential member. A stop and a removal still work. With the switch off
+nothing changes.
+
 Target, not shipped (#4000): with hosted egress on, a Sandbox Pod's own
 egress is only to named peers inside the cluster, each by selector and port,
 with no address range and no DNS: the egress process on its node, the

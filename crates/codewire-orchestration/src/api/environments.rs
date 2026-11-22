@@ -766,13 +766,15 @@ pub(crate) async fn require_systemd_bring_up(
 }
 
 /// A Pod bring-up's confidential and systemd workspace checks, after its
-/// ordinary ones.
+/// ordinary ones. A tier held while hosted egress is on is refused first,
+/// from the environment's own row ([`crate::egress::confidential_hold`]).
 pub(crate) async fn require_bring_up_access(
     state: &ApiState,
     user: &AuthUser,
     org_id: &str,
     env: &EnvSummary,
 ) -> AppResult<()> {
+    crate::egress::confidential_hold::check_tier(&state.sandbox_cfg, &env.isolation_tier)?;
     require_confidential_access(
         &state.pool,
         state.confidential_storage_flags,
@@ -1423,6 +1425,59 @@ mod failed_create_listing_database_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether a stopped environment of `tier` may be brought up. The pool is
+    /// closed, so a check that read the database would fail.
+    async fn bring_up(hosted_egress: bool, tier: &str) -> &'static str {
+        let pool = PgPool::connect_lazy("postgres://synthetic@127.0.0.1:1/none").unwrap();
+        pool.close().await;
+        let mut state = crate::api::test_state::offline(pool).await;
+        state.sandbox_cfg = crate::egress::confidential_hold::test_cfg(hosted_egress);
+        let user = AuthUser {
+            user_id: "user-1".into(),
+            org_id: None,
+            is_admin: false,
+            via_api_key: false,
+        };
+        let env = EnvSummary {
+            id: "env-1".into(),
+            state: "stopped".into(),
+            protected: false,
+            env_type: "sandbox".into(),
+            cpu_millicores: 2000,
+            memory_mb: 8192,
+            isolation_tier: tier.into(),
+            systemd_workspace: false,
+            image: String::new(),
+        };
+        let checked = require_bring_up_access(&state, &user, "org-1", &env);
+        match tokio::time::timeout(std::time::Duration::from_secs(10), checked)
+            .await
+            .expect("the bring-up check reads nothing that can wait")
+        {
+            Ok(()) => "ok",
+            Err(AppError::Coded { code, .. }) => code,
+            Err(_) => "other",
+        }
+    }
+
+    /// #4000: with hosted egress on, a stopped confidential environment's
+    /// start, like any bring-up of its Pod, is refused from its own row
+    /// before any other check, so before anything changes. With it off the
+    /// start goes on to confidential access, which this deployment, with
+    /// confidential storage disabled, then refuses for its own reason. A
+    /// standard environment is never held.
+    #[tokio::test]
+    async fn with_hosted_egress_on_a_confidential_start_is_refused_from_its_row() {
+        let held = crate::egress::confidential_hold::CODE;
+        assert_eq!(bring_up(true, "confidential").await, held);
+        assert_eq!(
+            bring_up(false, "confidential").await,
+            "CONFIDENTIAL_STORAGE_DISABLED"
+        );
+        assert_eq!(bring_up(true, "standard").await, "ok");
+        assert_eq!(bring_up(false, "standard").await, "ok");
+    }
 
     #[test]
     fn credit_refuses_charging_cards_at_zero_and_never_unlimited() {

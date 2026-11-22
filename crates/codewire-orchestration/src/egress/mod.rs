@@ -16,6 +16,7 @@ use crate::workspace_binding::PgBindingStore;
 
 pub mod admission;
 pub mod assignment;
+pub mod confidential_hold;
 pub mod gateway_check;
 pub mod interception_ca;
 pub mod lockdown;

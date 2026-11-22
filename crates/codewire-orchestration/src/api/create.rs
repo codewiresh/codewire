@@ -22,7 +22,10 @@ use super::environments::{
     coded, require_org_member, scan_environment, take_user_rate_limit, trigger_environment,
 };
 use crate::confidential_storage::require_confidential_access;
+use crate::egress::confidential_hold;
 use crate::repository_mount::validate_repository_mounts;
+use crate::runtime::Isolation;
+use crate::worker::create::SandboxWorkerCfg;
 use codewire_server_core::rate_limit;
 
 mod environment_name;
@@ -454,11 +457,19 @@ fn validate_confidential_storage_size(isolation_tier: &str, disk_gib: u64) -> Ap
     Ok(())
 }
 
-/// The isolation tier a create names, standard when it names none.
-fn create_isolation_tier(body: &CreateEnvironmentBody) -> AppResult<&'static str> {
+/// The isolation tier a create names, standard when it names none. A tier
+/// held while hosted egress is on is refused here, before anything is
+/// recorded ([`confidential_hold`]).
+fn create_isolation_tier(
+    body: &CreateEnvironmentBody,
+    sandbox_cfg: &SandboxWorkerCfg,
+) -> AppResult<&'static str> {
     match body.isolation_tier.trim() {
         "" | "standard" => Ok("standard"),
-        "confidential" => Ok("confidential"),
+        "confidential" => {
+            confidential_hold::check(sandbox_cfg, Isolation::Confidential)?;
+            Ok("confidential")
+        }
         _ => Err(coded(
             StatusCode::BAD_REQUEST,
             "invalid_isolation_tier",
@@ -1224,7 +1235,7 @@ pub(crate) async fn create_environment_core(
         body.name.as_deref(),
         &state.sandbox_cfg,
     )?;
-    let isolation_tier = create_isolation_tier(&body)?;
+    let isolation_tier = create_isolation_tier(&body, &state.sandbox_cfg)?;
     require_confidential_access(
         pool,
         state.confidential_storage_flags,
@@ -1454,6 +1465,42 @@ mod tests {
             assert_eq!(code(&below, tier, profile), "ok");
         }
         assert_eq!(code(&[], "standard", "runc"), "ok");
+    }
+
+    /// #4000: with hosted egress on, a confidential create is refused at its
+    /// tier, before anything is recorded, so a fork from a snapshot is
+    /// refused there too, before the snapshot's own checks. With it off a
+    /// confidential create goes on, and a confidential fork is refused by its
+    /// own rule as before.
+    #[test]
+    fn with_hosted_egress_on_a_confidential_create_or_fork_is_refused_at_its_tier() {
+        let outcome = |isolation_tier: &str, snapshot: Option<&str>, hosted_egress: bool| {
+            let body = CreateEnvironmentBody {
+                isolation_tier: isolation_tier.into(),
+                source_snapshot_id: snapshot.map(Into::into),
+                ..Default::default()
+            };
+            let cfg = confidential_hold::test_cfg(hosted_egress);
+            match create_isolation_tier(&body, &cfg).and_then(|tier| {
+                validate_source_snapshot_request(&body, tier, "linstor-local").map(|()| tier)
+            }) {
+                Ok(tier) => tier,
+                Err(AppError::Coded { code, .. }) => code,
+                Err(_) => "other",
+            }
+        };
+        let held = confidential_hold::CODE;
+        assert_eq!(outcome("confidential", None, true), held);
+        assert_eq!(outcome("confidential", Some("s"), true), held);
+        assert_eq!(outcome("confidential", None, false), "confidential");
+        assert_eq!(
+            outcome("confidential", Some("s"), false),
+            "snapshot_source_confidential"
+        );
+        for hosted_egress in [true, false] {
+            assert_eq!(outcome("", None, hosted_egress), "standard");
+            assert_eq!(outcome("standard", Some("s"), hosted_egress), "standard");
+        }
     }
 
     #[test]
