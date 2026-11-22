@@ -27,6 +27,16 @@ pub(crate) struct EpochPlaceholders(
 /// derives again, and a new generation of the same binding does not.
 type PlaceholderInputs = (String, u64, String, String);
 
+/// Whose leases carry a placeholder when their epoch has a cache: a hosted
+/// epoch's, and a delegation's that declared a front door (#4909). Only their
+/// admission gives an epoch the cache.
+pub(super) fn leases_carry_placeholders(identity: &RuntimeIdentity) -> bool {
+    matches!(
+        identity,
+        RuntimeIdentity::Hosted { .. } | RuntimeIdentity::OwnerLocal { .. }
+    )
+}
+
 pub(super) fn placeholder_inputs(grant: &DerivedGrant) -> PlaceholderInputs {
     (
         grant.environment_id.as_str().to_owned(),

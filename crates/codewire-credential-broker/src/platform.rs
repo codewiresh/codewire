@@ -721,7 +721,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             _ => self.lease_checked(slot, permission, admissible).await,
         }?;
         if let Some(placeholders) = &self.placeholders
-            && matches!(self.session.identity, RuntimeIdentity::Hosted { .. })
+            && placeholders::leases_carry_placeholders(&self.session.identity)
         {
             match self.placeholder(placeholders, &lease.grant).await {
                 Some(placeholder) => lease.placeholder = Some(placeholder),

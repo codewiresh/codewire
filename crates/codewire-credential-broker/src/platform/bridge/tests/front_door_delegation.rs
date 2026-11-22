@@ -216,3 +216,21 @@ fn every_joinable_scope_seals_placeholders() {
     )));
     assert!(!super::super::seals_placeholders(None));
 }
+
+/// A delegation epoch whose Open declared a front door is paired, so it
+/// seals only placeholder logins; its leases must carry placeholders, or
+/// every login is refused `no_placeholder_beside_front_door` (#4909, Dev
+/// 2026-11-22). Hosted epochs keep following the hosted switch, and an
+/// undeclared delegation carries none.
+#[test]
+fn a_delegation_that_declared_a_front_door_leases_placeholders() {
+    use super::super::lease_placeholders;
+    for hosted_switch in [false, true] {
+        assert!(lease_placeholders(false, hosted_switch, true));
+        assert!(!lease_placeholders(false, hosted_switch, false));
+        assert_eq!(
+            lease_placeholders(true, hosted_switch, false),
+            hosted_switch
+        );
+    }
+}

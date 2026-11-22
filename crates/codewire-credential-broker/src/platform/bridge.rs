@@ -536,6 +536,11 @@ where
     {
         let deadline = Instant::now() + ADMISSION_TIMEOUT;
         let permit = self.acquire()?;
+        // What the admission said, read once after it succeeds: the relay's
+        // word on a hosted epoch, or whether a delegation's Open declared a
+        // front door. Placeholders, login delivery and scope all follow it.
+        let mut relay_intercepted = false;
+        let mut delegated_front_door = false;
         // The TokenReviews and resolves of authentication, the Ready wait and
         // the recheck after it are all recorded into this one admission line.
         let (admission, timings) = timing::measure(async {
@@ -547,11 +552,16 @@ where
                         .map_err(PlatformBridgeAuthenticationError::status)?;
                     // An intercepted hosted epoch also derives the placeholders
                     // its Sandbox projects; the relay's word is read only now.
-                    let intercepted = matches!(
+                    relay_intercepted = matches!(
                         &joinable,
-                        Joinable::Binding(intercepted) if intercepted.load(Ordering::Acquire)
+                        Joinable::Binding(said) if said.load(Ordering::Acquire)
                     );
-                    self.admit(authority, input.boxed(), intercepted).await
+                    delegated_front_door = matches!(
+                        &joinable,
+                        Joinable::Owner(_, declared) if declared.load(Ordering::Acquire)
+                    );
+                    self.admit(authority, input.boxed(), relay_intercepted, delegated_front_door)
+                        .await
                 }) => {
                     result
                         .map_err(|_| Status::deadline_exceeded("platform credential bridge admission timed out"))
@@ -578,17 +588,13 @@ where
         let expires_at_unix = sink.epoch.expires_at_unix;
         let scope = match joinable {
             Joinable::No => None,
-            Joinable::Binding(intercepted) => {
-                intercepted
-                    .load(Ordering::Acquire)
-                    .then_some(FrontDoorScope::Binding {
-                        environment_id,
-                        generation,
-                    })
+            Joinable::Binding(_) => relay_intercepted.then_some(FrontDoorScope::Binding {
+                environment_id,
+                generation,
+            }),
+            Joinable::Owner(owner, _) => {
+                delegated_front_door.then_some(FrontDoorScope::Owner(owner))
             }
-            Joinable::Owner(owner, front_door) => front_door
-                .load(Ordering::Acquire)
-                .then_some(FrontDoorScope::Owner(owner)),
         };
         // An intercepted hosted epoch, or a delegation that declared a front
         // door, delivers placeholders, never the sign-in's tokens, from its
@@ -722,11 +728,14 @@ where
 
     /// `intercepted` (the relay's word, #4001) also derives the placeholders
     /// the epoch's Sandbox projects, after its authority is read again.
+    /// `delegated_front_door` (#4909) gives a delegation epoch whose Open
+    /// declared a front door its leases' placeholders.
     async fn admit<B: PlatformRuntimeAuthority + 'static>(
         &self,
         authority: Arc<B>,
         input: BoxStream<'static, Result<v1::CredentialBridgeGuestMessage, Status>>,
         intercepted: bool,
+        delegated_front_door: bool,
     ) -> Result<Admission<B, U>, Status> {
         let provider = PlatformBrokerLeaseProvider {
             // Every epoch of this service shares its one lease budget.
@@ -746,8 +755,12 @@ where
         let hosted = matches!(provider.session.identity, RuntimeIdentity::Hosted { .. });
         let provider = PlatformBrokerLeaseProvider {
             decision: hosted.then(EpochDecision::new),
-            placeholders: (hosted && self.state.hosted_placeholders)
-                .then(EpochPlaceholders::default),
+            placeholders: lease_placeholders(
+                hosted,
+                self.state.hosted_placeholders,
+                delegated_front_door,
+            )
+            .then(EpochPlaceholders::default),
             ..provider
         };
         #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
@@ -1049,6 +1062,15 @@ where
 /// a delegation that declared a front door (#4909).
 fn seals_placeholders(scope: Option<&FrontDoorScope>) -> bool {
     scope.is_some()
+}
+
+/// Whether an epoch's leases carry placeholders: a hosted epoch's while this
+/// service's hosted placeholders are on (#4001), and a delegation epoch's
+/// whose Open declared a front door (#4909), whatever that switch says. A
+/// broker paired with a front door seals only placeholder logins, so a
+/// delegation epoch without them would refuse every login.
+fn lease_placeholders(hosted: bool, hosted_placeholders: bool, delegated_front_door: bool) -> bool {
+    (hosted && hosted_placeholders) || delegated_front_door
 }
 
 /// Whether an admitted epoch can be joined by a front door, and in which

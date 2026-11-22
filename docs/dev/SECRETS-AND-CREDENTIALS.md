@@ -2325,6 +2325,15 @@ above). These rules hold:
   rule (#4722). The entry is decided by the method called,
   `FrontDoorDelegation`, never by a frame. The relay adds no engine, lease,
   decision or material of its own.
+- **Its logins carry placeholders.** A delegation epoch whose Open declared
+  a front door is paired, so its broker seals Claude and Codex logins with
+  placeholders, never the sign-in's tokens. Each one is the lease's
+  placeholder, derived by the platform's broker under the credential
+  service's per-environment key, exactly as a hosted epoch's leases derive
+  theirs, whatever the hosted placeholders switch says. The local front door
+  never swaps: it forwards over the front-door session to that same epoch,
+  whose leases carry the placeholder the login delivered. A delegation that
+  declared no front door delivers logins as before (#4909).
 - **The relay writes the session's Open itself, from a fixed pin.** The
   runner reads the pairing secret within 2 seconds of the connect, before
   the relay's delegation can be admitted, so the relay pairs at once, before

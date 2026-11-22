@@ -710,3 +710,56 @@ async fn a_login_selected_by_a_new_profile_revision_is_rechecked_after_refresh()
     .await;
     f.finish(result).await
 }
+
+/// A local VM's delegation whose Open declared a front door seals the Codex
+/// login with its environment's placeholder, derived under that environment's
+/// key exactly as a hosted lease's is; without a declared front door its
+/// lease carries none, as before (#4909, Dev 2026-11-22, where every login was
+/// refused `no_placeholder_beside_front_door`).
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn a_delegated_epoch_with_a_front_door_leases_its_environments_placeholder() -> Result<()> {
+    let f = Fixture::create_for_bridge().await?;
+    let result = async {
+        let delegation = || async {
+            f.owner_local(
+                f.owner.clone(),
+                true,
+                Some(f.current_binding().await?),
+                CapabilitySlot::codex(),
+                &f.record,
+                codex_login_permission(),
+            )
+            .await
+        };
+        let undeclared = delegation().await??;
+        let plain = login(&undeclared).await?;
+        ensure!(BrokerCredentialLease::placeholder(&plain).is_none());
+        drop(plain);
+
+        let declared = Adapter {
+            placeholders: Some(EpochPlaceholders::default()),
+            ..delegation().await??
+        };
+        let lease = login(&declared).await?;
+        let grant = lease.grant().clone();
+        let key = f
+            .store
+            .environment_placeholder_key(&grant.environment_id)
+            .await?;
+        let expected = codewire_access::CredentialPlaceholder::derive(
+            &key,
+            &grant.environment_id,
+            grant.profile.as_ref().map_or(0, |profile| profile.revision),
+            &grant.capability_slot,
+            &grant.credential_id,
+        );
+        ensure!(
+            BrokerCredentialLease::placeholder(&lease).is_some_and(|value| value.ct_eq(&expected)),
+            "the delegated login lease carries its environment's placeholder"
+        );
+        Ok(())
+    }
+    .await;
+    f.finish(result).await
+}
