@@ -27,6 +27,7 @@ mod seed_placeholders;
 mod snapshots;
 mod sources;
 mod ssh;
+mod staging;
 mod start_failure;
 mod start_state;
 #[cfg(test)]
@@ -3260,25 +3261,6 @@ impl SupervisorCore {
             self.state = next_state;
         }
         self.store.clear_host_reboot_workspace_transitions()?;
-        Ok(())
-    }
-
-    /// After `name`'s drain, nothing of it stays staged beside an active
-    /// workspace. Only that name: another environment may be mid-update
-    /// (#2978).
-    fn ensure_no_unowned_workspace_staging(&self, name: &str) -> Result<(), SupervisorError> {
-        if self
-            .state
-            .environments
-            .get(name)
-            .is_some_and(|environment| {
-                environment.active_workspace_generation.is_some()
-                    && environment.staging_workspace_generation.is_some()
-                    && !runtime_move::staged_runtime_move(environment)
-            })
-        {
-            return Err(SupervisorError::InvalidState);
-        }
         Ok(())
     }
 }
@@ -6816,7 +6798,7 @@ impl LocalSupervisorService for SupervisorRpc {
         }
         let lease = self
             .supervisor
-            .drain_under(lease, &name)
+            .drain_under_for_delete(lease, &name)
             .await
             .map_err(Status::from)?;
         let existing = self
@@ -9871,7 +9853,8 @@ impl From<SupervisorError> for Status {
             | SupervisorError::RunnerProtocolUnsupported
             | SupervisorError::EnvironmentAccessUnavailable
             | SupervisorError::EnvironmentAccessBindingRejected(_)
-            | SupervisorError::WorkloadSecretDeliveryUnavailable => {
+            | SupervisorError::WorkloadSecretDeliveryUnavailable
+            | SupervisorError::UnownedWorkspaceStaging(_) => {
                 Status::failed_precondition(error.to_string())
             }
             SupervisorError::CredentialAuthorityUnavailable
@@ -9998,6 +9981,10 @@ pub enum SupervisorError {
     AlreadyExists(String),
     #[error("native supervisor state is invalid")]
     InvalidState,
+    #[error(
+        "local environment {0:?} has a staged workspace that no operation owns, which cw does not expect; remove it with `cw --local rm {0}` if its workspace can go, or report it with the local runtime's supervisor.log"
+    )]
+    UnownedWorkspaceStaging(String),
     #[error("native supervisor state must never contain a secret")]
     SecretInState,
     #[error("local credential authority is unavailable")]
@@ -10285,6 +10272,7 @@ fn lifecycle_failure_cause(error: &SupervisorError) -> &'static str {
         SupervisorError::ReservedPort(_) => "reserved_port",
         SupervisorError::AlreadyExists(_) => "already_exists",
         SupervisorError::InvalidState => "invalid_state",
+        SupervisorError::UnownedWorkspaceStaging(_) => "unowned_workspace_staging",
         SupervisorError::SecretInState => "secret_in_state",
         SupervisorError::CredentialAuthorityUnavailable => "credential_authority_unavailable",
         SupervisorError::WorkloadSecretDeliveryUnavailable => {

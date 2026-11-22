@@ -7948,7 +7948,7 @@ fn a_failed_moved_boot_keeps_its_move_staged_for_the_next_start() {
     assert!(!runtime_move::staged_runtime_move(environment));
     assert!(matches!(
         core.ensure_no_unowned_workspace_staging("dev"),
-        Err(SupervisorError::InvalidState)
+        Err(SupervisorError::UnownedWorkspaceStaging(name)) if name == "dev"
     ));
 
     // A restart its preflight refuses booted nothing: the VM keeps running,

@@ -57,12 +57,14 @@ impl HaltReason<'_> {
 /// Whether a drain's error stops the supervisor, as an operation error always
 /// has (#3143). A recovery waiting for the credential authority stops only its
 /// name's drain until a later request retries it, and a retiring or stopping
-/// supervisor is already ending.
+/// supervisor is already ending. Unowned staging is a check of durable state
+/// that changed nothing, so it refuses only its name's request (#5144).
 pub(super) fn fatal_drain_error(error: &SupervisorError) -> bool {
     !matches!(
         error,
         SupervisorError::CredentialAuthorityUnavailable
             | SupervisorError::Retiring
             | SupervisorError::Store(SupervisorStoreError::Stopping)
+            | SupervisorError::UnownedWorkspaceStaging(_)
     )
 }

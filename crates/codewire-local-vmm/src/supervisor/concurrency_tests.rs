@@ -575,18 +575,20 @@ fn a_booting_environment_reads_as_starting_until_its_operation_ends() {
     );
 }
 
-/// A fatal error in a drain a request waits on stops the supervisor, as
-/// one in a spawned drain does (#3143), and the log names the error's class
-/// (#5144).
+/// #5144: staging no operation owns, the state a failed runtime move left
+/// in #4980, refuses its environment's request with an error that names it,
+/// and the supervisor keeps serving: another environment's request, the
+/// same request refused again the same way, and the delete that clears it,
+/// which is admitted. Before, it stopped the supervisor.
 #[tokio::test]
-async fn a_fatal_error_in_a_request_drain_stops_the_supervisor() {
+async fn unowned_staging_refuses_its_request_and_the_supervisor_keeps_serving() {
     let (_parent, mut core) = two_environments_core();
     attach_supervisor_log(&mut core);
     let service = test_supervisor_service(core);
     let shutdown = service.supervisor.shutdown.subscribe();
     {
         // "other" mid-update with no operation of its own: its drain
-        // ends on the staging check, a fatal error.
+        // ends on the staging check.
         let mut core = service.supervisor.core();
         let other = core.state.environments.get_mut("other").unwrap();
         let generation = super::tests::test_workspace_generation_with_artifact(
@@ -598,16 +600,88 @@ async fn a_fatal_error_in_a_request_drain_stops_the_supervisor() {
         other.active_workspace_generation = Some(generation.clone());
         other.staging_workspace_generation = Some(generation);
     }
-    service
-        .select_environment(Request::new(selector(&service, "other")))
+    for _ in 0..2 {
+        let refused = timeout(
+            HANG_GUARD,
+            service.select_environment(Request::new(selector(&service, "other"))),
+        )
         .await
+        .expect("a refused request answers")
         .unwrap_err();
-    assert!(service.supervisor.core().store.stopping());
-    assert!(*shutdown.borrow());
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            refused.message().contains("\"other\"")
+                && refused.message().contains("`cw --local rm other`"),
+            "{}",
+            refused.message()
+        );
+    }
+    assert!(!service.supervisor.core().store.stopping());
+    assert!(!*shutdown.borrow());
+    assert!(halted_lines(&service).is_empty());
+    let log = fs::read_to_string(
+        service
+            .supervisor
+            .root
+            .path()
+            .join(diagnostic_log::LOG_DIRECTORY)
+            .join(diagnostic_log::SUPERVISOR_LOG),
+    )
+    .unwrap();
+    let other_id = service.supervisor.environment("other").unwrap().id;
     assert_eq!(
-        halted_lines(&service),
-        ["reason=drain_error class=invalid_state"]
+        log.matches(&format!(
+            " event=drain_refused environment={other_id} class=unowned_workspace_staging"
+        ))
+        .count(),
+        2,
+        "{log}"
     );
+
+    timeout(
+        HANG_GUARD,
+        service.select_environment(Request::new(selector(&service, "dev"))),
+    )
+    .await
+    .expect("another environment's drain answers")
+    .unwrap();
+    let delete = timeout(
+        HANG_GUARD,
+        service.delete_environment(Request::new(selector(&service, "other"))),
+    )
+    .await
+    .expect("the refused environment's delete answers")
+    .expect("the refused environment's delete is admitted")
+    .into_inner();
+    let journaled = service
+        .operation(Uuid::parse_str(&delete.operation_id).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(journaled.kind, OperationKind::Delete);
+    assert_eq!(journaled.environment_id, Some(other_id));
+    assert!(!service.supervisor.core().store.stopping());
+}
+
+/// #5144: only unowned staging joins the drain errors that do not stop the
+/// supervisor. Store errors other than its stop, and any other state error,
+/// still halt, since there memory may be ahead of the store.
+#[test]
+fn only_unowned_staging_joins_the_drain_errors_that_do_not_halt() {
+    for kept_fatal in [
+        SupervisorError::InvalidState,
+        SupervisorError::Store(SupervisorStoreError::JournalConflict),
+        SupervisorError::NotFound("other".to_owned()),
+    ] {
+        assert!(fatal_drain_error(&kept_fatal), "{kept_fatal:?}");
+    }
+    for refused_only in [
+        SupervisorError::UnownedWorkspaceStaging("other".to_owned()),
+        SupervisorError::CredentialAuthorityUnavailable,
+        SupervisorError::Retiring,
+        SupervisorError::Store(SupervisorStoreError::Stopping),
+    ] {
+        assert!(!fatal_drain_error(&refused_only), "{refused_only:?}");
+    }
 }
 
 /// Attaches the supervisor log a spawned supervisor writes, as `serve` does.
