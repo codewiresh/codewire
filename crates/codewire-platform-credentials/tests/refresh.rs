@@ -8,6 +8,8 @@ mod support;
 
 #[path = "refresh/rate_limited.rs"]
 mod rate_limited;
+#[path = "refresh/transitions.rs"]
+mod transitions;
 
 use std::error::Error as _;
 use std::sync::Arc;

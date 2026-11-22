@@ -675,7 +675,15 @@ async fn refresh_github_app_record(context: GitHubAppRefreshContext) -> Result<(
             .begin_oauth_refresh(&owner, &credential_id, expected, attempt_id)
             .await
         {
-            Ok(prepared) => prepared,
+            Ok(prepared) => {
+                tracing::info!(
+                    credential_id = credential_id.as_str(),
+                    %attempt_id,
+                    holder = "credential_service",
+                    "provider credential refresh begun"
+                );
+                prepared
+            }
             // Another process can reserve the same record between our read of
             // the journal and this begin. Observe its durable outcome instead
             // of treating that race as permission to issue a second exchange.

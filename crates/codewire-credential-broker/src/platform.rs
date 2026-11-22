@@ -1220,16 +1220,13 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
         if admission.record.version != version {
             return Err(BrokerRefreshError::Stale);
         }
-        let prepared = self
-            .credentials
-            .begin_oauth_refresh(
-                &self.session.credential_owner,
-                &request.grant.credential_id,
-                version,
-                request.refresh_id,
-            )
-            .await
-            .map_err(refresh_store_error)?;
+        let prepared = refresh_errors::begin(
+            &self.credentials,
+            &self.session.credential_owner,
+            (&request.grant.credential_id, version, request.refresh_id),
+            self.instance_id,
+        )
+        .await?;
         Ok(BrokerRefreshAdmission::Reserved(
             PlatformRefreshReservation {
                 instance_id: self.instance_id,

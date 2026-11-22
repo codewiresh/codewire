@@ -53,3 +53,26 @@ pub(super) async fn rate_limit(
             .map_err(refresh_store_error),
     }
 }
+
+/// Reserves a refresh for this broker and names it: the store logs each
+/// transition of the attempt, and this line ties the attempt to the broker
+/// instance that began it (#5957, #4002). Ids only, never a value.
+pub(super) async fn begin(
+    credentials: &PlatformCredentialStore,
+    owner: &Owner,
+    (id, version, attempt_id): (&CredentialId, CredentialVersion, Uuid),
+    broker_instance: Uuid,
+) -> Result<PreparedOAuthRefresh, BrokerRefreshError> {
+    let prepared = credentials
+        .begin_oauth_refresh(owner, id, version, attempt_id)
+        .await
+        .map_err(refresh_store_error)?;
+    tracing::info!(
+        credential_id = id.as_str(),
+        %attempt_id,
+        holder = "broker",
+        %broker_instance,
+        "provider credential refresh begun"
+    );
+    Ok(prepared)
+}

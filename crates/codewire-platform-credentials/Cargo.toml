@@ -28,6 +28,8 @@ sqlx = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true, optional = true }
 tokio = { workspace = true }
+# One line per durable refresh transition (#5957).
+tracing = { workspace = true }
 uuid = { workspace = true }
 # Reads a stored CA certificate's key, to check it pairs with the opened key.
 x509-parser = { workspace = true, optional = true }
@@ -43,6 +45,7 @@ codewire-protected-store = { workspace = true, features = ["platform-test-suppor
 codewire-server-core = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }
 url = { workspace = true }
 x509-parser = { workspace = true }
 codewire-workspace-hack.workspace = true

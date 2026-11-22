@@ -121,6 +121,24 @@ struct Identity {
 }
 
 impl Identity {
+    /// One line per durable refresh transition, so a refresh token spent or
+    /// raced can be traced to its attempt and from there to the broker or
+    /// keepalive that began it, which logs the same attempt id (#5957,
+    /// #4002). The credential id, the attempt and generations only: never a
+    /// token, an expiry or an account.
+    fn log_transition(&self, outcome: &'static str, after: CredentialVersion) {
+        tracing::info!(
+            credential_id = self.credential_id.as_str(),
+            attempt_id = %self.attempt_id,
+            outcome,
+            material_generation = self.expected.material_generation,
+            revocation_generation = self.expected.revocation_generation,
+            material_generation_after = after.material_generation,
+            revocation_generation_after = after.revocation_generation,
+            "provider credential refresh transition"
+        );
+    }
+
     fn new(
         owner: &Owner,
         id: &CredentialId,
@@ -362,6 +380,7 @@ impl PlatformCredentialStore {
             .bind(i64::from(generated.wrapped.key_version)).bind(&generated.wrapped.ciphertext)
             .bind(generated.wrapped.format).execute(&mut *tx).await.map_err(database_error)?;
         tx.commit().await.map_err(database_error)?;
+        identity.log_transition("reserved", expected);
         Ok(PreparedOAuthRefresh {
             identity,
             next,
@@ -396,6 +415,7 @@ impl PlatformCredentialStore {
             return Err(Error::StaleRefresh);
         }
         tx.commit().await.map_err(database_error)?;
+        identity.log_transition("started", identity.expected);
         Ok(StartedOAuthRefresh(prepared))
     }
 
@@ -415,6 +435,9 @@ impl PlatformCredentialStore {
         if attempt.state()? == OAuthRefreshState::Committed {
             return Err(Error::StaleRefresh);
         }
+        // Staged proves the provider answered and rotated the refresh token:
+        // an attempt staged and never committed is a spent token.
+        let mut staged_now = false;
         compare_version(&current, identity.expected)?;
         require_oauth_refresh(&current)?;
         match attempt.state()? {
@@ -448,11 +471,15 @@ impl PlatformCredentialStore {
                 if changed != 1 {
                     return Err(Error::StaleRefresh);
                 }
+                staged_now = true;
             }
             OAuthRefreshState::Unknown => return Err(Error::RefreshOutcomeUnknown),
             _ => return Err(Error::StaleRefresh),
         }
         tx.commit().await.map_err(database_error)?;
+        if staged_now {
+            identity.log_transition("staged", identity.expected);
+        }
         Ok(())
     }
 
@@ -535,6 +562,7 @@ impl PlatformCredentialStore {
         sqlx::query("UPDATE platform_credential_refresh_attempts SET state='committed',updated_at=clock_timestamp() WHERE credential_id=$1")
             .bind(id.as_str()).execute(&mut *tx).await.map_err(database_error)?;
         tx.commit().await.map_err(database_error)?;
+        identity.log_transition("committed", current.version);
         Ok(current.version)
     }
 
@@ -602,6 +630,7 @@ impl PlatformCredentialStore {
             _ => return Err(Error::StaleRefresh),
         }
         tx.commit().await.map_err(database_error)?;
+        identity.log_transition("cancelled", expected);
         Ok(())
     }
 
@@ -712,6 +741,7 @@ impl PlatformCredentialStore {
         }
         delete_attempt_material(&mut tx, identity.attempt_id).await?;
         tx.commit().await.map_err(database_error)?;
+        identity.log_transition("rate_limited", identity.expected);
         Ok(())
     }
 
@@ -782,6 +812,14 @@ impl PlatformCredentialStore {
             sqlx::query("UPDATE platform_credentials SET status='refresh_failed',revocation_generation=$2,updated_at=clock_timestamp() WHERE id=$1")
                 .bind(id.as_str()).bind(generation(expected.revoked()?.revocation_generation)?)
                 .execute(&mut *tx).await.map_err(database_error)?;
+            tx.commit().await.map_err(database_error)?;
+            let outcome = if require_expired {
+                "abandoned"
+            } else {
+                "failed"
+            };
+            identity.log_transition(outcome, expected.revoked()?);
+            return Ok(());
         }
         tx.commit().await.map_err(database_error)?;
         Ok(())

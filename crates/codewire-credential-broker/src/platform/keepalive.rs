@@ -502,6 +502,12 @@ impl OAuthKeepAlive {
         else {
             return Outcome::Skipped;
         };
+        tracing::info!(
+            credential_id = id.as_str(),
+            %attempt_id,
+            holder = "keepalive",
+            "provider credential refresh begun"
+        );
         if self.stop.is_cancelled() {
             // Shutdown before Start: release the reservation, send nothing.
             let _ = self
