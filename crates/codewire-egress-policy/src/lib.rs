@@ -21,6 +21,8 @@ pub mod host_addresses;
 mod hostname;
 pub mod intercept;
 pub mod lease;
+mod platform_peers;
+pub use platform_peers::{PLATFORM_PEER_RULE_ID, parse as platform_peer};
 pub mod record;
 pub mod reference;
 pub mod typed;
@@ -50,6 +52,10 @@ const DIGEST_DOMAIN: &[u8] = b"codewire.egress-policy/v1\0";
 
 #[derive(Debug, Error)]
 pub enum PolicyError {
+    #[error("only a standard Pod's own boot policy names platform peers")]
+    PlatformPeersRefused,
+    #[error("a platform peer must be a literal IPv4 address and port of another host: {0}")]
+    InvalidPlatformPeer(String),
     #[error("egress policy document is {actual} bytes; maximum is {maximum}")]
     DocumentTooLarge { actual: usize, maximum: usize },
     #[error("parse egress policy document: {0}")]
@@ -110,6 +116,13 @@ pub struct PolicyDocument {
     pub default: PolicyAction,
     #[serde(default)]
     pub rules: Vec<PolicyRule>,
+    /// A standard Pod's platform peers (#5602): exact IPv4 address and port
+    /// pairs its daemon dials, allowed over TCP before any address class is
+    /// refused. Only [`CompiledPolicy::locked_with_platform_peers`] and a
+    /// broker's own bootstrap build a policy with any; every other compile
+    /// refuses them, so no workload's policy can name one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platform_peers: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -465,11 +478,19 @@ pub(crate) struct NamedDial {
 pub struct CompiledPolicy {
     document: PolicyDocument,
     rules: Vec<CompiledRule>,
+    platform_peers: Vec<std::net::SocketAddrV4>,
     digest: PolicyDigest,
 }
 
 impl CompiledPolicy {
-    pub fn compile(mut document: PolicyDocument) -> Result<Self, PolicyError> {
+    pub fn compile(document: PolicyDocument) -> Result<Self, PolicyError> {
+        if !document.platform_peers.is_empty() {
+            return Err(PolicyError::PlatformPeersRefused);
+        }
+        Self::compile_document(document)
+    }
+
+    fn compile_document(mut document: PolicyDocument) -> Result<Self, PolicyError> {
         if document.version != POLICY_SCHEMA_VERSION {
             return Err(PolicyError::UnsupportedSchema(document.version));
         }
@@ -570,6 +591,7 @@ impl CompiledPolicy {
 
         document.rules.sort_by(|left, right| left.id.cmp(&right.id));
         compiled.sort_by(|left, right| left.id.cmp(&right.id));
+        let platform_peers = platform_peers::canonicalize(&mut document.platform_peers)?;
         let canonical = serde_json::to_vec(&document)?;
         let mut hasher = Sha256::new();
         hasher.update(DIGEST_DOMAIN);
@@ -578,6 +600,7 @@ impl CompiledPolicy {
         Ok(Self {
             document,
             rules: compiled,
+            platform_peers,
             digest,
         })
     }
@@ -616,6 +639,9 @@ impl CompiledPolicy {
             && let Some(class) = protected_name(hostname)
         {
             return self.deny(DecisionReason::ProtectedName(class), None);
+        }
+        if let Some(decision) = self.platform_peer_decision(request) {
+            return decision;
         }
         if let Some(address) = request.address
             && let Some(class) = classify_address(address)

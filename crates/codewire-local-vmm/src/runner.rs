@@ -104,6 +104,10 @@ mod egress_control;
 mod egress_status;
 mod front_door;
 #[cfg(target_os = "linux")]
+mod hosted;
+#[cfg(target_os = "linux")]
+pub use hosted::HostedSendError;
+#[cfg(target_os = "linux")]
 mod image_builder;
 mod intercept;
 mod mesh_processes;
@@ -286,6 +290,23 @@ impl CloudHypervisorRunner {
     }
 
     pub async fn prepare(&self, request: CreateVmRequest) -> Result<PreparedVm, RunnerError> {
+        self.prepare_boot(request, false).await
+    }
+
+    /// A standard Pod's boot (#5602): its guest runs the hosted daemon, with
+    /// the settings and tokens the hosted control channel carries.
+    pub async fn prepare_hosted(
+        &self,
+        request: CreateVmRequest,
+    ) -> Result<PreparedVm, RunnerError> {
+        self.prepare_boot(request, true).await
+    }
+
+    async fn prepare_boot(
+        &self,
+        request: CreateVmRequest,
+        hosted: bool,
+    ) -> Result<PreparedVm, RunnerError> {
         #[cfg(target_os = "linux")]
         preflight()?;
         validate_request(&request)?;
@@ -344,10 +365,10 @@ impl CloudHypervisorRunner {
             direct_shares_sha256,
             docker_disk.is_some(),
             cw_runtime_disk.as_ref(),
+            hosted,
+            // The front door's spawn supplies the placeholders beside its CA
+            // (#3999, change 12), in the request; none until then.
             egress_ca,
-            // The front door's spawn supplies these with its CA (#3999,
-            // change 12); none until then.
-            request.credential_placeholders.clone(),
         )?;
         publish_seed(&paths.seed_disk, &seed.encode())?;
         paths.prepare_diagnostics()?;
@@ -387,6 +408,7 @@ impl CloudHypervisorRunner {
         .with_docker_disk(docker_disk.as_ref().map(|_| paths.docker_disk.clone()))?
         .with_cw_runtime_disk(cw_runtime_disk.as_ref().map(|disk| disk.path.clone()))?
         .with_image_disk(image_disk.as_ref().map(|disk| disk.path.clone()))?
+        .with_guest_carried(hosted)
         .with_checkpoint_dir(Some(paths.checkpoints_dir.clone()))?
         .with_virtiofs(
             direct_shares
@@ -5124,16 +5146,7 @@ mod tests {
     fn an_image_disk_request_is_exact_and_its_seed_asks_for_the_disk() {
         let mut valid = request(1, 512);
         let seed = |request: &CreateVmRequest| {
-            boot_seed::boot_seed(
-                request,
-                &"s".repeat(64),
-                None,
-                false,
-                None,
-                None,
-                Default::default(),
-            )
-            .unwrap()
+            boot_seed::boot_seed(request, &"s".repeat(64), None, false, None, false, None).unwrap()
         };
         assert!(!seed(&valid).image_disk());
         valid.image_disk = Some(ImageDiskAttachment::Stored {

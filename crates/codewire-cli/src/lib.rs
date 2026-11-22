@@ -27,6 +27,8 @@ mod hosted_daemon;
 // `hosted_guest` example), which runs this loop without the daemon.
 pub mod hosted_egress;
 mod hosted_exec;
+#[cfg(target_os = "linux")]
+pub mod hosted_listener;
 mod local_runtime_pin;
 mod mesh;
 mod organization_client;
@@ -88,6 +90,15 @@ use secret_client::{CreateSecretProjectRequest, SecretClient, SecretMetadata, Se
 // The effective compiled version: `CODEWIRE_VERSION` when the build set it,
 // otherwise the workspace version, read from this cw's embedded build record.
 use build_record::CLI_VERSION;
+
+/// What `main` runs before anything else: a completion request is answered
+/// and exits, and `cw __hosted-daemon` takes its inherited listener before
+/// any thread starts (#5602).
+pub fn before_runtime() {
+    completion::answer_if_requested();
+    #[cfg(target_os = "linux")]
+    hosted_listener::take_before_runtime();
+}
 
 /// Reassert a credential-bearing child's non-dumpable state immediately after
 /// `execve`, which resets this flag for an ordinary executable. The selected
@@ -1253,9 +1264,18 @@ async fn serve_hosted_daemon(
     #[cfg(target_os = "linux")]
     codewire_daemon::ssh_known_hosts::SshKnownHosts::new(&config.home_root)
         .prepare(config.managed_credential_clients);
-    let listener = tokio::net::TcpListener::bind(&config.listen_addr)
-        .await
-        .with_context(|| format!("listen hosted daemon {}", config.listen_addr))?;
+    // A guest-carried daemon inherited its listener and never binds 7777.
+    #[cfg(target_os = "linux")]
+    let inherited = hosted_listener::take();
+    #[cfg(not(target_os = "linux"))]
+    let inherited: Option<std::net::TcpListener> = None;
+    let listener = match inherited {
+        Some(listener) => tokio::net::TcpListener::from_std(listener)
+            .context("serve the hosted daemon's inherited listener")?,
+        None => tokio::net::TcpListener::bind(&config.listen_addr)
+            .await
+            .with_context(|| format!("listen hosted daemon {}", config.listen_addr))?,
+    };
     let local_addr = listener
         .local_addr()
         .context("read hosted daemon listener address")?;

@@ -5,6 +5,7 @@
 #![allow(clippy::undocumented_unsafe_blocks, clippy::unwrap_used)]
 
 mod checkpoint_protocol;
+pub mod hosted_control;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod direct_share;

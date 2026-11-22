@@ -373,6 +373,7 @@ impl TypedPolicy {
             version: POLICY_SCHEMA_VERSION,
             default: PolicyAction::Deny,
             rules,
+            platform_peers: Vec::new(),
         }
     }
 

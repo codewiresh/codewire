@@ -570,7 +570,7 @@ impl Drop for AlignedSeed {
     }
 }
 
-fn fill_random(buffer: &mut [u8]) -> Result<()> {
+pub(super) fn fill_random(buffer: &mut [u8]) -> Result<()> {
     let mut filled = 0;
     while filled < buffer.len() {
         // SAFETY: writes at most the remaining bytes of `buffer`.

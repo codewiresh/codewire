@@ -68,12 +68,16 @@ mod disks;
 use bootstrap::runtime_path_environment;
 use bootstrap::with_boot_selection;
 mod egress_trust;
+mod hosted;
+mod hosted_ingress;
 mod image_attach;
 mod image_build;
 mod interception;
 mod network_check;
 mod network_rekey;
 mod network_status;
+mod network_topology;
+use network_topology::verify_isolated_tun;
 mod oci_config;
 mod shutdown;
 mod vm_only;
@@ -83,6 +87,7 @@ use bootstrap::{BootstrapChild, BootstrapParent};
 use codewire_daemon::execution::BootstrapPhase;
 pub use disks::find_disk_by_serial;
 use disks::{validate_block_device, wait_for_disk_by_serial};
+pub use hosted_ingress::run_listener_check as run_hosted_listener_check;
 pub use network_check::run_network_check;
 use network_status::{
     NETWORK_AGENT_FAILURE_STAGES, NETWORK_AGENT_GENERIC_FAILURE_STAGE,
@@ -280,49 +285,14 @@ struct LinuxCapabilityData {
 #[path = "checkpoint.rs"]
 mod checkpoint;
 
-pub fn run_init() -> Result<()> {
-    // Keep the startup capability in the actual sealed guest ELF. Host
-    // preflight reads it from the admitted boot image without executing it.
-    std::hint::black_box(crate::GUEST_RUNTIME_ABI_MARKER);
-    std::hint::black_box(crate::GUEST_CHECKPOINT_ABI_MARKER);
-    std::hint::black_box(crate::GUEST_CHECKPOINT_THAW_CLOCK_MARKER);
-    std::hint::black_box(crate::cw_runtime_live::LIVE_RUNTIME_CAPABILITY_MARKER);
-    std::hint::black_box(crate::VM_ONLY_CAPABILITY_MARKER);
-    std::hint::black_box(crate::WORKSPACE_ROOT_SHARE_CAPABILITY_MARKER);
-    ensure!(
-        unsafe { libc::getpid() } == 1,
-        "guest init must run as PID 1"
-    );
-    POWEROFF_REQUESTED.store(false, Ordering::Release);
-
-    mount_minimal_filesystems()?;
-    crate::rtc_clock::follow_if_requested()?;
-    install_poweroff_handlers()?;
-
-    let seed_device = wait_for_disk_by_serial(
-        Path::new(SYS_BLOCK_PATH),
-        Path::new(DEV_PATH),
-        SEED_DISK_SERIAL,
-        DISK_DISCOVERY_TIMEOUT,
-    )?;
-    validate_block_device(&seed_device)?;
-    let seed = read_seed_file(&seed_device)?;
-    if seed.image_build() {
-        return image_build::run(&seed, &seed_device);
-    }
-    let state_device = wait_for_disk_by_serial(
-        Path::new(SYS_BLOCK_PATH),
-        Path::new(DEV_PATH),
-        STATE_DISK_SERIAL,
-        DISK_DISCOVERY_TIMEOUT,
-    )?;
-    validate_block_device(&state_device)?;
-    mount_state(&state_device)?;
-    create_dir(Path::new(CONTROL_PATH), 0o700)?;
-    record_boot_stage("state-mounted")?;
-    mount_workspace_cgroups()?;
-    record_boot_stage("cgroups-ready")?;
-
+/// The root disk, and the Docker, cw runtime and image disks the seed asks
+/// for: each found by its serial, validated, and distinct from every other
+/// guest disk. The cw runtime and image disks are mounted here.
+fn admit_disks(
+    seed: &Seed,
+    seed_device: &Path,
+    state_device: &Path,
+) -> Result<(PathBuf, Option<PathBuf>)> {
     let root_device = wait_for_disk_by_serial(
         Path::new(SYS_BLOCK_PATH),
         Path::new(DEV_PATH),
@@ -373,14 +343,57 @@ pub fn run_init() -> Result<()> {
         );
     }
     if seed.image_disk() {
-        let mut others = vec![
-            state_device.as_path(),
-            root_device.as_path(),
-            seed_device.as_path(),
-        ];
+        let mut others = vec![state_device, root_device.as_path(), seed_device];
         others.extend(docker_device.as_deref());
         image_attach::mount(&others)?;
     }
+    Ok((root_device, docker_device))
+}
+
+pub fn run_init() -> Result<()> {
+    // Keep the startup capability in the actual sealed guest ELF. Host
+    // preflight reads it from the admitted boot image without executing it.
+    std::hint::black_box(crate::GUEST_RUNTIME_ABI_MARKER);
+    std::hint::black_box(crate::GUEST_CHECKPOINT_ABI_MARKER);
+    std::hint::black_box(crate::GUEST_CHECKPOINT_THAW_CLOCK_MARKER);
+    std::hint::black_box(crate::cw_runtime_live::LIVE_RUNTIME_CAPABILITY_MARKER);
+    std::hint::black_box(crate::VM_ONLY_CAPABILITY_MARKER);
+    std::hint::black_box(crate::WORKSPACE_ROOT_SHARE_CAPABILITY_MARKER);
+    ensure!(
+        unsafe { libc::getpid() } == 1,
+        "guest init must run as PID 1"
+    );
+    POWEROFF_REQUESTED.store(false, Ordering::Release);
+
+    mount_minimal_filesystems()?;
+    crate::rtc_clock::follow_if_requested()?;
+    install_poweroff_handlers()?;
+
+    let seed_device = wait_for_disk_by_serial(
+        Path::new(SYS_BLOCK_PATH),
+        Path::new(DEV_PATH),
+        SEED_DISK_SERIAL,
+        DISK_DISCOVERY_TIMEOUT,
+    )?;
+    validate_block_device(&seed_device)?;
+    let seed = read_seed_file(&seed_device)?;
+    if seed.image_build() {
+        return image_build::run(&seed, &seed_device);
+    }
+    let state_device = wait_for_disk_by_serial(
+        Path::new(SYS_BLOCK_PATH),
+        Path::new(DEV_PATH),
+        STATE_DISK_SERIAL,
+        DISK_DISCOVERY_TIMEOUT,
+    )?;
+    validate_block_device(&state_device)?;
+    mount_state(&state_device)?;
+    create_dir(Path::new(CONTROL_PATH), 0o700)?;
+    record_boot_stage("state-mounted")?;
+    mount_workspace_cgroups()?;
+    record_boot_stage("cgroups-ready")?;
+
+    let (root_device, docker_device) = admit_disks(&seed, &seed_device, &state_device)?;
     record_boot_stage("disks-admitted")?;
     mount_root_generation(&root_device)?;
     if let Some(device) = docker_device.as_deref() {
@@ -399,6 +412,7 @@ pub fn run_init() -> Result<()> {
     // disk rather than inheriting the token through argv or environment.
     start_boot_progress(&seed, GuestBootStage::RootMounted)?;
     checkpoint::start()?;
+    let hosted = seed.hosted().then(|| hosted::start(&seed)).transpose()?;
     let plan = if let Some(binding) = seed.setup() {
         let mut persistent = vec![
             state_device.as_path(),
@@ -473,6 +487,9 @@ pub fn run_init() -> Result<()> {
     // The broker transport must exist before install/image/startup can ask the
     // final child launcher for a projection. Terminal progress remains after
     // all of that startup and the durable install acknowledgement.
+    if let Some(hosted) = &hosted {
+        hosted.prepare(&plan)?;
+    }
     let mut daemon = DaemonStartGuard(Some(spawn_daemon()?));
     let workspace = spawn_workspace_container(
         &plan,
@@ -491,6 +508,9 @@ pub fn run_init() -> Result<()> {
         network.id(),
     )?;
 
+    if hosted.is_some() {
+        hosted::wait_until_ready()?;
+    }
     record_boot_stage("daemon-started")?;
     let daemon = daemon.0.take().expect("daemon start child is present");
     supervise_guest(daemon, workspace, network, docker, poweroff, vm_only)
@@ -775,7 +795,7 @@ pub async fn run_network_agent() -> Result<()> {
         signal(SignalKind::user_defined1()).context("listen for checkpoint resume signals"),
         "workspace-net-async-failed",
     )?;
-    let tun_descriptor = open_and_configure_tun()?;
+    let tun_descriptor = open_and_configure_tun(hosted::network_interface(&seed))?;
     // RUSTSEC-2026-0386: an owned `OwnedFd` is outside `AsyncFd::new`'s unsound case; `register` migration is #3249.
     #[allow(deprecated)]
     let registered = AsyncFd::new(tun_descriptor);
@@ -870,8 +890,8 @@ pub async fn run_network_agent() -> Result<()> {
     }
 }
 
-fn open_and_configure_tun() -> Result<OwnedFd> {
-    let descriptor = match crate::tun::open(NETWORK_INTERFACE) {
+fn open_and_configure_tun(interface: &str) -> Result<OwnedFd> {
+    let descriptor = match crate::tun::open(interface) {
         Ok(descriptor) => descriptor,
         Err(error) => {
             record_boot_stage(match error {
@@ -888,27 +908,11 @@ fn open_and_configure_tun() -> Result<OwnedFd> {
             "workspace-net-loopback-failed",
         ),
         (
-            vec![
-                "ip",
-                "link",
-                "set",
-                "dev",
-                NETWORK_INTERFACE,
-                "mtu",
-                "1500",
-                "up",
-            ],
+            vec!["ip", "link", "set", "dev", interface, "mtu", "1500", "up"],
             "workspace-net-link-failed",
         ),
         (
-            vec![
-                "ip",
-                "addr",
-                "add",
-                NETWORK_GUEST_ADDRESS,
-                "dev",
-                NETWORK_INTERFACE,
-            ],
+            vec!["ip", "addr", "add", NETWORK_GUEST_ADDRESS, "dev", interface],
             "workspace-net-address-failed",
         ),
         (
@@ -920,7 +924,7 @@ fn open_and_configure_tun() -> Result<OwnedFd> {
                 "via",
                 NETWORK_GATEWAY_ADDRESS,
                 "dev",
-                NETWORK_INTERFACE,
+                interface,
             ],
             "workspace-net-route-failed",
         ),
@@ -931,7 +935,7 @@ fn open_and_configure_tun() -> Result<OwnedFd> {
         "/proc/sys/net/ipv6/conf/all/disable_ipv6",
         "/proc/sys/net/ipv6/conf/default/disable_ipv6",
         "/proc/sys/net/ipv6/conf/lo/disable_ipv6",
-        "/proc/sys/net/ipv6/conf/cw0/disable_ipv6",
+        format!("/proc/sys/net/ipv6/conf/{interface}/disable_ipv6").as_str(),
     ] {
         network_agent_startup(
             write_proc_value(Path::new(path), b"1\n"),
@@ -940,6 +944,7 @@ fn open_and_configure_tun() -> Result<OwnedFd> {
     }
     network_agent_startup(
         verify_isolated_tun(
+            interface,
             Path::new("/proc/net/dev"),
             Path::new("/proc/net/route"),
             Path::new("/proc/net/ipv6_route"),
@@ -1323,8 +1328,8 @@ pub fn run_workspace_init() -> Result<()> {
     if let Err(error) = confine_workspace_readiness_descriptor() {
         return fail_workspace_init("workspace-confinement-failed", error);
     }
-    let plan = match read_container_workspace_plan() {
-        Ok(plan) => plan,
+    let (plan, workload) = match read_container_workspace_plan().and_then(hosted::with_workload) {
+        Ok(plans) => plans,
         Err(error) => return fail_workspace_init("workspace-plan-invalid", error),
     };
     if let Err(error) = prepare_container_docker_socket(&plan.identity) {
@@ -1360,19 +1365,20 @@ pub fn run_workspace_init() -> Result<()> {
     {
         return fail_workspace_init("workspace-install-failed", error);
     }
-    if !plan.workload_args.is_empty() {
+    if !workload.workload_args.is_empty() {
         ensure_workspace_start_active(deadline, &POWEROFF_REQUESTED)?;
         let _workload =
             match bootstrap
                 .channel(BootstrapPhase::Image, deadline)
                 .and_then(|channel| {
-                    spawn_workspace_process_with_projection(
-                        &plan,
-                        &plan.workload_args,
-                        &plan.workload_cwd,
+                    spawn_workspace_process(
+                        &workload,
+                        &workload.workload_args,
+                        &workload.workload_cwd,
                         "start image workload",
                         channel,
                         deadline,
+                        hosted::workload_listener(),
                     )
                 }) {
                 Ok(workload) => workload,
@@ -1876,6 +1882,28 @@ fn spawn_workspace_process_with_projection(
     projection_channel: Option<UnixStream>,
     deadline: Instant,
 ) -> Result<std::process::Child> {
+    spawn_workspace_process(
+        plan,
+        arguments,
+        working_directory,
+        action,
+        projection_channel,
+        deadline,
+        None,
+    )
+}
+
+/// As [`spawn_workspace_process_with_projection`], and `listener`, when
+/// given, as descriptor 9: only the hosted workload's spawn passes one.
+fn spawn_workspace_process(
+    plan: &WorkspacePlan,
+    arguments: &[String],
+    working_directory: &str,
+    action: &'static str,
+    projection_channel: Option<UnixStream>,
+    deadline: Instant,
+    listener: Option<std::os::fd::RawFd>,
+) -> Result<std::process::Child> {
     let (program, remaining) = arguments
         .split_first()
         .ok_or_else(|| anyhow::anyhow!("workspace process command is empty"))?;
@@ -1934,6 +1962,7 @@ fn spawn_workspace_process_with_projection(
         .collect::<Vec<_>>();
     let projection_fd = projection_descriptor.as_ref().map(AsRawFd::as_raw_fd);
     let status_fd = status_descriptor.as_ref().map(AsRawFd::as_raw_fd);
+    let listener_fd = listener;
     unsafe {
         command.pre_exec(move || {
             if let Some(descriptor) = projection_fd
@@ -1944,6 +1973,12 @@ fn spawn_workspace_process_with_projection(
             }
             if let Some(descriptor) = status_fd
                 && (libc::dup2(descriptor, 4) == -1 || libc::fcntl(4, libc::F_SETFD, 0) == -1)
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // After 3 and 4 are placed, so 9 may reuse a source descriptor.
+            if let Some(descriptor) = listener_fd
+                && (libc::dup2(descriptor, 9) == -1 || libc::fcntl(9, libc::F_SETFD, 0) == -1)
             {
                 return Err(io::Error::last_os_error());
             }
@@ -4760,6 +4795,7 @@ fn spawn_workspace_container(
         .set_nonblocking(true)
         .context("make workspace readiness channel nonblocking")?;
     let readiness_fd = readiness_writer.as_raw_fd();
+    let listener = hosted_ingress::daemon_listener_fd();
     let mut command = Command::new(RUNC_PATH);
     command
         .args([
@@ -4772,7 +4808,7 @@ fn spawn_workspace_container(
             "run",
             "--no-pivot",
             "--preserve-fds",
-            "1",
+            hosted_ingress::preserved_fds(),
             "--bundle",
             RUNC_BUNDLE_PATH,
             WORKSPACE_CONTAINER_ID,
@@ -4789,7 +4825,11 @@ fn spawn_workspace_container(
             {
                 return Err(io::Error::last_os_error());
             }
-            if libc::fcntl(WORKSPACE_READY_FD, libc::F_SETFD, 0) == -1 {
+            if libc::fcntl(WORKSPACE_READY_FD, libc::F_SETFD, 0) == -1
+                || listener.is_some_and(|fd| {
+                    libc::dup2(fd, 4) == -1 || libc::fcntl(4, libc::F_SETFD, 0) == -1
+                })
+            {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
@@ -5831,88 +5871,6 @@ fn write_durable(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     bail!("durable temporary filename collisions exceeded limit")
 }
 
-fn verify_isolated_tun(net_dev: &Path, route: &Path, ipv6_route: &Path) -> Result<()> {
-    // An inherited sysfs mount remains associated with the network namespace
-    // in which it was mounted. /proc/net is process-namespace aware, so use
-    // its bounded interface table to inspect this agent's actual namespace.
-    let devices = fs::read_to_string(net_dev)
-        .with_context(|| format!("read guest network interfaces {}", net_dev.display()))?;
-    let mut lines = devices.lines();
-    ensure!(
-        lines.next().is_some() && lines.next().is_some(),
-        "guest network interface table is malformed"
-    );
-    let mut interfaces = Vec::new();
-    for line in lines.filter(|line| !line.trim().is_empty()) {
-        let (interface, counters) = line
-            .split_once(':')
-            .ok_or_else(|| anyhow::anyhow!("guest network interface table is malformed"))?;
-        let interface = interface.trim();
-        let counters = counters.split_ascii_whitespace().collect::<Vec<_>>();
-        ensure!(
-            !interface.is_empty()
-                && counters.len() == 16
-                && counters
-                    .iter()
-                    .all(|value| !value.is_empty()
-                        && value.bytes().all(|byte| byte.is_ascii_digit())),
-            "guest network interface table is malformed"
-        );
-        interfaces.push(interface);
-    }
-    interfaces.sort();
-    ensure!(
-        interfaces.as_slice() == [NETWORK_INTERFACE, "lo"],
-        "guest network namespace does not contain exactly loopback and the trusted TUN"
-    );
-
-    let routes = fs::read_to_string(route)
-        .with_context(|| format!("read guest route table {}", route.display()))?;
-    let mut default_route = false;
-    for line in routes
-        .lines()
-        .skip(1)
-        .filter(|line| !line.trim().is_empty())
-    {
-        let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
-        ensure!(fields.len() >= 8, "guest route table is malformed");
-        ensure!(
-            matches!(fields[0], "lo" | NETWORK_INTERFACE),
-            "guest has a route through an unexpected interface"
-        );
-        if fields[1] == "00000000" {
-            ensure!(
-                fields[0] == NETWORK_INTERFACE
-                    && fields[2].eq_ignore_ascii_case("010200C0")
-                    && fields[7] == "00000000",
-                "guest default route is not bound to the trusted TUN gateway"
-            );
-            default_route = true;
-        }
-    }
-    ensure!(default_route, "guest trusted TUN default route is absent");
-
-    match fs::read_to_string(ipv6_route) {
-        Ok(routes) => {
-            for line in routes.lines().filter(|line| !line.trim().is_empty()) {
-                let interface = line
-                    .split_ascii_whitespace()
-                    .next_back()
-                    .ok_or_else(|| anyhow::anyhow!("guest IPv6 route table is malformed"))?;
-                ensure!(
-                    interface == "lo",
-                    "guest TUN unexpectedly has an IPv6 route"
-                );
-            }
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            // A kernel with IPv6 disabled has no IPv6 route surface.
-        }
-        Err(error) => return Err(error).context("read guest IPv6 route table"),
-    }
-    Ok(())
-}
-
 fn ensure_init_is_expected(container: bool) -> Result<()> {
     let (process, expected) = if container {
         ("self", Path::new(CONTAINER_INIT_PATH))
@@ -6416,7 +6374,7 @@ mod tests {
             "00000000000000000000000000000001 80 00000000000000000000000000000000 00 00000000 00000001 00000000 80200001 lo\n",
         )
         .unwrap();
-        verify_isolated_tun(&net_dev, &route, &ipv6_route).unwrap();
+        verify_isolated_tun(NETWORK_INTERFACE, &net_dev, &route, &ipv6_route).unwrap();
 
         OpenOptions::new()
             .append(true)
@@ -6424,7 +6382,7 @@ mod tests {
             .unwrap()
             .write_all(b"eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n")
             .unwrap();
-        assert!(verify_isolated_tun(&net_dev, &route, &ipv6_route).is_err());
+        assert!(verify_isolated_tun(NETWORK_INTERFACE, &net_dev, &route, &ipv6_route).is_err());
     }
 
     #[test]

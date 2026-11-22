@@ -198,11 +198,7 @@ mod linux {
         artifact_lock: PathBuf,
         state_root: PathBuf,
         vm_id: Uuid,
-        /// image-disk only: the second VM over the same image disk.
-        second_vm_id: Option<Uuid>,
-        /// image-disk only: where to write the built disk's record and the
-        /// image's config, as a published image disk holds them (#5602).
-        publish: Option<PathBuf>,
+        image_disk: image_disk::ImageDiskOptions,
         outside_disk: Option<PathBuf>,
         resources: Option<RunResources>,
     }

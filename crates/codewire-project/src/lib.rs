@@ -73,12 +73,14 @@ pub const VM_ONLY_FIELD: &str = "workspace.vm_only";
 /// top-level folders only.
 pub const DEFAULT_VM_ONLY_PATTERNS: [&str; 3] = ["node_modules", "target", ".venv"];
 /// Environment names reserved for Codewire-owned runtime control channels.
-pub const RESERVED_RUNTIME_ENVIRONMENT_KEYS: [&str; 5] = [
+pub const RESERVED_RUNTIME_ENVIRONMENT_KEYS: [&str; 6] = [
     "CODEWIRE_MESH_URL",
     "CODEWIRE_MESH_AUTH_TOKEN",
     "CODEWIRE_MESH_NETWORK",
     "CODEWIRE_MESH_INVITE_CODE",
     "CODEWIRE_MANAGED_CREDENTIAL_CLIENTS",
+    // A standard Pod's hosted daemon's inherited listener (#5602).
+    "CODEWIRE_WORKSPACE_SHIM_LISTEN_FD",
 ];
 /// Maximum key size accepted by canonical project and guest workload boundaries.
 pub const MAX_ENVIRONMENT_KEY_BYTES: usize =

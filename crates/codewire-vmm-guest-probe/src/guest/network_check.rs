@@ -8,11 +8,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use super::{NETWORK_MARKER, read_guest_identity, verify_isolated_tun};
+use super::{NETWORK_INTERFACE, NETWORK_MARKER, read_guest_identity, verify_isolated_tun};
 
 pub fn run_network_check() -> Result<()> {
     let _ = read_guest_identity()?;
     verify_isolated_tun(
+        NETWORK_INTERFACE,
         Path::new("/proc/net/dev"),
         Path::new("/proc/net/route"),
         Path::new("/proc/net/ipv6_route"),

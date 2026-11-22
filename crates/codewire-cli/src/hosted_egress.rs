@@ -14,7 +14,9 @@ use codewire_daemon_proto::{CLUSTER_DNS_IP_ENV, EGRESS_TOKEN_PATH};
 use codewire_network_session::guest::hosted::{
     EgressEvents, HostedEgressConfig, PodConnector, RoundEnd, VersionRefused, run,
 };
-use codewire_network_session::guest::{InterfaceProbes, PROBE_TIMEOUT, self_check};
+use codewire_network_session::guest::{
+    InterfaceProbes, PROBE_TIMEOUT, ProbeOutcome, SelfCheckProbes, self_check,
+};
 use codewire_network_session::hosted::{HOSTED_TUN_NAME, pod_interface, routing};
 use codewire_network_session::{EgressTrust, SelfCheck, SelfCheckFailure};
 use tokio::io::unix::AsyncFd;
@@ -114,6 +116,137 @@ fn pod_dial() -> codewire_tls::PeerDial {
 pub fn prove_pod_interface() -> anyhow::Result<()> {
     drop(pod_interface::tcp_socket()?);
     Ok(())
+}
+
+/// The kernel command line this daemon's kernel booted with.
+const KERNEL_COMMAND_LINE: &str = "/proc/cmdline";
+/// A public resolver the guest-carried self-check queries: it answers UDP
+/// from anywhere, so a query that is not blocked is answered.
+const PUBLIC_RESOLVER: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 53);
+
+/// Whether this daemon runs guest-carried, in a standard Pod's guest
+/// (#5602): its kernel booted with the parameter only that runtime's VMM
+/// sets. It then keeps broker mode's literal platform addresses and runs no
+/// egress loop; the guest's network session carries its dials and the host
+/// end refuses everything else. A Kata broker Pod's egress path (its egress
+/// identity or its egress TUN) alongside the parameter, or the parameter
+/// without broker settings, refuses to start: there is no fallback.
+pub(crate) fn guest_carried(broker: bool) -> anyhow::Result<bool> {
+    let command_line =
+        std::fs::read_to_string(KERNEL_COMMAND_LINE).context("read the kernel command line")?;
+    guest_carried_from(
+        &command_line,
+        broker,
+        std::path::Path::new(EGRESS_TOKEN_PATH).exists()
+            || std::path::Path::new("/sys/class/net")
+                .join(HOSTED_TUN_NAME)
+                .exists(),
+    )
+}
+
+fn guest_carried_from(
+    command_line: &str,
+    broker: bool,
+    kata_egress_path: bool,
+) -> anyhow::Result<bool> {
+    if !codewire_vmm_guest_probe::hosted_control::guest_carried(command_line) {
+        return Ok(false);
+    }
+    anyhow::ensure!(
+        broker,
+        "a guest-carried daemon needs broker mode's platform addresses; it never dials names"
+    );
+    anyhow::ensure!(
+        !kata_egress_path,
+        "a broker Pod's egress path is present in a guest-carried boot; refusing to start without its egress loop"
+    );
+    Ok(true)
+}
+
+/// The guest-carried daemon's start-time self-check (cw-security, #5602),
+/// standing in for the broker loop's until the host end joins `cw-egress`:
+/// from the workload's network, bound to the Pod interface, a TCP dial to a
+/// public address and a DNS query to a public resolver and to the cluster's
+/// must all fail. If any is answered the daemon refuses to serve.
+pub(crate) async fn guest_carried_self_check(
+    cluster_dns: Option<Ipv4Addr>,
+) -> anyhow::Result<codewire_proto::codewire::internal::v1::GuestCarriedSelfCheck> {
+    let dial_target = codewire_network_session::guest::self_check::DIRECT_DIAL_TARGET;
+    let probes = |resolver: SocketAddrV4| InterfaceProbes {
+        interface: codewire_network_session::hosted::HOSTED_POD_INTERFACE.to_owned(),
+        dial_target: SocketAddr::V4(dial_target),
+        resolver: SocketAddr::V4(resolver),
+        timeout: PROBE_TIMEOUT,
+    };
+    // The cluster's resolver is one of the three, so without it the check
+    // fails closed, as broker mode's does.
+    let Some(dns) = cluster_dns else {
+        tracing::error!(
+            "{CLUSTER_DNS_IP_ENV} is missing or not an IPv4 address; the guest-carried self-check fails closed"
+        );
+        anyhow::bail!(
+            "the guest-carried self-check has no cluster DNS to probe; refusing to serve"
+        );
+    };
+    let cluster_resolver = SocketAddrV4::new(dns, 53);
+    let checks = [
+        CarriedProbe::Dial("direct_dial", dial_target, probes(PUBLIC_RESOLVER)),
+        CarriedProbe::Dns("public_dns", PUBLIC_RESOLVER, probes(PUBLIC_RESOLVER)),
+        CarriedProbe::Dns("cluster_dns", cluster_resolver, probes(cluster_resolver)),
+    ];
+    check_carried(&checks).await
+}
+
+/// One probe of the guest-carried self-check: its name, its target and how
+/// it is made.
+enum CarriedProbe<P> {
+    Dial(&'static str, SocketAddrV4, P),
+    Dns(&'static str, SocketAddrV4, P),
+}
+
+/// Runs every probe and logs each one's name, target and outcome, whether the
+/// check passes or fails. Any probe answered, or one that could not be set
+/// up, fails the check; a refusal, no route or a timeout is its pass, as in
+/// broker mode's self-check. A pass returns the record the daemon sends with
+/// its host key.
+async fn check_carried<P: SelfCheckProbes>(
+    checks: &[CarriedProbe<P>],
+) -> anyhow::Result<codewire_proto::codewire::internal::v1::GuestCarriedSelfCheck> {
+    let mut report = Vec::with_capacity(checks.len());
+    let mut probes = Vec::with_capacity(checks.len());
+    let mut answered = false;
+    for check in checks {
+        let (name, target, outcome) = match check {
+            CarriedProbe::Dial(name, target, probes) => (name, target, probes.direct_dial().await),
+            CarriedProbe::Dns(name, target, probes) => (name, target, probes.dns_query().await),
+        };
+        answered |= outcome == ProbeOutcome::Reached;
+        probes.push(codewire_proto::codewire::internal::v1::SelfCheckProbe {
+            name: (*name).to_owned(),
+            target: target.to_string(),
+            refused: outcome == ProbeOutcome::Blocked,
+            ..Default::default()
+        });
+        let outcome = match outcome {
+            ProbeOutcome::Blocked => "refused",
+            ProbeOutcome::Reached => "answered",
+        };
+        report.push(format!("{name} {target} {outcome}"));
+    }
+    let report = report.join("; ");
+    if answered {
+        tracing::error!(probes = %report, "guest-carried egress self-check failed; refusing to serve");
+        anyhow::bail!(
+            "the guest-carried egress self-check reached the network ({report}); refusing to serve"
+        );
+    }
+    tracing::info!(probes = %report, "guest-carried egress self-check passed");
+    Ok(
+        codewire_proto::codewire::internal::v1::GuestCarriedSelfCheck {
+            probes,
+            ..Default::default()
+        },
+    )
 }
 
 /// Attach the TUN, start the egress loop, and return once the first
@@ -380,6 +513,85 @@ impl<R: PartialEq> RoundLog<R> {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn a_guest_carried_check_without_a_cluster_dns_fails_closed() {
+        let error = guest_carried_self_check(None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no cluster DNS"), "{error}");
+    }
+
+    /// Probes that answer as told.
+    struct FixedProbes(ProbeOutcome);
+
+    impl SelfCheckProbes for FixedProbes {
+        async fn direct_dial(&self) -> ProbeOutcome {
+            self.0
+        }
+        async fn dns_query(&self) -> ProbeOutcome {
+            self.0
+        }
+    }
+
+    #[tokio::test]
+    async fn the_guest_carried_check_passes_only_when_every_probe_is_refused() {
+        use ProbeOutcome::{Blocked, Reached};
+        let target = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 9), 53);
+        let all = |outcomes: [ProbeOutcome; 3]| {
+            vec![
+                CarriedProbe::Dial("direct_dial", target, FixedProbes(outcomes[0])),
+                CarriedProbe::Dns("public_dns", target, FixedProbes(outcomes[1])),
+                CarriedProbe::Dns("cluster_dns", target, FixedProbes(outcomes[2])),
+            ]
+        };
+        let passed = check_carried(&all([Blocked, Blocked, Blocked]))
+            .await
+            .unwrap();
+        assert_eq!(
+            passed
+                .probes
+                .iter()
+                .map(|probe| probe.name.as_str())
+                .collect::<Vec<_>>(),
+            ["direct_dial", "public_dns", "cluster_dns"]
+        );
+        assert!(
+            passed
+                .probes
+                .iter()
+                .all(|probe| probe.refused && probe.target == "192.0.2.9:53")
+        );
+        for answered in [
+            [Reached, Blocked, Blocked],
+            [Blocked, Reached, Blocked],
+            [Blocked, Blocked, Reached],
+        ] {
+            let error = check_carried(&all(answered)).await.unwrap_err().to_string();
+            assert!(error.contains("answered"), "{error}");
+        }
+    }
+
+    #[test]
+    fn only_the_runtimes_parameter_makes_a_daemon_guest_carried_and_never_a_kata_pod() {
+        let carried = "console=ttyS0 rdinit=/init panic=-1 codewire.guest_carried=1";
+        assert!(guest_carried_from(carried, true, false).unwrap());
+        // No parameter, or one that merely contains its text: broker mode as now.
+        for kata in [
+            "",
+            "console=hvc0 quiet",
+            "codewire.guest_carried=10",
+            "xcodewire.guest_carried=1",
+        ] {
+            assert!(!guest_carried_from(kata, true, false).unwrap(), "{kata}");
+        }
+        // A Kata broker Pod with the parameter forced on still refuses to
+        // start without its egress loop, as does the parameter without broker
+        // settings.
+        assert!(guest_carried_from(carried, true, true).is_err());
+        assert!(guest_carried_from(carried, false, false).is_err());
+    }
     use std::collections::HashMap;
 
     use codewire_daemon_proto::{

@@ -32,6 +32,7 @@ fn document(rules: Vec<PolicyRule>) -> PolicyDocument {
         version: POLICY_SCHEMA_VERSION,
         default: PolicyAction::Deny,
         rules,
+        platform_peers: Vec::new(),
     }
 }
 
@@ -320,11 +321,13 @@ fn malformed_policy_documents_fail_closed() {
             version: 2,
             default: PolicyAction::Deny,
             rules: Vec::new(),
+            platform_peers: Vec::new(),
         },
         PolicyDocument {
             version: 1,
             default: PolicyAction::Allow,
             rules: Vec::new(),
+            platform_peers: Vec::new(),
         },
         document(vec![PolicyRule {
             id: "Bad Id".to_string(),

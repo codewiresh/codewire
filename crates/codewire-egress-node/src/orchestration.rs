@@ -59,7 +59,9 @@ pub enum Assignment {
     Bound {
         environment_id: String,
         operation_generation: i64,
-        policy: AssignedPolicy,
+        /// Boxed: a compiled policy, with its platform peers, outweighs the
+        /// unbound variant.
+        policy: Box<AssignedPolicy>,
         platform: Vec<PlatformAllow>,
         /// Boxed: with its route table it outweighs the rest of the variant.
         interception: Box<Interception>,
@@ -120,11 +122,11 @@ pub fn assignment(assignment: &EgressAssignment) -> Result<Assignment, Assignmen
             Ok(Assignment::Bound {
                 environment_id: bound.environment_id.clone(),
                 operation_generation: bound.operation_generation,
-                policy: AssignedPolicy {
+                policy: Box::new(AssignedPolicy {
                     reference: revision.reference.clone(),
                     revision: revision.revision,
                     policy,
-                },
+                }),
                 platform,
                 interception: Box::new(interception(bound)),
             })

@@ -142,6 +142,11 @@ pub(crate) struct BindingClient {
     /// The listener admits one in-flight request per Pod: every call holds
     /// this for its whole duration.
     in_flight: tokio::sync::Mutex<()>,
+    /// A guest-carried daemon's passed self-check (#5602), sent with its
+    /// host key; none for any other daemon.
+    #[cfg(target_os = "linux")]
+    guest_carried_self_check:
+        std::sync::Mutex<Option<codewire_proto::codewire::internal::v1::GuestCarriedSelfCheck>>,
 }
 
 /// The public roots the binding listener's certificate must chain to.
@@ -197,6 +202,8 @@ impl BindingClient {
             token_path: token_path.to_owned(),
             timing,
             in_flight: tokio::sync::Mutex::new(()),
+            #[cfg(target_os = "linux")]
+            guest_carried_self_check: std::sync::Mutex::new(None),
         })
     }
 
@@ -289,6 +296,18 @@ impl BindingClient {
         access
     }
 
+    /// Keeps a guest-carried daemon's passed self-check, which every later
+    /// host-key record carries.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn set_guest_carried_self_check(
+        &self,
+        check: codewire_proto::codewire::internal::v1::GuestCarriedSelfCheck,
+    ) {
+        if let Ok(mut held) = self.guest_carried_self_check.lock() {
+            *held = Some(check);
+        }
+    }
+
     /// Record this Pod's SSH host public key (`ssh-ed25519 <base64>`).
     /// Recording the same key again succeeds; a different key for the same
     /// environment and generation is `failed_precondition`.
@@ -303,6 +322,14 @@ impl BindingClient {
             .record_host_key_with_options(
                 RecordHostKeyRequest {
                     public_key_openssh: public_key_openssh.to_owned(),
+                    #[cfg(target_os = "linux")]
+                    guest_carried_self_check: self
+                        .guest_carried_self_check
+                        .lock()
+                        .ok()
+                        .and_then(|check| check.clone())
+                        .map(::buffa::MessageField::some)
+                        .unwrap_or_default(),
                     ..Default::default()
                 },
                 options,

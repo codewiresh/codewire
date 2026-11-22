@@ -31,7 +31,10 @@ use crate::runner::ExitClass;
 use crate::setup_pack::{PublishedSetupRequest, ensure_published_setup_pack};
 use crate::workspace::ensure_empty_state_disk;
 use crate::{CloudHypervisorRunner, CreateVmRequest, RunnerConfig, RunnerError};
+
+mod hosted;
 use codewire_vmm_guest_probe::image_disk::BuildId;
+pub use hosted::HostedPaths;
 
 /// The runtime image's own artifacts: Cloud Hypervisor, the guest kernel and
 /// the guest root, with the lock that pins them.
@@ -42,6 +45,9 @@ const STATE_VOLUME: &str = "/state";
 /// The workspace image's published disk, an image volume.
 const IMAGE_DISK_DIRECTORY: &str = "/image";
 const IMAGE_CONFIG_NAME: &str = "config.json";
+/// The image index the disk's manifest came from, when it came from one.
+const IMAGE_INDEX_NAME: &str = "index.json";
+const MAX_IMAGE_INDEX_BYTES: u64 = 1024 * 1024;
 /// The memory volume the kubelet's readiness probe reads. The probe tests
 /// the same file a Kata Pod's daemon writes, `daemon/ready`.
 const RUN_DIRECTORY: &str = "/codewire/run";
@@ -75,6 +81,12 @@ pub enum PodRuntimeError {
     #[error(transparent)]
     Runner(#[from] RunnerError),
     #[error(transparent)]
+    Hosted(#[from] crate::runner::HostedSendError),
+    #[error(transparent)]
+    CwRuntime(#[from] crate::cw_runtime::CwRuntimeError),
+    #[error(transparent)]
+    Policy(#[from] codewire_egress_policy::PolicyError),
+    #[error(transparent)]
     Generation(#[from] crate::generation::GenerationError),
     #[error(transparent)]
     Workspace(#[from] crate::workspace::WorkspaceError),
@@ -99,6 +111,8 @@ pub struct PodSettings {
     pub workspace_image: String,
     pub image_disk_id: String,
     pub build_id: String,
+    /// The platform peers the host end may dial for the hosted daemon.
+    pub platform_peers: Vec<std::net::SocketAddrV4>,
 }
 
 impl PodSettings {
@@ -131,6 +145,10 @@ impl PodSettings {
             workspace_image: read("CODEWIRE_WORKSPACE_IMAGE")?,
             image_disk_id: read("CODEWIRE_IMAGE_DISK_ID")?,
             build_id: read("CODEWIRE_IMAGE_DISK_BUILD_ID")?,
+            platform_peers: match variable("CODEWIRE_POD_PLATFORM_PEERS") {
+                Some(peers) => hosted::parse_platform_peers(&peers)?,
+                None => Vec::new(),
+            },
         };
         if !settings
             .attachment(Path::new(IMAGE_DISK_DIRECTORY))
@@ -158,6 +176,9 @@ pub struct PodPaths {
     pub state_volume: PathBuf,
     pub image_disk: PathBuf,
     pub run_directory: PathBuf,
+    /// The sealed cw runtime the guest's hosted daemon runs from.
+    pub cw_runtime_lock: PathBuf,
+    pub hosted: hosted::HostedPaths,
 }
 
 impl Default for PodPaths {
@@ -168,6 +189,8 @@ impl Default for PodPaths {
             state_volume: STATE_VOLUME.into(),
             image_disk: IMAGE_DISK_DIRECTORY.into(),
             run_directory: RUN_DIRECTORY.into(),
+            cw_runtime_lock: Path::new(ARTIFACT_LOCK).with_file_name("cw-runtime.lock.json"),
+            hosted: hosted::HostedPaths::default(),
         }
     }
 }
@@ -198,7 +221,8 @@ pub async fn run(
     })
     .await?;
     let image = admit_image(settings, paths)?;
-    let request = boot_request(settings, paths, &engine_root, &image)?;
+    let catalog = install_cw_runtime(&engine_root, &paths.cw_runtime_lock)?;
+    let request = boot_request(settings, paths, &engine_root, &image, catalog)?;
     boot_and_wait(&runner, request, settings, paths, stop).await
 }
 
@@ -225,10 +249,11 @@ fn admit_image(settings: &PodSettings, paths: &PodPaths) -> Result<AdmittedImage
     };
     let manifest_sha256 = Sha256Value::parse_hex(&disk.record.manifest_sha256)
         .map_err(|_| PodRuntimeError::Setting("CODEWIRE_IMAGE_DISK_ID"))?;
-    // The image the project names is the one the disk was built from: its
-    // reference carries the disk's manifest digest.
-    if workspace_image_manifest(&settings.workspace_image)
-        != Some(disk.record.manifest_sha256.as_str())
+    // The image the project names is the one the disk was built from.
+    let named = workspace_image_manifest(&settings.workspace_image)
+        .ok_or(PodRuntimeError::ImageMismatch)?;
+    if named != disk.record.manifest_sha256
+        && !index_selects(&paths.image_disk, named, &disk.record)?
     {
         return Err(PodRuntimeError::ImageMismatch);
     }
@@ -261,6 +286,7 @@ fn boot_request(
     paths: &PodPaths,
     engine_root: &Path,
     image: &AdmittedImage,
+    cw_runtime_catalog_generation: String,
 ) -> Result<CreateVmRequest, PodRuntimeError> {
     ensure_empty_state_disk(engine_root, POD_VM_ID, settings.state_disk_bytes)?;
     // The root disk is named by the build it sits on, so a new image build
@@ -312,17 +338,20 @@ fn boot_request(
         vcpus: settings.vcpus,
         memory_mib: settings.memory_mib,
         setup,
+        // The Pod's ports reach the guest through its own ingress, not the
+        // runner's host ports (see `hosted::publish_ports`).
         host_ports: Vec::new(),
         mesh: None,
         direct_shares: Vec::new(),
         skill_snapshot_sha256: None,
         environment_projection_sha256: None,
         managed_credential_clients: codewire_access::ManagedCredentialClients::default(),
-        cw_runtime_catalog_generation: None,
+        cw_runtime_catalog_generation: Some(cw_runtime_catalog_generation),
         cw_runtime_moved_from_generation: None,
         image_disk: Some(settings.attachment(&paths.image_disk)),
-        // Closed is the only mode (cw-security, #5602).
-        network_policy: CompiledPolicy::locked(),
+        // Closed is the only mode, with the platform peers alone open to the
+        // daemon (cw-security, #5602).
+        network_policy: CompiledPolicy::locked_with_platform_peers(&settings.platform_peers)?,
         intercepts: InterceptSet::default(),
         credential_placeholders: Default::default(),
         checkpoint: None,
@@ -342,13 +371,20 @@ async fn boot_and_wait(
         "standard runtime: booting the VM over image disk {}",
         settings.image_disk_id
     );
+    // Read before the boot, so a Pod missing its settings fails at once.
+    let hosted_settings = hosted::read_settings(|name| std::env::var(name).ok(), &paths.hosted)?;
+    let mut tokens = hosted::read_tokens(&paths.hosted)?;
     let booting = std::time::Instant::now();
-    let prepared = runner.prepare(request).await?;
+    let prepared = runner.prepare_hosted(request).await?;
     let mut running = runner.start(prepared).await?;
+    // The guest waits for these before it starts the workspace, network
+    // readiness included, so they go before the network worker's wait.
+    hosted::hand_over(&running, hosted_settings, tokens.clone()).await?;
     let executable = fs::canonicalize(std::env::current_exe()?)?;
     running
         .start_network_worker(&executable, BOOT_TIMEOUT)
         .await?;
+    let _published = hosted::publish_ports(&running.paths().vsock_socket).await?;
     let stage = running
         .authenticated_guest_terminal_stage(BOOT_TIMEOUT)
         .await?;
@@ -377,6 +413,7 @@ async fn boot_and_wait(
                 if exit != ExitClass::StillRunning {
                     break exit;
                 }
+                tokens = hosted::refresh_tokens(&running, &paths.hosted, tokens).await?;
             }
         }
     };
@@ -386,6 +423,16 @@ async fn boot_and_wait(
         ExitClass::GuestShutdown => Ok(()),
         other => Err(PodRuntimeError::GuestFailed(format!("{other:?}"))),
     }
+}
+
+/// The image's sealed cw runtime, installed as a catalog the VM attaches
+/// read-only; the guest's hosted daemon runs from it.
+fn install_cw_runtime(engine_root: &Path, lock: &Path) -> Result<String, PodRuntimeError> {
+    let store = crate::cw_runtime::CwRuntimeStore::create(&PrivateRoot::open(engine_root)?)?;
+    let asset = store.admit_source(lock)?;
+    Ok(store
+        .prepare_catalog(&asset.provenance, &std::collections::BTreeMap::new())?
+        .generation)
 }
 
 fn ensure_private_dir(path: &Path) -> Result<PathBuf, PodRuntimeError> {
@@ -419,6 +466,47 @@ fn next_generation(engine_root: &Path) -> Result<u64, PodRuntimeError> {
     fs::File::open(&staged)?.sync_all()?;
     fs::rename(&staged, &path)?;
     Ok(next)
+}
+
+/// Whether the published disk's `index.json` is the image index `named` and
+/// selects the disk's manifest for its architecture on Linux. A workspace
+/// image is published as an index, and environments name it by that digest.
+fn index_selects(
+    directory: &Path,
+    named: &str,
+    record: &crate::image_disk::ImageDiskRecord,
+) -> Result<bool, PodRuntimeError> {
+    let bytes = match read_bounded(&directory.join(IMAGE_INDEX_NAME), MAX_IMAGE_INDEX_BYTES) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(PodRuntimeError::ImageMismatch),
+    };
+    if Sha256Value::calculate(&bytes).to_string() != named {
+        return Ok(false);
+    }
+    #[derive(serde::Deserialize)]
+    struct Index {
+        manifests: Vec<Entry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        digest: String,
+        platform: Option<Platform>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Platform {
+        os: String,
+        architecture: String,
+    }
+    let index: Index =
+        serde_json::from_slice(&bytes).map_err(|_| PodRuntimeError::ImageMismatch)?;
+    let manifest = format!("sha256:{}", record.manifest_sha256);
+    Ok(index.manifests.iter().any(|entry| {
+        entry.digest == manifest
+            && entry.platform.as_ref().is_some_and(|platform| {
+                platform.os == "linux" && platform.architecture == record.architecture
+            })
+    }))
 }
 
 /// The manifest digest a `repo@sha256:<hex>` reference names.
@@ -499,6 +587,44 @@ mod tests {
                 .find(|(existing, _)| existing == name)
                 .map(|(_, value)| value.clone())
         }
+    }
+
+    #[test]
+    fn an_index_pairs_only_when_it_is_the_named_one_and_selects_the_disks_manifest() {
+        let manifest = "0e".repeat(32);
+        let record = crate::image_disk::ImageDiskRecord {
+            schema_version: 1,
+            image_disk_id: String::new(),
+            build_id: String::new(),
+            format_version: 1,
+            architecture: "amd64".to_owned(),
+            manifest_sha256: manifest.clone(),
+            disk_bytes: 4096,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let index = |architecture: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2,
+                "manifests": [
+                    {"digest": format!("sha256:{manifest}"),
+                     "platform": {"os": "linux", "architecture": architecture}},
+                ],
+            }))
+            .unwrap()
+        };
+        // No index: only the manifest digest itself pairs.
+        assert!(!index_selects(directory.path(), &"22".repeat(32), &record).unwrap());
+        let bytes = index("amd64");
+        fs::write(directory.path().join(IMAGE_INDEX_NAME), &bytes).unwrap();
+        let named = Sha256Value::calculate(&bytes).to_string();
+        assert!(index_selects(directory.path(), &named, &record).unwrap());
+        // Another digest than the index's own, or an index that selects the
+        // manifest for another architecture, does not pair.
+        assert!(!index_selects(directory.path(), &"22".repeat(32), &record).unwrap());
+        let other = index("arm64");
+        fs::write(directory.path().join(IMAGE_INDEX_NAME), &other).unwrap();
+        let named = Sha256Value::calculate(&other).to_string();
+        assert!(!index_selects(directory.path(), &named, &record).unwrap());
     }
 
     #[test]

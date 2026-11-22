@@ -1,6 +1,8 @@
 //! The smoke's own arguments: every path absolute, every count bounded.
 
+use super::image_disk::ImageDiskOptions;
 use super::*;
+use codewire_local_vmm::oci::RegistryReference;
 
 impl Args {
     pub(super) fn parse(arguments: impl IntoIterator<Item = String>) -> SmokeResult<Option<Self>> {
@@ -26,6 +28,7 @@ impl Args {
         let mut vm_id = None;
         let mut second_vm_id = None;
         let mut publish = None;
+        let mut image = None;
         let mut outside_disk = None;
         let mut vcpus = None;
         let mut memory_mib = None;
@@ -54,6 +57,16 @@ impl Args {
                     second_vm_id = Some(
                         Uuid::parse_str(&value)
                             .map_err(|_| failure("--second-vm-id is not a UUID"))?,
+                    );
+                    continue;
+                }
+                "--image" if mode == Mode::ImageDisk => {
+                    if image.is_some() {
+                        return Err(failure("duplicate smoke flag"));
+                    }
+                    image = Some(
+                        RegistryReference::parse(&value)
+                            .map_err(|_| failure("--image is not an image reference"))?,
                     );
                     continue;
                 }
@@ -99,16 +112,24 @@ impl Args {
             artifact_lock: artifact_lock.ok_or_else(|| failure("--artifact-lock is required"))?,
             state_root: state_root.ok_or_else(|| failure("--state-root is required"))?,
             vm_id: vm_id.ok_or_else(|| failure("--vm-id is required"))?,
-            second_vm_id,
-            publish,
+            image_disk: ImageDiskOptions {
+                second_vm_id,
+                publish,
+                image,
+            },
             outside_disk,
             resources,
         };
         if result.mode == Mode::Run && result.outside_disk.is_none() {
             return Err(failure("--outside-disk is required for run"));
         }
+        let options = &result.image_disk;
+        if options.image.is_some() && options.publish.is_none() {
+            return Err(failure("--image needs --publish"));
+        }
         if result.mode == Mode::ImageDisk
-            && result
+            && options.image.is_none()
+            && options
                 .second_vm_id
                 .is_none_or(|second| second == result.vm_id)
         {
@@ -146,7 +167,7 @@ impl Args {
 
 pub(super) fn print_usage() {
     eprintln!(
-        "usage:\n  codewire-local-vmm-smoke run --artifact-root PATH --artifact-lock PATH --state-root PATH --vm-id UUID --outside-disk PATH --cpus COUNT --memory-mib MIB\n  codewire-local-vmm-smoke image-disk --artifact-root PATH --artifact-lock PATH --state-root PATH --vm-id UUID --second-vm-id UUID [--publish DIR] --cpus COUNT --memory-mib MIB\n  codewire-local-vmm-smoke cleanup --artifact-root PATH --artifact-lock PATH --state-root PATH --vm-id UUID"
+        "usage:\n  codewire-local-vmm-smoke run --artifact-root PATH --artifact-lock PATH --state-root PATH --vm-id UUID --outside-disk PATH --cpus COUNT --memory-mib MIB\n  codewire-local-vmm-smoke image-disk --artifact-root PATH --artifact-lock PATH --state-root PATH --vm-id UUID (--second-vm-id UUID [--publish DIR] | --image REF --publish DIR) --cpus COUNT --memory-mib MIB\n  codewire-local-vmm-smoke cleanup --artifact-root PATH --artifact-lock PATH --state-root PATH --vm-id UUID"
     );
 }
 

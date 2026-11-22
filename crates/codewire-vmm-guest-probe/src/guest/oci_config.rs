@@ -14,16 +14,9 @@ pub(super) fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
 /// own init still holds only `CAP_SETUID` and `CAP_SETGID`. Without it, the
 /// container and everything in it keep no-new-privileges
 /// (`docs/dev/LINUX-LOCAL-VMS.md`, "Root and sudo in a VM", #5464).
-pub(super) fn workspace_oci_config_with_cw(
-    plan: &WorkspacePlan,
-    cw_asset: bool,
-    workload_may_become_root: bool,
-) -> Result<Vec<u8>> {
-    let bounding: Vec<&str> = if workload_may_become_root {
-        codewire_daemon::execution::WORKLOAD_ROOT_CAPABILITIES.to_vec()
-    } else {
-        vec!["CAP_SETGID", "CAP_SETUID"]
-    };
+/// The workspace container's standard character devices, and the cgroup
+/// rules that allow exactly those.
+fn standard_devices() -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
     let standard_devices = [
         ("/dev/null", 1, 3, 0o666),
         ("/dev/zero", 1, 5, 0o666),
@@ -58,6 +51,20 @@ pub(super) fn workspace_oci_config_with_cw(
             })
         })
         .collect::<Vec<_>>();
+    (devices, allowed_devices)
+}
+
+pub(super) fn workspace_oci_config_with_cw(
+    plan: &WorkspacePlan,
+    cw_asset: bool,
+    workload_may_become_root: bool,
+) -> Result<Vec<u8>> {
+    let bounding: Vec<&str> = if workload_may_become_root {
+        codewire_daemon::execution::WORKLOAD_ROOT_CAPABILITIES.to_vec()
+    } else {
+        vec!["CAP_SETGID", "CAP_SETUID"]
+    };
+    let (devices, allowed_devices) = standard_devices();
     let mut configuration = serde_json::json!({
         "ociVersion": "1.2.0",
         "process": {
@@ -162,6 +169,12 @@ pub(super) fn workspace_oci_config_with_cw(
                     "options": ["bind", "ro", "nosuid", "nodev", "exec"]
                 }),
             ]);
+    }
+    if super::hosted::active() {
+        configuration["mounts"]
+            .as_array_mut()
+            .context("workspace mounts")?
+            .extend(super::hosted::container_mounts());
     }
     serde_json::to_vec(&configuration).context("encode workspace OCI configuration")
 }

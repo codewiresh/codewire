@@ -17,6 +17,7 @@ Updated 2026-11-22. Written first; every step is not yet observed.
 | `standard-exec` | not yet observed | not yet observed | not yet observed |
 | `standard-docker` | not yet observed | not yet observed | not yet observed |
 | `standard-network` | not yet observed | not yet observed | not yet observed |
+| `standard-closed-egress` | not yet observed | not yet observed | not yet observed |
 | `standard-stop-start` | not yet observed | not yet observed | not yet observed |
 | `standard-admission` | not yet observed | not yet observed | not yet observed |
 | `standard-beside-commodity` | not yet observed | not yet observed | not yet observed |
@@ -93,6 +94,24 @@ Updated 2026-11-22. Written first; every step is not yet observed.
 - **Proof:** the image ID present in one sandbox and absent in the other, and
   Docker's data on its own disk.
 - **Observed:** not yet observed.
+
+## `standard-closed-egress`: the first version refuses every workload connection
+
+- **Entry points:** any program in the sandbox; the daemon's start.
+- **States to exercise:** a TCP connection to a public address; a DNS
+  lookup of a public name; a connection to a private address that is none of
+  the Pod's platform peers. Each is made by the workload, in the sandbox.
+- **Driving it:** `cw exec NAME -- curl -sS --max-time 5 https://example.com`,
+  `cw exec NAME -- getent hosts example.com` and a dial to the cluster's
+  DNS Service address.
+- **Proof:** each command fails without an answer; the create reached
+  `access_ready`, which a guest-carried daemon cannot reach before its
+  self-check passes, and the daemon's log line names each probe, its target
+  and `refused`; the
+  orchestration log has no `egress lockdown is not applied` for the Pod, so
+  the lockdown check passed it against its own template policy.
+- **Observed:** not yet observed. Until the supervisor's join to cw-egress
+  lands this step stands in for `standard-network`.
 
 ## `standard-network`: every connection goes through the node's egress service
 

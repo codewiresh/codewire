@@ -79,6 +79,9 @@ const CW_RUNTIME_MOVED_FROM_PRESENT_FLAG: u16 = 1 << 8;
 const IMAGE_BUILD_FLAG: u16 = 1 << 9;
 /// The VM's overlay takes its lower from the shared image disk (#4646).
 const IMAGE_DISK_FLAG: u16 = 1 << 10;
+/// A standard Pod's guest: the workspace runs the hosted daemon, with the
+/// settings and tokens the hosted control channel carries (#5602).
+const HOSTED_FLAG: u16 = 1 << 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetupBinding {
@@ -142,6 +145,7 @@ pub struct Seed {
     placeholders: SeedPlaceholders,
     image_build: bool,
     image_disk: bool,
+    hosted: bool,
 }
 
 impl Seed {
@@ -168,6 +172,7 @@ impl Seed {
             placeholders: SeedPlaceholders::default(),
             image_build: false,
             image_disk: false,
+            hosted: false,
         };
         seed.validate()?;
         Ok(seed)
@@ -212,6 +217,7 @@ impl Seed {
             placeholders: SeedPlaceholders::default(),
             image_build: false,
             image_disk: false,
+            hosted: false,
         };
         seed.validate()?;
         Ok(seed)
@@ -242,6 +248,7 @@ impl Seed {
             placeholders: SeedPlaceholders::default(),
             image_build: false,
             image_disk: false,
+            hosted: false,
         };
         seed.validate()?;
         Ok(seed)
@@ -273,6 +280,7 @@ impl Seed {
             placeholders: SeedPlaceholders::default(),
             image_build: false,
             image_disk: false,
+            hosted: false,
         };
         seed.validate()?;
         Ok(seed)
@@ -410,6 +418,16 @@ impl Seed {
         self.image_disk
     }
 
+    /// Run the hosted daemon in the workspace, as a standard Pod's guest.
+    pub fn with_hosted(mut self) -> Self {
+        self.hosted = true;
+        self
+    }
+
+    pub fn hosted(&self) -> bool {
+        self.hosted
+    }
+
     pub fn encode(&self) -> [u8; SEED_LEN] {
         // Construction and decoding are the only ways to obtain a Seed, so
         // these invariants have already been checked.
@@ -477,6 +495,9 @@ impl Seed {
         if self.image_build {
             flags |= IMAGE_BUILD_FLAG;
         }
+        if self.hosted {
+            flags |= HOSTED_FLAG;
+        }
         if self.image_disk {
             flags |= IMAGE_DISK_FLAG;
         }
@@ -528,7 +549,8 @@ impl Seed {
                 | PLACEHOLDERS_PRESENT_FLAG
                 | CW_RUNTIME_MOVED_FROM_PRESENT_FLAG
                 | IMAGE_BUILD_FLAG
-                | IMAGE_DISK_FLAG)
+                | IMAGE_DISK_FLAG
+                | HOSTED_FLAG)
             != 0
             || bytes[RESERVED_OFFSET..RESERVED_END]
                 .iter()
@@ -619,6 +641,7 @@ impl Seed {
         let mut seed = seed.with_managed_credential_clients(clients);
         seed.image_build = flags & IMAGE_BUILD_FLAG != 0;
         seed.image_disk = flags & IMAGE_DISK_FLAG != 0;
+        seed.hosted = flags & HOSTED_FLAG != 0;
         seed.validate()?;
         Ok(seed)
     }
@@ -654,9 +677,14 @@ impl Seed {
         }
         // Build mode fails closed: a builder carries its setup pack and
         // nothing an environment could use (condition 2 on #4646).
+        // The hosted daemon runs from the sealed cw runtime.
+        if self.hosted && self.cw_runtime_catalog_sha256.is_none() {
+            return Err(SeedError::InvalidHosted);
+        }
         if self.image_build
             && (self.setup.is_none()
                 || self.image_disk
+                || self.hosted
                 || self.direct_shares_sha256.is_some()
                 || self.skill_snapshot_sha256.is_some()
                 || self.docker_data_disk
@@ -688,6 +716,7 @@ impl fmt::Debug for Seed {
             .field("cw_runtime_catalog_sha256", &self.cw_runtime_catalog_sha256)
             .field("image_build", &self.image_build)
             .field("image_disk", &self.image_disk)
+            .field("hosted", &self.hosted)
             .field(
                 "cw_runtime_moved_from_sha256",
                 &self.cw_runtime_moved_from_sha256,
@@ -750,6 +779,8 @@ pub enum SeedError {
     InvalidRuntimeMove,
     #[error("an image disk builder's seed carries only its setup pack")]
     InvalidImageBuild,
+    #[error("a hosted seed names the cw runtime the hosted daemon runs from")]
+    InvalidHosted,
 }
 
 /// The egress trust a seed carries (#3999): the CA certificate and, only

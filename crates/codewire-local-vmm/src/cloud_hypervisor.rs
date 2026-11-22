@@ -69,6 +69,9 @@ pub struct CloudHypervisorConfig {
     /// The shared read-only image disk the guest's overlay takes its lower
     /// from (#4646). None for a VM on the old combined root disk.
     pub image_disk: Option<PathBuf>,
+    /// A standard Pod's guest: the kernel command line names
+    /// [`codewire_vmm_guest_probe::hosted_control::GUEST_CARRIED_PARAMETER`].
+    pub guest_carried: bool,
     pub api_socket: PathBuf,
     pub event_monitor: PathBuf,
     pub vsock_socket: PathBuf,
@@ -103,6 +106,7 @@ impl fmt::Debug for CloudHypervisorConfig {
             .field("setup_disk", &self.setup_disk)
             .field("cw_runtime_disk", &self.cw_runtime_disk)
             .field("image_disk", &self.image_disk)
+            .field("guest_carried", &self.guest_carried)
             .field("api_socket", &self.api_socket)
             .field("event_monitor", &self.event_monitor)
             .field("vsock_socket", &self.vsock_socket)
@@ -210,6 +214,7 @@ impl CloudHypervisorConfig {
             setup_disk,
             cw_runtime_disk: None,
             image_disk: None,
+            guest_carried: false,
             api_socket,
             event_monitor,
             vsock_socket,
@@ -268,6 +273,11 @@ impl CloudHypervisorConfig {
         self.cw_runtime_disk = disk;
         self.validate()?;
         Ok(self)
+    }
+
+    pub fn with_guest_carried(mut self, guest_carried: bool) -> Self {
+        self.guest_carried = guest_carried;
+        self
     }
 
     pub fn with_image_disk(
@@ -339,7 +349,18 @@ impl CloudHypervisorConfig {
         );
         push_option(&mut arguments, "--kernel", display(&self.kernel)?);
         push_option(&mut arguments, "--initramfs", display(&self.initramfs)?);
-        push_option(&mut arguments, "--cmdline", GUEST_KERNEL_CMDLINE);
+        push_option(
+            &mut arguments,
+            "--cmdline",
+            if self.guest_carried {
+                format!(
+                    "{GUEST_KERNEL_CMDLINE} {}",
+                    codewire_vmm_guest_probe::hosted_control::GUEST_CARRIED_PARAMETER
+                )
+            } else {
+                GUEST_KERNEL_CMDLINE.to_owned()
+            },
+        );
         push_option(
             &mut arguments,
             "--cpus",
@@ -907,6 +928,29 @@ mod tests {
                 actual: 4
             })
         ));
+    }
+
+    #[test]
+    fn only_a_standard_pods_guest_boots_with_the_guest_carried_parameter() {
+        let command_line = |config: CloudHypervisorConfig| {
+            let command = config.command().unwrap();
+            command.validate_allowlist().unwrap();
+            command
+                .arguments()
+                .windows(2)
+                .find(|pair| pair[0] == "--cmdline")
+                .map(|pair| pair[1].to_str().unwrap().to_owned())
+                .unwrap()
+        };
+        assert_eq!(command_line(config()), GUEST_KERNEL_CMDLINE);
+        let carried = command_line(config().with_guest_carried(true));
+        assert!(codewire_vmm_guest_probe::hosted_control::guest_carried(
+            &carried
+        ));
+        assert!(!codewire_vmm_guest_probe::hosted_control::guest_carried(
+            GUEST_KERNEL_CMDLINE
+        ));
+        assert!(carried.starts_with(GUEST_KERNEL_CMDLINE));
     }
 
     #[test]

@@ -6,7 +6,7 @@ mod hosted_egress_tun;
 mod local_mesh_helper;
 
 fn main() {
-    codewire_cli::completion::answer_if_requested();
+    codewire_cli::before_runtime();
     #[cfg(target_os = "linux")]
     if let Some(role) = std::env::args_os()
         .nth(1)

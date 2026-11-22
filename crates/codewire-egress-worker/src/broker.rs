@@ -726,7 +726,10 @@ fn read_bootstrap_policy(
 fn compile_bootstrap_policy(document: &[u8]) -> Result<CompiledPolicy, EgressBrokerProcessError> {
     let document: PolicyDocument =
         serde_json::from_slice(document).map_err(|_| EgressBrokerProcessError::PolicyMismatch)?;
-    CompiledPolicy::compile(document).map_err(|_| EgressBrokerProcessError::PolicyMismatch)
+    // The runner's own document: a standard Pod's may name its platform
+    // peers (#5602), which no workload's policy can.
+    CompiledPolicy::compile_bootstrap(document)
+        .map_err(|_| EgressBrokerProcessError::PolicyMismatch)
 }
 
 fn decode_bootstrap(

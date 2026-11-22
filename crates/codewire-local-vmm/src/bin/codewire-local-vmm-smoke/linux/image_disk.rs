@@ -5,7 +5,8 @@ use super::*;
 use codewire_local_vmm::image_disk::{ImageDiskAttachment, ImageDiskStore};
 use codewire_local_vmm::linux::path::PrivateRoot;
 use codewire_local_vmm::oci::{
-    ContentStore, OciArchitecture, ResolvedDescriptor, ResolvedImage, ResolvedLayer, Sha256Digest,
+    ContentStore, OciArchitecture, RegistryReference, RegistryResolver, ResolvedDescriptor,
+    ResolvedImage, ResolvedLayer, Sha256Digest,
 };
 use codewire_local_vmm::setup_pack::{SetupPackRequest, ensure_attached_setup_pack};
 use codewire_vmm_guest_probe::image_disk::image_root_generation;
@@ -14,6 +15,19 @@ const IMAGE_DISK_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const OCI_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 const OCI_CONFIG: &str = "application/vnd.oci.image.config.v1+json";
 const OCI_LAYER: &str = "application/vnd.oci.image.layer.v1.tar";
+
+/// The image-disk mode's own options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImageDiskOptions {
+    /// The second VM over the same image disk.
+    pub(crate) second_vm_id: Option<Uuid>,
+    /// Where to write the built disk's record and the image's config, as a
+    /// published image disk holds them (#5602).
+    pub(crate) publish: Option<PathBuf>,
+    /// A registry image to build and publish instead of the fixture (#5602).
+    /// No VM boots over it: the fixture's run is the proof of that.
+    pub(crate) image: Option<RegistryReference>,
+}
 
 /// #4646: the builder guest unpacks the fixture image onto an image
 /// disk, then two VMs boot over that one disk. Their setup packs carry no
@@ -26,6 +40,9 @@ pub(super) async fn image_disk_proof(arguments: Args) -> SmokeResult<()> {
     runner.preflight()?;
     let engine = PrivateRoot::open(&arguments.state_root)?;
     let content = ContentStore::create(&engine)?;
+    if let Some(reference) = &arguments.image_disk.image {
+        return publish_registry_image(&arguments, &runner, &engine, &content, reference).await;
+    }
     let (image, project, config) = admit_smoke_image(&runner, &content).await?;
     let (_, image_architecture) = smoke_setup_architecture()?;
     let disks = ImageDiskStore::create(&engine)?;
@@ -43,7 +60,7 @@ pub(super) async fn image_disk_proof(arguments: Args) -> SmokeResult<()> {
         building.elapsed().as_millis(),
     );
     observation("image_disk.id", &admitted.record.image_disk_id);
-    if let Some(directory) = &arguments.publish {
+    if let Some(directory) = &arguments.image_disk.publish {
         // The disk itself is copied sparse by the caller, which also sizes
         // it to its content; the record and config are written here.
         fs::write(
@@ -60,6 +77,7 @@ pub(super) async fn image_disk_proof(arguments: Args) -> SmokeResult<()> {
     };
     // The second VM is the point: the same disk, not rebuilt.
     let second = arguments
+        .image_disk
         .second_vm_id
         .ok_or_else(|| failure("second VM ID missing after argument admission"))?;
     for (index, vm_id) in [arguments.vm_id, second].into_iter().enumerate() {
@@ -85,6 +103,69 @@ pub(super) async fn image_disk_proof(arguments: Args) -> SmokeResult<()> {
     disks.revalidate(&admitted)?;
     observation("image_disk.unchanged_after_boots", true);
     drop(lock);
+    Ok(())
+}
+
+/// Pulls a registry image, builds its image disk and writes the published
+/// record and config. The caller copies and sizes the disk (#5602).
+async fn publish_registry_image(
+    arguments: &Args,
+    runner: &CloudHypervisorRunner,
+    engine: &PrivateRoot,
+    content: &ContentStore,
+    reference: &RegistryReference,
+) -> SmokeResult<()> {
+    let directory = arguments
+        .image_disk
+        .publish
+        .as_ref()
+        .ok_or_else(|| failure("--image needs --publish"))?;
+    let pulling = Instant::now();
+    let image = match RegistryResolver::new(content)?
+        .resolve_anonymous(reference)
+        .await
+    {
+        Ok(image) => image,
+        Err(error) => {
+            // Every variant is a bare name: no registry text reaches the log.
+            observation("image_disk.pull_error", format!("{error:?}"));
+            return Err(error.into());
+        }
+    };
+    observation("image_disk.pull_elapsed_ms", pulling.elapsed().as_millis());
+    observation("image_disk.manifest", image.manifest.digest.as_str());
+    let config = content.read_blob(&image.config.digest, image.config.size, 1024 * 1024)?;
+    let (_, image_architecture) = smoke_setup_architecture()?;
+    let disks = ImageDiskStore::create(engine)?;
+    let image_disk_id = codewire_local_vmm::image_disk::image_disk_id(
+        image_architecture,
+        image.manifest.digest.hex(),
+    )?;
+    let lock = disks.lock(&image_disk_id, Instant::now() + IMAGE_DISK_LOCK_TIMEOUT)?;
+    let building = Instant::now();
+    let admitted = runner
+        .build_image_disk(&disks, &lock, content, &image)
+        .await
+        // Local errors only: no registry or guest bytes reach this text.
+        .inspect_err(|error| observation("image_disk.build_error", error))?;
+    observation(
+        "image_disk.build_elapsed_ms",
+        building.elapsed().as_millis(),
+    );
+    fs::write(
+        directory.join("record.json"),
+        serde_json::to_vec(&admitted.record)?,
+    )?;
+    fs::write(directory.join("config.json"), &config)?;
+    // An index reference: the runtime checks the index selects this manifest.
+    if image.source.digest != image.manifest.digest {
+        let index = content.read_blob(&image.source.digest, image.source.size, 1024 * 1024)?;
+        fs::write(directory.join("index.json"), index)?;
+        observation("image_disk.index", image.source.digest.as_str());
+    }
+    observation("image_disk.id", &admitted.record.image_disk_id);
+    observation("image_disk.build_id", &admitted.record.build_id);
+    observation("image_disk.path", admitted.path.display());
     Ok(())
 }
 

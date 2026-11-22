@@ -136,6 +136,14 @@ fn entrypoint() -> anyhow::Result<()> {
             runtime.block_on(guest::run_credential_forwarder())
         }
         Some("workspace-exec") => guest::run_workspace_exec(arguments.collect()),
+        // The held listener's boot-time check, as the workspace uid (#5602).
+        Some("hosted-listener-check") => {
+            ensure!(
+                arguments.next().is_none(),
+                "hosted-listener-check accepts no arguments"
+            );
+            guest::run_hosted_listener_check()
+        }
         // A local VM's Unix-socket forward, run as a workload process (#5608).
         Some("workspace-unix-connect") => {
             let arguments = arguments

@@ -203,11 +203,11 @@ fn bound(environment: &str, revision: u32, policy: CompiledPolicy) -> Assignment
     Assignment::Bound {
         environment_id: environment.into(),
         operation_generation: 1,
-        policy: AssignedPolicy {
+        policy: Box::new(AssignedPolicy {
             reference: "platform:web".into(),
             revision,
             policy,
-        },
+        }),
         platform: platform(),
         interception: Box::new(Interception::Off),
     }
@@ -890,11 +890,11 @@ async fn a_change_to_a_pairs_front_door_ends_the_pair() {
         .send(Ok(Assignment::Bound {
             environment_id,
             operation_generation,
-            policy: AssignedPolicy {
+            policy: Box::new(AssignedPolicy {
                 reference: "platform:web".into(),
                 revision: 2,
                 policy: locked(),
-            },
+            }),
             platform,
             interception: Box::new(Interception::On(first)),
         }))

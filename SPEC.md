@@ -460,12 +460,37 @@ Pod: the supervisor, Cloud Hypervisor and guest that run a local VM
   UDP path is later work.
 - **The VM has no network device.** Its traffic leaves through the
   supervisor to cw-egress on the node, which decides every destination, so
-  `standard` is offered only where hosted egress (#4000) is on. The egress
-  stream's lockdown check never sees a daemon in the guest, so until
-  orchestration checks the Pod itself, the daemon sends its own egress
-  self-check with its SSH host key. Orchestration records the key, and the
-  sandbox's access becomes ready, only when each of its three probes (a
-  direct dial, public DNS and the cluster's DNS) found no way out.
+  `standard` is offered only where hosted egress (#4000) is on.
+- **The first version is guest-carried.** Until the supervisor joins the
+  VM's network session to cw-egress, the daemon in the VM runs no egress
+  path of its own: its platform connections (the binding, the gateway, the
+  relay) leave through the VM's session to the exact addresses the Pod names,
+  and every other connection, the workload's included, is refused at the
+  supervisor. The daemon learns it is guest-carried only from the VM's kernel
+  command line, which the runtime alone sets; a daemon that also finds a
+  broker Pod's egress path refuses to start. Before it serves, the daemon
+  checks from the workload's network that a direct dial to a public address
+  and a DNS query to a public resolver and to the cluster's all fail, and
+  refuses to serve if any is answered. It records no SSH host key before the
+  check passes and sends the check with the key: orchestration records the
+  key, and the sandbox's access becomes ready, only when each of its three
+  probes (a direct dial, public DNS and the cluster's DNS) found no way out.
+  That record is the guest's own report, evidence that the daemon ran its
+  check, not the boundary, since the whole guest is the Sandbox user's; its
+  log names each probe, its target and its outcome either way.
+  The Pod's 7777 and 2222 reach the VM over two fixed guest-channel ports
+  that exist only in such a boot and accept only the host; the guest joins
+  each to one address in the workspace's network: the daemon's gRPC
+  listener and its SSH port. The daemon's listener is made by the VM's own
+  init, as root, before the workspace starts, held for the VM's life and
+  handed to the daemon alone, so no workspace process can listen in its
+  place and receive orchestration's credential; the daemon keeps it from its
+  children and cannot be traced by them. SSH needs no such listener: a
+  process that took its port would fail the platform's pinned host key, not
+  learn anything.
+  Production's `standard` profile stays off until an orchestration-side
+  check that does not depend on the guest exists; for a broker-mode
+  `standard` Pod that is #5800's lockdown check at the `cw-egress` handshake.
 - **The workspace image** reaches the VM as a read-only disk that the node
   pulls and caches like any image and every Sandbox on the node shares. Each
   VM adds a small writable root that is rebuilt at every start. The home and

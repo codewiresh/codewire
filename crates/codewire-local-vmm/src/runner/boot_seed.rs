@@ -1,6 +1,6 @@
 //! The seed a boot's guest reads first, built from the runner's request.
 
-use codewire_vmm_guest_probe::{EgressCaCertificate, Seed, SeedPlaceholders, Sha256Value};
+use codewire_vmm_guest_probe::{EgressCaCertificate, Seed, Sha256Value};
 use rand::{RngCore as _, rngs::OsRng};
 
 use super::{CreateVmRequest, RunnerError};
@@ -14,8 +14,8 @@ pub(super) fn boot_seed(
     direct_shares_sha256: Option<Sha256Value>,
     docker_data_disk: bool,
     cw_runtime_disk: Option<&AdmittedCwRuntimeDisk>,
+    hosted: bool,
     egress_ca: Option<EgressCaCertificate>,
-    placeholders: SeedPlaceholders,
 ) -> Result<Seed, RunnerError> {
     let seed = Seed::new_with_all_bindings(
         request.vm_id,
@@ -40,6 +40,7 @@ pub(super) fn boot_seed(
         Some(disk) => seed.with_cw_runtime_catalog_sha256(digest(&disk.generation)?),
         None => seed,
     };
+    let seed = if hosted { seed.with_hosted() } else { seed };
     // The runner admitted the request's image disk before building this.
     let seed = if request.image_disk.is_some() {
         seed.with_image_disk()
@@ -55,7 +56,7 @@ pub(super) fn boot_seed(
         None => seed,
     };
     // Placeholders ride only beside the CA (#3999).
-    let seed = seed.with_credential_placeholders(placeholders)?;
+    let seed = seed.with_credential_placeholders(request.credential_placeholders.clone())?;
     Ok(seed)
 }
 

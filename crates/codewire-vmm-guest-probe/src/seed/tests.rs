@@ -956,3 +956,24 @@ fn an_image_disk_seed_round_trips_and_older_flags_are_unchanged() {
     assert!(!decoded.image_build());
     assert_eq!(get_u16(&sample_seed().encode(), FLAGS_OFFSET), 0);
 }
+
+/// #5602: a standard Pod's guest runs the hosted daemon from the sealed cw
+/// runtime, so its seed names a catalog; a builder is never hosted.
+#[test]
+fn a_hosted_seed_names_its_runtime_and_is_never_a_builder() {
+    let catalog = Sha256Value::from_bytes([0x5a; 32]);
+    let seed = sample_seed()
+        .with_cw_runtime_catalog_sha256(catalog)
+        .with_hosted();
+    let decoded = Seed::decode(&seed.encode()).unwrap();
+    assert!(decoded.hosted());
+    assert!(get_u16(&seed.encode(), FLAGS_OFFSET) & HOSTED_FLAG != 0);
+    assert_eq!(
+        sample_seed().with_hosted().validate(),
+        Err(SeedError::InvalidHosted)
+    );
+    assert!(
+        !sample_seed().encode().is_empty()
+            && !Seed::decode(&sample_seed().encode()).unwrap().hosted()
+    );
+}

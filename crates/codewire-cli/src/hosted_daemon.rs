@@ -56,6 +56,10 @@ pub(crate) async fn run_bound_hosted_daemon_with(
     if config.broker().is_some() {
         hosted_egress::prove_pod_interface()?;
     }
+    // A standard Pod's guest carries the daemon's egress (#5602): its
+    // platform dials keep broker mode's literal routes, with no egress loop.
+    #[cfg(target_os = "linux")]
+    let carried = hosted_egress::guest_carried(config.broker().is_some())?;
     #[cfg(target_os = "linux")]
     let egress = config
         .broker()
@@ -133,6 +137,100 @@ pub(crate) async fn run_bound_hosted_daemon_with(
         None => None,
     };
     #[cfg(target_os = "linux")]
+    let check = {
+        let client = client.clone();
+        async move {
+            if carried {
+                let dns = std::env::var(codewire_daemon_proto::CLUSTER_DNS_IP_ENV).ok();
+                let passed = hosted_egress::guest_carried_self_check(
+                    dns.and_then(|dns| dns.trim().parse().ok()),
+                )
+                .await?;
+                // Its host key carries the result, which orchestration checks.
+                client.set_guest_carried_self_check(passed);
+            }
+            Ok(())
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let check = std::future::ready(Ok(()));
+    // A guest-carried daemon serves nothing until its self-check has passed
+    // (cw-security, #5602): `serve_after` never polls the serving future
+    // after a failed check, so nothing listens and no host key is recorded.
+    // A standard Pod's `access_ready` is therefore evidence the check passed.
+    serve_after(
+        check,
+        serve_bound(BoundServe {
+            // A guest-carried daemon keeps the settings for its literal
+            // routes (the binding's above) and runs no egress loop.
+            #[cfg(target_os = "linux")]
+            egress: egress.filter(|_| !carried),
+            #[cfg(target_os = "linux")]
+            refusal,
+            #[cfg(target_os = "linux")]
+            measured,
+            #[cfg(target_os = "linux")]
+            platform,
+            paths,
+            bound,
+            daemon_config,
+            client,
+            pod_uid,
+            defaults,
+        }),
+    )
+    .await
+}
+
+/// Runs `check`, then `serve` only once `check` has passed. `serve` is a
+/// future, so after a failed check it is never polled and nothing in it
+/// starts.
+async fn serve_after(
+    check: impl std::future::Future<Output = anyhow::Result<()>>,
+    serve: impl std::future::Future<Output = anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    check.await?;
+    serve.await
+}
+
+/// What the bound daemon serves with, once bound.
+struct BoundServe {
+    #[cfg(target_os = "linux")]
+    egress: Option<hosted_egress::EgressSettings>,
+    #[cfg(target_os = "linux")]
+    refusal: Option<codewire_daemon::platform_refusal::PlatformRefusal>,
+    #[cfg(target_os = "linux")]
+    measured: bool,
+    #[cfg(target_os = "linux")]
+    platform: Option<codewire_workspace_access::platform::DaemonPlatform>,
+    paths: codewire_daemon::hosted_state::HostedStatePaths,
+    bound: hosted_binding::BoundWorkspace,
+    daemon_config: codewire_daemon::Config,
+    client: std::sync::Arc<hosted_binding::BindingClient>,
+    pod_uid: String,
+    defaults: Option<codewire_daemon::workspace_defaults::DefaultsOutcome>,
+}
+
+/// Installs the egress trust, starts workspace access and serves the bound
+/// daemon until it exits.
+async fn serve_bound(serve: BoundServe) -> anyhow::Result<()> {
+    let BoundServe {
+        #[cfg(target_os = "linux")]
+        egress,
+        #[cfg(target_os = "linux")]
+        refusal,
+        #[cfg(target_os = "linux")]
+        measured,
+        #[cfg(target_os = "linux")]
+        platform,
+        paths,
+        bound,
+        daemon_config,
+        client,
+        pod_uid,
+        defaults,
+    } = serve;
+    #[cfg(target_os = "linux")]
     if let Some(egress) = egress {
         // The egress trust is installed here, before serving (#4001).
         let health = refusal.as_ref().map(|refusal| refusal.egress());
@@ -190,8 +288,9 @@ pub(crate) async fn run_bound_hosted_daemon_with(
             }
         });
     }
+    // Only the Linux access server uses the connector, paths and client.
     #[cfg(not(target_os = "linux"))]
-    drop(connector);
+    drop((connector, paths, client));
     serve_hosted_daemon(
         daemon_config,
         true,
@@ -205,4 +304,37 @@ pub(crate) async fn run_bound_hosted_daemon_with(
         None,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::serve_after;
+
+    #[tokio::test]
+    async fn a_failed_check_never_starts_what_it_serves() {
+        let served = Arc::new(AtomicBool::new(false));
+        let serve = {
+            let served = served.clone();
+            async move {
+                served.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        };
+        let failed = serve_after(async { anyhow::bail!("a probe was answered") }, serve).await;
+        assert!(failed.is_err());
+        assert!(!served.load(Ordering::SeqCst));
+
+        let serve = {
+            let served = served.clone();
+            async move {
+                served.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        };
+        serve_after(async { Ok(()) }, serve).await.unwrap();
+        assert!(served.load(Ordering::SeqCst));
+    }
 }
