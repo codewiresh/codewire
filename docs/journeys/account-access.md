@@ -18,7 +18,7 @@ Updated 2026-11-22.
 | `access-websockets` | the SSH proxy's API-key leg observed on Dev 2026-11-21, source 6ef416acfb; its `cw logout` leg not yet observed; the terminal half observed on Kind only (2026-11-20, main 6557aa7e83) | not yet observed |
 | `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only; the browser's terminal not as written, #5677); not on Dev | not yet observed |
 | `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
-| `access-key-org-create` | not yet observed | not yet observed |
+| `access-key-org-create` | the key half observed 2026-11-22, source ba20ac0df; the signed-in half by its database test | not yet observed |
 
 ## `access-ticket`: a terminal ticket from a session that has ended
 
@@ -404,5 +404,13 @@ Issue: #5863. The rule: [`docs/dev/AUTH-POLICY.md`](../dev/AUTH-POLICY.md),
     from a sign-in", exits non-zero, and no organization with that slug
     exists;
   - signed in, the create succeeds and the organization is listed.
-- **Observed:** not yet observed.
+- **Observed:** the key half on Dev, 2026-11-22, source `ba20ac0df`, as the
+  Dev smoke identity, with `cw` built from `253add63c`. At 04:30:56Z,
+  `cw org create "Scratch cwt-5863" --slug cwt-5863-key` failed at once with
+  "✗ Create org: organizations are made from a sign-in, not with an API
+  key", exited 1 and printed nothing on stdout. Dev's database (read-only)
+  has no organization with that slug. The signed-in half isn't walked live,
+  since Dev's test identities sign in with API keys only.
+  `db_an_api_key_cannot_create_an_organization_and_a_sign_in_can` covers
+  both halves against the database.
 

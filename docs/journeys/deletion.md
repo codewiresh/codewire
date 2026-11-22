@@ -26,7 +26,21 @@ Issue: #4823. Code: `crates/codewire-dashboard-web/templates/settings-delete-acc
     "Deleting your account permanently removes it. This can't be undone."
     The organizations it leaves are listed under "You leave".
   - Nothing on the page mentions credit or money.
-- **Observed:** not yet observed.
+- **Observed:** on a local Kind cluster, 2026-11-22, main `34267ebbe8`, in
+  headless Chromium, with no delete pressed:
+  - `e2e-outsider`, sole owner of "Outsider Org" (02:16Z): listed under
+    "Deleted with your account", and "Deleting your account permanently
+    removes it, the organizations under "Deleted with your account" and all
+    their resources. This can't be undone."
+  - `e2e-admin`, which owns none (02:08Z): "Deleting your account
+    permanently removes it. This can't be undone."
+  - `e2e-member`, which only leaves "E2E Owner" (02:08Z): the same sentence,
+    with "E2E Owner – You are a member; the organization stays" under "You
+    leave".
+  - `e2e-owner`, blocked by an organization with another member (02:08Z):
+    "Transfer or delete these organizations first", listing "E2E Owner – 2
+    members", and no delete button.
+  - Nothing on any of them mentions credit or money.
 
 ## `org-delete-cli`: `cw org delete`
 
@@ -55,4 +69,14 @@ Issue: #4823. Code: `crates/codewire-cli/src/commands/organizations.rs`.
   - Without `--yes`, JSON fails at once and names `--yes`, and deletes
     nothing.
   - No output mentions credit or money.
-- **Observed:** not yet observed.
+- **Observed:** on the same Kind cluster, 2026-11-22, `cw` built from
+  `253add63c`, signed in with `cw login` as `e2e-owner`, from 02:10Z to
+  02:12Z:
+  - at a terminal: the sentence came before `Type "Scratch k1" to confirm
+    deletion…`, and the answer deleted it (the pty merges the two streams);
+  - `--yes`: the sentence on stderr, stdout empty;
+  - `--yes -o json`: stdout only `{operation_id, organization_id, state}`;
+  - `-o json` without `--yes`: refused at once with "`--output json` never
+    asks, so deleting "Scratch k4" that way needs --yes", and nothing
+    deleted;
+  - no output mentioned credit or money.
