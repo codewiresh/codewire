@@ -557,14 +557,16 @@ async fn reconcile_incomplete_external_cleanup(ctx: &WorkerContext) {
 /// stale one (a republished selection, new managed clients, a new
 /// generation), and nothing else asks for that on a running Sandbox. Its
 /// SSH access check logs in as the access probe, which idle stop doesn't
-/// count as use (#3384).
-pub(super) async fn stuck_environment_ids(pool: &PgPool) -> sqlx::Result<Vec<String>> {
+/// count as use (#3384). Each comes with the reason its trigger records.
+pub(super) async fn stuck_environment_ids(
+    pool: &PgPool,
+) -> sqlx::Result<Vec<(String, &'static str)>> {
     let kinds: Vec<String> = RECOVERY_JOURNAL_KINDS
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let ids: Vec<(String,)> = sqlx::query_as(
-        r#"SELECT e.id
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        r#"SELECT e.id, e.state, e.desired_state
              FROM environments e
              LEFT JOIN LATERAL (
                SELECT MAX(created_at) AS last_activity_at
@@ -581,7 +583,20 @@ pub(super) async fn stuck_environment_ids(pool: &PgPool) -> sqlx::Result<Vec<Str
     .bind(RECOVERY_ACTIVITY_WINDOW_SECS)
     .fetch_all(pool)
     .await?;
-    Ok(ids.into_iter().map(|(id,)| id).collect())
+    Ok(rows
+        .into_iter()
+        .map(|(id, state, desired_state)| (id, sweep_reason(&state, &desired_state)))
+        .collect())
+}
+
+/// A running Sandbox is swept for its bootstrap check, not because it is
+/// stuck (#5913): its logs say so.
+fn sweep_reason(state: &str, desired_state: &str) -> &'static str {
+    if state == "running" && desired_state == "started" {
+        "running bootstrap check"
+    } else {
+        "stuck-state recovery"
+    }
 }
 
 /// Mirrors `reconcileStuckEnvironments`.
@@ -594,9 +609,8 @@ async fn reconcile_stuck_environments(ctx: &WorkerContext) {
         }
     };
 
-    for id in ids {
-        if let Err(e) = enqueue_environment_reconcile(ctx, &id, false, "stuck-state recovery").await
-        {
+    for (id, reason) in ids {
+        if let Err(e) = enqueue_environment_reconcile(ctx, &id, false, reason).await {
             tracing::error!(environment_id = id, error = %e, "reconciler: enqueue stuck environment reconcile failed");
         }
     }

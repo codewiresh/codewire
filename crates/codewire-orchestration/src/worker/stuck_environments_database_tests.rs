@@ -1,7 +1,7 @@
 //! Disposable-PostgreSQL proof of which environments the stuck-state sweep
 //! reconciles (#3384): every one not in its desired state and quiet for the
 //! window, a running Sandbox whose desired state is `started` included, since
-//! the sweep is what recovers its stale bootstrap.
+//! the sweep is what recovers its stale bootstrap. Its trigger says so (#5913).
 
 use anyhow::{Result, ensure};
 use serde_json::to_value;
@@ -13,43 +13,43 @@ const CREATOR: &str = "stuck-creator";
 const ORGANIZATION: &str = "stuck-organization";
 const PRESET: &str = "stuck-preset";
 
-/// (id, state, desired state, whether the sweep takes it)
-const CASES: [(&str, &str, &str, bool); 6] = [
+/// (id, state, desired state, the reason the sweep takes it with, if it does)
+const CASES: [(&str, &str, &str, Option<&str>); 6] = [
     (
         "1b7e0c52-6a1d-4f0e-9d3a-000000000001",
         "running",
         "started",
-        true,
+        Some("running bootstrap check"),
     ),
     (
         "1b7e0c52-6a1d-4f0e-9d3a-000000000002",
         "stopped",
         "stopped",
-        false,
+        None,
     ),
     (
         "1b7e0c52-6a1d-4f0e-9d3a-000000000003",
         "running",
         "stopped",
-        true,
+        Some("stuck-state recovery"),
     ),
     (
         "1b7e0c52-6a1d-4f0e-9d3a-000000000004",
         "stopped",
         "started",
-        true,
+        Some("stuck-state recovery"),
     ),
     (
         "1b7e0c52-6a1d-4f0e-9d3a-000000000005",
         "error",
         "started",
-        true,
+        Some("stuck-state recovery"),
     ),
     (
         "1b7e0c52-6a1d-4f0e-9d3a-000000000006",
         "creating",
         "started",
-        true,
+        Some("stuck-state recovery"),
     ),
 ];
 
@@ -94,10 +94,13 @@ async fn db_every_quiet_mismatch_is_swept_a_running_sandbox_included() -> Result
         seed(&db).await?;
         let swept = stuck_environment_ids(&db.pool).await?;
         for (id, state, desired_state, expected) in CASES {
+            let reason = swept
+                .iter()
+                .find(|(swept, _)| swept == id)
+                .map(|(_, reason)| *reason);
             ensure!(
-                swept.iter().any(|swept| swept == id) == expected,
-                "{state} with desired {desired_state}: swept {}, expected {expected}",
-                !expected
+                reason == expected,
+                "{state} with desired {desired_state}: swept with {reason:?}, expected {expected:?}"
             );
         }
         Ok(())
