@@ -531,7 +531,9 @@ the managed credential is used without the first-run login picker. Whatever
 clients are selected, it also marks trusted
 (`projects[FOLDER].hasTrustDialogAccepted`) the workspace root and every Git
 repository under it, each by its own root, because Claude Code stops looking
-upward at a repository's root. So `claude` starts in any checkout without asking
+upward at a repository's root. That includes a repository inside another, such
+as those a workspace file clones into a root checkout, and a checkout's
+submodules (#5882). So `claude` starts in any checkout without asking
 whether you trust the folder, and loads the repository's own project settings,
 such as hooks, without that question. Other folders, such as the home
 directory, still ask. A local VM's guest daemon does the same for the workload
@@ -551,7 +553,15 @@ sets in `~/.claude/settings.json`:
   repository's `.mcp.json` runs its servers' commands as soon as `claude`
   starts there.
 
-Each key is set only where it is missing, and a value the user set is never
+In `~/.claude.json`, whatever clients are selected, it also sets
+`hasSeenAutoDefaultNudge: true`, as declining records it (#5883). Claude Code
+2.1.330 offers "Make auto mode your default permission mode?" while the user's
+settings name any mode but `auto` and no project, local or managed settings
+name one. The offer's default answer rewrites the user's
+`permissions.defaultMode` to `auto`, and the next `cw msg` to a detached
+session gives that answer.
+
+Each settings key is set only where it is missing, and a value the user set is never
 changed. That includes their own `permissions.defaultMode` and an
 administrator's `permissions.disableBypassPermissionsMode`, which still turns
 bypass off. These keys are written only on a Sandbox placement, never by `cw`
@@ -562,8 +572,9 @@ Checked against Claude Code 2.1.308 and 2.1.330 in a Dev Sandbox with a
 throwaway home: with these keys, `claude` and `claude
 --dangerously-skip-permissions` in a repository start and answer with no
 screen. Without `skipDangerousModePermissionPrompt`, both stop at the bypass
-screen. Not yet observed through the daemon
-([claude-in-a-sandbox.md](../journeys/claude-in-a-sandbox.md)).
+screen. Observed through the daemon on Dev with 2.1.330, together with the
+two gaps it found (#5882, #5883), in
+[claude-in-a-sandbox.md](../journeys/claude-in-a-sandbox.md).
 
 Limitation: a native local VM that uses a platform profile still receives the
 API-key projection, because its platform source authority carries slot names

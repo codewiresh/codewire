@@ -10,7 +10,8 @@
 //! identity modes and whatever clients are selected (#4332). A folder's trust
 //! covers the folders beneath it, but Claude Code stops looking upward at a
 //! repository's root, so `/workspace`'s trust alone never covers
-//! `/workspace/REPO`: each repository is trusted by its own root. It does so
+//! `/workspace/REPO`: each repository is trusted by its own root, one cloned
+//! inside another included (#5882). It does so
 //! before it listens, which covers a local VM's repositories (already on its
 //! disk), and again before each session it launches, through
 //! [`WorkspaceTrust`], which covers repositories cloned since: a hosted
@@ -51,7 +52,9 @@
 //! user's own login there is never touched.
 //!
 //! The same pass sets Claude Code's own settings so that `claude` starts in
-//! bypass permissions mode with no screen ([`settings`], #5813).
+//! bypass permissions mode with no screen ([`settings`], #5813), and, whatever
+//! clients are selected, marks Claude Code's offer to make auto mode the
+//! default answered ([`CLAUDE_AUTO_DEFAULT_OFFER_KEY`], #5883).
 //!
 //! Only [`ClaudeOnboardingSync`] and [`settings::ClaudeSettingsSync`] states
 //! are logged, never file contents.
@@ -79,6 +82,11 @@ pub const CLAUDE_CONFIG_FILE_NAME: &str = ".claude.json";
 /// The members set to `true`.
 pub const CLAUDE_ONBOARDING_KEYS: [&str; 2] =
     ["hasCompletedOnboarding", "hasAcknowledgedCostThreshold"];
+/// Set to `true` whatever clients are selected, as declining records it:
+/// Claude Code offers to make auto mode the default while the user's settings
+/// name another mode, as [`settings`] does, and the offer's default answer
+/// rewrites that mode to `auto` (#5883).
+pub const CLAUDE_AUTO_DEFAULT_OFFER_KEY: &str = "hasSeenAutoDefaultNudge";
 /// The per-folder member, under `projects`, that records folder trust.
 pub const CLAUDE_TRUST_KEY: &str = "hasTrustDialogAccepted";
 const CLAUDE_CONFIG_MODE: u32 = 0o600;
@@ -146,9 +154,9 @@ impl ClaudeHome {
         self.root.join(CLAUDE_CONFIG_FILE_NAME)
     }
 
-    /// Mark the workspace and its repositories trusted and, while the served
-    /// `clients` select the Anthropic client in any form, Claude Code's
-    /// onboarding complete.
+    /// Mark the workspace and its repositories trusted, the auto-mode offer
+    /// answered and, while the served `clients` select the Anthropic client
+    /// in any form, Claude Code's onboarding complete.
     pub fn sync(&self, clients: ManagedCredentialClients) -> io::Result<ClaudeOnboardingSync> {
         self.mark(
             onboarding_keys(clients),
@@ -302,9 +310,10 @@ impl WorkspaceTrust {
 
 /// The folders Claude Code is told to trust: the workspace root and every Git
 /// repository root under it (a folder holding `.git`), at most
-/// [`TRUST_DEPTH`] levels down. The walk follows no symlink, skips hidden
-/// folders, does not look inside a repository, and reads at most
-/// [`MAX_TRUST_ENTRIES`] entries. Sorted, the root first.
+/// [`TRUST_DEPTH`] levels down, a repository inside another included, such as
+/// one a workspace file clones into a root checkout (#5882). The walk follows
+/// no symlink, skips hidden folders, and reads at most [`MAX_TRUST_ENTRIES`]
+/// entries. Sorted, the root first.
 pub fn trusted_folders(workspace: &Path) -> Vec<String> {
     let mut repositories = Vec::new();
     let mut level = vec![workspace.to_path_buf()];
@@ -330,9 +339,8 @@ pub fn trusted_folders(workspace: &Path) -> Vec<String> {
                 let path = entry.path();
                 if std::fs::symlink_metadata(path.join(".git")).is_ok() {
                     repositories.push(path.to_string_lossy().into_owned());
-                } else {
-                    next.push(path);
                 }
+                next.push(path);
             }
         }
         level = next;
@@ -349,13 +357,19 @@ enum Marking {
     Marked(Vec<u8>),
 }
 
-/// The onboarding keys to set: all of them while the Anthropic client is
-/// selected, which gives Claude Code its credential, and none otherwise.
+/// The keys to set: [`CLAUDE_AUTO_DEFAULT_OFFER_KEY`], and every onboarding
+/// key while the Anthropic client is selected, which gives Claude Code its
+/// credential.
 fn onboarding_keys(clients: ManagedCredentialClients) -> &'static [&'static str] {
+    const WITH_ANTHROPIC: [&str; 3] = [
+        CLAUDE_ONBOARDING_KEYS[0],
+        CLAUDE_ONBOARDING_KEYS[1],
+        CLAUDE_AUTO_DEFAULT_OFFER_KEY,
+    ];
     if clients.contains(ManagedCredentialClient::Anthropic) {
-        &CLAUDE_ONBOARDING_KEYS
+        &WITH_ANTHROPIC
     } else {
-        &[]
+        &[CLAUDE_AUTO_DEFAULT_OFFER_KEY]
     }
 }
 
@@ -457,6 +471,7 @@ mod tests {
         json!({
             "hasCompletedOnboarding": true,
             "hasAcknowledgedCostThreshold": true,
+            "hasSeenAutoDefaultNudge": true,
             "projects": { "/cw-test-workspace-absent": { "hasTrustDialogAccepted": true } }
         })
     }
@@ -559,13 +574,14 @@ mod tests {
         assert!(!home.config_path().exists());
     }
 
-    /// `contents` with both onboarding keys `true` and the workspace trusted,
-    /// as a value.
+    /// `contents` with both onboarding keys and the auto-mode offer key
+    /// `true` and the workspace trusted, as a value.
     fn marked(contents: &str) -> Value {
         let mut value: Value = serde_json::from_str(contents).unwrap();
         for key in CLAUDE_ONBOARDING_KEYS {
             value[key] = Value::Bool(true);
         }
+        value[CLAUDE_AUTO_DEFAULT_OFFER_KEY] = Value::Bool(true);
         value["projects"][WORKSPACE][CLAUDE_TRUST_KEY] = Value::Bool(true);
         value
     }
@@ -623,10 +639,11 @@ mod tests {
         let (_root, home) = home();
         for current in [
             "{\"hasAcknowledgedCostThreshold\":true,\"hasCompletedOnboarding\":true,\
-             \"projects\":{\"/cw-test-workspace-absent\":{\"hasTrustDialogAccepted\":true}}}",
+             \"hasSeenAutoDefaultNudge\":true,\"projects\":{\"/cw-test-workspace-absent\":{\"hasTrustDialogAccepted\":true}}}",
             // Claude Code reads the last of a repeated key.
             "{\"hasCompletedOnboarding\": false, \"hasCompletedOnboarding\": true, \
-             \"hasAcknowledgedCostThreshold\": true, \"other\": null, \
+             \"hasAcknowledgedCostThreshold\": true, \"hasSeenAutoDefaultNudge\": true, \
+             \"other\": null, \
              \"projects\": {\"/elsewhere\": {}, \"/cw-test-workspace-absent\": {\"hasTrustDialogAccepted\": true}}}",
         ] {
             write(&home.config_path(), current, 0o644);
@@ -778,8 +795,11 @@ mod tests {
     }
 
     #[test]
-    fn without_the_anthropic_client_only_the_workspace_is_trusted() {
-        let trusted = json!({ "projects": { "/cw-test-workspace-absent": { "hasTrustDialogAccepted": true } } });
+    fn without_the_anthropic_client_only_trust_and_the_auto_mode_offer_are_marked() {
+        let trusted = json!({
+            "hasSeenAutoDefaultNudge": true,
+            "projects": { "/cw-test-workspace-absent": { "hasTrustDialogAccepted": true } }
+        });
         for slots in [&[][..], &["codex"], &["openai", "ssh", "github"]] {
             let (_root, home) = home();
             assert_eq!(
@@ -794,7 +814,8 @@ mod tests {
             assert!(other_entries(&home).is_empty());
         }
         // An existing home keeps every member, onboarding included, and gains
-        // only the workspace's trust; another folder's entry is untouched.
+        // only the workspace's trust and the auto-mode offer key; another
+        // folder's entry is untouched.
         let (_root, home) = home();
         write(
             &home.config_path(),
@@ -809,6 +830,7 @@ mod tests {
             written(&home),
             json!({
                 "hasCompletedOnboarding": false,
+                "hasSeenAutoDefaultNudge": true,
                 "projects": {
                     "/home/codewire": { "hasTrustDialogAccepted": false },
                     "/cw-test-workspace-absent": { "hasTrustDialogAccepted": true }
@@ -862,6 +884,9 @@ mod tests {
                 workspace.to_string_lossy().into_owned(),
                 at("a/b/deep"),
                 at("app"),
+                // Inside `app`, as a workspace file clones repositories into
+                // a root checkout (#5882).
+                at("app/vendor/nested"),
                 at("linked"),
                 at("team/api"),
             ]
@@ -929,6 +954,7 @@ mod tests {
                 [
                     "hasAcknowledgedCostThreshold",
                     "hasCompletedOnboarding",
+                    "hasSeenAutoDefaultNudge",
                     "projects",
                     "theme"
                 ]
