@@ -55,8 +55,8 @@ The desktop is built on these, which are on `main`:
   generated clients and the Rust, TypeScript, Go and Python SDK wrappers
   ("Starting and stopping"). It is reachable with an API key.
 - The same service on a local VM's supervisor, to the VM's owner over its
-  owner-only socket (supervisor protocol 25). `cw desktop` and the dashboard
-  viewer are not built, so nothing a user runs starts a desktop yet.
+  owner-only socket (supervisor protocol 25).
+- `cw desktop` ("`cw desktop`", below). The dashboard viewer is not built.
 
 ## In the image
 
@@ -257,13 +257,21 @@ port 5901 stays reserved exactly as below.
 - **`cw desktop`** keeps it in memory, uses it only once it has checked
   that it is eight lowercase letters or digits, and never puts it in a file
   or in an argument of a process it starts, where other users of the
-  computer could read it. On macOS it writes the address with the password
-  to the standard input of `osascript`, the system's script runner, which
-  opens it, so the built-in viewer opens without asking. On other systems a
+  computer could read it. The check is made where the address is built,
+  because the value comes from the environment, which the computer has no
+  reason to trust, and on macOS it becomes script text. On macOS it writes
+  the address with the password to the standard input of
+  `/usr/bin/osascript`, the system's script runner, which opens it, so the
+  built-in viewer opens without asking. If the script runner cannot start,
+  fails or takes longer than 10 s, `cw desktop` does what it does on other
+  systems, never an opener with the password in an argument. On other systems a
   registered viewer is started with the address as an argument, so
   `cw desktop` opens the address without the password and prints the
-  password for the user to type. With `--no-open` it prints the address and
-  the password, for a viewer of the user's own. `--status` never prints it.
+  password for the user to type. It prints it only when its output is a
+  terminal, so a run whose output is logged does not record it, and
+  otherwise says that `--no-open` prints it. With `--no-open` it prints the
+  address and the password, for a viewer of the user's own. `--status` never
+  prints it.
 - **The dashboard** receives it in the answer to the panel's own state
   read, keeps it in the page's memory and hands it to the viewer. It is
   never in a URL, in browser storage or in the page's markup. The desktop
@@ -287,9 +295,8 @@ of the two:
 - **At use, not only at publication.** The preview proxy, the host-port
   forward and Mesh ingress refuse to open a connection to it, so a port
   published before this rule existed is not served either.
-- `cw` and the dashboard show the server's refusal, which names `cw desktop`.
-  Until `cw desktop` ships, the refusal names the path that works: an SSH local
-  forward.
+- `cw` and the dashboard show the server's refusal, which names `cw desktop`
+  and the SSH local forward a viewer of one's own uses.
 
 SSH local forwards and orchestration's desktop stream are the two paths
 that still reach 5901, and an SSH local forward is the one path that reaches

@@ -397,6 +397,7 @@ async fn selector_error(argv: &[&str]) -> String {
         Command::Interrupt(args) => selector_target("interrupt", args).map(|_| ()),
         Command::Shell(args) => handle_environment_shell_command(&globals, args).await,
         Command::Vscode(args) => handle_vscode_command(&globals, args).await,
+        Command::Desktop(args) => crate::commands::handle_desktop_command(&globals, args).await,
         // Without a terminal to ask on, as for any script.
         Command::Run(args) => check_run_request(&args, false).map(|_| ()),
         other => panic!("unexpected {other:?}"),
@@ -470,6 +471,10 @@ async fn session_commands_refuse_missing_contradictory_or_retired_selectors_befo
         (
             vec!["cw", "vscode", "--cloud", "cw-local-app"],
             "`cw-local-app` names a local VM, which --cloud does not reach",
+        ),
+        (
+            vec!["cw", "desktop", "app", "--in", "app"],
+            "name the environment once: `cw desktop ENV` or `cw desktop --in ENV`, not both",
         ),
         (
             vec!["cw", "run"],
@@ -703,6 +708,8 @@ fn placement_is_refused_by_commands_that_do_not_read_it() {
         vec!["cw", "--local", "send", "--session", "coding", "text"],
         vec!["cw", "--local", "wait", "--session", "coding"],
         vec!["cw", "--cloud", "vscode", "app"],
+        vec!["cw", "--local", "desktop", "app"],
+        vec!["cw", "desktop", "app", "--cloud", "--status"],
         vec!["cw", "--local", "stop", "app"],
         vec!["cw", "stop", "app", "--cloud"],
         vec!["cw", "--cloud", "credentials", "list"],

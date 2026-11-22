@@ -195,7 +195,7 @@ const HELP_SECTIONS: &[HelpSection] = &[
     HelpSection::everyday(
         "Work and return",
         &[
-            "exec", "attach", "shell", "vscode", "logs", "msg", "inbox", "ports",
+            "exec", "attach", "shell", "vscode", "desktop", "logs", "msg", "inbox", "ports",
         ],
     ),
     HelpSection::everyday(
@@ -427,6 +427,11 @@ enum Command {
         long_about = "Open VS Code connected to a running environment via Remote-SSH, through its `cw-cloud-<id>` alias, or `cw-local-<id>` for a local VM. Ensures your SSH config is up to date before launching VS Code with the vscode:// URI scheme.\n\nExamples:\n  cw vscode app\n  cw --local vscode my-vm --folder /workspace/my-repo\n\nA local VM must be running, and created by this cw: Remote-SSH reaches its server through port forwarding, which an older VM runtime refuses."
     )]
     Vscode(VscodeArgs),
+    #[command(
+        about = "Show an environment's graphical desktop",
+        long_about = "Start the environment's graphical desktop if it is not running, connect to it through OpenSSH, and open it in this computer's VNC viewer. Programs started in the environment while the desktop runs draw on it.\n\nExamples:\n  cw desktop app\n  cw desktop app --no-open\n  cw desktop app --status\n  cw desktop app --stop\n\nCtrl-C closes the connection and leaves the desktop running; --stop ends it. On macOS the built-in viewer opens without asking. Elsewhere cw prints a password for the viewer to ask for."
+    )]
+    Desktop(DesktopArgs),
     #[command(
         about = "Open a shell session in the selected or named environment",
         long_about = "Open a login shell in a new session:\n  cw shell ENV\n  cw shell --in ENV\n  cw shell                         (in the selected environment)\n\nThe shell ends when you leave it, as `ssh` does, and cw exits with its status; every key goes to it, Ctrl-B included. A shell whose connection drops waits 10 minutes for `cw attach ENV --session SESSION` before it ends.\n\nWith --durable, the shell is a named session that keeps running: detach with Ctrl-B, then d, and `cw attach ENV --session SESSION` reconnects."
@@ -1000,6 +1005,7 @@ where
         Command::Current(args) => handle_current_command(&globals, args).await,
         Command::Init(args) => handle_init_command(&globals, args).await,
         Command::Vscode(args) => handle_vscode_command(&globals, args).await,
+        Command::Desktop(args) => handle_desktop_command(&globals, args).await,
         Command::Shell(args) => {
             let globals = globals.with_org(args.org.clone());
             handle_environment_shell_command(&globals, args).await

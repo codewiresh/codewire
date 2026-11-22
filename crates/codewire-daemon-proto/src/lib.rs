@@ -204,11 +204,10 @@ pub const WORKSPACE_ACCESS_PROBE_USER: &str = "codewire-access-probe";
 /// Every path that publishes a guest port, or serves a published one, refuses
 /// this port instead, whether or not a desktop runs.
 pub const DESKTOP_VNC_PORT: u16 = 5901;
-/// What a refusal to publish or serve [`DESKTOP_VNC_PORT`] says. It names the
-/// path that works today; `cw desktop` replaces it here when that command
-/// ships.
+/// What a refusal to publish or serve [`DESKTOP_VNC_PORT`] says: the command
+/// that shows the desktop, and the forward a viewer of one's own uses.
 pub const DESKTOP_VNC_PORT_REFUSAL: &str = "port 5901 is reserved for this environment's desktop and is never published; \
-     reach it with an SSH local forward";
+     `cw desktop` shows it, or reach it with an SSH local forward";
 /// The port the image's Chromium listens on, on the workload's loopback, when
 /// a launch turns its remote debugging on (`docs/dev/SANDBOX-DESKTOP.md`,
 /// "The browser"). The debugging protocol has no authentication: whatever
@@ -660,6 +659,7 @@ mod tests {
             assert!(super::unpublished_port_refusal(port + 1).is_none());
             assert!(!super::platform_listeners(Some(7777)).contains_key(&port));
         }
+        assert!(super::DESKTOP_VNC_PORT_REFUSAL.contains("`cw desktop`"));
         assert_eq!(
             super::UNPUBLISHED_WORKLOAD_PORTS,
             [super::DESKTOP_VNC_PORT, super::BROWSER_DEBUG_PORT]

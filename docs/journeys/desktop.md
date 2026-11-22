@@ -8,10 +8,9 @@ it in "7. Access paths" under "Desktop", and the contract is
 [README.md](README.md).
 
 Every step is written first, as the owner's rule of 2026-11-15 (#3013)
-requires: a review refuses desktop code this file does not describe. Most of
-it does not exist yet: there is no `cw desktop` command, no browser in the
-workspace image and no Desktop panel until #3223's pull requests land. Every
-step reads "not yet observed".
+requires: a review refuses desktop code this file does not describe. Part of
+the dashboard's Desktop panel does not exist until #3223's last pull request
+lands. Every step reads "not yet observed" until it is walked.
 
 ## Where the journey stands
 
@@ -78,7 +77,7 @@ when both have been observed.
 ## `desktop-cli`: `cw desktop` shows the desktop
 
 - **Entry points:** `cw desktop [ENV]`, `cw desktop --in ENV`, with `--no-open`;
-  `--local` and `--cloud`. No command yet (#3223).
+  `--local` and `--cloud`.
 - **States to exercise:**
   - a first start, which shows progress until the desktop runs;
   - a second `cw desktop` while the desktop runs, which starts nothing;
@@ -115,7 +114,9 @@ when both have been observed.
     `cw desktop` names the same start time;
   - on a Mac the built-in viewer opens without asking for anything:
     `cw desktop` gave it the password. On Linux `cw desktop` prints the
-    password under the address and the viewer asks for it once. With
+    password under the address and the viewer asks for it once. With its
+    output in a file (`cw desktop desk-walk > out`), the file holds the
+    address and no password, and a note names `--no-open`. With
     `--no-open`, the printed password lets a viewer of your own connect, and
     a wrong one is refused by the VNC server;
   - the password is nowhere it should not be: `--status` does not print it;
@@ -355,8 +356,8 @@ when both have been observed.
     is on TCP at all;
   - `cw ports` lists no port for the desktop, and no preview URL serves it;
   - publishing 5901 is refused with one sentence that says the port is the
-    desktop's and names the way in (`cw desktop`; an SSH local forward until
-    that command ships), with the desktop running and with it stopped, in
+    desktop's and names the way in (`cw desktop`, and the SSH local forward
+    a viewer of one's own uses), with the desktop running and with it stopped, in
     the cloud and on a local VM; publishing 5902 succeeds, and is removed
     afterwards; the create from the project file is refused with the same
     sentence;

@@ -78,6 +78,14 @@ owner model itself is shared (owner.rs)."""
 reason = """Role dispatch and module lists for the groups above: each line routes to, \
 or declares, code of one of them."""
 
+[groups.desktop-viewer]
+reason = """How `cw desktop` opens a viewer (docs/dev/SANDBOX-DESKTOP.md, "`cw desktop`"): \
+on macOS the built-in viewer always exists and takes the per-start password from the \
+standard input of /usr/bin/osascript, never from an argument; Linux has no private way to \
+give a viewer a password, so the address opens without it and the password is printed, and \
+the viewer is looked for with xdg-mime first, since the opener otherwise hands the address \
+to a browser."""
+
 [groups.linux-tests]
 reason = """Tests of Linux-only behaviour (the groups above) or that use a Linux-only \
 proof such as a subreaper, pidfds or /proc. Their macOS counterparts are the macOS tests \
@@ -147,6 +155,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/commands/sessions/agents/noel.rs" = { group = "member", count = 6 }
 "crates/codewire-cli/src/commands/sessions/agents/pause.rs" = { group = "member", count = 11 }
 "crates/codewire-cli/src/commands/sessions/agents/turn_failure_tests.rs" = { group = "linux-tests", count = 2 }
+"crates/codewire-cli/src/commands/sessions/desktop/viewer.rs" = { group = "desktop-viewer", count = 9 }
 "crates/codewire-cli/src/commands/storage_placement.rs" = { group = "credentials", count = 1 }
 "crates/codewire-cli/src/commands/tests/environment.rs" = { group = "linux-tests", count = 5 }
 "crates/codewire-cli/src/commands/tests/sessions.rs" = { group = "linux-tests", count = 5 }

@@ -5,6 +5,7 @@ use codewire_client::hosted_shell::{InputNotice, InputStream, restart};
 #[cfg(unix)]
 pub(crate) mod agents;
 mod attach_mode;
+mod desktop;
 mod entry;
 mod exec;
 mod navigation;
@@ -13,6 +14,7 @@ use attach_mode::{attaches_interactively, session_is_terminal};
 pub(crate) mod setup;
 mod short_id;
 mod table;
+pub(crate) use desktop::{DesktopArgs, handle_desktop_command};
 pub(crate) use entry::{handle_environment_run_command, handle_environment_shell_command};
 pub(crate) use exec::handle_exec_command;
 pub(crate) use navigation::AttachNavigationDecoder;

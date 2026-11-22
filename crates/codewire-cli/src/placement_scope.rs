@@ -52,6 +52,7 @@ pub(crate) fn validate_placement_scope(
             | Command::Wait(_)
             | Command::Shell(_)
             | Command::Vscode(_)
+            | Command::Desktop(_)
             | Command::Ls(_)
             | Command::Logs(_)
             | Command::Stop(_)
