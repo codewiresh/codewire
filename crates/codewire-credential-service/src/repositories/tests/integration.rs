@@ -41,6 +41,9 @@ const GITHUB_APP_SECOND_REFRESH_TOKEN: &str = "ghr_synthetic_app_second_refresh_
 struct Provider {
     calls: AtomicUsize,
     app_refreshes: AtomicUsize,
+    /// Every refresh exchange is answered 429 with `Retry-After` (#4975).
+    rate_limit_refreshes: AtomicBool,
+    rate_limited_refreshes: AtomicUsize,
     reject_first_app_repository: AtomicBool,
     reject_first_refreshed_app_repository: AtomicBool,
     initial_app_access_lifetime: AtomicUsize,
@@ -63,6 +66,8 @@ impl Default for Provider {
         Self {
             calls: AtomicUsize::new(0),
             app_refreshes: AtomicUsize::new(0),
+            rate_limit_refreshes: AtomicBool::new(false),
+            rate_limited_refreshes: AtomicUsize::new(0),
             reject_first_app_repository: AtomicBool::new(false),
             reject_first_refreshed_app_repository: AtomicBool::new(false),
             initial_app_access_lifetime: AtomicUsize::new(28_800),
@@ -200,6 +205,10 @@ impl Provider {
                     Some(GITHUB_APP_REFRESH_TOKEN | GITHUB_APP_REFRESHED_REFRESH_TOKEN)
                 ) =>
             {
+                if self.rate_limit_refreshes.load(Ordering::SeqCst) {
+                    self.rate_limited_refreshes.fetch_add(1, Ordering::SeqCst);
+                    return rate_limited_response();
+                }
                 // Each rotation consumes its refresh token and issues the next;
                 // GitHub rejects a refresh token that was already used.
                 let second = form.get("refresh_token").map(|value| value.as_ref())
@@ -299,6 +308,23 @@ fn github_app_headers(headers: &HeaderMap) -> bool {
         == Some(&HeaderValue::from_static("application/vnd.github+json"))
         && headers.get(http::header::USER_AGENT)
             == Some(&HeaderValue::from_static("Codewire-Credential-Service"))
+}
+
+/// A token endpoint's 429: it consumes no refresh token.
+fn rate_limited_response() -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+    Ok(BrokerUpstreamResponse::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        HeaderMap::from_iter([
+            (
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            ),
+            (http::header::RETRY_AFTER, HeaderValue::from_static("120")),
+        ]),
+        Box::pin(futures::stream::once(async {
+            Ok(br#"{"message":"rate limited"}"#.as_slice().into())
+        })),
+    ))
 }
 
 fn json_response(
@@ -1164,6 +1190,75 @@ async fn github_pending_permissions_follow_the_live_grant_under_discovery_author
                 attempt,
             )
             .await?;
+        Ok(())
+    }
+    .await;
+    f.finish(result).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn github_app_refresh_rate_limit_waits_once_then_fails() -> Result<()> {
+    let f = Fixture::app().await?;
+    let result = async {
+        // Within the renewal skew, so discovery refreshes first, and the
+        // token endpoint answers 429 with Retry-After (#4975).
+        f.provider
+            .initial_app_access_lifetime
+            .store(60, Ordering::SeqCst);
+        let original = f.app_credential().await?;
+        f.provider
+            .rate_limit_refreshes
+            .store(true, Ordering::SeqCst);
+        error(
+            f.post(&original).bearer_auth(oauth(ALICE)),
+            "resource_exhausted",
+        )
+        .await?;
+        ensure!(f.provider.rate_limited_refreshes.load(Ordering::SeqCst) == 1);
+        ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 0);
+        ensure!(f.provider.calls.load(Ordering::SeqCst) == 0);
+        // The 429 rotated nothing: the record keeps its refresh token.
+        let current =
+            f.h.store
+                .record(&original.metadata.owner, &original.metadata.id)
+                .await?;
+        ensure!(
+            current == original,
+            "rate-limited refresh changed the record"
+        );
+        // During the wait the refresh's begin is refused: the same answer,
+        // and no second exchange reaches the provider.
+        error(
+            f.post(&original).bearer_auth(oauth(ALICE)),
+            "resource_exhausted",
+        )
+        .await?;
+        ensure!(f.provider.rate_limited_refreshes.load(Ordering::SeqCst) == 1);
+        ensure!(f.provider.calls.load(Ordering::SeqCst) == 0);
+        // The wait runs on the database's clock: move the rate-limited
+        // attempt into the past there, as if its 429 came 20 minutes ago.
+        // The one retry is answered 429 again, and that refresh fails rather
+        // than waiting a second time.
+        sqlx::query(
+            "UPDATE platform_credential_refresh_attempts \
+             SET started_at = started_at - interval '20 minutes', \
+                 started_until = started_until - interval '20 minutes', \
+                 rate_limited_until = clock_timestamp() - interval '1 second' \
+             WHERE credential_id = $1 AND state = 'rate_limited'",
+        )
+        .bind(original.metadata.id.as_str())
+        .execute(&f.h.db.pool)
+        .await?;
+        error(f.post(&original).bearer_auth(oauth(ALICE)), "unavailable").await?;
+        ensure!(f.provider.rate_limited_refreshes.load(Ordering::SeqCst) == 2);
+        ensure!(f.provider.app_refreshes.load(Ordering::SeqCst) == 0);
+        ensure!(f.provider.calls.load(Ordering::SeqCst) == 0);
+        let failed =
+            f.h.store
+                .record(&original.metadata.owner, &original.metadata.id)
+                .await?;
+        ensure!(failed.metadata.status == CredentialStatus::RefreshFailed);
         Ok(())
     }
     .await;
