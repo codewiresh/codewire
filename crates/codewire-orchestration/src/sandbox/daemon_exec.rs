@@ -52,8 +52,8 @@ impl std::fmt::Debug for WorkspaceExecCredential {
 pub(crate) struct DaemonExec {
     /// Held until the exit is read: the daemon ends a command whose request
     /// stream closes first, so a dropped handle never leaves it running
-    /// unseen.
-    _input: DaemonRunSender,
+    /// unseen. The daemon ends its response only after this closes.
+    input: DaemonRunSender,
     output: DaemonRunReceiver,
 }
 
@@ -121,26 +121,25 @@ impl SandboxClient {
             .send_input(DaemonRunInput::CloseStdin)
             .await
             .map_err(|error| anyhow::anyhow!("workspace exec: {}", described(&error)))?;
-        Ok(WorkspaceExecHandle::daemon(DaemonExec {
-            _input: input,
-            output,
-        }))
+        Ok(WorkspaceExecHandle::daemon(DaemonExec { input, output }))
     }
 }
 
 impl DaemonExec {
-    pub(crate) async fn wait(
-        mut self,
-        tap: Option<&StderrTap>,
-    ) -> anyhow::Result<WorkspaceExecResult> {
-        complete(&mut self.output, tap).await
+    pub(crate) async fn wait(self, tap: Option<&StderrTap>) -> anyhow::Result<WorkspaceExecResult> {
+        let Self { input, mut output } = self;
+        complete(&mut output, input, tap).await
     }
 }
 
 /// Reads one command to its end. The frames' bytes are kept to their first
 /// [`WORKSPACE_EXEC_CAPTURE_BYTES`], and every stderr frame goes to `tap`.
-pub(crate) async fn complete(
+/// `input`, the command's request stream, is held until the exit and closed
+/// before the clean end is awaited: `CloseStdin` is only a half-close, and the
+/// daemon ends its response once the request stream ends.
+pub(crate) async fn complete<I>(
     output: &mut impl RunOutputs,
+    input: I,
     tap: Option<&StderrTap>,
 ) -> anyhow::Result<WorkspaceExecResult> {
     let mut stdout = Zeroizing::new(Vec::new());
@@ -160,6 +159,7 @@ pub(crate) async fn complete(
             Err(error) => anyhow::bail!("workspace exec completion: {}", described(&error)),
         }
     };
+    drop(input);
     match output.next().await {
         Ok(None) => {}
         Ok(Some(_)) => anyhow::bail!("workspace exec completion: a frame followed the exit"),
@@ -227,16 +227,41 @@ mod tests {
     /// may reach an error.
     const MARKER: &str = "s3cr3t-marker";
 
-    struct Frames(VecDeque<Result<Option<DaemonRunOutput>, DaemonClientError>>);
+    /// The scripted frames, then the end of the stream. With `closed`, the
+    /// end comes only once the request stream is closed, as from the daemon.
+    struct Frames {
+        frames: VecDeque<Result<Option<DaemonRunOutput>, DaemonClientError>>,
+        closed: Option<Arc<std::sync::atomic::AtomicBool>>,
+    }
 
     impl RunOutputs for Frames {
         async fn next(&mut self) -> Result<Option<DaemonRunOutput>, DaemonClientError> {
-            self.0.pop_front().unwrap_or(Ok(None))
+            if let Some(frame) = self.frames.pop_front() {
+                return frame;
+            }
+            if let Some(closed) = &self.closed
+                && !closed.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                std::future::pending::<()>().await;
+            }
+            Ok(None)
         }
     }
 
     fn frames(frames: Vec<Result<Option<DaemonRunOutput>, DaemonClientError>>) -> Frames {
-        Frames(frames.into())
+        Frames {
+            frames: frames.into(),
+            closed: None,
+        }
+    }
+
+    /// A request stream that records when it is closed.
+    struct Input(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for Input {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     fn output(text: &str) -> Vec<Result<Option<DaemonRunOutput>, DaemonClientError>> {
@@ -249,7 +274,7 @@ mod tests {
     async fn run(
         list: Vec<Result<Option<DaemonRunOutput>, DaemonClientError>>,
     ) -> anyhow::Result<WorkspaceExecResult> {
-        complete(&mut frames(list), None).await
+        complete(&mut frames(list), (), None).await
     }
 
     fn exited(code: i32) -> Vec<Result<Option<DaemonRunOutput>, DaemonClientError>> {
@@ -339,7 +364,7 @@ mod tests {
         }
         list.push(Ok(Some(DaemonRunOutput::Exit(0))));
         let (tap, mut tapped) = tokio::sync::mpsc::channel(8);
-        let result = complete(&mut frames(list), Some(&tap)).await.unwrap();
+        let result = complete(&mut frames(list), (), Some(&tap)).await.unwrap();
         assert_eq!(result.stdout.len(), WORKSPACE_EXEC_CAPTURE_BYTES);
         assert_eq!(result.stderr.len(), WORKSPACE_EXEC_CAPTURE_BYTES);
         drop(tap);
@@ -348,5 +373,42 @@ mod tests {
             total += bytes.len();
         }
         assert_eq!(total, 2 * WORKSPACE_EXEC_CAPTURE_BYTES);
+    }
+
+    #[tokio::test]
+    async fn the_request_stream_closes_at_the_exit_so_the_daemon_ends_its_response() {
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut daemon = Frames {
+            frames: exited(0).into(),
+            closed: Some(closed.clone()),
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            complete(&mut daemon, Input(closed.clone()), None),
+        )
+        .await
+        .expect("completion waited on a request stream it still held")
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(closed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn the_request_stream_is_held_until_the_exit() {
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut daemon = Frames {
+            frames: output("out").into(),
+            closed: Some(closed.clone()),
+        };
+        // No exit yet: completion waits, and the command's request stream
+        // stays open, so the daemon does not end the command.
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                complete(&mut daemon, Input(closed.clone()), None),
+            )
+            .await
+            .is_err()
+        );
     }
 }
