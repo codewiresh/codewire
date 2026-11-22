@@ -637,7 +637,12 @@ if (steps[1].get("id") != "turn"
     sys.exit("the pending job does not take its release turn with the job token alone")
 if steps[2].get("run") != f"scripts/ci/release/find-pending-release.sh {workflow}":
     sys.exit("the pending job does not run the release finder")
-if steps[2].get("if") != "${{ steps.turn.outputs.turn == 'go' }}":
+# cli-release's finder also names nothing on a kernel builder mirror refresh (#5619).
+finder_if = "${{ steps.turn.outputs.turn == 'go' }}"
+if workflow == "cli-release":
+    finder_if = ("${{ steps.turn.outputs.turn == 'go' && !(github.event_name == 'workflow_dispatch'"
+                 " && inputs.kernel_builder_mirror) }}")
+if steps[2].get("if") != finder_if:
     sys.exit("the release finder runs without this run's turn")
 if set(steps[2].get("env", {})) - {"GITEA_TOKEN", "DISPATCHED_TAG", "DISPATCHED_R2_PUBLICATION",
                                      "DISPATCHED_R2_PROMOTE_CHANNEL"}:

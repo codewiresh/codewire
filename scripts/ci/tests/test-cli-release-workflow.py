@@ -311,15 +311,19 @@ PRODUCTION_WAIT_STEP = "      - name: Wait for Production to accept this release
 MIRROR_IF = ("${{ github.event_name == 'workflow_dispatch' && inputs.kernel_builder_mirror"
              " && github.ref == 'refs/heads/main' }}")
 MIRROR_MAIN_STEP = """      - name: Refuse any ref but main\n        run: '[ "$GITHUB_REF" = refs/heads/main ]'\n"""
-MIRROR_SKIP = "${{ !(github.event_name == 'workflow_dispatch' && inputs.kernel_builder_mirror) }}"
+MIRROR_FIND_IF = ("${{ steps.turn.outputs.turn == 'go' && !(github.event_name == 'workflow_dispatch'"
+                  " && inputs.kernel_builder_mirror) }}")
 
 
 def kernel_builder_mirror_errors(header, blocks):
     """The kernel builder mirror refresh (#5619) can never half-release.
 
     Its boolean input defaults to false; when it is true, on main, only its two
-    jobs run, because the first release job is skipped and every other release
-    job needs it; when it is false neither runs. The collect job runs the
+    jobs run, because the first release job names no release and every other
+    release job needs one; when it is false neither runs. That first job has no
+    job-level if: Forgejo 17 evaluates one when it creates the run, the skip
+    cascades through the release jobs past its recursion limit, and the
+    dispatch fails with a 500. The collect job runs the
     archive's container and holds no OIDC or credential; the record job, on a
     fresh checkout, receives the collected tree outside it, fetches the R2
     credential only in its storing step, and neither holds a forge token.
@@ -329,7 +333,10 @@ def kernel_builder_mirror_errors(header, blocks):
     collect, record = blocks.get("kernel-builder-mirror-collect", ""), blocks.get("kernel-builder-mirror-record", "")
     need(re.search(r"      kernel_builder_mirror:\n(?:        .*\n)*?        type: boolean\n        default: false\n",
                    header) is not None, "the kernel builder mirror input is not a boolean that defaults to false")
-    need(f"    if: {MIRROR_SKIP}\n" in blocks.get("pending", ""), "a mirror refresh also starts a release")
+    pending = blocks.get("pending", "")
+    need(not re.search(r"^    if:", pending, re.M), "the first release job has a job-level if, so a dispatch fails at creation")
+    find = next((text for _, text in steps(pending) if "find-pending-release.sh" in text), "")
+    need(f"        if: {MIRROR_FIND_IF}\n" in find, "a mirror refresh also names a release")
     for name, block in (("collect", collect), ("record", record)):
         need(f"    if: {MIRROR_IF}\n" in block, f"the mirror's {name} job runs without its dispatch input, or off main")
         parts = [text for _, text in steps(block)]
@@ -812,7 +819,12 @@ MUTATIONS = {
     "mirror record runs on any ref": lambda t: nth_replace(
         t, " && github.ref == 'refs/heads/main' }}\n    runs-on", " }}\n    runs-on", 2),
     "mirror collect without its main-only step": lambda t: t.replace(MIRROR_MAIN_STEP, "", 1),
-    "a mirror refresh also releases": lambda t: t.replace(f"    if: {MIRROR_SKIP}\n", "", 1),
+    "a mirror refresh also releases": lambda t: t.replace(
+        f"        if: {MIRROR_FIND_IF}\n", "        if: ${{ steps.turn.outputs.turn == 'go' }}\n", 1),
+    "the first release job skips at creation": lambda t: t.replace(
+        "    name: Find the release to deliver\n",
+        "    name: Find the release to deliver\n"
+        "    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.kernel_builder_mirror) }}\n", 1),
     "mirror collect requests OIDC": lambda t: t.replace(
         "    name: Collect the kernel builder's packages\n",
         "    name: Collect the kernel builder's packages\n    enable-openid-connect: true\n", 1),

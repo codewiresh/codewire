@@ -75,6 +75,14 @@ def release_jobs(workflow: str, run_id: int, phase: str) -> list[dict]:
     ]
 
 
+# The finder runs only on this run's turn; cli-release's never on a kernel
+# builder mirror refresh, which names no release (#5619).
+FIND_IF = {
+    "deploy-prod": "${{ steps.turn.outputs.turn == 'go' }}",
+    "cli-release": "${{ steps.turn.outputs.turn == 'go' && !(github.event_name == 'workflow_dispatch'"
+                   " && inputs.kernel_builder_mirror) }}",
+}
+
 class FakeForgejo:
     """Release runs whose phases change from one poll to the next."""
 
@@ -343,7 +351,7 @@ class Workflows(unittest.TestCase):
                     "        id: turn\n        env:\n          GITEA_TOKEN: ${{ github.token }}\n"
                     f"        run: python3 -I -B scripts/ci/release/release-turn.py {workflow}\n\n"
                     "      - name: Find the pending release\n"
-                    "        if: ${{ steps.turn.outputs.turn == 'go' }}\n        id: find\n"))
+                    f"        if: {FIND_IF[workflow]}\n        id: find\n"))
                 self.assertNotIn("cancel-in-progress: true", text)
 
 

@@ -88,8 +88,11 @@ jobs:
   pending:
     # zizmor: ignore[excessive-permissions] Forgejo ignores permissions; this job's capabilities come from its runner label and whether it requests OIDC.
     name: Find the release to deliver
-    # A mirror refresh delivers no release: every release job needs this one.
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.kernel_builder_mirror) }}
+    # A mirror refresh delivers no release: its finder step names none, so
+    # every release job skips, as on a schedule that finds nothing. Not a
+    # job-level if: Forgejo 17 evaluates that when it creates the run, and the
+    # skip cascades through every release job past its recursion limit of 6,
+    # so the dispatch fails with a 500 (#5619).
     # The trusted light runner, with the job token alone: on the untrusted one
     # the release's first job queued 18 minutes behind gates on 2026-11-15 (#5009).
     runs-on: ${{ vars.CODEWIRE_CI_RUNNER_TRUSTED_LIGHT || 'unset-CODEWIRE_CI_RUNNER_TRUSTED_LIGHT' }}
@@ -115,7 +118,7 @@ jobs:
         run: python3 -I -B scripts/ci/release/release-turn.py cli-release
 
       - name: Find the pending release
-        if: ${{ steps.turn.outputs.turn == 'go' }}
+        if: ${{ steps.turn.outputs.turn == 'go' && !(github.event_name == 'workflow_dispatch' && inputs.kernel_builder_mirror) }}
         id: find
         env:
           GITEA_TOKEN: ${{ github.token }}
