@@ -198,6 +198,47 @@ async function organizationApiKeys(page: Page, slug: string): Promise<void> {
   await fits(page);
 }
 
+// The console sidebar links Updates just above Documentation, and that link
+// opens the public page (#5324, docs/journeys/updates.md U1 step 2). A miss
+// prints not-held and does not fail the walk.
+async function updatesLink(page: Page): Promise<void> {
+  const started = Date.now();
+  const links = page.locator("nav.cw-console-sidebar a.cw-nav-link");
+  if (await holds("updates-link", [
+    ["sidebar-link", async () => {
+      await visit(page, "/dashboard/");
+      await expect(links.filter({ hasText: "Updates" })).toHaveAttribute("href", "/updates");
+    }],
+    ["above-docs", async () => {
+      const hrefs = await links.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("href")));
+      expect(hrefs.indexOf("/updates")).toBeGreaterThanOrEqual(0);
+      expect(hrefs.indexOf("/docs") - hrefs.indexOf("/updates")).toBe(1);
+    }],
+    ["opens-page", async () => {
+      expect((await page.request.get(`${ORIGIN}/updates`)).status()).toBe(200);
+    }],
+  ])) passed("updates-link", started);
+}
+
+// An organization's Network policies page is in its settings navigation and
+// lists the built-in open and locked policies (#5114, docs/journeys/
+// network-and-egress.md policy-dashboard). View only: nothing is created.
+async function networkPolicies(page: Page, slug: string): Promise<void> {
+  const started = Date.now();
+  if (await holds("network-policies", [
+    ["page-title", async () => {
+      await visit(page, `/${slug}/network-policies/`);
+      await expect(page.locator("main h1.cw-page-title")).toHaveText("Network policies");
+    }],
+    ["nav-link", async () => {
+      await expect(page.locator(`a.cw-nav-link[href="/${slug}/network-policies/"]`)).toHaveAttribute("aria-current", "page");
+    }],
+    ["built-ins", async () => {
+      await expect(page.locator(".cw-network-policy-list .cw-network-policy-copy > strong")).toHaveText(["open", "locked"]);
+    }],
+  ])) passed("network-policies", started);
+}
+
 // Each key a member may delete has a Delete dialog that says what deleting does
 // in one sentence (#3586). The dialog is read as rendered, never opened, and no
 // key is deleted; with no such key there is nothing to read. A miss prints
@@ -710,6 +751,8 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await credentials(page, slug, width);
     await settings(page, slug, width);
     if (width === 1440) {
+      await updatesLink(page);
+      await networkPolicies(page, slug);
       await stage("settings-to-create-1440", async () => {
         // Personal pages visited directly carry no organization context, so
         // start from organization-scoped Settings, where Create is offered.
