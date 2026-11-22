@@ -1,4 +1,4 @@
-d0ae6813574df9f000feb0f2a770f10634e7749d5ac640b46ac2e2866cfd3950  cw-v0.4.27-aarch64-apple-darwin
-2af49f2769e3e8306fd8b058da3dd63c75d4322a5c474af9a1ee98022c37d798  cw-v0.4.27-aarch64-unknown-linux-gnu
-09866cbecfc4f727cdd2c9e9b216eaf8ddd3e10787744a0fb9472542c5e52a3e  cw-v0.4.27-x86_64-apple-darwin
-ce2c5d9a18813a5a0610fff428e754a940ca68f4b4d90090cbd1b3eec7dcd7f7  cw-v0.4.27-x86_64-unknown-linux-musl
+d821d24fbd4beee29fa90d1f74e65f70c6c46b337dce4f0449c3dce4dd4965be  cw-v0.4.30-aarch64-apple-darwin
+cded3b17957d2f57909c68f03809630812ba3b0608ef2b320804e8c158fe5f85  cw-v0.4.30-aarch64-unknown-linux-gnu
+9c76a7d6e501ea08140f2cc4bf1954cc9528c152ab50554aaeb4f3812a69aab2  cw-v0.4.30-x86_64-apple-darwin
+08a2c92ca8f8392383adfe0c4cc627cf2a8a6ba005abca61328940092c8ecd53  cw-v0.4.30-x86_64-unknown-linux-musl
