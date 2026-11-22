@@ -2919,8 +2919,17 @@ the host never parses the state. Three things differ from Linux:
   `~/.codewire`, was not indexed when tried. Spotlight types a disk image by
   its `.raw` extension as camera RAW, so in an indexed folder its image
   importer parses guest-written bytes on the host: every local VM's disks,
-  not only a checkpoint's (#5830, #5831). A capture is refused when the
-  local VM state root is inside a folder a sync service copies (iCloud Drive,
+  not only a checkpoint's (#5830). So `cw` warns at local VM setup, create
+  and start when the state root is not in a dot folder or a `.noindex`
+  folder (#5831). Measured on macOS 27.2.1 with a token file one folder
+  below each: `mdfind` found none under a dot folder or a `.noindex` folder,
+  on Spotlight's own indexing or after `mdimport`, and found the one under a
+  plain folder in the home folder both ways. A disk image attached
+  `nobrowse` had indexing off, so that run shows nothing about external
+  volumes. Until #5900, Time Machine still backs up each VM's disks,
+  delivered sign-ins on the state disk included; then it skips the whole
+  `vms/` tree, as it skips `checkpoints/` and the snapshot store now. A
+  capture is refused when the local VM state root is inside a folder a sync service copies (iCloud Drive,
   `~/Library/CloudStorage`), and warned about under `~/Desktop` or
   `~/Documents`, which iCloud may sync.
 - APFS clones share blocks, so a removed checkpoint stays readable on the

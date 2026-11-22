@@ -8,7 +8,7 @@ walk observed on macOS 27 and on macOS 26. The format is in
 
 ## Where it stands
 
-Updated 2026-11-20.
+Updated 2026-11-22.
 
 | ID | macOS 27 | macOS 26 |
 | --- | --- | --- |
@@ -19,6 +19,8 @@ Updated 2026-11-20.
 | `mac-vm-intercept` | boots observed on #4916 on #5124 (268f2709e), 5 of 5; serving partly observed on a scratch merge with the placeholder seed (245992e87) | not yet observed |
 | `mac-vm-refresh` | not yet observed (#5539) | not yet observed (#5539) |
 | `local-vm-git-mounted` | not yet observed ([local-vm-git.md](local-vm-git.md), #5478) | not yet observed |
+| `mac-vm-indexed-root` | not yet observed (#5831) | not yet observed (#5831) |
+| `mac-vm-backup-excluded` | not yet observed (#5900) | not yet observed (#5900) |
 
 ## Before the walk
 
@@ -344,4 +346,50 @@ Issues: #5537, #5539. The rule is in
   worked only until its access token was due, about 8 hours for a Claude
   sign-in. Assert on the refresh's result, not the Sandbox log: that refusal
   logged no file-write denial.
+- **Observed:** not yet observed.
+
+## 7. `mac-vm-indexed-root`: a state root Spotlight may index is warned about
+
+Issues: #5831, #5830.
+
+- **Entry points:** `cw setup --local`, `cw create --local` and
+  `cw --local start`.
+- **States to exercise:** the default state root under `~/.codewire`; a
+  visible one set with `CODEWIRE_NATIVE_STATE_ROOT`, such as
+  `~/cw-visible/native-v1`; and one under a `.noindex` folder, such as
+  `~/vms.noindex/native-v1`.
+- **Driving it:** set the override in the walk's throwaway `HOME`, then run
+  each entry point once with it and once without.
+- **Proof:** with the visible root, each command prints one warning on
+  stderr naming the root: Spotlight may index that folder, and its image
+  importer reads the VM's disks there, so keep the state root in a folder
+  whose name ends in `.noindex`, or in a dot folder such as the default
+  `~/.codewire`. The command still completes, and with `-o json` its stdout
+  is still only the JSON. With the default root and the `.noindex` root, no
+  warning is printed. A dot folder or a `.noindex` folder anywhere in the
+  path counts.
+- **Gotchas:** the warning goes by the path alone; it does not ask
+  Spotlight. `~/Library` is not a folder Spotlight skips. The rule was
+  measured with `mdfind` on macOS 27.2.1
+  ([SECRETS-AND-CREDENTIALS.md](../dev/SECRETS-AND-CREDENTIALS.md)); external
+  volumes were not. It goes away once #5830 gives the disks an
+  extension no importer claims.
+- **Observed:** not yet observed.
+
+## 8. `mac-vm-backup-excluded`: a local VM's disks stay out of Time Machine
+
+Issues: #5900.
+
+- **Entry points:** `cw create --local`, and `cw --local start` on a state
+  root made before #5900.
+- **States to exercise:** a new state root, and an existing one whose `vms/`
+  carries no exclusion.
+- **Driving it:** in the walk's throwaway `HOME`, create a VM; for the
+  existing root, clear the exclusion with `tmutil removeexclusion` on `vms/`,
+  then start a VM.
+- **Proof:** `tmutil isexcluded` reports `[Excluded]` for the state root's
+  `vms/` and for the VM's directory under it, after the create and after the
+  start. Folders shared from the host into the VM are not excluded.
+- **Gotchas:** the exclusion is the attribute `tmutil addexclusion` writes, so
+  it moves with the folder and needs no Time Machine settings change.
 - **Observed:** not yet observed.

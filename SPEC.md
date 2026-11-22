@@ -428,7 +428,17 @@ virtualization entitlement.
 One supervisor process per user (`cw __native-supervisor`) owns local VM
 lifecycle, state and host ports. Its state is one SQLite database,
 `supervisor.db`, in the state root (`~/.codewire/native-v1` by default,
-`CODEWIRE_NATIVE_STATE_ROOT` overrides it). `cw` talks to it over gRPC on a
+`CODEWIRE_NATIVE_STATE_ROOT` overrides it). On macOS, `cw setup --local`,
+`cw create --local` and `cw --local start` warn on stderr when no folder in the
+state root's path is one Spotlight skips, a dot folder or one whose name ends
+in `.noindex`: Spotlight indexes other folders, and its image importer reads
+the VMs' `.raw` disk images there (#5831, until #5830 renames them). The
+warning suggests a `.noindex` folder. `~/Library` is not skipped. Time Machine
+skips the state root's `vms/` tree, marked when it is created and on an
+existing root at the supervisor's next start (#5900, not yet built), as it
+already skips each VM's `checkpoints/` and the snapshot store (#4654). So a
+local VM's disks are not backed up; work kept in Git or in folders shared from
+the host is. `cw` talks to it over gRPC on a
 Unix socket under `/tmp/cw-<uid>/` whose directory is mode 0700 and whose
 socket is 0600, and the supervisor checks every connection's peer uid
 (`crates/codewire-local-vmm/src/uds.rs`).
