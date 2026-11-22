@@ -96,6 +96,7 @@ pub(super) async fn handle(globals: &Globals, command: PolicyCommand) -> anyhow:
     let (org_id, _, _) = super::super::core::resolve_platform_context(globals).await?;
     let client = super::super::guided_credentials::platform_client(globals)?;
     match command {
+        PolicyCommand::Log(_) => anyhow::bail!(NO_HOSTED_REFUSAL_LOG),
         PolicyCommand::Create(args) => {
             let from = args
                 .from

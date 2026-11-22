@@ -19,8 +19,9 @@ use codewire_egress_policy::intercept::InterceptSet;
 use codewire_egress_policy::lease::{
     Admission, AdmittedDnsQuery, AdmittedDnsResolution, DnsResolution, EgressLeaseTable,
     EstablishedFlow, InterceptReplacement, LeaseError, LeaseInstant, PolicyReplacement,
-    Readmission, RefusalCounts, TcpAdmission, TcpInterception, TcpVerdict,
+    Readmission, Refusal, RefusalCounts, RefusalReason, TcpAdmission, TcpInterception, TcpVerdict,
 };
+use codewire_egress_policy::record::{Destination, Transport};
 use codewire_egress_policy::{CompiledPolicy, PolicyDecision, PolicyDigest, RouteClass};
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -31,6 +32,7 @@ mod intercept;
 #[cfg(unix)]
 pub mod ipc;
 pub mod records;
+pub mod refusals;
 
 pub use intercept::{InterceptHandoff, InterceptRevision};
 
@@ -263,6 +265,9 @@ pub struct PolicyEgressBroker<R, C, K> {
     /// Bumped by every [`Self::replace_intercepts`], only while `state` is
     /// held; a flow admitted under an older set is not recorded.
     intercept_revision: AtomicU64,
+    /// Where each refusal is folded for the owner's log (#5058), when the
+    /// broker reports them.
+    refusals: Option<Arc<refusals::RefusalFold>>,
     resolver: Arc<R>,
     connector: Arc<C>,
     clock: Arc<K>,
@@ -290,6 +295,7 @@ where
             }),
             handoff: None,
             intercept_revision: AtomicU64::new(0),
+            refusals: None,
             resolver,
             connector,
             clock,
@@ -300,6 +306,53 @@ where
     pub fn with_intercept_handoff(mut self, handoff: Arc<dyn InterceptHandoff>) -> Self {
         self.handoff = Some(handoff);
         self
+    }
+
+    /// Fold every refusal into `fold`, for the owner's log (#5058).
+    pub fn with_refusal_fold(mut self, fold: Arc<refusals::RefusalFold>) -> Self {
+        self.refusals = Some(fold);
+        self
+    }
+
+    /// Folds `refusal` of `destination`, when the broker reports refusals.
+    pub(crate) fn note(
+        &self,
+        destination: Destination,
+        address: Option<IpAddr>,
+        transport: Transport,
+        refusal: &Refusal,
+    ) -> PolicyDecision {
+        if let Some(fold) = &self.refusals {
+            fold.record(
+                destination,
+                address,
+                transport,
+                refusal.reason(),
+                refusal.decision().policy_digest,
+            );
+        }
+        refusal.decision().clone()
+    }
+
+    /// A refused dial to `destination`, under the name of the lease that
+    /// points at its address when one does.
+    pub(crate) fn note_dial(
+        &self,
+        state: &EgressLeaseTable,
+        destination: SocketAddr,
+        refusal: &Refusal,
+    ) -> PolicyDecision {
+        let name = state
+            .lease_name_at(destination.ip(), self.route_class)
+            .map(Destination::checked_name);
+        self.note(
+            name.unwrap_or(Destination::Address(destination.ip())),
+            Some(destination.ip()),
+            Transport::Tcp {
+                port: destination.port(),
+            },
+            refusal,
+        )
     }
 
     pub fn route_class(&self) -> RouteClass {
@@ -460,7 +513,18 @@ where
             let state = self.state.lock().await;
             match state.authorize_dns_query(name, self.route_class)? {
                 Admission::Allowed(query) => query,
-                Admission::Denied(decision) => return Err(BrokerError::Denied(decision)),
+                Admission::Denied(decision) => {
+                    if let Some(fold) = &self.refusals {
+                        fold.record(
+                            Destination::checked_name(name),
+                            None,
+                            Transport::Dns,
+                            RefusalReason::NameNotAllowed,
+                            decision.policy_digest,
+                        );
+                    }
+                    return Err(BrokerError::Denied(decision));
+                }
             }
         };
         let request = DnsResolverRequest {
@@ -485,9 +549,14 @@ where
                 }
                 let now = self.clock.now();
                 let mut state = self.state.lock().await;
-                match state.admit_dns(query.name(), self.route_class, resolution, now)? {
-                    Admission::Allowed(resolution) => Ok(BrokerDnsResponse::Positive(resolution)),
-                    Admission::Denied(decision) => Err(BrokerError::Denied(decision)),
+                match state.admit_resolution(query.name(), self.route_class, resolution, now)? {
+                    Ok(resolution) => Ok(BrokerDnsResponse::Positive(resolution)),
+                    Err(refusal) => Err(BrokerError::Denied(self.note(
+                        Destination::checked_name(query.name()),
+                        None,
+                        Transport::Dns,
+                        &refusal,
+                    ))),
                 }
             }
         }
@@ -521,14 +590,12 @@ where
                     revision,
                 })
             }
-            (TcpAuthorization::Intercept(interception), _) => Err(BrokerError::Denied(
-                self.state
-                    .lock()
-                    .await
-                    .refuse_interception(interception)
-                    .decision()
-                    .clone(),
-            )),
+            (TcpAuthorization::Intercept(interception), _) => {
+                let state = self.state.lock().await;
+                Err(BrokerError::Denied(
+                    self.refuse_interception(&state, interception),
+                ))
+            }
         }
     }
 
@@ -559,7 +626,11 @@ where
                     return Ok((self.intercept_or_refuse(&state, interception)?, revision));
                 }
                 TcpVerdict::Refused(refusal) => {
-                    return Err(BrokerError::Denied(refusal.decision().clone()));
+                    return Err(BrokerError::Denied(self.note_dial(
+                        &state,
+                        destination,
+                        &refusal,
+                    )));
                 }
                 TcpVerdict::LeaseExpired(expired) => expired,
             }
@@ -569,6 +640,7 @@ where
             name: expired.name().to_string(),
             family,
         };
+        let name = Destination::checked_name(expired.name());
         // A failed, empty or wrong-family lookup is no answer: the dial is
         // refused as `lease_expired`.
         let resolution = match self.resolver.resolve(request).await {
@@ -591,7 +663,14 @@ where
             Ok(Readmission::Intercepted(interception)) => {
                 Ok((self.intercept_or_refuse(&state, interception)?, revision))
             }
-            Err(refusal) => Err(BrokerError::Denied(refusal.decision().clone())),
+            Err(refusal) => Err(BrokerError::Denied(self.note(
+                name,
+                Some(destination.ip()),
+                Transport::Tcp {
+                    port: destination.port(),
+                },
+                &refusal,
+            ))),
         }
     }
 }

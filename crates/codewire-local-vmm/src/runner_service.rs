@@ -69,10 +69,13 @@ const RUNNER_WATCH_BUFFER: usize = 8;
 // 14: GetBootSecrets gives the supervisor an intercepting boot's secrets, and
 //     brokers pair with the front door on the boot's pairing secret, not the
 //     daemon token (#3999).
+// 15: GetEgressRefusals reads the running generation's refusal log, and
+//     StartVm and ReplaceNetworkPolicy name the policy it is labelled with
+//     (#5058).
 /// The protocol a runner speaks, and the only one [`RunnerClient`] admits.
 /// A local credential authority reports it for the brokers it starts, which
 /// connect as that client (#5238).
-pub const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 14;
+pub const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 15;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =
@@ -92,9 +95,12 @@ pub struct RunnerEntrypointConfig {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod checkpoint;
+mod egress_refusals;
 mod egress_status;
 mod events;
+mod network_policy;
 use events::RunnerEvents;
+pub(crate) use network_policy::policy_label;
 mod exit_cause;
 mod generation_access;
 mod guest_start;
@@ -234,34 +240,6 @@ impl RunnerClient {
             })
             .await?;
         Ok(())
-    }
-
-    /// Enforce `policy` on the running generation's egress broker; the
-    /// digest it acknowledged.
-    pub async fn replace_network_policy(
-        &mut self,
-        environment_id: Uuid,
-        generation: u64,
-        policy: &codewire_egress_policy::CompiledPolicy,
-    ) -> Result<codewire_egress_policy::PolicyDigest, Status> {
-        let document = policy
-            .canonical_json()
-            .map_err(|_| Status::internal("network policy has no canonical document"))?;
-        let response = self
-            .inner
-            .replace_network_policy(v1::ReplaceNetworkPolicyRequest {
-                environment_id: environment_id.to_string(),
-                generation,
-                network_policy_document: document,
-            })
-            .await?
-            .into_inner();
-        let digest: [u8; 32] = response
-            .enforced_digest
-            .as_slice()
-            .try_into()
-            .map_err(|_| Status::internal("runner returned a malformed policy digest"))?;
-        Ok(codewire_egress_policy::PolicyDigest::from_bytes(digest))
     }
 
     pub async fn prepare_retire(&mut self) -> Result<(), Status> {
@@ -584,6 +562,17 @@ struct RunnerState {
 }
 
 impl RunnerState {
+    /// Refuses a request before adoption, or for another environment.
+    fn require_adopted(&self, environment_id: Uuid) -> Result<(), Status> {
+        if !self.adopted {
+            return Err(Status::failed_precondition("runner is not adopted"));
+        }
+        if environment_id != self.environment_id {
+            return Err(Status::permission_denied("runner identity mismatch"));
+        }
+        Ok(())
+    }
+
     fn cw_runtime_catalog_generation(&self) -> Option<&str> {
         self.running
             .as_ref()
@@ -914,12 +903,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         let started = std::time::Instant::now();
         let mut state = self.state.lock().await;
         state.retirement.require_active()?;
-        if !state.adopted {
-            return Err(Status::failed_precondition("runner is not adopted"));
-        }
-        if environment_id != state.environment_id {
-            return Err(Status::permission_denied("runner identity mismatch"));
-        }
+        state.require_adopted(environment_id)?;
         state
             .observe_exit()
             .await
@@ -1191,6 +1175,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         state.generation = request.generation;
         state.state = v1::EnvironmentState::Running;
         state.error_code = None;
+        running.label_start_policy(request.network_policy_label.as_ref());
         state.running = Some(running);
         state.interception = interception;
         state.generation_access = Some(generation_access);
@@ -1456,41 +1441,18 @@ impl EnvironmentRunnerService for RunnerRpc {
         &self,
         request: Request<v1::ReplaceNetworkPolicyRequest>,
     ) -> Result<Response<v1::ReplaceNetworkPolicyResponse>, Status> {
-        let request = request.into_inner();
-        let environment_id = parse_environment_id(&request.environment_id)?;
-        if request.network_policy_document.is_empty() {
-            return Err(Status::invalid_argument("network policy document is empty"));
-        }
-        let policy = start_network_policy(&request.network_policy_document)?;
-        let mut state = self.state.lock().await;
-        state.retirement.require_active()?;
-        if !state.adopted {
-            return Err(Status::failed_precondition("runner is not adopted"));
-        }
-        if environment_id != state.environment_id {
-            return Err(Status::permission_denied("runner identity mismatch"));
-        }
-        state
-            .observe_exit()
+        self.replace_policy(request.into_inner())
             .await
-            .map_err(|_| Status::internal("observe VMM state failed"))?;
-        if state.generation != request.generation || state.state != v1::EnvironmentState::Running {
-            return Err(Status::failed_precondition(
-                "a network policy is replaced only on the running generation",
-            ));
-        }
-        let running = state.running.as_mut().ok_or_else(|| {
-            Status::failed_precondition(
-                "a network policy is replaced only on the running generation",
-            )
-        })?;
-        let enforced = running
-            .replace_network_policy(policy)
+            .map(Response::new)
+    }
+
+    async fn get_egress_refusals(
+        &self,
+        request: Request<v1::GetEgressRefusalsRequest>,
+    ) -> Result<Response<v1::EgressRefusals>, Status> {
+        self.egress_refusals(request.into_inner())
             .await
-            .map_err(|error| Status::unavailable(error.to_string()))?;
-        Ok(Response::new(v1::ReplaceNetworkPolicyResponse {
-            enforced_digest: enforced.as_bytes().to_vec(),
-        }))
+            .map(Response::new)
     }
 
     async fn get_daemon_access(

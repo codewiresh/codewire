@@ -60,6 +60,7 @@ pub(super) fn format_native_environment(
         }
     }
     output.push_str(&view.error.line());
+    output.push_str(&view.error.refusals_line());
     for row in attention {
         output.push_str(&format!("Attention:   {row}\n"));
     }

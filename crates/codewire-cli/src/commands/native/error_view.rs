@@ -2,7 +2,8 @@
 //! and how the runner's failed process ended (#4953), or a running VM's
 //! egress, unavailable while its egress broker is past its deadline (#4965).
 //! Beside them, what a running boot's agents hold (#4912), which needs action
-//! only once its interception is lost (#5216).
+//! only once its interception is lost (#5216), and how many requests its
+//! egress broker refused (#5058).
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -12,6 +13,14 @@ use serde::Serialize;
 use crate::commands::collaboration::trimmed_str;
 use crate::commands::environment::progress::format_duration;
 use crate::output::{CredentialsNote, Status, Style};
+
+/// Requests a running VM's egress broker refused since it started, and when
+/// the last was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct EgressRefusalsView {
+    pub(crate) refused: u64,
+    pub(crate) last_unix_ms: i64,
+}
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct ErrorView {
@@ -23,6 +32,8 @@ pub(crate) struct ErrorView {
     pub(crate) egress_unavailable: Option<EgressUnavailableView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) interception: Option<InterceptionView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) egress_refusals: Option<EgressRefusalsView>,
     /// The environment's name, for the next step a line names.
     #[serde(skip)]
     pub(crate) name: String,
@@ -162,6 +173,13 @@ impl ErrorView {
             runner_exit,
             egress_unavailable,
             interception: InterceptionView::of(environment),
+            egress_refusals: environment
+                .egress_refusals
+                .filter(|refusals| refusals.refused > 0)
+                .map(|refusals| EgressRefusalsView {
+                    refused: refusals.refused,
+                    last_unix_ms: refusals.last_unix_ms,
+                }),
             name: environment.name.clone(),
         }
     }
@@ -185,6 +203,32 @@ impl ErrorView {
             ));
         }
         lines
+    }
+
+    /// The `Refused:` line, naming the command that lists them, only when a
+    /// running VM's egress broker refused something. It names the command in
+    /// the line, so `cw info`'s fields stay one block.
+    pub(crate) fn refusals_line(&self) -> String {
+        self.refusals_line_at(SystemTime::now())
+    }
+
+    fn refusals_line_at(&self, now: SystemTime) -> String {
+        let Some(refusals) = self.egress_refusals else {
+            return String::new();
+        };
+        let last = UNIX_EPOCH + Duration::from_millis(refusals.last_unix_ms.max(0).unsigned_abs());
+        let ago = now.duration_since(last).unwrap_or_default();
+        format!(
+            "Refused:     {} {} since the VM started, the last {} ago; `cw --local policy log {}` lists them\n",
+            refusals.refused,
+            if refusals.refused == 1 {
+                "request"
+            } else {
+                "requests"
+            },
+            format_duration(ago, false),
+            self.name,
+        )
     }
 
     /// What a running boot's agents hold, for the lines under `cw info`'s
@@ -246,6 +290,35 @@ mod tests {
             }),
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn info_counts_the_refusals_since_the_vm_started_and_points_at_the_log() {
+        let view = |refused| {
+            ErrorView::of(&v1::Environment {
+                name: "walk-log".to_owned(),
+                egress_refusals: Some(v1::EgressRefusalSummary {
+                    refused,
+                    last_unix_ms: 1_000_000,
+                }),
+                ..Default::default()
+            })
+        };
+        let now = UNIX_EPOCH + Duration::from_millis(1_000_000 + 125_000);
+        assert_eq!(
+            view(6).refusals_line_at(now),
+            "Refused:     6 requests since the VM started, the last 2m 05s ago; `cw --local policy log walk-log` lists them\n"
+        );
+        assert!(
+            view(1)
+                .refusals_line_at(now)
+                .starts_with("Refused:     1 request since")
+        );
+        assert_eq!(view(0).refusals_line_at(now), "");
+        assert_eq!(
+            ErrorView::of(&v1::Environment::default()).refusals_line_at(now),
+            ""
+        );
     }
 
     #[test]

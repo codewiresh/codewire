@@ -138,6 +138,78 @@ fn a_full_log_drops_the_record_seen_least_recently() {
 }
 
 #[test]
+fn past_the_limit_the_log_keeps_the_limit_and_counts_what_it_dropped() {
+    let mut log = EgressRecordLog::new(label(1));
+    for index in 0..1_100_u64 {
+        log.record(
+            refused(
+                &format!("h{index}.example.com"),
+                443,
+                RefusalReason::NameNotAllowed,
+            ),
+            index,
+        );
+    }
+    assert_eq!(log.len(), 1_000);
+    assert_eq!(log.dropped(), 100);
+    let records = log.list(EGRESS_RECORD_LIMIT);
+    assert!(
+        records
+            .iter()
+            .all(|record| record.destination != Destination::Name("h99.example.com".to_owned()))
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record.destination == Destination::Name("h100.example.com".to_owned()))
+    );
+}
+
+#[test]
+fn a_folded_count_adds_to_one_record_under_the_policy_it_names() {
+    let mut log = EgressRecordLog::new(label(1));
+    let observation = refused("example.com", 8080, RefusalReason::PortNotAllowed);
+    assert!(log.fold(observation.clone(), label(2), 5, 10));
+    assert!(log.fold(observation.clone(), label(3), 1, 20));
+    assert!(!log.fold(observation, label(4), 0, 30));
+    let records = log.list(EGRESS_RECORD_LIMIT);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].count, 6);
+    assert_eq!(records[0].policy, label(3));
+    assert_eq!(
+        (records[0].first_seen_unix_ms, records[0].last_seen_unix_ms),
+        (10, 20)
+    );
+}
+
+#[test]
+fn a_name_that_could_carry_a_terminal_sequence_is_withheld() {
+    for host in [
+        "evil\x1b[2J.example.com",
+        "a b.example.com",
+        "tab\t.example.com",
+        "caf\u{e9}.example.com",
+        "",
+        ".",
+        &"a".repeat(254),
+    ] {
+        assert_eq!(
+            Destination::checked_name(host),
+            Destination::Withheld,
+            "{host:?}"
+        );
+    }
+    assert_eq!(
+        Destination::checked_name("Example.COM."),
+        Destination::Name("example.com".to_owned())
+    );
+    assert_eq!(
+        Destination::checked_name(&"a".repeat(253)),
+        Destination::Name("a".repeat(253))
+    );
+}
+
+#[test]
 fn list_is_newest_first_and_bounded() {
     let mut log = EgressRecordLog::new(label(1));
     log.record(refused("a.example", 443, RefusalReason::NameNotAllowed), 1);

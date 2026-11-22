@@ -4,7 +4,9 @@ use std::net::SocketAddr;
 use std::os::fd::OwnedFd;
 use std::sync::atomic::Ordering;
 
+use codewire_egress_policy::PolicyDecision;
 use codewire_egress_policy::lease::{EgressLeaseTable, TcpInterception};
+use codewire_egress_policy::record::{Destination, Transport};
 
 use crate::{
     BrokerAdapterFailure, BrokerClock, BrokerConnection, BrokerError, BrokerTcpConnection,
@@ -54,13 +56,9 @@ where
             }
             (TcpAuthorization::Intercept(interception), revision) => {
                 let Some(handoff) = self.handoff.as_ref() else {
+                    let state = self.state.lock().await;
                     return Err(BrokerError::Denied(
-                        self.state
-                            .lock()
-                            .await
-                            .refuse_interception(interception)
-                            .decision()
-                            .clone(),
+                        self.refuse_interception(&state, interception),
                     ));
                 };
                 match handoff.hand_off(&interception) {
@@ -69,14 +67,12 @@ where
                         interception,
                         revision,
                     }),
-                    Err(_) => Err(BrokerError::Denied(
-                        self.state
-                            .lock()
-                            .await
-                            .refuse_interception(interception)
-                            .decision()
-                            .clone(),
-                    )),
+                    Err(_) => {
+                        let state = self.state.lock().await;
+                        Err(BrokerError::Denied(
+                            self.refuse_interception(&state, interception),
+                        ))
+                    }
                 }
             }
         }
@@ -97,8 +93,26 @@ where
             Ok(TcpAuthorization::Intercept(interception))
         } else {
             Err(BrokerError::Denied(
-                state.refuse_interception(interception).decision().clone(),
+                self.refuse_interception(state, interception),
             ))
         }
+    }
+
+    /// Refuses an intercepted dial as `intercept_unavailable`, recorded
+    /// under the bound name it was for.
+    pub(crate) fn refuse_interception(
+        &self,
+        state: &EgressLeaseTable,
+        interception: TcpInterception,
+    ) -> PolicyDecision {
+        let destination = Destination::checked_name(interception.hostname());
+        let (address, port) = (interception.address(), interception.port());
+        let refusal = state.refuse_interception(interception);
+        self.note(
+            destination,
+            Some(address),
+            Transport::Tcp { port },
+            &refusal,
+        )
     }
 }

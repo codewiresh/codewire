@@ -36,7 +36,7 @@ separately.
 | `policy-protected` | #2537, #4000 | observed 2026-11-16, source 40a2877e7 | not yet observed | no command yet | no command yet |
 | `locked-refuses-managed-github` | #4926 | not yet observed | not yet observed | n/a | n/a |
 | `egress-late-answer` | #4948 | not yet observed | not yet observed | n/a | n/a |
-| `refusal-log` | #5058, #4000 | not yet observed | not yet observed | no command yet (#4000) | no command yet (#4000) |
+| `refusal-log` | #5058, #4000 | observed 2026-11-21, a build of 385cf721d9, c403fcf960 after a rebase onto main (the egress broker's rows; the credential broker's rows, slice 2, not yet built) | not yet observed | no command yet (#4000) | no command yet (#4000) |
 | `refusal-in-environment` | #4015 | no command yet | no command yet | no command yet | no command yet |
 | `refusal-readable` | #5057, #5058 | no command yet | no command yet | n/a | n/a |
 | `learn-mode` | #4015 | after launch | after launch | after launch | after launch |
@@ -523,13 +523,13 @@ in `docs/dev/SECRETS-AND-CREDENTIALS.md`.
     the log keeps;
   - a name the workload builds to carry a terminal escape sequence;
   - the one-step allow from the log's next step, under a policy of yours and
-    under the built-in `open`;
+    under the built-in `locked`, and none under `open`;
   - a stopped VM, a restarted VM, and a supervisor older than the command.
 - **Driving it:** on the host, with a released `cw` or one built from the
   source under test, and a throwaway `HOME`:
 
   ```sh
-  cw policy --local create walk-log --from open
+  cw --local policy create walk-log --allow example.com:443
   cw create --local --name walk-log --policy walk-log --yes
   cw --local policy log walk-log
   cw exec --in walk-log -- sh -c 'curl -sS -m 5 https://example.org/ ; curl -sS -m 5 http://example.com:8080/ ; curl -sS -m 5 http://169.254.169.254/ ; true'
@@ -558,29 +558,37 @@ in `docs/dev/SECRETS-AND-CREDENTIALS.md`.
     request's `Host` header named another;
   - five refusals of one destination are one row with a count of 5 (6 with
     the first);
-  - the rows are most recently seen first, and the table fits the terminal;
+  - the rows are most recently seen first; at a terminal the table fits its
+    width, the policy column giving way first and an address never cut, and
+    piped it is whole;
   - the last line is one `→` step for the most recent refusal a rule can
     allow: `→ cw --local policy allow walk-log example.com:8080`, or under
-    a built-in policy `→ cw --local policy create NAME --from open --allow
-    example.com:8080`. A protected or credential reason gets no `→` line;
-  - after the allow, the same request succeeds and its row's count doesn't
-    grow;
+    `locked` `→ cw --local policy create NAME --from locked --allow
+    example.com:8080`. A protected or credential reason gets no `→` line,
+    and neither does `open`: `create` can't start from it, and a policy
+    from `locked` would drop the ports `open` allows;
+  - after the allow, the same request is no longer refused, its row's count
+    doesn't grow, and the log offers no `→` step for a row refused under an
+    older revision of the policy;
   - JSON holds every row with its destination, address (`null` when none),
     port (`null` for `dns`), protocol (`tcp`, `udp` or `dns`),
     the raw reason code, `source` (`network` or `credentials`), the policy's
-    name and revision, the first and last time in RFC 3339, and the count,
-    and nothing on stdout but that;
+    name and revision, the first and last time in RFC 3339, and the count;
+    beside the rows, `dropped`, the number of rows dropped since the VM
+    started; and nothing on stdout but that;
   - `cw --local info walk-log` shows how many requests were refused since
-    it started and when the last was, and `→ cw --local policy log
-    walk-log`;
+    it started and when the last was, naming `cw --local policy log
+    walk-log` in the same line;
   - no row or JSON value holds a path, a header, a body, a placeholder or a
     credential;
   - a lookup of a name holding an escape sequence (`printf` with `\033`
-    inside the name) is refused, and its row reads `(a name cw won't show)`
-    with no sequence; the terminal is unchanged;
+    inside the name) is refused by the guest's network stack before the
+    broker sees it, so it leaves no row and the terminal is unchanged; the
+    broker's own check, which keeps such a name as `(a name cw won't
+    show)`, is proven by its tests;
   - past 1,000 rows (a loop over 1,100 refused names), the log keeps 1,000
     and says it dropped the least recently seen;
-  - a stopped VM: `walk-log isn't running; its log starts when it starts`
+  - a stopped VM: `There's no refusal log while walk-log isn't running`
     with `→ cw --local start walk-log`, exit 1; after a start the log is
     empty;
   - an older supervisor: `your local VMs run on an older cw's supervisor,
@@ -593,7 +601,31 @@ in `docs/dev/SECRETS-AND-CREDENTIALS.md`.
     more than once;
   - the log is in memory and lasts one run of the VM, so read it before a
     stop.
-- **Observed:** not yet observed.
+- **Observed:** Linux local VM, 2026-11-21, `cw` and the local runtime built
+  from 385cf721d9 (c403fcf960 after a rebase onto main), in the local-smoke isolation (private `HOME` and Secret
+  Service), VM and policy `walk-log` (`--allow example.com:443`, from
+  `locked`), both removed afterwards:
+  - before anything was sent: `Nothing refused since walk-log started.`;
+  - after `curl` to `https://example.org/`, `http://example.com:8080/` five
+    more times, and `http://169.254.169.254/`: three rows, most recently
+    seen first; `example.com tcp 8080 port not allowed walk-log · rev 1`
+    with a count of 6, `example.org dns - name not allowed` with 2 (the
+    resolver's retry), `169.254.169.254 tcp 80 protected address` with 1;
+    `→ cw --local policy allow walk-log example.com:8080`;
+  - piped, the table was whole; at 70 and 60 columns only the policy column
+    was cut, and the address stayed whole;
+  - `--output json`: the three rows with `address` `null` and `port` `null`
+    for the `dns` row, the raw reasons, `source` `network`, and `dropped` 0;
+  - `cw --local info walk-log`: a `Refused:` line, `9 requests since the
+    VM started, the last 1s ago`, naming `cw --local policy log walk-log`;
+  - after the allow, the request was no longer refused (it timed out: nothing
+    listens on example.com:8080), the row's count stayed 6, and no `→` step
+    was offered;
+  - stopped: `✗ There's no refusal log while walk-log isn't running` and
+    `→ cw --local start walk-log`, exit 1; after a start, empty again.
+  - Not walked here: the credential broker's rows (slice 2), more than
+    1,000 rows, an older supervisor, learn mode (#4015), and the interception
+    smoke's assertion (#5046).
 
 ## `refusal-in-environment`: an agent finds out why a connection failed
 

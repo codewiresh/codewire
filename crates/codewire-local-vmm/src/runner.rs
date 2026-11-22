@@ -54,9 +54,7 @@ use crate::egress_broker::{
 use crate::host::path::current_uid;
 use crate::host::path::{FileIdentity, PathError, PrivateRoot, set_socket_private};
 use crate::host::process::{LiveProcess, RecoveryError, signal_unreaped_child};
-use crate::host_addresses::{
-    HostAddressMonitor, INTERFACE_POLL, PUBLIC_RELEARN, SystemHostAddressSource, encode_frame,
-};
+use crate::host_addresses::{HostAddressMonitor, SystemHostAddressSource, encode_frame};
 use crate::host_port::{
     HostPortBinding, bind_loopback_listener, validate_canonical_host_port_bindings,
 };
@@ -101,6 +99,7 @@ use crate::state::{
 mod boot_seed;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod checkpoint;
+mod egress_control;
 mod egress_status;
 mod front_door;
 mod intercept;
@@ -1238,35 +1237,6 @@ impl RunningVm {
         self.request.vm_id
     }
 
-    /// Enforce `policy` on this generation's egress broker from now on
-    /// (#2537). It returns the digest the broker acknowledged, once every
-    /// flow the policy refuses has ended. A failure closes the broker's
-    /// control channel, so the broker fails closed.
-    pub async fn replace_network_policy(
-        &mut self,
-        policy: CompiledPolicy,
-    ) -> Result<codewire_egress_policy::PolicyDigest, RunnerError> {
-        let control = self
-            .network_worker
-            .as_ref()
-            .and_then(|worker| worker.broker.as_ref())
-            .and_then(|broker| broker.policy_control.clone())
-            .ok_or(RunnerError::EgressPolicyControl)?;
-        let (reply, acknowledged) = tokio::sync::oneshot::channel();
-        control
-            .send(crate::broker_control::PolicyReplacementRequest {
-                policy: policy.clone(),
-                reply,
-            })
-            .await
-            .map_err(|_| RunnerError::EgressPolicyControl)?;
-        let enforced = acknowledged
-            .await
-            .map_err(|_| RunnerError::EgressPolicyControl)?;
-        self.request.network_policy = policy;
-        Ok(enforced)
-    }
-
     /// Converges this generation's published host ports to `bindings`. New
     /// ports bind all-or-nothing before anything changes; a host port keeps
     /// its guest port until it is withdrawn.
@@ -2066,6 +2036,8 @@ struct EgressBrokerProcess {
     /// Policy replacements for the control channel (#2537).
     policy_control:
         Option<tokio::sync::mpsc::Sender<crate::broker_control::PolicyReplacementRequest>>,
+    /// The broker's refusals for this run (#5058).
+    refusals: Option<Arc<crate::broker_control::RunnerRefusalLog>>,
     /// The front door's end of the hand-off socket (#3999), present only when
     /// the broker was started with interception bindings. Whatever starts the
     /// environment's front door takes it with [`Self::take_front_door_handoff`].
@@ -2304,6 +2276,7 @@ impl EgressBrokerStartup {
             host_addresses: None,
             front_door_handoff: None,
             policy_control: None,
+            refusals: None,
         }
     }
 }
@@ -3376,23 +3349,7 @@ async fn spawn_egress_broker_process(
     endpoints.push(endpoint);
     endpoints.extend(worker_endpoints);
     let mut process = startup.disarm();
-    // One task owns the control socket: the monitor's host address updates
-    // and each policy replacement (#2537). When either ends, the socket
-    // closes and the broker fails closed.
-    let (address_updates, addresses) = tokio::sync::mpsc::channel(1);
-    let (replace, replacements) = tokio::sync::mpsc::channel(1);
-    process.host_addresses = Some(HostAddressTask(tokio::spawn(async move {
-        tokio::select! {
-            _ = monitor.run(address_updates, host_addresses, INTERFACE_POLL, PUBLIC_RELEARN) => {}
-            _ = crate::broker_control::serve_runner_control(
-                control,
-                addresses,
-                replacements,
-                crate::broker_control::POLICY_ACK_TIMEOUT,
-            ) => {}
-        }
-    })));
-    process.policy_control = Some(replace);
+    process.serve_control(monitor, host_addresses, control);
     process.front_door_handoff = front_door_handoff;
     Ok(EgressBrokerLaunch {
         process,
@@ -5579,6 +5536,7 @@ mod tests {
                 process: broker_process,
                 host_addresses: None,
                 policy_control: None,
+                refusals: None,
                 front_door_handoff: None,
             }),
             ingress_control: None,

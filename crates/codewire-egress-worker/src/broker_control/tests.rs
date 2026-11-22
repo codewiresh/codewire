@@ -146,6 +146,7 @@ async fn the_runner_waits_for_each_acknowledgement_and_carries_host_addresses() 
         address_receiver,
         replacements,
         POLICY_ACK_TIMEOUT,
+        Arc::new(RunnerRefusalLog::new(0)),
     ));
 
     address_updates.send(addresses()).await.unwrap();
@@ -200,6 +201,7 @@ async fn a_late_acknowledgement_ends_the_channel() {
         address_receiver,
         replacements,
         POLICY_ACK_TIMEOUT,
+        Arc::new(RunnerRefusalLog::new(0)),
     ));
     let (reply, unanswered) = oneshot::channel();
     replace
@@ -227,9 +229,99 @@ async fn the_channel_closes_when_the_host_address_monitor_stops() {
         address_receiver,
         replacements,
         POLICY_ACK_TIMEOUT,
+        Arc::new(RunnerRefusalLog::new(0)),
     ));
     drop(address_updates);
     served.await.unwrap().unwrap();
     let mut byte = [0_u8; 1];
     assert_eq!(broker.read(&mut byte).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_refusal_report_is_filed_in_the_runners_own_log() {
+    use codewire_egress_broker::refusals::{RefusalBatch, RefusedRow};
+    use codewire_egress_policy::lease::RefusalReason;
+    use codewire_egress_policy::record::{Destination, Transport};
+
+    let (runner, mut broker) = tokio::io::duplex(1 << 20);
+    let (_address_updates, address_receiver) = mpsc::channel(1);
+    let (_replace, replacements) = mpsc::channel(1);
+    let log = Arc::new(RunnerRefusalLog::new(0));
+    let served = tokio::spawn(serve_runner_control(
+        runner,
+        address_receiver,
+        replacements,
+        POLICY_ACK_TIMEOUT,
+        Arc::clone(&log),
+    ));
+    let report = RefusalBatch {
+        rows: vec![RefusedRow {
+            destination: Destination::checked_name("example.com"),
+            address: Some(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))),
+            transport: Transport::Tcp { port: 8080 },
+            reason: RefusalReason::PortNotAllowed,
+            policy_digest: policy("github.com").digest(),
+            count: 6,
+        }],
+        dropped: 0,
+    };
+    broker
+        .write_all(&encode_refusal_frame(&report).unwrap())
+        .await
+        .unwrap();
+    let filed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = log.snapshot();
+            if !snapshot.records.is_empty() {
+                return snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(filed.records.len(), 1);
+    assert_eq!(filed.records[0].count, 6);
+
+    // A malformed report ends the channel; the runner carries on.
+    let mut malformed = encode_refusal_frame(&report).unwrap();
+    let count_at = malformed.len() - 8;
+    malformed[count_at..].copy_from_slice(&0_u64.to_be_bytes());
+    broker.write_all(&malformed).await.unwrap();
+    assert_eq!(
+        served.await.unwrap().unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+    assert_eq!(log.snapshot().records[0].count, 6);
+}
+
+#[tokio::test]
+async fn an_acknowledgement_nobody_asked_for_ends_the_channel() {
+    let (runner, mut broker) = tokio::io::duplex(1 << 20);
+    let (_address_updates, address_receiver) = mpsc::channel(1);
+    let (replace, replacements) = mpsc::channel(1);
+    let served = tokio::spawn(serve_runner_control(
+        runner,
+        address_receiver,
+        replacements,
+        POLICY_ACK_TIMEOUT,
+        Arc::new(RunnerRefusalLog::new(0)),
+    ));
+    let work = policy("github.com");
+    for _ in 0..2 {
+        broker
+            .write_all(&encode_policy_ack(work.digest()))
+            .await
+            .unwrap();
+    }
+    let (reply, unanswered) = oneshot::channel();
+    // The channel may already have ended on the second acknowledgement.
+    let _ = replace
+        .send(PolicyReplacementRequest {
+            policy: work,
+            reply,
+        })
+        .await;
+    assert!(served.await.unwrap().is_err());
+    assert!(unanswered.await.is_err());
 }

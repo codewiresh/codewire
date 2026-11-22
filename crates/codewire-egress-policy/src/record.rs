@@ -19,12 +19,35 @@ pub use guest::{GuestEgressRecord, GuestOutcome, GuestRefusal, guest_records};
 /// seen least recently is dropped.
 pub const EGRESS_RECORD_LIMIT: usize = 1_000;
 
+/// The longest name a record keeps: a DNS name's bound.
+pub const MAX_RECORDED_NAME_BYTES: usize = 253;
+
 /// What a decision was about. A dial is attributed to a name by the broker's
 /// DNS lease; a dial to an address no lease names has none.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Destination {
+    /// A name, checked with [`Destination::checked_name`] before it is kept.
     Name(String),
     Address(IpAddr),
+    /// A name that failed the check, kept for its reason and count but never
+    /// its text, so a name the workload built can't reach a terminal (#5058).
+    Withheld,
+}
+
+impl Destination {
+    /// `host` as a record may keep it: printable ASCII without spaces, at
+    /// most [`MAX_RECORDED_NAME_BYTES`], lowercased and without a trailing
+    /// dot. Anything else is [`Destination::Withheld`].
+    pub fn checked_name(host: &str) -> Self {
+        let name = host.strip_suffix('.').unwrap_or(host);
+        if name.is_empty()
+            || name.len() > MAX_RECORDED_NAME_BYTES
+            || !name.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+        {
+            return Self::Withheld;
+        }
+        Self::Name(name.to_ascii_lowercase())
+    }
 }
 
 /// The protocol, and the destination port where the protocol has one. A DNS
@@ -93,6 +116,7 @@ pub struct EgressRecordLog {
     policy: PolicyLabel,
     learning_since_unix_ms: Option<u64>,
     generation: u64,
+    dropped: u64,
 }
 
 impl EgressRecordLog {
@@ -102,6 +126,7 @@ impl EgressRecordLog {
             policy,
             learning_since_unix_ms: None,
             generation: 0,
+            dropped: 0,
         }
     }
 
@@ -134,7 +159,23 @@ impl EgressRecordLog {
     /// Records one observation. Returns false for a pass while not learning,
     /// which is not recorded.
     pub fn record(&mut self, observation: EgressObservation, now_unix_ms: u64) -> bool {
-        if observation.outcome == Outcome::Passed && self.learning_since_unix_ms.is_none() {
+        let policy = self.policy.clone();
+        self.fold(observation, policy, 1, now_unix_ms)
+    }
+
+    /// Records `count` observations seen together under `policy`, as a
+    /// reporter that folded them first sends them. A count of zero records
+    /// nothing.
+    pub fn fold(
+        &mut self,
+        observation: EgressObservation,
+        policy: PolicyLabel,
+        count: u64,
+        now_unix_ms: u64,
+    ) -> bool {
+        if count == 0
+            || (observation.outcome == Outcome::Passed && self.learning_since_unix_ms.is_none())
+        {
             return false;
         }
         let key = RecordKey {
@@ -144,9 +185,9 @@ impl EgressRecordLog {
         };
         if let Some(record) = self.records.get_mut(&key) {
             record.address = observation.address.or(record.address);
-            record.policy = self.policy.clone();
+            record.policy = policy;
             record.last_seen_unix_ms = record.last_seen_unix_ms.max(now_unix_ms);
-            record.count = record.count.saturating_add(1);
+            record.count = record.count.saturating_add(count);
         } else {
             if self.records.len() >= EGRESS_RECORD_LIMIT {
                 self.evict_least_recent();
@@ -156,10 +197,10 @@ impl EgressRecordLog {
                 address: observation.address,
                 transport: key.transport,
                 outcome: key.outcome,
-                policy: self.policy.clone(),
+                policy,
                 first_seen_unix_ms: now_unix_ms,
                 last_seen_unix_ms: now_unix_ms,
-                count: 1,
+                count,
             };
             self.records.insert(key, record);
         }
@@ -188,6 +229,11 @@ impl EgressRecordLog {
         self.records.is_empty()
     }
 
+    /// Records dropped to keep the log within [`EGRESS_RECORD_LIMIT`].
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
     /// Rises on every change a reader would see: a record added, folded or
     /// dropped, or learning started or stopped.
     pub fn generation(&self) -> u64 {
@@ -202,6 +248,7 @@ impl EgressRecordLog {
             .map(|(key, _)| key.clone());
         if let Some(key) = oldest {
             self.records.remove(&key);
+            self.dropped = self.dropped.saturating_add(1);
         }
     }
 

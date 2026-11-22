@@ -686,6 +686,21 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
+    /// A running VM's refusal log (#5058). Fails with `Unimplemented`
+    /// before contacting a supervisor older than protocol 26.
+    pub async fn egress_refusals(&mut self, name: &str) -> Result<EgressRefusalsRead, Status> {
+        if !self.supports(SupervisorFeature::EgressRefusals) {
+            return Err(Status::unimplemented(EGRESS_REFUSALS_UNSUPPORTED));
+        }
+        match self.inner.get_egress_refusals(read_selector(name)).await {
+            Ok(response) => Ok(EgressRefusalsRead::Log(response.into_inner())),
+            Err(status) if status.code() == tonic::Code::FailedPrecondition => {
+                Ok(EgressRefusalsRead::NotRunning)
+            }
+            Err(status) => Err(status),
+        }
+    }
+
     pub async fn managed_runtime(
         &mut self,
         name: &str,
@@ -1326,6 +1341,17 @@ fn operation_error_hint(error_code: &str) -> &'static str {
         }
         _ => "",
     }
+}
+
+/// What an older supervisor answers for the refusal log, as `cw ssh` says
+/// for its own feature.
+pub const EGRESS_REFUSALS_UNSUPPORTED: &str = "your local VMs run on an older cw's supervisor, which has no refusal log; `cw upgrade --vms` moves them to this cw once they are idle";
+
+/// A refusal log read: the log, or the VM isn't running, so it has none.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EgressRefusalsRead {
+    Log(v1::EgressRefusals),
+    NotRunning,
 }
 
 pub(crate) fn read_selector(name: &str) -> v1::EnvironmentSelector {

@@ -69,6 +69,64 @@ service LocalSupervisorService {
   // enforces it at its next start; a running one keeps enforcing what it
   // started with and reports restart_required.
   rpc UpdateEnvironmentNetworkPolicy(UpdateEnvironmentNetworkPolicyRequest) returns (Environment);
+  // What a running VM's egress broker refused since the VM started (#5058,
+  // protocol 26), from its runner's log: the owner's view, with the raw
+  // reasons the guest never sees. A VM that isn't running answers
+  // FAILED_PRECONDITION and nothing else does.
+  rpc GetEgressRefusals(EnvironmentSelector) returns (EgressRefusals);
+}
+
+// One row of a refusal log: every refusal of one destination, protocol,
+// port and reason since the VM started (#5058). It names a host and port
+// only, never a request's contents.
+message EgressRefusal {
+  oneof destination {
+    // A name the runner checked: printable ASCII, at most 253 bytes.
+    string name = 1;
+    // A dial to an address no name leads to.
+    string address_only = 2;
+    // A name that failed the check, kept without its text.
+    bool withheld = 3;
+  }
+  // The latest address refused; empty when none, as for most lookups.
+  string address = 4;
+  EgressRefusalProtocol protocol = 5;
+  // Zero for a lookup.
+  uint32 port = 6;
+  // The refusal reason's stable code (`port_not_allowed`, …).
+  string reason = 7;
+  // The policy and revision the latest refusal was decided under, as the
+  // runner was told them; an empty name for one it was not.
+  string policy_name = 8;
+  uint32 policy_revision = 9;
+  int64 first_seen_unix_ms = 10;
+  int64 last_seen_unix_ms = 11;
+  uint64 count = 12;
+}
+
+enum EgressRefusalProtocol {
+  EGRESS_REFUSAL_PROTOCOL_UNSPECIFIED = 0;
+  EGRESS_REFUSAL_PROTOCOL_DNS = 1;
+  EGRESS_REFUSAL_PROTOCOL_TCP = 2;
+  EGRESS_REFUSAL_PROTOCOL_UDP = 3;
+}
+
+// A running VM's refusal log, in memory for this run only (#5058).
+message EgressRefusals {
+  // Most recently seen first; at most 1,000.
+  repeated EgressRefusal refusals = 1;
+  // Rows dropped, the least recently seen first, to stay within the bound.
+  uint64 dropped = 2;
+  // When the log began: when this run's egress broker started.
+  int64 started_unix_ms = 3;
+  EgressRefusalSummary summary = 4;
+}
+
+// How many requests a running VM's egress broker refused since it started,
+// dropped rows included, and when the last was (#5058).
+message EgressRefusalSummary {
+  uint64 refused = 1;
+  int64 last_unix_ms = 2;
 }
 
 message EnvironmentNetworkPolicy {
@@ -480,6 +538,21 @@ service EnvironmentRunnerService {
   // disks, resume and thaw, into vms/<id>/checkpoints/out-<operation_id>.
   // The supervisor takes that tree over and treats it as untrusted.
   rpc CheckpointVm(CheckpointVmRequest) returns (CheckpointVmResponse);
+  // Runner protocol 15 (#5058): the running generation's refusal log. Any
+  // other generation, or a VM that isn't running, is FAILED_PRECONDITION.
+  rpc GetEgressRefusals(GetEgressRefusalsRequest) returns (EgressRefusals);
+}
+
+message GetEgressRefusalsRequest {
+  string environment_id = 1;
+  uint64 generation = 2;
+}
+
+// The name and revision the supervisor knows a policy by, which the runner
+// labels its refusal log with (#5058); revision zero for a built-in.
+message NetworkPolicyLabel {
+  string name = 1;
+  uint32 revision = 2;
 }
 
 message CheckpointVmRequest {
@@ -921,6 +994,9 @@ message Environment {
   // Read from the running VM's runner when the environment is shown (#4912,
   // #5216).
   Interception interception = 31;
+  // Read from the running VM's runner when the environment is shown
+  // (#5058); absent when nothing was refused.
+  EgressRefusalSummary egress_refusals = 32;
 }
 
 message ListEnvironmentsRequest {}
@@ -1040,6 +1116,8 @@ message RunnerInfo {
   RunnerExit exit = 7;
   EgressUnavailable egress_unavailable = 8;
   Interception interception = 9;
+  // Absent unless the running VM's egress broker refused something (#5058).
+  EgressRefusalSummary egress_refusals = 10;
 }
 
 // The VM's egress broker is past its deadline, so its network worker refuses
@@ -1234,6 +1312,9 @@ message StartVmRequest {
   // its front door ends unasked. Absent from an older supervisor: the
   // runner then reports only lost.
   Interception interception = 30;
+
+  // How the supervisor names network_policy_document (#5058).
+  NetworkPolicyLabel network_policy_label = 31;
 }
 
 message SeedCredentialPlaceholder {
@@ -1301,6 +1382,8 @@ message ReplaceNetworkPolicyRequest {
   uint64 generation = 2;
   // The canonical policy document, as in StartVmRequest.
   bytes network_policy_document = 3;
+  // How the supervisor names it (#5058).
+  NetworkPolicyLabel network_policy_label = 4;
 }
 message ReplaceNetworkPolicyResponse {
   // The digest the broker acknowledged.

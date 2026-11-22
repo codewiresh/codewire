@@ -15,7 +15,7 @@ use crate::control::v1;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible. Linux and Darwin serve the
 // same shared supervisor; Darwin's former stopped-state dispatcher was 8.
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 25;
+pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 26;
 /// The oldest supervisor protocol this cw works with: v0.3.388's (#2826). After a cw
 /// update, a supervisor in [minimum, current] keeps serving its VMs; only an
 /// idle older one is replaced (`supervisor_upgrade`).
@@ -85,6 +85,10 @@ pub const SUPERVISOR_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         25,
         "the desktop (#3223): the supervisor serves codewire.v1.EnvironmentDesktopService on its owner-only socket (StartDesktop, GetDesktop, StopDesktop) through the guest daemon, for cw desktop; an older supervisor has no such service",
     ),
+    (
+        26,
+        "refusal log (#5058): GetEgressRefusals reads a running VM's egress refusals from its runner (runner protocol 15), and Environment.egress_refusals counts them; an older supervisor has no log",
+    ),
 ];
 
 /// A supervisor capability newer than the minimum protocol.
@@ -113,10 +117,12 @@ pub enum SupervisorFeature {
     LocalHttpsCa,
     /// The public `EnvironmentDesktopService` on the owner-only socket.
     Desktop,
+    /// `GetEgressRefusals`: a running VM's refusal log.
+    EgressRefusals,
 }
 
 impl SupervisorFeature {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Retire,
         Self::Ssh,
         Self::NetworkPolicies,
@@ -128,6 +134,7 @@ impl SupervisorFeature {
         Self::LocalHttps,
         Self::LocalHttpsCa,
         Self::Desktop,
+        Self::EgressRefusals,
     ];
 
     /// The protocol that introduced it.
@@ -144,6 +151,7 @@ impl SupervisorFeature {
             Self::LocalHttps => 23,
             Self::LocalHttpsCa => 24,
             Self::Desktop => 25,
+            Self::EgressRefusals => 26,
         }
     }
 }
@@ -451,7 +459,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        assert_eq!(info.protocol_version, 25);
+        assert_eq!(info.protocol_version, 26);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(

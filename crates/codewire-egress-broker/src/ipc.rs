@@ -427,14 +427,14 @@ impl BrokerIpcClient {
     /// refuses before any upstream effect: a protected loopback destination,
     /// and for DNS the protected name `localhost`.
     pub async fn verify_sessions(&self) -> Result<(), BrokerIpcError> {
-        let protected = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+        let protected = crate::refusals::SESSION_PROBE_ADDRESS;
         // Checkouts rotate through the idle queue, so each session is used once.
         for _ in 0..self.admission.len() {
             expect_denied(self.authorize_tcp(protected).await)?;
         }
         for _ in 0..self.dns.len() {
             expect_denied(
-                self.resolve_dns("localhost", DnsRecordFamily::Ipv4)
+                self.resolve_dns(crate::refusals::SESSION_PROBE_NAME, DnsRecordFamily::Ipv4)
                     .await
                     .map(drop),
             )?;

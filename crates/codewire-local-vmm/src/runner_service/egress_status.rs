@@ -1,7 +1,7 @@
 //! A runner's `info`, with its running VM's egress: unavailable while its
 //! egress broker is past its deadline (#4965), and its interception, as its
 //! supervisor started the boot (#4912) or lost once its front door has ended
-//! unasked (#5216).
+//! unasked (#5216); and how much its egress broker refused (#5058).
 
 use std::time::UNIX_EPOCH;
 
@@ -19,6 +19,7 @@ impl super::RunnerState {
             exit: self.reported_exit(),
             egress_unavailable: self.egress_unavailable(),
             interception: self.interception(),
+            egress_refusals: self.egress_refusal_summary(),
             cw_runtime_catalog_generation: self
                 .cw_runtime_catalog_generation()
                 .unwrap_or_default()

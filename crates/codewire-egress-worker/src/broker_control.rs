@@ -6,9 +6,12 @@
 //! carrying the digest it enforces from then on. Interception bindings
 //! (`CWIR`, #3999) replace the broker's set; a broker started with a
 //! front-door hand-off reads one right after the first host addresses.
+//! Up the channel, besides each acknowledgement, the broker reports its
+//! refusals (`CWRL`, [`refusals`], #5058) at most once a second.
 //! Anything malformed ends the channel, and the broker fails closed with it.
 
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use codewire_egress_policy::intercept::{
@@ -22,6 +25,12 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::host_addresses::{
     HOST_ADDRESS_FRAME_MAGIC, HostAddressSet, encode_frame, read_frame_after_magic,
+};
+
+mod refusals;
+pub use refusals::{
+    MAX_REFUSAL_FRAME_BYTES, MAX_REFUSAL_FRAME_ROWS, REFUSAL_REPORT_INTERVAL, RefusalLogSnapshot,
+    RunnerRefusalLog, decode_refusal_body, encode_refusal_frame, now_unix_ms, report_refusals,
 };
 
 const POLICY_FRAME_MAGIC: [u8; 4] = *b"CWPR";
@@ -217,15 +226,39 @@ pub fn encode_policy_ack(digest: PolicyDigest) -> Vec<u8> {
     frame
 }
 
+/// An acknowledgement alone, for a channel that carries nothing else.
 pub async fn read_policy_ack<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<PolicyDigest> {
-    let mut frame = [0_u8; 4 + 1 + DIGEST_LEN];
-    reader.read_exact(&mut frame).await?;
-    if frame[..4] != POLICY_ACK_MAGIC || frame[4] != FRAME_VERSION {
-        return Err(invalid("policy acknowledgement has an unknown header"));
+    match read_broker_frame(reader).await? {
+        BrokerFrame::PolicyAck(digest) => Ok(digest),
+        BrokerFrame::Refusals(_) => {
+            Err(invalid("broker sent a frame other than an acknowledgement"))
+        }
     }
-    Ok(PolicyDigest::from_bytes(
-        frame[5..].try_into().expect("fixed policy digest length"),
-    ))
+}
+
+/// One frame the runner reads from the broker.
+#[derive(Debug)]
+pub enum BrokerFrame {
+    PolicyAck(PolicyDigest),
+    Refusals(codewire_egress_broker::refusals::RefusalBatch),
+}
+
+pub async fn read_broker_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<BrokerFrame> {
+    let mut magic = [0_u8; 4];
+    reader.read_exact(&mut magic).await?;
+    if magic == refusals::REFUSAL_FRAME_MAGIC {
+        return refusals::read_refusal_frame_after_magic(reader)
+            .await
+            .map(BrokerFrame::Refusals);
+    }
+    let mut frame = [0_u8; 1 + DIGEST_LEN];
+    reader.read_exact(&mut frame).await?;
+    if magic != POLICY_ACK_MAGIC || frame[0] != FRAME_VERSION {
+        return Err(invalid("broker frame has an unknown header"));
+    }
+    Ok(BrokerFrame::PolicyAck(PolicyDigest::from_bytes(
+        frame[1..].try_into().expect("fixed policy digest length"),
+    )))
 }
 
 /// One replacement for the runner's control task to deliver.
@@ -238,13 +271,47 @@ pub struct PolicyReplacementRequest {
 
 /// The runner's end of the channel: send each host address update and each
 /// replacement in turn, and wait for every replacement's acknowledgement
-/// before the next frame. It ends when the host address monitor stops, the
-/// broker closes the channel, or an acknowledgement is late or wrong; the
-/// channel then closes and the broker fails closed.
+/// before the next frame, while every refusal report the broker sends is
+/// filed in `refusals`, the log of the environment this runner serves. It
+/// ends when the host address monitor stops, the broker closes the channel,
+/// sends a malformed or oversized frame, or an acknowledgement is late,
+/// wrong or unasked for; the channel then closes and the broker fails
+/// closed.
 pub async fn serve_runner_control<S: AsyncRead + AsyncWrite + Unpin>(
-    mut control: S,
+    control: S,
+    addresses: mpsc::Receiver<HostAddressSet>,
+    replacements: mpsc::Receiver<PolicyReplacementRequest>,
+    ack_timeout: Duration,
+    refusals: Arc<RunnerRefusalLog>,
+) -> io::Result<()> {
+    let (reader, writer) = tokio::io::split(control);
+    let (acks, acknowledged) = mpsc::channel(1);
+    tokio::select! {
+        result = read_from_broker(reader, acks, &refusals) => result,
+        result = write_to_broker(writer, addresses, replacements, acknowledged, ack_timeout) => result,
+    }
+}
+
+async fn read_from_broker<R: AsyncRead + Unpin>(
+    mut reader: R,
+    acks: mpsc::Sender<PolicyDigest>,
+    refusals: &RunnerRefusalLog,
+) -> io::Result<()> {
+    loop {
+        match read_broker_frame(&mut reader).await? {
+            BrokerFrame::PolicyAck(digest) => acks
+                .try_send(digest)
+                .map_err(|_| invalid("broker acknowledged a replacement twice"))?,
+            BrokerFrame::Refusals(batch) => refusals.file(batch, now_unix_ms()),
+        }
+    }
+}
+
+async fn write_to_broker<W: AsyncWrite + Unpin>(
+    mut control: W,
     mut addresses: mpsc::Receiver<HostAddressSet>,
     mut replacements: mpsc::Receiver<PolicyReplacementRequest>,
+    mut acknowledged: mpsc::Receiver<PolicyDigest>,
     ack_timeout: Duration,
 ) -> io::Result<()> {
     let mut replacements_open = true;
@@ -260,12 +327,16 @@ pub async fn serve_runner_control<S: AsyncRead + AsyncWrite + Unpin>(
                     replacements_open = false;
                     continue;
                 };
+                if acknowledged.try_recv().is_ok() {
+                    return Err(invalid("broker acknowledged a replacement nobody sent"));
+                }
                 let expected = request.policy.digest();
                 control.write_all(&encode_policy_frame(&request.policy)?).await?;
                 control.flush().await?;
-                let enforced = tokio::time::timeout(ack_timeout, read_policy_ack(&mut control))
+                let enforced = tokio::time::timeout(ack_timeout, acknowledged.recv())
                     .await
-                    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "policy acknowledgement timed out"))??;
+                    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "policy acknowledgement timed out"))?
+                    .ok_or_else(|| invalid("broker control channel closed"))?;
                 if enforced != expected {
                     return Err(invalid("broker acknowledged another policy"));
                 }

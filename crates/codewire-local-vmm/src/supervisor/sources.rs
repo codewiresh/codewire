@@ -37,6 +37,21 @@ pub(super) fn profile_placement(
 
 /// Derive only exact local source metadata. Platform-backed values use their
 /// authenticated delegation path; never silently replace them with local data.
+/// The project spec hash a boot hands the runner: the boot's own when its
+/// credential broker projects anything, and none otherwise.
+pub(super) fn projection_sha256_for_boot(
+    broker_request: &CredentialBrokerEnsureRequest,
+    environment: &EnvironmentRecord,
+) -> Result<String, SupervisorError> {
+    if broker_request.projection.is_none() && broker_request.platform.is_none() {
+        return Ok(String::new());
+    }
+    environment
+        .project_spec_sha256
+        .clone()
+        .ok_or(SupervisorError::InvalidState)
+}
+
 pub(super) fn projection_environment_for_boot(
     environment: &EnvironmentRecord,
 ) -> Result<EnvironmentRecord, SupervisorError> {

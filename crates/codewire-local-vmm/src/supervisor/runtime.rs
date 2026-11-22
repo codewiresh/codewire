@@ -2128,6 +2128,12 @@ mod tests {
         ) -> Result<Response<v1::CheckpointVmResponse>, Status> {
             self.forbidden()
         }
+        async fn get_egress_refusals(
+            &self,
+            _: Request<v1::GetEgressRefusalsRequest>,
+        ) -> Result<Response<v1::EgressRefusals>, Status> {
+            self.forbidden()
+        }
         type WatchRunnerStream =
             Pin<Box<dyn Stream<Item = Result<v1::RunnerEvent, Status>> + Send>>;
         async fn watch_runner(

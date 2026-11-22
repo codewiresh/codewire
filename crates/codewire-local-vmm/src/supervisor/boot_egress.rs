@@ -19,6 +19,8 @@ pub(super) struct BootEgress {
     /// That policy's canonical document, which the boot's egress broker
     /// enforces exactly; empty for `open`.
     pub(super) network_policy_document: Vec<u8>,
+    /// How the boot's refusal log names that policy (#5058).
+    pub(super) network_policy_label: v1::NetworkPolicyLabel,
     /// Whether the boot intercepts agent hosts (#3999): the per-host switch
     /// is on and the boot has a local credential broker to pair with.
     pub(super) intercept: bool,
@@ -72,6 +74,7 @@ impl Supervisor {
         let interception =
             egress_intercept::for_boot(&self.config.root, self.log.as_deref(), broker, authority);
         Ok(BootEgress {
+            network_policy_label: crate::runner_service::policy_label(&network_policy),
             network_policy,
             network_policy_document,
             intercept: interception.state == v1::InterceptionState::Intercepted as i32,

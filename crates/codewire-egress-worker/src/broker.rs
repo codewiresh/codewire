@@ -25,6 +25,7 @@ use codewire_egress_broker::adapters::{SystemDnsResolver, SystemTcpConnector};
 use codewire_egress_broker::ipc::{
     BROKER_IPC_KEY_LEN, BROKER_IPC_SESSIONS, BrokerIpcBinding, BrokerIpcKey, serve_broker_ipc,
 };
+use codewire_egress_broker::refusals::RefusalFold;
 use codewire_egress_broker::{PolicyEgressBroker, SystemBrokerClock};
 use codewire_egress_policy::{CompiledPolicy, PolicyDocument, RouteClass};
 use tokio::io::AsyncWriteExt as _;
@@ -417,14 +418,27 @@ pub async fn run_inherited_egress_broker(
     } else {
         BrokerIntercepts::Off
     };
-    run_inherited_egress_broker_intercepting(environment_id, generation, intercepts).await
+    run_broker(environment_id, generation, intercepts, true).await
 }
 
-/// [`run_inherited_egress_broker`], with what it does with intercepted dials.
+/// [`run_inherited_egress_broker`], with what it does with intercepted dials,
+/// for a control channel that carries only acknowledgements: it reports no
+/// refusals.
 pub async fn run_inherited_egress_broker_intercepting(
     environment_id: Uuid,
     generation: u64,
     intercepts: BrokerIntercepts,
+) -> Result<(), EgressBrokerProcessError> {
+    run_broker(environment_id, generation, intercepts, false).await
+}
+
+/// The broker process. With `report_refusals`, it folds its refusals and
+/// reports them to its runner on the control channel (#5058).
+async fn run_broker(
+    environment_id: Uuid,
+    generation: u64,
+    intercepts: BrokerIntercepts,
+    report_refusals: bool,
 ) -> Result<(), EgressBrokerProcessError> {
     let mut bootstrap = inherited_std_unix_stream(EGRESS_BROKER_BOOTSTRAP_FD)?;
     let handoff = (intercepts == BrokerIntercepts::HandOff)
@@ -459,21 +473,23 @@ pub async fn run_inherited_egress_broker_intercepting(
         bootstrap: decoded,
         policy,
     } = prepared;
-    let broker = Arc::new(handoff::with_handoff(
-        PolicyEgressBroker::new(
-            policy,
-            RouteClass::General,
-            Arc::new(resolver),
-            Arc::new(SystemTcpConnector::new()),
-            Arc::new(SystemBrokerClock::new()),
-        ),
-        handoff,
-    ));
+    let refusals = report_refusals.then(|| Arc::new(RefusalFold::new()));
+    let mut broker = PolicyEgressBroker::new(
+        policy,
+        RouteClass::General,
+        Arc::new(resolver),
+        Arc::new(SystemTcpConnector::new()),
+        Arc::new(SystemBrokerClock::new()),
+    );
+    if let Some(fold) = &refusals {
+        broker = broker.with_refusal_fold(Arc::clone(fold));
+    }
+    let broker = Arc::new(handoff::with_handoff(broker, handoff));
 
     // The host's own addresses, and the interception bindings when handing
     // off, arrive before the broker can admit anything; every later update
     // replaces them (#2614, #3999).
-    let mut control = match receive_startup_control(control, &broker, intercepts).await {
+    let control = match receive_startup_control(control, &broker, intercepts).await {
         Ok(control) => control,
         Err(error) => {
             let _ = write_status(&bootstrap, error.startup_failure().message());
@@ -534,23 +550,46 @@ pub async fn run_inherited_egress_broker_intercepting(
         .await
         .map_err(|_| EgressBrokerProcessError::StatusIo)?;
     streams.insert(0, stream);
-    let updated = Arc::clone(&broker);
-    let updates = async move {
+    // A malformed frame or a closed control socket fails the broker closed.
+    tokio::select! {
+        served = serve_broker_ipc(streams, decoded.binding, decoded.key, Arc::clone(&broker)) => {
+            served.map_err(|_| EgressBrokerProcessError::Protocol)
+        }
+        () = serve_control(control, &*broker, refusals) => Err(EgressBrokerProcessError::HostAddresses),
+    }
+}
+
+/// The control channel once the broker is ready: every update the runner
+/// sends, and the refusal reports when the broker makes them. It returns
+/// when the channel fails.
+async fn serve_control<R, C, K>(
+    control: tokio::net::UnixStream,
+    broker: &PolicyEgressBroker<R, C, K>,
+    refusals: Option<Arc<RefusalFold>>,
+) where
+    R: codewire_egress_broker::DnsResolver,
+    C: codewire_egress_broker::TcpConnector,
+    K: codewire_egress_broker::BrokerClock,
+{
+    let (mut reader, writer) = control.into_split();
+    let writer = tokio::sync::Mutex::new(writer);
+    let updates = async {
         loop {
-            match crate::broker_control::read_control_frame(&mut control).await {
+            match crate::broker_control::read_control_frame(&mut reader).await {
                 Ok(ControlFrame::HostAddresses(addresses)) => {
-                    updated.set_host_addresses(addresses).await;
+                    broker.set_host_addresses(addresses).await;
                 }
                 // Every flow whose outcome the new bindings change ends.
                 Ok(ControlFrame::ReplaceIntercepts(intercepts)) => {
-                    updated.replace_intercepts(intercepts).await;
+                    broker.replace_intercepts(intercepts).await;
                 }
                 // A new revision applies at once, and every flow it refuses
                 // ends before the runner hears it is enforced (#2537).
                 Ok(ControlFrame::ReplacePolicy(policy)) => {
-                    let enforced = updated.replace_policy(policy).await.current_digest();
+                    let enforced = broker.replace_policy(policy).await.current_digest();
                     let ack = crate::broker_control::encode_policy_ack(enforced);
-                    if control.write_all(&ack).await.is_err() || control.flush().await.is_err() {
+                    let mut writer = writer.lock().await;
+                    if writer.write_all(&ack).await.is_err() || writer.flush().await.is_err() {
                         break;
                     }
                 }
@@ -558,12 +597,19 @@ pub async fn run_inherited_egress_broker_intercepting(
             }
         }
     };
-    // A malformed frame or a closed control socket fails the broker closed.
-    tokio::select! {
-        served = serve_broker_ipc(streams, decoded.binding, decoded.key, broker) => {
-            served.map_err(|_| EgressBrokerProcessError::Protocol)
+    let reports = async {
+        match &refusals {
+            Some(fold) => {
+                // It returns only when the channel failed, which ends the
+                // broker either way.
+                let _ = crate::broker_control::report_refusals(fold, &writer).await;
+            }
+            None => std::future::pending().await,
         }
-        _ = updates => Err(EgressBrokerProcessError::HostAddresses),
+    };
+    tokio::select! {
+        () = updates => {}
+        () = reports => {}
     }
 }
 

@@ -599,9 +599,11 @@ by the secret the runner minted for it, so the runner files every report
 under the boot it serves and never under an environment a report names; a
 report naming another environment is refused. The runner keeps the
 environment's one merged log, bounded at 1,000 rows with the row seen least
-recently dropped, and the log says when it dropped rows. Every host is
-checked before it is stored or printed: ASCII only (an international name in
-its IDNA form), at most 253 characters, and no control or escape character.
+recently dropped, and the log says when it dropped rows (`--output json`
+gives `dropped`, the number of rows dropped since the VM started). Every
+host is checked before it is stored or printed: ASCII only (an
+international name in its IDNA form), at most 253 characters, and no
+control or escape character.
 A host that fails the check is kept as one row, `(a name cw won't show)`,
 with its reason and count and never its text, so a host can never carry a
 terminal sequence to the owner's screen. The supervisor reads the log through
@@ -612,8 +614,8 @@ on a VM that isn't running the command says so. Only the owner's socket
 reads it; the view inside the environment (#4015) is the protected
 projection, `guest_records`, and the two share no code path that could widen
 what the guest sees. `cw info ENV` adds one line: how many requests were
-refused since the VM started and when the last was, with `→ cw --local policy
-log ENV`; the rows keep counts, not a time series, so it can't count by hour.
+refused since the VM started and when the last was, naming `cw --local policy log
+ENV`; the rows keep counts, not a time series, so it can't count by hour.
 `cw --cloud policy log` for a hosted Sandbox stays with #4000.
 
 Target, not shipped (#5114, #5116, #5117): the dashboard's Network policies

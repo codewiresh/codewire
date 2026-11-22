@@ -1094,6 +1094,13 @@ impl crate::control::v1::environment_runner_service_server::EnvironmentRunnerSer
     ) -> Result<Response<v1::CheckpointVmResponse>, Status> {
         self.unexpected_use()
     }
+
+    async fn get_egress_refusals(
+        &self,
+        _request: Request<v1::GetEgressRefusalsRequest>,
+    ) -> Result<Response<v1::EgressRefusals>, Status> {
+        self.unexpected_use()
+    }
 }
 
 fn spawn_test_runner_protocol_server(

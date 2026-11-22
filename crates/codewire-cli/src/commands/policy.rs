@@ -19,6 +19,11 @@ use codewire_egress_policy::{BuiltinPolicy, CompiledPolicy};
 use super::*;
 
 mod platform;
+mod refusal_log;
+
+/// `cw --cloud policy log`'s answer until hosted Sandboxes keep a log (#4000).
+const NO_HOSTED_REFUSAL_LOG: &str =
+    "hosted Sandboxes have no refusal log yet; `cw --local policy log ENV` shows a local VM's";
 
 /// The ports a target gets when it names none: those `open` allows, so an
 /// allowed Git host also works over SSH.
@@ -92,6 +97,8 @@ pub(crate) enum PolicyCommand {
     Check(PolicyCheckArgs),
     #[command(about = "Delete a network policy no environment selects")]
     Delete(PolicyDeleteArgs),
+    #[command(about = "Show what a running local VM's network policy refused, and why")]
+    Log(refusal_log::PolicyLogArgs),
 }
 
 #[derive(Debug, Args)]
@@ -160,6 +167,7 @@ impl PolicyCommand {
             Self::Allow(args) | Self::Rm(args) => args.output,
             Self::Check(args) => args.output,
             Self::Delete(args) => args.output,
+            Self::Log(args) => args.output,
         };
         matches!(output, OutputFormat::Json)
     }
@@ -205,6 +213,10 @@ pub(crate) async fn handle_policy_command(
         && !args.command.json()
     {
         eprintln!("Policies on this computer; your organization's are in `cw --cloud policy ls`:");
+    }
+    if let PolicyCommand::Log(log) = args.command {
+        anyhow::ensure!(!platform, NO_HOSTED_REFUSAL_LOG);
+        return refusal_log::handle(log).await;
     }
     if platform {
         return platform::handle(globals, args.command).await;
@@ -349,18 +361,13 @@ async fn handle_local_policy_command(
             let compiled = typed_from(&stored, "the supervisor")?.compile();
             print_check(&args, &stored.name, Some(stored.revision), &compiled, None)
         }
+        PolicyCommand::Log(args) => refusal_log::handle(args).await,
         PolicyCommand::Delete(args) => {
             let deleted = client
                 .delete_network_policy(stored_selector(&args.name)?)
                 .await
                 .map_err(status("delete the network policy"))?;
-            match args.output {
-                OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&deleted.json())?)
-                }
-                OutputFormat::Text => println!("Deleted network policy {}", deleted.name),
-            }
-            Ok(())
+            print_deleted(&deleted, args.output)
         }
     }
 }
@@ -678,6 +685,14 @@ fn policies_text(policies: &[impl ShownPolicy]) -> String {
         ));
     }
     text
+}
+
+fn print_deleted(policy: &impl ShownPolicy, output: OutputFormat) -> anyhow::Result<()> {
+    match output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&policy.json())?),
+        OutputFormat::Text => println!("Deleted network policy {}", policy.name()),
+    }
+    Ok(())
 }
 
 fn print_policies(policies: &[impl ShownPolicy], output: OutputFormat) -> anyhow::Result<()> {

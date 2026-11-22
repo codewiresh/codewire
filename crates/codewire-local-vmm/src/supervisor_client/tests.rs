@@ -152,6 +152,16 @@ impl LocalSupervisorService for ProtocolPeer {
         Err(Status::unimplemented("unused synthetic method"))
     }
 
+    async fn get_egress_refusals(
+        &self,
+        _: Request<v1::EnvironmentSelector>,
+    ) -> Result<Response<v1::EgressRefusals>, Status> {
+        self.record("egress_refusals");
+        Err(Status::failed_precondition(
+            "local environment is not running",
+        ))
+    }
+
     async fn create_network_policy(
         &self,
         _: Request<v1::CreateNetworkPolicyRequest>,
@@ -1283,4 +1293,40 @@ fn a_supervisor_refusal_is_found_through_each_wrapping_error() {
         .to_string(),
         "native supervisor admission refused: role or configuration arguments do not match"
     );
+}
+
+#[tokio::test]
+async fn the_refusal_log_says_a_vm_is_not_running_and_an_older_supervisor_has_none() {
+    let server = TestServer::start(valid_info, vec![]);
+    let mut client = bounded(NativeSupervisorClient::connect(&server.socket))
+        .await
+        .unwrap();
+    assert_eq!(
+        bounded(client.egress_refusals("dev")).await.unwrap(),
+        EgressRefusalsRead::NotRunning
+    );
+    assert_eq!(server.calls(), ["info", "egress_refusals"]);
+    drop(client);
+    server.finish().await;
+
+    let older = TestServer::start(
+        |config| {
+            let mut info = valid_info(config)?;
+            info.protocol_version = SupervisorFeature::EgressRefusals.since() - 1;
+            Ok(info)
+        },
+        vec![],
+    );
+    let mut client = bounded(NativeSupervisorClient::connect(&older.socket))
+        .await
+        .unwrap();
+    let refused = bounded(client.egress_refusals("dev")).await.unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::Unimplemented);
+    assert_eq!(
+        refused.message(),
+        "your local VMs run on an older cw's supervisor, which has no refusal log; `cw upgrade --vms` moves them to this cw once they are idle"
+    );
+    assert_eq!(older.calls(), ["info"]);
+    drop(client);
+    older.finish().await;
 }

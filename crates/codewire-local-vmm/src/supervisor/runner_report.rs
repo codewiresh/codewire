@@ -1,6 +1,6 @@
 //! What an environment's runner reports when the environment is shown: how
 //! the process that failed it closed ended (#4953), or that a running VM's
-//! egress is unavailable (#4965).
+//! egress is unavailable (#4965) and how much it refused (#5058).
 
 use super::*;
 
@@ -37,6 +37,9 @@ pub(super) async fn with_runner_report(
         environment.runner_exit = reported_exit(&environment, &info);
         environment.egress_unavailable = reported_egress(&environment, &info);
         environment.interception = reported_interception(&environment, &info);
+        environment.egress_refusals = reports_running(&environment, &info)
+            .then_some(info.egress_refusals)
+            .flatten();
     }
     environment
 }

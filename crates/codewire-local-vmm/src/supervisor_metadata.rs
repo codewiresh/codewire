@@ -247,10 +247,11 @@ impl EnvironmentRecord {
                 .filter(|_| self.state == StoredEnvironmentState::Error)
                 .unwrap_or_default(),
             // Read from the runner when the environment is shown (#4953, #4965,
-            // #5216).
+            // #5216, #5058).
             runner_exit: None,
             egress_unavailable: None,
             interception: None,
+            egress_refusals: None,
         }
     }
 

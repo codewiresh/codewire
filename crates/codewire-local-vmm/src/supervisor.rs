@@ -13,9 +13,11 @@ mod checkpoints;
 use checkpoints::stop_payload_checkpoint;
 mod collection_roots;
 mod egress_intercept;
+mod egress_refusals;
 mod halt;
 use halt::{HaltReason, fatal_drain_error};
 mod local_https;
+mod managed_runtime;
 mod metadata;
 pub mod network_policies;
 mod operation_log;
@@ -4480,14 +4482,7 @@ impl Supervisor {
             .core()
             .credential_broker_request_for_environment(&projection_environment, generation)?;
         let environment_projection_sha256 =
-            if broker_request.projection.is_some() || broker_request.platform.is_some() {
-                projection_environment
-                    .project_spec_sha256
-                    .clone()
-                    .ok_or(SupervisorError::InvalidState)?
-            } else {
-                String::new()
-            };
+            sources::projection_sha256_for_boot(&broker_request, &projection_environment)?;
         let egress = self.boot_egress(environment.id, &broker_request).await?;
         let credential_placeholders = self
             .seed_placeholders(
@@ -4499,6 +4494,7 @@ impl Supervisor {
             .await?;
         let start_request = v1::StartVmRequest {
             network_policy_document: egress.network_policy_document,
+            network_policy_label: Some(egress.network_policy_label),
             intercept: egress.intercept,
             interception: Some(egress.interception),
             credential_placeholders,
@@ -5116,7 +5112,7 @@ impl Supervisor {
             .runner_client_for_artifact(name, &artifact_generation)
             .await?;
         let enforced = runner
-            .replace_network_policy(environment.id, environment.generation, &policy)
+            .replace_network_policy(environment.id, environment.generation, &current.selected)
             .await
             .map_err(|_| SupervisorError::InvalidRunnerResponse)?;
         if enforced != policy.digest() {
@@ -7149,74 +7145,9 @@ impl LocalSupervisorService for SupervisorRpc {
         &self,
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::ManagedRuntime>, Status> {
-        let request = request.into_inner();
-        let expected = parse_optional_environment_id(&request.environment_id)
-            .map_err(Status::from)?
-            .ok_or_else(|| {
-                Status::invalid_argument("managed runtime requires an environment UUID")
-            })?;
-        let name = selected_name(request)?;
-        self.start_drains()?;
-        let _lease = self
-            .supervisor
-            .quiet_lease(&name)
+        self.managed_runtime(request.into_inner())
             .await
-            .map_err(Status::from)?;
-        self.supervisor
-            .reconcile(&name)
-            .await
-            .map_err(Status::from)?;
-        if self
-            .supervisor
-            .core()
-            .incompatible_runners
-            .contains(&expected)
-        {
-            return Err(Status::from(SupervisorError::RunnerProtocolUnsupported));
-        }
-        let environment = self.supervisor.environment(&name).map_err(Status::from)?;
-        let generation = managed_runtime_artifact_generation(&environment, expected)?.to_owned();
-        let runtime_generation = environment
-            .cw_runtime
-            .as_ref()
-            .filter(|binding| binding.staging_catalog_generation.is_none())
-            .map(|binding| binding.active_catalog_generation.clone())
-            .filter(|generation| {
-                environment.runner.as_ref().is_some_and(|runner| {
-                    runner.cw_runtime_catalog_generation.as_ref() == Some(generation)
-                })
-            })
-            .ok_or_else(|| {
-                Status::failed_precondition("running VM has no admitted cw runtime catalog")
-            })?;
-        let engine_root = self.supervisor.config.engine_root();
-        let open_generation = runtime_generation.clone();
-        let disk = tokio::task::spawn_blocking(move || {
-            let engine = PrivateRoot::open(&engine_root)?;
-            CwRuntimeStore::create(&engine)?.open_catalog(&open_generation)
-        })
-        .await
-        .map_err(|_| Status::internal("cw runtime admission task failed"))?
-        .map_err(|_| Status::failed_precondition("retained cw runtime catalog is unavailable"))?;
-        let provenance_json = serde_json::to_vec(
-            disk.manifest
-                .catalog
-                .active()
-                .map_err(Status::failed_precondition)?,
-        )
-        .map_err(|_| Status::internal("cw runtime provenance encoding failed"))?;
-        let catalog_json = disk
-            .manifest
-            .catalog
-            .encode()
-            .map_err(Status::failed_precondition)?;
-        Ok(Response::new(v1::ManagedRuntime {
-            environment_id: expected.to_string(),
-            artifact_generation: generation,
-            provenance_json,
-            catalog_json,
-            cw_runtime_catalog_generation: runtime_generation,
-        }))
+            .map(Response::new)
     }
 
     /// Select the network policy an environment enforces (#2537 B1). A
@@ -7254,6 +7185,15 @@ impl LocalSupervisorService for SupervisorRpc {
                 .environment_proto(&request.name)
                 .map_err(Status::from)?,
         ))
+    }
+
+    async fn get_egress_refusals(
+        &self,
+        request: Request<v1::EnvironmentSelector>,
+    ) -> Result<Response<v1::EgressRefusals>, Status> {
+        self.egress_refusals(request.into_inner())
+            .await
+            .map(Response::new)
     }
 
     async fn create_network_policy(

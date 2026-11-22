@@ -30,6 +30,8 @@ use crate::{
     PolicyError, RouteClass,
 };
 
+mod names;
+
 pub const MAX_CNAME_CHAIN: usize = 8;
 pub const MAX_DNS_ADDRESSES: usize = 16;
 pub const MAX_ACTIVE_DNS_LEASES: usize = 1_024;
@@ -722,7 +724,7 @@ impl EgressLeaseTable {
         )
     }
 
-    fn admit_resolution(
+    pub fn admit_resolution(
         &mut self,
         name: &str,
         route_class: RouteClass,
