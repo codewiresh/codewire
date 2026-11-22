@@ -153,16 +153,16 @@ pub(crate) const CLAUDE_DEFAULT_MODEL: &str = "claude-opus-5-5";
 const CODEX_POLICY: &str = "trusted host execution: Codex app-server danger-full-access and approvalPolicy never; native approval requests are declined";
 const CLAUDE_POLICY: &str = "trusted host execution: installed Claude CLI with the user's ordinary settings, MCP configuration and permission rules; no permission mode is passed, so the user's own default mode decides which tools run";
 const CODEX_SANDBOX_POLICY: &str = "Sandbox execution: Codex app-server danger-full-access and approvalPolicy never, through the environment's selected typed provider projection; provider material remains outside the Sandbox";
-const CLAUDE_SANDBOX_POLICY: &str = "Sandbox execution: installed Claude CLI in auto mode (--permission-mode auto), as `claude` runs for the user in this Sandbox, with the user's and the repository's Claude settings, MCP configuration and permission rules; by default it uses the selected credential through the broker, and those settings or the declared environment can choose another provider or credential; no Codewire-held credential material enters the Sandbox either way";
+const CLAUDE_SANDBOX_POLICY: &str = "Sandbox execution: installed Claude CLI in bypass permissions mode (--permission-mode bypassPermissions), as `claude` runs for the user in this Sandbox, with the user's and the repository's Claude settings, MCP configuration and permission rules; by default it uses the selected credential through the broker, and those settings or the declared environment can choose another provider or credential; no Codewire-held credential material enters the Sandbox either way";
 /// Managed Claude's permission mode on a Sandbox placement, a local VM or a
-/// hosted Sandbox: auto mode, so that a headless turn can use tools with no
-/// person to answer a prompt. Claude Code 2.1.308 lists `auto` among
-/// `--permission-mode`'s choices and needs no separate opt-in. The
-/// argument outranks the user's own `permissions.defaultMode`; a
-/// `permissions.disableAutoMode` setting still turns auto mode off, and the
-/// provider can refuse it for an account or a model. A trusted host passes no
+/// hosted Sandbox: bypass permissions, the same default `claude` typed there
+/// gets (#5813; CLI-ORCHESTRATION.md), so a headless turn runs every tool with
+/// no person to answer a prompt. The argument outranks the user's own
+/// `permissions.defaultMode`; an administrator's managed
+/// `permissions.disableBypassPermissionsMode` still turns bypass off, and
+/// Claude Code then starts in its default mode. A trusted host passes no
 /// mode: there the user's own rules decide, on their own machine.
-const CLAUDE_SANDBOX_PERMISSION_MODE: [&str; 2] = ["--permission-mode", "auto"];
+const CLAUDE_SANDBOX_PERMISSION_MODE: [&str; 2] = ["--permission-mode", "bypassPermissions"];
 const NOEL_POLICY: &str = "trusted host execution: installed noel with the user's ordinary noel settings, login and project trust; its tools run without approval prompts, and extension dialogs are declined";
 const NOEL_HOST_ONLY: &str = "noel managed conversations are qualified only on trusted Linux hosts (`cw --local create --type host`)";
 const NOT_QUALIFIED: &str = "managed agent conversations are qualified only on trusted host environments (`cw --local create --type host`); sandbox and platform placements are not qualified yet";
@@ -2744,7 +2744,7 @@ fn codex_app_server_arguments(working_dir: &str) -> [String; 3] {
 
 /// The arguments one managed Claude peer starts with, on every placement: the
 /// stream protocol, the model, its saved conversation and, on a Sandbox
-/// placement only, auto mode. Nothing else is passed, so Claude runs with the
+/// placement only, bypass mode. Nothing else is passed, so Claude runs with the
 /// settings, MCP configuration and permission rules it would have if the user
 /// typed `claude` there.
 fn claude_arguments(
@@ -5608,12 +5608,12 @@ mod tests {
         }
     }
 
-    /// Managed Claude starts in auto mode on a Sandbox placement (a local VM
-    /// or a hosted Sandbox) and with no permission mode on a trusted host,
-    /// where the user's own rules decide. No placement adds anything that
-    /// hides the user's settings or skips permission checks.
+    /// Managed Claude starts in bypass permissions mode on a Sandbox placement
+    /// (a local VM or a hosted Sandbox) and with no permission mode on a
+    /// trusted host, where the user's own rules decide. No placement adds
+    /// anything that hides the user's settings.
     #[test]
-    fn claude_launch_uses_auto_mode_on_sandbox_placements_only() {
+    fn claude_launch_uses_bypass_mode_on_sandbox_placements_only() {
         let session = "0b0f1a5e-6f0c-4f6e-9d53-0a4a4f1f7a10";
         let stream = [
             "-p",
@@ -5630,9 +5630,12 @@ mod tests {
         assert_eq!(host[..9], stream);
         assert_eq!(host[9..], ["--session-id", session]);
         let sandbox = claude_arguments(&claude_config(None), true, false, session);
-        // The Sandbox launch is the host launch plus auto mode, last.
+        // The Sandbox launch is the host launch plus bypass mode, last.
         assert_eq!(sandbox[..host.len()], host[..]);
-        assert_eq!(sandbox[host.len()..], ["--permission-mode", "auto"]);
+        assert_eq!(
+            sandbox[host.len()..],
+            ["--permission-mode", "bypassPermissions"]
+        );
         // A saved conversation resumes, and effort keeps its place.
         assert_eq!(
             claude_arguments(&claude_config(Some("high")), true, true, session)[9..],
@@ -5642,7 +5645,7 @@ mod tests {
                 "--effort",
                 "high",
                 "--permission-mode",
-                "auto"
+                "bypassPermissions"
             ]
         );
         assert_eq!(
@@ -5659,10 +5662,16 @@ mod tests {
                         .count(),
                     usize::from(sandbox)
                 );
+                assert_eq!(
+                    arguments
+                        .iter()
+                        .any(|argument| argument == "bypassPermissions"),
+                    sandbox
+                );
                 for forbidden in [
                     "--dangerously-skip-permissions",
                     "--allow-dangerously-skip-permissions",
-                    "bypassPermissions",
+                    "auto",
                     "--setting-sources",
                     "--strict-mcp-config",
                     "--mcp-config",
@@ -5682,7 +5691,7 @@ mod tests {
     fn agent_policy_names_what_each_placement_does() {
         assert_eq!(agent_policy(false, AgentKind::Codex), CODEX_POLICY);
         assert_eq!(agent_policy(false, AgentKind::Claude), CLAUDE_POLICY);
-        // A trusted host passes no mode; a Sandbox names auto mode.
+        // A trusted host passes no mode; a Sandbox names bypass mode.
         assert!(CLAUDE_POLICY.starts_with("trusted host execution"));
         assert!(CLAUDE_POLICY.contains("no permission mode is passed"));
         let sandbox = agent_policy(true, AgentKind::Claude);
@@ -5711,10 +5720,10 @@ mod tests {
     }
 
     /// A trusted host is never a Sandbox placement, so managed Claude there
-    /// can never be given auto mode: its launch passes no permission mode,
+    /// can never be given bypass mode: its launch passes no permission mode,
     /// whatever else changes.
     #[test]
-    fn a_trusted_host_is_not_a_sandbox_placement_and_never_gets_auto_mode() {
+    fn a_trusted_host_is_not_a_sandbox_placement_and_never_gets_bypass_mode() {
         for runtime_root in [None, Some(PathBuf::from("/synthetic/runtime"))] {
             let host = DriverEnvironment::Host(HostEnvironment {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -5741,7 +5750,8 @@ mod tests {
                 assert!(
                     !arguments
                         .iter()
-                        .any(|argument| argument == "--permission-mode" || argument == "auto"),
+                        .any(|argument| argument == "--permission-mode"
+                            || argument == "bypassPermissions"),
                     "{arguments:?}"
                 );
             }

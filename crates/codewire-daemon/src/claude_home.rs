@@ -50,7 +50,11 @@
 //! `~/.claude/.credentials.json` unless the sign-in form is selected; the
 //! user's own login there is never touched.
 //!
-//! Only [`ClaudeOnboardingSync`] states are logged, never file contents.
+//! The same pass sets Claude Code's own settings so that `claude` starts in
+//! bypass permissions mode with no screen ([`settings`], #5813).
+//!
+//! Only [`ClaudeOnboardingSync`] and [`settings::ClaudeSettingsSync`] states
+//! are logged, never file contents.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -62,6 +66,7 @@ use serde_json::{Map, Value};
 use crate::private_files::{Entry, FileOwner, PrivateDirectory};
 
 pub mod login;
+pub mod settings;
 pub use login::{
     CLAUDE_CONFIG_DIR_NAME, CLAUDE_CREDENTIALS_FILE_NAME, CLAUDE_LOGIN_KEY, CLAUDE_LOGIN_LAPSE,
     CLAUDE_LOGIN_STATE_DIRECTORY, CLAUDE_MANAGED_MARKER, CLAUDE_MANAGED_REFRESH_TOKEN_PREFIX,
@@ -200,7 +205,8 @@ impl ClaudeHome {
         })
     }
 
-    /// [`Self::sync`] before the daemon listens, and removal of Codewire's
+    /// [`Self::sync`] and [`Self::sync_settings`] before the daemon listens,
+    /// and removal of Codewire's
     /// Claude login unless the sign-in form is selected, or always when the
     /// boot `intercepted` its agent hosts: a login kept from a boot without
     /// interception may hold the real access token, and nothing but a
@@ -215,6 +221,15 @@ impl ClaudeHome {
             Err(error) => tracing::warn!(
                 error_kind = ?error.kind(),
                 "Claude Code home unavailable; onboarding was not marked"
+            ),
+        }
+        match self.sync_settings() {
+            Ok(outcome) => {
+                tracing::info!(claude_settings = ?outcome, "Claude Code settings prepared");
+            }
+            Err(error) => tracing::warn!(
+                error_kind = ?error.kind(),
+                "Claude Code settings unavailable; claude may stop at a first-run screen"
             ),
         }
         if !clients.anthropic_sign_in() || intercepted {

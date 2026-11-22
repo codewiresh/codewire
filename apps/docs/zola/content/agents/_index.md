@@ -91,7 +91,7 @@ was launched with.
 
 | Placement | Codex | Claude Code |
 | --- | --- | --- |
-| Hosted sandbox, local VM | full access, approvals off, working directory trusted | `--permission-mode auto`, so a headless turn can use tools; your settings and permission rules still apply, and `permissions.disableAutoMode` turns it off |
+| Hosted sandbox, local VM | full access, approvals off, working directory trusted | `--permission-mode bypassPermissions`, so a headless turn runs every tool with no prompt, as `claude` typed in the sandbox does; your settings still apply, and a managed `permissions.disableBypassPermissionsMode` turns bypass off |
 | Trusted host | full access, approvals off | your own default permission mode |
 
 Codewire never passes an option that hides or skips the agent's permission

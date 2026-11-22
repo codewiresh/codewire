@@ -681,7 +681,7 @@ fn check_peer_arguments(
                 .as_deref()
                 .context("platform Claude native thread missing")?;
             id(session)?;
-            // A hosted Sandbox is a Sandbox placement: auto mode included.
+            // A hosted Sandbox is a Sandbox placement: bypass mode included.
             ensure!(
                 native == claude_arguments(config, true, state.native_thread_established, session),
                 "platform Claude peer differs"

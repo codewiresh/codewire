@@ -371,7 +371,7 @@ impl ClaudeHome {
 /// `~/.claude` is a symlink, not a directory or another unprivileged uid's
 /// (`owner`'s, when the daemon keeps it for that user), or, unless `create`,
 /// absent.
-fn open_config(
+pub(super) fn open_config(
     home: &Path,
     create: bool,
     owner: Option<FileOwner>,

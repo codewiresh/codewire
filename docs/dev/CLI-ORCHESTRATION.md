@@ -288,20 +288,16 @@ them. What differs is the permission mode:
 | Placement | Permission mode | Why |
 | --- | --- | --- |
 | Trusted host | None passed: the user's own default mode decides | The user's rules on their own machine |
-| Local VM, platform sandbox | `--permission-mode auto` today. Target, not shipped (#5813): `--permission-mode bypassPermissions` | A headless turn can use tools such as Bash with no person to answer a prompt |
+| Local VM, platform sandbox | `--permission-mode bypassPermissions` (#5813) | A headless turn can use tools such as Bash with no person to answer a prompt |
 
-Verified against Claude Code 2.1.308: `auto` is one of
-`--permission-mode`'s choices and needs no separate opt-in. The argument
-outranks `permissions.defaultMode` in the user's settings. A
-`permissions.disableAutoMode` setting (the user's or an administrator's) still
-turns auto mode off, and Claude Code then starts in its default mode, where a
-tool that needs approval is refused: nobody answers a headless turn, and the
-driver declines every control request. The provider can also refuse auto mode
-for an account or a model. Auto mode relies on safety verdicts the provider
-returns with its responses, so in a Sandbox it depends on the credential route
-passing responses through unchanged.
+Checked against Claude Code 2.1.308 and 2.1.330: `bypassPermissions` is one
+of `--permission-mode`'s choices, and the argument outranks
+`permissions.defaultMode` in the user's settings. Without the daemon's
+`skipDangerousModePermissionPrompt` (below), an interactive start stops at a
+confirmation screen first. Until #5813, managed Claude used `auto` mode here,
+which relied on safety verdicts the provider returns with its responses.
 
-Target, not shipped (#5813, owner decision: "bypass wins and default"): on a
+Owner decision (#5813): "bypass wins and default". On a
 Sandbox placement, a cloud Sandbox or a local VM, bypass permissions mode
 replaces auto mode for managed Claude, as it becomes the default for `claude`
 typed there (SECRETS-AND-CREDENTIALS.md, the Claude home paragraph). Every tool

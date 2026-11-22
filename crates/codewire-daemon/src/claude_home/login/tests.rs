@@ -939,10 +939,17 @@ fn deselection_removes_only_codewires_login() {
     fixture.store(&json!({ "claudeAiOauth": users_login() }));
     home.prepare(clients(&[]), false);
     assert_eq!(fixture.json(), json!({ "claudeAiOauth": users_login() }));
-    // An absent `~/.claude` is not created.
+    // Login cleanup writes no login into an absent `~/.claude`: the pass
+    // creates it only for Claude Code's settings (`settings`, #5813).
     let empty = Fixture::new();
     ClaudeHome::new(empty.home(), Path::new("/workspace")).prepare(clients(&[]), false);
-    assert!(!empty.config().exists());
+    let mut names: Vec<_> = std::fs::read_dir(empty.config())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["settings.json"]);
+    assert!(!empty.credentials().exists());
     assert_eq!(
         ClaudeHome::new(empty.home(), Path::new("/workspace")).credentials_path(),
         empty.credentials()

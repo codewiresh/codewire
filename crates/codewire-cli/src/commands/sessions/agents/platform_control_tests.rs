@@ -755,9 +755,12 @@ fn platform_peer_arguments_are_exactly_the_drivers_for_its_route() {
     };
     for established in [false, true] {
         let saved = state(established, Some(&session));
-        // Exactly the Sandbox launch, auto mode included.
+        // Exactly the Sandbox launch, bypass mode included.
         let exact = claude_arguments(&claude, true, established, &session);
-        assert_eq!(exact[exact.len() - 2..], ["--permission-mode", "auto"]);
+        assert_eq!(
+            exact[exact.len() - 2..],
+            ["--permission-mode", "bypassPermissions"]
+        );
         assert!(check_peer_arguments(&claude, Route::Anthropic, Some(&saved), &exact).is_ok());
         // A trusted host's launch (no permission mode) is not a hosted one.
         let host = claude_arguments(&claude, false, established, &session);
@@ -779,9 +782,10 @@ fn platform_peer_arguments_are_exactly_the_drivers_for_its_route() {
                 "{widened:?}"
             );
         }
-        let mut bypass = exact.clone();
-        *bypass.last_mut().unwrap() = "bypassPermissions".into();
-        assert!(check_peer_arguments(&claude, Route::Anthropic, Some(&saved), &bypass).is_err());
+        // Another mode in its place is not the hosted launch either.
+        let mut auto = exact.clone();
+        *auto.last_mut().unwrap() = "auto".into();
+        assert!(check_peer_arguments(&claude, Route::Anthropic, Some(&saved), &auto).is_err());
         // The other conversation flag, another model or another conversation.
         let flipped = state(!established, Some(&session));
         assert!(check_peer_arguments(&claude, Route::Anthropic, Some(&flipped), &exact).is_err());

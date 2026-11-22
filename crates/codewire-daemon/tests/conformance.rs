@@ -2295,3 +2295,42 @@ async fn a_forward_dropped_right_after_its_last_write_delivers_all_of_it() {
     assert!(received == upload, "the bytes differ");
     harness.shutdown().await;
 }
+
+/// The daemon a trusted host serves (`serve_grpc_with_incoming`, as the host
+/// daemon in `crates/codewire-cli/src/commands/host.rs` does) never prepares
+/// Claude Code's home, so bypass permissions mode is never made a host's
+/// default (#5813): only a Sandbox placement's launch writes those settings.
+#[tokio::test]
+async fn a_trusted_hosts_daemon_never_writes_claude_code_settings() {
+    let temp = tempfile::tempdir().expect("host daemon roots");
+    let workspace_root = temp.path().join("workspace");
+    let home_root = temp.path().join("home");
+    std::fs::create_dir_all(workspace_root.join("repository/.git")).expect("repository");
+    let daemon = DaemonHarness::spawn_at(workspace_root, home_root.clone()).await;
+    let mut client = daemon.client().await;
+    let session_id = client
+        .launch_session(v1::LaunchSessionRequest {
+            command: vec!["sh".into(), "-c".into(), "exit 0".into()],
+            ..Default::default()
+        })
+        .await
+        .expect("launch a host session")
+        .into_inner()
+        .session
+        .expect("host session")
+        .session_id;
+    wait_for_session_state(
+        &mut client,
+        &session_id,
+        &[v1::SessionLifecycleState::Exited],
+    )
+    .await;
+    for written in [".claude.json", ".claude"] {
+        assert!(
+            std::fs::symlink_metadata(home_root.join(written)).is_err(),
+            "{written}"
+        );
+    }
+    drop(client);
+    daemon.shutdown().await;
+}

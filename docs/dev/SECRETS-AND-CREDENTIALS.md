@@ -537,8 +537,8 @@ such as hooks, without that question. Other folders, such as the home
 directory, still ask. A local VM's guest daemon does the same for the workload
 user.
 
-Target, not shipped (#5813): `claude` in a Sandbox, a cloud Sandbox or a local
-VM, starts with no screen at all, in bypass permissions mode. Whatever clients are selected, the same pass also
+`claude` in a Sandbox, a cloud Sandbox or a local VM, starts with no screen at
+all, in bypass permissions mode (#5813). Whatever clients are selected, the same pass also
 sets in `~/.claude/settings.json`:
 - `permissions.defaultMode: "bypassPermissions"`, so plain `claude` runs every
   tool without asking, as `--dangerously-skip-permissions` does;
@@ -3275,8 +3275,7 @@ guarantee. Your and the repository's Claude settings apply as they do for
 declared `CLAUDE_CODE_USE_BEDROCK`, can move it to another provider or
 credential. No Codewire-held material is involved either way: the Sandbox
 holds only the placeholder. On a Sandbox placement it starts with
-`--permission-mode auto`; target, not shipped (#5813), it starts with
-`--permission-mode bypassPermissions`. See
+`--permission-mode bypassPermissions` (#5813). See
 [CLI-ORCHESTRATION.md](CLI-ORCHESTRATION.md) for what that argument outranks.
 
 ### Codex home in hosted Sandboxes
