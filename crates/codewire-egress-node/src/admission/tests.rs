@@ -20,6 +20,9 @@ struct Fake {
     watches: AtomicUsize,
     /// How each watch call ends, in order; past the end it never does.
     watch_ends: Mutex<Vec<Result<(), CallError>>>,
+    /// Whether each watch call delivers an assignment before it ends, in
+    /// order; past the end it does.
+    watch_delivers: Mutex<Vec<bool>>,
 }
 
 impl Fake {
@@ -29,6 +32,7 @@ impl Fake {
             admits: AtomicUsize::new(0),
             watches: AtomicUsize::new(0),
             watch_ends: Mutex::new(Vec::new()),
+            watch_delivers: Mutex::new(Vec::new()),
         })
     }
 }
@@ -66,7 +70,13 @@ impl Admits for Fake {
             let mut ends = self.watch_ends.lock().unwrap();
             (!ends.is_empty()).then(|| ends.remove(0))
         };
-        on_change(Err(AssignmentError::Missing));
+        let delivers = {
+            let mut delivers = self.watch_delivers.lock().unwrap();
+            delivers.is_empty() || delivers.remove(0)
+        };
+        if delivers {
+            on_change(Err(AssignmentError::Missing));
+        }
         async move {
             match end {
                 Some(end) => end,
@@ -300,6 +310,57 @@ async fn a_lost_watch_is_opened_again_and_a_watch_orchestration_ends_closes_the_
     // The watch's last change arrived, and the ended Pod closed the channel.
     assert!(receiver.borrow_and_update().is_err());
     assert!(receiver.changed().await.is_err());
+}
+
+/// Follows a watch scripted to end as `ends`, delivering as `delivers`,
+/// and returns the number of watches opened and the time spent waiting.
+async fn follow(ends: Vec<Result<(), CallError>>, delivers: Vec<bool>) -> (usize, Duration) {
+    let fake = Fake::admitting();
+    *fake.watch_ends.lock().unwrap() = ends;
+    *fake.watch_delivers.lock().unwrap() = delivers;
+    let (changes, _receiver) = watch::channel(Ok(Assignment::Unbound {
+        platform: Vec::new(),
+    }));
+    let started = tokio::time::Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(600),
+        follow_assignment(
+            Arc::clone(&fake),
+            POD.to_string(),
+            "workspace".into(),
+            changes,
+        ),
+    )
+    .await
+    .unwrap();
+    (fake.watches.load(Ordering::SeqCst), started.elapsed())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_watch_that_delivered_and_reached_its_lifetime_is_opened_again_at_once() {
+    let (watches, waited) = follow(vec![Err(CallError::Expired), Ok(())], Vec::new()).await;
+    assert_eq!(watches, 2);
+    assert_eq!(waited, Duration::ZERO);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_backoff_starts_over_after_a_watch_that_delivered() {
+    let lost = || Err(CallError::Unavailable("down".into()));
+    let (watches, waited) = follow(vec![lost(), lost(), lost(), Ok(())], Vec::new()).await;
+    assert_eq!(watches, 4);
+    assert_eq!(waited, 3 * WATCH_RETRY_MIN);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_watch_that_never_delivered_backs_off_even_at_its_deadline() {
+    let (watches, waited) = follow(
+        vec![Err(CallError::Expired), Err(CallError::Expired), Ok(())],
+        vec![false, false],
+    )
+    .await;
+    assert_eq!(watches, 3);
+    // 1 s, then 2 s: nothing was delivered, so neither is a lifetime.
+    assert_eq!(waited, 3 * WATCH_RETRY_MIN);
 }
 
 #[tokio::test]

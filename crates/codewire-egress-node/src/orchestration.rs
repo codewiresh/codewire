@@ -30,6 +30,12 @@ use crate::interception::{Interception, interception};
 /// The longest one unary call to orchestration may take.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long one assignment watch stream runs before cw-egress opens it again.
+/// Orchestration sends only on change, so this bounds how long a connection
+/// that died without a word goes unnoticed. A stream that reaches it after
+/// delivering is opened again at once (#4000).
+pub const WATCH_LIFETIME: Duration = Duration::from_secs(60);
+
 /// A destination every sandbox may reach whatever its policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformAllow {
@@ -160,6 +166,10 @@ pub enum CallError {
     /// established one keeps its last assignment.
     #[error("orchestration is unavailable: {0}")]
     Unavailable(String),
+    /// The call reached its deadline. For an assignment watch that has
+    /// delivered, that is its [`WATCH_LIFETIME`], not an outage.
+    #[error("the call to orchestration reached its deadline")]
+    Expired,
 }
 
 impl From<ConnectError> for CallError {
@@ -169,6 +179,7 @@ impl From<ConnectError> for CallError {
             | ErrorCode::Unauthenticated
             | ErrorCode::InvalidArgument => Self::Refused,
             ErrorCode::ResourceExhausted => Self::Limited,
+            ErrorCode::DeadlineExceeded => Self::Expired,
             _ => Self::Unavailable(format!("{:?}", error.code)),
         }
     }
@@ -239,7 +250,8 @@ impl Orchestration {
     }
 
     /// Follows an admitted Pod's assignment. `on_change` gets each one, the
-    /// current first; the call returns when orchestration ends the stream.
+    /// current first; the call returns when orchestration ends the stream,
+    /// or with [`CallError::Expired`] after [`WATCH_LIFETIME`].
     pub async fn watch(
         &self,
         pod_uid: &str,
@@ -254,7 +266,9 @@ impl Orchestration {
                     pod_name: pod_name.to_owned(),
                     ..Default::default()
                 },
-                self.options()?,
+                // A deadline bounds the whole stream, so the unary one would
+                // end it at 5 s.
+                self.options()?.with_timeout(WATCH_LIFETIME),
             )
             .await?;
         while let Some(message) = stream.message::<WatchAssignmentResponse>().await? {
@@ -433,6 +447,10 @@ mod tests {
         assert!(matches!(
             CallError::from(ConnectError::unavailable("down")),
             CallError::Unavailable(_)
+        ));
+        assert!(matches!(
+            CallError::from(ConnectError::deadline_exceeded("lifetime")),
+            CallError::Expired
         ));
     }
 }

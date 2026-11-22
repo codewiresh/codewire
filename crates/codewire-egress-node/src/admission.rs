@@ -29,6 +29,8 @@ use crate::reporter::Reporter;
 
 /// How long a guest has to send its hello, and cw-egress to answer it.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// The first wait before a lost assignment watch is opened again.
+const WATCH_RETRY_MIN: Duration = Duration::from_secs(1);
 /// The longest wait before a lost assignment watch is opened again.
 const WATCH_RETRY_MAX: Duration = Duration::from_secs(30);
 
@@ -217,26 +219,35 @@ async fn read_hello(stream: &mut TcpStream) -> Result<GuestHello, hello::HelloEr
 
 /// Follows the Pod's assignment into `changes` until orchestration ends the
 /// Pod or the supervisor drops the stream. Through an orchestration outage
-/// the stream keeps its last assignment, and the watch is opened again.
+/// the stream keeps its last assignment, and the watch is opened again. The
+/// backoff starts over after a watch that delivered, so one outage doesn't
+/// slow every later reopening.
 async fn follow_assignment<A: Admits>(
     admits: Arc<A>,
     pod_uid: String,
     pod_name: String,
     changes: watch::Sender<Result<Assignment, AssignmentError>>,
 ) {
-    let mut retry = Duration::from_secs(1);
+    let mut retry = WATCH_RETRY_MIN;
     loop {
+        let mut delivered = false;
         let watched = tokio::select! {
             () = changes.closed() => return,
             watched = admits.watch(&pod_uid, &pod_name, |assignment| {
+                delivered = true;
                 // A receiver that is gone is noticed by `closed` above.
                 let _ = changes.send(assignment);
             }) => watched,
         };
+        if delivered {
+            retry = WATCH_RETRY_MIN;
+        }
         match watched {
             // Orchestration ended the Pod's stream: the Pod is gone, and the
             // closed channel tells the supervisor.
             Ok(()) | Err(CallError::Refused) => return,
+            // A working stream reached its lifetime.
+            Err(CallError::Expired) if delivered => {}
             Err(error) => {
                 tracing::warn!(pod = %pod_uid, %error, "the assignment watch was lost; retrying");
                 tokio::select! {
