@@ -32,6 +32,31 @@ environment activity command carries it as a required positive
 `operation_generation`. No command form omits the generation. The external
 signal that starts a command does not carry it.
 
+### A run's history is bounded
+
+A Sandbox's one workflow lives as long as the Sandbox, and every command it
+handles adds about ten events, a periodic reconcile included. A worker that
+does not have the workflow cached, as after every orchestration restart,
+replays the whole history before it can handle the next command. A history
+of about 20,000 events took more memory than orchestration's limit and
+longer than the 10 s workflow-task timeout (#5856), so the replay never
+finished and was retried.
+
+So a run ends once it is past 2,000 events, or once Temporal suggests it:
+after finishing a command, with no command queued and no handler running,
+the run continues as new with no command of its own. The workflow id stays
+the same, so the next signal reaches the new run. The new run claims a new
+generation before its first command does any work, as any replacement run
+does (below), so the ended run is fenced.
+
+The check runs only while the workflow is not replaying. A run ends at the
+end of its history, and an open run's history never holds that end, so
+replaying an open run never reaches a point where it continued. This also
+lets a run that predates the bound end at its next command. A patch could
+not do that: replay records the patch's answer as absent at the first check
+and keeps it. A query that replays a run which has continued as new cannot
+replay its end, so it fails; the open run answers queries.
+
 ### Claim
 
 `ActivityAuthority::claim` records claims in
@@ -142,8 +167,8 @@ Rules:
   - The command sits behind the `retry-setup-4767` workflow patch. The SDK
     records a patch's answer once per workflow, so a workflow that skipped a
     `retry_setup` before the patch ignores every later one while the RPC
-    returns Ok. Environment workflows never continue-as-new, so that lasts
-    until the Sandbox is destroyed. It affects only a Sandbox whose Retry was
+    returns Ok. That lasts until the run continues as new (see "A run's
+    history is bounded"). It affects only a Sandbox whose Retry was
     signalled during the rollout.
 - `AuthorityLost` propagates through every setup path. It is never turned
   into a warning or followed by advancing to the next setup phase.
