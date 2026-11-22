@@ -22,6 +22,7 @@ the first Production release after codewire/deploy#245.
 | `billing-zero-refusal` | observed 2026-11-11 and 2026-11-13 (#3381) | not yet observed |
 | `billing-admin-adjust` | not yet observed | not yet observed |
 | `billing-banner` | not yet observed | not yet observed |
+| `billing-admin-prices` | not yet observed | not yet observed |
 | `billing-operator-notice` | not yet observed (not yet built, #5358) | not yet observed |
 | `billing-notice` | sent once observed 2026-11-13 (#4087); failure backoff not observed | not yet observed |
 | `billing-stripe-delivery` | observed 2026-10-24 (#3263) | endpoint created 2026-10-24; delivery not yet observed |
@@ -353,6 +354,31 @@ Issue: #4754. Design: private-docs `designs/billing-compute-credits.md`,
     and the refusal.
 - **Gotchas:** where credit isn't enforced (`CODEWIRE_CREDIT_ENFORCEMENT`
   unset), there is no banner at all: nothing would be refused or charged.
+- **Observed:** not yet observed.
+
+## 12. `billing-admin-prices`: an administrator sets the prices
+
+Issue: #5782. The rule is [`docs/dev/BILLING.md`](../dev/BILLING.md),
+"Prices".
+
+- **Entry points:** the admin panel's Pricing page, the public pricing page,
+  home, the Billing page and the Sandboxes menu's estimate.
+- **States to exercise:**
+  - a rate changed, its old and new value shown before it saves;
+  - the suspended or hibernated storage rate at 0;
+  - Unlimited, which can't be changed;
+  - a non-administrator, who can't open the page or make the call.
+- **Driving it:** on Dev, as a platform administrator, raise Regular's vCPU
+  price by a cent an hour. Keep a Sandbox of a metered test organization
+  running across the change, then set the price back.
+- **Proof:**
+  - the page shows the old and new value before saving, and one audit
+    entry records the administrator, the card, the rate and both values;
+  - the public pricing page, home, the Billing page and the Sandboxes
+    estimate show the new price without a release;
+  - the first draw after the change uses the new price, and the draws
+    before it keep their amounts in the ledger;
+  - setting it back does the same in reverse.
 - **Observed:** not yet observed.
 
 ## 11. `billing-operator-notice`: the operator is told when credit is bought
