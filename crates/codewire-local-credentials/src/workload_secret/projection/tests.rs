@@ -182,6 +182,30 @@ fn denied_or_missing_winner_never_falls_back_to_project_material() {
     }
 }
 
+/// One winner's material missing fails the whole seal, even when another
+/// winner's was read: a projection is never a partial set (#5413).
+#[test]
+fn one_missing_winner_seals_nothing_for_the_others() {
+    let (_temp, authority, store, _project_id) = fixture();
+    authority
+        .set_user_workload_secret("SECOND", ProtectedValue::from_slice(b"second").unwrap())
+        .unwrap();
+    store.delete(&user_entry(&authority, "SHARED")).unwrap();
+    store.reads.lock().unwrap().clear();
+    let user_only = LocalLaunchSecretSelection {
+        user: true,
+        ..Default::default()
+    };
+    let recipient = ProjectionRecipient::new();
+    assert_eq!(
+        authority
+            .seal_workload_projection(&user_only, &context(), recipient.public_key())
+            .unwrap_err(),
+        LocalCredentialError::WorkloadSecretMaterialMissing
+    );
+    assert!(!store.reads.lock().unwrap().is_empty());
+}
+
 #[test]
 fn nonready_winner_does_not_disappear_into_a_lower_priority_source() {
     let (_temp, authority, store, project_id) = fixture();

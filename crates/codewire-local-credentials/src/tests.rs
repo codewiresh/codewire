@@ -242,6 +242,16 @@ fn workload_secret_journal_count(authority: &LocalCredentialAuthority<TestProtec
         .expect("count workload-secret journals")
 }
 
+/// The next secret write, which first finishes what an earlier one left:
+/// reads never touch the store, so recovery in a live authority comes with
+/// the next write (#5413). This one leaves no secret behind.
+fn next_secret_write(authority: &LocalCredentialAuthority<TestProtectedStore>) {
+    authority
+        .set_user_workload_secret("NEXT_WRITE", material(b"synthetic-next"))
+        .unwrap();
+    authority.delete_user_workload_secret("NEXT_WRITE").unwrap();
+}
+
 fn catalog_with_incompatible_api_key_slot() -> ProviderCatalog {
     ProviderCatalog::from_definitions([ProviderDefinition {
         id: provider("openai"),
@@ -3578,6 +3588,7 @@ fn workload_secret_initial_write_recovers_in_live_authority_for_both_fault_timin
         assert_eq!(store.entry_values(), expected_values);
 
         store.clear_faults();
+        next_secret_write(&authority);
         assert!(authority.list_user_workload_secrets().unwrap().is_empty());
         assert!(workload_secret_rows(&authority).is_empty());
         assert_eq!(workload_secret_journal_count(&authority), 0);
@@ -3618,6 +3629,7 @@ fn workload_secret_rotation_write_recovers_in_live_authority_for_both_fault_timi
         assert_eq!(store.entry_values(), expected_values);
 
         store.clear_faults();
+        next_secret_write(&authority);
         let recovered = authority.list_user_workload_secrets().unwrap();
         assert_eq!(recovered.len(), 1);
         assert!(!recovered[0].protected_store_cleanup_pending);
@@ -3662,6 +3674,7 @@ fn committed_workload_secret_rotation_reports_cleanup_pending_for_both_fault_tim
         assert_eq!(store.entry_values(), expected_values);
 
         store.clear_faults();
+        next_secret_write(&authority);
         let recovered = authority.list_user_workload_secrets().unwrap();
         assert_eq!(recovered.len(), 1);
         assert!(!recovered[0].protected_store_cleanup_pending);
@@ -3701,6 +3714,7 @@ fn workload_secret_delete_recovers_in_live_authority_for_both_fault_timings() {
         assert_eq!(store.entry_values(), expected_values);
 
         store.clear_faults();
+        next_secret_write(&authority);
         assert!(authority.list_user_workload_secrets().unwrap().is_empty());
         assert!(workload_secret_rows(&authority).is_empty());
         assert_eq!(workload_secret_journal_count(&authority), 0);
@@ -3882,7 +3896,7 @@ fn the_credential_kinds_the_local_authority_stores_are_pinned_to_its_protocol() 
         admitted, expected,
         "bump the authority protocol with this set"
     );
-    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 30);
+    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 31);
 }
 
 /// The store keeps one default profile as the cloud does (#4717): the first

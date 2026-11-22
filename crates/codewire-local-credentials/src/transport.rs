@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 30;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 31;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -90,6 +90,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
     (
         30,
         "rotation, deletion, the journal's reconcile and refresh admission, abort and promotion run on their own connection, so a frozen keyring inside one never stalls a revoke, a listing or a lease (#5413)",
+    ),
+    (
+        31,
+        "a workload secret's set, delete and a launch's projection run on the material connection, and listing and rename show only ready secrets, so a frozen keyring never stalls a secrets listing or another VM's launch (#5413)",
     ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);

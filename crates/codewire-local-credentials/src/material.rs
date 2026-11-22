@@ -6,7 +6,9 @@
 //! write would wait behind it. So each store call checks the connection is in
 //! autocommit, and refuses otherwise.
 
-use codewire_protected_store::{ProtectedEntryId, ProtectedStore, ProtectedValue};
+use codewire_protected_store::{
+    ProtectedEntryId, ProtectedStore, ProtectedStorePersistence, ProtectedValue,
+};
 use rusqlite::Connection;
 
 use crate::LocalCredentialError;
@@ -46,6 +48,11 @@ impl<'a, S: ProtectedStore> MaterialStore<'a, S> {
     pub(crate) fn delete(&self, id: &ProtectedEntryId) -> Result<(), LocalCredentialError> {
         self.outside_transaction()?;
         Ok(self.store.delete(id)?)
+    }
+
+    /// The store's lifetime: a property of the store, not a call to it.
+    pub(crate) fn persistence(&self) -> ProtectedStorePersistence {
+        self.store.persistence()
     }
 
     fn outside_transaction(&self) -> Result<(), LocalCredentialError> {

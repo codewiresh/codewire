@@ -16,9 +16,10 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::{
-    InternalWorkloadSecret, SecretScope, load_secret_by_id, require_project, validate_secret_key,
-    validate_secret_value,
+    InternalWorkloadSecret, SecretScope, load_secret_by_id, require_project, snapshot,
+    validate_secret_key, validate_secret_value,
 };
+use crate::material::MaterialStore;
 use crate::{
     LocalCredentialAuthority, LocalCredentialError, MaterialState, database_error, unix_millis,
 };
@@ -64,7 +65,10 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     ) -> Result<Vec<ProjectionSourceInventory>, LocalCredentialError> {
         selection.validate()?;
         let connection = self.connection()?;
-        Ok(capture_local_sources(&connection, selection)?.inventories)
+        Ok(snapshot(&connection, |connection| {
+            capture_local_sources(connection, selection)
+        })?
+        .inventories)
     }
 
     /// Seal this authority's part of one mixed-origin launch. The transport
@@ -90,8 +94,11 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         if inventories.len() > 3 {
             return Err(LocalCredentialError::InvalidWorkloadSecret);
         }
-        let connection = self.connection()?;
-        let mut capture = capture_local_sources(&connection, selection)?;
+        let connection = self.material_connection()?;
+        let material = MaterialStore::new(&connection, &self.protected_store);
+        let mut capture = snapshot(&connection, |connection| {
+            capture_local_sources(connection, selection)
+        })?;
         if !capture.inventories.iter().eq(inventories
             .iter()
             .filter(|inventory| inventory.contributor == ProjectionContributor::Local))
@@ -113,7 +120,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         if !capture.winners.keys().eq(winning_keys.iter()) {
             return Err(LocalCredentialError::InvalidWorkloadSecret);
         }
-        let projection = self.read_projection_values(capture.winners, context)?;
+        let projection = read_projection_values(&material, capture.winners, context)?;
         seal_environment_projection_fragment(
             projection,
             context,
@@ -130,8 +137,11 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     /// environment lifecycle admission and the complete selection fingerprint.
     /// This method cannot establish either from unchecked request fields.
     ///
-    /// Metadata selection and protected reads hold the same authority lock, so
-    /// rotation/deletion cannot change the winner halfway through assembly.
+    /// Selection and protected reads both run on the material connection, which
+    /// secret writers also hold, so rotation/deletion cannot change the winner
+    /// halfway through assembly (#5413). The selection is captured once, as a
+    /// launch-time snapshot: a metadata change after it applies to the next
+    /// launch.
     /// Missing/denied winning material fails the whole projection; a lower
     /// precedence source is never a fallback. Provider entries are not queried.
     pub fn seal_workload_projection(
@@ -142,46 +152,50 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     ) -> Result<Vec<u8>, LocalCredentialError> {
         selection.validate()?;
         validate_launch(context, recipient)?;
-        let connection = self.connection()?;
-        let mut winners = capture_local_sources(&connection, selection)?.winners;
+        let connection = self.material_connection()?;
+        let material = MaterialStore::new(&connection, &self.protected_store);
+        let mut winners = snapshot(&connection, |connection| {
+            capture_local_sources(connection, selection)
+        })?
+        .winners;
         winners.retain(|key, _| !selection.overridden_keys.contains(key));
-        let projection = self.read_projection_values(winners, context)?;
+        let projection = read_projection_values(&material, winners, context)?;
         // Protected-store I/O is blocking and may outlast the original request.
         // Re-read time; never turn an expired result into a fresh lifetime.
         seal_environment_projection(projection, context, recipient, unix_millis()?)
             .map_err(|_| LocalCredentialError::InvalidWorkloadSecret)
     }
+}
 
-    // Both callers retain their original connection guard through this read
-    // and the final seal. This helper never reopens or releases that lock.
-    fn read_projection_values(
-        &self,
-        winners: BTreeMap<String, InternalWorkloadSecret>,
-        context: &ProjectionContext,
-    ) -> Result<EnvironmentProjection, LocalCredentialError> {
-        let mut values = Vec::with_capacity(winners.len());
-        let mut encoded_bytes = 4_usize;
-        for (key, secret) in winners {
-            context
-                .validate_at(unix_millis()?)
-                .map_err(|_| LocalCredentialError::InvalidWorkloadSecret)?;
-            if secret.material_state != MaterialState::Ready {
-                return Err(LocalCredentialError::WorkloadSecretMaterialMissing);
-            }
-            let value = self
-                .protected_store
-                .get(&secret.protected_entry_id)?
-                .ok_or(LocalCredentialError::WorkloadSecretMaterialMissing)?;
-            validate_secret_value(value.expose_secret())?;
-            encoded_bytes = encoded_bytes
-                .checked_add(8 + key.len() + value.expose_secret().len())
-                .filter(|size| *size <= MAX_ENVIRONMENT_PROJECTION_BYTES)
-                .ok_or(LocalCredentialError::InvalidWorkloadSecret)?;
-            values.push((key, Zeroizing::new(value.expose_secret().to_vec())));
+/// Both callers hold the material connection through this read and the final
+/// seal, outside any transaction. Any winner whose material can't be read
+/// fails the whole projection: it never seals a partial set.
+fn read_projection_values<S: ProtectedStore>(
+    material: &MaterialStore<'_, S>,
+    winners: BTreeMap<String, InternalWorkloadSecret>,
+    context: &ProjectionContext,
+) -> Result<EnvironmentProjection, LocalCredentialError> {
+    let mut values = Vec::with_capacity(winners.len());
+    let mut encoded_bytes = 4_usize;
+    for (key, secret) in winners {
+        context
+            .validate_at(unix_millis()?)
+            .map_err(|_| LocalCredentialError::InvalidWorkloadSecret)?;
+        if secret.material_state != MaterialState::Ready {
+            return Err(LocalCredentialError::WorkloadSecretMaterialMissing);
         }
-        EnvironmentProjection::from_entries(values)
-            .map_err(|_| LocalCredentialError::InvalidWorkloadSecret)
+        let value = material
+            .get(&secret.protected_entry_id)?
+            .ok_or(LocalCredentialError::WorkloadSecretMaterialMissing)?;
+        validate_secret_value(value.expose_secret())?;
+        encoded_bytes = encoded_bytes
+            .checked_add(8 + key.len() + value.expose_secret().len())
+            .filter(|size| *size <= MAX_ENVIRONMENT_PROJECTION_BYTES)
+            .ok_or(LocalCredentialError::InvalidWorkloadSecret)?;
+        values.push((key, Zeroizing::new(value.expose_secret().to_vec())));
     }
+    EnvironmentProjection::from_entries(values)
+        .map_err(|_| LocalCredentialError::InvalidWorkloadSecret)
 }
 
 fn validate_launch(

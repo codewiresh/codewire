@@ -3638,8 +3638,31 @@ These rules hold on it:
 `cw` with it replaces a running authority that has only the add's step once
 no local VM runs.
 
-**Not yet** (#5413's last part): workload secrets still call the store under
-the metadata connection.
+**Workload secrets** follow the same rule:
+- **Writers on the material connection.** Setting, deleting and a secret
+  project's delete run on the material connection, under its mutex, with
+  their store calls outside any transaction. Each first finishes what an
+  earlier write left, so a write cut short is cleaned up by the next one, or
+  by start-up recovery.
+- **Reads touch no store.** Listing, metadata resolution and rename run on
+  the metadata connection and make no store call. A listing reads one
+  snapshot and shows only `ready` secrets: during a first set its key is not
+  listed until the value is stored, and during a delete it is already gone.
+  A rename of a secret being written or deleted is refused as not found.
+- **A launch's projection reads one generation.** Sealing a VM's workload
+  secrets runs on the material connection: it captures the selection in one
+  read transaction, ends it, then reads each winner's value through the
+  store. Secret writers hold the same connection, so no winner's generation
+  is retired or replaced during the read. The selection is a launch-time
+  snapshot: a change after it applies to the next launch. If any winner's
+  value can't be read, nothing is sealed, never a partial set.
+- **Any later value read** follows the same rule: no metadata connection held
+  across its store call, and it fails closed if the generation it read was
+  retired in between.
+
+**Workload secrets on the material connection have their own authority
+protocol step,** so a `cw` with them replaces a running authority that has
+only the material connection's step once no local VM runs.
 
 ## Dashboard
 
