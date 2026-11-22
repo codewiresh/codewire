@@ -187,3 +187,33 @@ fn a_published_refresh_forgets_the_wait() {
     start(&authority, &later);
     rate_limit(&authority, &later, 60).expect("a later refresh may wait once");
 }
+
+/// A local revoke is one write that leaves the credential revoked, so it
+/// never fences a waiting sign-in and leaves it active: no refresh begins
+/// after it, and none can wait a second time. The revocation generation
+/// moves only with the status or with the material generation, so a wait is
+/// never forgotten while its sign-in stays the same and active.
+#[test]
+fn a_revoke_during_the_wait_leaves_no_refresh_to_wait_again() {
+    let (_temp, authority, credential, environment_id) = setup("revoked");
+    let first = begin(&authority, &environment_id).expect("begin");
+    start(&authority, &first);
+    rate_limit(&authority, &first, 60).expect("rate limit");
+
+    let revoked = authority
+        .revoke_credential(&credential.metadata.id)
+        .expect("revoke during the wait");
+    assert_eq!(revoked.metadata.status, CredentialStatus::Revoked);
+    assert_eq!(
+        revoked.metadata.revocation_generation,
+        credential.metadata.revocation_generation + 1
+    );
+    end_wait(&authority, &credential.metadata.id);
+    assert_eq!(
+        begin(&authority, &environment_id).err(),
+        Some(LocalCredentialError::CredentialWithheld(
+            codewire_access::WithheldReason::Revoked
+        )),
+        "a revoked sign-in begins no refresh"
+    );
+}
