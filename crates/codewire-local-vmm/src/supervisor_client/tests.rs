@@ -243,11 +243,22 @@ impl LocalSupervisorService for ProtocolPeer {
         Err(Status::unimplemented("unused synthetic method"))
     }
 
+    /// Answers from the same queue as a watch: one update, or a failure.
     async fn get_operation(
         &self,
-        _: Request<v1::GetOperationRequest>,
+        request: Request<v1::GetOperationRequest>,
     ) -> Result<Response<v1::Operation>, Status> {
-        Err(Status::unimplemented("unused synthetic method"))
+        self.record(format!(
+            "get_operation:{}",
+            request.into_inner().operation_id
+        ));
+        match self.replies.lock().unwrap().pop_front() {
+            Some(WatchReply::Updates(mut updates)) if updates.len() == 1 => {
+                updates.remove(0).map(Response::new)
+            }
+            Some(WatchReply::Failure(code)) => Err(Status::new(code, "synthetic operation read")),
+            _ => Err(Status::unimplemented("unused synthetic method")),
+        }
     }
 
     async fn ensure_credential_broker(
@@ -839,6 +850,80 @@ async fn only_a_watch_that_loses_the_supervisor_is_lost_contact() {
         drop(client);
         server.finish().await;
     }
+}
+
+/// #5144: a lost wait names its operation, and the next supervisor's
+/// journal decides what the caller hears: a finished operation's outcome
+/// exactly as a delivered wait's, one still running stays unknown, and one
+/// with no record is said so.
+#[tokio::test]
+async fn a_lost_wait_names_its_operation_and_its_journal_decides_the_outcome() {
+    let initial = operation(v1::OperationPhase::Intent);
+    let id = initial.operation_id.as_str();
+    let server = TestServer::start(
+        valid_info,
+        vec![WatchReply::Failure(tonic::Code::Unavailable)],
+    );
+    let mut client = bounded(NativeSupervisorClient::connect(&server.socket))
+        .await
+        .unwrap();
+    let lost = bounded(client.follow_operation(initial.clone(), &mut |_| {}))
+        .await
+        .unwrap_err();
+    assert!(operation_watch_lost_contact(&lost));
+    assert_eq!(lost_operation_id(&lost), Some(id));
+    drop(client);
+    server.finish().await;
+
+    let mut failed = operation(v1::OperationPhase::Failed);
+    failed.error_code = "start_network_stack_failed".to_owned();
+    let delivered = operation_outcome(failed.clone()).unwrap_err();
+    let server = TestServer::start(
+        valid_info,
+        vec![
+            WatchReply::Updates(vec![Ok(failed)]),
+            WatchReply::Updates(vec![Ok(operation(v1::OperationPhase::Completed))]),
+            WatchReply::Updates(vec![Ok(operation(v1::OperationPhase::EffectApplied))]),
+            WatchReply::Failure(tonic::Code::NotFound),
+            WatchReply::Failure(tonic::Code::Unavailable),
+        ],
+    );
+    let mut client = bounded(NativeSupervisorClient::connect(&server.socket))
+        .await
+        .unwrap();
+    let Journaled::Finished(outcome) = bounded(client.journaled(id)).await.unwrap() else {
+        panic!("a journaled failure is the operation's outcome");
+    };
+    let failure = outcome.unwrap_err();
+    assert_eq!(failure.code(), delivered.code());
+    assert_eq!(failure.message(), delivered.message());
+    assert_eq!(
+        operation_error_code(&failure),
+        Some("start_network_stack_failed")
+    );
+    assert!(!operation_watch_lost_contact(&failure));
+    let Journaled::Finished(outcome) = bounded(client.journaled(id)).await.unwrap() else {
+        panic!("a journaled completion is the operation's outcome");
+    };
+    let completed = outcome.unwrap();
+    assert_eq!(completed.operation_id, id);
+    assert!(matches!(
+        bounded(client.journaled(id)).await.unwrap(),
+        Journaled::Running
+    ));
+    assert!(matches!(
+        bounded(client.journaled(id)).await.unwrap(),
+        Journaled::Unrecorded
+    ));
+    assert_eq!(
+        bounded(client.journaled(id)).await.unwrap_err().code(),
+        tonic::Code::Unavailable
+    );
+    let read = format!("get_operation:{id}");
+    let read = read.as_str();
+    assert_eq!(server.calls(), ["info", read, read, read, read, read]);
+    drop(client);
+    server.finish().await;
 }
 
 #[cfg(target_os = "linux")]

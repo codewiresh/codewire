@@ -563,6 +563,35 @@ impl NativeSupervisorClient {
         }
     }
 
+    /// What this supervisor's journal holds for the operation
+    /// `operation_id`, read once (#5144).
+    pub async fn journaled(&mut self, operation_id: &str) -> Result<Journaled, Status> {
+        let operation = match self
+            .inner
+            .get_operation(v1::GetOperationRequest {
+                operation_id: operation_id.to_owned(),
+                request_id: String::new(),
+            })
+            .await
+        {
+            Ok(response) => response.into_inner(),
+            Err(status) if status.code() == tonic::Code::NotFound => {
+                return Ok(Journaled::Unrecorded);
+            }
+            Err(status) => return Err(status),
+        };
+        if operation.operation_id != operation_id {
+            return Err(Status::internal(
+                "local supervisor answered for another operation",
+            ));
+        }
+        Ok(if operation_terminal(&operation)? {
+            Journaled::Finished(Box::new(operation_outcome(operation)))
+        } else {
+            Journaled::Running
+        })
+    }
+
     /// Waits for `operation` to finish: its terminal state, or the failure
     /// it ended with.
     pub async fn follow(&mut self, operation: v1::Operation) -> Result<v1::Operation, Status> {
@@ -1094,7 +1123,7 @@ pub(crate) fn operation_watch_failure(operation_id: &str, failure: Status) -> St
     )
 }
 
-/// Set on [`operation_watch_lost`] only.
+/// Set on [`operation_watch_lost`] only, to the operation the wait followed.
 const OPERATION_WATCH_LOST_METADATA: &str = "codewire-operation-watch-lost";
 
 /// A wait that lost the supervisor before the operation finished: the
@@ -1105,9 +1134,35 @@ pub(crate) fn operation_watch_lost(operation_id: &str, failure: Status) -> Statu
     let mut status = operation_watch_failure(operation_id, failure);
     status.metadata_mut().insert(
         OPERATION_WATCH_LOST_METADATA,
-        tonic::metadata::MetadataValue::from_static("1"),
+        operation_id
+            .parse()
+            .unwrap_or_else(|_| tonic::metadata::MetadataValue::from_static("")),
     );
     status
+}
+
+/// The operation a lost wait followed, for asking the next supervisor what
+/// its journal holds (#5144).
+pub fn lost_operation_id(status: &Status) -> Option<&str> {
+    status
+        .metadata()
+        .get(OPERATION_WATCH_LOST_METADATA)?
+        .to_str()
+        .ok()
+        .filter(|operation_id| !operation_id.is_empty())
+}
+
+/// What a supervisor's journal holds for an operation another supervisor's
+/// wait lost (#5144).
+#[derive(Debug)]
+pub enum Journaled {
+    /// Its outcome, exactly as a wait that saw it finish would have
+    /// delivered it.
+    Finished(Box<Result<v1::Operation, Status>>),
+    /// It is still running, so its outcome is still unknown.
+    Running,
+    /// This supervisor has no record of it.
+    Unrecorded,
 }
 
 /// Whether `status` is a wait that lost the supervisor before the operation

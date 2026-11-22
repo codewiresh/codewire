@@ -197,6 +197,49 @@ pub(super) fn lost_contact(noun: &str, name: &str, stage: Option<&str>) -> anyho
     )
 }
 
+/// After a wait that lost the supervisor, asks the next one, once, what its
+/// journal holds for the operation (#5144). A finished operation's outcome is
+/// returned as the wait would have delivered it, with a client of the new
+/// supervisor, so a start that failed names its step and reason instead of
+/// "lost contact". One still running stays lost, and one with no record is
+/// said so, never reported as pending.
+pub(super) async fn journaled_after_lost(
+    lost: tonic::Status,
+) -> Result<(NativeSupervisorClient, v1::Operation), tonic::Status> {
+    use codewire_local_vmm::supervisor_client::{Journaled, lost_operation_id};
+
+    let Some(operation_id) = lost_operation_id(&lost).map(str::to_owned) else {
+        return Err(lost);
+    };
+    let Ok(mut client) = native_client().await else {
+        return Err(lost);
+    };
+    match client.journaled(&operation_id).await {
+        Ok(Journaled::Finished(outcome)) => outcome.map(|operation| (client, operation)),
+        Ok(Journaled::Unrecorded) => Err(tonic::Status::failed_precondition(
+            "the local runtime restarted with no record of this operation",
+        )),
+        Ok(Journaled::Running) | Err(_) => Err(lost),
+    }
+}
+
+/// A wait whose result is the environment `name`, after
+/// [`journaled_after_lost`] when it lost the supervisor.
+pub(super) async fn environment_after_lost(
+    waited: Result<v1::Environment, tonic::Status>,
+    name: &str,
+) -> Result<v1::Environment, tonic::Status> {
+    use codewire_local_vmm::supervisor_client::operation_watch_lost_contact;
+
+    match waited {
+        Err(lost) if operation_watch_lost_contact(&lost) => {
+            let (mut client, _) = journaled_after_lost(lost).await?;
+            client.get(name).await
+        }
+        waited => waited,
+    }
+}
+
 /// A create or start wait that ended without success, as the stage to
 /// report and the error. A wait that lost the supervisor (#4418) clears the
 /// open step and names no stage, since the operation may still finish; a
@@ -357,9 +400,21 @@ pub(super) async fn run_native_start(
     progress: &NativeProgress,
 ) -> anyhow::Result<NativeStart> {
     let mut observe = |operation: &v1::Operation| progress.observe(operation);
-    let started = progress
+    let started = match progress
         .tick_while(client.start_observed(name, &mut observe))
-        .await?;
+        .await?
+    {
+        Err(lost) if codewire_local_vmm::supervisor_client::operation_watch_lost_contact(&lost) => {
+            match journaled_after_lost(lost).await {
+                Ok((mut client, completed)) => client
+                    .get(name)
+                    .await
+                    .map(|environment| (environment, completed)),
+                Err(status) => Err(status),
+            }
+        }
+        started => started,
+    };
     Ok(match started {
         Ok((environment, completed)) => {
             progress.complete();

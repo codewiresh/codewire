@@ -731,7 +731,7 @@ pub(crate) async fn create_native_environment(
     let created = progress
         .tick_while(client.create_observed(request.clone(), &mut observe))
         .await?;
-    let environment = match created {
+    let environment = match lifecycle::environment_after_lost(created, &request.name).await {
         Ok(environment) => {
             progress.complete();
             environment

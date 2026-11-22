@@ -96,6 +96,14 @@ installed runtime (orchestrator, 2026-11-15, recorded on #4980).
     SIGTERM.
   - A walk from a scratch `HOME` needs its `cw`'s network allowed by the host
     firewall. The installed paths are allowed; scratch copies are not.
+  - A start that fails says why, with the next step, and never "lost
+    contact" when the operation has a terminal result. If the supervisor
+    stops after journaling the failure, `cw` asks the next one for the
+    operation once and reports its failed step and reason (#5144). Only an
+    operation that is still running reads "lost contact … it may still
+    finish". `supervisor.log` keeps the failed supervisor's lines across
+    restarts, and a supervisor that stops itself logs `supervisor_halted`
+    with its reason.
 - **Observed:**
   - Linux, development builds, 2026-11-15: failure observed. An environment
     and a VM checkpoint were made with #4809's `cw` and runtime (seed 10),
