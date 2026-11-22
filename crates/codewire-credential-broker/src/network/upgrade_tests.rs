@@ -163,6 +163,7 @@ async fn an_upgrade_is_refused_before_any_connection_unless_a_get_to_a_selected_
         upgrade_client: upgrade_client_builder().build().unwrap(),
         selected: BTreeSet::from([HttpProvider::OpenAiApiKey]),
         unresolved: BTreeSet::new(),
+        log_hosts: BTreeSet::new(),
         resolved_address_count: 1,
         reuse: ConnectionReuse::PerRequest,
     };
@@ -241,6 +242,7 @@ fn transport_with(upgrade_client: reqwest::Client) -> ProviderHttpsTransport {
         upgrade_client,
         selected: BTreeSet::from([HttpProvider::OpenAiApiKey]),
         unresolved: BTreeSet::new(),
+        log_hosts: BTreeSet::new(),
         resolved_address_count: 1,
         reuse: ConnectionReuse::PerRequest,
     }

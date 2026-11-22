@@ -152,6 +152,44 @@ fn provider_families_keep_provider_relative_paths_and_queries() {
             "/graphql",
             None,
         ),
+        // Actions reads and a log download (#5737); the broker holds the
+        // exact paths.
+        (
+            "GET",
+            "/repos/owner/repo/actions/runs?branch=main&status=failure",
+            Some("api.github.com"),
+            "github",
+            "github-api",
+            "/repos/owner/repo/actions/runs",
+            Some("branch=main&status=failure"),
+        ),
+        (
+            "GET",
+            "/repos/owner/repo/actions/runs/7/attempts/2/jobs",
+            Some("api.github.com"),
+            "github",
+            "github-api",
+            "/repos/owner/repo/actions/runs/7/attempts/2/jobs",
+            None,
+        ),
+        (
+            "GET",
+            "/repos/owner/repo/actions/jobs/7/logs",
+            Some("api.github.com"),
+            "github",
+            "github-api",
+            "/repos/owner/repo/actions/jobs/7/logs",
+            None,
+        ),
+        (
+            "GET",
+            "/repos/owner/repo/check-runs/7/annotations",
+            Some("api.github.com"),
+            "github",
+            "github-api",
+            "/repos/owner/repo/check-runs/7/annotations",
+            None,
+        ),
         // The API root `gh auth status` reads: GET only, with no query.
         (
             "GET",
@@ -371,6 +409,27 @@ fn rejected_routes() -> Vec<(&'static str, &'static str, Option<&'static str>)> 
         ("GET", "/_codewire/github/owner/repo/readme", None),
         ("GET", "/_codewire/github/", None),
         ("GET", "/repos/owner/repo/actions", Some("api.github.com")),
+        // Actions writes never leave the bridge (#5737).
+        (
+            "POST",
+            "/repos/owner/repo/actions/runs/7/rerun",
+            Some("api.github.com"),
+        ),
+        (
+            "DELETE",
+            "/repos/owner/repo/actions/runs/7",
+            Some("api.github.com"),
+        ),
+        (
+            "GET",
+            "/repos/owner/repo/actions/runs/7/attempts/2/jobs/x",
+            Some("api.github.com"),
+        ),
+        (
+            "POST",
+            "/repos/owner/repo/check-runs/7/annotations",
+            Some("api.github.com"),
+        ),
         ("GET", "/repos/owner/repo/secrets", Some("api.github.com")),
         (
             "GET",

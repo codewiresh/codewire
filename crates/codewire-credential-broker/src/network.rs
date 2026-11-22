@@ -88,6 +88,9 @@ pub struct ProviderHttpsTransport {
     /// [`Self::available`] has any. A request to one is never sent,
     /// and never looked up again.
     unresolved: BTreeSet<&'static str>,
+    /// GitHub's log hosts this transport pinned an address for (#5737). A log
+    /// host that is not here is never dialled, and is no provider's.
+    log_hosts: BTreeSet<&'static str>,
     resolved_address_count: usize,
     reuse: ConnectionReuse,
 }
@@ -163,30 +166,9 @@ impl ProviderHttpsTransport {
         let mut hosts = BTreeSet::new();
         for selected in selections {
             hosts.extend(selected_hosts(selected)?);
+            hosts.extend(log_hosts_for(selected));
         }
-        // One thread a host, all ended when the scope returns: none outlives
-        // this call, so none is left outside the confinement the broker
-        // applies afterwards.
-        let looked_up: Vec<_> = std::thread::scope(|scope| {
-            let lookups: Vec<_> = hosts
-                .iter()
-                .map(|host| scope.spawn(|| lookup(host, OPENAI_PORT)))
-                .collect();
-            lookups.into_iter().map(|lookup| lookup.join()).collect()
-        });
-        Ok(LookedUpHosts(
-            hosts
-                .into_iter()
-                .zip(looked_up)
-                .map(|(host, looked_up)| {
-                    let admitted = match looked_up {
-                        Ok(Ok(addresses)) => admit_resolved_addresses(addresses).ok(),
-                        Ok(Err(_)) | Err(_) => None,
-                    };
-                    (host, admitted)
-                })
-                .collect(),
-        ))
+        Ok(LookedUpHosts(look_up_all(hosts, &lookup)))
     }
 
     /// The transport for `selected` from one start's lookups. A host whose
@@ -210,7 +192,18 @@ impl ProviderHttpsTransport {
                 None => return Err(BrokerUpstreamError::DestinationDenied),
             }
         }
-        Self::pinned(selected, ConnectionReuse::PerRequest, &pinned, unresolved)
+        // A log host without an address is dropped by name; GitHub stays
+        // served.
+        let logs = log_hosts_for(selected)
+            .filter_map(|host| Some((host, looked_up.0.get(host)?.clone()?)))
+            .collect::<Vec<_>>();
+        Self::pinned(
+            selected,
+            ConnectionReuse::PerRequest,
+            &pinned,
+            &logs,
+            unresolved,
+        )
     }
 
     /// The selected hosts this transport has no address for.
@@ -221,7 +214,7 @@ impl ProviderHttpsTransport {
     fn resolve_with(
         selected: &BTreeSet<HttpProvider>,
         reuse: ConnectionReuse,
-        lookup: impl Fn(&str, u16) -> std::io::Result<Vec<SocketAddr>>,
+        lookup: impl Fn(&str, u16) -> std::io::Result<Vec<SocketAddr>> + Sync,
     ) -> Result<Self, BrokerUpstreamError> {
         // This deliberately uses the calling thread instead of Tokio's
         // blocking resolver pool. Broker launch is bounded by the authority's
@@ -233,7 +226,17 @@ impl ProviderHttpsTransport {
             let addresses = lookup(host, OPENAI_PORT).map_err(|_| BrokerUpstreamError::Connect)?;
             pinned.push((*host, admit_resolved_addresses(addresses)?));
         }
-        Self::pinned(selected, reuse, &pinned, BTreeSet::new())
+        // The pooled transport is the hosted credential service's, which
+        // serves guests' log downloads; a per-request one serves sign-in
+        // commands, which follow no log redirect. Log hosts never fail it.
+        let logs = match reuse {
+            ConnectionReuse::Pooled => look_up_all(log_hosts_for(selected).collect(), &lookup)
+                .into_iter()
+                .filter_map(|(host, addresses)| Some((host, addresses?)))
+                .collect(),
+            ConnectionReuse::PerRequest => Vec::new(),
+        };
+        Self::pinned(selected, reuse, &pinned, &logs, BTreeSet::new())
     }
 
     /// The transport for `pinned` hosts and their admitted addresses.
@@ -241,6 +244,7 @@ impl ProviderHttpsTransport {
         selected: &BTreeSet<HttpProvider>,
         reuse: ConnectionReuse,
         pinned: &[(&'static str, Vec<SocketAddr>)],
+        logs: &[(&'static str, Vec<SocketAddr>)],
         unresolved: BTreeSet<&'static str>,
     ) -> Result<Self, BrokerUpstreamError> {
         let resolved_address_count = pinned
@@ -249,7 +253,7 @@ impl ProviderHttpsTransport {
             .sum::<usize>();
         // Both clients take the one pinned list, so they cannot differ.
         let pin = |mut builder: reqwest::ClientBuilder| {
-            for (host, addresses) in pinned {
+            for (host, addresses) in pinned.iter().chain(logs) {
                 builder = builder.resolve_to_addrs(host, addresses);
             }
             builder.build().map_err(|_| BrokerUpstreamError::Protocol)
@@ -261,6 +265,7 @@ impl ProviderHttpsTransport {
             upgrade_client,
             selected: selected.clone(),
             unresolved,
+            log_hosts: logs.iter().map(|(host, _)| *host).collect(),
             resolved_address_count,
             reuse,
         })
@@ -294,6 +299,43 @@ fn slot_hosts(slot: &str) -> &'static [&'static str] {
 
 fn system_lookup(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
     Ok((host, port).to_socket_addrs()?.collect())
+}
+
+/// GitHub's log hosts, for a selection that serves GitHub (#5737).
+fn log_hosts_for(selected: &BTreeSet<HttpProvider>) -> impl Iterator<Item = &'static str> {
+    selected
+        .contains(&HttpProvider::GitHubOAuth)
+        .then(crate::github::log_hosts::log_hosts)
+        .into_iter()
+        .flatten()
+}
+
+/// Each host's admitted addresses, or none, from lookups that all run at
+/// once. One thread a host, all ended when the scope returns: none outlives
+/// this call, so none is left outside the confinement the broker applies
+/// afterwards.
+fn look_up_all(
+    hosts: BTreeSet<&'static str>,
+    lookup: &(impl Fn(&str, u16) -> std::io::Result<Vec<SocketAddr>> + Sync),
+) -> BTreeMap<&'static str, Option<Vec<SocketAddr>>> {
+    let looked_up: Vec<_> = std::thread::scope(|scope| {
+        let lookups: Vec<_> = hosts
+            .iter()
+            .map(|host| scope.spawn(|| lookup(host, OPENAI_PORT)))
+            .collect();
+        lookups.into_iter().map(|lookup| lookup.join()).collect()
+    });
+    hosts
+        .into_iter()
+        .zip(looked_up)
+        .map(|(host, looked_up)| {
+            let admitted = match looked_up {
+                Ok(Ok(addresses)) => admit_resolved_addresses(addresses).ok(),
+                Ok(Err(_)) | Err(_) => None,
+            };
+            (host, admitted)
+        })
+        .collect()
 }
 
 /// What every provider client shares: HTTPS to the pinned addresses, no
@@ -405,6 +447,9 @@ impl BrokerUpstreamTransport for ProviderHttpsTransport {
             .await
             .map_err(|error| request_failed(provider_host, is_refresh, error))?;
         validate(response.url(), &method, &self.selected)?;
+        if pinned_client.is_none() && log_redirect::follows(&target, &method, response.status()) {
+            return self.follow_log_redirect(response).await;
+        }
         upstream_response(response)
     }
 
@@ -1077,6 +1122,8 @@ fn map_reqwest_error(error: reqwest::Error) -> BrokerUpstreamError {
         BrokerUpstreamError::Protocol
     }
 }
+
+mod log_redirect;
 
 #[cfg(test)]
 #[path = "network/upgrade_tests.rs"]
@@ -1988,12 +2035,16 @@ mod tests {
             HttpProvider::AnthropicClaudeSignIn,
         ]);
         let app = BTreeSet::from([HttpProvider::GitHubAppAuthorization]);
+        // GitHub's log hosts are looked up with them (#5737).
         let mut hosts = [
             ANTHROPIC_HOST,
             CLAUDE_TOKEN_HOST,
             GITHUB_API_HOST,
             GITHUB_GIT_HOST,
-        ];
+        ]
+        .into_iter()
+        .chain(crate::github::log_hosts::log_hosts())
+        .collect::<Vec<_>>();
         hosts.sort();
         let asked = std::sync::Mutex::new(Vec::new());
         // A lookup answers only once every host's lookup has begun, so the
@@ -2286,6 +2337,7 @@ mod tests {
             upgrade_client: upgrade_client_builder().build().unwrap(),
             selected: BTreeSet::from([HttpProvider::OpenAiApiKey]),
             unresolved: BTreeSet::new(),
+            log_hosts: BTreeSet::new(),
             resolved_address_count: 1,
             reuse: ConnectionReuse::Pooled,
         };

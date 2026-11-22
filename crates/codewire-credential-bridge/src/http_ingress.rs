@@ -327,6 +327,12 @@ fn github_api_family(method: &Method, parts: &[&str], query: Option<&str>) -> bo
                 Method::GET | Method::POST | Method::PATCH | Method::PUT | Method::DELETE
             )
         }
+        // Actions reads `gh run list` and `gh run view` make (#5737), GET
+        // only. Like the family above, the exact paths are the broker's.
+        ["repos", _, _, "actions", tail @ ..] if (1..=5).contains(&tail.len()) => {
+            method == Method::GET
+        }
+        ["repos", _, _, "check-runs", _, "annotations"] => method == Method::GET,
         _ => false,
     }
 }

@@ -395,10 +395,8 @@ fn finite_routes_bind_exact_operations_and_never_normalize_path_aliases() {
             "{path}"
         );
     }
-    // Still refused, as before: Actions runs, arbitrary REST and release
-    // uploads.
+    // Still refused, as before: arbitrary REST and release uploads.
     for (method, path) in [
-        (Method::GET, "/repos/owner/repo/actions/runs"),
         (Method::GET, "/repos/owner/repo/contents/README.md"),
         (Method::GET, "/repos/owner/repo/releases/tags/v1"),
         (Method::POST, "/repos/owner/repo/releases/1/assets"),
@@ -723,4 +721,196 @@ fn response_coding_media_headers_and_bodyless_status_are_strict() {
     let mut result = response.push(wire).unwrap();
     result.extend(response.finish().unwrap());
     assert_eq!(result, wire);
+}
+
+/// The Actions reads `gh run list` and `gh run view` make, GET only (#5737).
+#[test]
+fn actions_reads_are_get_only_on_their_exact_paths() {
+    for (path, query) in [
+        (
+            "/repos/owner/repo/actions/runs",
+            Some(
+                "branch=main&event=push&status=failure&actor=a&created=%3E2026-11-01&head_sha=abc&exclude_pull_requests=true&per_page=20",
+            ),
+        ),
+        ("/repos/owner/repo/actions/runs/7", None),
+        (
+            "/repos/owner/repo/actions/runs/7/jobs",
+            Some("filter=latest&per_page=100"),
+        ),
+        ("/repos/owner/repo/actions/runs/7/attempts/2/jobs", None),
+        ("/repos/owner/repo/actions/jobs/7", None),
+        ("/repos/owner/repo/actions/workflows", None),
+        ("/repos/owner/repo/actions/workflows/7", None),
+        ("/repos/owner/repo/actions/workflows/ci.yml", None),
+        ("/repos/owner/repo/actions/workflows/ci.yaml", None),
+        ("/repos/owner/repo/check-runs/7/annotations", None),
+        ("/repos/owner/repo/actions/jobs/7/logs", None),
+        ("/repos/owner/repo/actions/runs/7/logs", None),
+    ] {
+        assert_eq!(
+            classify_request("github-api", &Method::GET, path, query),
+            Ok(GitHubOperation::Rest),
+            "{path}"
+        );
+        for method in [
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::HEAD,
+        ] {
+            assert!(
+                classify_request("github-api", &method, path, None).is_err(),
+                "{method} {path}"
+            );
+        }
+    }
+    for path in [
+        "/repos/owner/repo/actions",
+        "/repos/owner/repo/actions/runs/7/rerun",
+        "/repos/owner/repo/actions/runs/7/rerun-failed-jobs",
+        "/repos/owner/repo/actions/runs/7/cancel",
+        "/repos/owner/repo/actions/runs/7/artifacts",
+        "/repos/owner/repo/actions/runs/7/attempts/2",
+        "/repos/owner/repo/actions/runs/7/attempts/2/logs",
+        "/repos/owner/repo/actions/jobs/7/rerun",
+        "/repos/owner/repo/actions/workflows/7/dispatches",
+        "/repos/owner/repo/actions/workflows/7/runs",
+        "/repos/owner/repo/actions/workflows/.yml",
+        "/repos/owner/repo/actions/workflows/ci.json",
+        "/repos/owner/repo/actions/artifacts",
+        "/repos/owner/repo/actions/caches",
+        "/repos/owner/repo/actions/secrets",
+        "/repos/owner/repo/actions/variables",
+        "/repos/owner/repo/actions/runners",
+        "/repos/owner/repo/actions/runs/07",
+        "/repos/owner/repo/actions/runs/0/logs",
+        "/repos/owner/repo/actions/runs/x/logs",
+        "/repos/owner/repo/check-runs/7",
+        "/repos/owner/repo/check-runs/x/annotations",
+    ] {
+        assert!(
+            classify_request("github-api", &Method::GET, path, None).is_err(),
+            "{path}"
+        );
+    }
+    // The log downloads are the only paths whose redirect is followed.
+    for path in [
+        "/repos/owner/repo/actions/jobs/7/logs",
+        "/repos/owner/repo/actions/runs/7/logs",
+    ] {
+        assert!(log_download(&Method::GET, path), "{path}");
+        assert!(!log_download(&Method::HEAD, path), "{path}");
+    }
+    for path in [
+        "/repos/owner/repo/actions/runs/7",
+        "/repos/owner/repo/actions/runs/07/logs",
+        "/repos/owner/repo/readme",
+        "repos/owner/repo/actions/runs/7/logs",
+    ] {
+        assert!(!log_download(&Method::GET, path), "{path}");
+    }
+}
+
+/// A run's logs come as a zip, admitted for the two log downloads only.
+#[test]
+fn a_zip_body_is_admitted_only_for_a_log_download() {
+    let adapter = GitHubOAuthAdapter::new().unwrap();
+    let prepare = |path: &str| {
+        let request = adapter
+            .validate_request(
+                "github-api",
+                &Method::GET,
+                path,
+                None,
+                HeaderMap::new(),
+                Vec::new(),
+            )
+            .unwrap();
+        adapter
+            .prepare_validated(lease(GitHubOperation::Rest), request)
+            .unwrap()
+            .into_parts()
+            .4
+    };
+    for path in [
+        "/repos/owner/repo/actions/runs/7/logs",
+        "/repos/owner/repo/actions/jobs/7/logs",
+    ] {
+        assert!(
+            prepare(path)
+                .begin(StatusCode::OK, &headers("application/zip"))
+                .is_ok()
+        );
+        assert!(
+            prepare(path)
+                .begin(StatusCode::OK, &headers("text/plain"))
+                .is_ok()
+        );
+    }
+    for path in [
+        "/repos/owner/repo/actions/runs/7",
+        "/repos/owner/repo/readme",
+    ] {
+        assert!(
+            prepare(path)
+                .begin(StatusCode::OK, &headers("application/zip"))
+                .is_err()
+        );
+    }
+}
+
+/// A log the broker fetched streams under the route's response cap and its
+/// redaction, like any other REST answer: past the cap it is cut off, and the
+/// injected token never comes back in it.
+#[test]
+fn a_followed_log_is_capped_and_redacted_like_any_response() {
+    let adapter = GitHubOAuthAdapter::new().unwrap();
+    let prepare = || {
+        let request = adapter
+            .validate_request(
+                "github-api",
+                &Method::GET,
+                "/repos/owner/repo/actions/jobs/7/logs",
+                None,
+                HeaderMap::new(),
+                Vec::new(),
+            )
+            .unwrap();
+        adapter
+            .prepare_validated(lease(GitHubOperation::Rest), request)
+            .unwrap()
+            .into_parts()
+            .4
+    };
+    let (_, mut response) = prepare()
+        .begin(StatusCode::OK, &headers("text/plain"))
+        .unwrap();
+    let mut log = b"step 1 ".to_vec();
+    log.extend_from_slice(VALUE);
+    log.extend_from_slice(b" step 2\n");
+    let mut out = response.push(&log).unwrap();
+    out.extend(response.finish().unwrap());
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("[REDACTED]"), "{out}");
+    assert!(
+        !out.as_bytes()
+            .windows(VALUE.len())
+            .any(|window| window == VALUE)
+    );
+
+    let (_, mut response) = prepare()
+        .begin(StatusCode::OK, &headers("application/zip"))
+        .unwrap();
+    let chunk = vec![b'x'; 64 * 1024];
+    let mut sent = 0;
+    let refused = loop {
+        match response.push(&chunk) {
+            Ok(_) => sent += chunk.len(),
+            Err(error) => break error,
+        }
+        assert!(sent <= MAX_RESPONSE_BYTES, "the log was not cut off");
+    };
+    assert_eq!(refused, CredentialBrokerError::ResponseTooLarge);
 }

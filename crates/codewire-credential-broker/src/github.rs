@@ -7,8 +7,8 @@
 //! <https://git-scm.com/docs/gitprotocol-http>.
 //!
 //! GraphQL uses the selected token's provider permissions, not a repository or
-//! field-level policy. REST routes below exclude admin, Actions, secrets, apps,
-//! and release assets. Smart HTTP supports fetch/push only: no dumb HTTP, LFS,
+//! field-level policy. REST routes below exclude admin, Actions writes,
+//! secrets, apps, and release assets; Actions reads are GET only (#5737). Smart HTTP supports fetch/push only: no dumb HTTP, LFS,
 //! redirects, arbitrary hosts, or credential-helper token disclosure.
 //! A whole request body is capped at 4 MiB and its response at 256 MiB. A Git
 //! POST whose body streams from the bridge (#4280) has no request or response
@@ -38,6 +38,7 @@ use crate::{
     BrokerCredentialLease, CredentialBrokerError, OpenAiStreamingResponse, PreparedOpenAiResponse,
 };
 
+pub(crate) mod log_hosts;
 pub mod repositories;
 
 const TOKEN: &str = "GITHUB_OAUTH_TOKEN";
@@ -98,6 +99,15 @@ const REST_QUERY: &[&str] = &[
     "type",
     "affiliation",
     "visibility",
+    // What `gh run list` and `gh run view` send (#5737).
+    "branch",
+    "event",
+    "status",
+    "actor",
+    "created",
+    "head_sha",
+    "exclude_pull_requests",
+    "filter",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,6 +271,7 @@ impl GitHubOAuthAdapter {
             .map_err(|_| denied)?;
         Ok(ValidatedGitHubRequest {
             operation,
+            log_download: log_download(method, path),
             policy,
             request,
             method: method.clone(),
@@ -338,6 +349,7 @@ impl GitHubOAuthAdapter {
         }
         let response = PreparedGitHubResponse {
             operation: request.operation,
+            log_download: request.log_download,
             inner,
         };
         Ok(PreparedGitHubRequest {
@@ -353,6 +365,9 @@ impl GitHubOAuthAdapter {
 #[derive(Clone)]
 pub struct ValidatedGitHubRequest {
     operation: GitHubOperation,
+    /// One of the two Actions log downloads, whose body the broker fetches
+    /// from the log host GitHub redirects it to (#5737).
+    log_download: bool,
     policy: ProxyRouteConfig,
     request: ValidatedProxyRequest,
     method: Method,
@@ -389,6 +404,7 @@ impl PreparedGitHubRequest {
 
 pub struct PreparedGitHubResponse {
     operation: GitHubOperation,
+    log_download: bool,
     inner: PreparedOpenAiResponse,
 }
 impl PreparedGitHubResponse {
@@ -409,12 +425,13 @@ impl PreparedGitHubResponse {
                     | "application/vnd.github+json"
                     | "application/vnd.github.v3.diff"
                     | "application/vnd.github.v3.patch"
-            ) || (self.operation == GitHubOperation::GitFetch
-                && matches!(
-                    media.as_str(),
-                    "application/x-git-upload-pack-advertisement"
-                        | "application/x-git-upload-pack-result"
-                ))
+            ) || (self.log_download && media == "application/zip")
+                || (self.operation == GitHubOperation::GitFetch
+                    && matches!(
+                        media.as_str(),
+                        "application/x-git-upload-pack-advertisement"
+                            | "application/x-git-upload-pack-result"
+                    ))
                 || (self.operation == GitHubOperation::GitPush
                     && matches!(
                         media.as_str(),
@@ -568,6 +585,27 @@ pub(crate) fn classify_request(
             ["repos", _, _, "pulls", number, "merge"] if numeric_id(number) => {
                 matches!(m, "GET" | "PUT")
             }
+            // Actions reads, GET only: no re-run, cancel, dispatch, artifact,
+            // cache, secret or variable path (#5737).
+            ["repos", _, _, "actions", "runs" | "workflows"] => m == "GET",
+            ["repos", _, _, "actions", "runs" | "jobs", id] if numeric_id(id) => m == "GET",
+            ["repos", _, _, "actions", "runs", id, "jobs"] if numeric_id(id) => m == "GET",
+            [
+                "repos",
+                _,
+                _,
+                "actions",
+                "runs",
+                id,
+                "attempts",
+                attempt,
+                "jobs",
+            ] if numeric_id(id) && numeric_id(attempt) => m == "GET",
+            ["repos", _, _, "actions", "workflows", workflow] if workflow_id(workflow) => {
+                m == "GET"
+            }
+            ["repos", _, _, "check-runs", id, "annotations"] if numeric_id(id) => m == "GET",
+            ["repos", _, _, "actions", "runs" | "jobs", _, "logs"] => log_download(method, path),
             _ => false,
         };
         if admitted {
@@ -584,6 +622,29 @@ fn numeric_id(value: &str) -> bool {
     value
         .parse::<u64>()
         .is_ok_and(|id| id > 0 && id.to_string() == value)
+}
+
+/// One of the two Actions log downloads, one job's log or one run's logs:
+/// the only requests whose redirect the broker follows (#5737).
+pub(crate) fn log_download(method: &Method, path: &str) -> bool {
+    let parts = path
+        .strip_prefix('/')
+        .map(|path| path.split('/').collect::<Vec<_>>());
+    *method == Method::GET
+        && matches!(
+            parts.as_deref(),
+            Some(["repos", owner, repo, "actions", "runs" | "jobs", id, "logs"])
+                if !owner.is_empty() && !repo.is_empty() && numeric_id(id)
+        )
+}
+
+/// A workflow is named by its numeric id or its file name, as GitHub admits.
+fn workflow_id(value: &str) -> bool {
+    numeric_id(value)
+        || value
+            .strip_suffix(".yml")
+            .or_else(|| value.strip_suffix(".yaml"))
+            .is_some_and(|stem| !stem.is_empty() && !stem.starts_with('.'))
 }
 
 fn validate_rest_query(query: Option<&str>) -> Result<(), CredentialBrokerError> {
