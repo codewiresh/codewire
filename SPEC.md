@@ -124,6 +124,40 @@ its own. `cw create` reads flags and `codewire.yaml` instead, with its own
 lifetime syntax (`--ttl 1h30m`); every create meets the same project
 validation and the server's checks.
 
+An environment carries **labels** (#5804, not yet built): keys and values its
+users set to find and group environments, such as `team=search` or
+`job=nightly`. Codewire stores and returns them and never reads them to
+decide anything. The journey is
+[docs/journeys/environment-labels.md](docs/journeys/environment-labels.md).
+- **Limits.** Up to 64 labels. A key is 1 to 63 characters of letters,
+  digits, `-`, `_`, `.` and `/`, starting with a letter or a digit. A value is
+  up to 256 characters, may be empty, and holds no control characters. A
+  request over a limit is refused whole with `invalid_argument` naming the
+  label.
+- **Setting them.** At create (`CreateEnvironmentRequest.labels`,
+  `cw create --label KEY=VALUE`, repeatable). `UpdateEnvironmentLabels`
+  names the keys to set and the keys to remove, and the server applies both
+  in one transaction, so two callers changing different keys never undo each
+  other; with `replace`, the set it names becomes the whole set and it
+  names nothing to remove. A key named both to set and to remove is refused
+  with `invalid_argument`. The limits apply to the result, and a request
+  that would break one changes nothing. `cw label ENV KEY=VALUE...
+  [--remove KEY]...` sends exactly the keys it names. Changing labels needs
+  the access that stopping the environment needs, and an API key needs
+  `write:environments`. A create from a snapshot or a VM checkpoint takes
+  only the labels its own request names.
+- **Finding by them.** `ListEnvironments` takes `labels` and lists an
+  environment only when it has every given key with the given value;
+  `cw ls --label KEY=VALUE` (repeatable) does the same. `Environment.labels`,
+  `cw info`, `cw ls --output json` and the SDKs return them.
+- **Not secret.** Everyone who can list an environment sees its labels. Never
+  put a credential or personal data in one.
+- **Local VMs** take the same labels, limits and commands
+  (`cw create --local --label`, `cw --local ls --label`, `cw label`). The
+  supervisor stores them with the environment's local record, and they never
+  reach the server.
+- The dashboard does not show labels yet.
+
 ### Placements
 
 A **placement** is where an environment runs. The same `cw` commands work in
