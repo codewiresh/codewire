@@ -61,6 +61,10 @@ pub(crate) async fn exchange_github_app_refresh(
             RefreshFailure::ProviderUncertain,
             BrokerRequestError::UpstreamFailed,
         )),
+        Ok(Err(GitHubAppRefreshError::RateLimited { wait_seconds })) => Err((
+            RefreshFailure::RateLimited { wait_seconds },
+            BrokerRequestError::UpstreamFailed,
+        )),
         Err(_) => Err((RefreshFailure::Timeout, BrokerRequestError::UpstreamFailed)),
     }
 }

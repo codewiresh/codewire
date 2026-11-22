@@ -754,6 +754,9 @@ impl GitHubAppAuthorizationOwner {
         )
         .await
         .map_err(GitHubAppRefreshError::from_authorization)?;
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            return Err(rate_limited(response).await);
+        }
         let response: TokenResponse = response_json(response)
             .await
             .map_err(GitHubAppRefreshError::from_authorization)?;
@@ -956,6 +959,11 @@ pub enum GitHubAppStatusError {
 pub enum GitHubAppRefreshError {
     Permanent,
     Uncertain,
+    /// The token endpoint answered 429 and its whole bounded response was
+    /// read: not processed, so the attempt waits this long (#4975).
+    RateLimited {
+        wait_seconds: u64,
+    },
 }
 
 impl GitHubAppRefreshError {
@@ -1182,6 +1190,26 @@ fn unix_now() -> Result<u64, GitHubAppAuthorizationError> {
 
 fn unix_now_refresh() -> Result<u64, GitHubAppRefreshError> {
     unix_now().map_err(GitHubAppRefreshError::from_authorization)
+}
+
+/// The token endpoint's 429, read in full within the bound: the provider did
+/// not process the refresh (#4975). A body that breaks off or overruns leaves
+/// it uncertain, as any other failure after the send.
+async fn rate_limited(response: crate::BrokerUpstreamResponse) -> GitHubAppRefreshError {
+    let (_, headers, mut body) = response.into_parts();
+    let wait_seconds =
+        crate::refresh_failure::rate_limit_wait(&headers, std::time::SystemTime::now());
+    let mut read = 0_usize;
+    while let Some(chunk) = body.next().await {
+        let Ok(chunk) = chunk else {
+            return GitHubAppRefreshError::Uncertain;
+        };
+        read = read.saturating_add(chunk.len());
+        if read > MAX_RESPONSE_BYTES {
+            return GitHubAppRefreshError::Uncertain;
+        }
+    }
+    GitHubAppRefreshError::RateLimited { wait_seconds }
 }
 
 async fn response_json<T>(
@@ -1812,6 +1840,96 @@ mod tests {
                 .await,
             Err(GitHubAppAuthorizationError::Configuration)
         ));
+    }
+
+    /// The refresh exchange's own 429, read in full, or one whose body
+    /// breaks off; every other request goes to the expiring provider.
+    struct RateLimitedRefresh {
+        inner: ExpiringProvider,
+        retry_after: &'static str,
+        breaks_off: bool,
+    }
+
+    #[async_trait]
+    impl BrokerUpstreamTransport for RateLimitedRefresh {
+        async fn execute(
+            &self,
+            request: BrokerUpstreamRequest,
+        ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+            // The fourth request is the refresh exchange, after the sign-in's
+            // three.
+            if self.inner.requests.lock().unwrap().len() != 3 {
+                return self.inner.execute(request).await;
+            }
+            self.inner.requests.lock().unwrap().push({
+                let (method, target, headers, body) = request.into_parts();
+                (method, target.as_str().to_owned(), headers, body)
+            });
+            let chunks: Vec<Result<Bytes, BrokerUpstreamError>> = if self.breaks_off {
+                vec![
+                    Ok(Bytes::from_static(b"{\"message\":")),
+                    Err(BrokerUpstreamError::Protocol),
+                ]
+            } else {
+                vec![Ok(Bytes::from_static(
+                    b"{\"message\":\"synthetic rate limit\"}",
+                ))]
+            };
+            Ok(BrokerUpstreamResponse::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                HeaderMap::from_iter([
+                    (
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    ),
+                    (
+                        header::RETRY_AFTER,
+                        HeaderValue::from_static(self.retry_after),
+                    ),
+                ]),
+                Box::pin(futures::stream::iter(chunks)),
+            ))
+        }
+    }
+
+    /// The token endpoint's 429 read in full waits, with its Retry-After
+    /// clamped; one whose body breaks off stays uncertain (#4975).
+    #[tokio::test]
+    async fn a_refresh_the_token_endpoint_rate_limited_waits_unless_its_answer_broke_off() {
+        for (retry_after, breaks_off, expected) in [
+            (
+                "90",
+                false,
+                GitHubAppRefreshError::RateLimited { wait_seconds: 90 },
+            ),
+            (
+                "1",
+                false,
+                GitHubAppRefreshError::RateLimited { wait_seconds: 60 },
+            ),
+            ("90", true, GitHubAppRefreshError::Uncertain),
+        ] {
+            let provider = Arc::new(RateLimitedRefresh {
+                inner: ExpiringProvider::default(),
+                retry_after,
+                breaks_off,
+            });
+            let owner = GitHubAppAuthorizationOwner::new(config(), provider.clone());
+            let mut imported = owner
+                .complete(Zeroizing::new(b"synthetic-code-123".to_vec()))
+                .await
+                .unwrap();
+            let (material, _) = imported.take_import().unwrap();
+            let bundle = GitHubAppUserOAuthBundle::parse(&material).unwrap();
+            assert_eq!(
+                owner.refresh(bundle).await.err(),
+                Some(expected),
+                "{retry_after} {breaks_off}"
+            );
+            let requests = provider.inner.requests.lock().unwrap();
+            assert_eq!(requests.len(), 4, "nothing after the refresh exchange");
+            assert_eq!(requests[3].1, TOKEN_EXCHANGE_URL);
+        }
     }
 
     #[tokio::test]

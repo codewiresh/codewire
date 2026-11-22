@@ -775,6 +775,29 @@ async fn complete_github_app_refresh(
             )
             .await;
         }
+        // Not processed: the attempt waits, and the next refresh after the
+        // wait is the one retry; a refused close fails it (#4975).
+        Ok(Err(GitHubAppRefreshError::RateLimited { wait_seconds })) => {
+            tracing::warn!(
+                provider = "github",
+                failure = "rate_limited",
+                http_status = 429,
+                wait_seconds,
+                "refresh_rate_limited"
+            );
+            return match store.rate_limit_oauth_refresh(&started, wait_seconds).await {
+                Ok(()) => Err(Error::RateLimited),
+                Err(_) => {
+                    fail_started_refresh(
+                        store.as_ref(),
+                        started,
+                        "rate_limited",
+                        Error::Unavailable,
+                    )
+                    .await
+                }
+            };
+        }
         Err(_) => {
             return fail_started_refresh(store.as_ref(), started, "timeout", Error::Unavailable)
                 .await;

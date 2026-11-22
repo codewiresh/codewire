@@ -3176,9 +3176,11 @@ placements.
 
 **Built in part** (#4975). In a hosted Sandbox and a local VM, a Codex or
 Claude sign-in's refresh, on demand and (hosted) in the keep-alive, is closed
-as rate-limited and waits as above, and during the wait a request whose access
-token has expired is answered `credential_unavailable` (503), never Reconnect
-needed. Not yet: a GitHub App login, whose 429 is still terminal; and the
+as rate-limited and waits as above, and so is a GitHub App login's, in the
+broker and in the credential service's repository access, where only its
+token exchange's own 429 counts, never the user or installation reads after
+it. During the wait a request whose access token has expired is answered
+`credential_unavailable` (503), never Reconnect needed. Not yet: the
 request's own 429 with `Retry-After` and its refusal reason.
 
 ### Idle OAuth keep-alive
