@@ -104,6 +104,12 @@ pub const POD_RUNTIME_DOCKER_DISK_MIB_ENV: &str = "CODEWIRE_VM_DOCKER_DISK_MIB";
 pub const POD_RUNTIME_VM_STATE_ENV: &str = "CODEWIRE_VM_STATE";
 pub const POD_RUNTIME_VM_STATE_NEW: &str = "new";
 pub const POD_RUNTIME_VM_STATE_EXISTING: &str = "existing";
+/// What the workspace container's first process is (#5638): `systemd`, or
+/// `image` for the image's own entrypoint. Every `standard` Pod carries it,
+/// and the runtime refuses any other value, a missing or empty one included.
+pub const POD_RUNTIME_WORKSPACE_INIT_ENV: &str = "CODEWIRE_WORKSPACE_INIT";
+pub const POD_RUNTIME_WORKSPACE_INIT_SYSTEMD: &str = "systemd";
+pub const POD_RUNTIME_WORKSPACE_INIT_IMAGE: &str = "image";
 /// The workspace image the VM's project names; its published disk is at
 /// [`POD_RUNTIME_IMAGE_DISK_MOUNT_PATH`].
 pub const POD_RUNTIME_WORKSPACE_IMAGE_ENV: &str = "CODEWIRE_WORKSPACE_IMAGE";

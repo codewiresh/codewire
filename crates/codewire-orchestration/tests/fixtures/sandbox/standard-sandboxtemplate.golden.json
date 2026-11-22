@@ -222,6 +222,10 @@
                 "value": "registry.example.invalid/codewire/workspace@sha256:5555555555555555555555555555555555555555555555555555555555555555"
               },
               {
+                "name": "CODEWIRE_WORKSPACE_INIT",
+                "value": "image"
+              },
+              {
                 "name": "CODEWIRE_IMAGE_DISK_ID",
                 "value": "3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a"
               },

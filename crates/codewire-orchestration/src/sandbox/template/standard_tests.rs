@@ -197,6 +197,8 @@ fn a_standard_workspace_hands_cw_pod_runtime_its_settings_by_their_names() {
         // Until its daemon's first bind is answered.
         ("CODEWIRE_VM_STATE", "new"),
         ("CODEWIRE_WORKSPACE_IMAGE", WORKSPACE_IMAGE),
+        // The disk holds the workspace image, which has no systemd.
+        ("CODEWIRE_WORKSPACE_INIT", "image"),
         ("CODEWIRE_IMAGE_DISK_ID", IMAGE_DISK_ID),
         ("CODEWIRE_IMAGE_DISK_BUILD_ID", BUILD_ID),
         (
@@ -216,6 +218,37 @@ fn a_standard_workspace_hands_cw_pod_runtime_its_settings_by_their_names() {
     );
     // Docker is the guest's own.
     assert!(!env.contains_key("DOCKER_HOST"));
+}
+
+#[test]
+fn a_standard_workspace_boots_systemd_exactly_when_its_disk_holds_the_systemd_image() {
+    use crate::sandbox::runtime_images::RuntimeImages;
+
+    const SYSTEMD_REPOSITORY: &str = "registry.example.invalid/codewire/workspace-systemd";
+    let init = |workspace_image: &str, images: &RuntimeImages| {
+        let runtime = StandardRuntime::parse(
+            RUNTIME_IMAGE,
+            &format!("{IMAGE_DISK} {IMAGE_DISK_ID} {BUILD_ID} {workspace_image}"),
+        )
+        .unwrap()
+        .unwrap()
+        .with_systemd_repository(images);
+        let opts = TemplateOpts {
+            standard_runtime: Some(runtime),
+            ..opts()
+        };
+        env(&render_sandbox_template(NAMESPACE, &opts))["CODEWIRE_WORKSPACE_INIT"].clone()
+    };
+    let offered = RuntimeImages::example()
+        .with_systemd_workspace_repository(SYSTEMD_REPOSITORY)
+        .unwrap();
+    let systemd_image = format!("{SYSTEMD_REPOSITORY}@sha256:{}", "7".repeat(64));
+    assert_eq!(init(&systemd_image, &offered), "systemd");
+    // Any other image, or a deployment that names no systemd repository.
+    assert_eq!(init(WORKSPACE_IMAGE, &offered), "image");
+    assert_eq!(init(&systemd_image, &RuntimeImages::example()), "image");
+    let lookalike = format!("{SYSTEMD_REPOSITORY}-old@sha256:{}", "7".repeat(64));
+    assert_eq!(init(&lookalike, &offered), "image");
 }
 
 #[test]

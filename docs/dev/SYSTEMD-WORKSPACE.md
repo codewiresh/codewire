@@ -17,9 +17,11 @@ session sees systemd as PID 1, with the environment daemon as one of its
 units. The workspace container's first process is a small fixed command that
 starts systemd and outlives it ("The first process", below).
 
-It is an opt-in image, on a deployment that turns it on, for an
-organization that a global admin has opted in. It is offered on Dev and
-nowhere else ("Stop", below). The default workspace does not change.
+On `commodity` it is an opt-in image, on a deployment that turns it on, for
+an organization that a global admin has opted in. On `standard` it is the
+default ("On the `standard` profile", below). It is offered on Dev and
+nowhere else ("Stop", below). The default `commodity` workspace does not
+change.
 
 ## The image
 
@@ -237,7 +239,9 @@ memory and CPU limits still hold ("What is loosened").
 ## On the `standard` profile
 
 Target, not built (#5638, #5602): orchestration's half is described here;
-the guest half belongs to the `standard` runtime and is written with it.
+the guest half belongs to the `standard` runtime and is written with it. Of
+orchestration's half, the Pod setting below is on `main`; creating a systemd
+workspace on `standard` is not, and such a create is still refused.
 
 On `commodity`, Kubernetes and Kata build the workspace container, so the
 Pod has to ask for systemd's shape itself: root, `CAP_SYS_ADMIN` and the
@@ -245,16 +249,29 @@ bootstrap above. On `standard`, the Pod runs `cw __pod-runtime`, which boots
 a VM whose PID 1 is Codewire's guest init, and guest init builds the
 workspace container itself. So none of the above is rendered there:
 
-- **The Pod is the default `standard` Pod.** Its container gets one more
-  setting, `CODEWIRE_WORKSPACE_INIT=systemd`, which the runtime carries into
-  the guest. The runtime refuses any value other than `systemd`; unset means
-  the default workspace. No capability, no root,
-  no bootstrap, and no change to the cluster's admission for that shape.
-- **The disk is a second published disk**, built from the workspace-systemd
-  image the way the default disk is built from the workspace image, and named
-  by its own deployment setting. A `standard` deployment offers systemd
-  workspaces only when that setting is set, and a create's image must be the
-  image that disk was built from.
+- **The Pod is the default `standard` Pod.** Its container carries
+  `CODEWIRE_WORKSPACE_INIT`, which the runtime carries into the guest. Every
+  `standard` Pod has it, exactly once: `systemd` for systemd as the workspace
+  container's first process, `image` for the image's own entrypoint. The
+  runtime refuses a missing or empty value and any other value, compared
+  exactly (`Systemd` is refused). No capability, no root, no bootstrap, and
+  no change to the cluster's admission for that shape. A `standard` Sandbox
+  rendered before the setting existed lacks it, so its next Pod is refused;
+  such a Sandbox is recreated.
+- **The disk decides it.** A `standard` deployment boots one published disk
+  (`SANDBOX_STANDARD_IMAGE_DISK`), and a disk is the kind of the image it was
+  built from, by the same rule as a `commodity` create: `systemd` when that
+  image is a digest-pinned image of
+  `CODEWIRE_SYSTEMD_WORKSPACE_IMAGE_REPOSITORY`, `image` otherwise,
+  including when the repository is unset. orchestration reads it once at
+  startup and renders it on every `standard` Pod.
+- **systemd is the default on `standard`.** A `standard` deployment's
+  default disk is built from the workspace-systemd image, so every `standard`
+  workspace boots systemd. There is no organization opt-in on `standard`: the
+  opt-in exists because the `commodity` shape loosens the Pod, and the
+  `standard` Pod is not loosened. A deployment switches only once its runtime
+  boots systemd; until then its disk is built from the workspace image and
+  renders `image`.
 - **In the guest,** guest init stays the VM's PID 1 and keeps what only it
   holds: the vsock control channel, the hosted ingress, the daemon's listener
   on 127.0.0.1:17777 and the per-boot bind check. systemd becomes PID 1 of
@@ -349,7 +366,7 @@ the clean stop is best effort and the bound is the runtime's.
 
 **Docker.** A `standard` workspace's Docker is the guest's own `dockerd`,
 which runs outside the container on a Docker disk the runtime sizes from
-`CODEWIRE_VM_DOCKER_DISK_MIB` (in review). orchestration sets it on every
+`CODEWIRE_VM_DOCKER_DISK_MIB`. orchestration sets it on every
 `standard` Pod, splitting the volume evenly with the state disk. A systemd
 workspace reaches that `dockerd` through the same socket a default workspace
 uses, and the image's `docker.service` is masked.

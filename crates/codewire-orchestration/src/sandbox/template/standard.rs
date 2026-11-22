@@ -13,8 +13,11 @@ use codewire_daemon_proto::{
     POD_RUNTIME_IMAGE_DISK_ID_ENV, POD_RUNTIME_IMAGE_DISK_MOUNT_PATH, POD_RUNTIME_MEMORY_MIB_ENV,
     POD_RUNTIME_PLATFORM_PEERS_ENV, POD_RUNTIME_STATE_DISK_MIB_ENV, POD_RUNTIME_STATE_MOUNT_PATH,
     POD_RUNTIME_VCPUS_ENV, POD_RUNTIME_VM_STATE_ENV, POD_RUNTIME_VM_STATE_EXISTING,
-    POD_RUNTIME_VM_STATE_NEW, POD_RUNTIME_WORKSPACE_IMAGE_ENV,
+    POD_RUNTIME_VM_STATE_NEW, POD_RUNTIME_WORKSPACE_IMAGE_ENV, POD_RUNTIME_WORKSPACE_INIT_ENV,
+    POD_RUNTIME_WORKSPACE_INIT_IMAGE, POD_RUNTIME_WORKSPACE_INIT_SYSTEMD,
 };
+
+use crate::sandbox::runtime_images::{RuntimeImages, SystemdWorkspaceImage};
 
 use super::runtime_policy::{
     RUNTIME_CLASS_STANDARD, STANDARD_VMM_CPU_MILLICORES, STANDARD_VMM_MEMORY_MIB,
@@ -70,6 +73,9 @@ pub struct StandardRuntime {
     image_disk_id: String,
     build_id: String,
     workspace_image: String,
+    /// Whether the disk's workspace image boots systemd as its container's
+    /// first process ([`Self::with_systemd_repository`]).
+    boots_systemd: bool,
 }
 
 impl StandardRuntime {
@@ -106,7 +112,27 @@ impl StandardRuntime {
             image_disk_id: image_disk_id.to_owned(),
             build_id: build_id.to_owned(),
             workspace_image: workspace_image.to_owned(),
+            boots_systemd: false,
         }))
+    }
+
+    /// This runtime, booting systemd when its disk was built from a
+    /// digest-pinned image of the systemd workspace repository: a disk is the
+    /// kind of the image it holds, by the rule a `commodity` create follows
+    /// (docs/dev/SYSTEMD-WORKSPACE.md, "On the `standard` profile").
+    pub fn with_systemd_repository(mut self, images: &RuntimeImages) -> Self {
+        self.boots_systemd =
+            images.systemd_workspace(&self.workspace_image) == SystemdWorkspaceImage::Pinned;
+        self
+    }
+
+    /// [`POD_RUNTIME_WORKSPACE_INIT_ENV`] for this runtime's disk.
+    pub fn workspace_init(&self) -> &'static str {
+        if self.boots_systemd {
+            POD_RUNTIME_WORKSPACE_INIT_SYSTEMD
+        } else {
+            POD_RUNTIME_WORKSPACE_INIT_IMAGE
+        }
     }
 
     /// Whether the VM boots `image`: it has the manifest digest of the
@@ -116,13 +142,16 @@ impl StandardRuntime {
             .is_some_and(|digest| Some(digest) == manifest_digest(&self.workspace_image))
     }
 
-    /// [`Self::parse`] of this process's environment.
+    /// [`Self::parse`] of this process's environment, with its configured
+    /// systemd workspace repository.
     pub fn from_env() -> Result<Option<Self>, String> {
         let read = |name: &str| std::env::var(name).unwrap_or_default();
-        Self::parse(
+        let images = crate::sandbox::runtime_images::configured();
+        Ok(Self::parse(
             &read(STANDARD_RUNTIME_IMAGE_ENV),
             &read(STANDARD_IMAGE_DISK_ENV),
-        )
+        )?
+        .map(|runtime| runtime.with_systemd_repository(images)))
     }
 }
 
@@ -344,6 +373,10 @@ fn settings(
         (
             POD_RUNTIME_WORKSPACE_IMAGE_ENV,
             runtime.workspace_image.clone(),
+        ),
+        (
+            POD_RUNTIME_WORKSPACE_INIT_ENV,
+            runtime.workspace_init().to_owned(),
         ),
         (POD_RUNTIME_IMAGE_DISK_ID_ENV, runtime.image_disk_id.clone()),
         (
