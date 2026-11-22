@@ -7,17 +7,19 @@ before the code. The format is in [README.md](README.md).
 
 ## Where it stands
 
-Updated 2026-11-21. Written first; every step is not yet observed.
+Updated 2026-11-22. Walked on Dev on 2026-11-21. Not yet observed: the
+agent, a gone daemon, the dashboard, `ssh`, the browser terminal and
+previews.
 
 | ID | Dev | Production |
 | --- | --- | --- |
-| `idle-stop-setting` | not yet observed | not yet observed |
-| `idle-stop-stops` | not yet observed | not yet observed |
-| `idle-stop-busy` | not yet observed | not yet observed |
-| `idle-stop-input` | not yet observed | not yet observed |
+| `idle-stop-setting` | observed 2026-11-21, but the dashboard | not yet observed |
+| `idle-stop-stops` | observed 2026-11-21, but the dashboard and billing | not yet observed |
+| `idle-stop-busy` | observed 2026-11-21; Docker stopped 22 s late | not yet observed |
+| `idle-stop-input` | steps 1 and 2 over `cw shell`, 2026-11-21 | not yet observed |
 | `idle-stop-agent` | not yet observed | not yet observed |
 | `idle-stop-daemon-gone` | not yet observed | not yet observed |
-| `idle-stop-off` | not yet observed | not yet observed |
+| `idle-stop-off` | observed 2026-11-21 (Kind half not yet) | not yet observed |
 
 ## Before the walk
 
@@ -57,7 +59,13 @@ Updated 2026-11-21. Written first; every step is not yet observed.
      `IdleStop: 1h`.
 - **Proof:** each `cw info` value above, the refusal's words, and the
   unchanged start time in step 4.
-- **Observed:** not yet observed.
+- **Observed:** 2026-11-21 on Dev, services and daemon from source 8c8c32eb2, `cw` built from 253add63c, as the Dev smoke identity. Every check matched: `idle_stop: 45m`
+  in `codewire.yaml` gave `IdleStop: 45m`; no setting gave `off`, and
+  `--idle-stop on` then `6h`; `2m` and `8d` were refused with "must be off,
+  or from 5m to 7d" and nothing was created; `cw update idle-a --idle-stop
+  5m` gave `5m` with `StartedAt` unchanged (23:02:23Z); a fork of its
+  snapshot gave `5m`, and a fork with `--idle-stop 1h` gave `1h`. The
+  dashboard's Sandbox page is not yet observed.
 
 ## `idle-stop-stops`: an unused Sandbox stops itself and says why
 
@@ -82,7 +90,14 @@ Updated 2026-11-21. Written first; every step is not yet observed.
   `cw ls` then shows `running` with no reason.
 - **Gotchas:** creating the Sandbox and the `cw run` are activity; time the
   wait from the end of the `cw run`.
-- **Observed:** not yet observed.
+- **Observed:** 2026-11-21 on Dev, services and daemon from source 8c8c32eb2, `cw` built from 253add63c, as the Dev smoke identity. The marker was written at 23:04:54Z and
+  `StoppedAt` was 23:09:56Z (5 min 2 s), `StopReason: idle`. `cw info` gave
+  the notice word for word, `cw shell` refused with the same reason and
+  `→ cw --cloud start idle-stop`, and after `cw start` the marker read
+  `kept` and the Sandbox was `running` with no reason. `cw ls` was read as
+  JSON (`stopped`, reason `idle`), not as its text column. Not yet observed:
+  the dashboard (#5511 is merged, not yet on Dev) and the billing session's
+  close.
 
 ## `idle-stop-busy`: a busy Sandbox stays up
 
@@ -97,7 +112,13 @@ Updated 2026-11-21. Written first; every step is not yet observed.
   3. Repeat with the loop inside `docker run --rm alpine sh -c '…'`.
 - **Proof:** the Sandbox is running at 6 minutes, and stops (`stopped
   (idle)`) between 5 and 5.5 minutes after the loop ends, in both runs.
-- **Observed:** not yet observed.
+- **Observed:** 2026-11-21 on Dev, services and daemon from source 8c8c32eb2, `cw` built from 253add63c, as the Dev smoke identity. Both busy loops kept their Sandbox
+  `running` for their 8 minutes. A second run timed the stop: the plain
+  loop ended at 23:32:31Z and `StoppedAt` was 23:37:56Z (5 min 25 s); the
+  loop in `docker run --rm alpine` ended at 23:32:34Z and `StoppedAt` was
+  23:38:26Z (5 min 52 s), 22 s past this proof's 5.5 minutes, on the late
+  side. Docker removing the container after the loop may be what counted
+  in the next minute; that is not confirmed.
 
 ## `idle-stop-input`: typing and previews count; an idle shell does not
 
@@ -125,7 +146,12 @@ Updated 2026-11-21. Written first; every step is not yet observed.
      >/dev/null; sleep 60; done'`: polling out doesn't keep it up; it stops
      within 5.5 minutes.
 - **Proof:** `cw ls` at each check, and the stop times.
-- **Observed:** not yet observed.
+- **Observed:** 2026-11-21 on Dev, services and daemon from source 8c8c32eb2, `cw` built from 253add63c, as the Dev smoke identity, steps 1 and 2 over `cw shell`. A shell
+  left at its prompt (opened 23:24:32Z) stopped with `StoppedAt` 23:29:49Z
+  (5 min 17 s), and the shell then ended. Typing `date` every 2 minutes
+  kept the Sandbox `running` for 8 minutes; the last key was at 23:32:32Z
+  and `StoppedAt` was 23:37:59Z (5 min 27 s). Not yet observed: `ssh` and
+  the browser terminal, steps 3 to 6.
 
 ## `idle-stop-agent`: an agent turn keeps its Sandbox up
 
@@ -160,4 +186,6 @@ Updated 2026-11-21. Written first; every step is not yet observed.
   leave it untouched for 10 minutes.
 - **Proof:** it is `running` after 10 minutes. On Kind with the switch off, a
   `--idle-stop 5m` Sandbox is also `running` after 10 minutes.
-- **Observed:** not yet observed.
+- **Observed:** 2026-11-21 on Dev, services and daemon from source 8c8c32eb2, `cw` built from 253add63c, as the Dev smoke identity: a Sandbox created with `--idle-stop off`
+  was `running` 16 minutes later. The Kind half, with the switch off, is not
+  yet observed.
