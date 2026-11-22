@@ -156,6 +156,7 @@ impl Fixture {
             control_pending: HashMap::new(),
             settled: HashSet::new(),
             stopping: false,
+            heartbeat: Default::default(),
             noel: noel::Recovery::default(),
             cw: None,
             takedown_marker_wait: pause::TAKEDOWN_MARKER_WAIT,

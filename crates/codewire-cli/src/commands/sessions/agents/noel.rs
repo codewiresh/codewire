@@ -1519,6 +1519,7 @@ mod tests {
             control_pending: HashMap::new(),
             settled: HashSet::new(),
             stopping: false,
+            heartbeat: Default::default(),
             noel: Recovery::default(),
             cw: env::current_exe().ok(),
             takedown_marker_wait: HANG,

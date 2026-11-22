@@ -218,6 +218,11 @@ and driver identities in the same host environment; an unmanaged process
 cannot receive semantic worker results. `cw wait --message ID` returns the final
 reply; the message ID alone names its session. `cw logs ENV --session SESSION` shows each
 turn's prompt, the commands, edits and tools the agent uses, and its reply.
+While a turn runs, the driver also writes `cw agent driver: turn running`
+once a minute, its own line and not the agent's: it carries nothing the turn
+does, and it isn't in the conversation or `cw msg` output. It is what keeps
+an idle-stop Sandbox up through a long tool call or model wait
+([IDLE-STOP.md](IDLE-STOP.md)).
 `cw stop ENV --session NAME` asks at a terminal whether to stop the session's
 running children too; adding `--all` stops every running descendant without
 asking. Without a terminal, children keep running and `cw stop` names them.

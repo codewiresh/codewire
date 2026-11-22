@@ -419,6 +419,7 @@ fn running(fixture: &[Value], model: &str, effort: &str) -> (Harness, MessageRec
         control_pending: HashMap::new(),
         settled: HashSet::new(),
         stopping: false,
+        heartbeat: Default::default(),
         noel: Default::default(),
         cw: None,
         takedown_marker_wait: crate::commands::sessions::agents::pause::TAKEDOWN_MARKER_WAIT,
