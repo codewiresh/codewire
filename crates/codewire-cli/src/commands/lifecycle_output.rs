@@ -307,13 +307,17 @@ pub(crate) struct InterruptNotice {
 
 impl InterruptNotice {
     /// `operation` names it as a noun: `creation`, `start`, `restart`,
-    /// `stop` or `removal`.
+    /// `stop`, `removal` or `setup retry`.
     pub(crate) fn new(location: VmLocation, operation: &'static str, name: &str) -> Self {
         let name = terminal_text(name);
-        let check = if operation == "removal" {
-            format!("cw {} ls", placement_flag(location))
-        } else {
-            environment_command(location, "info", &name)
+        let check = match operation {
+            "removal" => format!("cw {} ls", placement_flag(location)),
+            // `cw info` doesn't show setup; its log does.
+            "setup retry" => format!(
+                "{} --setup --follow",
+                environment_command(location, "logs", &name)
+            ),
+            _ => environment_command(location, "info", &name),
         };
         Self {
             operation,
@@ -437,6 +441,12 @@ mod tests {
                 .error(false)
                 .to_string(),
             "Interrupted. The removal of app was requested but not confirmed; check it with `cw --local ls`."
+        );
+        assert_eq!(
+            InterruptNotice::new(VmLocation::Cloud, "setup retry", "app")
+                .error(true)
+                .to_string(),
+            "Interrupted. The setup retry of app continues in the background; check it with `cw --cloud logs app --setup --follow`."
         );
         let wrapped = InterruptNotice::new(VmLocation::Cloud, "creation", "app")
             .error(true)

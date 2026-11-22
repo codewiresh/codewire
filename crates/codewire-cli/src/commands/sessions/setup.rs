@@ -102,9 +102,10 @@ fn failed_warning(line: &str, name: &str, style: crate::output::Style) -> String
     )
 }
 
+// Not led by the name: the error line capitalises its first letter.
 fn setup_running(name: &str) -> String {
     format!(
-        "{name}'s setup is running; wait for it, or follow it with `cw logs {name} --setup --follow`"
+        "The setup of {name} is running; wait for it, or follow it with `cw logs {name} --setup --follow`"
     )
 }
 
@@ -224,7 +225,7 @@ mod tests {
         }
         assert_eq!(
             setup_running("app"),
-            "app's setup is running; wait for it, or follow it with `cw logs app --setup --follow`"
+            "The setup of app is running; wait for it, or follow it with `cw logs app --setup --follow`"
         );
     }
 }

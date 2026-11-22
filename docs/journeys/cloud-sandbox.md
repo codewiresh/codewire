@@ -27,7 +27,7 @@ Updated 2026-11-21.
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
 | `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
 | `sandbox-row-menu` | cw-web | not yet observed | not yet observed |
-| `sandbox-setup-retry` | cw-hosted-runtime | observed in part 2026-11-17 (CLI: create, run and `cw retry`; #5167) | not yet observed |
+| `sandbox-setup-retry` | cw-hosted-runtime | observed in part 2026-11-21 (CLI, all but the 2-minute note; the dashboard waits on #5065) | not yet observed |
 | `sandbox-attach-repaint` | cw-direct-udp | partly observed 2026-11-18 (#5120) | not yet observed |
 | `sandbox-cp-upload` | cw-workspace-mount | observed 2026-11-14 (#4460) | not yet observed |
 | `sandbox-cp-resume` | cw-workspace-mount | observed 2026-11-13 (#4373) | not yet observed; v0.4.17 lacks it |
@@ -787,7 +787,8 @@ Issues: #4767, and #5050 for the clone's reason.
   - **`cw create` with the failure:** it ends with `✗ Setup failed at Running install command: …`, which says SANDBOX is still running and to fix it there and run `cw retry SANDBOX`, then `→ cw shell SANDBOX`, and exits 1.
   - **`cw` after the failure:** `cw run --in SANDBOX -- CMD` and `cw shell SANDBOX` print `! Setup failed at Running install command: …` and `→ cw retry SANDBOX`, then run.
   - **`cw retry SANDBOX`:** it follows the retry's steps from install and ends with `✓ Setup complete for SANDBOX`. A retry that would clone again names the directories and asks `Retry? [y/N]`; without a terminal it refuses with `→ cw retry SANDBOX --yes`.
-  - **`cw` while setup runs:** they refuse with "SANDBOX's setup is running; wait for it, or follow it with `cw logs SANDBOX --setup --follow`".
+  - **`cw` while setup runs:** they refuse with "The setup of SANDBOX is running; wait for it, or follow it with `cw logs SANDBOX --setup --follow`".
+  - **Ctrl-C during `cw retry`:** it ends with "Interrupted. The setup retry of SANDBOX continues in the background; check it with `cw --cloud logs SANDBOX --setup --follow`.", and the retry carries on.
 - **Gotchas:**
   - A Retry runs the failed step's own command again: install and startup scripts should be safe to rerun.
   - New terminals wait while the Retry's setup runs, as they do during the first setup.
@@ -806,7 +807,14 @@ Issues: #4767, and #5050 for the clone's reason.
     - `cw retry` before the fix followed install again to the same failure, exit 1.
     - `cw run --in NAME -- touch /workspace/ok` printed `! Setup failed at …` and `→ cw retry NAME`, then ran, exit 0.
     - `cw retry` after it ran install only and ended with `✓ Setup complete for NAME` in about 1 s, exit 0. Once more, the service refused: `This Sandbox's setup completed`.
-  - Not yet observed: `cw`'s refusal while setup runs; `cw retry`'s reclone question and its 2-minute note; on Dev, the dashboard banner and Retry setup (a dashboard walk runs on Dev only in the protected smoke, which gains this step in #5065).
+  - Dev, 2026-11-21, 20:41–20:45Z: Dev ran source 8880d56e76 (promoted 20:15Z, acceptance passed 20:23Z), with `cw` built from that commit, the smoke identity and an install command `sleep 20; test -f /workspace/ok`. Evidence: #4767's comment of that date.
+    - `cw create --cloud` ended with `✗ Setup failed at Running install command: …` and `→ cw shell NAME`, exit 1.
+    - Ctrl-C during `cw retry` (a SIGINT at 8 s, at a terminal) ended with "Interrupted. The setup retry of NAME continues in the background; check it with `cw --cloud info NAME`.", and the retry carried on. `cw info` shows nothing about setup, so this change points to the setup log instead.
+    - `cw run --in NAME -- true` during it refused with "✗ Hrt-retry-a-2041's setup is running; …", exit 1. The error line capitalised the Sandbox's name, so the sentence no longer starts with it.
+    - Once the retry had failed, `cw run --in NAME -- touch /workspace/ok` printed `! Setup failed at …` and `→ cw retry NAME`, then ran, exit 0. `cw retry` then ran install only and ended with `✓ Setup complete for NAME`, exit 0; once more, the service refused with `This Sandbox's setup completed`.
+    - A create cloning `https://git.example.invalid/none/none.git` failed at "Cloning repositories: … git.example.invalid couldn't be reached from the Sandbox", exit 1. `cw retry` without a terminal refused with "Retrying setup clones the repositories again, which deletes /workspace/none and any edits made there" and `→ cw retry NAME --yes`. At a terminal it asked `… Retry? [y/N]:`, and `n` ended with `✗ Cancelled; setup was not retried`. `cw retry NAME --yes` cloned again and failed the same way, exit 1.
+    - Both Sandboxes were removed by name, and `cw ls --cloud` then listed neither.
+  - Not yet observed: `cw retry`'s 2-minute note, "The retry hasn't started yet; it runs after the Sandbox's current operation"; on Dev, the dashboard banner and Retry setup (a dashboard walk runs on Dev only in the protected smoke, which gains this step in #5065).
   - Production: not yet; v0.4.21 lacks Retry setup.
 
 ## `sandbox-attach-repaint`: a full-screen program is left clean after a reconnect
