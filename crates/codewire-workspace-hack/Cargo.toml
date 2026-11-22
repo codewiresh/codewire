@@ -60,7 +60,7 @@ fastrand = { version = "2.4.1" }
 ff = { version = "0.14.0", default-features = false, features = ["alloc"] }
 flate2 = { version = "1.1.9", features = ["zlib-rs"] }
 foldhash = { version = "0.1.5", default-features = false, features = ["std"] }
-form_urlencoded = { version = "1.2.2" }
+form_urlencoded = { version = "1.2.3" }
 futures = { version = "0.3.32" }
 futures-channel = { version = "0.3.32", features = ["sink"] }
 futures-core = { version = "0.3.32" }
@@ -154,7 +154,7 @@ tracing-core = { version = "0.1.36" }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "parking_lot"] }
 tungstenite = { version = "0.28.0", default-features = false, features = ["__rustls-tls", "handshake"] }
 typenum = { version = "1.20.1", default-features = false, features = ["const-generics"] }
-url = { version = "2.5.8" }
+url = { version = "2.5.9" }
 uuid = { version = "1.23.2", features = ["serde", "v4"] }
 x509-parser = { version = "0.18.1", default-features = false, features = ["verify"] }
 zeroize = { version = "1.9.0", features = ["aarch64", "serde", "zeroize_derive"] }
@@ -206,7 +206,7 @@ fastrand = { version = "2.4.1" }
 ff = { version = "0.14.0", default-features = false, features = ["alloc"] }
 flate2 = { version = "1.1.9", features = ["zlib-rs"] }
 foldhash = { version = "0.1.5", default-features = false, features = ["std"] }
-form_urlencoded = { version = "1.2.2" }
+form_urlencoded = { version = "1.2.3" }
 futures = { version = "0.3.32" }
 futures-channel = { version = "0.3.32", features = ["sink"] }
 futures-core = { version = "0.3.32" }
@@ -302,7 +302,7 @@ tracing-core = { version = "0.1.36" }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "parking_lot"] }
 tungstenite = { version = "0.28.0", default-features = false, features = ["__rustls-tls", "handshake"] }
 typenum = { version = "1.20.1", default-features = false, features = ["const-generics"] }
-url = { version = "2.5.8" }
+url = { version = "2.5.9" }
 uuid = { version = "1.23.2", features = ["serde", "v4"] }
 x509-parser = { version = "0.18.1", default-features = false, features = ["verify"] }
 zeroize = { version = "1.9.0", features = ["aarch64", "serde", "zeroize_derive"] }
