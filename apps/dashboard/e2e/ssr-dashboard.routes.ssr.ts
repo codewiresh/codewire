@@ -346,8 +346,8 @@ test.describe("server-rendered public, auth, and account routes", () => {
     await page.goto("/settings/credentials/");
     await page.getByRole("button", { name: "Add credential", exact: true }).click();
     await page.getByRole("dialog", { name: "Add credential", exact: true })
-      .getByRole("button", { name: "Claude subscription token", exact: true }).click();
-    const editor = page.getByRole("dialog", { name: "Add Claude subscription token", exact: true });
+      .getByRole("button", { name: "Claude (token)", exact: true }).click();
+    const editor = page.getByRole("dialog", { name: "Connect Claude (token)", exact: true });
     await editor.getByLabel("Credential name", { exact: true }).fill("Synthetic Claude plan");
     // Synthetic and malformed: whitespace is never part of a token.
     const malformed = "synthetic malformed subscription token canary";

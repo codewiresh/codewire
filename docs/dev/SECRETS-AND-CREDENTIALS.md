@@ -463,9 +463,10 @@ one Anthropic slot holds an API key, a subscription token or a Claude sign-in.
 
 Both subscription forms are connected with `connect` (owner, 2026-11-15,
 #4945): `connect claude` signs in with the browser, and `connect claude-token`
-takes the token `claude setup-token` prints. Help, the guided picker and the
-dashboard call them **Claude (sign-in)** and **Claude (token)**, both the
-user's Claude subscription, and lists show the same names. The sign-in shows
+takes the token `claude setup-token` prints. Help, the guided picker and
+`cw` lists call them **Claude (sign-in)** and **Claude (token)**, both the
+user's Claude subscription. The dashboard calls the sign-in **Connect Claude**
+and lists it as Claude (below), and keeps **Claude (token)**. The sign-in shows
 the plan and usage; the token lasts a year, suits automation and makes model
 requests only. A token is replaced by connecting it again under its name,
 which asks first, as every `connect` does; `rotate` is for API keys only and
@@ -686,6 +687,30 @@ expires. The stored record has no hard expiry; its account hint is the
 profile's email. Repeating `connect claude` with an existing sign-in's name
 reconnects that identity after confirmation, keeping its profile bindings and
 reading the plan again.
+
+The dashboard offers the same sign-in, through the same two calls. Settings →
+Credentials → Add credential lists **Connect Claude** and then **Claude
+(token)**. The sign-in's dialog, **Connect Claude**, takes the name with no
+other text, then starts the sign-in and shows **Open Claude to sign in**, a
+link to the authorize URL that opens in a new tab, with the one sentence "Sign
+in to Claude with the account whose plan you want to use. Claude then shows a
+code: copy it and paste it here." Before showing it, the dashboard checks that
+the URL is Claude's authorize page.
+A password-type field, never echoed, takes the `code#state` Claude
+shows on its page; the callback URL the CLI also accepts is for a terminal, and
+the dashboard takes only the code. The dashboard keeps the handle in a cookie,
+`__Secure-codewire_claude_sign_in`, never in the page or a URL. The cookie is
+`HttpOnly`, `Secure` and `SameSite=Strict`, its path is the sign-in's two
+actions, and it lasts until the handle's expiry. Both actions are POSTs that
+pass the dashboard's CSRF check. A paste that isn't `code#state` makes no call and
+keeps the cookie, ready for another paste. Any answer
+from Complete clears it, and starting again replaces it. The
+cookie stays in the browser that started the sign-in, so a dashboard replica
+keeps nothing. A wrong or malformed code reopens the dialog with the name kept
+and the code cleared; an expired sign-in says to start again. A sign-in's row
+reads "Anthropic · Claude" with the Claude account's email and offers
+**Reconnect**, which repeats the dialog for that identity at its current
+generation.
 
 The access token lives about 8 hours. The broker refreshes it at Claude's token
 endpoint when a request finds it within five minutes of expiry, through the
@@ -3789,8 +3814,9 @@ stores.
   scopes and in secret projects, and manage the organization's secret
   projects. Only key names and update times are readable.
 - **Settings → Credentials** adds credentials (**Connect Codex**,
-  **Connect GitHub**, OpenAI and Anthropic API keys, a Claude subscription
-  token, and a generated or imported SSH key) and shows each one's status.
+  **Connect GitHub**, OpenAI and Anthropic API keys, a
+  [Claude sign-in](#claude-sign-in), a Claude subscription token, and a
+  generated or imported SSH key) and shows each one's status.
   A credential's menu renames, rotates an API key, replaces a token,
   reconnects, revokes and deletes it; an SSH key offers **Copy public key**.
   **Profiles** creates, renames and deletes identity-only profiles and edits

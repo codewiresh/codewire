@@ -854,3 +854,161 @@ async fn service_rejections_keep_the_name_and_uncertain_outcomes_redirect_withou
         assert_eq!(writes.len(), ADDITIONS.len(), "{mode}");
     }
 }
+
+const CLAUDE_CODE_INVALID: &str =
+    "That isn't the code Claude shows; copy the whole code and paste it again.";
+const CLAUDE_CODE_REFUSED: &str = "Claude didn't accept that code; start again.";
+const CLAUDE_SIGN_IN_ENDED: &str = "This sign-in ended after 15 minutes; start again.";
+
+/// The `Set-Cookie` that carries the sign-in's handle, if the response sets one.
+fn claude_handle_cookie(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|value| value.to_str().unwrap().to_owned())
+        .find(|value| value.starts_with("__Secure-codewire_claude_sign_in="))
+}
+
+#[tokio::test]
+async fn a_claude_sign_in_keeps_its_handle_in_a_cookie_and_answers_each_paste() {
+    let (upstream, calls) = fixture("success").await;
+    let dashboard = serve(crate::app(config(&upstream.origin))).await;
+    let post = |step: &'static str, fields: Vec<(&'static str, String)>, handle: bool| {
+        let origin = dashboard.origin.clone();
+        async move {
+            let csrf = crate::security::new_csrf_token();
+            let mut headers = authority(&csrf);
+            if handle {
+                headers.insert(
+                    header::COOKIE,
+                    format!(
+                        "codewire.session_token=synthetic-session; codewire_ssr_csrf={csrf}; \
+                         __Secure-codewire_claude_sign_in={CLAUDE_HANDLE}"
+                    )
+                    .parse()
+                    .unwrap(),
+                );
+            }
+            let mut fields = fields;
+            fields.push(("_csrf", csrf));
+            fields.push(("name", "claude-login".into()));
+            let response = client()
+                .post(format!(
+                    "{origin}{PATH}_actions/credentials/claude-sign-in/{step}?org=synthetic"
+                ))
+                .headers(headers)
+                .form(&fields)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let headers = response.headers().clone();
+            (status, headers, response.text().await.unwrap())
+        }
+    };
+    let alert = |message: &str| format!("role=\"alert\">{}</p>", message.replace('\'', "&#39;"));
+    let dialog = "id=\"add-claude-sign-in\" aria-labelledby=\"add-claude-sign-in-title\" data-dialog-auto-open";
+
+    // Start sets the handle as a cookie scoped to the two actions and shows
+    // Claude's page and the code field; the handle is never in the page.
+    let (status, headers, html) = post("start", Vec::new(), false).await;
+    assert_eq!(status, StatusCode::OK);
+    let cookie = claude_handle_cookie(&headers).unwrap();
+    assert!(cookie.starts_with(&format!(
+        "__Secure-codewire_claude_sign_in={CLAUDE_HANDLE}; "
+    )));
+    assert!(cookie.contains("Path=/settings/credentials/_actions/credentials/claude-sign-in/;"));
+    assert!(cookie.contains("HttpOnly; SameSite=Strict;"));
+    assert!(html.contains(dialog));
+    assert!(html.contains(&format!(
+        "href=\"{}\" target=\"_blank\" rel=\"noopener noreferrer\">Open Claude to sign in</a>",
+        CLAUDE_AUTHORIZE_URL.replace('&', "&#38;")
+    )));
+    assert!(html.contains("for=\"add-claude-sign-in-code\">Code from Claude</label>"));
+    assert!(!html.contains(CLAUDE_HANDLE));
+
+    // A paste of another shape sends nothing and keeps the handle for another try.
+    let (status, headers, html) = post(
+        "complete",
+        vec![("code", format!("{PRIVATE_MARKER} not a code"))],
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(claude_handle_cookie(&headers), None);
+    assert!(html.contains(dialog));
+    assert!(html.contains(&alert(CLAUDE_CODE_INVALID)));
+    assert!(html.contains("for=\"add-claude-sign-in-code\">Code from Claude</label>"));
+    assert!(!html.contains("Open Claude to sign in"));
+
+    // Each answer from Complete clears the handle: a refused code and an
+    // ended sign-in each say to start again.
+    for (code, error) in [
+        ("refused#synthetic-state", CLAUDE_CODE_REFUSED),
+        ("late#synthetic-state", CLAUDE_SIGN_IN_ENDED),
+    ] {
+        let (status, headers, html) = post("complete", vec![("code", code.into())], true).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{code}");
+        assert!(
+            claude_handle_cookie(&headers)
+                .unwrap()
+                .contains("Max-Age=0;"),
+            "{code}"
+        );
+        assert!(html.contains(dialog), "{code}");
+        assert!(html.contains(&alert(error)), "{code}");
+        assert!(
+            html.contains("for=\"add-claude-sign-in-name\">Credential name</label>"),
+            "{code}"
+        );
+        assert!(!html.contains(code), "{code} was echoed");
+    }
+    // Without its cookie a sign-in has ended, and Claude is not asked.
+    let (status, headers, html) = post(
+        "complete",
+        vec![("code", "synthetic-code#synthetic-state".into())],
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        claude_handle_cookie(&headers)
+            .unwrap()
+            .contains("Max-Age=0;")
+    );
+    assert!(html.contains(&alert(CLAUDE_SIGN_IN_ENDED)));
+
+    let (status, headers, _) = post(
+        "complete",
+        vec![("code", " synthetic-code#synthetic-state\n".into())],
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert!(
+        claude_handle_cookie(&headers)
+            .unwrap()
+            .contains("Max-Age=0;")
+    );
+    assert!(
+        headers[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .contains("message=claude-sign-in-added")
+    );
+
+    let calls = calls.lock().unwrap();
+    let count = |suffix: &str| {
+        calls
+            .iter()
+            .filter(|(path, _)| path.ends_with(suffix))
+            .count()
+    };
+    assert_eq!(count("/StartClaudeSignIn"), 1);
+    // The refused, the ended and the stored paste; never the malformed one or the cookieless one.
+    assert_eq!(count("/CompleteClaudeSignIn"), 3);
+    assert!(!calls.iter().any(|(_, body)| {
+        body.windows(PRIVATE_MARKER.len())
+            .any(|window| window == PRIVATE_MARKER.as_bytes())
+    }));
+}

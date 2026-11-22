@@ -53,7 +53,7 @@ const footer = async (owner: Locator, primary?: string, dismissal = "Cancel") =>
   }
 };
 
-test("six full-row choices open focused provider editors with Back and one footer", { tag: "@mobile" }, async ({ page }) => {
+test("seven full-row choices open focused provider editors with Back and one footer", { tag: "@mobile" }, async ({ page }) => {
   const errors: string[] = [];
   const posts: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -61,7 +61,7 @@ test("six full-row choices open focused provider editors with Back and one foote
   const add = action(page, "Add credential");
   await add.click();
   const chooser = dialog(page, "Add credential");
-  await expect(chooser.locator(".cw-credential-types > li")).toHaveCount(6);
+  await expect(chooser.locator(".cw-credential-types > li")).toHaveCount(7);
   await footer(chooser);
   await fits(page, chooser);
   await artifactScreenshot(page, "credential-chooser.png");
@@ -70,13 +70,16 @@ test("six full-row choices open focused provider editors with Back and one foote
     // connect dialog routes to Reconnect and offers no second authorization.
     ["GitHub", "Connect GitHub", "", ""],
     ["Codex", "Connect Codex", "Connect Codex", "codex"],
+    ["Connect Claude", "Connect Claude", "Continue", ""],
+    ["Claude (token)", "Connect Claude (token)", "Add token", ""],
     ["OpenAI API key", "Add OpenAI API key", "Add API key", "openai"],
     ["Anthropic API key", "Add Anthropic API key", "Add API key", "anthropic"],
-    ["Claude subscription token", "Add Claude subscription token", "Add token", ""],
   ]) {
     const row = action(chooser, name);
     // The description itself is inside the action, not detached underneath it.
-    await row.locator("span > span").click();
+    // Connect Claude has no description, so its name is what is clicked.
+    const description = row.locator("span > span");
+    await (await description.count() ? description : row.locator("strong")).click();
     const editor = dialog(page, title);
     await expect(page.locator("dialog[open]")).toHaveCount(1);
     await footer(editor, primary || undefined, name === "GitHub" ? "Done" : "Cancel");
@@ -102,7 +105,15 @@ test("six full-row choices open focused provider editors with Back and one foote
       await expect(editor.getByLabel("Credential name", { exact: true })).toBeFocused();
       await expect(editor.getByLabel("Hard expiry (UTC)", { exact: true })).not.toBeVisible();
     }
-    if (name === "Claude subscription token") {
+    if (name === "Connect Claude") {
+      // The name first; the sign-in starts on Continue, so no code field yet.
+      await expect(editor.getByLabel("Credential name", { exact: true })).toBeFocused();
+      await expect(editor.locator('[name="code"], [name="provider"], [name="credential_id"]')).toHaveCount(0);
+      // A name and Continue, and no text: Claude's own page says the rest.
+      await expect(editor.locator(".cw-dialog-body > p")).toHaveCount(0);
+      await artifactScreenshot(page, "claude-sign-in-dialog.png");
+    }
+    if (name === "Claude (token)") {
       // Paste only: the owner runs claude setup-token; the service sets the expiry.
       await expect(editor.getByLabel("Credential name", { exact: true })).toBeFocused();
       await expect(editor.getByLabel("Token", { exact: true })).toHaveAttribute("type", "password");
@@ -538,6 +549,74 @@ test.describe("without JavaScript", () => {
     }
     await expect(page.locator('button[type="button"][data-dialog-open], button[type="button"][data-dialog-close]')).toHaveCount(0);
   });
+});
+
+test("a started Claude sign-in opens Claude in a new tab and takes the code it shows, never echoed", { tag: "@mobile" }, async ({ page }) => {
+  const posts: string[] = [];
+  page.on("request", (request) => { if (request.method() === "POST") posts.push(request.url()); });
+  await page.goto(`${process.env.CODEWIRE_DESIGN_ORIGIN}/reference/fixtures/settings-credentials-claude-sign-in.html`);
+  const editor = dialog(page, "Connect Claude");
+  await expect(editor).toBeVisible();
+  const link = editor.getByRole("link", { name: "Open Claude to sign in", exact: true });
+  await expect(link).toHaveAttribute("href", /^https:\/\/claude\.com\/cai\/oauth\/authorize\?/);
+  await expect(link).toHaveAttribute("target", "_blank");
+  await expect(link).toHaveAttribute("rel", "noopener noreferrer");
+  const code = editor.getByLabel("Code from Claude", { exact: true });
+  await expect(code).toBeFocused();
+  await expect(code).toHaveAttribute("type", "password");
+  await expect(code).toHaveAttribute("autocomplete", "off");
+  await expect(code).toHaveValue("");
+  // The handle stays in its cookie: no field of the form that posts carries it.
+  expect(await editor.locator('form[method="post"] input').evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).name).sort()))
+    .toEqual(["_csrf", "code", "name"]);
+  await footer(editor, "Connect Claude");
+  await fits(page, editor);
+  await artifactScreenshot(page, "claude-sign-in-code-step.png");
+  expect(posts).toEqual([]);
+});
+
+test("a paste that isn't Claude's code is refused before it is sent, and the field is ready again", { tag: "@mobile" }, async ({ page }) => {
+  await page.goto(`${process.env.CODEWIRE_DESIGN_ORIGIN}/reference/fixtures/settings-credentials-claude-sign-in-code-invalid.html`);
+  const editor = dialog(page, "Connect Claude");
+  await expect(editor.getByRole("alert")).toHaveText("That isn't the code Claude shows; copy the whole code and paste it again.");
+  // The sign-in is still running, so the page asks for the code again and not for Claude's page.
+  await expect(editor.getByRole("link", { name: "Open Claude to sign in" })).toHaveCount(0);
+  const code = editor.getByLabel("Code from Claude", { exact: true });
+  await expect(code).toBeFocused();
+  await expect(code).toHaveAttribute("type", "password");
+  await expect(code).toHaveValue("");
+  await footer(editor, "Connect Claude");
+  await fits(page, editor);
+  await artifactScreenshot(page, "claude-sign-in-code-invalid.png");
+});
+
+test("an ended or refused Claude sign-in says to start again, keeping the name", { tag: "@mobile" }, async ({ page }) => {
+  await page.goto(`${process.env.CODEWIRE_DESIGN_ORIGIN}/reference/fixtures/settings-credentials-claude-sign-in-ended.html`);
+  const editor = dialog(page, "Connect Claude");
+  await expect(editor.getByRole("alert")).toHaveText("This sign-in ended after 15 minutes; start again.");
+  await expect(editor.getByLabel("Credential name", { exact: true })).toHaveValue("Work Claude");
+  await expect(editor.locator('[name="code"]')).toHaveCount(0);
+  await footer(editor, "Continue");
+  await fits(page, editor);
+  await artifactScreenshot(page, "claude-sign-in-ended.png");
+});
+
+test("a Claude sign-in row names its account and Reconnect starts a new sign-in for it", { tag: "@mobile" }, async ({ page }) => {
+  const row = page.locator(".cw-credential-row").filter({ hasText: "Personal Claude" });
+  await expect(row).toContainText("Anthropic · Claude");
+  await expect(row).toContainText("owner@example.test");
+  const menu = await rowMenu(row);
+  await expect(menuItems(menu)).toContainText(["Reconnect"]);
+  await menuItems(menu).filter({ hasText: "Reconnect" }).click();
+  const editor = dialog(page, "Reconnect Personal Claude");
+  await expect(editor).toBeVisible();
+  await expect(editor).toContainText("Sign in to Claude again.");
+  // The same identity at the generation the row showed; nothing to type before Claude's page.
+  await expect(editor.locator('input[name="credential_id"]')).toHaveValue("fixture-claude-sign-in");
+  await expect(editor.locator('input[name="expected_revocation_generation"]')).toHaveValue("4");
+  await expect(editor.locator('input:not([type="hidden"])')).toHaveCount(0);
+  await footer(editor, "Continue");
+  await fits(page, editor);
 });
 
 // Each sign-in state hides the form and its Connect button, so focus moves

@@ -538,6 +538,8 @@ pub(crate) struct CredentialRowView {
     pub(crate) oauth: bool,
     /// A Claude subscription token, replaced by pasting a new token.
     pub(crate) subscription_token: bool,
+    /// A Claude sign-in, reconnected by signing in again.
+    pub(crate) claude_sign_in: bool,
     /// A rotating OAuth refresh failed, or a Claude subscription token was
     /// refused or expired; only the owner's Reconnect or Replace restores it.
     pub(crate) reconnect_needed: bool,
@@ -579,6 +581,10 @@ pub(crate) struct CredentialProfileRowView {
 }
 
 pub(crate) struct CredentialSettingsView {
+    /// The Claude sign-in dialog shows its code field (#4935), with Claude's
+    /// authorize page when the sign-in has just started.
+    pub(crate) claude_sign_in_code: bool,
+    pub(crate) claude_sign_in_url: String,
     pub(crate) navigation_query: String,
     pub(crate) creation_return_url: String,
     pub(crate) git_identity: SettingsData,
@@ -2744,6 +2750,8 @@ mod secret_debug_tests {
     #[test]
     fn credential_settings_debug_redacts_csrf_capability() {
         let page = CredentialSettingsView {
+            claude_sign_in_code: false,
+            claude_sign_in_url: String::new(),
             navigation_query: String::new(),
             creation_return_url: String::new(),
             git_identity: SettingsData::default(),

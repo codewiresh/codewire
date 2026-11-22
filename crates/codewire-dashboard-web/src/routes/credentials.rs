@@ -43,6 +43,7 @@ use crate::{
     },
 };
 
+pub(super) mod claude_sign_in;
 mod lifecycle;
 pub(super) use lifecycle::{delete_credential_action, revoke_credential_action};
 
@@ -117,6 +118,9 @@ struct RejectedAddition<'a> {
     dialog: &'a str,
     error: &'static str,
     name: &'a str,
+    /// A Claude sign-in's dialog reopened at its code step; with no error it
+    /// is the step a started sign-in shows, not a rejection.
+    sign_in: Option<claude_sign_in::CodeStep<'a>>,
 }
 
 async fn render_page(
@@ -193,7 +197,12 @@ async fn render_page(
         .credentials
         .iter()
         .any(|credential| credential.oauth_provider == "github" && !credential.revoked);
+    let sign_in = rejected
+        .as_ref()
+        .and_then(|rejected| rejected.sign_in.as_ref());
     let page = CredentialSettingsView {
+        claude_sign_in_code: sign_in.is_some(),
+        claude_sign_in_url: sign_in.map_or_else(String::new, |step| step.authorize_url.into()),
         navigation_query: page_query(query),
         creation_return_url: if dashboard.has_selected_organization {
             if let DraftReturn::Exact(id) = &query.draft {
@@ -228,7 +237,9 @@ async fn render_page(
         }),
         csrf_cookie(&state.public_origin, &csrf),
     );
-    if rejected.is_some() && response.status() == StatusCode::OK {
+    if rejected.is_some_and(|rejected| !rejected.error.is_empty())
+        && response.status() == StatusCode::OK
+    {
         *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
     }
     timing.apply(&mut response);
@@ -254,6 +265,7 @@ async fn reject_addition(
             dialog,
             error,
             name,
+            sign_in: None,
         }),
     )
     .await
@@ -1507,11 +1519,12 @@ fn approved_dialog(requested: &str, data: &credentials_connect::CredentialSettin
                     || requested == row_action_dialog("credential", id, "delete")
                         && (credential.revoked || credential.oauth_provider == "github"))
         })
-    }) || requested_row_id(requested, "profile").is_some_and(|id| {
-        // Rows open their actions directly; there is no per-row manage dialog.
-        requested != row_dialog("profile", id)
-            && data.profiles.iter().any(|profile| profile.id == id)
-    });
+    }) || claude_sign_in::approved_dialog(requested, data)
+        || requested_row_id(requested, "profile").is_some_and(|id| {
+            // Rows open their actions directly; there is no per-row manage dialog.
+            requested != row_dialog("profile", id)
+                && data.profiles.iter().any(|profile| profile.id == id)
+        });
     if allowed {
         requested.to_owned()
     } else {
@@ -1554,7 +1567,7 @@ fn approved_message(code: &str) -> &'static str {
         "profile-updated" => "Credential profile updated.",
         "profile-renamed" => "Credential profile renamed.",
         "profile-deleted" => "Credential profile deleted.",
-        _ => "",
+        code => claude_sign_in::approved_message(code),
     }
 }
 
@@ -1609,7 +1622,7 @@ fn approved_error(code: &str) -> &'static str {
         }
         "profile-in-use" => "The credential profile is still in use and cannot be deleted.",
         "request-failed" => "The credential profile change could not be completed. Try again.",
-        _ => "",
+        code => claude_sign_in::approved_error(code),
     }
 }
 
@@ -1640,6 +1653,7 @@ mod tests {
                 api_key: false,
                 oauth: true,
                 subscription_token: false,
+                claude_sign_in: false,
                 reconnect_needed: false,
                 revoked: false,
                 oauth_provider: "github",
@@ -1711,6 +1725,43 @@ mod tests {
         retained_name: &str,
         github_notice_deferred: bool,
     ) -> String {
+        let mut page = page_view(active_dialog, error, data, navigation, retained_name);
+        page.github_notice_deferred = github_notice_deferred;
+        render_view(&page)
+    }
+
+    /// The page as the handler builds it, for a test to adjust before rendering.
+    pub(super) fn page_view(
+        active_dialog: &str,
+        error: &str,
+        data: credentials_connect::CredentialSettingsData,
+        navigation: &str,
+        retained_name: &str,
+    ) -> CredentialSettingsView {
+        CredentialSettingsView {
+            claude_sign_in_code: false,
+            claude_sign_in_url: String::new(),
+            navigation_query: navigation.into(),
+            creation_return_url: String::new(),
+            git_identity: crate::view::SettingsData {
+                git_identity_available: true,
+                ..Default::default()
+            },
+            git_identity_feedback: false,
+            active_dialog: approved_dialog(active_dialog, &data),
+            github_install_url: github_app_installation_url("codewire-synthetic"),
+            credentials: data.credentials,
+            profiles: data.profiles,
+            choices: data.choices,
+            csrf_token: "synthetic-csrf".into(),
+            message: String::new(),
+            error: error.into(),
+            retained_name: retained_name.into(),
+            github_notice_deferred: false,
+        }
+    }
+
+    pub(super) fn render_view(page: &CredentialSettingsView) -> String {
         let view = DashboardView {
             account_id: "synthetic-account".to_owned(),
             user_name: "Dashboard User".into(),
@@ -1740,31 +1791,9 @@ mod tests {
             support_mailto: String::new(),
             updates_enabled: false,
         };
-        let page = CredentialSettingsView {
-            navigation_query: navigation.into(),
-            creation_return_url: String::new(),
-            git_identity: crate::view::SettingsData {
-                git_identity_available: true,
-                ..Default::default()
-            },
-            git_identity_feedback: false,
-            active_dialog: approved_dialog(active_dialog, &data),
-            github_install_url: github_app_installation_url("codewire-synthetic"),
-            credentials: data.credentials,
-            profiles: data.profiles,
-            choices: data.choices,
-            csrf_token: "synthetic-csrf".into(),
-            message: String::new(),
-            error: error.into(),
-            retained_name: retained_name.into(),
-            github_notice_deferred,
-        };
-        CredentialSettingsTemplate {
-            view: &view,
-            page: &page,
-        }
-        .render()
-        .unwrap()
+        CredentialSettingsTemplate { view: &view, page }
+            .render()
+            .unwrap()
     }
 
     #[test]
@@ -1989,10 +2018,73 @@ mod tests {
             api_key: false,
             oauth: false,
             subscription_token: true,
+            claude_sign_in: false,
             reconnect_needed,
             revoked: false,
             oauth_provider: "",
         }
+    }
+
+    fn sign_in_row(id: &str) -> CredentialRowView {
+        CredentialRowView {
+            name: "Personal Claude".into(),
+            authentication: "Claude",
+            account_hint: "owner@example.test".into(),
+            status: "Active",
+            status_tone: "success",
+            expires: String::new(),
+            generation: 4,
+            subscription_token: false,
+            claude_sign_in: true,
+            ..subscription_row(id, false)
+        }
+    }
+
+    #[test]
+    fn a_claude_sign_in_row_shows_its_account_and_reconnects_through_a_new_sign_in() {
+        let id = "00000000-0000-4000-8000-000000000021";
+        let mut data = dialog_data();
+        data.credentials.push(sign_in_row(id));
+        let reconnect = format!("credential-{id}-reconnect");
+        assert_eq!(approved_dialog(&reconnect, &data), reconnect);
+        assert!(approved_dialog(&format!("credential-{id}-replace"), &data).is_empty());
+        let html = rendered_dialogs_with_data("", "", data);
+        let row = html
+            .split("<li class=\"cw-credential-row\">")
+            .find(|row| row.contains("Personal Claude"))
+            .unwrap();
+        let (primary, dialogs) = row.split_once("<dialog").unwrap();
+        assert!(primary.contains("<span>Anthropic · Claude</span><span>owner@example.test</span>"));
+        let items: Vec<_> = primary
+            .split("class=\"cw-menu-item")
+            .skip(1)
+            .map(|item| item.split('>').nth(1).unwrap().split('<').next().unwrap())
+            .collect();
+        assert!(items.contains(&"Reconnect"), "{items:?}");
+        let dialog = dialogs
+            .split(&format!("id=\"{reconnect}\""))
+            .nth(1)
+            .unwrap()
+            .split("</dialog>")
+            .next()
+            .unwrap();
+        assert!(dialog.contains(&format!(
+            "<h2 id=\"{reconnect}-title\">Reconnect Personal Claude</h2>"
+        )));
+        assert!(dialog.contains("<p>Sign in to Claude again.</p>"));
+        assert!(dialog.contains(&format!(
+            "action=\"{PATH}_actions/credentials/claude-sign-in/start?org=sample-org\""
+        )));
+        for hidden in [
+            format!("name=\"credential_id\" value=\"{id}\""),
+            "name=\"expected_revocation_generation\" value=\"4\"".into(),
+            "name=\"name\" value=\"Personal Claude\"".into(),
+        ] {
+            assert!(dialog.contains(&hidden), "{hidden}");
+        }
+        // The code field appears only once the sign-in has started.
+        assert!(!dialog.contains("name=\"code\""));
+        assert!(dialog.contains(">Continue</button></footer>"));
     }
 
     #[test]
@@ -2061,7 +2153,7 @@ mod tests {
             .next()
             .unwrap();
         assert!(add.contains(
-            "<h2 id=\"add-claude-subscription-token-title\">Add Claude subscription token</h2>"
+            "<h2 id=\"add-claude-subscription-token-title\">Connect Claude (token)</h2>"
         ));
         assert!(add.contains("<p>Run <code>claude setup-token</code>, then paste the token here.</p><p class=\"cw-settings-muted\">Requires a Claude Pro, Max, Team or Enterprise plan. Codewire records an expiry one year from when you add the token. It stays in Codewire and is never delivered to a Sandbox.</p>"));
         assert!(add.contains("<label class=\"cw-label\" for=\"claude-subscription-token-name\">Credential name</label>"));
@@ -2069,7 +2161,7 @@ mod tests {
         assert!(add.contains(">Add token</button></footer>"));
         assert!(!add.contains("name=\"provider\""));
         assert!(!add.contains("name=\"credential_id\""));
-        assert!(html.contains("<strong id=\"add-claude-subscription-token-choice-name\">Claude subscription token</strong><span id=\"add-claude-subscription-token-choice-description\">Use your Claude plan with Claude Code. Paste a token from claude setup-token.</span>"));
+        assert!(html.contains("<strong id=\"add-claude-subscription-token-choice-name\">Claude (token)</strong><span id=\"add-claude-subscription-token-choice-description\">Your subscription; lasts a year, for automation.</span>"));
 
         // An expired token offers its replacement on the row itself.
         let mut data = dialog_data();
@@ -2230,7 +2322,7 @@ mod tests {
         );
         // Rows open their actions from a menu with no per-row manage dialog;
         // the profile row has Rename, Edit identities and Delete dialogs.
-        assert_eq!(html.matches("data-dialog id=").count(), 15);
+        assert_eq!(html.matches("data-dialog id=").count(), 16);
         assert!(!html.contains("data-dialog-auto-open"));
         assert!(!html.contains("<dialog open"));
         assert!(html.contains("name=\"expected_revocation_generation\" value=\"7\""));

@@ -51,6 +51,12 @@ const CLAUDE_SUBSCRIPTION_TOKEN_LIFETIME_SECONDS: u64 = 365 * 24 * 60 * 60;
 /// ordinary clock skew, never by a different lifetime.
 const CLAUDE_SUBSCRIPTION_TOKEN_EXPIRY_TOLERANCE_SECONDS: u64 = 24 * 60 * 60;
 
+mod claude_sign_in;
+pub(crate) use claude_sign_in::{
+    ClaudeSignInRefusal, claude_sign_in_refusal, complete_claude_sign_in, pasted_claude_code,
+    start_claude_sign_in,
+};
+
 #[derive(Clone, Copy)]
 pub(crate) enum OAuthProvider {
     Codex,
@@ -1181,9 +1187,10 @@ fn build_settings_data_at(
             api_key: matches!(form, "openai" | "anthropic"),
             oauth: matches!(form, "codex" | "github"),
             subscription_token: form == "claude",
+            claude_sign_in: form == "claude-sign-in",
             // A subscription token has no refresh and no provider answer
             // marks it: only its recorded expiry asks its owner for a new one.
-            reconnect_needed: (matches!(form, "codex" | "github")
+            reconnect_needed: (matches!(form, "codex" | "github" | "claude-sign-in")
                 && credential.status == CredentialStatus::RefreshFailed)
                 || (form == "claude" && credential.status == CredentialStatus::Active && withheld),
             revoked,
@@ -1537,7 +1544,7 @@ fn authentication_label(form: &str) -> &'static str {
         "codex" | "github" => "OAuth",
         "openai" | "anthropic" => "API key",
         "claude" => "Claude subscription token",
-        "claude-sign-in" => "Claude sign-in",
+        "claude-sign-in" => "Claude",
         "ssh" => "SSH key",
         _ => unreachable!("closed form"),
     }
@@ -1692,7 +1699,8 @@ mod tests {
 
     /// A Claude sign-in fills the Anthropic slot as its own form: labelled,
     /// never offered a subscription token's Replace token or a device
-    /// Reconnect, and named in a profile's attention when it needs Reconnect.
+    /// Reconnect, but its own Reconnect, which the row offers on the row
+    /// when its refresh failed and a profile names in its attention.
     #[test]
     fn a_claude_sign_in_reads_as_its_own_anthropic_form() {
         let sign_in_id = "00000000-0000-4000-8000-000000000011";
@@ -1708,13 +1716,15 @@ mod tests {
         let data = build_settings_data(vec![sign_in.clone()], Vec::new()).unwrap();
         let row = &data.credentials[0];
         assert_eq!(row.provider, "Anthropic");
-        assert_eq!(row.authentication, "Claude sign-in");
+        assert_eq!(row.authentication, "Claude");
         assert_eq!(row.account_hint, "person@example.test");
         assert!(!row.subscription_token && !row.oauth && !row.api_key);
+        assert!(row.claude_sign_in && !row.reconnect_needed);
         assert_eq!(data.choices.anthropic.len(), 1);
         sign_in.status = CredentialStatus::RefreshFailed.into();
         let data = build_settings_data(vec![sign_in], Vec::new()).unwrap();
         assert_eq!(data.credentials[0].status, "Reconnect needed");
+        assert!(data.credentials[0].reconnect_needed);
         assert_eq!(
             attention_notice("claude-sign-in"),
             "Claude sign-in needs Reconnect"

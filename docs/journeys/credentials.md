@@ -19,7 +19,7 @@ observed**.
 | `cred-openai-key` | not yet observed | not yet observed | not yet observed |
 | `cred-anthropic-key` | not yet observed | not yet observed | not yet observed |
 | `cred-claude-setup-token` | not yet observed | not yet observed | not yet observed |
-| `cred-claude-sign-in` | observed, #4798 at f5657302c, 2026-11-15 (steps 1–4; the plan and `/usage`, step 5, not yet observed) | observed, cw v0.4.24 on macOS 27.2.1, 2026-11-19 (every step: the login file holds only a placeholder, `claude -p` answers, `/status` names the plan and `/usage` shows its weekly usage; #3999 comment 117487) | link screen and paste prompt observed, v0.4.18, 2026-11-14; a completed sign-in not yet observed |
+| `cred-claude-sign-in` | observed, #4798 at f5657302c, 2026-11-15 (steps 1–4; the plan and `/usage`, step 5, not yet observed) | observed, cw v0.4.24 on macOS 27.2.1, 2026-11-19 (every step: the login file holds only a placeholder, `claude -p` answers, `/status` names the plan and `/usage` shows its weekly usage; #3999 comment 117487) | link screen and paste prompt observed, v0.4.18, 2026-11-14; a completed sign-in not yet observed; dashboard sign-in not yet observed |
 | `cred-ssh-key` | not yet observed | not yet observed | not yet observed |
 | `cred-sign-in-screen` | partly observed, #4885 at aea6abdb8, 2026-11-16 (steps 1 and 2 for Claude and Codex at a pty; GitHub, `cw login`, piped, `TERM=dumb` and SSH not yet observed) | not yet observed | not yet observed |
 | `profile-revisions` | not yet observed | not yet observed | not yet observed |
@@ -402,6 +402,20 @@ Issues: #4714 (local), #2559 (cloud).
   the wait on Dev and Production, never by provoking a 429. Not yet observed.
 - **Remove:** `cw` says the sign-in keeps working at Claude until it expires,
   or until you sign out of other sessions in Claude's settings.
+- **Dashboard:** Settings → Credentials → Add credential lists "Connect
+  Claude" before "Claude (token)", with no description under it. Its dialog,
+  "Connect Claude", asks only for a name. Press Continue; expect **Open Claude
+  to sign in**, a `https://claude.com/cai/oauth/authorize?` link that opens in
+  a new tab, and the one sentence "Sign in to Claude with the account whose
+  plan you want to use. Claude then shows a code: copy it and paste it here."
+  Sign in, copy the `code#state` Claude shows, paste it into the code field
+  (nothing shows) and press **Connect Claude**. Expect a row reading
+  "Anthropic · Claude" with the Claude account's email, offering
+  **Reconnect**, and no "(sign-in)" or "Claude sign-in" anywhere on the page.
+- **Dashboard states:** a paste that isn't `code#state` reopens the dialog
+  with the name kept and the field empty, ready for another paste; a refused
+  code, or a sign-in started 15 minutes ago or more, says to start again;
+  **Reconnect** repeats the dialog for that credential and keeps its profiles.
 - **Gotchas:** after a `cw` update, the first local `connect claude` may
   replace the credential store the previous `cw` left running (starting the
   local VM supervisor, as a VM command does); with a local VM running, it

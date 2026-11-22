@@ -531,6 +531,15 @@ pub(crate) fn router() -> Router<AppState> {
                 .layer(DefaultBodyLimit::max(8 * 1024)),
         )
         .route(
+            "/settings/credentials/_actions/credentials/claude-sign-in/start",
+            post(credentials::claude_sign_in::start_action).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/settings/credentials/_actions/credentials/claude-sign-in/complete",
+            post(credentials::claude_sign_in::complete_action)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
             "/settings/credentials/_actions/credentials/ssh/generate",
             post(credentials::generate_ssh_action).layer(DefaultBodyLimit::max(8 * 1024)),
         )

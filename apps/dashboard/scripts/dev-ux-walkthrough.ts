@@ -312,14 +312,16 @@ async function credentials(page: Page, slug: string, width: number): Promise<voi
   });
   await stage(`credentials-chooser-${width}`, async () => {
     await add.click();
-    await expect(chooser.locator(".cw-credential-types > li")).toHaveCount(6);
+    await expect(chooser.locator(".cw-credential-types > li")).toHaveCount(7);
     await expect(chooser.locator(".cw-dialog-header [data-dialog-close]")).toHaveCount(0);
     await fits(page, chooser);
   });
   for (const [key, choice, title] of [
     ["github", "GitHub", "Connect GitHub"], ["codex", "Codex", "Connect Codex"],
+    ["claude-sign-in", "Claude (sign-in)", "Connect Claude (sign-in)"],
+    ["claude", "Claude (token)", "Connect Claude (token)"],
     ["openai", "OpenAI API key", "Add OpenAI API key"], ["anthropic", "Anthropic API key", "Add Anthropic API key"],
-    ["claude", "Claude subscription token", "Add Claude subscription token"], ["ssh", "SSH key", "Add SSH key"],
+    ["ssh", "SSH key", "Add SSH key"],
   ]) {
     await stage(`credentials-${key}-${width}`, async () => {
       await button(chooser, choice).click();

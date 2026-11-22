@@ -73,6 +73,8 @@ fn mutation(path: &str) -> bool {
         "/CompleteGithubAppAuthorization",
         "/AddApiKeyCredential",
         "/AddClaudeSubscriptionTokenCredential",
+        "/StartClaudeSignIn",
+        "/CompleteClaudeSignIn",
         "/GenerateSshCredential",
         "/AddSshCredential",
     ]
@@ -94,6 +96,41 @@ fn synthetic_github_credential(generation: u64) -> codewire_proto::codewire::v1:
         revocation_generation: generation,
         ..Default::default()
     }
+}
+
+const CLAUDE_AUTHORIZE_URL: &str =
+    "https://claude.com/cai/oauth/authorize?code=true&client_id=synthetic&state=synthetic-state";
+const CLAUDE_HANDLE: &str = "cwcs2.1800000000.synthetic-handle";
+
+fn synthetic_claude_sign_in(name: &str) -> codewire_proto::codewire::v1::Credential {
+    use codewire_proto::codewire::v1::{
+        Credential, CredentialAuthenticationKind, CredentialStatus,
+    };
+    Credential {
+        id: PROJECT.into(),
+        name: name.into(),
+        provider: "anthropic".into(),
+        authentication_kind: CredentialAuthenticationKind::ClaudeSignIn.into(),
+        status: CredentialStatus::Active.into(),
+        account_hint: Some("synthetic@example.test".into()),
+        revocation_generation: 1,
+        ..Default::default()
+    }
+}
+
+/// A Connect error as the credential service sends one: a code and its
+/// `codewire.sh` reason.
+fn connect_refusal(code: &str, reason: &str) -> axum::response::Response {
+    use base64::Engine as _;
+    let info = codewire_proto::google::rpc::ErrorInfo {
+        domain: "codewire.sh".into(),
+        reason: reason.into(),
+        ..Default::default()
+    };
+    let value = base64::engine::general_purpose::STANDARD_NO_PAD.encode(info.encode_to_vec());
+    let body = serde_json::json!({"code": code, "message": "synthetic refusal",
+        "details": [{"type": "google.rpc.ErrorInfo", "value": value}]});
+    (StatusCode::BAD_REQUEST, Json(body)).into_response()
 }
 
 async fn fixture(mode: &'static str) -> (TestServer, Calls) {
@@ -166,6 +203,30 @@ async fn fixture(mode: &'static str) -> (TestServer, Calls) {
                     assert_eq!(request.code, b"synthetic-callback-code");
                     assert_eq!(request.credential_id.as_deref(), request.expected_revocation_generation.map(|_| PROJECT));
                     CompleteGithubAppAuthorizationResponse { credential: Some(synthetic_github_credential(request.expected_revocation_generation.map_or(1, |generation| generation + 1))).into(), ..Default::default() }.encode_to_vec()
+                } else if path.ends_with("/StartClaudeSignIn") {
+                    codewire_proto::codewire::v1::StartClaudeSignInResponse {
+                        authorize_url: CLAUDE_AUTHORIZE_URL.into(),
+                        sign_in: CLAUDE_HANDLE.into(),
+                        expires_at_unix: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 900,
+                        ..Default::default()
+                    }.encode_to_vec()
+                } else if path.ends_with("/CompleteClaudeSignIn") {
+                    use codewire_proto::codewire::v1::{CompleteClaudeSignInRequest, CompleteClaudeSignInResponse};
+                    let mut input = body.as_ref();
+                    let request = CompleteClaudeSignInRequest::decode(&mut input).unwrap();
+                    assert_eq!(request.sign_in, CLAUDE_HANDLE);
+                    // The service's own refusals, by the code pasted: the state
+                    // check fails before Claude is contacted, and the handle ages out.
+                    let refusal = match request.authorization_code.as_slice() {
+                        b"refused#synthetic-state" => Some(("invalid_argument", "CREDENTIAL_CLAUDE_SIGN_IN_CODE_INVALID")),
+                        b"late#synthetic-state" => Some(("failed_precondition", "CREDENTIAL_CLAUDE_SIGN_IN_EXPIRED")),
+                        _ => None,
+                    };
+                    if let Some((code, reason)) = refusal {
+                        return connect_refusal(code, reason);
+                    }
+                    assert_eq!(request.authorization_code, b"synthetic-code#synthetic-state");
+                    CompleteClaudeSignInResponse { credential: Some(synthetic_claude_sign_in(&request.name)).into(), ..Default::default() }.encode_to_vec()
                 } else { Vec::new() }
             } else {
                 // Rail unavailability is supported. Every unexpected write is
