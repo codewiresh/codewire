@@ -255,7 +255,29 @@ impl RunStream for LocalStream {
     }
 
     async fn next_output(&mut self) -> anyhow::Result<Option<RunResponse>> {
-        Ok(self.0.next_output().await?)
+        self.0.next_output().await.map_err(local_run_error)
+    }
+}
+
+/// A local run's failure. A launch whose values didn't arrive (#5866) says so
+/// and offers `cw doctor`, whose own checks name the cause: the guest reports
+/// this one, so its words give no advice of their own, such as unlocking a
+/// keyring. Any other failure keeps its own words.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn local_run_error(
+    error: codewire_local_vmm::public_client::NativePublicClientError,
+) -> anyhow::Error {
+    match error {
+        codewire_local_vmm::public_client::NativePublicClientError::LaunchValuesUnavailable => {
+            crate::error_report::with_next_step(
+                anyhow::anyhow!(
+                    "the VM didn't start the command because its credentials and secrets didn't \
+                     arrive"
+                ),
+                "cw doctor",
+            )
+        }
+        other => other.into(),
     }
 }
 
@@ -387,6 +409,28 @@ async fn exec_on_host(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A local exec whose launch values didn't arrive says so, with no advice
+    /// on the guest's word, and offers `cw doctor` (#5866).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_launch_without_its_values_says_what_to_do() {
+        let error = local_run_error(
+            codewire_local_vmm::public_client::NativePublicClientError::LaunchValuesUnavailable,
+        );
+        assert_eq!(
+            error.root_cause().to_string(),
+            "the VM didn't start the command because its credentials and secrets didn't arrive"
+        );
+        assert_eq!(
+            crate::error_report::next_step(&error).as_deref(),
+            Some("cw doctor")
+        );
+        let other = local_run_error(
+            codewire_local_vmm::public_client::NativePublicClientError::ExecTimeout,
+        );
+        assert_eq!(crate::error_report::next_step(&other), None);
+    }
 
     /// Only a known foreground group other than this process's is the
     /// background: no terminal, or a group that can't be read, still reads.

@@ -36,7 +36,7 @@ const MAX_OUTPUT_READ_LIMIT: u64 = 4 * 1024 * 1024;
 const LAUNCH_OPERATION_TIMEOUT: Duration = Duration::from_secs(40);
 /// The status of a launch whose environment projection was refused, expired or
 /// cancelled before the program was started: the launcher never executed it.
-pub(crate) const LAUNCH_PROJECTION_DENIED: &str = "environment launch denied or expired";
+pub(crate) use codewire_daemon_proto::LAUNCH_PROJECTION_DENIED;
 /// The status of a launch whose projection failed after the launcher was
 /// told to execute: its program may have started, so this is never a
 /// denial (#2769).

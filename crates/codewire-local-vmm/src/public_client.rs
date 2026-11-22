@@ -423,7 +423,7 @@ impl NativePublicDataClient {
                 let event = match responses.message::<RunResponse>().await {
                     Ok(Some(response)) => Ok(response.to_owned_message()),
                     Ok(None) => return,
-                    Err(error) => Err(NativePublicClientError::from(error)),
+                    Err(error) => Err(run_error(error)),
                 };
                 let failed = event.is_err();
                 if events.send(event).await.is_err() || failed {
@@ -741,6 +741,22 @@ fn host_key_line(
 }
 
 /// One streaming `ExecService.Run` from [`NativePublicDataClient::run`].
+/// The supervisor's answer to an exec whose launch values the VM's credential
+/// broker didn't provide (#5866).
+pub(crate) const LAUNCH_VALUES_UNAVAILABLE: &str =
+    "local environment credential broker did not provide the command's launch values";
+
+/// A run's failure, with the one the person can act on typed.
+fn run_error(error: connectrpc::ConnectError) -> NativePublicClientError {
+    if error.code == connectrpc::ErrorCode::Unavailable
+        && error.message.as_deref() == Some(LAUNCH_VALUES_UNAVAILABLE)
+    {
+        NativePublicClientError::LaunchValuesUnavailable
+    } else {
+        error.into()
+    }
+}
+
 pub struct NativeRunStream {
     input: tokio::sync::mpsc::Sender<RunRequest>,
     output: tokio::sync::mpsc::Receiver<Result<RunResponse, NativePublicClientError>>,
@@ -790,6 +806,10 @@ pub enum NativePublicClientError {
     ExecOutputLimit,
     #[error("local exec did not finish before its deadline; its outcome is unknown")]
     ExecTimeout,
+    /// The VM's credential broker didn't give the command its launch values
+    /// (#5866), so the command never started.
+    #[error("the command's credentials and secrets didn't arrive")]
+    LaunchValuesUnavailable,
     #[error(transparent)]
     Supervisor(#[from] SupervisorError),
     #[error(transparent)]
@@ -803,6 +823,24 @@ pub enum NativePublicClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the supervisor's exact launch-values answer is typed; any other
+    /// unavailable answer stays an RPC error (#5866).
+    #[test]
+    fn only_the_launch_values_answer_is_typed() {
+        assert!(matches!(
+            run_error(connectrpc::ConnectError::unavailable(
+                LAUNCH_VALUES_UNAVAILABLE
+            )),
+            NativePublicClientError::LaunchValuesUnavailable
+        ));
+        for other in [
+            connectrpc::ConnectError::unavailable("local environment command transport was lost"),
+            connectrpc::ConnectError::failed_precondition(LAUNCH_VALUES_UNAVAILABLE),
+        ] {
+            assert!(matches!(run_error(other), NativePublicClientError::Rpc(_)));
+        }
+    }
 
     fn event(event: run_response::Event) -> RunResponse {
         RunResponse {

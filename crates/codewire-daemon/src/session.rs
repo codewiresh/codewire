@@ -223,7 +223,11 @@ async fn finish_cancelled_exec_launch(
     output: &mpsc::Sender<Result<v1::ExecMessage, Status>>,
 ) {
     if reaped.is_ok() {
-        send_exec_startup_failure(output, "environment launch denied or expired".into()).await;
+        send_exec_startup_failure(
+            output,
+            codewire_daemon_proto::LAUNCH_PROJECTION_DENIED.into(),
+        )
+        .await;
     } else {
         let _ = output
             .send(Err(Status::unavailable(
@@ -638,7 +642,11 @@ async fn finish_cancelled_pty_launch(
     })
     .await;
     if matches!(reaped, Ok(Ok(_))) {
-        send_pty_startup_failure(output, "environment launch denied or expired".into()).await;
+        send_pty_startup_failure(
+            output,
+            codewire_daemon_proto::LAUNCH_PROJECTION_DENIED.into(),
+        )
+        .await;
     } else {
         // No Exit ACK when wait/panic failed: the caller must retain its
         // existing ambiguous-admission recovery state, not assume a reap.

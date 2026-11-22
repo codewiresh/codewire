@@ -29,9 +29,11 @@ use super::*;
 mod connect_only;
 mod daemon_logs;
 mod desktop;
+mod exec_error;
 mod file_errors;
 mod session_error;
 use connect_only::enforce_connect_only;
+use exec_error::local_exec_error;
 use file_errors::local_file_error;
 use session_error::local_session_error;
 
@@ -1109,46 +1111,6 @@ fn local_bridge_validation(
     connectrpc::ConnectError::invalid_argument(format!(
         "local {operation} request is invalid: {fields}"
     ))
-}
-
-fn local_exec_error(error: DaemonClientError) -> connectrpc::ConnectError {
-    match error {
-        DaemonClientError::Status(status) => match status.code() {
-            tonic::Code::InvalidArgument => {
-                connectrpc::ConnectError::invalid_argument("local command request is invalid")
-            }
-            tonic::Code::Unimplemented | tonic::Code::FailedPrecondition => {
-                connectrpc::ConnectError::failed_precondition(
-                    "local environment daemon does not support this command operation",
-                )
-            }
-            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Cancelled => {
-                connectrpc::ConnectError::unavailable(
-                    "local environment command transport was lost",
-                )
-            }
-            _ => connectrpc::ConnectError::internal("local environment command failed"),
-        },
-        DaemonClientError::NotReady { .. }
-        | DaemonClientError::MissingCapability { .. }
-        | DaemonClientError::IncompatibleProtocol { .. } => {
-            connectrpc::ConnectError::failed_precondition(
-                "local environment daemon is not ready for commands",
-            )
-        }
-        DaemonClientError::Connect | DaemonClientError::RequestClosed => {
-            connectrpc::ConnectError::unavailable("local environment command transport was lost")
-        }
-        DaemonClientError::Remote(_) => {
-            connectrpc::ConnectError::failed_precondition("local environment command failed")
-        }
-        DaemonClientError::InvalidEndpoint
-        | DaemonClientError::InvalidCredential
-        | DaemonClientError::MissingResponse(_)
-        | DaemonClientError::InvalidFrame(_) => {
-            connectrpc::ConnectError::internal("local environment command failed")
-        }
-    }
 }
 
 #[derive(Clone)]

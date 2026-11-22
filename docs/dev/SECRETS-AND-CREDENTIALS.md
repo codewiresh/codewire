@@ -3749,6 +3749,16 @@ no local VM runs.
 protocol step,** so a `cw` with them replaces a running authority that has
 only the material connection's step once no local VM runs.
 
+**An exec whose launch values don't arrive** (#5866). On a local VM with a
+credential profile, each launch asks the VM's credential broker for its
+sealed projection before the program starts. A broker that doesn't answer
+within the projection's lifetime (about 30 s), or refuses, leaves the
+command unstarted. `cw exec` then says the VM didn't start the command because
+its credentials and secrets didn't arrive, with `→ cw doctor`, never a bare
+`Failed_precondition`. The guest reports this failure, so the message gives
+no advice on its word: `cw doctor`'s own checks name a keyring that isn't
+answering.
+
 ## Dashboard
 
 The dashboard uses the same platform services as `cw --cloud`, and its forms

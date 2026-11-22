@@ -7,6 +7,10 @@ pub const DAEMON_AUTH_TOKEN_HEADER: &str = "x-codewire-daemon-token";
 /// Lifecycle callers must recover the exact Pod on this status, conservatively
 /// including a real child that exits with the same code.
 pub const HOSTED_EXEC_AMBIGUOUS_EXIT_CODE: i32 = 125;
+/// What the environment daemon answers for a launch whose environment
+/// projection was refused, expired or cancelled before the program started:
+/// the launcher never executed it. The host words it for the person (#5866).
+pub const LAUNCH_PROJECTION_DENIED: &str = "environment launch denied or expired";
 /// Exact projected-token purpose for a workspace authenticating credential
 /// access through the credential relay, not the Kubernetes API.
 pub const CREDENTIAL_WORKSPACE_TOKEN_AUDIENCE: &str = "codewire.internal.credential-workspace.v1";
