@@ -108,6 +108,11 @@ fn end_runner(service: &SupervisorRpc, name: &str) {
 
 /// Stopped environments "dev" and "other".
 fn two_environments() -> (tempfile::TempDir, SupervisorRpc) {
+    let (parent, core) = two_environments_core();
+    (parent, test_supervisor_service(core))
+}
+
+fn two_environments_core() -> (tempfile::TempDir, SupervisorCore) {
     let (parent, mut core) = test_supervisor_core(project_environment());
     let mut other = project_environment();
     other.id = Uuid::new_v4();
@@ -116,7 +121,7 @@ fn two_environments() -> (tempfile::TempDir, SupervisorRpc) {
     next_state.environments.insert("other".to_owned(), other);
     core.state = next_state;
     core.save().unwrap();
-    (parent, test_supervisor_service(core))
+    (parent, core)
 }
 
 fn selector(service: &SupervisorRpc, name: &str) -> v1::EnvironmentSelector {
@@ -571,10 +576,13 @@ fn a_booting_environment_reads_as_starting_until_its_operation_ends() {
 }
 
 /// A fatal error in a drain a request waits on stops the supervisor, as
-/// one in a spawned drain does (#3143).
+/// one in a spawned drain does (#3143), and the log names the error's class
+/// (#5144).
 #[tokio::test]
 async fn a_fatal_error_in_a_request_drain_stops_the_supervisor() {
-    let (_parent, service) = two_environments();
+    let (_parent, mut core) = two_environments_core();
+    attach_supervisor_log(&mut core);
+    let service = test_supervisor_service(core);
     let shutdown = service.supervisor.shutdown.subscribe();
     {
         // "other" mid-update with no operation of its own: its drain
@@ -596,6 +604,73 @@ async fn a_fatal_error_in_a_request_drain_stops_the_supervisor() {
         .unwrap_err();
     assert!(service.supervisor.core().store.stopping());
     assert!(*shutdown.borrow());
+    assert_eq!(
+        halted_lines(&service),
+        ["reason=drain_error class=invalid_state"]
+    );
+}
+
+/// Attaches the supervisor log a spawned supervisor writes, as `serve` does.
+fn attach_supervisor_log(core: &mut SupervisorCore) {
+    core.log = Some(Arc::new(
+        DiagnosticLog::adopt(
+            diagnostic_log::open_child_log(&core.root, diagnostic_log::SUPERVISOR_LOG).unwrap(),
+        )
+        .unwrap(),
+    ));
+}
+
+/// The `supervisor_halted` lines in a test supervisor's log, from `event=`.
+fn halted_lines(service: &SupervisorRpc) -> Vec<String> {
+    let log = fs::read_to_string(
+        service
+            .supervisor
+            .root
+            .path()
+            .join(diagnostic_log::LOG_DIRECTORY)
+            .join(diagnostic_log::SUPERVISOR_LOG),
+    )
+    .unwrap();
+    log.lines()
+        .filter_map(|line| line.split_once(" event=supervisor_halted "))
+        .map(|(_, fields)| fields.to_owned())
+        .collect()
+}
+
+/// #5144: a panicked task and a poisoned state lock each say, once, why
+/// the supervisor stopped, by a closed reason with no error at hand.
+#[tokio::test]
+async fn a_panicked_task_and_a_poisoned_lock_each_log_why_the_supervisor_stopped() {
+    let (_parent, mut core) = test_supervisor_core(project_environment());
+    attach_supervisor_log(&mut core);
+    let service = test_supervisor_service(core);
+    let refused = service
+        .supervisor
+        .detached(|_| async {
+            if true {
+                panic!("synthetic task panic");
+            }
+            Ok::<(), SupervisorError>(())
+        })
+        .await;
+    assert!(refused.is_err());
+    assert!(service.supervisor.core().store.stopping());
+    assert_eq!(halted_lines(&service), ["reason=panicked_task class=none"]);
+
+    let (_parent, mut core) = test_supervisor_core(project_environment());
+    attach_supervisor_log(&mut core);
+    let service = test_supervisor_service(core);
+    let supervisor = Arc::clone(&service.supervisor);
+    std::thread::spawn(move || {
+        let _core = supervisor.core();
+        panic!("synthetic panic holding the state lock");
+    })
+    .join()
+    .unwrap_err();
+    for _ in 0..3 {
+        assert!(service.supervisor.core().store.stopping());
+    }
+    assert_eq!(halted_lines(&service), ["reason=poisoned_lock class=none"]);
 }
 
 /// A create that passed every earlier check, but reaches its journal

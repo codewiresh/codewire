@@ -2,12 +2,15 @@
 //! its environment runners (#2595).
 //!
 //! The process that spawns either one opens `<state root>/logs/<name>` (0600,
-//! in a 0700 directory), moves a non-empty earlier log to `<name>.1`, and gives
-//! the file to the child as stdout and stderr, so the child's exit error or
-//! panic is kept instead of discarded. The child appends one line per
-//! diagnostic event through [`DiagnosticLog`] and never past
-//! [`MAXIMUM_LOG_BYTES`]; the next spawn rotates. Each log therefore holds at
-//! most two bounded files.
+//! in a 0700 directory) and gives the file to the child as stdout and stderr,
+//! so the child's exit error or panic is kept instead of discarded. The child
+//! appends one line per diagnostic event through [`DiagnosticLog`] and never
+//! past [`MAXIMUM_LOG_BYTES`]. A spawn that finds the log past
+//! [`ROTATE_AT_BYTES`] moves it to `<name>.1` first; a smaller one is kept
+//! and appended to, so a child that fails and is started again, however
+//! often, does not push its own failure out of the log (#5144). Each log
+//! therefore holds at most two bounded files, and each child's lines begin at
+//! its own `*_started` event.
 //!
 //! An event field is a name compiled into this binary, a journaled error code,
 //! an identifier or a number. There is no free-text field, so no secret or
@@ -33,6 +36,9 @@ pub(crate) const LOG_DIRECTORY: &str = "logs";
 pub(crate) const SUPERVISOR_LOG: &str = "supervisor.log";
 /// The size at which a log stops growing until its next rotation.
 pub(crate) const MAXIMUM_LOG_BYTES: u64 = 1024 * 1024;
+/// The size past which the next spawn moves a log to `<name>.1`: half the
+/// bound, so the child it is opened for always has the other half to write.
+pub(crate) const ROTATE_AT_BYTES: u64 = MAXIMUM_LOG_BYTES / 2;
 const MAXIMUM_TOKEN_BYTES: usize = 64;
 
 /// The log of the runner for one environment.
@@ -59,7 +65,8 @@ pub(crate) enum LogField<'a> {
 }
 
 /// Opens (creating 0600) the named log for a child about to be spawned, after
-/// moving any earlier content to `<name>.1`. The file appends.
+/// moving earlier content past [`ROTATE_AT_BYTES`] to `<name>.1`, the only
+/// older file. The file appends.
 pub(crate) fn open_child_log(root: &PrivateRoot, name: &str) -> Result<File, DiagnosticLogError> {
     let directory = Path::new(LOG_DIRECTORY);
     root.ensure_dir(directory, 0o700)?;
@@ -68,7 +75,7 @@ pub(crate) fn open_child_log(root: &PrivateRoot, name: &str) -> Result<File, Dia
         .create_regular(Path::new(name), 0o600, false)?
         .into_file();
     let length = current.metadata()?.len();
-    if length > 0 {
+    if length > ROTATE_AT_BYTES {
         // A log can pass its bound only by the child's own exit or panic
         // output; keep the newest bounded tail.
         current.seek(SeekFrom::Start(length.saturating_sub(MAXIMUM_LOG_BYTES)))?;

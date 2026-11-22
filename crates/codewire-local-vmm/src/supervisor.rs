@@ -13,6 +13,8 @@ mod checkpoints;
 use checkpoints::stop_payload_checkpoint;
 mod collection_roots;
 mod egress_intercept;
+mod halt;
+use halt::{HaltReason, fatal_drain_error};
 mod local_https;
 mod metadata;
 mod network_policies;
@@ -949,17 +951,13 @@ impl Supervisor {
     fn core(&self) -> std::sync::MutexGuard<'_, SupervisorCore> {
         self.core.lock().unwrap_or_else(|poisoned| {
             let core = poisoned.into_inner();
+            if !core.store.stopping() {
+                self.record_halt(HaltReason::PoisonedLock);
+            }
             core.store.stop();
             let _ = self.shutdown.send(true);
             core
         })
-    }
-
-    /// Stop after a fatal error (#2978): no later commit or drain proceeds
-    /// in any environment, and the supervisor shuts down.
-    fn halt(&self) {
-        self.core().store.stop();
-        let _ = self.shutdown.send(true);
     }
 
     /// Run `work` in a task of its own and wait for it (#2978): a request
@@ -978,7 +976,7 @@ impl Supervisor {
         match tokio::spawn(work(supervisor)).await {
             Ok(result) => result,
             Err(_) => {
-                self.halt();
+                self.halt(HaltReason::PanickedTask);
                 Err(SupervisorStoreError::Stopping.into())
             }
         }
@@ -991,7 +989,7 @@ impl Supervisor {
 
     fn leases(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<Mutex<()>>>> {
         self.leases.lock().unwrap_or_else(|poisoned| {
-            self.halt();
+            self.halt(HaltReason::PoisonedLock);
             poisoned.into_inner()
         })
     }
@@ -1390,7 +1388,7 @@ impl Supervisor {
         self.detached(|supervisor| async move {
             if let Err(error) = supervisor.drain_held(&name).await {
                 if fatal_drain_error(&error) {
-                    supervisor.halt();
+                    supervisor.halt(HaltReason::DrainError(&error));
                 }
                 return Err(error);
             }
@@ -3283,19 +3281,6 @@ impl SupervisorCore {
         }
         Ok(())
     }
-}
-
-/// Whether a drain's error stops the supervisor, as an operation error always
-/// has (#3143). A recovery waiting for the credential authority stops only its
-/// name's drain until a later request retries it, and a retiring or stopping
-/// supervisor is already ending.
-fn fatal_drain_error(error: &SupervisorError) -> bool {
-    !matches!(
-        error,
-        SupervisorError::CredentialAuthorityUnavailable
-            | SupervisorError::Retiring
-            | SupervisorError::Store(SupervisorStoreError::Stopping)
-    )
 }
 
 /// Whether a create that commits its record selects itself (#2978). A
@@ -5939,7 +5924,7 @@ impl SupervisorRpc {
             if let Err(error) = supervisor.drain(&name).await
                 && fatal_drain_error(&error)
             {
-                supervisor.halt();
+                supervisor.halt(HaltReason::DrainError(&error));
             }
         }));
     }
@@ -5956,12 +5941,11 @@ impl SupervisorRpc {
                 .values()
                 .map(|environment| environment.id)
                 .collect::<BTreeSet<_>>();
-            if supervisor
+            if let Err(error) = supervisor
                 .recover_runtime_operations(|id| !held.contains(&id))
                 .await
-                .is_err()
             {
-                supervisor.halt();
+                supervisor.halt(HaltReason::RuntimeRecoveryError(&error));
             }
         }));
     }

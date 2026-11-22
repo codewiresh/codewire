@@ -29,7 +29,7 @@ fn failure_fields(code: &str) -> [(&'static str, LogField<'_>); 4] {
 }
 
 #[test]
-fn child_log_is_owner_only_bounded_and_rotated_at_the_next_spawn() {
+fn child_log_is_owner_only_bounded_and_rotated_once_it_is_half_full() {
     let (_parent, root) = runtime_root();
     let logs = root.path().join(LOG_DIRECTORY);
     let current = logs.join(SUPERVISOR_LOG);
@@ -51,7 +51,8 @@ fn child_log_is_owner_only_bounded_and_rotated_at_the_next_spawn() {
     assert!(u64::try_from(full.len()).unwrap() > MAXIMUM_LOG_BYTES - 1024);
     drop(log);
 
-    // The next spawn keeps that log as `.1` and starts an empty one, both 0600.
+    // The next spawn finds it past half its bound, keeps it as `.1` and
+    // starts an empty one, both 0600.
     let log = DiagnosticLog::adopt(open_child_log(&root, SUPERVISOR_LOG).unwrap()).unwrap();
     assert_eq!(fs::read(&previous).unwrap(), full);
     assert_eq!(mode(&previous), 0o600);
@@ -65,7 +66,9 @@ fn child_log_is_owner_only_bounded_and_rotated_at_the_next_spawn() {
         "{restarted}"
     );
 
-    // Two files, each bounded, are all a log ever keeps.
+    // A small log is kept and appended to: the spawn after it rotates
+    // nothing, and two files, each bounded, are all a log ever keeps.
+    drop(log);
     open_child_log(&root, SUPERVISOR_LOG).unwrap();
     let mut names = fs::read_dir(&logs)
         .unwrap()
@@ -73,7 +76,62 @@ fn child_log_is_owner_only_bounded_and_rotated_at_the_next_spawn() {
         .collect::<Vec<_>>();
     names.sort();
     assert_eq!(names, ["supervisor.log", "supervisor.log.1"]);
-    assert_eq!(fs::read_to_string(&previous).unwrap(), restarted);
+    assert_eq!(fs::read(&previous).unwrap(), full);
+    assert_eq!(fs::read_to_string(&current).unwrap(), restarted);
+}
+
+/// #5144: a child that fails and is started again in a loop keeps its first
+/// failure. Before, every spawn moved the log to the one `.1`, so the second
+/// restart dropped the failed child's lines.
+#[test]
+fn a_restart_loop_keeps_the_first_failures_lines() {
+    let (_parent, root) = runtime_root();
+    let logs = root.path().join(LOG_DIRECTORY);
+    for spawn in 0..200_u64 {
+        let log = DiagnosticLog::adopt(open_child_log(&root, SUPERVISOR_LOG).unwrap()).unwrap();
+        log.record("supervisor_started", &[("pid", LogField::Count(spawn))]);
+        if spawn == 0 {
+            log.record(
+                "operation_failed",
+                &failure_fields("start_network_stack_failed"),
+            );
+        }
+        log.record(
+            "supervisor_halted",
+            &[("reason", LogField::Name("drain_error"))],
+        );
+    }
+    let current = fs::read_to_string(logs.join(SUPERVISOR_LOG)).unwrap();
+    assert!(!logs.join(format!("{SUPERVISOR_LOG}.1")).exists());
+    assert!(
+        current.contains("error_code=start_network_stack_failed"),
+        "{current}"
+    );
+    assert_eq!(current.matches("event=supervisor_started").count(), 200);
+    assert_eq!(current.matches("event=supervisor_halted").count(), 200);
+
+    // However long the loop runs, the two files stay within their bounds.
+    let line = event_line(
+        0,
+        "supervisor_halted",
+        &[("reason", LogField::Name("drain_error"))],
+    );
+    let per_spawn = ROTATE_AT_BYTES / u64::try_from(line.len()).unwrap() / 4;
+    for _ in 0..12 {
+        let log = DiagnosticLog::adopt(open_child_log(&root, SUPERVISOR_LOG).unwrap()).unwrap();
+        for _ in 0..per_spawn {
+            log.record(
+                "supervisor_halted",
+                &[("reason", LogField::Name("drain_error"))],
+            );
+        }
+    }
+    for name in [SUPERVISOR_LOG.to_owned(), format!("{SUPERVISOR_LOG}.1")] {
+        assert!(
+            fs::metadata(logs.join(&name)).unwrap().len() <= MAXIMUM_LOG_BYTES,
+            "{name}"
+        );
+    }
 }
 
 #[test]
