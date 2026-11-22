@@ -20,9 +20,10 @@ is also changing.
 
 Each environment row has a monotonically increasing
 `environment_operation_generation`. One generation belongs to one workflow
-run, not to one activity attempt. Retries of an activity in the same run
-keep the generation. A replacement run claims a higher one, which fences
-the old run.
+run, or to a chain of runs that continued as new from one another (below),
+not to one activity attempt. Retries of an activity in the same run keep
+the generation. A replacement run claims a higher one, which fences the old
+run.
 
 A run claims its generation before any environment activity does work,
 through `EnvironmentClaimAuthorityActivity`, or
@@ -31,6 +32,62 @@ generation returns to the workflow and is recorded in its history. Every
 environment activity command carries it as a required positive
 `operation_generation`. No command form omits the generation. The external
 signal that starts a command does not carry it.
+
+### A run's history is bounded
+
+A Sandbox's one workflow lives as long as the Sandbox, and every command it
+handles adds about ten events, a periodic reconcile included. A worker that
+does not have the workflow cached, as after every orchestration restart,
+replays the whole history before it can handle the next command. A history
+of about 20,000 events took more memory than orchestration's limit and
+longer than the 10 s workflow-task timeout (#5856), so the replay never
+finished and was retried.
+
+So a run ends once it is past 2,000 events, or once Temporal suggests it:
+after finishing a command, with no command queued and no handler running,
+the run continues as new with no command of its own. The workflow id stays
+the same, so the next signal reaches the new run.
+
+The new run keeps the generation (#5950). A credentialed Sandbox's daemon
+opens its credential bridge with the generation its binding captured, and
+the broker refuses one that differs from the environment's, so a new
+generation would make every running credentialed Sandbox's bootstrap stale
+and the reconcile would restart it. So the new run's first claim takes over
+its predecessor's claim row, once, and keeps the generation, when all of
+these hold (step 3 of the claim, below):
+
+- Temporal reports, in the new run's own `WorkflowExecutionStarted` event,
+  the run it continued from, and describes that run as
+  `ContinuedAsNew`. Neither comes from a command or an activity input;
+- that run holds the current generation's claim row;
+- that run's claim was scheduled earlier than the new run's.
+
+Otherwise, a Temporal error included, the new run claims a new generation as
+a replacement run does, and a credentialed Sandbox restarts once.
+
+What this means for fencing:
+
+1. A continued run keeps its predecessor's generation.
+2. The predecessor's in-flight activities keep the authority they had, as
+   within one run: `ensure`, `ensure_for_states` and the locked checks
+   compare the generation, the desired state and the lifecycle state, never
+   the run id. That is the exposure before runs continued as new, and it is
+   small because a run continues as new only at an idle point, after its
+   command finished, with no command queued and no handler running. The
+   setup lease's attempt takeover (below) still governs any setup attempt.
+3. A new claim by the predecessor is refused (`AuthorityLost`), because the
+   claim row now names the successor.
+4. A replacement that isn't a continuation (a reset, a duplicate run, an
+   operator's start, or a predecessor in any status other than
+   `ContinuedAsNew`) still claims +1 and fences everything older.
+
+The continuation check runs only while the workflow is not replaying. A run
+ends at the end of its history, and an open run's history never holds that
+end, so replaying an open run never reaches a point where it continued. This
+also lets a run that predates the bound end at its next command. A patch
+could not do that: replay records the patch's answer as absent at the first
+check and keeps it. A query that replays a run which has continued as new
+cannot replay its end, so it fails; the open run answers queries.
 
 ### Claim
 
@@ -49,15 +106,22 @@ The claim is one transaction:
    is still the current generation and the scheduled time matches.
    Otherwise return `AuthorityLost`. A retry after a lost response is
    idempotent, and a superseded run cannot increment again.
-3. A run without a row may claim only when its scheduled time is strictly
+3. A run that continued as new (above) takes over the current
+   generation's claim row when that row names its predecessor and an
+   earlier scheduled time: one `UPDATE` sets the row's run id and
+   scheduled time to the new run's, and the claim returns the current
+   generation unchanged. The row then names the new run, so the takeover
+   happens once, and the predecessor's own retried claim is
+   `AuthorityLost` by step 2. Otherwise the claim goes on.
+4. A run without a row may claim only when its scheduled time is strictly
    later than that of the current generation's row. An equal or earlier
    time is `AuthorityLost`. A positive current generation with no claim row
    is `AuthorityLost`.
-4. Increment the generation, update the environment and insert the claim
+5. Increment the generation, update the environment and insert the claim
    row.
 
 A missing run id or scheduled time is `AuthorityLost`, never replaced by a
-default. Step 3 stops a delayed retry from an older run taking authority
+default. Step 4 stops a delayed retry from an older run taking authority
 back after a newer run has claimed it.
 
 ## Authority-checked writes
@@ -142,8 +206,8 @@ Rules:
   - The command sits behind the `retry-setup-4767` workflow patch. The SDK
     records a patch's answer once per workflow, so a workflow that skipped a
     `retry_setup` before the patch ignores every later one while the RPC
-    returns Ok. Environment workflows never continue-as-new, so that lasts
-    until the Sandbox is destroyed. It affects only a Sandbox whose Retry was
+    returns Ok. That lasts until the run continues as new (see "A run's
+    history is bounded"). It affects only a Sandbox whose Retry was
     signalled during the rollout.
 - `AuthorityLost` propagates through every setup path. It is never turned
   into a warning or followed by advancing to the next setup phase.

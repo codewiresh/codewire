@@ -132,12 +132,37 @@ impl ActivityAuthority {
 
     /// Claim the next workflow-execution generation before any environment
     /// activity is dispatched for the run.
-    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
     pub async fn claim(
         pool: &PgPool,
         environment_id: &str,
         workflow_run_id: &str,
         scheduled_at_unix_nanos: i64,
+    ) -> anyhow::Result<i64> {
+        Self::claim_continued(
+            pool,
+            environment_id,
+            workflow_run_id,
+            scheduled_at_unix_nanos,
+            None,
+        )
+        .await
+    }
+
+    /// As [`Self::claim`], for a run that may have continued as new
+    /// (#5950). `continued_from` is the run Temporal reports this one
+    /// continued from, and reports as continued-as-new; it never comes from a
+    /// command. When that run holds the current generation's claim and was
+    /// scheduled earlier, this run takes the claim over, once, and keeps the
+    /// generation: a continued run is the same long-lived workflow, so its
+    /// Sandbox's binding, daemon and credential bridge stay current. Anything
+    /// else claims as a new run does.
+    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %environment_id))]
+    pub async fn claim_continued(
+        pool: &PgPool,
+        environment_id: &str,
+        workflow_run_id: &str,
+        scheduled_at_unix_nanos: i64,
+        continued_from: Option<&str>,
     ) -> anyhow::Result<i64> {
         if workflow_run_id.trim().is_empty() || scheduled_at_unix_nanos < 0 {
             return Err(AuthorityLost.into());
@@ -179,6 +204,29 @@ impl ActivityAuthority {
                 return Ok(generation);
             }
             return Err(AuthorityLost.into());
+        }
+
+        // The take-over renames the predecessor's row, so it happens once and
+        // the predecessor's own retries are fenced as a replaced run's are.
+        if let Some(predecessor) = continued_from.filter(|run| *run != workflow_run_id) {
+            let taken = sqlx::query(
+                "UPDATE environment_operation_generation_claims
+                    SET workflow_run_id = $3, scheduled_at_unix_nanos = $4
+                  WHERE environment_id = $1 AND generation = $2
+                    AND workflow_run_id = $5 AND scheduled_at_unix_nanos < $4",
+            )
+            .bind(environment_id)
+            .bind(current_generation)
+            .bind(workflow_run_id)
+            .bind(scheduled_at_unix_nanos)
+            .bind(predecessor)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if taken == 1 {
+                tx.commit().await?;
+                return Ok(current_generation);
+            }
         }
 
         let current_scheduled_at: Option<i64> = sqlx::query_scalar(
@@ -486,6 +534,120 @@ mod tests {
                 .to_string()
                 .contains("external mutation exceeded")
         );
+    }
+
+    /// One running Sandbox, for a claim test.
+    async fn seed_environment(pool: &PgPool) -> String {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let user_id = format!("usr_continued_{suffix}");
+        let org_id = format!("org_continued_{suffix}");
+        let preset_id = format!("pre_continued_{suffix}");
+        let environment_id = format!("env_continued_{suffix}");
+        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+            .bind(&user_id)
+            .bind(format!("{suffix}@continued.invalid"))
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&org_id)
+        .bind("Continued test")
+        .bind(format!("continued-{suffix}"))
+        .bind(&user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO environment_presets (id, org_id, name, slug, project_spec)
+             VALUES ($1, $2, $3, $4, '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)",
+        )
+        .bind(&preset_id)
+        .bind(&org_id)
+        .bind("Continued test")
+        .bind(format!("continued-{suffix}"))
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO environments
+                    (id, org_id, created_by, type, state, desired_state, preset_id, project_spec)
+             VALUES ($1, $2, $3, 'sandbox', 'running', 'started', $4,
+                     '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)",
+        )
+        .bind(&environment_id)
+        .bind(&org_id)
+        .bind(&user_id)
+        .bind(&preset_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        environment_id
+    }
+
+    async fn generation(pool: &PgPool, environment_id: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT environment_operation_generation FROM environments WHERE id = $1",
+        )
+        .bind(environment_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// #5950: a run that continued as new from the current holder keeps its
+    /// generation, once, so a credentialed Sandbox's binding (captured at that
+    /// generation) stays current; every other claim is fenced as before.
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL"]
+    async fn a_continued_run_takes_over_its_predecessors_generation_once() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").expect("ignored DB test requires TEST_DATABASE_URL");
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        let environment_id = seed_environment(&pool).await;
+        let claim = |run: &'static str, scheduled: i64, continued_from: Option<&'static str>| {
+            let pool = pool.clone();
+            let environment_id = environment_id.clone();
+            async move {
+                ActivityAuthority::claim_continued(
+                    &pool,
+                    &environment_id,
+                    run,
+                    scheduled,
+                    continued_from,
+                )
+                .await
+            }
+        };
+
+        assert_eq!(claim("run-a", 10, None).await.unwrap(), 1);
+        // A Sandbox bound now captures generation 1.
+        let bound_generation = generation(&pool, &environment_id).await;
+
+        // The continued run keeps it, and the environment's generation, which
+        // the binding is compared with, does not move.
+        assert_eq!(claim("run-b", 20, Some("run-a")).await.unwrap(), 1);
+        assert_eq!(generation(&pool, &environment_id).await, bound_generation);
+        // Its retry is idempotent; the predecessor's own retry is fenced.
+        assert_eq!(claim("run-b", 20, Some("run-a")).await.unwrap(), 1);
+        assert!(is_authority_lost(
+            &claim("run-a", 10, None).await.unwrap_err()
+        ));
+
+        // Once only: a second successor of the same predecessor finds the
+        // claim held by run-b and claims as a new run.
+        assert_eq!(claim("run-c", 30, Some("run-a")).await.unwrap(), 2);
+        // A predecessor that does not hold the current claim hands nothing on.
+        assert_eq!(claim("run-d", 40, Some("run-b")).await.unwrap(), 3);
+        // Nor does one scheduled later than its successor.
+        assert!(is_authority_lost(
+            &claim("run-e", 35, Some("run-d")).await.unwrap_err()
+        ));
+        // A run naming itself is no continuation.
+        assert_eq!(claim("run-f", 50, Some("run-f")).await.unwrap(), 4);
+        // Without a predecessor, a new run claims the next generation.
+        assert_eq!(claim("run-g", 60, None).await.unwrap(), 5);
     }
 
     #[tokio::test]
