@@ -10,9 +10,17 @@ A gap is fixed with one implementation that both placements call, where only
 the store differs: the local credential authority (the operating system's
 protected store) or the platform credential service. Never a second copy.
 
-## Where it stands (2026-11-19)
+## Where it stands (2026-11-21)
 
-The tables below are the audit as it ran on 2026-11-15. Since then:
+The second pass (2026-11-21, `cw` v0.4.26) audited every other command group:
+secrets, network policy, create and run, lifecycle, inventory, sessions, ports
+and previews, snapshots and checkpoints, setup and health, and billing. Each
+has its own table and gap list below the credentials ones; two differences
+that run through all of them are under "Across groups". The organizations,
+platform-only and local-only groups are classified at the end, not walked.
+Nothing in this pass is fixed yet.
+
+The credentials tables are the audit as it ran on 2026-11-15. Since then:
 
 - **Same in both now:**
   - C1, C4's refusal sentences and C5 (#5097);
@@ -37,8 +45,8 @@ The tables below are the audit as it ran on 2026-11-15. Since then:
   - local store waits and refusals in words (#5271), and a Linux store kept
     inside its credential root (#5255).
 
-A row below keeps its 2026-11-15 wording until the change that closes it
-updates it.
+A credentials row keeps its 2026-11-15 wording until the change that closes
+it updates it.
 
 ## How the audit runs
 
@@ -59,6 +67,23 @@ updates it.
 First pass: 2026-11-14, `cw` v0.4.18, every row below run in both placements
 unless it says *read, not run*: those need a completed provider sign-in or an
 existing OAuth credential, and were read from the code.
+
+Second pass: 2026-11-21, `cw` v0.4.26, for the other command groups:
+
+- **Local:** the local-smoke isolation
+  (`scripts/ci/verify/lib/local-smoke-isolation.sh`): its own `HOME`, a
+  private Secret Service and a private mount namespace, a fresh root each run.
+  One local VM at a time, created with `--no-file --no-profile`.
+- **Cloud:** Dev, as the smoke identity with its organization API key, in a
+  fresh `HOME`. Dev has organization network policies turned off, so the
+  cloud's stored-policy rows are read from the code.
+- **Names:** every environment, policy, secret, project, snapshot and preset
+  starts with `parity-`, and each was removed by exact name (the three
+  same-named cloud environments of R1 by ID).
+- A command with no placement (`init`, `preset`, `current`, `whoami`,
+  `doctor`, `cost`) was run once not signed in, in the local isolation, and
+  once signed in to Dev. `prune` and `nuke` were run only where they touch
+  nothing but the audit's own objects; the rest is *read, not run*.
 
 ## Credentials (`cw credentials`)
 
@@ -344,23 +369,398 @@ A setup is **done** when walked in a Linux local VM, a Mac local VM (cw-dogfood 
 | OpenAI and Anthropic API keys, local | Paste each key into `cw`'s prompt (never into a chat) | Linux workstation; M3 |
 | Hosted Sandbox, all setups | None | The owner's Dev account already holds a GitHub connection, a Codex login, a Claude sign-in and an SSH key; the walk uses them and a Dev sign-in |
 
+## Across groups
+
+Two differences run through every group below, so each is listed once here.
+
+| Item | What differs | Fix |
+| --- | --- | --- |
+| A1 | The cloud's messages say "platform" where the flags and help say "cloud": "Platform environment "X" not found", "Platform secret project was not found …", `Delete platform secret project …`, `Secrets: platform:NAME`, `Environment: ID (platform)`. Local messages say "native" in places: "Native local preview does not yet support: --env", `Update native environment …`, "non-interactive native resize", and the cloud's "Restart is supported only for native local environments" | One placement noun, "local" or "cloud", from one display of the placement that both handlers use |
+| A2 | Cloud results name the environment by ID where local ones name it: `cp` (`Uploaded FILE -> ID:/workspace/FILE`), `resize` (`Environment: ID`), `rm --output json` (`"environment": ID`), `snapshot inspect` (`Source: ID`) | The shared name resolution returns the name and the ID; both handlers print the name |
+
+Same in both, and not a parity item: an error that starts with a name has its
+first letter raised (`Parity-c1 has 7 sessions …`, `Codewire.yaml already
+exists …`).
+
+## Secrets (`cw secrets`)
+
+One command module (`commands/secrets.rs`) parses the scope and the placement
+for both. The local store is the local credential authority and the cloud
+store the platform's secret service, and each branch prints its own results.
+`preview` already uses one renderer (`print_secret_resolution`).
+
+| Command | Local | Cloud | Same or gap |
+| --- | --- | --- | --- |
+| Any key command without `--local` or `--cloud` | "Storage placement is required: pass --local or --cloud (noninteractive and JSON commands never prompt)", exit 1 | Same | same |
+| `list` without a scope | "Key operations require exactly one of --project=NAME, --user, or --organization; no project is inferred" | Same | same |
+| `--user list`, nothing there | "No local user secrets found.", exit 0 | "No user secrets found.", exit 0 | same; neither names the command that adds one |
+| `--user list`, text and `--output json` | KEY, CREATED, UPDATED; times in RFC 3339 with milliseconds. JSON `key`, `created_at`, `updated_at` | Same columns and fields; times to the second | **Gap S1** (time format) |
+| `--user set KEY`, value on stdin | `Local user secret KEY set.` on stderr | `Secret KEY set.` | **Gap S1** |
+| `set` an empty value, or nothing on stdin | "Workload-secret value must be non-empty UTF-8 without NUL bytes and at most 65536 bytes", exit 1 | Same | same |
+| `set` a key that isn't a variable name | Parser error, exit 2 | Same | same |
+| `rename`, `delete` | `Local user secret A renamed to B.`, `… deleted.` | `Secret A renamed to B.`, `… deleted.` | **Gap S1** |
+| `rename` a key that isn't there | Raw store error: `Rename local user secret: code: 'Some requested entity was not found', message: "local credential record was not found"` | "Rename user secret: secret not found" | **Gap S2** |
+| `delete` a key that isn't there | The raw store error, exit 1 | `Secret KEY deleted.`, exit 0, though nothing was | **Gap S3** |
+| `--organization` (list, set, delete) | "Organization workload secrets are unsupported locally; use --cloud", exit 1 | Works | intended: a local store has one user and no organization. The message is plain, but "workload secrets" is an internal word; help says "application secrets" |
+| Guided `set` at a terminal | "Where should this secret live?": A project, Your account | Same, plus Organization | intended, as above |
+| `projects list`, nothing there | "No secret projects found." | Same | same |
+| `projects create NAME` | `Local secret project "NAME" created (ID).` | `Secret project "NAME" created. (id: ID)` | **Gap S1** |
+| `projects create` a name in use | Raw store error ending "local credential record already exists" | "Create secret project: secret project with this name already exists" | **Gap S2** |
+| `projects create 'bad name'` | Refused, with the raw "invalid local workload-secret request" | Creates a project named `bad name` | **Gap S4** |
+| `projects list`, text and JSON | NAME, SECRETS, CREATED. JSON has `org_id: ""` and `secret_count` | Same columns. JSON leaves out `secret_count` when it is 0 | **Gap S1** |
+| A project that doesn't exist | "Local secret project was not found" | "Platform secret project was not found in the selected organization" | **Gap S2** (neither names it), A1 |
+| `--project P set`, `list`, `delete` | `Local secret KEY set in project "P".` | `Secret KEY set in project "P".` | **Gap S1** |
+| `projects delete` without `--yes`, no terminal | "Project deletion requires --yes when noninteractive", exit 1 | Same | same |
+| `projects delete` at a terminal | `Delete local secret project "P" (ID) and all its keys? [y/N]`; `n` prints `Canceled.`, exit 0 | `Delete platform secret project "P" (ID) in organization ORG_ID and all its keys? [y/N]` | **Gap S1** (the raw organization ID), A1 |
+| `preview --file` | PLACEMENT, KEY, SOURCE, OVERRIDDEN; JSON the same fields | Same renderer | same |
+| `preview` of a file that selects organization secrets | "Organization workload secrets are unsupported in local preview; use --cloud" | "No workload secrets selected." when the organization has none | intended, as `--organization` |
+
+### The gaps
+
+- **S1.** One renderer for secret results, lists and prompts, text and JSON,
+  that both stores call. The placement word is the only difference; times use
+  the CLI's vocabulary; JSON has the same fields.
+- **S2.** Both stores' "not found" and "already exists" become one typed
+  error with one sentence that names the key or project and the command that
+  lists them. No store error text reaches the user.
+- **S3.** One rule, in the shared layer, for deleting a key that isn't there:
+  say nothing was deleted (the local answer, in words), never "deleted".
+- **S4.** One project-name check before either store
+  (`parse_secret_project_name`, the local grammar), and the service refuses the
+  same names.
+
+## Network policy (`cw policy`)
+
+`commands/policy.rs` holds the parser, the built-in policies and the
+renderers (`print_policy`, `print_policies`, `print_check`). The cloud handler
+(`commands/policy/platform.rs`) calls the same renderers, but passes the
+service's own message through for every refusal.
+
+Dev has organization network policies turned off, so every cloud command that
+reads or writes a stored policy is refused there. Checks against the built-in
+policies and target validation need no store and were run in both; the other
+cloud rows are *read, not run*.
+
+| Command | Local | Cloud | Same or gap |
+| --- | --- | --- | --- |
+| Any command without `--local` or `--cloud` | Uses this computer's store. A text `list` first says "Policies on this computer; your organization's are in `cw --cloud policy ls`:" | — | intended: scripts written before organization policies keep their meaning (#4594) |
+| A stored-policy command on Dev | — | "Organization network policies are not enabled on this deployment; keep the policy on this host with `cw --local policy`", exit 1; the same sentence under `--output json` | intended on this deployment; plain |
+| `list` | `open` and `locked`, then `NAME  rev N · TARGET (PORTS), …` per policy | Same renderer (*read, not run*) | same |
+| A local `list`, `--local` or none | Starts the local VM supervisor, which keeps running after the command | Starts nothing | **Gap P3** |
+| `create NAME --allow …` | `Created network policy NAME · rev 1` and its rules. JSON: id, `reference` (`local:id:…`), revision, digest, rules, `enforced_in` | Same renderer, then "Stored. Hosted sandboxes don't enforce network policies yet, so this changes nothing a sandbox can reach." (*read, not run*) | same output; enforcement is **P1** |
+| `create` with a private range or a bad pattern | "Invalid allow target: the range includes protected addresses"; "… not a host name, a *.domain pattern or a CIDR" | Same, before the store | same |
+| `create` without NAME, no terminal | "Missing required input; name the policy: `cw --local policy create NAME` …" | Same, naming `--cloud` | same |
+| `create open`, `allow open …`, `delete open` | "Open is a built-in policy and cannot be changed; create your own with `cw policy create NAME --allow TARGET` …" | Same, naming `--cloud` | same |
+| A name in use; `--from`, `allow`, `rm`, `check` or `delete` of a missing policy; `allow` of a rule it has | "Create the network policy: a local network policy named X already exists"; "… no local network policy is named X"; "Change the network policy: X already allows exactly that" | The action, then the service's message (*read, not run*) | **Gap P2** |
+| `allow` on a policy an environment uses | `Changed network policy X · rev 2`, then `Enforced now in: ENV` | The stored line above (*read, not run*) | **P1** |
+| `check POLICY DEST` | `Allowed: example.com:443 by X rev 4, when the name answers public addresses` or `Refused: … (name not allowed)`, exit 0 either way; JSON `allowed`, `reason`, `revision` | Same for `open` and `locked`; a stored policy *read, not run* | same |
+| `delete` a policy an environment selects | "Delete the network policy: local network policy X is selected by ENV" | *read, not run* | **Gap P2** |
+| `create --policy X`, `update ENV --policy X` | Selected and enforced; `info` shows `X · rev 1`. `update --policy` applies at once, without asking, even at a terminal | On Dev, `create`: "Create environment: platform network policies are not enabled on this deployment"; `update`: "Organization network policies are not enabled on this deployment", with no next step | **P1**, **Gap P4** |
+
+### The gaps
+
+- **P1.** A cloud sandbox doesn't enforce its policy yet, as `create --help`
+  says. Hosted enforcement (#4000) applies the same compiled rules a local VM
+  enforces.
+- **P2.** The cloud passes the service's refusal text through. One mapping
+  from the store's refusal codes to the local sentences ("no cloud network
+  policy is named X", "X is selected by ENV").
+- **P3.** A local policy read starts the local VM supervisor and leaves it
+  running. A read starts nothing, as the cloud's doesn't.
+- **P4.** The disabled-deployment refusal has three wordings (`policy`,
+  `create --policy`, `update --policy`). One mapping of
+  `NETWORK_POLICIES_DISABLED`, with the next step, used by all three.
+
+## Create and run (`create`, `run`, `init`, `update`, `export`, `preset`)
+
+`create` has a local path (`commands/native.rs`) and a cloud path
+(`commands/environment/platform_create.rs`) behind `launch_setup.rs`, and both
+print their result through `lifecycle_output.rs`. Source confirmation has two
+copies (`native/sources.rs` and `environment/sources.rs`). `run`, `init` and
+`export` are shared.
+
+| Command | Local | Cloud | Same or gap |
+| --- | --- | --- | --- |
+| `create --name N --yes`, result | `✓ Environment N created · local VM`, the size, Credentials, Secrets, Network, `→ cw --local shell N` | The same lines, `cloud VM` | same |
+| Default size | 2 vCPU · 4 GiB RAM · 20 GiB disk | 2 vCPU · 8 GiB RAM · 80 GiB disk | intended: a local VM uses this computer's memory and disk |
+| Progress | Preparing sources, Checking the VM runtime, Preparing the image, Starting the VM, Booting the workspace. The first create downloads the runtime (219 MiB) and says so | Creating sandbox, Waiting for SSH access, Waiting for the workspace daemon, Configuring environment | intended: different machinery, each in the user's terms |
+| A name already in use | Refused before anything: `local environment "N" already exists (remove it with cw --local rm N or choose another --name)` | Creates another environment with the same name. Every later command by name then fails: `Multiple environments named "N", use ID: …` (three were made; each was removed by ID) | **Gap R1** |
+| Without `--yes`, no terminal | Creates when there is nothing to confirm; with a secret project, refuses: "native source selection requires --yes …" (*read*) | Created, with nothing to confirm | same rule, in two copies (R4) |
+| `-e KEY=VALUE` | "Native local preview does not yet support: --env", exit 1 | Taken; the variable reaches `exec` | **Gap R2** |
+| `--cpu lots` | After the configuration lines: `Invalid native CPU quantity "lots"; use a core count such as 2: invalid digit found in string` | Before anything: `Invalid CPU quantity "lots"; use values such as 500m, 0.5, or 4` | **Gap R3** |
+| `--secrets` a missing project | "Source was not found in the eligible authenticated stores" | "Platform secret project was not found in the selected organization" | **R4**, S2 |
+| `--secrets P`, the confirmation block | `Create native environment "N" with these exact sources:`, `Secret project: "local:id:ID"`; the result says `Secrets: local:P` | `Create environment "N" on platform "URL", organization "ORG_ID".`, `Application-secret project: "platform:id:ID"`; the result says `Secrets: platform:P` | **Gap R4**, A1 |
+| `--policy P` | Selected and enforced | Refused on Dev | P1, P4 |
+| `run --in ENV -- CMD` | The output, then `✓ Started session ENV/echo · local VM` | The same, then `via direct UDP` | same; the transport line is intended: only the cloud has a network path |
+| `run --detach --name S`; a name in use; `--output json` | The same results and refusal; JSON the same fields | Same | same (`working_dir` is `/workspace/workspace` locally and `/workspace` in the cloud: intended, a local create mounts the folder at `/workspace/NAME`) |
+| `run` with no command; an option after the command; a missing ENV | The same sentences | Same | same |
+| `run --agent claude` with no credential profile | "Managed VM agents require a selected credential profile" | "Selected agent has no qualified provider proxy in this environment; create it with --profile PROFILE … and check `cw agent info ENV`" | **Gap R5** |
+| `run` at a terminal, nothing named | The agent picker ("Open an agent in a new or existing environment") | Same | same |
+| `run --name S -- sh` at a terminal | Attaches, with the detach and reconnect hints | The same, plus an OSC 7501 session-state sequence | **Gap R6** |
+| `init` | `--local` and `--cloud` refused ("does not apply to `cw init`"). Writes the same file signed in or not | Same | same |
+| `preset` | `--local` and `--cloud` refused. Signed out, every subcommand fails: "No server configured (set --server, CODEWIRE_SERVER_URL, run 'cw setup', or run 'cw login')" | Presets live on the server: `list`, `create`, `info` work. `rm` takes only the ID; `rm SLUG` says "preset not found" though `info SLUG` finds it | **Gap R7** |
+| `update --idle-stop` | "--idle-stop applies to cloud sandboxes; a local VM is never stopped for being idle" | Sets it, without a restart | intended: idle stop saves cloud compute; plain |
+| `update --secrets`, `--clear-secrets` | `Update native environment "N" ("ID"), generation 1.`, Current and Replacement, a managed restart, then the whole `info`. With nothing selected, `--clear-secrets` fails: "Update native sources; conflicts require a fresh exact preview: native environment request is invalid" | `Update environment Some("N") ("ID") on platform "URL", organization "ORG_ID", operation 1.`, Current and Replacement, then "Environment source selection stored; managed restart requested." It returns at once, and the next `update` fails ("Source updates require a running or stopped environment; wait for the current operation to finish") until the restart ends | **Gap R4**, **R8** |
+| `update` with no change; a missing ENV | The same sentences | Same | same |
+| `export ENV` | `✓ Exported local VM N to codewire.yaml`, then "! Not exported: the local workspace's host folder …" and "! Local only: secret and credential references are exact IDs as saved …" | `✓ Exported cloud environment N …`, then "! Not exported: environment values …" | intended: each names what its placement can't carry ("cloud environment" here, "cloud VM" in `create`: A1) |
+| `export` over an existing file; a missing ENV | The same sentences | Same | same |
+
+### The gaps
+
+- **R1.** The service refuses the name of a live environment in the
+  organization, with the local sentence, and the CLI's create checks it the
+  same way for both.
+- **R2.** A local VM takes environment values through the same
+  `ProjectSpec.environment` the cloud create sends.
+- **R3.** One resource parser for both, run before the configuration is
+  shown; a local VM takes what `--help` promises (2, 0.5, 500m) or the help
+  says what it takes.
+- **R4.** One source preview, confirmation and result for both, in the user's
+  words: no "native", no "platform", no raw organization ID and no Rust
+  `Some(…)`. A clear with nothing selected says so.
+- **R5.** One refusal for an agent with no profile, from the shared `run`
+  path, naming `--profile` and `cw agent info`.
+- **R6.** One attach client that reports session state the same way for both
+  placements.
+- **R7.** Presets have no local store, so a local user can't keep one. A local
+  preset store behind the same commands, as secrets have; until then, signed
+  out, say presets live in your Codewire account and name `cw login`. `rm`
+  takes the slug, as `info` does.
+- **R8.** A cloud `update` that restarts waits for the restart, as a local
+  one and `cw start` do.
+
+## Lifecycle (`start`, `stop`, `restart`, `rm`, `extend`, `protect`, `unprotect`, `cancel-delete`, `prune`, `nuke`)
+
+The environment commands share one dispatcher (`commands/environment.rs`).
+Commands with no local meaning are refused with "`cw NAME` is available only
+for cloud environments", and `prune --local` goes to its own handler
+(`local_images.rs`). Results print through `lifecycle_output.rs`. `prune` and
+`nuke` were run only where they touch nothing but the audit's own objects:
+`prune --local` in the isolated root, `prune --cloud` with `--dry-run`.
+
+| Command | Local | Cloud | Same or gap |
+| --- | --- | --- | --- |
+| `stop ENV` | `✓ Environment N stopped`, `local VM · environment disk retained`, `→ cw --local start N` | `✓ Environment N stopped`, `cloud VM`, `→ cw --cloud start N` | same |
+| `stop` a stopped environment | Prints the same result again, exit 0 | "Stop N: environment must be running to stop", exit 1 | **Gap L1** |
+| `start ENV` | `✓ Environment N started · local VM` with its progress | The same shape; the progress includes "desired state -> started" | same (the server's words are a CLI-design item) |
+| `start` a running environment; `start --output json` | Starts again, exit 0; JSON is the `info` record | Prints the plan, then "Start environment: environment must be stopped, pending, or errored to start", exit 1 | **Gap L1** |
+| `restart ENV` | `✓ Environment N restarted · local VM`, about 13 s | "Restart is supported only for native local environments" | **Gap L2**, A1 |
+| `extend ENV` | "`cw extend` is available only for cloud environments" | `Environment N: ttl_extended (1 hours added).` | intended: a local VM has no time to live. The cloud's result shows the state word `ttl_extended` |
+| `protect`, `unprotect` | "`cw protect` is available only for cloud environments"; `rm --yes` removed the VM at once | `Environment N: protected.`, JSON `{"status": "protected"}`; `rm --yes` is then refused: "Environment N is protected, so nothing was removed; remove the protection first with `cw --cloud unprotect N`" | **Gap L3** |
+| `cancel-delete` | Refused, as `extend` | "Cancel deletion: no pending deletion to cancel" | intended: only a cloud removal waits; a local one is finished when `rm` returns |
+| `rm` without `--yes`: no terminal, `--output json`, at a terminal | "N was not removed: `cw rm` asks first, and there is no terminal to ask at; add `--yes` to remove it"; the JSON refusal; "Remove N (local VM) and everything on its disk? [y/N]" | Same, `cloud VM` | same (one confirmation, #4595) |
+| `rm --yes` | `✓ Environment N removed`, `local VM · environment disk removed`, `→ cw ls` | `✓ Removal started: N`, `cloud VM · state: destroying`, `→ cw --cloud ls` | intended: a cloud removal finishes after the command. **Gap L4** for the wording |
+| `rm` a missing environment | `Local environment "N" not found` | `Platform environment "N" not found` | A1 |
+| `prune` | Frees the workspace images kept after the last VM: `Images kept for the next local VM: …`, `Would free 1.9 GiB (dry run).` | Deletes environments stuck in error, creating or pending: "No environments to prune." | **Gap L5** |
+| `prune`, `nuke` without `--yes`, no terminal (*read, not run*) | `prune` reads the answer from stdin; at end of input it prints "Aborted." and exits 0 | The same for `prune`; `nuke` reads its typed confirmation the same way | same, and both break the rule that a destructive command without a terminal fails and names `--yes` |
+| `nuke` | "`cw nuke` is available only for cloud environments" | Deletes every environment in the organization after a typed confirmation (run once, with none there: "No environments to nuke.") | **Gap L6** |
+
+### The gaps
+
+- **L1.** One rule in the shared lifecycle code: stopping a stopped
+  environment, or starting a running one, says it already is, and exits 0.
+- **L2.** `cw restart ENV` restarts a cloud environment too, as a stop and a
+  start through the same lifecycle path.
+- **L3.** Deletion protection is an environment setting both stores keep, and
+  the one `rm` path checks it.
+- **L4.** One `rm` result: the same next step for both (`cw --PLACEMENT ls`),
+  and no server state word.
+- **L5.** `prune` removes stuck environments in both placements; a local VM in
+  error is pruned too, and the kept images move to their own flag.
+- **L6.** `nuke --local` removes every local VM, with the same typed
+  confirmation.
+
+## Inventory (`ls`, `info`, `use`, `current`)
+
+`ls` and `use` print the same for both placements. `info` has one printer per
+placement (`environment/info.rs`, `native/info_text.rs`).
+
+| Command | Local | Cloud | Same or gap |
+| --- | --- | --- | --- |
+| `ls` | NAME, LOCATION, STATE, SESSIONS, NETWORK, then `→ Sessions: cw ls N` | Same | same |
+| `ls`, nothing there | `No local environments yet.`, `→ cw --local run claude` | `No cloud environments yet.`, `→ cw --cloud run claude` | same |
+| `ls --output json` | Each environment: id, name, placement, state, running, selected, session_count, sessions, daemon_health, error | The same fields | same |
+| `ls --state`, `--type host` | Filtered; nothing matches: the empty line above | Same | same |
+| `ls -a` | The same list | Adds destroyed environments | intended: a removed local VM leaves no record |
+| `ls ENV` | NAME, STATE, MODE, PARENT, SESSION, COMMAND | Same | same |
+| `ls ENV` while it isn't running | "N is stopped; its sessions are listed while it runs (`cw start N`)" | "The environment isn't running"; while it starts, "Environment is starting"; exit 1 | **Gap N2** |
+| `info ENV`, text | Environment, Backend (`cloud-hypervisor`), State, CPU `2`, Memory `4Gi`, Disk `20Gi`, Workspace with the full plan hash, Working dir, Access, Install, Env vars, Agents, Docker, Network policy, Generation, Secrets as `local:id:ID`, Credentials | ID, Name, Type, State, DesiredState, PresetID, CPU `2000m`, Isolation, Memory `8192MB`, Disk `80GB`, CreatedBy (a user ID), CreatedAt and StartedAt in RFC 3339, IdleStop, Recoverable, TotalRunning | **Gap I1** |
+| `info --output json` | backend, cpu, memory, disk, generation, workspace_plan, source_selection, network_policy, … | cpu_millicores, memory_mb, disk_gb, desired_state, org_id, preset_id, created_by, … | **Gap I1** |
+| `info`, `ls ENV` of a missing environment | `Local environment "X" not found` | `Platform environment "X" not found` | A1 |
+| `use ENV` | `✓ Current environment: N`, `local VM · running`, the size, Credentials, `→ cw --local shell N` | Same, `cloud VM` | same |
+| `use` at a terminal | "Choose an environment": NAME, LOCATION, STATE, vCPU, RAM, DISK, CREDENTIALS; Esc: "Selection canceled; the current environment is unchanged" | Same | same |
+| `use` without ENV, no terminal; a missing ENV | "An environment is required outside an interactive terminal …"; `No local VM is named "X" (cw --local ls lists them)` | The same; `No cloud environment is named "X" …` | same |
+| `current` | `--local` and `--cloud` refused ("does not apply to `cw current`"). Nothing selected: `No environment selected.`, `→ cw use`; JSON `{"selected": false}` | Same | same (with a selection: not run) |
+
+### The gaps
+
+- **I1.** One `info` view for both: name, placement, state, size in the
+  shared vocabulary (`2 vCPU · 4 GiB RAM · 20 GiB disk`), policy, secrets and
+  credentials by name, local or relative times. IDs, hashes, the backend and
+  generations only under `-v` or in JSON, and one JSON shape with placement as
+  a field.
+- **N2** (sessions, below) covers `ls ENV` on an environment that isn't
+  running.
+
+## Sessions (`exec`, `shell`, `attach`, `logs`, `msg`, `inbox`, `send`, `wait`, `interrupt`, `steer`, `resize`)
+
+The session commands print the same for both placements, apart from the rows
+below. They were walked twice in each placement: once with live sessions, and
+once after a restart had ended them.
+
+| Command | Local | Cloud | Same or gap |
+| --- | --- | --- | --- |
+| `exec --in ENV -- CMD`: output, exit status, `-e`, `-w`, stdin, the selected environment, an option after the command | Same results and refusals | Same | same |
+| `exec` a program that doesn't exist | "codewire guest probe failed: execute workspace session command: No such file or directory (os error 2)", exit 1 | "cw: 1: exec: definitely-not-a-command: not found", exit 127 | **Gap N1** |
+| `exec -t -- tty` | A blank line, then `/dev/pts/0` | `/dev/pts/0` | **Gap N1** |
+| `exec`, `logs`, `msg` in a stopped environment | "Failed_precondition: local environment is not in the required state"; "Local environment is not in the required state" | "Cloud environment N is stopped", `→ cw --cloud start N`; for `msg` "The environment isn't running" | **Gap N2** |
+| `shell ENV` at a terminal | A login shell; its exit status is cw's | The same, plus `via direct UDP` | same |
+| `shell ENV`, no terminal | Prints a prompt and waits until it is killed; a login-shell session stays running | Same | same |
+| `attach ENV --session S`; Ctrl-B d; a missing session; ENV with several sessions | `→ Attaching to ENV/S · local VM`; the same refusals ("N has 7 sessions; name one: …") | Same, plus the OSC 7501 state sequence (R6) | same |
+| `logs --session`, `--tail`, `--follow` | The session's output | Same | same |
+| `logs ENV --setup` | "Setup logs are kept for cloud environments; a local environment shows its setup as `cw start` or `cw create` runs" | The provisioning steps, including server words ("state transition pending -> creating") | **Gap N4** |
+| `msg` to a terminal session | `Sent to terminal ENV/S.`; JSON delivery, environment, session, session_id, submitted | Same | same |
+| `send` text, `--no-newline`, `--key` | `Input written to session-ID`; `--key` on a session without a terminal: "--key requires a PTY session; it is a terminal control byte" | Same | same (both show the session's ID, not its name) |
+| `inbox` of a terminal session | "ENV/S is a terminal session; it has no structured inbox." and the logs and attach commands; JSON the same fields | Same | same |
+| `wait --session` | The output, then "Session exited with code 3", exit 1; `--timeout 3s`: "Wait timed out; no completion confirmed: deadline has elapsed" | Same | same |
+| A session ended by an environment restart (`update`, `resize`) | `Exited`, exit code 143: `wait` says "Session exited with code 143"; `msg` "ENV/S is exited; …" | `Stopped`: "Session reached terminal state Stopped without an exit code: stopped with the environment"; `msg` "ENV/S is stopped; …" | **Gap N3** |
+| `interrupt` a terminal session | "Session is not a managed agent conversation" | "Original platform agent operation is unavailable" | **Gap N5** |
+| `steer` a terminal session | "ENV/S is a terminal session, not a managed agent conversation; …" | Same | same |
+| `stop --session`, `restart --session` | The session table | Same | same |
+| `resize` without a size, without `--yes` | "Non-interactive resize requires at least one of --cpu, --memory, or --disk and --yes"; "… requires --yes after explicit resource validation" | Same | same |
+| `resize --cpu N --yes` | With running sessions: "Active sessions would be terminated; non-interactive native resize requires --force". The result: `Environment: N (local · Cloud Hypervisor)`, Current and Desired, then the whole `info` | "This resize requires workspace Pod replacement (runtime class commodity fixes the workspace VM's vCPUs …); non-interactive use requires --allow-restart", and `--force` as well with sessions running. The result: `Environment: ID (platform)`, Current and Requested, Execution, Reason, warnings, `Resize completed: CPU 3, memory 8 Gi, disk 80 Gi.` | **Gap N6** |
+
+### The gaps
+
+- **N1.** `exec` behaves as `ssh HOST COMMAND` in both: a missing program
+  exits 127 with the shell's message, and `-t` adds nothing to the output.
+- **N2.** One refusal for a stopped environment in every session command and
+  `ls ENV`: "N is stopped", `→ cw --PLACEMENT start N`. No
+  `Failed_precondition` or "required state".
+- **N3.** A session that an environment restart ends has one end state and
+  one sentence in both.
+- **N4.** A local VM keeps its create and start progress as its setup log,
+  shown by the same renderer; the cloud's leaves out server state names.
+- **N5.** `interrupt` refuses a terminal session with `steer`'s sentence, in
+  both.
+- **N6.** One resize plan and result for both, in the user's words. One flag
+  says "end the sessions" (`--force`) and one says "restart the environment"
+  (`--allow-restart`), with the same meaning in both placements.
+
+## Ports and previews (`ports`, `share`, `access`, `vscode`, `cp`)
+
+A local port is a binding on this computer's 127.0.0.1; a cloud port is a
+preview URL. `ports` picks the store from ENV; each store prints its own
+results.
+
+| Command | Local | Cloud | Same or gap |
+| --- | --- | --- | --- |
+| `ports ENV`, none | "N publishes no host ports" | "No ports registered." | **Gap W1** (neither names `--publish`) |
+| `ports --publish P` | `Published http://127.0.0.1:8080 -> N:8080`, a note that nothing listens there yet, then the list | `* Port 8080 registered as port-8080`, `URL: …`, `Access: creator` | intended: a host binding against a preview URL. The format is **W1** |
+| `ports ENV`, with ports | `127.0.0.1:8080 -> 8080` | Tab-separated PORT, LABEL, ACCESS, PREVIEW URL | **Gap W1** |
+| `--publish` a port already published | "host port 8080 is already published; withdraw it first" | "create port: port or label already registered for this environment" | **Gap W2** |
+| `--host-port` in the cloud; `--label` or `--access` locally | "--label and --access apply to cloud preview ports; a local port is published on 127.0.0.1 only" | "--host-port applies to local environments; a cloud port is published as a preview URL" | intended; plain |
+| `--unpublish` | `Withdrew 127.0.0.1:8080 -> N:8080`; not published: "N does not publish guest port 8080" | `* Port 8080 (port-8080) removed`; not published: "No preview publishes port 8080" | **W1** for the result; the refusals mean the same |
+| `--publish` in a stopped environment | "N is not running; start it with `cw start N`, then publish the port" | "N is stopped; start it with `cw start N`, then publish the port" | same |
+| `share list`, `grant`, `revoke` | "Environment sharing is available only with --cloud" | Works: a list of user IDs, permission and time; grant and revoke refuse in plain words | intended: a local VM has one user |
+| `access ENV` | `Environment`, `Placement: local`, `Access profile: none`; JSON | "Environment credential-profile inspection is not yet available for platform environments" | **Gap W3** |
+| `vscode ENV` | "→ Opening VS Code for N · /workspace", exit 0, with no VS Code installed | Same | same (both claim to open it) |
+| `cp` to and from `/workspace` | `Uploaded FILE -> N:/workspace/FILE`; `Downloaded … (10 bytes)`; makes missing folders | The same, naming the environment by ID (A2) | same |
+| `cp` a remote file that isn't there | "Download: not_found: local file was not found" | "Download: file not found" | **Gap W4** |
+| `cp` to `/tmp` or `/proc` | "Upload: invalid_argument: local file path is invalid or denied" | "Upload: file path is invalid or denied" | same rule; wording **W4** |
+
+### The gaps
+
+- **W1.** One ports renderer for both: the same empty state with
+  `→ cw ports N --publish PORT`, and one list and result shape that shows the
+  binding or the URL.
+- **W2.** One refusal for a port already published, naming `--unpublish`.
+- **W3.** `access` reads a cloud environment's credential-profile binding,
+  through the same inspection.
+- **W4.** One `cp` error mapping: the remote path, said as remote, and no raw
+  codes.
+
+## Snapshots and checkpoints (`snapshot`, `checkpoint`)
+
+`commands/snapshot.rs` sends a snapshot command to the local store, or to
+`snapshot/platform.rs` for the cloud, and each prints its own results. VM checkpoints are local only.
+
+| Command | Local | Cloud | Same or gap |
+| --- | --- | --- | --- |
+| `snapshot ls`, none | "No snapshots. Make one from a stopped local VM with `cw snapshot create ENV`." | "No snapshots. Create one with: cw --cloud snapshot create ENV" | same |
+| `snapshot create ENV --name S` | `Snapshot S of N: mode=reflink consistency=clean disks=3 apparent=60.0 GiB in 0.26 s`, and a note on shared space | `Created snapshot S.`, and "It is kept on the storage node that holds this environment's disk and is not backed up …" | **Gap K1** |
+| `snapshot create` a running environment | "N is running; stop it first (`cw stop N`), or snapshot it later with a VM checkpoint" | "Snapshot create: environment must be stopped to snapshot it" | **Gap K2** |
+| `snapshot create` a name in use; a missing environment | "a snapshot named S already exists; choose another name or remove it first (`cw snapshot rm S`)"; "no local environment is named X; list them with `cw ls --local`" | "Snapshot create: you already have a snapshot with this name"; `Environment "X" not found` | **Gap K2** |
+| `snapshot create` at a terminal, no ENV | A picker of stopped environments; none: "No eligible stopped environments; …" | The same picker | same |
+| `snapshot ls` | NAME, SOURCE, CREATED (RFC 3339), DISKS, IMAGE, MODE | ID, STATE, SIZE, NAME | **Gap K1** |
+| `snapshot inspect`, text and JSON | Source by name, created, consistency, resources, each disk, what it holds, direct mounts, removed sign-ins; JSON the same | ID, State, Source (an ID), Size; JSON id, name, source_environment_id, state, size_bytes, location | **Gap K1**, A2 |
+| `snapshot inspect`, `rm` of a missing snapshot | "no local snapshot is named S; list them with `cw snapshot ls`" | "No snapshot named S" | **Gap K2** |
+| `snapshot rm S` | `Removed snapshot S; …`; again: refused | `Removing snapshot S; …`; again, while it is still being deleted: the same line, exit 0 | **Gap K3** |
+| `create --snapshot S` | Refuses `--no-file` and `--no-profile`; a snapshot of a VM that mounted a folder needs `--share-mounts` | Takes both flags; the new environment gets the default size, not the source's | **Gap K4**; `--share-mounts` is intended: only a local VM mounts this computer's folders |
+| `checkpoint create`, `ls`, `inspect`, `restore`, `rm` | Work on Linux. `restore` of a running VM without `--yes` refuses and names it | "VM checkpoints are local only for now; cloud environments cannot be checkpointed yet", exit 1, `ls` included | intended: a feature only local VMs have (the Mac is #4654); plain. An empty `ls` should still exit 0 |
+
+### The gaps
+
+- **K1.** One snapshot renderer for results, lists and `inspect`, text and
+  JSON: name, source by name, size, state, created in local time; the store's
+  details under `-v` or in JSON.
+- **K2.** One set of snapshot refusals, from the local sentences, which name
+  the next command.
+- **K3.** One rule for removing a snapshot that is already gone or going, as
+  S3.
+- **K4.** `create --snapshot` takes the same flags in both and keeps the
+  source's size in both.
+
+## Setup and health (`setup`, `doctor`, `login`, `logout`, `whoami`)
+
+Only `setup` takes a placement. `doctor`, `login`, `logout` and `whoami`
+refuse both flags ("--local does not apply to `cw whoami`"), so they were run
+without one: in the local isolation (not signed in) and on Dev with the API
+key.
+
+| Command | Local | Cloud | Same or gap |
+| --- | --- | --- | --- |
+| `setup` | `--local`: "Downloading the local VM runtime (6 files, 219 MiB)...", `Local VM runtime installed (ID).`; again: "Local VM runtime is installed and intact (ID)." | `--cloud`: a device sign-in. With no terminal it prints "Opening browser to authorize...", the link and the code, though no browser can open, and waits; at a terminal it shows the link, the code, the copy key and the waiting line. It starts a sign-in even with `CODEWIRE_API_KEY` set | intended: each sets up its own placement. **Gap H1** for the sign-in |
+| `setup --local --skip-ssh` (or `--org`, `--create-org`) | "--org, --create-org, --org-slug and --skip-ssh apply to sign-in, not to `cw setup --local`" | Taken | intended; plain |
+| `setup ssh --dry-run` | The same section, with `cw-local-*` and `cw-cloud-*` hosts | Same | same |
+| `whoami`, signed out | "No server configured (set --server, CODEWIRE_SERVER_URL, run 'cw setup', or run 'cw login')", exit 1 | Signed in: User and Server; JSON the user record | **Gap H2** for the signed-out words |
+| `doctor`, `--output json`, `doctor local` | One report: cw, platform, org, completion, ssh config, local VM egress, local credential store | Same | same |
+| `login` | Refuses both flags | Same; the sign-in itself is the one `setup --cloud` starts | same |
+| `logout` | "No sign-in was saved on this machine; removed the saved configuration." | The same, after "CODEWIRE_API_KEY is set: cw logout does not end API keys. …" | same |
+
+### The gaps
+
+- **H1.** `setup` signs in with the `login` screen in every mode: no "Opening
+  browser" when none opens, and with `CODEWIRE_API_KEY` set it says that key
+  is used and asks nothing.
+- **H2.** One signed-out state everywhere: "Not signed in" with `→ cw login`,
+  as `cw ls` already says. Today `whoami`, `cost` and `preset` say "No server
+  configured (…)", and `secrets` says "Not signed in (run `cw login`, or set
+  CODEWIRE_API_KEY)".
+
+## Billing (`cost`)
+
+| Command | Local | Cloud | Same or gap |
+| --- | --- | --- | --- |
+| `cost --local`, `cost --cloud` | "--local does not apply to `cw cost`" | Same | same: `cost` is the account's |
+| `cost` | Signed out: the "No server configured" error, exit 1 (H2) | The organization's balance, this month's cost and usage; JSON the billing record | intended: local VMs aren't billed, and `cost` doesn't count them |
+| `cost --org` an organization that doesn't exist | — | Prints nothing, exit 0 | **Gap B1** |
+
+### The gaps
+
+- **B1.** `cost --org X` for an organization you aren't in says so and names
+  `cw org list`.
+
 ## Other command groups
 
-Not audited yet; each will get its own table as above. Known differences are
-listed so they aren't lost.
+Classified from `--help` and one read-only probe with each flag; not walked.
 
-| Group | Commands | Status |
-| --- | --- | --- |
-| Secrets | `secrets` | not yet audited |
-| Network policy | `policy` | not yet audited |
-| Create and run | `create`, `run`, `init`, `update`, `export`, `preset` | not yet audited |
-| Lifecycle | `start`, `stop`, `restart`, `rm`, `extend`, `protect`, `unprotect`, `cancel-delete`, `prune`, `nuke` | not yet audited. `restart` is local only by its help text |
-| Inventory | `ls`, `info`, `use`, `current` | not yet audited |
-| Sessions | `exec`, `shell`, `attach`, `logs`, `msg`, `inbox`, `send`, `wait`, `interrupt`, `steer`, `resize` | not yet audited |
-| Ports and previews | `ports`, `share`, `access`, `vscode`, `cp` | not yet audited |
-| Snapshots and checkpoints | `snapshot`, `checkpoint` | not yet audited. Mac VM checkpoints are #4654 |
-| Setup and health | `setup`, `doctor`, `login`, `logout`, `whoami` | not yet audited |
-| Billing | `cost` | not yet audited; billing on a local VM is expected to be intended |
-| Organizations | `org` | platform only (an organization has no local store). Separately, a **CLI-versus-dashboard gap**: `cw org invite` sends an invitation, but no command lists or revokes an organization's pending invitations; `ListInvitations` and `RevokeInvitation` exist in `proto/codewire/v1/organization.proto`, and only the dashboard calls them. `cw org invitations` lists invitations sent to you |
-| Platform only | `api-keys`, `member`, `host`, `hosts`, `mesh`, `control` | to classify: account and organization administration has no local store |
-| Local only | `daemon`, `runtime`, `network`, `agent`, `install`, `config` | to classify |
+| Group | Commands | With `--local` / `--cloud` | Class |
+| --- | --- | --- | --- |
+| Organizations | `org` | Both refused ("does not apply to `cw org`") | platform only: an organization has no local store. Separately, a **CLI-versus-dashboard gap**: `cw org invite` sends an invitation, but no command lists or revokes an organization's pending invitations; `ListInvitations` and `RevokeInvitation` exist in `proto/codewire/v1/organization.proto`, and only the dashboard calls them. `cw org invitations` lists invitations sent to you |
+| Account and organization administration | `api-keys`, `hosts`, `host`, `member` | Both refused | platform only: they administer the account, or let this computer serve the organization |
+| This computer | `mesh`, `config`, `local-https`, `install` | `mesh`, `config` and `local-https` refuse both; `install` lists both in its help | local only: they configure this computer's `cw` |
+| Trusted host access | `control` | Needs `--environment`; not probed further | local only (Linux): grants on this host |
+| Environment runtime | `daemon`, `runtime`, `network` | Both accepted | both placements; not yet audited. `runtime info --local` with no local VM running prints a raw socket error ("Connect to existing native runtime publisher: filesystem operation failed for …/supervisor.sock …") |
+| Cloud environment evidence | `agent`, `report` | `--local` refused: "Cw agent requires a cloud environment", "`cw report` is available only for cloud environments" | cloud only for now; not yet audited |
+| Skills | `refresh-skills` | Help says local; `--cloud` also resolves a cloud environment | to audit |
