@@ -226,8 +226,19 @@ These follow the Linux contract and messages:
   copy's unreadable blocks out with `F_PUNCHHOLE`: as with a reflink on
   Linux, the copy stops referring to them, and the source VM's disk keeps
   its own. A snapshot holds disks only, never the helper's `vz.json` or the
-  VM's machine identifier. VM checkpoints, and forks of them, still need a
-  Linux host.
+  VM's machine identifier.
+- **VM checkpoints and forks of them** (#4654). The runner asks the helper
+  over its control channel to pause, save the VM's state to `vz-save` and
+  resume, and clones the disks while it is paused; the checkpoint keeps the
+  `vz.json` it started with, its machine identifier included. A restore or a
+  fork starts the helper with a 0400 clone of the saved state in the VM's own
+  `checkpoints/in` and the exact device list, waits for the helper's
+  `started`, then sends the guest's Resume and, at hook ABI 2, a Thaw that
+  steps its clock. A checkpoint restores only on the hardware model and
+  macOS build it was taken on, with the helper it pinned. The snapshot store
+  and each VM's `checkpoints/` carry Time Machine's exclusion. No Spotlight
+  importer reads a saved state, and macOS 27 ignores the never-index marker,
+  so none is written (#4654).
 
 This is the product topology: the network worker and egress broker are host
 processes under Seatbelt, and no service VM is used.

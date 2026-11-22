@@ -69,6 +69,7 @@ use bootstrap::with_boot_selection;
 mod egress_trust;
 mod interception;
 mod network_check;
+mod network_rekey;
 mod network_status;
 mod oci_config;
 mod shutdown;
@@ -823,19 +824,7 @@ pub async fn run_network_agent() -> Result<()> {
                 // later worker from receiving pre-authentication traffic.
                 let _ = packet?;
             }
-            Some(()) = resumes.recv() => {
-                // A failure leaves the old key, so the restored boot's worker
-                // is refused; PID 1 times out and the VM never thaws.
-                match checkpoint::read_seed_direct().and_then(|seed| {
-                    let rekeyed = NetworkKey::derive(seed.auth_token(), seed.vm_id(), seed.generation())
-                        .context("derive the restored network key")?;
-                    checkpoint::acknowledge_rekey(checkpoint::NETWORK_REKEY, &seed, false)?;
-                    Ok((seed.vm_id(), seed.generation(), rekeyed))
-                }) {
-                    Ok(rekeyed) => (vm_id, generation, key) = rekeyed,
-                    Err(error) => eprintln!("codewire guest: network re-key failed: {error:#}"),
-                }
-            }
+            Some(()) = resumes.recv() => network_rekey::rekey(&mut vm_id, &mut generation, &mut key),
             accepted = listener.accept() => {
                 let (stream, peer) = accepted.context("accept guest network AF_VSOCK session")?;
                 if peer.cid() != VMADDR_CID_HOST {
@@ -879,12 +868,14 @@ pub async fn run_network_agent() -> Result<()> {
                 }
                 // A lost or malformed worker session never opens another
                 // route. Return to the host-only accept loop and drain/drop
-                // packets until a fresh authenticated worker arrives.
-                if codewire_network_session::guest::bridge_guest(stream, session, Arc::clone(&tun), NETWORK_MTU)
-                    .await
-                    .is_err()
-                {
-                    record_network_status("network-session-failed")?;
+                // packets until a fresh authenticated worker arrives. A
+                // restored guest's session is the captured boot's, whose
+                // worker is gone: on a Mac it stays open, so a re-key ends
+                // it instead of waiting for it (#4654).
+                let bridged = codewire_network_session::guest::bridge_guest(stream, session, Arc::clone(&tun), NETWORK_MTU);
+                tokio::select! {
+                    result = bridged => if result.is_err() { record_network_status("network-session-failed")?; },
+                    Some(()) = resumes.recv() => network_rekey::rekey(&mut vm_id, &mut generation, &mut key),
                 }
             }
         }

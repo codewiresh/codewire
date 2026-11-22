@@ -2,6 +2,7 @@
 
 mod acl;
 pub(crate) mod disk_tool;
+pub(crate) mod memory_store;
 pub mod path;
 pub mod process;
 pub mod sandbox;

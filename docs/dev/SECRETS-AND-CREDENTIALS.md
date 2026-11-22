@@ -2884,7 +2884,7 @@ capture; nothing is retried
 with `e2fsck -y`. The Filesystem path, and with it the exception, goes when the
 virtio-fs workspace path is removed at the Block cutover.
 
-A VM checkpoint (`cw checkpoint create`, Linux) is a running local VM's
+A VM checkpoint (`cw checkpoint create`, Linux or a Mac) is a running local VM's
 memory, device state and disks at one instant. Memory cannot be cleared the
 way a disk copy is, so a checkpoint may hold the creator's own delivered Codex
 or Claude Code sign-in: in the daemon's memory, in the page cache of its
@@ -2904,6 +2904,29 @@ under its own authority. An in-place restore keeps its environment's logins,
 and the writer rechecks them under the new generation. Agent processes that
 were running at capture keep the copy they held until it expires. The
 manifest records only references and hashes, never resolved values.
+
+On a Mac (#4654) the saved state `state.vzsave` holds the same memory. It
+and the helper's `vz.json` are sealed 0400 and pinned by their sha256, and
+the host never parses the state. Three things differ from Linux:
+- Virtualization.framework has no VMGENID device, so the guest's resume step
+  is the only RNG barrier: Codewire's guest services must draw nothing secret
+  between the resume and its reseed.
+- So that guest memory does not leave the Mac through backups, the snapshot
+  store and each VM's `checkpoints/` carry Time Machine's exclusion; that is
+  what keeps their contents off a backup disk. Spotlight reads no saved state:
+  no importer handles `state.vzsave`, and its never-index marker is ignored
+  on macOS 27, so none is written. A store in a folder Spotlight indexes may
+  have its file names and sizes indexed; the default store, under the hidden
+  `~/.codewire`, was not indexed when tried. Spotlight types a disk image by
+  its `.raw` extension as camera RAW, so in an indexed folder its image
+  importer parses guest-written bytes on the host: every local VM's disks,
+  not only a checkpoint's (#5830, #5831). A capture is refused when the
+  local VM state root is inside a folder a sync service copies (iCloud Drive,
+  `~/Library/CloudStorage`), and warned about under `~/Desktop` or
+  `~/Documents`, which iCloud may sync.
+- APFS clones share blocks, so a removed checkpoint stays readable on the
+  disk, and in Time Machine's local snapshots for about a day, unless
+  FileVault is on. With FileVault off, the host's first checkpoint says so.
 
 The platform broker admits a local VM's login for any delegation
 authenticated by the creator's own OAuth login (`oauth_bearer_only`; never a

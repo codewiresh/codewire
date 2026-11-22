@@ -342,7 +342,7 @@ pub(crate) fn boot_placeholders(
 /// the workload thaws. Placeholders follow the binding, so they are kept;
 /// an agent running at the checkpoint loaded the captured CA and fails its
 /// intercepted requests until it restarts (#3999).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn admit_restored_interception(
     captured: bool,
     intercepts: &InterceptSet,
@@ -437,7 +437,7 @@ mod tests {
         assert!(!api_key.binds("github.com", 443));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_restore_must_match_the_captured_boots_interception() {
         let selected = clients(&["anthropic"]);

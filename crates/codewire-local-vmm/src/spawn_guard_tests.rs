@@ -6,8 +6,9 @@
 //!
 //! The guard reads every source file under `src/`. A process starts through
 //! `Command::new(`, under any other name the crate gives a command type
-//! (`use ... as`, `type`), through `fork` or `vfork` called by path or
-//! imported, or through `posix_spawn`. Each function that does one of these,
+//! (`use ... as`, `type`), through `fork` or `vfork` called by path, imported
+//! or brought in by a glob of a module that exports it, or through
+//! `posix_spawn`. Each function that does one of these,
 //! or names `process::Command`, must be listed in [`SPAWNS`] and run the sweep
 //! once for each process it starts: itself, or by calling one of
 //! [`PREPARATIONS`]. Any of them outside a function fails. Code that macOS
@@ -18,6 +19,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const SWEEP: &str = "mark_inherited_descriptors_close_on_exec()";
+/// Glob imports of a module that exports `fork`, after which a bare `fork()`
+/// starts a process unseen (cw-security on #4685).
+const FORK_GLOBS: [&str; 3] = ["libc::*", "unistd::*", "runtime::*"];
 const LINUX: &str = "#[cfg(target_os = \"linux\")]";
 const TEST: [&str; 2] = ["#[cfg(test)]", "#[cfg(all(test,"];
 
@@ -38,7 +42,7 @@ const SPAWNS: [(&str, &str); 22] = [
     ("supervisor.rs", "spawn_runner"),
     ("supervisor.rs", "spawn_supervisor"),
     ("supervisor/snapshots.rs", "command"),
-    ("vz.rs", "probe_protocol"),
+    ("vz.rs", "probe_protocol_within"),
     ("vz.rs", "spawn"),
     ("workspace.rs", "format_empty_ext4"),
     ("workspace.rs", "format_state_disk"),
@@ -262,6 +266,8 @@ fn quoted() {
     let _ = ('"', 'a', '\'', b'"');
     let _ = Cmd::new("/bin/true");
 }
+
+use libc::*;
 "##;
     let elsewhere = "fn elsewhere() {\n    let _ = Cmd::new(\"/bin/true\");\n}\n";
     let sources = [
@@ -292,6 +298,7 @@ fn quoted() {
         ("a.rs", 28, Some("named"), false),
         ("a.rs", 51, Some("method"), true),
         ("a.rs", 79, Some("quoted"), true),
+        ("a.rs", 82, None, true),
         ("b.rs", 2, Some("elsewhere"), true),
     ]
     .map(|(file, line, function, starts)| {
@@ -413,7 +420,10 @@ fn spawns(sources: &[Source]) -> Vec<Spawn> {
                 || line.contains("::fork(")
                 || line.contains("::vfork(")
                 || line.contains("posix_spawn")
-                || (uses[at] && (has_word(line, "fork") || has_word(line, "vfork")));
+                || (uses[at]
+                    && (has_word(line, "fork")
+                        || has_word(line, "vfork")
+                        || FORK_GLOBS.iter().any(|glob| line.contains(glob))));
             let names = !uses[at] && has_word(line, "process::Command");
             if !(starts || names) || source.skipped(at) {
                 continue;

@@ -106,13 +106,6 @@ impl ControlPair {
 pub(crate) struct VzControl {
     stream: BufReader<tokio::net::UnixStream>,
     broken: bool,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the VM checkpoint capture (#4654 M4) sends requests; tested here"
-        )
-    )]
     next_id: u64,
 }
 
@@ -122,46 +115,25 @@ impl std::fmt::Debug for VzControl {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the VM checkpoint capture (#4654 M4) sends requests; tested here"
-    )
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The requests a capture sends. The helper also takes `stop`, but the runner
+/// stops a VM by closing the channel (cw-security, condition 4).
 pub(crate) enum VzOperation {
     Pause,
     Save,
     Resume,
-    Stop,
 }
 
 impl VzOperation {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the VM checkpoint capture (#4654 M4) sends requests; tested here"
-        )
-    )]
     fn as_str(self) -> &'static str {
         match self {
             Self::Pause => "pause",
             Self::Save => "save",
             Self::Resume => "resume",
-            Self::Stop => "stop",
         }
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the VM checkpoint capture (#4654 M4) sends requests; tested here"
-    )
-)]
 /// The helper's answer to one request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VzReply {
@@ -232,13 +204,6 @@ impl VzControl {
     }
 
     /// Send one request and wait, at most `timeout`, for its reply.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the VM checkpoint capture (#4654 M4) sends requests; tested here"
-        )
-    )]
     pub(crate) async fn request(
         &mut self,
         operation: VzOperation,
@@ -269,6 +234,32 @@ impl VzControl {
             .await
             .unwrap_or(Err(VzControlFailure::Timeout));
         self.breaking(result)
+    }
+
+    /// Resume the VM, whatever state the channel is in: a request that went
+    /// unanswered or failed may have left it paused. On a working channel
+    /// this is an ordinary request, true when the helper resumed it. On a
+    /// broken one the request is written and its reply never read, the one
+    /// write a broken channel still makes, so the VM resumes if the helper
+    /// can; the answer is unknown, so false.
+    pub(crate) async fn resume(&mut self, timeout: Duration) -> bool {
+        if !self.broken {
+            return matches!(
+                self.request(VzOperation::Resume, timeout).await,
+                Ok(VzReply::Done { .. })
+            );
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let line = format!(
+            "{{\"id\":{id},\"op\":\"{}\"}}\n",
+            VzOperation::Resume.as_str()
+        );
+        // Best effort: the channel is already broken, and the answer would be
+        // unknown either way.
+        let _ =
+            tokio::time::timeout(timeout, self.stream.get_mut().write_all(line.as_bytes())).await;
+        false
     }
 
     /// One line, at most `MAX_LINE_BYTES` before its newline. EOF, an
@@ -355,6 +346,28 @@ mod tests {
         assert_eq!(control.started().await, Err(VzControlFailure::Protocol));
     }
 
+    /// A broken channel still sends a resume, so a VM an unanswered pause
+    /// may have paused does not stay paused; its reply is never read.
+    #[tokio::test(start_paused = true)]
+    async fn a_broken_channel_still_sends_a_resume() {
+        let (mut control, helper) = channel();
+        let (read, _write) = helper.into_split();
+        let mut read = tokio::io::BufReader::new(read);
+        assert_eq!(
+            control
+                .request(VzOperation::Pause, Duration::from_secs(1))
+                .await,
+            Err(VzControlFailure::Timeout)
+        );
+        assert!(!control.resume(Duration::from_secs(1)).await);
+        let mut pause = String::new();
+        read.read_line(&mut pause).await.unwrap();
+        let mut resume = String::new();
+        read.read_line(&mut resume).await.unwrap();
+        assert_eq!(pause, "{\"id\":1,\"op\":\"pause\"}\n");
+        assert_eq!(resume, "{\"id\":2,\"op\":\"resume\"}\n");
+    }
+
     /// A timed-out wait cannot be resumed, so a late reply never answers a
     /// later request: the channel refuses everything after any failure.
     #[tokio::test(start_paused = true)]
@@ -412,7 +425,7 @@ mod tests {
         // A reply to another request is a protocol failure, and the channel
         // refuses everything after it.
         assert_eq!(
-            control.request(VzOperation::Stop, timeout).await,
+            control.request(VzOperation::Pause, timeout).await,
             Err(VzControlFailure::Protocol)
         );
         assert_eq!(
@@ -425,7 +438,7 @@ mod tests {
                 "{\"id\":1,\"op\":\"pause\"}\n",
                 "{\"id\":2,\"op\":\"save\"}\n",
                 "{\"id\":3,\"op\":\"resume\"}\n",
-                "{\"id\":4,\"op\":\"stop\"}\n",
+                "{\"id\":4,\"op\":\"pause\"}\n",
             ]
         );
     }

@@ -17,28 +17,18 @@ pub(in crate::supervisor) fn checkpoint_proto(
     let memory = snapshots_root(engine_root)?
         .path()
         .join(row.id.to_string())
-        .join("vmm/memory-ranges");
+        .join("vmm")
+        .join(super::host::MEMORY_FILE);
     let memory_allocated_bytes = fs::File::open(&memory)
         .and_then(|file| crate::fs_clone::allocated_bytes(&file))
         .unwrap_or(0);
-    let host = host_identity();
-    let unrestorable_reason = if host.cpu != checkpoint.host.cpu {
-        format!(
-            "it was taken on another CPU ({}; this host has {})",
-            checkpoint.host.cpu, host.cpu
-        )
-    } else {
-        earlier_runtime(engine_root, manifest).unwrap_or_default()
-    };
+    let unrestorable_reason = super::host::other_host(&checkpoint.host)
+        .or_else(|| earlier_runtime(engine_root, manifest))
+        .unwrap_or_default();
     let mut warnings = vec![
         "a VM checkpoint holds everything the VM's memory held, delivered sign-ins included, until they expire; it stays on this host and is never exported".to_owned(),
     ];
-    if host.kernel_release != checkpoint.host.kernel_release {
-        warnings.push(format!(
-            "taken under host kernel {}; this host runs {}",
-            checkpoint.host.kernel_release, host.kernel_release
-        ));
-    }
+    warnings.extend(super::host::host_warning(&checkpoint.host));
     Ok(v1::Checkpoint {
         id: snapshot.id,
         name: snapshot.name,

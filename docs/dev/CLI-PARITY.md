@@ -712,7 +712,7 @@ results.
 | `snapshot inspect`, `rm` of a missing snapshot | "no local snapshot is named S; list them with `cw snapshot ls`" | "No snapshot named S" | **Gap K2** |
 | `snapshot rm S` | `Removed snapshot S; …`; again: "no local snapshot is named S; list them with `cw snapshot ls`" | `Removing snapshot S; …`; again, while it is still being deleted: "no cloud snapshot is named S; list them with `cw --cloud snapshot ls`", exit 1 | Same in both now (2e2960920c); was K3: the cloud's second `rm` printed the same line and exited 0 |
 | `create --snapshot S` | Refuses `--no-file` and `--no-profile`; a snapshot of a VM that mounted a folder needs `--share-mounts` | Takes both flags; the new environment gets the default size, not the source's | **Gap K4**; `--share-mounts` is intended: only a local VM mounts this computer's folders |
-| `checkpoint create`, `ls`, `inspect`, `restore`, `rm` | Work on Linux. `restore` of a running VM without `--yes` refuses and names it | "VM checkpoints are local only for now; cloud environments cannot be checkpointed yet", exit 1, `ls` included | intended: a feature only local VMs have (the Mac is #4654); plain. An empty `ls` should still exit 0 |
+| `checkpoint create`, `ls`, `inspect`, `restore`, `rm` | Work on Linux and on a Mac (#4654). `restore` of a running VM without `--yes` refuses and names it | "VM checkpoints are local only for now; cloud environments cannot be checkpointed yet", exit 1, `ls` included | intended: a feature only local VMs have; plain. An empty `ls` should still exit 0 |
 
 ### The gaps
 

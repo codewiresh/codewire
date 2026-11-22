@@ -173,13 +173,11 @@ only.
   [docs/journeys/snapshots-and-forks.md](docs/journeys/snapshots-and-forks.md).
 - A **VM checkpoint** is saved running-VM execution state: memory and device
   state, with the VM's disks ([GLOSSARY.md](docs/GLOSSARY.md#vm-checkpoint)).
-  Local VMs on Linux have them: `cw checkpoint` creates, lists, inspects,
-  restores and removes them, and `cw create --local --checkpoint` forks one
-  into new environments with fresh identity. A checkpoint stays on the host
-  that made it. On macOS they are refused for now and are being built
-  (#4654): the Mac steps of `ckpt-local`, `ckpt-restore` and `ckpt-fork` in
-  [docs/journeys/snapshots-and-forks.md](docs/journeys/snapshots-and-forks.md)
-  describe them and are not yet observed. Hosted sandboxes have none.
+  Local VMs on Linux and on a Mac have them: `cw checkpoint` creates, lists,
+  inspects, restores and removes them, and `cw create --local --checkpoint`
+  forks one into new environments with fresh identity. A checkpoint stays on
+  the host that made it, and a Mac restores it only on the macOS build it was
+  taken on (#4654). Hosted sandboxes have none.
 
 ## 3. Components
 

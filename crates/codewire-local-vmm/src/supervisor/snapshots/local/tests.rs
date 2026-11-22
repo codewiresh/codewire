@@ -2070,7 +2070,7 @@ async fn a_stop_for_restore_needs_the_checkpoint_files_the_restore_will_use() {
     let intact = |row: &SnapshotRow| {
         let (_, manifest) = find_ready(&config, &row.id.to_string(), true).unwrap();
         let checkpoint = manifest.checkpoint.clone().unwrap();
-        crate::supervisor::checkpoints::linux::stored_files_intact(
+        crate::supervisor::checkpoints::local::stored_files_intact(
             &config,
             row.id,
             &manifest,

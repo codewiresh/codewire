@@ -58,10 +58,10 @@ Secret Service, such as a server, keeps it in a file only its user can read, so 
 comes back after a reboot with nobody logged in (owner, 2026-11-13). A Mac always has its \
 Keychain, so `--key-store file` is refused there and nothing falls back."""
 
-[groups.snapshots]
-reason = """VM checkpoints, and forks of them, are not yet implemented on macOS (#3803, \
-#4654): a missing implementation, refused with that reason. Local disk snapshots run on \
-both."""
+[groups.filevault]
+reason = """A Mac's first VM checkpoint warns when FileVault is off (#4654, cw-security's \
+condition 11): APFS clones share blocks, so a removed checkpoint's memory stays on the disk \
+readable on the disk unless FileVault is on. Linux has no such store-wide switch to report."""
 
 [groups.executable]
 reason = """The running executable: Linux opens its image through /proc/self/exe even \
@@ -115,7 +115,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli-bin/tests/retained_mesh.rs" = { group = "linux-tests", count = 6 }
 "crates/codewire-cli-bin/tests/support/cw_fixture.rs" = { group = "linux-tests", count = 10 }
 "crates/codewire-cli/src/build_record.rs" = { group = "executable", count = 1 }
-"crates/codewire-cli/src/commands/checkpoint.rs" = { group = "snapshots", count = 5 }
+"crates/codewire-cli/src/commands/checkpoint.rs" = { group = "filevault", count = 2 }
 "crates/codewire-cli/src/commands/collaboration.rs" = { group = "member", count = 1 }
 "crates/codewire-cli/src/commands/credential_authority.rs" = { group = "credentials", count = 39 }
 "crates/codewire-cli/src/commands/credential_authority/ssh.rs" = { group = "credentials", count = 17 }

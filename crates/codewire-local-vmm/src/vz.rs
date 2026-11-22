@@ -27,7 +27,7 @@ mod checkpointing;
 mod control;
 
 pub(crate) use checkpointing::{Checkpointing, ProtocolCache};
-pub(crate) use control::{ControlPair, VzControl, is_machine_identifier};
+pub(crate) use control::{ControlPair, VzControl, VzOperation, VzReply, is_machine_identifier};
 
 /// The configuration file inside the private VM directory.
 pub(crate) const CONFIG_NAME: &str = "vz.json";
@@ -38,6 +38,11 @@ pub(crate) const MACHINE_IDENTIFIER_NAME: &str = "vz-machine-id";
 /// The one file a schema 3 helper's `save` writes, in the VM's
 /// `checkpoints/` directory.
 pub(crate) const SAVE_STATE_NAME: &str = "vz-save";
+/// A captured VM's saved state in its VM checkpoint's `vmm/` (design §5).
+pub(crate) const CHECKPOINT_STATE_NAME: &str = "state.vzsave";
+/// The helper's identity in a VM checkpoint's manifest (`vmm.version`): the
+/// configuration schema its checkpoints are taken with (design §6).
+pub(crate) const CHECKPOINT_VMM_VERSION: &str = "vz-3";
 /// What the helper's `protocol` command may print.
 const PROTOCOL_OUTPUT_LIMIT: u64 = 16;
 /// The status a helper from before schema 3 exits with, printing its usage,
@@ -255,6 +260,11 @@ pub(crate) fn spawn(
 /// helper could not be asked, such as a spawn failure or no answer in time;
 /// the caller then starts on schema 2 and asks again next time.
 pub(crate) async fn probe_protocol(executable: &Path) -> Option<u32> {
+    probe_protocol_within(executable, PROTOCOL_TIMEOUT).await
+}
+
+/// [`probe_protocol`] with the time the helper has to answer.
+async fn probe_protocol_within(executable: &Path, timeout: std::time::Duration) -> Option<u32> {
     use tokio::io::AsyncReadExt as _;
     let mut command = tokio::process::Command::new(executable);
     command
@@ -284,10 +294,7 @@ pub(crate) async fn probe_protocol(executable: &Path) -> Option<u32> {
             None
         }
     };
-    tokio::time::timeout(PROTOCOL_TIMEOUT, probe)
-        .await
-        .ok()
-        .flatten()
+    tokio::time::timeout(timeout, probe).await.ok().flatten()
 }
 
 /// The machine identifier kept for this VM, if its helper reported one.
@@ -602,18 +609,31 @@ mod tests {
     async fn the_probe_answers_only_when_the_helper_does() {
         let temporary = tempfile::tempdir().unwrap();
         let directory = temporary.path();
+        // A bound no run reaches for the answers, and a short one for the
+        // helper that never answers, so a loaded machine changes nothing.
+        let answer = std::time::Duration::from_secs(3600);
+        for (body, expected) in [
+            ("echo 3", Some(CHECKPOINTING_SCHEMA_VERSION)),
+            ("echo usage >&2; exit 2", Some(SCHEMA_VERSION)),
+            ("echo 4", None),
+            ("exit 1", None),
+        ] {
+            let script = helper(directory, body);
+            assert_eq!(
+                probe_protocol_within(&script, answer).await,
+                expected,
+                "{body}"
+            );
+        }
         assert_eq!(
-            probe_protocol(&helper(directory, "echo 3")).await,
-            Some(CHECKPOINTING_SCHEMA_VERSION)
+            probe_protocol_within(&directory.join("absent"), answer).await,
+            None
         );
+        let silent = helper(directory, "sleep 5");
         assert_eq!(
-            probe_protocol(&helper(directory, "echo usage >&2; exit 2")).await,
-            Some(SCHEMA_VERSION)
+            probe_protocol_within(&silent, std::time::Duration::from_millis(100)).await,
+            None
         );
-        assert_eq!(probe_protocol(&helper(directory, "echo 4")).await, None);
-        assert_eq!(probe_protocol(&helper(directory, "exit 1")).await, None);
-        assert_eq!(probe_protocol(&helper(directory, "sleep 5")).await, None);
-        assert_eq!(probe_protocol(&directory.join("absent")).await, None);
     }
 
     /// A probe with no answer is asked again; a definite one is kept.

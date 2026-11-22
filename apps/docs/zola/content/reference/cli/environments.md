@@ -403,7 +403,7 @@ size stream; a cloud upload over 64 MiB goes in resumable parts, so running
 the same command again after an interruption resumes it. See
 [Files](@/access/files.md).
 
-## cw checkpoint (local, Linux)
+## cw checkpoint (local)
 
 ```sh
 cw checkpoint create ENV --name NAME
@@ -422,8 +422,14 @@ running; it stands still for the moment its memory is written.
 `restore` puts the checkpoint's own environment back at that instant: its
 running processes and every disk change since are discarded, after asking
 unless `--yes` is given. To keep the environment and run the checkpoint beside
-it, fork it with `cw create --local --checkpoint NAME`. VM checkpoints need a
-Linux host for now; on macOS the command says so.
+it, fork it with `cw create --local --checkpoint NAME`.
+
+VM checkpoints run on a Linux host and on a Mac. On a Mac, the checkpoint
+store is kept out of Time Machine backups, a local VM state root inside
+a folder a sync service copies (iCloud Drive, or a provider under
+`~/Library/CloudStorage`) is refused, and a checkpoint restores only on the
+macOS build it was taken on. With FileVault off, the first checkpoint warns
+that a removed checkpoint's memory stays readable on the disk.
 
 ## Local VMs on an older cw
 

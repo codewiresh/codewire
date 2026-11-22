@@ -1,4 +1,5 @@
-//! The runner's `CheckpointVm` (#3046 R4), a child of `runner_service`.
+//! The runner's `CheckpointVm` (#3046 R4), a child of `runner_service`, and a
+//! restore's boot, on Linux and macOS (#4654).
 
 use super::*;
 
@@ -61,12 +62,16 @@ impl RunnerRpc {
                 ));
             }
             let (vmm_version, vmm_sha256) = state.runner.vmm_identity();
+            let abi = state
+                .runner
+                .guest_checkpoint_request_abi()
+                .map_err(map_checkpoint_error)?;
             let running = state.running.as_mut().ok_or_else(|| {
                 Status::failed_precondition("a VM checkpoint is taken only of a running VM")
             })?;
             let started = std::time::Instant::now();
             let capture = running
-                .checkpoint(operation_id)
+                .checkpoint(operation_id, abi)
                 .await
                 .map_err(map_checkpoint_error)?;
             let boot = running.boot_bindings();
@@ -237,7 +242,7 @@ fn bool_text(value: bool) -> &'static str {
     if value { "true" } else { "false" }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

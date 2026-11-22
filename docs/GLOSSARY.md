@@ -83,7 +83,7 @@ snapshot holds no memory; that is a VM checkpoint.
 Saved running-VM execution state, including memory and device state, together
 with the VM's disks. A checkpoint is backend-specific and is not an environment
 projection. `cw checkpoint` creates, lists, inspects, restores and removes VM
-checkpoints of local VMs on Linux, and `cw create --local --checkpoint` forks
+checkpoints of local VMs on Linux or a Mac, and `cw create --local --checkpoint` forks
 one into new environments with fresh identity. A VM checkpoint stays on the
 host that made it. Cloud environments do not have VM checkpoints yet.
 

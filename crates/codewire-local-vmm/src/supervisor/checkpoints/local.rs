@@ -1,7 +1,4 @@
-use std::io::Read as _;
 use std::time::Instant;
-
-use sha2::Digest as _;
 
 use super::super::snapshots::{
     CAPTURE_STAGING_PREFIX, InFlight, delete_ready, find_ready, list_ready, now_unix_ms, publish,
@@ -10,7 +7,10 @@ use super::super::snapshots::{
 use super::*;
 use crate::state::{CHECKPOINT_OUT_PREFIX, CHECKPOINT_VMM_FILES, CHECKPOINTS_DIRECTORY};
 
+mod host;
 mod proto;
+use host::{CLONING_FILESYSTEMS, pinned_vmm, require_same_host, synced_store_warning};
+pub(in crate::supervisor) use host::{host_identity, read_vmm_files};
 pub(in crate::supervisor) use proto::{checkpoint_proto, earlier_runtime, unrestorable_after_move};
 
 /// The seed bindings a runner reports for the boot it captured; an empty
@@ -38,26 +38,7 @@ pub(super) async fn capture(
 ) -> Result<v1::Checkpoint, Status> {
     let started = Instant::now();
     let environment_name = request.environment.clone();
-    if !valid_environment_name(&environment_name) {
-        return Err(Status::invalid_argument(
-            "name the running environment to checkpoint",
-        ));
-    }
-    let name = if request.name.is_empty() {
-        default_name(&environment_name, now_unix_ms() / 1000)
-    } else {
-        request.name.clone()
-    };
-    if !valid_environment_name(&name) {
-        return Err(Status::invalid_argument(
-            "a VM checkpoint name is 1 to 63 letters, digits, `-`, `_` or `.`, starting with a letter or digit",
-        ));
-    }
-    if Uuid::parse_str(&name).is_ok() {
-        return Err(Status::invalid_argument(
-            "a VM checkpoint name cannot be a UUID, which names it by id; choose another name",
-        ));
-    }
+    let name = checkpoint_name(&environment_name, &request.name)?;
     let account = PlatformAccount::from_proto(request.account.as_ref())?;
     let settling = supervisor.config.clone();
     let store = tokio::task::spawn_blocking(move || {
@@ -105,7 +86,7 @@ pub(super) async fn capture(
         })?;
     let space = supervisor.config.clone();
     let memory_bytes = u64::from(environment.memory_mib) * MIB;
-    tokio::task::spawn_blocking(move || require_capture_space(&space, memory_bytes))
+    let synced = tokio::task::spawn_blocking(move || require_capture_space(&space, memory_bytes))
         .await
         .map_err(|_| Status::internal("VM checkpoint space check failed"))??;
 
@@ -225,7 +206,7 @@ pub(super) async fn capture(
                 sha256: captured.vmm_sha256.clone(),
             },
             guest_checkpoint_abi: captured.guest_checkpoint_abi,
-            host: linux::host_identity(),
+            host: host_identity(),
             memory_bytes: admitted.memory_bytes,
             config_sha256: admitted.config_sha256,
             state_sha256: admitted.state_sha256,
@@ -251,6 +232,7 @@ pub(super) async fn capture(
     .await?;
     let mut proto = checkpoint_proto(&supervisor.config.engine_root(), &row, &manifest, true)
         .map_err(status)?;
+    proto.warnings.extend(synced);
     if captured.resume_failed {
         proto.warnings.push(format!(
             "the VM checkpoint is complete, but {environment_name} did not resume; restore it with `cw checkpoint restore {}`",
@@ -260,11 +242,37 @@ pub(super) async fn capture(
     Ok(proto)
 }
 
+/// The new checkpoint's name: the one asked for, or `ENV-<UTC time>`, as
+/// environment names are spelled and never a UUID, which names one by id.
+fn checkpoint_name(environment: &str, requested: &str) -> Result<String, Status> {
+    if !valid_environment_name(environment) {
+        return Err(Status::invalid_argument(
+            "name the running environment to checkpoint",
+        ));
+    }
+    let name = if requested.is_empty() {
+        default_name(environment, now_unix_ms() / 1000)
+    } else {
+        requested.to_owned()
+    };
+    if !valid_environment_name(&name) {
+        return Err(Status::invalid_argument(
+            "a VM checkpoint name is 1 to 63 letters, digits, `-`, `_` or `.`, starting with a letter or digit",
+        ));
+    }
+    if Uuid::parse_str(&name).is_ok() {
+        return Err(Status::invalid_argument(
+            "a VM checkpoint name cannot be a UUID, which names it by id; choose another name",
+        ));
+    }
+    Ok(name)
+}
+
 /// `RestoreCheckpoint`: every refusable check, then a Start operation
 /// whose payload names the checkpoint. The source must be stopped.
 /// Everything a restore requires of a VM checkpoint and its source,
 /// other than the source being stopped: the same workspace, resources,
-/// CPU, platform account, runtime and Cloud Hypervisor build, and stored
+/// host, platform account, runtime and VMM build, and stored
 /// files that still match the manifest. A restore runs it, and so does a
 /// Stop for a restore before it discards the guest's state (#3046).
 #[allow(clippy::too_many_arguments)]
@@ -329,13 +337,7 @@ async fn admit_restorable(
             fork()
         )));
     }
-    let host = host_identity();
-    if host.cpu != checkpoint.host.cpu {
-        return Err(Status::failed_precondition(format!(
-            "VM checkpoint {} was taken on another CPU ({}; this host has {}); it cannot be restored here",
-            row.name, checkpoint.host.cpu, host.cpu
-        )));
-    }
+    require_same_host(&row.name, &checkpoint.host)?;
     let fresh = PlatformAccount::from_proto(account)?;
     if let (Some(recorded), Some(fresh)) = (manifest.platform_account.as_ref(), fresh.as_ref())
         && recorded != fresh
@@ -358,9 +360,10 @@ async fn admit_restorable(
                 row.name
             ))
         })?;
-    if artifacts.cloud_hypervisor.sha256() != checkpoint.vmm.sha256 {
+    let (vmm_sha256, vmm_name) = pinned_vmm(&artifacts);
+    if vmm_sha256 != checkpoint.vmm.sha256 {
         return Err(Status::failed_precondition(format!(
-            "VM checkpoint {} is unrestorable: its Cloud Hypervisor build changed",
+            "VM checkpoint {} is unrestorable: its {vmm_name} changed",
             row.name
         )));
     }
@@ -782,16 +785,21 @@ fn admit_source(supervisor: &Supervisor, name: &str) -> Result<EnvironmentRecord
     Ok(environment)
 }
 
-/// The snapshot store's filesystem shares blocks, and holds the memory
-/// file, written densely, with room to spare.
-fn require_capture_space(config: &NativeRuntimeConfig, memory_bytes: u64) -> Result<(), Status> {
+/// The snapshot store's filesystem shares blocks, holds the memory file,
+/// written densely, with room to spare, and is not one a sync service
+/// copies off the host; with the warning for one it might.
+fn require_capture_space(
+    config: &NativeRuntimeConfig,
+    memory_bytes: u64,
+) -> Result<Option<String>, Status> {
+    let synced = synced_store_warning(&config.engine_root())?;
     let snapshots = snapshots_root(&config.engine_root()).map_err(status)?;
     let reflink = crate::fs_clone::reflink_works(snapshots.path())
         .map_err(|error| Status::internal(format!("checking the filesystem failed: {error}")))?;
     if !reflink {
-        return Err(Status::failed_precondition(
-            "VM checkpoints need a filesystem that shares blocks between files (btrfs or XFS) under the local VM state root",
-        ));
+        return Err(Status::failed_precondition(format!(
+            "VM checkpoints need a filesystem that shares blocks between files ({CLONING_FILESYSTEMS}) under the local VM state root",
+        )));
     }
     let free = crate::fs_clone::free_bytes(snapshots.path())
         .map_err(|error| Status::internal(format!("checking free space failed: {error}")))?;
@@ -803,7 +811,7 @@ fn require_capture_space(config: &NativeRuntimeConfig, memory_bytes: u64) -> Res
             bytes_text(free)
         )));
     }
-    Ok(())
+    Ok(synced)
 }
 
 fn bytes_text(bytes: u64) -> String {
@@ -942,95 +950,6 @@ fn admit_disk(
         mode: "reflink".to_owned(),
         filesystem_uuid: superblock.uuid,
     })
-}
-
-pub(super) struct VmmFiles {
-    pub(super) config_sha256: String,
-    pub(super) state_sha256: String,
-}
-
-/// Read `vmm/` as the VMM must have written it: exactly its three files,
-/// sealed 0400, the memory file exactly `memory_bytes`, the configuration
-/// a JSON object.
-pub(super) fn read_vmm_files(vmm: &Path, memory_bytes: u64) -> Result<VmmFiles, SupervisorError> {
-    only_entries(vmm, &CHECKPOINT_VMM_FILES)?;
-    let root = PrivateRoot::open(vmm)?;
-    let digest = |name: &str, limit: u64| -> Result<(String, Vec<u8>), SupervisorError> {
-        let opened = root
-            .open_regular(Path::new(name), false, None, false, Some(0o400))
-            .map_err(|_| SupervisorError::InvalidRunnerResponse)?;
-        let mut bytes = Vec::new();
-        opened
-            .file()
-            .take(limit + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|source| SupervisorError::Io {
-                path: vmm.join(name),
-                source,
-            })?;
-        if bytes.len() as u64 > limit {
-            return Err(SupervisorError::InvalidRunnerResponse);
-        }
-        Ok((format!("{:x}", Sha256::digest(&bytes)), bytes))
-    };
-    let (config_sha256, config) = digest("config.json", MAXIMUM_VMM_CONFIG_BYTES)?;
-    if !serde_json::from_slice::<serde_json::Value>(&config).is_ok_and(|value| value.is_object()) {
-        return Err(SupervisorError::InvalidRunnerResponse);
-    }
-    let (state_sha256, _) = digest("state.json", MAXIMUM_VMM_STATE_BYTES)?;
-    root.open_regular(
-        Path::new("memory-ranges"),
-        false,
-        Some(memory_bytes),
-        false,
-        Some(0o400),
-    )
-    .map_err(|_| SupervisorError::InvalidRunnerResponse)?;
-    Ok(VmmFiles {
-        config_sha256,
-        state_sha256,
-    })
-}
-
-/// The first processor's vendor, family, model and stepping, and the
-/// kernel release.
-pub(super) fn host_identity() -> HostIdentity {
-    let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
-    let field = |key: &str| {
-        cpuinfo
-            .lines()
-            .take_while(|line| !line.trim().is_empty())
-            .find_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                (name.trim() == key).then(|| value.trim().to_owned())
-            })
-            .unwrap_or_default()
-    };
-    // x86_64 names these; aarch64 names its implementer and part.
-    let cpu = [
-        field("vendor_id"),
-        field("cpu family"),
-        field("model"),
-        field("stepping"),
-        field("CPU implementer"),
-        field("CPU part"),
-        field("CPU variant"),
-        field("CPU revision"),
-    ]
-    .into_iter()
-    .filter(|value| !value.is_empty())
-    .collect::<Vec<_>>()
-    .join(":");
-    HostIdentity {
-        cpu: if cpu.is_empty() {
-            "unknown".to_owned()
-        } else {
-            cpu
-        },
-        kernel_release: fs::read_to_string("/proc/sys/kernel/osrelease")
-            .map(|release| release.trim().to_owned())
-            .unwrap_or_default(),
-    }
 }
 
 pub(super) fn list(

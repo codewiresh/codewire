@@ -10,10 +10,6 @@
 //! the guest's memory held, the creator's delivered sign-ins included (owner,
 //! 2026-10-25, Q1); it is never exported.
 
-// VM checkpoints are Linux only, so most of this module is unused on other
-// targets.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
-
 use super::snapshots::{
     Consistency, DiskRole, Manifest, ManifestDisk, ManifestResources, ManifestSource,
     PlatformAccount, RecordedAuthority,
@@ -28,8 +24,6 @@ const SPACE_HEADROOM_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MIB: u64 = 1024 * 1024;
 const MAXIMUM_VMM_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAXIMUM_VMM_STATE_BYTES: u64 = 64 * 1024 * 1024;
-#[cfg(not(target_os = "linux"))]
-const LINUX_ONLY: &str = "VM checkpoints need a Linux host for now";
 
 /// The pinned VMM a VM checkpoint restores only into.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,7 +116,13 @@ impl CheckpointManifest {
             || self.vmm.version.is_empty()
             || self.vmm.version.len() > 32
             || !digest(&self.vmm.sha256)
-            || self.guest_checkpoint_abi != codewire_vmm_guest_probe::GUEST_CHECKPOINT_ABI
+            // Linux sends ABI 1; a Mac sends 2 to a guest that steps its
+            // clock on Thaw (#4654).
+            || !matches!(
+                self.guest_checkpoint_abi,
+                codewire_vmm_guest_probe::GUEST_CHECKPOINT_ABI
+                    | codewire_vmm_guest_probe::GUEST_CHECKPOINT_THAW_CLOCK_ABI
+            )
             || self.host.cpu.is_empty()
             || self.host.cpu.len() > 256
             || self.host.kernel_release.len() > 256
@@ -157,37 +157,21 @@ impl CheckpointManifest {
 
     /// Whether a VM tree's `checkpoints/in` files are this checkpoint's.
     pub(in crate::supervisor) fn files_match_in(&self, vm: &Path) -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            linux::read_vmm_files(
-                &vm.join(crate::state::CHECKPOINTS_DIRECTORY)
-                    .join(crate::state::CHECKPOINT_IN),
-                self.memory_bytes,
-            )
-            .is_ok_and(|files| {
-                files.config_sha256 == self.config_sha256 && files.state_sha256 == self.state_sha256
-            })
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = vm;
-            false
-        }
+        local::read_vmm_files(
+            &vm.join(crate::state::CHECKPOINTS_DIRECTORY)
+                .join(crate::state::CHECKPOINT_IN),
+            self.memory_bytes,
+        )
+        .is_ok_and(|files| {
+            files.config_sha256 == self.config_sha256 && files.state_sha256 == self.state_sha256
+        })
     }
 
     /// Whether `directory`'s `vmm/` files are the ones this manifest names.
     pub(in crate::supervisor) fn files_match(&self, directory: &Path) -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            linux::read_vmm_files(&directory.join("vmm"), self.memory_bytes).is_ok_and(|files| {
-                files.config_sha256 == self.config_sha256 && files.state_sha256 == self.state_sha256
-            })
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = directory;
-            false
-        }
+        local::read_vmm_files(&directory.join("vmm"), self.memory_bytes).is_ok_and(|files| {
+            files.config_sha256 == self.config_sha256 && files.state_sha256 == self.state_sha256
+        })
     }
 }
 
@@ -234,18 +218,10 @@ pub(super) async fn retire_for_environment(
     supervisor: &Supervisor,
     environment_id: Uuid,
 ) -> Result<(), SupervisorError> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (supervisor, environment_id);
-        Ok(())
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let config = supervisor.config.clone();
-        tokio::task::spawn_blocking(move || linux::retire(&config, environment_id))
-            .await
-            .map_err(|_| SupervisorError::InvalidState)?
-    }
+    let config = supervisor.config.clone();
+    tokio::task::spawn_blocking(move || local::retire(&config, environment_id))
+        .await
+        .map_err(|_| SupervisorError::InvalidState)?
 }
 
 // ---------------------------------------------------------------------------
@@ -275,22 +251,14 @@ pub(super) async fn place_in_place(
     checkpoint_id: Uuid,
     operation_id: Uuid,
 ) -> Result<Option<WorkspaceGenerationRecord>, SupervisorError> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (supervisor, name, checkpoint_id, operation_id);
-        Err(SupervisorError::InvalidRequest)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let environment = supervisor.environment(name)?;
-        let config = supervisor.config.clone();
-        tokio::task::spawn_blocking(move || {
-            linux::place(&config, &environment, checkpoint_id, operation_id)
-        })
-        .await
-        .map_err(|_| SupervisorError::WorkspaceProvisionTask)??;
-        Ok(None)
-    }
+    let environment = supervisor.environment(name)?;
+    let config = supervisor.config.clone();
+    tokio::task::spawn_blocking(move || {
+        local::place(&config, &environment, checkpoint_id, operation_id)
+    })
+    .await
+    .map_err(|_| SupervisorError::WorkspaceProvisionTask)??;
+    Ok(None)
 }
 
 /// A restoring Start's StartVm request: the checkpoint to restore, and its
@@ -330,55 +298,47 @@ pub(super) fn attach_boot(
     let Some(checkpoint_id) = checkpoint_id else {
         return Ok(request);
     };
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = checkpoint_id;
-        Err(SupervisorError::InvalidRequest)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let mut request = request;
-        let (_, manifest) =
-            super::snapshots::find_ready(&supervisor.config, &checkpoint_id.to_string(), true)
-                .map_err(|_| SupervisorError::NotFound(checkpoint_id.to_string()))?;
-        let checkpoint = manifest
-            .checkpoint
-            .as_ref()
-            .ok_or(SupervisorError::InvalidState)?;
-        request.vsock_cid = checkpoint.vsock_cid;
-        request.checkpoint = Some(v1::CheckpointBoot {
-            checkpoint_id: checkpoint_id.to_string(),
-            source_environment_id: manifest.source.environment_id.to_string(),
-            config_sha256: checkpoint.config_sha256.clone(),
-            state_sha256: checkpoint.state_sha256.clone(),
-            memory_bytes: checkpoint.memory_bytes,
-            setup_disk_bytes: checkpoint.setup_disk_bytes.unwrap_or_default(),
-            vmm_sha256: checkpoint.vmm.sha256.clone(),
-            boot: Some(v1::CheckpointBootBindings {
-                skill_snapshot_sha256: checkpoint
-                    .boot
-                    .skill_snapshot_sha256
-                    .clone()
-                    .unwrap_or_default(),
-                environment_projection_sha256: checkpoint
-                    .boot
-                    .environment_projection_sha256
-                    .clone()
-                    .unwrap_or_default(),
-                managed_credential_clients: checkpoint.boot.managed_credential_clients.clone(),
-                docker: checkpoint.boot.docker,
-                cw_runtime_catalog_generation: checkpoint
-                    .boot
-                    .cw_runtime_catalog_generation
-                    .clone()
-                    .unwrap_or_default(),
-                daemon_vsock_port: checkpoint.boot.daemon_vsock_port,
-                intercept: checkpoint.boot.intercept,
-            }),
-            source_generation: checkpoint.source_generation,
-        });
-        Ok(request)
-    }
+    let mut request = request;
+    let (_, manifest) =
+        super::snapshots::find_ready(&supervisor.config, &checkpoint_id.to_string(), true)
+            .map_err(|_| SupervisorError::NotFound(checkpoint_id.to_string()))?;
+    let checkpoint = manifest
+        .checkpoint
+        .as_ref()
+        .ok_or(SupervisorError::InvalidState)?;
+    request.vsock_cid = checkpoint.vsock_cid;
+    request.checkpoint = Some(v1::CheckpointBoot {
+        checkpoint_id: checkpoint_id.to_string(),
+        source_environment_id: manifest.source.environment_id.to_string(),
+        config_sha256: checkpoint.config_sha256.clone(),
+        state_sha256: checkpoint.state_sha256.clone(),
+        memory_bytes: checkpoint.memory_bytes,
+        setup_disk_bytes: checkpoint.setup_disk_bytes.unwrap_or_default(),
+        vmm_sha256: checkpoint.vmm.sha256.clone(),
+        boot: Some(v1::CheckpointBootBindings {
+            skill_snapshot_sha256: checkpoint
+                .boot
+                .skill_snapshot_sha256
+                .clone()
+                .unwrap_or_default(),
+            environment_projection_sha256: checkpoint
+                .boot
+                .environment_projection_sha256
+                .clone()
+                .unwrap_or_default(),
+            managed_credential_clients: checkpoint.boot.managed_credential_clients.clone(),
+            docker: checkpoint.boot.docker,
+            cw_runtime_catalog_generation: checkpoint
+                .boot
+                .cw_runtime_catalog_generation
+                .clone()
+                .unwrap_or_default(),
+            daemon_vsock_port: checkpoint.boot.daemon_vsock_port,
+            intercept: checkpoint.boot.intercept,
+        }),
+        source_generation: checkpoint.source_generation,
+    });
+    Ok(request)
 }
 
 // ---------------------------------------------------------------------------
@@ -443,36 +403,20 @@ impl LocalCheckpointService for SupervisorRpc {
         &self,
         request: Request<v1::StopForRestoreRequest>,
     ) -> Result<Response<v1::Operation>, Status> {
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = request;
-            Err(Status::unimplemented(LINUX_ONLY))
-        }
-        #[cfg(target_os = "linux")]
-        {
-            self.start_drains()?;
-            linux::stop_for_restore(self, request.into_inner())
-                .await
-                .map(Response::new)
-        }
+        self.start_drains()?;
+        local::stop_for_restore(self, request.into_inner())
+            .await
+            .map(Response::new)
     }
 
     async fn restore_checkpoint(
         &self,
         request: Request<v1::RestoreCheckpointRequest>,
     ) -> Result<Response<v1::Operation>, Status> {
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = request;
-            Err(Status::unimplemented(LINUX_ONLY))
-        }
-        #[cfg(target_os = "linux")]
-        {
-            self.start_drains()?;
-            linux::restore(self, request.into_inner())
-                .await
-                .map(Response::new)
-        }
+        self.start_drains()?;
+        local::restore(self, request.into_inner())
+            .await
+            .map(Response::new)
     }
 
     async fn delete_checkpoint(
@@ -488,37 +432,9 @@ impl LocalCheckpointService for SupervisorRpc {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-async fn capture(
-    _supervisor: &Supervisor,
-    _request: v1::CreateCheckpointRequest,
-) -> Result<v1::Checkpoint, Status> {
-    Err(Status::unimplemented(LINUX_ONLY))
-}
+pub(in crate::supervisor) mod local;
 
-#[cfg(not(target_os = "linux"))]
-fn list(
-    _config: &NativeRuntimeConfig,
-    _source: Option<Uuid>,
-) -> Result<Vec<v1::Checkpoint>, Status> {
-    Err(Status::unimplemented(LINUX_ONLY))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn get(_config: &NativeRuntimeConfig, _selector: &str) -> Result<v1::Checkpoint, Status> {
-    Err(Status::unimplemented(LINUX_ONLY))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn delete(_config: &NativeRuntimeConfig, _selector: &str) -> Result<v1::Checkpoint, Status> {
-    Err(Status::unimplemented(LINUX_ONLY))
-}
-
-#[cfg(target_os = "linux")]
-pub(in crate::supervisor) mod linux;
-
-#[cfg(target_os = "linux")]
-use linux::{capture, delete, get, list};
+use local::{capture, delete, get, list};
 
 /// The closed cause class of a failed lifecycle effect (#2595). Like
 /// [`create_failure_code`], it names the error, never its Display, Debug or

@@ -19,8 +19,8 @@ format is in [README.md](README.md).
 Updated 2026-11-22. Cloud capture, management and a three-way fork are
 observed on Dev and on Production, as the smoke identities. The launch walk by
 a new account, the fork while the snapshot's node is down and the dashboard
-are not observed. VM checkpoints on a Mac (#4654) are written first: every
-Mac step of `ckpt-local`, `ckpt-restore` and `ckpt-fork` is not yet observed.
+are not observed. VM checkpoints are observed on a Mac and on Linux with
+development builds of #4654's branch (2026-11-21); not yet with a release.
 
 | ID | What | Dev | Production |
 | --- | --- | --- | --- |
@@ -30,9 +30,9 @@ Mac step of `ckpt-local`, `ckpt-restore` and `ckpt-fork` is not yet observed.
 | `snap-fork-node-down` | a fork while the snapshot's node is unavailable | not yet observed (#4371) | not yet observed |
 | `snap-local` | `cw snapshot create`, `ls`, `inspect` and `rm` on a local VM (Linux or a Mac) | does not apply; a local VM observed on a pre-merge build (#3525) and on a Mac with the v0.4.22 candidate; `create` and `rm` with v0.4.22 on Linux and on a Mac | does not apply |
 | `snap-local-fork` | `cw create --local --snapshot`, one fork and `--count N` | does not apply; a local VM observed on a pre-merge build (#3525); one fork on a Mac with the v0.4.22 candidate; with v0.4.22, one fork on Linux and `--count 2` on Linux and on a Mac | does not apply |
-| `ckpt-local` | `cw checkpoint create`, `ls`, `inspect` and `rm` of a running local VM (Linux or a Mac) | does not apply; on Linux, a checkpoint created, listed and removed across an upgrade in [local-vm-upgrade.md](local-vm-upgrade.md), not walked on its own; on a Mac not yet observed (#4654) | does not apply |
-| `ckpt-restore` | `cw checkpoint restore`: a local VM back at a checkpoint's instant, in place | does not apply; on Linux only the refusal of a checkpoint an upgrade left unrestorable is recorded ([local-vm-upgrade.md](local-vm-upgrade.md)); a working restore not yet recorded; on a Mac not yet observed (#4654) | does not apply |
-| `ckpt-fork` | `cw create --local --checkpoint`: a running copy beside the source | does not apply; on Linux only the refusal of a checkpoint an upgrade left unrestorable is recorded ([local-vm-upgrade.md](local-vm-upgrade.md)); a working fork not yet recorded; on a Mac not yet observed (#4654) | does not apply |
+| `ckpt-local` | `cw checkpoint create`, `ls`, `inspect` and `rm` of a running local VM (Linux or a Mac) | does not apply; observed on a Mac and on Linux with development builds of #4654's branch, 2026-11-21 | does not apply |
+| `ckpt-restore` | `cw checkpoint restore`: a local VM back at a checkpoint's instant, in place | does not apply; a running source observed on a Mac and on Linux with development builds of #4654's branch, 2026-11-21 | does not apply |
+| `ckpt-fork` | `cw create --local --checkpoint`: a running copy beside the source | does not apply; observed on a Mac and on Linux with development builds of #4654's branch, 2026-11-21 | does not apply |
 | `snap-dashboard` | the organization's Snapshots page | hidden for launch (#4582) | hidden for launch (#4582) |
 
 ## Before any of these
@@ -404,9 +404,8 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     or XFS on Linux and APFS on a Mac;
   - on a Mac, the source's clock after the capture: within 50 ms of the
     host's, since the guest steps its clock when it thaws;
-  - on a Mac, the store kept off backups and search: Time Machine excludes
-    the snapshot store and each VM's `checkpoints/` directory, and Spotlight
-    the snapshot store;
+  - on a Mac, the store kept off backups: Time Machine excludes the snapshot
+    store and each VM's `checkpoints/` directory;
   - on a Mac, a local VM state root under `~/Library/Mobile Documents` or
     `~/Library/CloudStorage`: the capture is refused; under `~/Desktop` or
     `~/Documents`: taken, with a warning that iCloud may sync it;
@@ -437,9 +436,31 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
     default 4 GiB on a Mac.
 - **Observed:**
   - Linux: a checkpoint created, listed and removed as part of
-    `local-vm-runtime-upgrade` in [local-vm-upgrade.md](local-vm-upgrade.md);
-    these steps are not walked on their own.
-  - A Mac: not yet observed (#4654).
+    `local-vm-runtime-upgrade` in [local-vm-upgrade.md](local-vm-upgrade.md).
+  - A local VM on Linux, development `cw` built from #4654's branch at
+    47e9e9d535 with the runtime from 3c665a0247, in an isolated home,
+    2026-11-21, by cw-mac: `cw checkpoint create lck --name before` printed
+    "VM paused 1003 ms, workload frozen 1010 ms, total 3282 ms; memory 4.0
+    GiB, disks 3"; `inspect` read `Consistency: paired` and `VMM: Cloud
+    Hypervisor v54.0`.
+  - A local VM on macOS 27.2.1 (an M3 Mac), development `cw` and runtime
+    built from #4654's branch at 3c665a0247, 2026-11-21, by cw-mac: `cw
+    checkpoint create ck --name before` of the running VM printed "VM paused
+    1140 ms, workload frozen 1149 ms, total 6342 ms; memory 4.0 GiB, disks 3";
+    the guest clock read 21 ms behind the host before it and 17 ms ahead
+    after. `ls` listed it `ready`; `inspect` read `Consistency: paired` and
+    `VMM: macOS virtualization helper vz-3`; `tmutil isexcluded` reported
+    `[Excluded]` for the snapshot store and the VM's `checkpoints/`. On the
+    same Mac, `mdimport -t` found no importer for `state.vzsave`, and a
+    folder holding `.metadata_never_index` was still indexed, so the marker
+    this build wrote is no longer written. FileVault was on, and no warning was
+    shown. A checkpoint of the stopped VM was refused with "ck is stopped; a
+    VM checkpoint needs it running (`cw start ck`), or take a disk snapshot of
+    it (`cw snapshot create ck`)", and after the last one was removed `ls`
+    read "No VM checkpoints." At 47e9e9d535 a second capture paused the VM for
+    1170 ms. Not observed on a Mac: the limit of 8, the iCloud refusal and the
+    Desktop or Documents warning (unit-tested), and the FileVault-off warning
+    (unit-tested).
 
 ## `ckpt-restore`: a local VM back at a VM checkpoint's instant (Linux or a Mac)
 
@@ -471,10 +492,31 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
   checkpoint is still running; `cw run app -- date -u +%s.%N` agrees with
   the host to within 50 ms.
 - **Observed:**
-  - Linux: only the refusal of a checkpoint an upgrade left unrestorable is
-    recorded, in [local-vm-upgrade.md](local-vm-upgrade.md). A working
-    restore is not yet recorded in a journey.
-  - A Mac: not yet observed (#4654).
+  - Linux: the refusal of a checkpoint an upgrade left unrestorable, in
+    [local-vm-upgrade.md](local-vm-upgrade.md).
+  - A local VM on Linux, the same builds, 2026-11-21, by cw-mac: with the
+    marker changed after the capture, `cw checkpoint restore before --yes`
+    printed "Restored lck to VM checkpoint before: stop 0.73 s, restore
+    9.43 s, total 10.16 s"; the marker read `before`, and the ticker was
+    still running as PID 13, counting on from 8. Its guest predates the
+    network agent's fix for the Mac's restore, and restored without it.
+  - A local VM on macOS 27.2.1, 2026-11-21, by cw-mac. Failure observed
+    three times first, each fixed on #4654's branch: at 3c665a0247 the
+    restore failed `start_filesystem` (a clone of the sealed saved state
+    could not be opened); at de6a49e10e it failed `vmm_start_failed` with
+    `hybrid_vsock` (the guest's Resume was sent before the helper had
+    restored the VM), then with `checkpoint` (the restored guest refused
+    Resume after 5 s: its network agent could not move to the new boot's
+    key while it still held the captured boot's session). Each failed
+    restore left the VM `error`; `cw stop` made it `stopped` again. With
+    `cw` and runtime built from 47e9e9d535, a new VM ck2 checkpointed and its
+    marker changed: `cw checkpoint restore before2 --yes` printed "Restored
+    ck2 to VM checkpoint before2: stop 10.46 s, restore 16.41 s, total
+    26.88 s"; the marker read `before`; the ticker started before the
+    checkpoint was still running as PID 13, counting on from 5; the guest
+    clock read 20 ms ahead of the host. Not observed on a Mac: a restore of
+    a source that was already stopped, and the refusals for another hardware
+    model or macOS build.
 
 ## `ckpt-fork`: local VMs from a VM checkpoint (Linux or a Mac)
 
@@ -500,10 +542,21 @@ Issues: #4370 (hosted snapshots on Production; forks landed in #3754), #4379
   running at the checkpoint, its own environment ID, machine ID and SSH host
   key, and its first command succeeds.
 - **Observed:**
-  - Linux: only the refusal of a fork of a checkpoint an upgrade left
-    unrestorable is recorded, in [local-vm-upgrade.md](local-vm-upgrade.md).
-    A working fork is not yet recorded in a journey.
-  - A Mac: not yet observed (#4654).
+  - Linux: the refusal of a fork of a checkpoint an upgrade left
+    unrestorable, in [local-vm-upgrade.md](local-vm-upgrade.md).
+  - A local VM on Linux, the same builds, 2026-11-21, by cw-mac: `cw create
+    --local --checkpoint before --name lck-fork` beside the running lck
+    printed "Created lck-fork from VM checkpoint before in 9.2 s"; its first
+    command read the marker `before` and the ticker at 8; its machine-id
+    differed from lck's; after `cw checkpoint rm before` its ticker kept
+    counting.
+  - A local VM on macOS 27.2.1, `cw` and runtime from 47e9e9d535,
+    2026-11-21, by cw-mac: `cw create --local --checkpoint before2 --name
+    ck2-fork` beside the running ck2 printed "Created ck2-fork from VM
+    checkpoint before2 in 16.2 s"; its first command, run at once, read the
+    marker `before` and the ticker at 5, still running as PID 13; its
+    machine-id differed from ck2's; after `cw checkpoint rm before2` the
+    fork's ticker kept counting.
 
 ## `snap-dashboard`: the Snapshots page
 

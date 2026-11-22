@@ -1201,7 +1201,7 @@ pub(crate) struct EnvCreateArgs {
         long,
         value_name = "CHECKPOINT",
         group = "restore_source",
-        help = "Fork a local VM checkpoint (`cw checkpoint`): a running copy of the VM at its instant, processes included, with fresh identity; local VMs on Linux"
+        help = "Fork a local VM checkpoint (`cw checkpoint`): a running copy of the VM at its instant, processes included, with fresh identity; local VMs only"
     )]
     checkpoint: Option<String>,
     #[arg(

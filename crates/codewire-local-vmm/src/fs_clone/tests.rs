@@ -146,6 +146,25 @@ fn a_mac_clones_on_apfs_and_reserves_nothing() {
     assert!(reflink_works(directory.path()).unwrap());
 }
 
+/// A VM checkpoint's saved state is sealed 0400; its clone for a restore or
+/// a fork is still this user's writable 0600 file (#4654).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_mac_clone_of_a_sealed_file_is_writable() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sealed");
+    std::fs::write(&path, b"saved state").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+    let source = File::open(&path).unwrap();
+    let mut destination = clone_new(&source, &directory.path().join("clone")).unwrap();
+    assert_eq!(
+        destination.metadata().unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    destination.write_all(b"!").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"saved state");
+}
+
 #[test]
 fn the_reflink_probe_agrees_with_a_clone_and_leaves_nothing_behind() {
     let directory = tempfile::tempdir().unwrap();

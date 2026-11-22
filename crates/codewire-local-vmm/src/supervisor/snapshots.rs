@@ -511,6 +511,13 @@ pub(in crate::supervisor) fn snapshots_root(
 ) -> Result<PrivateRoot, SupervisorError> {
     let engine = PrivateRoot::open(engine_root)?;
     let path = engine.ensure_dir(Path::new(SNAPSHOTS_DIRECTORY), 0o700)?;
+    #[cfg(target_os = "macos")]
+    crate::darwin::memory_store::exclude_from_backup(&path).map_err(|source| {
+        SupervisorError::Io {
+            path: path.clone(),
+            source,
+        }
+    })?;
     Ok(PrivateRoot::open(&path)?)
 }
 
@@ -919,14 +926,6 @@ pub(super) async fn restore_plan(
             other => status(other),
         })?;
     admit_restore_request(&row, &manifest, request)?;
-    // A fork of a VM checkpoint needs this host to take checkpoints; the CLI
-    // refuses it first.
-    #[cfg(not(target_os = "linux"))]
-    if manifest.checkpoint.is_some() {
-        return Err(Status::failed_precondition(
-            "VM checkpoints need a Linux host for now",
-        ));
-    }
     // A fork boots the cw runtime catalog its VM checkpoint's memory was
     // booted with, never the installed one; refuse here, with the
     // checkpoint's name, if that catalog is gone (#3046).

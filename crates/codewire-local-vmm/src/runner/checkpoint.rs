@@ -1,18 +1,25 @@
 //! VM checkpoints of a running VM (#3046 R4), a child of `runner`.
 //!
 //! A capture freezes the guest's workload through PID 1's checkpoint hook,
-//! pauses the VM, has Cloud Hypervisor write its memory and device state,
-//! clones its writable disks, resumes it and thaws the workload. Everything
-//! lands in `vms/<id>/checkpoints/out-<operation>`, the one directory Landlock
-//! lets the VMM write. The supervisor takes that tree over and admits it as
-//! untrusted input before it publishes anything.
+//! pauses the VM, has the VMM write its memory and device state, clones its
+//! writable disks, resumes it and thaws the workload. Everything lands in
+//! `vms/<id>/checkpoints/out-<operation>`. On Linux that is the one directory
+//! Landlock lets Cloud Hypervisor write; on macOS the helper writes only its
+//! `saveState` file, which the runner moves in (`vz`, #4654). The supervisor
+//! takes that tree over and admits it as untrusted input before it publishes
+//! anything. Restoring one is Linux-only for now.
+
+#[cfg(target_os = "macos")]
+mod vz;
+#[cfg(target_os = "macos")]
+pub(super) use vz::{RestoreInput, restore_configuration, restore_input};
 
 use std::time::Instant;
 
 use codewire_vmm_guest_probe::{
     CHECKPOINT_HELLO_LEN, CHECKPOINT_HOST_ENTROPY_LEN, CHECKPOINT_REPLY_LEN, CheckpointAction,
     CheckpointHello, CheckpointKey, CheckpointReply, CheckpointRequest, CheckpointStatus,
-    GUEST_CHECKPOINT_ABI, GUEST_CHECKPOINT_VSOCK_PORT,
+    GUEST_CHECKPOINT_ABI, GUEST_CHECKPOINT_THAW_CLOCK_ABI, GUEST_CHECKPOINT_VSOCK_PORT,
 };
 
 use super::*;
@@ -49,11 +56,33 @@ pub(crate) struct CaptureTimings {
 impl CloudHypervisorRunner {
     /// The pinned VMM's release and sha256, which a checkpoint restores only
     /// into.
+    #[cfg(target_os = "linux")]
     pub(crate) fn vmm_identity(&self) -> (&'static str, String) {
         (
             crate::artifact::CLOUD_HYPERVISOR_RELEASE,
             self.artifacts.cloud_hypervisor.sha256().to_owned(),
         )
+    }
+
+    /// The pinned helper's schema and sha256, which a checkpoint restores
+    /// only into (#4654 design §6).
+    #[cfg(target_os = "macos")]
+    pub(crate) fn vmm_identity(&self) -> (&'static str, String) {
+        (
+            crate::vz::CHECKPOINT_VMM_VERSION,
+            self.artifacts.vz_runner.sha256().to_owned(),
+        )
+    }
+
+    /// The hook ABI a capture's requests use. A Mac's guest clocks stop while
+    /// its VM is paused, so a Mac guest whose init carries the marker gets
+    /// ABI 2, whose `Thaw` steps its clock; Linux keeps ABI 1 (#4654).
+    pub(crate) fn guest_checkpoint_request_abi(&self) -> Result<u32, RunnerError> {
+        #[cfg(target_os = "macos")]
+        if self.artifacts.guest_checkpoint_thaw_clock()? {
+            return Ok(GUEST_CHECKPOINT_THAW_CLOCK_ABI);
+        }
+        Ok(GUEST_CHECKPOINT_ABI)
     }
 }
 
@@ -73,12 +102,13 @@ impl RunningVm {
         self.restored
     }
 
-    /// Capture a VM checkpoint into `checkpoints/out-<operation_id>`. On any
-    /// failure the VM is running and thawed again, as far as it can be, and
-    /// the tree is removed.
+    /// Capture a VM checkpoint into `checkpoints/out-<operation_id>`, with
+    /// hook requests of ABI `abi`. On any failure the VM is running and thawed
+    /// again, as far as it can be, and the tree is removed.
     pub(crate) async fn checkpoint(
         &mut self,
         operation_id: Uuid,
+        abi: u32,
     ) -> Result<CheckpointCapture, RunnerError> {
         if !matches!(self.try_exit()?, ExitClass::StillRunning) {
             return Err(RunnerError::Checkpoint("the VM is not running"));
@@ -92,7 +122,7 @@ impl RunningVm {
         }
         let out_name = format!("{CHECKPOINT_OUT_PREFIX}{operation_id}");
         let out = checkpoints.create_dir(Path::new(&out_name), 0o700)?;
-        let result = self.capture_into(&out, operation_id).await;
+        let result = self.capture_into(&out, operation_id, abi).await;
         if result.is_err() {
             let _ = remove_checkpoint_tree(&checkpoints, &out_name);
         }
@@ -103,6 +133,7 @@ impl RunningVm {
         &mut self,
         out: &Path,
         operation_id: Uuid,
+        abi: u32,
     ) -> Result<CheckpointCapture, RunnerError> {
         let out_root = PrivateRoot::open(out)?;
         let vmm = out_root.create_dir(Path::new("vmm"), 0o700)?;
@@ -112,7 +143,9 @@ impl RunningVm {
             .create_dir(Path::new(&self.request.root_generation), 0o700)?;
 
         let frozen_at = Instant::now();
-        let freeze = self.hook(CheckpointAction::Freeze, operation_id).await?;
+        let freeze = self
+            .hook(CheckpointAction::Freeze, operation_id, abi)
+            .await?;
         if freeze.status != CheckpointStatus::Done {
             // A failed freeze has thawed again in the guest.
             return Err(RunnerError::Checkpoint(
@@ -122,7 +155,7 @@ impl RunningVm {
         let captured = self.pause_and_capture(&vmm, &disks, &generation_dir).await;
         // The workload thaws on every path once the VM runs again.
         let thawed = match &captured {
-            Ok((_, false)) | Err(_) => self.hook(CheckpointAction::Thaw, operation_id).await,
+            Ok((_, false)) | Err(_) => self.hook(CheckpointAction::Thaw, operation_id, abi).await,
             Ok((_, true)) => Ok(freeze),
         };
         let workload_frozen = frozen_at.elapsed();
@@ -139,7 +172,6 @@ impl RunningVm {
         timings.workload_frozen = workload_frozen;
 
         // Outside the pause: everything durable before the supervisor sees it.
-        let mut memory_bytes = 0;
         for name in CHECKPOINT_VMM_FILES {
             let path = vmm.join(name);
             let file = File::open(&path).map_err(|source| PathError::Io {
@@ -150,15 +182,6 @@ impl RunningVm {
                 path: path.clone(),
                 source,
             })?;
-            if name == "memory-ranges" {
-                memory_bytes = file
-                    .metadata()
-                    .map_err(|source| PathError::Io {
-                        path: path.clone(),
-                        source,
-                    })?
-                    .len();
-            }
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).map_err(
                 |source| PathError::Io {
                     path: path.clone(),
@@ -166,6 +189,17 @@ impl RunningVm {
                 },
             )?;
         }
+        // Cloud Hypervisor writes the memory as it is; Virtualization.framework's
+        // saved state is opaque, so the VM's memory is what it saved.
+        #[cfg(target_os = "linux")]
+        let memory_bytes = std::fs::metadata(vmm.join("memory-ranges"))
+            .map_err(|source| PathError::Io {
+                path: vmm.join("memory-ranges"),
+                source,
+            })?
+            .len();
+        #[cfg(target_os = "macos")]
+        let memory_bytes = u64::from(self.request.memory_mib) << 20;
         for directory in [&vmm, &disks, &generation_dir, &root, &out.to_owned()] {
             File::open(directory)
                 .and_then(|directory| directory.sync_all())
@@ -177,20 +211,41 @@ impl RunningVm {
         Ok(CheckpointCapture {
             timings,
             memory_bytes,
-            guest_abi: GUEST_CHECKPOINT_ABI,
+            guest_abi: abi,
             setup_disk_bytes: self.setup_disk.as_ref().map(|setup| setup.file.size),
             resume_failed,
         })
     }
 
+    /// Each writable disk and the clone a capture makes of it.
+    fn disk_clones(
+        &self,
+        disks: &Path,
+        generation_dir: &Path,
+    ) -> Result<Vec<(PathBuf, PathBuf)>, RunnerError> {
+        let mut clones = vec![
+            (self.paths.state_disk.clone(), disks.join("state.raw")),
+            (
+                RootGenerationPaths::create(&self.paths, &self.request.root_generation)?.root_disk,
+                generation_dir.join("root.raw"),
+            ),
+        ];
+        if self.docker_disk.is_some() {
+            clones.push((self.paths.docker_disk.clone(), disks.join("docker.raw")));
+        }
+        Ok(clones)
+    }
+
     /// Pause, write the VMM's state, clone the disks, resume. Returns the
     /// timings and whether the resume failed after a complete capture.
+    #[cfg(target_os = "linux")]
     async fn pause_and_capture(
         &mut self,
         vmm: &Path,
         disks: &Path,
         generation_dir: &Path,
     ) -> Result<(CaptureTimings, bool), RunnerError> {
+        let clones = self.disk_clones(disks, generation_dir)?;
         let mut timings = CaptureTimings::default();
         let paused_at = Instant::now();
         self.api.pause().await?;
@@ -201,19 +256,8 @@ impl RunningVm {
                 .await?;
             timings.memory_write = started.elapsed();
             let started = Instant::now();
-            let mut clones = vec![
-                (self.paths.state_disk.clone(), disks.join("state.raw")),
-                (
-                    RootGenerationPaths::create(&self.paths, &self.request.root_generation)?
-                        .root_disk,
-                    generation_dir.join("root.raw"),
-                ),
-            ];
-            if self.docker_disk.is_some() {
-                clones.push((self.paths.docker_disk.clone(), disks.join("docker.raw")));
-            }
-            for (source, destination) in clones {
-                clone_disk(&source, &destination)?;
+            for (source, destination) in &clones {
+                clone_disk(source, destination)?;
             }
             timings.disk_clone = started.elapsed();
             Ok::<_, RunnerError>(())
@@ -233,23 +277,30 @@ impl RunningVm {
     }
 
     /// One authenticated exchange with the guest's checkpoint hook, as this
-    /// boot.
+    /// boot. An ABI 2 `Thaw` carries the host's clock.
     async fn hook(
         &self,
         action: CheckpointAction,
         operation_id: Uuid,
+        abi: u32,
     ) -> Result<CheckpointReply, RunnerError> {
+        let host_time_ns =
+            if action == CheckpointAction::Thaw && abi == GUEST_CHECKPOINT_THAW_CLOCK_ABI {
+                host_time_ns()?
+            } else {
+                0
+            };
         hook_exchange(
             &self.hybrid.socket,
             &self.token,
             CheckpointRequest {
-                abi: GUEST_CHECKPOINT_ABI,
+                abi,
                 action,
                 operation_id,
                 vm_id: self.request.vm_id,
                 generation: self.request.generation,
                 host_entropy: [0; CHECKPOINT_HOST_ENTROPY_LEN],
-                host_time_ns: 0,
+                host_time_ns,
             },
         )
         .await
@@ -296,6 +347,17 @@ pub(crate) async fn hook_exchange(
     })
     .await
     .map_err(|_| RunnerError::Checkpoint("the guest's checkpoint hook timed out"))?
+}
+
+/// The host's wall clock, in nanoseconds since the epoch.
+fn host_time_ns() -> Result<u64, RunnerError> {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| RunnerError::Checkpoint("the host clock is before the epoch"))?
+            .as_nanos(),
+    )
+    .map_err(|_| RunnerError::Checkpoint("the host clock is out of range"))
 }
 
 fn snapshot_timeout(memory_mib: u32) -> Duration {
@@ -398,7 +460,9 @@ pub struct RestoreReport {
     pub admit: Duration,
     /// Starting the direct shares' virtiofsd processes.
     pub shares: Duration,
-    /// From spawning Cloud Hypervisor with `--restore` until its API answers.
+    /// From spawning the VMM until it answers: Cloud Hypervisor with
+    /// `--restore` and its API, or the macOS helper with `restoreState` and
+    /// its vsock endpoint.
     pub vmm: Duration,
     pub resume: Duration,
     pub thaw: Duration,
@@ -416,10 +480,18 @@ impl CloudHypervisorRunner {
         restore: &RestoreBoot,
     ) -> Result<(), RunnerError> {
         self.artifacts.require_guest_checkpoint_abi()?;
-        if self.artifacts.cloud_hypervisor.sha256() != restore.vmm_sha256 {
-            return Err(RunnerError::Checkpoint(
-                "the VM checkpoint was taken by another Cloud Hypervisor build; it restores only into its own",
-            ));
+        #[cfg(target_os = "linux")]
+        let (vmm_sha256, another_build) = (
+            self.artifacts.cloud_hypervisor.sha256(),
+            "the VM checkpoint was taken by another Cloud Hypervisor build; it restores only into its own",
+        );
+        #[cfg(target_os = "macos")]
+        let (vmm_sha256, another_build) = (
+            self.artifacts.vz_runner.sha256(),
+            "the VM checkpoint was taken by another VZ helper build; it restores only into its own",
+        );
+        if vmm_sha256 != restore.vmm_sha256 {
+            return Err(RunnerError::Checkpoint(another_build));
         }
         if request.setup.is_some() {
             return Err(RunnerError::Checkpoint("a restored VM has no setup pack"));
@@ -444,6 +516,7 @@ impl CloudHypervisorRunner {
     /// The restore command for `config`: admit the checkpoint's VMM files in
     /// `checkpoints/in`, rewrite its configuration to this VM's paths, and
     /// return `cloud-hypervisor --restore` of them.
+    #[cfg(target_os = "linux")]
     pub(super) fn restore_command(
         &self,
         paths: &VmPaths,
@@ -569,29 +642,24 @@ pub(super) async fn resume_restored(
     token: &str,
     vm_id: Uuid,
     generation: u64,
+    abi: u32,
 ) -> Result<RestoreReport, RunnerError> {
     let operation_id = Uuid::new_v4();
     let mut host_entropy = [0_u8; CHECKPOINT_HOST_ENTROPY_LEN];
     OsRng.fill_bytes(&mut host_entropy);
-    let host_time_ns = u64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| RunnerError::Checkpoint("the host clock is before the epoch"))?
-            .as_nanos(),
-    )
-    .map_err(|_| RunnerError::Checkpoint("the host clock is out of range"))?;
+    let resume_time_ns = host_time_ns()?;
     let started = Instant::now();
     let resumed = hook_exchange(
         socket,
         token,
         CheckpointRequest {
-            abi: GUEST_CHECKPOINT_ABI,
+            abi,
             action: CheckpointAction::Resume,
             operation_id,
             vm_id,
             generation,
             host_entropy,
-            host_time_ns,
+            host_time_ns: resume_time_ns,
         },
     )
     .await?;
@@ -606,13 +674,18 @@ pub(super) async fn resume_restored(
         socket,
         token,
         CheckpointRequest {
-            abi: GUEST_CHECKPOINT_ABI,
+            abi,
             action: CheckpointAction::Thaw,
             operation_id,
             vm_id,
             generation,
             host_entropy: [0; CHECKPOINT_HOST_ENTROPY_LEN],
-            host_time_ns: 0,
+            // A Mac guest's clocks stopped while it was saved (#4654).
+            host_time_ns: if abi == GUEST_CHECKPOINT_THAW_CLOCK_ABI {
+                host_time_ns()?
+            } else {
+                0
+            },
         },
     )
     .await?;
@@ -643,4 +716,5 @@ pub(super) fn remove_restored_input(paths: &VmPaths) -> Result<(), RunnerError> 
 }
 
 use crate::state::CHECKPOINT_IN;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::FileExt as _;

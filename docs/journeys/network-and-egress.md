@@ -1298,7 +1298,8 @@ Issues: #3999 (local VMs, #4897), #4001 (hosted Sandboxes).
     agent has run;
   - synthetic values planted in the credential store, and controls planted
     where a scan must find them;
-  - on macOS, disks and logs only: VM checkpoints are Linux-only.
+  - on macOS, disks and logs only: a Mac VM checkpoint (#4654) is not
+    scanned yet.
 - **Driving it:** no command yet (#4897). The scan plants synthetic values
   only. Searching for a real token would mean reading it, so for a real
   sign-in `agent-claude` checks the other side: the login file holds a

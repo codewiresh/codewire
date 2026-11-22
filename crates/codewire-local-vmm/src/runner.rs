@@ -99,7 +99,7 @@ use crate::state::{
 };
 
 mod boot_seed;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod checkpoint;
 mod egress_status;
 mod front_door;
@@ -124,7 +124,7 @@ use cw_runtime_disk::validate_live_cw_runtime_disk;
 #[cfg(target_os = "macos")]
 mod vz_launch;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use checkpoint::{RestoreBoot, RestoreReport};
 use host_port_forward::HostPortForwarder;
 use mesh_ingress_pass::MeshIngressPass;
@@ -192,8 +192,7 @@ pub struct CreateVmRequest {
     /// With `intercepts`, the seed's placeholders beside the front door's CA (#3999).
     pub credential_placeholders: codewire_vmm_guest_probe::SeedPlaceholders,
     /// Restore this boot from the VM checkpoint placed in
-    /// `checkpoints/in` instead of booting it (#3046 R4).
-    #[cfg(target_os = "linux")]
+    /// `checkpoints/in` instead of booting it (#3046 R4; macOS #4654).
     pub checkpoint: Option<RestoreBoot>,
 }
 
@@ -217,7 +216,8 @@ pub struct CloudHypervisorRunner {
     state_root: PrivateRoot,
     artifacts: AdmittedArtifacts,
     /// The configuration schema the admitted VZ helper accepts, kept once
-    /// its probe answers (#4654).
+    /// its probe answers (#4654). One cache serves the runner's life because
+    /// `artifacts` is admitted once, in `new`, and never replaced.
     #[cfg(target_os = "macos")]
     vz_protocol: crate::vz::ProtocolCache,
 }
@@ -281,7 +281,6 @@ impl CloudHypervisorRunner {
         preflight()?;
         validate_request(&request)?;
         self.artifacts.require_current_guest_seed_abi()?;
-        #[cfg(target_os = "linux")]
         if let Some(restore) = &request.checkpoint {
             self.admit_restore(&request, restore)?;
         }
@@ -308,7 +307,6 @@ impl CloudHypervisorRunner {
         let _ = root_disk_path;
         let setup_disk = admit_setup_disk(&paths, &request)?;
         paths.clear_stale_runtime_endpoints()?;
-        #[cfg(target_os = "linux")]
         if request.checkpoint.is_none() {
             checkpoint::remove_restored_input(&paths)?;
         }
@@ -589,6 +587,7 @@ impl CloudHypervisorRunner {
                         &prepared.token,
                         prepared.request.vm_id,
                         prepared.request.generation,
+                        self.guest_checkpoint_request_abi()?,
                     )
                     .await?;
                     report.admit = prepared.restore_admit.unwrap_or_default();
@@ -1191,7 +1190,6 @@ pub struct RunningVm {
     /// applied `set_host_ports`.
     host_ports: Vec<HostPortBinding>,
     /// What the guest reported when this boot resumed from a VM checkpoint.
-    #[cfg(target_os = "linux")]
     restored: Option<RestoreReport>,
     /// The environment's front door and its pairing socket (#3999), when
     /// the boot binds interception.
@@ -1199,9 +1197,10 @@ pub struct RunningVm {
     /// When the host first received each guest boot stage (#4242).
     stage_times: GuestStageTimes,
     /// The runner's end of a schema 3 helper's control channel, held for the
-    /// VM's life: when it closes, the helper stops its VM (#4654).
+    /// VM's life: when it closes, the helper stops its VM (#4654). A VM
+    /// checkpoint's capture sends its requests.
     #[cfg(target_os = "macos")]
-    _control: Option<crate::vz::VzControl>,
+    control: Option<crate::vz::VzControl>,
     _lock: VmLock,
 }
 
@@ -5169,7 +5168,6 @@ mod tests {
         CreateVmRequest {
             cw_runtime_catalog_generation: None,
             cw_runtime_moved_from_generation: None,
-            #[cfg(target_os = "linux")]
             checkpoint: None,
             network_policy: CompiledPolicy::developer_baseline(),
             intercepts: InterceptSet::default(),

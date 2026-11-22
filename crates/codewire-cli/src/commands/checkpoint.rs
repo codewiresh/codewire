@@ -3,15 +3,17 @@
 //! instant, on this host; it is never exported. Hidden until restore and
 //! forks land.
 
-// VM checkpoints are Linux only, so most of this module is unused on other
-// targets.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// VM checkpoints run on Linux and macOS, so most of this module is unused on
+// other targets.
+#![cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use super::*;
 
+#[cfg(target_os = "macos")]
+mod filevault;
 pub(in crate::commands) mod interception;
 
 #[derive(Debug, Args)]
@@ -109,28 +111,60 @@ pub(crate) async fn handle_checkpoint_command(
         globals.placement != Some(EnvironmentPlacement::Platform),
         "VM checkpoints are local only for now; cloud environments cannot be checkpointed yet"
     );
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         handle_local_checkpoint_command(globals, args.command).await
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = args;
-        anyhow::bail!("VM checkpoints need a Linux host for now")
+        anyhow::bail!("VM checkpoints need a Linux or macOS host")
+    }
+}
+
+/// `cw checkpoint create`; the supervisor names it by the UTC time when no
+/// name is given.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn create(
+    client: &mut codewire_local_vmm::supervisor::NativeSupervisorClient,
+    globals: &Globals,
+    args: CheckpointCreateArgs,
+    refused: impl FnOnce(tonic::Status) -> anyhow::Error,
+) -> anyhow::Result<()> {
+    let name = args
+        .name
+        .as_deref()
+        .and_then(trimmed_str)
+        .unwrap_or_default()
+        .to_owned();
+    let account = native_signed_in_account(globals);
+    let checkpoint = client
+        .create_checkpoint(&args.environment, &name, account)
+        .await
+        .map_err(refused)?;
+    #[cfg(target_os = "macos")]
+    let checkpoint = filevault::at_first_checkpoint(client, checkpoint).await;
+    match args.output {
+        OutputFormat::Json => print_json(&CheckpointView::from(&checkpoint)),
+        OutputFormat::Text => {
+            println!("{}", created_text(&checkpoint));
+            print_warnings(&checkpoint);
+            Ok(())
+        }
     }
 }
 
 /// A fork of a VM checkpoint (`cw create --local --checkpoint`) needs this
 /// host to take checkpoints.
 pub(crate) fn require_local_checkpoints() -> anyhow::Result<()> {
-    if cfg!(target_os = "linux") {
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
         Ok(())
     } else {
-        anyhow::bail!("VM checkpoints need a Linux host for now")
+        anyhow::bail!("VM checkpoints need a Linux or macOS host")
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn handle_local_checkpoint_command(
     globals: &Globals,
     command: CheckpointCommand,
@@ -150,26 +184,7 @@ async fn handle_local_checkpoint_command(
     };
     match command {
         CheckpointCommand::Create(args) => {
-            // The supervisor names it by the UTC time when none is given.
-            let name = args
-                .name
-                .as_deref()
-                .and_then(trimmed_str)
-                .unwrap_or_default()
-                .to_owned();
-            let account = native_signed_in_account(globals);
-            let checkpoint = client
-                .create_checkpoint(&args.environment, &name, account)
-                .await
-                .map_err(status("checkpoint create"))?;
-            match args.output {
-                OutputFormat::Json => print_json(&CheckpointView::from(&checkpoint)),
-                OutputFormat::Text => {
-                    println!("{}", created_text(&checkpoint));
-                    print_warnings(&checkpoint);
-                    Ok(())
-                }
-            }
+            create(&mut client, globals, args, status("checkpoint create")).await
         }
         CheckpointCommand::Ls(args) => {
             let checkpoints = client
@@ -344,6 +359,16 @@ fn milliseconds(micros: u64) -> String {
     format!("{:.0} ms", micros as f64 / 1000.0)
 }
 
+/// The VMM a checkpoint was taken with: a Mac's records the helper's
+/// schema as `vz-N` (#4654), Linux's the Cloud Hypervisor version.
+fn vmm_name(version: &str) -> &'static str {
+    if version.starts_with("vz-") {
+        "macOS virtualization helper"
+    } else {
+        "Cloud Hypervisor"
+    }
+}
+
 fn created_at(unix_ms: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp_millis(unix_ms)
         .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
@@ -445,7 +470,8 @@ fn inspect_text(checkpoint: &v1::Checkpoint) -> String {
             gib(checkpoint.disk_bytes)
         ),
         format!(
-            "VMM:           Cloud Hypervisor {} (sha256 {})",
+            "VMM:           {} {} (sha256 {})",
+            vmm_name(&checkpoint.vmm_version),
             terminal_text(&checkpoint.vmm_version),
             terminal_text(&checkpoint.vmm_sha256)
         ),
@@ -710,5 +736,22 @@ mod tests {
         assert!(list_text(&[unrestorable.clone()]).contains("unrestorable"));
         assert!(inspect_text(&unrestorable).contains("another CPU"));
         assert!(inspect_text(&checkpoint()).contains("paired"));
+    }
+
+    #[test]
+    fn inspect_names_the_vmm_a_checkpoint_was_taken_with() {
+        let mut mac = checkpoint();
+        mac.vmm_version = "vz-3".to_owned();
+        let text = inspect_text(&mac);
+        assert!(
+            text.contains("VMM:           macOS virtualization helper vz-3"),
+            "{text}"
+        );
+        mac.vmm_version = "v48.0".to_owned();
+        let text = inspect_text(&mac);
+        assert!(
+            text.contains("VMM:           Cloud Hypervisor v48.0"),
+            "{text}"
+        );
     }
 }

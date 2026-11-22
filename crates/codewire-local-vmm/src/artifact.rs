@@ -414,7 +414,6 @@ impl AdmittedArtifacts {
 
     /// The guest init answers the VM checkpoint hook (#3046 R4): only a boot
     /// of such a guest is checkpointed, and its checkpoints restored.
-    #[cfg(target_os = "linux")]
     pub(crate) fn require_guest_checkpoint_abi(&self) -> Result<(), ArtifactError> {
         let init = read_canonical_initramfs_entry(&self.initramfs, b"init")?;
         let marker = codewire_vmm_guest_probe::GUEST_CHECKPOINT_ABI_MARKER;
@@ -429,6 +428,26 @@ impl AdmittedArtifacts {
             ));
         }
         Ok(())
+    }
+
+    /// Whether the guest init also accepts the hook's ABI 2, whose `Thaw`
+    /// steps the guest's clock (#4654): its marker appears exactly once. More
+    /// than once is not an init this cw understands.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn guest_checkpoint_thaw_clock(&self) -> Result<bool, ArtifactError> {
+        let init = read_canonical_initramfs_entry(&self.initramfs, b"init")?;
+        let marker = codewire_vmm_guest_probe::GUEST_CHECKPOINT_THAW_CLOCK_MARKER;
+        match init
+            .windows(marker.len())
+            .filter(|bytes| *bytes == marker)
+            .count()
+        {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(ArtifactError::GuestCheckpointUnsupported(
+                self.initramfs.path().to_owned(),
+            )),
+        }
     }
 
     pub(crate) fn require_live_cw_runtime_publisher(&self) -> Result<(), ArtifactError> {
@@ -934,8 +953,8 @@ pub(crate) fn declared_guest_abi(initramfs: &AdmittedArtifact) -> Result<String,
 /// contents.
 ///
 /// [`GUEST_RUNTIME_ABI_MARKER`]: codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER
-// For VM checkpoints, which need a Linux host.
-#[cfg(target_os = "linux")]
+// For VM checkpoints.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn current_guest_abi() -> &'static str {
     let marker = codewire_vmm_guest_probe::GUEST_RUNTIME_ABI_MARKER;
     std::str::from_utf8(&marker[b"\0CWGUESTABI\0".len()..marker.len() - 1])
@@ -943,8 +962,8 @@ pub(crate) fn current_guest_abi() -> &'static str {
 }
 
 /// One stored data file, admitted alone: no executable is probed.
-// For VM checkpoints, which need a Linux host.
-#[cfg(target_os = "linux")]
+// For VM checkpoints.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn admit_data_file(
     root: &PrivateRoot,
     spec: &ArtifactSpec,

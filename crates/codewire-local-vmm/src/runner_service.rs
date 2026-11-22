@@ -90,7 +90,7 @@ pub struct RunnerEntrypointConfig {
     pub platform_config_dir: PathBuf,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod checkpoint;
 mod egress_status;
 mod events;
@@ -764,15 +764,17 @@ impl EnvironmentRunnerService for RunnerRpc {
         &self,
         request: Request<v1::CheckpointVmRequest>,
     ) -> Result<Response<v1::CheckpointVmResponse>, Status> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         return self
             .checkpoint(request.into_inner())
             .await
             .map(Response::new);
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = request;
-            Err(Status::unimplemented("VM checkpoints need a Linux host"))
+            Err(Status::unimplemented(
+                "VM checkpoints need a Linux or macOS host",
+            ))
         }
     }
 
@@ -907,7 +909,6 @@ impl EnvironmentRunnerService for RunnerRpc {
         let cw_runtime_moved_from_generation = parse_cw_runtime_moved_from_generation(&request)?;
         let managed_credential_clients = parse_managed_credential_clients(&request)?;
         let interception = start_request::parse_interception(&request)?;
-        #[cfg(target_os = "linux")]
         let checkpoint = checkpoint::parse_checkpoint_boot(&request)?;
         let daemon_ready_timeout = daemon_ready_timeout(setup.is_some());
         let started = std::time::Instant::now();
@@ -972,7 +973,6 @@ impl EnvironmentRunnerService for RunnerRpc {
                     request.credential_placeholders,
                 )
                 .map_err(|_| Status::invalid_argument("invalid credential placeholders"))?,
-                #[cfg(target_os = "linux")]
                 checkpoint,
             })
             .await
@@ -1042,7 +1042,6 @@ impl EnvironmentRunnerService for RunnerRpc {
         };
         // Stage timings for the vm_started line (#3046): logging only.
         let launch_ms = elapsed_ms(started);
-        #[cfg(target_os = "linux")]
         self.log_restore(environment_id, request.generation, &running);
         // Publish only after the exact VMM process is owned. If this future is
         // cancelled, its local guard revokes access before RunningVm drops.

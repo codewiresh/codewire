@@ -90,9 +90,8 @@ impl RuntimeArtifactStore {
 
     /// What `generation`'s guest init declares, read from its initramfs
     /// alone: no executable is probed, so a listing can ask it of every
-    /// retained generation (#4980). For VM checkpoints, which need a Linux
-    /// host.
-    #[cfg(target_os = "linux")]
+    /// retained generation (#4980). For VM checkpoints.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn guest_runtime_abi(
         &self,
         generation: &str,

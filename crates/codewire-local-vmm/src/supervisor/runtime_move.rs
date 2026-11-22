@@ -316,19 +316,15 @@ impl Supervisor {
                     .ok_or(SupervisorError::InvalidState)?,
             )
             .await?;
-        #[cfg(target_os = "linux")]
         let unrestorable = {
             let (config, id) = (self.config.clone(), environment.id);
             tokio::task::spawn_blocking(move || {
-                checkpoints::linux::unrestorable_after_move(&config, id)
+                checkpoints::local::unrestorable_after_move(&config, id)
             })
             .await
             .map_err(|_| SupervisorError::InvalidState)?
             .map_err(|_| SupervisorError::InvalidState)?
         };
-        // VM checkpoints need a Linux host.
-        #[cfg(not(target_os = "linux"))]
-        let unrestorable = 0_u32;
         Ok(serde_json::json!({
             "from_guest_abi": from,
             "to_guest_abi": to,

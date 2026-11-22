@@ -137,7 +137,6 @@ fn reflink(source: &File, destination: &File) -> io::Result<()> {
 #[cfg(target_os = "macos")]
 fn clonefile(source: &File, destination: &Path) -> io::Result<File> {
     use rustix::fs::CloneFlags;
-    use std::os::unix::fs::PermissionsExt as _;
     let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "not a file path");
     let parent = destination.parent().ok_or_else(invalid)?;
     let name = destination.file_name().ok_or_else(invalid)?;
@@ -156,15 +155,23 @@ fn clonefile(source: &File, destination: &Path) -> io::Result<File> {
         name,
         CloneFlags::NOFOLLOW | CloneFlags::NOOWNERCOPY,
     )?;
-    let opened = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(destination)
-        .and_then(|target| {
-            target.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-            Ok(target)
-        });
+    // The clone keeps the source's mode, and a sealed 0400 source (a VM
+    // checkpoint's saved state) cannot be opened for writing, so the mode
+    // is set first, through the directory and without following a link.
+    let opened = rustix::fs::chmodat(
+        &directory,
+        name,
+        rustix::fs::Mode::from_raw_mode(0o600),
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .map_err(io::Error::from)
+    .and_then(|()| {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(destination)
+    });
     if opened.is_err() {
         // The open's error matters; this only removes the clone it made.
         let _ = std::fs::remove_file(destination);

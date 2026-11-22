@@ -83,10 +83,14 @@ impl VmPaths {
         let generations_dir = vm_root.ensure_dir(Path::new("generations"), 0o700)?;
         let seed_dir = vm_root.ensure_dir(Path::new("seed"), 0o700)?;
         let diagnostics_dir = vm_root.ensure_dir(Path::new("diagnostics"), 0o700)?;
-        #[cfg(target_os = "linux")]
         let checkpoints_dir = vm_root.ensure_dir(Path::new(CHECKPOINTS_DIRECTORY), 0o700)?;
-        #[cfg(not(target_os = "linux"))]
-        let checkpoints_dir = vm_dir.join(CHECKPOINTS_DIRECTORY);
+        #[cfg(target_os = "macos")]
+        crate::darwin::memory_store::exclude_from_backup(&checkpoints_dir).map_err(|source| {
+            StateError::Io {
+                path: checkpoints_dir.clone(),
+                source,
+            }
+        })?;
         let api_socket = api_dir.join("api.sock");
         let vsock_socket = vsock_dir.join(VSOCK_SOCKET_NAME);
         let front_door_socket = sockets_dir.join("front-door.sock");
@@ -882,8 +886,13 @@ pub(crate) const CHECKPOINT_OUT_PREFIX: &str = "out-";
 /// `checkpoints/in`: the VM checkpoint this boot restored from, which its
 /// memory stays mapped from while the VMM runs.
 pub(crate) const CHECKPOINT_IN: &str = "in";
-/// The files the VMM writes for one VM checkpoint.
+/// The files the VMM writes for one VM checkpoint: Cloud Hypervisor's, or the
+/// macOS helper's configuration and saved state (#4654).
+#[cfg(target_os = "linux")]
 pub(crate) const CHECKPOINT_VMM_FILES: [&str; 3] = ["config.json", "state.json", "memory-ranges"];
+#[cfg(target_os = "macos")]
+pub(crate) const CHECKPOINT_VMM_FILES: [&str; 2] =
+    [crate::vz::CONFIG_NAME, crate::vz::CHECKPOINT_STATE_NAME];
 const CHECKPOINT_TREE_LIMIT: usize = 16;
 
 /// The names in a checkpoints directory, each `in` or `out-<uuid>`; anything
@@ -902,6 +911,12 @@ pub(crate) fn checkpoint_tree_names(checkpoints: &PrivateRoot) -> Result<Vec<Str
             .file_name()
             .into_string()
             .map_err(|_| StateError::UnexpectedOwnedObject(entry.path()))?;
+        // The macOS helper saves here; its capture moves the file into its tree
+        // or removes it, and removes a leftover first (#4654).
+        #[cfg(target_os = "macos")]
+        if name == crate::vz::SAVE_STATE_NAME {
+            continue;
+        }
         let valid = name == CHECKPOINT_IN
             || name
                 .strip_prefix(CHECKPOINT_OUT_PREFIX)

@@ -2467,7 +2467,7 @@ fn checkpoint_is_listed_with_restore_the_fork_and_its_host() {
     for needle in [
         "cw checkpoint restore before-refactor",
         "cw create --local --checkpoint before-refactor",
-        "need a Linux host",
+        "on this host",
     ] {
         assert!(help.contains(needle), "{needle}: {help}");
     }
