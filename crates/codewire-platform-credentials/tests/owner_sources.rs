@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use codewire_access::{
-    AccessProfile, AccessProfileName, CapabilitySlot, CredentialAuthKind, DerivedGrant,
-    EnvironmentAccessBinding, EnvironmentId, GrantContext, GrantPlacement, Owner, OwnerId,
-    builtin_provider_catalog,
+    AccessProfile, AccessProfileName, AvailableGrants, CapabilitySlot, CredentialAuthKind,
+    DerivedGrant, EnvironmentAccessBinding, EnvironmentId, GrantContext, GrantPlacement, Owner,
+    OwnerId, WithheldReason, builtin_provider_catalog,
 };
 use codewire_platform_credentials::{
     CredentialRecord, PlatformAccessProfileStore, PlatformProfileError as Error,
@@ -116,6 +116,20 @@ async fn evaluate(
     binding: &EnvironmentAccessBinding,
     confirmation: Option<&OwnerId>,
 ) -> Result<Result<Vec<DerivedGrant>, Error>> {
+    Ok(
+        evaluate_available(pool, selection, context, binding, confirmation)
+            .await?
+            .map(|available| available.grants),
+    )
+}
+
+async fn evaluate_available(
+    pool: &PgPool,
+    selection: &Selection,
+    context: &GrantContext,
+    binding: &EnvironmentAccessBinding,
+    confirmation: Option<&OwnerId>,
+) -> Result<Result<AvailableGrants, Error>> {
     let store = profiles(pool);
     let mut tx = store.begin_transaction().await?;
     selection.authority.lock_for_publication(&mut tx).await?;
@@ -124,6 +138,15 @@ async fn evaluate(
         .await;
     tx.rollback().await?;
     Ok(result)
+}
+
+/// The selected credential's capability, withheld for `reason` and nothing
+/// granted (#4909); every other failure still rejects the whole selection.
+fn withholds(available: &AvailableGrants, selection: &Selection, reason: WithheldReason) -> bool {
+    available.grants.is_empty()
+        && available.reconnect_required.values().any(|withheld| {
+            withheld.credential == selection.credential.metadata.id && withheld.reason == reason
+        })
 }
 
 async fn no_platform_runtime_rows(pool: &PgPool) -> Result<()> {
@@ -368,10 +391,11 @@ async fn owner_selection_rechecks_current_credential_status_expiry_revocation_an
             .len()
                 == 1
         );
+        // A credential's lifecycle withholds only its own capability (#4909).
         for (status, expires, expected) in [
-            ("refresh_failed", None, Error::InactiveCredential),
-            ("expired", None, Error::ExpiredCredential),
-            ("active", Some(0_i64), Error::ExpiredCredential),
+            ("refresh_failed", None, WithheldReason::NeedsReconnect),
+            ("expired", None, WithheldReason::Expired),
+            ("active", Some(0_i64), WithheldReason::Expired),
         ] {
             sqlx::query("UPDATE platform_credentials SET status=$2,expires_at_unix=$3 WHERE id=$1")
                 .bind(selection.credential.metadata.id.as_str())
@@ -379,17 +403,15 @@ async fn owner_selection_rechecks_current_credential_status_expiry_revocation_an
                 .bind(expires)
                 .execute(&db.pool)
                 .await?;
-            ensure!(
-                evaluate(
-                    &db.pool,
-                    &selection,
-                    &selection.context,
-                    &selected,
-                    Some(selection.user.id())
-                )
-                .await?
-                    == Err(expected)
-            );
+            let available = evaluate_available(
+                &db.pool,
+                &selection,
+                &selection.context,
+                &selected,
+                Some(selection.user.id()),
+            )
+            .await??;
+            ensure!(withholds(&available, &selection, expected), "{status}");
         }
         sqlx::query(
             "UPDATE platform_credentials SET status='active',expires_at_unix=NULL WHERE id=$1",
@@ -433,17 +455,15 @@ async fn owner_selection_rechecks_current_credential_status_expiry_revocation_an
             revoked.metadata.revocation_generation
                 == selection.credential.metadata.revocation_generation + 1
         );
-        ensure!(
-            evaluate(
-                &db.pool,
-                &selection,
-                &selection.context,
-                &selected,
-                Some(selection.user.id())
-            )
-            .await?
-                == Err(Error::InactiveCredential)
-        );
+        let available = evaluate_available(
+            &db.pool,
+            &selection,
+            &selection.context,
+            &selected,
+            Some(selection.user.id()),
+        )
+        .await??;
+        ensure!(withholds(&available, &selection, WithheldReason::Revoked));
         ensure!(selection.provider.unwrap_calls.load(Ordering::SeqCst) == 0);
         no_platform_runtime_rows(&db.pool).await
     }
@@ -527,6 +547,7 @@ async fn writer_waits(db: &TestDatabase, selection: &Selection, sql: &str) -> Re
                 Some(selection.user.id())
             )
             .await?
+            .grants
             .len()
             == 1
     );

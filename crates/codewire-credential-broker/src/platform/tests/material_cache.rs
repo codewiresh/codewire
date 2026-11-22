@@ -266,11 +266,14 @@ impl PlatformRuntimeAuthority for OwnerLocalAuthority {
     async fn owner_local_grants(
         &self,
         expected: &PlatformRuntimeSession,
-    ) -> Result<Vec<DerivedGrant>, PlatformRuntimeError> {
+    ) -> Result<AvailableGrants, PlatformRuntimeError> {
         if self.deny.load(Ordering::SeqCst) || !expected.same_binding(&self.session) {
             return Err(PlatformRuntimeError::Denied);
         }
-        Ok(vec![self.grant.clone()])
+        Ok(AvailableGrants {
+            grants: vec![self.grant.clone()],
+            ..AvailableGrants::default()
+        })
     }
 }
 

@@ -1,14 +1,14 @@
 //! Original owner-OAuth authority for an exact platform selection targeting one
 //! local environment operation. This module owns no listener or transport.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use codewire_access::{
-    AccessProfileId, DerivedGrant, EnvironmentAccessBinding, EnvironmentId, GrantContext,
-    GrantPlacement, HttpProvider, Owner, OwnerId, Placement,
+    AccessProfileId, AvailableGrants, CapabilitySlot, DerivedGrant, EnvironmentAccessBinding,
+    EnvironmentId, GrantContext, GrantPlacement, HttpProvider, Owner, OwnerId, Placement, Withheld,
 };
 use codewire_credential_broker::platform::{
     PlatformRuntimeAuthority, PlatformRuntimeError as Error, PlatformRuntimeSession,
@@ -73,6 +73,10 @@ impl OwnerLocalSelection {
 pub struct OwnerLocalRuntimeAuthority {
     source: OwnerLocalSource,
     initial: Admission,
+    /// Every capability this epoch has answered as withheld. It stays withheld,
+    /// even once its credential is reconnected, for the rest of this epoch;
+    /// the next epoch is admitted afresh (#4909).
+    withheld: std::sync::Mutex<BTreeMap<CapabilitySlot, Withheld>>,
 }
 
 struct OwnerLocalSource {
@@ -89,32 +93,69 @@ struct OwnerLocalSource {
 #[derive(Clone, PartialEq, Eq)]
 struct Admission {
     session: PlatformRuntimeSession,
-    grants: Vec<DerivedGrant>,
+    grants: AvailableGrants,
 }
 
 impl Admission {
-    /// Whether this admission is still the delegation's `initial` one. Only
-    /// a granted credential's revocation generation may differ: a refresh or
-    /// replacement of that same credential advances it, and every lease
-    /// rereads the record by id and owner and binds it to the current grant,
-    /// as a hosted lease does, so the next request uses the new version. The
-    /// session (owner, selection, profile revision, authorized credential ids,
-    /// consent) and each grant's credential, slot, permissions, profile and
-    /// expiry must be unchanged; a revoked or inactive credential fails grant
-    /// evaluation before this.
-    fn is_initial(&self, initial: &Self) -> bool {
-        self.session == initial.session
-            && self.grants.len() == initial.grants.len()
-            && self
+    /// This admission's grants as the delegation may use them, or `None` when
+    /// it is no longer the delegation's `initial` one (#4909). The session
+    /// (owner, selection, profile revision, authorized credential ids,
+    /// consent) must be unchanged. Each capability granted at first is either
+    /// still granted, where only its credential's revocation generation may
+    /// differ (a refresh or replacement advances it, and every lease rereads
+    /// the record and binds the current grant), or now withheld for its
+    /// lifecycle: revoked, expired or needing Reconnect. A capability withheld
+    /// at first stays withheld, even once reconnected, for this epoch, and
+    /// nothing not granted or withheld at first may appear.
+    fn effective(&self, initial: &Self) -> Option<AvailableGrants> {
+        if self.session != initial.session {
+            return None;
+        }
+        let first = &initial.grants;
+        let now = &self.grants;
+        let known = |slot: &CapabilitySlot| {
+            first
                 .grants
                 .iter()
-                .zip(&initial.grants)
-                .all(|(current, initial)| {
-                    DerivedGrant {
-                        credential_revocation_generation: initial.credential_revocation_generation,
+                .any(|grant| &grant.capability_slot == slot)
+                || first.reconnect_required.contains_key(slot)
+        };
+        if !now.grants.iter().all(|grant| known(&grant.capability_slot))
+            || !now.reconnect_required.keys().all(known)
+        {
+            return None;
+        }
+        let mut effective = AvailableGrants {
+            grants: Vec::with_capacity(first.grants.len()),
+            reconnect_required: first.reconnect_required.clone(),
+            ungranted_github: first.ungranted_github,
+        };
+        for granted in &first.grants {
+            let slot = &granted.capability_slot;
+            match now
+                .grants
+                .iter()
+                .find(|grant| &grant.capability_slot == slot)
+            {
+                Some(current) => {
+                    let same = DerivedGrant {
+                        credential_revocation_generation: granted.credential_revocation_generation,
                         ..current.clone()
-                    } == *initial
-                })
+                    } == *granted;
+                    if !same {
+                        return None;
+                    }
+                    effective.grants.push(current.clone());
+                }
+                None => {
+                    let withheld = now.reconnect_required.get(slot)?;
+                    effective
+                        .reconnect_required
+                        .insert(slot.clone(), withheld.clone());
+                }
+            }
+        }
+        Some(effective)
     }
 }
 
@@ -189,7 +230,11 @@ impl OwnerLocalRuntimeAuthority {
             admission_timeout,
         };
         let initial = source.admit().await?;
-        Ok(Arc::new(Self { source, initial }))
+        Ok(Arc::new(Self {
+            source,
+            initial,
+            withheld: std::sync::Mutex::new(BTreeMap::new()),
+        }))
     }
 }
 
@@ -250,7 +295,7 @@ impl OwnerLocalSource {
             authorized_credentials: BTreeSet::new(),
         };
         let (credential_owner, profile, grants) = match &self.selection.platform.profile {
-            None => (Owner::User(user), None, Vec::new()),
+            None => (Owner::User(user), None, AvailableGrants::default()),
             Some((profile_id, revision)) => {
                 let profile_id = AccessProfileId::parse(profile_id).map_err(|_| Error::Denied)?;
                 let owner = resolve_profile_owner(tx, &profile_id, &user, &organization).await?;
@@ -351,7 +396,7 @@ impl OwnerLocalSource {
         tokio::time::timeout_at(tokio::time::Instant::from_std(request_deadline), async {
             let mut first_tx = self.pool.begin().await.map_err(|_| Error::Unavailable)?;
             let first = self.admit_in(&mut first_tx).await?;
-            if &first != expected {
+            if first.effective(expected).is_none() {
                 return Err(Error::Denied);
             }
             let captured = capture_in(&mut first_tx, &self.selection.platform).await?;
@@ -364,7 +409,10 @@ impl OwnerLocalSource {
             let mut final_tx = self.pool.begin().await.map_err(|_| Error::Unavailable)?;
             let current = self.admit_in(&mut final_tx).await?;
             let current_capture = capture_in(&mut final_tx, &self.selection.platform).await?;
-            if &current != expected || current != first || current_capture != captured {
+            if current.effective(expected).is_none()
+                || current != first
+                || current_capture != captured
+            {
                 return Err(Error::Denied);
             }
             ensure_request_live(&context, self)?;
@@ -408,7 +456,7 @@ impl OwnerLocalSource {
         tokio::time::timeout_at(tokio::time::Instant::from_std(request_deadline), async {
             let mut first_tx = self.pool.begin().await.map_err(|_| Error::Unavailable)?;
             let first_admission = self.admit_in(&mut first_tx).await?;
-            if &first_admission != expected {
+            if first_admission.effective(expected).is_none() {
                 return Err(Error::Denied);
             }
             let first = composition::capture_in(
@@ -442,7 +490,7 @@ impl OwnerLocalSource {
                 unix_millis()?,
             )
             .await?;
-            if &final_admission != expected
+            if final_admission.effective(expected).is_none()
                 || final_admission != first_admission
                 || current != first
             {
@@ -483,7 +531,7 @@ impl OwnerLocalSource {
 impl PlatformRuntimeAuthority for OwnerLocalRuntimeAuthority {
     async fn current_session(&self) -> Result<PlatformRuntimeSession, Error> {
         let current = self.source.admit().await?;
-        if !current.is_initial(&self.initial) {
+        if current.effective(&self.initial).is_none() {
             return Err(Error::Denied);
         }
         Ok(current.session)
@@ -492,15 +540,32 @@ impl PlatformRuntimeAuthority for OwnerLocalRuntimeAuthority {
     async fn owner_local_grants(
         &self,
         expected: &PlatformRuntimeSession,
-    ) -> Result<Vec<DerivedGrant>, Error> {
+    ) -> Result<AvailableGrants, Error> {
         if &self.initial.session != expected {
             return Err(Error::Denied);
         }
         let current = self.source.admit().await?;
-        if !current.is_initial(&self.initial) {
-            return Err(Error::Denied);
+        let mut effective = current.effective(&self.initial).ok_or(Error::Denied)?;
+        let mut withheld = self
+            .withheld
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        withheld.extend(
+            effective
+                .reconnect_required
+                .iter()
+                .map(|(slot, reason)| (slot.clone(), reason.clone())),
+        );
+        effective
+            .grants
+            .retain(|grant| !withheld.contains_key(&grant.capability_slot));
+        for (slot, reason) in withheld.iter() {
+            effective
+                .reconnect_required
+                .entry(slot.clone())
+                .or_insert_with(|| reason.clone());
         }
-        Ok(current.grants)
+        Ok(effective)
     }
 
     async fn project_environment(

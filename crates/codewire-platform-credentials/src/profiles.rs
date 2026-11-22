@@ -18,7 +18,7 @@ use codewire_access::{
     AccessError, AccessProfile, AccessProfileId, AccessProfileName, AvailableGrants,
     CapabilitySlot, CredentialId, CredentialMetadata, DerivedGrant, EnvironmentAccessBinding,
     GrantContext, GrantPlacement, Owner, OwnerId, Placement, ProviderCatalog, ProviderId,
-    derive_account_github_grant, derive_available_grants, derive_grants, validate_profile_entries,
+    derive_account_github_grant, derive_available_grants, validate_profile_entries,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
@@ -833,7 +833,7 @@ impl PlatformAccessProfileStore {
         context: &GrantContext,
         binding: &EnvironmentAccessBinding,
         personal_owner_confirmation: Option<&OwnerId>,
-    ) -> Result<Vec<DerivedGrant>, Error> {
+    ) -> Result<AvailableGrants, Error> {
         if context.placement != GrantPlacement::PlatformToLocal {
             return Err(Error::InvalidInput);
         }
@@ -854,11 +854,11 @@ impl PlatformAccessProfileStore {
         if !found {
             return Err(Error::NotFound);
         }
-        // An owner-local launch admits its exact selection as a whole.
         let (profile, credentials) = self
             .bound_profile(tx, context, binding, personal_owner_confirmation)
             .await?;
-        derive_grants(
+        // A lifecycle-broken credential withholds only its own capability (#4909).
+        derive_available_grants(
             context,
             binding,
             &profile,

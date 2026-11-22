@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use codewire_access::{
-    AccessProfileName, CapabilitySlot, CredentialAuthKind, Owner, OwnerId, ProviderId,
-    builtin_provider_catalog,
+    AccessProfileName, AvailableGrants, CapabilitySlot, CredentialAuthKind, Owner, OwnerId,
+    ProviderId, WithheldReason, builtin_provider_catalog,
 };
 use codewire_daemon_proto::projection::{decode_local_inventories, decode_platform_inventories};
 use codewire_platform_credentials::{CredentialRegistration, PlatformAccessProfileStore};
@@ -204,6 +204,10 @@ async fn setup_owner_sources_with_entries(
     entries: BTreeMap<CapabilitySlot, codewire_access::CredentialId>,
 ) -> Result<(OwnerLocalSelection, String)> {
     let project = Uuid::new_v4().to_string();
+    let slots: Vec<String> = entries
+        .keys()
+        .map(|slot| slot.as_str().to_owned())
+        .collect();
     // The shared seed already makes Alice the organization's owner (#3254);
     // these cases run her as a plain member.
     sqlx::query(
@@ -241,7 +245,11 @@ async fn setup_owner_sources_with_entries(
             .await?;
     }
 
-    let mut reserved = platform_projection_reserved_keys(["github"])?;
+    let mut reserved = platform_projection_reserved_keys(
+        ["github"]
+            .into_iter()
+            .chain(slots.iter().map(String::as_str)),
+    )?;
     reserved.extend([NATIVE_CODEX_HOME_KEY.into(), "SSH_AUTH_SOCK".into()]);
     let platform = PlatformProjectionSelection {
         creator: ALICE.into(),
@@ -456,7 +464,7 @@ async fn application_and_credential_authorities_are_incompatible_across_full_and
             admitted_with_provider(&h, selection.clone(), authorities.delegation_provider())
                 .await?;
         let session = authority.current_session().await?;
-        let grants = authority.owner_local_grants(&session).await?;
+        let grants = authority.owner_local_grants(&session).await?.grants;
         ensure!(
             grants.len() == 1 && grants[0].credential_id == credential.metadata.id,
             "profile admission changed the application projection authority"
@@ -580,7 +588,7 @@ async fn github_is_granted_only_when_the_local_capture_selected_it_and_it_is_con
             async move {
                 let authority = admitted(h, selection).await?;
                 let session = authority.current_session().await?;
-                anyhow::Ok(authority.owner_local_grants(&session).await?)
+                anyhow::Ok(authority.owner_local_grants(&session).await?.grants)
             }
         };
 
@@ -625,7 +633,8 @@ async fn github_is_granted_only_when_the_local_capture_selected_it_and_it_is_con
 /// revocation generation. The delegation keeps admitting it at the new
 /// generation, so the next lease binds the refreshed record: a sign-in
 /// delivered after its own refresh, or a proxied request. A revoked
-/// credential ends the delegation.
+/// credential withholds only its own capability; the delegation stays
+/// admitted (#4909).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
 async fn a_refreshed_credential_keeps_its_owner_local_delegation() -> Result<()> {
@@ -653,7 +662,7 @@ async fn a_refreshed_credential_keeps_its_owner_local_delegation() -> Result<()>
         .await?;
         let authority = admitted(&h, selection).await?;
         let session = authority.current_session().await?;
-        let before = authority.owner_local_grants(&session).await?;
+        let before = authority.owner_local_grants(&session).await?.grants;
         ensure!(before.len() == 1 && before[0].credential_id == codex.metadata.id);
 
         let refreshed = h
@@ -671,7 +680,7 @@ async fn a_refreshed_credential_keeps_its_owner_local_delegation() -> Result<()>
             "a replacement advances the revocation generation"
         );
         ensure!(authority.current_session().await? == session);
-        let after = authority.owner_local_grants(&session).await?;
+        let after = authority.owner_local_grants(&session).await?.grants;
         ensure!(
             after.len() == 1
                 && after[0].credential_revocation_generation
@@ -685,6 +694,168 @@ async fn a_refreshed_credential_keeps_its_owner_local_delegation() -> Result<()>
 
         h.store
             .revoke(&owner, &codex.metadata.id, refreshed.version)
+            .await?;
+        ensure!(authority.current_session().await? == session);
+        let revoked = authority.owner_local_grants(&session).await?;
+        ensure!(
+            revoked.grants.is_empty()
+                && revoked
+                    .reconnect_required
+                    .get(&CapabilitySlot::codex())
+                    .is_some_and(|withheld| withheld.credential == codex.metadata.id
+                        && withheld.reason == WithheldReason::Revoked),
+            "a revoked credential withholds only its own capability"
+        );
+        Ok(())
+    }
+    .await;
+    h.finish(result).await
+}
+
+/// A credential that is revoked, expired or needs Reconnect withholds only
+/// its own capability (#4909): the delegation stays admitted and the other
+/// capabilities keep their grants. A capability withheld in an epoch stays
+/// withheld, even once reconnected, until the next epoch. With every
+/// capability withheld, the delegation still admits the VM and seals its
+/// projection, so `cw exec` works. A change of owner still refuses the whole
+/// delegation, not just a capability.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated TEST_DATABASE_URL, executable TMPDIR and owned Linux tmpfs"]
+async fn a_lifecycle_broken_credential_withholds_only_its_capability() -> Result<()> {
+    let h = Harness::unserved("127.0.0.1:0".parse()?).await?;
+    let result = async {
+        let owner = Owner::User(OwnerId::parse(ALICE)?);
+        let codex = h
+            .store
+            .create(
+                &owner,
+                CredentialRegistration {
+                    provider: ProviderId::parse("openai")?,
+                    authentication_kind: CredentialAuthKind::OAuth,
+                    display_name: "Codex".into(),
+                    account_hint: Some("synthetic-account".into()),
+                    expires_at_unix: None,
+                },
+                &ProtectedValue::from_slice(b"synthetic-codex-material-never-public")?,
+            )
+            .await?;
+        let key = h
+            .store
+            .create(
+                &owner,
+                CredentialRegistration {
+                    provider: ProviderId::parse("openai")?,
+                    authentication_kind: CredentialAuthKind::ApiKey,
+                    display_name: "OpenAI key".into(),
+                    account_hint: None,
+                    expires_at_unix: Some(4_102_444_800),
+                },
+                &ProtectedValue::from_slice(b"sk-synthetic-openai-key-never-public")?,
+            )
+            .await?;
+        let (selection, _) = setup_owner_sources_with_entries(
+            &h,
+            BTreeMap::from([
+                (CapabilitySlot::codex(), codex.metadata.id.clone()),
+                (CapabilitySlot::openai(), key.metadata.id.clone()),
+            ]),
+        )
+        .await?;
+        let granted = |available: &AvailableGrants| -> Vec<CapabilitySlot> {
+            available
+                .grants
+                .iter()
+                .map(|grant| grant.capability_slot.clone())
+                .collect()
+        };
+        let withheld = |available: &AvailableGrants, slot: &CapabilitySlot| {
+            available
+                .reconnect_required
+                .get(slot)
+                .map(|withheld| withheld.reason)
+        };
+        let set_status = |id: String, status: &'static str| {
+            let pool = h.db.pool.clone();
+            async move {
+                sqlx::query("UPDATE platform_credentials SET status=$2 WHERE id=$1")
+                    .bind(id)
+                    .bind(status)
+                    .execute(&pool)
+                    .await
+            }
+        };
+
+        let authority = admitted(&h, selection.clone()).await?;
+        let session = authority.current_session().await?;
+        let first = authority.owner_local_grants(&session).await?;
+        ensure!(first.grants.len() == 2 && first.reconnect_required.is_empty());
+
+        // Needing Reconnect withholds exactly Codex.
+        set_status(codex.metadata.id.to_string(), "refresh_failed").await?;
+        ensure!(authority.current_session().await? == session);
+        let broken = authority.owner_local_grants(&session).await?;
+        ensure!(
+            granted(&broken) == [CapabilitySlot::openai()]
+                && withheld(&broken, &CapabilitySlot::codex())
+                    == Some(WithheldReason::NeedsReconnect),
+            "refresh_failed withholds exactly its capability"
+        );
+
+        // Reconnected, it stays withheld for this epoch.
+        set_status(codex.metadata.id.to_string(), "active").await?;
+        let reconnected = authority.owner_local_grants(&session).await?;
+        ensure!(
+            granted(&reconnected) == [CapabilitySlot::openai()]
+                && withheld(&reconnected, &CapabilitySlot::codex())
+                    == Some(WithheldReason::NeedsReconnect),
+            "a reconnected credential is not granted mid-epoch"
+        );
+
+        // An expired key withholds exactly its capability too, which leaves
+        // every capability withheld: the VM stays admitted and its projection
+        // is still sealed.
+        sqlx::query("UPDATE platform_credentials SET expires_at_unix=1 WHERE id=$1")
+            .bind(key.metadata.id.to_string())
+            .execute(&h.db.pool)
+            .await?;
+        ensure!(authority.current_session().await? == session);
+        let none = authority.owner_local_grants(&session).await?;
+        ensure!(
+            none.grants.is_empty()
+                && withheld(&none, &CapabilitySlot::openai()) == Some(WithheldReason::Expired)
+                && withheld(&none, &CapabilitySlot::codex())
+                    == Some(WithheldReason::NeedsReconnect),
+            "an expired credential withholds exactly its capability"
+        );
+        let (request, recipient, context) = projection_request(&selection, unix_millis()? + 15_000);
+        let sealed = authority.project_environment(request).await?;
+        recipient.open(&sealed, &context, unix_millis()?)?;
+        // The next epoch, a new delegation, gets the reconnected Codex.
+        let restarted = admitted(&h, selection.clone()).await?;
+        let restarted_session = restarted.current_session().await?;
+        let next = restarted.owner_local_grants(&restarted_session).await?;
+        ensure!(
+            granted(&next) == [CapabilitySlot::codex()]
+                && withheld(&next, &CapabilitySlot::openai()) == Some(WithheldReason::Expired),
+            "a reconnected credential reaches the VM with its next epoch"
+        );
+        // A delegation admitted with every capability withheld still admits.
+        set_status(codex.metadata.id.to_string(), "refresh_failed").await?;
+        let fresh = admitted(&h, selection.clone()).await?;
+        let fresh_session = fresh.current_session().await?;
+        ensure!(
+            fresh
+                .owner_local_grants(&fresh_session)
+                .await?
+                .grants
+                .is_empty()
+        );
+
+        // A change of owner still refuses the whole delegation.
+        sqlx::query("DELETE FROM org_members WHERE org_id=$1 AND user_id=$2")
+            .bind(ORGANIZATION)
+            .bind(ALICE)
+            .execute(&h.db.pool)
             .await?;
         ensure!(authority.current_session().await.is_err());
         ensure!(authority.owner_local_grants(&session).await.is_err());
@@ -735,7 +906,13 @@ async fn empty_profile_admits_without_platform_environment_and_seals_exact_winne
 
         let authority = admitted(&h, selection.clone()).await?;
         let session = authority.current_session().await?;
-        ensure!(authority.owner_local_grants(&session).await?.is_empty());
+        ensure!(
+            authority
+                .owner_local_grants(&session)
+                .await?
+                .grants
+                .is_empty()
+        );
 
         let now = unix_millis()?;
         let (mut stale_hash, _, _) = projection_request(&selection, now + 15_000);

@@ -294,7 +294,7 @@ impl PlatformRuntimeAuthority for DescriptionsAuthority {
     async fn owner_local_grants(
         &self,
         expected: &PlatformRuntimeSession,
-    ) -> Result<Vec<DerivedGrant>, PlatformRuntimeError> {
+    ) -> Result<AvailableGrants, PlatformRuntimeError> {
         self.description_calls.fetch_add(1, Ordering::SeqCst);
         assert!(expected.same_binding(&self.session.lock().unwrap()));
         if self.gated.load(Ordering::SeqCst) {
@@ -303,7 +303,10 @@ impl PlatformRuntimeAuthority for DescriptionsAuthority {
             self.gate.acquire().await.unwrap().forget();
             self.inside.fetch_sub(1, Ordering::SeqCst);
         }
-        Ok(self.descriptions.lock().unwrap().clone())
+        Ok(AvailableGrants {
+            grants: self.descriptions.lock().unwrap().clone(),
+            ..AvailableGrants::default()
+        })
     }
 }
 

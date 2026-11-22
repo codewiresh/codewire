@@ -141,10 +141,13 @@ impl PlatformRuntimeAuthority for SyntheticAuthority {
     async fn owner_local_grants(
         &self,
         expected: &PlatformRuntimeSession,
-    ) -> Result<Vec<DerivedGrant>, PlatformRuntimeError> {
+    ) -> Result<AvailableGrants, PlatformRuntimeError> {
         let current = self.current_session().await?;
         match &self.owner_local_grants {
-            Some(grants) if expected.same_binding(&current) => Ok(grants.clone()),
+            Some(grants) if expected.same_binding(&current) => Ok(AvailableGrants {
+                grants: grants.clone(),
+                ..AvailableGrants::default()
+            }),
             _ => Err(PlatformRuntimeError::Denied),
         }
     }

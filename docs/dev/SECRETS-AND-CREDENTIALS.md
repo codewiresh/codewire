@@ -1363,7 +1363,22 @@ pinned (#5594). That read is best effort and bounded: when it fails, the
 command still succeeds and prints nothing for it. A
 selected credential that no longer exists still refuses the whole runtime:
 bound credentials cannot be deleted, so that is integrity damage.
-Platform-to-local launches still admit their exact selection as a whole.
+A local VM on a platform profile (a delegation, #4909) is admitted the same
+way: a selected credential that was revoked, expired or needs reconnecting
+withholds only its own capability. Its agent's login is refused and its
+requests get `credential_needs_reconnect`, while the environment projection,
+`cw exec` and every other capability keep working, even when every capability
+is withheld. Each request checks the delegation again against its first
+admission. The check passes if the two are equal, or if the only difference is
+capabilities withheld since for those lifecycle reasons. Any other change still
+refuses the whole delegation: its binding, profile or owner, or a capability
+not granted at first. A capability withheld at any point in a delegation epoch
+stays withheld for the rest of that epoch, so no running epoch ever regains it.
+That set lives in the epoch's authority. The next epoch, which the local
+authority opens before 600 seconds (above) or at the VM's next start, is
+admitted afresh, so a reconnected credential reaches the running VM within
+about 10 minutes. A fresh admission can grant only what the VM's pinned
+selection names.
 
 A local VM is the user's own machine, and the same holds there (#5545). A
 profile credential that was revoked, expired or needs reconnecting withholds

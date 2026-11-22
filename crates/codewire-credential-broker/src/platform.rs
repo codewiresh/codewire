@@ -292,10 +292,12 @@ pub trait PlatformRuntimeAuthority: Send + Sync {
     /// source authority fences with profile/credential evaluation in one SQL
     /// transaction. These material-free descriptions are not transferable
     /// authorization. Hosted authenticators cannot use this path by default.
+    /// A capability withheld for its credential's lifecycle comes back in
+    /// `reconnect_required`, never as a grant (#4909).
     async fn owner_local_grants(
         &self,
         _expected: &PlatformRuntimeSession,
-    ) -> Result<Vec<DerivedGrant>, PlatformRuntimeError> {
+    ) -> Result<AvailableGrants, PlatformRuntimeError> {
         Err(PlatformRuntimeError::Denied)
     }
 
@@ -600,11 +602,11 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                     profile: Some(profile),
                     ..
                 } => {
-                    let grants =
+                    let available =
                         timing::timed(Phase::Grants, self.authority.owner_local_grants(session))
                             .await
                             .map_err(runtime_error)?;
-                    if grants.iter().any(|grant| {
+                    if available.grants.iter().any(|grant| {
                         grant.environment_id != session.context.environment_id
                             || grant.environment_generation
                                 != session.context.environment_generation
@@ -619,12 +621,9 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                     }) {
                         return Err(BrokerLeaseError::Denied);
                     }
-                    // An owner-local selection is admitted whole; nothing is withheld.
-                    Ok(AvailableGrants {
-                        grants,
-                        reconnect_required: Default::default(),
-                        ungranted_github: codewire_access::UngrantedGitHub::None,
-                    })
+                    // A capability withheld for its lifecycle answers
+                    // Reconnect for its own slot only (#4909).
+                    Ok(available)
                 }
                 RuntimeIdentity::OwnerLocal { profile: None, .. } => Err(BrokerLeaseError::Denied),
             }
