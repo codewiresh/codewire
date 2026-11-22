@@ -13,9 +13,11 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 WORKFLOW = ROOT / ".github/workflows/nix-flake.yml"
-ALLOWED_ACTIONS = {"actions/checkout", "cachix/install-nix-action"}
+ALLOWED_ACTIONS = {"actions/checkout"}
+INSTALLER_URL = re.compile(r"https://releases\.nixos\.org/nix/nix-[0-9]+\.[0-9]+\.[0-9]+/install")
 PATHS = ["flake.nix", "flake.lock", "nix/**", ".github/workflows/nix-flake.yml"]
 NIX_CONFIG = {
+    "experimental-features": "nix-command flakes",
     "accept-flake-config": "false",
     "sandbox": "true",
     "require-sigs": "true",
@@ -60,11 +62,19 @@ def errors(text: str) -> list[str]:
     need(flake.get("runs-on") == "${{ matrix.os }}"
          and flake.get("strategy", {}).get("matrix", {}).get("os") == ["ubuntu-24.04", "macos-15"],
          "the flake is installed on GitHub-hosted Linux and macOS")
-    install = next((step for step in flake.get("steps", [])
-                    if step.get("uses", "").startswith("cachix/install-nix-action@")), {})
-    options = install.get("with", {})
-    need(options.get("set_as_trusted_user") is False, "the runner's user is a trusted Nix user")
-    config = dict(line.split(" = ", 1) for line in options.get("extra_nix_config", "").splitlines() if line)
+    install = next((step for step in flake.get("steps", []) if step.get("name") == "Install Nix"), {})
+    env = install.get("env", {})
+    script = install.get("run", "")
+    need(INSTALLER_URL.fullmatch(str(env.get("NIX_INSTALLER_URL", ""))) is not None,
+         "Nix is not installed by its official installer at one release")
+    need(re.fullmatch(r"[0-9a-f]{64}", str(env.get("NIX_INSTALLER_SHA256", ""))) is not None,
+         "the Nix installer has no pinned SHA-256")
+    need('[[ "$got" == "$NIX_INSTALLER_SHA256" ]]' in script
+         and script.index('[[ "$got" == "$NIX_INSTALLER_SHA256" ]]') < script.find('sh "$work/install"'),
+         "the installer runs before its SHA-256 is checked")
+    need('sh "$work/install" --daemon ' in script, "Nix is not a daemon install, so the runner's user is trusted")
+    body = script.split("<<'EOF'\n", 1)[1].split("\nEOF\n", 1)[0] if "<<'EOF'\n" in script else ""
+    config = dict(line.split(" = ", 1) for line in body.splitlines() if " = " in line)
     need(config == NIX_CONFIG, f"Nix is not configured exactly as reviewed: {config}")
     run = "\n".join(step.get("run", "") for step in flake.get("steps", []))
     need("nix flake check --all-systems --no-build" in run, "every system's package is not evaluated")
@@ -90,9 +100,15 @@ MUTATIONS = {
     "no sandbox": lambda t: t.replace("sandbox = true", "sandbox = false", 1),
     "extra cache": lambda t: t.replace("substituters = https://cache.nixos.org/",
                                        "substituters = https://cache.nixos.org/ https://example.invalid", 1),
-    "trusted user": lambda t: t.replace("set_as_trusted_user: false", "set_as_trusted_user: true", 1),
-    "unpinned action": lambda t: t.replace("cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b",
-                                           "cachix/install-nix-action@v31", 1),
+    "trusted user": lambda t: t.replace("          require-sigs = true\n",
+                                        "          require-sigs = true\n          trusted-users = root runner\n", 1),
+    "single-user install": lambda t: t.replace('sh "$work/install" --daemon ', 'sh "$work/install" --no-daemon ', 1),
+    "unchecked installer": lambda t: t.replace('[[ "$got" == "$NIX_INSTALLER_SHA256" ]]', "true", 1),
+    "unpinned installer": lambda t: t.replace("https://releases.nixos.org/nix/nix-2.28.3/install",
+                                              "https://nixos.org/nix/install", 1),
+    "third-party action": lambda t: t.replace("      - name: Install Nix\n",
+                                              "      - name: Set up\n        uses: example/setup@v1\n\n"
+                                              "      - name: Install Nix\n", 1),
     "no version check": lambda t: t.replace('[[ "$version" == "cw $release" ]]', "true", 1),
     "no byte check": lambda t: t.replace('[[ "$got" == "$want" ]]', "true", 1),
     "no blob check": lambda t: t.replace(" --pin nix/release.json --blobs", " --pin nix/release.json", 1),

@@ -191,5 +191,9 @@ pull request carries the release step's recomputation for review. It:
 Nix runs with `accept-flake-config = false`, `sandbox = true`,
 `require-sigs = true`, only the default cache and its key, and the runner's
 user not trusted, so a flake can't widen what Nix trusts (cw-security,
-2026-11-18, on #5399). The installer is `cachix/install-nix-action`, pinned by
-commit. The jobs only read the repository and hold no secret.
+2026-11-18, on #5399). Nix comes from its own installer at one release
+(`releases.nixos.org/nix/nix-<version>/install`), which runs only if its
+SHA-256 is the pinned one. The installer then checks its tarball's SHA-256.
+It is a daemon install, so only root is a trusted Nix user. The workflow uses
+no action but `actions/checkout`. The jobs only read the repository and hold
+no secret.

@@ -41,19 +41,42 @@ jobs:
         with:
           persist-credentials: false
 
-      # A flake's nixConfig can't add substituters or keys, builds are
-      # sandboxed, and only the default cache's signatures are trusted.
+      # Nix's own installer at one release, run only if its SHA-256 is the pin;
+      # it checks its tarball's SHA-256 in turn. No third-party action. The
+      # daemon install leaves the runner's user untrusted. A flake's nixConfig
+      # can't add substituters or keys, builds are sandboxed, and only the
+      # default cache's signatures are trusted.
       - name: Install Nix
-        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
-        with:
-          set_as_trusted_user: false
-          enable_kvm: false
-          extra_nix_config: |
-            accept-flake-config = false
-            sandbox = true
-            require-sigs = true
-            substituters = https://cache.nixos.org/
-            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+        env:
+          NIX_INSTALLER_URL: https://releases.nixos.org/nix/nix-2.28.3/install
+          NIX_INSTALLER_SHA256: 46b8d7165dceb471f4346366b3a93f1009407b99729b843b8664918f4cc800a0
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            "$NIX_INSTALLER_URL" -o "$work/install"
+          got="$(shasum -a 256 "$work/install" | cut -d' ' -f1)"
+          [[ "$got" == "$NIX_INSTALLER_SHA256" ]] || {
+            echo "::error::the Nix installer is $got, not the pinned $NIX_INSTALLER_SHA256"
+            exit 1
+          }
+          cat >"$work/nix.conf" <<'EOF'
+          experimental-features = nix-command flakes
+          accept-flake-config = false
+          sandbox = true
+          require-sigs = true
+          substituters = https://cache.nixos.org/
+          trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+          EOF
+          sh "$work/install" --daemon --yes --no-channel-add --nix-extra-conf-file "$work/nix.conf"
+          # Later steps get what a login shell would: Nix's PATH and, on macOS,
+          # the CA bundle its client fetches flake inputs with.
+          set +u
+          . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+          set -u
+          echo /nix/var/nix/profiles/default/bin >>"$GITHUB_PATH"
+          [[ -z "${NIX_SSL_CERT_FILE:-}" ]] || echo "NIX_SSL_CERT_FILE=$NIX_SSL_CERT_FILE" >>"$GITHUB_ENV"
+          nix --version
 
       - name: Evaluate every system's package
         run: nix flake check --all-systems --no-build
