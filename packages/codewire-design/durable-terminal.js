@@ -297,6 +297,10 @@
     }
     // A refusal no retry can change (#3586): no Retry and no reconnect.
     const organizationDeleting = "This organization is being deleted, so its Sandboxes can't open terminals.";
+    // Once the server revoked a tab's access, nothing later on the page, such
+    // as the status feed failing with the same sign-in, replaces that line or
+    // offers Reconnect: the page moves to sign-in instead (#5943).
+    const accessRevoked = "Access revoked. Sign in again to continue.";
     function detach(tab, text = "Disconnected", keepWanted = false, tone = "neutral") {
       if (!keepWanted) {
         tab.wanted = false;
@@ -315,10 +319,11 @@
       tab.queuedBytes = 0;
       discardInput(tab);
       if (socket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(socket.readyState)) socket.close(1000, "browser detached");
-      tab.toggle.hidden = false;
+      tab.toggle.hidden = tab.revoked === true;
       tab.root.dataset.terminalSettled = String(tab.pendingFrames === 0);
       tab.presentation.terminal.options.disableStdin = true;
-      connectionText(tab, text, tone);
+      if (tab.revoked) connectionText(tab, accessRevoked, "warning");
+      else connectionText(tab, text, tone);
     }
     // Transport loss is not a decision to stop. Re-attach the same wanted
     // session automatically; a final status, unverifiable output, render
@@ -595,9 +600,9 @@
         } else if (finalStatus) {
           detach(tab, "Connection closed before terminal output could be confirmed.", false, "danger");
         } else if (event.code === 1008 && event.reason === "access revoked") {
-          detach(tab, "Access revoked. Sign in again to continue.", false, "warning");
           // Reconnecting can't succeed; the page moves to sign-in instead.
-          tab.toggle.hidden = true;
+          tab.revoked = true;
+          detach(tab);
         } else lose(tab, "Disconnected.");
       });
     }
@@ -1175,6 +1180,7 @@
       root.dataset.terminalAvailable = String(runtimeAvailable);
       root.dataset.terminalRunning = String(runtimeRunning);
       for (const tab of tabs.values()) {
+        if (tab.revoked) continue;
         // Readiness loss pauses the transport without withdrawing intent. An
         // unknown status leaves an open terminal attached; a tab without a
         // socket says why it waits.

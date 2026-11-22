@@ -2059,6 +2059,31 @@ test("a terminal whose access is revoked says so and offers no Reconnect", async
   expect(state.connections).toHaveLength(1);
 });
 
+// The same sign-out fails the page's status feed a moment later. The revoked
+// line stays, with no Reconnect, until the page moves to sign-in (#5943).
+test("a revoked terminal keeps its line when the Sandbox status then fails or returns", async ({ page }) => {
+  const state = await transport(page);
+  state.sessions = [{ sessionId: sessionId(1), state: "running" }];
+  await openFixture(page);
+  await expect.poll(() => state.connections.length).toBe(1);
+  await expectAttached(page);
+  await pauseClock(page);
+  await settleReadiness(page);
+  state.connections[0].route.close({ code: 1008, reason: "access revoked" });
+  await expect(connectionStatus(page, sessionId(1))).toHaveText("Access revoked. Sign in again to continue.");
+  const status = (available: boolean) => page.evaluate((detail) => {
+    document.dispatchEvent(new CustomEvent("codewire:sandbox-status", { detail }));
+  }, { environmentId: environment, available, running: true, setupComplete: true });
+  await status(false);
+  await expect(connectionStatus(page, sessionId(1))).toHaveText("Access revoked. Sign in again to continue.");
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeHidden();
+  await status(true);
+  await expect(connectionStatus(page, sessionId(1))).toHaveText("Access revoked. Sign in again to continue.");
+  await expect(page.getByRole("button", { name: "Reconnect", exact: true })).toBeHidden();
+  await advance(page, 30_000);
+  expect(state.connections).toHaveLength(1);
+});
+
 test("Sandbox lifecycle changes pause terminal controls without automatic launch, and re-attaches existing sessions automatically when ready again", async ({ page }) => {
   const state = await transport(page);
   state.sessions = [{ sessionId: sessionId(1), state: "running" }];
