@@ -53,7 +53,7 @@ aider | aider 0.86.2
 | Go | Go 1.27 |
 | Rust | Rust 1.99 with `rustfmt` and `clippy` |
 | Containers | Docker Engine with Buildx and Compose; the daemon runs in the VM, see [Docker inside](@/environments/docker.md) |
-| Git | `git`, GitHub CLI (`gh`), Forgejo CLI (`fj`) |
+| Git | `git`, GitHub CLI (`gh`) |
 | Agents | Claude Code (`claude`), Codex (`codex`), Gemini CLI (`gemini`), Amp (`amp`), Aider (`aider`) |
 
 You work as the `codewire` user (UID 1000) in `/workspace`, with

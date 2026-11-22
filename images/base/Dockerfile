@@ -1,20 +1,3 @@
-# forgejo-cli publishes no checksums or signatures, so fj is built here from a
-# pinned upstream commit. --locked builds exactly the committed Cargo.lock,
-# whose crate checksums Cargo verifies (#5937).
-FROM rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS fj-build
-# forgejo-cli v0.6.0's tag commit.
-ARG FJ_COMMIT=f968e0a4f98078d9e9786cd65992e13fb804fa47
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    set -eu; \
-    git init -q /src; cd /src; \
-    git fetch -q --depth 1 https://codeberg.org/forgejo-contrib/forgejo-cli.git "$FJ_COMMIT"; \
-    git checkout -q --detach FETCH_HEAD; \
-    test "$(git rev-parse HEAD)" = "$FJ_COMMIT"; \
-    cargo build --locked --release --bin fj; \
-    install -D -m 0755 target/release/fj /out/fj; \
-    strip /out/fj; \
-    /out/fj version
-
 FROM ubuntu:noble@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
 
 SHELL ["/bin/bash", "-c"]
@@ -43,8 +26,6 @@ RUN --mount=type=secret,id=codewire-apt-mirror,required=false \
       bash build-essential ca-certificates curl file git htop iproute2 iptables jq locales man \
       openssh-client postgresql-client python3 python3-pip sudo tmux unzip vim wget rsync && \
     rm -rf /var/lib/apt/lists/*
-
-COPY --from=fj-build --chmod=0755 /out/fj /usr/local/bin/fj
 
 # Foundational release tools are direct, checksum-verified upstream artifacts.
 # Every supported architecture has an explicit reviewed digest; unknown
@@ -94,7 +75,7 @@ RUN set -euo pipefail; \
     tar -xzf /tmp/gh.tgz -C /tmp; \
     install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${gh_arch}/bin/gh" /usr/local/bin/gh; \
     rm -rf /tmp/docker /tmp/docker.tgz /tmp/gh.tgz "/tmp/gh_${GH_VERSION}_linux_${gh_arch}"; \
-    docker --version; dockerd --version; docker buildx version; docker compose version; gh --version; fj version
+    docker --version; dockerd --version; docker buildx version; docker compose version; gh --version
 
 RUN locale-gen en_US.UTF-8
 ENV LANG=en_US.UTF-8
