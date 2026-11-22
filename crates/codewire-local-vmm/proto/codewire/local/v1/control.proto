@@ -1172,6 +1172,8 @@ message RunnerExit {
   // That status's name in the process's own exit-code table, in the
   // error_code vocabulary; empty when the table has none.
   string reason = 2;
+  // The signal that ended it; absent when it exited with a status (#4953).
+  optional int32 signal = 3;
 }
 
 enum RunnerStage {

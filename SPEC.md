@@ -438,8 +438,8 @@ in `.noindex`: Spotlight indexes other folders, and its image importer reads
 the VMs' `.raw` disk images there (#5831, until #5830 renames them). The
 warning suggests a `.noindex` folder. `~/Library` is not skipped. Time Machine
 skips the state root's `vms/` tree, marked when it is created and on an
-existing root at the supervisor's next start (#5900, not yet built), as it
-already skips each VM's `checkpoints/` and the snapshot store (#4654). So a
+existing root at the supervisor's next start (#5900), as it already skips
+each VM's `checkpoints/` and the snapshot store (#4654). So a
 local VM's disks are not backed up; work kept in Git or in folders shared from
 the host is. `cw` talks to it over gRPC on a
 Unix socket under `/tmp/cw-<uid>/` whose directory is mode 0700 and whose
@@ -529,9 +529,9 @@ stop and start restores egress. The state keeps which process ended and how:
 `cw info` names its exit status and what that status means, as the process's
 own exit codes define it, or the signal that ended it. `--output json` carries
 them as `runner_exit.status`, `reason` and `signal`, and `cw --local daemon
-logs` shows the same in an `# exit` part (#4953, the signal and the `# exit`
-part not yet built). An answer from the broker that misses the
-worker's deadline refuses only its own lookup or connection: the worker keeps
+logs` shows the same in an `# exit` part (#4953). An answer from the broker
+that misses the worker's deadline refuses only its own lookup or connection:
+the worker keeps
 the session until the late answer arrives and checks it, so a slow resolver or
 a stalled broker never ends the broker or fails the environment (#4948). While
 the broker is past that deadline the VM stays `running` with egress refused,

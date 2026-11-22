@@ -236,10 +236,16 @@ same (#5238).
     environment is not in the required state`, and `cw ls --output json`
     has `"error": null`; the smoke logs what `cw exec` says and checks none
     of this until #5359 lands.
-  - **How it ended** (not yet observed, #4953): after the kill,
+  - **How it ended** (#4953): after the kill,
     `cw --local info NAME --output json` has `"runner_exit": {"status":
     null, "signal": 9}`, `cw --local info NAME` says the broker was ended by
     signal 9, and `cw --local daemon logs NAME` shows the same in its
+    `# exit` part. Observed on Linux on 2026-11-22 with a development build
+    of #4953's change, by a SIGKILL of the egress broker outside the smoke,
+    which does not check this yet. `cw --local info` read `Error:
+    egress_broker_exit (ended by signal 9)`, and the JSON was as above. The
+    daemon logs read `# exit` then `egress_broker_exit: ended by signal 9`.
+    After a stop and a start the VM ran again and showed no error and no
     `# exit` part.
   - **No provider call while it is down:** with synthetic providers, Part B
     (#5220).

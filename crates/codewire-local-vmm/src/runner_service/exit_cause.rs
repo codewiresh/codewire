@@ -80,6 +80,7 @@ impl ObservedExit {
         (code == Some(self.code)).then(|| v1::RunnerExit {
             status: self.end.code(),
             reason: self.reason.unwrap_or_default().to_owned(),
+            signal: self.end.signal(),
         })
     }
 
@@ -102,6 +103,7 @@ mod tests {
             Some(v1::RunnerExit {
                 status: Some(72),
                 reason: "egress_broker_protocol".to_owned(),
+                signal: None,
             })
         );
     }
@@ -115,6 +117,7 @@ mod tests {
             v1::RunnerExit {
                 status: Some(250),
                 reason: String::new(),
+                signal: None,
             }
         );
         let signalled = observed_exit(ExitClass::VmmFailure(ProcessEnd::Signal(9))).unwrap();
@@ -123,6 +126,7 @@ mod tests {
             v1::RunnerExit {
                 status: None,
                 reason: String::new(),
+                signal: Some(9),
             }
         );
     }

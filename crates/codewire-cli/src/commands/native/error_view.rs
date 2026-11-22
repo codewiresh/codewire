@@ -142,12 +142,15 @@ impl InterceptionView {
 }
 
 /// How a runner's process ended: its exit status, absent when a signal
-/// ended it, and that status's name, when its process names it.
+/// ended it, that status's name, when its process names it, and the signal,
+/// which a supervisor before #4953's follow-up does not report.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct RunnerExitView {
     pub(crate) status: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) signal: Option<i32>,
 }
 
 impl ErrorView {
@@ -159,6 +162,7 @@ impl ErrorView {
             .map(|exit| RunnerExitView {
                 status: exit.status,
                 reason: trimmed_str(&exit.reason).map(str::to_owned),
+                signal: exit.signal,
             });
         let egress_unavailable =
             environment
@@ -260,14 +264,21 @@ impl ErrorView {
         };
         let how = match &self.runner_exit {
             None => return format!("Error:       {error_code}\n"),
+            Some(RunnerExitView {
+                status: None,
+                signal: Some(signal),
+                ..
+            }) => format!("ended by signal {signal}"),
             Some(RunnerExitView { status: None, .. }) => "ended by a signal".to_owned(),
             Some(RunnerExitView {
                 status: Some(status),
                 reason: None,
+                ..
             }) => format!("exited {status}"),
             Some(RunnerExitView {
                 status: Some(status),
                 reason: Some(reason),
+                ..
             }) => format!("exited {status}: {reason}"),
         };
         format!("Error:       {error_code} ({how})\n")
@@ -287,6 +298,7 @@ mod tests {
             runner_exit: exit.map(|(status, reason)| v1::RunnerExit {
                 status,
                 reason: reason.to_owned(),
+                signal: None,
             }),
             ..Default::default()
         })
@@ -342,6 +354,32 @@ mod tests {
         assert_eq!(
             shown("runner_exit", None).line(),
             "Error:       runner_exit\n"
+        );
+    }
+
+    /// A signal is named, in the line and in JSON, when the supervisor
+    /// reports it (#4953).
+    #[test]
+    fn a_signal_that_ended_the_process_is_named() {
+        let view = ErrorView::of(&v1::Environment {
+            error_code: "egress_broker_exit".to_owned(),
+            runner_exit: Some(v1::RunnerExit {
+                status: None,
+                reason: String::new(),
+                signal: Some(9),
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            view.line(),
+            "Error:       egress_broker_exit (ended by signal 9)\n"
+        );
+        assert_eq!(
+            serde_json::to_value(&view).unwrap(),
+            serde_json::json!({
+                "error_code": "egress_broker_exit",
+                "runner_exit": {"status": null, "signal": 9},
+            })
         );
     }
 

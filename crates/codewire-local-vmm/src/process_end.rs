@@ -21,6 +21,14 @@ impl ProcessEnd {
         }
     }
 
+    /// The signal that ended the process; `None` when it exited with a code.
+    pub fn signal(self) -> Option<i32> {
+        match self {
+            Self::Signal(signal) => Some(signal),
+            Self::Code(_) | Self::Unknown => None,
+        }
+    }
+
     /// The exit code as text, or `signal` when there is none.
     pub fn code_or_signal(self) -> String {
         self.code()

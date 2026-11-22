@@ -107,6 +107,7 @@ mod tests {
             exit: Some(v1::RunnerExit {
                 status: Some(72),
                 reason: reason.to_owned(),
+                signal: None,
             }),
             ..Default::default()
         }
@@ -125,6 +126,7 @@ mod tests {
             Some(v1::RunnerExit {
                 status: Some(72),
                 reason: "egress_broker_protocol".to_owned(),
+                signal: None,
             })
         );
     }

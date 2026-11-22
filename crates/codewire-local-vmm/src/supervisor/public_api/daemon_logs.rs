@@ -1,7 +1,8 @@
 //! `StreamEnvironmentDaemonLogs` for a local VM: the supervisor's operation
-//! lines, the guest daemon's recent log and the credential authority's lease
-//! decisions for the environment (docs/dev/SECRETS-AND-CREDENTIALS.md,
-//! "Diagnosing delivery in a local VM").
+//! lines, how the process whose exit put the VM in error ended (#4953), the
+//! guest daemon's recent log and the credential authority's lease decisions
+//! for the environment (docs/dev/SECRETS-AND-CREDENTIALS.md, "Diagnosing
+//! delivery in a local VM").
 
 use codewire_daemon::client::SessionClientError;
 use codewire_daemon::recent_log::RECENT_LOG_BYTES;
@@ -46,6 +47,17 @@ impl SupervisorRpc {
 
         let mut output = b"# operations\n".to_vec();
         output.extend(operation_lines(&operations)?);
+        // The listing carries no runner report, so ask the runner as
+        // `GetEnvironment` does; it is reached only in error or running.
+        let reported = crate::supervisor::runner_report::with_runner_report(
+            &self.supervisor,
+            environment.clone(),
+        )
+        .await;
+        if let Some(exit) = exit_line(&reported) {
+            output.extend(b"# exit\n");
+            output.extend(exit.into_bytes());
+        }
         output.extend(b"# guest daemon\n");
         output.extend(match state {
             v1::EnvironmentState::Running => {
@@ -125,6 +137,24 @@ enum LeasesUnavailable {
 
 fn unavailable(what: &str, why: &str) -> Vec<u8> {
     format!("{what} unavailable: {why}\n").into_bytes()
+}
+
+/// The error and how its process ended, as `cw info` says it, while the
+/// runner reports that exit; none for any other state or error. Both parts
+/// are in the error-code vocabulary, which `runner_report` checks.
+fn exit_line(environment: &v1::Environment) -> Option<String> {
+    let exit = environment.runner_exit.as_ref()?;
+    let code = environment.error_code.trim();
+    if code.is_empty() {
+        return None;
+    }
+    let how = match (exit.status, exit.signal, exit.reason.trim()) {
+        (Some(status), _, "") => format!("exited {status}"),
+        (Some(status), _, reason) => format!("exited {status}: {reason}"),
+        (None, Some(signal), _) => format!("ended by signal {signal}"),
+        (None, None, _) => "ended by a signal".to_owned(),
+    };
+    Some(format!("{code}: {how}\n"))
 }
 
 fn operation_lines(operations: &[OperationRecord]) -> Result<Vec<u8>, connectrpc::ConnectError> {
@@ -307,6 +337,44 @@ mod tests {
         assert!(logs.contains("stage=OPERATION_STAGE_COMPLETED"));
         assert!(!logs.contains(sentinel));
         assert!(logs.len() <= MAXIMUM_OPERATION_BYTES);
+    }
+
+    #[test]
+    fn the_exit_part_says_how_the_failed_process_ended() {
+        let environment = |code: &str, exit| v1::Environment {
+            error_code: code.to_owned(),
+            runner_exit: exit,
+            ..Default::default()
+        };
+        let exit = |status, reason: &str, signal| {
+            Some(v1::RunnerExit {
+                status,
+                reason: reason.to_owned(),
+                signal,
+            })
+        };
+        assert_eq!(
+            exit_line(&environment(
+                "egress_broker_exit",
+                exit(Some(72), "egress_broker_protocol", None)
+            ))
+            .as_deref(),
+            Some("egress_broker_exit: exited 72: egress_broker_protocol\n")
+        );
+        assert_eq!(
+            exit_line(&environment("vmm_exit", exit(Some(1), "", None))).as_deref(),
+            Some("vmm_exit: exited 1\n")
+        );
+        assert_eq!(
+            exit_line(&environment("egress_broker_exit", exit(None, "", Some(9)))).as_deref(),
+            Some("egress_broker_exit: ended by signal 9\n")
+        );
+        assert_eq!(
+            exit_line(&environment("network_worker_exit", exit(None, "", None))).as_deref(),
+            Some("network_worker_exit: ended by a signal\n")
+        );
+        assert_eq!(exit_line(&environment("guest_shutdown", None)), None);
+        assert_eq!(exit_line(&environment("", exit(Some(72), "", None))), None);
     }
 
     fn rendered(log: &[u8]) -> String {
