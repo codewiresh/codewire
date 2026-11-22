@@ -70,6 +70,7 @@ mod tests {
     mod interception_cas;
     mod invitation_link;
     mod invite_only_sign_up;
+    mod live_changes;
     mod network_policies;
     mod oauth_sign_in;
     mod oidc_auth_request_prompt_max_age;
@@ -214,6 +215,8 @@ mod tests {
     const APPLIED_CREDENTIAL_NAMES_PER_PROVIDER_CHECKSUM: &str = "810fab514904408cabb7f6cafca421c301a4a130c30b39c16bbea815a4bf55af271ceac13e01a76fca635fe0630d94c5";
     // SHA-384 of 0044_organization_systemd_environments.sql (#5638).
     const APPLIED_ORGANIZATION_SYSTEMD_ENVIRONMENTS_CHECKSUM: &str = "359caa675b0fef3cc070a7660869e0d541339a3db7558ad672042325c5bf3a6f09d76b43e1342df0dd90bd20a83a7758";
+    // SHA-384 of 0045_live_changes.sql (#4762).
+    const APPLIED_LIVE_CHANGES_CHECKSUM: &str = "b2e7462f36709b3f9a5979b2f8769d0b6fec8a1c8cbe70e8e978f01a9759bf561ba2de1019bd8a573fb9a2e097333672";
 
     async fn startup(database_url: String) -> anyhow::Result<()> {
         ensure_schema(&database_url).await
@@ -1339,6 +1342,7 @@ mod tests {
             (42, APPLIED_WORKSPACE_BINDING_INTERCEPTION_CHECKSUM),
             (43, APPLIED_CREDENTIAL_NAMES_PER_PROVIDER_CHECKSUM),
             (44, APPLIED_ORGANIZATION_SYSTEMD_ENVIRONMENTS_CHECKSUM),
+            (45, APPLIED_LIVE_CHANGES_CHECKSUM),
         ];
         anyhow::ensure!(
             migrations.len() == pinned.len(),
@@ -1369,11 +1373,11 @@ mod tests {
                 .await?;
             let first = applied_migrations(&pool).await?;
             anyhow::ensure!(
-                first.len() == 44
+                first.len() == 45
                     && first.iter().map(|migration| migration.0).eq([
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
                         22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-                        41, 42, 43, 44
+                        41, 42, 43, 44, 45
                     ])
                     && first.iter().all(|migration| migration.2)
             );

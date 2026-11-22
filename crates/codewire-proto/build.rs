@@ -14,6 +14,7 @@ fn main() {
         "codewire/console/v1/account.proto",
         "codewire/console/v1/billing.proto",
         "codewire/console/v1/environment_setup.proto",
+        "codewire/console/v1/live.proto",
         "codewire/internal/v1/coordinate.proto",
         "codewire/internal/v1/derp_admission.proto",
         "codewire/internal/v1/egress.proto",

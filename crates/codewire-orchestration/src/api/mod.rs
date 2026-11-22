@@ -26,6 +26,7 @@ pub mod host_operations;
 pub(crate) mod host_placement;
 pub mod host_session;
 pub mod hosts;
+pub mod live;
 pub mod log_notifications;
 pub mod logs;
 pub mod network_policies;
@@ -121,6 +122,8 @@ pub struct ApiState {
     /// The process-wide environment-log listener fan-out and the
     /// per-account bound on live StreamLogs follows.
     pub environment_logs: Arc<log_notifications::EnvironmentLogNotifications>,
+    /// The process-wide live change notices signed-in pages watch (#4762).
+    pub live: Arc<live::LiveNotifications>,
     /// This replica's drain, which ends its public streams (#4426).
     pub drain: crate::drain::Drain,
     /// Where cw runtime uploads are staged, validated before serving (#5508).

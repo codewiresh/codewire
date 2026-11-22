@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package codewire.console.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// LiveService tells a signed-in page that state it shows has changed, so the
+// page re-fetches what it shows instead of polling for it (#4762).
+//
+// Events carry identifiers only, never state: a page re-fetches the fragment
+// it renders, and that read is authorized as usual. The dashboard relays the
+// stream to the browser as Server-Sent Events; browsers never call this
+// service directly.
+service LiveService {
+  // Watch streams change notices for the caller's organizations. The first
+  // event is a resync, and so is the first after any gap in which notices
+  // may have been missed; a heartbeat follows every 15 seconds. The server
+  // ends a stream after at most 10 minutes, and the caller opens a new one.
+  //
+  // Each stream checks the caller's organizations when it opens: a member
+  // removed meanwhile keeps receiving identifiers until the stream ends, and
+  // every re-fetch those identifiers lead to is refused. Past 16 open
+  // streams for one account in a process, it is refused with
+  // RESOURCE_EXHAUSTED.
+  rpc Watch(WatchRequest) returns (stream WatchResponse);
+}
+
+message WatchRequest {}
+
+// New kinds of change are only ever added as new arms of `event`, so a
+// client that meets one it doesn't know ignores it; no arm changes meaning.
+message WatchResponse {
+  oneof event {
+    // Notices may have been missed: refresh everything shown.
+    LiveResync resync = 1;
+    LiveHeartbeat heartbeat = 2;
+    // A Sandbox's state, resources, schedule or setup changed, or it was
+    // created or removed.
+    SandboxChanged sandbox = 3;
+    // A resize of the Sandbox was requested or moved on.
+    ResizeChanged resize = 4;
+    // An organization's compute credit, automatic top-up or out-of-credit
+    // mark changed.
+    CreditChanged credit = 5;
+  }
+}
+
+message LiveResync {}
+
+message LiveHeartbeat {
+  google.protobuf.Timestamp sent_at = 1;
+}
+
+message SandboxChanged {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message ResizeChanged {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message CreditChanged {
+  string org_id = 1;
+}

@@ -1901,6 +1901,10 @@ if [ "$event_selected" = false ]; then
       crates/codewire-orchestration/src/worker/credit_stop.rs|\
       crates/codewire-orchestration/src/api/create.rs|\
       crates/codewire-orchestration/src/api/feedback.rs|\
+      crates/codewire-orchestration/src/api/live.rs|\
+      crates/codewire-orchestration/src/api/live/*|\
+      crates/codewire-orchestration/src/connect/live.rs|\
+      crates/codewire-orchestration/src/connect/live/*|\
       crates/codewire-orchestration/src/api/hosts.rs|\
       crates/codewire-orchestration/src/api/host_session.rs|\
       crates/codewire-orchestration/src/api/host_operations.rs|\

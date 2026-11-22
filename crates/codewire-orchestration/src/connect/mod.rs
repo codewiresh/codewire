@@ -24,6 +24,7 @@ pub mod feedback;
 pub mod file;
 pub mod host_agent;
 pub mod hosts;
+pub mod live;
 pub mod mesh_authorization;
 pub mod network_policies;
 pub mod organizations;

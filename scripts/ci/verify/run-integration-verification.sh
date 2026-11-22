@@ -669,7 +669,7 @@ readonly DATABASE_LANES=(
   broker-admission         # broker admission itself, Claude sign-in, gRPC rotation: 70 s
   broker-checked           # broker checked leases: 70 s
   broker-decisions         # broker decisions and Codex login: 70 s
-  broker-refresh           # broker keepalive, material cache, subscription, SSH: 65 s
+  broker-refresh           # broker keepalive, material cache, subscription, SSH: 51 s (main run 69843); with the live watch's mount: about 120 s
   orchestration            # orchestration preview, access and environments: 66 s
   orchestration-journals   # orchestration cw runtime and managed agent journals: 78 s
   orchestration-workspaces # orchestration sources, admin, workspaces and create limits: 88 s (main run 60167)
@@ -677,9 +677,9 @@ readonly DATABASE_LANES=(
 )
 # The order lanes start in when not all run at once: the longest first.
 readonly DATABASE_LANE_ORDER=(
-  credential-mutations orchestration-journals orchestration-hosts broker-admission
-  broker-checked broker-decisions credential-service orchestration core
-  broker-refresh orchestration-workspaces
+  broker-refresh credential-mutations orchestration-journals orchestration-hosts
+  broker-admission broker-checked broker-decisions credential-service orchestration
+  core orchestration-workspaces
 )
 
 # The database suites' builds. Each uses one package and feature set, as its
@@ -1037,6 +1037,14 @@ database_lane_broker_refresh() {
     cargo test --locked -p codewire-credential-broker --no-default-features \
       --features platform,ssh-agent --lib platform::tests::ssh:: \
       -- --ignored --nocapture --test-threads=1
+
+  # In the shortest lane: it holds one watch past the unary dispatcher's
+  # 60-second deadline, so it takes 65 s by design (#4762).
+  counted_suite "the live watch's authenticated streaming mount" live-watch-mount \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'connect::live::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
 }
 
 database_lane_orchestration() {
@@ -1290,6 +1298,12 @@ database_lane_orchestration_workspaces() {
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \
       'api::environments::failed_create_listing_database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "live page watches and their organizations" live-watch \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::live::database_tests::' \
       -- --ignored --nocapture --test-threads=1
 }
 

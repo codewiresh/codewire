@@ -724,8 +724,8 @@ lanes, lane_commands, lanes_environment = cases['lanes'].result()
 assert lanes.returncode == 0 and '[product-integration] green' in lanes.stdout, lanes.stdout + lanes.stderr
 # Without a CPU share (a cloud runner, a workstation) all eleven lanes run at
 # once, longest first, with the test threads their commands name.
-lane_start_order = ('credential-mutations orchestration-journals orchestration-hosts broker-admission broker-checked '
-                    'broker-decisions credential-service orchestration core broker-refresh orchestration-workspaces')
+lane_start_order = ('broker-refresh credential-mutations orchestration-journals orchestration-hosts broker-admission '
+                    'broker-checked broker-decisions credential-service orchestration core orchestration-workspaces')
 assert sorted(lane_start_order.split()) == sorted(lane_order)
 assert 'database lanes: 11 at a time: ' + lane_start_order in lanes.stdout, lanes.stdout
 assert all(command['threads'] is None for command in lane_commands), 'a lane set test threads without a CPU share'

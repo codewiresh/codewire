@@ -130,6 +130,14 @@ impl Drop for FollowPermit {
     }
 }
 
+/// The process's environment-log notifications, with their listener running
+/// on `pool`.
+pub fn start(pool: PgPool) -> Arc<EnvironmentLogNotifications> {
+    let notifications = EnvironmentLogNotifications::new(MAX_LIVE_FOLLOWS_PER_ACCOUNT);
+    spawn_environment_log_listener(pool, notifications.clone());
+    notifications
+}
+
 /// Runs the process-wide `LISTEN environment_logs` loop on `pool`,
 /// reconnecting after failures. Every successful (re)subscription is
 /// followed by a resync, since rows committed meanwhile sent no signal.

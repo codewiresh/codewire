@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use codewire_orchestration::confidential_storage::{ConfidentialStorageManager, FeatureFlags};
+use codewire_orchestration::connect::live::MountLive as _;
 use codewire_orchestration::drain::{DRAIN_WINDOW, Drain};
 use codewire_orchestration::identity::config::{IDENTITY_PORT, ORCHESTRATION_IDENTITY_PORT_ENV};
 use codewire_orchestration::identity::{IdentityConfig, IdentitySettings};
@@ -808,15 +809,6 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .as_deref(),
         )?;
-    // One LISTEN connection serves every StreamLogs follower in this process.
-    let environment_logs =
-        codewire_orchestration::api::log_notifications::EnvironmentLogNotifications::new(
-            codewire_orchestration::api::log_notifications::MAX_LIVE_FOLLOWS_PER_ACCOUNT,
-        );
-    codewire_orchestration::api::log_notifications::spawn_environment_log_listener(
-        pool.clone(),
-        environment_logs.clone(),
-    );
     // One LISTEN connection serves every host session in this process.
     let host_operation_signals =
         codewire_orchestration::api::host_operation_signals::HostOperationSignals::new();
@@ -863,7 +855,10 @@ async fn main() -> anyhow::Result<()> {
         sandbox_cfg: ctx.sandbox_cfg.clone(),
         confidential_storage_flags,
         network_policy_flags,
-        environment_logs,
+        // One LISTEN connection each serves every StreamLogs follower and
+        // every live page watch in this process.
+        environment_logs: codewire_orchestration::api::log_notifications::start(pool.clone()),
+        live: codewire_orchestration::api::live::start(pool.clone()),
         drain: drain.clone(),
         cw_runtime_staging,
         revocation,
@@ -990,6 +985,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_unary_connect_routes_auth(
             codewire_orchestration::connect::environment_setup::router(api_state.clone()),
+            connect_auth.clone(),
+        )
+        .with_live_watch(
+            codewire_orchestration::connect::live::router(api_state.clone()),
             connect_auth.clone(),
         )
         .with_unary_connect_routes_auth(

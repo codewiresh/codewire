@@ -6,6 +6,7 @@
     "codewire.console.v1.AccountService": "orchestration",
     "codewire.console.v1.BillingService": "billing",
     "codewire.console.v1.EnvironmentSetupService": "orchestration",
+    "codewire.console.v1.LiveService": "orchestration",
     "codewire.internal.v1.CoordinatorService": "coordinator",
     "codewire.internal.v1.MeshCoordinatorService": "mesh",
     "codewire.testing.v1.PingService": "testing",
