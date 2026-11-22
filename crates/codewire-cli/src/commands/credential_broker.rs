@@ -348,6 +348,19 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
     let unresolved = BTreeSet::<&'static str>::new();
     #[cfg(feature = "local-broker-synthetic-smoke")]
     let upstream = (!http_providers.is_empty()).then_some(SyntheticOpenAiSmokeTransport);
+    // As in a release, a broker serving GitHub can rotate an App login; the
+    // featured build answers that refresh in process.
+    #[cfg(feature = "local-broker-synthetic-smoke")]
+    let github_app = http_providers
+        .contains(&HttpProvider::GitHubOAuth)
+        .then(|| {
+            std::sync::Arc::new(
+                codewire_credential_broker::GitHubAppAuthorizationOwner::public_client(
+                    codewire_credential_broker::provider_oauth::github::codewire_github_app(),
+                    std::sync::Arc::new(SyntheticOpenAiSmokeTransport),
+                ),
+            )
+        });
     anyhow::ensure!(
         lookup_allows(&args, &unresolved),
         "resolve credential broker provider endpoint"
@@ -585,7 +598,6 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
         .map_err(|_| anyhow::anyhow!("initialize broker provider policy"))?
         .with_network_policy_allowing_github(args.network_policy_allows_github)
         .with_network_policy_allowing_hosts(&args.network_policy_allowed_hosts);
-    #[cfg(not(feature = "local-broker-synthetic-smoke"))]
     let broker = match github_app {
         Some(owner) => broker.with_github_app_authorization_owner(owner),
         None => broker,
