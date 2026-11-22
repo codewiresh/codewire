@@ -35,6 +35,8 @@ mod lifecycle;
 pub(crate) use lifecycle::{DeleteError, GitHubAnswer, delete_credential, revoke_credential};
 mod status;
 use status::{credential_status, credential_status_at};
+mod live_check;
+pub(crate) use live_check::live_check_allowed;
 
 const PAGE_SIZE: i32 = 100;
 const MAX_PAGES: usize = 10;
@@ -587,33 +589,6 @@ impl GithubPendingPermissions {
             })
             .take(MAX_GITHUB_PENDING)
             .collect()
-    }
-}
-
-/// Whether this credentials page load may run the live GitHub check: never
-/// for a navigation another site started, so a link elsewhere cannot make
-/// the dashboard call GitHub or renew a token (#2712). A request without
-/// fetch metadata (no browser, or an old one) is the person's own.
-pub(crate) fn live_check_allowed(headers: &axum::http::HeaderMap, public_origin: &str) -> bool {
-    match headers
-        .get("sec-fetch-site")
-        .map(|value| value.to_str().unwrap_or("unreadable"))
-    {
-        None | Some("same-origin" | "same-site" | "none") => true,
-        Some("cross-site") => false,
-        // Anything else counts only with a referrer from this dashboard.
-        Some(_) => {
-            let origin = |value: &str| {
-                url::Url::parse(value)
-                    .ok()
-                    .map(|url| url.origin().ascii_serialization())
-            };
-            headers
-                .get(axum::http::header::REFERER)
-                .and_then(|value| value.to_str().ok())
-                .and_then(origin)
-                .is_some_and(|referrer| Some(referrer) == origin(public_origin))
-        }
     }
 }
 
