@@ -3162,6 +3162,14 @@ async fn a_stop_settles_when_only_a_process_outside_the_session_holds_its_output
     {
         return;
     }
+    // A stop whose cleanup is unknown names the step only in its log, which
+    // this prints with a failure (#5929).
+    let _log = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::WARN)
+            .finish(),
+    );
     let mut unsettled = Vec::new();
     for ((owner, engine_for), pty) in OWNERS
         .into_iter()

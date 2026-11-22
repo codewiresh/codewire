@@ -63,6 +63,9 @@ impl PtyLaunchGuard {
         .unwrap_or(false);
         if reaped {
             self.0 = None;
+        } else {
+            // The session's record keeps one closed message (#5929).
+            tracing::warn!("session leader was not reaped within its cleanup checks");
         }
         reaped
     }

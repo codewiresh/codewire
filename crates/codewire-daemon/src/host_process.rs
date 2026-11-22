@@ -159,10 +159,12 @@ impl OwnedProcessGroup {
         let descendants = self.terminate_session_members().await;
         let kill = self.signal(libc::SIGKILL);
         self.armed = false;
-        kill.and(leader)
-            .and(descendants)
-            .and(term)
-            .map(|()| members)
+        let ended = kill.and(leader).and(descendants).and(term);
+        if let Err(error) = &ended {
+            // The session's record keeps one closed message (#5929).
+            tracing::warn!(%error, "session group signals were not confirmed");
+        }
+        ended.map(|()| members)
     }
     /// PTY job control can create additional process groups without escaping the
     /// owned session. Linux pidfds signal those exact processes, never bare PIDs.
