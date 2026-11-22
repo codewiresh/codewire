@@ -437,8 +437,9 @@ the address's owner taking the account back from whoever chose the old password
 in with the old one minted: browser sessions, pending 2FA challenges, and OAuth
 authorization requests, access and refresh tokens and device authorizations.
 A device sign-in that the old password's session approved pays out nothing
-after the reset. API keys stay; they are an organization's automation, not a
-sign-in (owner, 2026-11-13, #4481). A sign-in that verified the old password
+after the reset. API keys stay: a key ends when it is disabled, deleted or
+expires, or when its account is disabled, never through a reset (owner,
+2026-11-13, #4481). A sign-in that verified the old password
 just before the reset committed gets nothing either: it issues its session or
 second-factor challenge only while the account's credential row, locked
 `FOR SHARE`, still holds the hash it verified.
@@ -659,6 +660,9 @@ so only unsuspension brings it back.
   key through their generated Connect client wrapper for organization APIs.
   Personal access profiles instead require the existing user OAuth bearer;
   supplying an organization API key cannot act as its owning user.
+  [API key permissions and expiry](#api-key-permissions-and-expiry-approved-not-yet-shipped)
+  and [Signing in from the environment](#signing-in-from-the-environment-approved-not-yet-shipped)
+  are the approved changes to both rules.
 - Workspace binding uses an exact-audience, Pod-bound Kubernetes token.
   Coordinator and daemon calls use distinct environment-scoped HMAC
   capabilities; the retired environment bearer is unsupported.
@@ -671,6 +675,174 @@ so only unsuspension brings it back.
   inject, or fall back to a raw forge token. Protected local GitHub credential
   enrollment remains a local credential-broker capability and does not create
   a platform credential.
+
+## API key permissions and expiry (approved, not yet shipped)
+
+The owner decided this on 2026-11-21 (#5688). Until each part ships, the
+rules above describe what runs. The change that ships a part rewrites the
+rule it replaces in the same change. The journey is
+[`docs/journeys/api-keys.md`](../journeys/api-keys.md).
+
+**What is true today.** A `cw_` key belongs to one organization and acts as
+the person who made it, with their role there (`ApiKey.user_id`).
+Authentication joins `org_members`, so the key stops working when its creator
+leaves, and leaving also disables it. Its `scopes` are stored but not
+enforced. Its expiry is optional, from 1 to 3650 days. Nothing writes an
+audit row when a key is made, refused or revoked. A key can make further
+keys in its organization.
+
+**What changes:**
+- **One organization, as today.** A key never binds a personal credential
+  profile. A person's own profiles are reached with a user token
+  ([Signing in from the environment](#signing-in-from-the-environment-approved-not-yet-shipped)).
+  Organization-owned credentials for keys are #5685.
+- **Permissions.** Each key carries a set of permissions, chosen when it is
+  made, and they are enforced. A key acts with the smaller of its
+  permissions and its creator's role at that moment. A key can't be made
+  with a permission its creator's role lacks: such a request is refused
+  whole, never trimmed. Existing keys get every permission, so nothing they
+  do today stops working.
+- **Expiry.** Chosen when the key is made: a date up to 3650 days ahead, or
+  never. `cw api-keys create NAME --expires DAYS` or `--expires never`, and
+  the dashboard asks. A key that never expires lives until it is revoked, so
+  its last use is always shown.
+- **Made only from a sign-in.** Keys are made only with a browser session or
+  a `cw login` sign-in. The power a key has today to make keys ends.
+- **Last use.** `cw api-keys list` and Settings → API keys show each key's
+  last use, its permissions and its expiry.
+
+**The permissions:**
+
+| Permission | Allows |
+| --- | --- |
+| `write:environments` | create, update, start, stop and resize environments; change their TTL, idle stop and protection; grant and revoke access to one |
+| `delete:environments` | delete environments |
+| `write:snapshots`, `delete:snapshots` | make and change snapshots; delete them |
+| `write:presets`, `delete:presets` | make and change presets; delete them |
+| `write:network_policies`, `delete:network_policies` | make and change network policies; delete them |
+| `manage:secrets` | the organization's application secrets and secret projects |
+| `manage:mesh` | Mesh networks, groups, invites, nodes and their key-value store |
+| `manage:hosts` | enroll, rename and revoke hosts |
+| `manage:members` | invite and remove members and change their roles |
+
+Every key, whatever its permissions, may:
+- read the organization's environments, snapshots, presets, network
+  policies, Mesh networks and hosts;
+- use the environments its creator can reach: exec, files, sessions,
+  terminals, ports, previews, the desktop and agents.
+
+Using what runs is not a permission. A key exists to reach environments,
+so there is no read-only key (owner, 2026-11-21, #5688). `cw api-keys
+create`, the dashboard's create form and the API keys docs page say so
+plainly: every key can run commands, use files and run agents in the
+environments its creator can reach. Account services (credential profiles,
+credentials, delegation) and making keys stay refused to every key.
+
+Each public method is classified in one table in code: a permission, "every
+key" or "never a key". A repository policy check fails on a public method
+missing from the table, and a key calling a method the table lacks is
+refused. A refusal names the missing permission.
+
+**Audit.** Each of these writes a row naming the key's id, never its secret:
+`api_key.created`, with its permissions and expiry; `api_key.disabled`,
+`api_key.enabled` and `api_key.deleted`, with the actor; and
+`api_key.refused`, with the method and the missing permission, at most one a
+minute per key and method.
+
+**Revocation**, together with
+[Account access revocation](#account-access-revocation), is unchanged:
+- disabling or deleting a key ends what it can start, and its live streams
+  within 30 seconds;
+- disabling the account retires all of the person's keys;
+- leaving the organization disables the person's keys there;
+- a password reset leaves every key alone;
+- an organization's owner or admin can disable or delete any key in the
+  organization.
+
+## Signing in from the environment (approved, not yet shipped)
+
+The owner decided this on 2026-11-21 (#5687, #5688). Until it ships, an SDK
+signs in only with the key passed to it or `CODEWIRE_API_KEY`. The change
+that ships it rewrites "Client use" above. The journey is
+[`docs/journeys/sdk-sign-in.md`](../journeys/sdk-sign-in.md).
+
+An SDK program, or a script, authenticates in one of two ways:
+- **an API key**, belonging to one organization;
+- **a user token**, acting as a person, with the organization named.
+
+**Configuration**, per field, in this order:
+1. code (the client's options);
+2. the process environment;
+3. `.env.local`, then `.env`, in the working directory (Python and
+   TypeScript only);
+4. the defaults.
+
+| Field | Variable | Option |
+| --- | --- | --- |
+| API key | `CODEWIRE_API_KEY` | `api_key` |
+| user token | `CODEWIRE_JWT_TOKEN` | `jwt_token` |
+| organization | `CODEWIRE_ORGANIZATION_ID`, or the older `CODEWIRE_ORG_ID` | `organization_id` |
+| server | `CODEWIRE_API_URL`, or `CODEWIRE_SERVER_URL`; default `https://codewire.sh` | `api_url` |
+
+The options take each language's own case (`apiKey`, `jwtToken`,
+`organizationId`, `apiUrl`).
+- **The server is never read from a `.env` file.** One there is ignored and
+  reported, so a file in a checkout can't send a key or a token to another
+  server. The Python SDK keeps `CODEWIRE_BASE_URL` as an alias for one
+  release.
+- **When a key and a user token are both set,** the key is used.
+- **With neither,** the client refuses and names both variables.
+- **A user token with no organization** is refused, naming
+  `CODEWIRE_ORGANIZATION_ID`.
+- **Each request names its organization** in its request fields, as the API
+  already does. The SDK fills them from the organization setting; there is
+  no organization header.
+
+**The CLI.** With `CODEWIRE_API_KEY` set, and `CODEWIRE_API_URL` or
+`CODEWIRE_SERVER_URL` naming the server, `cw` uses them instead of the saved
+sign-in for that command, as `CODEWIRE_API_KEY` does today.
+
+**The user token.** `cw auth token [--expires DAYS|never]`, after
+`cw login`, issues one and writes it only when its output is not a terminal:
+`export CODEWIRE_JWT_TOKEN=$(cw auth token --expires 30)`.
+- **What it is:** an OAuth access token (flavor 2) for the product API,
+  opaque and checked against the token store on every call, so revoking it
+  takes effect at once. The variable keeps its conventional name; the token
+  is not a JWT.
+- **Issued by:** the IdP, through one grant (a token exchange) that takes
+  only a live access token of the same user and the `cw` client. The new
+  token has at most that token's scope.
+  - A user token can't be exchanged again.
+  - The grant never issues or accepts a refresh token.
+  - It is never `cw`'s own token, which `cw` refreshes and can't be given a
+    lifetime.
+- **Lifetime:** chosen when it is issued, a number of days or never. The
+  default is 1 day.
+- **What ends it:** signing out or revoking the sign-in it came from, a
+  password reset, an account disable, or revoking the token itself in
+  Settings. A token that never expires lives until one of those, so Settings
+  lists each live token with its creation, expiry and last use, and marks
+  the ones that never expire. A stream it
+  admitted ends as an OAuth token's does under
+  [Account access revocation](#account-access-revocation).
+- **What it can't do:** make API keys, change sign-in methods or second
+  factors, or delete the account. It is refused for those by its kind.
+- **Audit:** each one issued writes a row naming its parent sign-in, and so
+  does each revocation. Neither names the token. The SDKs never log it and
+  remove it from errors.
+
+**Credential profiles.** A user token is an account credential, so it binds
+the person's own profiles as `cw` does, with one difference. A binding made
+with a user token gets none of the direct delivery exceptions
+([SECRETS-AND-CREDENTIALS.md](SECRETS-AND-CREDENTIALS.md#direct-delivery-exceptions)):
+its credentials stay behind the proxy. A user token is made to be copied
+into environment variables and `.env` files, and can live forever, so a
+leaked one must never put a real Codex or Claude login into a Sandbox. Direct
+delivery stays for `cw`'s own sign-in and the dashboard. An SDK binds one in a single call:
+the program names the profile and states the confirmation, and the SDK reads
+the profile's revision itself. Before creating anything, the SDK refuses an
+API key asked for a profile, or a missing confirmation, and names the user
+token as the way.
 
 ## Protocol and error boundaries
 

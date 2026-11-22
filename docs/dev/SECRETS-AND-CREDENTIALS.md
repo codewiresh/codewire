@@ -1308,6 +1308,27 @@ server/organization; stale local or platform selections must not fall back to a
 different environment. Cached local-only environments retain offline operation;
 platform-backed material needs its platform authority online.
 
+### Who may bind a personal profile
+
+Selecting a personal credential profile, or personal application secrets, at
+create or update needs the person's own sign-in: a browser session or a
+`cw login` OAuth token, with the explicit personal confirmation. Every API key
+is refused (`require_account_credential`), and `cw` skips profiles when it
+signs in with one. A program signed in with an API key gets no managed
+credential.
+
+**Approved, not yet shipped** (owner, 2026-11-21; #5687, #5688). The rules
+are in [AUTH-POLICY.md](AUTH-POLICY.md#signing-in-from-the-environment-approved-not-yet-shipped):
+- **A program acting as a person** uses a user token from `cw auth token`.
+  It binds that person's profiles as a `cw login` sign-in does, with the
+  same confirmation. A binding it made gets none of the
+  [direct delivery exceptions](#direct-delivery-exceptions): its credentials
+  stay behind the proxy, with only placeholders inside.
+- **An API key** still binds no personal profile, and the refusal names the
+  user token. Organization-owned credentials for keys are #5685.
+
+The change that ships each point rewrites the first paragraph above.
+
 ## Runtime boundaries
 
 Application-secret values reach a launch through one bounded, typed
