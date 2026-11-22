@@ -181,6 +181,10 @@ pub(crate) fn router() -> Router<AppState> {
             post(admin::set_organization_confidential),
         )
         .route(
+            "/admin/organizations/_actions/systemd/set",
+            post(admin::set_organization_systemd),
+        )
+        .route(
             "/admin/organizations/_actions/rate-card/set",
             post(admin::set_organization_rate_card),
         )

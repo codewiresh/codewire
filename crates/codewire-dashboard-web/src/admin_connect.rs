@@ -8,12 +8,13 @@ use codewire_admin_proto::codewire::admin::v1::{
     GetDefaultEnvironmentQuotaRequest, GetOrganizationDefaultCardRequest,
     GetOrganizationOverviewRequest, GetStatsRequest, ListAuditLogsRequest,
     ListConfidentialOrganizationsRequest, ListFeedbackRequest, ListOrganizationsRequest,
-    ListSubscriptionMigrationsRequest, PlanSpec, PreviewSubscriptionMigrationRequest,
-    RunSubscriptionMigrationRequest, SetDefaultEnvironmentQuotaRequest,
-    SetOrganizationConfidentialEnvironmentsRequest, SetOrganizationDedicatedCpuRequest,
-    SetOrganizationEnvironmentQuotaRequest, SetOrganizationRateCardRequest, SetPlanArchivedRequest,
-    SetPriceArchivedRequest, SuspendAccountRequest, UnsuspendAccountRequest, UpdatePlanRequest,
-    UpdatePriceRequest, UpdateSettingRequest,
+    ListSubscriptionMigrationsRequest, ListSystemdOrganizationsRequest, PlanSpec,
+    PreviewSubscriptionMigrationRequest, RunSubscriptionMigrationRequest,
+    SetDefaultEnvironmentQuotaRequest, SetOrganizationConfidentialEnvironmentsRequest,
+    SetOrganizationDedicatedCpuRequest, SetOrganizationEnvironmentQuotaRequest,
+    SetOrganizationRateCardRequest, SetOrganizationSystemdEnvironmentsRequest,
+    SetPlanArchivedRequest, SetPriceArchivedRequest, SuspendAccountRequest,
+    UnsuspendAccountRequest, UpdatePlanRequest, UpdatePriceRequest, UpdateSettingRequest,
 };
 use connectrpc::{ConnectError, client::ClientConfig};
 
@@ -307,6 +308,9 @@ pub(crate) struct AdminOrganizationView {
     /// Opted in to confidential environments (#2497); `None` while the
     /// billing service that owns the opt-in cannot be read.
     pub(crate) confidential_environments: Option<bool>,
+    /// Opted in to systemd workspaces (#5638); `None` while the billing
+    /// service that owns the opt-in cannot be read.
+    pub(crate) systemd_environments: Option<bool>,
     pub(crate) active_environments: i64,
     pub(crate) active_sandboxes: i64,
     pub(crate) used_cpu: String,
@@ -685,6 +689,25 @@ pub(crate) async fn set_confidential_environments(
     Ok(())
 }
 
+/// Opt an organization in to, or out of, systemd workspaces (#5638). The
+/// billing service checks the global administrator and writes the audit
+/// event.
+pub(crate) async fn set_systemd_environments(
+    state: &AppState,
+    cookie: HeaderValue,
+    organization_slug: String,
+    enabled: bool,
+) -> Result<(), ConnectError> {
+    catalog_client(state, cookie)
+        .set_organization_systemd_environments(SetOrganizationSystemdEnvironmentsRequest {
+            organization_slug,
+            enabled,
+            ..Default::default()
+        })
+        .await?;
+    Ok(())
+}
+
 /// Suspends an account and the organizations it alone owns (#3297). Returns
 /// how many organizations it shares with another owner, which are left as
 /// they were.
@@ -807,6 +830,26 @@ async fn confidential_organization_ids(
     )
 }
 
+/// The organizations opted in to systemd workspaces, by id, from the billing
+/// service that owns the opt-in (#5638). `None` when billing cannot answer.
+async fn systemd_organization_ids(
+    state: &AppState,
+    cookie: HeaderValue,
+) -> Option<HashSet<String>> {
+    let response = catalog_client(state, cookie)
+        .list_systemd_organizations(ListSystemdOrganizationsRequest::default())
+        .await
+        .ok()?
+        .into_owned();
+    Some(
+        response
+            .organizations
+            .into_iter()
+            .map(|organization| organization.organization_id)
+            .collect(),
+    )
+}
+
 pub(crate) async fn organizations(
     state: &AppState,
     cookie: HeaderValue,
@@ -845,12 +888,13 @@ pub(crate) async fn organization(
     organization_id: &str,
 ) -> Result<AdminOrganizationView, ConnectError> {
     let admin_rpc = admin_client(state, cookie.clone());
-    let (response, confidential) = tokio::join!(
+    let (response, confidential, systemd) = tokio::join!(
         admin_rpc.get_organization_overview(GetOrganizationOverviewRequest {
             organization_id: organization_id.to_owned(),
             ..Default::default()
         }),
-        confidential_organization_ids(state, cookie),
+        confidential_organization_ids(state, cookie.clone()),
+        systemd_organization_ids(state, cookie),
     );
     let response = response?.into_owned();
     let organization = response.organization.into_option().unwrap_or_default();
@@ -862,6 +906,7 @@ pub(crate) async fn organization(
         confidential_environments: confidential
             .as_ref()
             .map(|ids| ids.contains(&organization.id)),
+        systemd_environments: systemd.as_ref().map(|ids| ids.contains(&organization.id)),
         id: organization.id,
         name: organization.name,
         slug: organization.slug,

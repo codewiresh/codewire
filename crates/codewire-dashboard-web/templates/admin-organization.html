@@ -41,6 +41,16 @@
                 <p>Confidential environments <span class="cw-badge">Not opted in</span></p>
                 <button class="cw-button cw-button--outline" type="submit"><span>Opt in</span><span class="cw-sr-only"> to confidential environments</span></button>{% endif %}
               </form>{% when None %}<p>Confidential environments <span class="cw-muted">cannot be read right now</span></p>{% endmatch %}</li>
+              <li>{% match organization.systemd_environments %}{% when Some(enabled) %}<form class="cw-organization-toggle" method="post" action="/admin/organizations/_actions/systemd/set">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="organization_id" value="{{ organization.id }}">
+                <input type="hidden" name="organization_slug" value="{{ organization.slug }}">
+                {% if enabled %}<input type="hidden" name="enabled" value="false">
+                <p>Systemd workspaces <span class="cw-badge" data-tone="success">Opted in</span></p>
+                <button class="cw-button cw-button--outline" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for systemd workspaces</span></button>{% else %}<input type="hidden" name="enabled" value="true">
+                <p>Systemd workspaces <span class="cw-badge">Not opted in</span></p>
+                <button class="cw-button cw-button--outline" type="submit"><span>Opt in</span><span class="cw-sr-only"> to systemd workspaces</span></button>{% endif %}
+              </form>{% when None %}<p>Systemd workspaces <span class="cw-muted">cannot be read right now</span></p>{% endmatch %}</li>
               <li><form class="cw-organization-toggle" method="post" action="/admin/organizations/_actions/dedicated-cpu/set">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="organization_id" value="{{ organization.id }}">

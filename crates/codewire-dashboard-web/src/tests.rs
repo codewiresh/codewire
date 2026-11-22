@@ -858,6 +858,7 @@ fn unsafe_organization(has_explicit_quota: bool) -> AdminOrganizationView {
         }],
         has_explicit_quota,
         confidential_environments: Some(false),
+        systemd_environments: Some(false),
         effective_quota: QuotaView {
             environments: limit(-1, "Unlimited"),
             sandboxes: limit(200, "200"),
@@ -1043,6 +1044,62 @@ fn admin_organization_dedicated_cpu_toggle_follows_the_setting() {
     assert!(dedicated.contains(r#"<input type="hidden" name="dedicated_cpu" value="false">"#));
     assert!(dedicated.contains(">Return to shared CPU</button>"));
     assert!(!dedicated.contains(">Give dedicated CPU</button>"));
+}
+
+/// The systemd opt-in is one button whose verb follows the state, posting the
+/// opposite state with the organization's id and slug; while billing cannot
+/// say, the page says so and offers no button (#5638).
+#[test]
+fn admin_organization_systemd_toggle_follows_the_opt_in() {
+    let view = admin_view();
+    let render = |systemd_environments: Option<bool>| {
+        let organization = AdminOrganizationView {
+            systemd_environments,
+            ..unsafe_organization(false)
+        };
+        AdminOrganizationTemplate {
+            view: &view,
+            organization: &organization,
+            csrf_token: "csrf-safe",
+            credit_key: "credit-key-1",
+            credit_confirmation: None,
+            message: "",
+            error: "",
+        }
+        .render()
+        .expect("render admin organization page")
+    };
+    let action = r#"action="/admin/organizations/_actions/systemd/set""#;
+    let form = |html: &str| -> String {
+        let start = html.find(action).expect("the systemd form");
+        html[start..start + html[start..].find("</form>").unwrap()].to_owned()
+    };
+
+    let off = form(&render(Some(false)));
+    assert!(off.contains(r#"<input type="hidden" name="organization_id" value="org_safe-1">"#));
+    assert!(off.contains(r#"<input type="hidden" name="organization_slug" value="safe-org">"#));
+    assert!(off.contains(r#"<input type="hidden" name="enabled" value="true">"#));
+    assert!(
+        off.contains(r#"<p>Systemd workspaces <span class="cw-badge">Not opted in</span></p>"#)
+    );
+    assert!(off.contains(
+        r#"<button class="cw-button cw-button--outline" type="submit"><span>Opt in</span><span class="cw-sr-only"> to systemd workspaces</span></button>"#
+    ));
+
+    let on = form(&render(Some(true)));
+    assert!(on.contains(r#"<input type="hidden" name="enabled" value="false">"#));
+    assert!(on.contains(
+        r#"<p>Systemd workspaces <span class="cw-badge" data-tone="success">Opted in</span></p>"#
+    ));
+    assert!(on.contains(
+        r#"<button class="cw-button cw-button--outline" type="submit"><span>Remove opt-in</span><span class="cw-sr-only"> for systemd workspaces</span></button>"#
+    ));
+
+    let unknown = render(None);
+    assert!(!unknown.contains(action));
+    assert!(unknown.contains(
+        r#"<p>Systemd workspaces <span class="cw-muted">cannot be read right now</span></p>"#
+    ));
 }
 
 /// The confidential opt-in is one button whose verb follows the state, posting

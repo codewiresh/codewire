@@ -247,7 +247,7 @@ pub(super) struct SettingSubmission {
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct ConfidentialOrganizationSubmission {
+pub(super) struct OrganizationOptInSubmission {
     #[serde(rename = "_csrf")]
     csrf: String,
     organization_id: String,
@@ -629,7 +629,7 @@ pub(super) async fn set_organization_confidential(
     State(state): State<AppState>,
     Query(query): Query<AdminQuery>,
     headers: HeaderMap,
-    Form(submission): Form<ConfidentialOrganizationSubmission>,
+    Form(submission): Form<OrganizationOptInSubmission>,
 ) -> Response {
     if !valid_organization_id(&submission.organization_id) {
         return error_page(WebError::NotFound);
@@ -664,6 +664,54 @@ pub(super) async fn set_organization_confidential(
         Err(error) => {
             let code = match mutation_error(&error) {
                 "unavailable" | "conflict" => "confidential-unavailable",
+                code => code,
+            };
+            admin_redirect_to(&path, "", code, &headers)
+        }
+    }
+}
+
+/// Opt an organization in to, or out of, systemd workspaces (#5638), from its
+/// admin page. Global administrators only; the billing service owns the
+/// opt-in, checks the administrator again and writes the audit event.
+pub(super) async fn set_organization_systemd(
+    State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
+    headers: HeaderMap,
+    Form(submission): Form<OrganizationOptInSubmission>,
+) -> Response {
+    if !valid_organization_id(&submission.organization_id) {
+        return error_page(WebError::NotFound);
+    }
+    let path = organization_path(&submission.organization_id);
+    let cookie =
+        match admin_action_page_context_for(&state, &headers, &submission.csrf, &query.org, &path)
+            .await
+        {
+            Ok((_, cookie)) => cookie,
+            Err(response) => return response,
+        };
+    let slug = submission.organization_slug;
+    if !codewire_server_core::organization_slug::valid_organization_slug(&slug) {
+        return admin_redirect_to(&path, "", "not-found", &headers);
+    }
+    let result =
+        admin_connect::set_systemd_environments(&state, cookie, slug, submission.enabled).await;
+    match result {
+        Ok(()) => admin_redirect_to(
+            &path,
+            if submission.enabled {
+                "systemd-enabled"
+            } else {
+                "systemd-disabled"
+            },
+            "",
+            &headers,
+        ),
+        Err(error) if error.code == ErrorCode::Unauthenticated => login_redirect(&path, &headers),
+        Err(error) => {
+            let code = match mutation_error(&error) {
+                "unavailable" | "conflict" => "systemd-unavailable",
                 code => code,
             };
             admin_redirect_to(&path, "", code, &headers)
@@ -1302,6 +1350,8 @@ fn quota_message(value: &str) -> &'static str {
         "quota-cleared" => "Environment quota cleared; the defaults apply.",
         "confidential-enabled" => "Organization opted in to confidential environments.",
         "confidential-disabled" => "Organization removed from confidential environments.",
+        "systemd-enabled" => "Organization opted in to systemd workspaces.",
+        "systemd-disabled" => "Organization removed from systemd workspaces.",
         "rate-card-saved" => "Rate card saved.",
         "dedicated-cpu-set" => "New sandboxes of this organization get dedicated CPU.",
         "dedicated-cpu-cleared" => "New sandboxes of this organization share CPU.",
@@ -1330,6 +1380,7 @@ fn quota_error(value: &str) -> &'static str {
             "Organization changes are temporarily unavailable; try again."
         }
         "confidential-unavailable" => "Confidential environments are temporarily unavailable.",
+        "systemd-unavailable" => "Systemd workspaces are temporarily unavailable.",
         _ => "",
     }
 }
