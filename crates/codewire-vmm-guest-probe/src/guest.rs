@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
+use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -68,6 +68,7 @@ use bootstrap::runtime_path_environment;
 use bootstrap::with_boot_selection;
 mod egress_trust;
 mod interception;
+mod network_check;
 mod network_status;
 mod oci_config;
 mod shutdown;
@@ -76,6 +77,7 @@ mod workload_execution;
 
 use bootstrap::{BootstrapChild, BootstrapParent};
 use codewire_daemon::execution::BootstrapPhase;
+pub use network_check::run_network_check;
 use network_status::{
     NETWORK_AGENT_FAILURE_STAGES, NETWORK_AGENT_GENERIC_FAILURE_STAGE,
     NETWORK_AGENT_HOST_FAILURE_STAGE, NETWORK_STATUS_VALUES, handshake_failure_stage,
@@ -1115,81 +1117,6 @@ pub fn run_read_nonce() -> Result<()> {
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{NONCE_MARKER} {nonce}")?;
     stdout.flush()?;
-    Ok(())
-}
-
-pub fn run_network_check() -> Result<()> {
-    let _ = read_guest_identity()?;
-    verify_isolated_tun(
-        Path::new("/proc/net/dev"),
-        Path::new("/proc/net/route"),
-        Path::new("/proc/net/ipv6_route"),
-    )?;
-    for destination in [
-        SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 53),
-        SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 19), 443),
-        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1),
-        SocketAddrV4::new(Ipv4Addr::new(169, 254, 169, 254), 80),
-    ] {
-        ensure!(
-            TcpStream::connect_timeout(&SocketAddr::V4(destination), Duration::from_millis(100),)
-                .is_err(),
-            "isolated workspace unexpectedly completed a TCP connection"
-        );
-    }
-    require_no_udp_response()?;
-    require_raw_icmp_denied()?;
-    let mut stdout = io::stdout().lock();
-    writeln!(stdout, "{NETWORK_MARKER}")?;
-    stdout.flush()?;
-    Ok(())
-}
-
-fn require_no_udp_response() -> Result<()> {
-    let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
-        .context("bind isolated workspace UDP canary")?;
-    socket
-        .set_read_timeout(Some(Duration::from_millis(100)))
-        .context("bound isolated workspace UDP canary")?;
-    let query = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07fixture\x08codewire\x04test\x00\x00\x01\x00\x01";
-    let mut response = [0_u8; 512];
-    for destination in [
-        SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 53),
-        SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 53),
-        SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 9),
-    ] {
-        let _ = socket.send_to(query, destination);
-        match socket.recv_from(&mut response) {
-            Ok(_) => bail!("isolated workspace unexpectedly received a UDP response"),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) => {}
-            Err(_) => {}
-        }
-    }
-    Ok(())
-}
-
-fn require_raw_icmp_denied() -> Result<()> {
-    let descriptor = unsafe {
-        libc::socket(
-            libc::AF_INET,
-            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
-            libc::IPPROTO_ICMP,
-        )
-    };
-    if descriptor != -1 {
-        unsafe {
-            libc::close(descriptor);
-        }
-        bail!("isolated workspace unexpectedly created a raw ICMP socket");
-    }
-    ensure!(
-        io::Error::last_os_error().raw_os_error() == Some(libc::EPERM),
-        "isolated workspace raw ICMP denial is not capability-enforced"
-    );
     Ok(())
 }
 

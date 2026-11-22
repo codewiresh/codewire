@@ -124,6 +124,12 @@ mod linux {
     use tonic::Code;
     use uuid::Uuid;
 
+    mod live_landlock;
+    mod vmm_confinement;
+    use vmm_confinement::{
+        capability_sets_empty, parse_process_confinement, require_vmm_process_confinement,
+    };
+
     type SmokeResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
     const STATE_DISK_BYTES: u64 = 256 * 1024 * 1024;
@@ -654,7 +660,7 @@ mod linux {
         let first_client = connect_ready_daemon(&mut first).await?;
         observation("guest.daemon_ready", true);
         observation("guest.oci_restart_without_setup", "verified");
-        require_vmm_process_confinement(&first_process)?;
+        require_vmm_process_confinement(&first_process).await?;
         require_supervisor_socket_boundary()?;
         require_wrong_token_rejected(
             first
@@ -1543,112 +1549,6 @@ mod linux {
         observation("vmm.executable.sha256", &identity.executable_sha256);
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct ProcessConfinement {
-        seccomp: u32,
-        seccomp_filters: u32,
-        no_new_privs: u32,
-        cap_inh: u128,
-        cap_prm: u128,
-        cap_eff: u128,
-        cap_amb: u128,
-    }
-
-    fn require_vmm_process_confinement(identity: &ProcessIdentity) -> SmokeResult<()> {
-        if ProcessIdentity::capture(identity.pid)? != *identity {
-            return Err(failure(
-                "VMM process identity changed before confinement inspection",
-            ));
-        }
-        let leader_status = fs::read_to_string(format!("/proc/{0}/task/{0}/status", identity.pid))?;
-        let leader = parse_process_confinement(&leader_status)?;
-        if !matches!(leader.seccomp, 0 | 2)
-            || leader.no_new_privs != 1
-            || !capability_sets_empty(&leader)
-        {
-            return Err(failure(
-                "VMM leader lacks its required no-new-privileges/capability boundary",
-            ));
-        }
-        let mut workers = 0_u32;
-        let mut filtered_workers = 0_u32;
-        let mut unfiltered_workers = 0_u32;
-        let mut weak_filter_workers = 0_u32;
-        let mut minimum_worker_filters = u32::MAX;
-        let mut maximum_worker_filters = 0_u32;
-        for entry in fs::read_dir(format!("/proc/{}/task", identity.pid))? {
-            let entry = entry?;
-            let tid = entry
-                .file_name()
-                .to_string_lossy()
-                .parse::<u32>()
-                .map_err(|_| failure("VMM task identifier is malformed"))?;
-            let status = fs::read_to_string(entry.path().join("status"))?;
-            let confinement = parse_process_confinement(&status)?;
-            if tid == identity.pid {
-                if confinement != leader {
-                    return Err(failure("VMM leader status changed during task inspection"));
-                }
-                continue;
-            }
-            if confinement.no_new_privs != 1 || !capability_sets_empty(&confinement) {
-                return Err(failure(
-                    "VMM task lacks no-new-privileges or retains capabilities",
-                ));
-            }
-            workers = workers
-                .checked_add(1)
-                .ok_or_else(|| failure("VMM task count overflowed"))?;
-            match confinement.seccomp {
-                2 => filtered_workers += 1,
-                0 => unfiltered_workers += 1,
-                _ => return Err(failure("VMM worker has an unexpected seccomp mode")),
-            }
-            if confinement.seccomp_filters <= leader.seccomp_filters {
-                weak_filter_workers += 1;
-            }
-            minimum_worker_filters = minimum_worker_filters.min(confinement.seccomp_filters);
-            maximum_worker_filters = maximum_worker_filters.max(confinement.seccomp_filters);
-        }
-        // Cloud Hypervisor v54 applies role-specific filters inside its VMM,
-        // API, vCPU, and virtio worker threads. Its process leader performs
-        // startup, applies Landlock, and waits for those threads, but is not
-        // itself seccomp-filtered. Accept a filtered leader as a future
-        // hardening, while requiring every guest-processing worker observed at
-        // daemon readiness to have SECCOMP_MODE_FILTER.
-        if !matches!(leader.seccomp, 0 | 2)
-            || workers == 0
-            || filtered_workers != workers
-            || unfiltered_workers != 0
-            || weak_filter_workers != 0
-        {
-            observation("vmm.worker_count", workers);
-            observation("vmm.filtered_worker_count", filtered_workers);
-            observation("vmm.unfiltered_worker_count", unfiltered_workers);
-            observation("vmm.weak_filter_worker_count", weak_filter_workers);
-            return Err(failure(
-                "VMM worker-thread seccomp confinement is not active",
-            ));
-        }
-        if ProcessIdentity::capture(identity.pid)? != *identity {
-            return Err(failure(
-                "VMM process identity changed during confinement inspection",
-            ));
-        }
-        observation("vmm.leader_seccomp", leader.seccomp);
-        observation("vmm.leader_seccomp_filters", leader.seccomp_filters);
-        observation("vmm.worker_count", workers);
-        observation("vmm.filtered_worker_count", filtered_workers);
-        observation("vmm.unfiltered_worker_count", unfiltered_workers);
-        observation("vmm.weak_filter_worker_count", weak_filter_workers);
-        observation("vmm.minimum_worker_seccomp_filters", minimum_worker_filters);
-        observation("vmm.maximum_worker_seccomp_filters", maximum_worker_filters);
-        observation("vmm.worker_seccomp_verified", true);
-        observation("vmm.all_tasks_no_new_privs_verified", true);
-        observation("vmm.all_tasks_capability_sets_empty_verified", true);
-        Ok(())
-    }
-
     fn require_network_worker_boundary(
         identity: &ProcessIdentity,
         paths: &VmPaths,
@@ -1905,69 +1805,6 @@ mod linux {
         }
     }
 
-    fn parse_process_confinement(status: &str) -> SmokeResult<ProcessConfinement> {
-        let seccomp = parse_status_decimal(unique_status_value(status, "Seccomp")?)?;
-        let seccomp_filters =
-            parse_status_decimal(unique_status_value(status, "Seccomp_filters")?)?;
-        let no_new_privs = parse_status_decimal(unique_status_value(status, "NoNewPrivs")?)?;
-        let cap_inh = parse_status_hex(unique_status_value(status, "CapInh")?)?;
-        let cap_prm = parse_status_hex(unique_status_value(status, "CapPrm")?)?;
-        let cap_eff = parse_status_hex(unique_status_value(status, "CapEff")?)?;
-        let cap_amb = parse_status_hex(unique_status_value(status, "CapAmb")?)?;
-        Ok(ProcessConfinement {
-            seccomp,
-            seccomp_filters,
-            no_new_privs,
-            cap_inh,
-            cap_prm,
-            cap_eff,
-            cap_amb,
-        })
-    }
-
-    fn capability_sets_empty(confinement: &ProcessConfinement) -> bool {
-        confinement.cap_inh == 0
-            && confinement.cap_prm == 0
-            && confinement.cap_eff == 0
-            && confinement.cap_amb == 0
-    }
-
-    fn unique_status_value<'a>(status: &'a str, field: &str) -> SmokeResult<&'a str> {
-        let mut values = status.lines().filter_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            (name == field).then_some(value.trim())
-        });
-        let value = values
-            .next()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| failure("VMM process status is missing a confinement field"))?;
-        if values.next().is_some() {
-            return Err(failure("VMM process status repeats a confinement field"));
-        }
-        Ok(value)
-    }
-
-    fn parse_status_decimal(value: &str) -> SmokeResult<u32> {
-        if !value.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(failure(
-                "VMM process status has a malformed confinement field",
-            ));
-        }
-        value
-            .parse()
-            .map_err(|_| failure("VMM process status has an out-of-range confinement field"))
-    }
-
-    fn parse_status_hex(value: &str) -> SmokeResult<u128> {
-        if !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(failure(
-                "VMM process status has a malformed confinement field",
-            ));
-        }
-        u128::from_str_radix(value, 16)
-            .map_err(|_| failure("VMM process status has an out-of-range confinement field"))
-    }
-
     async fn wait_for_identity_to_end(identity: &ProcessIdentity) -> SmokeResult<()> {
         let deadline = Instant::now() + VM_EXIT_TIMEOUT;
         loop {
@@ -1994,6 +1831,7 @@ mod linux {
     }
 
     fn require_runtime_endpoints(paths: &VmPaths) -> SmokeResult<()> {
+        live_landlock::require_resolved_checkpoints_dir(paths)?;
         for directory in [
             &paths.vm_dir,
             &paths.api_dir,
@@ -2747,6 +2585,9 @@ mod linux {
         format!("/workspace/.cw-mesh-{generation}")
     }
 
+    /// The host's fixture connects as soon as the port listens, and `nc -l`
+    /// stops listening once it accepts, so a connection already accepted or
+    /// served also counts as ready (#5748).
     fn mesh_guest_script(generation: u64) -> String {
         let received_path = mesh_received_path(generation);
         let handler_path = format!("/workspace/.cw-mesh-handler-{generation}");
@@ -2758,7 +2599,7 @@ mod linux {
              /bin/busybox nc -l -s 0.0.0.0 -p {MESH_GUEST_PORT} -e {handler_path} & \
              server=\"$!\"; ready=0; i=0; \
              while test \"$i\" -lt 200; do \
-               if /bin/busybox grep -q ':{guest_port_hex} .* 0A ' /proc/net/tcp; then ready=1; break; fi; \
+               if /bin/busybox grep -q ':{guest_port_hex} .* 0[1A] ' /proc/net/tcp || ! kill -0 \"$server\" 2>/dev/null; then ready=1; break; fi; \
                i=$((i + 1)); /bin/busybox sleep 0.05; \
              done; \
              test \"$ready\" -eq 1; printf 'CWMESH1 ready\\n'; \
@@ -2873,18 +2714,21 @@ mod linux {
             }
             output.extend_from_slice(&chunk.data);
         }
-        let class = [
-            ("non-loopback network interface", "interface"),
-            ("non-loopback IPv6 route", "ipv6-route"),
-            ("non-loopback route", "ipv4-route"),
-            ("open TCP canary socket", "tcp-open"),
-            ("guest TCP canary", "tcp-connect"),
-            ("open UDP canary socket", "udp-open"),
-            ("guest UDP canary", "udp-connect"),
-            ("open DNS canary socket", "dns-open"),
-            ("guest DNS canary", "dns-connect"),
-            ("open ICMP canary socket", "icmp-open"),
-            ("guest ICMP canary", "icmp-connect"),
+        let class = network_failure_class(&output);
+        // Never render the guest-controlled bytes. Only this fixed allowlisted
+        // classification reaches the controlled receipt.
+        observation("guest.network_failure_class", class);
+    }
+
+    /// Classifies a failed `network-check` by the guest probe's own messages.
+    fn network_failure_class(output: &[u8]) -> &'static str {
+        [
+            ("guest network", "interface"),
+            ("IPv6 route", "ipv6-route"),
+            ("route", "ipv4-route"),
+            ("TCP connection", "tcp-connect"),
+            ("UDP", "udp"),
+            ("raw ICMP", "icmp"),
         ]
         .into_iter()
         .find_map(|(needle, class)| {
@@ -2893,10 +2737,7 @@ mod linux {
                 .any(|window| window == needle.as_bytes())
                 .then_some(class)
         })
-        .unwrap_or("unclassified");
-        // Never render the guest-controlled bytes. Only this fixed allowlisted
-        // classification reaches the controlled receipt.
-        observation("guest.network_failure_class", class);
+        .unwrap_or("unclassified")
     }
 
     async fn launch_poweroff(client: &SessionClient) -> SmokeResult<String> {
@@ -3148,7 +2989,6 @@ mod linux {
             "vfio",
             "tpm",
             "migration",
-            "landlock_rules",
             "preserved_fds",
         ] {
             if config.get(key).is_some_and(nonempty_json) {
@@ -3169,11 +3009,7 @@ mod linux {
                 "Cloud Hypervisor live configuration has unexpected disks",
             ));
         }
-        if config.get("landlock_enable") != Some(&Value::Bool(true)) {
-            return Err(failure(
-                "Cloud Hypervisor live configuration does not enable native Landlock",
-            ));
-        }
+        live_landlock::require_live_landlock(config, paths)?;
         let state_path = paths.state_disk.to_string_lossy();
         let root_path = root_disk_path(paths).to_string_lossy().into_owned();
         let seed_path = paths.seed_disk.to_string_lossy();
@@ -3600,6 +3436,47 @@ mod linux {
         }
 
         #[test]
+        fn network_failures_are_classified_by_the_probe_messages() {
+            for (message, class) in [
+                (
+                    "guest network namespace does not contain exactly loopback and the trusted TUN",
+                    "interface",
+                ),
+                ("guest network interface table is malformed", "interface"),
+                ("guest TUN unexpectedly has an IPv6 route", "ipv6-route"),
+                (
+                    "guest default route is not bound to the trusted TUN gateway",
+                    "ipv4-route",
+                ),
+                (
+                    "guest has a route through an unexpected interface",
+                    "ipv4-route",
+                ),
+                (
+                    "isolated workspace unexpectedly completed a TCP connection",
+                    "tcp-connect",
+                ),
+                (
+                    "isolated workspace unexpectedly received a UDP response",
+                    "udp",
+                ),
+                ("bind isolated workspace UDP canary", "udp"),
+                (
+                    "isolated workspace unexpectedly created a raw ICMP socket",
+                    "icmp",
+                ),
+                (
+                    "isolated workspace raw ICMP denial is not capability-enforced",
+                    "icmp",
+                ),
+                ("guest identity is unreadable", "unclassified"),
+            ] {
+                let output = format!("codewire guest probe failed: {message}\n");
+                assert_eq!(network_failure_class(output.as_bytes()), class, "{message}");
+            }
+        }
+
+        #[test]
         fn top_level_failure_text_never_renders_the_error_chain() {
             const ATTACKER_MARKER: &str = "CW_ATTACKER_SECRET_TOKEN_MARKER";
             let attacker_controlled_error = failure(ATTACKER_MARKER);
@@ -3678,31 +3555,6 @@ mod linux {
             }
         }
 
-        #[test]
-        fn process_confinement_parser_requires_unique_exact_fields() {
-            let status = "Name:\tcloud-hypervisor\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapAmb:\t0000000000000000\nNoNewPrivs:\t1\nSeccomp:\t2\nSeccomp_filters:\t1\n";
-            assert_eq!(
-                parse_process_confinement(status).unwrap(),
-                ProcessConfinement {
-                    seccomp: 2,
-                    seccomp_filters: 1,
-                    no_new_privs: 1,
-                    cap_inh: 0,
-                    cap_prm: 0,
-                    cap_eff: 0,
-                    cap_amb: 0,
-                }
-            );
-            assert!(
-                parse_process_confinement("CapInh:\t0\nCapPrm:\t0\nCapEff:\t0\nCapAmb:\t0\nNoNewPrivs:\t1\nSeccomp:\t2\nSeccomp:\t2\nSeccomp_filters:\t1\n")
-                    .is_err()
-            );
-            assert!(
-                parse_process_confinement("CapInh:\t0\nCapPrm:\t0\nCapEff:\t0\nCapAmb:\t0\nNoNewPrivs:\t1\nSeccomp:\tfilter\nSeccomp_filters:\t1\n")
-                    .is_err()
-            );
-        }
-
         #[tokio::test]
         async fn daemon_readiness_deadline_bounds_an_attempt_that_never_returns() {
             let result = tokio::time::timeout(
@@ -3719,7 +3571,7 @@ mod linux {
             assert!(result.is_err());
         }
 
-        fn test_paths() -> VmPaths {
+        pub(super) fn test_paths() -> VmPaths {
             let vm_dir = PathBuf::from("/state/vms/00000000-0000-4000-8000-000000000001");
             let sockets_dir = PathBuf::from("/tmp/cw-0/0000000000000000/vms/vm");
             let api_dir = sockets_dir.join("api");
@@ -3765,7 +3617,10 @@ mod linux {
         fn exact_vm_info(paths: &VmPaths, resources: RunResources) -> VmInfo {
             let config = serde_json::json!({
                 "landlock_enable": true,
-                "landlock_rules": null,
+                "landlock_rules": [{
+                    "path": paths.checkpoints_dir.to_str().unwrap(),
+                    "access": "rw"
+                }],
                 "preserved_fds": null,
                 "cpus": {
                     "boot_vcpus": resources.vcpus,

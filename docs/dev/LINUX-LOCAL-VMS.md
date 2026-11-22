@@ -110,6 +110,26 @@ this host cannot run local VMs yet:
 
 A missing git is only a note, since other workspaces do not need it.
 
+### What the qualification smoke checks
+
+`codewire-local-vmm-smoke run` takes one VM through OCI provisioning, restarts
+and a guest poweroff, and kills its network worker, egress broker and Mesh
+transport to see the VM fail closed. Along the way it checks the VMM's
+confinement and the guest's isolation. Nothing in CI runs it.
+
+Its VMM checks are derived for Cloud Hypervisor v54.0, the exact pinned
+release, and refuse to run against any other:
+
+- **seccomp:** the VMM runs with exactly one `--seccomp true`. Its main
+  thread, the VMM thread and the HTTP API thread each hold exactly one filter
+  of their own. Every other thread holds at least two, the VMM thread's and
+  its own. A new release needs that layout derived again from its source.
+- **Landlock:** native Landlock is on, and its one broadening is write access
+  to the VM's own checkpoint directory.
+
+These follow Cloud Hypervisor's thread model and flags, not the host kernel.
+They were last run on Linux 7.2.15 (#5748).
+
 ## Managed agents in a local VM
 
 A managed agent (`cw run --agent codex` or `--agent claude`) in a local VM uses

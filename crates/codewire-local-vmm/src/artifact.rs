@@ -1331,8 +1331,10 @@ fn read_prefix(file: &mut File, path: &Path, limit: usize) -> Result<Vec<u8>, Ar
     Ok(bytes)
 }
 
+/// Refuses an executable that does not report the pinned Cloud Hypervisor
+/// release, [`CLOUD_HYPERVISOR_RELEASE`], exactly.
 #[cfg(target_os = "linux")]
-async fn verify_cloud_hypervisor_version(path: &Path) -> Result<(), ArtifactError> {
+pub async fn verify_cloud_hypervisor_version(path: &Path) -> Result<(), ArtifactError> {
     verify_executable_version(path, expected_cloud_hypervisor_version_output).await
 }
 
