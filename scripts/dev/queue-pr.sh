@@ -34,7 +34,19 @@ if [[ -z "${QUEUE_PR_CALLER-}" ]]; then
   git -C "$here" update-ref -d "refs/queue-pr/$$/self"
   QUEUE_PR_CALLER="$here" QUEUE_PR_COPY="$copy" exec bash "$copy/scripts/dev/queue-pr.sh" "$@"
 fi
-[[ -z "${QUEUE_PR_COPY-}" ]] || trap 'rm -rf -- "$QUEUE_PR_COPY"' EXIT
+if [[ -n "${QUEUE_PR_COPY-}" ]]; then
+  # The copy's path comes in through the environment, and it is removed on
+  # exit: it must be this very run's copy, a queue-pr.* directory directly
+  # under the temporary directory, or nothing is removed and nothing queued.
+  copy_root="$(cd "$QUEUE_PR_COPY" 2>/dev/null && pwd)" || copy_root=''
+  tmp_root="$(cd "${TMPDIR:-/tmp}" 2>/dev/null && pwd)" || tmp_root=''
+  if [[ -z "$copy_root" || "$copy_root" != "$here" || "${copy_root%/*}" != "$tmp_root" ||
+    "${copy_root##*/}" != queue-pr.* ]]; then
+    printf "queue-pr.sh: QUEUE_PR_COPY is not this run's copy of main's queue-pr.sh; nothing was queued\n" >&2
+    exit 1
+  fi
+  trap 'rm -rf -- "$QUEUE_PR_COPY"' EXIT
+fi
 pr="$1" title="$2"
 # The title becomes a commit on main and on the public mirror, and it cannot be
 # changed afterwards. A placeholder is refused: #4834's pull request was

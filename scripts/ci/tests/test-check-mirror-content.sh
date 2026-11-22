@@ -573,6 +573,20 @@ grep -qxF 'check --locked --all-targets --all-features -p demo' "$work/cargo.log
   fail "queue-pr.sh did not check the touched package: $(cat "$work/cargo.log")"
 grep -qP '\t44\t[0-9]+\t0\tdemo$' "$work/xdg/codewire-queue-pr/times.tsv" || fail 'queue-pr.sh did not record the check'
 [[ -z "$(ls -A "$work/queue-tmp")" ]] || fail "queue-pr.sh left main's copy behind: $(ls -A "$work/queue-tmp")"
+# QUEUE_PR_COPY is removed on exit, so a run refuses one that isn't its own
+# copy, a queue-pr.* directory directly under the temporary directory, and
+# leaves it alone.
+mkdir "$work/precious"
+printf 'keep\n' >"$work/precious/file"
+mv "$MERGE_TEST_ARGS" "$work/merge.args.before"
+TMPDIR="$work/queue-tmp" PATH="$work/merge-bin:$PATH" QUEUE_PR_CALLER="$merge_repo" QUEUE_PR_COPY="$work/precious" \
+  bash "$merge_repo/scripts/dev/queue-pr.sh" 42 'fix: safe title' >"$work/queue-copy.out" 2>&1 &&
+  fail 'queue-pr.sh ran with a QUEUE_PR_COPY that is not its own copy'
+grep -qF "QUEUE_PR_COPY is not this run's copy" "$work/queue-copy.out" ||
+  fail "queue-pr.sh did not say why it refused the copy: $(cat "$work/queue-copy.out")"
+[[ -f "$work/precious/file" ]] || fail 'queue-pr.sh removed a QUEUE_PR_COPY that was not its own copy'
+[[ ! -e "$MERGE_TEST_ARGS" ]] || fail 'a run with a foreign QUEUE_PR_COPY reached the forge'
+mv "$work/merge.args.before" "$MERGE_TEST_ARGS"
 # The caller's own copy hands over to main's, whatever the caller's branch
 # carries: here main's is a stub that says it ran.
 cat >"$merge_repo/scripts/dev/queue-pr.sh" <<'SH'
@@ -595,6 +609,6 @@ rendered=Template(Path(sys.argv[1]).read_text()).substitute(
     PullRequestTitle='fix: safe title', PullRequestIndex='42')
 assert rendered == 'fix: safe title (#42)\n\nReviewed-on: #42\n', rendered
 PYTEST
-printf '[test-check-mirror-content] explicit merge metadata, the queue path and template: 11 cases passed\n'
+printf '[test-check-mirror-content] explicit merge metadata, the queue path and template: 12 cases passed\n'
 
 printf '[test-check-mirror-content] mirror content gate contract passed\n'
