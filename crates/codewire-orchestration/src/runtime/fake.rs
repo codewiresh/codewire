@@ -386,6 +386,14 @@ impl RuntimeObservations for FakeRuntimeDriver {
         anyhow::bail!("not scripted")
     }
 
+    async fn mark_vm_state_existing(
+        &self,
+        _placement: &Placement,
+        _runtime: &RuntimeFacts,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("not scripted")
+    }
+
     async fn delete_refused_member(
         &self,
         _placement: &Placement,

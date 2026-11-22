@@ -9,7 +9,7 @@ This journey was written before the code. The format is in
 
 ## Where it stands
 
-Updated 2026-11-20. Written first; every step is not yet observed.
+Updated 2026-11-22. Written first; every step is not yet observed.
 
 | ID | Kind | Dev | Production |
 | --- | --- | --- | --- |
@@ -108,14 +108,18 @@ Updated 2026-11-20. Written first; every step is not yet observed.
 
 - **Entry points:** `cw stop`, `cw start`, the dashboard's stop and start.
 - **States to exercise:** a stop while a process writes; a start on the same
-  volume; a file written outside the home and the workspace.
+  volume; a file written outside the home and the workspace; a used volume
+  whose disk has gone.
 - **Driving it:**
   1. `cw exec --in std-a -- sh -c 'echo NONCE > ~/keep; echo NONCE > /workspace/keep; sudo sh -c "echo NONCE > /opt/gone"'`.
   2. `cw stop std-a`, then `cw start std-a`.
   3. `cw exec --in std-a -- cat ~/keep /workspace/keep` prints the nonce twice;
      `cw exec --in std-a -- cat /opt/gone` fails with "No such file".
-- **Proof:** the nonce read back from the two kept paths, and the missing
-  third file.
+  4. The Sandbox's `workspace` container has `CODEWIRE_VM_STATE=existing`.
+     On a scratch sandbox only: stop it, remove its state disk from the
+     volume, start it. Its Pod fails, and no empty workspace binds.
+- **Proof:** the nonce read back from the two kept paths, the missing third
+  file, the Sandbox's `existing`, and the failed Pod with nothing bound.
 - **Gotchas:** a stop that takes the whole grace period means the guest did
   not power off when asked; record the stop's duration.
 - **Observed:** not yet observed.

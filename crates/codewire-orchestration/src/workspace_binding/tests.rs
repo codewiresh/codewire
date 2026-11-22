@@ -16,6 +16,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codewire_daemon_proto::{SANDBOX_SERVICE_ACCOUNT, WORKSPACE_BINDING_TOKEN_AUDIENCE};
 use codewire_server_core::bounded_http1::PeerAddr;
+use http_body_util::BodyExt as _;
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewStatus, UserInfo};
 use k8s_openapi::api::core::v1::{Pod, PodSpec, PodStatus};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference, Time};
@@ -281,6 +282,9 @@ struct FakeCluster {
     node: Mutex<Option<Value>>,
     /// Every request, as (method, path), in order.
     requests: Mutex<Vec<(String, String)>>,
+    /// Every Sandbox patch's body, and how the next one is answered.
+    sandbox_patches: Mutex<Vec<Value>>,
+    sandbox_patch_status: Mutex<StatusCode>,
 }
 
 impl FakeCluster {
@@ -297,6 +301,8 @@ impl FakeCluster {
             service: Mutex::new(None),
             node: Mutex::new(None),
             requests: Mutex::new(Vec::new()),
+            sandbox_patches: Mutex::new(Vec::new()),
+            sandbox_patch_status: Mutex::new(StatusCode::OK),
         })
     }
 
@@ -384,6 +390,27 @@ impl FakeCluster {
                     match cluster.sandboxes.next() {
                         Some(sandbox) => json_response(StatusCode::OK, sandbox),
                         None => not_found(),
+                    }
+                } else if method == "PATCH"
+                    && path
+                        == format!(
+                            "/apis/agents.x-k8s.io/v1beta1/namespaces/{NAMESPACE}/sandboxes/{SANDBOX_NAME}"
+                        )
+                {
+                    let body = request.into_body().collect().await.unwrap().to_bytes();
+                    cluster
+                        .sandbox_patches
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(&body).unwrap());
+                    let status = *cluster.sandbox_patch_status.lock().unwrap();
+                    if status == StatusCode::OK {
+                        json_response(status, sandbox())
+                    } else {
+                        json_response(
+                            status,
+                            json!({"apiVersion":"v1","kind":"Status","status":"Failure","message":"the test failed","reason":"Invalid","code":status.as_u16()}),
+                        )
                     }
                 } else if method == "GET"
                     && path
@@ -2321,3 +2348,5 @@ async fn each_method_makes_the_reads_it_made_before() {
 
 #[path = "authorize_tests.rs"]
 mod authorize_tests;
+#[path = "vm_state_tests.rs"]
+mod vm_state_tests;

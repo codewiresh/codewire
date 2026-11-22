@@ -12,6 +12,7 @@ use codewire_daemon_proto::{
     POD_RUNTIME_IMAGE_DISK_BUILD_ID_ENV, POD_RUNTIME_IMAGE_DISK_ID_ENV,
     POD_RUNTIME_IMAGE_DISK_MOUNT_PATH, POD_RUNTIME_MEMORY_MIB_ENV, POD_RUNTIME_PLATFORM_PEERS_ENV,
     POD_RUNTIME_STATE_DISK_MIB_ENV, POD_RUNTIME_STATE_MOUNT_PATH, POD_RUNTIME_VCPUS_ENV,
+    POD_RUNTIME_VM_STATE_ENV, POD_RUNTIME_VM_STATE_EXISTING, POD_RUNTIME_VM_STATE_NEW,
     POD_RUNTIME_WORKSPACE_IMAGE_ENV,
 };
 
@@ -316,6 +317,10 @@ fn settings(
             state_disk_mib(opts.disk_gib).to_string(),
         ),
         (
+            POD_RUNTIME_VM_STATE_ENV,
+            POD_RUNTIME_VM_STATE_NEW.to_owned(),
+        ),
+        (
             POD_RUNTIME_WORKSPACE_IMAGE_ENV,
             runtime.workspace_image.clone(),
         ),
@@ -332,4 +337,64 @@ fn settings(
     .into_iter()
     .map(|(name, value)| json!({ "name": name, "value": value }))
     .collect()
+}
+
+/// The JSON Patch operations that turn a `standard` Sandbox's rendered
+/// [`POD_RUNTIME_VM_STATE_ENV`] from `new` into `existing` (#5602), fenced by
+/// `test`s of the Sandbox's UID and of the entry's name and value, so no
+/// later Pod of it creates its state disk. Empty for a Sandbox of another
+/// class, or once it is `existing`. Only the next Pod reads it: the
+/// controller never rewrites a running one.
+pub(crate) fn vm_state_existing(sandbox: &Value) -> anyhow::Result<Vec<Value>> {
+    let spec = "/spec/podTemplate/spec";
+    if sandbox
+        .pointer(&format!("{spec}/runtimeClassName"))
+        .and_then(Value::as_str)
+        != Some(RUNTIME_CLASS_STANDARD)
+    {
+        return Ok(Vec::new());
+    }
+    let uid = sandbox
+        .pointer("/metadata/uid")
+        .and_then(Value::as_str)
+        .filter(|uid| !uid.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("the standard Sandbox has no UID"))?;
+    let containers = sandbox
+        .pointer(&format!("{spec}/containers"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let (index, workspace) = containers
+        .iter()
+        .enumerate()
+        .find(|(_, container)| container["name"] == "workspace")
+        .ok_or_else(|| anyhow::anyhow!("the standard Sandbox has no workspace container"))?;
+    let (entry, value) = workspace["env"]
+        .as_array()
+        .and_then(|env| {
+            env.iter()
+                .enumerate()
+                .find(|(_, variable)| variable["name"] == POD_RUNTIME_VM_STATE_ENV)
+        })
+        .map(|(entry, variable)| (entry, variable.get("value").and_then(Value::as_str)))
+        .ok_or_else(|| {
+            anyhow::anyhow!("the standard Sandbox's workspace has no {POD_RUNTIME_VM_STATE_ENV}")
+        })?;
+    let path = format!("{spec}/containers/{index}/env/{entry}");
+    match value {
+        Some(POD_RUNTIME_VM_STATE_EXISTING) => Ok(Vec::new()),
+        Some(POD_RUNTIME_VM_STATE_NEW) => Ok(vec![
+            json!({"op": "test", "path": "/metadata/uid", "value": uid}),
+            json!({"op": "test", "path": format!("{path}/name"), "value": POD_RUNTIME_VM_STATE_ENV}),
+            json!({"op": "test", "path": format!("{path}/value"), "value": POD_RUNTIME_VM_STATE_NEW}),
+            json!({
+                "op": "replace",
+                "path": format!("{path}/value"),
+                "value": POD_RUNTIME_VM_STATE_EXISTING,
+            }),
+        ]),
+        _ => anyhow::bail!(
+            "the standard Sandbox's {POD_RUNTIME_VM_STATE_ENV} is neither {POD_RUNTIME_VM_STATE_NEW} nor {POD_RUNTIME_VM_STATE_EXISTING}"
+        ),
+    }
 }

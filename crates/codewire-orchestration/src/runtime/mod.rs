@@ -635,6 +635,15 @@ pub trait RuntimeObservations: Send + Sync {
         support_image: &str,
     ) -> anyhow::Result<()>;
 
+    /// Mark `runtime`, as the bind read it, as having held its workspace, so
+    /// no later incarnation creates its disks afresh (#5602). Nothing changes
+    /// for a runtime that never creates them, or once it is marked.
+    async fn mark_vm_state_existing(
+        &self,
+        placement: &Placement,
+        runtime: &RuntimeFacts,
+    ) -> anyhow::Result<()>;
+
     /// Delete exactly this incarnation, only while it holds this UID (§5.6).
     async fn delete_refused_member(
         &self,

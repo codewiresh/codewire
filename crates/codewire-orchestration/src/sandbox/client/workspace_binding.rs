@@ -257,6 +257,29 @@ impl SandboxClient {
         )
         .await
     }
+
+    /// Marks the `standard` Sandbox `sandbox`, as its daemon's bind read it,
+    /// as having held its workspace
+    /// ([`vm_state_existing`](crate::sandbox::template::vm_state_existing)).
+    /// Nothing is written for any other Sandbox or once it is marked; a
+    /// Sandbox changed since the read fails a `test` and is read again at the
+    /// daemon's next bind.
+    pub async fn mark_vm_state_existing(&self, sandbox: &Value) -> anyhow::Result<()> {
+        let operations = crate::sandbox::template::vm_state_existing(sandbox)?;
+        if operations.is_empty() {
+            return Ok(());
+        }
+        let name = sandbox
+            .pointer("/metadata/name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("the standard Sandbox has no name"))?;
+        let patch = Patch::Json::<()>(serde_json::from_value(Value::Array(operations))?);
+        self.sandboxes()
+            .patch(name, &PatchParams::default(), &patch)
+            .await
+            .map_err(|error| anyhow::anyhow!("mark Sandbox {name} existing: {error}"))?;
+        Ok(())
+    }
 }
 
 /// The Claim is the recorded one, live, and names its bound Sandbox.

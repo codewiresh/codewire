@@ -42,7 +42,7 @@ use super::{BINDING_REQUERY_INTERVAL, MAX_BIND_WAIT};
 use crate::environment_mesh::{
     ENROLLMENT_LIFETIME_SECS, enrollment_code_sha256, generate_enrollment_code,
 };
-use crate::runtime::{MemberFacts, Placement, RuntimeDriver};
+use crate::runtime::{MemberFacts, Placement, RuntimeDriver, RuntimeFacts};
 use crate::runtime_transport::RuntimeTransportZone;
 use crate::worker::environment_auth::{
     WorkspaceCredentialScope, issue_workspace_daemon_credential,
@@ -294,13 +294,13 @@ impl WorkspaceBindingState {
 
     /// §4.6: the freshly read Pod, its Sandbox and SandboxClaim still match
     /// the recorded binding, the binding is Pod-scoped, and it is still the
-    /// same live binding.
+    /// same live binding. Returns the Sandbox as read.
     async fn confirm(
         &self,
         caller: &Caller,
         member: &MemberFacts,
         binding: &LiveBinding,
-    ) -> Result<(), BindError> {
+    ) -> Result<RuntimeFacts, BindError> {
         let identity = &caller.identity;
         let owner =
             authorize::bound_pod(member, identity, binding).ok_or(BindError::PermissionDenied)?;
@@ -335,7 +335,7 @@ impl WorkspaceBindingState {
         if current != *binding {
             return Err(BindError::PermissionDenied);
         }
-        Ok(())
+        Ok(sandbox)
     }
 
     /// An already-bound caller: every method except `BindWorkspace`.
@@ -400,7 +400,14 @@ impl WorkspaceBindingState {
             );
             return Err(BindError::FailedPrecondition);
         }
-        self.confirm(&caller, &member, &binding).await?;
+        let sandbox = self.confirm(&caller, &member, &binding).await?;
+        // #5602: a daemon that asks has booted its VM, whose runtime has
+        // made the disks on the volume, so no later Pod may make them afresh.
+        // The daemon is answered only once that is written.
+        self.runtime()?
+            .mark_vm_state_existing(&Placement::new(&binding.namespace), &sandbox)
+            .await
+            .map_err(|_| BindError::Unavailable)?;
         let access = self.access_grant(&member, &binding).await?;
 
         // §4.7: respond only while the reviewed token is still valid.

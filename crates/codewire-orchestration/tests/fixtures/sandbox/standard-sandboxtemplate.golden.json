@@ -210,6 +210,10 @@
                 "value": "14694"
               },
               {
+                "name": "CODEWIRE_VM_STATE",
+                "value": "new"
+              },
+              {
                 "name": "CODEWIRE_WORKSPACE_IMAGE",
                 "value": "registry.example.invalid/codewire/workspace@sha256:5555555555555555555555555555555555555555555555555555555555555555"
               },

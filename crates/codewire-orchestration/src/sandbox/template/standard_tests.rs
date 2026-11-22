@@ -192,6 +192,8 @@ fn a_standard_workspace_hands_cw_pod_runtime_its_settings_by_their_names() {
         ("CODEWIRE_VM_MEMORY_MIB", "4096"),
         // 20 GiB less 7%, 256 MiB and the 4 GiB root disk, whole MiB.
         ("CODEWIRE_VM_STATE_DISK_MIB", "14694"),
+        // Until its daemon's first bind is answered.
+        ("CODEWIRE_VM_STATE", "new"),
         ("CODEWIRE_WORKSPACE_IMAGE", WORKSPACE_IMAGE),
         ("CODEWIRE_IMAGE_DISK_ID", IMAGE_DISK_ID),
         ("CODEWIRE_IMAGE_DISK_BUILD_ID", BUILD_ID),
@@ -333,4 +335,85 @@ fn a_standard_template_matches_its_golden_file() {
         "standard-sandboxtemplate.golden.json",
         &render_sandbox_template(NAMESPACE, &opts()),
     );
+}
+
+/// A Sandbox of `template`'s Pod, as the controller makes it.
+fn sandbox(template: &Value) -> Value {
+    json!({
+        "metadata": { "name": "sandbox-std", "uid": "sandbox-uid" },
+        "spec": { "podTemplate": template["spec"]["podTemplate"].clone() },
+    })
+}
+
+fn vm_state_entry(sandbox: &Value) -> usize {
+    workspace(sandbox)["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|entry| entry["name"] == "CODEWIRE_VM_STATE")
+        .unwrap()
+}
+
+#[test]
+fn a_standard_sandbox_is_marked_existing_once_by_a_fenced_replace() {
+    let mut sandbox = sandbox(&render_sandbox_template(NAMESPACE, &opts()));
+    let entry = vm_state_entry(&sandbox);
+    let path = format!("/spec/podTemplate/spec/containers/0/env/{entry}");
+    let operations = vm_state_existing(&sandbox).unwrap();
+    assert_eq!(
+        operations,
+        vec![
+            json!({"op": "test", "path": "/metadata/uid", "value": "sandbox-uid"}),
+            json!({"op": "test", "path": format!("{path}/name"), "value": "CODEWIRE_VM_STATE"}),
+            json!({"op": "test", "path": format!("{path}/value"), "value": "new"}),
+            json!({"op": "replace", "path": format!("{path}/value"), "value": "existing"}),
+        ]
+    );
+    *sandbox.pointer_mut(&format!("{path}/value")).unwrap() = json!("existing");
+    assert_eq!(env(&sandbox)["CODEWIRE_VM_STATE"], "existing");
+    // Marked, it is never written again.
+    assert!(vm_state_existing(&sandbox).unwrap().is_empty());
+}
+
+#[test]
+fn a_sandbox_of_another_class_is_never_marked() {
+    let mut commodity = opts();
+    commodity.runtime_profile = super::runtime_policy::RUNTIME_PROFILE_COMMODITY.into();
+    commodity.standard_runtime = None;
+    let sandbox = sandbox(&render_sandbox_template(NAMESPACE, &commodity));
+    assert_ne!(pod(&sandbox)["runtimeClassName"], "standard");
+    assert!(vm_state_existing(&sandbox).unwrap().is_empty());
+    assert!(vm_state_existing(&json!({})).unwrap().is_empty());
+}
+
+#[test]
+fn a_standard_sandbox_without_its_vm_state_or_with_another_value_is_refused() {
+    let rendered = sandbox(&render_sandbox_template(NAMESPACE, &opts()));
+    let entry = vm_state_entry(&rendered);
+    let env = format!("/spec/podTemplate/spec/containers/0/env/{entry}");
+    for case in ["missing", "another value", "from a source", "no UID"] {
+        let mut sandbox = rendered.clone();
+        match case {
+            "missing" => {
+                sandbox
+                    .pointer_mut("/spec/podTemplate/spec/containers/0/env")
+                    .and_then(Value::as_array_mut)
+                    .unwrap()
+                    .remove(entry);
+            }
+            "another value" => {
+                *sandbox.pointer_mut(&format!("{env}/value")).unwrap() = json!("blank")
+            }
+            "from a source" => {
+                *sandbox.pointer_mut(&env).unwrap() = json!({
+                    "name": "CODEWIRE_VM_STATE",
+                    "valueFrom": { "fieldRef": { "fieldPath": "metadata.name" } },
+                });
+            }
+            _ => {
+                sandbox["metadata"].as_object_mut().unwrap().remove("uid");
+            }
+        }
+        assert!(vm_state_existing(&sandbox).is_err(), "{case}");
+    }
 }

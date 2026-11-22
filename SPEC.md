@@ -388,7 +388,10 @@ Pod: the supervisor, Cloud Hypervisor and guest that run a local VM
 - **The workspace image** reaches the VM as a read-only disk that the node
   pulls and caches like any image and every Sandbox on the node shares. Each
   VM adds a small writable root that is rebuilt at every start. The home and
-  the workspace persist on the Sandbox's volume, as on `commodity`.
+  the workspace persist on the Sandbox's volume, as on `commodity`. Once the
+  daemon's first bind is answered, the volume is marked as used, and a later
+  Pod that finds its disk missing fails instead of starting an empty
+  workspace.
 - **Beside the other profiles.** `commodity` and `confidential` do not
   change. A profile is chosen for an organization, an environment keeps the
   profile it was created on, and nothing is converted. Until `standard` can

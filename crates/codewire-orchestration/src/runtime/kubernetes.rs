@@ -615,6 +615,16 @@ impl RuntimeObservations for KubernetesDriver {
             .await
     }
 
+    async fn mark_vm_state_existing(
+        &self,
+        placement: &Placement,
+        runtime: &RuntimeFacts,
+    ) -> anyhow::Result<()> {
+        self.sandbox_client(placement)
+            .mark_vm_state_existing(&runtime.json)
+            .await
+    }
+
     async fn delete_refused_member(
         &self,
         placement: &Placement,

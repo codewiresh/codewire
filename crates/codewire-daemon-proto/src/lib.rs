@@ -94,6 +94,12 @@ pub const EGRESS_STREAM_PORT: u16 = 8089;
 pub const POD_RUNTIME_VCPUS_ENV: &str = "CODEWIRE_VM_VCPUS";
 pub const POD_RUNTIME_MEMORY_MIB_ENV: &str = "CODEWIRE_VM_MEMORY_MIB";
 pub const POD_RUNTIME_STATE_DISK_MIB_ENV: &str = "CODEWIRE_VM_STATE_DISK_MIB";
+/// Whether the Sandbox's volume has held its workspace: `new` until its
+/// daemon's first bind is answered, then `existing`, after which the runtime
+/// never creates the state disk and a missing one fails the boot.
+pub const POD_RUNTIME_VM_STATE_ENV: &str = "CODEWIRE_VM_STATE";
+pub const POD_RUNTIME_VM_STATE_NEW: &str = "new";
+pub const POD_RUNTIME_VM_STATE_EXISTING: &str = "existing";
 /// The workspace image the VM's project names; its published disk is at
 /// [`POD_RUNTIME_IMAGE_DISK_MOUNT_PATH`].
 pub const POD_RUNTIME_WORKSPACE_IMAGE_ENV: &str = "CODEWIRE_WORKSPACE_IMAGE";
