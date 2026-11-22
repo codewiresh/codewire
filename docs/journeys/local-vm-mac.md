@@ -233,18 +233,18 @@ Issue: #5084.
   product (`docs/dev/MACOS-CLI.md`). The hold is built and unit-tested on
   Linux (#5084); its walk on a Mac is not done.
 
-## 5. `mac-vm-intercept`: a VM boots with agent interception switched on
+## 5. `mac-vm-intercept`: a VM boots with agent interception on
 
 Issues: #3999, #4916.
 
-- **Entry points:** the file `egress-intercept` in the local VM state root
-  (`~/.codewire/native-v1` by default) with the content `on`, then
-  `cw create --local --profile local:P` or `cw --local start` of a VM bound
-  to a local profile.
-- **States to exercise:** a boot with the switch on, and the same VM stopped
-  and started after the file is removed.
-- **Driving it:** write `on` to the file, create a VM bound to a local
-  profile, find its front-door process (`cw __native-front-door`), and in the
+- **Entry points:** `cw create --local --profile local:P` or
+  `cw --local start` of a VM bound to a local profile: interception is on by
+  default. Until the switch-on lands (#3999), the file `egress-intercept` in
+  the local VM state root (`~/.codewire/native-v1` by default) holding `on`
+  turns it on.
+- **States to exercise:** a boot with interception on, and the same VM
+  stopped and started after `off` is written to the file.
+- **Driving it:** create a VM bound to a local profile, find its front-door process (`cw __native-front-door`), and in the
   VM read the CA that `NODE_EXTRA_CA_CERTS` names. A VM with no profile has no
   local credential broker, so it boots without interception, and the
   supervisor's log records `egress_intercept switch=on

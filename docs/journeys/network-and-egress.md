@@ -717,9 +717,10 @@ pairing (#4884), placeholder delivery (#4812, #4887). The local Claude
 sign-in it uses is #4798, whose walk is the credentials journey that pull
 request adds.
 
-- **Entry points:** the per-host switch for local VMs (no command yet,
-  #4809), then `cw create --local` or `cw start` as usual. Nothing inside the
-  VM turns interception on.
+- **Entry points:** `cw create --local` or `cw start` as usual, for a VM
+  with a selected credential: interception is on by default. Nothing inside
+  the VM turns it on or off. Until the switch-on lands (#3999), the file
+  `egress-intercept` holding `on` turns it on.
 - **States to exercise:**
   - the switch on, with a Claude credential selected: an API key, and the
     owner's Claude sign-in;
@@ -750,8 +751,9 @@ request adds.
     on. With it on, `cw --local info` shows `placeholders only: agents never
     hold your tokens` on the line under its `Credentials` row, and so do the
     start and create results; `--output json` carries
-    `"interception": {"state": "intercepted"}` (#4912). With the switch off
-    nothing is under the row, and the JSON says `{"state": "off"}`;
+    `"interception": {"state": "intercepted"}` (#4912). With the switch set
+    to `off`, the line names the file that turned it off, and the JSON says
+    `{"state": "off"}`;
   - **the guest trusts the boot's certificate authority, from the seed**
     (#4809, #4884). With the switch on, the boot's seed carries the
     authority's certificate, the guest publishes it as a read-only file, and
@@ -1563,21 +1565,23 @@ Issues: #3999, #4001.
   `TERM=dumb` that build's restart line drew `→` where the rest of `cw`
   drew `->`; the line now takes `cw`'s own glyphs.
 
-## `agent-switch-off`: with interception off, a local VM behaves as today
+## `agent-switch-off`: with interception switched off, a local VM behaves as before it
 
 Issue: #3999.
 
-- **Entry points:** the per-host switch for local VMs, off by default, which
-  the change that makes interception the default removes. No command yet
-  (#3999).
-- **States to exercise:** the switch absent; the switch holding something
-  other than its one accepted value; a VM checkpoint taken with it off and
+- **Entry points:** the file `egress-intercept` in the local VM state root
+  holding `off`: the rollback, kept for one release and removed with D3
+  (#4002). No command.
+- **States to exercise:** the switch set to `off`; the switch absent, or
+  holding anything else (both on); a VM checkpoint taken with it off and
   restored with it on, and the reverse.
-- **Driving it:** no command yet (#3999).
+- **Driving it:** write `off` to the file, then stop and start the VM.
 - **Proof:**
-  - with the switch absent or unrecognised, a VM boots and its agents use
-    today's routes, exactly as `docs/dev/SECRETS-AND-CREDENTIALS.md`
-    describes; an unrecognised value is logged once;
+  - with the switch set to `off`, a VM boots and its agents use the
+    loopback routes, exactly as `docs/dev/SECRETS-AND-CREDENTIALS.md`
+    describes, and `cw --local info` names the file;
+  - with the switch absent, `on`, or anything else, the boot intercepts,
+    and anything but `on` or `off` is logged once;
   - **with the switch off the guest has no certificate authority** (#4809,
     #4884): the seed carries none, the guest publishes no certificate file,
     and Codewire sets no `NODE_EXTRA_CA_CERTS`;

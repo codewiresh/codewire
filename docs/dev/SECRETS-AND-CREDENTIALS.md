@@ -1627,20 +1627,26 @@ inside an opaque encoding would not be caught, in a header or in a body. GitHub
 keeps its closed families and exact operations, since `git` and `gh` go through
 its signer and executor.
 
-### Agent host interception (in progress, #3999)
+### Agent host interception (#3999)
 
-Local VMs are gaining a TLS front door outside the VM that terminates
-connections to the agent hosts and swaps a per-environment placeholder for
-the credential (Program #3997). It is off by default, and with it off a boot
-is exactly as described above. What exists today:
+A local VM has a TLS front door outside the VM that terminates connections
+to the agent hosts and swaps a per-environment placeholder for the credential
+(Program #3997). It will be on by default for every local VM boot that can
+intercept (below); **not yet built** (#3999's switch-on), so today it is off
+unless switched on. A boot that doesn't intercept is exactly as described
+above.
 
 - **The switch, temporary and per host.** The file `egress-intercept` in the
   local VM state root (`~/.codewire/native-v1` by default, or
-  `CODEWIRE_NATIVE_STATE_ROOT`) switches interception on
-  for every boot the supervisor starts while its whole content is exactly
-  `on`, with an optional trailing newline. Anything else is off and logged.
-  The supervisor reads it once per boot and logs `egress_intercept` with what
-  the boot used. D3 removes it once interception is the default (#3997).
+  `CODEWIRE_NATIVE_STATE_ROOT`) switches interception off for every boot the
+  supervisor starts while its whole content is exactly `off`, with an
+  optional trailing newline. It is the rollback for one release, and D3
+  removes it once no local VM gets a real agent login (#4002). A missing
+  file, `on`, or anything else is on; anything but `on` or `off` is logged
+  once. Unreadable or odd content leaves the safe default, placeholders. The
+  supervisor reads it once per boot and logs `egress_intercept` with what the
+  boot used. **Not yet built** (#3999's switch-on): today the default is off,
+  and only a file holding exactly `on` turns interception on.
 - **What a boot with it on does.** The runner binds the hosts the boot's
   selected credentials name (below) on 443 in the egress broker and carries
   the front door's CA certificate, never its key, to the guest in the seed.
@@ -1696,8 +1702,9 @@ is exactly as described above. What exists today:
   log and `cw` say why (below). Nor does a boot whose credentials come from
   the platform on macOS, or against an authority that does not join the
   platform's front-door session (#4909; see "A local VM on a platform
-  profile" below). On macOS a boot with the switch on is refused and names
-  the file, until the front door is confined there.
+  profile" below). On macOS the front door is confined by Seatbelt's
+  deny-all profile (#4916), and a boot whose credentials come from the
+  platform does not intercept there.
 - **What `cw` shows (#4912).** The supervisor sends the boot's decision to
   its runner with the start, and the runner reports it while the boot runs.
   `cw --local info` shows it on its own line under the `Credentials` row
@@ -1723,8 +1730,9 @@ is exactly as described above. What exists today:
     the local credential service that is running is from an earlier cw; stop
     your local VMs so cw replaces that service, then start this one`. That is
     the sentence #4926's refusal uses, from one constant.
-  - `off`, with the switch off: no line, only JSON, until interception is
-    the default (D3).
+  - `off`, with the switch set to `off`: `no placeholders: interception is
+    switched off in NATIVE_ROOT/egress-intercept`, naming the file, so a
+    rollback left in place is visible.
   - `lost`, once the front door has ended without a stop being asked for:
     `! agents can't reach their providers; restart the VM`, then
     `→ cw --local restart NAME` (#5216).
@@ -1756,9 +1764,12 @@ is exactly as described above. What exists today:
   Nothing is mounted over the image's trust store and its layer is never
   written. A restored boot publishes from its own seed before the workspace
   thaws.
-- **The agent's login.** Claude Code's login writer accepts this
-  environment's placeholder as the access token; the broker delivering it is
-  the next step, and until then the direct delivery exception below applies.
+- **The agent's login.** A broker paired with the boot's front door seals
+  Claude's and Codex's logins with this environment's placeholders, never the
+  sign-in's tokens. One started with a front door it can't pair with seals no
+  login at all. A boot that doesn't intercept still gets the real login under
+  the direct delivery exceptions below, until #4002's local cutover refuses
+  it there too.
 - **GitHub's two hosts.** The front door, the bridge and the broker can
   serve `github.com` and `api.github.com` whole, so that Git and `gh` use
   GitHub's own names. No boot binds them yet: that needs the boot chain to
