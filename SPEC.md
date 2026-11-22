@@ -76,6 +76,45 @@ settings; a cloud create never reads that file. Repeated `--file` merges the
 named files in order: mappings merge by key, a later value or list replaces the
 earlier one, and `null` removes a key.
 
+Target, not shipped (#5949): `cw update ENV --file codewire.yaml` gives an
+existing cloud Sandbox the file's `startup_script`, added, changed or removed,
+without recreating it, so its ID and preview host names stay. Repeated `--file`
+merges as create does. The update compares the file with the Sandbox's saved
+settings (what `cw export` prints) and shows each difference before the prompt
+or `--yes`. `startup_script` is the one setting it changes: every start reads
+the saved script and runs it, so the change takes effect at the next start, and
+a running Sandbox keeps running. Any other setting that differs refuses the
+whole update by name, with where it changes instead: `secrets` and
+`credentials` with `--secrets` and `--profile`, `resources` with `cw resize`,
+`idle_stop` with `--idle-stop`, and the rest (the image, preset, repositories,
+`install_command`, ports, agents, skills, network, `working_directory` and
+`environment`) only by creating a Sandbox, since create applies them once.
+Nothing is saved after a refusal. `--file` doesn't combine with the source
+flags, and a local VM's `cw --local update --file` is refused for now: its
+setup is sealed per VM.
+
+The rules for the startup script after create:
+
+- **One writer.** Only the Sandbox's creator may change it, as with its
+  sources; organization owners and admins have no override. A member who can
+  exec into the Sandbox can't leave a hook that runs unattended at the
+  creator's next start, when the creator's bindings are present. Only one call
+  writes the saved script after create. It validates it exactly as create
+  validates `codewire.yaml`, with the same size limit and encoding, and it
+  changes no other setting.
+- **Only while running or stopped.** A running Sandbox gets the new script at
+  its next start, not now, and `cw` says so, so nobody takes it to have run.
+- **Audited without its text.** The audit row names the actor, the Sandbox,
+  and the script's SHA-256 and length, never the script. A startup script is
+  not a place for secrets; use `secrets`.
+- **Never under someone else.** A saved script runs only for its creator. When
+  the creator leaves or is removed from the organization, the script is
+  cleared with the departure. No Sandbox changes owner today, and any future
+  transfer must clear it too.
+- **No wider reading.** Whoever can read the Sandbox's saved settings today
+  (`cw export`) can read the script, and nobody else. It appears in no list
+  view and no log.
+
 A create form enters the same environment field by field: the dashboard's
 Create Sandbox form and the iOS app's Create sheet. Their fields, limits and
 refusal words are one set, in `codewire_project::create_input`, and

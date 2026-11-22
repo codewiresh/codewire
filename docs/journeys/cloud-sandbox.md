@@ -24,6 +24,7 @@ Updated 2026-11-22.
 | `sandbox-cw-knows-its-server` | cw-identity | partly observed 2026-11-17 (#5202) | not yet observed |
 | `sandbox-attach-stays` | cw-mesh | observed 2026-11-18 (#5120); 4.5 h attach 2026-11-21 | observed in part 2026-11-21 (#5120): the attach only, no cut or `cw shell` |
 | `sandbox-stop-start` | cw-cleanup | observed 2026-11-14; named sessions and `cw run --name` 2026-11-20 (#5494, #5497) | not yet observed |
+| `sandbox-update-startup` | cw-cli | not yet observed (#5949) | not yet observed |
 | `sandbox-session-stop` | cw-cleanup | observed 2026-11-20 (#5490) | not yet observed |
 | `sandbox-start-list` | cw-fast-start | not yet observed | not yet observed |
 | `sandbox-list-live` | cw-placement | not yet observed | not yet observed |
@@ -608,6 +609,53 @@ server it belongs to and says what it can do, instead of asking for a URL.
     `Running` under the same session ID, exit 0. With `play` running it
     refused and named the attach command. No message said "fenced". Evidence:
     the walk comment on #5471.
+
+## `sandbox-update-startup`: an existing Sandbox gains a startup script
+
+Not shipped yet (#5949). A Sandbox keeps the `codewire.yaml` settings it was
+created with; recreating it to add a startup script gives it a new ID, and with
+it new preview host names, which breaks whatever is bound to them (passkeys,
+OAuth redirect URIs, cookies).
+
+- **Entry points:** `cw update SANDBOX --file codewire.yaml`; `cw export
+  SANDBOX` to see the saved settings.
+- **States to exercise:**
+  - a Sandbox created without a `startup_script` gets one: the update shows
+    `startup_script` added and says it runs at the next start; `cw export`
+    shows it; after `cw stop` and `cw start` it has run; the preview host name
+    is unchanged;
+  - a changed script, and a removed one, the same way;
+  - the update on a running Sandbox: it keeps running, and the script runs at
+    its next start;
+  - a file that also changes `install_command` (or the image, or
+    repositories): refused by that name, saying only a new Sandbox takes it,
+    and `cw export` shows nothing changed;
+  - a file that changes `secrets`: refused, pointing to `--secrets`;
+  - a file identical to the saved settings: says nothing changed;
+  - another member of the organization, and an organization admin: refused,
+    only the creator may;
+  - the audit row: actor, Sandbox, the script's SHA-256 and length, no text;
+  - the creator leaves the organization: the saved script is cleared, and the
+    next start runs none;
+  - `cw --local update --file`: refused, a local VM's setup is per VM.
+- **Driving it:**
+
+  ```sh
+  cw --cloud create walk-start --file codewire.yaml --yes   # no startup_script
+  cw --cloud ls walk-start                                    # note the preview host
+  printf 'startup_script: echo started > /workspace/started\n' >> codewire.yaml
+  cw update walk-start --file codewire.yaml
+  cw export walk-start
+  cw --cloud stop walk-start && cw --cloud start walk-start
+  cw exec --in walk-start cat /workspace/started
+  cw --cloud ls walk-start                                    # same preview host
+  ```
+
+- **Proof:** `cw export` shows the script before the restart; after it,
+  `/workspace/started` exists; the preview host name is the one noted before;
+  `install_command` didn't run again (the Sandbox's setup stays complete, and a
+  marker its install wrote isn't rewritten); each refusal leaves `cw export`
+  unchanged.
 
 ## `sandbox-session-stop`: stopping a session ends every process it started
 
