@@ -11,10 +11,11 @@ discovery. The work is #4661; the configuration is in
 
 ## Where it stands
 
-Updated 2026-11-21. The issuer's code (#4662) is merged and off by default;
-Dev's signing key and settings are in review. The contract for groups,
-audiences and minting is [dev/SANDBOX-IDENTITY.md](../dev/SANDBOX-IDENTITY.md);
-nothing mints a token yet.
+Updated 2026-11-22. Dev serves the issuer at `https://identity.codewire-dev.sh`,
+from its own signing key in OpenBao (#4662). Production serves nothing yet
+(#4667). The contract for groups, audiences and minting is
+[dev/SANDBOX-IDENTITY.md](../dev/SANDBOX-IDENTITY.md); nothing mints a token
+yet.
 
 | ID | Slice | Dev | Production |
 | --- | --- | --- | --- |
@@ -24,8 +25,8 @@ nothing mints a token yet.
 | `identity-groups-stay-put` | #4663 | not yet built | not yet built |
 | `identity-changes-apply` | #4663, #4664 | not yet built | not yet built |
 | `identity-limits` | #4664 | not yet built | not yet built |
-| `identity-discovery` | #4662 | not yet observed | not yet observed |
-| `identity-custody` | #4662 | not yet observed | not yet observed |
+| `identity-discovery` | #4662 | partly observed (2026-11-22) | not yet observed |
+| `identity-custody` | #4662 | partly observed (2026-11-22) | not yet observed |
 | `identity-own-openbao` | #4666 | not yet built | not yet built |
 | `identity-rotation` | #4662 | not yet observed | not yet observed |
 | `identity-audit` | #4663, #4664 | not yet built | not yet built |
@@ -160,8 +161,11 @@ nothing mints a token yet.
   5. `curl -sS -D- "$ISSUER_BASE/orgs/$ORG/jwks.json?x=1"` answers 404
      `no-store`. The edge's cache key includes the query string, so the
      request reaches the listener, which refuses any query string.
-  6. Send 30 requests in one second for an unknown org ID from one client.
-     Some get 429. A request from a second client address in the same second,
+  6. Send 150 requests at once for an unknown org ID from one client. Some
+     get 429: the documents route allows 30 a second per client on each of
+     the gateway's two proxies, so 30 in a second is not enough to see it. A
+     canonical document fetched right after still answers, from the edge's
+     cache. A request from a second client address in the same second,
      such as from inside a Dev sandbox, still gets its normal answer: each
      client has its own budget.
      The gateway's access log names the route for each request: a document
@@ -182,7 +186,20 @@ nothing mints a token yet.
   - The edge may cache a success for five minutes. Compare a refusal only on
     a path no one has fetched successfully.
   - Tokens never carrying `jku` or `x5u` waits for minting (#4664).
-- **Observed:** not yet observed.
+- **Observed:** partly, on Dev on 2026-11-22 from a workstation, with an
+  existing organization (#4662):
+  - 1: 200, `Cache-Control: public, max-age=300`, with `issuer` and
+    `jwks_uri` byte-exact;
+  - 2: the forged headers left the body byte-identical;
+  - 3: one key, `sandbox-identity-1`, with `kty: EC`, `crv: P-256`,
+    `alg: ES256`, `use: sig` and a `kid`;
+  - 4 and 5: an unknown ID, the ID in upper case, a trailing slash, the bare
+    `.well-known`, a `POST` and `?x=1` were each 404 `no-store`, with no
+    `Location` and no ID in the body;
+  - 6: 150 parallel requests drew 102 answers of 429, and a canonical
+    document right after answered 200.
+
+  Not yet observed: 6's second client from inside a Dev sandbox, and 7.
 
 ## 8. `identity-custody`: the signing key never leaves OpenBao
 
@@ -209,7 +226,19 @@ nothing mints a token yet.
 - **Gotchas:** walk drift only with a setting that can be undone, such as
   `auto_rotate_period`, and set it back at once. Never set `exportable` or
   `allow_plaintext_backup` on a real key: neither can be turned off again.
-- **Observed:** not yet observed.
+- **Next pass:** a live check from each role's own service-account token that
+  the signer's and the rotator's refused calls above answer 403 on Dev's
+  OpenBao. It needs the helper first.
+- **Observed:** partly, on Dev on 2026-11-22 (#4662). No helper exists yet, so
+  OpenBao's own engine is the evidence, not live refused calls:
+  - the key's custody pins read back exact (`exportable=false`,
+    `plaintext_backup=false`, `deletion_allowed=false`);
+  - the capability audit found no violations and no unreviewed holder of
+    either role's policy across 119 policies;
+  - the deny-rule read-back found the block on all 117 other policies.
+
+  Not yet observed: the refused calls against the live server, and their
+  alerts.
 
 ## 10. `identity-rotation`: rotating the key fails no request
 
