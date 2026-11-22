@@ -32,6 +32,8 @@ mod direct_share;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod egress_broker;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod engine_root;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod front_door;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 // Disk snapshots and VM checkpoints call it on macOS from #4654's later slices.

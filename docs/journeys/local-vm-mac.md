@@ -19,8 +19,8 @@ Updated 2026-11-22.
 | `mac-vm-intercept` | boots observed on #4916 on #5124 (268f2709e), 5 of 5; serving partly observed on a scratch merge with the placeholder seed (245992e87) | not yet observed |
 | `mac-vm-refresh` | not yet observed (#5539) | not yet observed (#5539) |
 | `local-vm-git-mounted` | not yet observed ([local-vm-git.md](local-vm-git.md), #5478) | not yet observed |
-| `mac-vm-indexed-root` | not yet observed (#5831) | not yet observed (#5831) |
-| `mac-vm-backup-excluded` | not yet observed (#5900) | not yet observed (#5900) |
+| `mac-vm-indexed-root` | the warning observed on a development build of #5831 (84a45bb16); a completed create not yet observed | not yet observed |
+| `mac-vm-backup-excluded` | observed on a development build of #5900 (84a45bb16), a new root and an older one | not yet observed |
 
 ## Before the walk
 
@@ -364,8 +364,8 @@ Issues: #5831, #5830.
   stderr naming the root: Spotlight may index that folder, and its image
   importer reads the VM's disks there, so keep the state root in a folder
   whose name ends in `.noindex`, or in a dot folder such as the default
-  `~/.codewire`. The command still completes, and with `-o json` its stdout
-  is still only the JSON. With the default root and the `.noindex` root, no
+  `~/.codewire`. The command still completes, and with `--output json` its
+  stdout is still only the JSON. With the default root and the `.noindex` root, no
   warning is printed. A dot folder or a `.noindex` folder anywhere in the
   path counts.
 - **Gotchas:** the warning goes by the path alone; it does not ask
@@ -374,7 +374,17 @@ Issues: #5831, #5830.
   ([SECRETS-AND-CREDENTIALS.md](../dev/SECRETS-AND-CREDENTIALS.md)); external
   volumes were not. It goes away once #5830 gives the disks an
   extension no importer claims.
-- **Observed:** not yet observed.
+- **Observed:**
+  - macOS 27.2.1, a development `cw` at 84a45bb16 with no runtime installed,
+    2026-11-22: `cw create --local --yes --output json` against four state
+    roots. A visible root under a new folder in the home folder, and an older
+    visible root, each printed the warning once on stderr, naming the root.
+    The default root under the walk `HOME`'s `.codewire` and a root under
+    `x.noindex` printed none. Each create then stopped on the scratch
+    project's missing Git remote (`invalid repositories.source`), with
+    nothing on stdout.
+  - A create that completes, its JSON on stdout, and `cw setup --local` and
+    `cw --local start` with a visible root: not yet observed.
 
 ## 8. `mac-vm-backup-excluded`: a local VM's disks stay out of Time Machine
 
@@ -391,5 +401,15 @@ Issues: #5900.
   `vms/` and for the VM's directory under it, after the create and after the
   start. Folders shared from the host into the VM are not excluded.
 - **Gotchas:** the exclusion is the attribute `tmutil addexclusion` writes, so
-  it moves with the folder and needs no Time Machine settings change.
-- **Observed:** not yet observed.
+  it moves with the folder and needs no Time Machine settings change. Roots
+  under `/private/tmp` read `[Excluded]` before anything runs, because macOS
+  already skips that folder, so walk with roots under the home folder.
+- **Observed:**
+  - macOS 27.2.1, a development `cw` at 84a45bb16, 2026-11-22. An older root
+    was made by hand with `vms/` and one VM directory: `tmutil isexcluded`
+    read `[Included]` for both. A `cw create --local` against it and against
+    three new roots started each root's supervisor. Then `vms/` read
+    `[Excluded]` for all four roots, and so did the older root's VM
+    directory. The project folder stayed `[Included]`.
+  - The same after a VM that completes its create, and after
+    `cw --local start` of a VM made before #5900: not yet observed.

@@ -2,19 +2,26 @@
 //! Virtualization.framework helper itself enforces. cw refuses before any
 //! effect and names the reason; the helper's own guard stays a second line.
 
+#[cfg(any(target_os = "macos", test))]
+mod spotlight;
+
 /// The oldest macOS major version that runs local VMs.
 #[cfg(any(target_os = "macos", test))]
 const MINIMUM_MACOS_MAJOR: u32 = 26;
 
 /// Refuse to create, start or install local VMs on a Mac that cannot run them.
-/// Listing and inspecting environments stay available everywhere.
+/// Listing and inspecting environments stay available everywhere. A state
+/// root Spotlight may index is warned about, never refused (#5831).
 #[cfg(target_os = "macos")]
 pub(crate) fn require_local_vm_host() -> anyhow::Result<()> {
     let version = sysctl_string(c"kern.osproductversion").unwrap_or_default();
     let translated = sysctl_i32(c"sysctl.proc_translated") == Some(1);
     match local_vm_host_refusal(std::env::consts::ARCH, translated, &version) {
         Some(reason) => Err(anyhow::anyhow!(reason)),
-        None => Ok(()),
+        None => {
+            spotlight::warn_when_indexed();
+            Ok(())
+        }
     }
 }
 

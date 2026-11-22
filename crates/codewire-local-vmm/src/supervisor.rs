@@ -9654,7 +9654,7 @@ fn prepare_runtime_root(path: &Path) -> Result<PrivateRoot, SupervisorError> {
         }
         Err(error) => return Err(error.into()),
     };
-    root.ensure_dir(Path::new("engine"), 0o700)?;
+    crate::engine_root::prepare(&root)?;
     prepare_runner_socket_dir(root.path())?;
     Ok(root)
 }

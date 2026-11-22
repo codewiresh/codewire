@@ -36,7 +36,9 @@ macOS masks that bit. ECHO, ICANON and every other terminal attribute remain exa
 reason = """The local VM backend and host facts: Cloud Hypervisor and /proc on Linux; \
 Virtualization.framework and sysctl on macOS. The environment's TLS front door confines \
 itself with no-new-privileges, Landlock and seccomp on Linux and with Seatbelt on macOS \
-(#3999), and its test checks each platform's own mechanism."""
+(#3999), and its test checks each platform's own mechanism. On macOS, Spotlight's image \
+importer reads local VM disk images in folders it indexes, so `cw` warns about a state root \
+there (#5831); Linux has no indexer that reads them."""
 
 [groups.local-https]
 reason = """HTTPS hostnames for local VMs (#4316): Linux lets only root listen below \
@@ -141,7 +143,7 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 "crates/codewire-cli/src/commands/mesh_commands/retained.rs" = { group = "member", count = 2 }
 "crates/codewire-cli/src/commands/mod.rs" = { group = "dispatch", count = 13 }
 "crates/codewire-cli/src/commands/native.rs" = { group = "vm-backend", count = 12 }
-"crates/codewire-cli/src/commands/native/host_support.rs" = { group = "vm-backend", count = 7 }
+"crates/codewire-cli/src/commands/native/host_support.rs" = { group = "vm-backend", count = 8 }
 "crates/codewire-cli/src/commands/native/local_https.rs" = { group = "local-https", count = 10 }
 "crates/codewire-cli/src/commands/native/local_https/trust.rs" = { group = "local-https", count = 2 }
 "crates/codewire-cli/src/commands/native/sources.rs" = { group = "vm-backend", count = 1 }

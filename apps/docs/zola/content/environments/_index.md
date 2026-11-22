@@ -100,6 +100,9 @@ fast and the host stays clean. Local credentials live in your Secret Service
 or Keychain and reach the VM only as a bounded capability through a broker on
 the host. A local VM joins Codewire Mesh only when you select a network.
 
+On a Mac, Time Machine does not back up a local VM's disks, so keep work you
+want backed up in Git or in your mounted project directory.
+
 A local VM runs its host's architecture, so on a Mac the image needs a
 `linux/arm64` variant; the Codewire workspace image has one.
 
