@@ -15,8 +15,8 @@ Updated 2026-11-22.
 | --- | --- | --- |
 | `access-ticket` | not yet observed | not yet observed |
 | `access-streams` | not yet observed | not yet observed |
-| `access-websockets` | the SSH proxy's API-key leg observed on Dev 2026-11-21, source 6ef416acfb; its `cw logout` leg not yet observed; the terminal half observed on Kind only (2026-11-20, main 6557aa7e83) | not yet observed |
-| `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only; the browser's terminal not as written, #5677); not on Dev | not yet observed |
+| `access-websockets` | the SSH proxy's API-key leg observed on Dev 2026-11-21, source 6ef416acfb; its `cw logout` leg not yet observed; the terminal half observed on Kind only (2026-11-20, main 6557aa7e83), and its revoked wording (#5660) on Kind 2026-11-22, main 253add63cd, with a status line that replaces it after about a second | not yet observed |
+| `access-org-deleting` | partly observed on Kind 2026-11-20, #5674's source (the owner only), and the dashboard's terminal area (#5677) on Kind 2026-11-22, main 253add63cd (an open terminal not as written; the preview pages not walkable on Kind); not on Dev | not yet observed |
 | `access-tailnet` | partly observed 2026-11-20, source adc886de2 (an API key; a sign-out and a disable on Kind, not on Dev) | not yet observed |
 | `access-key-org-create` | the key half observed 2026-11-22, source ba20ac0df; the signed-in half by its database test | not yet observed |
 
@@ -177,7 +177,7 @@ Kind; the SSH proxy is not yet observed.
 - **Proof:** the last line each socket printed lies within 30 seconds of
   its revocation; the socket closes with code 1008, "access revoked"; the
   browser's terminal shows "Access revoked. Sign in again to continue."
-  with no Reconnect (#5660; not yet observed; any other close keeps
+  with no Reconnect (#5660; any other close keeps
   "Disconnected.") and its page moves to sign-in within about five seconds; and a `stream.revoked` audit event names the
   key that matched and the surface, `terminal` or `ssh_proxy`. The
   surviving terminal is still printing at the end of its step, and the
@@ -218,6 +218,16 @@ Kind; the SSH proxy is not yet observed.
   first half), which waits on a sign-in to a Dev account, the account
   disable for the SSH proxy, and the terminal half on Dev.
 
+  The revoked terminal's words (#5660), on a local Kind cluster, 2026-11-22,
+  main 253add63cd, in Chromium, as a scratch owner, twice; recorded on #3586.
+  Signed out in a second tab, the terminal's socket closed with 1008 "access
+  revoked" at 11:07:45.228Z, and 0.29 s later its footer said "Access
+  revoked. Sign in again to continue." with no Reconnect. About a second
+  after the sign-out the page's Sandbox status feed failed too, and its
+  "Sandbox status is unavailable. Terminal controls are paused." with a
+  Reconnect link replaced that line until the page reached sign-in, 7 s and
+  36 s later on the two runs.
+
 ## `access-org-deleting`: no new stream into an organization being deleted
 
 Issue: #3586, ahead of the `membership` step (cw-security, 2026-11-20,
@@ -249,7 +259,7 @@ comment 123530). Not yet observed.
   organization is being deleted, and none reaches the Sandbox; the tailnet
   shell opened before ends within 60 seconds and the WebSocket one keeps
   printing until the deletion stops the Sandbox; another organization's
-  streams are unaffected. In the dashboard (#5677; not yet observed), the
+  streams are unaffected. In the dashboard (#5677), the
   Sandbox page's terminal area says "This organization is being deleted, so
   its Sandboxes can't open terminals." with no Retry, and an open terminal
   shows the same line and stops reconnecting; a member opening a shared
@@ -280,6 +290,23 @@ comment 123530). Not yet observed.
   not found". Not walked in the product: a second member, a non-member, and
   another organization's streams during a deletion; the database tests hold
   those. Dev is not yet observed.
+
+  The dashboard's terminal (#5677), on a local Kind cluster, 2026-11-22, main
+  253add63cd, in Chromium, as a scratch owner, in two scratch organizations
+  of one running Sandbox each; recorded on #3586. New tabs of the Sandbox
+  page 0.3 to 0.6 s into a deletion said "This organization is being
+  deleted, so its Sandboxes can't open terminals." with no Retry and opened
+  no terminal socket. Not as written: a terminal opened before the deletion
+  printed until the deletion stopped the Sandbox (11:16:19.231Z, 1008
+  "terminal detached", 12 s in), showed "Disconnected. Reconnecting…" for
+  about half a second, then the Sandbox's own "Deleting… This Sandbox is
+  being deleted"; it stopped reconnecting but never showed the organization
+  line. The preview pages were not walked: the preview proxy builds them
+  only for an https dashboard origin and Kind's is http, so a preview
+  navigation gets 503 "preview authorization unavailable"; their database
+  tests and fixtures hold them. An organization API key read the preview
+  before the deletion and got 401 during it, so a Bearer request never
+  reached the deleting check.
 
 ## `access-tailnet`: a tailnet shell or exec when its authority is lost
 
