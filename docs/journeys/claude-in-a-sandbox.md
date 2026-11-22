@@ -12,15 +12,16 @@ This journey was written before the code. The format is in
 
 Updated 2026-11-22. The first walk on Dev found two gaps: a repository cloned
 inside another is not trusted (#5882), and Claude Code 2.1.330 offers to make
-auto mode the default (#5883). Both are fixed, and the fixes are not yet
-observed.
+auto mode the default (#5883). Both are fixed and were observed in a second
+walk the same day. Only the administrator's off switch and a local VM are not
+yet observed.
 
 | ID | Dev (cloud sandbox) | Local VM (Linux) | Production |
 | --- | --- | --- | --- |
-| `claude-starts-interactive` | observed in a top-level repository; a nested repository and the auto-mode offer not yet observed | not yet observed | not yet observed |
-| `claude-starts-detached` | observed; the auto-mode offer not yet observed | not yet observed | not yet observed |
+| `claude-starts-interactive` | observed 2026-11-22 | not yet observed | not yet observed |
+| `claude-starts-detached` | observed 2026-11-22 | not yet observed | not yet observed |
 | `claude-starts-managed` | observed on the Sandbox; the trusted-host half is pinned by a test only | not yet observed | not yet observed |
-| `claude-starts-user-values-kept` | observed but the MCP question and a foreign file | not yet observed | not yet observed |
+| `claude-starts-user-values-kept` | observed 2026-11-22, but a foreign file | not yet observed | not yet observed |
 | `claude-starts-admin-off` | not yet observed | not yet observed | not yet observed |
 
 ## Before the walk
@@ -76,9 +77,19 @@ observed.
   - "Make auto mode your default permission mode? ❯ Yes …" appeared at start
     (#5883).
 
-  Not yet observed: the fixes for both, the MCP question (the root checkout
-  has no `.mcp.json`, and the nested one stopped at trust first), and
-  `--dangerously-skip-permissions`.
+  Second walk, 2026-11-22 on Dev, services and daemon from source cfdbb923b7
+  (accepted by promote-dev run 70698, with #5890), `cw` 0.4.26, the same
+  login and workspace file, in a fresh Sandbox. Before the first session,
+  `~/.claude.json` held the onboarding keys and `hasSeenAutoDefaultNudge:
+  true`. After the first launch it held trust for `/workspace`, the root
+  checkout and all three repositories inside it. `claude` (2.1.330) in
+  `/workspace/codewire/codewire`, which has an `.mcp.json`, went straight to
+  the prompt in "bypass permissions on": no trust, MCP, bypass or auto-mode
+  screen. Its `playwright` server was running, with no question. `git status`
+  ran with no prompt ("The branch is main."). A second `cw msg` got "done",
+  and `permissions.defaultMode` was still `bypassPermissions`. `claude
+  --dangerously-skip-permissions` in `/workspace/codewire/private-docs`
+  started the same way.
 
 ## `claude-starts-detached`: a detached session works from its first line
 
@@ -94,7 +105,12 @@ observed.
   Code 2.1.330, in the root checkout. The task ran `git status` with no prompt
   and answered "The branch is main." Then the auto-mode offer appeared, with
   "Yes" selected (#5883), so the second message was not sent: its Enter would
-  have rewritten the default to `auto`. Not yet observed: the fix.
+  have rewritten the default to `auto`. Second walk, same source as the
+  second interactive walk, in `/workspace/codewire/deploy`, nested in the
+  root checkout: the session answered "The branch is main. It's up to date
+  with origin/main and the working tree is clean." from its first line. The
+  second message got "done", with no offer, and `defaultMode` was still
+  `bypassPermissions`.
 
 ## `claude-starts-managed`: a managed agent in bypass mode
 
@@ -132,9 +148,13 @@ observed.
   held the user's `defaultMode: "default"` and `enableAllProjectMcpServers:
   false` unchanged, plus only `skipDangerousModePermissionPrompt: true`, mode
   0600, in a new inode. `claude` started in "manual mode on". The auto-mode
-  offer also appeared here (#5883). Not yet observed: the MCP question (no
-  trusted repository with an `.mcp.json` was reachable before #5882's fix) and
-  a symlinked or foreign file, which the unit tests pin.
+  offer also appeared here (#5883). Second walk, same source as the second
+  interactive walk: the same file, written before a `cw stop` and `cw start`,
+  came back unchanged but for `skipDangerousModePermissionPrompt: true`.
+  `claude` in `/workspace/codewire/codewire` asked "New MCP server found in
+  this project: playwright", as the user chose, and then started in "manual
+  mode on" with no auto-mode offer. Not yet observed: a symlinked or foreign
+  file, which the unit tests pin.
 
 ## `claude-starts-admin-off`: an administrator can still turn bypass off
 
