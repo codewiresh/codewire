@@ -293,8 +293,11 @@ pub(crate) mod tests {
     }
 
     /// #4347: a published port is reachable only from this machine. Its
-    /// listener holds `127.0.0.1` alone, so the host's own network address on
-    /// that port refuses, and loopback-only guest servers stay local-only.
+    /// listener holds `127.0.0.1` alone, so a connection to the host's own
+    /// network address on that port never reaches it, and loopback-only guest
+    /// servers stay local-only. A Mac's per-binary network filter can complete
+    /// that connect itself and then drop the flow, or hold it unanswered
+    /// (#4917, #5761), so the test asks the listener, not the connect.
     #[test]
     fn a_published_port_listens_on_loopback_only() {
         let port = free_loopback_port();
@@ -311,9 +314,30 @@ pub(crate) mod tests {
             .map(|address| address.ip())
             .filter(|ip| !ip.is_loopback() && !ip.is_unspecified());
         if let Some(ip) = routable {
+            let connect = std::net::TcpStream::connect_timeout(
+                &(ip, port).into(),
+                std::time::Duration::from_secs(2),
+            );
+            // A connection the kernel completed is queued for accept by now;
+            // wait a moment more in case its last ACK is still in flight.
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            let accepted = loop {
+                match listener.accept() {
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    other => break other.map(|(_, peer)| peer),
+                }
+            };
             assert!(
-                std::net::TcpStream::connect((ip, port)).is_err(),
-                "{ip}:{port} reached a loopback-only listener"
+                accepted
+                    .as_ref()
+                    .is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock),
+                "{ip}:{port} reached a loopback-only listener: connect {connect:?}, accept {accepted:?}"
             );
         }
     }
