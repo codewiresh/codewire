@@ -218,10 +218,20 @@ mod tests {
         std::fs::write(&path, "usage_usec 1500\n").unwrap();
         tokio::time::sleep(Duration::from_millis(120)).await;
         assert_eq!(CLOCK.load(Ordering::Relaxed), 1);
-        // Busy: seven seconds in a sample.
-        std::fs::write(&path, "usage_usec 7001500\n").unwrap();
-        tokio::time::sleep(Duration::from_millis(120)).await;
-        assert!(CLOCK.load(Ordering::Relaxed) > 1);
+        // Busy: seven more seconds every poll, so any two samples either side
+        // of one are busy, however late a loaded runner takes them (#5880).
+        // Bounded, as a hang guard.
+        let busy = async {
+            let mut usage = 1500_u64;
+            while CLOCK.load(Ordering::Relaxed) <= 1 {
+                usage += 7_000_000;
+                std::fs::write(&path, format!("usage_usec {usage}\n")).unwrap();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), busy)
+            .await
+            .expect("a busy sample moves the clock");
         sampler.abort();
     }
 }
