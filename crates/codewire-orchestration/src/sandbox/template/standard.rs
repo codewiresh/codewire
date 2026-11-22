@@ -9,11 +9,11 @@ use std::net::SocketAddrV4;
 use serde_json::{Map, Value, json};
 
 use codewire_daemon_proto::{
-    POD_RUNTIME_IMAGE_DISK_BUILD_ID_ENV, POD_RUNTIME_IMAGE_DISK_ID_ENV,
-    POD_RUNTIME_IMAGE_DISK_MOUNT_PATH, POD_RUNTIME_MEMORY_MIB_ENV, POD_RUNTIME_PLATFORM_PEERS_ENV,
-    POD_RUNTIME_STATE_DISK_MIB_ENV, POD_RUNTIME_STATE_MOUNT_PATH, POD_RUNTIME_VCPUS_ENV,
-    POD_RUNTIME_VM_STATE_ENV, POD_RUNTIME_VM_STATE_EXISTING, POD_RUNTIME_VM_STATE_NEW,
-    POD_RUNTIME_WORKSPACE_IMAGE_ENV,
+    POD_RUNTIME_DOCKER_DISK_MIB_ENV, POD_RUNTIME_IMAGE_DISK_BUILD_ID_ENV,
+    POD_RUNTIME_IMAGE_DISK_ID_ENV, POD_RUNTIME_IMAGE_DISK_MOUNT_PATH, POD_RUNTIME_MEMORY_MIB_ENV,
+    POD_RUNTIME_PLATFORM_PEERS_ENV, POD_RUNTIME_STATE_DISK_MIB_ENV, POD_RUNTIME_STATE_MOUNT_PATH,
+    POD_RUNTIME_VCPUS_ENV, POD_RUNTIME_VM_STATE_ENV, POD_RUNTIME_VM_STATE_EXISTING,
+    POD_RUNTIME_VM_STATE_NEW, POD_RUNTIME_WORKSPACE_IMAGE_ENV,
 };
 
 use super::runtime_policy::{
@@ -48,9 +48,15 @@ const STATE_DISK_RESERVE_MIB: i64 = 256;
 /// also keeps on the Sandbox's volume. It costs the user this much of their
 /// disk against `commodity` until it moves to the Pod's own storage (#5602).
 const STANDARD_ROOT_DISK_MIB: i64 = 4_096;
-/// The smallest disk a `standard` workspace takes: its state disk is then
-/// about 3 GiB.
-const MIN_DISK_GIB: i64 = 8;
+/// The Docker data disk's share of the room the VM's disks have on the
+/// volume; the state disk has the rest. The disks are never larger together
+/// than that room, so the guest can never fill the volume under them.
+const DOCKER_DISK_SHARE_PERCENT: i64 = 50;
+/// The smallest Docker data disk `cw __pod-runtime` takes.
+pub(super) const MIN_DOCKER_DISK_MIB: i64 = 1_024;
+/// The smallest disk a `standard` workspace takes: its state and Docker disks
+/// are then about 1.6 GiB each.
+pub(super) const MIN_DISK_GIB: i64 = 8;
 /// What `cw __pod-runtime` accepts (`crates/codewire-local-vmm`).
 const MAX_VCPUS: i64 = 32;
 const MEMORY_MIB_RANGE: std::ops::RangeInclusive<i64> = 128..=65_536;
@@ -143,13 +149,24 @@ fn lowercase_hex(value: &str, length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// The VM's home, workspace and Docker disk, in MiB, on a volume of
-/// `disk_gib` that also holds its root disk.
-fn state_disk_mib(disk_gib: i64) -> i64 {
+/// The room in MiB the VM's state and Docker disks share on a volume of
+/// `disk_gib`, which also holds its root disk.
+pub(super) fn disks_mib(disk_gib: i64) -> i64 {
     let volume = disk_gib.saturating_mul(1_024);
     volume.saturating_mul(100 - STATE_DISK_RESERVE_PERCENT) / 100
         - STATE_DISK_RESERVE_MIB
         - STANDARD_ROOT_DISK_MIB
+}
+
+/// The VM's Docker data disk, in MiB, on a volume of `disk_gib`.
+pub(super) fn docker_disk_mib(disk_gib: i64) -> i64 {
+    (disks_mib(disk_gib) * DOCKER_DISK_SHARE_PERCENT / 100).max(MIN_DOCKER_DISK_MIB)
+}
+
+/// The VM's home and workspace disk, in MiB, on a volume of `disk_gib`: the
+/// room its Docker disk leaves.
+pub(super) fn state_disk_mib(disk_gib: i64) -> i64 {
+    disks_mib(disk_gib) - docker_disk_mib(disk_gib)
 }
 
 /// The VM's whole vCPUs for a CPU size in millicores.
@@ -315,6 +332,10 @@ fn settings(
         (
             POD_RUNTIME_STATE_DISK_MIB_ENV,
             state_disk_mib(opts.disk_gib).to_string(),
+        ),
+        (
+            POD_RUNTIME_DOCKER_DISK_MIB_ENV,
+            docker_disk_mib(opts.disk_gib).to_string(),
         ),
         (
             POD_RUNTIME_VM_STATE_ENV,

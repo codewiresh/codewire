@@ -94,6 +94,10 @@ pub const EGRESS_STREAM_PORT: u16 = 8089;
 pub const POD_RUNTIME_VCPUS_ENV: &str = "CODEWIRE_VM_VCPUS";
 pub const POD_RUNTIME_MEMORY_MIB_ENV: &str = "CODEWIRE_VM_MEMORY_MIB";
 pub const POD_RUNTIME_STATE_DISK_MIB_ENV: &str = "CODEWIRE_VM_STATE_DISK_MIB";
+/// The size in MiB of the VM's Docker data disk, a file on the Sandbox's
+/// volume beside the state disk (#5602). The runtime creates it whenever it
+/// is missing: its data is disposable.
+pub const POD_RUNTIME_DOCKER_DISK_MIB_ENV: &str = "CODEWIRE_VM_DOCKER_DISK_MIB";
 /// Whether the Sandbox's volume has held its workspace: `new` until its
 /// daemon's first bind is answered, then `existing`, after which the runtime
 /// never creates the state disk and a missing one fails the boot.

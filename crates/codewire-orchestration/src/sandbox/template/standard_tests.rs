@@ -190,8 +190,10 @@ fn a_standard_workspace_hands_cw_pod_runtime_its_settings_by_their_names() {
     for (name, value) in [
         ("CODEWIRE_VM_VCPUS", "2"),
         ("CODEWIRE_VM_MEMORY_MIB", "4096"),
-        // 20 GiB less 7%, 256 MiB and the 4 GiB root disk, whole MiB.
-        ("CODEWIRE_VM_STATE_DISK_MIB", "14694"),
+        // 20 GiB less 7%, 256 MiB and the 4 GiB root disk is 14694 MiB,
+        // shared evenly by the state and Docker disks.
+        ("CODEWIRE_VM_STATE_DISK_MIB", "7347"),
+        ("CODEWIRE_VM_DOCKER_DISK_MIB", "7347"),
         // Until its daemon's first bind is answered.
         ("CODEWIRE_VM_STATE", "new"),
         ("CODEWIRE_WORKSPACE_IMAGE", WORKSPACE_IMAGE),
@@ -416,4 +418,27 @@ fn a_standard_sandbox_without_its_vm_state_or_with_another_value_is_refused() {
         }
         assert!(vm_state_existing(&sandbox).is_err(), "{case}");
     }
+}
+
+#[test]
+fn the_state_and_docker_disks_never_outgrow_the_room_the_volume_has() {
+    use super::standard::{
+        MIN_DISK_GIB, MIN_DOCKER_DISK_MIB, disks_mib, docker_disk_mib, state_disk_mib,
+    };
+
+    for disk_gib in [MIN_DISK_GIB, 9, 10, 20, 200] {
+        let docker = docker_disk_mib(disk_gib);
+        let state = state_disk_mib(disk_gib);
+        assert!(docker >= MIN_DOCKER_DISK_MIB, "{disk_gib}");
+        assert!(state > 0, "{disk_gib}");
+        assert_eq!(state + docker, disks_mib(disk_gib), "{disk_gib}");
+    }
+    // The smallest disk: about 1.6 GiB each.
+    assert_eq!(
+        (state_disk_mib(MIN_DISK_GIB), docker_disk_mib(MIN_DISK_GIB)),
+        (1633, 1633)
+    );
+    // An odd room gives the state disk the extra MiB.
+    assert_eq!(disks_mib(10) % 2, 1);
+    assert_eq!(state_disk_mib(10), docker_disk_mib(10) + 1);
 }

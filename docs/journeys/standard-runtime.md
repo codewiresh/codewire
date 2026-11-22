@@ -88,7 +88,10 @@ Updated 2026-11-22. Written first; every step is not yet observed.
   1. `cw exec --in std-a -- docker run --rm busybox echo hello` prints `hello`.
   2. `cw exec --in std-a -- docker images -q` lists the image; the same command
      in `std-b` lists nothing.
-- **Proof:** the image ID present in one sandbox and absent in the other.
+  3. `cw exec --in std-a -- df -h /var/lib/docker` shows Docker's own disk,
+     about half the room the VM's disks have on the sandbox's volume.
+- **Proof:** the image ID present in one sandbox and absent in the other, and
+  Docker's data on its own disk.
 - **Observed:** not yet observed.
 
 ## `standard-network`: every connection goes through the node's egress service

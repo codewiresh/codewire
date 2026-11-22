@@ -207,7 +207,11 @@
               },
               {
                 "name": "CODEWIRE_VM_STATE_DISK_MIB",
-                "value": "14694"
+                "value": "7347"
+              },
+              {
+                "name": "CODEWIRE_VM_DOCKER_DISK_MIB",
+                "value": "7347"
               },
               {
                 "name": "CODEWIRE_VM_STATE",
