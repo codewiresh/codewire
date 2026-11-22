@@ -79,6 +79,9 @@ const NEEDS_CREDENTIALS: &[&str] = &[
 ];
 const NOT_FOUND: &[&str] = &[
     "Repository not found",
+    // Git's own line for a 404, `fatal: repository '<url>' not found`, which
+    // is all a forge other than GitHub leaves.
+    "fatal: repository '",
     "The requested URL returned error: 404",
     "does not appear to be a git repository",
 ];
@@ -198,6 +201,10 @@ mod tests {
             ),
             (
                 "fatal: unable to access 'https://forge.example/r.git/': The requested URL returned error: 404\n",
+                CloneFailure::NotFound,
+            ),
+            (
+                "Cloning into 'r'...\nfatal: repository 'https://forge.example/team/r.git/' not found\n",
                 CloneFailure::NotFound,
             ),
             (
