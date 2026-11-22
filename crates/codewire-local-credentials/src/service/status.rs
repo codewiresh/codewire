@@ -73,6 +73,9 @@ pub(super) fn status_for_error(error: LocalCredentialError) -> Status {
         LocalCredentialError::EnvironmentBindingNotFound => {
             Status::not_found("local environment access binding was not found")
         }
+        LocalCredentialError::CredentialRefreshRateLimited { .. } => {
+            Status::resource_exhausted("local credential refresh is rate-limited by the provider")
+        }
         LocalCredentialError::CredentialUnavailable
         | LocalCredentialError::CredentialInactive
         | LocalCredentialError::CredentialWithheld(_)

@@ -84,6 +84,10 @@ pub enum LocalCredentialError {
     CredentialRefreshInProgress,
     #[error("local credential refresh is stale or invalid")]
     StaleCredentialRefresh,
+    /// The provider rate-limited the credential's last refresh, and none
+    /// begins for this many more seconds (#4975).
+    #[error("credential refresh is rate-limited by the provider")]
+    CredentialRefreshRateLimited { retry_after_seconds: u64 },
     #[error("local credential revision changed or was not supplied")]
     StaleCredentialRevision,
     #[error("local credential protected entry unexpectedly already exists")]

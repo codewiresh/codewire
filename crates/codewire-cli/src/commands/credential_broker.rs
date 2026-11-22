@@ -129,6 +129,7 @@ fn exit_kind(error: &anyhow::Error) -> &'static str {
                 Lease::StaleRefresh => "lease.stale_refresh",
                 // The reason stays out: the kind is the same for every one.
                 Lease::Withheld(_) => "lease.withheld",
+                Lease::RateLimited { .. } => "lease.rate_limited",
             };
         }
         if cause.is::<tokio::time::error::Elapsed>() {

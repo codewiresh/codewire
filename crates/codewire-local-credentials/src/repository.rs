@@ -737,6 +737,9 @@ fn map_refresh_error(error: LocalCredentialError) -> Status {
         LocalCredentialError::CredentialRefreshInProgress => {
             Status::aborted("credential refresh is already in progress")
         }
+        LocalCredentialError::CredentialRefreshRateLimited { .. } => {
+            Status::resource_exhausted("credential refresh is rate-limited by the provider")
+        }
         LocalCredentialError::CredentialOperationLeaseDenied
         | LocalCredentialError::CredentialInactive
         | LocalCredentialError::CredentialUnavailable
@@ -997,6 +1000,29 @@ where
         Ok(Response::new(v1::BrokerCredentialRefreshFailureResponse {
             revocation_generation: record.metadata.revocation_generation,
         }))
+    }
+
+    async fn rate_limit_repository_credential_refresh(
+        &self,
+        request: Request<v1::BrokerCredentialRefreshRateLimitRequest>,
+    ) -> Result<Response<v1::BrokerCredentialRefreshRateLimitResponse>, Status> {
+        self.lifetime.ensure_open()?;
+        let request = request.into_inner();
+        let refresh_id = parse_canonical_uuid(&request.refresh_id)?;
+        let request_id = parse_canonical_uuid(&request.request_id)?;
+        let (channel_id, wait_seconds) = (self.channel_id, request.wait_seconds);
+        self.journal(move |authority| {
+            authority.rate_limit_environment_credential_refresh(
+                channel_id,
+                refresh_id,
+                request_id,
+                wait_seconds,
+            )
+        })
+        .await?;
+        Ok(Response::new(
+            v1::BrokerCredentialRefreshRateLimitResponse {},
+        ))
     }
 
     async fn get_repository_ssh_checkout(

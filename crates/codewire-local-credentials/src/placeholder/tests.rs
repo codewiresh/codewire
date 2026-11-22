@@ -1111,6 +1111,13 @@ impl LocalCredentialBrokerLeaseService for FixedLeaseResponse {
     ) -> Result<Response<v1::BrokerCredentialRefreshFailureResponse>, Status> {
         Err(Status::unimplemented("not under test"))
     }
+
+    async fn rate_limit_credential_refresh(
+        &self,
+        _: Request<v1::BrokerCredentialRefreshRateLimitRequest>,
+    ) -> Result<Response<v1::BrokerCredentialRefreshRateLimitResponse>, Status> {
+        Err(Status::unimplemented("not under test"))
+    }
 }
 
 impl Fixture {

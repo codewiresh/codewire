@@ -1,6 +1,7 @@
 //! The lease channel's answers as RPC statuses, both ways. A withheld
 //! credential's reason crosses as metadata on the denial, so the broker
-//! answers the same refusal a hosted Sandbox does (#5593).
+//! answers the same refusal a hosted Sandbox does (#5593). A rate-limited
+//! refresh (#4975) carries the seconds left as `retry-after`.
 
 use codewire_access::WithheldReason;
 use tonic::Status;
@@ -8,6 +9,19 @@ use tonic::metadata::MetadataValue;
 
 use super::BrokerLeaseChannelError;
 use crate::LocalCredentialError;
+
+const RETRY_AFTER: &str = "retry-after";
+
+/// The seconds a rate-limited answer names. One without a readable value
+/// waits the shortest bound.
+fn retry_after(status: &Status) -> u64 {
+    status
+        .metadata()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(*crate::refresh_journal::RATE_LIMIT_WAIT_SECONDS.start())
+}
 
 /// The metadata key that names why the slot's credential is withheld; never
 /// an id.
@@ -53,6 +67,9 @@ pub(super) fn map_client_status(status: Status) -> BrokerLeaseChannelError {
         tonic::Code::InvalidArgument => BrokerLeaseChannelError::InvalidRequest,
         tonic::Code::Aborted => BrokerLeaseChannelError::RefreshInProgress,
         tonic::Code::OutOfRange => BrokerLeaseChannelError::StaleRefresh,
+        tonic::Code::ResourceExhausted => BrokerLeaseChannelError::RateLimited {
+            retry_after_seconds: retry_after(&status),
+        },
         tonic::Code::FailedPrecondition => match withheld_of(&status) {
             Some(reason) => BrokerLeaseChannelError::Withheld(reason),
             None => BrokerLeaseChannelError::Denied,
@@ -84,6 +101,16 @@ pub(super) fn map_server_error(error: LocalCredentialError) -> Status {
         }
         LocalCredentialError::CredentialRefreshInProgress => {
             Status::aborted("credential refresh is already in progress")
+        }
+        LocalCredentialError::CredentialRefreshRateLimited {
+            retry_after_seconds,
+        } => {
+            let mut status =
+                Status::resource_exhausted("credential refresh is rate-limited by the provider");
+            if let Ok(value) = retry_after_seconds.to_string().parse() {
+                status.metadata_mut().insert(RETRY_AFTER, value);
+            }
+            status
         }
         _ => Status::unavailable("credential broker lease authority is unavailable"),
     }

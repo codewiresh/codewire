@@ -45,6 +45,7 @@ mod delegation;
 mod login;
 mod observed_stream;
 mod projection;
+mod rate_limit;
 mod ready;
 mod status;
 pub(crate) use ready::BrokerReady;
@@ -134,6 +135,8 @@ pub enum BrokerLeaseChannelError {
     /// The slot's credential is withheld, and why (#5593).
     #[error("the selected credential needs reconnecting")]
     Withheld(codewire_access::WithheldReason),
+    #[error("credential refresh is rate-limited by the provider")]
+    RateLimited { retry_after_seconds: u64 },
 }
 
 /// Client for one authority-created, environment-generation-bound channel.
@@ -1360,6 +1363,15 @@ where
         Ok(Response::new(v1::BrokerCredentialRefreshFailureResponse {
             revocation_generation: record.metadata.revocation_generation,
         }))
+    }
+
+    async fn rate_limit_credential_refresh(
+        &self,
+        request: Request<v1::BrokerCredentialRefreshRateLimitRequest>,
+    ) -> Result<Response<v1::BrokerCredentialRefreshRateLimitResponse>, Status> {
+        self.rate_limit_refresh(request.into_inner())
+            .await
+            .map(Response::new)
     }
 }
 

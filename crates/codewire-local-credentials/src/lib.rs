@@ -37,6 +37,7 @@ mod platform;
 mod profile_rows;
 mod provider_revocation;
 mod refresh_commit;
+mod refresh_journal;
 mod repository;
 mod revocation;
 mod service;
@@ -57,6 +58,7 @@ use profile_rows::{
     insert_profile_revision, load_profile, load_profile_revision, profile_exists,
     profile_is_default,
 };
+use refresh_journal::delete_credential_refresh_journal;
 
 pub use boot_secrets::{
     BOOT_SECRET_BYTES, BootSecretPurpose, BrokerBootSecrets, InvalidBootSecrets,
@@ -1183,6 +1185,9 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         {
             return Err(LocalCredentialError::StaleCredentialRefresh);
         }
+        // A rate-limit wait refuses the refresh, or marks it the one retry,
+        // in the same transaction as its reservation (#4975).
+        refresh_journal::admit_after_wait(&transaction, &current)?;
         insert_credential_refresh_journal(
             &transaction,
             id,
@@ -2814,29 +2819,6 @@ fn fail_oauth_refresh(
         )
         .map_err(database_error)?;
     if changed != 1 || journal_changed != 1 || marker_changed != 1 {
-        return Err(LocalCredentialError::CorruptMetadata);
-    }
-    transaction.commit().map_err(database_error)
-}
-
-fn delete_credential_refresh_journal(
-    connection: &Connection,
-    credential_id: &CredentialId,
-) -> Result<(), LocalCredentialError> {
-    let transaction = crate::immediate(connection)?;
-    let journal_changed = transaction
-        .execute(
-            "DELETE FROM protected_entry_journal WHERE credential_id = ?1",
-            [credential_id.as_str()],
-        )
-        .map_err(database_error)?;
-    let marker_changed = transaction
-        .execute(
-            "DELETE FROM authority_metadata WHERE key = ?1",
-            [credential_refresh_marker_key(credential_id)],
-        )
-        .map_err(database_error)?;
-    if journal_changed != 1 || marker_changed != 1 {
         return Err(LocalCredentialError::CorruptMetadata);
     }
     transaction.commit().map_err(database_error)

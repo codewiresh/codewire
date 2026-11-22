@@ -3144,7 +3144,11 @@ placements.
   2026-11-18, #4975).
 
 **Not yet built** (#4975). Today a 429 is terminal like any other failure
-after the refresh started.
+after the refresh started. Both stores can already record the wait: the
+platform's closes a started refresh as `rate_limited`, and the local
+authority's refresh journal keeps it, refusing a refresh during it as
+rate-limited with the seconds left. That local behaviour has its own
+authority protocol step. No broker asks either store for it yet.
 
 ### Idle OAuth keep-alive
 

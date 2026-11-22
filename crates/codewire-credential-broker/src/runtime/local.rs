@@ -96,7 +96,8 @@ where
             codewire_local_credentials::BrokerLeaseChannelError::StaleRefresh => {
                 BrokerLeaseError::Denied
             }
-            codewire_local_credentials::BrokerLeaseChannelError::Unavailable => {
+            codewire_local_credentials::BrokerLeaseChannelError::Unavailable
+            | codewire_local_credentials::BrokerLeaseChannelError::RateLimited { .. } => {
                 BrokerLeaseError::Unavailable
             }
             codewire_local_credentials::BrokerLeaseChannelError::InvalidResponse => {
@@ -274,7 +275,9 @@ fn map_local_refresh_error(
         | codewire_local_credentials::BrokerLeaseChannelError::Withheld(_) => {
             BrokerRefreshError::Denied
         }
-        codewire_local_credentials::BrokerLeaseChannelError::Unavailable => {
+        // Never a denial: the sign-in is kept while the provider's wait runs.
+        codewire_local_credentials::BrokerLeaseChannelError::Unavailable
+        | codewire_local_credentials::BrokerLeaseChannelError::RateLimited { .. } => {
             BrokerRefreshError::Unavailable
         }
         codewire_local_credentials::BrokerLeaseChannelError::InvalidResponse => {
@@ -328,7 +331,8 @@ fn map_local_lease_error(
         codewire_local_credentials::BrokerLeaseChannelError::StaleRefresh => {
             BrokerLeaseError::Denied
         }
-        codewire_local_credentials::BrokerLeaseChannelError::Unavailable => {
+        codewire_local_credentials::BrokerLeaseChannelError::Unavailable
+        | codewire_local_credentials::BrokerLeaseChannelError::RateLimited { .. } => {
             BrokerLeaseError::Unavailable
         }
         codewire_local_credentials::BrokerLeaseChannelError::InvalidResponse => {
