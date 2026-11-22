@@ -247,7 +247,18 @@ reads the invitation in the sign-up's transaction, `FOR SHARE`. It must be
 pending, unexpired and addressed to the sign-up's address, compared with
 `lower()`. Anything else gets one answer, `403 invitation_invalid` ("This
 invitation is no longer valid. Ask for a new one."), or `403 invite_only` on
-an invite-only server. The link carries one of two tokens:
+an invite-only server. Only a token that names a live invitation for the
+address skips Turnstile, so on a server with Turnstile's keys any other token
+fails the challenge first: `400 human_verification_failed`, the code every
+failed challenge carries.
+
+The dashboard's sign-up from an invitation asks for no reason, invite code or
+challenge, on every server (#5908). It shows `invitation_invalid`, and
+`human_verification_failed` on a form that carries a token, as "This
+invitation is no longer valid. Ask for a new one."; every other refusal keeps
+its own words.
+
+The link carries one of two tokens:
 
 - **The CreateInvitation token**, the one-time link an admin copies. Only
   its SHA-256 is stored, in `org_invitations.token_hash`.

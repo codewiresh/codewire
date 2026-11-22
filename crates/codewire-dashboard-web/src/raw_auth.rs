@@ -43,6 +43,11 @@ pub(crate) enum IdentityErrorCode {
     /// The sign-up's account was saved, but its verification email couldn't
     /// be sent; submitting again sends a new one (#4723).
     VerificationEmailUnsent,
+    /// The sign-up's invitation token names no live invitation for its
+    /// address (#5908).
+    InvitationInvalid,
+    /// The sign-up failed its Turnstile challenge (#5908).
+    HumanVerificationFailed,
 }
 
 #[derive(Deserialize)]
@@ -147,15 +152,12 @@ pub(crate) async fn oauth_providers(state: &AppState) -> Vec<&'static str> {
 pub(crate) struct SignupMode {
     pub(crate) open: bool,
     pub(crate) reason: bool,
-    /// Only an invitation admits a sign-up (#4121).
-    pub(crate) invite_only: bool,
 }
 
 impl SignupMode {
     pub(crate) const REVIEW: Self = Self {
         open: false,
         reason: true,
-        invite_only: false,
     };
 }
 
@@ -200,7 +202,6 @@ pub(crate) async fn signup_mode(state: &AppState) -> SignupMode {
             SignupMode {
                 open: body.mode == "open",
                 reason: body.reason,
-                invite_only: body.mode == "invite-only",
             },
         ),
         None => (OAUTH_PROVIDERS_FAILURE_TTL, SignupMode::REVIEW),
@@ -299,7 +300,9 @@ where
                     Some(
                         code @ (IdentityErrorCode::RateLimited
                         | IdentityErrorCode::RateLimitUnavailable
-                        | IdentityErrorCode::VerificationEmailUnsent),
+                        | IdentityErrorCode::VerificationEmailUnsent
+                        | IdentityErrorCode::InvitationInvalid
+                        | IdentityErrorCode::HumanVerificationFailed),
                     ),
                 ..
             }) => (None, Some(code), None),

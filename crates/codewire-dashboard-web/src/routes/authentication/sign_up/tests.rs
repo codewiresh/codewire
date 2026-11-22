@@ -331,7 +331,8 @@ const SITE_KEY: &str = "synthetic-site-key";
 type Bodies = Arc<Mutex<Vec<serde_json::Value>>>;
 
 /// An identity service in sign-up `mode` that records each sign-up and
-/// refuses it as an invite-only server refuses.
+/// refuses it as an invite-only server refuses. It reports a reason as
+/// required in every mode but open, as the IdP does by default.
 async fn identity_in_mode(mode: &'static str) -> (TestServer, Bodies) {
     let bodies = Bodies::default();
     let captured = bodies.clone();
@@ -340,7 +341,8 @@ async fn identity_in_mode(mode: &'static str) -> (TestServer, Bodies) {
         async move {
             match request.uri().path() {
                 "/api/auth/sign-up/mode" => {
-                    return Json(serde_json::json!({"mode": mode, "reason": true})).into_response();
+                    return Json(serde_json::json!({"mode": mode, "reason": mode != "open"}))
+                        .into_response();
                 }
                 "/api/auth/oauth/providers" => {
                     return Json(serde_json::json!({"providers": ["github"]})).into_response();
@@ -389,14 +391,20 @@ fn input_named<'a>(body: &'a str, name: &str) -> &'a str {
     &body[start..=end]
 }
 
-/// On an invite-only server the invitation page's Create account opens
-/// sign-up with the token in a hidden field, the masked address as a hint
-/// and the address for the person to type; no Turnstile, reason, invite
-/// code or provider, since the IdP admits a live invitation without the
-/// first three and a provider sign-up can't carry it (#4121).
-#[tokio::test]
-async fn an_invitation_opens_sign_up_with_its_token_hidden_and_its_address_a_hint() {
-    let (identity, _) = identity_in_mode("invite-only").await;
+/// What a sign-up page asks besides the account: the second step, the
+/// reason, the invite code, Turnstile and a provider.
+const ACCESS_REQUEST: [&str; 6] = [
+    "data-signup-step=\"2\"",
+    "What would you like to build?",
+    r#"name="reason""#,
+    r#"name="invite_code""#,
+    SITE_KEY,
+    "Continue with GitHub",
+];
+
+/// The invitation page's Create account on a server in sign-up `mode`.
+async fn invited_sign_up_page(mode: &'static str) -> String {
+    let (identity, _) = identity_in_mode(mode).await;
     let dashboard = dashboard_for(&identity).await;
     let csrf = crate::security::new_csrf_token();
     let (status, body) = page(
@@ -406,50 +414,87 @@ async fn an_invitation_opens_sign_up_with_its_token_hidden_and_its_address_a_hin
         &invited_form(&csrf),
     )
     .await;
+    assert_eq!(status, StatusCode::OK, "{mode}: {body}");
+    body
+}
 
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains(r#"action="/signup/_actions/sign-up""#));
-    assert!(input_named(&body, "invitation_token").contains(INVITATION_TOKEN));
-    assert!(body.contains(
-        "Your invitation is for <strong>s\u{2022}\u{2022}\u{2022}@example.invalid</strong>."
-    ));
-    assert!(!input_named(&body, "email").contains("value="));
-    assert!(input_named(&body, "return_to").contains(r#"value="/accept-invite""#));
-    assert!(body.contains("Create account"));
-    for absent in [
-        r#"name="reason""#,
-        r#"name="invite_code""#,
-        SITE_KEY,
-        "Continue with GitHub",
-    ] {
-        assert!(!body.contains(absent), "{absent}: {body}");
+/// The invitation page's Create account opens sign-up with the token in a
+/// hidden field, the masked address as a hint and the address for the
+/// person to type, in one step with Create account. It asks for no reason,
+/// invite code, Turnstile or provider, since on every server the IdP admits
+/// a live invitation without the first three and a provider sign-up can't
+/// carry it (#4121).
+fn assert_invited_sign_up(mode: &str, body: &str) {
+    assert!(
+        body.contains(r#"action="/signup/_actions/sign-up""#),
+        "{mode}"
+    );
+    assert!(
+        input_named(body, "invitation_token").contains(INVITATION_TOKEN),
+        "{mode}"
+    );
+    assert!(
+        body.contains(
+            "Your invitation is for <strong>s\u{2022}\u{2022}\u{2022}@example.invalid</strong>."
+        ),
+        "{mode}"
+    );
+    assert!(!input_named(body, "email").contains("value="), "{mode}");
+    assert!(
+        input_named(body, "return_to").contains(r#"value="/accept-invite""#),
+        "{mode}"
+    );
+    assert!(body.contains("Create account"), "{mode}");
+    assert!(body.contains("By creating an account"), "{mode}");
+    for absent in ACCESS_REQUEST {
+        assert!(!body.contains(absent), "{mode}, {absent}: {body}");
     }
 }
 
-/// Anywhere but an invite-only server the IdP ignores the token, so sign-up
-/// asks what it always asks, and still carries the token and the hint.
 #[tokio::test]
-async fn an_invitation_elsewhere_keeps_the_usual_sign_up() {
+async fn an_invitation_opens_the_invited_sign_up_on_an_invite_only_server() {
+    let body = invited_sign_up_page("invite-only").await;
+    assert_invited_sign_up("invite-only", &body);
+}
+
+/// The hosted default (#5908): review mode used to ask an invitee what it
+/// would build, which the IdP ignores.
+#[tokio::test]
+async fn an_invitation_opens_the_invited_sign_up_on_a_review_server() {
+    let body = invited_sign_up_page("review").await;
+    assert_invited_sign_up("review", &body);
+}
+
+#[tokio::test]
+async fn an_invitation_opens_the_invited_sign_up_on_an_open_server() {
+    let body = invited_sign_up_page("open").await;
+    assert_invited_sign_up("open", &body);
+}
+
+/// Without a token the IdP can read, a review server's sign-up asks what it
+/// always asks: two steps, the reason, the invite code, Turnstile and a
+/// provider.
+#[tokio::test]
+async fn a_sign_up_without_an_invitation_asks_what_it_always_asks() {
     let (identity, _) = identity_in_mode("review").await;
     let dashboard = dashboard_for(&identity).await;
     let csrf = crate::security::new_csrf_token();
-    let (status, body) = page(
-        &dashboard,
-        "/signup/invited",
-        browser(&csrf, None, false),
-        &invited_form(&csrf),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(input_named(&body, "invitation_token").contains(INVITATION_TOKEN));
-    for present in [
-        r#"name="reason""#,
-        r#"name="invite_code""#,
-        SITE_KEY,
-        "Continue with GitHub",
-    ] {
-        assert!(body.contains(present), "{present}: {body}");
+    for token in [None, Some("two words")] {
+        let mut form = vec![("_csrf", csrf.as_str()), ("email_hint", MASKED)];
+        form.extend(token.map(|token| ("invitation_token", token)));
+        let (status, body) = page(
+            &dashboard,
+            "/signup/invited",
+            browser(&csrf, None, false),
+            &form,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{token:?}: {body}");
+        assert!(body.contains("Request access"), "{token:?}");
+        assert!(!body.contains(r#"name="invitation_token""#), "{token:?}");
+        for present in ACCESS_REQUEST {
+            assert!(body.contains(present), "{token:?}, {present}: {body}");
+        }
     }
 }
 
@@ -471,11 +516,11 @@ async fn an_invitation_sign_up_needs_the_page_csrf() {
     assert!(!body.contains(INVITATION_TOKEN));
 }
 
-/// The invited sign-up hands its token to the IdP with no reason, and a
-/// refusal shows the form again with the invitation kept.
-#[tokio::test]
-async fn an_invited_sign_up_hands_its_token_to_the_identity_service() {
-    let (identity, bodies) = identity_in_mode("invite-only").await;
+/// On a server in sign-up `mode`, the invited sign-up hands its token to the
+/// IdP with no reason, and a refusal shows the invited form again with the
+/// invitation kept.
+async fn assert_invited_sign_up_reaches_the_identity_service(mode: &'static str) {
+    let (identity, bodies) = identity_in_mode(mode).await;
     let dashboard = dashboard_for(&identity).await;
     let csrf = crate::security::new_csrf_token();
     let mut form = sign_up_form(&csrf);
@@ -493,12 +538,94 @@ async fn an_invited_sign_up_hands_its_token_to_the_identity_service() {
     .await;
 
     let bodies = bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 1, "{body}");
-    assert_eq!(bodies[0]["invitation_token"], INVITATION_TOKEN);
-    assert_eq!(bodies[0]["reason"], "");
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(bodies.len(), 1, "{mode}: {body}");
+    assert_eq!(bodies[0]["invitation_token"], INVITATION_TOKEN, "{mode}");
+    assert_eq!(bodies[0]["reason"], "", "{mode}");
+    assert_eq!(status, StatusCode::FORBIDDEN, "{mode}");
+    assert_invited_sign_up(mode, &body);
+}
+
+#[tokio::test]
+async fn an_invited_sign_up_hands_its_token_to_the_identity_service() {
+    assert_invited_sign_up_reaches_the_identity_service("invite-only").await;
+}
+
+/// A review server doesn't hold an invited sign-up back for the reason the
+/// IdP ignores (#5908).
+#[tokio::test]
+async fn an_invited_sign_up_on_a_review_server_asks_no_reason() {
+    assert_invited_sign_up_reaches_the_identity_service("review").await;
+}
+
+#[tokio::test]
+async fn an_invited_sign_up_on_an_open_server_is_the_invited_form() {
+    assert_invited_sign_up_reaches_the_identity_service("open").await;
+}
+
+const NO_LONGER_VALID: &str = "This invitation is no longer valid. Ask for a new one.";
+const CHECK_THE_FORM: &str = "The request could not be completed. Check the form and try again.";
+
+/// The page an email sign-up gets when the IdP refuses it with `status` and
+/// `code`, from the invitation's form when `invited`.
+async fn refused_sign_up(status: StatusCode, code: &str, invited: bool) -> String {
+    let identity = refusing_identity(status, code, None).await;
+    let dashboard = serve(crate::app(config(&identity.origin))).await;
+    let csrf = crate::security::new_csrf_token();
+    let mut form = sign_up_form(&csrf);
+    if invited {
+        form.extend([
+            ("invitation_token", INVITATION_TOKEN),
+            ("email_hint", MASKED),
+        ]);
+    }
+    let (answered, body) = page(
+        &dashboard,
+        "/signup/_actions/sign-up",
+        browser(&csrf, None, false),
+        &form,
+    )
+    .await;
+    assert_eq!(answered, status, "{code}: {body}");
+    assert!(!body.contains("internal detail"), "{code}");
+    body
+}
+
+/// A token that names no live invitation for the address says the
+/// invitation is no longer valid (#5908).
+#[tokio::test]
+async fn a_dead_invitation_says_it_is_no_longer_valid() {
+    let body = refused_sign_up(StatusCode::FORBIDDEN, "invitation_invalid", true).await;
+    assert!(body.contains(NO_LONGER_VALID), "{body}");
     assert!(input_named(&body, "invitation_token").contains(INVITATION_TOKEN));
-    assert!(!body.contains(SITE_KEY));
+}
+
+/// On a server with Turnstile's keys only a live invitation skips the
+/// challenge the invited page doesn't show, so an invited sign-up that fails
+/// it had a dead invitation (#5908).
+#[tokio::test]
+async fn an_invited_sign_up_that_fails_the_challenge_says_the_invitation_is_no_longer_valid() {
+    let body = refused_sign_up(StatusCode::BAD_REQUEST, "human_verification_failed", true).await;
+    assert!(body.contains(NO_LONGER_VALID), "{body}");
+}
+
+/// Without a token a failed challenge says what it said before.
+#[tokio::test]
+async fn a_sign_up_without_an_invitation_that_fails_the_challenge_keeps_its_words() {
+    let body = refused_sign_up(StatusCode::BAD_REQUEST, "human_verification_failed", false).await;
+    assert!(body.contains(CHECK_THE_FORM), "{body}");
+    assert!(!body.contains(NO_LONGER_VALID), "{body}");
+}
+
+/// An unavailable sign-up, such as a server without mail or Turnstile's
+/// keys, is not a dead invitation.
+#[tokio::test]
+async fn an_unavailable_invited_sign_up_keeps_its_words() {
+    let body = refused_sign_up(StatusCode::SERVICE_UNAVAILABLE, "", true).await;
+    assert!(
+        body.contains("Sign-up is temporarily unavailable. Try again in a few minutes."),
+        "{body}"
+    );
+    assert!(!body.contains(NO_LONGER_VALID), "{body}");
 }
 
 #[test]

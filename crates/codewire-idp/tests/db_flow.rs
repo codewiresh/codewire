@@ -3939,6 +3939,7 @@ async fn invite_only_sign_up_without_mail_vouches_by_invitation_against_postgres
     let (st, body, _) = invite_only_sign_up(&challenged, "frank@example.test", "").await;
     assert_eq!(st, 400, "uninvited: {body}");
     assert_eq!(body["detail"], "Complete the human verification challenge");
+    assert_eq!(body["code"], "human_verification_failed");
     // A wrong token is no way around the challenge: it is asked, not refused
     // as an invitation.
     let (st, body, _) = invite_only_sign_up(
@@ -3949,6 +3950,7 @@ async fn invite_only_sign_up_without_mail_vouches_by_invitation_against_postgres
     .await;
     assert_eq!(st, 400, "bogus token: {body}");
     assert_eq!(body["detail"], "Complete the human verification challenge");
+    assert_eq!(body["code"], "human_verification_failed");
     let (st, body, _) =
         invite_only_sign_up(&challenged, "gina@example.test", &token("gina-token")).await;
     assert_eq!(st, 200, "invited: {body}");
@@ -4418,6 +4420,7 @@ async fn an_invitation_link_admits_one_sign_up_at_its_address_on_every_server_ag
         let (st, body, _) = invite_only_sign_up(&challenged, email, &token(link)).await;
         assert_eq!(st, 400, "{email}: {body}");
         assert_eq!(body["detail"], "Complete the human verification challenge");
+        assert_eq!(body["code"], "human_verification_failed");
         let (st, body, cookie) = invite_only_sign_up(&trusted, email, &token(link)).await;
         assert_eq!(st, 403, "{email}: {body}");
         assert_eq!(body["code"], "invitation_invalid");

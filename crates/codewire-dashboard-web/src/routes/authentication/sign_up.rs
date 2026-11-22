@@ -54,7 +54,7 @@ pub(in crate::routes) async fn signup_action(
         return error_page(WebError::CsrfRejected);
     }
     let mode = signup_mode(&state).await;
-    let reason_required = mode.reason && !invited(&form, mode);
+    let reason_required = mode.reason && !invited(&form);
     let error = validate_new_password(&form);
     if !error.is_empty()
         || form.email.trim().is_empty()
@@ -111,7 +111,7 @@ pub(in crate::routes) async fn signup_action(
             &state,
             &headers,
             identity.status,
-            signup_form_view(&form, refusal_message(&identity, "sign-up"), mode),
+            signup_form_view(&form, sign_up_refusal(&form, &identity), mode),
         )
         .await;
     }
@@ -267,6 +267,25 @@ pub(in crate::routes) async fn signup_complete_action(
         ),
     }
 }
+
+/// What a refused email sign-up says. An invited one whose invitation isn't
+/// live says so (#5908): the IdP refuses it `invitation_invalid`, or, on a
+/// server with Turnstile's keys, fails its challenge first, since only a live
+/// invitation skips it and the invited page shows none. Without a token a
+/// failed challenge is just that, and every other refusal keeps its words.
+fn sign_up_refusal(form: &AuthFormSubmission, identity: &IdentityResponse<AuthResponse>) -> String {
+    match identity.error_code {
+        Some(IdentityErrorCode::InvitationInvalid | IdentityErrorCode::HumanVerificationFailed)
+            if invited(form) =>
+        {
+            INVITATION_NO_LONGER_VALID.to_owned()
+        }
+        _ => refusal_message(identity, "sign-up"),
+    }
+}
+
+/// The `invite-signup` journey's words for an invitation that isn't live.
+const INVITATION_NO_LONGER_VALID: &str = "This invitation is no longer valid. Ask for a new one.";
 
 /// What a refused sign-up says. One the sign-up limits refused names what was
 /// limited and when to try again (#4695). Only the code for an unsent
@@ -425,32 +444,31 @@ pub(super) fn signup_view(query: AuthQuery, error: String, mode: SignupMode) -> 
 /// The sign-up page again for a submitted form, keeping its invitation.
 fn signup_form_view(form: &AuthFormSubmission, error: String, mode: SignupMode) -> AuthFormView {
     let mut view = signup_view(form_query(form), error, mode);
-    let token = invitation_token(&form.invitation_token);
-    if token.is_empty() {
+    if !invited(form) {
         return view;
     }
-    view.invitation_token = token.to_owned();
+    view.invitation_token = invitation_token(&form.invitation_token).to_owned();
     view.invitation_email = email_hint(&form.email_hint);
     // Signing in from this page returns to the invitation.
     view.return_to = INVITATION_PATH.to_owned();
     view.secondary_url = auth_path_from_view("/login", &view);
-    if invited(form, mode) {
-        view.invited = true;
-        view.title = "Create your Codewire account";
-        view.submit_label = "Create account";
-        view.show_reason = false;
-        view.show_invite_code = false;
-        view.open_signup = true;
-    }
+    view.invited = true;
+    view.title = "Create your Codewire account";
+    view.submit_label = "Create account";
+    view.show_reason = false;
+    view.show_invite_code = false;
+    view.open_signup = true;
     view
 }
 
-/// An invitation's sign-up on an invite-only server, which the IdP admits
-/// without Turnstile, a reason or an invite code when the token names a live
-/// invitation for the address typed (#4121). Elsewhere the token changes
-/// nothing, so the page asks what it always asks.
-fn invited(form: &AuthFormSubmission, mode: SignupMode) -> bool {
-    mode.invite_only && !invitation_token(&form.invitation_token).is_empty()
+/// An invitation's sign-up, in every sign-up mode. The IdP admits a sign-up
+/// whose token names a live invitation for the address typed at once, with
+/// no invite code, review, reason or Turnstile, on every server (#4121,
+/// `auth_session/email_sign_up.rs`), and refuses one whose token names none
+/// rather than reviewing it. So the page asks for none of them; the IdP
+/// decides whether the invitation is live.
+fn invited(form: &AuthFormSubmission) -> bool {
+    !invitation_token(&form.invitation_token).is_empty()
 }
 
 /// The posted invitation token, or empty when it can't be one.

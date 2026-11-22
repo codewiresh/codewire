@@ -765,9 +765,7 @@ pub(crate) async fn validate_turnstile(
         || token.len() > MAX_TURNSTILE_TOKEN_BYTES
         || token.bytes().any(|byte| byte.is_ascii_control())
     {
-        return Err(AppError::BadRequest(
-            "Complete the human verification challenge".into(),
-        ));
+        return Err(human_verification_failed());
     }
 
     let response = state
@@ -797,11 +795,20 @@ pub(crate) async fn validate_turnstile(
             AppError::ServiceUnavailable("Human verification is temporarily unavailable".into())
         })?;
     if !turnstile_validation_matches(&validation, hostname) {
-        return Err(AppError::BadRequest(
-            "Complete the human verification challenge".into(),
-        ));
+        return Err(human_verification_failed());
     }
     Ok(())
+}
+
+/// A failed challenge, `400 human_verification_failed`. The code tells it
+/// apart from a sign-up's other refusals: on the dashboard's invited sign-up,
+/// which shows no challenge, it means the invitation wasn't live (#5908).
+fn human_verification_failed() -> AppError {
+    AppError::Coded {
+        status: StatusCode::BAD_REQUEST,
+        code: "human_verification_failed",
+        detail: "Complete the human verification challenge".into(),
+    }
 }
 
 fn turnstile_bypassed_for_email(configured_email: &str, requested_email: &str) -> bool {
@@ -1594,6 +1601,41 @@ mod tests {
             validate_turnstile(&state, "other@example.test", "").await,
             Err(AppError::ServiceUnavailable(_))
         ));
+    }
+
+    /// A missing challenge answer is refused with its own code, so the
+    /// dashboard can tell it from the sign-up's other refusals (#5908).
+    #[tokio::test]
+    async fn a_failed_challenge_carries_its_code() {
+        let state = SessionAuthState {
+            pool: PgPool::connect_lazy("postgres://localhost/none").unwrap(),
+            secure: false,
+            signup_invite_policy: SignupInvitePolicy::open(),
+            frontend_url: String::new(),
+            email: EmailClient::disabled(),
+            human_verification: HumanVerification::Configured {
+                secret: "synthetic-turnstile-secret".into(),
+                hostname: "codewire.test".into(),
+            },
+            turnstile_bypass_email: String::new(),
+            client_address_key: "synthetic-client-address-key".into(),
+            http: reqwest::Client::new(),
+            operator_email: None,
+        };
+
+        let refused = validate_turnstile(&state, "other@example.test", "").await;
+        assert!(
+            matches!(
+                refused,
+                Err(AppError::Coded {
+                    status: StatusCode::BAD_REQUEST,
+                    code: "human_verification_failed",
+                    ..
+                })
+            ),
+            "{:?}",
+            refused.err()
+        );
     }
 
     #[test]
