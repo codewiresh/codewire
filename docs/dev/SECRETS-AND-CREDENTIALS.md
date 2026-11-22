@@ -3054,14 +3054,48 @@ writes.
     account anyone can register. A same-shape name outside the list is
     refused, and a test pins that;
   - as a fresh GET carrying no credential, cookie or header from the guest or
-    the first request, through the same client, with its address resolved,
-    classified and pinned per request as the first hop's are, and with its
-    own deadline;
+    the first request, on the same client settings as the first hop, to the
+    address the broker pinned for that host at its start (below), and with
+    its own deadline. TLS sends the redirect's own host and verifies the
+    certificate for it against the normal roots, so the pinned address only
+    chooses where to connect;
   - streaming the body back under the existing response cap and redaction.
     The guest gets the body, the final status, and `Content-Type` and
     `Content-Length` only, never `Location` or the signed URL, in a
     response, an error or a log line. The signed URL's query is never
     logged or put in a trace.
+- **Where a log host's address comes from.** A broker that serves GitHub
+  looks up every log host on the list at its start, before it confines
+  itself, at the same time as its providers' hosts, as for #5286 above. The
+  confined broker does no DNS, so no log host is ever looked up for a
+  request.
+  - Each name's addresses go through the same classification as every
+    provider host's: a private, loopback, link-local or metadata address is
+    refused. The admitted ones are pinned for the broker's life.
+  - A log host that doesn't resolve, or resolves only to refused addresses,
+    is dropped by name. It never fails or delays the start, and GitHub stays
+    served.
+  - A redirect to a dropped host, or to a pinned address that no longer
+    answers, is refused for that redirect only. There is no second lookup.
+    A long-running broker picks up GitHub's changed addresses only when it is
+    replaced.
+- **The list** is GitHub's own published one, pinned in code: the exact
+  names in `domains.actions_inbound.full_domains` of
+  `https://api.github.com/meta`, as fetched on 2026-11-21, that can serve a
+  log. That is the 140 Azure accounts `productionresultssa0` to `19`, `30`
+  to `49` and `100` to `199` under `blob.core.windows.net`, and GitHub's
+  `pipelines*` hosts under `actions.githubusercontent.com`, each written out.
+  It is never fetched at run time, and it changes only by a reviewed change.
+  The match is exact on the parsed URL's host. The URL parser lowercases
+  it, so an upper-case form is the same name and is admitted; a trailing dot
+  is refused like any other name outside the list. The #4926
+  walk records the hosts GitHub actually redirects to and checks that each
+  is on the list.
+- **A refused redirect** answers the guest `upstream_failed` (502), never
+  the 3xx or its `Location`. The broker's log records one line for it with
+  the host, never the URL, and the reason (an unlisted host, another scheme
+  or port, userinfo, a dropped host, a second redirect, a refused status).
+  Each line carries the broker's running count of such refusals.
 - **Where it needs egress.** On a computer, the broker dials the log hosts
   from the host. A hosted credential service needs egress that names those
   hosts, since Azure's address ranges move.
