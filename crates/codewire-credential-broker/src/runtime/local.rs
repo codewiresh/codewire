@@ -222,6 +222,29 @@ where
         .map_err(map_local_refresh_error)
     }
 
+    async fn rate_limit_credential_refresh(
+        &self,
+        permit: Self::StartedRefresh,
+        wait_seconds: u64,
+    ) -> Result<RateLimitClose, BrokerRefreshError> {
+        let mut client = self.clone();
+        // Any refusal leaves the attempt started (an older authority, or the
+        // one retry after a wait): it is failed, which is terminal (#4975).
+        match codewire_local_credentials::LocalCredentialBrokerLeaseClient::rate_limit_credential_refresh(
+            &mut client,
+            &permit,
+            wait_seconds,
+        )
+        .await
+        {
+            Ok(()) => Ok(RateLimitClose::Waiting),
+            Err(_) => self
+                .fail_credential_refresh(permit)
+                .await
+                .map(|()| RateLimitClose::Failed),
+        }
+    }
+
     async fn wait_for_active_operations(&self) -> Result<(), BrokerRefreshError> {
         codewire_local_credentials::LocalCredentialBrokerLeaseClient::wait_for_protected_store_operations(
             self,
@@ -275,11 +298,15 @@ fn map_local_refresh_error(
         | codewire_local_credentials::BrokerLeaseChannelError::Withheld(_) => {
             BrokerRefreshError::Denied
         }
-        // Never a denial: the sign-in is kept while the provider's wait runs.
-        codewire_local_credentials::BrokerLeaseChannelError::Unavailable
-        | codewire_local_credentials::BrokerLeaseChannelError::RateLimited { .. } => {
+        codewire_local_credentials::BrokerLeaseChannelError::Unavailable => {
             BrokerRefreshError::Unavailable
         }
+        // Never a denial: the sign-in is kept while the provider's wait runs.
+        codewire_local_credentials::BrokerLeaseChannelError::RateLimited {
+            retry_after_seconds,
+        } => BrokerRefreshError::RateLimited {
+            wait_seconds: retry_after_seconds,
+        },
         codewire_local_credentials::BrokerLeaseChannelError::InvalidResponse => {
             BrokerRefreshError::InvalidResponse
         }
@@ -347,6 +374,23 @@ mod tests {
     use codewire_local_credentials::BrokerLeaseChannelError;
 
     use super::*;
+
+    /// The local authority's refusal of a refresh during a rate-limit wait
+    /// keeps its seconds and reads as the wait, never a denial (#4975).
+    #[test]
+    fn a_local_rate_limit_refusal_is_the_wait_never_a_denial() {
+        let refusal = map_local_refresh_error(BrokerLeaseChannelError::RateLimited {
+            retry_after_seconds: 240,
+        });
+        assert_eq!(
+            refusal,
+            BrokerRefreshError::RateLimited { wait_seconds: 240 }
+        );
+        assert_eq!(
+            map_refresh_error(refusal),
+            BrokerRequestError::RefreshRateLimited { wait_seconds: 240 }
+        );
+    }
 
     /// A local VM's withheld credential reaches the agent as the same
     /// refusal a hosted Sandbox gives it, is never refreshed, and is a plain

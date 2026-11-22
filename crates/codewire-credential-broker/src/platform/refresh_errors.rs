@@ -34,7 +34,8 @@ pub(super) fn refresh_store_error(error: PlatformCredentialError) -> BrokerRefre
 
 /// Close a started attempt as rate-limited. The store refuses one begun after
 /// a wait, or no longer started, as stale: that attempt is then failed, so a
-/// second rate limit is terminal, as the rule says.
+/// second rate limit is terminal, as the rule says. Any other refusal fails
+/// it too, at once, rather than leaving it to lapse to the same end.
 pub(super) async fn rate_limit(
     credentials: &PlatformCredentialStore,
     started: StartedOAuthRefresh,
@@ -45,11 +46,10 @@ pub(super) async fn rate_limit(
         .await
     {
         Ok(()) => Ok(RateLimitClose::Waiting),
-        Err(PlatformCredentialError::StaleRefresh) => credentials
+        Err(_) => credentials
             .fail_oauth_refresh(started)
             .await
             .map(|()| RateLimitClose::Failed)
             .map_err(refresh_store_error),
-        Err(error) => Err(refresh_store_error(error)),
     }
 }
